@@ -13,6 +13,27 @@ const access = @import("host/session_service_access.zig");
 const a = std.testing.allocator;
 const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(732) };
 
+test "BMC view snapshot owns resource paths and retained error strings after source mutation" {
+    var code = "SyntheticReadError".*;
+    var fixture: Fixture = .{};
+    fixture.progress.event_count = 1;
+    fixture.progress.events[0] = .{ .stage = .redfish_discovery, .error_code = &code, .context = .{ .method = .get, .resource_path = console.progress.resourcePath("/redfish/v1/Systems/node-B/BootOptions/Boot0001"), .http_status = 404, .response_errors = console.progress.ResponseErrors.init("Base.1.19.ResourceNotFound") } };
+    fixture.progress.failure_code = &code;
+    fixture.progress.failure_event = fixture.progress.events[0];
+    fixture.progress.discovery_issue = fixture.progress.events[0];
+    var snapshot = try Fixture.snapshot(&fixture, undefined, a);
+    defer snapshot.deinit();
+    @memset(&code, 'x');
+    fixture.progress = .{};
+    const value = snapshot.value.progress;
+    try std.testing.expectEqualStrings("SyntheticReadError", value.failure_code.?);
+    try std.testing.expectEqualStrings("SyntheticReadError", value.failure_event.?.error_code.?);
+    try std.testing.expectEqualStrings("SyntheticReadError", value.discovery_issue.?.error_code.?);
+    try std.testing.expectEqualStrings("SyntheticReadError", value.events[0].error_code.?);
+    try std.testing.expectEqualStrings("/redfish/v1/Systems/node-B/BootOptions/Boot0001", value.events[0].context.?.resource_path.?.text());
+    try std.testing.expectEqualStrings("Base.1.19.ResourceNotFound", value.events[0].context.?.response_errors.?.text());
+}
+
 test "BMC view mapping preserves fit aspect, rejects letterbox and clamps captured drag" {
     const g = mapping.Geometry.calculate(.{ .x = 8, .y = 94, .width = 1194, .height = 750 }, 1920, 1200, .fit, .{ .x = 0, .y = 0 }).?;
     try std.testing.expectApproxEqAbs(@as(f32, 0.621875), g.scale, 0.00001);

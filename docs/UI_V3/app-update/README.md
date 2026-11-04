@@ -35,9 +35,9 @@ node --test docs/UI_V3/app-update/model.test.mjs
 
 组件颜色使用共享 `../theme-tokens.css`，主题选择器读取 `../theme-presets.json`；材质复用 `../shared/global-background.js`，图标采用 currentColor。`styles.css` 不定义产品颜色常量。切换主题保留当前状态、关闭进度与任务数量。
 
-「导出当前 SVG」读取已渲染 DOM 的实际坐标和计算样式，导出可编辑文字、形状及图标。所有主题使用同一份结构与布局，不手工绘制多套颜色。导出定格当前状态，不嵌入实时模糊、动画与交互；HTML 是材质、键盘、滚动与行为的权威参考。PNG 与运行日志保存在仓库外，明确引用的必要 SVG 资源可保留。
+「导出当前 SVG」读取已渲染 DOM 的实际坐标和计算样式，导出可编辑文字、形状及图标。所有主题使用同一份结构与布局，不手工绘制多套颜色。导出定格当前状态，不嵌入实时模糊、动画与交互；HTML 是材质、键盘、滚动与行为的权威参考。图片、SVG 导出图与运行日志保存在仓库外，本目录仅保留可编辑原型。
 
-本轮效果稿：[三主题对照](previews/theme-comparison.svg)；单独查看 [Dark 确认](previews/dark-confirm.svg)、[Light 确认](previews/light-confirm.svg)、[Sauber 确认](previews/sauber-confirm.svg)，以及 [Dark 进度](previews/dark-closing.svg)、[Light 进度](previews/light-closing.svg)、[Sauber 进度](previews/sauber-closing.svg)。在 1440×900、DPR 2、100% 页面缩放下，从 900×640 产品面板导出；确认与关闭弹窗的基线尺寸为 520×378（新增异常态按内容计算），标题 16/22、正文 12/18、按钮 32 高。主题/材质变更后以重新渲染导出为准，不直接修改效果稿色值。
+本轮效果稿：[可编辑主题与状态入口](index.html)；单独查看 [Dark 确认](index.html?theme=dark&state=confirm)、[Light 确认](index.html?theme=light&state=confirm)、[Sauber 确认](index.html?theme=sauber&state=confirm)，以及 [Dark 进度](index.html?theme=dark&state=closing)、[Light 进度](index.html?theme=light&state=closing)、[Sauber 进度](index.html?theme=sauber&state=closing)。在 1440×900、DPR 2、100% 页面缩放下，从 900×640 产品面板导出；确认与关闭弹窗的基线尺寸为 520×378（新增异常态按内容计算），标题 16/22、正文 12/18、按钮 32 高。主题/材质变更后以可编辑原型的实际渲染为准。
 
 ## 原生映射与验收
 
@@ -45,6 +45,6 @@ node --test docs/UI_V3/app-update/model.test.mjs
 
 原型只验证状态、主题和交互表达。后续原生仍需完成实施设计 §7 的关闭、替换、恢复与真实窗口验收，不能凭原型或 SVG 宣称自动更新已可用。
 
-修订后的恢复效果：[取消确认、恢复失败与数据兼容三主题对照](previews/recovery-comparison.svg)。原型状态为权威入口；效果稿必须由同一 DOM 的计算样式重新导出。
+修订后的恢复效果：[取消确认](index.html?state=cancel_pending)、[恢复失败](index.html?state=restore_failed)与[数据兼容](index.html?state=incompatible_data)。原型状态为权威入口；效果稿必须由同一 DOM 的计算样式重新导出。
 
-导出单态 SVG 并保存到 `previews/<theme>-<state>.svg` 后，运行 `python3 docs/UI_V3/app-update/build_preview_sheets.py`，即可按导出文件内的实际区域元数据重建两份对照图，不需要手调裁剪坐标或主题颜色。
+导出单态 SVG 并保存到系统临时目录（`tempfile.gettempdir()`）下的 `zerowork-app-update-previews/<theme>-<state>.svg` 后，运行 `python3 docs/UI_V3/app-update/build_preview_sheets.py`，即可按导出文件内的实际区域元数据重建两份对照图，不需要手调裁剪坐标或主题颜色。

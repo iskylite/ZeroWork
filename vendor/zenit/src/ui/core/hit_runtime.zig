@@ -926,10 +926,10 @@ pub const HitRuntime = struct {
         const r = node.rectFromWorldOrFallback();
         const world_rect = node.frame_state.frame_local.spatial.world.matrix.transformRect(ComputedRect.init(0, 0, r.w, r.h));
         node.frame_state.frame_local.spatial.world.inverse = node.frame_state.frame_local.spatial.world.matrix.invert();
+        if (node.frame_state.state_bits.dirty.hit.geometry or node.frame_state.state_bits.dirty.hit.semantics) node_dirty_gen.bumpLooseInteractionGen();
         node.frame_state.state_bits.dirty.hit.geometry = false;
         node.frame_state.state_bits.dirty.hit.semantics = false;
         node.frame_state.state_bits.dirty.hit.structure = false;
-        node_dirty_gen.bumpLooseInteractionGen();
 
         // clip membership determined only by ancestor overflow_hidden chain, unrelated to z_index
         // (z>0 no longer clears

@@ -44,12 +44,15 @@ pub const Callbacks = struct {
 // not a valid error-union payload on this project's Zig version.
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
-    value: Snapshot,
-    fn init(allocator: std.mem.Allocator, source: Snapshot) !Owned {
+    // Keep the large bounded journal in the arena: copying Owned must never
+    // put another full journal on the UI thread stack.
+    value: *Snapshot,
+    fn init(allocator: std.mem.Allocator, source: *const Snapshot) !Owned {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const owned = arena.allocator();
-        var copy = source;
+        const copy = try owned.create(Snapshot);
+        copy.* = source.*;
         const hops = try owned.alloc(Hop, source.hops.len);
         for (source.hops, hops) |hop, *destination| destination.* = .{ .name = try owned.dupe(u8, hop.name), .host = try owned.dupe(u8, hop.host), .user = try owned.dupe(u8, hop.user), .port = hop.port };
         copy.hops = hops;
@@ -171,6 +174,8 @@ pub const View = struct {
     action_scope: ?*ui.Scope = null,
     action_skins: [3]ActionSkin = undefined,
     action_skin_count: usize = 0,
+    action_tips: [2]ui.widgets.TooltipResult = undefined,
+    action_tip_count: usize = 0,
     chain_scope: ?*ui.Scope = null,
     title: *ui.Node,
     state_label: *ui.Node = undefined,
@@ -187,6 +192,7 @@ pub const View = struct {
     identity_chip: *ui.Node = undefined,
     toggle_button: *ui.Node = undefined,
     copy_icon: ?*ui.Node = null,
+    copy_feedback: *@import("copy_button.zig").Button = undefined,
     close_icon: ?*ui.Node = null,
     connectors: [S.max_hops]struct { icon: *ui.Node, label: *ui.Node } = undefined,
     header_action: *ui.Node,
@@ -365,7 +371,7 @@ pub const View = struct {
         self.toggle_label = try ui.text(cx, "查看连接日志", S.text(11, 500, false));
         try toggle.appendChild(cx.allocator, self.toggle_label);
         try log_controls.appendChild(cx.allocator, toggle);
-        self.log_help = try self.appendLabel(log_controls, "日志不含凭据", S.text(10, 400, false));
+        self.log_help = try self.appendLabel(log_controls, "", S.text(10, 400, false));
         self.log_help.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0 });
         self.jump_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.actionHover(false, false), .pressed_style = S.actionHover(false, true), .a11y_label = "回到阶段日志底部", .on_click = cx.on(View, self, jumpToBottom) }).mount(scope, cx);
         prepareCustomButton(self.jump_button);
@@ -413,7 +419,7 @@ pub const View = struct {
     /// Safe-hook only. Takes an owned value copy and preserves the inline
     /// authentication slot, including its current focus/composition/selection.
     pub fn show(self: *View, snapshot: Snapshot) !void {
-        try validate(snapshot);
+        try validate(&snapshot);
         var same = false;
         if (self.source) |current| {
             same = current.value.key.eql(snapshot.key);
@@ -427,7 +433,7 @@ pub const View = struct {
                 }
             }
         }
-        var copy = try Owned.init(self.cx.allocator, snapshot);
+        var copy = try Owned.init(self.cx.allocator, &snapshot);
         var transferred = false;
         errdefer if (!transferred) copy.deinit();
         self.observeUserScroll();
@@ -454,6 +460,7 @@ pub const View = struct {
         self.open.set(!snapshot.attached);
         if (snapshot.attached) {
             self.closeLogTip();
+            for (self.action_tips[0..self.action_tip_count]) |tip| tip.open.?.set(false);
             self.authentication_area.setDisplay(.none);
         }
         self.cx.requestRedraw();
@@ -463,6 +470,7 @@ pub const View = struct {
         self.visible = false;
         self.closeLogTip();
         self.identity_tip_open.set(false);
+        for (self.action_tips[0..self.action_tip_count]) |tip| tip.open.?.set(false);
         for (self.slots[0..self.slot_count]) |slot| slot.tip_open.set(false);
         self.open.set(false);
         self.authentication_area.setDisplay(.none);
@@ -485,6 +493,10 @@ pub const View = struct {
         self.route_label.setTextColor(c.fg_1);
         self.identity_tip_content.setBackground(S.theme.popupInset());
         self.identity_tip_label.setTextColor(c.fg_1);
+        for (self.action_tips[0..self.action_tip_count]) |tip| {
+            tip.content.setBackground(S.theme.popupInset());
+            tip.content.children.items[0].setTextColor(c.fg_1);
+        }
         if (self.copy_icon != null) self.copy_label.setTextColor(c.fg_1);
         self.identity_chip.setStyleInline(self.cx.allocator, S.chip());
         self.footer.setStyleInline(self.cx.allocator, S.footer(self.compact));
@@ -553,7 +565,7 @@ pub const View = struct {
         self.cx.requestRedraw();
     }
     pub fn cancel(self: *View) void {
-        const source = if (self.source) |*source| &source.value else return;
+        const source = if (self.source) |source| source.value else return;
         if (!self.visible or self.cancel_requested or source.attached or (source.cleanup == .released and source.state != .retrying)) return;
         self.cancel_requested = true;
         self.cancel_disabled.set(true);
@@ -573,7 +585,7 @@ pub const View = struct {
         };
     }
     pub fn close(self: *View) void {
-        const source = if (self.source) |*source| &source.value else return;
+        const source = if (self.source) |source| source.value else return;
         if (!self.visible) return;
         if (source.state != .failed and source.state != .cancelled and !source.attached) {
             self.cancel();
@@ -600,7 +612,7 @@ pub const View = struct {
     }
 
     fn refresh(self: *View) !void {
-        const source = &self.source.?.value;
+        const source = self.source.?.value;
         const spinning = !source.attached and !self.cancel_requested and (source.state == .connecting or source.state == .retrying or source.state == .protocol_ready or source.state == .attaching);
         self.header_spinner.setDisplay(if (spinning) .flex else .none);
         self.header_icon.setDisplay(if (spinning) .none else .flex);
@@ -634,6 +646,7 @@ pub const View = struct {
         self.clearNodes(self.footer);
         if (self.action_scope) |scope| scope.dispose();
         self.action_skin_count = 0;
+        self.action_tip_count = 0;
         const scope = try self.scope.childScope();
         self.action_scope = scope;
         const ctx = try self.cx.allocator.create(ActionContext);
@@ -650,7 +663,7 @@ pub const View = struct {
         close_button.setStyleInline(self.cx.allocator, S.iconButton(28));
         close_button.unsetStyleInline(.{ .background = ui.Color.TRANSPARENT });
         close_button.meta.ownership.meta.test_id = "connection.progress.close";
-        try self.header_action.appendChild(self.cx.allocator, close_button);
+        try self.header_action.appendChild(self.cx.allocator, try self.actionTip(scope, close_button, "关闭窗口将取消本次连接", "connection.progress.close.tooltip", S.iconButton(28)));
         const copy_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .base_style = S.copyButton(), .a11y_label = "复制连接日志", .disabled = self.copy_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.copy) }).mount(scope, self.cx);
         prepareCustomButton(copy_button);
         self.copy_icon = try ui.iconTint(self.cx, ui.icons.copy, S.theme.current().fg_2, S.icon(16));
@@ -660,20 +673,34 @@ pub const View = struct {
         copy_button.setStyleInline(self.cx.allocator, S.copyButton());
         copy_button.unsetStyleInline(.{ .background = ui.Color.TRANSPARENT });
         copy_button.meta.ownership.meta.test_id = "connection.progress.logs.copy";
-        try self.copy_host.appendChild(self.cx.allocator, copy_button);
-        const hint = try self.appendLabel(self.footer, "关闭窗口将取消本次连接", S.text(10.5, 400, false));
+        self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, copy_button);
+        try self.copy_host.appendChild(self.cx.allocator, try self.actionTip(scope, copy_button, "复制连接日志，日志不含凭据", "connection.progress.logs.copy.tooltip", S.copyButton()));
+        const hint = try self.appendLabel(self.footer, "", S.text(10.5, 400, false));
         self.footer_hint = hint;
         hint.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0 });
         self.cancel_button = try self.button(self.footer, scope, ctx, "取消连接", 96, false, self.cancel_disabled, ActionContext.cancel, "connection.progress.cancel");
         self.close_button = try self.button(self.footer, scope, ctx, "关闭", 72, false, self.close_disabled, ActionContext.close, "connection.progress.dismiss");
         self.retry_button = try self.button(self.footer, scope, ctx, "重新连接", 112, true, self.retry_disabled, ActionContext.retry, "connection.progress.retry");
     }
+    fn actionTip(self: *View, scope: *ui.Scope, button_node: *ui.Node, text: []const u8, id: []const u8, style: ui.BoxStyle) !*ui.Node {
+        const tip = try ui.widgets.Tooltip(.{ .text = text, .open_delay_ms = 450, .position = .bottom_end, .font_size = 11, .background = S.theme.popupInset(), .text_color = S.theme.current().fg_1 }).mount(scope, self.cx);
+        tip.wrapper.setStyleInline(self.cx.allocator, style);
+        tip.trigger.setStyleInline(self.cx.allocator, style);
+        tip.content.meta.ownership.meta.test_id = id;
+        const focus = try scope.createState(TipFocus, .{ .cx = self.cx, .open = tip.open.?, .previous_focus = button_node.behavior.events.on_focus, .previous_blur = button_node.behavior.events.on_blur });
+        button_node.behavior.events.on_focus = self.cx.on(TipFocus, focus, TipFocus.focus);
+        button_node.behavior.events.on_blur = self.cx.on(TipFocus, focus, TipFocus.blur);
+        try tip.trigger.appendChild(self.cx.allocator, button_node);
+        self.action_tips[self.action_tip_count] = tip;
+        self.action_tip_count += 1;
+        return tip.wrapper;
+    }
     fn buildChain(self: *View) !void {
         self.clearNodes(self.chain_scroll.content);
         if (self.chain_scope) |scope| scope.dispose();
         const scope = try self.scope.childScope();
         self.chain_scope = scope;
-        const source = &self.source.?.value;
+        const source = self.source.?.value;
         self.slot_count = source.hops.len + 1;
         self.chain_scroll.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @as(f32, @floatFromInt(self.slot_count)) * 36 + 8 } });
         self.chain_scroll.content.setStyleInline(self.cx.allocator, S.chain(self.slot_count, @min(S.width, self.cx.viewport.width - 16) - 32));
@@ -720,7 +747,7 @@ pub const View = struct {
         }
     }
     fn refreshCards(self: *View) !void {
-        const source = &self.source.?.value;
+        const source = self.source.?.value;
         const fault = self.currentFailure();
         var buffer: [1536]u8 = undefined;
         for (self.slots[0..self.slot_count]) |*slot| {
@@ -779,7 +806,7 @@ pub const View = struct {
         if (button_node) |node| node.behavior.interaction.a11y.?.label = label.getText().?.content;
     }
     fn refreshSummary(self: *View) !void {
-        const source = &self.source.?.value;
+        const source = self.source.?.value;
         const fault = self.currentFailure();
         self.summary.setStyleInline(self.cx.allocator, S.notice(fault != null or source.state == .failed));
         self.summary_title.setTextColor(if (fault != null or source.state == .failed) S.theme.current().danger_ink else S.theme.current().fg_1);
@@ -790,8 +817,12 @@ pub const View = struct {
             .not_started => "正在确认连接状态",
             .releasing => "正在结束上一次连接…",
             .unknown => "连接结束状态待核实",
-            .released => if (self.canRetry()) "可以重新连接" else "连接已结束",
-        } else "关闭窗口将取消本次连接");
+            .released => "",
+        } else "");
+        const close_tip = self.action_tips[0].content;
+        const close_tip_label = close_tip.children.items[0];
+        try close_tip_label.setTextContent(self.cx.allocator, if (source.state == .failed or source.state == .cancelled) "关闭连接结果" else "关闭窗口将取消本次连接");
+        close_tip.behavior.interaction.a11y.?.label = close_tip_label.getText().?.content;
         try self.cancel_label.?.setTextContent(self.cx.allocator, if (self.cancel_requested) "正在取消…" else "取消连接");
         try self.retry_label.?.setTextContent(self.cx.allocator, if (source.state == .failed and source.cleanup == .unknown) "暂不可重试" else if (source.state == .failed and source.cleanup != .released) "等待连接结束" else "重新连接");
         if (self.close_icon) |icon| if (icon.parent) |button_node| {
@@ -815,7 +846,7 @@ pub const View = struct {
             };
         } else if (source.attached) {
             try title.writer.writeAll("已接入会话");
-            try detail.writer.writeAll("连接已由宿主接入当前会话。");
+            try detail.writer.writeAll("连接已就绪，可以开始使用。");
         } else if (self.cancel_requested or source.state == .cancelled) {
             try title.writer.writeAll(if (source.cleanup == .released) "连接已取消" else "正在取消连接");
             try detail.writer.writeAll(cleanupText(source.cleanup));
@@ -868,7 +899,7 @@ pub const View = struct {
         try self.summary_detail.setTextContent(self.cx.allocator, detail.writer.buffered());
     }
     fn refreshResources(self: *View) !void {
-        const source = &self.source.?.value;
+        const source = self.source.?.value;
         const shown = source.cleanup == .releasing or source.cleanup == .unknown;
         self.resource_box.setDisplay(if (shown) .flex else .none);
         if (!shown) return;
@@ -900,7 +931,7 @@ pub const View = struct {
         }
         self.log_help.setTextColor(S.theme.current().fg_2);
         var label: [256]u8 = undefined;
-        try self.log_help.setTextContent(self.cx.allocator, if (self.filter) |hop| try std.fmt.bufPrint(&label, "第 {d} 跳 · 日志不含凭据", .{hop + 1}) else "日志不含凭据");
+        try self.log_help.setTextContent(self.cx.allocator, if (self.filter) |hop| try std.fmt.bufPrint(&label, "第 {d} 跳", .{hop + 1}) else "");
         const drop_count = @max(self.source.?.value.dropped, self.source.?.value.journal.dropped);
         if (drop_count != 0) try self.log_help.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&label, "已省略 {d} 条旧日志", .{drop_count}));
     }
@@ -976,11 +1007,11 @@ pub const View = struct {
         }
     }
     fn logCount(self: *const View) usize {
-        const source = &self.source.?.value;
+        const source = self.source.?.value;
         return if (source.logs.len != 0) source.logs.len else source.journal.count;
     }
     fn logAt(self: *const View, index: usize) LogRecord {
-        const source = &self.source.?.value;
+        const source = self.source.?.value;
         return if (source.logs.len != 0) source.logs[index] else .{ .key = source.key, .entry = source.journal.entries[index] };
     }
     fn updateLogMarker(self: *View) void {
@@ -1024,7 +1055,7 @@ pub const View = struct {
         if (!std.mem.eql(u8, self.jump_label.getText().?.content, label)) self.jump_label.setTextContent(self.cx.allocator, label) catch {};
     }
     fn resize(self: *View) void {
-        const source = if (self.source) |*source| &source.value else return;
+        const source = if (self.source) |source| source.value else return;
         const natural = self.body_scroll.content.globalRect().h;
         const fallback = if (self.currentFailure() != null or source.state == .failed) S.failed_height else S.normal_height;
         const height = @min(if (natural > 0) natural + (if (self.compact) @as(f32, 118) else 126) else fallback, @max(100, self.cx.viewport.height - 16));
@@ -1065,7 +1096,7 @@ pub const View = struct {
         return null;
     }
     fn currentFailure(self: *const View) ?Failure {
-        const source = &self.source.?.value;
+        const source = self.source.?.value;
         if (source.failure) |fault| {
             var result = fault;
             result.reason = inlineFailureText(fault.reason, if (source.journal.failure) |entry| entry.diagnostic.len != 0 else false);
@@ -1077,16 +1108,17 @@ pub const View = struct {
         return .{ .hop = fault.hop, .phase = fault.phase, .reason = inlineFailureText(failureText(fault.failure), fault.diagnostic.len != 0) };
     }
     fn canDismiss(self: *const View) bool {
-        const source = if (self.source) |*source| &source.value else return false;
+        const source = if (self.source) |source| source.value else return false;
         return (source.state == .failed or source.state == .cancelled) and source.cleanup == .released;
     }
     fn canRetry(self: *const View) bool {
-        const source = if (self.source) |*source| &source.value else return false;
+        const source = if (self.source) |source| source.value else return false;
         if (source.attached or source.state != .failed or source.cleanup != .released) return false;
         const resources = source.resources orelse return source.file_session;
         return resources.released() and !resources.hasUnknown();
     }
     fn copyFeedback(self: *View, success: bool) void {
+        self.copy_feedback.report(success);
         self.copy_result = success;
         self.log_help.setTextContent(self.cx.allocator, if (success) "已复制连接日志" else "复制失败，请重试") catch {};
         self.log_help.setTextColor(if (success) S.theme.current().ok_ink else S.theme.current().danger_ink);
@@ -1159,7 +1191,7 @@ fn writeLogRecord(writer: *std.Io.Writer, record: LogRecord, include_raw: bool) 
     if (include_raw) try record.entry.writeDiagnostic(writer);
 }
 
-fn validate(snapshot: Snapshot) !void {
+fn validate(snapshot: *const Snapshot) !void {
     const attempt = snapshot.key.attempt_id orelse return error.InvalidProgressIdentity;
     if (attempt == 0 or snapshot.key.operation_id == 0 or snapshot.journal.attempt != attempt) return error.InvalidProgressIdentity;
     if (snapshot.hops.len == 0 or snapshot.hops.len > S.max_hops or snapshot.journal.count > progress.Journal.capacity or snapshot.logs.len > progress.Journal.capacity) return error.InvalidProgressSnapshot;

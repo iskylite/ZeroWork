@@ -17,6 +17,11 @@ pub const Controls = struct {
     effort: ?Effort = null,
     thinking: ?bool = null,
 
+    pub fn ensureEffort(self: *Controls, ai: @import("../config/config.zig").Ai) void {
+        if (self.effort != null or self.thinking == false) return;
+        self.effort = @import("provider_config.zig").lowestEffort(ai, self.model) catch null;
+    }
+
     pub fn setModel(self: *Controls, allocator: std.mem.Allocator, key: ?ModelSelection) !void {
         var next: ?ModelSelection = null;
         if (key) |value| {
@@ -79,6 +84,9 @@ pub const State = struct {
     selected: bool = true,
     listed: bool = true,
     closed: bool = false,
+    /// Ended entries remain in history, but are never automatically reopened
+    /// when a terminal becomes independently visible again.
+    ended: bool = false,
     tool_results: ?@import("tool_results.zig").Store = null,
     owner: scope.Owner,
     history: std.ArrayList(Message) = .empty,
@@ -155,6 +163,7 @@ pub const Store = struct {
     pub fn select(self: *Store, id: u64) bool {
         const chosen = self.find(id) orelse return false;
         if (chosen.closed) return false;
+        chosen.ended = false;
         const owner = chosen.owner;
         for (self.states.items) |*state| {
             if (state.owner.eql(owner)) state.selected = state.id == id;
@@ -170,12 +179,12 @@ pub const Store = struct {
         return self.find(id).?;
     }
     pub fn get(self: *Store, owner: scope.Owner) !*State {
-        for (self.states.items) |*state| if (state.owner.eql(owner) and state.selected and !state.closed) return state;
+        if (self.active(owner)) |state| return state;
         var index = self.states.items.len;
         while (index > 0) {
             index -= 1;
             const state = &self.states.items[index];
-            if (state.owner.eql(owner) and !state.closed) {
+            if (state.owner.eql(owner) and !state.closed and !state.ended) {
                 _ = self.select(state.id);
                 return &self.states.items[index];
             }
@@ -184,19 +193,34 @@ pub const Store = struct {
         state.listed = false;
         return state;
     }
+    pub fn active(self: *Store, owner: scope.Owner) ?*State {
+        for (self.states.items) |*state| if (state.owner.eql(owner) and state.selected and !state.closed and !state.ended) return state;
+        return null;
+    }
+    pub fn endActivity(self: *Store, id: u64, revision: u64) !void {
+        const state = self.find(id) orelse return error.ConversationNotFound;
+        if (state.closed or state.ended or !state.selected or state.binding_revision != revision) return error.BindingChanged;
+        const next = try @import("../host/identity.zig").advance(revision);
+        state.binding_revision = next;
+        state.selected = false;
+        state.ended = true;
+        state.listed = true;
+        state.phase = .stopped;
+        state.model.visible = false;
+    }
     pub const Handoff = struct { id: ConversationId, runtime_id: u64, from: scope.Owner, to: scope.Owner, revision: u64, next_revision: u64 };
     /// Reserve/validate before a controller publishes the group. This plan has
     /// no borrowed State pointer and commits without allocation or cloning data.
     pub fn prepareHandoff(self: *Store, id: ConversationId, from: scope.Owner, revision: u64, group_id: u64) !Handoff {
         const state = self.findConversation(id) orelse return error.ConversationNotFound;
-        if (state.closed or !state.owner.eql(from) or state.binding_revision != revision) return error.BindingChanged;
+        if (state.closed or state.ended or !state.owner.eql(from) or state.binding_revision != revision) return error.BindingChanged;
         if (from != .session or group_id == 0) return error.InvalidBindingHandoff;
         for (self.states.items) |other| if (!other.closed and other.owner.eql(.{ .group = group_id })) return error.BindingConflict;
         return .{ .id = id, .runtime_id = state.id, .from = from, .to = .{ .group = group_id }, .revision = revision, .next_revision = try @import("../host/identity.zig").advance(revision) };
     }
     pub fn commitHandoff(self: *Store, plan: Handoff) !void {
         const state = self.findConversation(plan.id) orelse return error.ConversationNotFound;
-        if (state.id != plan.runtime_id or state.closed or !state.owner.eql(plan.from) or state.binding_revision != plan.revision) return error.BindingChanged;
+        if (state.id != plan.runtime_id or state.closed or state.ended or !state.owner.eql(plan.from) or state.binding_revision != plan.revision) return error.BindingChanged;
         if (plan.from != .session or plan.to != .group or plan.to.group == 0 or plan.next_revision != try @import("../host/identity.zig").advance(plan.revision)) return error.InvalidBindingHandoff;
         for (self.states.items) |other| if (!other.closed and other.owner.eql(plan.to)) return error.BindingConflict;
         if (state.initial_owner == null) state.initial_owner = plan.from;
@@ -209,7 +233,7 @@ pub const Store = struct {
     pub fn attachmentDraftForTicket(self: *Store, ticket: @import("local_text_attachments.zig").Ticket) ?*@import("local_text_attachments.zig").Draft {
         if (ticket.conversation_id) |id| {
             const state = self.findConversation(id) orelse return null;
-            if (state.closed) return null;
+            if (state.closed or state.ended) return null;
             return self.attachmentDraftFor(state.id);
         }
         return null;
@@ -217,7 +241,7 @@ pub const Store = struct {
     pub fn imageDraftForTicket(self: *Store, ticket: @import("image_attachments.zig").Ticket) ?*@import("image_attachments.zig").Draft {
         if (ticket.conversation_id) |id| {
             const state = self.findConversation(id) orelse return null;
-            if (state.closed) return null;
+            if (state.closed or state.ended) return null;
             return self.imageDraftFor(state.id);
         }
         return null;
@@ -411,6 +435,49 @@ test "owner controls own callback model strings and keep session and group overr
     try std.testing.expectEqualStrings("quiet", group_restored.model.?.model_id);
     try std.testing.expectEqual(PermissionMode.confirm, group_restored.permission.?);
     try std.testing.expectEqual(Effort.low, group_restored.effort.?);
+}
+
+test "owner controls initialize lowest effort and inherit it across models and providers" {
+    const allocator = std.testing.allocator;
+    var models = [_]@import("../config/config.zig").AiModel{
+        .{ .id = "first", .context_window = 8192, .reasoning = true, .efforts = .{ false, true, true, false, false, false, false } },
+        .{ .id = "second", .context_window = 8192, .reasoning = true, .efforts = .{ true, false, true, false, false, false, false } },
+        .{ .id = "quiet", .context_window = 8192, .reasoning = false, .efforts = @splat(false) },
+    };
+    var providers = [_]@import("../config/config.zig").AiProvider{
+        .{ .name = "one", .enabled = true, .model_count = models.len, .models = &models },
+        .{ .name = "two", .enabled = true, .model_count = models.len, .models = &models },
+    };
+    const ai: @import("../config/config.zig").Ai = .{ .default_provider = "one", .provider_count = providers.len, .providers = &providers };
+    var controls: Controls = .{};
+    defer controls.deinit(allocator);
+    controls.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.medium, controls.effort.?);
+    try controls.setModel(allocator, .{ .provider_id = "two", .model_id = "second" });
+    controls.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.medium, controls.effort.?);
+    try std.testing.expectError(error.UnsupportedEffort, @import("provider_config.zig").validateEffort(ai, controls.model, controls.effort.?));
+    controls.effort = .high;
+    try controls.setModel(allocator, .{ .provider_id = "one", .model_id = "quiet" });
+    controls.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.high, controls.effort.?);
+    try controls.setModel(allocator, .{ .provider_id = "two", .model_id = "second" });
+    controls.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.high, controls.effort.?);
+    controls.effort = null;
+    controls.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.low, controls.effort.?);
+    controls.effort = null;
+    controls.thinking = false;
+    controls.ensureEffort(ai);
+    try std.testing.expect(controls.effort == null);
+    controls.thinking = null;
+    models[1].efforts = @splat(false);
+    controls.ensureEffort(ai);
+    try std.testing.expect(controls.effort == null);
+    models[1].efforts[5] = true;
+    controls.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.none, controls.effort.?);
 }
 
 test "owner controls model replacement keeps prior state on allocation failure and supports reset" {

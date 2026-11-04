@@ -43,6 +43,9 @@ pub const OpenRequest = struct {
     membership_revision: ?u64 = null,
 };
 pub const Snapshot = struct {
+    /// Read-only capability projection; not a connection or execution grant.
+    execution_readiness: enum { unknown, initializing, ready, unsupported } = .unknown,
+    completion_source: @import("terminal_execution.zig").CompletionSource = .unknown,
     operation_ref: identity.HostOperationId,
     context: host_tools.Context,
     group: identity.GroupOwner,

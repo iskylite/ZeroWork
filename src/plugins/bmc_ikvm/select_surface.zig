@@ -56,10 +56,9 @@ const Surface = struct {
             self.scroll.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = height } });
             changed = true;
         }
-        const background = S.theme.layerBackground(2);
         const glass = S.theme.overlayGlass();
-        if (!ui.Color.eql(self.select.chrome.getBackground(), background) or self.select.chrome.style.backdrop_blur() != glass.backdrop_blur) {
-            self.select.chrome.setStyleInline(self.cx.allocator, .{ .background = background, .glass = glass });
+        if (self.select.chrome.style.backdrop_blur() != glass.backdrop_blur) {
+            self.select.chrome.setStyleInline(self.cx.allocator, .{ .glass = glass });
         }
         if (!state.shown_open or state.highlighted_index == null) {
             self.highlighted = null;

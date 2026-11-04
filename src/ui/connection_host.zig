@@ -61,13 +61,25 @@ pub const Host = struct {
             self.painted_colors = colors;
         }
         const pending = self.workspace.pendingAuthentication();
+        if (try self.refreshFilePresentation(pending)) return;
+        try self.refreshTerminal(pending);
+    }
+
+    fn refreshFilePresentation(self: *Host, pending: ?auth.Snapshot) !bool {
         // A later owner's prompt cannot replace the card currently being
         // read. Reconcile its actual attached/released receipt first.
         const captured = self.progress.operationKey();
         const file_key = if (captured) |key| (if (self.application.fileConnectionProgress(key) != null) key else if (self.workspace.connectionProgress(key) != null) null else self.application.fileProgressKey()) else self.application.fileProgressKey();
         if (file_key) |key| {
-            if (try self.refreshFile(key, pending)) return;
+            return self.refreshFile(key, pending);
         }
+        return false;
+    }
+
+    // Terminal progress carries bounded route/history arrays. Keep its stack
+    // frame out of the SFTP presentation path.
+    fn refreshTerminal(self: *Host, pending: ?auth.Snapshot) !void {
+        const captured = self.progress.operationKey();
         var source = if (captured) |key| self.workspace.connectionProgress(key) else null;
         if (captured != null and source == null) self.hide();
         const key = if (source) |current| current.key else if (pending) |request| request.identity.key else self.workspace.nextConnectionPresentationKey() orelse {

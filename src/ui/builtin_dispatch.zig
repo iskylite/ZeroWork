@@ -4,7 +4,7 @@ const Timeline = @import("../vt/timeline.zig").Timeline;
 const catalog = @import("command_catalog.zig");
 
 pub const default_log_path = "logs/session.log";
-pub const help_text = "@up @dl @ai @new @dup @grp @pin @sync @ts @log @socks @theme @help @@";
+pub const help_text = "@up @dl @ai @new @dup @grp @pin @sync @ts @history @log @socks @theme @shell @help @dots @@";
 pub const HelpEntry = catalog.Entry;
 
 pub const Context = struct {
@@ -68,10 +68,16 @@ test "formatted help renders every local command" {
 
 test "help entries mirror local command catalog" {
     const entries = helpEntries();
-    try std.testing.expectEqual(@as(usize, 15), entries.len);
+    try std.testing.expectEqual(@as(usize, catalog.operation_count + 1), entries.len);
     try std.testing.expect(catalog.find("@help") != null);
     try std.testing.expect(catalog.find("@sync") != null);
     try std.testing.expect(catalog.find("@@") != null);
+    for (entries) |entry| {
+        var names = std.mem.tokenizeScalar(u8, help_text, ' ');
+        while (names.next()) |name| {
+            if (std.mem.eql(u8, name, entry.name)) break;
+        } else return error.CommandMissingFromHelp;
+    }
 }
 
 test "log command saves timeline to requested path" {

@@ -492,6 +492,18 @@ fn resourceLinks(a: std.mem.Allocator, origin: Origin, value: ?std.json.Value) !
     for (array.array.items, 0..) |item, i| result[i] = try resourceUri(a, origin, text(item, "@odata.id") orelse return error.InvalidLinks);
     return result;
 }
+/// This firmware documents a singleton link object; other versions return an
+/// array. Normalize only ManagerForServers, preserving strict array schemas for
+/// other relationships and the existing same-origin URI validation.
+pub fn managerForServers(a: std.mem.Allocator, origin: Origin, value: ?std.json.Value) ![]const []const u8 {
+    const links = value orelse return &.{};
+    if (links != .object) return resourceLinks(a, origin, links);
+    const uri = try resourceUri(a, origin, text(links, "@odata.id") orelse return error.InvalidLinks);
+    errdefer a.free(uri);
+    const result = try a.alloc([]const u8, 1);
+    result[0] = uri;
+    return result;
+}
 pub fn applyActionInfo(a: std.mem.Allocator, snapshot: *svc.PowerSnapshot, doc: Document) !void {
     if (!doc.resourceAvailable()) return;
     const params = member(doc.value, "Parameters") orelse return;
@@ -540,7 +552,41 @@ pub fn parseTask(doc: Document) Task {
 
 pub const ResourceKind = enum { root, systems, managers, system, manager, chassis, action_info, boot_options, boot_option, security, settings, session_service };
 pub const Resource = struct { kind: ResourceKind, doc: Document, system_scope: ?[]const u8 = null };
-pub const ReadRequest = struct { uri: []const u8, kind: ResourceKind, system_scope: ?[]const u8 = null };
+pub const LinkSource = enum {
+    none,
+    systems,
+    managers,
+    sessions,
+    member,
+    members_next,
+    odata_next,
+    manager_for_servers,
+    security,
+    public_security,
+    action_info,
+    boot_options,
+    settings,
+    chassis,
+    pub fn property(self: LinkSource) []const u8 {
+        return switch (self) {
+            .none => "",
+            .systems => "/Systems",
+            .managers => "/Managers",
+            .sessions => "/SessionService",
+            .member => "/Members",
+            .members_next => "/Members@odata.nextLink",
+            .odata_next => "/@odata.nextLink",
+            .manager_for_servers => "/Links/ManagerForServers",
+            .security => "/SecurityService",
+            .public_security => "/Oem/Public/SecurityService",
+            .action_info => "/Actions/#ComputerSystem.Reset/@Redfish.ActionInfo",
+            .boot_options => "/Boot/BootOptions",
+            .settings => "/@Redfish.Settings/SettingsObject",
+            .chassis => "/Links/Chassis",
+        };
+    }
+};
+pub const ReadRequest = struct { uri: []const u8, kind: ResourceKind, system_scope: ?[]const u8 = null, source_uri: ?[]const u8 = null, source: LinkSource = .none };
 pub const ResourceAssociation = struct {
     system_uri: []const u8,
     manager_uri: []const u8,
@@ -587,10 +633,13 @@ pub const Discovery = struct {
         return self.scheduleScoped(uri, kind, null);
     }
     fn scheduleScoped(self: *Discovery, uri: []const u8, kind: ResourceKind, system_scope: ?[]const u8) !void {
+        return self.scheduleFrom(uri, kind, system_scope, null, .none);
+    }
+    fn scheduleFrom(self: *Discovery, uri: []const u8, kind: ResourceKind, system_scope: ?[]const u8, source_uri: ?[]const u8, source: LinkSource) !void {
         const checked = try resourceUri(self.arena.allocator(), self.origin, uri);
         for (self.queue.items) |existing| if (std.mem.eql(u8, existing.uri, checked)) return;
         if (self.queue.items.len >= max_resources) return error.DiscoveryLimit;
-        try self.queue.append(self.arena.allocator(), .{ .uri = checked, .kind = kind, .system_scope = system_scope });
+        try self.queue.append(self.arena.allocator(), .{ .uri = checked, .kind = kind, .system_scope = system_scope, .source_uri = source_uri, .source = source });
     }
     pub fn next(self: *Discovery) ?ReadRequest {
         if (self.cursor == self.queue.items.len or self.outstanding.items.len >= 8) return null;
@@ -618,14 +667,19 @@ pub const Discovery = struct {
         };
         _ = self.outstanding.swapRemove(outstanding_index orelse return error.StaleDiscoveryCompletion);
         const a = self.arena.allocator();
-        var doc = try Document.parse(self.backing, request.uri, status, body, etag, now_ms);
+        var doc = Document.parse(self.backing, request.uri, status, body, etag, now_ms) catch |err| missing_link: {
+            // A missing, advertised alias must not abort the collection reads
+            // merely because its 404 body is HTML or not a Redfish object.
+            if (err == error.OutOfMemory or body.len > max_body_bytes or status != 404 or request.source != .manager_for_servers) return err;
+            break :missing_link try Document.parse(self.backing, request.uri, status, "{}", etag, now_ms);
+        };
         errdefer doc.deinit();
         if (doc.resourceAvailable()) switch (request.kind) {
             .root => {
                 const root = try parseRoot(a, self.origin, doc);
-                try self.schedule(root.systems, .systems);
-                try self.schedule(root.managers, .managers);
-                try self.schedule(root.sessions, .session_service);
+                try self.scheduleFrom(root.systems, .systems, null, doc.uri, .systems);
+                try self.scheduleFrom(root.managers, .managers, null, doc.uri, .managers);
+                try self.scheduleFrom(root.sessions, .session_service, null, doc.uri, .sessions);
             },
             .systems, .managers, .boot_options => collection: {
                 if (!doc.fieldAccepted("/Members")) break :collection;
@@ -635,18 +689,18 @@ pub const Discovery = struct {
                     .managers => .manager,
                     else => .boot_option,
                 };
-                for (collection.members) |uri| try self.scheduleScoped(uri, kind, request.system_scope);
+                for (collection.members) |uri| try self.scheduleFrom(uri, kind, request.system_scope, doc.uri, .member);
                 if (collection.next) |next_uri| {
                     for (self.queue.items[0..self.cursor]) |existing| if (std.mem.eql(u8, existing.uri, next_uri)) return error.PaginationCycle;
-                    try self.scheduleScoped(next_uri, request.kind, request.system_scope);
+                    try self.scheduleFrom(next_uri, request.kind, request.system_scope, doc.uri, if (member(doc.value, "Members@odata.nextLink") != null) .members_next else .odata_next);
                 }
             },
             .system => {
                 const parsed_system = try parseSystem(a, self.origin, doc);
-                if (parsed_system.action_info) |uri| try self.schedule(uri, .action_info);
-                if (parsed_system.boot_options) |uri| try self.scheduleScoped(uri, .boot_options, doc.uri);
-                if (parsed_system.boot.settings_uri) |uri| try self.scheduleScoped(uri, .settings, doc.uri);
-                for (parsed_system.chassis) |uri| try self.schedule(uri, .chassis);
+                if (parsed_system.action_info) |uri| try self.scheduleFrom(uri, .action_info, null, doc.uri, .action_info);
+                if (parsed_system.boot_options) |uri| try self.scheduleFrom(uri, .boot_options, doc.uri, doc.uri, .boot_options);
+                if (parsed_system.boot.settings_uri) |uri| try self.scheduleFrom(uri, .settings, doc.uri, doc.uri, .settings);
+                for (parsed_system.chassis) |uri| try self.scheduleFrom(uri, .chassis, null, doc.uri, .chassis);
             },
             .manager => {
                 // The manager can identify the canonical ComputerSystem even
@@ -655,13 +709,13 @@ pub const Discovery = struct {
                 // still requires valid System identity and a
                 // reciprocal ManagedBy relationship before publishing reads.
                 if (doc.fieldAccepted("/Links/ManagerForServers")) if (member(doc.value, "Links")) |links| {
-                    const managed = resourceLinks(a, self.origin, member(links, "ManagerForServers")) catch |err| switch (err) {
+                    const managed = managerForServers(a, self.origin, member(links, "ManagerForServers")) catch |err| switch (err) {
                         error.OutOfMemory => return err,
                         else => &.{},
                     };
-                    for (managed) |uri| try self.schedule(uri, .system);
+                    for (managed) |uri| try self.scheduleFrom(uri, .system, null, doc.uri, .manager_for_servers);
                 };
-                if (self.managerSecurityLink(doc)) |uri| if (try optionalResourceUri(a, self.origin, uri)) |checked| try self.schedule(checked, .security);
+                if (self.managerSecurityLink(doc)) |uri| if (try optionalResourceUri(a, self.origin, uri)) |checked| try self.scheduleFrom(checked, .security, null, doc.uri, if (doc.fieldAccepted("/SecurityService") and link(doc.value, "SecurityService") != null) .security else .public_security);
             },
             else => {},
         };
@@ -804,7 +858,7 @@ pub const Discovery = struct {
         } else |_| {}
         if (member(manager.value, "Links")) |links| if (member(links, "ManagerForServers") != null and !manager.fieldAccepted("/Links/ManagerForServers")) return error.ManagementTargetUnverified;
         const managed = if (member(manager.value, "Links")) |links|
-            try resourceLinks(self.arena.allocator(), self.origin, member(links, "ManagerForServers"))
+            try managerForServers(self.arena.allocator(), self.origin, member(links, "ManagerForServers"))
         else
             &.{};
         if (managed.len == 1 and try self.collectionIdentifiesSystem(managed[0])) {
@@ -862,7 +916,7 @@ pub const Discovery = struct {
         const manager_identity = self.documentIdentityUri(manager.*) catch return error.MappingUnverified;
         defer self.backing.free(manager_identity);
         const links = member(manager.value, "Links") orelse return error.MappingUnverified;
-        const managed = try resourceLinks(self.arena.allocator(), self.origin, member(links, "ManagerForServers"));
+        const managed = try managerForServers(self.arena.allocator(), self.origin, member(links, "ManagerForServers"));
         if (managed.len != 1) return error.MappingAmbiguous;
         const system_doc = self.find(managed[0]) orelse return error.MappingUnverified;
         const parsed_system = try parseSystem(self.arena.allocator(), self.origin, system_doc.*);

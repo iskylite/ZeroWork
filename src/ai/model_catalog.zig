@@ -186,23 +186,7 @@ pub fn metadata(v: std.json.Value) Capability {
 }
 /// Preserve custom reverse-proxy base paths; remove only known protocol suffixes.
 pub fn endpoint(allocator: std.mem.Allocator, base: []const u8, kind: Kind) ![]u8 {
-    const query_at = std.mem.indexOfScalar(u8, base, '?') orelse base.len;
-    const query = base[query_at..];
-    var path = std.mem.trimEnd(u8, base[0..query_at], "/");
-    var removed_suffix = false;
-    for ([_][]const u8{ "/chat/completions", "/messages", "/api/chat" }) |suffix| if (std.mem.endsWith(u8, path, suffix)) {
-        path = path[0 .. path.len - suffix.len];
-        removed_suffix = true;
-        break;
-    };
-    if (kind == .ollama) return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ path, if (std.mem.endsWith(u8, path, "/api")) "/tags" else "/api/tags", query });
-    const uri = try std.Uri.parse(path);
-    const uri_path = switch (uri.path) {
-        .raw => |v| v,
-        .percent_encoded => |v| v,
-    };
-    const version = if (!removed_suffix and uri_path.len == 0) "/v1" else "";
-    return std.fmt.allocPrint(allocator, "{s}{s}/models{s}", .{ path, version, query });
+    return @import("provider_endpoint.zig").modelsEndpoint(allocator, kind, base);
 }
 
 test "model catalog preserves toggle and longest unambiguous model prefix" {

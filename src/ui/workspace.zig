@@ -38,6 +38,7 @@ const sidebar_view = @import("sidebar_view.zig");
 const plugin_registry = @import("../host/plugin_registry.zig");
 const plugin_ui = @import("../host/plugin_ui_contract.zig");
 const envelopes = @import("../config/connection_envelope.zig");
+const ai_tab_grouping = @import("../ai/tab_grouping.zig");
 
 var tab_ids: identity.Allocator(identity.TabId) = .{};
 var history_ids: identity.Allocator(identity.HistoryId) = .{};
@@ -428,12 +429,17 @@ pub const Workspace = struct {
     rename_draft: std.ArrayList(u8) = .empty,
     rename_editor: ?*tab_rename.Editor = null,
     tab_rebuild_pending: bool = false,
+    tab_drop_target: ?identity.TabId = null,
+    tab_reorder_target: ?identity.TabId = null,
+    pending_tab_drop: ?struct { source: identity.TabId, target: identity.TabId } = null,
+    group_tab_menu: ?*GroupTabMenu = null,
     active_tab: ?usize = null,
     /// Set only by a rendered group workspace. Membership alone never makes
     /// an independently opened session tab a group-owned AI conversation.
     active_group_view: ?u32 = null,
 
     group_roster: ?*group_model.Roster = null,
+    ai_grouping_bridge: ai_tab_grouping.Bridge = .{},
     group_views: std.ArrayList(*group_view.View) = .empty,
     group_action_context: ?*anyopaque = null,
     group_action: ?*const fn (?*anyopaque, u32, u64, GroupAction) void = null,
@@ -716,6 +722,10 @@ pub const Workspace = struct {
         if (self.isStaleTabCell(cell)) return .ignored;
         const tab_id = cell.tab_id orelse return .ignored;
         if (self.groupIdByTab(tab_id)) |group| {
+            if (event == .mouse_down and event.mouse_down.button == .right) {
+                self.showGroupTabMenu(group, cell.node orelse return .ignored) catch {};
+                return .stop;
+            }
             if (event == .mouse_down and event.mouse_down.button == .middle) {
                 self.requestCloseGroup(group);
                 return .stop;
@@ -1084,7 +1094,7 @@ pub const Workspace = struct {
                 const host = self.registry.hosts[index];
                 const context = try self.newClickCtx(index);
                 const route = try self.sidebarRoute(host);
-                defer self.allocator.free(route);
+                defer self.allocator.free(route.text);
                 const detail = try std.fmt.allocPrint(self.allocator, "{s}@{s}:{d}", .{ host.user, host.host, host.port });
                 defer self.allocator.free(detail);
                 const row = try sidebar_view.HostRow.mount(self.cx, scope, .{
@@ -1092,10 +1102,10 @@ pub const Workspace = struct {
                     .kind = if (host.protocol == .sftp) .file else .terminal,
                     .icon = session_icon.forHost(self.plugins, host.protocolId(), @import("session_os_cache.zig").load(self.allocator, self.io, self.hosts_path, host)),
                     .protocol = host.protocolId(),
-                    .supports_route = if (self.plugins.find(host.protocolId())) |plugin| plugin.supports(@import("../host/plugin_registry.zig").legacyServiceDefinitions(&.{.route})[0]) else false,
+                    .supports_route = route.supported,
                     .detail = detail,
-                    .route = route,
-                    .hops = if (host.route.len > 0) host.route.len else host.jump_chain.len,
+                    .route = route.text,
+                    .hops = route.hops,
                     .online = self.hostOnline(index),
                     .selected = self.selected_host == index,
                     .forward = self.backgroundForwardBadge(host.owner()),
@@ -1117,14 +1127,39 @@ pub const Workspace = struct {
         const host = self.registry.hosts[index];
         return query.len == 0 or matchesFold(host.name, query) or matchesFold(host.host, query) or matchesFold(host.group orelse "", query);
     }
-    fn sidebarRoute(self: *Workspace, host: hosts_mod.HostConfig) ![]const u8 {
-        const hops = if (host.route.len > 0) host.route.len else host.jump_chain.len;
+    const SidebarRoute = struct { text: []const u8, hops: usize = 0, supported: bool = false };
+
+    fn sidebarRoute(self: *Workspace, host: hosts_mod.HostConfig) !SidebarRoute {
+        var ids = host.route;
+        var names = host.jump_chain;
+        var kvm_ids: [8]identity.ConnectionId = undefined;
+        var supported = if (self.plugins.find(host.protocolId())) |plugin| plugin.supports(plugin_registry.legacyServiceDefinitions(&.{.route})[0]) else false;
+        // KVM consumes SSH routes, but does not expose the legacy SSH route
+        // service. Its persisted payload is the source for both count and hint.
+        const kvm = @import("../plugins/bmc_ikvm/model.zig");
+        if (std.mem.eql(u8, host.protocolId(), kvm.protocol_id)) {
+            if (host.payload_version != kvm.payload_version) return .{ .text = try self.allocator.dupe(u8, "路径不可用") };
+            var parsed = kvm.parse(self.allocator, host.plugin_payload orelse "") catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return .{ .text = try self.allocator.dupe(u8, "路径不可用") },
+            };
+            defer parsed.deinit();
+            const hops = switch (parsed.value().access) {
+                .direct => &.{},
+                .ssh_route => |route| route.hops,
+            };
+            for (hops, 0..) |hop, i| kvm_ids[i] = @fromBackingInt(hop.asset_id);
+            ids = kvm_ids[0..hops.len];
+            names = &.{};
+            supported = true;
+        }
+        const hops = if (ids.len > 0) ids.len else names.len;
         const parts = try self.allocator.alloc([]const u8, hops + 2);
         defer self.allocator.free(parts);
         parts[0] = "本机";
-        for (0..hops) |i| parts[i + 1] = if (host.route.len > 0) if (self.registry.indexOf(host.route[i])) |position| self.registry.hosts[position].name else "缺失的跳板" else host.jump_chain[i];
+        for (0..hops) |i| parts[i + 1] = if (ids.len > 0) if (self.registry.indexOf(ids[i])) |position| self.registry.hosts[position].name else "缺失的跳板" else names[i];
         parts[hops + 1] = host.name;
-        return std.mem.join(self.allocator, " → ", parts);
+        return .{ .text = try std.mem.join(self.allocator, " → ", parts), .hops = hops, .supported = supported };
     }
     fn sidebarIndex(cell: *ClickCtx) ?usize {
         if (cell.asset_owner) |owner| {
@@ -1201,8 +1236,10 @@ pub const Workspace = struct {
 
     /// The menu passes its captured TabId, never the current active session.
     pub fn showTabColor(self: *Workspace, id: identity.TabId) void {
-        const index = self.tabIndexById(id) orelse return;
-        if (self.tabs.items[index].closing) return;
+        const index = self.tabIndexById(id);
+        if (index) |at| {
+            if (self.tabs.items[at].closing) return;
+        } else if (self.groupIdByTab(id) == null) return;
         const anchor = for (self.tab_nodes.items) |cell| {
             if (cell.tab_id == id) break cell.node;
         } else return;
@@ -1213,15 +1250,22 @@ pub const Workspace = struct {
             self.tab_bar.appendChild(self.allocator, view.root) catch return;
             self.color_picker = view;
         }
+        self.color_picker.?.palette.select(if (index) |at| self.tabs.items[at].tab_color else if (self.group_roster.?.findById(self.groupIdByTab(id).?)) |group| @as(u32, @truncate(group.color)) & 0xffffff else null);
         self.color_picker.?.show(@backingInt(id), anchor);
     }
 
     fn commitTabColor(raw: *anyopaque, owner: u64, color: u32) bool {
         const self: *Workspace = @ptrCast(@alignCast(raw));
-        const index = self.tabIndexById(@fromBackingInt(owner)) orelse return false;
-        const tab = self.tabs.items[index];
-        if (tab.closing) return false;
-        tab.tab_color = color;
+        const id: identity.TabId = @fromBackingInt(owner);
+        if (self.groupIdByTab(id)) |group_id| {
+            const group = (self.group_roster orelse return false).findById(group_id) orelse return false;
+            group.color = 0xff000000 | color;
+        } else {
+            const index = self.tabIndexById(id) orelse return false;
+            const tab = self.tabs.items[index];
+            if (tab.closing) return false;
+            tab.tab_color = color;
+        }
         self.rebuildTabBar() catch return false;
         return true;
     }
@@ -1231,9 +1275,39 @@ pub const Workspace = struct {
         self.refreshNotificationAttention();
     }
 
-    /// Tab titles have no trailing notification marker. Host read tracking
-    /// remains independent of the tab's connection icon and custom title color.
-    pub fn refreshNotificationAttention(_: *Workspace) void {}
+    /// Animate only the icon of unread background tabs. The existing host
+    /// owns activity/read receipts; animation never changes their generations.
+    pub fn refreshNotificationAttention(self: *Workspace) void {
+        for (self.tab_nodes.items) |*node| {
+            const at = self.model.indexOf(node.tab_id) orelse continue;
+            const tab = &self.model.tabs.items[at];
+            const unread = self.tabHasActivity(node.tab_id);
+            if (!unread) tab.attention_started_ms = null;
+            const background = !(self.cx.window_active and self.model.active == node.tab_id);
+            if (!unread or !background or self.command_held) {
+                if (node.type_icon.style.translate_y != 0) node.type_icon.setStyle(self.allocator, .translate_y, @as(f32, 0));
+                continue;
+            }
+            if (tab.attention_started_ms == null) tab.attention_started_ms = self.cx.frame_time_ms;
+            const elapsed = @max(0, self.cx.frame_time_ms - tab.attention_started_ms.?);
+            node.type_icon.setStyle(self.allocator, .translate_y, tab_styles.attentionOffset(elapsed));
+            if (elapsed < tab_styles.attention_duration_ms) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        }
+    }
+    fn tabIsBouncing(self: *Workspace, id: identity.TabId) bool {
+        if (!self.tabHasActivity(id) or (self.cx.window_active and self.model.active == id)) return false;
+        const at = self.model.indexOf(id) orelse return false;
+        const started = self.model.tabs.items[at].attention_started_ms orelse return true;
+        return @max(0, self.cx.frame_time_ms - started) < tab_styles.attention_duration_ms;
+    }
+
+    fn tabHasActivity(self: *Workspace, id: identity.TabId) bool {
+        const has_activity = self.notification_attention_bridge.has_dot orelse return false;
+        for (self.model.tabs.items) |item| if (item.id == id or item.container == id) {
+            if (has_activity(self.notification_attention_bridge.context, item.owner)) return true;
+        };
+        return false;
+    }
 
     fn installTabModel(self: *Workspace, tab: *SessionTab) !void {
         tab.tab_color = self.creation_tab_color;
@@ -1340,7 +1414,8 @@ pub const Workspace = struct {
         row.meta.ownership.meta.test_id = "tabs.strip";
         self.strip_root = row;
         if (overflow) _ = try self.stripControl(scope, row, ui.icons.chevron_left, "向左滚动页签", "tabs.scroll_left", 24, !self.strip_geometry.can_scroll_left, scrollLeft);
-        const viewport = try ui.box(self.cx, .{ .width = .{ .px = viewport_width }, .height = .{ .px = tab_styles.height }, .overflow_hidden = true, .flex_shrink = 0 }, .{});
+        // Only scrolling tabs need clipping; otherwise it cuts the last tab's rounded shadow flat.
+        const viewport = try ui.box(self.cx, .{ .width = .{ .px = viewport_width }, .height = .{ .px = tab_styles.height }, .overflow_hidden = overflow, .flex_shrink = 0 }, .{});
         viewport.meta.ownership.meta.test_id = "tabs.viewport";
         viewport.behavior.events.event_context = self;
         viewport.behavior.events.on_event = onStripEvent;
@@ -1365,6 +1440,8 @@ pub const Workspace = struct {
             const width = self.strip_widths.items[ordinal];
             const active = self.model.active == model_tab.id;
             const holder = try ui.box(self.cx, .{ .width = .{ .px = width }, .height = .{ .px = tab_styles.height }, .flex_shrink = 0 }, .{});
+            holder.behavior.interaction.window_region = .client;
+            holder.setStyle(self.allocator, .hit_behavior, .@"opaque");
             if (group_id != null) holder.meta.ownership.meta.test_id = "groups.tab";
             const select_ctx = try self.newTabClickCtx(index);
             const full_name = try std.fmt.allocPrint(self.allocator, "{s}\n{s}\n{s}", .{ self.model.tabs.items[index].name(), self.model.tabs.items[index].details, self.tabStatus(model_tab.id) });
@@ -1385,12 +1462,10 @@ pub const Workspace = struct {
             tooltip.trigger.style.width = .fill();
             tooltip.trigger.style.height = .fill();
             const tab_box = try ui.box(self.cx, tab_styles.tab(width, active), .{});
-            if (group_id) |id| if (self.groupTabColor(id)) |color| {
-                tab_box.setBackground(tab_styles.groupTint(color));
-                const marker = try ui.box(self.cx, tab_styles.groupMarker(color), .{});
-                marker.meta.ownership.meta.test_id = "tabs.group_marker";
-                try tab_box.appendChild(self.allocator, marker);
-            };
+            const identity_color = if (group_id) |id| self.groupTabColor(id) orelse app_theme.current().accent else if (tab.?.tab_color) |color| ui.Color.hex(@intCast(color)) else app_theme.current().accent;
+            const marker = try ui.box(self.cx, tab_styles.groupMarker(identity_color), .{});
+            marker.meta.ownership.meta.test_id = if (group_id != null) "tabs.group_marker" else "tabs.color_marker";
+            try tab_box.appendChild(self.allocator, marker);
             select_ctx.node = tab_box;
             tab_box.meta.ownership.meta.test_id = try std.fmt.bufPrint(&select_ctx.test_id, "tabs.tab.{d}", .{@backingInt(model_tab.id)});
             tab_box.behavior.interaction.focusable = true;
@@ -1403,12 +1478,8 @@ pub const Workspace = struct {
             tab_box.behavior.events.on_focus = .{ .callback = tabFocus, .context = select_ctx };
             tab_box.behavior.events.on_blur = .{ .callback = tabLeave, .context = select_ctx };
             const icon_slot = try ui.box(self.cx, tab_styles.iconSlot(), .{});
-            const connection_color = if (group_id != null) app_theme.current().fg_2 else if (tab.?.failed) self.palette.red else if (tab.?.plugin_renderer != null) switch (pluginConnectionState(tab.?)) {
-                .online => self.palette.green,
-                .degraded => self.palette.red,
-                else => self.palette.fg_muted,
-            } else if (tab.?.terminal == null) (if (tab.?.file_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal.?.tombstone.state != .active) self.palette.fg_muted else if (tab.?.runtime != null or (tab.?.local and tab.?.local_state == .running)) self.palette.green else self.palette.fg_muted;
             const tab_icon_asset = if (group_id != null) ui.icons.get("panels-top-left").? else self.tabIcon(tab.?);
+            const connection_color = session_icon.tabTint(self.tabIconState(model_tab.id), tab_icon_asset);
             const type_icon = try ui.iconTint(self.cx, tab_icon_asset, connection_color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
             try icon_slot.appendChild(self.cx.allocator, type_icon);
             const number = try ui.text(self.cx, "", .{ .font_size = 10, .font_weight = 500, .color = app_theme.current().fg_2, .selectable = false });
@@ -1419,7 +1490,7 @@ pub const Workspace = struct {
             try tab_box.appendChild(self.cx.allocator, icon_slot);
             var label_style = tab_styles.title();
             label_style.font_family = family;
-            label_style.color = if (group_id == null and tab.?.tab_color != null) ui.Color.hex(@intCast(tab.?.tab_color.?)) else if (active) app_theme.current().fg_1 else app_theme.current().fg_2;
+            label_style.color = if (active) app_theme.current().fg_1 else app_theme.current().fg_2;
             const title = try ui.text(self.cx, self.model.tabs.items[index].name(), label_style);
             title.meta.ownership.meta.test_id = "tabs.title";
             title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 30 }, .top = .{ .px = (tab_styles.height - 18) / 2 } }, .width = .{ .px = width - 62 }, .height = .{ .px = 18 }, .overflow_hidden = true });
@@ -1437,13 +1508,14 @@ pub const Workspace = struct {
             try tab_box.appendChild(self.cx.allocator, close);
             if (active) {
                 const underline = try ui.box(self.cx, tab_styles.underline(width), .{});
+                underline.setBackground(identity_color);
                 underline.meta.ownership.meta.test_id = "tabs.active_underline";
                 try tab_box.appendChild(self.cx.allocator, underline);
             }
             try tooltip.trigger.appendChild(self.cx.allocator, tab_box);
             try holder.appendChild(self.cx.allocator, tooltip.wrapper);
             try content.appendChild(self.cx.allocator, holder);
-            const drag = try ui.interaction.drag.Binding.attach(scope, self.cx, holder, .{ .axis = .horizontal, .activation_distance = 5 }, onTabDrag, select_ctx);
+            const drag = try ui.interaction.drag.Binding.attach(scope, self.cx, holder, .{ .axis = .both, .activation_distance = 5 }, onTabDrag, select_ctx);
             select_ctx.drag_binding = drag;
             try self.tab_nodes.append(self.allocator, .{ .node = tab_box, .holder = holder, .icon = number, .type_icon = type_icon, .icon_asset = tab_icon_asset, .label = title, .close = close, .tab_id = model_tab.id, .tab_index = index, .select_ctx = select_ctx, .close_ctx = close_ctx });
         }
@@ -1488,15 +1560,22 @@ pub const Workspace = struct {
         const index = if (source.container) |container| self.model.indexOf(container) orelse return null else source_index.?;
         const model_tab = &self.model.tabs.items[index];
         for (self.tab_nodes.items) |node| if (node.tab_id == model_tab.id) {
-            const icon = node.type_icon.getIcon() orelse return null;
             const asset = node.icon_asset;
+            const state = self.tabIconState(model_tab.id);
+            const tint = session_icon.tabTint(state, asset);
+            const backdrop = session_icon.artworkBackdrop(asset.icon_id.?);
+            const artwork = @import("host_os_assets.zig");
             return .{
                 .tab_id = model_tab.id,
                 .order = index,
                 .title = model_tab.name(),
                 .icon_svg = asset.svg_data,
-                .icon_id = icon.icon_id,
-                .icon_tint = (@as(u32, icon.tint.r) << 24) | (@as(u32, icon.tint.g) << 16) | (@as(u32, icon.tint.b) << 8) | icon.tint.a,
+                .icon_rgba = if (artwork.index(asset.icon_id.?)) |i| if (state == .normal) artwork.display_pixels[i] else artwork.pixels[i] else &.{},
+                .icon_original = state == .normal and artwork.index(asset.icon_id.?) != null,
+                .icon_bouncing = self.tabIsBouncing(model_tab.id),
+                .icon_id = asset.icon_id.?,
+                .icon_tint = (@as(u32, tint.r) << 24) | (@as(u32, tint.g) << 16) | (@as(u32, tint.b) << 8) | tint.a,
+                .icon_backdrop = (@as(u32, backdrop.r) << 24) | (@as(u32, backdrop.g) << 16) | (@as(u32, backdrop.b) << 8) | backdrop.a,
                 .current = self.model.active == model_tab.id,
                 .status = self.tabStatus(model_tab.id),
             };
@@ -1508,12 +1587,52 @@ pub const Workspace = struct {
         for (self.tab_nodes.items) |*node| {
             const index = self.tabIndexById(node.tab_id) orelse continue;
             const tab = self.tabs.items[index];
-            const old = node.type_icon.getIcon() orelse continue;
-            if (tabShowsHistory(tab) == (old.icon_id == session_icon.resolve(.history).icon_id.?)) continue;
+            if (tabShowsHistory(tab) == (node.icon_asset.icon_id == session_icon.resolve(.history).icon_id)) continue;
+            const tint = session_icon.tabTint(self.tabIconState(node.tab_id), self.tabIcon(tab));
             const asset = self.tabIcon(tab);
             node.icon_asset = asset;
-            node.type_icon.setIcon(.{ .icon_id = asset.icon_id.?, .rep = asset.pickRep(14).?, .tint = old.tint });
+            node.type_icon.setImage(null);
+            node.type_icon.setIcon(.{ .icon_id = asset.icon_id.?, .rep = asset.pickRep(14).?, .tint = tint });
             node.type_icon.markRenderDirty();
+        }
+    }
+
+    pub fn tabIconState(self: *Workspace, id: identity.TabId) session_icon.TabState {
+        if (self.groupIdByTab(id) != null) return .normal;
+        const index = self.tabIndexById(id) orelse return .normal;
+        const tab = self.tabs.items[index];
+        if (tab.archived or tab.closing) return .normal;
+        if (tab.local) return switch (tab.local_state) {
+            .starting => .connecting,
+            .failed, .cleanup_unknown => .failed,
+            else => .normal,
+        };
+        if (tab.terminal) |terminal| if (terminal.tombstone.state == .reconnecting) return .connecting;
+        if (tab.remote_notice) |notice| if (notice.snapshot) |snapshot| switch (snapshot.state) {
+            .reconnecting => return .connecting,
+            .disconnected, .retry_failed => return .failed,
+            .exited => return .normal,
+            .connected => {},
+        };
+        if (tab.failed) return .failed;
+        if (tab.plugin_renderer != null) return switch (pluginConnectionState(tab)) {
+            .degraded => .failed,
+            .connecting => .connecting,
+            else => .normal,
+        };
+        if (tab.terminal) |terminal| {
+            if (terminal.tombstone.state != .active) return .normal;
+            return if (tab.runtime == null) .connecting else .normal;
+        }
+        return if (tab.file_ready or tab.content_ready) .normal else .connecting;
+    }
+
+    fn refreshTabIconTints(self: *Workspace) void {
+        for (self.tab_nodes.items) |node| {
+            if (node.type_icon.getIcon()) |icon| {
+                const tint = session_icon.tabTint(self.tabIconState(node.tab_id), node.icon_asset);
+                if (!ui.Color.eql(icon.tint, tint)) _ = node.type_icon.setTint(tint);
+            }
         }
     }
 
@@ -1683,8 +1802,7 @@ pub const Workspace = struct {
             node.close.setOpacity(if (show) 1 else 0);
             node.close.setHitTestVisible(show);
             node.close.setFocusable(show);
-            const group_color = if (self.groupIdByTab(node.tab_id)) |id| self.groupTabColor(id) else null;
-            node.node.setBackground(if (group_color) |color| tab_styles.groupTint(color) else if (self.model.active == node.tab_id) app_theme.current().tab_on else if (cell.hovered) app_theme.states().hover else ui.Color.TRANSPARENT);
+            node.node.setBackground(if (self.model.active == node.tab_id) app_theme.current().tab_on else if (cell.hovered) app_theme.states().hover else ui.Color.TRANSPARENT);
             return;
         };
     }
@@ -1711,54 +1829,148 @@ pub const Workspace = struct {
         if (event == .mouse_down or event == .mouse_up) return .stop;
         return .ignored;
     }
+    fn clearTabDropFeedback(self: *Workspace) void {
+        for (self.tab_nodes.items) |node| node.node.setStyle(self.allocator, .outline, @as(?ui.Outline, null));
+    }
     fn onTabDrag(event: ui.interaction.drag.Event, context: *anyopaque) void {
         const cell: *ClickCtx = @ptrCast(@alignCast(context));
         const self = cell.workspace;
         const id = cell.tab_id orelse return;
+        self.clearTabDropFeedback();
         switch (event.phase) {
             .start => {
                 self.model.beginDrag() catch return;
                 self.drag_tab = id;
+                self.tab_reorder_target = null;
                 self.drag_binding = cell.drag_binding;
             },
             .move => {},
             .end, .cancel => {
+                if (event.phase == .end) {
+                    if (self.tab_drop_target) |target| {
+                        for (self.tab_nodes.items) |node| if (node.tab_id == target) {
+                            const r = node.node.globalRect();
+                            const p = event.position_window;
+                            if (p.x >= r.x + r.w * 0.25 and p.x <= r.x + r.w * 0.75 and p.y >= r.y and p.y <= r.y + r.h) {
+                                self.pending_tab_drop = .{ .source = id, .target = target };
+                            }
+                            break;
+                        };
+                    }
+                }
+                if (event.phase == .end and self.pending_tab_drop == null) {
+                    if (self.tab_reorder_target) |target| if (self.model.indexOf(target)) |at| self.model.moveTab(id, at) catch {};
+                }
+                self.tab_drop_target = null;
+                self.tab_reorder_target = null;
                 self.model.endDrag(event.phase == .cancel) catch {};
                 self.drag_tab = null;
                 self.drag_binding = null;
                 if (self.drag_gap) |gap| gap.setDisplay(.none);
                 self.syncModelOrder() catch {};
-                self.rebuildTabBar() catch {};
+                self.tab_rebuild_pending = true;
+                self.cx.requestRedraw();
                 return;
             },
+        }
+        self.tab_drop_target = null;
+        if (self.tabIndexById(id) != null) {
+            for (self.tab_nodes.items) |node| {
+                if (node.tab_id == id) continue;
+                const r = node.node.globalRect();
+                const p = event.position_window;
+                if (p.x >= r.x + r.w * 0.25 and p.x <= r.x + r.w * 0.75 and p.y >= r.y and p.y <= r.y + r.h) {
+                    self.tab_drop_target = node.tab_id;
+                    node.node.setStyle(self.allocator, .outline, @as(?ui.Outline, .{ .color = app_theme.current().accent, .width = 2, .offset = -2 }));
+                    if (self.drag_gap) |gap| {
+                        gap.setDisplay(.none);
+                    }
+                    self.cx.requestRedraw();
+                    return;
+                }
+            }
         }
         self.drag_pointer_x = event.position_window.x;
         self.moveDraggedTab();
     }
+    fn dropTabIntoGroup(self: *Workspace, source_id: identity.TabId, target_id: identity.TabId) !void {
+        if (source_id == target_id) return;
+        const source = self.tabs.items[self.tabIndexById(source_id) orelse return error.StaleSession];
+        if (source.archived or source.closing or source.owned_pending or source.content_owner != .session) return error.StaleSession;
+        const roster = self.group_roster orelse return error.UnknownGroup;
+        const group_id: u32 = if (self.groupIdByTab(target_id)) |id| existing: {
+            if (self.groupClosing(id)) return error.GroupClosing;
+            const group = roster.findById(id) orelse return error.UnknownGroup;
+            if (group.contains(source.id)) return;
+            const revision = try identity.advance(group.membership_revision);
+            try group.members.ensureUnusedCapacity(self.allocator, 1);
+            const plan = try self.prepareTabGrouping(.{ .source = source.content_owner.session, .group = id });
+            group.members.appendAssumeCapacity(.{ .pane_id = source.id, .membership_revision = revision });
+            group.membership_revision = revision;
+            self.commitTabGrouping(plan);
+            break :existing id;
+        } else fresh: {
+            const target = self.tabs.items[self.tabIndexById(target_id) orelse return error.StaleSession];
+            if (target.archived or target.closing or target.owned_pending or target.content_owner != .session) return error.StaleSession;
+            const name = try std.fmt.allocPrint(self.allocator, "{s} 会话组 #{d}", .{ target.titleSlice(), target.id });
+            defer self.allocator.free(name);
+            var prepared = try roster.prepareNew(name, 0xff818cf8, target.id);
+            defer prepared.deinit();
+            const entry = &prepared.entry.?;
+            try entry.members.append(self.allocator, .{ .pane_id = source.id, .membership_revision = 3 });
+            entry.membership_revision = 3;
+            var view = try self.prepareGroupView(prepared.id, name, target.id);
+            defer view.deinit();
+            try view.validate();
+            const plan = try self.prepareTabGrouping(.{ .source = source.content_owner.session, .target = target.content_owner.session, .group = prepared.id });
+            const id = prepared.commit() catch unreachable;
+            self.commitTabGrouping(plan);
+            view.commit(roster) catch unreachable;
+            break :fresh id;
+        };
+        const group = roster.findById(group_id).?;
+        try self.openGroup(roster, group.id);
+        const parent = self.groupTabId(group.id).?;
+        for (group.members.items) |member| if (self.sessionTab(member.pane_id)) |tab| try self.model.setContainer(tab.tab_id, parent);
+        self.refreshGroup(group.id);
+        self.tab_rebuild_pending = true;
+    }
+    fn prepareTabGrouping(self: *Workspace, drop: ai_tab_grouping.Drop) !?ai_tab_grouping.Plan {
+        const prepare = self.ai_grouping_bridge.prepare orelse return null;
+        return try prepare(self.ai_grouping_bridge.context orelse return error.ContextUnavailable, drop);
+    }
+    fn commitTabGrouping(self: *Workspace, plan: ?ai_tab_grouping.Plan) void {
+        if (plan) |value| if (self.ai_grouping_bridge.commit) |commit| commit(self.ai_grouping_bridge.context.?, value);
+    }
+
     fn moveDraggedTab(self: *Workspace) void {
         const id = self.drag_tab orelse return;
         const viewport = self.strip_viewport orelse return;
         const rect = viewport.globalRect();
         const content_x = self.drag_pointer_x - rect.x + self.strip_offset;
+        // Keep target geometry stable while the pointer crosses tab edges.
+        // Moving the rows here makes a later centre drop land on the source.
         var left: f32 = 0;
-        var target: usize = 0;
+        var slot: usize = 0;
         for (self.strip_widths.items, 0..) |width, index| {
-            target = index;
             if (content_x < left + width / 2) break;
+            slot = index + 1;
             left += width + tab_styles.gap;
         }
-        self.model.moveTab(id, self.model.visibleAt(target) orelse return) catch return;
-        self.syncModelOrder() catch {};
+        const source = self.model.visibleIndexOf(id) orelse return;
+        const destination = @min(self.model.visibleCount() - 1, slot - @as(usize, if (source < slot) 1 else 0));
+        const target_at = self.model.visibleAt(destination) orelse return;
+        self.tab_reorder_target = self.model.tabs.items[target_at].id;
         if (self.drag_gap) |gap| {
-            var destination: f32 = 0;
-            for (self.strip_widths.items[0..target]) |width| destination += width + tab_styles.gap;
-            gap.setStyle(self.allocator, .translate_x, destination - self.strip_offset - 2);
+            var x: f32 = 0;
+            for (self.strip_widths.items[0..slot]) |width| x += width + tab_styles.gap;
+            gap.setStyle(self.allocator, .translate_x, x - self.strip_offset - 2);
             gap.setDisplay(.flex);
         }
         if (self.strip_geometry.mode == .overflow and (self.drag_pointer_x < rect.x + 24 or self.drag_pointer_x > rect.x + rect.w - 24)) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
     }
     fn autoScrollDrag(self: *Workspace) bool {
-        if (!self.model.dragging or self.strip_geometry.mode != .overflow) return false;
+        if (!self.model.dragging or self.tab_drop_target != null or self.strip_geometry.mode != .overflow) return false;
         const rect = (self.strip_viewport orelse return false).globalRect();
         const delta: f32 = if (self.drag_pointer_x < rect.x + 24) -12 else if (self.drag_pointer_x > rect.x + rect.w - 24) 12 else return false;
         const old = self.strip_offset;
@@ -2076,6 +2288,59 @@ pub const Workspace = struct {
                 return container;
             },
         }
+    }
+
+    const GroupTabMenu = struct {
+        workspace: *Workspace,
+        group: u32 = 0,
+        open: *ui.Signal(bool),
+        anchor: ui.widgets.popover.AnchorRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+        fn rect(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.anchor;
+        }
+        fn rename(self: *@This()) void {
+            self.open.set(false);
+            self.workspace.beginRenamePresentation(self.workspace.groupTabId(self.group) orelse return) catch {};
+        }
+        fn color(self: *@This()) void {
+            self.open.set(false);
+            self.workspace.showTabColor(self.workspace.groupTabId(self.group) orelse return);
+        }
+        fn side(self: *@This()) void {
+            self.open.set(false);
+            self.workspace.setGroupLayout(self.group, .side_by_side);
+        }
+        fn stack(self: *@This()) void {
+            self.open.set(false);
+            self.workspace.setGroupLayout(self.group, .stacked);
+        }
+        fn close(self: *@This()) void {
+            self.open.set(false);
+            self.workspace.requestCloseGroup(self.group);
+        }
+    };
+    fn showGroupTabMenu(self: *Workspace, group: u32, anchor: *ui.Node) !void {
+        if (self.groupClosing(group)) return;
+        if (self.group_tab_menu == null) {
+            const state = try self.scope.createState(GroupTabMenu, .{ .workspace = self, .open = try self.scope.createSignal(bool, false) });
+            const popup = try ui.widgets.Popover(.{ .open = state.open, .trigger = .manual, .position = .bottom_start, .width = 208, .anchor = .{ .virtual = .{ .ctx = state, .getRect = GroupTabMenu.rect } } }).mount(self.scope, self.cx);
+            popup.content.setStyleInline(self.allocator, .{ .padding = ui.Padding.all(6), .gap = 2, .background = app_theme.current().overlay, .glass = app_theme.overlayGlass(), .border = .{ .radius = 10 } });
+            popup.content.meta.ownership.meta.test_id = "groups.tab.menu";
+            inline for (.{ .{ "重命名会话组", "groups.tab.rename", GroupTabMenu.rename }, .{ "页签颜色", "groups.tab.color", GroupTabMenu.color }, .{ "全部左右排列", "groups.tab.side", GroupTabMenu.side }, .{ "全部上下排列", "groups.tab.stack", GroupTabMenu.stack }, .{ "断开并关闭会话组…", "groups.tab.close", GroupTabMenu.close } }) |item| {
+                const button = try ui.widgets.Button(.{ .label = item[0], .variant = .ghost, .base_style = @as(ui.BoxStyle, .{ .width = .fill(), .height = .{ .px = 30 }, .font_size = 12 }), .on_click = self.cx.on(GroupTabMenu, state, item[2]) }).mount(popup.scope, self.cx);
+                button.meta.ownership.meta.test_id = item[1];
+                try popup.content.appendChild(self.allocator, button);
+            }
+            try self.cx.root.?.appendChild(self.allocator, popup.wrapper);
+            self.group_tab_menu = state;
+        }
+        const menu = self.group_tab_menu.?;
+        const r = anchor.globalRect();
+        menu.group = group;
+        menu.anchor = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+        menu.open.set(true);
+        self.cx.requestRedraw();
     }
 
     fn groupView(self: *Workspace, id: u32) ?*group_view.View {
@@ -2499,6 +2764,7 @@ pub const Workspace = struct {
             if (tab.content_owner != .session or tab.archived or tab.owned_pending) continue;
             if (tab.terminal) |*terminal| terminal.setGrouped(true);
             var pane_style = group_styles.pane();
+            pane_style.background = ui.Color.TRANSPARENT;
             pane_style.border = .{ .width = 0, .radius = 11 };
             pane_style.padding = .{};
             pane_style.width = .fill();
@@ -2687,6 +2953,11 @@ pub const Workspace = struct {
     }
 
     fn pollGroupWorkspace(self: *Workspace) bool {
+        if (self.pending_tab_drop) |drop| {
+            self.pending_tab_drop = null;
+            self.dropTabIntoGroup(drop.source, drop.target) catch |err| self.statusFailure(@errorName(err));
+        }
+
         for (self.model.tabs.items) |tab| self.restoreStandaloneIfUngrouped(tab.id);
         if (self.pending_split) |pending| {
             if (self.sessionTab(pending.session)) |tab| {
@@ -3146,14 +3417,25 @@ pub const Workspace = struct {
                 return;
             }
             const index = self.tabIndexById(target.tab) orelse return;
-            if (self.tabs.items[index].closing) return;
+            if (self.tabs.items[index].closing) {
+                if (self.window_close_request != null) {
+                    self.close_cursor += 1;
+                    continue;
+                }
+                return;
+            }
             const risk = if (self.close_bridge.risk) |callback| callback(self.close_bridge.context, self.tabs.items[index].id) else CloseRisk{};
             if (risk.any()) {
                 self.confirmClose(index);
                 return;
             }
             self.forceCloseTab(index);
-            if (self.tabIndexById(target.tab) != null) return;
+            // Window close must dispatch every approved owner before waiting
+            // for release: sibling SSH channels can share one native parent.
+            // windowTargetsReleased still requires every actual close receipt.
+            if (self.tabIndexById(target.tab)) |remaining| {
+                if (self.window_close_request == null or !self.tabs.items[remaining].closing) return;
+            }
             self.close_cursor += 1;
         }
         self.close_others_keep = null;
@@ -3363,7 +3645,7 @@ pub const Workspace = struct {
             .on_click = cx.on(Workspace, self, rejectHostKey),
         }).mount(self.scope, cx));
         const changed_button = try ui.widgets.Button(.{
-            .label = "输入 yes 并继续",
+            .label = "替换密钥并继续",
             .variant = .secondary,
             .on_click = cx.on(Workspace, self, trustChangedHostKey),
         }).mount(self.scope, cx);
@@ -3377,7 +3659,7 @@ pub const Workspace = struct {
         // Persist this fingerprint in the configured known_hosts store. This
         // remains an explicit first-use choice; subsequent connections with
         // the same host/port/key skip the modal, while a changed key still
-        // requires the separate literal-yes flow.
+        // requires an explicit replacement confirmation.
         const remember_button = try ui.widgets.Button(.{
             .label = "记住此主机",
             .variant = .primary,
@@ -3434,6 +3716,32 @@ pub const Workspace = struct {
         self.hideHostKeyConfirm();
     }
 
+    /// Per-tick lifecycle checks do not need the connection log or hop labels.
+    pub const ConnectionLifecycle = struct {
+        finished: bool,
+        failure: ?anyerror,
+        cleanup: @import("../host/operation.zig").Cleanup,
+    };
+
+    fn projectConnectionLifecycle(job: *ConnectJob, finished: bool, cancelled: bool, resources: *const ResourceLedger.Snapshot) ConnectionLifecycle {
+        return .{
+            .finished = finished,
+            .failure = if (finished and job.automatic_retry_deadline_ns == null) job.err else null,
+            .cleanup = if (resources.hasUnknown() or job.cleanup_unknown) .unknown else if (finished and resources.released()) .released else if (cancelled) .releasing else .not_started,
+        };
+    }
+
+    pub fn connectionLifecycle(self: *Workspace, key: OperationKey) ?ConnectionLifecycle {
+        for (self.connect_jobs.items) |job| {
+            if (job.operation_key == null or !job.operation_key.?.eql(key)) continue;
+            _ = self.findTicket(job.ticket) orelse return null;
+            const finished = job.ready.load(.acquire);
+            const resources = job.resource_ledger.snapshot();
+            return projectConnectionLifecycle(job, finished, job.cancelled.load(.acquire), &resources);
+        }
+        return null;
+    }
+
     pub const ConnectionProgress = struct {
         pub const Hop = struct { name: []const u8, host: []const u8, user: []const u8, port: u16 };
         pub const LogRecord = struct { key: OperationKey, entry: @import("../proto/ssh/connection_progress.zig").Journal.Entry };
@@ -3481,7 +3789,7 @@ pub const Workspace = struct {
     }
 
     pub fn dismissConnectionProgress(self: *Workspace, key: OperationKey) !void {
-        const progress = self.connectionProgress(key) orelse return error.StaleConnection;
+        const progress = self.connectionLifecycle(key) orelse return error.StaleConnection;
         if (!progress.finished or progress.cleanup != .released) return error.CleanupNotReleased;
         for (self.connect_jobs.items) |job| {
             if (job.operation_key != null and job.operation_key.?.eql(key)) {
@@ -3501,18 +3809,19 @@ pub const Workspace = struct {
             const finished = job.ready.load(.acquire);
             const resources = job.resource_ledger.snapshot();
             const cancelled = job.cancelled.load(.acquire);
+            const lifecycle_state = projectConnectionLifecycle(job, finished, cancelled, &resources);
             var result: ConnectionProgress = .{
                 .key = key,
                 .hop_count = job.jump_snapshot.value.len + 1,
                 .journal = job.progress.snapshot(),
                 .resources = resources,
-                .finished = finished,
+                .finished = lifecycle_state.finished,
                 .attached = false,
                 .attachment_failed = finished and tab.failed and job.automatic_retry_deadline_ns == null,
                 .cancelled = cancelled,
-                .failure = if (finished and job.automatic_retry_deadline_ns == null) job.err else null,
+                .failure = lifecycle_state.failure,
                 .automatic_retry_pending = job.automatic_retry_deadline_ns != null,
-                .cleanup = if (resources.hasUnknown() or job.cleanup_unknown) .unknown else if (finished and resources.released()) .released else if (cancelled) .releasing else .not_started,
+                .cleanup = lifecycle_state.cleanup,
             };
             if (result.hop_count > result.hops.len) return null;
             result.dropped = job.progress_history_dropped;
@@ -3744,7 +4053,7 @@ pub const Workspace = struct {
             };
             var buffer: [1024]u8 = undefined;
             const message = if (request.status == .changed)
-                std.fmt.bufPrint(&buffer, "警告：服务器 {s}:{d} 的主机密钥已变化\n当前主机指纹\n{s} {s}\n只有输入 yes 才能继续", .{
+                std.fmt.bufPrint(&buffer, "警告：服务器 {s}:{d} 的主机密钥已变化\n当前主机指纹\n{s} {s}\n核对指纹后，点击替换密钥并继续", .{
                     request.hostSlice(), request.port, request.algorithmSlice(), request.fingerprintSlice(),
                 }) catch "主机密钥已变化"
             else
@@ -4429,7 +4738,7 @@ pub const Workspace = struct {
                     const exit_detail = if (std.mem.indexOf(u8, text, " · ")) |offset| text[offset + " · ".len ..] else "";
                     const prefix: []const u8 = if (std.mem.startsWith(u8, exit_detail, "exit ")) " · 退出码 " else if (std.mem.startsWith(u8, exit_detail, "signal ")) " · 终止信号 " else if (exit_detail.len > 0) " · " else "";
                     const value = if (std.mem.startsWith(u8, exit_detail, "exit ")) exit_detail[5..] else if (std.mem.startsWith(u8, exit_detail, "signal ")) exit_detail[7..] else exit_detail;
-                    break :blk std.fmt.bufPrint(&buffer, "历史输出仍可查看，继续使用请新建终端{s}{s}", .{ prefix, value }) catch "历史输出仍可查看，继续使用请新建终端";
+                    break :blk std.fmt.bufPrint(&buffer, "历史输出仍可查看{s}{s}", .{ prefix, value }) catch "历史输出仍可查看";
                 },
                 .closing => "正在释放会话资源，请稍候",
                 .cleanup_unknown => "资源清理结果未知，已保留会话；请稍后查看状态",
@@ -4750,8 +5059,16 @@ pub const Workspace = struct {
         try retry(self.session_bridge.context, source.id);
     }
 
-    /// Reuses the original tab, worker/VT and frozen Job. The host has already
-    /// allocated this successor; no registry lookup selects another route.
+    fn reconnectConfiguration(self: *Workspace, source: hosts_mod.HostConfig) @import("../vt/reconnect.zig").Configuration {
+        const host = if (self.registry.indexOf(source.connection_id)) |index| self.registry.hosts[index] else source;
+        return .{
+            .startup_commands = host.startup_commands,
+            .auto_shell_integration = host.auto_shell_integration orelse self.app_config.ssh.auto_shell_integration,
+        };
+    }
+
+    /// Keep the original tab/VT and connection identity. Each new shell gets
+    /// the current startup commands and initialization policy.
     pub fn retrySshSession(self: *Workspace, id: SessionId, next: OperationKey) !void {
         const tab = self.sessionTab(id) orelse return error.StaleSession;
         if (tab.local or tab.archived or tab.closing or next.owner != .session) return error.LifecycleDoesNotAllowRetry;
@@ -4768,6 +5085,14 @@ pub const Workspace = struct {
             const state = runtime.reconnectSnapshot() orelse return error.SessionClosed;
             if (state.key == null or !state.key.?.eql(previous) or (state.phase != .waiting and state.phase != .ended) or state.cleanup != .released) return error.CleanupNotReleased;
         } else if (!job.ready.load(.acquire) or !job.drained or !job.resource_ledger.snapshot().released()) return error.CleanupNotReleased;
+        const configuration = self.reconnectConfiguration(job.host_snapshot.value);
+        if (tab.runtime == null) {
+            // No worker has been installed; its next construction must use the
+            // same resolved startup policy as an existing worker's new shell.
+            job.host_snapshot.value.startup_commands = try lifecycle.cloneValue([]const []const u8, job.host_snapshot.arena.allocator(), configuration.startup_commands);
+            if (self.registry.indexOf(job.host_snapshot.value.connection_id)) |host_index| job.host_snapshot.value.auto_shell_integration = self.registry.hosts[host_index].auto_shell_integration;
+            job.config_snapshot.value.ssh.auto_shell_integration = self.app_config.ssh.auto_shell_integration;
+        }
         if (job.progress_history.items.len < 6) try job.progress_history.ensureUnusedCapacity(std.heap.c_allocator, 1);
         try job.retained_cleanup.resetReleased();
         const generation = try identity.advance(tab.generation);
@@ -4808,7 +5133,7 @@ pub const Workspace = struct {
             const skip = if (tab.shell_init_skip_for_operation) |key| key.eql(previous) else false;
             tab.shell_init_skip_for_operation = null;
             tab.shell_init_confirmation_required = false;
-            runtime.requestReconnectWithInitialization(previous, next, skip) catch |err| {
+            runtime.requestReconnectConfigured(previous, next, skip, configuration) catch |err| {
                 job.err = err;
                 job.ready.store(true, .release);
                 tab.failed = true;
@@ -5247,6 +5572,8 @@ pub const Workspace = struct {
                 };
             }
             workspace.refreshHistoryTabIcons();
+            workspace.refreshTabIconTints();
+            workspace.refreshNotificationAttention();
             workspace.drainCloseReceipts();
             if (workspace.pollGroupWorkspace()) return .needs_layout;
             if ((workspace.close_others_keep != null or workspace.window_close_request != null) and (workspace.confirming_id == null or workspace.window_close_reconcile)) workspace.continueCloseOthers();
@@ -5358,6 +5685,111 @@ test "recent tab input leaves plain Tab and higher priority input untouched" {
     tab.terminal.?.local_editor.active = true;
     try std.testing.expectEqual(ui.events.EventResult.ignored, workspace.handleTabKey(.tab, control));
     try std.testing.expect(workspace.model.recent_cursor == null);
+}
+
+test "tab grouping native drop preserves target conversation and refreshes existing group membership only" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const strip = try ui.box(cx, .{ .height = .{ .px = 32 }, .direction = .row }, .{});
+    try root.appendChild(allocator, strip);
+    const area = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    try root.appendChild(allocator, area);
+    const config: config_mod.Config = .{};
+    var roster = group_model.Roster.init(allocator);
+    defer roster.deinit();
+    var workspace: Workspace = .{ .allocator = allocator, .cx = cx, .scope = scope, .io = std.testing.io, .app_config = &config, .palette = Palette.fromTheme(), .registry = .{ .arena = std.heap.ArenaAllocator.init(allocator), .hosts = &.{} }, .hosts_path = "", .sidebar_list = root, .tab_bar = strip, .terminal_area = area, .empty_state = area, .group_roster = &roster, .model = .{ .allocator = allocator, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) } };
+    defer {
+        if (workspace.poll_hook) |hook| {
+            cx.removeAfterLayoutHook(hook);
+            allocator.destroy(hook);
+            workspace.poll_hook = null;
+        }
+        scope.dispose();
+        for (workspace.click_ctxs.items) |cell| allocator.destroy(cell);
+        workspace.click_ctxs.deinit(allocator);
+        workspace.tab_nodes.deinit(allocator);
+        workspace.strip_advances.deinit(allocator);
+        workspace.strip_widths.deinit(allocator);
+        workspace.tabs.deinit(allocator);
+        workspace.model.deinit();
+        workspace.registry.deinit();
+        for (workspace.group_views.items) |view| {
+            view.deinit(allocator);
+            allocator.destroy(view);
+        }
+        workspace.group_views.deinit(allocator);
+    }
+    const Probe = struct {
+        store: @import("../ai/assistant_store.zig").Store,
+        preparations: usize = 0,
+        stops: usize = 0,
+        fn prepare(raw: *anyopaque, drop: ai_tab_grouping.Drop) !ai_tab_grouping.Plan {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.preparations += 1;
+            return ai_tab_grouping.prepare(&self.store, drop);
+        }
+        fn commit(raw: *anyopaque, plan: ai_tab_grouping.Plan) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            ai_tab_grouping.commit(&self.store, plan, self, stop) catch unreachable;
+        }
+        fn stop(raw: *anyopaque, _: ai_tab_grouping.Activity) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.stops += 1;
+        }
+    };
+    var probe: Probe = .{ .store = @import("../ai/assistant_store.zig").Store.init(allocator) };
+    defer probe.store.deinit();
+    workspace.ai_grouping_bridge = .{ .context = &probe, .prepare = Probe.prepare, .commit = Probe.commit };
+    cx.setViewport(860, 480);
+    var tabs: [3]SessionTab = undefined;
+    var conversations: [3]u64 = undefined;
+    for (&tabs, 0..) |*tab, index| {
+        const id: u64 = @intCast(index + 71);
+        const pane = try ui.box(cx, .{}, .{});
+        try area.appendChild(allocator, pane);
+        tab.* = .{ .id = id, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = .{ .session_id = @fromBackingInt(id), .generation = 1 } }, .host_id = 0, .host_index = 0, .host_snapshot = null, .root = pane, .local = true };
+        tab.setTitle(if (index == 0) "Source A" else if (index == 1) "Target B" else "Source C");
+        try workspace.tabs.append(allocator, tab);
+        try workspace.installTabModel(tab);
+        conversations[index] = (try probe.store.create(.{ .session = id })).id;
+    }
+    const b_identity = probe.store.find(conversations[1]).?.conversation_id;
+    // A genuine edge drop follows the reorder path and never calls the AI bridge.
+    try workspace.renderTabBar();
+    cx.layout();
+    const first = workspace.tab_nodes.items[0].node.globalRect();
+    const last = workspace.tab_nodes.items[2].node.globalRect();
+    cx.handleMouseDown(first.x + 35, first.y + 15, .{});
+    cx.handleMouseMove(last.x + last.w - 2, last.y + 15);
+    cx.handleMouseUp(last.x + last.w - 2, last.y + 15);
+    try std.testing.expect(workspace.pending_tab_drop == null);
+    try std.testing.expectEqual(@as(usize, 0), probe.preparations);
+    try std.testing.expectEqual(@as(usize, 0), probe.stops);
+    try workspace.dropTabIntoGroup(tabs[0].tab_id, tabs[1].tab_id);
+    const group = roster.groups.items[0].id;
+    const parent = workspace.groupTabId(group).?;
+    try std.testing.expect(probe.store.find(conversations[0]).?.ended);
+    try std.testing.expect(probe.store.active(.{ .group = group }).?.conversation_id.eql(b_identity));
+    try std.testing.expectEqual(@as(usize, 1), probe.stops);
+    const revision = roster.findById(group).?.membership_revision;
+    try workspace.dropTabIntoGroup(tabs[2].tab_id, parent);
+    try std.testing.expectEqual(revision + 1, roster.findById(group).?.membership_revision);
+    try std.testing.expectEqual(@as(usize, 3), roster.findById(group).?.members.items.len);
+    try std.testing.expect(probe.store.active(.{ .group = group }).?.conversation_id.eql(b_identity));
+    try std.testing.expect(probe.store.find(conversations[2]).?.ended);
+    try std.testing.expectEqual(@as(usize, 2), probe.stops);
+    for (tabs) |tab| {
+        try std.testing.expect(!tab.closing);
+        try std.testing.expectEqual(parent, workspace.model.tabs.items[workspace.model.indexOf(tab.tab_id).?].container.?);
+    }
+}
+
+test {
+    _ = ai_tab_grouping;
 }
 
 test "temporary connection source uses the frozen remote tab and excludes saved local or closed tabs" {
@@ -5595,7 +6027,7 @@ test "Local presentation has independent owners and keeps ended output beneath i
     workspace.updateLocalState(second, .exited, "本地 zsh 已退出 · exit 0");
     try std.testing.expectEqualStrings("我的终端", workspace.model.tabs.items[1].name());
     try std.testing.expectEqualStrings("本地终端已退出", tab.local_message.?.getText().?.content);
-    try std.testing.expectEqualStrings("历史输出仍可查看，继续使用请新建终端 · 退出码 0", tab.local_detail.?.getText().?.content);
+    try std.testing.expectEqualStrings("历史输出仍可查看 · 退出码 0", tab.local_detail.?.getText().?.content);
     try std.testing.expect(tab.local_new.?.style.display != .none);
     try std.testing.expect(tab.local_close.?.style.display != .none);
     try std.testing.expect(tab.local_retry.?.style.display == .none);
@@ -6157,6 +6589,76 @@ test "saved revision opens with transient credentials without mutating registry"
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
 }
 
+test "connection lifecycle polls authentication failure retries cleanup and stale keys without log snapshots" {
+    const key: OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(91), .generation = 3 } }, .operation_id = 201, .attempt_id = 2 };
+    var tab: SessionTab = undefined;
+    tab.id = 17;
+    tab.generation = 4;
+    var job: Workspace.ConnectJob = undefined;
+    job.ticket = tab.ticket();
+    job.operation_key = key;
+    job.ready = .init(false);
+    job.cancelled = .init(false);
+    job.cleanup_unknown = false;
+    job.automatic_retry_deadline_ns = null;
+    job.resource_ledger = try ResourceLedger.init(key, 1);
+    // Logs, endpoint snapshots and runtime are deliberately unavailable to
+    // this lifecycle-only consumer, including while authentication is pending.
+    var tabs = [_]*SessionTab{&tab};
+    var jobs = [_]*Workspace.ConnectJob{&job};
+    var workspace: Workspace = undefined;
+    workspace.tabs = .empty;
+    workspace.tabs.items = &tabs;
+    workspace.connect_jobs = .empty;
+    workspace.connect_jobs.items = &jobs;
+    const pending = workspace.connectionLifecycle(key).?;
+    try std.testing.expect(!pending.finished and pending.failure == null);
+    try std.testing.expectEqual(.not_started, pending.cleanup);
+
+    job.err = error.AuthenticationFailed;
+    job.ready.store(true, .release);
+    const failed = workspace.connectionLifecycle(key).?;
+    try std.testing.expect(failed.finished);
+    try std.testing.expectEqual(error.AuthenticationFailed, failed.failure.?);
+    try std.testing.expectEqual(.released, failed.cleanup);
+    job.automatic_retry_deadline_ns = 1;
+    try std.testing.expect(workspace.connectionLifecycle(key).?.failure == null);
+    job.automatic_retry_deadline_ns = null;
+    job.ready.store(false, .release);
+    try std.testing.expect(workspace.connectionLifecycle(key).?.failure == null);
+
+    try std.testing.expect(job.resource_ledger.record(key, 0, .transport, .owned));
+    job.cancelled.store(true, .release);
+    try std.testing.expectEqual(.releasing, workspace.connectionLifecycle(key).?.cleanup);
+    try std.testing.expectError(error.CleanupNotReleased, workspace.dismissConnectionProgress(key));
+    try std.testing.expect(job.resource_ledger.record(key, 0, .transport, .unknown));
+    job.ready.store(true, .release);
+    try std.testing.expectEqual(.unknown, workspace.connectionLifecycle(key).?.cleanup);
+    try std.testing.expectError(error.CleanupNotReleased, workspace.dismissConnectionProgress(key));
+    try std.testing.expect(job.resource_ledger.record(key, 0, .transport, .released));
+    try std.testing.expectEqual(.released, workspace.connectionLifecycle(key).?.cleanup);
+    job.cleanup_unknown = true;
+    try std.testing.expectEqual(.unknown, workspace.connectionLifecycle(key).?.cleanup);
+    job.cleanup_unknown = false;
+    try workspace.dismissConnectionProgress(key);
+    try std.testing.expect(job.progress_dismissed);
+
+    var stale = key;
+    stale.attempt_id = 1;
+    try std.testing.expect(workspace.connectionLifecycle(stale) == null);
+    stale = key;
+    stale.owner.session.generation += 1;
+    try std.testing.expect(workspace.connectionLifecycle(stale) == null);
+    var next = key;
+    next.operation_id += 1;
+    job.operation_key = next;
+    try std.testing.expect(workspace.connectionLifecycle(key) == null);
+    try std.testing.expect(workspace.connectionLifecycle(next) != null);
+    tab.generation += 1;
+    try std.testing.expect(workspace.connectionLifecycle(next) == null);
+    try std.testing.expectError(error.StaleConnection, workspace.dismissConnectionProgress(next));
+}
+
 test "connection progress keeps protocol readiness separate from host attachment" {
     const key: OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(91), .generation = 3 } }, .operation_id = 201, .attempt_id = 2 };
     var tab: SessionTab = undefined;
@@ -6171,6 +6673,7 @@ test "connection progress keeps protocol readiness separate from host attachment
     job.ready = .init(true);
     job.cancelled = .init(false);
     job.cleanup_unknown = false;
+    job.automatic_retry_deadline_ns = null;
     job.err = null;
     job.resource_ledger = try ResourceLedger.init(key, 1);
     job.progress = .{};
@@ -6194,6 +6697,10 @@ test "connection progress keeps protocol readiness separate from host attachment
     workspace.connect_jobs = .empty;
     workspace.connect_jobs.items = &jobs;
     const projection = workspace.connectionProgress(key).?;
+    const lifecycle_state = workspace.connectionLifecycle(key).?;
+    try std.testing.expectEqual(projection.finished, lifecycle_state.finished);
+    try std.testing.expectEqual(projection.failure, lifecycle_state.failure);
+    try std.testing.expectEqual(projection.cleanup, lifecycle_state.cleanup);
     try std.testing.expect(projection.finished and projection.journal.completed);
     try std.testing.expect(!projection.attached);
     try std.testing.expectEqual(@as(usize, 1), projection.hop_count);
@@ -6311,7 +6818,7 @@ test "SSH middle menu bridge preserves the clicked handle across active changes 
     try std.testing.expectEqual(@as(usize, 1), sink.calls);
 }
 
-test "notification output never adds tab dots and preserves icon and title colors" {
+test "notification output keeps marker colors and stops old unread animation across rebuilds" {
     const allocator = std.testing.allocator;
     const cx = try ui.Cx.init(allocator, std.testing.io);
     defer cx.deinit();
@@ -6362,8 +6869,9 @@ test "notification output never adds tab dots and preserves icon and title color
     workspace.sessionTab(first).?.tab_color = 0x67b88b;
     try workspace.renderTabBar();
     cx.layout();
-    try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].label.getText().?.color);
-    try std.testing.expectEqual(workspace.palette.green, workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(app_theme.current().fg_2, workspace.tab_nodes.items[0].label.getText().?.color);
+    try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].node.children.items[0].getBackground());
+    try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[0].icon_asset), workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
     try std.testing.expectEqual(workspace.palette.red, workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
     const first_presentation = workspace.tabPresentation(.{ .session = first_owner }).?;
     const second_presentation = workspace.tabPresentation(.{ .session = second_owner }).?;
@@ -6375,6 +6883,17 @@ test "notification output never adds tab dots and preserves icon and title color
     try std.testing.expectEqualStrings("离线", second_presentation.status);
     try std.testing.expect(first_presentation.order < second_presentation.order);
     try std.testing.expect(first_presentation.icon_svg.len > 0);
+    // Source-colour OS artwork becomes an image after the renderer uploads it.
+    // Notification metadata must still expose the tab's stable asset identity.
+    const uploaded_node = workspace.tab_nodes.items[0].type_icon;
+    uploaded_node.setIcon(null);
+    uploaded_node.setImage(.{ .texture_id = 9001, .tint = ui.Color.WHITE });
+    const uploaded_presentation = workspace.tabPresentation(.{ .session = first_owner }).?;
+    try std.testing.expectEqual(first_presentation.icon_id, uploaded_presentation.icon_id);
+    try std.testing.expectEqualStrings(first_presentation.icon_svg, uploaded_presentation.icon_svg);
+    try std.testing.expectEqual(first_presentation.icon_tint, uploaded_presentation.icon_tint);
+    uploaded_node.setImage(null);
+    uploaded_node.setIcon(live_icon);
     const first_child_count = workspace.tab_nodes.items[0].node.children.items.len;
     const second_child_count = workspace.tab_nodes.items[1].node.children.items.len;
     const notifications = @import("../host/notification_coordinator.zig");
@@ -6402,12 +6921,136 @@ test "notification output never adds tab dots and preserves icon and title color
             try std.testing.expect(!std.mem.eql(u8, id, "tabs.connection_status"));
         }
     }
-    try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].label.getText().?.color);
-    try std.testing.expectEqual(workspace.palette.green, workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(app_theme.current().fg_2, workspace.tab_nodes.items[0].label.getText().?.color);
+    try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].node.children.items[0].getBackground());
+    try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[0].icon_asset), workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
     try std.testing.expectEqual(workspace.palette.red, workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
     try std.testing.expect(coordinator.markRead(.{ .session = second_owner }, 3, true));
     workspace.refreshNotificationAttention();
     try std.testing.expect(!coordinator.hasDot(.{ .session = second_owner }));
+    // Only an unread background tab bounces; colour and custom titles stay put.
+    cx.window_active = true;
+    workspace.model.active = workspace.sessionTab(second).?.tab_id;
+    workspace.model.tabs.items[workspace.model.indexOf(first_tab_id).?].attention_started_ms = null;
+    cx.frame_time_ms = 100;
+    workspace.refreshNotificationAttention();
+    cx.frame_time_ms = 220;
+    workspace.refreshNotificationAttention();
+    try std.testing.expectApproxEqAbs(@as(f32, -3), workspace.tab_nodes.items[0].type_icon.style.translate_y, 0.01);
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[1].type_icon.style.translate_y);
+    try std.testing.expect(workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
+    try std.testing.expect(!workspace.tabPresentation(.{ .session = second_owner }).?.icon_bouncing);
+    cx.frame_time_ms = 2000;
+    workspace.refreshNotificationAttention();
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    try std.testing.expect(!workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
+    try workspace.renderTabBar();
+    workspace.refreshNotificationAttention();
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    try std.testing.expect(!workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
+    try std.testing.expect(coordinator.markRead(.{ .session = first_owner }, 7, true));
+    workspace.refreshNotificationAttention();
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    _ = try coordinator.observeOutput(.{ .session = first_owner }, 8);
+    workspace.model.active = first_tab_id;
+    workspace.refreshNotificationAttention();
+    try std.testing.expect(workspace.model.tabs.items[workspace.model.indexOf(first_tab_id).?].attention_started_ms == null);
+    workspace.sessionTab(second).?.local_state = .starting;
+    workspace.refreshTabIconTints();
+    try std.testing.expectEqual(session_icon.tabTint(.connecting, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    workspace.sessionTab(second).?.local_state = .exited;
+    workspace.refreshTabIconTints();
+    try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+}
+
+test "notification standalone Local tab settles without new activity and does not restart old unread output" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const strip = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 46 }, .flex_shrink = 0 }, .{});
+    try root.appendChild(allocator, strip);
+    const area = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .flex = 1, .direction = .column }, .{});
+    try root.appendChild(allocator, area);
+    const empty = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .position = .absolute }, .{});
+    try area.appendChild(allocator, empty);
+    const sidebar = try ui.box(cx, .{ .display = .none }, .{});
+    try root.appendChild(allocator, sidebar);
+    const config: config_mod.Config = .{};
+    const workspace = try allocator.create(Workspace);
+    workspace.* = .{
+        .allocator = allocator,
+        .cx = cx,
+        .scope = scope,
+        .io = std.testing.io,
+        .app_config = &config,
+        .palette = Palette.fromTheme(),
+        .registry = .{ .arena = std.heap.ArenaAllocator.init(allocator), .hosts = &.{} },
+        .hosts_path = "",
+        .sidebar_list = sidebar,
+        .tab_bar = strip,
+        .model = .{ .allocator = allocator, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) },
+        .terminal_area = area,
+        .empty_state = empty,
+    };
+    try scope.onCleanup(Workspace, workspace, Workspace.cleanup);
+    cx.setViewport(1194, 800);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(43) };
+    const session = try workspace.createLocalSessionDirect(owner);
+    workspace.updateLocalState(session, .running, "");
+    try workspace.renderTabBar();
+    const id = workspace.sessionTab(session).?.tab_id;
+    const notifications = @import("../host/notification_coordinator.zig");
+    var coordinator = try notifications.Coordinator.init(allocator, .{}, .{});
+    defer coordinator.deinit();
+    const Bridge = struct {
+        fn hasDot(raw: ?*anyopaque, content: identity.ContentOwner) bool {
+            const value: *notifications.Coordinator = @ptrCast(@alignCast(raw.?));
+            return value.hasDot(content);
+        }
+    };
+    cx.window_active = false;
+    cx.frame_time_ms = 100;
+    workspace.setNotificationAttentionBridge(.{ .context = &coordinator, .has_dot = Bridge.hasDot });
+    try std.testing.expectEqual(@as(usize, 1), workspace.tab_nodes.items.len);
+    try std.testing.expectEqual(id, workspace.model.active.?);
+    try std.testing.expect(!workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+
+    _ = try coordinator.observeOutput(.{ .session = owner }, 7);
+    workspace.refreshNotificationAttention();
+    cx.frame_time_ms = 220;
+    workspace.refreshNotificationAttention();
+    try std.testing.expectApproxEqAbs(@as(f32, -3), workspace.tab_nodes.items[0].type_icon.style.translate_y, 0.01);
+    try std.testing.expect(workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
+    // Exactly one burst, including the former 1600ms repeat boundary.
+    for ([_]f64{ 580, 1720, 3320 }) |now| {
+        cx.frame_time_ms = now;
+        workspace.refreshNotificationAttention();
+        try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+        try std.testing.expect(!workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
+    }
+    try workspace.renderTabBar();
+    workspace.refreshNotificationAttention();
+    cx.window_active = true;
+    workspace.refreshNotificationAttention();
+    cx.window_active = false;
+    _ = try coordinator.observeOutput(.{ .session = owner }, 8);
+    workspace.refreshNotificationAttention();
+    try std.testing.expect(coordinator.hasDot(.{ .session = owner }));
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    try std.testing.expect(!workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
+    // A real read receipt permits a later unread episode to animate again.
+    try std.testing.expect(coordinator.markRead(.{ .session = owner }, 8, true));
+    workspace.refreshNotificationAttention();
+    _ = try coordinator.observeOutput(.{ .session = owner }, 9);
+    workspace.refreshNotificationAttention();
+    cx.frame_time_ms += 120;
+    workspace.refreshNotificationAttention();
+    try std.testing.expectApproxEqAbs(@as(f32, -3), workspace.tab_nodes.items[0].type_icon.style.translate_y, 0.01);
 }
 
 test "Local rename survives same title startup but rejects real title or owner changes" {
@@ -6604,7 +7247,7 @@ test "group close cancel has no resource effects and membership change needs new
     try std.testing.expect(retry.behavior.interaction.a11y.?.disabled);
 }
 
-test "mixed tab group identity unifies drag rollback ordinals picker and MRU" {
+test "mixed tab group identity unifies drag cursor rollback ordinals picker and MRU" {
     const allocator = std.testing.allocator;
     const cx = try ui.Cx.init(allocator, std.testing.io);
     defer cx.deinit();
@@ -6682,10 +7325,14 @@ test "mixed tab group identity unifies drag rollback ordinals picker and MRU" {
     cx.layout();
     const drag_rect = workspace.tab_nodes.items[1].node.globalRect();
     const target_rect = workspace.tab_nodes.items[0].node.globalRect();
+    cx.handleMouseMove(drag_rect.x + drag_rect.w / 2, drag_rect.y + 15);
+    try std.testing.expectEqual(ui.CursorShape.grab, cx.current_cursor);
     cx.handleMouseDown(drag_rect.x + drag_rect.w / 2, drag_rect.y + 15, .{});
     cx.handleMouseMove(target_rect.x + 8, target_rect.y + 15);
     try std.testing.expect(workspace.model.dragging);
-    try std.testing.expectEqual(group_tab, workspace.model.tabs.items[0].id);
+    try std.testing.expectEqual(ui.CursorShape.grabbing, cx.current_cursor);
+    try std.testing.expectEqual(first_id, workspace.model.tabs.items[0].id);
+    try std.testing.expectEqual(first_id, workspace.tab_reorder_target.?);
     cx.cancelPointerInteractions(.window_blur);
     try std.testing.expect(!workspace.model.dragging);
     try std.testing.expectEqual(group_tab, workspace.model.tabs.items[1].id);
@@ -6715,6 +7362,42 @@ test "mixed tab group identity unifies drag rollback ordinals picker and MRU" {
     try std.testing.expectEqualStrings("renamed group tab", workspace.model.tabs.items[workspace.model.indexOf(group_tab).?].name());
     try std.testing.expectEqualStrings("First Local", first.titleSlice());
     try std.testing.expectEqual(group_id, workspace.groupIdByTab(group_tab).?);
+    try workspace.showGroupTabMenu(group_id, workspace.tab_nodes.items[1].node);
+    try std.testing.expect(workspace.group_tab_menu.?.open.peek());
+    workspace.group_tab_menu.?.side();
+    try std.testing.expectEqual(group_view.Layout.side_by_side, workspace.groupView(group_id).?.layout);
+    workspace.group_tab_menu.?.stack();
+    try std.testing.expectEqual(group_view.Layout.stacked, workspace.groupView(group_id).?.layout);
+    try std.testing.expect(Workspace.commitTabColor(&workspace, @backingInt(group_tab), 0x67b88b));
+    try workspace.renderTabBar();
+    cx.layout();
+    workspace.activateTabId(last_id);
+    try workspace.renderTabBar();
+    cx.layout();
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, workspace.tab_nodes.items[1].node.getBackground());
+    Workspace.tabLeave(workspace.tab_nodes.items[1].select_ctx);
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, workspace.tab_nodes.items[1].node.getBackground());
+    try std.testing.expectEqual(app_theme.current().tab_on, workspace.tab_nodes.items[2].node.getBackground());
+    workspace.activateTabId(group_tab);
+    try workspace.renderTabBar();
+    cx.layout();
+    const group_node = workspace.tab_nodes.items[1].node;
+    try std.testing.expectEqual(ui.Color.hex(0x67b88b), group_node.children.items[0].getBackground());
+    try std.testing.expectEqual(ui.Color.hex(0x67b88b), group_node.children.items[group_node.children.items.len - 1].getBackground());
+    // Actual pointer events must reach the holder's drag binding through the tab.
+    const source_rect = workspace.tab_nodes.items[2].node.globalRect();
+    const group_rect = group_node.globalRect();
+    cx.handleMouseDown(source_rect.x + 35, source_rect.y + 15, .{});
+    cx.handleMouseMove(group_rect.x + group_rect.w - 2, group_rect.y + 15);
+    cx.layout();
+    try std.testing.expectEqual(group_rect, group_node.globalRect());
+    cx.handleMouseMove(group_rect.x + group_rect.w / 2, group_rect.y + 15);
+    try std.testing.expectEqual(group_tab, workspace.tab_drop_target.?);
+    cx.handleMouseUp(group_rect.x + group_rect.w / 2, group_rect.y + 15);
+    try std.testing.expect(workspace.pending_tab_drop != null);
+    _ = workspace.pollGroupWorkspace();
+    try std.testing.expect(roster.findById(group_id).?.contains(last.id));
+    try std.testing.expectEqual(group_tab, workspace.model.tabs.items[workspace.model.indexOf(last_id).?].container.?);
 }
 
 test "registered nonterminal renderer mounts into the existing tab without a legacy host snapshot" {
@@ -6987,7 +7670,7 @@ test "repeated close on retained closing tab reaches the same owner bridge" {
     try std.testing.expect(tab.closing);
 }
 
-test "mixed session group mounts terminal file KVM and future content and retains split proportions" {
+test "mixed session group mounts terminal file KVM and future content and retains split proportions and resize cursor" {
     const a = std.testing.allocator;
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
@@ -7083,16 +7766,22 @@ test "mixed session group mounts terminal file KVM and future content and retain
     try std.testing.expect(second.y > fourth.y + 100);
     const tree_root = view.root.?.children.items[0];
     const divider = tree_root.children.items[1].globalRect();
+    cx.handleMouseMove(divider.x + 2, divider.y + 90);
+    try std.testing.expectEqual(ui.CursorShape.ew_resize, cx.current_cursor);
     cx.handleMouseDown(divider.x + 2, divider.y + 90, .{});
     cx.handleMouseMove(divider.x + 62, divider.y + 90);
+    try std.testing.expectEqual(ui.CursorShape.ew_resize, cx.current_cursor);
     cx.handleMouseUp(divider.x + 62, divider.y + 90);
     cx.layout();
     try std.testing.expect(view.panes.items[0].node.globalRect().w > first.w + 40);
     try std.testing.expectApproxEqAbs(third.h, view.panes.items[2].node.globalRect().h, 0.1);
     const upper = view.panes.items[0].node.globalRect();
     const horizontal = tree_root.children.items[0].children.items[1].globalRect();
+    cx.handleMouseMove(horizontal.x + 100, horizontal.y + 2);
+    try std.testing.expectEqual(ui.CursorShape.ns_resize, cx.current_cursor);
     cx.handleMouseDown(horizontal.x + 100, horizontal.y + 2, .{});
     cx.handleMouseMove(horizontal.x + 100, horizontal.y - 28);
+    try std.testing.expectEqual(ui.CursorShape.ns_resize, cx.current_cursor);
     cx.handleMouseUp(horizontal.x + 100, horizontal.y - 28);
     cx.layout();
     try std.testing.expect(view.panes.items[0].node.globalRect().h < upper.h - 10);
@@ -7123,4 +7812,26 @@ test "mixed session group mounts terminal file KVM and future content and retain
     try Workspace.GroupJoinTarget.leave(&file);
     try std.testing.expect(!group.contains(tabs[2].id));
     try std.testing.expect(!tabs[2].closing);
+}
+
+test "reconnect configuration reads current host commands global policy and host overrides" {
+    var registry = try hosts_mod.Registry.parse(std.testing.allocator, "[[hosts]]\nname=\"target\"\nhost=\"target.test\"\nuser=\"operator\"\nstartup_commands=[\"old command\"]\n");
+    defer registry.deinit();
+    const original = registry.hosts[0];
+    var config: config_mod.Config = .{};
+    var workspace: Workspace = undefined;
+    workspace.registry = registry;
+    workspace.app_config = &config;
+    config.ssh.auto_shell_integration = false;
+    registry.hosts[0].startup_commands = &.{"new command"};
+    var resolved = workspace.reconnectConfiguration(original);
+    try std.testing.expectEqualStrings("new command", resolved.startup_commands[0]);
+    try std.testing.expect(!resolved.auto_shell_integration);
+    registry.hosts[0].auto_shell_integration = true;
+    resolved = workspace.reconnectConfiguration(original);
+    try std.testing.expect(resolved.auto_shell_integration);
+    workspace.registry.hosts = &.{};
+    resolved = workspace.reconnectConfiguration(original);
+    try std.testing.expectEqualStrings("old command", resolved.startup_commands[0]);
+    try std.testing.expect(!resolved.auto_shell_integration);
 }

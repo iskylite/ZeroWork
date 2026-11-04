@@ -393,11 +393,8 @@ fn hashPaintItem(hasher: *std.hash.Wyhash, it: anytype, comptime glass_address: 
     // fed
     // field by field above; icon_rep is generated statically from icon_id and never mutated in
     // place;
-    // the pointer value distinguishes within a frame only. WARNING: implicit contract:
-    // resource_handle's
-    // GPU texture content must be immutable (an animated/video in-place texture-update path would
-    // need
-    // a version number fed into the fingerprint).
+    // the pointer value distinguishes within a frame only. Retained surface
+    // planning additionally hashes the image texture's content revision.
     if (glass_address) hasher.update(std.mem.asBytes(&@intFromPtr(it.glass_ptr)));
     if (glass_address) {
         hasher.update(std.mem.asBytes(&@intFromPtr(it.icon_rep_ptr)));

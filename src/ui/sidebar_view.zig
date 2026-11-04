@@ -402,15 +402,6 @@ pub const HostRow = struct {
         name.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .max_width = cx.text.measureTextWidth(data.name, 12, 500, false), .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
         self.name = name;
         try metadata.appendChild(cx.allocator, name);
-        const tag = try ui.box(cx, .{ .height = .{ .px = 12 }, .padding = .{ .left = 3, .right = 3 }, .margin = .{ .top = 8 }, .direction = .row, .align_items = .center, .justify = .center, .background = T.current().well, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
-        tag.meta.ownership.meta.test_id = "sidebar.host.protocol";
-        const upper = try std.ascii.allocUpperString(cx.allocator, if (std.ascii.eqlIgnoreCase(data.protocol, "bmc_ikvm")) "KVM" else data.protocol);
-        defer cx.allocator.free(upper);
-        const protocol_text = try ui.text(cx, upper, .{ .font_size = 7, .font_weight = 400, .line_height = 10.0 / 7.0, .color = T.current().fg_2, .selectable = false });
-        try protocol_text.setTextContent(cx.allocator, upper);
-        protocol_text.setStyleInline(cx.allocator, .{ .height = .{ .px = 10 }, .flex_shrink = 0 });
-        try tag.appendChild(cx.allocator, protocol_text);
-        try metadata.appendChild(cx.allocator, tag);
         const identity = try std.fmt.allocPrint(cx.allocator, "{s}\n{s}\n{s}", .{ data.name, data.detail, data.route });
         defer cx.allocator.free(identity);
         const identity_hint = try mountHostHint(cx, scope, metadata, identity, node);
@@ -459,7 +450,7 @@ pub const HostRow = struct {
         const connect_hover = try ui.hooks.useHover(scope, connect_button);
         const focus = try ui.hooks.useFocusState(scope, cx, node);
         const connect_focus = try ui.hooks.useFocusState(scope, cx, connect_button);
-        try scope.createEffect(.{ .self = self, .protocol = tag, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
+        try scope.createEffect(.{ .self = self, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.theme.get();
                 const picked = ctx.self.selected.get();
@@ -478,7 +469,6 @@ pub const HostRow = struct {
                 ctx.self.node.setStyleInline(ctx.self.cx.allocator, S.host(picked, hot));
                 setFocusRing(ctx.self.node);
                 ctx.self.hot = hot;
-                ctx.protocol.setDisplay(if (hot) .none else .flex);
                 ctx.self.updateTrailing();
                 if (ctx.self.forward_badge) |badge| ctx.self.forward_label.setTextColor(@import("socks_background_styles.zig").ink(badge.phase));
                 if (ctx.self.name.getText()) |current| {
@@ -585,6 +575,7 @@ pub const GroupRow = struct {
     root: *ui.Node,
     header: *ui.Node,
     members: *ui.Node,
+    actions: *ui.Node,
     reference: ?GroupRef,
     bridge: Bridge,
     collapsed: bool,
@@ -594,8 +585,9 @@ pub const GroupRow = struct {
     count: usize,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, data: GroupData, bridge: Bridge) !*GroupRow {
         const root = try ui.box(cx, S.groupCard(), .{});
+        @import("layer_materials.zig").card(root, .surface_2);
         root.meta.ownership.meta.test_id = "sidebar.group.card";
-        const self = try scope.createState(GroupRow, .{ .cx = cx, .root = root, .header = undefined, .members = undefined, .reference = data.reference, .bridge = bridge, .collapsed = data.collapsed, .chevron = undefined, .menu = undefined, .count = data.count });
+        const self = try scope.createState(GroupRow, .{ .cx = cx, .root = root, .header = undefined, .members = undefined, .actions = undefined, .reference = data.reference, .bridge = bridge, .collapsed = data.collapsed, .chevron = undefined, .menu = undefined, .count = data.count });
         const header = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(data.name, .{}), .base_style = S.group(), .hover_style = ui.BoxStyle{ .background = T.states().hover }, .on_click = cx.on(GroupRow, self, GroupRow.toggle), .on_event = groupEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx);
         header.meta.ownership.meta.test_id = "sidebar.group";
         setFocusRing(header);
@@ -625,10 +617,13 @@ pub const GroupRow = struct {
         count_label.setStyleInline(cx.allocator, count_style);
         count_label.meta.ownership.meta.test_id = "sidebar.group.count";
         try badge.appendChild(cx.allocator, count_label);
-        const trailing = try ui.box(cx, S.tail(), .{});
+        var group_tail = S.tail();
+        group_tail.width = .{ .fit = .{} };
+        const trailing = try ui.box(cx, group_tail, .{});
         try content.appendChild(cx.allocator, trailing);
         try trailing.appendChild(cx.allocator, badge);
         const actions = try ui.box(cx, .{ .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 }, .{});
+        self.actions = actions;
         const plus = try iconButton(cx, scope, "plus", "组内新建主机", "sidebar.group.new", S.action(24), tint, hover, cx.on(GroupRow, self, GroupRow.newHost), swallowDoubleClick);
         if (bridge.new_host == null) plus.behavior.interaction.focusable = false;
         try actions.appendChild(cx.allocator, plus);
@@ -651,6 +646,7 @@ pub const GroupRow = struct {
             item_style.font_size = 11.5;
             item_style.font_weight = 400;
             const button = try ui.widgets.Button(.{ .label = label, .icon_asset = ui.icons.get(icon_name), .icon_size = @as(f32, 14), .icon_tint = if (action == .delete_empty) T.current().danger_ink else T.current().fg_2, .variant = .ghost, .a11y_label = label, .disabled = !enabled, .base_style = item_style, .hover_style = ui.BoxStyle{ .background = T.states().hover }, .on_click = cx.on(GroupControl, control, GroupControl.run) }).mount(menu.scope, cx);
+            button.setStyleInline(cx.allocator, .{ .justify = .start });
             if (button.behavior.interaction.a11y) |*a11y| a11y.role = .menuitem;
             try menu.content.appendChild(cx.allocator, button);
         }
@@ -694,6 +690,13 @@ pub const GroupRow = struct {
             .mouse_down => |mouse| if (mouse.button == .right) {
                 self.menu.show.invoke();
                 return .handled;
+            },
+            .click => |click| {
+                if (self.cx.focus_manager.getFocused()) |focused| {
+                    if (focused.isDescendantOf(self.actions)) return .handled;
+                }
+                const actions = self.actions.globalRect();
+                if (self.actions.style.display != .none and click.x >= actions.x and click.x < actions.x + actions.w and click.y >= actions.y and click.y < actions.y + actions.h) return .handled;
             },
             .double_click => return .handled,
             else => {},

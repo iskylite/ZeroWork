@@ -8,6 +8,17 @@ pub const Bridge = struct {
     allocator: std.mem.Allocator,
     snapshot: execution.Snapshot,
     lease: execution.Lease = .{},
+    /// Inactive shell observers own output/results, never a live input lease.
+    contexts: std.ArrayList(*Bridge) = .empty,
+    context_revision: u64 = 0,
+    pending_context: ?struct { id: [32]u8, parent: ?[32]u8 } = null,
+    context_closed: bool = false,
+    attach_failure: ?[]const u8 = null,
+    /// Only collect a line that began at an integrated empty prompt. Unknown
+    /// foreground/authentication input is never retained for classification.
+    switch_input: @import("../ui/command_palette.zig").LineTracker = .{},
+    switch_tracking: bool = false,
+
     command: ?[]u8 = null,
     captured: std.ArrayList(u8) = .empty,
     capture_start: u64 = 0,
@@ -43,11 +54,18 @@ pub const Bridge = struct {
         context: *anyopaque,
         output: *const fn (*anyopaque, []const u8, u64) void,
         boundary: *const fn (*anyopaque, execution.Boundary) execution.Boundary,
+        semantic_context: ?*const fn (*anyopaque, ?[32]u8, bool) void = null,
     };
     pub fn init(a: std.mem.Allocator, owner: identity.SessionHandle) Bridge {
         return .{ .allocator = a, .snapshot = .{ .owner = owner, .completion_source = .shell_reported, .input_ready = false, .failure = "ShellIntegrationPending" } };
     }
     pub fn deinit(self: *Bridge) void {
+        for (self.contexts.items) |context| {
+            context.deinit();
+            self.allocator.destroy(context);
+        }
+        self.contexts.deinit(self.allocator);
+        self.switch_input.deinit(self.allocator);
         if (self.command) |value| self.allocator.free(value);
         self.captured.deinit(self.allocator);
     }
@@ -57,6 +75,7 @@ pub const Bridge = struct {
         self.snapshot.grant = self.lease.holder;
         self.snapshot.lease_expires_at = self.lease.expires_at;
         self.snapshot.local_released = self.lease.holder == null and !self.lease.draining;
+        self.snapshot.shell.prompt_ready = !self.active and self.prompt_clean;
         // Handoff releases local keys while the foreground is still running.
         // A fresh AI command additionally waits for the next shell prompt.
         self.snapshot.input_ready = self.snapshot.local_released and
@@ -64,10 +83,27 @@ pub const Bridge = struct {
     }
     pub fn ordinaryInput(self: *Bridge) !void {
         try self.lease.ordinaryInput();
+        if (self.switch_input.atLineStart()) self.switch_tracking = self.prompt_clean;
         self.prompt_clean = false;
         self.changed();
     }
+    /// Called under the execution guard, only after exact input admission.
+    /// Split on submissions while retaining whole escape sequences for the
+    /// shared line tracker. History/completion editing falls back to read-screen.
+    pub fn observeInput(self: *Bridge, bytes: []const u8, notice: *@import("shell_switch.zig").Notice) void {
+        var rest = bytes;
+        while (rest.len != 0) {
+            const end = std.mem.indexOfAny(u8, rest, "\r\n") orelse rest.len;
+            if (self.switch_tracking) self.switch_input.record(self.allocator, rest[0..end]);
+            if (end == rest.len) return;
+            if (self.switch_tracking and !self.switch_input.unknown) notice.submitted(self.switch_input.content.items);
+            self.switch_input.clearLine();
+            self.switch_tracking = false;
+            rest = rest[end + 1 ..];
+        }
+    }
     pub fn begin(self: *Bridge, request: execution.Request, now: i64) !void {
+        if (self.snapshot.shell.id != null and (!std.meta.eql(request.expected_shell_id, self.snapshot.shell.id) or request.expected_shell_revision != self.snapshot.shell.revision)) return error.ShellContextChanged;
         if (!self.snapshot.interactive_execution) return error.IntegrationUnavailable;
         if (!self.prompt_clean or self.active) return error.InputConflict;
         if (self.snapshot.execution_id != null and !self.snapshot.recording_settled) return error.OperationBusy;
@@ -97,7 +133,8 @@ pub const Bridge = struct {
         self.active = true;
         self.prompt_clean = false;
         const revision = self.snapshot.revision;
-        self.snapshot = .{ .owner = self.snapshot.owner, .completion_source = .shell_reported, .execution_id = request.execution_id, .command_hash = request.command_hash, .execution_fence = grant.fence, .execution_input_epoch = grant.input_epoch, .state = .preparing, .revision = revision, .interactive_execution = true, .local_released = false, .input_ready = false, .output_scope = .session_interval, .output_attribution = .unverified, .output_attribution_reason = "OutputProcessIdentityUnknown" };
+        const shell = self.snapshot.shell;
+        self.snapshot = .{ .shell = shell, .owner = self.snapshot.owner, .completion_source = .shell_reported, .execution_id = request.execution_id, .command_hash = request.command_hash, .execution_fence = grant.fence, .execution_input_epoch = grant.input_epoch, .state = .preparing, .revision = revision, .interactive_execution = true, .local_released = false, .input_ready = false, .output_scope = .session_interval, .output_attribution = .unverified, .output_attribution_reason = "OutputProcessIdentityUnknown" };
         self.changed();
     }
     pub fn prepared(self: *Bridge, recording_id: [32]u8, generation: u64, revision: u64) void {
@@ -210,6 +247,7 @@ pub const Bridge = struct {
         return receipt;
     }
     pub fn fail(self: *Bridge, reason: []const u8) void {
+        self.snapshot.shell.suspended = false;
         self.snapshot.interactive_execution = false;
         self.prompt_clean = false;
         if (self.snapshot.execution_id != null and self.snapshot.process == null) {
@@ -243,6 +281,7 @@ pub const Bridge = struct {
         self.settled(revision, false);
     }
     pub fn capture(self: *Bridge, bytes: []const u8) void {
+        for (self.contexts.items) |context| context.capture(bytes);
         if (!self.active or self.snapshot.start == null or self.snapshot.end != null) return;
         self.capture_total +|= bytes.len;
         if (bytes.len >= max_capture) {
@@ -271,7 +310,10 @@ pub const Bridge = struct {
         self.snapshot.output_received = self.capture_total;
     }
     pub fn readOutput(self: *Bridge, id: identity.ExecutionId, a: std.mem.Allocator, cursor: u64, maximum: usize) !execution.Output {
-        if (self.snapshot.execution_id == null or !self.snapshot.execution_id.?.eql(id)) return error.ExecutionNotFound;
+        if (self.snapshot.execution_id == null or !self.snapshot.execution_id.?.eql(id)) {
+            for (self.contexts.items) |context| if (context.snapshot.execution_id) |saved| if (saved.eql(id)) return context.readOutput(id, a, cursor, maximum);
+            return error.ExecutionNotFound;
+        }
         const start = @min(@max(cursor, self.capture_start), self.capture_total);
         const length = @min(@as(usize, @intCast(self.capture_total - start)), @min(maximum, 64 * 1024));
         const offset: usize = @intCast(start - self.capture_start);
@@ -321,6 +363,13 @@ pub const Bridge = struct {
                 },
             }
             if (complete) {
+                if (sink.semantic_context) |select| {
+                    const frame = self.osc[0..self.osc_len];
+                    const id = if (field(frame, "zw_ctx")) |text| contextId(text) else null;
+                    const semantic = std.mem.startsWith(u8, frame, "133;") or std.mem.startsWith(u8, frame, "633;");
+                    const allowed = !semantic or (if (id) |shell| std.meta.eql(self.snapshot.shell.id, @as(?[32]u8, shell)) or self.ancestor(shell) else self.snapshot.shell.id == null);
+                    select(sink.context, if (semantic) id else null, allowed);
+                }
                 sink.output(sink.context, bytes[forwarded .. index + 1], base + forwarded);
                 forwarded = index + 1;
                 self.event(self.osc[0..self.osc_len], base + forwarded, sink, now);
@@ -329,10 +378,160 @@ pub const Bridge = struct {
         if (forwarded < bytes.len) sink.output(sink.context, bytes[forwarded..], base + forwarded);
         self.raw_received = base + bytes.len;
     }
+    pub fn snapshotFor(self: *const Bridge, id: identity.ExecutionId) ?execution.Snapshot {
+        if (self.snapshot.execution_id) |current| if (current.eql(id)) return self.snapshot;
+        for (self.contexts.items) |context| if (context.snapshot.execution_id) |saved| if (saved.eql(id)) return context.snapshot;
+        return null;
+    }
+    pub fn expectContext(self: *Bridge, id: [32]u8, parent: ?[32]u8) !void {
+        if (self.contexts.items.len >= 31) return error.ShellContextLimit;
+        if (self.lease.draining or self.queued_end != null or self.input_end != null) return error.InputConflict;
+        self.pending_context = .{ .id = id, .parent = parent };
+    }
+    fn field(frame: []const u8, name: []const u8) ?[]const u8 {
+        var parts = std.mem.splitScalar(u8, frame, ';');
+        while (parts.next()) |part| if (std.mem.startsWith(u8, part, name) and part.len > name.len and part[name.len] == '=') return part[name.len + 1 ..];
+        return null;
+    }
+    fn contextId(value: []const u8) ?[32]u8 {
+        if (value.len != 32) return null;
+        for (value) |c| if (!std.ascii.isHex(c)) return null;
+        return value[0..32].*;
+    }
+    // Swap only shell activity. OSC parsing, initialization and the one PTY
+    // input lease remain owned by this root bridge.
+    fn swapActivity(self: *Bridge, other: *Bridge) void {
+        inline for (.{ "switch_input", "switch_tracking", "snapshot", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "debug_start", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
+            std.mem.swap(@FieldType(Bridge, name), &@field(self, name), &@field(other, name));
+        }
+    }
+    pub fn ancestor(self: *Bridge, id: [32]u8) bool {
+        var parent = self.snapshot.shell.parent_id;
+        var remaining: usize = 32;
+        while (parent) |current| {
+            if (std.mem.eql(u8, &current, &id)) return true;
+            if (remaining == 0) return false;
+            remaining -= 1;
+            parent = null;
+            for (self.contexts.items) |context| if (context.snapshot.shell.id) |candidate| if (std.mem.eql(u8, &candidate, &current)) {
+                parent = context.snapshot.shell.parent_id;
+                break;
+            };
+        }
+        return false;
+    }
+    fn activate(self: *Bridge, id: [32]u8, parent: ?[32]u8, create: bool) !void {
+        if (self.snapshot.shell.id) |current| if (std.mem.eql(u8, &current, &id)) return;
+        var destination: ?*Bridge = null;
+        for (self.contexts.items) |context| if (context.snapshot.shell.id) |candidate| if (std.mem.eql(u8, &candidate, &id)) {
+            if (context.context_closed) return error.ShellContextChanged;
+            destination = context;
+            break;
+        };
+        const returning = self.ancestor(id);
+        if (destination == null) {
+            if (!create) return error.ShellContextChanged;
+            if (self.contexts.items.len >= 31) return error.ShellContextLimit;
+            const context = try self.allocator.create(Bridge);
+            errdefer self.allocator.destroy(context);
+            context.* = Bridge.init(self.allocator, self.snapshot.owner);
+            context.snapshot.shell = .{ .id = id, .parent_id = parent, .depth = if (parent != null) self.snapshot.shell.depth +| 1 else 0 };
+            try self.contexts.append(self.allocator, context);
+            destination = context;
+        } else if (!returning) return error.ShellContextChanged;
+        // A parent execution continues observing, but cannot retain authority
+        // to write into the newly active child shell.
+        self.lease.revoke(false);
+        self.snapshot.grant = null;
+        self.snapshot.local_released = true;
+        self.snapshot.input_ready = false;
+        self.snapshot.shell.suspended = self.active;
+        self.snapshot.shell.prompt_ready = false;
+        if (self.active) {
+            self.snapshot.input_handed_off = true;
+            self.snapshot.input_wait = null;
+            self.snapshot.output_attribution = .concurrent_observed;
+            self.snapshot.output_attribution_reason = "NestedShellObserved";
+            self.snapshot.state = .handed_off;
+        }
+        if (returning) {
+            // A parent may reappear after several shells disappear together.
+            // Missing child completion stays unknown; never strand an active
+            // observer forever or manufacture its exit status from the parent.
+            if (self.active) self.fail("ShellContextExitedWithoutCompletion");
+            self.context_closed = true;
+            self.snapshot.shell.suspended = false;
+            var cursor = self.snapshot.shell.parent_id;
+            var remaining: usize = 32;
+            while (cursor) |current| {
+                if (std.mem.eql(u8, &current, &id) or remaining == 0) break;
+                remaining -= 1;
+                cursor = null;
+                for (self.contexts.items) |context| if (context.snapshot.shell.id) |candidate| if (std.mem.eql(u8, &candidate, &current)) {
+                    cursor = context.snapshot.shell.parent_id;
+                    if (context.active) context.fail("ShellContextExitedWithoutCompletion");
+                    context.context_closed = true;
+                    context.snapshot.shell.suspended = false;
+                    break;
+                };
+            }
+        }
+        self.swapActivity(destination.?);
+        self.context_revision +|= 1;
+        self.snapshot.shell.revision = self.context_revision;
+        self.snapshot.shell.suspended = false;
+        self.context_closed = false;
+        self.changed();
+    }
     fn event(self: *Bridge, frame: []const u8, offset: u64, sink: Sink, now: i64) void {
         if (frame.len < 5 or (frame.len > 5 and frame[5] != ';') or (!std.mem.startsWith(u8, frame, "133;") and !std.mem.startsWith(u8, frame, "633;"))) return;
+        if (frame[4] != 'P') {
+            if (field(frame, "zw_ctx")) |text| {
+                const id = contextId(text) orelse return;
+                if (!std.meta.eql(self.snapshot.shell.id, @as(?[32]u8, id))) {
+                    if (!self.ancestor(id)) return;
+                    self.activate(id, null, false) catch return;
+                }
+            } else if (self.snapshot.shell.id != null) return;
+        }
         switch (frame[4]) {
             'P' => {
+                if (field(frame, "zw_reject")) |token| {
+                    const expected = self.initialization_nonce orelse return;
+                    if (!std.mem.eql(u8, token, &expected)) return;
+                    const reason = field(frame, "reason") orelse return;
+                    self.attach_failure = if (std.mem.eql(u8, reason, "UnsupportedMultiplexer")) "UnsupportedMultiplexer" else if (std.mem.eql(u8, reason, "UnsupportedShell")) "UnsupportedShell" else "ShellHooksConflict";
+                    return;
+                }
+                if (field(frame, "zw_hello")) |token| {
+                    const id = contextId(field(frame, "zw_ctx") orelse return) orelse return;
+                    if (self.pending_context == null and self.snapshot.shell.id != null) return;
+                    const expected = if (self.pending_context) |pending| pending.id else self.initialization_nonce orelse return;
+                    if (!std.mem.eql(u8, token, &expected)) return;
+                    const parent = if (self.pending_context) |pending| pending.parent else null;
+                    self.activate(id, parent, true) catch |err| {
+                        self.attach_failure = @errorName(err);
+                        return;
+                    };
+                    self.pending_context = null;
+                    if (sink.semantic_context) |select| select(sink.context, self.snapshot.shell.id, true);
+                    const kind = field(frame, "zw_shell") orelse "";
+                    self.snapshot.shell.kind = std.meta.stringToEnum(@FieldType(execution.ShellContext, "kind"), kind) orelse .unknown;
+                    inline for (.{ .{ "zw_host", "reported_host", "reported_host_len" }, .{ "zw_user", "reported_user", "reported_user_len" } }) |entry| {
+                        if (field(frame, entry[0])) |text| {
+                            var valid = text.len > 0 and text.len <= @field(self.snapshot.shell, entry[1]).len;
+                            for (text) |byte| if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "._@-", byte) == null) {
+                                valid = false;
+                                break;
+                            };
+                            if (valid) {
+                                @memcpy(@field(self.snapshot.shell, entry[1])[0..text.len], text);
+                                @field(self.snapshot.shell, entry[2]) = @intCast(text.len);
+                            }
+                        }
+                    }
+                    return;
+                }
                 const nonce = self.initialization_nonce orelse return;
                 if (std.mem.startsWith(u8, frame, "133;P;zw_restored=")) {
                     if (std.mem.eql(u8, frame[18..], &nonce)) self.initialization_restored = true;
@@ -343,7 +542,7 @@ pub const Bridge = struct {
                 if (!std.mem.eql(u8, parts.next() orelse return, &nonce)) return;
                 const sequence = std.fmt.parseInt(u64, parts.next() orelse return, 10) catch return;
                 const size = std.fmt.parseInt(u64, parts.next() orelse return, 10) catch return;
-                if (parts.next() != null or sequence == 0 or sequence != self.initialization_expected or size > 128) return;
+                if (parts.next() != null or sequence == 0 or sequence != self.initialization_expected or size > @import("shell_integration.zig").initialization_batch_bytes) return;
                 self.initialization_ack = sequence;
                 self.initialization_ack_size = size;
             },
@@ -537,13 +736,13 @@ test "SSH initialization ACK checks nonce sequence size and split frames" {
     bridge.initialization_expected = 2;
     bridge.output("\x1b]133;P;zw_init=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;2;128\x07", harness.sink(), 1);
     bridge.output("\x1b]133;P;zw_init=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;1;128\x07", harness.sink(), 1);
-    bridge.output("\x1b]133;P;zw_init=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;2;129\x07", harness.sink(), 1);
+    bridge.output("\x1b]133;P;zw_init=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;2;8193\x07", harness.sink(), 1);
     try std.testing.expectEqual(@as(u64, 0), bridge.initialization_ack);
     bridge.output("\x1b]133;P;zw_init=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;", harness.sink(), 1);
-    bridge.output("2;128\x1b", harness.sink(), 1);
+    bridge.output("2;8192\x1b", harness.sink(), 1);
     bridge.output("\\", harness.sink(), 1);
     try std.testing.expectEqual(@as(u64, 2), bridge.initialization_ack);
-    try std.testing.expectEqual(@as(u64, 128), bridge.initialization_ack_size);
+    try std.testing.expectEqual(@as(u64, 8192), bridge.initialization_ack_size);
     try std.testing.expect(!bridge.snapshot.interactive_execution);
     bridge.output("\x1b]133;P;zw_restored=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\x07", harness.sink(), 1);
     try std.testing.expect(!bridge.initialization_restored);
@@ -569,4 +768,104 @@ test "SSH missing start report times out without adding Enter or replay" {
     try std.testing.expect(bridge.snapshot.process == null and bridge.snapshot.start == null and bridge.snapshot.remote_effect_unknown);
     try bridge.enqueue(&queue);
     try std.testing.expectEqual(@as(usize, 0), queue.pending());
+}
+
+test "nested shell instances retain parent execution and reject stale child commands" {
+    const a = std.testing.allocator;
+    var bridge = Bridge.init(a, .{ .session_id = @fromBackingInt(1) });
+    defer bridge.deinit();
+    var harness = Harness{ .bridge = &bridge };
+    var queue = try Queue.init(a, 8192);
+    defer queue.deinit(a);
+    const parent = "11111111111111111111111111111111";
+    const child = "22222222222222222222222222222222";
+    bridge.initialization_nonce = parent.*;
+    bridge.output("\x1b]133;P;zw_hello=" ++ parent ++ ";zw_ctx=" ++ parent ++ ";zw_shell=bash\x07\x1b]133;A;zw_ctx=" ++ parent ++ "\x07\x1b]133;B;zw_ctx=" ++ parent ++ "\x07", harness.sink(), 1);
+    var request = Harness.request("ssh child");
+    request.expected_shell_id = bridge.snapshot.shell.id;
+    request.expected_shell_revision = bridge.snapshot.shell.revision;
+    request.expected_input_epoch = bridge.snapshot.input_epoch;
+    try bridge.begin(request, 2);
+    bridge.prepared(@splat('a'), 1, 1);
+    try bridge.enqueue(&queue);
+    try queue.consume(queue.pending());
+    bridge.written(&queue, 3);
+    const old_grant = bridge.lease.holder.?;
+    bridge.output("\x1b]133;C;zw_ctx=" ++ parent ++ "\x07", harness.sink(), 4);
+    // A new child needs an explicit attachment request and its own receipt.
+    bridge.output("\x1b]133;P;zw_hello=" ++ parent ++ ";zw_ctx=" ++ child ++ ";zw_shell=bash\x07", harness.sink(), 4);
+    try std.testing.expectEqual(parent.*, bridge.snapshot.shell.id.?);
+    try bridge.expectContext(child.*, bridge.snapshot.shell.id);
+    bridge.output("\x1b]133;P;zw_hello=" ++ child ++ ";zw_ctx=" ++ child ++ ";zw_shell=bash\x07\x1b]133;A;zw_ctx=" ++ child ++ "\x07\x1b]133;B;zw_ctx=" ++ child ++ "\x07", harness.sink(), 4);
+    try std.testing.expectEqual(child.*, bridge.snapshot.shell.id.?);
+    try std.testing.expectEqual(@as(u8, 1), bridge.snapshot.shell.depth);
+    try std.testing.expect(bridge.snapshot.input_ready and bridge.snapshot.execution_id == null);
+    const waiting = bridge.snapshotFor(request.execution_id).?;
+    try std.testing.expect(waiting.shell.suspended and waiting.process == null and waiting.grant == null);
+    try std.testing.expectError(error.StaleFence, bridge.renew(old_grant, 5));
+    var child_request = Harness.request("pwd");
+    child_request.execution_id = .{ .bytes = @splat(3) };
+    child_request.expected_shell_id = bridge.snapshot.shell.id;
+    child_request.expected_shell_revision = bridge.snapshot.shell.revision;
+    child_request.expected_input_epoch = bridge.snapshot.input_epoch;
+    try bridge.begin(child_request, 5);
+    bridge.prepared(@splat('a'), 1, 2);
+    try bridge.enqueue(&queue);
+    try queue.consume(queue.pending());
+    bridge.written(&queue, 6);
+    // Untagged or foreign completion must never end the child execution.
+    bridge.output("\x1b]133;D;9\x07\x1b]133;D;9;zw_ctx=ffffffffffffffffffffffffffffffff\x07", harness.sink(), 7);
+    try std.testing.expect(bridge.snapshot.process == null);
+    bridge.output("\x1b]133;C;zw_ctx=" ++ child ++ "\x07CHILD_OUTPUT\x1b]133;D;0;zw_ctx=" ++ child ++ "\x07\x1b]133;A;zw_ctx=" ++ child ++ "\x07\x1b]133;B;zw_ctx=" ++ child ++ "\x07", harness.sink(), 8);
+    bridge.recorded(3);
+    try std.testing.expectEqual(@as(?u8, 0), bridge.snapshot.process.?.exit_code);
+    try std.testing.expect(bridge.snapshotFor(request.execution_id).?.process == null);
+    // Child exit causes the known parent's D/A/B to resume its own observer.
+    bridge.output("\x1b]133;D;7;zw_ctx=" ++ parent ++ "\x07\x1b]133;A;zw_ctx=" ++ parent ++ "\x07\x1b]133;B;zw_ctx=" ++ parent ++ "\x07", harness.sink(), 9);
+    try std.testing.expectEqual(parent.*, bridge.snapshot.shell.id.?);
+    try std.testing.expectEqual(@as(?u8, 7), bridge.snapshot.process.?.exit_code);
+    try std.testing.expectEqual(@as(?u8, 0), bridge.snapshotFor(child_request.execution_id).?.process.?.exit_code);
+    try std.testing.expectError(error.ShellContextChanged, bridge.begin(child_request, 10));
+    const parent_output = try bridge.readOutput(request.execution_id, a, 0, 4096);
+    defer a.free(parent_output.bytes);
+    try std.testing.expect(std.mem.indexOf(u8, parent_output.bytes, "CHILD_OUTPUT") != null);
+}
+
+test "nested shell attach accepts a matched receipt and reuses an already attached instance" {
+    const a = std.testing.allocator;
+    var bridge = Bridge.init(a, .{ .session_id = @fromBackingInt(1) });
+    defer bridge.deinit();
+    var harness = Harness{ .bridge = &bridge };
+    const id = "11111111111111111111111111111111";
+    const token = "22222222222222222222222222222222";
+    bridge.initialization_nonce = id.*;
+    bridge.output("\x1b]133;P;zw_hello=" ++ id ++ ";zw_ctx=" ++ id ++ ";zw_shell=zsh\x07", harness.sink(), 1);
+    try bridge.expectContext(token.*, bridge.snapshot.shell.id);
+    const count = bridge.contexts.items.len;
+    bridge.output("\x1b]133;P;zw_hello=" ++ token ++ ";zw_ctx=" ++ id ++ ";zw_shell=zsh\x07", harness.sink(), 2);
+    try std.testing.expect(bridge.pending_context == null);
+    try std.testing.expectEqual(count, bridge.contexts.items.len);
+    try std.testing.expectEqual(id.*, bridge.snapshot.shell.id.?);
+}
+
+test "shell switch input classification retains long commands but never authentication input" {
+    var bridge = Bridge.init(std.testing.allocator, .{ .session_id = @fromBackingInt(1) });
+    defer bridge.deinit();
+    var notice: @import("shell_switch.zig").Notice = .{};
+    bridge.prompt_clean = true;
+    try bridge.ordinaryInput();
+    bridge.observeInput("ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i /a/long/path/to/a/test/key -p 22222 fixture@127.0.0.1", &notice);
+    try bridge.ordinaryInput();
+    bridge.observeInput("\r", &notice);
+    try std.testing.expectEqual(@as(u64, 1), notice.sequence);
+    try std.testing.expectEqual(@import("shell_switch.zig").Kind.ssh, notice.kind);
+    // The parent is awaiting ssh; a credential resembling a command is data.
+    try bridge.ordinaryInput();
+    bridge.observeInput("ssh this-is-not-a-command\r", &notice);
+    try std.testing.expectEqual(@as(u64, 1), notice.sequence);
+    try std.testing.expectEqual(@as(usize, 0), bridge.switch_input.content.items.len);
+    bridge.prompt_clean = true;
+    try bridge.ordinaryInput();
+    bridge.observeInput("ssh old\x1b[A\r", &notice);
+    try std.testing.expectEqual(@as(u64, 1), notice.sequence);
 }

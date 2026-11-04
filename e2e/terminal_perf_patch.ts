@@ -7,7 +7,7 @@ import {mkdir, mkdtemp, open, writeFile, readFile, rm, realpath} from 'node:fs/p
 import {tmpdir} from 'node:os';
 import {resolve, join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {waitForServerReady, query, clickTestId, type_, key, waitFor, screenshot, resizeWindow, screenPos, stats, resetTiming, startWindowRecording, stopWindowRecording} from '../zig-out/share/zenit/harness/client.ts';
+import {waitForServerReady, query, clickTestId, type_, key, waitFor, screenshot, resizeWindow, screenPos, stats, resetTiming, startWindowRecording, stopWindowRecording} from '../vendor/zenit/e2e/client.ts';
 const [binaryArg, outputArg] = process.argv.slice(2);
 assert(binaryArg && outputArg, 'usage: node e2e/terminal_perf_patch.ts binary output');
 const binary=resolve(binaryArg), out=resolve(outputArg), isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-perf-')));
@@ -18,13 +18,16 @@ process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const log=await open(join(out,'app.log'),'w');
 const child=spawn(binary,[],{env:{...process.env,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1',ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0'},stdio:['ignore',log.fd,log.fd]});
 const closed=new Promise(r=>child.once('close',r));
-const report:any={binary,sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),pid:child.pid,checks:[],query_strategy:'Bounded parallel per-row queries after initial row discovery',limits:['RPC input-to-visible observation includes Harness IPC and per-row query overhead; not key-to-photon.','Idle CPU is process CPU-time delta / wall time, one core = 100%; Harness server remains enabled.','Termination of this isolated test process does not prove normal quit cleanup.']};
+const report:any={binary,sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),pid:child.pid,checks:[],query_strategy:'Bounded visible terminal viewport, including annotated command/output rows',limits:['RPC input-to-visible observation includes Harness IPC and viewport query overhead; not key-to-photon.','Idle CPU is process CPU-time delta / wall time, one core = 100%; Harness server remains enabled.','Termination of this isolated test process does not prove normal quit cleanup.']};
 const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 function shown(n:any){return n.hidden!==true && n.visible!==false && n.rect?.w>0 && n.rect?.h>0 && (n.effective_opacity??1)>0;}
 function text(n:any):string {return n.hidden===true?'':(n.text??'')+(n.children??[]).map(text).join('');}
 async function surface(){const result=await query('terminal.surface');if(!Array.isArray(result)) throw new Error(JSON.stringify(result));return result.find(shown);}
 let rowIds:string[]=[];
-async function rows(ids=rowIds){return (await Promise.all(ids.map(id=>query(id)))).flat().filter(shown);}
+function discoverRows(node:any):string[]{return [...(node.test_id?.startsWith('terminal.surface.row.')?[node.test_id]:[]),...(node.children??[]).flatMap(discoverRows)];}
+// Command annotations change a viewport row's test id after submission.
+// Inspect the bounded viewport rather than freezing the initial row identities.
+async function rows(_ids=rowIds){const result=await query('terminal.surface.viewport');assert(Array.isArray(result),JSON.stringify(result));return result.find(shown)?.children?.filter(shown)??[];}
 async function outputText(ids=rowIds){return (await rows(ids)).map(text).join('');}
 function sample(){
  const fields=execFileSync('/bin/ps',['-p',String(child.pid),'-o','time=,rss='],{encoding:'utf8'}).trim().split(/\s+/);
@@ -43,8 +46,8 @@ try {
  assert((await clickTestId('workspace.empty.local')).ok);
  // Let the native pane apply its first PTY resize before discovering the row pool.
  await sleep(500);
- const initial=await waitFor(async()=>{const n=await surface();return n?.children?.some((r:any)=>r.test_id?.startsWith('terminal.surface.row.'))?n:null;},15000);
- rowIds=initial.children.filter((n:any)=>n.test_id?.startsWith('terminal.surface.row.')).map((n:any)=>n.test_id);
+ const initial=await waitFor(async()=>{const n=await surface();return n&&discoverRows(n).length?n:null;},15000);
+ rowIds=discoverRows(initial);
  assert(rowIds.length>0,'Discover actual terminal rows before output grows');
  await sleep(1500);
  await idle('single_idle');
@@ -94,7 +97,7 @@ try {
  }
  report.checks.push('Per-character PTY echo and 180 paced output updates remain responsive');
  assert((await screenshot(join(out,'post-flood.png'))).ok);
- await writeFile(join(out,'post-flood-rows.json'),JSON.stringify(Object.fromEntries(await Promise.all(tailIds.map(async(id:string)=>[id,await query(id)]))),null,2));
+ await writeFile(join(out,'post-flood-rows.json'),JSON.stringify(await rows(),null,2));
  if(process.env.ZEROWORK_PERF_SAMPLE==='1') execFileSync('/usr/bin/sample',[String(child.pid),'3','-file',join(out,'sample.txt')],{stdio:'ignore'});
  await type_("printf 'PATCH_%s\\n' AFTER_FLOOD");await key('enter');await waitFor(async()=>(await tailText()).includes('PATCH_AFTER_FLOOD')||null);
  report.checks.push('1000-line flood completes and input remains usable');

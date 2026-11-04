@@ -3,12 +3,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ZeroWork · 终端输入回执</title>
-<link rel="stylesheet" href="../theme-tokens.css?v=261a8c344116">
+<link rel="stylesheet" href="../theme-tokens.css?v=d326647094aa">
 <style>
 *{box-sizing:border-box}body{margin:0;background:var(--overlay-base);color:var(--fg-1);font:12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
 main{display:flex;flex-direction:column;gap:8px;padding:48px 14px 14px}
 .result{display:flex;flex-direction:column;flex:none;min-width:0;border:0;outline:none;border-radius:9px;background:var(--popup-action);overflow:hidden}
 summary{list-style:none;display:flex;align-items:center;gap:6px;height:32px;flex:none;padding:0 12px 0 10px;cursor:pointer;outline:none}
+.result:not([open])>summary .elapsed{display:none}
 summary::-webkit-details-marker{display:none}summary:focus-visible{background:var(--popup-selected)}
 .icon-slot{display:flex;align-items:center;justify-content:center;width:22px;height:22px;flex:none;color:var(--ok-ink)}
 svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
@@ -24,28 +25,31 @@ button{border:0;outline:none;border-radius:7px;background:transparent;color:var(
 </style>
 <body data-theme="dark">
 <main>
-  <details class="result" id="execution" open>
-    <summary><span class="icon-slot"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><strong>执行命令</strong><span class="summary">最近观测 · 前台已结束 · 观测片段已保存</span><span class="elapsed">6.8s</span></summary>
+  <details class="result" id="execution">
+    <summary><span class="icon-slot"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><strong>执行交互命令</strong><span class="summary">命令已结束</span><span class="elapsed">6.8s</span></summary>
     <div class="body">
       <span>目标 · deploy@app-prod-01.example.net:2222 · 会话 #101</span>
-      <span class="metadata">前台已结束 · 退出码 0</span>
-      <span class="metadata">同一终端观测片段 · 已保存</span>
-      <span class="metadata">输出归属未确认</span>
-      <span class="metadata">该片段仅覆盖本次观测区间；其他程序可写入同一终端，后台输出可能在前台结束后继续。</span>
+      <span class="metadata">退出码 0</span>
       <pre class="output">./deploy/check-release.sh --interactive</pre>
-      <span class="identity">执行 · x1:0123456789abcdef0123456789abcdef</span>
-      <span class="metadata">同一终端观测片段</span>
+      <span class="metadata">终端输出</span>
       <pre class="output">Checking release…
 ACTUAL_TERMINAL_OUTPUT
 Output boundary retained.</pre>
     </div>
-    <div class="actions"><button type="button">查看终端</button></div>
+    <div class="body metadata" id="collection-details" hidden>
+      <span>本次终端输出 · 已保存</span>
+      <span>未观察到并发写入 · 输出归属未确认</span>
+      <span>仅保存本次采集期间的终端输出，可能包含其他程序的内容；后台任务可能继续输出。</span>
+      <span>结束状态来源 · 未确认</span>
+      <span class="identity">执行 · x1:0123456789abcdef0123456789abcdef</span>
+      <span class="identity">记录 · 72caa8de1cc0436ea818599430082006</span>
+    </div>
+    <div class="actions"><button type="button">查看终端</button><button type="button" id="details-toggle" aria-expanded="false" aria-controls="collection-details">详情</button></div>
   </details>
   <details class="result" id="input" open>
     <summary><span class="icon-slot"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><strong>提交终端输入</strong><span class="summary" id="input-summary">输入结果 · 输入已消费</span><span class="elapsed">—</span></summary>
     <div class="body">
-      <span>输入类型 · 宿主安全输入</span>
-      <span class="metadata">输入序号 5 · 等待序号 3</span>
+      <span>输入类型 · 安全输入</span>
       <span class="metadata">此处仅确认本次输入的处理状态；命令执行结果请查看执行记录。</span>
       <span id="input-failure" hidden>本次调用未能完成，请核实原终端状态。</span>
       <span class="identity">执行 · x1:0123456789abcdef0123456789abcdef</span>
@@ -54,6 +58,15 @@ Output boundary retained.</pre>
 </main>
 <script>
 const params=new URLSearchParams(location.search);document.body.dataset.theme=params.get('theme')||'dark';
+const toggle=document.querySelector('#details-toggle'),collection=document.querySelector('#collection-details');
+toggle.addEventListener('click',()=>{collection.hidden=!collection.hidden;toggle.textContent=collection.hidden?'详情':'收起详情';toggle.setAttribute('aria-expanded',String(!collection.hidden));});
+if(['interval_concurrent','interval_unverified','recording_failed'].includes(params.get('state'))){
+  const warning=document.createElement('span');warning.className='metadata';warning.style.color='var(--warn-ink)';
+  warning.textContent=params.get('state')==='interval_concurrent'?'检测到其他程序可能写入终端，输出可能包含其他程序的内容。':params.get('state')==='recording_failed'?'终端记录保存失败，可查看原终端。':'未能确认输出来源，请结合原终端核实结果。';
+  document.querySelector('#execution .body').prepend(warning);
+  document.querySelector('#execution .icon-slot').style.color='var(--warn-ink)';
+}
+
 if(params.get('state')==='input_unknown'){
   document.querySelector('#input').classList.add('input-unknown');
   document.querySelector('#input-summary').textContent='输入结果 · 输入结果待核实';

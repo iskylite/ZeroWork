@@ -13,7 +13,7 @@
 | 全局设置 | [settings](./?state=settings&theme=dark) | 默认自行判断、五种运行方式、默认空闲后关闭（auto_idle）与保存 |
 | 对话运行方式 | [mode-menu](./?state=mode-menu&theme=dark) | 继承全局、当前对话覆盖、次级任务结束策略 |
 | 批处理结果 | [exec](./?state=exec&theme=dark) | 保留完整 identity、cwd、command、stdout、stderr、exit、elapsed 与结果 |
-| 每次询问与审批 | [ask](./?state=ask&theme=dark) | 路径选择、具体命令、目标与影响，在一个审批卡中确认 |
+| 每次询问与审批 | [ask](./?state=ask&theme=dark) | 路径选择、具体命令、目标与影响，在一个审批卡中确认；未操作始终待确认，无倒计时或重新确认 |
 | 新 PTY 运行中 | [pty-running](./?state=pty-running&theme=dark) | 来源与工作会话双 pane，真实三工具步骤，AI 持有目标输入权 |
 | 已有组内新增 | [pty-running / existing group](./?state=pty-running&group=existing&theme=dark) | 只显示 open_session、run_in_terminal，不再创建组 |
 | 已有 PTY | [pty-running / existing target](./?state=pty-running&target=existing&theme=dark) | 当前原有 session-07 单 pane 获得 AI 输入权；不建组、不新建会话，只显示 run_in_terminal |
@@ -30,6 +30,8 @@
 | 保存失败保稿 | [settings-error](./?state=settings-error&theme=dark) | 首次保存失败，保留设置草稿，再次保存成功 |
 
 所有场景共用 `app.js` 的 renderer 与 fixture。`theme=dark|light|sauber` 和 `viewport=default|compact` 可组合；产品画板分别为 1440 × 900 和 860 × 480；最小窗口助手仍由真实 pane bounds 夹取；当前侧栏224px时可用宽588px，组状态实测高336px、单pane实测高376px。影响说明可在审批正文内部滚动。菜单正文内部滚动，批准footer、composer及停止按钮保持固定可达。评审栏位于产品画板外。首选入口为 `pty-running`。
+
+用户等待约定：等待用户确认、选择运行方式、授权范围或原生敏感输入时不因等待时长终止；等待期间暂停回合自动执行时间预算和处理用时。等待本身不产生批准；切换为自动模式时，符合条件的待批调用可按新策略继续，派发前仍复验目标、参数、权限与输入状态。网络请求、命令执行和提交后的传输／回执保留各自超时。 原型保留现有卡片样式，不模拟审批过期；旧 `ask-expired` 链接按普通待确认显示。
 
 ## 共享组件与交互映射
 
@@ -123,3 +125,24 @@ composer只插入运行方式控件，并移动原上下文与模型控件：左
 外部消息增加输入方向图标及“外部消息 · 宿主更新”来源；工具卡只显示中文动作和具体参数投影。标题栏无执行历史按钮，查看过程仍位于工具卡。较早截图中的自建助手、GPT-5.4硬编码与1.3k自建预算已废止，不作为原生实施基线。
 
 当前效果图以为准；此前独立助手外壳和composer截图已废止，不用于实现。
+
+
+### 2026-11-03 · 普通 Shell 切换与 AI 原地接入
+
+原型沿用现有 workspace、AI 对话、连续步骤折叠和终端输入；没有新增接管面板。设计与原生均使用普通 SSH/su/Bash/Zsh/容器交互命令；连接时按设置自动初始化，切层后由 AI 接入当前 Shell，也可通过客户端 `@shell attach` 恢复。初始化不定义远端切层包装命令。
+
+| 原型 state | 交互与原生映射 | 效果图 |
+| --- | --- | --- |
+| `shell-notice` / `shell-attached` | 绑定任务收到切层候选 → AI 读取终端/会话 → `host.attach_shell` → 回执就绪；连续工具步骤放在同一折叠组 | [自动接入](index.html?state=shell-attached) |
+| `shell-recovery` | 漏判时业务命令在派发前拒绝，失败步骤保留在组内；读屏后接入，只重新提交未发送命令 | [漏判恢复](index.html?state=shell-recovery) · [展开细节](index.html?state=shell-recovery) · [折叠状态](index.html?state=shell-recovery) |
+| `shell-waiting` | 屏幕是密码/确认阶段，只读取与处理认证，不调用接入 | [等待认证](index.html?state=shell-waiting) |
+| `shell-manual` | 在终端直接输入/粘贴 `@shell attach` + Enter，无需选择候选；复用原生内置指令结果记录 | [手输恢复](index.html?state=shell-manual) |
+
+在任一终端输入框完整输入 `@shell attach` 后按 Enter，可切到手工恢复状态。场景选择器可切换其余状态；原型只使用确定性演示数据，不执行真实终端命令。等待认证状态没有接入工具步骤。
+
+视觉契约：浏览器 viewport 为 1600×1050 CSS px、100% 缩放、DPR 1，应用区域 1440×900；原生测试窗口 1440×900 逻辑尺寸，PNG 为 2880×1800。复用 Inter/系统中文及已有 monospace 字体、主题 tokens、工具卡片与折叠交互。手工结果记录对应 `builtin_records_styles.zig`：正文 14/22 mono，标记 10/18，accent tint、4px 标记圆角；文字按内容区换行。原生继续使用现有 zenit 组件，不嵌入 HTML。对比以相同状态的内容区、文字和交互为准，不把最大化原生窗口与浮动原型整页做拉伸像素比较。
+
+未知结果允许 AI 继续只读观察终端、说明判断依据；真实退出码保持未知，业务执行和初始化不能借此重发。接入仍遵守当前自动/确认权限与会话范围。无活动任务时保存候选供下一次请求查询，不自动新建 AI 回合。
+
+
+原生验收：以本地可控模型回复驱动真实原生窗口和两次 SSH 连接，完成普通长 SSH 命令 → Zsh 原地接入、别名进入 Bash 的漏判恢复、过期证据拒绝、接入幂等和真实缺失结束事件后的下一轮读屏。原生终端手输逐字 `@shell attach`、层级返回与失败说明另有独立交互回归。设计状态、命令和测试帐号为演示数据；真实 su 身份切换及 Docker/Podman 引擎环境没有在本机做实机回归。

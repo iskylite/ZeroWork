@@ -1694,6 +1694,45 @@ test "retained plan: backend-independent layer ranges include nested damage and 
     try std.testing.expectEqual(@as(?usize, null), plan.layers[0].end);
 }
 
+test "retained plan tracks streaming texture revisions in nested layers and damage" {
+    const Item = DamageMock.MockItem;
+    const Revisions = struct {
+        value: ?u64 = 1,
+        pub fn imageContentRevision(self: *const @This(), _: u64) ?u64 {
+            return self.value;
+        }
+    };
+    const begin = Item{ .control_kind = .begin_opacity_layer };
+    const end = Item{ .control_kind = .end_opacity_layer };
+    const image = Item{ .kind = .image, .control_kind = .none, .resource_handle = 17 };
+    const commands = [_]Item{ begin, begin, image, end, end, begin, .{ .kind = .rect }, end };
+    var plan: retained_plan.Plan = .{};
+    var revisions: Revisions = .{};
+    retained_plan.scan(&plan, &commands, &revisions);
+    const outer = plan.retained_hashes[0];
+    const inner = plan.retained_hashes[1];
+    const sibling = plan.retained_hashes[2];
+    const damage = plan.damage_scratch[plan.damage_ranges[0].start + 1].digest;
+    try std.testing.expect(outer != 0 and inner != 0 and sibling != 0);
+    try std.testing.expect(plan.damage_ranges[0].safe);
+
+    retained_plan.scan(&plan, &commands, &revisions);
+    try std.testing.expectEqual(outer, plan.retained_hashes[0]);
+    revisions.value = 2;
+    retained_plan.scan(&plan, &commands, &revisions);
+    try std.testing.expect(plan.retained_hashes[0] != outer);
+    try std.testing.expect(plan.retained_hashes[1] != inner);
+    try std.testing.expectEqual(sibling, plan.retained_hashes[2]);
+    try std.testing.expect(plan.damage_scratch[plan.damage_ranges[0].start + 1].digest != damage);
+
+    revisions.value = null;
+    retained_plan.scan(&plan, &commands, &revisions);
+    try std.testing.expectEqual(@as(u64, 0), plan.retained_hashes[0]);
+    try std.testing.expectEqual(@as(u64, 0), plan.retained_hashes[1]);
+    try std.testing.expectEqual(sibling, plan.retained_hashes[2]);
+    try std.testing.expect(!plan.damage_ranges[0].safe);
+}
+
 test "retained plan: excess nesting and incomplete scopes cannot misassociate native layer boundaries" {
     const Item = DamageMock.MockItem;
     var commands: [140]Item = undefined;

@@ -35,8 +35,7 @@ test "plugin V3 reads registered metadata and detail actions preserve draft" {
     const content = try view.mountContent(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action });
     try cx.root.?.appendChild(cx.allocator, content);
     try std.testing.expect(byId(content, "settings.plugin.bmc_ikvm.row") != null);
-    try std.testing.expect(!hasText(byId(content, "settings.plugins.future.body").?, "BMC iKVM"));
-    try std.testing.expect(!hasText(byId(content, "settings.plugins.future.body").?, "BMC · iKVM"));
+    try std.testing.expect(byId(content, "settings.plugins.future") == null);
     const timing = byId(content, "settings.plugin.probe.show_grid.timing").?;
     try std.testing.expect(timing.behavior.interaction.focusable);
     try std.testing.expectEqualStrings("下次连接生效", timing.behavior.interaction.a11y.?.label.?);
@@ -53,7 +52,7 @@ test "plugin V3 reads registered metadata and detail actions preserve draft" {
     const close_click = close.behavior.events.on_click.?;
     close_click.callback(close_click.context);
     try std.testing.expectEqual(@as(u16, 19), controller.model.value.ui.font_size);
-    try std.testing.expectEqualStrings("静态链接插件随应用管理", byId(cx.root.?, "settings.plugin.ssh.version.message").?.getText().?.content);
+    try std.testing.expectEqualStrings("插件随应用更新", byId(cx.root.?, "settings.plugin.ssh.version.message").?.getText().?.content);
     // Unknown plugins disclose only their actual metadata; there is no invented capability.
     try std.testing.expectEqualStrings("canvas", @import("config/settings_parts/settings_plugins.zig").description(entries[1]));
     try std.testing.expectEqualStrings("连接时按需请求权限", @import("config/settings_parts/settings_plugins.zig").permissions(entries[1]));

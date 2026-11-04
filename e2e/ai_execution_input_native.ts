@@ -59,8 +59,12 @@ const commands={
  SECRET:`printf ready > '${paths.secretReady}'; zerowork_secret_consume && { printf consumed > '${paths.secretDone}'; printf '%s\\n' '${markers.SECRET}'; }`,
 };
 type Stage=keyof typeof commands;
+// Focus ordinary input approval without opening the independent secret collector.
+const inputOnly=process.env.ZW_AI_TEST_INPUT_ONLY==='1';
+const stages:Stage[]=inputOnly?['INPUT']:['INPUT','TAKEOVER','SECRET'];
 type Call={id:string,name:string,wire:string,arguments:any};
 const emitted=new Map<string,Call>(),observations=new Map<string,any>(),requests:any[]=[];
+const fullHostResults=new Map<string,any>();
 const states:Record<Stage,any>={INPUT:{},TAKEOVER:{},SECRET:{}};
 let fixtureFailure:string|null=null,activeCall:Call|null=null,finalEmitted=false,quitting=false;
 let held:any=null,unexpectedProviderClose=false,currentStage:Stage|null=null;
@@ -70,9 +74,10 @@ const wireName=(name:string)=>name.replaceAll('_','_u').replaceAll('.','__');
 const frame=(delta:any)=>'data: '+JSON.stringify({choices:[{index:0,delta}]})+'\n\n';
 const result=(results:Map<string,any>,id:string)=>{
  const envelope=results.get(id);if(!envelope)return null;
- assert.equal(envelope.status,'succeeded',`${id}: ${JSON.stringify(envelope)}`);const body=payload(envelope);
+ assert.equal(envelope.status,'succeeded',`${id}: ${JSON.stringify(envelope)}`);const modelBody=payload(envelope),full=fullHostResults.get(id),body=full?payload(full):modelBody;
+ if(modelBody.snapshot&&full){assert.equal(modelBody.snapshot.state,body.snapshot.state);assert.deepEqual(modelBody.snapshot.input_receipt,body.snapshot.input_receipt,'model must observe actual input consumption');assert(!('grant' in modelBody.snapshot));}
  if(body.snapshot)assert(!['cancelled_unsent','outcome_unknown','recording_degraded'].includes(body.state),`${id}: ${JSON.stringify(body)}`);
- observations.set(id,{envelope,body});return body;
+ observations.set(id,{envelope,body,model_body:modelBody});return body;
 };
 const emitMany=(body:any,res:any,calls:{id:string,name:string,arguments:any}[])=>{
  const tool_calls=calls.map(({id,name,arguments:args},index)=>{
@@ -131,6 +136,7 @@ const server=createServer(async(req,res)=>{
   if(req.method!=='POST'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({data:[{id:'input-native-fixture'}]}));return}
   let raw='';for await(const chunk of req)raw+=chunk;assert(!raw.includes(syntheticSecret),'synthetic secure input leaked into the provider request');
   const body=JSON.parse(raw);validateWire(body);
+  for(const line of(await readFile(join(out,'app.log'),'utf8')).split('\n')){const start=line.indexOf('AI_TOOL_TRACE ');if(start<0)continue;try{const event=JSON.parse(line.slice(start+14));if(event.event==='host_result')fullHostResults.set(event.call_id,event.result)}catch{}}
   const boundary=body.messages.findLastIndex((m:any)=>m.role==='user'&&/\[NATIVE-(INPUT|TAKEOVER|SECRET)\]/.test(String(m.content)));
   const stage=/\[NATIVE-(INPUT|TAKEOVER|SECRET)\]/.exec(String(body.messages[boundary]?.content??''))?.[1] as Stage;assert(stage);assert.equal(stage,currentStage);
   const current=body.messages.slice(boundary+1),results=new Map<string,any>(current.filter((m:any)=>m.role==='tool').map((m:any)=>[m.tool_call_id,JSON.parse(m.content)]));
@@ -218,12 +224,12 @@ const capture=async(name:string)=>{await h.mouseMove(1,1);assert((await h.screen
 async function approvePending(approved:Set<string>){
  if(!(await h.query('ai.host_approval')).some(shown))return;assert(activeCall,'approval has no current provider call');if(approved.has(activeCall.id))return;
  const call=activeCall;assert(call.name==='host.run_in_terminal'||call.name==='host.send_execution_input');assert.equal(call.arguments.host_secret_request,undefined,'secret input must use its own real AppKit collector');
- const expected=call.arguments.command??call.arguments.text??'按下 Enter（提交已接收的当前行）';assert.equal(text(await visible('ai.host_approval.summary')),queryText(expected));assert.equal(text(await visible('ai.host_approval.target')),call.arguments.session_ref??call.arguments.execution_ref);
+ const expected=call.arguments.command??call.arguments.text??'按下 Enter（提交已接收的当前行）';assert.equal(text(await visible('ai.host_approval.summary')),queryText(expected));const target=text((await h.query('ai.host_approval.target')).filter((node:any)=>node.hidden!==true));assert.equal(target,call.arguments.session_ref?'会话 #'+states[currentStage!].session.session_id:'','human approval header must not expose opaque references');
  if(call.name==='host.run_in_terminal'){
   const path=currentStage==='INPUT'?paths.inputReady:currentStage==='TAKEOVER'?paths.takeoverReady:paths.secretReady;assert.equal(await exists(path),false,'command has no effect before exact native approval');
   await click('ai.host_approval.copy');assert.equal((await promisify(execFile)('/usr/bin/pbpaste',[],{encoding:'utf8'})).stdout,expected,'full native approval copy changed the exact command');
  }else{
-  assert.equal(await exists(paths.inputDone),false,'ordinary text and pending Enter must leave the helper waiting');const impact=text(await visible('ai.host_approval.impact'));assert(impact.includes('zerowork_read')&&impact.includes('等待序号')&&impact.includes('已接收输入序号'));
+  assert.equal(await exists(paths.inputDone),false,'ordinary text and pending Enter must leave the helper waiting');const impact=text(await visible('ai.host_approval.impact'));assert(impact.includes('向当前等待输入的程序发送内容')&&impact.includes('本次输入可能影响后续命令行为'));assert(!impact.includes('等待序号')&&!impact.includes('已接收输入序号'),'trusted fences must stay out of approval copy');
  }
  const record={call_id:call.id,name:call.name,summary:queryText(expected),target:call.arguments.session_ref??call.arguments.execution_ref,at:new Date().toISOString()};report.approvals.push(record);await capture(call.id+'-approval');approved.add(call.id);await click('ai.host_approval.accept');
 }
@@ -246,7 +252,7 @@ async function scanLeaks(){
 }
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
- for(const stage of['INPUT','TAKEOVER','SECRET'] as Stage[]){
+ for(const stage of stages){
   currentStage=stage;activeCall=null;finalEmitted=false;const approved=new Set<string>();
   await click('ai.prompt');await h.key('a',{cmd:true});await h.type_(`[NATIVE-${stage}] 验收受控本机输入，仅按明确审批执行。`);await click('ai.send');
   const started=performance.now();
@@ -285,21 +291,24 @@ try{
  assert(states.INPUT.approved.includes('input-text-a')&&states.INPUT.approved.includes('input-text-b')&&states.INPUT.approved.includes('input-enter'),'each new ordinary input needs a separate native approval');
  // This is metadata coordination after the private consumer has finished;
  // it does not extend the production collector's fixed 60-second lifetime.
+ let cuaEvidence:any=null;
+ if(!inputOnly){
  await h.waitFor(async()=>await exists(join(out,'native-cua-evidence.json'))||null,60000);
- const cuaEvidence=JSON.parse(await readFile(join(out,'native-cua-evidence.json'),'utf8'));assert.equal(cuaEvidence.run_id,token,'CUA evidence must belong to this exact native run');for(const flag of['observed_with_cua','secure_field_observed','synthetic_input_only','submitted'])assert.equal(cuaEvidence[flag],true,`missing real CUA evidence: ${flag}`);assert.equal(cuaEvidence.window_title,'安全输入');assert.equal(cuaEvidence.field_label,'本次宿主安全输入');assert(cuaEvidence.screenshot_ref);assert(!JSON.stringify(cuaEvidence).includes(syntheticSecret));
+ cuaEvidence=JSON.parse(await readFile(join(out,'native-cua-evidence.json'),'utf8'));assert.equal(cuaEvidence.run_id,token,'CUA evidence must belong to this exact native run');for(const flag of['observed_with_cua','secure_field_observed','synthetic_input_only','submitted'])assert.equal(cuaEvidence[flag],true,`missing real CUA evidence: ${flag}`);assert.equal(cuaEvidence.window_title,'安全输入');assert.equal(cuaEvidence.field_label,'本次宿主安全输入');assert(cuaEvidence.screenshot_ref);assert(!JSON.stringify(cuaEvidence).includes(syntheticSecret));
  assert.equal(typeof cuaEvidence.visual_verified,'boolean');if(cuaEvidence.visual_verified){assert.equal(cuaEvidence.screenshot_status,'captured_masked');assert.equal(cuaEvidence.field_masked,true)}else{assert.equal(cuaEvidence.screenshot_status,'white_capture_unavailable');assert.equal(typeof cuaEvidence.visual_limitation,'string');assert(cuaEvidence.visual_limitation.length>0);report.limits.push(cuaEvidence.visual_limitation)}report.native_cua_evidence=cuaEvidence;
+ }
  await normalQuit();assert(report.normal_app_close,'successful acceptance requires the actual normal Quit route');
  const trace:any[]=[];for(const line of(await readFile(join(out,'app.log'),'utf8')).split('\n')){const start=line.indexOf('AI_TOOL_TRACE ');if(start>=0)try{trace.push(JSON.parse(line.slice(start+14)))}catch{}}
- const identities=trace.filter(event=>event.event==='request_identity');assert.equal(identities.length,3,'handoff must not create another Task');assert(!trace.some(event=>event.event==='conversation_rollback'));
+ const identities=trace.filter(event=>event.event==='request_identity');assert.equal(identities.length,stages.length,'handoff must not create another Task');assert(!trace.some(event=>event.event==='conversation_rollback'));
  for(const call of emitted.values()){const first=trace.find(event=>event.event==='tool_feedback'&&event.call_id===call.id);assert(first,`${call.id} needs real production feedback`);assert.equal(trace.filter(event=>event.event==='tool_feedback'&&event.call_id===call.id&&event.turn_id===first.turn_id).length,1,`${call.id} must settle once in its original turn`)}
- const journal=JSON.parse(await readFile(join(data,'ai/lifecycle.json'),'utf8')),runs=journal.records.filter((record:any)=>record.tool_id==='host.run_in_terminal'),inputs=journal.records.filter((record:any)=>record.tool_id==='host.send_execution_input');assert.equal(runs.length,3);assert.equal(inputs.length,4,'same-key ordinary and secret calls must reuse their original operations');
- for(const stage of['INPUT','TAKEOVER','SECRET'] as Stage[]){const run=runs.find((record:any)=>record.original_call===stage.toLowerCase()+'-run');assert(run);assert.equal(run.stage,'succeeded');assert.equal(run.execution_receipt.execution_id,states[stage].finished.snapshot.execution_id);assert.equal(run.execution_receipt.interval_saved,true);assert.equal(run.execution_receipt.output_scope,'session_interval');assert.equal(run.remote_effect_unknown,false)}
- for(const id of['input-text-a','input-text-b','input-enter','secret-request']){const record=inputs.find((item:any)=>item.original_call===id);assert(record,id);assert.equal(record.stage,'succeeded');assert.equal(record.execution_receipt.input_receipt.stage,'consumed');assert.equal(record.remote_effect_unknown,false)}
+ const journal=JSON.parse(await readFile(join(data,'ai/lifecycle.json'),'utf8')),runs=journal.records.filter((record:any)=>record.tool_id==='host.run_in_terminal'),inputs=journal.records.filter((record:any)=>record.tool_id==='host.send_execution_input');assert.equal(runs.length,stages.length);assert.equal(inputs.length,inputOnly?3:4,'same-key ordinary and secret calls must reuse their original operations');
+ for(const stage of stages){const run=runs.find((record:any)=>record.original_call===stage.toLowerCase()+'-run');assert(run);assert.equal(run.stage,'succeeded');assert.equal(run.execution_receipt.execution_id,states[stage].finished.snapshot.execution_id);assert.equal(run.execution_receipt.interval_saved,true);assert.equal(run.execution_receipt.output_scope,'session_interval');assert.equal(run.remote_effect_unknown,false)}
+ for(const id of(inputOnly?['input-text-a','input-text-b','input-enter']:['input-text-a','input-text-b','input-enter','secret-request'])){const record=inputs.find((item:any)=>item.original_call===id);assert(record,id);assert.equal(record.stage,'succeeded');assert.equal(record.execution_receipt.input_receipt.stage,'consumed');assert.equal(record.remote_effect_unknown,false)}
  await writeFile(join(out,'lifecycle-journal.json'),JSON.stringify(journal,null,2));
  const manifests:any[]=[];for(const relative of await readdir(data,{recursive:true}))if(String(relative).endsWith('.json'))try{const document=JSON.parse(await readFile(join(data,String(relative)),'utf8'));if(document.execution_ranges?.some((range:any)=>Object.values(states).some(state=>state.execution_ref==='x1:'+range.execution_id)))manifests.push({path:String(relative),document})}catch{}
- for(const state of Object.values(states)){const s=state.finished.snapshot,matching=manifests.filter(item=>item.document.execution_ranges.some((range:any)=>range.execution_id===s.execution_id));assert.equal(matching.length,1);const range=matching[0].document.execution_ranges.find((item:any)=>item.execution_id===s.execution_id);assert.equal(range.interval_saved,true);assert.equal(range.completion_evidence,'foreground_finished');assert.deepEqual(range.start,{raw_offset:s.start.raw_offset,event_sequence:s.start.event_sequence});assert.deepEqual(range.end,{raw_offset:s.end.raw_offset,event_sequence:s.end.event_sequence});assert.deepEqual(range.process_receipt,s.process)}
+ for(const stage of stages){const state=states[stage],s=state.finished.snapshot,matching=manifests.filter(item=>item.document.execution_ranges.some((range:any)=>range.execution_id===s.execution_id));assert.equal(matching.length,1);const range=matching[0].document.execution_ranges.find((item:any)=>item.execution_id===s.execution_id);assert.equal(range.interval_saved,true);assert.equal(range.completion_evidence,'foreground_finished');assert.deepEqual(range.start,{raw_offset:s.start.raw_offset,event_sequence:s.start.event_sequence});assert.deepEqual(range.end,{raw_offset:s.end.raw_offset,event_sequence:s.end.event_sequence});assert.deepEqual(range.process_receipt,s.process)}
  await writeFile(join(out,'recording-manifests.json'),JSON.stringify(manifests,null,2));report.leak_scan=await scanLeaks();
- report.checks.push('Two separately approved text fragments remain in one attested zerowork_read wait until a separately approved Enter consumes the exact concatenated line','A new original call with the same text request_key retains its original input_sequence and creates no repeated text or journal operation','Native user takeover preserves the original live provider Task and running command, delivers the real host notice, and ordinary terminal input finishes that same helper/execution naturally','A genuine AppKit secure collector accepts only the externally typed synthetic vector; its exact host_secret consumed receipt has accepted_bytes=0 and the fixed native sink completes naturally','Same-key secret retry returns secret_submitted with the original consumed sequence and no new journal operation','All three real PTY intervals are saved with true foreground exit 0, and normal Quit exits 0 without a signal','The synthetic secure vector is absent from provider wire, tool calls/results, Zenit queries, isolated history, journal, logs and every captured local evidence/data file');report.status=cuaEvidence.visual_verified?'passed':'passed_with_collector_visual_limit';
+ report.checks.push('Two separately approved text fragments remain in one attested zerowork_read wait until a separately approved Enter consumes the exact concatenated line','A new original call with the same text request_key retains its original input_sequence and creates no repeated text or journal operation','Native user takeover preserves the original live provider Task and running command, delivers the real host notice, and ordinary terminal input finishes that same helper/execution naturally','A genuine AppKit secure collector accepts only the externally typed synthetic vector; its exact host_secret consumed receipt has accepted_bytes=0 and the fixed native sink completes naturally','Same-key secret retry returns secret_submitted with the original consumed sequence and no new journal operation','All three real PTY intervals are saved with true foreground exit 0, and normal Quit exits 0 without a signal','The synthetic secure vector is absent from provider wire, tool calls/results, Zenit queries, isolated history, journal, logs and every captured local evidence/data file');if(inputOnly){report.checks=report.checks.slice(0,2);report.checks.push('The real ordinary-input PTY interval is saved and normal Quit exits without a signal');report.limits.push('Focused ordinary-input mode does not exercise takeover or the independent secret collector');report.status='passed_input_only'}else report.status=cuaEvidence.visual_verified?'passed':'passed_with_collector_visual_limit';
 }catch(error){report.status='failed';report.error=String(error);report.active_call=activeCall;process.exitCode=1;try{await capture('failure')}catch{}
 }finally{
  quitting=true;if(held){clearInterval(held.heartbeat);held.res.end('data: [DONE]\n\n');held=null}

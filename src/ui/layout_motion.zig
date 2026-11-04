@@ -41,6 +41,11 @@ pub const Disclosure = struct {
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, content: *ui.Node, expanded: bool) !*Disclosure {
         const root = try ui.box(cx, .{ .width = .fill(), .height = if (expanded) .{ .fit = .{} } else .{ .px = 0 }, .direction = .column, .flex_shrink = 0, .overflow_hidden = true }, .{});
         try root.appendChild(cx.allocator, content);
+        return attach(cx, scope, root, content, expanded);
+    }
+    /// Reuse an existing widget's content slot without replacing its nodes.
+    pub fn attach(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node, content: *ui.Node, expanded: bool) !*Disclosure {
+        root.setStyleInline(cx.allocator, .{ .overflow_hidden = true, .flex_shrink = 0 });
         const self = try scope.createState(Disclosure, .{ .cx = cx, .root = root, .content = content, .expanded = expanded });
         try cx.addAfterLayoutHook(self, afterLayout);
         try scope.onCleanup(Disclosure, self, cleanup);
@@ -49,17 +54,35 @@ pub const Disclosure = struct {
     }
     pub fn setExpanded(self: *Disclosure, expanded: bool) void {
         if (expanded == self.expanded) return;
+        // Freeze the current natural height only for the user transition.
+        // Restored/open disclosures otherwise participate in normal layout.
+        const current = if (self.root.style.height == .px) self.root.style.height.px else self.root.globalRect().h;
+        self.motion = .{ .value = current, .target = current, .from = current, .started = self.cx.frame_time_ms };
+        self.root.setStyle(self.cx.allocator, .height, .{ .px = current });
         self.expanded = expanded;
         self.animating = true;
-        if (!expanded) self.cx.invalidateReferencesTo(self.content);
+        // Collapsing retains the nodes; only clear focus/input references.
+        if (!expanded) self.cx.invalidateReferencesToEx(self.content, false);
         self.root.setHitTestVisible(expanded);
         self.cx.requestRedraw();
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Disclosure = @ptrCast(@alignCast(raw));
         const target = if (self.expanded) self.content.globalRect().h else 0;
+        if (self.expanded and !self.animating) {
+            // Keeping an open group at a sampled pixel height makes nested
+            // details one layout behind after a transcript rebuild. That
+            // transient shorter tree clamps the outer reader's scroll offset.
+            if (self.root.style.height == .fit) return .done;
+            self.root.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
+            return .needs_layout;
+        }
         const height = self.motion.sample(self.cx, target, self.animating);
         if (@abs(height - target) < 0.1) self.animating = false;
+        if (self.expanded and !self.animating) {
+            self.root.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
+            return .needs_layout;
+        }
         if (self.root.style.height == .px and @abs(self.root.style.height.px - height) < 0.05) return .done;
         self.root.setStyle(self.cx.allocator, .height, .{ .px = height });
         return .needs_layout;
@@ -133,4 +156,44 @@ test "layout motion disclosure clips both directions and releases its hook with 
 fn afterTestFrame(disclosure: *Disclosure) ui.AfterLayoutResult {
     disclosure.cx.layout();
     return Disclosure.afterLayout(disclosure, 0, false);
+}
+
+test "layout motion restored nested disclosures keep their full height when mounted after layout" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(400, 400);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    const Mount = struct {
+        cx: *ui.Cx,
+        scope: *ui.Scope,
+        group: ?*Disclosure = null,
+        clipped: bool = false,
+        fn run(raw: *anyopaque, round: u8, _: bool) ui.AfterLayoutResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.group) |group| {
+                if (round > 0 and group.root.globalRect().h < 160) self.clipped = true;
+                return .done;
+            }
+            const content = ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .flex_shrink = 0 }, .{}) catch unreachable;
+            const group = Disclosure.mount(self.cx, self.scope, content, true) catch unreachable;
+            self.group = group;
+            self.cx.root.?.appendChild(a, group.root) catch unreachable;
+            const detail = ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 160 }, .flex_shrink = 0 }, .{}) catch unreachable;
+            const card = Disclosure.mount(self.cx, self.scope, detail, true) catch unreachable;
+            content.appendChild(a, card.root) catch unreachable;
+            return .needs_layout;
+        }
+    };
+    var mount: Mount = .{ .cx = cx, .scope = scope };
+    try cx.addAfterLayoutHook(&mount, Mount.run);
+    defer cx.removeAfterLayoutHook(&mount);
+    cx.advanceFrameClock();
+    cx.layout();
+    _ = cx.render();
+    try std.testing.expect(!mount.clipped);
+    try std.testing.expectApproxEqAbs(@as(f32, 160), mount.group.?.root.globalRect().h, 0.1);
+    try std.testing.expect(mount.group.?.root.style.height == .fit);
 }

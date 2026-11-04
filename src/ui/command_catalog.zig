@@ -15,24 +15,26 @@ pub const Entry = struct {
     }
 };
 
-pub const operation_count = 14;
+pub const operation_count = 16;
 
 /// Order and wording follow mockup-at-help.png. @@ is an escape, not an action.
 pub const entries = [_]Entry{
     .{ .name = "@up", .usage = "@up [文件]", .description = "选择文件并上传", .example = "@up", .icon = "📤" },
     .{ .name = "@dl", .usage = "@dl <远程路径>", .description = "选择保存位置并下载", .example = "@dl /var/log/app.log", .icon = "📥", .requires_arguments = true },
     .{ .name = "@ai", .usage = "@ai [问题]", .description = "打开 AI 助手，问题保留为草稿", .example = "@ai 连接为何失败", .icon = "✨" },
-    .{ .name = "@new", .usage = "@new", .description = "同主机新会话·组内自动入组", .example = "@new", .icon = "🖥️" },
+    .{ .name = "@new", .usage = "@new [主机名|--pick]", .description = "新建会话·可选择主机·组内自动入组", .example = "@new", .icon = "🖥️" },
     .{ .name = "@dup", .usage = "@dup", .description = "镜像复制会话（含当前目录）", .example = "@dup", .icon = "⧉" },
     .{ .name = "@grp", .usage = "@grp <组名>", .description = "加入/创建终端组", .example = "@grp prod", .icon = "👥", .requires_arguments = true },
     .{ .name = "@pin", .usage = "@pin", .description = "组内置顶会话（AI/斜杠锚点）", .example = "@pin", .icon = "📌" },
-    .{ .name = "@sync", .usage = "@sync on|off", .description = "广播输入开关", .example = "@sync on", .icon = "🔁", .requires_arguments = true },
+    .{ .name = "@sync", .usage = "@sync on|off", .description = "本会话广播开关", .example = "@sync on", .icon = "🔁", .requires_arguments = true },
     .{ .name = "@ts", .usage = "@ts [on|off]", .description = "切换时间戳侧栏（无参数自动开关）", .example = "@ts", .icon = "🕐" },
     .{ .name = "@history", .usage = "@history [on|off]", .description = "显示或隐藏命令历史", .example = "@history on", .icon = "📋" },
     .{ .name = "@log", .usage = "@log", .description = "历史回溯模式", .example = "@log", .icon = "📜" },
     .{ .name = "@socks", .usage = "@socks on|off", .description = "SOCKS5 动态转发开关", .example = "@socks on 1080", .icon = "🧦", .requires_arguments = true },
     .{ .name = "@theme", .usage = "@theme [名称]", .description = "全局主题选择（应用与全部终端）", .palette_description = "全局主题选择", .example = "@theme dark-pro", .icon = "🎨" },
+    .{ .name = "@shell", .usage = "@shell [status|attach]", .description = "查看 Shell 状态；attach 确认空提示符并接入当前层", .example = "@shell attach", .icon = "⌘" },
     .{ .name = "@help", .usage = "@help", .description = "列出内置指令与用法", .example = "@help", .icon = "❓" },
+    .{ .name = "@dots", .usage = "@dots", .description = "支付宝扫码 · 捐献支持开发", .example = "@dots", .icon = "♡" },
     .{ .name = "@@", .usage = "@@", .description = "转义字面 @", .example = "@@", .icon = "⌨️" },
 };
 
@@ -50,7 +52,7 @@ test "catalog operations include command history and literal escape" {
     try std.testing.expect(find("@history") != null);
     try std.testing.expectEqualStrings("@log", find("@log").?.usage);
     try std.testing.expectEqualStrings("历史回溯模式", find("@log").?.description);
-    try std.testing.expectEqualStrings("@new", find("@new").?.usage);
+    try std.testing.expectEqualStrings("@new [主机名|--pick]", find("@new").?.usage);
     for (entries, 0..) |entry, i| {
         for (entries[i + 1 ..]) |other| {
             try std.testing.expect(!std.mem.eql(u8, entry.name, other.name));

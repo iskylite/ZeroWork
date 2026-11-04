@@ -126,7 +126,6 @@ playwright-report/
 /docs/**/*.jpeg
 /docs/**/*.webp
 /docs/**/*.gif
-!/docs/UI_V3/assets/ai/assistant-logo.png
 /docs/UI_V3/assets/design-records/
 /docs/UI_V3/connection/preview.svg
 /docs/UI_V3/settings/preview.svg
@@ -140,9 +139,11 @@ playwright-report/
 !/vendor/libghostty-vt/src/font/res/MIT.txt
 !/vendor/libghostty-vt/src/font/res/BSD-2-Clause.txt
 
-# Required menu-bar design assets referenced by the editable reference pages.
-!/docs/UI_V3/menu-bar/assets/badge-0.png
-!/docs/UI_V3/menu-bar/assets/badge-1.png
-!/docs/UI_V3/menu-bar/assets/badge-12.png
-!/docs/UI_V3/menu-bar/assets/badge-123.png
-!/docs/UI_V3/menu-bar/assets/design-preview.png
+# UI design sources reference shared assets; image exports stay outside this directory.
+/docs/UI_V3/**/*.svg
+/docs/UI_V3/**/*.ico
+/docs/UI_V3/**/*.icns
+/docs/UI_V3/**/*.avif
+/docs/UI_V3/**/*.bmp
+/docs/UI_V3/**/*.tif
+/docs/UI_V3/**/*.tiff

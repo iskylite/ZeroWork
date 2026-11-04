@@ -55,6 +55,36 @@ const Fixture = struct {
     }
 };
 
+test "floating input scrollbar cursor follows real thumb drag and releases outside either axis" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const scroll = try ui.widgets.ScrollArea(.{ .width = 300, .height = 200, .direction = .both }).mount(f.scope, f.cx);
+    scroll.container.setStyleInline(f.cx.allocator, .{ .position = .absolute });
+    scroll.content.setStyleInline(f.cx.allocator, .{ .width = .{ .px = 800 }, .height = .{ .px = 600 }, .flex_shrink = 0 });
+    try f.background.appendChild(f.cx.allocator, scroll.container);
+    scroll.state.onScrollActivity();
+    f.frames();
+    for ([_]usize{ 1, 2 }) |index| {
+        const thumb = scroll.container.children.items[index];
+        const r = thumb.globalRect();
+        try std.testing.expect(r.w > 0 and r.h > 0);
+        const x = r.x + r.w / 2;
+        const y = r.y + r.h / 2;
+        f.cx.handleMouseMove(x, y);
+        try std.testing.expectEqual(ui.CursorShape.grab, f.cx.current_cursor);
+        f.cx.handleMouseDown(x, y, .{});
+        f.cx.handleMouseMove(500, 400);
+        try std.testing.expectEqual(ui.CursorShape.grabbing, f.cx.current_cursor);
+        f.cx.handleMouseUp(500, 400);
+        try std.testing.expectEqual(ui.CursorShape.default, f.cx.current_cursor);
+        try std.testing.expect(!f.cx.dispatcher.hasPointerCapture());
+        scroll.state.onScrollActivity();
+        f.frames();
+    }
+    f.cx.handleMouseMove(40, 40);
+    try std.testing.expect(f.cx.current_cursor != .grab);
+}
+
 test "floating input manual surface consumes blank clicks and wheels before its terminal ancestor" {
     const f = try Fixture.init();
     defer f.deinit();

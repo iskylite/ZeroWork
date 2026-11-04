@@ -257,9 +257,10 @@ pub const Panel = struct {
     source_summary: *ui.Node = undefined,
     source_hint: *ui.Node = undefined,
     remote_row: *ui.Node = undefined,
+    remote_hint: *ui.Node = undefined,
+    remote_tip: ui.widgets.TooltipResult = undefined,
     local_row: *ui.Node = undefined,
     rename_row: *ui.Node = undefined,
-    remote_hint: *ui.Node = undefined,
     identity_box: *ui.Node = undefined,
     identity_name: *ui.Node = undefined,
     identity_endpoint: *ui.Node = undefined,
@@ -366,10 +367,18 @@ pub const Panel = struct {
         source_field.input.input_container.meta.ownership.meta.test_id = "transfer.remote_source";
         self.source_hint = try self.text(scroll.content, "", 10.5, 400, true);
         self.source_hint.setStyleInline(cx.allocator, S.confirmationHint());
-        self.remote_row = (try self.field(scroll.content, "远程目录", "folder", self.remote_dir_sig, "", null)).row;
+        const remote_field = try self.field(scroll.content, "远程目录", "folder", self.remote_dir_sig, "", null);
+        self.remote_row = remote_field.row;
         self.remote_row.meta.ownership.meta.test_id = "transfer.remote_directory";
-        self.remote_hint = try self.text(scroll.content, "跟随打开时的终端目录", 10.5, 400, true);
+        cx.detachChild(scroll.content, self.remote_row);
+        const remote_hint = try @import("control_hint.zig").mount(cx, scope, self.remote_row, "初始值来自打开时的终端目录，可修改。", .{ .id = "transfer.remote_directory.tooltip", .layout = .{ .width = .fill(), .flex_shrink = 0 }, .focus_target = remote_field.input.input_container, .visible = self.open });
+        self.remote_tip = remote_hint;
+        try scroll.content.appendChild(cx.allocator, remote_hint.wrapper);
+        self.remote_row = remote_hint.wrapper;
+        self.remote_hint = try self.text(scroll.content, "", 10.5, 400, true);
+        self.remote_hint.meta.ownership.meta.test_id = "transfer.remote_directory.status";
         self.remote_hint.setStyleInline(cx.allocator, S.confirmationHint());
+        self.remote_hint.setDisplay(.none);
         const local_field = try self.field(scroll.content, "保存到", "folder", self.local_dir_sig, "选择本地目录", directory);
         self.local_row = local_field.row;
         self.local_input = local_field.input;
@@ -493,7 +502,8 @@ pub const Panel = struct {
         self.local_row.setDisplay(if (upload) .none else .flex);
         self.rename_row.setDisplay(if (upload) .none else .flex);
         self.remote_row.setDisplay(if (upload) .flex else .none);
-        self.remote_hint.setDisplay(if (upload) .flex else .none);
+        self.remote_hint.setTextContent(self.cx.allocator, "") catch {};
+        self.remote_hint.setDisplay(.none);
         self.source_hint.setDisplay(if (upload and !self.drop) .flex else .none);
         self.source_summary.setDisplay(if (upload) .none else .flex);
         self.sources_dirty = true;
@@ -501,6 +511,11 @@ pub const Panel = struct {
         self.setError(null);
         self.validateFields();
         self.open.set(true);
+        self.cx.requestRedraw();
+    }
+    pub fn setRemoteStatus(self: *Panel, value: []const u8) !void {
+        try self.remote_hint.setTextContent(self.cx.allocator, value);
+        self.remote_hint.setDisplay(if (self.mode == .upload and value.len > 0) .flex else .none);
         self.cx.requestRedraw();
     }
     pub fn hide(self: *Panel) void {

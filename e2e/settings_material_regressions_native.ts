@@ -3,11 +3,12 @@
  * Uses private configuration, a synthetic PNG, and background Harness input.
  */
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawn, execFileSync} from 'node:child_process';
 import {mkdir, mkdtemp, open, readFile, realpath, rm, writeFile} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 import {deflateSync} from 'node:zlib';
 import * as h from '../vendor/zenit/e2e/client.ts';
+import {cleanupOwnedBridgeDirectories} from './native_owned_cleanup.ts';
 
 const binary = resolve(process.argv[2]), out = resolve(process.argv[3]);
 const iso = await realpath(await mkdtemp('/private/tmp/zw-settings-regressions-'));
@@ -34,11 +35,39 @@ const image = join(data, 'checker.png');
 await writeFile(image, Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]));
 await writeFile(join(out, 'fixture.png'), await readFile(image));
 await writeFile(join(data, 'config.toml'), `[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\n[ui.materials]\nblur_px=0\n[ui.materials.background]\nenabled=true\npath=${JSON.stringify(image)}\nfit="tile"\ntransparency=50\n`);
+await writeFile(join(data, 'hosts.toml'), `[registry]
+schema_version=2
+revision=1
+next_connection_id=3
+next_group_id=2
+[[groups]]
+group_id=1
+revision=1
+name="Material fixture"
+collapsed=false
+ordered_connection_ids=[1,2]
+[[hosts]]
+connection_id=1
+revision=1
+asset_group_id=1
+protocol="ssh"
+name="Fixture Linux"
+host="192.0.2.1"
+user="demo"
+[[hosts]]
+connection_id=2
+revision=1
+asset_group_id=1
+protocol="ssh"
+name="Fixture Server"
+host="192.0.2.2"
+user="demo"
+`);
 const log = await open(join(out, 'app.log'), 'w');
 const app = spawn(binary, [], {env: {...process.env, ZEROWORK_DATA_DIR: data, ZEROWORK_AUTOCONNECT: '0', ZENIT_E2E_BACKGROUND: '1', ZENIT_E2E_ISOLATE_POINTER: '1'}, stdio: ['ignore', log.fd, log.fd]});
 const ended = new Promise<number | null>(done => app.once('close', done));
 const report: any = {status: 'running', binary, checks: [], captures: []};
-const visible = (id: string) => h.waitFor(async () => (await h.query(id)).find(n => n.visible !== false && (n.effective_opacity ?? 1) > 0 && n.rect.w > 0 && n.rect.h > 0) ?? null, 15000);
+const visible = (id: string) => h.waitFor(async () => {const nodes=await h.query(id);if(!Array.isArray(nodes))throw Error(id+': '+JSON.stringify(nodes));return nodes.find(n => n.visible !== false && (n.effective_opacity ?? 1) > 0 && n.rect.w > 0 && n.rect.h > 0) ?? null;}, 15000);
 async function click(id: string) {
   const n = await visible(id); assert((await h.clickAt(n.rect.x + n.rect.w / 2, n.rect.y + n.rect.h / 2)).ok, id); await h.sleep(90);
 }
@@ -56,7 +85,9 @@ async function edit(id: string, value: string) {
 }
 async function capture(name: string, id: string) {
   await h.mouseMove(3, 3); await h.sleep(300);
-  const rect = (await visible(id)).rect;
+  // The retained settings/preview tree can exceed a full-root query response.
+  // Capturing geometry needs only the dedicated bounded screenPos route.
+  const rect = await h.screenPos(id); assert(rect.w > 0 && rect.h > 0, id);
   const path = join(out, name + '.png'); assert((await h.screenshot(path)).ok);
   report.captures.push({name, path, rect}); await writeFile(join(out, 'report.json'), JSON.stringify(report, null, 2));
 }
@@ -64,6 +95,11 @@ try {
   await h.waitForServerReady(); await h.resizeWindow(1440, 900);
   await click('workspace.empty.local'); await visible('terminal.surface'); await click('terminal.surface');
   const terminalFocus = await h.focused(); assert(terminalFocus.id !== undefined);
+  await capture('workspace-t50-blur0', 'workspace.shell');
+  report.canvas_pixels = JSON.parse(execFileSync('python3', [resolve('e2e/canvas_material_pixels.py'), join(out, 'workspace-t50-blur0.png'), JSON.stringify((await visible('ai.strip.lip')).rect)], {encoding: 'utf8'}));
+  report.checks.push('All four cards and the AI entry actual pixels use one 50% canvas mix; no extra card opacity is applied.');
+  await h.type_('@theme sauber'); await h.key('return'); await h.sleep(350);
+  await capture('sauber-t50-blur0', 'workspace.shell');
   await click('toolbar.settings'); await click('settings.search');
   const card = (await visible('settings.panel')).rect;
   for (const [x, y] of [[card.x + 160, card.y + 14], [card.x + card.w - 12, card.y + card.h / 2], [card.x + card.w + 15, card.y + card.h / 2]]) {
@@ -93,7 +129,8 @@ try {
   report.checks.push('Real decoded image previews captured at transparency 0/50/100 and blur 0/24/96, including returning blur to zero and full-window preview.');
   await click('settings.save'); await h.waitFor(async () => (await visible('settings.footer.state')).text === '已保存' || null, 15000);
   const saved = await readFile(join(data, 'config.toml'), 'utf8'); assert.match(saved, /transparency = 100/); assert.match(saved, /blur_px = 24/);
-  await click('settings.close'); await capture('saved-background', 'workspace.shell');
+  await click('settings.close');
+  await capture('workspace-t100-blur24', 'workspace.shell'); await capture('saved-background', 'workspace.shell');
   await h.request('POST', '/quit', {}); const code = await ended; assert.equal(code, 0, 'normal app shutdown');
   report.status = 'passed';
 } catch (error) {
@@ -101,6 +138,6 @@ try {
   await h.screenshot(join(out, 'failure.png')).catch(() => {});
 } finally {
   if (app.exitCode === null && app.signalCode === null) app.kill('SIGTERM');
-  await ended; await log.close(); await writeFile(join(out, 'report.json'), JSON.stringify(report, null, 2));
+  await ended; if (app.pid) await cleanupOwnedBridgeDirectories(app.pid); await log.close(); await writeFile(join(out, 'report.json'), JSON.stringify(report, null, 2));
   await rm(iso, {recursive: true, force: true});
 }

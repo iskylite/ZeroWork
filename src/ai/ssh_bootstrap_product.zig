@@ -113,8 +113,9 @@ pub const Prepared = struct {
         if (!self.context.eql(invocation.context)) return error.StaleBootstrapAuthorization;
         const exact = try self.subject(a);
         defer a.free(exact.detail);
-        const expires_at = broker.authorizedSubjectExpiry(permit, invocation, exact, policy_revision) orelse return error.StaleBootstrapAuthorization;
-        if (expires_at <= now_ms or expires_at - now_ms > 120_000) return error.StaleBootstrapAuthorization;
+        if (broker.authorizeSubject(permit, invocation, exact, policy_revision) != .allow) return error.StaleBootstrapAuthorization;
+        // Bound machine deployment only after the user has decided.
+        const expires_at = now_ms +| 120_000;
         self.plan.permit = .{ .owner = self.plan.owner, .task_id = invocation.context.task_id, .plan_hash = self.plan.hash(), .expires_at = expires_at };
         try self.plan.validate(self.plan.owner, now_ms);
     }
@@ -175,6 +176,7 @@ test "bootstrap product exact second approval owns target hash and cannot reuse 
     try std.testing.expect(std.mem.indexOf(u8, exact.detail, &prepared.plan.directory) != null);
     const approval = try broker.beginSubject(invocation, exact, 9, a);
     try std.testing.expectError(error.StaleBootstrapAuthorization, prepared.approve(&broker, approval, invocation, 9, clock, a));
+    clock += 30 * 24 * 60 * 60 * 1000;
     try broker.decide(approval.sequence, approval.arguments_hash, true);
     try prepared.approve(&broker, approval, invocation, 9, clock, a);
     try prepared.plan.validate(prepared.plan.owner, clock);

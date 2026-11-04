@@ -52,7 +52,10 @@ pub fn targetButton() ButtonStyle {
     return .{ .width = .fill(), .height = .{ .px = 26 }, .padding = .{ .left = 0, .right = 0 }, .gap = 6, .font_size = 10.5, .flex_shrink = 0, .corner_radius = 4, .background = ui.Color.TRANSPARENT };
 }
 pub fn headerTitle(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 84 }, .height = .{ .px = 18 }, .flex_shrink = 0 };
+    return .{ .width = .{ .fit = .{} }, .max_width = 128, .height = .{ .px = 18 }, .flex_shrink = 0 };
+}
+pub fn headerSeparator(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .{ .px = 3 }, .height = .{ .px = 3 }, .corner_radius = 1.5, .background = theme.current().fg_2, .flex_shrink = 0 };
 }
 pub fn headerSummary(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0, .overflow = .hidden };

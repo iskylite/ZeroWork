@@ -43,7 +43,7 @@ pub fn validateClipboard(bytes: []const u8) !void {
         return err;
     };
 }
-pub const Content = struct { path: []const u8, bytes: []const u8, mime: Mime, width: u32, height: u32, pixels: []const u8, captured_at_ms: i64, sha256: [32]u8 };
+pub const Content = struct { path: []const u8, bytes: []const u8, mime: Mime, width: u32, height: u32, pixels: []const u8, captured_at_ms: i64, sha256: [32]u8, pixel_sha256: [32]u8 };
 const Snapshot = struct { allocator: std.mem.Allocator, references: std.atomic.Value(usize) = .init(1), value: Content };
 pub const ContentRef = struct {
     snapshot: ?*Snapshot = null,
@@ -63,11 +63,31 @@ pub const ContentRef = struct {
         const snapshot = try allocator.create(Snapshot);
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-        snapshot.* = .{ .allocator = allocator, .value = .{ .path = owned_path, .bytes = owned_bytes, .mime = mime, .width = image.width, .height = image.height, .pixels = image.pixels, .captured_at_ms = captured_at_ms, .sha256 = digest } };
+        var pixel_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(image.pixels, &pixel_digest, .{});
+        snapshot.* = .{ .allocator = allocator, .value = .{ .path = owned_path, .bytes = owned_bytes, .mime = mime, .width = image.width, .height = image.height, .pixels = image.pixels, .captured_at_ms = captured_at_ms, .sha256 = digest, .pixel_sha256 = pixel_digest } };
         return .{ .snapshot = snapshot };
     }
     pub fn content(self: ContentRef) ?Content {
         return if (self.snapshot) |snapshot| snapshot.value else null;
+    }
+    /// Host encoder only: adopts already validated immutable RGBA storage.
+    /// External files/clipboard/network images must continue through create().
+    /// Ownership of pixels transfers only on success.
+    pub fn fromHostPng(allocator: std.mem.Allocator, bytes: []const u8, pixels: []u8, width: u32, height: u32, captured_at_ms: i64) !ContentRef {
+        if (width == 0 or height == 0 or width > 8192 or height > 8192 or pixels.len > 16 * 1024 * 1024 * 4 or bytes.len > max_bytes or pixels.len != try std.math.mul(usize, try std.math.mul(usize, width, height), 4)) return error.InvalidImage;
+        if (try sniff(bytes) != .png or bytes.len < 24 or std.mem.readInt(u32, bytes[16..20], .big) != width or std.mem.readInt(u32, bytes[20..24], .big) != height) return error.InvalidImage;
+        const path = try allocator.dupe(u8, "bmc_ikvm:remote-frame");
+        errdefer allocator.free(path);
+        const encoded = try allocator.dupe(u8, bytes);
+        errdefer allocator.free(encoded);
+        const snapshot = try allocator.create(Snapshot);
+        var digest: [32]u8 = undefined;
+        var pixel_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(encoded, &digest, .{});
+        std.crypto.hash.sha2.Sha256.hash(pixels, &pixel_digest, .{});
+        snapshot.* = .{ .allocator = allocator, .value = .{ .path = path, .bytes = encoded, .mime = .png, .width = width, .height = height, .pixels = pixels, .captured_at_ms = captured_at_ms, .sha256 = digest, .pixel_sha256 = pixel_digest } };
+        return .{ .snapshot = snapshot };
     }
     pub fn retain(self: ContentRef) ContentRef {
         if (self.snapshot) |snapshot| {

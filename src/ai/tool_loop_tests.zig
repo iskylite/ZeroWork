@@ -927,6 +927,16 @@ test "host uncertain execution blocks a fresh command while preserving exact rea
     try std.testing.expectEqual(@as(usize, 3), gateway.calls);
     try std.testing.expect(!run.records.items[1].dispatched);
     try std.testing.expect(std.mem.indexOf(u8, run.records.items[1].result_body.?, "EarlierToolOutcomeUnknown") != null);
+    const observation = try run.nextRequest();
+    try std.testing.expect(run.host_observation_only);
+    for (observation.tools) |definition| {
+        const entry = run.tool_table.?.lookup(definition.name()).?;
+        try std.testing.expect(entry.definition.effect == .read_state or std.mem.eql(u8, entry.definition.id, "host.stop_execution"));
+        try std.testing.expect(!std.mem.eql(u8, entry.definition.id, "host.attach_shell"));
+    }
+    try run.complete("读取原执行核验结果，不重发命令。", &.{.{ .id = "observe-next-round", .name = wire[1].name(), .arguments = "{\"execution_ref\":\"x1:opaque\"}" }}, .{ .context = &gateway, .execute = Gateway.legacy, .execute_host = Gateway.invoke }, .{}, 1, null);
+    try std.testing.expectEqual(@as(usize, 1), gateway.writes);
+    try std.testing.expectEqual(@as(usize, 4), gateway.calls);
     try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
 }
 
@@ -1036,4 +1046,35 @@ test "execution deadline known unsent timeout never becomes an unknown side effe
     try std.testing.expect(!body.value.object.get("side_effect_started").?.bool);
     try std.testing.expect(!body.value.object.get("remote_effect_unknown").?.bool);
     try http.validateToolMessages(run.request);
+}
+
+test "live permission manager rechecks calls in one batch and following rounds" {
+    const permission = @import("permission.zig");
+    const Fixture = struct {
+        manager: *manager_mod.Manager,
+        verdicts: [3]permission.Verdict = undefined,
+        count: usize = 0,
+        fn execute(raw: *anyopaque, call: loop_mod.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.verdicts[self.count] = call.verdict;
+            self.count += 1;
+            self.manager.setPermissionMode(if (self.count == 1) .auto else .confirm);
+            return loop_mod.Outcome.copy(allocator, &.{.{ .session_id = 101, .status = .succeeded, .exit = 0 }});
+        }
+    };
+    var manager = manager_mod.Manager.init(a);
+    defer manager.deinit();
+    manager.permission_engine = .{ .mode = .confirm, .whitelist = &.{"touch"} };
+    manager.scope = scope;
+    manager.tool_limits.context_window = 200_000;
+    var fixture: Fixture = .{ .manager = &manager };
+    manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute };
+    const second: provider.ToolCall = .{ .id = "live-second", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"touch /tmp/fixture\"}" };
+    var third = second;
+    third.id = "live-third";
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{ df, second } }, .{ .calls = &.{third} }, .{ .text = "done" } } };
+    defer script.deinit();
+    _ = try manager.run(script.interface(), .{ .model = "test", .system = "", .messages = &.{.{ .content = "permission test" }}, .tools = &definitions });
+    try std.testing.expectEqual(@as(usize, 3), fixture.count);
+    try std.testing.expectEqualSlices(permission.Verdict, &.{ .allow_auto, .allow_auto, .need_confirm }, &fixture.verdicts);
 }

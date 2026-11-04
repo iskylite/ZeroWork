@@ -21,6 +21,7 @@ pub fn main(init: std.process.Init) !void {
     const directory_path = args.next() orelse return error.MissingIsolatedDirectory;
     const mode = args.next() orelse return error.MissingMode;
     if (port < 1024 or !std.mem.startsWith(u8, directory_path, "/tmp/")) return error.NonFixtureTarget;
+    if (std.mem.eql(u8, mode, "reconnect-startup")) return configuredReconnect(init, port, directory_path);
     if (std.mem.startsWith(u8, mode, "init-retry-")) return initializationRecovery(init, port, directory_path, mode);
     var library = try ssh.Library.init();
     defer library.deinit();
@@ -60,7 +61,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..30) |_| try tick(worker);
         const snapshot = try worker.executionSnapshot();
         if (snapshot.interactive_execution) return error.FalseRecordingReadiness;
-        worker.executionRequest(.{ .execution_id = .generate(), .task_id = task, .expected_input_epoch = snapshot.input_epoch, .ownership_revision = 1, .command = "printf NEVER_UNRECORDED", .command_hash = execution.digest("printf NEVER_UNRECORDED") }) catch |err| {
+        worker.executionRequest(.{ .execution_id = .generate(), .task_id = task, .expected_input_epoch = snapshot.input_epoch, .expected_shell_id = snapshot.shell.id, .expected_shell_revision = snapshot.shell.revision, .ownership_revision = 1, .command = "printf NEVER_UNRECORDED", .command_hash = execution.digest("printf NEVER_UNRECORDED") }) catch |err| {
             if (err != error.RecordingUnavailable) return err;
             try release(worker, &ledger);
             std.debug.print("SHELL_EXECUTION_PASS mode=recording-unavailable user_commands=0\n", .{});
@@ -70,6 +71,24 @@ pub fn main(init: std.process.Init) !void {
     }
     try worker.configureExecutionRecording(init.io, dir, recording);
     try waitReady(worker);
+    if (std.mem.eql(u8, mode, "attach-evidence")) {
+        try attachEvidence(worker, task);
+        try release(worker, &ledger);
+        std.debug.print("SHELL_EXECUTION_PASS mode=attach-evidence late_remote_output_rejected=true no_stale_initializer=true input_fence=true fresh_retry=true same_pty=true\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, mode, "attach-timeout")) {
+        try attachTimeout(worker, task);
+        try release(worker, &ledger);
+        std.debug.print("SHELL_EXECUTION_PASS mode=attach-timeout nonce_barrier=true retry_same_pty=true no_payload_echo=true\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, mode, "nested")) {
+        try nestedShells(worker, task, port);
+        try release(worker, &ledger);
+        std.debug.print("SHELL_EXECUTION_PASS mode=nested manual_attach=true three_layers=true observed_attach=true parent_restored=true stale_rejected=true parent_observer=true actual_nested_ssh=true\n", .{});
+        return;
+    }
     if (std.mem.eql(u8, mode, "history-reopen")) {
         try historyReopen(init, worker, &ledger, task, dir);
         return;
@@ -101,6 +120,178 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.indexOf(u8, cast, "_zwR()") != null or std.mem.indexOf(u8, cast, "_zwP=") != null) return error.InitializerEchoLeakedToRecording;
     std.debug.print("INITIALIZER_ECHO_PASS recording=true\n", .{});
     std.debug.print("SHELL_EXECUTION_PASS mode={s} executions=7 same_session=true source=shell_reported interval_saved=true\n", .{mode});
+}
+
+fn waitShell(worker: *Worker, previous: ?[32]u8, expected: ?[32]u8) !execution.Snapshot {
+    const deadline = now() + 15_000;
+    while (now() < deadline) {
+        try worker.step(10);
+        const value = try worker.executionSnapshot();
+        const matches = if (expected) |id| std.meta.eql(value.shell.id, @as(?[32]u8, id)) else value.shell.id != null and !std.meta.eql(value.shell.id, previous);
+        if (matches and value.input_ready) return value;
+        try @import("ai/retry.zig").wait(1, null);
+    }
+    const last = try worker.executionSnapshot();
+    std.debug.print("nested wait failure shell={any} pending={} failure={?s}\n", .{ last.shell, worker.startup_pending.load(.acquire), last.failure });
+    return error.NestedShellNotReady;
+}
+// This isolated fixture starts known empty prompts. Exercise the same fresh
+// screen/state evidence admission used by AI attachment after ordinary entry.
+fn attachFixtureShell(worker: *Worker, task: identity.TaskId, prompt: []const u8, after_output: u64) !void {
+    try worker.attachShell(try observeFixtureShell(worker, task, prompt, after_output));
+}
+fn observeFixtureShell(worker: *Worker, task: identity.TaskId, prompt: []const u8, after_output: u64) !execution.ShellAttachment {
+    const deadline = now() + 5000;
+    while (now() < deadline) {
+        try tick(worker);
+        const screen = try worker.searchText(a);
+        defer a.free(screen);
+        const trimmed = std.mem.trimEnd(u8, screen, " \t\r\n");
+        const line = trimmed[if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |index| index + 1 else 0..];
+        const empty_prompt = if (std.mem.eql(u8, prompt, "bash-")) std.mem.indexOf(u8, line, prompt) != null and (std.mem.endsWith(u8, line, "$") or std.mem.endsWith(u8, line, "#")) else std.mem.endsWith(u8, line, prompt);
+        if (!empty_prompt or worker.vt.snapshot().output_sequence <= after_output or worker.input.pending() != 0 or worker.io.write_len != 0) continue;
+        const snapshot = try worker.executionSnapshot();
+        return .{ .task_id = task, .shell_id = snapshot.shell.id, .shell_revision = snapshot.shell.revision, .input_epoch = snapshot.input_epoch, .output_sequence = worker.vt.snapshot().output_sequence };
+    }
+    return error.FixturePromptNotObserved;
+}
+
+fn attachEvidence(worker: *Worker, task: identity.TaskId) !void {
+    const original_fd = worker.session.socket_fd;
+    const original_terminal = worker.vt.terminal;
+    var before_output = worker.vt.snapshot().output_sequence;
+    try worker.pushInputFrom("bash --noprofile --norc -i\r", .ordinary);
+    _ = try observeFixtureShell(worker, task, "bash-", before_output);
+    before_output = worker.vt.snapshot().output_sequence;
+    try worker.pushInputFrom("(sleep 1; printf 'LATE_EVIDENCE_%s\\n' actual) &\r", .ordinary);
+    const observed = try observeFixtureShell(worker, task, "bash-", before_output);
+    try worker.attachShell(observed);
+    if (worker.pushInputFrom("NEVER_DURING_ATTACH\r", .ordinary)) |_| return error.AttachmentGateBypassed else |err| if (err != error.TerminalControlled) return err;
+    // Real peer output reaches the SSH stream after admission, while no
+    // worker step has had a chance to begin the initializer's native write.
+    try @import("ai/retry.zig").wait(1200, null);
+    const deadline = now() + 5000;
+    while (now() < deadline and worker.startup_pending.load(.acquire)) try tick(worker);
+    if (worker.startup_pending.load(.acquire) or worker.shell_initializer_index != 0 or worker.input.pending() != 0) return error.StaleInitializerWasSent;
+    if (!std.mem.eql(u8, (try worker.executionSnapshot()).failure orelse "", "ShellAttachmentStale")) return error.LateOutputDidNotReject;
+    before_output = worker.vt.snapshot().output_sequence;
+    try worker.pushInputFrom("\r", .ordinary);
+    try attachFixtureShell(worker, task, "bash-", before_output);
+    _ = try waitShell(worker, null, null);
+    const current = try worker.executionSnapshot();
+    const fresh: execution.ShellAttachment = .{ .task_id = task, .shell_id = current.shell.id, .shell_revision = current.shell.revision, .input_epoch = current.input_epoch, .output_sequence = worker.vt.snapshot().output_sequence };
+    var wrong_shell = fresh;
+    wrong_shell.shell_revision += 1;
+    if (worker.attachShell(wrong_shell)) |_| return error.StaleShellEvidenceAccepted else |err| if (err != error.ShellContextChanged) return err;
+    try worker.pushInputFrom("\r", .ordinary);
+    if (worker.attachShell(fresh)) |_| return error.StaleInputEvidenceAccepted else |err| if (err != error.ShellAttachmentStale) return err;
+    try waitReady(worker);
+    _ = try run(worker, task, "printf 'EVIDENCE_RETRY_%s\\n' ok", .{ .expected = "EVIDENCE_RETRY_ok", .exit_code = 0 });
+    if (worker.session.socket_fd != original_fd or worker.vt.terminal != original_terminal) return error.EvidenceRecoveryReplacedSession;
+}
+fn nestedShells(worker: *Worker, task: identity.TaskId, port: u16) !void {
+    const root = (try worker.executionSnapshot()).shell.id orelse return error.NoRootShellIdentity;
+    _ = try run(worker, task, "export ZW_PARENT=outer; cd /tmp; printf 'NESTED_PARENT_%s\\n' \"$ZW_PARENT\"", .{ .expected = "NESTED_PARENT_outer", .exit_code = 0 });
+    try worker.pushInputFrom("bash --noprofile --norc -i\r", .ordinary);
+    // This controlled fixture deliberately starts a clean Bash. Only the user
+    // action supplies this admission boundary in the native product.
+    for (0..20) |_| {
+        try worker.step(10);
+        try @import("ai/retry.zig").wait(1, null);
+    }
+    if ((try worker.executionSnapshot()).input_ready) return error.UnintegratedChildWasReady;
+    try worker.attachCurrentShell();
+    const first = try waitShell(worker, root, null);
+    _ = try run(worker, task, "export ZW_INNER=kept; printf 'NESTED_INNER_%s_%s\\n' \"$ZW_PARENT\" \"$PWD\"", .{ .expected = "NESTED_INNER_outer_/tmp", .exit_code = 0 });
+    try worker.attachCurrentShell();
+    const same = try waitShell(worker, null, first.shell.id);
+    if (same.shell.depth != first.shell.depth) return error.ReattachAddedLayer;
+    const before_child = worker.vt.snapshot().output_sequence;
+    try worker.pushInputFrom("bash --noprofile --norc -i\r", .ordinary);
+    try attachFixtureShell(worker, task, "bash-", before_child);
+    const second = try waitShell(worker, first.shell.id, null);
+    if (second.shell.depth != first.shell.depth + 1) return error.NestedDepthWrong;
+    _ = try run(worker, task, "printf 'NESTED_THIRD_%s_%s\\n' \"$ZW_INNER\" \"$PWD\"", .{ .expected = "NESTED_THIRD_kept_/tmp", .exit_code = 0 });
+    const stale = execution.Request{ .execution_id = .generate(), .task_id = task, .expected_input_epoch = second.input_epoch, .expected_shell_id = second.shell.id, .expected_shell_revision = second.shell.revision, .ownership_revision = 1, .command = "echo NEVER_STALE_LAYER", .command_hash = execution.digest("echo NEVER_STALE_LAYER") };
+    try worker.pushInputFrom("exit\r", .ordinary);
+    _ = try waitShell(worker, null, first.shell.id);
+    if (worker.executionRequest(stale)) |_| return error.StaleChildCommandAccepted else |err| if (err != error.ShellContextChanged) return err;
+    _ = try run(worker, task, "printf 'NESTED_RETURN_%s\\n' \"$ZW_INNER\"", .{ .expected = "NESTED_RETURN_kept", .exit_code = 0 });
+    try worker.pushInputFrom("exit\r", .ordinary);
+    _ = try waitShell(worker, null, root);
+    const ssh_entry = try std.fmt.allocPrint(a, "ssh -i \"$HOME/nested-test-key\" -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -p {d} shell-fixture@127.0.0.1\r", .{port});
+    defer a.free(ssh_entry);
+    const before_ssh = worker.vt.snapshot().output_sequence;
+    try worker.pushInputFrom(ssh_entry, .ordinary);
+    try attachFixtureShell(worker, task, "fixture>", before_ssh);
+    _ = try waitShell(worker, root, null);
+    _ = try run(worker, task, "export ZW_REMOTE=remote; cd /tmp; printf 'NESTED_SSH_%s\\n' \"$ZW_REMOTE\"", .{ .expected = "NESTED_SSH_remote", .exit_code = 0 });
+    _ = try run(worker, task, "printf 'NESTED_SSH_KEEP_%s_%s\\n' \"$ZW_REMOTE\" \"$PWD\"", .{ .expected = "NESTED_SSH_KEEP_remote_/tmp", .exit_code = 0 });
+    try worker.pushInputFrom("exit\r", .ordinary);
+    _ = try waitShell(worker, null, root);
+    // An AI-issued entry remains an active parent observer while child
+    // commands execute, then receives its own completion on child exit.
+    const before = try worker.executionSnapshot();
+    const parent_execution = identity.ExecutionId.generate();
+    const before_ai = worker.vt.snapshot().output_sequence;
+    try worker.executionRequest(.{ .execution_id = parent_execution, .task_id = task, .expected_input_epoch = before.input_epoch, .expected_shell_id = before.shell.id, .expected_shell_revision = before.shell.revision, .ownership_revision = 1, .command = "bash --noprofile --norc -i", .command_hash = execution.digest("bash --noprofile --norc -i") });
+    try attachFixtureShell(worker, task, "bash-", before_ai);
+    _ = try waitShell(worker, root, null);
+    const suspended = try worker.executionSnapshotFor(parent_execution);
+    if (!suspended.shell.suspended or suspended.process != null or suspended.grant != null) return error.ParentObserverWasLost;
+    _ = try run(worker, task, "printf 'NESTED_AI_CHILD_%s\\n' \"$ZW_PARENT\"", .{ .expected = "NESTED_AI_CHILD_outer", .exit_code = 0 });
+    try worker.pushInputFrom("exit\r", .ordinary);
+    _ = try waitShell(worker, null, root);
+    const deadline = now() + 5000;
+    while (now() < deadline) {
+        try worker.step(10);
+        const result = try worker.executionSnapshotFor(parent_execution);
+        if (result.interval_saved and result.process != null and result.process.?.exit_code == 0) return;
+        try @import("ai/retry.zig").wait(1, null);
+    }
+    return error.ParentObserverNotSettled;
+}
+
+fn attachTimeout(worker: *Worker, task: identity.TaskId) !void {
+    const original_fd = worker.session.socket_fd;
+    const original_terminal = worker.vt.terminal;
+    const before = worker.vt.snapshot().output_sequence;
+    try worker.pushInputFrom("bash --noprofile --norc -i\r", .ordinary);
+    try attachFixtureShell(worker, task, "bash-", before);
+    const deadline = now() + 15_000;
+    var expired = false;
+    while (now() < deadline) {
+        try tick(worker);
+        if (!expired and worker.shell_initializer_index == 2 and worker.shell_execution.?.initialization_ack == 1) {
+            // Force loss of the payload ACK after the 8 KiB batch is queued,
+            // before the final eval is admitted. The real transport drains it.
+            worker.shell_initializer_deadline = 0;
+            expired = true;
+        }
+        if (expired and !worker.startup_pending.load(.acquire)) break;
+    }
+    if (!expired or worker.startup_pending.load(.acquire)) return error.AttachAbortDidNotRestore;
+    if (!worker.shell_execution.?.initialization_restored or worker.input.pending() != 0 or worker.io.write_len != 0) return error.AttachAbortWasPremature;
+    if (worker.session.socket_fd != original_fd or worker.vt.terminal != original_terminal) return error.AttachAbortReplacedSession;
+    if (!std.mem.eql(u8, (try worker.executionSnapshot()).failure orelse "", "ShellInitializationTimedOut")) return error.AttachAbortLostFailure;
+    const last_output = worker.vt.snapshot().output_sequence;
+    try worker.pushInputFrom("printf 'POST_ABORT_%s\\n' ordinary\r", .ordinary);
+    const echo_deadline = now() + 3000;
+    var observed = false;
+    while (now() < echo_deadline) {
+        try tick(worker);
+        const screen = try worker.searchText(a);
+        defer a.free(screen);
+        if (std.mem.indexOf(u8, screen, "_zwP+=") != null or std.mem.indexOf(u8, screen, "_zwR()") != null) return error.AbortedPayloadEscaped;
+        if (std.mem.indexOf(u8, screen, "POST_ABORT_ordinary") != null) {
+            observed = true;
+            break;
+        }
+    }
+    if (!observed) return error.AttachAbortLostOrdinaryInput;
+    try attachFixtureShell(worker, task, "bash-", last_output);
+    _ = try waitShell(worker, null, null);
+    _ = try run(worker, task, "printf 'REATTACH_%s\\n' ok", .{ .expected = "REATTACH_ok", .exit_code = 0 });
 }
 
 fn historyReopen(init: std.process.Init, worker: *Worker, ledger: *ssh.ResourceLedger, task: identity.TaskId, dir: std.Io.Dir) !void {
@@ -166,7 +357,7 @@ fn initializationRecovery(init: std.process.Init, port: u16, directory: []const 
     const app = try Application.init(a, workspace);
     try scope.onCleanup(Application, app, Application.deinit);
     app.install();
-    const accepted = try app.create(.{ .connection_id = @fromBackingInt(77), .revision = 1, .name = "init-recovery", .host = "127.0.0.1", .port = port, .user = "shell-fixture", .auth_mode = .password, .password = "fixture-only", .startup_commands = &.{"echo NEVER_REPLAY_STARTUP"} }, 1, 0, "echo NEVER_REPLAY_INITIAL\n");
+    const accepted = try app.create(.{ .connection_id = @fromBackingInt(77), .revision = 1, .name = "init-recovery", .host = "127.0.0.1", .port = port, .user = "shell-fixture", .auth_mode = .password, .password = "fixture-only", .startup_commands = &.{"echo CONFIGURED_STARTUP"} }, 1, 0, "echo NEVER_REPLAY_INITIAL\n");
     const id = app.legacyForHandle(accepted.handle) orelse return error.MissingTab;
     const original = workspace.sessionTab(id).?;
     const original_tab = original.tab_id;
@@ -234,7 +425,7 @@ fn initializationRecovery(init: std.process.Init, port: u16, directory: []const 
                 if (!snapshot.interactive_execution) continue;
                 if (!ai_started) {
                     if (!snapshot.input_ready) continue;
-                    live.executionRequest(.{ .execution_id = ai_id, .task_id = .generate(), .expected_input_epoch = snapshot.input_epoch, .ownership_revision = 1, .command = ai_command, .command_hash = execution.digest(ai_command) }) catch |err| switch (err) {
+                    live.executionRequest(.{ .execution_id = ai_id, .task_id = .generate(), .expected_input_epoch = snapshot.input_epoch, .expected_shell_id = snapshot.shell.id, .expected_shell_revision = snapshot.shell.revision, .ownership_revision = 1, .command = ai_command, .command_hash = execution.digest(ai_command) }) catch |err| switch (err) {
                         error.WorkerBusy => continue,
                         else => return err,
                     };
@@ -263,7 +454,7 @@ fn initializationRecovery(init: std.process.Init, port: u16, directory: []const 
                 while (now() < until) {
                     _ = try app.safeTick();
                     if (app.sessions.queryState(close.owner.session).?.lifecycle == .closed and workspace.sessionTab(id) == null) {
-                        std.debug.print("SHELL_EXECUTION_PASS mode={s} same_tab=true automatic_retries=1 confirmed_bypass={} settings_unchanged=true ordinary_input=true no_startup_replay=true reconnected_ai_recorded={}\n", .{ mode, confirmed, ai_finished });
+                        std.debug.print("SHELL_EXECUTION_PASS mode={s} same_tab=true automatic_retries=1 confirmed_bypass={} settings_unchanged=true ordinary_input=true startup_per_shell=true reconnected_ai_recorded={}\n", .{ mode, confirmed, ai_finished });
                         return;
                     }
                     var fds: [1]std.c.pollfd = undefined;
@@ -301,7 +492,7 @@ fn run(worker: *Worker, task: identity.TaskId, command: []const u8, checks: Chec
         // D (finished) and the next A/B (empty prompt) can be separate packets.
         // InputConflict is a pre-write rejection, so only that admission may be
         // retried. Never retry an accepted request or clear a user's draft.
-        worker.executionRequest(.{ .execution_id = id, .task_id = task, .expected_input_epoch = before.input_epoch, .ownership_revision = 1, .command = command, .command_hash = execution.digest(command) }) catch |err| {
+        worker.executionRequest(.{ .execution_id = id, .task_id = task, .expected_input_epoch = before.input_epoch, .expected_shell_id = before.shell.id, .expected_shell_revision = before.shell.revision, .ownership_revision = 1, .command = command, .command_hash = execution.digest(command) }) catch |err| {
             if (err == error.InputConflict and now() < admission_deadline) {
                 try tick(worker);
                 continue;
@@ -379,7 +570,7 @@ fn run(worker: *Worker, task: identity.TaskId, command: []const u8, checks: Chec
 fn disconnected(worker: *Worker, task: identity.TaskId) !void {
     const before = try worker.executionSnapshot();
     const command = "printf 'DISCONNECT_%s\\n' armed; sleep 30";
-    try worker.executionRequest(.{ .execution_id = .generate(), .task_id = task, .expected_input_epoch = before.input_epoch, .ownership_revision = 1, .command = command, .command_hash = execution.digest(command) });
+    try worker.executionRequest(.{ .execution_id = .generate(), .task_id = task, .expected_input_epoch = before.input_epoch, .expected_shell_id = before.shell.id, .expected_shell_revision = before.shell.revision, .ownership_revision = 1, .command = command, .command_hash = execution.digest(command) });
     const deadline = now() + 8000;
     while (now() < deadline) {
         tick(worker) catch {};
@@ -400,4 +591,116 @@ fn release(worker: *Worker, ledger: *ssh.ResourceLedger) !void {
         receipt = worker.releaseConnection();
     }
     if (receipt != .released or !ledger.snapshot().released()) return error.ShellResourcesNotReleased;
+}
+
+fn configuredReconnect(init: std.process.Init, port: u16, directory: []const u8) !void {
+    const ui = @import("ui");
+    const Workspace = @import("ui/workspace.zig").Workspace;
+    const Application = @import("ui/application_host.zig").ApplicationHost;
+    const cx = try ui.Cx.init(a, init.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(1100, 720);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    var nodes: [4]*ui.Node = undefined;
+    for (&nodes) |*node| {
+        node.* = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+        try cx.root.?.appendChild(a, node.*);
+    }
+    var config: @import("config/config.zig").Config = .{};
+    config.ssh.auto_reconnect = false;
+    const path = try std.fmt.allocPrint(a, "{s}/hosts.toml", .{directory});
+    defer a.free(path);
+    const workspace = try Workspace.init(a, cx, scope, init.io, &config, path, nodes[0], nodes[1], nodes[2], nodes[3]);
+    const app = try Application.init(a, workspace);
+    try scope.onCleanup(Application, app, Application.deinit);
+    app.install();
+    _ = try workspace.registry.add(.{ .name = "reconnect-startup", .host = "127.0.0.1", .port = port, .user = "shell-fixture", .auth_mode = .password, .password = "fixture-only", .startup_commands = &.{"cd /tmp; export ZW_STARTUP=one; printf 'STARTUP_%s\\n' one"} });
+    const accepted = try app.create(workspace.registry.hosts[0], 1, 0, "printf 'INITIAL_%s\\n' once\n");
+    const id = app.legacyForHandle(accepted.handle) orelse return error.MissingTab;
+    const tab = workspace.sessionTab(id).?;
+    const original_root = tab.root;
+    var original_worker: ?*Worker = null;
+    var probed: u64 = 0;
+    var exited: u64 = 0;
+    var retried: u64 = 0;
+    const started = now();
+    const deadline = started + 25_000;
+    while (now() < deadline) {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+        _ = try app.safeTick();
+        if (workspace.pendingAuthentication()) |challenge| try workspace.submitAuthentication(challenge.identity, .trust_once);
+        if (workspace.sessionTab(id) != tab or tab.root != original_root) return error.ReconnectReplacedPane;
+        const runtime = tab.runtime orelse continue;
+        const native: *@import("ui/session_runtime.zig").SessionRuntime = @ptrCast(@alignCast(runtime.context));
+        // A headless Cx has no native frame loop to consume published frames.
+        // Drain presentation so a real shell EOF can publish its final frame.
+        _ = native.worker.text.acknowledge(0);
+        if (original_worker) |worker| {
+            if (worker != native.worker) return error.ReconnectReplacedWorker;
+        } else original_worker = native.worker;
+        const handle = app.ownerForLegacy(id) orelse return error.LostMapping;
+        const state = runtime.reconnectSnapshot() orelse continue;
+        const generation = handle.generation;
+        if (generation > 3) return error.UnexpectedReconnect;
+        if (state.phase == .ended and state.cleanup == .released and retried < generation) {
+            if (generation == 1) {
+                config.ssh.auto_shell_integration = false;
+                workspace.registry.hosts[0].startup_commands = &.{"cd /tmp; export ZW_STARTUP=two; printf 'STARTUP_%s\\n' two"};
+            } else {
+                // A host override must take precedence over the disabled global.
+                workspace.registry.hosts[0].auto_shell_integration = true;
+                workspace.registry.hosts[0].startup_commands = &.{"cd /tmp; export ZW_STARTUP=three; printf 'STARTUP_%s\\n' three"};
+            }
+            try app.requestSshReconnect(id);
+            retried = generation;
+        }
+        if (state.phase == .active and state.shell_initialized and probed < generation) {
+            if (native.worker.startup_pending.load(.acquire) or native.worker.input.pending() != 0) continue;
+            const binding = switch (app.sessions.queryService(handle, .terminal)) {
+                .available => |value| value,
+                else => continue,
+            };
+            const live = runtime.bindTerminalService(binding) catch continue;
+            const snapshot = live.executionSnapshot() catch continue;
+            if (snapshot.interactive_execution != (generation != 2)) return error.StaleInitializationPolicy;
+            // Reading the environment from the new shell proves startup execution,
+            // rather than merely checking that input was queued by the client.
+            runtime.pushInputFrom("printf 'ENV_%s_%s\\n' \"$ZW_STARTUP\" \"$PWD\"\r", .ordinary) catch continue;
+            probed = generation;
+        }
+        if (probed == generation and exited < generation) {
+            const screen = runtime.searchText(a) catch continue;
+            defer a.free(screen);
+            const expected = switch (generation) {
+                1 => "ENV_one_/tmp",
+                2 => "ENV_two_/tmp",
+                else => "ENV_three_/tmp",
+            };
+            if (std.mem.indexOf(u8, screen, expected) == null) continue;
+            std.debug.print("CONFIGURED_SHELL_READY generation={d} integration={} elapsed_ms={d}\n", .{ generation, generation != 2, now() - started });
+            if (generation == 3) {
+                const close = try app.requestCloseLegacy(id);
+                const until = now() + 5000;
+                while (now() < until) {
+                    _ = try app.safeTick();
+                    if (app.sessions.queryState(close.owner.session).?.lifecycle == .closed and workspace.sessionTab(id) == null) {
+                        std.debug.print("SHELL_EXECUTION_PASS mode=reconnect-startup generations=3 same_pane=true same_worker=true startup_per_shell=true current_settings=true host_override=true\n", .{});
+                        return;
+                    }
+                    var fds: [1]std.c.pollfd = undefined;
+                    _ = std.c.poll(&fds, 0, 2);
+                }
+                return error.ConfiguredReconnectCloseTimeout;
+            }
+            runtime.pushInputFrom("exit\r", .ordinary) catch continue;
+            exited = generation;
+        }
+        var fds: [1]std.c.pollfd = undefined;
+        _ = std.c.poll(&fds, 0, 2);
+    }
+    return error.ConfiguredReconnectTimedOut;
 }

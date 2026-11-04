@@ -16,10 +16,38 @@ fn RequestBudget(comptime Timing: type) type {
         timing: Timing,
         deadline_ns: i128,
         stop: ?*provider.CancelToken,
-        fn reason(self: *const @This()) ?anyerror {
+        mutex: std.atomic.Mutex = .unlocked,
+        user_waits: usize = 0,
+        wait_started_ns: i128 = 0,
+        expired_before_wait: bool = false,
+        fn lock(self: *const @This()) *@This() {
+            const mutable = @constCast(self);
+            while (!mutable.mutex.tryLock()) std.atomic.spinLoopHint();
+            return mutable;
+        }
+        fn userWait(raw: *const anyopaque, entering: bool) void {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            const mutable = self.lock();
+            defer mutable.mutex.unlock();
             const now = self.timing.now();
+            if (entering) {
+                if (mutable.user_waits == 0) {
+                    mutable.wait_started_ns = now;
+                    // Entering a human wait cannot revive an already expired run.
+                    mutable.expired_before_wait = mutable.expired_before_wait or now >= self.deadline_ns;
+                }
+                mutable.user_waits += 1;
+            } else if (mutable.user_waits != 0) {
+                mutable.user_waits -= 1;
+                if (mutable.user_waits == 0) mutable.deadline_ns +|= @max(0, now - mutable.wait_started_ns);
+            }
+        }
+        fn reason(self: *const @This()) ?anyerror {
             if (self.stop) |token| if (token.isCancelled()) return error.Cancelled;
-            return if (now >= self.deadline_ns) error.Timeout else null;
+            const mutable = self.lock();
+            defer mutable.mutex.unlock();
+            if (self.expired_before_wait) return error.Timeout;
+            return if (self.user_waits == 0 and self.timing.now() >= self.deadline_ns) error.Timeout else null;
         }
         fn check(self: *const @This()) !void {
             if (self.reason()) |err| return err;
@@ -29,7 +57,7 @@ fn RequestBudget(comptime Timing: type) type {
             return self.reason() != null;
         }
         fn childToken(self: *const @This()) provider.CancelToken {
-            return .{ .source = .{ .context = self, .poll = cancelled } };
+            return .{ .source = .{ .context = self, .poll = cancelled, .user_wait = userWait } };
         }
     };
 }
@@ -45,11 +73,13 @@ pub const Manager = struct {
         tool_rejected: ?*const fn (*anyopaque, provider.ToolCall, []const u8) anyerror!void = null,
     };
     allocator: std.mem.Allocator,
+    compaction_config: ?@import("provider_config.zig").ProviderConfig = null,
     observer: ?Observer = null,
     turn: turn_model.Turn,
     cards: card_stream.Stream,
     audit_log: audit.Log,
     permission_engine: permission.Engine = .{},
+    live_permission: permission.LiveMode = .{},
     retry_policy: retry.Policy = .{},
     timestamp_ms: i64 = 0,
     turn_id: u64 = 0,
@@ -102,6 +132,16 @@ pub const Manager = struct {
         };
     }
 
+    pub fn permissionEngine(self: *const Manager) permission.Engine {
+        return self.live_permission.apply(self.permission_engine);
+    }
+    pub fn setPermissionMode(self: *Manager, mode: permission.Mode) void {
+        self.live_permission.set(mode);
+    }
+    fn currentPermission(raw: *anyopaque) permission.Engine {
+        return @as(*Manager, @ptrCast(@alignCast(raw))).permissionEngine();
+    }
+
     pub fn deinit(self: *Manager) void {
         self.clearToolRun();
         self.round_text.deinit(self.allocator);
@@ -120,7 +160,7 @@ pub const Manager = struct {
     }
 
     fn runWithTiming(self: *Manager, p: provider.Provider, request: provider.ChatRequest, timing: anytype) !provider.ChatStats {
-        const budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = timing.now() + @as(i128, request.timeout_ms) * std.time.ns_per_ms, .stop = request.cancel };
+        var budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = timing.now() + @as(i128, request.timeout_ms) * std.time.ns_per_ms, .stop = request.cancel };
         var cancel = budget.childToken();
         return self.runWithinBudget(p, request, &budget, &cancel) catch |err| return budget.reason() orelse err;
     }
@@ -165,7 +205,12 @@ pub const Manager = struct {
             const scope = self.scope orelse return error.ToolScopeUnavailable;
             const loop = try self.allocator.create(tool_loop.Loop);
             loop.* = tool_loop.Loop.init(self.allocator, scope, self.turn_id, self.tool_limits);
+            loop.compaction_config = self.compaction_config;
             loop.start(request) catch |err| {
+                if (loop.compaction_failure != null) {
+                    self.tool_run = loop;
+                    return err;
+                }
                 loop.deinit();
                 self.allocator.destroy(loop);
                 return err;
@@ -173,7 +218,6 @@ pub const Manager = struct {
             self.tool_run = loop;
         } else if (request.tools.len != 0) return error.ToolHostUnavailable;
 
-        const frozen_policy = self.permission_engine;
         const frozen_policy_revision = self.policy_revision;
         var total: provider.ChatStats = .{};
         while (true) {
@@ -195,9 +239,9 @@ pub const Manager = struct {
                 try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = self.command, .verdict = "stream_done", .target = request.model });
                 return total;
             }
-            try self.completeTools(current.cancel, frozen_policy, frozen_policy_revision);
+            try self.completeTools(current.cancel, self.permissionEngine(), frozen_policy_revision);
             try budget.check();
-            if (self.tool_run.?.uncertain) return error.ToolOutcomeUnknown;
+            if (self.tool_run.?.uncertain and !self.tool_run.?.host_observation_only) return error.ToolOutcomeUnknown;
             if (self.tool_host) |host| try self.tool_run.?.refreshAuthority(host, current.cancel);
             try budget.check();
         }
@@ -217,7 +261,7 @@ pub const Manager = struct {
         const loop = self.tool_run orelse return error.NoToolTurnToResume;
         // A user-initiated answer retry is a fresh attempt, not an automatic
         // continuation. It keeps the original snapshot and dispatch ledger.
-        const budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = started + @as(i128, loop.request.timeout_ms) * std.time.ns_per_ms, .stop = stop };
+        var budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = started + @as(i128, loop.request.timeout_ms) * std.time.ns_per_ms, .stop = stop };
         var cancel = budget.childToken();
         return self.resumeAnswerWithinBudget(p, loop, &budget, &cancel) catch |err| return budget.reason() orelse err;
     }
@@ -225,7 +269,7 @@ pub const Manager = struct {
     fn resumeAnswerWithinBudget(self: *Manager, p: provider.Provider, loop: *tool_loop.Loop, budget: anytype, cancel: *provider.CancelToken) !provider.ChatStats {
         try budget.check();
         if (self.cooldownRemainingMs() != 0) return error.ProviderCoolingDown;
-        if (loop.uncertain) return error.ToolOutcomeUnknown;
+        if (loop.uncertain and !loop.host_observation_only) return error.ToolOutcomeUnknown;
         if (self.turn_id != loop.turn_id or self.scope == null or !tool_scope.Owner.eql(self.scope.?.owner, loop.scope.owner)) return error.ToolOwnerChanged;
         if (self.turn.state != .idle) return error.InvalidTransition;
         try self.turn.begin();
@@ -237,12 +281,12 @@ pub const Manager = struct {
             observer.reset(observer.context);
             try budget.check();
         }
+        try loop.checkRequestBudget();
         var resumed = loop.request;
         resumed.messages = loop.messages.items;
         resumed.tools = &.{};
         resumed.cancel = cancel;
-        // Do not mutate the original request/token snapshot to retry it.
-        try loop.checkRequestBudget();
+        // The retry uses the updated transcript after budget compaction.
         try budget.check();
         const stats = try self.runRoundUntil(p, resumed, budget.deadline_ns, budget.timing);
         try budget.check();
@@ -450,7 +494,8 @@ pub const Manager = struct {
 
     fn executeDynamic(raw: *anyopaque, invocation: @import("plugin_tools.zig").DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) ![]@import("plugin_tools.zig").ToolResult {
         const self: *Manager = @ptrCast(@alignCast(raw));
-        self.turn.state = if (try @import("plugin_tools.zig").callNeedsApproval(invocation.parsed, .{ .engine = self.permission_engine, .full_control = self.permission_engine.mode == .auto }, invocation.table.captured_scope.owner == .group)) .await_confirm else .executing;
+        const engine = self.permissionEngine();
+        self.turn.state = if (try @import("plugin_tools.zig").callNeedsApproval(invocation.parsed, .{ .engine = engine, .full_control = engine.mode == .auto }, invocation.table.captured_scope.owner == .group)) .await_confirm else .executing;
         const host = self.tool_host.?;
         const execute_dynamic = host.execute_dynamic orelse return error.DynamicToolHostUnavailable;
         return execute_dynamic(host.context, invocation, allocator, cancel);
@@ -483,7 +528,7 @@ pub const Manager = struct {
         }
         const loop = self.tool_run.?;
         const records_start = loop.records.items.len;
-        try loop.complete(self.round_text.items, calls[0..count], .{ .context = self, .execute = execute, .execute_dynamic = executeDynamic, .execute_host = executeHost, .accepted_host_result = acceptedHostResult }, policy, policy_revision, cancel);
+        try loop.complete(self.round_text.items, calls[0..count], .{ .context = self, .execute = execute, .current_permission = currentPermission, .execute_dynamic = executeDynamic, .execute_host = executeHost, .accepted_host_result = acceptedHostResult }, policy, policy_revision, cancel);
         if (self.observer) |observer| if (observer.tool_rejected) |notify| {
             for (calls[0..count]) |call| {
                 const record = blk: {
@@ -536,7 +581,7 @@ pub const Manager = struct {
         try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = value, .verdict = "tool_plan", .target = "provider", .call_id = call_id });
         _ = try self.cards.append(.{ .exec_plan = .{
             .cmd = value,
-            .verdict = permission.classify(self.permission_engine, value, false),
+            .verdict = permission.classify(self.permissionEngine(), value, false),
             .call_id = call_id,
         } });
     }
@@ -588,7 +633,7 @@ pub const Manager = struct {
                     .tool = call.tool,
                     .owner = scope.owner,
                     .targets = call.targets,
-                    .verdict = if (call.tool == .run_command) permission.classify(self.permission_engine, command, scope.owner == .group) else .allow_auto,
+                    .verdict = if (call.tool == .run_command) permission.classify(self.permissionEngine(), command, scope.owner == .group) else .allow_auto,
                 } });
                 try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = tool.arguments.items, .verdict = "scoped_tool_plan", .target = name, .call_id = tool.call_id });
             } else {
@@ -818,6 +863,7 @@ const TestMultiRun = struct {
     host_calls: usize = 0,
     budgets: [8]u32 = @splat(0),
     tool_work_ms: u32 = 20,
+    user_wait_ms: u32 = 0,
     wait_for_cancel: bool = false,
     stop_in_tool: ?*provider.CancelToken = null,
     stop_in_ack: ?*provider.CancelToken = null,
@@ -838,6 +884,12 @@ const TestMultiRun = struct {
     fn execute(raw: *anyopaque, _: tool_loop.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !tool_loop.Outcome {
         const self: *@This() = @ptrCast(@alignCast(raw));
         self.host_calls += 1;
+        if (self.user_wait_ms != 0) {
+            const waiting = provider.CancelToken.beginUserWait(cancel);
+            defer waiting.end();
+            self.timing.ns += @as(i128, self.user_wait_ms) * std.time.ns_per_ms;
+            if (cancel.?.isCancelled()) return error.UserWaitExpired;
+        }
         self.timing.ns += @as(i128, self.tool_work_ms) * std.time.ns_per_ms;
         if (self.wait_for_cancel) {
             var ticks: usize = 0;
@@ -1520,4 +1572,55 @@ test "provider error remains owned after its serialized response buffer is reuse
     // A subsequent provider error replaces the owned value in bounded space.
     Manager.receive(&manager, .{ .err = "second error" });
     try std.testing.expectEqualStrings("second error", manager.last_error.?);
+}
+
+test "approval human wait pauses the automatic run budget across provider rounds" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .tool_work_ms = 10, .user_wait_ms = 12 * 60 * 60 * 1000, .steps = &.{ .{ .work_ms = 20, .calls = &.{"approval"} }, .{ .work_ms = 30 } } };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    _ = try manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(null, 100), &timing);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 70 }, fixture.budgets[0..2]);
+    try std.testing.expectEqual(@as(usize, 1), fixture.host_calls);
+}
+
+test "approval budget nesting preserves remaining time and explicit Stop during human wait" {
+    var timing: TestRetryTiming = .{};
+    var stop: provider.CancelToken = .{};
+    var budget: RequestBudget(*TestRetryTiming) = .{ .timing = &timing, .deadline_ns = 100 * std.time.ns_per_ms, .stop = &stop };
+    var token = budget.childToken();
+    timing.ns = 20 * std.time.ns_per_ms;
+    const outer = provider.CancelToken.beginUserWait(&token);
+    timing.ns += std.time.ns_per_hour;
+    const inner = provider.CancelToken.beginUserWait(&token);
+    timing.ns += std.time.ns_per_hour;
+    inner.end();
+    try std.testing.expect(!token.isCancelled());
+    outer.end();
+    timing.ns += 79 * std.time.ns_per_ms;
+    try std.testing.expect(!token.isCancelled());
+    timing.ns += std.time.ns_per_ms;
+    try std.testing.expect(token.isCancelled());
+    const late = provider.CancelToken.beginUserWait(&token);
+    try std.testing.expectEqual(error.Timeout, budget.reason().?);
+    late.end();
+    const again = provider.CancelToken.beginUserWait(&token);
+    defer again.end();
+    try std.testing.expectEqual(error.Timeout, budget.reason().?);
+    stop.cancel();
+    try std.testing.expectEqual(error.Cancelled, budget.reason().?);
+}
+
+test "approval explicit Stop interrupts a valid paused budget" {
+    var timing: TestRetryTiming = .{};
+    var stop: provider.CancelToken = .{};
+    var budget: RequestBudget(*TestRetryTiming) = .{ .timing = &timing, .deadline_ns = 100 * std.time.ns_per_ms, .stop = &stop };
+    var token = budget.childToken();
+    const waiting = provider.CancelToken.beginUserWait(&token);
+    defer waiting.end();
+    timing.ns += 30 * std.time.ns_per_day;
+    try std.testing.expect(!token.isCancelled());
+    stop.cancel();
+    try std.testing.expectEqual(error.Cancelled, budget.reason().?);
+    try std.testing.expect(token.isCancelled());
 }

@@ -207,6 +207,47 @@ test "real Local Cx canvas recovery and assistant focus return execute on the sa
     try std.testing.expectEqual(host.CloseReceipt.released, (try rig.processSnapshot(accepted.handle)).cleanup);
 }
 
+test "real Local Option arrows move across words in ZSH through native key routing" {
+    var sandbox = std.testing.tmpDir(.{});
+    defer sandbox.cleanup();
+    try sandbox.dir.writeFile(std.testing.io, .{ .sub_path = ".zshenv", .data = "setopt NO_RCS\nPROMPT=''\nRPROMPT=''\nbindkey -e\n" });
+    const path = try sandbox.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(path);
+    const previous = if (std.c.getenv("ZDOTDIR")) |value| try a.dupeSentinel(u8, std.mem.span(value), 0) else null;
+    defer {
+        if (previous) |value| {
+            _ = setenv("ZDOTDIR", value.ptr, 1);
+            a.free(value);
+        } else _ = unsetenv("ZDOTDIR");
+    }
+    if (setenv("ZDOTDIR", path.ptr, 1) != 0) return error.EnvironmentFailed;
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const accepted = try rig.sessions.create(.{ .local = .{ .initial_cwd = path } }, .{ .window_id = @fromBackingInt(1), .workspace_id = @fromBackingInt(1) });
+    const service = try rig.ready(accepted);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(700, 240);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(service);
+    _ = cx.render();
+    try rig.promptSettled(&view, service);
+    cx.setFocus(view.root);
+    cx.handleTextInput("print -r -- __WORD_alpha beta gamma__");
+    cx.handleKeyDown(.left, .{ .alt = true });
+    cx.handleKeyDown(.left, .{ .alt = true });
+    cx.handleTextInput("X");
+    cx.handleKeyDown(.right, .{ .alt = true });
+    cx.handleTextInput("Y");
+    cx.handleKeyDown(.@"return", .{});
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(a);
+    // ZSH's forward-word lands at the next word's start.
+    try rig.output(&view, service, &output, "\r\n__WORD_alpha Xbeta Ygamma__\r\n");
+}
+
 test "real Local search editor keeps text keyboard and IME out of the original ZSH" {
     var sandbox = std.testing.tmpDir(.{});
     defer sandbox.cleanup();

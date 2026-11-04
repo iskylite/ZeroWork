@@ -368,16 +368,26 @@ test "status transfer ticker displays only the filename and retains a plain file
     const ticker = try @import("ui/status_transfer_view.zig").View.mount(f.cx, f.scope, null);
     try f.bar.progress_slot.appendChild(a, ticker.root);
     const absolute = try a.dupe(u8, "/fixture/远端目录/ticker-one.bin");
-    ticker.update(absolute, "25%", "2传·0候", 0.25, false);
+    ticker.update(absolute, "25%", "2", 0.25, false);
     a.free(absolute);
     f.settle();
     try std.testing.expectEqualStrings("ticker-one.bin", ticker.name.getText().?.content);
     try std.testing.expectEqualStrings("25%", ticker.percent.getText().?.content);
-    ticker.update("普通文件.txt", "50%", "1传·0候", 0.5, true);
+    ticker.update("普通文件.txt", "50%", "1", 0.5, true);
     f.settle();
     try std.testing.expectEqualStrings("普通文件.txt", ticker.name.getText().?.content);
     try std.testing.expectEqualStrings("50%", ticker.percent.getText().?.content);
-    try std.testing.expectEqual(@as(f32, 124), ticker.fill.style.width.px);
+    try std.testing.expectApproxEqAbs((ticker.width - 14) * 0.5, ticker.fill.style.width.px, 0.1);
+    ticker.updateSummary(.{ .name = "ubuntucloud_D91D1F2900_20260728225100.tgz", .percent = "72%", .rate = "12.6 MiB/s", .counts = "5", .fraction = 0.72 });
+    f.settle();
+    try std.testing.expectEqualStrings("12.6 MiB/s", ticker.speed.getText().?.content);
+    const percent_bounds = ticker.percent.globalRect();
+    const rate_bounds = ticker.speed.globalRect();
+    const name_bounds = ticker.name.globalRect();
+    try std.testing.expect(name_bounds.x + name_bounds.w <= percent_bounds.x);
+    try std.testing.expect(percent_bounds.x + percent_bounds.w <= rate_bounds.x);
+    try std.testing.expectEqual(@as(f32, 36), percent_bounds.w);
+    try std.testing.expectEqual(@as(f32, 76), rate_bounds.w);
     ticker.update("传输 · 空闲", "", "", 0, false);
     f.settle();
     const trigger = ticker.root.globalRect();
@@ -462,4 +472,59 @@ test "SSH status host reuses original graphical bar and trims terminal and trans
     try std.testing.expectEqual(.flex, controls.chain_button.style.display);
     try std.testing.expectEqual(.flex, controls.progress_slot.style.display);
     try std.testing.expectEqualStrings("已连接", controls.identity_label.getText().?.content);
+}
+
+test "SSH status unchanged terminal and graphical projections leave the scene clean" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    for (0..3) |_| {
+        try fixture.host.updateActive(null);
+        fixture.settle();
+    }
+    try std.testing.expect(!fixture.cx.hasPendingSceneWork());
+    try fixture.host.updateActive(null);
+    try std.testing.expect(!fixture.cx.hasPendingSceneWork());
+    const source: SSH.Active = .{ .details = try snapshot(key, "db"), .utf8 = true };
+    for (0..3) |_| {
+        try fixture.host.updateActive(source);
+        fixture.settle();
+    }
+    try fixture.host.updateActive(source);
+    try std.testing.expect(!fixture.cx.hasPendingSceneWork());
+    for (0..3) |_| {
+        try fixture.host.updateGraphical(.{ .state = .online, .label = "视频在线" });
+        fixture.settle();
+    }
+    try fixture.host.updateGraphical(.{ .state = .online, .label = "视频在线" });
+    try std.testing.expect(!fixture.cx.hasPendingSceneWork());
+    try fixture.host.updateGraphical(.{ .state = .ended, .label = "已断开" });
+    try std.testing.expectEqualStrings("已断开", fixture.bar.controls.identity_label.getText().?.content);
+}
+
+test "status transfer ticker fits the actual narrow bottom bar and keeps speed before task count" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    while (f.bar.progress_slot.children.items.len > 0) {
+        const child = f.bar.progress_slot.children.items[0];
+        f.cx.detachChild(f.bar.progress_slot, child);
+        f.cx.destroyDetached(child);
+    }
+    const ticker = try @import("ui/status_transfer_view.zig").View.mount(f.cx, f.scope, null);
+    try f.bar.progress_slot.appendChild(a, ticker.root);
+    ticker.updateSummary(.{ .name = "ubuntucloud_D91D1F2900_20260728225100.tgz", .percent = "72%", .rate = "12.6 MiB/s", .counts = "5", .fraction = 0.72 });
+    f.cx.setViewport(860, 480);
+    f.bar.bar.setStyleInline(a, .{ .width = .{ .px = 844 }, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 440 } } });
+    try f.update(try snapshot(key, "ZZ-GPU25"), true);
+    const bar = f.bar.bar.globalRect();
+    const control = ticker.root.globalRect();
+    try std.testing.expect(control.x >= bar.x);
+    try std.testing.expect(control.x + control.w <= bar.x + bar.w - 8 + 0.1);
+    try std.testing.expectEqual(@as(f32, 76), ticker.speed.globalRect().w);
+    try std.testing.expect(ticker.speed.globalRect().x + ticker.speed.globalRect().w <= control.x + control.w);
+    const speed = @import("ui/status_transfer_view.zig").formatSpeed;
+    var buffer: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("64 B/s", speed(&buffer, 64));
+    try std.testing.expectEqualStrings("8.0 KiB/s", speed(&buffer, 8192));
 }

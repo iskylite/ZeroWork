@@ -81,7 +81,7 @@ test "transfer projection global popover stays in current Cx hides without nativ
     try std.testing.expectEqual(V.Presentation.global_popover, p.options.presentation);
     try std.testing.expectEqual(h.cx, p.cx);
     try std.testing.expectEqual(h.root, p.root.parent.?);
-    try std.testing.expectApproxEqAbs(@as(f32, 760), bounds.w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 640), bounds.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 272), bounds.h, 0.01);
     try std.testing.expectApproxEqAbs(trigger.y + trigger.h + 8, bounds.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 12), 1440 - bounds.x - bounds.w, 0.01);
@@ -186,12 +186,12 @@ test "native transfer semantic paints stay readable and retheme across all built
         for ([_]usize{ 2, 3, 4 }) |index| {
             const label_ = p.counts_labels[index];
             const background = label_.parent.?.getBackground();
-            try std.testing.expectEqual(@as(u8, 255), background.a);
+            try std.testing.expectEqual(theme.popupInset(), background);
             try std.testing.expect(paintContrast(label_.getText().?.color, background) >= 4.5);
         }
         const styles = @import("ui/transfer_styles.zig");
         const enabled_option = styles.optionTag(true).background.?;
-        try std.testing.expectEqual(@as(u8, 255), enabled_option.a);
+        try std.testing.expectEqual(theme.popupInset(), enabled_option);
         try std.testing.expect(paintContrast(theme.current().ok_ink, enabled_option) >= 4.5);
         // The retained task is a derived fill, not a literal palette slot.
         const task_background = id(p.root, "transfer.task").?.getBackground();
@@ -332,7 +332,7 @@ test "transfer projection exact window and session geometry uses actual widgets"
     try pop.update(.{ .revision = 1, .rows = &.{row(1, 101, .running)} });
     pop.show();
     h.frames();
-    try std.testing.expectApproxEqAbs(@as(f32, 760), pop.root.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 560), pop.root.globalRect().w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 228), pop.root.globalRect().h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 84), pop.list.container.globalRect().h, 0.01);
     try std.testing.expect(id(pop.root, "transfer.window.minimize") == null);
@@ -421,7 +421,7 @@ test "transfer projection details events are readonly and terminal actions never
     try std.testing.expectApproxEqAbs(@as(f32, 48), viewport.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 46), viewport.globalRect().y - events.dialog.globalRect().y, 0.1);
     const reference_events = "14:20:01 入队 · job1042 · session101\n14:20:02 SSH传输连接就绪\n14:20:02 开始上传 /srv/releases/release.tar.gz\n14:20:08 已传81.9MiB / 128MiB · 64%";
-    try events.show(1042, reference_events);
+    try events.show(1042, reference_events, id(p.root, "transfer.task.events").?);
     h.frames();
     try std.testing.expectEqualStrings(reference_events, events.snapshot);
     try std.testing.expectApproxEqAbs(@as(f32, 162), events.dialog.globalRect().h, 0.1);
@@ -433,7 +433,7 @@ test "transfer projection details events are readonly and terminal actions never
         try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(i * 28)), entry.globalRect().y - events.entries.globalRect().y, 0.1);
     }
     const many_events = "入队\n连接\n开始\n进度1\n进度2\n进度3\n进度4\n进度5\n进度6\n进度7\n进度8\n进度9\n完成";
-    try events.show(cancelled.target.job, many_events);
+    try events.show(cancelled.target.job, many_events, id(p.root, "transfer.task.events").?);
     h.frames();
     try std.testing.expectEqualStrings(many_events, events.snapshot);
     try std.testing.expectEqual(@as(usize, 13), events.entries.children.items.len);
@@ -441,7 +441,7 @@ test "transfer projection details events are readonly and terminal actions never
     try std.testing.expectApproxEqAbs(@as(f32, 242), events.dialog.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 184), viewport.globalRect().h, 0.1);
     try std.testing.expect(events.entries.globalRect().h > viewport.globalRect().h);
-    try events.show(cancelled.target.job, "");
+    try events.show(cancelled.target.job, "", id(p.root, "transfer.task.events").?);
     h.frames();
     try std.testing.expectEqualStrings("", events.snapshot);
     try std.testing.expect(text(h.root, "暂无任务事件") != null);
@@ -1291,13 +1291,12 @@ test "transfer projection current cards keep all native phases readable and acti
             const head = id(p.root, "transfer.task.head").?.globalRect();
             const meta = id(p.root, "transfer.task.meta").?.globalRect();
             const filename = id(p.root, "transfer.task.name").?.globalRect();
-            const location = id(p.root, "transfer.task.location").?.globalRect();
             const status = id(p.root, "transfer.task.status").?.globalRect();
             try std.testing.expectApproxEqAbs(@as(f32, 76), card.h, 0.01);
             try std.testing.expect(head.y + head.h <= meta.y);
             try std.testing.expect(meta.y + meta.h <= card.y + card.h);
-            try std.testing.expect(filename.w > 0 and location.w > 0);
-            try std.testing.expect(filename.x + filename.w <= status.x + 0.5);
+            try std.testing.expect(filename.w > 0 and status.w > 0);
+            try std.testing.expect(status.y >= meta.y - 0.5);
             try std.testing.expect(id(p.root, "transfer.task.select") != null);
             try std.testing.expect(id(p.root, "transfer.task.events") != null);
             const actions = id(p.root, "transfer.task.actions").?.globalRect();
@@ -1389,7 +1388,7 @@ test "transfer direction trays hide empty cards without layout and restore with 
     try std.testing.expectEqual(@as(@TypeOf(p.root.style.display), .flex), p.root.style.display);
 }
 
-test "transfer projection long paths remain clipped inside the card" {
+test "transfer projection status replaces duplicate path inside the card" {
     const h = try H.init(860, 480);
     defer h.deinit();
     var c: Capture = .{};
@@ -1399,10 +1398,11 @@ test "transfer projection long paths remain clipped inside the card" {
     try p.update(.{ .revision = 1, .rows = &.{task} });
     p.show();
     h.frames();
-    const path = id(p.root, "transfer.task.location").?;
+    const status_node = id(p.root, "transfer.task.status").?;
     const card = id(p.root, "transfer.task").?.globalRect();
-    try std.testing.expectEqualStrings(task.remote_path, path.getText().?.content);
-    try std.testing.expect(path.globalRect().x + path.globalRect().w <= card.x + card.w);
+    try std.testing.expectEqualStrings("传输中", status_node.getText().?.content);
+    try std.testing.expect(id(p.root, "transfer.task.location") == null);
+    try std.testing.expect(status_node.globalRect().x + status_node.globalRect().w <= card.x + card.w);
     try std.testing.expect(id(p.root, "transfer.task.expand") == null);
 }
 
@@ -1423,13 +1423,14 @@ test "transfer projection narrow SFTP card keeps all controls within 266px after
     const card = id(p.root, "transfer.task").?.globalRect();
     const name = id(p.root, "transfer.task.name").?;
     const status = id(p.root, "transfer.task.status").?.globalRect();
-    const path = id(p.root, "transfer.task.location").?;
+    const status_node = id(p.root, "transfer.task.status").?;
     try std.testing.expect(id(p.root, "transfer.task.rate").?.style.display == .none);
-    try std.testing.expect(name.globalRect().w > 0 and path.globalRect().w > 0);
-    try std.testing.expect(name.globalRect().x + name.globalRect().w <= status.x + 0.1);
-    try std.testing.expect(name.parent.?.style.overflow_hidden and path.parent.?.style.overflow_hidden);
+    try std.testing.expect(name.globalRect().w > 0 and status_node.globalRect().w > 0);
+    try std.testing.expect(status.y > name.globalRect().y);
+    try std.testing.expect(name.parent.?.style.overflow_hidden);
     try std.testing.expectEqualStrings(task.name, name.getText().?.content);
-    try std.testing.expectEqualStrings(task.remote_path, path.getText().?.content);
+    try std.testing.expectEqualStrings("传输中", status_node.getText().?.content);
+    try std.testing.expect(id(p.root, "transfer.task.location") == null);
     for ([_][]const u8{ "transfer.task.primary", "transfer.task.copy_path", "transfer.task.events" }) |control| {
         const r = id(p.root, control).?.globalRect();
         try std.testing.expectEqual(@as(f32, 24), r.w);
@@ -1483,7 +1484,7 @@ test "transfer projection metadata columns retain equal right edges across mixed
             const node = id(panel.root, test_id).?;
             const rect = node.globalRect();
             try std.testing.expectEqual(@as(@TypeOf(id(panel.root, "transfer.task.status").?.getText().?.text_align), .end), node.getText().?.text_align);
-            try std.testing.expectApproxEqAbs(if (col == 0) panel.owner_column_width else width, rect.w, 0.01);
+            if (col != 1) try std.testing.expectApproxEqAbs(if (col == 0) panel.owner_column_width else width, rect.w, 0.01);
             edges[col] = rect.x + rect.w;
             if (expected) |before| try std.testing.expectApproxEqAbs(before[col], edges[col], 0.01);
         }
@@ -1513,7 +1514,8 @@ test "transfer projection owner column expands for complete names without coveri
     try panel.update(.{ .revision = 2, .rows = &tasks });
     h.frames();
     const filename_needed = h.cx.text.measureTextWidth(tasks[0].name, 12, 400, false);
-    try std.testing.expect(id(panel.root, "transfer.task.name").?.globalRect().w >= filename_needed);
+    try std.testing.expect(id(panel.root, "transfer.task.name").?.globalRect().w < filename_needed);
+    try std.testing.expectEqual(.ellipsis, id(panel.root, "transfer.task.name").?.getText().?.text_overflow);
     try std.testing.expect(panel.owner_column_width < h.cx.text.measureTextWidth(tasks[0].owner_label, 11, 400, false));
     h.cx.setViewport(640, 480);
     h.frames();
@@ -1523,7 +1525,7 @@ test "transfer projection owner column expands for complete names without coveri
     try std.testing.expect(narrow_name.x + narrow_name.w <= narrow_owner.x);
 }
 
-test "transfer projection header dropdown includes sessions without tasks and hover contains static fields" {
+test "transfer projection header dropdown includes sessions without tasks and click details contain static fields" {
     const h = try H.init(1440, 900);
     defer h.deinit();
     var capture: Capture = .{};
@@ -1544,7 +1546,7 @@ test "transfer projection header dropdown includes sessions without tasks and ho
     try std.testing.expectEqual(@as(usize, 0), panel.visible.items.len);
     try std.testing.expectEqual(@as(u64, 202), @backingInt(panel.selected_scope.session.session_id));
     try std.testing.expect(id(panel.root, "transfer.detail.status") == null);
-    try std.testing.expectApproxEqAbs(@as(f32, 760), panel.root.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 640), panel.root.globalRect().w, 0.01);
 }
 
 test "transfer projection popovers size to content and independently cap scroll height" {
@@ -1603,4 +1605,81 @@ test "transfer projection V3 scope menu keeps theme material density and anchor 
         try std.testing.expect(bounds.w >= 160 and bounds.w <= 320);
         try std.testing.expectApproxEqAbs(@as(f32, 33), id(h.root, "transfer.scope.option.1").?.globalRect().h, 0.1);
     }
+}
+
+test "transfer projection event popover follows corners resize and scroll limits" {
+    const h = try H.init(1000, 700);
+    defer h.deinit();
+    const anchor = try ui.box(h.cx, .{ .position = .absolute, .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
+    try h.root.appendChild(h.cx.allocator, anchor);
+    const events = try @import("ui/transfer_events_view.zig").View.mount(h.cx, h.scope);
+    const many = "入队\n连接\n开始\n进度1\n进度2\n进度3\n进度4\n进度5\n进度6\n进度7\n完成";
+    for ([_][2]f32{ .{ 8, 8 }, .{ 968, 8 }, .{ 8, 668 }, .{ 968, 668 } }) |point| {
+        anchor.setStyleInline(h.cx.allocator, .{ .inset = .{ .left = .{ .px = point[0] }, .top = .{ .px = point[1] } } });
+        try events.show(1, many, anchor);
+        h.frames();
+        h.frames();
+        const r = events.dialog.globalRect();
+        try std.testing.expect(r.x >= 7.9 and r.x + r.w <= 992.1);
+        try std.testing.expect(r.y >= 7.9 and r.y + r.h <= 692.1);
+        if (point[1] < 100) {
+            try std.testing.expectApproxEqAbs(point[1] + 24 + 8, r.y, 0.2);
+        } else {
+            try std.testing.expectApproxEqAbs(point[1] - 8, r.y + r.h, 0.2);
+        }
+    }
+    // Resize while open, then restore: width and scrolling body must recover.
+    anchor.setStyleInline(h.cx.allocator, .{ .inset = .{ .left = .auto, .top = .auto, .right = .{ .px = 8 }, .bottom = .{ .px = 8 } } });
+    for ([_][2]f32{ .{ 340, 220 }, .{ 900, 600 } }) |size| {
+        h.cx.setViewport(size[0], size[1]);
+        h.frames();
+        h.frames();
+        const r = events.dialog.globalRect();
+        const a = anchor.globalRect();
+        try std.testing.expect(events.open.peek());
+        try std.testing.expectApproxEqAbs(@min(520, size[0] - 16), r.w, 0.2);
+        try std.testing.expect(r.x >= 7.9 and r.x + r.w <= size[0] - 7.9);
+        try std.testing.expect(r.y >= 7.9 and r.y + r.h <= size[1] - 7.9);
+        try std.testing.expectApproxEqAbs(a.y - 8, r.y + r.h, 0.2);
+        const viewport = events.viewport.globalRect();
+        try std.testing.expect(viewport.y + viewport.h <= r.y + r.h - 11.9);
+        if (size[0] == 340) try std.testing.expect(events.content.globalRect().h > viewport.h);
+    }
+    h.cx.safe_area_top = 40;
+    h.cx.safe_area_bottom = 24;
+    anchor.setStyleInline(h.cx.allocator, .{ .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 48 } } });
+    h.frames();
+    h.frames();
+    const safe = events.dialog.globalRect();
+    try std.testing.expect(safe.y >= 48 and safe.y + safe.h <= 568.1);
+    anchor.setDisplay(.none);
+    h.frames();
+    try std.testing.expect(!events.open.peek());
+}
+
+test "transfer projection event popover reanchors after live row replacement" {
+    const h = try H.init(1000, 700);
+    defer h.deinit();
+    var c: Capture = .{};
+    const p = try h.panel(&c, .window);
+    var task = row(1, 101, .running);
+    try p.update(.{ .revision = 1, .rows = &.{task} });
+    p.show();
+    h.frames();
+    click(h, id(p.root, "transfer.task.events").?);
+    h.frames();
+    const events = p.event_view.?;
+    const previous = events.anchor_id.?;
+    task.done_bytes += 1;
+    task.events = "新进度";
+    try p.update(.{ .revision = 2, .rows = &.{task} });
+    h.frames();
+    h.frames();
+    try std.testing.expect(events.open.peek());
+    try std.testing.expect(events.anchor_id.? != previous);
+    try std.testing.expectEqual(id(p.root, "transfer.task.events").?.id, events.anchor_id.?);
+    try std.testing.expectEqualStrings("已连接\n收到 40 B ACK", events.snapshot);
+    try p.update(.{ .revision = 3, .rows = &.{} });
+    h.frames();
+    try std.testing.expect(!events.open.peek());
 }

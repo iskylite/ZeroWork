@@ -48,6 +48,8 @@ pub const ProviderConfig = struct {
     /// Per-image admission reservation for a custom model with unknown local
     /// tokenization; never an assertion of actual provider usage.
     image_token_reservation: ?u32 = null,
+    image_token_max_width: ?u32 = null,
+    image_token_max_height: ?u32 = null,
     reasoning_wire: provider.ReasoningWire = .none,
     native_effort: bool = false,
 
@@ -56,6 +58,9 @@ pub const ProviderConfig = struct {
         if (std.mem.trim(u8, self.model, " \t\r\n").len == 0) return error.MissingModel;
         if (self.context_window == 0) return error.InvalidContextWindow;
         if (self.image_token_reservation) |value| if (!@import("image_budget.zig").validReservation(value)) return error.InvalidImageTokenReservation;
+        if ((self.image_token_max_width == null) != (self.image_token_max_height == null) or (self.image_token_max_width != null and self.image_token_reservation == null)) return error.InvalidImageTokenReservation;
+        if (self.image_token_max_width) |value| if (value == 0 or value > 8192) return error.InvalidImageTokenReservation;
+        if (self.image_token_max_height) |value| if (value == 0 or value > 8192) return error.InvalidImageTokenReservation;
         switch (self.kind) {
             .anthropic => if (self.auth != .anthropic_memory) return error.InvalidAuth,
             .openai_compat => if (self.auth != .bearer_memory and !(self.auth == .none and allowsNoAuth(self.kind, self.endpoint))) return error.InvalidAuth,
@@ -70,6 +75,8 @@ pub const ProviderConfig = struct {
         configured.model = self.model;
         configured.vision = self.vision;
         configured.image_token_reservation = self.image_token_reservation;
+        configured.image_token_max_width = self.image_token_max_width;
+        configured.image_token_max_height = self.image_token_max_height;
         configured.reasoning_wire = self.reasoning_wire;
         configured.native_effort = self.native_effort;
         return configured;
@@ -94,7 +101,7 @@ pub fn fromSettingsSelection(ai: app_config.Ai, selection: ?ModelSelection) !Pro
         .anthropic => if (p.api_key.len == 0) return error.MissingApiKey else .{ .anthropic_memory = p.api_key },
         .openai_compat => if (p.api_key.len != 0) .{ .bearer_memory = p.api_key } else if (allowsNoAuth(p.kind, p.endpoint)) .none else return error.MissingApiKey,
     };
-    const result = ProviderConfig{ .kind = p.kind, .endpoint = p.endpoint, .model = resolved.model.id, .auth = auth, .context_window = resolved.model.context_window, .vision = resolved.model.vision, .image_token_reservation = resolved.model.image_token_reservation, .native_effort = resolved.model.reasoning_discovered, .reasoning_wire = if (p.kind == .anthropic and resolved.model.reasoning_adaptive) .anthropic_adaptive else toggleProtocol(p.kind, p.endpoint, resolved.model.id) };
+    const result = ProviderConfig{ .kind = p.kind, .endpoint = p.endpoint, .model = resolved.model.id, .auth = auth, .context_window = resolved.model.context_window, .vision = resolved.model.vision, .image_token_reservation = resolved.model.image_token_reservation, .image_token_max_width = resolved.model.image_token_max_width, .image_token_max_height = resolved.model.image_token_max_height, .native_effort = resolved.model.reasoning_discovered, .reasoning_wire = if (p.kind == .anthropic and resolved.model.reasoning_adaptive) .anthropic_adaptive else toggleProtocol(p.kind, p.endpoint, resolved.model.id) };
     try result.validate();
     return result;
 }
@@ -112,6 +119,12 @@ pub fn supportsEffort(ai: app_config.Ai, selection: ?ModelSelection, effort: pro
 
 pub fn validateEffort(ai: app_config.Ai, selection: ?ModelSelection, effort: provider.Effort) !void {
     if (!try supportsEffort(ai, selection, effort)) return error.UnsupportedEffort;
+}
+
+pub fn lowestEffort(ai: app_config.Ai, selection: ?ModelSelection) !?provider.Effort {
+    const resolved = try settingsModel(ai, selection);
+    if (!resolved.model.reasoning or (resolved.provider.kind != .openai_compat and !resolved.model.reasoning_discovered)) return null;
+    return provider.Effort.lowestSupported(resolved.model.efforts);
 }
 
 const SettingsModel = struct { provider: app_config.AiProvider, model: app_config.AiModel };

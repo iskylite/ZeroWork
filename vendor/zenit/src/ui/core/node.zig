@@ -417,6 +417,9 @@ pub const ScopeBinding = struct {
 pub const NodeVersions = struct {
     content: u32 = 1,
     composite: u32 = 1,
+    /// Structural epoch at the last hidden-layout settlement. This also
+    /// catches newly attached nodes below a layout-isolation boundary.
+    hidden_layout_structure: u64 = 0,
 };
 
 /// Node metadata: component type name + test identifier (DevTools/test_harness use). component_name
@@ -794,6 +797,12 @@ pub const Node = struct {
     /// P-Node-SoA-5b: events + interaction merge -> behavior.
     behavior: NodeBehavior = .{},
 
+    /// UI-thread tree topology serial, shared by retained consumers that cache
+    /// node references. Check before dereferencing a cache across tree changes.
+    pub fn treeStructureRevision() u64 {
+        return node_tree.structureRevision();
+    }
+
     /// read rect from global World, fallback standalone fallback storage on fail. For cx-less
     /// functions (computeStickyOffset/tickBeforeRender etc) use.
     pub fn rectFromWorldOrFallback(self: *const Node) ComputedRect {
@@ -834,6 +843,22 @@ pub const Node = struct {
     /// borrowed content/spans after mutating them; identical writes are inert.
     /// Ownership changes still reach the storage layer even when pixels match.
     pub fn setText(self: *Node, t_in: ?TextProps) void {
+        self.publishText(t_in, false);
+    }
+
+    /// Publish single-line text whose absolute pixel box is supplied by the
+    /// caller (for example a terminal grid run). Content and font changes still
+    /// invalidate paint/shaping, but cannot reflow siblings or move hit bounds.
+    /// Other layout modes fall back to the ordinary sizing invalidation.
+    pub fn setTextFixedBounds(self: *Node, t_in: ?TextProps) void {
+        const fixed_bounds = self.children.items.len == 0 and
+            self.style.position == .absolute and self.style.width == .px and self.style.height == .px and
+            (if (t_in) |t| t.wrap == .none else false) and
+            (if (self.getTextRaw()) |t| t.wrap == .none else true);
+        self.publishText(t_in, fixed_bounds);
+    }
+
+    fn publishText(self: *Node, t_in: ?TextProps, fixed_bounds: bool) void {
         var t = t_in;
         // ownership: explicit owned=true writer declare transfer; without declare but write back
         // node already owned same content (getText -> change style fields -> setText) preserve
@@ -860,7 +885,10 @@ pub const Node = struct {
         node_render_cache.invalidateTextHashCache(self);
         self.meta.per_frame.caches.text_signature = next;
         if (next.layout != previous.layout) {
-            self.markSizingDirty();
+            if (fixed_bounds) {
+                self.clearTextLayout();
+                self.markRenderDirty();
+            } else self.markSizingDirty();
         } else if (next.paint != previous.paint) {
             self.markRenderDirty();
         }

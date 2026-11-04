@@ -10,6 +10,8 @@ pub const Tab = struct {
     title: [64]u8 = @splat(0),
     title_len: u8 = 0,
     revision: u64 = 1,
+    /// Presentation clock survives strip rebuilds; no repeated animation for old unread output.
+    attention_started_ms: ?f64 = null,
     /// A session created inside a group retains its owner but has one visual entry.
     container: ?TabId = null,
     details: []const u8 = "",

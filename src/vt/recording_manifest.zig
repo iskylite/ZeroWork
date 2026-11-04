@@ -26,6 +26,7 @@ pub const Generation = struct {
 pub const Segment = struct { id: u64 = 1, start: Position, end: Position, data_file_ref: []const u8, committed_length: u64, checksum: []const u8 };
 pub const Evidence = enum { pending, exit_confirmed, foreground_finished, interrupted, cancelled_unsent, unknown };
 pub const ExecutionRange = struct {
+    shell_context_id: ?[]const u8 = null,
     execution_id: []const u8,
     recording_generation: u64,
     start: Position,
@@ -164,6 +165,10 @@ pub fn validate(value: Manifest) !void {
     for (value.execution_ranges) |range| {
         if (range.sealed and range.completion_source == .shell_reported) return error.InvalidManifest;
         if (range.execution_id.len != 32) return error.InvalidManifest;
+        if (range.shell_context_id) |shell| {
+            if (shell.len != 32) return error.InvalidManifest;
+            for (shell) |byte| if (!std.ascii.isHex(byte)) return error.InvalidManifest;
+        }
         if (range.end) |end| if (end.raw_offset < range.start.raw_offset or end.event_sequence <= range.start.event_sequence) return error.InvalidManifest;
         if (range.sealed and (range.end == null or range.start_boundary_sequence == null or range.end_boundary_sequence == null)) return error.InvalidManifest;
         if (range.sealed and (range.output_scope != .exact or range.interval_saved)) return error.InvalidManifest;

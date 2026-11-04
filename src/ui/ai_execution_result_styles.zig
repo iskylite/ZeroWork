@@ -32,6 +32,11 @@ pub fn summary(tokens: *const ui.ThemeTokens) ui.TextStyle {
     style.text_overflow = .ellipsis;
     return style;
 }
+pub fn warning(tokens: *const ui.ThemeTokens) ui.TextStyle {
+    var style = text(tokens);
+    style.color = theme.patchInk(theme.current().warn_ink, &.{theme.popupAction()});
+    return style;
+}
 pub fn identity(tokens: *const ui.ThemeTokens) ui.TextStyle {
     var style = metadata(tokens);
     style.use_monospace_font = true;

@@ -36,7 +36,7 @@ pub const Controller = struct {
         try binding.validate();
         try self.authority.validate(self.authority.context, binding);
         var metadata: [256]u8 = undefined;
-        const text = try std.fmt.bufPrint(metadata[0 .. metadata.len - 1], "终端 {d}/{d} · 受控 zerowork_secret_consume\n授权 {d} · 等待 {d}", .{ @backingInt(binding.handle.session_id), binding.handle.generation, binding.grant.fence, binding.wait_sequence });
+        const text = try std.fmt.bufPrint(metadata[0 .. metadata.len - 1], "终端 #{d} · 安全输入\n输入内容不会发送给 AI", .{@backingInt(binding.handle.session_id)});
         metadata[text.len] = 0;
         const handle = try self.collector.open(self.collector.context, metadata[0..text.len :0], theme);
         self.pending = .{ .binding = binding, .created_ms = now_ms, .native = handle };
@@ -45,7 +45,8 @@ pub const Controller = struct {
     pub fn poll(self: *Controller, now_ms: u64) void {
         self.store.expire(now_ms);
         const pending = self.pending orelse return;
-        if (now_ms < pending.created_ms or now_ms - pending.created_ms >= secret.lifetime_ms) {
+        // User entry has no deadline; only the submitted private receipt is bounded.
+        if (pending.submitted and (now_ms < pending.created_ms or now_ms - pending.created_ms >= secret.lifetime_ms)) {
             self.cancel();
             return;
         }
@@ -74,6 +75,7 @@ pub const Controller = struct {
         };
         self.collector.close(self.collector.context, pending.native);
         self.pending.?.submitted = true;
+        self.pending.?.created_ms = now_ms;
         // Native pointer is no longer accessed once submitted.
     }
     fn transfer(raw: *anyopaque, binding: Binding, bytes: []const u8) !void {
@@ -193,7 +195,7 @@ test "host secret controller async metadata and exact consumed receipt" {
     try std.testing.expectEqual(State.secret_submitted, controller.state);
     try std.testing.expectEqual(@as(usize, 1), fixture.closed);
 }
-test "host secret controller revocation timeout cancellation zero submit" {
+test "host secret controller waits indefinitely before submission and still honours revocation" {
     var fixture: Fixture = .{ .ready = true };
     var controller = fixture.controller();
     defer controller.deinit();
@@ -204,10 +206,16 @@ test "host secret controller revocation timeout cancellation zero submit" {
     try std.testing.expectEqual(@as(usize, 0), fixture.submitted);
     fixture.valid = true;
     try controller.begin(Fixture.binding(), 10, test_theme);
-    controller.poll(60_010);
+    fixture.ready = false;
+    controller.poll(30 * 24 * 60 * 60 * 1000);
+    try std.testing.expectEqual(State.awaiting_host_secret, controller.state);
     try std.testing.expectEqual(@as(usize, 0), fixture.submitted);
+    fixture.ready = true;
+    controller.poll(30 * 24 * 60 * 60 * 1000 + 1);
+    try std.testing.expectEqual(@as(usize, 1), fixture.submitted);
+    try controller.consumed(Fixture.binding());
     try std.testing.expectEqual(@as(usize, 2), fixture.closed);
-    try std.testing.expectEqual(@as(usize, 2), fixture.cancelled);
+    try std.testing.expectEqual(@as(usize, 1), fixture.cancelled);
 }
 
 test "host secret controller queued cancellation does not reuse native handle" {
@@ -218,7 +226,7 @@ test "host secret controller queued cancellation does not reuse native handle" {
     controller.poll(1);
     try std.testing.expectEqual(@as(usize, 1), fixture.submitted);
     try std.testing.expectEqual(@as(usize, 1), fixture.closed);
-    controller.poll(60_000);
+    controller.poll(60_001);
     try std.testing.expectEqual(State.cancelled, controller.state);
     try std.testing.expectEqual(@as(usize, 1), fixture.closed);
     try std.testing.expectEqual(@as(usize, 1), fixture.cancelled);

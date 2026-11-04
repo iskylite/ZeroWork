@@ -37,7 +37,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         }
         try section.select(.{ .section = "ssh", .key = "term" }, "默认终端类型", "内置类型已做兼容性验证。自定义仅声明 TERM 名称，需远端提供对应终端描述。用于新连接和重连。", term_options[0 .. terms.len + @intFromBool(!known_term)], null);
         try section.toggle(.{ .section = "ssh", .key = "compression" }, "SSH 压缩", "", null);
-        try section.toggle(.{ .section = "ssh", .key = "auto_shell_integration" }, "自动会话初始化", "新建 SSH 会话时在原 shell 内初始化文本钩子，以获取命令状态，不上传文件。主机高级选项可单独覆盖；下次新建会话生效。", null);
+        try section.toggle(.{ .section = "ssh", .key = "auto_shell_integration" }, "自动会话初始化", "每次连接 SSH 时在原 shell 内初始化文本钩子，以获取命令状态，不上传文件。主机高级选项可单独覆盖；下次新建会话或重连生效。", null);
     }
     if (binding.matches(query, "断线 自动重连 最大次数 退避 输入缓存 auto_reconnect reconnect_max reconnect_backoff buffer_input")) {
         const section = try page.section("断线重连", "自动重连与输入缓存", ui.icons.rotate_ccw, 9, "settings.ssh.reconnect", null);

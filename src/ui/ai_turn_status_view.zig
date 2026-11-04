@@ -41,7 +41,7 @@ pub const Label = struct {
 pub fn turnLabel(turn: *const Turn) Label {
     if (turn.ended_at_ms != null) return .{ .text = "～回合结束～", .animated = false };
     // A decision that needs the user takes precedence over other active tools.
-    for (turn.steps.items) |step| if (step.phase == .approval) return .{ .text = if (step.approval_expired) "审批已过期 · 流程暂停" else "等待确认 · 流程暂停", .animated = false };
+    for (turn.steps.items) |step| if (step.phase == .approval) return .{ .text = "等待确认 · 流程暂停", .animated = false };
     var index = turn.steps.items.len;
     while (index > 0) {
         index -= 1;
@@ -61,8 +61,8 @@ const Wave = struct {
     }
     fn tick(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Wave = @ptrCast(@alignCast(raw));
-        if (!self.root.isDisplayedInTree()) return .done;
-        for (self.root.children.items, 0..) |glyph, index| glyph.setStyleInline(self.cx.allocator, .{ .translate_y = waveOffset(self.cx.frame_time_ms, index, self.cx.reduced_motion) });
+        if (@import("material_geometry.zig").snapshot(self.cx, self.root) == null) return .done;
+        for (self.root.children.items, 0..) |glyph, index| glyph.setStyle(self.cx.allocator, .translate_y, waveOffset(self.cx.frame_time_ms, index, self.cx.reduced_motion));
         if (!self.cx.reduced_motion) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
         return .done;
     }
@@ -94,6 +94,7 @@ const Clock = struct {
     }
     fn tick(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Clock = @ptrCast(@alignCast(raw));
+        if (@import("material_geometry.zig").snapshot(self.cx, self.node) == null) return .done;
         const now_wall: u64 = @intCast(@max(0, @import("../platform/realtime.zig").milliseconds(self)));
         const now_mono: u64 = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
         const elapsed = elapsedMs(self.turn, now_wall, now_mono);

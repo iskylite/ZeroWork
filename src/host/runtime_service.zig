@@ -35,6 +35,7 @@ pub const Runtime = struct {
         reconnectSnapshot: *const fn (*anyopaque) ?@import("../vt/reconnect.zig").Control.Snapshot,
         requestReconnect: *const fn (*anyopaque, OperationKey, OperationKey) anyerror!void,
         requestReconnectWithInitialization: ?*const fn (*anyopaque, OperationKey, OperationKey, bool) anyerror!void = null,
+        requestReconnectConfigured: ?*const fn (*anyopaque, OperationKey, OperationKey, bool, @import("../vt/reconnect.zig").Configuration) anyerror!void = null,
         preflightExplicitDisconnect: ?*const fn (*anyopaque, OperationKey) anyerror!u64 = null,
         requestExplicitDisconnect: ?*const fn (*anyopaque, OperationKey) anyerror!ReleaseReceipt = null,
         acknowledgeAttached: *const fn (*anyopaque, OperationKey) bool,
@@ -43,7 +44,10 @@ pub const Runtime = struct {
         markAttached: *const fn (*anyopaque) void,
         setScrollbackLimit: ?*const fn (*anyopaque, u32) void = null,
         setInputBufferEnabled: *const fn (*anyopaque, bool) void,
+        attachCurrentShell: ?*const fn (*anyopaque) anyerror!void = null,
+        attachShell: ?*const fn (*anyopaque, terminal.execution.ShellAttachment) anyerror!void = null,
         requestCurrentDirectory: ?*const fn (*anyopaque) anyerror!void = null,
+        completeRemotePath: ?*const fn (*anyopaque, []const u8) anyerror!@import("../ui/builtin_completion.zig").Call = null,
         copyCwd: *const fn (*anyopaque, std.mem.Allocator) anyerror!?[]u8,
         searchText: *const fn (*anyopaque, std.mem.Allocator) anyerror![]u8,
         readLines: *const fn (*anyopaque, terminal.LineLimits, std.mem.Allocator) anyerror!terminal.Lines,
@@ -145,6 +149,11 @@ pub const Runtime = struct {
         if (self.torn_down) return error.SessionClosed;
         return self.vtable.requestReconnect(self.context, previous, next);
     }
+    pub fn requestReconnectConfigured(self: *Runtime, previous: OperationKey, next: OperationKey, skip: bool, configuration: @import("../vt/reconnect.zig").Configuration) anyerror!void {
+        if (self.torn_down) return error.SessionClosed;
+        if (self.vtable.requestReconnectConfigured) |call| return call(self.context, previous, next, skip, configuration);
+        return self.requestReconnectWithInitialization(previous, next, skip);
+    }
     pub fn requestReconnectWithInitialization(self: *Runtime, previous: OperationKey, next: OperationKey, skip: bool) anyerror!void {
         if (self.torn_down) return error.SessionClosed;
         if (self.vtable.requestReconnectWithInitialization) |call| return call(self.context, previous, next, skip);
@@ -174,9 +183,23 @@ pub const Runtime = struct {
         if (self.torn_down) return;
         return self.vtable.setInputBufferEnabled(self.context, enabled);
     }
+    pub fn attachCurrentShell(self: *Runtime) !void {
+        if (self.torn_down) return error.SessionClosed;
+        const call = self.vtable.attachCurrentShell orelse return error.UnsupportedShell;
+        return call(self.context);
+    }
+    pub fn attachShell(self: *Runtime, request: terminal.execution.ShellAttachment) !void {
+        if (self.torn_down) return error.SessionClosed;
+        const call = self.vtable.attachShell orelse return error.UnsupportedShell;
+        return call(self.context, request);
+    }
     pub fn requestCurrentDirectory(self: *Runtime) !void {
         if (self.vtable.requestCurrentDirectory) |call| return call(self.context);
         return error.UnsupportedOperation;
+    }
+    pub fn completeRemotePath(self: *Runtime, path: []const u8) !@import("../ui/builtin_completion.zig").Call {
+        if (self.torn_down) return error.SessionClosed;
+        return (self.vtable.completeRemotePath orelse return error.UnsupportedService)(self.context, path);
     }
     pub fn copyCwd(self: *Runtime, allocator: std.mem.Allocator) anyerror!?[]u8 {
         if (self.torn_down) return error.SessionClosed;

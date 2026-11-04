@@ -25,15 +25,38 @@ pub fn forPlugin(source: @import("../host/plugin_registry.zig").Registry, protoc
 }
 
 pub const Os = @import("../proto/ssh/remote_os.zig").Kind;
+pub const TabState = enum { normal, connecting, failed };
+
+/// A separate neutral backplate preserves iSoft's dark source ink on any theme.
+pub fn artworkBackdrop(icon_id: u32) ui.Color {
+    return if (icon_id == @import("host_os_assets.zig").isoft.icon_id.?) ui.Color.WHITE else ui.Color.TRANSPARENT;
+}
+
+pub fn tabTint(state: TabState, asset_value: ui.SvgAsset) ui.Color {
+    const theme = @import("app_theme.zig").current();
+    return switch (state) {
+        .failed => theme.danger_ink,
+        .connecting => theme.fg_3,
+        .normal => if (@import("host_os_assets.zig").index(asset_value.icon_id.?) != null) ui.Color.WHITE else if (asset_value.icon_id == resolve(.local).icon_id) ui.Color.hex(0xa1a1aa) else theme.fg_2,
+    };
+}
+
 pub fn forOs(kind: Os) ?ui.SvgAsset {
-    const os = @import("session_os_assets.zig");
+    const os = @import("host_os_assets.zig");
     return switch (kind) {
         .unknown => null,
         .macos => @import("assets_generated.zig").local_apple,
         .windows => os.windows,
         .ubuntu => os.ubuntu,
-        .rocky => @import("rocky_os_asset.zig").rocky,
-        .linux, .debian, .fedora, .arch, .alpine, .freebsd => os.linux,
+        .rocky => os.rocky,
+        .linux => os.linux,
+        .debian => os.debian,
+        .fedora => os.fedora,
+        .arch => os.archlinux,
+        .alpine => os.alpine,
+        .freebsd => os.freebsd,
+        .kylin, .neokylin, .openkylin, .ubuntukylin, .uos, .deepin, .openeuler, .euleros, .anolis, .opencloudos, .tencentos, .alinux, .loongnix, .aosc, .bclinux, .kylinsec, .nfs, .linx, .isoft, .redflag => domesticAsset(kind),
+        inline .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd => |value| @field(os, @tagName(value)),
     };
 }
 pub fn forConnection(source: @import("../host/plugin_registry.zig").Registry, protocol_id: []const u8, kind: Os, archived: bool) ui.SvgAsset {
@@ -41,8 +64,9 @@ pub fn forConnection(source: @import("../host/plugin_registry.zig").Registry, pr
 }
 pub fn setNode(node: *ui.Node, kind: Os) void {
     const selected = forOs(kind) orelse return;
-    const old = node.getIcon() orelse return;
-    node.setIcon(.{ .icon_id = selected.icon_id.?, .rep = selected.pickRep(14).?, .tint = old.tint });
+    const tint = if (node.getIcon()) |old| old.tint else ui.Color.WHITE;
+    node.setImage(null);
+    node.setIcon(.{ .icon_id = selected.icon_id.?, .rep = selected.pickRep(14).?, .tint = tint });
     node.markRenderDirty();
 }
 
@@ -54,7 +78,7 @@ test "OS icons take precedence over protocol and retain unknown fallback" {
 }
 
 /// Saved OS artwork uses source colours; protocol glyphs use theme ink.
-/// Live tabs keep their existing status tint.
+/// Tab appearance is selected independently through tabTint.
 pub fn forHost(source: @import("../host/plugin_registry.zig").Registry, protocol_id: []const u8, kind: Os) ui.SvgAsset {
     if (@import("std").mem.eql(u8, protocol_id, "bmc_ikvm")) return ui.icons.screen_share;
     const os = @import("host_os_assets.zig");
@@ -70,6 +94,16 @@ pub fn forHost(source: @import("../host/plugin_registry.zig").Registry, protocol
         .windows => os.windows,
         .macos => forOs(kind).?,
         .unknown => if (@import("std").mem.eql(u8, protocol_id, "ssh") or @import("std").mem.eql(u8, protocol_id, "sftp")) os.linux else forPlugin(source, protocol_id, false),
+        .kylin, .neokylin, .openkylin, .ubuntukylin, .uos, .deepin, .openeuler, .euleros, .anolis, .opencloudos, .tencentos, .alinux, .loongnix, .aosc, .bclinux, .kylinsec, .nfs, .linx, .isoft, .redflag => domesticAsset(kind),
+        inline .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd => |value| @field(os, @tagName(value)),
+    };
+}
+
+fn domesticAsset(kind: Os) ui.SvgAsset {
+    const os = @import("host_os_assets.zig");
+    return switch (kind) {
+        inline .kylin, .neokylin, .openkylin, .ubuntukylin, .uos, .deepin, .openeuler, .euleros, .anolis, .opencloudos, .tencentos, .alinux, .loongnix, .aosc, .bclinux, .kylinsec, .nfs, .linx, .isoft, .redflag => |value| @field(os, @tagName(value)),
+        else => unreachable,
     };
 }
 pub fn setHostNode(node: *ui.Node, source: @import("../host/plugin_registry.zig").Registry, protocol_id: []const u8, kind: Os) void {
@@ -83,11 +117,12 @@ pub fn setHostNode(node: *ui.Node, source: @import("../host/plugin_registry.zig"
 /// Coloured host SVGs become images after upload; both forms retain source RGB.
 pub fn refreshHostTint(node: *ui.Node) void {
     const artwork = if (node.getIcon()) |icon| @import("host_os_assets.zig").index(icon.icon_id) != null else node.getImage() != null;
+    const apple = if (node.getIcon()) |icon| icon.icon_id == resolve(.local).icon_id.? else false;
     const remote_screen = if (node.getIcon()) |icon| icon.icon_id == ui.icons.screen_share.icon_id.? else false;
-    _ = node.setTint(if (artwork) ui.Color.WHITE else if (remote_screen) @import("sidebar_styles.zig").kvmIconInk() else @import("app_theme.zig").current().fg_2);
+    _ = node.setTint(if (artwork) ui.Color.WHITE else if (apple) tabTint(.normal, resolve(.local)) else if (remote_screen) @import("sidebar_styles.zig").kvmIconInk() else @import("app_theme.zig").current().fg_2);
 }
 
-test "saved host artwork has independent coloured assets without changing tab OS assets" {
+test "saved host and tab OS artwork share source colours" {
     const std = @import("std");
     const artwork = @import("host_os_assets.zig");
     const kinds = [_]Os{ .ubuntu, .debian, .fedora, .arch, .alpine, .freebsd, .windows, .linux, .rocky };
@@ -98,5 +133,36 @@ test "saved host artwork has independent coloured assets without changing tab OS
         for (kinds[0..i]) |previous| try std.testing.expect(forHost(.{}, "ssh", previous).icon_id != saved.icon_id);
     }
     try std.testing.expectEqual(artwork.linux.icon_id, forHost(.{}, "ssh", .unknown).icon_id);
-    try std.testing.expectEqual(@import("session_os_assets.zig").ubuntu.icon_id, forOs(.ubuntu).?.icon_id);
+    try std.testing.expectEqual(artwork.ubuntu.icon_id, forOs(.ubuntu).?.icon_id);
+}
+
+test "identified OS logos replace the Linux fallback in both host and tab artwork" {
+    const std = @import("std");
+    const artwork = @import("host_os_assets.zig");
+    const kinds = [_]Os{ .kylin, .neokylin, .openkylin, .ubuntukylin, .uos, .deepin, .openeuler, .euleros, .anolis, .opencloudos, .tencentos, .alinux, .loongnix, .aosc, .bclinux, .kylinsec, .nfs, .linx, .isoft, .redflag, .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd };
+    for (kinds) |kind| {
+        const host = forHost(.{}, "ssh", kind);
+        try std.testing.expectEqual(host.icon_id, forOs(kind).?.icon_id);
+        try std.testing.expectEqual(host.icon_id, forHost(.{}, "sftp", kind).icon_id);
+        const pixels = artwork.pixels[artwork.index(host.icon_id.?).?];
+        try std.testing.expectEqual(@as(usize, 72 * 72 * 4), pixels.len);
+        try std.testing.expect(!std.mem.eql(u8, artwork.pixels[artwork.index(artwork.linux.icon_id.?).?], pixels));
+    }
+}
+
+test "tab OS colour uses original artwork except connecting and failed states" {
+    const std = @import("std");
+    const theme = @import("app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        for ([_]Os{ .linux, .ubuntu, .kylin, .uos, .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd }) |kind| {
+            const logo = forOs(kind).?;
+            try std.testing.expectEqual(ui.Color.WHITE, tabTint(.normal, logo));
+            try std.testing.expectEqual(theme.current().danger_ink, tabTint(.failed, logo));
+            try std.testing.expectEqual(theme.current().fg_3, tabTint(.connecting, logo));
+            try std.testing.expectEqual(forHost(.{}, "ssh", kind).icon_id, logo.icon_id);
+        }
+    }
 }

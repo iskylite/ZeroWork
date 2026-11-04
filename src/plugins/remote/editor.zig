@@ -457,6 +457,7 @@ pub const RemoteEditor = struct {
     copy_open: ?*ui.Signal(bool) = null,
     copy_dialog: ?*ui.Node = null,
     copy_body: ?*ui.Node = null,
+    copy_footer: ?*ui.Node = null,
     copy_trigger: ?*ui.Node = null,
     review_test_card: ?*ui.Node = null,
     logs_scroll: ?*ui.Node = null,
@@ -477,6 +478,7 @@ pub const RemoteEditor = struct {
     test_follow_hint: ?*ui.Node = null,
     test_filter_label: ?*ui.Node = null,
     test_copy_icon: ?*ui.Node = null,
+    test_copy_feedback: ?*@import("../../ui/copy_button.zig").Button = null,
     test_disclosure_icon: ?*ui.Node = null,
     test_actions: [10]?*TestHopAction = @splat(null),
     review_body: ?*ui.Node = null,
@@ -619,6 +621,7 @@ pub const RemoteEditor = struct {
     sig_group_selection: ?*ui.Signal(?[]const u8) = null,
     group_options: ?*ui.Signal([]const ui.widgets.SelectOption) = null,
     group_name_pending: bool = false,
+    group_edited: bool = false,
     sig_host: ?*ui.Signal([]const u8) = null,
     sig_port: ?*ui.Signal([]const u8) = null,
     sig_user: ?*ui.Signal([]const u8) = null,
@@ -1103,12 +1106,14 @@ pub const RemoteEditor = struct {
     fn onGroupChanged(self: *RemoteEditor, value: ?[]const u8) void {
         if (self.isLocked()) return;
         self.group_name_pending = false;
+        self.group_edited = true;
         self.sig_group.?.set(value orelse "");
         self.onFieldChange("");
     }
     fn onGroupInput(self: *RemoteEditor, _: []const u8) void {
         if (self.isLocked()) return;
         self.group_name_pending = false;
+        self.group_edited = true;
         self.sig_group_selection.?.set(null);
         self.onFieldChange("");
     }
@@ -1117,6 +1122,7 @@ pub const RemoteEditor = struct {
         // update that host unless the user explicitly picks another source
         // from the copy row after this load.
         self.copied_from_existing = false;
+        self.group_edited = false;
         self.loaded_scrollback_explicit = draft.scrollback_explicit or draft.scrollback != 25000;
         self.dormant_jump_count = 0;
         self.dormant_socks_exit = null;
@@ -1214,6 +1220,7 @@ pub const RemoteEditor = struct {
         for (self.assets) |asset| {
             if (asset.source_owner.?.id != id) continue;
             self.loadDraft(asset);
+            self.group_edited = true;
             self.copy_source_owner = asset.source_owner;
             self.source_owner = null;
             self.copied_from_existing = true;
@@ -1891,6 +1898,7 @@ pub const RemoteEditor = struct {
             if (self.save_failure) |failure| {
                 const message = if (failure.stage == .open) "配置已保存，但无法打开会话。草稿已保留，可重试。" else switch (failure.cause) {
                     error.FileConflict, error.RevisionConflict => "主机配置已被修改。当前草稿已保留，请重新载入后再保存。",
+                    error.StaleGroup => "原分组已更名或删除，请重新选择分组后保存。",
                     error.AccessDenied, error.PermissionDenied => "无法写入主机配置。请检查文件权限后重试。",
                     error.CredentialDenied, error.CredentialLocked, error.CredentialUnavailable, error.CredentialStorageFailure => "无法保存密码到系统钥匙串。草稿已保留，请解锁或授权钥匙串后重试，也可取消保存密码。",
                     error.OutOfMemory => "内存不足。连接草稿已保留，请重试。",
@@ -2066,6 +2074,7 @@ pub const RemoteEditor = struct {
             self.refreshSaveState();
         }
         const receipt = (callback(self.result_ctx, if (only) .{ .save_only = draft } else .{ .saved = draft }) catch |err| {
+            @import("../../platform/applog.zig").warn(.ui, "connection configuration save failed: {s}", .{@errorName(err)});
             self.save_failure = .{ .stage = .save, .cause = err };
             return;
         }) orelse {
@@ -2297,6 +2306,7 @@ pub const RemoteEditor = struct {
     fn onLogsCopy(self: *RemoteEditor) void {
         const text = self.test_log_text.getText() orelse return;
         self.test_copy_result = ui.platform_services.clipboardSetText(self.cx.system_sdk, text.content);
+        if (self.test_copy_feedback) |feedback| feedback.report(self.test_copy_result.?);
         self.refreshTestProjection() catch {};
     }
     fn onTestFilterAll(self: *RemoteEditor) void {
@@ -2412,7 +2422,7 @@ pub const RemoteEditor = struct {
                 try preview.users[index].?.setTextContent(self.alloc, source.?.node(i, &buffer));
                 const last = source.?.latest(i);
                 preview.users[index].?.setTextColor(if (last != null and last.?.status == .failed) S.theme.current().danger else if (source.?.finished and source.?.failure == null and !source.?.cancelled) S.theme.current().ok else if (last != null and last.?.status == .started and source.?.cleanup == .not_started) S.theme.current().accent else S.theme.current().fg_2);
-                node.setBackground(if (self.test_filter == i) S.theme.popupSelection() else S.theme.current().well);
+                node.setBackground(if (self.test_filter == i) S.theme.popupSelection() else S.testNode().background.?);
             }
         }
         for (preview.arrows, 0..) |node, index| node.?.setDisplay(if (index < source.?.hops.len) .flex else .none);
@@ -2543,38 +2553,41 @@ pub const RemoteEditor = struct {
             if (self.copy_dialog) |node| retintText(node, before, colors);
         }
         self.painted_colors = colors;
-        if (self.stepper) |stepper| stepper.setBackground(S.theme.current().well);
-        if (self.footer) |footer| footer.setBackground(S.theme.current().surface_2);
-        self.modal.?.setBackground(S.theme.current().overlay);
+        // Embedded editors share the shell's material; layout chrome must not
+        // introduce another fill when a retained editor changes theme.
+        if (self.stepper) |stepper| stepper.setBackground(ui.Color.TRANSPARENT);
+        if (self.footer) |footer| footer.setBackground(S.footer().background.?);
+        self.modal.?.setBackground(if (self.embedded) ui.Color.TRANSPARENT else colors.overlay);
         if (self.route_empty_hint) |node| node.setTextColor(S.theme.current().danger_ink);
         for (self.jump_rows) |node| if (node) |row| row.setBackground(ui.Color.TRANSPARENT);
         for (self.editor_actions.items) |action_| if (action_.icon) |icon| {
             _ = icon.setTint(S.theme.current().fg_3);
         };
-        if (self.review_test_card) |card| card.setBackground(S.theme.current().well);
+        if (self.review_test_card) |card| card.setBackground(S.testResult(undefined).background.?);
         for (self.inputs.items) |input| {
             input.input_container.setStyleInline(self.alloc, S.input());
             input.state.tokens = self.cx.tokens;
             input.state.dirty = true;
         }
-        for (self.selects.items) |select| select.trigger.setBackground(S.theme.current().well);
+        for (self.selects.items) |select| select.trigger.setBackground(S.input().background.?);
         if (self.remember_checkbox) |checkbox| paintCheckboxLabels(checkbox);
         if (self.compression_checkbox) |group| paintAuthLabels(group);
         if (self.startup_textarea) |area| {
             area.state.tokens = self.cx.tokens;
             area.state.dirty = true;
             area.input.markLayoutDirty();
-            area.input.setBackground(S.theme.current().well);
+            area.input.setBackground(S.theme.popupInset());
         }
-        if (self.copy_dialog) |dialog| dialog.setBackground(S.theme.current().overlay);
+        if (self.copy_dialog) |dialog| dialog.setBackground(colors.overlay);
+        if (self.copy_footer) |footer| footer.setBackground(S.copyFooter().background.?);
         if (self.title) |title| title.setTextColor(S.theme.current().fg_1);
-        if (self.summary_card) |card| card.setBackground(S.theme.current().well);
-        if (self.summary_route_card) |card| card.setBackground(S.theme.current().well);
+        if (self.summary_card) |card| card.setBackground(S.reviewIdentity().background.?);
+        if (self.summary_route_card) |card| card.setBackground(S.reviewRoute().background.?);
         self.paintSteps();
-        self.test_logs_area.setBackground(S.theme.current().well);
+        self.test_logs_area.setBackground(S.testLogs().background.?);
         for (&self.route_previews) |*preview| for (preview.addresses) |node| if (node) |address| address.setTextColor(S.theme.current().fg_2);
         self.paintButtons();
-        for (&self.route_previews) |*preview| for (preview.nodes) |node| if (node) |n| n.setBackground(S.theme.current().well);
+        for (&self.route_previews) |*preview| for (preview.nodes) |node| if (node) |n| n.setBackground(S.routeNode(false).background.?);
         self.refreshTestRow();
         self.cx.requestRedraw();
     }
@@ -2903,7 +2916,7 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     try copy_bar.appendChild(w.alloc, source.wrapper);
     try copy_modal.body.appendChild(w.alloc, copy_bar);
     const copy_foot = try ui.box(cx, S.copyFooter(), .{});
-    copy_foot.setBackground(S.theme.current().surface_2);
+    w.copy_footer = copy_foot;
     _ = try action(w, copy_foot, "取消", "wizard.copy.cancel", 76, 34, false, null, RemoteEditor.onCopyCancel, null);
     try copy_foot.appendChild(w.alloc, try ui.spacer(cx));
     _ = try action(w, copy_foot, "复制到当前草稿", "wizard.copy.apply", 128, 34, true, w.copy_disabled, RemoteEditor.onCopyApply, null);
@@ -3098,7 +3111,7 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
 
     const shell_field = try ui.box(cx, S.field(null), .{});
     w.shell_integration_field = shell_field;
-    try shell_field.appendChild(w.alloc, try helpLabel(w, "自动会话初始化", "新建 SSH 会话时发送文本钩子以获取命令状态，不上传文件。登录后会自动运行其他程序的主机可关闭；下次新建会话生效。", "wizard.shell_integration.help"));
+    try shell_field.appendChild(w.alloc, try helpLabel(w, "自动会话初始化", "每次连接 SSH 时发送文本钩子以获取命令状态，不上传文件。登录后会自动运行其他程序的主机可关闭；下次新建会话或重连生效。", "wizard.shell_integration.help"));
     const shell_options = [_]ui.widgets.SelectOption{
         .{ .value = "inherit", .label = "继承全局设置", .test_id = "wizard.shell_integration.inherit" },
         .{ .value = "on", .label = "开启", .test_id = "wizard.shell_integration.on" },
@@ -3413,6 +3426,7 @@ fn mountReview(w: *RemoteEditor) !*ui.Node {
     const copy = try action(w, log_header, "复制日志", "wizard.test.logs.copy", 24, 24, false, null, RemoteEditor.onLogsCopy, ui.icons.copy);
     copy.setBackground(ui.Color.TRANSPARENT);
     w.test_copy_icon = copy.children.items[copy.children.items.len - 1];
+    w.test_copy_feedback = try @import("../../ui/copy_button.zig").Button.attach(w.cx, w.scope, copy);
     const toggle = try action(w, log_header, "展开或收起阶段日志", "wizard.test.logs.toggle", 24, 24, false, null, RemoteEditor.onLogsToggle, ui.icons.chevron_up);
     toggle.setBackground(ui.Color.TRANSPARENT);
     w.test_disclosure_icon = toggle.children.items[toggle.children.items.len - 1];
@@ -3493,7 +3507,6 @@ fn paintSelectContent(node: *ui.Node, color: ui.Color) void {
 fn paintSelectMenu(select: ui.widgets.SelectResult) void {
     const colors = S.theme.current();
     const state = ui.widgets.select.stateOf(select);
-    select.chrome.setBackground(colors.overlay);
     select.trigger.setBorderColor(ui.Color.TRANSPARENT);
     _ = select.chevron_down.setTint(colors.fg_2);
     _ = select.chevron_up.setTint(colors.fg_2);
@@ -3547,7 +3560,7 @@ fn skinSelect(w: *RemoteEditor, result: ui.widgets.SelectResult, height: f32, si
     // width. Let that wrapper follow its responsive field as well.
     if (result.trigger.parent) |trigger_wrapper| trigger_wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
     // HTML preview: 5px panel inset, contiguous 32px rows, radius10/7.
-    result.chrome.setStyleInline(w.alloc, .{ .padding = ui.Padding.all(5), .gap = 0, .border = .{ .radius = 10, .width = 0 } });
+    result.chrome.setStyleInline(w.alloc, .{ .padding = ui.Padding.all(5), .gap = 0, .background = S.theme.current().overlay, .border = .{ .radius = 10, .width = 0 } });
     result.panel.setStyleInline(w.alloc, .{ .gap = 0 });
     const state = ui.widgets.select.stateOf(result);
     for (state.option_nodes) |row| row.setStyleInline(w.alloc, .{ .height = .{ .px = 32 }, .padding = .{ .top = 7, .bottom = 7, .left = 9, .right = 9 }, .border = .{ .radius = 7 }, .flex_shrink = 0 });

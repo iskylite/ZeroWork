@@ -1,4 +1,4 @@
-@import url("theme-states.css?v=f052faf0bbf3");
+@import url("theme-states.css?v=ed02de03338b");
 @font-face{font-family:Inter;src:url("assets/fonts/InterVariable.woff2") format("woff2");font-style:normal;font-weight:100 900;font-display:swap}
 @font-face{font-family:"JetBrains Mono";src:url("assets/fonts/JetBrainsMono-Regular.ttf") format("truetype");font-style:normal;font-weight:400;font-display:swap}
 /* V3 semantic source: DESIGN_STANDARDS §2.2 + src/ui/app_theme.zig.
@@ -28,9 +28,9 @@ button.danger-solid{background:var(--action-danger);color:var(--accent-fg);box-s
 button.danger-solid:not(:disabled):hover{transform:translateY(-1px);box-shadow:0 6px 16px color-mix(in srgb,var(--action-danger) 22%,transparent)}
 button.danger-solid:not(:disabled):active{transform:translateY(0);box-shadow:0 2px 6px color-mix(in srgb,var(--action-danger) 22%,transparent)}
 
-:root{--surface-1-alpha:55.2941%;--surface-2-alpha:69.4118%;--well-alpha:78.8235%;--overlay-alpha:96.0784%;--hover-alpha:76.4706%;--tab-on-alpha:83.5294%;--card-deep-alpha:69.4118%;--card-deep-ft-alpha:78.8235%;--overlay-blur:12px}
+:root{--surface-1-alpha:100.0000%;--surface-2-alpha:27.8431%;--well-alpha:36.0784%;--overlay-alpha:100.0000%;--hover-alpha:18.0392%;--tab-on-alpha:32.1569%;--card-deep-alpha:27.8431%;--card-deep-ft-alpha:36.0784%;--overlay-blur:12px}
 /* One global background; surface tints derived from global effective T/B, independent of image enablement. */
-:root,body[data-theme]{--surface-1:color-mix(in srgb,rgb(from var(--surface-1-base) r g b / 1) var(--surface-1-alpha,55.2941%),transparent);--surface-2:color-mix(in srgb,rgb(from var(--surface-2-base) r g b / 1) var(--surface-2-alpha,69.4118%),transparent);--well:color-mix(in srgb,rgb(from var(--well-base) r g b / 1) var(--well-alpha,78.8235%),transparent);--overlay:color-mix(in srgb,rgb(from var(--overlay-base) r g b / 1) var(--overlay-alpha,96.0784%),transparent);--hover:color-mix(in srgb,rgb(from var(--hover-base) r g b / 1) var(--hover-alpha,76.4706%),transparent);--tab-on:color-mix(in srgb,rgb(from var(--tab-on-base) r g b / 1) var(--tab-on-alpha,83.5294%),transparent);--bg-term:transparent;--card-deep:color-mix(in srgb,rgb(from var(--card-deep-base) r g b / 1) var(--card-deep-alpha,69.4118%),transparent);--card-deep-ft:color-mix(in srgb,rgb(from var(--card-deep-ft-base) r g b / 1) var(--card-deep-ft-alpha,78.8235%),transparent);--panel:var(--surface-1);--card:var(--surface-2);--card-head:var(--surface-2);--terminal:transparent}
+:root,body[data-theme]{--surface-1:color-mix(in srgb,rgb(from var(--surface-1-base) r g b / 1) var(--surface-1-alpha,100.0000%),transparent);--surface-2:color-mix(in srgb,rgb(from var(--surface-2-base) r g b / 1) var(--surface-2-alpha,27.8431%),transparent);--well:color-mix(in srgb,rgb(from var(--well-base) r g b / 1) var(--well-alpha,36.0784%),transparent);--overlay:color-mix(in srgb,rgb(from var(--overlay-base) r g b / 1) var(--overlay-alpha,100.0000%),transparent);--hover:color-mix(in srgb,rgb(from var(--hover-base) r g b / 1) var(--hover-alpha,18.0392%),transparent);--tab-on:color-mix(in srgb,rgb(from var(--tab-on-base) r g b / 1) var(--tab-on-alpha,32.1569%),transparent);--bg-term:transparent;--card-deep:color-mix(in srgb,rgb(from var(--card-deep-base) r g b / 1) var(--card-deep-alpha,27.8431%),transparent);--card-deep-ft:color-mix(in srgb,rgb(from var(--card-deep-ft-base) r g b / 1) var(--card-deep-ft-alpha,36.0784%),transparent);--panel:var(--surface-1);--card:var(--surface-2);--card-head:var(--surface-2);--terminal:transparent}
 .zw-background-root{position:relative;isolation:isolate;background:transparent!important}.zw-global-background{position:absolute;inset:0;z-index:-1;border-radius:inherit;overflow:hidden;pointer-events:none;background-color:var(--bg-app)}.zw-global-background-image{position:absolute;inset:0;background-position:center;background-size:cover;pointer-events:none}
 html[data-global-embedded=true],html[data-global-embedded=true] body{background:transparent!important}html[data-global-embedded=true] .zw-background-root{background:transparent!important}
 #app .terminal-pane,#app .terminal-scroll,#app .terminal-document,#app .sftp-workspace,#app .sftp-dual,#app .graphic-content,#notes-app .notes-main{background:transparent!important}
@@ -40,12 +40,13 @@ html[data-global-embedded=true],html[data-global-embedded=true] body{background:
 #app :is(.modal-scrim,.scrim),#settings-layer{background:rgb(0 0 0 / var(--material-scrim-alpha,.25));backdrop-filter:none;-webkit-backdrop-filter:none}
 #app .modal :is(.modal-body,.modal-foot),#app .popover .popover-head{background-color:transparent}
 .view,.utility-layer .view{background:transparent!important}
-.settings-window .card{background:var(--surface-2)}.settings-window .card-header{background:var(--surface-1);backdrop-filter:none}
+.settings-window .card{background:var(--surface-2)}.settings-window .card-header{background:transparent;backdrop-filter:none}
 
 .material-review-controls{display:flex;align-items:center;gap:20px;flex-wrap:wrap;padding:10px}.material-review-controls input[type=number]{border:0;outline:0;background:var(--control-bg);border-radius:7px;width:64px;min-height:28px;padding:4px 6px}.material-review summary{cursor:pointer}
 /* Settings is a modal surface, not an ordinary shell card. */
-html[data-global-embedded=true] .settings-window.zw-background-root{background:var(--overlay)!important}
-html[data-global-embedded=false] .settings-window.zw-background-root::after{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;background:var(--overlay);backdrop-filter:blur(var(--overlay-blur,12px));-webkit-backdrop-filter:blur(var(--overlay-blur,12px))}
+.settings-window.zw-background-root{background:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+html[data-global-embedded=true] .settings-window.zw-background-root::after{display:none}
+html[data-global-embedded=false] .settings-window.zw-background-root::after{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;background:var(--layer-background,var(--overlay));backdrop-filter:blur(var(--overlay-blur,12px));-webkit-backdrop-filter:blur(var(--overlay-blur,12px))}
 
 /* Shared surfaces stay frameless; selection uses a filled surface. */
 .card,.file-panel,.terminal-pane,.transfer-job,.provider-card,.model-card{border:0;box-shadow:none}
@@ -61,7 +62,10 @@ html[data-global-embedded=false] .settings-window.zw-background-root::after{cont
 :is(.popover,.context-menu) :is(.selected,[aria-selected=true]){background:var(--popup-selected)}
 
 /* Surface depth is resolved from the live owner chain by global-background.js. */
-[data-material-level]{background-color:var(--layer-background)!important;backdrop-filter:blur(var(--overlay-blur,12px));-webkit-backdrop-filter:blur(var(--overlay-blur,12px))}
+[data-material-level]{background-color:var(--layer-background)!important}
+[data-material-compensation=true]{background-image:var(--layer-compensation)!important}
+[data-material-kind=floating]{backdrop-filter:blur(var(--overlay-blur,12px));-webkit-backdrop-filter:blur(var(--overlay-blur,12px))}
+[data-material-kind=card]{backdrop-filter:none;-webkit-backdrop-filter:none}
 
 /* Complete built-in UI palettes; terminal ANSI remains independently owned. */
 body[data-theme="dark"]{--bg-app:#060608;--surface-1-base:#131316;--surface-2-base:#1b1b1f;--well-base:#0c0c0f;--well-bd:#26262c;--bg-term-base:#0a0a0d;--overlay-base:#292a30;--card-deep-base:#1b1b1f;--card-deep-ft-base:#0c0c0f;--hover-base:#202026;--tab-on-base:#1e1e23;--fg-1:#f4f4f5;--fg-2:#b4b4bc;--fg-3:#a8a8ad;--accent-base:#6366f1;--accent-2:#8457ea;--accent-ink:#999bf5;--action-accent:#6164ec;--action-accent-2:#8457ea;--action-danger:#d53d3d;--accent-fg:#ffffff;--ok:#22c55e;--warn:#f59e0b;--danger-base:#ef4444;--ok-ink:#22c55e;--warn-ink:#f59e0b;--danger-ink:#f48282;--sel-bg:#6366f124;--accent-30:#6366f159;--grip:#a8a8ad;--shadow-float:0 24px 48px #0000005c;--shadow-1:0 2px 8px #0006;--shadow-tab:0 2px 8px #00000059;--bg-term:transparent;--control-inset-well-strength:30%;--card-head:#1b1b1f;color-scheme:dark;--terminal-default-fg:#f4f4f5;}
@@ -116,3 +120,10 @@ button:focus-visible:not(.primary):not(.btn-primary):not(.danger-solid):not([rol
 #component-stage .tag{background:var(--state-tag)}
 #component-stage .tag.good{background:var(--state-tag-ok)}
 #component-stage .tag.pending{background:var(--state-tag-warn)}
+
+/* Four shell fills are painted once with the base canvas, behind foregrounds. */
+.zw-canvas-tint{position:absolute;inset:0;background:var(--bg-app);isolation:isolate;pointer-events:none}
+.zw-canvas-card{position:absolute;display:block;background:rgb(from var(--surface-1-base) r g b / 1);pointer-events:none}
+[data-canvas-card=true]{background-color:transparent!important}
+
+.provider{--provider-material-base:var(--well-base)}.provider.provider-open{--provider-material-base:color-mix(in srgb,var(--well-base) 62%,var(--surface-2-base))}

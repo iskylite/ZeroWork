@@ -379,8 +379,8 @@ pub const SessionRuntime = struct {
 
     pub fn releaseStep(self: *SessionRuntime, archive: ?ArchiveRequest) ReleaseReceipt {
         if (self.release.state.load(.acquire) == .idle) {
-            if (self.terminal_provider) |*provider| provider.deinit();
             self.archive_request = archive;
+            applog.info(.ssh, "runtime close begin session={any}", .{if (self.worker.options.operation_key) |key| if (key.owner == .session) @as(?u64, @backingInt(key.owner.session.session_id)) else null else null});
             self.cancelOwnedWork();
             self.torn_down = true;
         }
@@ -395,17 +395,26 @@ pub const SessionRuntime = struct {
         if (self.cancel_token) |token| token.store(true, .release);
         if (self.host_key_bridge) |bridge| bridge.cancel();
         if (self.keyboard_bridge) |bridge| bridge.cancel();
+        if (self.terminal_provider) |*provider| provider.deinit();
         self.worker.invalidateInput();
         self.thread.requestStop();
     }
 
     fn releaseOwned(raw: *anyopaque) ReleaseReceipt {
         const self: *SessionRuntime = @ptrCast(@alignCast(raw));
+        const key = self.worker.options.operation_key;
+        const id: ?u64 = if (key) |value| if (value.owner == .session) @backingInt(value.owner.session.session_id) else null else null;
         // Archive final output only once the IO owner has stopped. All joins,
         // filesystem IO and reverse target/relay/hop teardown stay off the UI.
-        self.thread.stopAndJoin();
-        const receipt = self.worker.releaseConnection();
+        if (!self.thread.joined) {
+            applog.info(.ssh, "runtime close join session={any}", .{id});
+            self.thread.stopAndJoin();
+            applog.info(.ssh, "runtime close joined session={any}", .{id});
+        }
+        if (self.terminal_provider) |*provider| provider.finishSearches();
+        const receipt = self.worker.releaseForClose();
         if (receipt != .released) return receipt;
+        applog.info(.ssh, "runtime close protocol released session={any}", .{id});
         if (self.checkpoint_writer) |writer| writer.deinit();
         self.checkpoint_writer = null;
         if (self.archive_request) |request| self.persistClosedArchive(request.session_id, request.retention_days) catch |err| {
@@ -431,6 +440,7 @@ pub const SessionRuntime = struct {
         if (self.key_passphrase) |value| self.allocator.free(value);
         if (self.recording_display_arena) |*arena| arena.deinit();
         if (self.route_arena) |*arena| arena.deinit();
+        applog.info(.ssh, "runtime close released session={any}", .{id});
         return .released;
     }
 
@@ -447,6 +457,7 @@ pub const SessionRuntime = struct {
         const allocator = self.allocator;
         self.teardown();
         if (self.release.state.load(.acquire) != .released) return false;
+        if (self.terminal_provider) |*provider| provider.disposeSearches();
         allocator.destroy(self);
         return true;
     }
@@ -470,6 +481,10 @@ pub const SessionRuntime = struct {
     pub fn requestReconnectWithInitialization(self: *SessionRuntime, previous: OperationKey, next: OperationKey, skip: bool) !void {
         if (self.torn_down) return error.SessionClosed;
         try self.thread.requestReconnectWithInitialization(previous, next, skip);
+    }
+    pub fn requestReconnectConfigured(self: *SessionRuntime, previous: OperationKey, next: OperationKey, skip: bool, configuration: @import("../vt/reconnect.zig").Configuration) !void {
+        if (self.torn_down) return error.SessionClosed;
+        try self.thread.requestReconnectConfigured(previous, next, skip, configuration);
     }
     pub fn preflightExplicitDisconnect(self: *SessionRuntime, key: OperationKey) !u64 {
         if (self.torn_down) return error.SessionClosed;

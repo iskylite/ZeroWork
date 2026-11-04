@@ -41,7 +41,7 @@ const Card = struct {
         self.remove_style.set(S.iconButton());
         self.preview_style.set(S.previewButton());
         self.hover_style.set(S.hover());
-        self.root.setBackground(S.theme.current().surface_2);
+        self.root.setBackground(S.card(undefined).background.?);
         self.filename.setTextColor(S.theme.current().fg_1);
         self.metadata.setTextColor(S.theme.current().fg_2);
         _ = self.icons[0].setTint(S.theme.current().accent);
@@ -247,7 +247,7 @@ pub const View = struct {
         self.modal_body = body;
         body.meta.ownership.meta.test_id = "ai.attachment.preview.body";
         try modal.body.appendChild(cx.allocator, body);
-        const card = try ui.box(cx, .{ .width = .fill(), .padding = ui.Padding.all(14), .direction = .column, .background = S.theme.current().surface_2, .corner_radius = 11, .flex_shrink = 0 }, .{});
+        const card = try ui.box(cx, .{ .width = .fill(), .padding = ui.Padding.all(14), .direction = .column, .background = S.theme.popupInset(), .corner_radius = 11, .flex_shrink = 0 }, .{});
         self.modal_card = card;
         self.preview_identity_box = card;
         try body.appendChild(cx.allocator, card);
@@ -319,6 +319,7 @@ pub const View = struct {
         try self.cards.ensureUnusedCapacity(self.cx.allocator, 1);
         const state = try scope.createState(Card, .{ .view = self, .ticket = itemTicket(source, item), .remove_style = try scope.createSignal(S.ButtonStyle, S.iconButton()), .preview_style = try scope.createSignal(S.ButtonStyle, S.previewButton()), .hover_style = try scope.createSignal(?ui.BoxStyle, S.hover()), .removing = try scope.createSignal(bool, false) });
         const card = try ui.boxStyled(self.cx, S.card, .{});
+        @import("layer_materials.zig").card(card, .control);
         errdefer self.cx.destroyDetached(card);
         state.root = card;
         card.meta.ownership.meta.test_id = if (content.source == .terminal) "ai.attachment.terminal_text" else if (content.source == .remote_file) "ai.attachment.remote_file" else "ai.attachment.local_text";
@@ -555,7 +556,7 @@ pub const View = struct {
             self.icon_style.set(S.iconButton());
             self.icon_hover.set(S.hover());
             for (self.cards.items) |card| card.retheme();
-            self.preview_panel.setBackground(S.theme.current().overlay.withAlpha(245));
+            self.preview_panel.setBackground(S.theme.current().overlay);
             self.preview_title.setTextColor(self.colors.fg_1);
             _ = self.preview_icon.setTint(self.colors.accent);
             self.preview_identity_box.setBackground(S.theme.popupInset());

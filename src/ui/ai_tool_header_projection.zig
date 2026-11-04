@@ -4,8 +4,25 @@ const std = @import("std");
 
 pub fn projectWithStatus(a: std.mem.Allocator, name: []const u8, raw: []const u8, status: ?[]const u8) ![]u8 {
     const value = try project(a, name, raw);
-    const label = status orelse return value;
     defer a.free(value);
+    return withStatus(a, value, status);
+}
+
+pub fn phaseLabel(phase: @import("../ai/step_events.zig").Phase) []const u8 {
+    return switch (phase) {
+        .assembling => "准备中",
+        .approval => "待确认",
+        .running, .approved => "进行中",
+        .succeeded => "已完成",
+        .failed => "失败",
+        .rejected => "已拒绝",
+        .cancelled => "已取消",
+    };
+}
+
+/// Prefix an already projected summary without parsing it as tool arguments.
+pub fn withStatus(a: std.mem.Allocator, value: []const u8, status: ?[]const u8) ![]u8 {
+    const label = status orelse return a.dupe(u8, value);
     return if (value.len == 0) a.dupe(u8, label) else std.fmt.allocPrint(a, "{s} · {s}", .{ label, value });
 }
 

@@ -97,7 +97,6 @@ pub const View = struct {
         close_button.meta.ownership.meta.test_id = "ai.remote.close";
         try heading.appendChild(cx.allocator, close_button);
         try self.surface.appendChild(cx.allocator, heading);
-        try self.surface.appendChild(cx.allocator, try ui.textStyled(cx, S.text, "打开文件夹，选择文件后附加到当前对话。"));
         const source = try ui.boxStyled(cx, S.row, .{});
         source.setStyleInline(cx.allocator, .{ .height = .{ .px = 32 } });
         self.source_label = try ui.textStyled(cx, S.text, "远程来源");
@@ -122,7 +121,9 @@ pub const View = struct {
         input.node.meta.ownership.meta.test_id = "ai.remote.path";
         self.input_state = input.state;
         try path_row.appendChild(cx.allocator, input.node);
-        try path_row.appendChild(cx.allocator, try self.button("打开", "ai.remote.go", go));
+        const go_button = try self.button("打开", "ai.remote.go", go);
+        const go_hint = try @import("control_hint.zig").mount(cx, scope, go_button, "打开目录（Enter）", .{ .id = "ai.remote.go.tooltip", .visible = self.modal_open });
+        try path_row.appendChild(cx.allocator, go_hint.wrapper);
         try self.surface.appendChild(cx.allocator, path_row);
         var filter = try ui.widgets.Input(.{ .value = self.filter, .placeholder = "筛选当前目录的文件名…", .on_change = cx.on(View, self, filterChanged) }).mountResult(scope, cx);
         @import("app_theme.zig").styleInput(filter);
@@ -253,7 +254,7 @@ pub const View = struct {
         self.invalidate();
         self.want_list = false;
         self.want_read = false;
-        self.message("按 Enter 或点击“打开”读取目录") catch {};
+        self.message("目录已修改，尚未读取") catch {};
     }
     fn pathSubmitted(self: *View, _: []const u8) void {
         self.go();

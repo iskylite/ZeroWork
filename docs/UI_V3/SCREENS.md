@@ -2,7 +2,7 @@
 
 ## 0.3 macOS 菜单栏与会话活动
 
-[效果图](menu-bar/assets/design-preview.png) · [可编辑效果总览](menu-bar/effects.html) · [可交互原型](menu-bar/index.html) · [0.3 设计](../DESIGN/V0.3_MENU_BAR_ACTIVITY.md)。包含无角标、1/12/99+、右键活动会话、左键显示及前台清零。原生角标直接导出，菜单为目标效果，含已原生接入并验证的 Tab 图标、状态与排序；不冒充实机菜单验收。
+[可编辑效果总览](menu-bar/effects.html) · [可交互原型](menu-bar/index.html) · [0.3 设计](../DESIGN/V0.3_MENU_BAR_ACTIVITY.md)。包含无角标、1/12/99+、右键活动会话、左键显示及前台清零。角标和菜单均为可编辑目标效果，含已原生接入并验证的 Tab 图标、状态与排序；不冒充实机菜单验收。
 
 ## 0.2.6 AI 执行与会话管理 PATCH（设计稿）
 

@@ -12,7 +12,8 @@ const binary=resolve(process.env.ZW_AI_TEST_BINARY??join(prefix,'bin/zerowork'))
 const h=await import(join(prefix,'share/zenit/harness/client.ts'));
 const out=resolve(process.argv[2]??'dist/ui-acceptance/ai-host-fetch-integrated');await mkdir(out,{recursive:true});
 const iso=await realpath(await mkdtemp('/tmp/zw-ai-host-fetch-')),data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);
-const publicUrl='https://example.com/docs/release-notes?version=0.2.6';
+const publicUrl=process.env.ZW_FETCH_TEST_URL??'https://example.com/';
+const expectedFailure=process.env.ZW_FETCH_EXPECT_FAILURE??null;
 const stages=['REJECT','STOP','PROXY','BACKGROUND'] as const;
 type Stage=typeof stages[number];
 const callId=(stage:Stage)=>`fetch-${stage.toLowerCase()}-original-call`;
@@ -48,7 +49,9 @@ const server=createServer(async(req,res)=>{
    const envelope=JSON.parse(result.content);observations[stage]={call_id:result.tool_call_id,envelope};
    if(stage==='REJECT'||stage==='BACKGROUND'){assert.equal(envelope.error_code,'ToolApprovalRejected');assert.equal(envelope.status,'rejected');checkUnsent(envelope);}
    if(stage==='PROXY'){
-    const net=networkBody(envelope);assert.equal(net.code,'CapabilityUnavailable');assert.equal(net.execution_location,'client');assert.equal(net.requested_url,publicUrl);assert.equal(net.http_status,null);assert.equal(net.text,'');checkUnsent(envelope);
+    const net=networkBody(envelope);assert.equal(net.execution_location,'client');assert.equal(net.requested_url,publicUrl);
+    if(expectedFailure){assert.equal(envelope.status,'failed');assert.equal(net.code,expectedFailure);assert.equal(net.http_status,null);assert.equal(net.text,'');checkUnsent(envelope);}
+    else{assert.equal(envelope.status,'succeeded');assert.equal(net.code,null);assert.equal(net.http_status,200);assert(net.text.length>0);assert.equal(net.request_sent,true);assert.equal(net.local_released,true);}
    }
    res.end(frame({content:`[G-${stage}] 已保留本次本机读取的真实结果。`})+'data: [DONE]\n\n');return;
   }
@@ -69,7 +72,7 @@ const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)
 const send=async(stage:Stage)=>{await click('ai.prompt');await h.key('a',{cmd:true});await h.type_(`[G-${stage}] 获取已知公共URL资料，按本次独立网络授权执行。`);await click('ai.send');};
 const capture=async(name:string)=>{await h.mouseMove(1,1);assert((await h.screenshot(join(out,name+'.png'))).ok);await writeFile(join(out,name+'.json'),JSON.stringify(await h.query('ai.panel'),null,2));};
 const pending=async()=>{
- await visible('ai.host_approval');assert.equal(text(await visible('ai.host_approval.title')),'获取网页');
+ await visible('ai.host_approval');assert.equal(text(await visible('ai.host_approval.title')),'读取网页内容');
  const address=await visible('ai.host_approval.address_bar');assert.equal(address.rect.h,38);
  const icon=await visible('ai.host_approval.icon.network'),title=await visible('ai.host_approval.title');assert(Math.abs(icon.rect.y+icon.rect.h/2-title.rect.y-title.rect.h/2)<.5);
  assert.equal(text(await visible('ai.host_approval.url')),publicUrl);
@@ -85,7 +88,7 @@ const traceEvents=async()=>{
  for(const line of raw.split('\n')){const start=line.indexOf('AI_TOOL_TRACE ');if(start<0)continue;try{events.push(JSON.parse(line.slice(start+14)));}catch{}}
  return events;
 };
-const report:any={status:'running',binary,checks:[],limits:['Full native application, actual host catalog/Bridge/independent approval/Gate/results and notification routing; only model output is supplied by a local SSE fixture.','Current configured system proxy is tested as a real CapabilityUnavailable boundary; this run does not establish direct public-network 200/redirect/compressed-body success.']};
+const report:any={status:'running',binary,checks:[],expected_failure:expectedFailure,limits:['Full native application, actual host catalog/Bridge/independent approval/Gate/results and notification routing; only model output is supplied by a local SSE fixture.']};
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
  // Inspect the actual local proxy state without changing it. This test is
@@ -105,8 +108,18 @@ try{
  report.stop={call_id:callId('STOP'),elapsed_ms:performance.now()-stoppedAt,envelope:stopEnvelope};await capture('04-stopped-released');
  report.checks.push('Stop cancels the pending independent host approval, releases the original call and leaves an explicit unsent result without a new provider request');
 
- await send('PROXY');await pending();await click('ai.host_approval.accept');await complete('PROXY');await capture('05-approved-real-proxy-boundary');
- report.checks.push('A fresh task can request approval after Stop; approval reaches the production local HTTP backend and reports the actual configured-proxy CapabilityUnavailable with request_sent=false');
+ await h.resizeWindow(1440,900);
+ await send('PROXY');await pending();await click('ai.host_approval.accept');await complete('PROXY');
+ const group=(await h.query('ai.step_group.header')).at(-1);assert(group);
+ await h.clickAt(group.rect.x+group.rect.w/2,group.rect.y+16);await h.sleep(250);
+ const resultHeader=(await h.query('ai.tool.result.header')).at(-1);assert(resultHeader);
+ const resultStatus=text((await h.query('ai.tool.result.status')).at(-1));
+ if(expectedFailure){assert(!resultStatus.includes('已拒绝'));assert(resultStatus.includes(expectedFailure==='ProxyUnsupported'?'能力不可用':'代理'));}
+ else assert(resultStatus.includes('成功'));
+ await h.clickAt(resultHeader.rect.x+resultHeader.rect.w/2,resultHeader.rect.y+16);await h.sleep(250);
+ if(expectedFailure){const diagnostic=text((await h.query('ai.tool.result.diagnostic')).at(-1));assert(diagnostic.includes(expectedFailure));assert(diagnostic.includes('原因与建议'));}
+ await capture('05-approved-real-proxy-result');
+ report.checks.push(expectedFailure?'Proxy failure is failed rather than rejected; native header and expanded details expose the specific cause and recovery hint':'Approval reaches the production local HTTP backend through the configured system proxy and returns real HTTP 200 text');
 
  await h.resizeWindow(1440,900);await send('BACKGROUND');await h.waitFor(async()=>background||fixtureFailure?true:null,10000);assert.equal(fixtureFailure,null);
  await click('ai.session.new');await visible('ai.prompt');await click('ai.prompt');await h.type_('G 测试另一对话独立草稿');assert.equal((await h.inputState('ai.prompt')).buffer,'G 测试另一对话独立草稿');

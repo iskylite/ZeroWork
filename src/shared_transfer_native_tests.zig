@@ -339,3 +339,55 @@ test "shared transfer native real original parent FIN preserves the paused check
     try expectNoPartial(temporary.dir);
     std.debug.print("SHARED_FIN {{\"confirmed_prefix\":{d},\"actual_parent_released\":true,\"checkpoint_held_release_gate\":true,\"exported_original_binding\":true,\"explicit_checkpoint_cancel_released\":true}}\n", .{confirmed});
 }
+
+test "builtin download source read progress and terminal input survive real shared SFTP completion" {
+    var fixture = try Fixture.environment();
+    var library = try ssh.Library.init();
+    defer library.deinit();
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(directory);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(1501), .generation = 1 };
+    const binding: transfer.ServiceHandle = .{ .resource_owner = .{ .session = owner }, .origin_session = owner, .kind = .transfer, .binding_id = 1701, .binding_generation = 1 };
+    const worker = try Worker.init(a, &library, .{ .host = "127.0.0.1", .port = fixture.port, .user = "fixture", .auth = .{ .password = "shared-fixture" }, .operation_key = .{ .owner = .{ .session = owner }, .operation_id = 1601, .attempt_id = 1 }, .host_key_observer = .{ .ctx = &fixture, .callback = Fixture.trust }, .rows = 40, .cols = 160 }, .{ .keepalive_sec = 0, .auto_reconnect = false, .connect_timeout_ms = 3000, .auto_shell_integration = false });
+    const thread = try WorkerThread.start(a, worker);
+    const shared = try worker.transferService(binding);
+    defer {
+        shared.requestClose();
+        const deadline = clock.monotonicNs() + 5 * std.time.ns_per_s;
+        while (shared.closeReceipt() != .released and clock.monotonicNs() < deadline and !thread.hasFailed()) pause();
+        shared.routingReleased(binding) catch {};
+        thread.stopAndJoin();
+        while (worker.releaseConnection() == .awaiting and clock.monotonicNs() < deadline) pause();
+        thread.deinit();
+    }
+    const bytes = try a.alloc(u8, TextSlot.default_capacity);
+    defer a.free(bytes);
+    var frames: Frames = .{ .worker = worker, .thread = thread, .bytes = bytes };
+    try frames.waitText("ZW_SHARED_READY");
+    const api = shared.engine();
+    const job = try api.open(api.ctx, .{ .session_id = @backingInt(owner.session_id), .transfer_binding = binding, .direction = .download, .sources = &.{"/source.bin"}, .remote_dir = "/", .local_dir = directory, .pacing_kbps = 128 });
+    const deadline = clock.monotonicNs() + 10 * std.time.ns_per_s;
+    var saw_source_progress = false;
+    while (!saw_source_progress and clock.monotonicNs() < deadline) {
+        try frames.take();
+        while (api.poll(api.ctx)) |event| if (event.job == job) {
+            if (event.source_read) |read| if (read.done_bytes > 0 and read.done_bytes < read.total_bytes and read.speed_bps > 0) {
+                try std.testing.expectEqual(@as(u64, 0), event.done_bytes);
+                saw_source_progress = true;
+            };
+        };
+        pause();
+    }
+    try std.testing.expect(saw_source_progress);
+    _ = try frames.echo("DURING_DOWNLOAD");
+    const completed = try frames.terminal(api, job);
+    try std.testing.expectEqual(transfer.EngineState.succeeded, completed.state);
+    const data = try temporary.dir.readFileAlloc(io, "source.bin", a, .limited(200 * 1024));
+    defer a.free(data);
+    try std.testing.expectEqual(@as(usize, 96 * 1024 + 53), data.len);
+    for (data, 0..) |value, index| try std.testing.expectEqual(@as(u8, @intCast((index * 29 + 17) % 251)), value);
+    _ = try frames.echo("AFTER_DOWNLOAD");
+    std.debug.print("BUILTIN_DOWNLOAD_NATIVE source_progress=true speed_nonzero=true during_echo=true after_echo=true bytes={d}\n", .{data.len});
+}

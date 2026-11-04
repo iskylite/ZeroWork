@@ -260,6 +260,7 @@ pub const ProgressProjection = struct {
     cancelled: bool = false,
 
     pub fn observe(self: *ProgressProjection, snapshot: console.progress.Snapshot) void {
+        if (snapshot.discovery_issue != null) self.warnings |= groupBit(.management);
         inline for (@typeInfo(console.progress.Stage).@"enum".field_names) |field| {
             const stage = @field(console.progress.Stage, field);
             if (snapshot.completed_stage_ms[@intCast(@backingInt(stage))] != null) {
@@ -393,8 +394,8 @@ pub fn writeDuration(writer: *std.Io.Writer, ms: u64) !void {
     try writer.print("{d}.{d} 秒", .{ ms / 1000, (ms % 1000) / 100 });
 }
 
-/// Only schema-owned labels, numeric diagnostics and static error names cross
-/// this formatter. It never receives response bodies, headers or credentials.
+/// Owned resource paths and registry IDs supplement static labels. Response
+/// bodies, headers, queries and credentials never reach this formatter.
 pub fn writeConnectionLog(writer: *std.Io.Writer, snapshot: console.progress.Snapshot) !void {
     return writeConnectionLogForTarget(writer, snapshot, null);
 }
@@ -411,6 +412,15 @@ pub fn writeConnectionLogForTarget(writer: *std.Io.Writer, snapshot: console.pro
         try writer.writeAll("\n保留的原始失败 · ");
         try writeProgressEvent(writer, event, target);
     }
+    if (retainedDiscoveryIssue(snapshot)) |event| {
+        try writer.writeAll("\n保留的管理资源异常 · ");
+        try writeProgressEvent(writer, event, target);
+    }
+}
+fn retainedDiscoveryIssue(snapshot: console.progress.Snapshot) ?console.progress.Event {
+    const issue = snapshot.discovery_issue orelse return null;
+    for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| if (event.sequence == issue.sequence) return null;
+    return issue;
 }
 
 pub fn writeStepDiagnostics(writer: *std.Io.Writer, snapshot: console.progress.Snapshot, group: ProgressGroup) !void {
@@ -418,8 +428,14 @@ pub fn writeStepDiagnostics(writer: *std.Io.Writer, snapshot: console.progress.S
 }
 pub fn writeStepDiagnosticsForTarget(writer: *std.Io.Writer, snapshot: console.progress.Snapshot, group: ProgressGroup, target: ?[]const u8) !void {
     var count: usize = 0;
+    if (retainedDiscoveryIssue(snapshot)) |event| if (progressGroup(event.stage) == group) {
+        try writer.writeAll("保留的管理资源异常 · ");
+        try writeProgressEvent(writer, event, target);
+        count += 1;
+    };
     var original_failure: ?console.progress.Event = null;
     if (snapshot.failure_stage) |stage| if (progressGroup(stage) == group) {
+        if (count != 0) try writer.writeByte('\n');
         try writer.print("{s}\n失败阶段：{s} · {s}", .{ failureReason(snapshot.failure_code, stage), console.progress.stageLabel(stage), snapshot.failure_code orelse "UnknownFailure" });
         original_failure = snapshot.failure_event;
         if (original_failure == null) for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| {
@@ -453,8 +469,9 @@ fn retainedFailure(snapshot: console.progress.Snapshot) ?console.progress.Event 
     return failure;
 }
 
+pub const log_capacity = console.progress.capacity + 2;
 pub const LogEvents = struct {
-    events: [console.progress.capacity + 1]console.progress.Event = @splat(.{}),
+    events: [log_capacity]console.progress.Event = @splat(.{}),
     count: usize = 0,
 };
 pub fn connectionLogEvents(snapshot: console.progress.Snapshot) LogEvents {
@@ -462,6 +479,10 @@ pub fn connectionLogEvents(snapshot: console.progress.Snapshot) LogEvents {
     result.count = @min(snapshot.event_count, snapshot.events.len);
     @memcpy(result.events[0..result.count], snapshot.events[0..result.count]);
     if (retainedFailure(snapshot)) |event| {
+        result.events[result.count] = event;
+        result.count += 1;
+    }
+    if (retainedDiscoveryIssue(snapshot)) |event| {
         result.events[result.count] = event;
         result.count += 1;
     }
@@ -502,14 +523,61 @@ fn writeProgressMessage(writer: *std.Io.Writer, event: console.progress.Event, t
         if (context.channel == .ssh) {
             if (context.ssh_hop) |hop| if (context.ssh_hops) |hops| try writer.print(" · 跳板 {d}/{d}", .{ hop, hops });
         } else if (target) |endpoint| try writer.print(" → {s}", .{endpoint});
-        if (context.method != .none) try writer.print(" · {s} {s}", .{ console.progress.methodLabel(context.method), console.progress.pathLabel(context.path) });
+        if (context.method != .none) try writer.print(" · {s} {s}", .{ console.progress.methodLabel(context.method), if (context.resource_path) |*path| path.text() else console.progress.pathLabel(context.path) });
+        if (context.source_path) |*source| {
+            try writer.print(" · 链接来源：{s}", .{source.text()});
+            if (context.source_property) |*property| try writer.print(" 的 {s}", .{property.text()});
+        }
         if (context.phase != .none) try writer.print(" · {s}", .{console.progress.phaseLabel(context.phase)});
         if (context.received_bytes) |bytes| try writer.print(" · 已收 {d} B", .{bytes});
         if (include_duration) if (context.duration_ms) |ms| try writer.print(" · 请求 {d}.{d}s", .{ ms / 1000, (ms % 1000) / 100 });
     }
     if (event.code != .none) try writer.print(" · {s}", .{console.progress.codeLabel(event.code)});
     if (event.resource != .none) try writer.print(" · {s}", .{console.progress.resourceLabel(event.resource)});
-    if (event.http_status orelse (if (event.context) |context| context.http_status else null)) |status| try writer.print(" · HTTP {d}", .{status});
+    if (event.http_status orelse (if (event.context) |context| context.http_status else null)) |status| {
+        try writer.print(" · HTTP {d}{s}", .{ status, switch (status) {
+            400 => "（请求无效）",
+            401 => "（认证失败）",
+            403 => "（权限不足）",
+            404 => "（资源不存在）",
+            405 => "（不支持该请求方法）",
+            409 => "（资源冲突）",
+            412 => "（前置条件不满足）",
+            429 => "（请求过于频繁）",
+            500 => "（设备内部错误）",
+            502, 503, 504 => "（设备服务暂不可用）",
+            else => "",
+        } });
+    } else if (event.error_code != null) {
+        if (event.context) |context| if (context.method != .none) try writer.writeAll(" · HTTP 状态不可用");
+    }
+    if (event.context) |context| if (context.response_errors) |*errors| {
+        try writer.writeAll(if (event.code == .resource_fields_available or event.code == .readonly_projection_available) " · 设备附带诊断/MessageId：" else " · Redfish 错误码/MessageId：");
+        var ids = std.mem.splitSequence(u8, errors.text(), ", ");
+        var first = true;
+        while (ids.next()) |id| {
+            if (!first) try writer.writeAll(", ");
+            first = false;
+            try writer.writeAll(id);
+            const key = id[(std.mem.lastIndexOfScalar(u8, id, '.') orelse continue) + 1 ..];
+            const reasons = .{
+                .{ "InternalError", "设备报告内部错误" },
+                .{ "GeneralError", "设备报告一般错误" },
+                .{ "ResourceNotFound", "资源不存在" },
+                .{ "InsufficientPrivilege", "当前账号权限不足" },
+                .{ "NoValidSession", "认证会话无效" },
+                .{ "ResourceInUse", "资源正被占用" },
+                .{ "PropertyValueError", "属性值错误" },
+                .{ "PropertyValueTypeError", "属性值类型错误" },
+                .{ "PropertyValueNotInList", "属性值不在设备允许范围内" },
+                .{ "ActionNotSupported", "设备不支持该动作" },
+                .{ "PreconditionFailed", "前置条件不满足" },
+            };
+            inline for (reasons) |reason| {
+                if (std.mem.eql(u8, key, reason[0])) try writer.print("（{s}）", .{reason[1]});
+            }
+        }
+    };
     if (event.count) |count| try writer.print(" · {d} 项", .{count});
     if (event.validity) |validity| try writer.print(" · {s}", .{switch (validity) {
         .valid => "有效",

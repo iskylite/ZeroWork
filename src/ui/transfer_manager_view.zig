@@ -43,6 +43,7 @@ pub const Task = struct {
     done_bytes: u64 = 0,
     total_bytes: ?u64 = null,
     speed_bps: u64 = 0,
+    reading_source: bool = false,
     status_detail: []const u8 = "",
     options: []const u8 = "",
     events: []const u8 = "",
@@ -67,6 +68,7 @@ pub const Hooks = struct {
     scope_changed: ?*const fn (*anyopaque, Scope) void = null,
     new_transfer: ?*const fn (*anyopaque) void = null,
     open_manager: ?*const fn (*anyopaque, Scope) void = null,
+    closed: ?*const fn (*anyopaque) void = null,
 };
 pub const Filter = enum { all, active, waiting, paused, failed, ended };
 pub const Counts = struct { active: usize = 0, waiting: usize = 0, paused: usize = 0, failed: usize = 0, ended: usize = 0, speed_bps: u64 = 0 };
@@ -157,7 +159,7 @@ fn copyScope(a: std.mem.Allocator, scope: Scope) !Scope {
 fn taskEql(a: Task, b: Task) bool {
     if (!same(a.target, b.target) or a.direction != b.direction or a.phase != b.phase or
         a.done_bytes != b.done_bytes or a.total_bytes != b.total_bytes or a.speed_bps != b.speed_bps or
-        a.can_resume != b.can_resume or a.can_reveal != b.can_reveal) return false;
+        a.can_resume != b.can_resume or a.can_reveal != b.can_reveal or a.reading_source != b.reading_source) return false;
     inline for (.{ "name", "owner_label", "local_path", "remote_path", "route", "status_detail", "options", "events", "event_summary" }) |field| {
         if (!std.mem.eql(u8, @field(a, field), @field(b, field))) return false;
     }
@@ -236,35 +238,6 @@ pub fn mountWindow(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager, call
     return panel;
 }
 
-// A short leave grace lets the pointer cross the tooltip's 8px gap.
-const DetailHover = struct {
-    cx: *ui.Cx,
-    close: ?ui.Handler(void),
-    show: ?ui.Handler(void),
-    deadline: ?i128 = null,
-    fn enter(self: *DetailHover) void {
-        self.deadline = null;
-    }
-    fn triggerEnter(self: *DetailHover) void {
-        self.enter();
-        if (self.show) |show| show.invoke();
-    }
-    fn leave(self: *DetailHover) void {
-        self.deadline = @import("../platform/realtime.zig").monotonicNs() + 250 * std.time.ns_per_ms;
-        self.cx.scheduleRedrawAfterNs(250 * std.time.ns_per_ms);
-    }
-    fn tick(node: *ui.Node) void {
-        const self: *DetailHover = @ptrCast(@alignCast(node.meta.ownership.debug_slots.state_ptrs[0].?));
-        if (self.deadline) |deadline| {
-            const now = @import("../platform/realtime.zig").monotonicNs();
-            if (now >= deadline) {
-                self.deadline = null;
-                if (self.close) |close| close.invoke();
-            } else self.cx.scheduleRedrawAfterNs(@intCast(deadline - now));
-        }
-    }
-};
-
 const Control = struct {
     panel: *Panel,
     target: ?Target = null,
@@ -273,9 +246,13 @@ const Control = struct {
     choice: ?usize = null,
     menu_open: ?*ui.Signal(bool) = null,
     state_filter: ?Filter = null,
+    copy_feedback: ?*@import("copy_button.zig").Button = null,
+    copy_anchor: ?*ui.Node = null,
+    event_anchor: ?*ui.Node = null,
     kind: enum { action, detail, events, copy_path, copy_local_path, window, choice, search, filter, new_transfer, batch, batch_pause, batch_resume, batch_cancel, all_tasks, scope_tasks, state_filter } = .action,
     fn run(self: *Control) void {
         const p = self.panel;
+        const copy_rect = if (self.copy_anchor) |node| node.globalRect() else p.root.globalRect();
         if (self.menu_open) |open| open.set(false);
         p.in_action = true;
         defer p.in_action = false;
@@ -288,11 +265,13 @@ const Control = struct {
                     p.fail(err);
                     return;
                 };
-                p.event_view.?.show(task_.target.job, task_.events) catch |err| p.fail(err);
+                p.event_view.?.show(task_.target.job, task_.events, self.event_anchor orelse return) catch |err| p.fail(err);
             },
             .copy_path, .copy_local_path => {
                 const task_ = p.task(self.target.?) orelse return;
-                if (!ui.platform_services.clipboardSetText(p.cx.system_sdk, if (self.kind == .copy_local_path) task_.local_path else task_.remote_path)) p.fail(error.ClipboardUnavailable);
+                const success = ui.platform_services.clipboardSetText(p.cx.system_sdk, if (self.kind == .copy_local_path) task_.local_path else task_.remote_path);
+                if (self.copy_feedback) |button| button.report(success);
+                if (!success) p.fail(error.ClipboardUnavailable) else if (self.menu_open != null or self.copy_feedback == null) @import("notification_presenter.zig").acknowledgeAt(p.cx, copy_rect, "路径已复制") catch {};
             },
             .detail => {
                 if (p.task(self.target.?) == null) return;
@@ -307,7 +286,10 @@ const Control = struct {
                         return;
                     };
                 }
-                if (self.window == .close) p.hide();
+                if (self.window == .close) {
+                    p.hide();
+                    if (p.hooks.closed) |call| call(p.hooks.context);
+                }
             },
             .choice => {
                 const source = p.source orelse return;
@@ -486,7 +468,7 @@ pub const Panel = struct {
         p.counts_row.meta.ownership.meta.test_id = "transfer.states.toolbar";
         try p.root.appendChild(cx.allocator, p.counts_row);
         for (&p.counts_labels, 0..) |*label_, i| {
-            const box = try ui.box(cx, S.badge(if (i == 0) 84 else 74, countColor(i)), .{});
+            const box = try ui.box(cx, S.badge(if (i == 0) 64 else 54, countColor(i)), .{});
             label_.* = try p.label(box, "", 10, 500, true);
             try p.counts_row.appendChild(cx.allocator, box);
         }
@@ -606,6 +588,14 @@ pub const Panel = struct {
         const owned_label = try scope.createText(label_, .{});
         const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = if (size <= 24) @as(f32, 14) else 16, .a11y_label = owned_label, .base_style = S.action(size), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
         node.meta.ownership.meta.test_id = test_id;
+        if (control.kind == .copy_path or control.kind == .copy_local_path) {
+            state.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, node);
+            state.copy_anchor = node;
+        }
+        if (control.kind == .events) {
+            state.event_anchor = node;
+            if (self.event_view) |events| events.reanchor(control.target.?.job, node);
+        }
         try parent.appendChild(self.cx.allocator, node);
         return node;
     }
@@ -692,12 +682,10 @@ pub const Panel = struct {
         if (self.options.presentation != .session_popover and self.options.presentation != .session_tray) {
             var preferred: f32 = 106;
             for (self.visible.items) |index| preferred = @max(preferred, self.cx.text.measureTextWidth(source.value.rows[index].owner_label, 11, 400, false) + 2);
-            // Filename gets its measured list-wide width first; only the owner
-            // gives up space, retaining a small ellipsis slot on narrow views.
-            var filename_width: f32 = 120;
-            for (self.visible.items) |index| filename_width = @max(filename_width, self.cx.text.measureTextWidth(source.value.rows[index].name, 12, 400, false) + 2);
+            // Keep a useful filename slot; long filenames ellipsize within it.
+            const filename_width: f32 = 160;
             const available = if (self.metadata_layout_width > 0) self.metadata_layout_width else 812;
-            const reserved: f32 = 20 + 14 + 76 + 112 + 102 + 30 + (if (self.batch_visible) @as(f32, 22) else 0);
+            const reserved: f32 = 20 + 14 + 112 + 102 + 24 + (if (self.batch_visible) @as(f32, 22) else 0);
             const budget = @max(0, available - reserved);
             const filename_reserved = @min(filename_width, @max(0, budget - 48));
             self.owner_column_width = @min(preferred, @max(0, budget - filename_reserved));
@@ -717,7 +705,7 @@ pub const Panel = struct {
         for ([_][]const u8{ "进行中", "等待", "暂停", "失败", "结束" }, values, self.counts_labels, 0..) |name, count, node, i| {
             try self.format(node, "{s} {d}", .{ name, count });
             node.setTextColor(if (count == 0) S.theme.current().fg_3 else countColor(i));
-            node.parent.?.setStyleInline(self.cx.allocator, S.badge(if (i == 0) 84 else 74, if (count == 0) S.theme.current().fg_3 else countColor(i)));
+            node.parent.?.setStyleInline(self.cx.allocator, S.badge(if (i == 0) 64 else 54, if (count == 0) S.theme.current().fg_3 else countColor(i)));
         }
         const has_tasks = self.counts.active + self.counts.waiting + self.counts.paused + self.counts.failed + self.counts.ended != 0;
         self.counts_row.setDisplay(if (self.options.presentation != .session_tray and has_tasks) .flex else .none);
@@ -796,7 +784,7 @@ pub const Panel = struct {
                     width = std.math.clamp(self.cx.text.measureTextWidth(choice_label, 10, 400, false) + 38, 64, 260);
                 }
             }
-            const select = try ui.widgets.Select(.{ .options = choices.items, .value = selected, .placeholder = "全局", .size = .xs, .width = width, .dropdown_width = @min(menu_width, 320), .dropdown_position = .bottom_start, .on_change = self.cx.on(Panel, self, scopeChanged) }).mount(scope, self.cx);
+            const select = try ui.widgets.Select(.{ .options = choices.items, .value = selected, .placeholder = "全局", .size = .xs, .width = width, .dropdown_width = @min(menu_width, 320), .dropdown_position = .bottom_start, .on_change = self.cx.on(Panel, self, scopeChanged), .option_style = S.scopeOption() }).mount(scope, self.cx);
             select.chrome.meta.ownership.meta.test_id = "transfer.scope.menu";
             select.chrome.setStyleInline(self.cx.allocator, S.scopeMenu());
             try S.theme.bindMaterial(self.cx, select.scope, select.chrome, "overlay");
@@ -805,7 +793,6 @@ pub const Panel = struct {
             if (select.trigger.behavior.interaction.a11y) |*a11y| a11y.label = "选择传输会话";
             const state = ui.widgets.select.stateOf(select);
             state.trigger.setStyleInline(self.cx.allocator, S.scopeTrigger());
-            for (state.option_nodes) |option| option.setStyleInline(self.cx.allocator, S.scopeOption());
             try picker.appendChild(self.cx.allocator, select.wrapper);
         }
         try self.v3TaskAction(self.tools_row, scope, if (self.batch_visible) "完成" else "管理", "transfer.batch", .{ .panel = self, .kind = .batch }, false);
@@ -841,7 +828,11 @@ pub const Panel = struct {
         const color = phaseColor(task_.phase);
         try upper.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.direction == .upload) "arrow-up-right" else "arrow-down-left").?, color, S.icon(14)));
         checkbox.setStyleInline(cx.allocator, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .min_width = 16, .padding = .ZERO, .flex_shrink = 0 });
-        _ = try self.taskTextSlot(upper, scope, task_.name, 12, false, false, "transfer.task.name");
+        const tip = try ui.widgets.Popover(.{ .trigger = .click, .position = .bottom_start, .offset = .{ .static = 8 }, .width = @as(f32, 420), .max_width = @as(f32, 420), .max_height = @as(f32, 520), .constrain_width_to_viewport = true, .shift_main_axis = true, .size_policy = .fit_content }).mount(scope, cx);
+        tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 24 }, .flex = 1, .min_width = 0 });
+        tip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0, .align_items = .center, .cursor = .pointer });
+        try upper.appendChild(cx.allocator, tip.wrapper);
+        _ = try self.taskTextSlot(tip.trigger, scope, task_.name, 12, false, false, "transfer.task.name");
         if (self.options.presentation != .session_tray and self.options.presentation != .session_popover) {
             const owner = try self.label(upper, task_.owner_label, 11, 400, true);
             owner.setStyleInline(cx.allocator, S.label(self.owner_column_width));
@@ -852,16 +843,6 @@ pub const Panel = struct {
                 text_props.text_align = .end;
                 owner.setText(text_props);
             }
-        }
-        const status = try self.label(upper, phaseLabel(task_.phase), 11, 400, true);
-        status.setTextColor(color);
-        status.meta.ownership.meta.test_id = "transfer.task.status";
-        status.setStyleInline(cx.allocator, S.label(if (compact) 48 else if (self.options.presentation == .session_tray) 66 else 76));
-        if (status.getText()) |value| {
-            var props = value;
-            props.text_overflow = .ellipsis;
-            props.text_align = .end;
-            status.setText(props);
         }
         var buffer: [96]u8 = undefined;
         const description = if (task_.phase == .running) try std.fmt.bufPrint(&buffer, "{d:.1} MiB/s", .{@as(f64, @floatFromInt(task_.speed_bps)) / 1048576}) else if (task_.status_detail.len > 0) task_.status_detail else switch (task_.phase) {
@@ -915,7 +896,16 @@ pub const Panel = struct {
             } else try self.format(progress, "{s} / {s}", .{ done_text, total_text });
         } else try self.format(progress, "{s} / 大小未知", .{done_text});
         progress.setStyleInline(cx.allocator, .{ .width = .{ .px = if (compact) @max(@as(f32, 1), (self.tray_layout_width - 40) * 0.48) else if (self.options.presentation == .session_tray) 160 else 270 }, .min_width = 0, .flex_shrink = 1, .overflow = .hidden, .overflow_hidden = true });
-        _ = try self.taskTextSlot(lower, scope, task_.remote_path, 10.5, true, true, "transfer.task.location");
+        const status = try self.label(lower, if (task_.reading_source) "读取源文件" else phaseLabel(task_.phase), 11, 400, true);
+        status.setTextColor(color);
+        status.meta.ownership.meta.test_id = "transfer.task.status";
+        status.setStyleInline(cx.allocator, S.flexibleLabel());
+        if (status.getText()) |value| {
+            var props = value;
+            props.text_overflow = .ellipsis;
+            props.text_align = .end;
+            status.setText(props);
+        }
         {
             const track = try ui.box(cx, S.track(), .{});
             track.meta.ownership.meta.test_id = "transfer.task.progress";
@@ -923,22 +913,11 @@ pub const Panel = struct {
             const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
             try track.appendChild(cx.allocator, try ui.box(cx, S.fill(@floatCast(fraction), progressColor(task_.phase)), .{}));
         }
-        const tip = try ui.widgets.Tooltip(.{ .text = "", .open_delay_ms = @as(f32, 450), .position = .bottom_end, .offset = 8, .width = @as(f32, 420), .wrap = .word }).mount(scope, cx);
-        const hover = try scope.createState(DetailHover, .{ .cx = cx, .close = tip.wrapper.behavior.events.on_leave, .show = tip.wrapper.behavior.events.on_hover });
-        tip.wrapper.behavior.events.on_hover = cx.on(DetailHover, hover, DetailHover.triggerEnter);
-        tip.wrapper.behavior.events.on_leave = cx.on(DetailHover, hover, DetailHover.leave);
-        tip.wrapper.meta.ownership.debug_slots.state_ptrs[0] = hover;
-        tip.wrapper.addBeforeRender(DetailHover.tick);
-        tip.content.behavior.events.on_hover = cx.on(DetailHover, hover, DetailHover.enter);
-        tip.content.behavior.events.on_leave = cx.on(DetailHover, hover, DetailHover.leave);
-        // Keep Tooltip's portal, delay and lifetime; replace its empty label
-        // visually with the same structured detail groups as the HTML baseline.
-        tip.content.children.items[0].setDisplay(.none);
-        tip.content.setStyleInline(cx.allocator, S.hoverDetail());
+        tip.chrome.setStyleInline(cx.allocator, S.hoverDetail());
         const detail_ext = try tip.content.style.ensureExtFallible(cx.allocator);
         detail_ext.hit_shape = .{ .rounded_rect = 10 };
         detail_ext.clip_shape = .{ .rounded_rect = 10 };
-        tip.content.meta.ownership.meta.test_id = "transfer.task.hover_detail";
+        tip.content.meta.ownership.meta.test_id = "transfer.task.detail_popup";
         const identity_text = try std.fmt.allocPrint(cx.allocator, "任务 #{d} · {s}", .{ task_.target.job, task_.owner_label });
         defer cx.allocator.free(identity_text);
         const detail_identity = try self.detailLabel(tip.content, identity_text, false, true, "transfer.detail.identity");
@@ -965,12 +944,8 @@ pub const Panel = struct {
                 try tag.appendChild(cx.allocator, label_);
             }
         }
-        tip.content.behavior.interaction.a11y.?.label = "传输任务详情";
-        tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = S.row_height }, .flex_shrink = 0 });
-        tip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill() });
-        root.removeChild(row);
-        try tip.trigger.appendChild(cx.allocator, row);
-        try root.appendChild(cx.allocator, tip.wrapper);
+        tip.content.behavior.interaction.a11y = .{ .role = .dialog, .label = "传输任务详情" };
+        tip.trigger.behavior.interaction.a11y = .{ .role = .button, .label = task_.name };
         return root;
     }
     fn detailLabel(self: *Panel, parent: *ui.Node, value: []const u8, mono: bool, secondary: bool, test_id: []const u8) !*ui.Node {
@@ -992,11 +967,11 @@ pub const Panel = struct {
         const heading = try ui.box(self.cx, S.row(24, 6), .{});
         try group.appendChild(self.cx.allocator, heading);
         _ = try self.detailLabel(heading, title, false, true, "transfer.detail.label");
-        if (value.len != 0) _ = try self.button(heading, scope, if (local) "复制本地路径" else "复制远程路径", if (local) "transfer.detail.copy_local" else "transfer.detail.copy_remote", "copy", .{ .panel = self, .target = target, .kind = if (local) .copy_local_path else .copy_path }, false, 24);
+        const copy_button = if (value.len != 0) try self.button(heading, scope, if (local) "复制本地路径" else "复制远程路径", if (local) "transfer.detail.copy_local" else "transfer.detail.copy_remote", "copy", .{ .panel = self, .target = target, .kind = if (local) .copy_local_path else .copy_path }, false, 24) else null;
         const path = try self.detailLabel(group, if (value.len != 0) value else "未提供", true, false, test_id);
         if (value.len != 0) {
-            const control = try scope.createState(Control, .{ .panel = self, .target = target, .kind = if (local) .copy_local_path else .copy_path });
-            _ = ui.clickable(path, self.cx.on(Control, control, Control.run));
+            // Clicking the path acknowledges on its adjacent copy button too.
+            _ = ui.clickable(path, copy_button.?.behavior.events.on_click.?);
         }
     }
 
@@ -1072,6 +1047,11 @@ pub const Panel = struct {
             const label_ = try menu.scope.createText(entry.label, .{});
             const button_ = try ui.widgets.Button(.{ .label = label_, .variant = .ghost, .icon_asset = ui.icons.get(entry.icon), .icon_size = @as(f32, 14), .a11y_label = label_, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 28 }, .justify = .start, .padding = .{ .left = 8, .right = 8 }, .font_size = 11, .text_color = if (entry.action != null) S.theme.current().danger_ink else S.theme.current().fg_2, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .shadow = .{} }, .disabled = entry.action != null and !self.actionAvailable(task_.target), .on_click = self.cx.on(Control, state, Control.run) }).mount(menu.scope, self.cx);
             button_.meta.ownership.meta.test_id = entry.id;
+            if (entry.kind == .copy_path) state.copy_anchor = button_;
+            if (entry.kind == .events) {
+                state.event_anchor = trigger;
+                if (self.event_view) |events| events.reanchor(task_.target.job, trigger);
+            }
             try menu.content.appendChild(self.cx.allocator, button_);
         }
     }
@@ -1316,6 +1296,12 @@ pub const Panel = struct {
                 row.speed_bps = 0;
                 row.status_detail = "";
             }
+            if (p.state == .running) if (p.source_read) |read| {
+                row.reading_source = true;
+                row.done_bytes = read.done_bytes;
+                row.total_bytes = read.total_bytes;
+                row.speed_bps = read.speed_bps;
+            };
             if (p.state == .succeeded and p.skipped_files > 0) {
                 if (p.skipped_files == spec.sources.len) row.phase = .skipped;
                 row.status_detail = try std.fmt.allocPrint(a, "已跳过 {d} 项", .{p.skipped_files});
@@ -1440,7 +1426,7 @@ pub const Panel = struct {
             return .needs_layout;
         }
         const global = p.options.presentation == .global_popover;
-        const desired_width: f32 = 760;
+        const desired_width: f32 = if (global) 640 else 560;
         const width = @max(@as(f32, 1), @min(desired_width, bounds.w - 24));
         var list_height: f32 = 0;
         for (p.visible.items, 0..) |_, i| list_height += itemHeight(i, p);

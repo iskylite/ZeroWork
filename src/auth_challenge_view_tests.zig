@@ -12,7 +12,10 @@ test "idle authentication hide clears secrets once without requesting another fr
     defer f.deinit();
     _ = try f.offer(.keyboard_interactive, .protected_form, &.{.{ .text = "Password:", .echo = false }});
     f.edit(0, "temporary secret");
+    f.cx.focus_manager.setFocusWithReason(f.view.header_close, .tab);
+    try std.testing.expect(f.view.close_hint_open.?.peek());
     f.view.hide();
+    try std.testing.expect(!f.view.close_hint_open.?.peek());
     try std.testing.expectEqualStrings("", f.view.fields[0].input.state.getText());
     f.cx.needs_redraw = false;
     f.view.hide();
@@ -112,6 +115,7 @@ test "auth challenge view protected form orders real inputs and submits the orig
     defer f.deinit();
     const id = try f.offer(.keyboard_interactive, .protected_form, &.{ .{ .text = "Account:", .echo = true }, .{ .text = "Recovery phrase:", .echo = false } });
     try std.testing.expect(f.view.isInline());
+    try std.testing.expect(f.view.notice_detail.style.display == .none);
     try std.testing.expect(f.view.modal == null);
     try std.testing.expectEqualStrings("Account:", f.view.snapshot.?.promptAt(0).text);
     try std.testing.expectEqualStrings("operator@target.example:2222", f.view.identity_endpoint.getText().?.content);
@@ -259,7 +263,7 @@ test "auth challenge view error retry expiry and cancellation never replay old s
     try std.testing.expectEqualStrings("正在取消连接", f.view.notice_title.getText().?.content);
 }
 
-test "auth challenge view host key details are copied and replacement needs exact lowercase yes" {
+test "auth challenge view host key details are copied and one explicit click confirms replacement" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -269,11 +273,10 @@ test "auth challenge view host key details are copied and replacement needs exac
     try f.view.setDetails(id, .{ .algorithm = "ssh-ed25519", .fingerprint = &fingerprint, .previous_algorithm = "ssh-rsa", .previous_fingerprint = "SHA256:actual-old-key", .store_path = "/tmp/known_hosts" });
     @memset(&fingerprint, 'x');
     try std.testing.expectEqualStrings("SHA256:actual-new-key", f.view.fingerprint.?.getText().?.content);
-    f.edit(0, "YES");
-    try std.testing.expect(f.view.submit_disabled.peek());
-    f.view.fields[0].input.state.applyExternalText("") catch unreachable;
-    f.edit(0, "yes");
+    try std.testing.expectEqual(@as(usize, 0), f.view.field_count);
     try std.testing.expect(!f.view.submit_disabled.peek());
+    _ = f.view.handleKey(.@"return");
+    try std.testing.expectEqual(@as(usize, 0), f.submitted);
     f.view.submit();
     var response = try f.bridge.waitResponse(id, 50);
     defer response.deinit();

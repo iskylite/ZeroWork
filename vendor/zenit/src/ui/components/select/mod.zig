@@ -11,6 +11,7 @@ const core = @import("../../core.zig");
 const view = @import("../../view.zig");
 const svg_assets = @import("../../svg_assets.zig");
 const icons = @import("zenit_system_icons");
+const virtual_list = @import("../virtual_list/mod.zig");
 const popover_mod = @import("../popover/mod.zig");
 const input_mod = @import("../input/mod.zig");
 const button_mod = @import("../button/mod.zig");
@@ -52,7 +53,7 @@ pub const SelectOption = struct {
 pub const SelectProps = struct {
     /// Options (can pass signal/derived: rebuild option rows on content/address change). Strings in
     /// option owned by
-    /// caller, must stay valid while current; static arrays shallow-copied. Max 64 items
+    /// caller, must stay valid while current; static arrays shallow-copied.
     options: Source([]const SelectOption) = .{ .value = &.{} },
     /// Placeholder text in trigger when unselected (can pass signal/derived: i18n, loading, updates
     /// with deps).
@@ -65,6 +66,8 @@ pub const SelectProps = struct {
     size: SelectSize = .md,
     mode: SelectMode = .single,
     searchable: bool = false,
+    /// Use a scrollable virtual viewport even below the automatic 200-row threshold.
+    virtualize: bool = false,
     /// Keep the selected label in a searchable single-select trigger. Set to
     /// false for search-first presentations where the trigger should retain
     /// its search placeholder while the selected row remains checked.
@@ -86,6 +89,8 @@ pub const SelectProps = struct {
     on_open_change: ?Handler(bool) = null,
     disabled: Source(bool) = .{ .value = false },
     max_dropdown_height: f32 = 280,
+    /// Style applied to every option, including rows rebound by virtualization.
+    option_style: Source(?core.BoxStyle) = .{ .value = null },
 };
 
 /// Create Select: `W.Select(.{ .options = &opts, .value = lang, .on_change = cx.on(S, s, S.picked)
@@ -214,6 +219,7 @@ pub const SelectState = struct {
     cx: *Cx,
     mode: SelectMode,
     searchable: bool,
+    virtualize: bool = false,
     clearable: bool,
     /// At mount don't write selected label to search box (`show_selected_value_in_search = false`);
     /// clear after first view, then selected writes back normally
@@ -261,7 +267,26 @@ pub const SelectState = struct {
     tag_nodes: []*Node = &.{},
 
     // ---- Derived / internal interaction state ----
-    selected_mask: u64 = 0,
+    selected_flags: []bool = &.{},
+    selection_next: []bool = &.{},
+    selected_count: usize = 0,
+    first_selected: ?usize = null,
+    option_index: ?*const std.StringHashMapUnmanaged(usize) = null,
+    tags_dirty: bool = true,
+    tags_parent_scope: *Scope,
+    tags_scope: ?*Scope = null,
+    large: bool = false,
+    options_scope: ?*Scope = null,
+    virtual: ?*virtual_list.VirtualListState = null,
+    filtered_indices: []usize = &.{},
+    filtered_count: usize = 0,
+    filtered_positions: []?usize = &.{},
+    virtual_update_pending: bool = false,
+    virtual_viewport_height: f32 = -1,
+    max_dropdown_height: f32,
+    option_style: Source(?core.BoxStyle),
+    shown_option_style: ?core.BoxStyle = null,
+    options_container: ?*Node = null,
     shown_open: bool = false,
     shown_disabled: bool = false,
     /// Last selected label written to search box (only overwrite when changes, don't interrupt user
@@ -273,15 +298,15 @@ pub const SelectState = struct {
     query_len: usize = 0,
 
     pub fn isSelected(self: *const SelectState, index: usize) bool {
-        if (index >= 64) return false;
-        return (self.selected_mask & (@as(u64, 1) << @intCast(index))) != 0;
+        return index < self.selected_flags.len and self.selected_flags[index];
     }
 
     pub fn selectedCount(self: *const SelectState) usize {
-        return @popCount(self.selected_mask);
+        return self.selected_count;
     }
 
     fn indexOf(self: *const SelectState, value: []const u8) ?usize {
+        if (self.option_index) |index| return index.get(value);
         for (self.options, 0..) |o, i| {
             if (std.mem.eql(u8, o.value, value)) return i;
         }
@@ -295,25 +320,41 @@ pub const SelectState = struct {
     }
 
     fn applyView(self: *SelectState, comptime tracked: bool) void {
+        const row_style = self.option_style.read(tracked);
+        if (!std.meta.eql(row_style, self.shown_option_style)) {
+            self.shown_option_style = row_style;
+            if (self.virtual != null) self.virtual_update_pending = true;
+        }
         const disabled = self.disabled.read(tracked);
         const open = self.open.readAs(tracked);
-        var mask: u64 = 0;
+        // Selection storage follows this option publication, never a fixed bit mask.
+        @memset(self.selection_next, false);
         if (self.mode == .single) {
-            const v = self.value.?.readAs(tracked);
-            // Value not in options just doesn't display as selected, doesn't write back
-            if (v) |s| if (self.indexOf(s)) |i| {
-                mask = @as(u64, 1) << @intCast(i);
+            if (self.value.?.readAs(tracked)) |v| if (self.indexOf(v)) |i| {
+                self.selection_next[i] = true;
             };
         } else {
-            for (self.values.?.readAs(tracked)) |s| {
-                if (self.indexOf(s)) |i| mask |= @as(u64, 1) << @intCast(i);
+            for (self.values.?.readAs(tracked)) |v| if (self.indexOf(v)) |i| {
+                self.selection_next[i] = true;
+            };
+        }
+        var changed = false;
+        self.selected_count = 0;
+        self.first_selected = null;
+        for (self.selection_next, self.selected_flags, 0..) |flag, old, i| {
+            changed = changed or flag != old;
+            if (flag) {
+                self.selected_count += 1;
+                if (self.first_selected == null) self.first_selected = i;
             }
         }
-        // Label displays placeholder when unselected: subscribe to it, redraw when changes
-        // (syncSelection reads current and copies to label)
+        const old_flags = self.selected_flags;
+        self.selected_flags = self.selection_next;
+        self.selection_next = old_flags;
+        if (changed) self.tags_dirty = true;
         if (self.trigger_label != null) _ = self.placeholder.read(tracked);
-        self.selected_mask = mask;
         const closing = self.shown_open and !open;
+        if (self.large and open and !self.shown_open) self.tags_dirty = true;
         self.shown_open = open;
         if (disabled != self.shown_disabled) self.applyDisabled(disabled);
         if (closing) self.discardSearchDraft() else self.syncSearchLabel();
@@ -411,22 +452,40 @@ pub const SelectState = struct {
         return true;
     }
 
-    /// Multi-select: propose value set corresponding to mask in option order
-    /// Return whether proposal settled (data source actually changed)
-    fn proposeMask(self: *SelectState, mask: u64) bool {
+    const SelectionChange = enum { replace, add, remove, toggle };
+
+    /// The temporary proposal survives synchronous option rebuilding/unmount.
+    /// Bound list models copy it before returning, including split models.
+    fn proposeItems(self: *SelectState, change: SelectionChange, index: usize, clear_query: bool) bool {
         const b = self.values orelse return false;
-        var buf: [64][]const u8 = undefined;
-        var n: usize = 0;
+        const allocator = self.allocator;
+        const buf = allocator.alloc([]const u8, self.options.len) catch return false;
+        defer allocator.free(buf);
+        var count: usize = 0;
         for (self.options, 0..) |o, i| {
-            if (i < 64 and (mask & (@as(u64, 1) << @intCast(i))) != 0) {
-                buf[n] = o.value;
-                n += 1;
+            const previous = self.isSelected(i);
+            const wanted = switch (change) {
+                .replace => i == index,
+                .add => previous or i == index,
+                .remove => previous and i != index,
+                .toggle => if (i == index) !previous else previous,
+            };
+            if (wanted) {
+                buf[count] = o.value;
+                count += 1;
             }
         }
         const on_change = self.on_values_change;
-        const landed = b.commit(buf[0..n]) orelse return false;
+        const landed = b.commit(buf[0..count]) orelse return false;
+        var exact = landed.len == count;
+        if (exact) for (landed, buf[0..count]) |x, y| {
+            if (!std.mem.eql(u8, x, y)) exact = false;
+        };
+        if (clear_query) clearSearch(self);
+        self.paint();
+        // A handler may destroy the component. Do not touch self afterwards.
         if (on_change) |h| h.call(landed);
-        return true;
+        return exact;
     }
 
     // ---- Option rebuild (ui.rebuildOn) ----
@@ -458,6 +517,10 @@ pub const SelectState = struct {
             self.cx.detachChild(tags, n);
             self.cx.freeNode(n);
         }
+        if (self.tags_scope) |scope| {
+            self.tags_scope = null;
+            scope.dispose();
+        }
         tags.markLayoutDirty();
     }
 
@@ -465,11 +528,21 @@ pub const SelectState = struct {
         options: []*Node = &.{},
         checks: []*Node = &.{},
         tags: []*Node = &.{},
+        next_selection: []bool = &.{},
+        positions: []?usize = &.{},
         items: []ItemContext = &.{},
         tag_ctxs: []ItemContext = &.{},
+        selection: []bool = &.{},
+        indices: []usize = &.{},
+        index: std.StringHashMapUnmanaged(usize) = .empty,
 
         fn destroy(ptr: *anyopaque, alloc: Allocator) void {
             const p: *Parts = @ptrCast(@alignCast(ptr));
+            alloc.free(p.selection);
+            alloc.free(p.next_selection);
+            alloc.free(p.positions);
+            alloc.free(p.indices);
+            p.index.deinit(alloc);
             alloc.free(p.options);
             alloc.free(p.checks);
             alloc.free(p.tags);
@@ -478,6 +551,167 @@ pub const SelectState = struct {
             alloc.destroy(p);
         }
     };
+
+    const Row = struct { node: *Node, check: *Node };
+    fn buildRow(self: *SelectState, child: *Scope, container: *Node, option: SelectOption, i: usize, supplied_context: ?*ItemContext) !Row {
+        const cx = self.cx;
+        const m = self.metrics;
+        const colors = self.colors;
+        const option_style: core.BoxStyle = .{
+            .width = .{ .grow = .{} },
+            .direction = .row,
+            .align_items = .center,
+            .justify = .space_between,
+            .padding = if (self.mode == .multiple) core.Padding.all(m.row_padding.top) else m.row_padding,
+            .corner_radius = m.row_radius,
+            .cursor = if (option.disabled) .default else .pointer,
+        };
+        const checkbox_style: core.BoxStyle = .{
+            .width = .{ .px = m.checkbox_size },
+            .height = .{ .px = m.checkbox_size },
+            .direction = .row,
+            .align_items = .center,
+            .justify = .center,
+            .background = colors.bg,
+            .border = .{ .width = 1.5, .color = colors.border_strong, .radius = m.checkbox_radius },
+        };
+        var check_node: *Node = undefined;
+        // Row = [content (icon + text), selection mark]: single is check icon, multi is
+        // checkbox.
+        // Row scope bound to row node (view.append), released together when rebuild clears rows
+        const option_node = try view.append(child, cx, container, view.box(.{
+            .style = .{ option_style, view.styleBy(self.option_style, resolveOptionStyle) },
+            .a11y = .{ .role = .option, .label = option.label, .disabled = option.disabled, .selected = false },
+            .test_id = option.test_id,
+        }, .{
+            view.row(.{ .style = rowStyle(8) }, .{
+                if (option.icon) |asset| iconEl(asset, @min(m.icon_size, 16), colors.text_secondary) else null,
+                textEl(option.label, m.row_font, if (option.disabled) colors.text_tertiary else colors.text_primary, 400),
+            }),
+            view.branch(
+                self.mode == .single,
+                view.capture(&check_node, iconEl(icons.check, @min(m.icon_size, 16), colors.primary)),
+                view.capture(&check_node, view.box(.{ .style = checkbox_style }, iconEl(icons.check, m.check_size, colors.panel))),
+            ),
+        }));
+        errdefer {
+            cx.detachChild(container, option_node);
+            cx.freeNode(option_node);
+        }
+        const context = supplied_context orelse try option_node.meta.ownership.scope.scope.?.createState(ItemContext, .{ .state = self, .index = i });
+        context.* = .{ .state = self, .index = i };
+        option_node.behavior.events.event_context = context;
+        option_node.behavior.events.on_event = itemEvent;
+        if (option_node.behavior.interaction.a11y) |*ax| ax.item_selection = .{ .context = context, .set = setAccessibleItemSelection };
+        return .{ .node = option_node, .check = check_node };
+    }
+
+    fn rowStride(self: *const SelectState) f32 {
+        const m = self.metrics;
+        const check_height = @max(if (self.mode == .single) @min(m.icon_size, 16) else m.checkbox_size, @min(m.icon_size, 16));
+        var row_height = @max(m.row_font * 1.2, check_height) + m.row_padding.top + m.row_padding.bottom;
+        if (self.shown_option_style) |style| {
+            const padding = style.padding orelse m.row_padding;
+            row_height = switch (style.height orelse core.Sizing{ .fit = .{} }) {
+                .px => |height| height,
+                else => @max(style.min_height orelse 0, @max(m.row_font * 1.2, check_height) + padding.top + padding.bottom),
+            };
+        }
+        const gap = if (self.options_container) |container| container.style.gap else 2;
+        return @max(1, row_height + gap);
+    }
+    fn rebuildFilterData(self: *SelectState) void {
+        self.filtered_count = 0;
+        @memset(self.filtered_positions, null);
+        for (self.options, 0..) |option, i| if (optionMatches(self, option)) {
+            self.filtered_positions[i] = self.filtered_count;
+            self.filtered_indices[self.filtered_count] = i;
+            self.filtered_count += 1;
+        };
+    }
+    fn buildVirtualOptions(self: *SelectState, child: *Scope, container: *Node) !void {
+        self.rebuildFilterData();
+        const height = @min(@max(1, self.max_dropdown_height - 2 * self.metrics.panel_padding), self.rowStride() * @as(f32, @floatFromInt(self.filtered_count)));
+        const list = try virtual_list.VirtualList(.{
+            .item_count = self.filtered_count,
+            .item_height = self.rowStride(),
+            .height = height,
+            .overscan = 3,
+            .item_label_fn = virtualLabel,
+            .item_label_context = self,
+        }).mountWithContext(child, self.cx, self, null, renderVirtualRow);
+        errdefer self.cx.freeNode(list.container);
+        try container.appendChild(self.cx.allocator, list.container);
+        self.virtual = list.state;
+    }
+    fn virtualLabel(index: usize, _: []u8, raw: ?*anyopaque) []const u8 {
+        const self: *SelectState = @ptrCast(@alignCast(raw.?));
+        if (index >= self.filtered_count) return "";
+        return self.options[self.filtered_indices[index]].label;
+    }
+    fn renderVirtualRow(node: *Node, index: usize, _: *Cx, raw: ?*anyopaque) void {
+        const self: *SelectState = @ptrCast(@alignCast(raw.?));
+        if (index >= self.filtered_count) return;
+        const i = self.filtered_indices[index];
+        const row = self.buildRow(self.options_scope.?, node, self.options[i], i, null) catch {
+            _ = virtual_list.markPoolNodeRenderIncomplete(node);
+            return;
+        };
+        paintOption(self, row.node, row.check, i);
+    }
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) core.AfterLayoutResult {
+        const self: *SelectState = @ptrCast(@alignCast(raw));
+        var changed = false;
+        if (self.large and self.mode == .multiple and self.tags_dirty) {
+            self.rebuildSelectedTags() catch |err| {
+                self.tags_dirty = false;
+                std.log.warn("[select] selected tags: {s}", .{@errorName(err)});
+                return .done;
+            };
+            changed = true;
+        }
+        const list = self.virtual orelse return if (changed) .needs_layout else .done;
+        if (self.virtual_update_pending or list.props.item_height != self.rowStride()) {
+            self.virtual_update_pending = false;
+            list.props.item_height = self.rowStride();
+            self.rebuildFilterData();
+            // Filtering can be requested by a row event. Recycle only after
+            // that event handler returns, never in its synchronous effect.
+            virtual_list.updateItemCount(list, self.filtered_count);
+            const height = @min(@max(1, self.max_dropdown_height - 2 * self.metrics.panel_padding), self.rowStride() * @as(f32, @floatFromInt(self.filtered_count)));
+            list.container_node.setStyle(self.cx.allocator, .height, .{ .px = height });
+            if (self.highlighted_index) |i| if (self.filtered_positions[i]) |position| virtual_list.scrollIndexIntoView(list, position, .nearest);
+            list.updateVisibleItems();
+            changed = true;
+        }
+        // A filter can grow the viewport after this layout pass. Rebind again
+        // at that settled size, without waiting for another key or caret blink.
+        const viewport_height = list.scroll_state.viewport_height;
+        if (self.virtual_viewport_height != viewport_height) {
+            self.virtual_viewport_height = viewport_height;
+            list.updateVisibleItems();
+            changed = true;
+        }
+        return if (changed) .needs_layout else .done;
+    }
+    fn removeAfterLayout(self: *SelectState) void {
+        self.cx.removeAfterLayoutHook(self);
+    }
+    fn rebuildSelectedTags(self: *SelectState) !void {
+        self.clearTags();
+        const scope = try self.tags_parent_scope.childScope();
+        self.tags_scope = scope;
+        errdefer self.clearTags();
+        for (self.options, 0..) |option, i| if (self.isSelected(i)) {
+            const ctx = try scope.createState(ItemContext, .{ .state = self, .index = i });
+            const tag = try buildTag(self, scope, option, ctx);
+            if (option.test_id) |tid| {
+                try assignDerivedTestId(self.cx, tag, tid, ".tag");
+                try assignDerivedTestId(self.cx, tag.children.items[1], tid, ".tag-close");
+            }
+        };
+        self.tags_dirty = false;
+    }
 
     fn buildOptions(self: *SelectState, child: *Scope, container: *Node, opts: []const SelectOption) !void {
         // Stop runtime referencing previous nodes/arrays first: any failure after stops at "no
@@ -488,16 +722,64 @@ pub const SelectState = struct {
         self.check_nodes = &.{};
         self.tag_nodes = &.{};
         self.highlighted_index = null;
-        if (opts.len > 64) return error.TooManySelectOptions;
+        self.selected_flags = &.{};
+        self.selection_next = &.{};
+        self.selected_count = 0;
+        self.first_selected = null;
+        self.option_index = null;
+        self.virtual = null;
+        self.filtered_indices = &.{};
+        self.filtered_positions = &.{};
+        self.virtual_update_pending = false;
+        self.virtual_viewport_height = -1;
+        self.large = self.virtualize or opts.len > 200;
+        self.options_scope = child;
+        self.options_container = container;
+        self.shown_option_style = self.option_style.peek();
+        self.tags_dirty = true;
         // Failed partial-built tags must not remain: their event contexts released with this-round
         // child scope
-        errdefer self.clearTags();
+        errdefer {
+            self.clearTags();
+            self.options = &.{};
+            self.option_nodes = &.{};
+            self.check_nodes = &.{};
+            self.tag_nodes = &.{};
+            self.selected_flags = &.{};
+            self.selection_next = &.{};
+            self.option_index = null;
+            self.first_selected = null;
+            self.selected_count = 0;
+            self.virtual = null;
+            self.filtered_indices = &.{};
+            self.filtered_positions = &.{};
+            self.filtered_count = 0;
+            self.large = false;
+        }
 
         const a = child.allocator;
         const parts = try a.create(Parts);
         parts.* = .{};
         // If adopt fails, destroy releases on spot (arrays are empty)
         try child.adoptResource(@ptrCast(parts), Parts.destroy);
+        parts.selection = try a.alloc(bool, opts.len);
+        parts.next_selection = try a.alloc(bool, opts.len);
+        @memset(parts.selection, false);
+        try parts.index.ensureTotalCapacity(a, @intCast(opts.len));
+        for (opts, 0..) |option, i| if (!parts.index.contains(option.value)) parts.index.putAssumeCapacity(option.value, i);
+        self.selected_flags = parts.selection;
+        self.selection_next = parts.next_selection;
+        self.option_index = &parts.index;
+        if (self.large) {
+            parts.indices = try a.alloc(usize, opts.len);
+            parts.positions = try a.alloc(?usize, opts.len);
+            self.filtered_positions = parts.positions;
+            self.filtered_indices = parts.indices;
+            self.options = opts;
+            try self.buildVirtualOptions(child, container);
+            self.applyView(false);
+            return;
+        }
         parts.options = try a.alloc(*Node, opts.len);
         parts.checks = try a.alloc(*Node, opts.len);
         parts.items = try a.alloc(ItemContext, opts.len);
@@ -507,52 +789,10 @@ pub const SelectState = struct {
         }
 
         const cx = self.cx;
-        const m = self.metrics;
-        const colors = self.colors;
         for (opts, 0..) |option, i| {
-            const option_style: core.BoxStyle = .{
-                .width = .{ .grow = .{} },
-                .direction = .row,
-                .align_items = .center,
-                .justify = .space_between,
-                .padding = if (self.mode == .multiple) core.Padding.all(m.row_padding.top) else m.row_padding,
-                .corner_radius = m.row_radius,
-                .cursor = if (option.disabled) .default else .pointer,
-            };
-            const checkbox_style: core.BoxStyle = .{
-                .width = .{ .px = m.checkbox_size },
-                .height = .{ .px = m.checkbox_size },
-                .direction = .row,
-                .align_items = .center,
-                .justify = .center,
-                .background = colors.bg,
-                .border = .{ .width = 1.5, .color = colors.border_strong, .radius = m.checkbox_radius },
-            };
-            var check_node: *Node = undefined;
-            // Row = [content (icon + text), selection mark]: single is check icon, multi is
-            // checkbox.
-            // Row scope bound to row node (view.append), released together when rebuild clears rows
-            const option_node = try view.append(child, cx, container, view.box(.{
-                .style = option_style,
-                .a11y = .{ .role = .option, .label = option.label, .disabled = option.disabled, .selected = false },
-                .test_id = option.test_id,
-            }, .{
-                view.row(.{ .style = rowStyle(8) }, .{
-                    if (option.icon) |asset| iconEl(asset, @min(m.icon_size, 16), colors.text_secondary) else null,
-                    textEl(option.label, m.row_font, if (option.disabled) colors.text_tertiary else colors.text_primary, 400),
-                }),
-                view.branch(
-                    self.mode == .single,
-                    view.capture(&check_node, iconEl(icons.check, @min(m.icon_size, 16), colors.primary)),
-                    view.capture(&check_node, view.box(.{ .style = checkbox_style }, iconEl(icons.check, m.check_size, colors.panel))),
-                ),
-            }));
-            parts.options[i] = option_node;
-            parts.checks[i] = check_node;
-            parts.items[i] = .{ .state = self, .index = i };
-            option_node.behavior.events.event_context = @ptrCast(&parts.items[i]);
-            option_node.behavior.events.on_event = itemEvent;
-            if (option_node.behavior.interaction.a11y) |*ax| ax.item_selection = .{ .context = @ptrCast(&parts.items[i]), .set = setAccessibleItemSelection };
+            const row = try self.buildRow(child, container, option, i, &parts.items[i]);
+            parts.options[i] = row.node;
+            parts.checks[i] = row.check;
 
             if (self.mode == .multiple) {
                 parts.tag_ctxs[i] = .{ .state = self, .index = i };
@@ -619,6 +859,10 @@ pub fn stateOf(r: SelectResult) *SelectState {
 
 const ItemContext = struct { state: *SelectState, index: usize };
 
+fn resolveOptionStyle(style: ?core.BoxStyle, _: *const core.theme.ThemeTokens) core.BoxStyle {
+    return style orelse .{};
+}
+
 // Helper returning elements: props uses named type, return type shared with function body (two
 // identical-looking anonymous struct types differ)
 const TextElProps = struct { style: core.TextStyle };
@@ -645,8 +889,7 @@ fn rowStyle(gap: f32) core.BoxStyle {
 }
 
 fn selectedIndex(state: *const SelectState) ?usize {
-    for (state.options, 0..) |_, i| if (state.isSelected(i)) return i;
-    return null;
+    return state.first_selected;
 }
 
 fn syncClearAffordance(state: *SelectState) void {
@@ -666,7 +909,13 @@ fn syncA11y(state: *SelectState) void {
             a.value_text = if (selectedIndex(state)) |i| state.options[i].label else null;
         }
     }
-    for (state.option_nodes, 0..) |node, i| {
+    if (state.virtual) |list| {
+        for (list.pool_nodes) |node| if (node.children.items.len > 0) {
+            const row = node.children.items[0];
+            const ctx: *ItemContext = @ptrCast(@alignCast(row.behavior.events.event_context orelse continue));
+            if (row.behavior.interaction.a11y) |*a| a.selected = state.isSelected(ctx.index);
+        };
+    } else for (state.option_nodes, 0..) |node, i| {
         if (node.behavior.interaction.a11y) |*a| a.selected = state.isSelected(i);
     }
     state.focus_target.markRenderDirty();
@@ -674,7 +923,6 @@ fn syncA11y(state: *SelectState) void {
 
 fn syncSelection(state: *SelectState) void {
     const colors = state.colors;
-
     if (state.mode == .single) {
         const index = selectedIndex(state);
         if (state.trigger_label) |label| {
@@ -695,24 +943,40 @@ fn syncSelection(state: *SelectState) void {
         }
         syncClearAffordance(state);
     } else {
-        for (state.tag_nodes, 0..) |tag_node, i| tag_node.setDisplay(if (state.isSelected(i)) .flex else .none);
+        if (state.large) {
+            // Rebuilding can destroy a tag whose close handler is currently
+            // proposing this selection. The after-layout hook owns that work.
+        } else for (state.tag_nodes, 0..) |tag_node, i| tag_node.setDisplay(if (state.isSelected(i)) .flex else .none);
     }
 
-    for (state.option_nodes, state.check_nodes, 0..) |option_node, check_node, i| {
-        const selected = state.isSelected(i);
-        const highlighted = state.highlighted_index != null and state.highlighted_index.? == i;
-        option_node.setBackgroundRaw(if (highlighted) colors.hover else Color.TRANSPARENT);
-        if (state.mode == .single) {
-            check_node.setOpacityRaw(if (selected) 1 else 0);
-        } else {
-            check_node.setBackgroundRaw(if (selected) colors.primary else colors.bg);
-            check_node.style.border.width = if (selected) 0 else 1.5;
-            if (check_node.children.items.len > 0) check_node.children.items[0].setOpacityRaw(if (selected) 1 else 0);
-        }
-        option_node.markRenderDirty();
-        check_node.markRenderDirty();
+    if (state.virtual) |list| {
+        for (list.pool_nodes) |node| if (node.children.items.len > 0) {
+            const row = node.children.items[0];
+            const ctx: *ItemContext = @ptrCast(@alignCast(row.behavior.events.event_context orelse continue));
+            paintOption(state, row, row.children.items[1], ctx.index);
+        };
+        if (!state.virtual_update_pending) if (state.highlighted_index) |i| if (state.filtered_positions[i]) |position| virtual_list.scrollIndexIntoView(list, position, .nearest);
+    } else for (state.option_nodes, state.check_nodes, 0..) |option_node, check_node, i| {
+        paintOption(state, option_node, check_node, i);
     }
     syncOpen(state);
+}
+
+fn paintOption(state: *SelectState, option_node: *Node, check_node: *Node, i: usize) void {
+    const colors = state.colors;
+    const selected = state.isSelected(i);
+    const highlighted = state.highlighted_index != null and state.highlighted_index.? == i;
+    const background = if (state.shown_option_style) |style| style.background orelse Color.TRANSPARENT else Color.TRANSPARENT;
+    option_node.setBackgroundRaw(if (highlighted) colors.hover else background);
+    if (state.mode == .single) {
+        check_node.setOpacityRaw(if (selected) 1 else 0);
+    } else {
+        check_node.setBackgroundRaw(if (selected) colors.primary else colors.bg);
+        check_node.style.border.width = if (selected) 0 else 1.5;
+        if (check_node.children.items.len > 0) check_node.children.items[0].setOpacityRaw(if (selected) 1 else 0);
+    }
+    option_node.markRenderDirty();
+    check_node.markRenderDirty();
 }
 
 /// AT ExpandCollapse: explicit target state, goes through same proposal pipeline as click.
@@ -737,20 +1001,21 @@ fn syncOpen(state: *SelectState) void {
     syncA11y(state);
 }
 
-fn applyFilter(state: *SelectState) void {
+fn optionMatches(state: *const SelectState, option: SelectOption) bool {
     const query = state.query_buf[0..state.query_len];
-    for (state.options, state.option_nodes) |option, node| {
-        var matches = query.len == 0;
-        if (!matches and query.len <= option.label.len) {
-            var offset: usize = 0;
-            while (offset + query.len <= option.label.len) : (offset += 1) {
-                if (std.ascii.eqlIgnoreCase(option.label[offset .. offset + query.len], query)) {
-                    matches = true;
-                    break;
-                }
-            }
-        }
-        node.setDisplay(if (matches) .flex else .none);
+    if (query.len == 0) return true;
+    if (query.len > option.label.len) return false;
+    var offset: usize = 0;
+    while (offset + query.len <= option.label.len) : (offset += 1) {
+        if (std.ascii.eqlIgnoreCase(option.label[offset .. offset + query.len], query)) return true;
+    }
+    return false;
+}
+fn applyFilter(state: *SelectState) void {
+    if (state.large) {
+        state.virtual_update_pending = true;
+    } else for (state.options, state.option_nodes) |option, node| {
+        node.setDisplay(if (optionMatches(state, option)) .flex else .none);
     }
     state.highlighted_index = null;
     state.panel.markLayoutDirty();
@@ -773,8 +1038,8 @@ fn commit(state: *SelectState, index: usize) void {
         _ = state.proposeValue(state.options[index].value);
         state.proposeOpen(false);
     } else {
-        // Clear search term only after check settles: parent rejection keeps user's search
-        if (state.proposeMask(state.selected_mask ^ (@as(u64, 1) << @intCast(index))) and state.searchable) clearSearch(state);
+        _ = state.proposeItems(.toggle, index, state.searchable);
+        return;
     }
     // View effect doesn't run if proposal doesn't change data source: highlight/filter changes must
     // paint anyway
@@ -839,19 +1104,14 @@ fn clearEvent(event: Event, context: ?*anyopaque) EventResult {
 fn setAccessibleItemSelection(raw: *anyopaque, operation: core.A11yProps.ItemSelectionOperation) bool {
     const ctx: *ItemContext = @ptrCast(@alignCast(raw));
     const state = ctx.state;
-    if (state.shown_disabled or ctx.index >= state.options.len or ctx.index >= 64 or state.options[ctx.index].disabled) return false;
-    const bit = @as(u64, 1) << @intCast(ctx.index);
-    const previous = state.selected_mask;
-    if (operation == .add and state.mode == .single and previous != 0 and previous != bit) return false;
-    const next: u64 = switch (operation) {
-        .replace => bit,
-        .add => if (state.mode == .single) bit else previous | bit,
-        .remove => previous & ~bit,
-    };
-    if (next == previous) return true;
+    if (state.shown_disabled or ctx.index >= state.options.len or state.options[ctx.index].disabled) return false;
+    const selected = state.isSelected(ctx.index);
     if (state.mode == .single) {
+        if (operation == .add and state.selectedCount() != 0 and !selected) return false;
+        if (operation != .remove and selected) return true;
+        if (operation == .remove and !selected) return true;
         const b = state.value orelse return false;
-        const want: ?[]const u8 = if (next != 0) state.options[ctx.index].value else null;
+        const want: ?[]const u8 = if (operation == .remove) null else state.options[ctx.index].value;
         const on_change = state.on_change;
         const landed = b.commit(want) orelse return false;
         const ok = optStrEql(landed, want);
@@ -860,26 +1120,12 @@ fn setAccessibleItemSelection(raw: *anyopaque, operation: core.A11yProps.ItemSel
         if (on_change) |h| h.call(landed);
         return ok;
     }
-    const b = state.values orelse return false;
-    var buf: [64][]const u8 = undefined;
-    var n: usize = 0;
-    for (state.options, 0..) |o, i| {
-        if (i < 64 and (next & (@as(u64, 1) << @intCast(i))) != 0) {
-            buf[n] = o.value;
-            n += 1;
-        }
-    }
-    const on_change = state.on_values_change;
-    const landed = b.commit(buf[0..n]) orelse return false;
-    var ok = landed.len == n;
-    if (ok) {
-        for (landed, buf[0..n]) |x, y| {
-            if (!std.mem.eql(u8, x, y)) ok = false;
-        }
-    }
-    state.paint();
-    if (on_change) |h| h.call(landed);
-    return ok;
+    if (operation == .add and selected or operation == .remove and !selected) return true;
+    return state.proposeItems(switch (operation) {
+        .replace => .replace,
+        .add => .add,
+        .remove => .remove,
+    }, ctx.index, false);
 }
 
 fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
@@ -911,7 +1157,7 @@ fn itemEvent(event: Event, context: ?*anyopaque) EventResult {
 fn tagCloseEvent(event: Event, context: ?*anyopaque) EventResult {
     const ctx: *ItemContext = @ptrCast(@alignCast(context orelse return .ignored));
     if (event != .click or ctx.state.shown_disabled) return .ignored;
-    if (ctx.index < 64) _ = ctx.state.proposeMask(ctx.state.selected_mask & ~(@as(u64, 1) << @intCast(ctx.index)));
+    _ = ctx.state.proposeItems(.remove, ctx.index, false);
     return .stop;
 }
 
@@ -934,7 +1180,7 @@ fn nextVisible(state: *SelectState, start: usize, forward: bool) ?usize {
 
 /// Visible after filter and not disabled
 fn optionNavigable(state: *const SelectState, i: usize) bool {
-    return state.option_nodes[i].style.display != .none and !state.options[i].disabled;
+    return (if (state.large) optionMatches(state, state.options[i]) else state.option_nodes[i].style.display != .none) and !state.options[i].disabled;
 }
 
 fn triggerKeyDown(key: KeyCode, _: Modifiers, context: ?*anyopaque) EventResult {
@@ -1031,6 +1277,7 @@ fn mountSelect(props: SelectProps, scope: *Scope, cx: *Cx) !SelectResult {
     const colors = palette(cx.tokens);
     reactive.checkBorrow(my_scope, props.options);
     reactive.checkBorrow(my_scope, props.disabled);
+    reactive.checkBorrow(my_scope, props.option_style);
     // Trigger geometry all from control metrics (same source as Button/Input/DatePicker);
     // outer frame height = padding_y * 2 + line height fitted.
     const shell_size: control_shell.ControlSize = props.size;
@@ -1096,6 +1343,7 @@ fn mountSelect(props: SelectProps, scope: *Scope, cx: *Cx) !SelectResult {
         .cx = cx,
         .mode = props.mode,
         .searchable = props.searchable,
+        .virtualize = props.virtualize,
         .clearable = props.clearable,
         .hold_initial_search_label = !props.show_selected_value_in_search,
         .placeholder = props.placeholder,
@@ -1126,8 +1374,16 @@ fn mountSelect(props: SelectProps, scope: *Scope, cx: *Cx) !SelectResult {
         .input_state = null,
         .input_node = null,
         .tags_row = null,
+        .tags_parent_scope = my_scope,
+        .max_dropdown_height = props.max_dropdown_height,
+        .option_style = props.option_style,
     };
     pop.wrapper.addDebugState(@ptrCast(state));
+    try cx.addAfterLayoutHook(state, SelectState.afterLayout);
+    my_scope.onCleanup(SelectState, state, SelectState.removeAfterLayout) catch |err| {
+        cx.removeAfterLayoutHook(state);
+        return err;
+    };
 
     // Select uses the same three-slot shell as Button/Input. Business content
     // can now shrink only inside content_slot, while clear + chevron remain a
@@ -1279,7 +1535,10 @@ fn mountSelect(props: SelectProps, scope: *Scope, cx: *Cx) !SelectResult {
     // Keep rebuilt rows separate from the stable floating chrome. Application
     // material layers attached to chrome must survive option publication.
     const option_content = try core.box(cx, .{ .width = .fill(), .direction = .column, .gap = 2, .flex_shrink = 0 }, .{});
-    try pop.content.appendChild(allocator, option_content);
+    pop.content.appendChild(allocator, option_content) catch |err| {
+        cx.freeNode(option_content);
+        return err;
+    };
     // Option rows write content (portal): rebuild and view effect belong to Popover scope.
     try bind_mod.rebuildOn(cx, pop.scope, options, option_content, state, SelectState.optionsKey, SelectState.buildOptions);
     try pop.scope.createEffect(state, SelectState.viewEffect);
@@ -1789,4 +2048,234 @@ test "select(multiple, searchable, dynamic): mount 在任意分配点失败时�
             return (try Select(.{ .options = opts, .mode = .multiple, .values = vals, .searchable = true, .disabled = d }).mount(scope, cx)).wrapper;
         }
     }.m);
+}
+
+fn ManyOptions(comptime count: usize) type {
+    return struct {
+        options: [count]SelectOption = undefined,
+        labels: [count][24]u8 = undefined,
+        fn init(self: *@This()) !void {
+            for (&self.options, &self.labels, 0..) |*option, *buffer, i| {
+                const label = try std.fmt.bufPrint(buffer, "Item {d:0>4}", .{i});
+                option.* = .{ .value = label, .label = label, .test_id = label };
+            }
+        }
+    };
+}
+
+fn renderSelectFrames(t: T) void {
+    for (0..8) |_| {
+        t.cx.frame_count += 1;
+        t.cx.frame_time_ms += 40;
+        _ = t.cx.render();
+    }
+}
+
+test "Select capacity: single keyboard and accessibility select values beyond 64" {
+    const t = try T.init();
+    defer t.deinit();
+    var options: ManyOptions(120) = .{};
+    try options.init();
+    const result = try t.mount(.{ .options = &options.options, .clearable = true });
+    const state = stateOf(result);
+    _ = triggerKeyDown(.end, .{}, state);
+    try testing.expectEqual(@as(?usize, 119), state.highlighted_index);
+    _ = triggerKeyDown(.@"return", .{}, state);
+    try testing.expectEqualStrings(options.options[119].value, result.value.?.peek().?);
+    try testing.expect(state.isSelected(119));
+    const selection = state.option_nodes[90].behavior.interaction.a11y.?.item_selection.?;
+    try testing.expect(selection.set(selection.context, .replace));
+    try testing.expect(state.isSelected(90) and !state.isSelected(119));
+    _ = clearEvent(.{ .click = .{ .x = 0, .y = 0 } }, state);
+    try testing.expect(result.value.?.peek() == null);
+}
+
+test "Select capacity: multiple tags reorder by value and controlled rejection beyond 64" {
+    const t = try T.init();
+    defer t.deinit();
+    var options: ManyOptions(120) = .{};
+    try options.init();
+    const source = try t.scope.createSignal([]const SelectOption, &options.options);
+    const values = try t.scope.createList([]const u8, &.{});
+    const result = try t.mount(.{ .options = source, .mode = .multiple, .values = values });
+    const state = stateOf(result);
+    commit(state, 110);
+    commit(state, 65);
+    try testing.expectEqual(@as(usize, 2), state.selectedCount());
+    try testing.expect(state.isSelected(65) and state.isSelected(110));
+    const tag = state.tag_nodes[110].children.items[1];
+    _ = tagCloseEvent(.{ .click = .{ .x = 0, .y = 0 } }, tag.behavior.events.event_context);
+    try testing.expect(state.isSelected(65) and !state.isSelected(110));
+    var reversed: [120]SelectOption = undefined;
+    for (&reversed, 0..) |*option, i| option.* = options.options[119 - i];
+    source.set(&reversed);
+    try testing.expect(state.isSelected(54));
+    try testing.expectEqualStrings(options.options[65].value, values.peek()[0]);
+    source.set(reversed[60..]);
+    try testing.expectEqual(@as(usize, 0), state.selectedCount());
+    try testing.expectEqual(@as(usize, 1), values.peek().len);
+}
+
+test "Select capacity: thousand option dropdown virtualizes search keyboard and selected tags" {
+    const t = try T.init();
+    defer t.deinit();
+    t.cx.setViewport(800, 600);
+    var options: ManyOptions(1000) = .{};
+    try options.init();
+    const result = try t.mount(.{ .options = &options.options, .mode = .multiple, .searchable = true, .open = true });
+    const state = stateOf(result);
+    renderSelectFrames(t);
+    try testing.expect(state.virtual != null);
+    try testing.expectEqual(@as(usize, 0), state.option_nodes.len);
+    try testing.expect(state.virtual.?.pool_size < 32);
+    try testing.expectEqual(@as(usize, 0), state.tags_row.?.children.items.len);
+    _ = triggerKeyDown(.end, .{}, state);
+    renderSelectFrames(t);
+    try testing.expectEqual(@as(?usize, 999), state.highlighted_index);
+    try testing.expect(state.virtual.?.scroll_state.scroll_y > 1000);
+    _ = triggerKeyDown(.@"return", .{}, state);
+    renderSelectFrames(t);
+    try testing.expect(state.isSelected(999));
+    try testing.expectEqual(@as(usize, 1), state.tags_row.?.children.items.len);
+    onSearchChanged(state, "Item 0700");
+    renderSelectFrames(t);
+    try testing.expectEqual(@as(usize, 1), state.virtual.?.item_count);
+    _ = triggerKeyDown(.down, .{}, state);
+    try testing.expectEqual(@as(?usize, 700), state.highlighted_index);
+    _ = triggerKeyDown(.@"return", .{}, state);
+    renderSelectFrames(t);
+    try testing.expect(state.isSelected(700) and state.isSelected(999));
+    try testing.expectEqual(@as(usize, 2), state.tags_row.?.children.items.len);
+    try testing.expectEqual(@as(usize, 1000), state.virtual.?.item_count);
+    var visible_rows: usize = 0;
+    for (state.virtual.?.pool_bindings) |binding| if (binding != null) {
+        visible_rows += 1;
+    };
+    try testing.expect(visible_rows >= 8);
+    try testing.expectEqual(core.AfterLayoutResult.done, SelectState.afterLayout(state, 0, false));
+    const tag = state.tags_row.?.children.items[0].children.items[1];
+    _ = tagCloseEvent(.{ .click = .{ .x = 0, .y = 0 } }, tag.behavior.events.event_context);
+    renderSelectFrames(t);
+    try testing.expectEqual(@as(usize, 1), state.selectedCount());
+    try testing.expectEqual(@as(usize, 1), state.tags_row.?.children.items.len);
+}
+
+test "Select capacity: virtual reordering deletion and eager transition retain value semantics" {
+    const t = try T.init();
+    defer t.deinit();
+    t.cx.setViewport(800, 600);
+    var options: ManyOptions(300) = .{};
+    try options.init();
+    options.options[299].disabled = true;
+    const source = try t.scope.createSignal([]const SelectOption, &options.options);
+    const value = try t.scope.createSignal(?[]const u8, options.options[250].value);
+    const result = try t.mount(.{ .options = source, .value = value, .open = true });
+    const state = stateOf(result);
+    renderSelectFrames(t);
+    _ = triggerKeyDown(.end, .{}, state);
+    renderSelectFrames(t);
+    try testing.expectEqual(@as(?usize, 298), state.highlighted_index);
+    for (state.virtual.?.pool_nodes) |node| if (node.children.items.len > 0) {
+        const row = node.children.items[0];
+        const ctx: *ItemContext = @ptrCast(@alignCast(row.behavior.events.event_context.?));
+        if (ctx.index == 299) try testing.expect(row.behavior.interaction.a11y.?.disabled);
+    };
+    var reversed: [300]SelectOption = undefined;
+    for (&reversed, 0..) |*option, i| option.* = options.options[299 - i];
+    source.set(&reversed);
+    renderSelectFrames(t);
+    try testing.expect(state.isSelected(49));
+    source.set(reversed[60..]);
+    renderSelectFrames(t);
+    try testing.expect(state.virtual != null);
+    try testing.expectEqual(@as(usize, 0), state.selectedCount());
+    try testing.expectEqualStrings(options.options[250].value, value.peek().?);
+    source.set(reversed[120..]);
+    renderSelectFrames(t);
+    try testing.expect(state.virtual == null);
+    try testing.expectEqual(@as(usize, 180), state.option_nodes.len);
+    source.set(&options.options);
+    renderSelectFrames(t);
+    try testing.expect(state.virtual != null and state.isSelected(250));
+    try testing.expectEqual(core.AfterLayoutResult.done, SelectState.afterLayout(state, 0, false));
+}
+
+test "Select capacity: dynamic row style refreshes virtual rows and geometry" {
+    const t = try T.init();
+    defer t.deinit();
+    t.cx.setViewport(800, 600);
+    var options: ManyOptions(300) = .{};
+    try options.init();
+    const style = try t.scope.createSignal(?core.BoxStyle, .{ .height = .{ .px = 33 }, .padding = core.Padding.all(2), .opacity = 0.5, .border = .{ .width = 2 } });
+    const result = try t.mount(.{ .options = &options.options, .option_style = style, .open = true });
+    const state = stateOf(result);
+    renderSelectFrames(t);
+    try testing.expectEqual(@as(f32, 35), state.virtual.?.props.item_height);
+    style.set(.{ .height = .{ .px = 40 }, .padding = core.Padding.all(3) });
+    renderSelectFrames(t);
+    try testing.expectEqual(@as(f32, 42), state.virtual.?.props.item_height);
+    for (state.virtual.?.pool_nodes) |node| if (node.children.items.len > 0) {
+        try testing.expectEqual(@as(f32, 0), node.children.items[0].style.border.width);
+        try testing.expectEqual(@as(f32, 1), node.children.items[0].getOpacity());
+    };
+    _ = triggerKeyDown(.end, .{}, state);
+    renderSelectFrames(t);
+    try testing.expect(state.virtual.?.pool_size < 32);
+    for (state.virtual.?.pool_nodes) |node| if (node.children.items.len > 0) {
+        try testing.expectEqual(@as(f32, 40), node.children.items[0].style.height.px);
+    };
+    // Eager rows survive style publications, so omitted fields must fall back
+    // rather than retaining the previous imperative override.
+    const eager = try t.mount(.{ .options = options.options[0..3], .option_style = style });
+    const eager_row = stateOf(eager).option_nodes[0];
+    style.set(.{ .opacity = 0.5, .border = .{ .width = 2 } });
+    try testing.expectEqual(@as(f32, 2), eager_row.style.border.width);
+    style.set(null);
+    try testing.expectEqual(@as(f32, 0), eager_row.style.border.width);
+    try testing.expectEqual(@as(f32, 1), eager_row.getOpacity());
+}
+
+test "Select capacity: controlled multi selection and accessibility preserve rejection above 64" {
+    const t = try T.init();
+    defer t.deinit();
+    var options: ManyOptions(120) = .{};
+    try options.init();
+    const Parent = struct {
+        values: *Signal([]const []const u8),
+        reject: bool = true,
+        fn write(self: *@This(), values: []const []const u8) void {
+            if (!self.reject) self.values.set(values);
+        }
+    };
+    var parent: Parent = .{ .values = try t.scope.createList([]const u8, &.{}) };
+    const result = try t.mount(.{ .options = &options.options, .mode = .multiple, .values = reactive.split(parent.values, t.cx.on(Parent, &parent, Parent.write)) });
+    const state = stateOf(result);
+    commit(state, 119);
+    try testing.expectEqual(@as(usize, 0), state.selectedCount());
+    parent.reject = false;
+    commit(state, 119);
+    try testing.expect(state.isSelected(119));
+    const selection = state.option_nodes[80].behavior.interaction.a11y.?.item_selection.?;
+    try testing.expect(selection.set(selection.context, .add));
+    try testing.expect(state.isSelected(80) and state.isSelected(119));
+    parent.reject = true;
+    try testing.expect(!selection.set(selection.context, .replace));
+    try testing.expect(state.isSelected(80) and state.isSelected(119));
+    parent.reject = false;
+    try testing.expect(selection.set(selection.context, .replace));
+    try testing.expect(state.isSelected(80) and !state.isSelected(119));
+    try testing.expect(selection.set(selection.context, .remove));
+    try testing.expectEqual(@as(usize, 0), state.selectedCount());
+}
+
+test "Select capacity: virtual mount allocation failures release selection and row resources" {
+    const sw = @import("../oom_sweep.zig");
+    const Fixture = struct {
+        var options: ManyOptions(250) = .{};
+        fn mount(scope: *Scope, cx: *Cx) !?*Node {
+            return (try Select(.{ .options = &options.options, .mode = .multiple, .searchable = true }).mount(scope, cx)).wrapper;
+        }
+    };
+    try Fixture.options.init();
+    try sw.sweepMount("Select virtual", Fixture.mount);
 }

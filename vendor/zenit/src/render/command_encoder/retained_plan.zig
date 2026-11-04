@@ -41,7 +41,7 @@ pub const Plan = struct {
 
     pub fn compute(self: *Plan, commands: anytype, scale: f32) void {
         self.scale = scale;
-        scan(self, commands);
+        scan(self, commands, NoImageRevisions{});
         self.layers = @as([64]Layer, @splat(.{}));
         var stack: [64]usize = undefined;
         var depth: usize = 0;
@@ -73,15 +73,24 @@ pub const Plan = struct {
     }
 };
 
-pub fn scan(self: anytype, commands: anytype) void {
+const NoImageRevisions = struct {
+    fn imageContentRevision(_: NoImageRevisions, _: u64) ?u64 {
+        return null;
+    }
+};
+
+fn hashItem(hasher: *std.hash.Wyhash, item: anytype, image_revision: ?u64) void {
+    paint_fp.hashPaintItemInto(hasher, item);
+    if (image_revision) |revision| hasher.update(std.mem.asBytes(&revision));
+}
+
+pub fn scan(self: anytype, commands: anytype, images: anytype) void {
     self.retained_hash_count = 0;
     self.damage_scratch_count = 0;
     self.damage_ranges = @as([64]DamageRange, @splat(.{}));
-    // backdrop: child tree has background blur (glass). Glass pixels depend on image **behind**
-    // layer,
-    // when behind changes cache expires, layer content fingerprint doesn't see behind, such layers
-    // (and all outer layers, outer-layer texture bakes inner glass) never reuse cache texture.
-    var stack: [64]struct { idx: usize, hasher: std.hash.Wyhash, backdrop: bool = false } = undefined;
+    // Backdrop-dependent layers and images with no known content revision
+    // cannot be reused, including every outer layer that contains them.
+    var stack: [64]struct { idx: usize, hasher: std.hash.Wyhash, uncacheable: bool = false } = undefined;
     var depth: usize = 0;
     var untracked_depth: usize = 0;
     // Non-flat layer capture state:
@@ -111,6 +120,12 @@ pub fn scan(self: anytype, commands: anytype) void {
     var capture_depth: usize = 0; // Nested translation-only layers entered count.
 
     for (commands) |it| {
+        const is_image = it.kind == .image and it.icon_rep_ptr == null;
+        const image_revision = if (is_image) images.imageContentRevision(it.resource_handle) else null;
+        if (is_image and image_revision == null and depth != 0) {
+            for (stack[0..depth]) |*layer| layer.uncacheable = true;
+            if (stack[0].idx < self.damage_ranges.len) self.damage_ranges[stack[0].idx].safe = false;
+        }
         // damage-rect capture: top-level layer (depth==1 = only stack[0] open) content commands
         // record {single fingerprint, padded bounds} per item. Own end token doesn't count as
         // content.
@@ -119,7 +134,7 @@ pub fn scan(self: anytype, commands: anytype) void {
         // (folded) are all captured; blur/rounded_clip subtrees, polygon clip and non-axis-aligned
         // transform nested layers stay unsafe -> full layer redraw.
         if (fold_depth > 0) {
-            paint_fp.hashPaintItemInto(&fold_hasher, it);
+            hashItem(&fold_hasher, it, image_revision);
             if (it.kind == .control) switch (it.control_kind) {
                 .begin_opacity_layer => fold_depth += 1,
                 .end_opacity_layer => {
@@ -246,7 +261,7 @@ pub fn scan(self: anytype, commands: anytype) void {
                     }
                     if (self.damage_scratch_count < self.damage_scratch.len) {
                         var ih = std.hash.Wyhash.init(0);
-                        paint_fp.hashPaintItemInto(&ih, it);
+                        hashItem(&ih, it, image_revision);
                         self.damage_scratch[self.damage_scratch_count] = .{
                             .digest = ih.final(),
                             .bounds = bounds,
@@ -275,13 +290,13 @@ pub fn scan(self: anytype, commands: anytype) void {
         // outside cached content), so feed outer layers (stack[0..depth], not the self about to be
         // pushed).
         var di: usize = 0;
-        while (di < depth) : (di += 1) paint_fp.hashPaintItemInto(&stack[di].hasher, it);
+        while (di < depth) : (di += 1) hashItem(&stack[di].hasher, it, image_revision);
 
         if (it.kind != .control) continue;
         switch (it.control_kind) {
             .begin_blur_layer => {
                 var bi: usize = 0;
-                while (bi < depth) : (bi += 1) stack[bi].backdrop = true;
+                while (bi < depth) : (bi += 1) stack[bi].uncacheable = true;
             },
             .begin_opacity_layer => {
                 if (untracked_depth == 0 and depth < stack.len) {
@@ -340,15 +355,10 @@ pub fn scan(self: anytype, commands: anytype) void {
                     depth -= 1;
                     const fr = &stack[depth];
                     if (fr.idx < self.retained_hashes.len) {
-                        // 0 is 'invalid fingerprint' sentinel, when truly compute 0 shift one bit
-                        // to avoid
-                        // misidentify. Layers with glass always 0: force redraw every frame
-                        // (background sample
-                        // must be current frame).
+                        // 0 is the non-cacheable sentinel; a genuine zero
+                        // hash is shifted so it remains a usable fingerprint.
                         const h = fr.hasher.final();
-                        // Layers with glass always 0 (invalid fingerprint -> never retained hit):
-                        // Background sample must be current frame.
-                        self.retained_hashes[fr.idx] = if (fr.backdrop) 0 else if (h == 0) 1 else h;
+                        self.retained_hashes[fr.idx] = if (fr.uncacheable) 0 else if (h == 0) 1 else h;
                     }
                 }
             },

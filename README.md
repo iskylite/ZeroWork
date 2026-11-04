@@ -10,7 +10,9 @@ ZeroWork is an Apple Silicon macOS SSH terminal specified in [docs/SPEC/OVERALL_
 
 ## Current baseline
 
-The current version is **0.3.0-rc3 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [editable V3 prototypes](docs/UI_V3/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
+The current version is **0.3.0-rc16 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [editable V3 prototypes](docs/UI_V3/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
+
+AI approval, execution-mode and scope decisions wait until the user decides or cancels, pausing the automatic-run time budget. Native secret entry has no user-entry deadline. Network, command execution and post-submission transfer timeouts remain separate.
 
 Dynamic plugin tool history currently retains at most 128 records per application process, counted per target session. At capacity, new operations are rejected before approval or dispatch; quit normally and restart the app to continue. Records are not evicted automatically, preserving unknown outcomes and operations whose resources have not been released.
 

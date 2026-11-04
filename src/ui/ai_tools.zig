@@ -45,6 +45,10 @@ const ControllerExchange = struct {
     result: ?tools.ToolResult = null,
     failure: ?anyerror = null,
     cancel: ?*provider.CancelToken,
+    observation_deadline_ms: i64 = 0,
+    preparation_deadline_ms: i64 = 0,
+    next_observation_ms: i64 = 0,
+    sent: bool = false,
 };
 const HostExchange = struct {
     invocation: host_tools.Invocation,
@@ -72,6 +76,7 @@ pub const Bridge = struct {
     wire: []provider.ToolDefinition = &.{},
     files: ?*@import("file_application_host.zig").Host = null,
     policy: tools.Policy = .{},
+    live_permission: @import("../ai/permission.zig").LiveMode = .{},
     execution_mode: @import("../config/config.zig").ExecutionMode = .auto,
     session_retention: @import("../config/config.zig").SessionRetention = .auto_idle,
     route_broker: ?*approvals.Broker = null,
@@ -102,6 +107,12 @@ pub const Bridge = struct {
     /// Keep that exact capture alive while a fresh Task queries host metadata.
     retired: std.ArrayList(*Bridge) = .empty,
     queries_only: bool = false,
+    /// Worker-only lookup into the active conversation transcript; never a path
+    /// reader. API-2 still owns target, generation, policy and approval gates.
+    image_lookup: ?struct {
+        context: *anyopaque,
+        find: *const fn (*anyopaque, identity.SessionHandle, []const u8) anyerror!@import("../ai/image_attachments.zig").ContentRef,
+    } = null,
 
     pub fn init(allocator: std.mem.Allocator) Bridge {
         return .{ .allocator = allocator, .owned_history = operations.Store.init(allocator), .validation_arena = .init(allocator), .capture_arena = .init(allocator) };
@@ -129,7 +140,18 @@ pub const Bridge = struct {
     pub fn configurePolicy(self: *Bridge, engine: @import("../ai/permission.zig").Engine, revision: u64) void {
         if (revision != self.policy_revision) for (self.children.items) |child| releaseAutomation(child, true);
         self.policy = .{ .engine = engine, .full_control = engine.mode == .auto };
+        self.live_permission.reset();
         self.policy_revision = revision;
+    }
+    pub fn permissionPolicy(self: *const Bridge) tools.Policy {
+        var result = self.policy;
+        result.engine = self.live_permission.apply(result.engine);
+        result.full_control = result.engine.mode == .auto;
+        return result;
+    }
+    pub fn setPermissionMode(self: *Bridge, mode: @import("../ai/permission.zig").Mode) void {
+        self.live_permission.set(mode);
+        if (self.route_broker) |broker| broker.updatePermissionPolicy(self.permissionPolicy().engine);
     }
     pub fn configureFiles(self: *Bridge, files: ?*@import("file_application_host.zig").Host) void {
         self.files = files;
@@ -154,6 +176,7 @@ pub const Bridge = struct {
         }
         try broker.execution_route.captureIntent(context, submitted, selected, self.session_retention);
         self.route_broker = broker;
+        broker.updatePermissionPolicy(self.permissionPolicy().engine);
     }
     /// Before backend preflight, freeze any trusted intent to this exact
     /// command. The backend still owns capability, forbidden and mode gates.
@@ -162,7 +185,7 @@ pub const Bridge = struct {
         const broker = self.route_broker orelse return null;
         const resolution = broker.execution_route.resolve(invocation.context, target, subject.detail, routing.fixedRoute(self.execution_mode, proposed));
         if (resolution.trusted and (resolution.route != proposed or resolution.needs_creation)) return try planChange(invocation, allocator, resolution.route, resolution.needs_creation);
-        if (!resolution.trusted and self.execution_mode != .auto and self.execution_mode != .ask and routing.fixedRoute(self.execution_mode, proposed) != proposed) return error.ModeConflict;
+        if (!resolution.trusted and self.execution_mode != .auto and self.execution_mode != .ask and routing.fixedRoute(self.execution_mode, proposed) != proposed) return try planChange(invocation, allocator, resolution.route, resolution.route == .new_terminal);
         const choice: routing.Choice = resolution.choice orelse .{ .route = resolution.route, .source = .{ .session = target }, .retention = self.session_retention };
         if (resolution.trusted and !resolution.approved) try broker.execution_route.select(invocation.context, choice, subject.detail, false);
         subject.route = .{ .proposed = proposed, .choice = choice, .target = target, .selectable = self.execution_mode == .ask and !resolution.trusted, .reason = if (resolution.trusted) "按本次用户明确指令；仅覆盖此命令。" else "按本次命令选择运行方式；权限确认与选择合并。" };
@@ -189,7 +212,7 @@ pub const Bridge = struct {
         if (self.route_broker) |broker| broker.execution_route.consume(invocation.context, target, command);
     }
     fn planChange(invocation: host_tools.Invocation, allocator: std.mem.Allocator, selected: routing.Route, requires_creation: bool) !host_tools.Result {
-        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = "requires_plan_change", .state = "cancelled_unsent", .selected_route = @tagName(selected), .requires_new_session = requires_creation, .host_fact = "用户已为这一条精确命令选择运行方式。当前工具没有派发；下一轮请生成所选方式的真实工具调用，所需创建步骤仍按精确依赖验证。", .next_tool = if (requires_creation and selected == .batch) "host.create_group/host.open_session/run_command" else if (selected == .batch) "run_command" else if (selected == .current_terminal) "host.run_in_terminal" else "host.create_group/host.open_session/host.run_in_terminal", .side_effect_started = false }, .{});
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = "requires_plan_change", .state = "cancelled_unsent", .selected_route = @tagName(selected), .requires_new_session = requires_creation, .host_fact = "当前运行方式已确定，当前工具没有派发。请直接使用 next_tool 指定的工具；无需为了重新确认运行模式查询上下文。仅补充缺少的目标、能力或创建依赖信息，命令权限仍由宿主验证。", .next_tool = if (requires_creation and selected == .batch) "host.create_group/host.open_session/run_command" else if (selected == .batch) "run_command" else if (selected == .current_terminal) "host.run_in_terminal" else "host.create_group/host.open_session/host.run_in_terminal", .side_effect_started = false }, .{});
         errdefer allocator.free(body);
         const blocks = try allocator.alloc(host_tools.Block, 1);
         blocks[0] = .{ .structured = body };
@@ -454,12 +477,16 @@ pub const Bridge = struct {
             self.emitHostStep(invocation, if (err == error.CancelledBeforeDispatch) .cancelled else .failed, @errorName(err));
             return err;
         };
+        // Retain rejected/cancelled result blocks too: no host dispatch error
+        // is thrown for these, so otherwise the UI only keeps the arguments.
+        const detail = if (result.status != .succeeded) std.json.Stringify.valueAlloc(allocator, .{ .status = result.status, .content = result.blocks, .receipt = result.receipt }, .{}) catch null else null;
+        defer if (detail) |value| allocator.free(value);
         self.emitHostStep(invocation, switch (result.status) {
             .succeeded => .succeeded,
             .rejected => .rejected,
             .cancelled_unsent => .cancelled,
             else => .failed,
-        }, "");
+        }, detail orelse "");
         return result;
     }
     fn dispatchHost(self: *Bridge, invocation: host_tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !host_tools.Result {
@@ -667,7 +694,7 @@ pub const Bridge = struct {
             // Complete target/capability and forbidden preflight before showing
             // a route card. An approval never makes a blocked command legal.
             try tools.preflight(invocation.table, invocation.parsed, try liveScope(self), try liveMembers(self));
-            _ = try tools.callNeedsApproval(invocation.parsed, self.policy, invocation.table.captured_scope.owner == .group);
+            _ = try tools.callNeedsApproval(invocation.parsed, self.permissionPolicy(), invocation.table.captured_scope.owner == .group);
             if (invocation.parsed.targets.len != 1) {
                 if (self.execution_mode == .ask) return error.TargetSelectionRequired;
             } else {
@@ -762,16 +789,22 @@ pub const Bridge = struct {
         return members;
     }
     fn currentPolicy(raw: *anyopaque) tools.Policy {
-        return @as(*Bridge, @ptrCast(@alignCast(raw))).policy;
+        return @as(*Bridge, @ptrCast(@alignCast(raw))).permissionPolicy();
     }
     fn timeNow(_: *anyopaque) i64 {
         return @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
     }
     fn askApproval(raw: *anyopaque, invocation: tools.DynamicInvocation, ticket: *tools.ApprovalTicket, cancel: ?*provider.CancelToken) !bool {
+        const waiting = provider.CancelToken.beginUserWait(cancel);
+        defer waiting.end();
         const self: *Bridge = @ptrCast(@alignCast(raw));
         if (self.active_route) |route| {
             if (!std.mem.eql(u8, &ticket.arguments_hash, &route.invocation.arguments_hash)) return error.StaleApproval;
-            if (self.route_broker.?.authorizeSubject(route.permit, route.invocation, route.subject, self.policy_revision) != .allow) return error.ScopeChanged;
+            const broker = self.route_broker.?;
+            try broker.waitForDecision(route.permit, cancel);
+            if (self.stopped.load(.acquire)) return error.CancelledBeforeDispatch;
+            if (broker.authorizeSubject(route.permit, route.invocation, route.subject, self.policy_revision) != .allow) return error.ScopeChanged;
+            ticket.policy_bypass = try broker.approvalIsAutomatic(route.permit);
             return true;
         }
         self.lock();
@@ -792,9 +825,12 @@ pub const Bridge = struct {
         }
         while (true) {
             self.lock();
-            if (exchange.decision == .approved and timeNow(self) >= ticket.expires_at_ms) {
-                exchange.decision = .pending;
-                self.emitStep(invocation, .approval, "审批已过期，等待重新确认");
+            if (exchange.decision == .pending and !(tools.callNeedsApproval(invocation.parsed, self.permissionPolicy(), invocation.table.captured_scope.owner == .group) catch |err| {
+                self.mutex.unlock();
+                return err;
+            })) {
+                ticket.policy_bypass = true;
+                exchange.decision = .approved;
             }
             const decision = exchange.decision;
             self.mutex.unlock();
@@ -829,20 +865,13 @@ pub const Bridge = struct {
             const value = arguments.object.get("command") orelse break :blk current.invocation.arguments;
             break :blk if (value == .string) value.string else current.invocation.arguments;
         } else current.invocation.arguments;
-        return .{ .expired = timeNow(self) >= current.ticket.expires_at_ms, .group = group, .target = target_writer.buffered(), .tool_id = tool_id, .owner = current.ticket.targets[0].owner, .cwd = null, .sequence = current.sequence, .arguments_hash = current.invocation.parsed.arguments_hash, .command = command, .call_id = current.invocation.call_id };
-    }
-    pub fn renewApproval(self: *Bridge, sequence: u64, hash: [32]u8) !void {
-        self.lock();
-        defer self.mutex.unlock();
-        const current = self.pending orelse return error.StaleApproval;
-        if (current.sequence != sequence or current.decision != .pending or !std.mem.eql(u8, &hash, &current.ticket.arguments_hash) or self.stopped.load(.acquire) or timeNow(self) < current.ticket.expires_at_ms) return error.StaleApproval;
-        current.ticket.expires_at_ms = timeNow(self) + 60_000;
+        return .{ .expired = false, .group = group, .target = target_writer.buffered(), .tool_id = tool_id, .owner = current.ticket.targets[0].owner, .cwd = null, .sequence = current.sequence, .arguments_hash = current.invocation.parsed.arguments_hash, .command = command, .call_id = current.invocation.call_id };
     }
     pub fn decide(self: *Bridge, sequence: u64, hash: [32]u8, approved: bool) !void {
         self.lock();
         defer self.mutex.unlock();
         const current = self.pending orelse return error.StaleApproval;
-        if (current.sequence != sequence or current.decision != .pending or !std.mem.eql(u8, &hash, &current.ticket.arguments_hash) or (approved and timeNow(self) >= current.ticket.expires_at_ms) or self.stopped.load(.acquire)) return error.StaleApproval;
+        if (current.sequence != sequence or current.decision != .pending or !std.mem.eql(u8, &hash, &current.ticket.arguments_hash) or self.stopped.load(.acquire)) return error.StaleApproval;
         current.decision = if (approved) .approved else .rejected;
         self.emitStep(current.invocation, if (approved) .approved else .rejected, if (approved) "用户已批准" else "用户已拒绝");
         @import("../ai/tool_trace.zig").emit(.{ .event = "dynamic_approval_decision", .call_id = current.invocation.call_id, .tool_id = current.invocation.parsed.entry.definition.id, .sequence = sequence, .approved = approved, .arguments_hash = std.fmt.bytesToHex(hash, .lower) });
@@ -854,9 +883,22 @@ pub const Bridge = struct {
             try tools.markSent(self.operationHistory(), request.owner, request.operation_id, request.call_id, request.tool_id, request.arguments_hash);
             if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
             if (self.running) |running| self.emitStep(running, .running, "");
+            if (std.mem.eql(u8, request.tool_id, @import("../ai/image_offload.zig").tool_id)) {
+                const lookup = self.image_lookup orelse return error.RequiredServiceUnavailable;
+                const reference = request.arguments.object.get("image_ref").?.string;
+                const image = lookup.find(lookup.context, request.owner, reference) catch |err| switch (err) {
+                    error.ImageReferenceNotFound => return @import("../ai/image_offload.zig").readResult(allocator, request, null),
+                    else => return err,
+                };
+                return @import("../ai/image_offload.zig").readResult(allocator, request, image);
+            }
             return target.binding.handler(target.context, request, allocator);
         }
         var exchange: ControllerExchange = .{ .target = target, .invocation = request, .allocator = allocator, .cancel = cancel };
+        if (request.effect == .observe_image) exchange.preparation_deadline_ms = timeNow(self) + 5000;
+        if (request.effect == .observe_image and request.arguments == .object) if (request.arguments.object.get("wait_ms")) |value| {
+            if (value == .integer and value.integer > 0 and value.integer <= 30000) exchange.observation_deadline_ms = timeNow(self) + value.integer;
+        };
         self.lock();
         if (self.controller != null or self.stopped.load(.acquire)) {
             self.mutex.unlock();
@@ -894,7 +936,7 @@ pub const Bridge = struct {
             };
             child.member.services = child.live_services.items;
         }
-        if (self.controller) |current| if (!current.ready.load(.acquire)) {
+        if (self.controller) |current| if (!current.ready.load(.acquire) and (current.next_observation_ms <= timeNow(self) or self.stopped.load(.acquire) or (if (current.cancel) |token| token.isCancelled() else false))) {
             if (self.stopped.load(.acquire) or (if (current.cancel) |token| token.isCancelled() else false)) current.failure = error.CancelledBeforeDispatch else {
                 // Controller effects recheck the current owner and full group
                 // authority in the immediately preceding runtime preflight.
@@ -944,13 +986,14 @@ pub const Bridge = struct {
                     };
                     current.invocation.automation_proof = child.automation.?.proof;
                 }
-                tools.markSent(self.operationHistory(), current.invocation.owner, current.invocation.operation_id, current.invocation.call_id, current.invocation.tool_id, current.invocation.arguments_hash) catch |err| {
+                if (!current.sent) tools.markSent(self.operationHistory(), current.invocation.owner, current.invocation.operation_id, current.invocation.call_id, current.invocation.tool_id, current.invocation.arguments_hash) catch |err| {
                     current.failure = err;
                     current.ready.store(true, .release);
                     self.mutex.unlock();
                     return;
                 };
-                self.emitStep(running, .running, "");
+                if (!current.sent) self.emitStep(running, .running, "");
+                current.sent = true;
                 current.result = current.target.binding.handler(current.target.context, current.invocation, current.allocator) catch |err| blk: {
                     current.failure = err;
                     break :blk null;
@@ -959,7 +1002,21 @@ pub const Bridge = struct {
                     for (self.children.items) |child| if (child.owner.eql(current.invocation.owner)) releaseAutomation(child, true);
                 };
             }
-            current.ready.store(true, .release);
+            const retry_ms = if (current.result) |result| result.observation_retry_ms else null;
+            const preparing = if (current.result) |result| result.observation_preparing else false;
+            const observation_deadline = if (preparing) @max(current.preparation_deadline_ms, current.observation_deadline_ms) else current.observation_deadline_ms;
+            if (current.failure == null and current.invocation.effect == .observe_image and retry_ms != null and timeNow(self) < observation_deadline) {
+                current.result.?.deinit(current.allocator);
+                current.result = null;
+                current.next_observation_ms = timeNow(self) + @min(retry_ms.?, 250);
+            } else {
+                if (current.failure == null and current.result != null) {
+                    @import("../ai/kvm_tool_feedback.zig").finishWait(current.allocator, current.invocation.tool_id, &current.result.?, observation_deadline > 0) catch |err| {
+                        current.failure = err;
+                    };
+                }
+                current.ready.store(true, .release);
+            }
         };
         self.mutex.unlock();
         self.pumpHost();
@@ -1209,6 +1266,38 @@ test "automation cancellation honors stable Stop and borrowed source before disp
     try std.testing.expectError(error.CancelledBeforeDispatch, bridge.automationCancel(&borrowed));
     stop.cancel();
     try std.testing.expectError(error.CancelledBeforeDispatch, bridge.automationCancel(null));
+}
+
+test "host rejected result retains its diagnostic blocks in step events" {
+    const a = std.testing.allocator;
+    const Fixture = struct {
+        fn invoke(_: *anyopaque, _: host_tools.Invocation, _: std.mem.Allocator) !host_tools.Result {
+            return error.UnexpectedDispatch;
+        }
+        fn worker(_: *anyopaque, _: *Bridge, invocation: host_tools.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !host_tools.Result {
+            const blocks = try allocator.alloc(host_tools.Block, 1);
+            errdefer allocator.free(blocks);
+            blocks[0] = .{ .structured = try allocator.dupe(u8, "{\"error_code\":\"ShellPromptNotObserved\",\"side_effect_started\":false}") };
+            return .{ .status = .rejected, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+        }
+    };
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    var mailbox = @import("../ai/step_events.zig").Mailbox.init(a);
+    defer mailbox.deinit();
+    bridge.events = &mailbox;
+    const context: host_tools.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    try bridge.configureHost(.{ .context = context, .handler_context = &bridge, .invoke = Fixture.invoke, .invoke_worker = Fixture.worker, .contributions = &.{} });
+    var result = try Bridge.executeHost(&bridge, .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "rejected", .tool_id = "host.run_in_terminal", .arguments = .{ .object = .empty }, .arguments_json = "{\"command\":\"pwd\"}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) }, a, null);
+    defer result.deinit(a);
+    const events = try mailbox.drain();
+    defer a.free(events);
+    defer for (events) |event| event.deinit(a);
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+    try std.testing.expectEqual(@import("../ai/step_events.zig").Phase.rejected, events[1].phase);
+    try std.testing.expect(std.mem.indexOf(u8, events[1].detail, "ShellPromptNotObserved") != null);
+    try std.testing.expect(std.mem.indexOf(u8, events[1].detail, "side_effect_started") != null);
+    try std.testing.expectEqualStrings("{\"command\":\"pwd\"}", events[1].command);
 }
 
 test "host metadata remains available for opening and failed sessions without terminal targets" {
@@ -1746,4 +1835,174 @@ test "routing intent and approval grants cannot expand retired metadata only bri
     var subject: approvals.Subject = .{ .kind = .terminal_command, .target = "session 1", .detail = "pwd" };
     try std.testing.expectError(error.ToolNotAvailable, bridge.prepareHostRoute(invocation, &subject, handle, .current_terminal, a));
     try std.testing.expectError(error.ToolNotAvailable, bridge.requestHostRoute(invocation, subject, a, null));
+}
+
+test "fixed execution mode mismatch gives actionable route without dispatch or discovery" {
+    const a = std.testing.allocator;
+    const context: host_tools.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
+    var broker: approvals.Broker = .{};
+    try broker.configure(context, 1);
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    bridge.route_broker = &broker;
+    const invocation: host_tools.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "fixed-mode", .tool_id = "run_command", .arguments = .null, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    inline for (.{ .attached_pty, .new_pty, .isolated_exec }) |mode| {
+        bridge.execution_mode = mode;
+        var subject: approvals.Subject = .{ .kind = .terminal_command, .target = "session", .detail = "pwd", .impact = "exact command" };
+        var result = (try bridge.prepareHostRoute(invocation, &subject, target, if (mode == .isolated_exec) .current_terminal else .batch, a)).?;
+        defer result.deinit(a);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("requires_plan_change", parsed.value.object.get("error_code").?.string);
+        try std.testing.expect(!parsed.value.object.get("side_effect_started").?.bool);
+        try std.testing.expectEqualStrings(if (mode == .isolated_exec) "run_command" else if (mode == .attached_pty) "host.run_in_terminal" else "host.create_group/host.open_session/host.run_in_terminal", parsed.value.object.get("next_tool").?.string);
+        try std.testing.expect(bridge.running == null and bridge.pending == null and bridge.host_exchange == null);
+    }
+}
+
+test "live permission pending dynamic calls resume once for both confirmation policies" {
+    const a = std.testing.allocator;
+    const Fixture = struct {
+        calls: usize = 0,
+        fn invoke(raw: *anyopaque, request: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .{ .status = .succeeded, .receipt = .{ .owner = request.owner, .operation_id = request.operation_id } };
+        }
+    };
+    const Worker = struct {
+        bridge: *Bridge,
+        invocation: tools.DynamicInvocation,
+        result: ?[]tools.ToolResult = null,
+        failure: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            self.result = Bridge.executeDynamic(self.bridge, self.invocation, a, null) catch |err| blk: {
+                self.failure = err;
+                break :blk null;
+            };
+            self.done.store(true, .release);
+        }
+    };
+    for ([_]tools.ApprovalPolicy{ .confirm, .always_confirm }) |approval_policy| {
+        var fixture: Fixture = .{};
+        var bridge = Bridge.init(a);
+        defer bridge.deinit();
+        const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1) };
+        const captured: scope.Scope = .{ .owner = .{ .session = 1 }, .members = .{ .ids = .{1} ++ @as([15]u64, @splat(0)), .len = 1 } };
+        bridge.captured_scope = captured;
+        const binding: tools.ToolBinding = .{ .plugin_id = "live-permission-fixture", .definition_id = "fixture.write", .handler = Fixture.invoke, .execution = .worker };
+        const child = try a.create(Child);
+        child.* = .{ .owner = target, .member = .{ .owner = target, .plugin_id = binding.plugin_id, .context = &fixture, .bindings = &.{binding} } };
+        try bridge.children.append(a, child);
+        const entry: tools.Entry = .{ .definition = .{ .id = "fixture.write", .schema = "{\"type\":\"object\"}", .effect = .resource_write, .approval_policy = approval_policy }, .provider_name = "fixture.write", .targets = &.{.{ .owner = target, .binding = binding, .context = &fixture, .capability_revision = 1, .policy_revision = 1, .services = &.{} }} };
+        var table: tools.RequestTable = .{ .arena = .init(a), .captured_scope = captured, .entries = &.{entry} };
+        defer table.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, "{}", .{});
+        defer parsed.deinit();
+        const invocation: tools.DynamicInvocation = .{ .table = &table, .parsed = .{ .json = parsed, .entry = &entry, .targets = captured.members, .arguments_hash = routing.digest("{}") }, .turn_id = 1, .call_id = "live-pending", .arguments = "{}", .operation_id = 1 };
+        var worker: Worker = .{ .bridge = &bridge, .invocation = invocation };
+        const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+        defer thread.join();
+        // Always release the worker even when a test expectation fails.
+        defer bridge.stopped.store(true, .release);
+        var pending: ?Approval = null;
+        for (0..1000) |_| {
+            pending = bridge.pendingApproval();
+            if (pending != null or worker.done.load(.acquire)) break;
+            pause();
+        }
+        try std.testing.expect(pending != null);
+        bridge.setPermissionMode(.auto);
+        for (0..1000) |_| {
+            if (worker.done.load(.acquire)) break;
+            pause();
+        }
+        try std.testing.expect(worker.done.load(.acquire));
+        if (worker.failure) |err| return err;
+        const results = worker.result.?;
+        defer a.free(results);
+        defer for (results) |*result| result.deinit(a);
+        try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+        try std.testing.expectEqual(tools.Status.succeeded, results[0].status);
+        try std.testing.expect(bridge.pendingApproval() == null);
+    }
+}
+
+test "API2 image offload reader uses live approval and the worker conversation lookup" {
+    const a = std.testing.allocator;
+    const refs = @import("../ai/image_attachments.zig");
+    const offload = @import("../ai/image_offload.zig");
+    const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" ++
+        "\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
+        "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d" ++
+        "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+    const Fixture = struct {
+        messages: []const provider.Message,
+        lookups: usize = 0,
+        approve: bool = false,
+        fn find(raw: *anyopaque, owner: identity.SessionHandle, reference: []const u8) !refs.ContentRef {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.lookups += 1;
+            return offload.find(self.messages, reference, owner);
+        }
+        fn approval(raw: *anyopaque, _: tools.DynamicInvocation, _: *tools.ApprovalTicket, _: ?*provider.CancelToken) !bool {
+            const bridge: *Bridge = @ptrCast(@alignCast(raw));
+            const self: *@This() = @ptrCast(@alignCast(bridge.image_lookup.?.context));
+            return self.approve;
+        }
+        fn unexpected(_: *anyopaque, _: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
+            return error.ImageReaderMustUseConversationLookup;
+        }
+    };
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(171), .generation = 3 };
+    var image = try refs.ContentRef.create(a, "fixture", png, 1, .{});
+    defer image.release();
+    const reference = try offload.reference(a, image);
+    defer a.free(reference);
+    var fixture: Fixture = .{ .messages = &.{.{ .content = "old screen", .offloaded_images = &.{.{ .reference = image, .owner = owner }} }} };
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const captured: scope.Scope = .{ .owner = .{ .session = 171 }, .members = .{ .ids = .{171} ++ @as([15]u64, @splat(0)), .len = 1 } };
+    bridge.captured_scope = captured;
+    bridge.image_lookup = .{ .context = &fixture, .find = Fixture.find };
+    const child = try a.create(Child);
+    const bindings = [_]tools.ToolBinding{.{ .plugin_id = "bmc_ikvm", .definition_id = offload.tool_id, .handler = Fixture.unexpected, .execution = .worker }};
+    child.* = .{ .owner = owner, .member = .{ .owner = owner, .plugin_id = "bmc_ikvm", .context = &fixture, .bindings = &bindings } };
+    try bridge.children.append(a, child);
+    // Isolate the image reader here; typed BMC service admission is covered by
+    // the production gateway tests, while all live API-2 authority gates run.
+    var definition = @import("../plugins/bmc_ikvm/tools.zig").definitions[7];
+    definition.required_services = &.{};
+    var table = try tools.RequestTable.init(a, captured, &.{definition}, &.{child.member});
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const schema_value = try std.json.parseFromSlice(std.json.Value, a, wire[0].dynamic.?.schema, .{});
+    defer schema_value.deinit();
+    try std.testing.expectEqual(@as(i64, 171), schema_value.value.object.get("properties").?.object.get("session_ids").?.object.get("items").?.object.get("enum").?.array.items[0].integer);
+    const args = try std.fmt.allocPrint(a, "{{\"session_ids\":[171],\"image_ref\":\"{s}\"}}", .{reference});
+    defer a.free(args);
+    var parsed = try table.parse(a, wire[0].name(), args);
+    defer parsed.deinit();
+    var invocation: tools.DynamicInvocation = .{ .table = &table, .parsed = parsed, .turn_id = 1, .call_id = "reread", .arguments = args, .operation_id = 1 };
+    const runtime: tools.Runtime = .{ .context = &bridge, .live_scope = Bridge.liveScope, .live_members = Bridge.liveMembers, .current_policy = Bridge.currentPolicy, .now_ms = Bridge.timeNow, .approval = Fixture.approval, .operations = bridge.operationHistory(), .invoke = Bridge.invoke };
+    try std.testing.expectError(error.ToolApprovalRejected, runtime.execute(invocation, a, null));
+    try std.testing.expectEqual(@as(usize, 0), fixture.lookups);
+    fixture.approve = true;
+    invocation.operation_id = 2;
+    const results = try runtime.execute(invocation, a, null);
+    defer {
+        for (results) |*result| result.deinit(a);
+        a.free(results);
+    }
+    try std.testing.expectEqual(@as(usize, 1), fixture.lookups);
+    try std.testing.expectEqual(tools.Status.succeeded, results[0].status);
+    try std.testing.expectEqualSlices(u8, png, results[0].blocks[1].image_ref.content().?.bytes);
+    try std.testing.expectEqual(@as(usize, 0), fixture.messages[0].images.len);
+    try std.testing.expectError(error.ToolOperationAlreadyRecorded, runtime.execute(invocation, a, null));
+    bridge.policy.allow_read = false;
+    invocation.operation_id = 3;
+    try std.testing.expectError(error.ToolExecutionDenied, runtime.execute(invocation, a, null));
+    try std.testing.expectEqual(@as(usize, 1), fixture.lookups);
 }

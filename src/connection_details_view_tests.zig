@@ -130,6 +130,43 @@ test "connection details view copies direct and ordered route facts in the V3 no
     try std.testing.expectEqual(@as(usize, 1), f.samples);
 }
 
+test "connection details view shows overall status only when the chain needs attention" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var source = try snapshot(2);
+    try f.show(source);
+    try std.testing.expect(f.view.source_status == null);
+    try std.testing.expectEqualStrings("就绪", f.view.row_status[0].?.getText().?.content);
+    try std.testing.expectEqualStrings("在线", f.view.row_status[1].?.getText().?.content);
+    try std.testing.expectEqualStrings("在线", f.view.row_status[2].?.getText().?.content);
+
+    source.revision += 1;
+    source.hops[1].status = .negotiating;
+    try f.view.update(source);
+    try f.view.flush();
+    try std.testing.expectEqualStrings("连接中", f.view.source_status.?.getText().?.content);
+    try std.testing.expectEqualStrings("在线", f.view.row_status[1].?.getText().?.content);
+    try std.testing.expectEqualStrings("连接中", f.view.row_status[2].?.getText().?.content);
+
+    source.revision += 1;
+    source.hops[1].status = .released;
+    try f.view.update(source);
+    try f.view.flush();
+    try std.testing.expectEqualStrings("未连接", f.view.source_status.?.getText().?.content);
+
+    source.revision += 1;
+    source.hops[1].status = .online;
+    try f.view.update(source);
+    try f.view.flush();
+    try std.testing.expect(f.view.source_status == null);
+    try std.testing.expectEqualStrings("在线", f.view.row_status[2].?.getText().?.content);
+
+    f.view.invalidate(source.key);
+    try f.view.flush();
+    try std.testing.expectEqualStrings("已过期", f.view.source_status.?.getText().?.content);
+}
+
 test "connection details view rejects other owners old revisions and stale generations without replacing the capture" {
     var f: Fixture = undefined;
     try f.init();

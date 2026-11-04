@@ -21,6 +21,7 @@ const Fake = struct {
     sends: usize = 0,
     rings: usize = 0,
     polls: usize = 0,
+    poll_status: c_int = 0,
     send_status: c_int = 0,
     last_query: u64 = 0,
     last_permission: u64 = 0,
@@ -79,6 +80,7 @@ const Fake = struct {
     fn poll(handle: *platform.Handle, out: *platform.RawEvent) callconv(.c) c_int {
         const self = get(handle);
         self.polls += 1;
+        if (self.poll_status != 0) return self.poll_status;
         if (self.read == self.written) return 0;
         out.* = self.events[self.read];
         self.read += 1;
@@ -341,8 +343,15 @@ const WindowProbe = struct {
     conversation: ?@import("host/identity.zig").ConversationId = null,
     selected: ?@import("host/identity.zig").ConversationId = null,
     conversation_activates: usize = 0,
+    maintenance_calls: usize = 0,
+    settings_changes: usize = 0,
     fn callbacks(self: *WindowProbe) notification_host.Window {
-        return .{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .feedback = feedback };
+        return .{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .feedback = feedback, .maintenance = maintain };
+    }
+    fn maintain(raw: *anyopaque, settings_changed: bool) void {
+        const self: *WindowProbe = @ptrCast(@alignCast(raw));
+        self.maintenance_calls += 1;
+        self.settings_changes += @intFromBool(settings_changed);
     }
     fn owns(raw: *anyopaque, value: notifications.Target) bool {
         const self: *WindowProbe = @ptrCast(@alignCast(raw));
@@ -368,6 +377,60 @@ const WindowProbe = struct {
     }
 };
 
+test "notification maintenance drains receipts without frames and fans settings out to live windows" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{}, fake.api());
+    defer host.destroy();
+    var first: WindowProbe = .{};
+    var second: WindowProbe = .{};
+    const first_id = try host.registerWindow(first.callbacks());
+    _ = try host.registerWindow(second.callbacks());
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
+    try std.testing.expect(try host.maintain(1000));
+    try std.testing.expectEqual(@as(usize, 1), first.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 1), second.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 1), first.settings_changes);
+    try std.testing.expectEqual(@as(usize, 1), second.settings_changes);
+    const polls = fake.polls;
+    try std.testing.expect(!try host.maintain(1249));
+    try std.testing.expectEqual(polls, fake.polls);
+    try std.testing.expectEqual(@as(usize, 1), first.maintenance_calls);
+    try std.testing.expect(try host.maintain(1250));
+    try std.testing.expectEqual(@as(usize, 2), first.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 1), first.settings_changes);
+    host.removeWindow(first_id);
+    try std.testing.expect(try host.maintain(1500));
+    try std.testing.expectEqual(@as(usize, 2), first.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 3), second.maintenance_calls);
+}
+
+test "notification maintenance observes windows despite receipt failure and recovers on next deadline" {
+    var fake: Fake = .{ .poll_status = -5 };
+    const host = try notification_host.Host.createWithApi(a, .{}, fake.api());
+    defer host.destroy();
+    var first: WindowProbe = .{};
+    var second: WindowProbe = .{};
+    _ = try host.registerWindow(first.callbacks());
+    _ = try host.registerWindow(second.callbacks());
+    try std.testing.expectError(error.NativeNotificationFailed, host.maintain(1000));
+    try std.testing.expectEqual(@as(usize, 1), first.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 1), second.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 0), first.settings_changes);
+    const polls = fake.polls;
+    try std.testing.expect(!try host.maintain(1249));
+    try std.testing.expectEqual(polls, fake.polls);
+    try std.testing.expectError(error.NativeNotificationFailed, host.maintain(1250));
+    try std.testing.expectEqual(@as(usize, 2), first.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 2), second.maintenance_calls);
+    fake.poll_status = 0;
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
+    try std.testing.expect(try host.maintain(1500));
+    try std.testing.expectEqual(@as(usize, 3), first.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 3), second.maintenance_calls);
+    try std.testing.expectEqual(@as(usize, 1), first.settings_changes);
+    try std.testing.expectEqual(@as(usize, 1), second.settings_changes);
+}
+
 test "AI reminder selects its exact stable conversation and never falls back to another dialog" {
     var fake: Fake = .{};
     const host = try notification_host.Host.createWithApi(a, .{ .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
@@ -388,7 +451,9 @@ test "AI reminder selects its exact stable conversation and never falls back to 
     const event_id = fake.last_event;
     const os_target = fake.last_target;
     fake.push(.{ .kind = 4, .result = 1, .event_id = event_id, .target = os_target, .current_instance = 1 });
-    _ = try host.poll();
+    // The native receipt is consumed by main-loop maintenance, even with no
+    // output, timer redraw or renderer frame in this test.
+    try std.testing.expect(try host.maintain(1000));
     try std.testing.expect(window.selected.?.eql(original));
     try std.testing.expectEqual(@as(usize, 1), window.conversation_activates);
     try std.testing.expectEqual(@as(usize, 0), window.activates);
@@ -625,7 +690,7 @@ test "notification recording risk persists in foreground and clears only on sour
     try host.publishRecordingStatus(id, target.owner.session, "DiskFull");
     try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
     const fact = host.coordinator.notification_records.items[0];
-    try std.testing.expect(fact.persistent());
+    try std.testing.expect(fact.priorityRisk());
     host.coordinator.dismissNotification(fact.fact_id);
     host.coordinator.readHistory();
     host.coordinator.clearHistory();

@@ -15,6 +15,32 @@ fn time(raw: ?*anyopaque) i64 {
     return @as(*i64, @ptrCast(@alignCast(raw.?))).*;
 }
 
+test "host approval binds trusted input evidence independently of visible text" {
+    const a = std.testing.allocator;
+    var broker: approval.Broker = .{};
+    const ctx = context();
+    try broker.configure(ctx, 9);
+    const json = "{\"text\":\"continue\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer parsed.deinit();
+    var call = try invocation(ctx, parsed.value, json);
+    call.tool_id = "host.send_execution_input";
+    call.authority = .execution_control;
+    const subject: approval.Subject = .{ .kind = .terminal_command, .target = "execution 1", .detail = "continue", .impact = "向当前等待输入的程序发送内容", .evidence_hash = @splat(1) };
+    const permit = try broker.beginSubject(call, subject, 9, a);
+    defer broker.finish(permit);
+    const shown = broker.snapshot().?;
+    try std.testing.expectEqualStrings(subject.detail, shown.detail.text());
+    try std.testing.expectEqualStrings(subject.impact, shown.impact.text());
+    try broker.decide(permit.sequence, permit.arguments_hash, true);
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorizeSubject(permit, call, subject, 9));
+    var changed = subject;
+    changed.evidence_hash = @splat(2);
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.scope_changed, broker.authorizeSubject(permit, call, changed, 9));
+    changed.evidence_hash = null;
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.scope_changed, broker.authorizeSubject(permit, call, changed, 9));
+}
+
 test "execution deadline Stop racing approved or rejected host approval clears the permit" {
     const Race = struct {
         broker: *approval.Broker,
@@ -45,7 +71,7 @@ test "execution deadline Stop racing approved or rejected host approval clears t
     }
 }
 
-test "execution deadline native host approval wait observes expiry and releases pending storage" {
+test "execution deadline native host approval still honours explicit caller cancellation" {
     const Deadline = struct {
         expires_ms: std.atomic.Value(i64) = .init(0),
         polls: std.atomic.Value(usize) = .init(0),
@@ -71,10 +97,10 @@ test "execution deadline native host approval wait observes expiry and releases 
     try std.testing.expectError(error.CancelledBeforeDispatch, broker.request(call, "https://example.test/", 4, std.testing.allocator, &cancel));
     try std.testing.expect(deadline.expires_ms.load(.acquire) != 0);
     try std.testing.expect(broker.entry == null);
-    std.debug.print("native approval deadline released in {d}ms\n", .{Deadline.milliseconds() - started});
+    std.debug.print("native approval caller cancellation released in {d}ms\n", .{Deadline.milliseconds() - started});
 }
 
-test "host approval freezes URL call authority expiry and sequence without session targets" {
+test "host approval freezes URL call authority and sequence without expiring" {
     const a = std.testing.allocator;
     const ctx = context();
     const json = "{\"url\":\"https://example.com/docs#part\"}";
@@ -103,9 +129,9 @@ test "host approval freezes URL call authority expiry and sequence without sessi
     call.arguments_json = "{}";
     try std.testing.expectEqual(@import("fetch_url.zig").Decision.scope_changed, broker.authorize(permit, call, "https://example.com/docs", 5));
     call.arguments_json = json;
-    now = pending.expires_at_ms;
-    try std.testing.expectError(error.ToolApprovalExpired, broker.poll(permit));
-    try std.testing.expectEqual(@import("fetch_url.zig").Decision.approval_required, broker.authorize(permit, call, "https://example.com/docs", 5));
+    now += 30 * 24 * 60 * 60 * 1000;
+    try std.testing.expect(try broker.poll(permit));
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorize(permit, call, "https://example.com/docs", 5));
     broker.finish(permit);
     now += 1;
     const next = try broker.begin(call, "https://example.com/docs#part", 5, a);
@@ -245,7 +271,7 @@ test "routing rejected pending choice and changed command cannot mint successor 
     try std.testing.expect(try broker.beginGrantedSubject(call, changed, 9, a) == null);
 }
 
-test "host approval expiry suspends the worker until explicit renewal and a separate decision" {
+test "host approval waits indefinitely and accepts one direct decision" {
     const a = std.testing.allocator;
     const ctx = context();
     const json = "{\"url\":\"https://example.com/\"}";
@@ -288,13 +314,10 @@ test "host approval expiry suspends the worker until explicit renewal and a sepa
         try @import("retry.zig").wait(1, null);
     }
     const frozen = pending orelse return error.ApprovalNotPublished;
-    clock.value.store(frozen.expires_at_ms + 1000, .release);
+    clock.value.store(30 * 24 * 60 * 60 * 1000, .release);
     try @import("retry.zig").wait(30, null);
-    try std.testing.expect(broker.snapshot().?.expired);
-    try std.testing.expect(!worker.finished.load(.acquire));
-    try std.testing.expectError(error.StaleApproval, broker.decide(frozen.sequence, frozen.arguments_hash, true));
-    try broker.renew(frozen.sequence, frozen.arguments_hash);
     try std.testing.expect(!broker.snapshot().?.expired);
+    try std.testing.expect(!worker.finished.load(.acquire));
     try std.testing.expectEqual(frozen.sequence, broker.snapshot().?.sequence);
     try std.testing.expectEqualStrings(frozen.call.text(), broker.snapshot().?.call.text());
     try @import("retry.zig").wait(30, null);
@@ -307,4 +330,143 @@ test "host approval expiry suspends the worker until explicit renewal and a sepa
     try std.testing.expect(worker.finished.load(.acquire));
     try std.testing.expect(worker.failure == null and worker.permit != null);
     broker.finish(worker.permit.?);
+}
+
+test "live permission PTY rejudges the same pending permit and revokes only automatic grants" {
+    const a = std.testing.allocator;
+    var broker: approval.Broker = .{};
+    const ctx = context();
+    try broker.configure(ctx, 9);
+    const json = "{\"command\":\"df -h\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer parsed.deinit();
+    var call = try invocation(ctx, parsed.value, json);
+    call.tool_id = "host.run_in_terminal";
+    call.authority = .execution_control;
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1) };
+    const subject: approval.Subject = .{ .kind = .terminal_command, .target = "session 1", .detail = "df -h", .route = .{ .proposed = .current_terminal, .choice = .{ .route = .current_terminal, .source = .{ .session = target } }, .target = target, .selectable = false } };
+    broker.updatePermissionPolicy(.{ .mode = .confirm });
+    const permit = try broker.beginSubject(call, subject, 9, a);
+    defer broker.finish(permit);
+    try std.testing.expect(!try broker.poll(permit));
+    broker.updatePermissionPolicy(.{ .mode = .auto });
+    try std.testing.expect(try broker.poll(permit));
+    try std.testing.expect(broker.snapshot() == null);
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorizeSubject(permit, call, subject, 9));
+    try std.testing.expect(!broker.execution_route.resolve(ctx, target, "df -h", .current_terminal).approved);
+    broker.updatePermissionPolicy(.{ .mode = .confirm });
+    try std.testing.expect(!try broker.poll(permit));
+    try std.testing.expectEqual(permit.sequence, broker.snapshot().?.sequence);
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.approval_required, broker.authorizeSubject(permit, call, subject, 9));
+    try broker.decide(permit.sequence, permit.arguments_hash, true);
+    broker.updatePermissionPolicy(.{ .mode = .auto });
+    broker.updatePermissionPolicy(.{ .mode = .confirm });
+    try std.testing.expect(try broker.poll(permit));
+}
+
+test "live permission PTY auto allows all safe commands and retains route rejection and stop checks" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "df -h", "kubectl rollout restart deploy/api", "touch /tmp/fixture", "df -h; echo x", "echo x; shutdown now" }) |command| {
+        for ([_]bool{ false, true }) |selectable| {
+            var broker: approval.Broker = .{};
+            const ctx = context();
+            try broker.configure(ctx, 9);
+            broker.updatePermissionPolicy(.{ .mode = .auto, .whitelist = &.{"kubectl rollout restart"} });
+            const json = try std.json.Stringify.valueAlloc(a, .{ .command = command }, .{});
+            defer a.free(json);
+            const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+            defer parsed.deinit();
+            var call = try invocation(ctx, parsed.value, json);
+            call.tool_id = "host.run_in_terminal";
+            call.authority = .execution_control;
+            const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1) };
+            const subject: approval.Subject = .{ .kind = .terminal_command, .target = "session 1", .detail = command, .route = .{ .proposed = .current_terminal, .choice = .{ .route = .current_terminal, .source = .{ .session = target } }, .target = target, .selectable = selectable } };
+            const permit = try broker.beginSubject(call, subject, 9, a);
+            defer broker.finish(permit);
+            const automatic = !selectable and !std.mem.eql(u8, command, "echo x; shutdown now");
+            try std.testing.expectEqual(automatic, try broker.poll(permit));
+            if (!automatic) {
+                try broker.decide(permit.sequence, permit.arguments_hash, false);
+                broker.updatePermissionPolicy(.{ .mode = .auto });
+                try std.testing.expectError(error.ToolApprovalRejected, broker.poll(permit));
+            }
+            broker.stop();
+            broker.updatePermissionPolicy(.{ .mode = .auto });
+            try std.testing.expectError(error.CancelledBeforeDispatch, broker.poll(permit));
+        }
+    }
+}
+
+test "automatic permission covers host lifecycle network input and group command approvals" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { tool: []const u8, kind: approval.SubjectKind, authority: provider.ToolAuthority, json: []const u8, detail: []const u8, automatic: bool = true }{
+        .{ .tool = "host.run_in_terminal", .kind = .terminal_command, .authority = .execution_control, .json = "{\"command\":\"touch /tmp/auto-fixture\"}", .detail = "touch /tmp/auto-fixture" },
+        .{ .tool = "run_command", .kind = .terminal_command, .authority = .execution_control, .json = "{\"command\":\"touch /tmp/auto-fixture\"}", .detail = "touch /tmp/auto-fixture" },
+        .{ .tool = "host.send_execution_input", .kind = .terminal_command, .authority = .execution_control, .json = "{\"text\":\"continue\"}", .detail = "continue" },
+        .{ .tool = "host.send_execution_input", .kind = .terminal_command, .authority = .execution_control, .json = "{\"host_secret_request\":true}", .detail = "host secret", .automatic = false },
+        .{ .tool = "host.create_group", .kind = .lifecycle, .authority = .lifecycle, .json = "{}", .detail = "create group" },
+        .{ .tool = "host.open_session", .kind = .lifecycle, .authority = .lifecycle, .json = "{}", .detail = "open session with its exact bootstrap dependencies" },
+        .{ .tool = "host.close_session", .kind = .lifecycle, .authority = .lifecycle, .json = "{}", .detail = "close authorized session" },
+        .{ .tool = "host.create_host", .kind = .lifecycle, .authority = .lifecycle, .json = "{}", .detail = "save static host configuration" },
+        .{ .tool = "host.fetch_url", .kind = .network_url, .authority = .local_network_read, .json = "{\"url\":\"https://example.test/\"}", .detail = "https://example.test/" },
+    };
+    for (cases) |case| {
+        var broker: approval.Broker = .{};
+        var ctx = context();
+        ctx.binding = .{ .group = 7 };
+        try broker.configure(ctx, 9);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, case.json, .{});
+        defer parsed.deinit();
+        var call = try invocation(ctx, parsed.value, case.json);
+        call.tool_id = case.tool;
+        call.authority = case.authority;
+        const subject: approval.Subject = .{ .kind = case.kind, .target = if (case.kind == .network_url) case.detail else "authorized target", .detail = case.detail };
+        const permit = try broker.beginSubject(call, subject, 9, a);
+        defer broker.finish(permit);
+        try std.testing.expect(!try broker.poll(permit));
+        broker.updatePermissionPolicy(.{ .mode = .auto });
+        try std.testing.expectEqual(case.automatic, try broker.poll(permit));
+        if (!case.automatic) continue;
+        try std.testing.expect(try broker.approvalIsAutomatic(permit));
+        try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorizeSubject(permit, call, subject, 9));
+        broker.updatePermissionPolicy(.{ .mode = .confirm });
+        try std.testing.expect(!try broker.poll(permit));
+        try std.testing.expectEqual(@import("fetch_url.zig").Decision.approval_required, broker.authorizeSubject(permit, call, subject, 9));
+        broker.updatePermissionPolicy(.{ .mode = .auto });
+        try std.testing.expect(try broker.poll(permit));
+        var changed = call;
+        changed.operation_id += 1;
+        try std.testing.expectEqual(@import("fetch_url.zig").Decision.scope_changed, broker.authorizeSubject(permit, changed, subject, 9));
+        broker.stop();
+        try std.testing.expectError(error.CancelledBeforeDispatch, broker.poll(permit));
+    }
+}
+
+test "automatic permission follows valid URL redirects while retaining transport and scope restrictions" {
+    const a = std.testing.allocator;
+    var broker: approval.Broker = .{};
+    const ctx = context();
+    try broker.configure(ctx, 9);
+    broker.updatePermissionPolicy(.{ .mode = .auto });
+    const json = "{\"url\":\"https://example.test/\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer parsed.deinit();
+    const call = try invocation(ctx, parsed.value, json);
+    const permit = try broker.request(call, "https://example.test/", 9, a, null);
+    defer broker.finish(permit);
+    const Decision = @import("fetch_url.zig").Decision;
+    try std.testing.expectEqual(Decision.allow, broker.authorize(permit, call, "https://other.example.test/final", 9));
+    for ([_][]const u8{ "file:///tmp/private", "http://127.0.0.1/", "http://169.254.169.254/", "https://user:secret@example.test/" }) |url| {
+        try std.testing.expectEqual(Decision.denied, broker.authorize(permit, call, url, 9));
+    }
+    var changed = call;
+    changed.context.task_id = identity.TaskId.generate();
+    try std.testing.expectEqual(Decision.scope_changed, broker.authorize(permit, changed, "https://other.example.test/final", 9));
+    broker.updatePermissionPolicy(.{ .mode = .confirm });
+    try std.testing.expectEqual(Decision.approval_required, broker.authorize(permit, call, "https://other.example.test/final", 9));
+    try broker.decide(permit.sequence, permit.arguments_hash, true);
+    try std.testing.expectEqual(Decision.allow, broker.authorize(permit, call, "https://example.test/", 9));
+    try std.testing.expectEqual(Decision.approval_required, broker.authorize(permit, call, "https://other.example.test/final", 9));
+    broker.stop();
+    try std.testing.expectEqual(Decision.scope_changed, broker.authorize(permit, call, "https://other.example.test/final", 9));
 }

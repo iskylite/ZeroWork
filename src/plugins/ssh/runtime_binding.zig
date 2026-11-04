@@ -28,6 +28,9 @@ fn requestReconnect(raw: *anyopaque, previous: OperationKey, next: OperationKey)
 fn requestReconnectWithInitialization(raw: *anyopaque, previous: OperationKey, next: OperationKey, skip: bool) anyerror!void {
     return get(raw).requestReconnectWithInitialization(previous, next, skip);
 }
+fn requestReconnectConfigured(raw: *anyopaque, previous: OperationKey, next: OperationKey, skip: bool, configuration: @import("../../vt/reconnect.zig").Configuration) anyerror!void {
+    return get(raw).requestReconnectConfigured(previous, next, skip, configuration);
+}
 fn preflightExplicitDisconnect(raw: *anyopaque, key: OperationKey) anyerror!u64 {
     return get(raw).preflightExplicitDisconnect(key);
 }
@@ -56,8 +59,30 @@ fn setInputBufferEnabled(raw: *anyopaque, enabled: bool) void {
     const native = get(raw);
     if (!native.torn_down) native.worker.setInputBufferEnabled(enabled and !native.thread.explicit_disconnect_active.load(.acquire));
 }
+fn attachCurrentShell(raw: *anyopaque) anyerror!void {
+    const native = get(raw);
+    if (native.torn_down) return error.SessionClosed;
+    try native.workerPtr().attachCurrentShell();
+}
+fn attachShell(raw: *anyopaque, request: @import("../../host/terminal_execution.zig").ShellAttachment) anyerror!void {
+    const native = get(raw);
+    if (native.torn_down) return error.SessionClosed;
+    try native.workerPtr().attachShell(request);
+}
 fn requestCurrentDirectory(raw: *anyopaque) anyerror!void {
     try get(raw).workerPtr().requestCurrentDirectory();
+}
+fn completeRemotePath(raw: *anyopaque, path: []const u8) anyerror!@import("../../ui/builtin_completion.zig").Call {
+    const runtime = get(raw);
+    if (runtime.torn_down) return error.SessionClosed;
+    const worker = runtime.workerPtr();
+    const a = worker.allocator;
+    const cwd = (try worker.vt.tryCopyCwd(a)) orelse return error.CurrentDirectoryUnavailable;
+    defer a.free(cwd);
+    const command = try @import("../../ui/builtin_completion.zig").command(a, cwd, path);
+    defer a.free(command);
+    const handle = try worker.exec_bridge.pathDiagnostic(command, .{ .timeout_ms = 5000, .capture_cap = 64 * 1024 });
+    return .{ .bridge = worker.exec_bridge.asBridge(), .handle = handle };
 }
 fn copyCwd(raw: *anyopaque, allocator: std.mem.Allocator) anyerror!?[]u8 {
     if (get(raw).torn_down) return error.SessionClosed;
@@ -118,8 +143,9 @@ fn terminalService(raw: *anyopaque) !terminal.Service {
     if (native.torn_down) return error.SessionClosed;
     const key = try native.worker.replay.notificationKey();
     if (key.owner != .session) return error.StaleOwner;
-    if (native.terminal_provider == null or !native.terminal_provider.?.source.owner.eql(key.owner.session)) {
-        if (native.terminal_provider) |*provider| provider.deinit();
+    if (native.terminal_provider) |*provider| {
+        if (!provider.source.owner.eql(key.owner.session)) try provider.rebindOwner(key.owner.session);
+    } else {
         native.terminal_provider = @import("terminal_service.zig").Provider.init(native, key.owner.session);
     }
     return native.terminal_provider.?.service();
@@ -197,4 +223,4 @@ fn encodeKey(raw: *anyopaque, event: terminal.KeyEvent, allocator: std.mem.Alloc
     if (native.torn_down or !isConnected(raw)) return error.SessionClosed;
     return native.workerPtr().vt.encodeKey(event, allocator);
 }
-const vtable: service.Runtime.VTable = .{ .reuseConnection = reuseConnection, .osDetection = osDetection, .documentSource = documentSource, .terminalService = terminalService, .bindTerminalService = bindTerminalService, .encodeKey = encodeKey, .releaseStep = releaseStep, .cleanupReleased = cleanupReleased, .reconnectSnapshot = reconnectSnapshot, .requestReconnect = requestReconnect, .requestReconnectWithInitialization = requestReconnectWithInitialization, .preflightExplicitDisconnect = preflightExplicitDisconnect, .requestExplicitDisconnect = requestExplicitDisconnect, .acknowledgeAttached = acknowledgeAttached, .isAttached = isAttached, .isConnected = isConnected, .markAttached = markAttached, .setScrollbackLimit = setScrollbackLimit, .setInputBufferEnabled = setInputBufferEnabled, .copyCwd = copyCwd, .requestCurrentDirectory = requestCurrentDirectory, .searchText = searchText, .readLines = readLines, .readonlyProvider = readonlyProvider, .notificationSnapshot = notificationSnapshot, .execService = execService, .transferService = transferService, .forwardService = forwardService, .exportTimeline = exportTimeline, .captureExport = captureExport, .sourceVersion = sourceVersion, .captureAiSelection = captureAiSelection, .semanticSequence = semanticSequence, .copyProjection = copyProjection, .hasJoined = hasJoined, .isStopping = isStopping, .hasFailed = hasFailed, .textSlot = textSlot, .reconnectState = reconnectState, .inputFreeCapacity = inputFreeCapacity, .requestResize = requestResize, .searchViewportOffset = searchViewportOffset, .locateSearchRow = locateSearchRow, .copySelection = copySelection, .pushInputFrom = pushInputFrom, .allowsBufferedOrdinaryInput = allowsBufferedOrdinaryInput, .discardBufferedInput = discardBufferedInput, .notificationPublication = notificationPublication };
+const vtable: service.Runtime.VTable = .{ .reuseConnection = reuseConnection, .osDetection = osDetection, .documentSource = documentSource, .terminalService = terminalService, .bindTerminalService = bindTerminalService, .encodeKey = encodeKey, .releaseStep = releaseStep, .cleanupReleased = cleanupReleased, .reconnectSnapshot = reconnectSnapshot, .requestReconnect = requestReconnect, .requestReconnectWithInitialization = requestReconnectWithInitialization, .requestReconnectConfigured = requestReconnectConfigured, .preflightExplicitDisconnect = preflightExplicitDisconnect, .requestExplicitDisconnect = requestExplicitDisconnect, .acknowledgeAttached = acknowledgeAttached, .isAttached = isAttached, .isConnected = isConnected, .markAttached = markAttached, .setScrollbackLimit = setScrollbackLimit, .setInputBufferEnabled = setInputBufferEnabled, .copyCwd = copyCwd, .completeRemotePath = completeRemotePath, .requestCurrentDirectory = requestCurrentDirectory, .attachCurrentShell = attachCurrentShell, .attachShell = attachShell, .searchText = searchText, .readLines = readLines, .readonlyProvider = readonlyProvider, .notificationSnapshot = notificationSnapshot, .execService = execService, .transferService = transferService, .forwardService = forwardService, .exportTimeline = exportTimeline, .captureExport = captureExport, .sourceVersion = sourceVersion, .captureAiSelection = captureAiSelection, .semanticSequence = semanticSequence, .copyProjection = copyProjection, .hasJoined = hasJoined, .isStopping = isStopping, .hasFailed = hasFailed, .textSlot = textSlot, .reconnectState = reconnectState, .inputFreeCapacity = inputFreeCapacity, .requestResize = requestResize, .searchViewportOffset = searchViewportOffset, .locateSearchRow = locateSearchRow, .copySelection = copySelection, .pushInputFrom = pushInputFrom, .allowsBufferedOrdinaryInput = allowsBufferedOrdinaryInput, .discardBufferedInput = discardBufferedInput, .notificationPublication = notificationPublication };

@@ -294,6 +294,47 @@ fn click(cx: *ui.Cx, node: *ui.Node) void {
     cx.handleMouseUpEx(rect.x + rect.w / 2, rect.y + rect.h / 2, .left, .{});
 }
 
+test "BMC editor retained backgrounds follow theme publication without replacing the draft" {
+    const theme = @import("ui/app_theme.zig");
+    const S = @import("plugins/bmc_ikvm/editor_styles.zig");
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.dark);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    try cx.setTestFrameStep(100);
+    cx.setViewport(760, 710);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const publication = try cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
+    var context: u8 = 0;
+    const instance = try editor.mountEditor(null, .{ .cx = cx, .scope = scope, .slot = cx.root.?, .protocol_id = model.protocol_id, .draft_revision = 1, .editor_id = 55, .events = .{ .context = &context, .changed = Driver.changed, .submit = Driver.submit } });
+    const view: *editor.EditorView = @ptrCast(@alignCast(instance.context));
+    try view.draft.?.setText(.name, "保留 BMC 草稿");
+    const revision = view.draft.?.revision;
+    const root_id = view.root.?.id;
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        _ = theme.setMaterialParameters(75, 24);
+        publication.publish(cx, theme.widgetTheme(theme.currentName()));
+        frames(cx);
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, view.root.?.getBackground());
+        try std.testing.expectEqual(theme.current().action_accent, view.steps[0].?.badge.getBackground());
+        try std.testing.expectEqual(S.host.accessChoice(true).background.?, view.access_styles[0].?.peek().background.?);
+        try std.testing.expectEqual(S.host.accessChoice(false).background.?, view.access_styles[1].?.peek().background.?);
+        try std.testing.expectEqual(S.action(false).background.?, view.cancel_button.?.getBackground());
+        try std.testing.expectEqual(S.footer(cx.tokens).background.?, view.footer.?.getBackground());
+        try std.testing.expectEqual(root_id, view.root.?.id);
+        try std.testing.expectEqual(revision, view.draft.?.revision);
+        try std.testing.expectEqualStrings("保留 BMC 草稿", view.draft.?.name);
+    }
+}
+
 test "BMC editor native actions defer submission and rollback failed saves while temporary and cancel preserve the draft" {
     var memory: credentials.MemoryBackend = .{};
     defer memory.deinit();

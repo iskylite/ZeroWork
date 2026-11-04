@@ -98,12 +98,72 @@ pub fn captureRange(adapter: anytype, allocator: std.mem.Allocator, start_row: u
         adapter.cells_dirty = true;
     }
     if (c.ghostty_render_state_update(state, adapter.terminal) != c.GHOSTTY_SUCCESS) return error.SearchUnavailable;
+    return decode(state, &native_allocator, bar, start_row, adapter.version, native_view.alternate(adapter.terminal), allocator, null);
+}
+
+/// Formatting reads only render-state-owned rows/cells/graphemes. begin_update
+/// is the sole terminal-exclusive phase (public render.h Two-Phase Updates).
+pub const Prepared = struct {
+    const Memory = struct { arena: std.heap.ArenaAllocator, allocator: c.GhosttyAllocator, backing: std.mem.Allocator };
+    memory: *Memory,
+    state: c.GhosttyRenderState,
+    bar: c.GhosttyTerminalScrollbar,
+    version: u64,
+    alternate: bool,
+    ended: bool = false,
+    pub fn capture(adapter: anytype) !Prepared {
+        return captureWithAllocator(adapter, std.heap.page_allocator);
+    }
+    pub fn captureWithAllocator(adapter: anytype, allocator: std.mem.Allocator) !Prepared {
+        var bar: c.GhosttyTerminalScrollbar = .{};
+        if (c.ghostty_terminal_get(adapter.terminal, c.GHOSTTY_TERMINAL_DATA_SCROLLBAR, @ptrCast(&bar)) != c.GHOSTTY_SUCCESS) return error.SearchUnavailable;
+        const below = bar.total -| bar.offset -| bar.len;
+        if (bar.offset > std.math.maxInt(u16) or below > std.math.maxInt(u16) or @as(u64, bar.total) * adapter.cols > 8 * 1024 * 1024) return error.SearchTooLarge;
+        const memory = try allocator.create(Memory);
+        memory.backing = allocator;
+        memory.arena = .init(allocator);
+        memory.allocator = .{ .ctx = &memory.arena, .vtable = &SnapshotArena.vtable };
+        errdefer {
+            memory.arena.deinit();
+            allocator.destroy(memory);
+        }
+        var state: c.GhosttyRenderState = null;
+        if (c.ghostty_render_state_new(&memory.allocator, &state) != c.GHOSTTY_SUCCESS) return error.OutOfMemory;
+        errdefer c.ghostty_render_state_free(state);
+        const overscan: c.GhosttyRenderStateOverscan = .{ .above = @intCast(bar.offset), .below = @intCast(below) };
+        if (c.ghostty_render_state_set(state, c.GHOSTTY_RENDER_STATE_OPTION_OVERSCAN, @ptrCast(&overscan)) != c.GHOSTTY_SUCCESS) return error.SearchUnavailable;
+        var display_state: c.GhosttyRenderState = null;
+        if (c.ghostty_render_state_new(null, &display_state) != c.GHOSTTY_SUCCESS) return error.OutOfMemory;
+        defer {
+            c.ghostty_render_state_free(adapter.render_state);
+            adapter.render_state = display_state;
+            adapter.cells_dirty = true;
+        }
+        const updated = c.ghostty_render_state_begin_update(state, adapter.terminal);
+        if (updated != c.GHOSTTY_SUCCESS) return if (updated == c.GHOSTTY_OUT_OF_MEMORY) error.OutOfMemory else error.SearchUnavailable;
+        return .{ .memory = memory, .state = state, .bar = bar, .version = adapter.version, .alternate = native_view.alternate(adapter.terminal) };
+    }
+    pub fn finish(self: *Prepared, allocator: std.mem.Allocator, cancelled: *const std.atomic.Value(bool)) !search.Document {
+        self.ended = true;
+        if (c.ghostty_render_state_end_update(self.state) != c.GHOSTTY_SUCCESS) return error.SearchUnavailable;
+        return decode(self.state, &self.memory.allocator, self.bar, 0, self.version, self.alternate, allocator, cancelled);
+    }
+    pub fn deinit(self: *Prepared) void {
+        if (!self.ended) _ = c.ghostty_render_state_end_update(self.state);
+        c.ghostty_render_state_free(self.state);
+        self.memory.arena.deinit();
+        self.memory.backing.destroy(self.memory);
+        self.* = undefined;
+    }
+};
+
+fn decode(state: c.GhosttyRenderState, native_allocator: *const c.GhosttyAllocator, bar: c.GhosttyTerminalScrollbar, start_row: u32, version: u64, alternate: bool, allocator: std.mem.Allocator, cancelled: ?*const std.atomic.Value(bool)) !search.Document {
     var iterator: c.GhosttyRenderStateRowIterator = null;
-    if (c.ghostty_render_state_row_iterator_new(&native_allocator, &iterator) != c.GHOSTTY_SUCCESS) return error.OutOfMemory;
+    if (c.ghostty_render_state_row_iterator_new(native_allocator, &iterator) != c.GHOSTTY_SUCCESS) return error.OutOfMemory;
     defer c.ghostty_render_state_row_iterator_free(iterator);
     if (c.ghostty_render_state_get(state, c.GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, @ptrCast(&iterator)) != c.GHOSTTY_SUCCESS) return error.SearchUnavailable;
     var row_cells: c.GhosttyRenderStateRowCells = null;
-    if (c.ghostty_render_state_row_cells_new(&native_allocator, &row_cells) != c.GHOSTTY_SUCCESS) return error.OutOfMemory;
+    if (c.ghostty_render_state_row_cells_new(native_allocator, &row_cells) != c.GHOSTTY_SUCCESS) return error.OutOfMemory;
     defer c.ghostty_render_state_row_cells_free(row_cells);
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
@@ -116,6 +176,7 @@ pub fn captureRange(adapter: anytype, allocator: std.mem.Allocator, start_row: u
     var logical_id: @import("snapshot.zig").RowId = undefined;
     const layout = CellLayout.load();
     while (c.ghostty_render_state_row_iterator_next(iterator)) {
+        if (cancelled) |flag| if (flag.load(.acquire)) return error.Cancelled;
         var y: i32 = 0;
         var id: c.GhosttyRenderStateRowId = .{};
         var raw_row: c.GhosttyRow = 0;
@@ -239,7 +300,7 @@ pub fn captureRange(adapter: anytype, allocator: std.mem.Allocator, start_row: u
     errdefer allocator.free(owned_text);
     const owned_rows = try rows.toOwnedSlice(allocator);
     errdefer allocator.free(owned_rows);
-    return .{ .source_version = adapter.version, .alternate_screen = native_view.alternate(adapter.terminal), .text = owned_text, .rows = owned_rows, .spans = try spans.toOwnedSlice(allocator) };
+    return .{ .source_version = version, .alternate_screen = alternate, .text = owned_text, .rows = owned_rows, .spans = try spans.toOwnedSlice(allocator) };
 }
 
 fn rgba(value: c.GhosttyColorRgb) u32 {

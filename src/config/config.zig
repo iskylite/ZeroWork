@@ -130,7 +130,7 @@ pub const Config = struct {
         try writer.print("[completion]\nenabled = {}\n\n", .{self.completion.enabled});
         try writer.print("[transfer]\ndedicated_connection = {}\nwindow_chunks = {d}\nchunk_kb = {d}\ndownload_dir = \"{s}\"\nverify_md5 = {}\nshared_pacing_kbps = {d}\nresume = {}\nmax_tasks = {d}\nconflict_policy = \"{s}\"\n\n", .{ self.transfer.dedicated_connection, self.transfer.window_chunks, self.transfer.chunk_kb, self.transfer.download_dir, self.transfer.verify_md5, self.transfer.shared_pacing_kbps, self.transfer.@"resume", self.transfer.max_tasks, self.transfer.conflict_policy });
         try writer.print("[ssh]\nkeepalive_sec = {d}\nreconnect_max = {d}\nreconnect_backoff = [{d},{d},{d},{d},{d}]\nconnect_timeout_sec = {d}\nterm = \"{s}\"\ncompression = {}\nauto_shell_integration = {}\nauto_reconnect = {}\nbuffer_input = {}\nsocks_port = {d}\nsocks_bind = \"{s}\"\notp_modal = {}\ntotp_autofill = {}\n\n", .{ self.ssh.keepalive_sec, self.ssh.reconnect_max, self.ssh.reconnect_backoff[0], self.ssh.reconnect_backoff[1], self.ssh.reconnect_backoff[2], self.ssh.reconnect_backoff[3], self.ssh.reconnect_backoff[4], self.ssh.connect_timeout_sec, self.ssh.term, self.ssh.compression, self.ssh.auto_shell_integration, self.ssh.auto_reconnect, self.ssh.buffer_input, self.ssh.socks_port, self.ssh.socks_bind, self.ssh.otp_modal, self.ssh.totp_autofill });
-        try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
+        try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nstep_display = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), @tagName(self.ai.step_display), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
         var has_provider = false;
         for (self.ai.providers) |p| if (p.endpoint.len > 0 or p.api_key.len > 0 or p.api_key_ref != null or p.name.len > 0 or p.model_count > 0 or p.enabled) {
             has_provider = true;
@@ -160,6 +160,8 @@ pub const Config = struct {
                 };
                 try writer.writeAll("]\n");
                 if (m.image_token_reservation) |reservation| try writer.print("image_token_reservation = {d}\n", .{reservation});
+                if (m.image_token_max_width) |value| try writer.print("image_token_max_width = {d}\n", .{value});
+                if (m.image_token_max_height) |value| try writer.print("image_token_max_height = {d}\n", .{value});
             }
         };
         try writer.writeAll("\n");
@@ -221,12 +223,14 @@ pub const Config = struct {
                 if (eq(key, "keepalive_sec")) self.ssh.keepalive_sec = try parseInt(u16, value) else if (eq(key, "reconnect_max")) self.ssh.reconnect_max = try parseInt(u8, value) else if (eq(key, "reconnect_backoff")) self.ssh.reconnect_backoff = try parseBackoff(value) else if (eq(key, "connect_timeout_sec")) self.ssh.connect_timeout_sec = try parseInt(u16, value) else if (eq(key, "term")) self.ssh.term = try parseString(value) else if (eq(key, "compression")) self.ssh.compression = try parseBool(value) else if (eq(key, "auto_shell_integration")) self.ssh.auto_shell_integration = try parseBool(value) else if (eq(key, "auto_reconnect")) self.ssh.auto_reconnect = try parseBool(value) else if (eq(key, "buffer_input")) self.ssh.buffer_input = try parseBool(value) else if (eq(key, "socks_port")) self.ssh.socks_port = try parseInt(u16, value) else if (eq(key, "socks_bind")) self.ssh.socks_bind = try parseString(value) else if (eq(key, "otp_modal")) self.ssh.otp_modal = try parseBool(value) else if (eq(key, "totp_autofill")) self.ssh.totp_autofill = try parseBool(value) else return error.UnknownKey;
             },
             .ai => {
-                if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
+                if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
             },
             .log => {
                 if (eq(key, "ring_mb")) self.log.ring_mb = try parseInt(u16, value) else if (eq(key, "checkpoint_sec")) self.log.checkpoint_sec = try parseInt(u16, value) else if (eq(key, "retention_days")) self.log.retention_days = try parseInt(u16, value) else if (eq(key, "export_format")) self.log.export_format = try parseString(value) else return error.UnknownKey;
             },
-            .updates => { if (eq(key, "auto_check")) self.updates.auto_check = try parseBool(value) else return error.UnknownKey; },
+            .updates => {
+                if (eq(key, "auto_check")) self.updates.auto_check = try parseBool(value) else return error.UnknownKey;
+            },
             .notify => {
                 if (eq(key, "transfer_done")) self.notify.transfer_done = try parseBool(value) else if (eq(key, "reconnect")) self.notify.reconnect = try parseBool(value) else if (eq(key, "ai_ready")) self.notify.ai_ready = try parseBool(value) else if (eq(key, "bell")) self.notify.bell = try parseBool(value) else if (eq(key, "tab_dot")) self.notify.tab_dot = try parseBool(value) else if (eq(key, "quiet_hours")) self.notify.quiet_hours = try parseString(value) else return error.UnknownKey;
             },
@@ -273,6 +277,10 @@ pub const Config = struct {
                 const reservation = try parseInt(u32, value);
                 if (reservation == 0 or reservation > 131072) return error.OutOfRange;
                 m.image_token_reservation = reservation;
+            } else if (eq(field, "image_token_max_width") or eq(field, "image_token_max_height")) {
+                const bound = try parseInt(u32, value);
+                if (bound == 0 or bound > 8192) return error.OutOfRange;
+                if (eq(field, "image_token_max_width")) m.image_token_max_width = bound else m.image_token_max_height = bound;
             } else if (eq(field, "efforts")) {
                 if (eq(value, "[]")) {
                     m.efforts = @splat(false);
@@ -307,10 +315,11 @@ pub const Config = struct {
                 if (std.mem.indexOfAny(u8, text, "\"\\\n\r;#") != null) return error.InvalidValue;
             }
             if (p.model_count > p.models.len) return error.OutOfRange;
-            if (p.enabled and (p.endpoint.len == 0 or p.model_count == 0)) return error.InvalidValue;
+            if (p.enabled and p.model_count > 0 and p.endpoint.len == 0) return error.InvalidValue;
             for (p.models[0..p.model_count]) |m| {
                 if (std.mem.indexOfAny(u8, m.id, "\"\\\n\r;#") != null) return error.InvalidValue;
                 if (m.image_token_reservation) |reservation| if (reservation == 0 or reservation > 131072) return error.OutOfRange;
+                if ((m.image_token_max_width == null) != (m.image_token_max_height == null) or (m.image_token_max_width != null and m.image_token_reservation == null)) return error.OutOfRange;
                 if (!p.enabled) continue;
                 if (m.id.len == 0 or m.context_window == 0) return error.InvalidValue;
                 if (m.reasoning and !m.reasoning_toggle and !m.efforts[0] and !m.efforts[1] and !m.efforts[2] and !m.efforts[3] and !m.efforts[4] and !m.efforts[5] and !m.efforts[6]) return error.InvalidValue;
@@ -409,12 +418,17 @@ pub const AiModel = struct {
     vision: bool = false,
     /// Conservative configured budget for models without a known image token formula.
     image_token_reservation: ?u32 = null,
+    image_token_max_width: ?u32 = null,
+    image_token_max_height: ?u32 = null,
     efforts: [7]bool = .{ true, true, true, false, false, false, false },
 };
 pub const default_providers = [_]AiProvider{ .{ .kind = .anthropic }, .{ .kind = .openai_compat }, .{ .kind = .ollama } };
+pub const StepDisplay = enum { collapsed, expanded };
+
 pub const Ai = struct {
     default_provider: []const u8 = "anthropic",
     permission_mode: PermissionMode = .confirm,
+    step_display: StepDisplay = .collapsed,
     execution_mode: ExecutionMode = .auto,
     session_retention: SessionRetention = .auto_idle,
     redact_ip: bool = false,
@@ -747,4 +761,31 @@ test "command info defaults enabled and persists the visual opt out" {
     try std.testing.expect(!reloaded.ui.command_info);
     try std.testing.expect(reloaded.ssh.auto_shell_integration);
     try std.testing.expect(!reloaded.ui.timestamp_gutter);
+}
+
+test "AI step aggregation config defaults collapsed and persists both display choices" {
+    const legacy = try Config.parse("[ai]\npermission_mode = \"confirm\"\n");
+    try std.testing.expectEqual(StepDisplay.collapsed, legacy.ai.step_display);
+    inline for (@typeInfo(StepDisplay).@"enum".field_names) |name| {
+        var value: Config = .{};
+        value.ai.step_display = @field(StepDisplay, name);
+        var buffer: [16384]u8 = undefined;
+        const decoded = try Config.parse(try value.format(&buffer));
+        try std.testing.expectEqual(value.ai.step_display, decoded.ai.step_display);
+    }
+    try std.testing.expectError(error.InvalidValue, Config.parse("[ai]\nstep_display = \"sometimes\"\n"));
+}
+
+test "efficiency bounded image calibration validates and roundtrips paired dimensions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const prefix = "[[ai.providers]]\nid=\"calibrated\"\nkind=\"openai_compat\"\nendpoint=\"http://127.0.0.1:3425/v1\"\n[[ai.providers.models]]\nname=\"grok/grok-4.7@500k\"\ncontext_window=500000\nvision=true\nimage_token_reservation=8192\n";
+    const configured = try Config.parseWithAllocator(arena.allocator(), prefix ++ "image_token_max_width=1920\nimage_token_max_height=1200\n");
+    try configured.validate();
+    var buffer: [65536]u8 = undefined;
+    const wire = try configured.format(&buffer);
+    const restored = try Config.parseWithAllocator(arena.allocator(), wire);
+    try std.testing.expectEqual(@as(?u32, 1920), restored.ai.providers[0].models[0].image_token_max_width);
+    try std.testing.expectEqual(@as(?u32, 1200), restored.ai.providers[0].models[0].image_token_max_height);
+    try std.testing.expectError(error.OutOfRange, Config.parseWithAllocator(arena.allocator(), prefix ++ "image_token_max_width=1920\n"));
 }

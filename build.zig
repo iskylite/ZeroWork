@@ -120,6 +120,16 @@ pub fn build(b: *std.Build) void {
     const application_options = b.addOptions();
     application_options.addOption(bool, "plugin_fixture", plugin_fixture);
     application_options.addOption(bool, "test_mode", test_mode);
+    const git_commit = buildCommand(b, &.{ "git", "rev-parse", "--short=12", "HEAD" }) orelse "未知";
+    const git_branch = buildCommand(b, &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" }) orelse "未知";
+    const git_status = buildCommand(b, &.{ "git", "status", "--porcelain", "--untracked-files=normal" });
+    const build_time = buildCommand(b, &.{ "date", "+%Y-%m-%d %H:%M:%S %z" }) orelse "未知";
+    application_options.addOption([]const u8, "version_metadata", b.fmt("{s}@{s}{s} · {s}", .{
+        if (std.mem.eql(u8, git_branch, "HEAD")) "HEAD" else git_branch,
+        git_commit,
+        if (git_status) |status| (if (status.len != 0) "*" else "") else "?",
+        build_time,
+    }));
     exe.root_module.addOptions("application_options", application_options);
 
     // Zenit owns the native macOS window/input/Metal boundary. ZeroWork adds no separate UI bridge.
@@ -890,6 +900,15 @@ fn addCoreTextBridgeForTest(zenit_dep: *std.Build.Dependency, exe: *std.Build.St
     // libobjc.A.tbd 的解析需要 SDK 的 usr/lib 在搜索路径（与 exe/mockup 同款）。
     exe.root_module.addLibraryPath(.{ .cwd_relative = sdk ++ "/usr/lib" });
     exe.root_module.link_libc = true;
+}
+
+// Capture metadata on each build invocation so packaged binaries retain their
+// source identity and timestamp even when launched outside the checkout.
+fn buildCommand(b: *std.Build, argv: []const []const u8) ?[]const u8 {
+    return switch (b.runFallible(argv, .{ .cwd = .{ .path = b.root.joinString(b.allocator, "") catch @panic("OOM") }, .stderr_behavior = .ignore })) {
+        .success => |stdout| std.mem.trim(u8, stdout, " \t\r\n"),
+        else => null,
+    };
 }
 
 fn addUrlFetchFrameworks(module: *std.Build.Module) void {

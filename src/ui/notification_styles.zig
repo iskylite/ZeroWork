@@ -5,7 +5,8 @@ pub const edge = 12;
 pub const width = 340;
 pub const gap = 8;
 pub fn overlay(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .position = .absolute, .direction = .column, .width = .{ .px = width }, .height = .{ .fit = .{} }, .gap = ui.arb.px(gap), .hit_behavior = .children_only, .z_index = 120 };
+    // Window portal toast tier: above assistant popovers, below tooltips.
+    return .{ .position = .absolute, .direction = .column, .width = .{ .px = width }, .height = .{ .fit = .{} }, .gap = ui.arb.px(gap), .hit_behavior = .children_only, .z_index = 2000 };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .align_items = .stretch, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 12 }, .gap = 4, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = ui.arb.px(12) }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .flex_shrink = 0 };

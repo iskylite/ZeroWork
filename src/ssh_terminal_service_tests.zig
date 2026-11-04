@@ -6,6 +6,7 @@ const Worker = @import("vt/ssh_worker.zig").SshWorker;
 const Thread = @import("vt/ssh_worker_thread.zig").Thread;
 const a = std.testing.allocator;
 test {
+    _ = @import("vt/search_executor.zig");
     _ = @import("proto/ssh/bootstrap.zig");
     _ = @import("ssh_bootstrap_protocol_tests.zig");
     _ = @import("ssh_execution_recording_tests.zig");
@@ -21,6 +22,7 @@ const Fixture = struct {
         self.worker.allocator = a;
         self.worker.execution_mutex = .unlocked;
         self.worker.execution = null;
+        self.worker.shell_execution = null;
         self.worker.options = .{ .host = "fixture", .user = "fixture", .auth = .{ .password = "unused" }, .operation_key = operation };
         self.worker.vt = try @import("vt/ghostty_adapter.zig").Adapter.init(a, 4, 80);
         self.worker.text = try @import("vt/text_slot.zig").TextSlot.init(a, 4096);
@@ -39,6 +41,8 @@ const Fixture = struct {
     }
     fn deinit(self: *@This()) void {
         self.provider.deinit();
+        self.provider.finishSearches();
+        self.provider.disposeSearches();
         self.worker.timeline.deinit();
         self.worker.replay.deinit();
         self.worker.input.deinit(a);
@@ -46,6 +50,75 @@ const Fixture = struct {
         self.worker.vt.destroy();
     }
 };
+test "SSH terminal async search reconnect keeps owner storage stable across generations and drains close" {
+    const work = @import("vt/search_task.zig");
+    const pool = @import("vt/search_executor.zig");
+    const before = work.live_count.load(.acquire);
+    {
+        var f: Fixture = .{};
+        try f.init();
+        defer f.deinit();
+        var current = owner;
+        for (1..5) |generation| {
+            const old_service = f.provider.service();
+            f.worker.vt.mutex.lock();
+            var locked = true;
+            defer if (locked) f.worker.vt.mutex.unlock();
+            const old_task = try old_service.beginSearch();
+            defer old_task.release();
+            current.generation = owner.generation + @as(u64, @intCast(generation));
+            f.worker.replay.configure(.{ .owner = .{ .session = current }, .operation_id = generation + 1, .attempt_id = 1 }, true, true);
+            try std.testing.expectError(error.WorkerBusy, f.provider.rebindOwner(current));
+            try std.testing.expect(old_task.cancelled.load(.acquire));
+            try std.testing.expect(old_task.owner.eql(old_service.binding.resource_owner.session));
+            f.worker.vt.mutex.unlock();
+            locked = false;
+            var remaining: usize = 10000;
+            while (!old_task.done.load(.acquire) and remaining > 0) : (remaining -= 1) {
+                var delay: std.c.timespec = .{ .sec = 0, .nsec = 100_000 };
+                _ = std.c.nanosleep(&delay, null);
+            }
+            try std.testing.expect(old_task.done.load(.acquire));
+            while (true) {
+                f.provider.rebindOwner(current) catch |err| {
+                    if (err != error.WorkerBusy) return err;
+                    continue;
+                };
+                break;
+            }
+            try std.testing.expectError(error.StaleOwner, old_service.beginSearch());
+            var next: ?*terminal.SearchTask = null;
+            remaining = 10000;
+            while (remaining > 0) : (remaining -= 1) {
+                next = f.provider.service().beginSearch() catch |err| {
+                    if (err != error.WorkerBusy) return err;
+                    var delay: std.c.timespec = .{ .sec = 0, .nsec = 100_000 };
+                    _ = std.c.nanosleep(&delay, null);
+                    continue;
+                };
+                break;
+            }
+            const task = next orelse return error.SearchDidNotDrain;
+            defer task.release();
+            remaining = 10000;
+            while (!task.done.load(.acquire) and remaining > 0) : (remaining -= 1) {
+                var delay: std.c.timespec = .{ .sec = 0, .nsec = 100_000 };
+                _ = std.c.nanosleep(&delay, null);
+            }
+            try std.testing.expect(task.done.load(.acquire));
+            var result = task.take() orelse return error.MissingSearchResult;
+            defer result.document.deinit(work.allocator);
+            try std.testing.expect(result.owner.eql(current));
+        }
+    }
+    const final = pool.stats();
+    try std.testing.expectEqual(before, work.live_count.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), final.owners);
+    try std.testing.expectEqual(@as(usize, 0), final.workers);
+    try std.testing.expectEqual(@as(usize, 0), final.queued);
+    try std.testing.expectEqual(@as(usize, 0), final.running);
+}
+
 test "SSH terminal service uses native graphemes and rejects stale modes owners and geometry" {
     var f: Fixture = .{};
     try f.init();
@@ -70,6 +143,44 @@ test "SSH terminal service uses native graphemes and rejects stale modes owners 
     _ = try service.writeMouse(.{ .input_sequence = 2, .mode_revision = mode, .geometry_revision = 1, .event = .{ .action = .press, .button = .right, .x = 10, .y = 10, .screen_width = 640, .screen_height = 80, .cell_width = 8, .cell_height = 20 } });
     try std.testing.expectEqualStrings("\x1b[<2;2;1M", f.worker.input.drain(&bytes));
 }
+test "SSH terminal Option arrows queue word navigation repeats and preserve keyboard protocols" {
+    var f: Fixture = .{};
+    try f.init();
+    defer f.deinit();
+    const service = f.provider.service();
+    var sequence: u64 = 0;
+    const Event = terminal.KeyEvent;
+    const cases = [_]struct { event: Event, expected: []const u8 }{
+        .{ .event = .{ .key = .arrow_left, .modifiers = .{ .alt = true } }, .expected = "\x1bb" },
+        .{ .event = .{ .key = .arrow_right, .action = .repeat, .modifiers = .{ .alt = true } }, .expected = "\x1bf" },
+        .{ .event = .{ .key = .arrow_left, .action = .release, .modifiers = .{ .alt = true } }, .expected = "" },
+        .{ .event = .{ .key = .arrow_left, .composing = true, .modifiers = .{ .alt = true } }, .expected = "" },
+        .{ .event = .{ .key = .arrow_left, .modifiers = .{ .alt = true, .shift = true } }, .expected = "\x1b[1;4D" },
+        .{ .event = .{ .key = .arrow_right, .modifiers = .{ .alt = true, .control = true } }, .expected = "\x1b[1;7C" },
+    };
+    var bytes: [256]u8 = undefined;
+    for (cases) |case| {
+        sequence += 1;
+        _ = try service.writeKey(.{ .input_sequence = sequence, .mode_revision = f.worker.vt.snapshot().mode_revision, .event = case.event });
+        try std.testing.expectEqualStrings(case.expected, f.worker.input.drain(&bytes));
+    }
+    for ([_]struct { enable: []const u8, expected: []const u8 }{
+        // Flag 1 still uses the legacy-looking arrow sequence: the protocol
+        // guard must prevent remapping it even without an event-type suffix.
+        .{ .enable = "\x1b[>1u", .expected = "\x1b[1;3D" },
+        .{ .enable = "\x1b[>3u", .expected = "\x1b[1;3:1D" },
+    }) |protocol| {
+        _ = try f.worker.vt.feed(protocol.enable);
+        sequence += 1;
+        _ = try service.writeKey(.{ .input_sequence = sequence, .mode_revision = f.worker.vt.snapshot().mode_revision, .event = cases[0].event });
+        try std.testing.expectEqualStrings(protocol.expected, f.worker.input.drain(&bytes));
+        _ = try f.worker.vt.feed("\x1b[<u");
+    }
+    sequence += 1;
+    _ = try service.writeKey(.{ .input_sequence = sequence, .mode_revision = f.worker.vt.snapshot().mode_revision, .event = cases[0].event });
+    try std.testing.expectEqualStrings("\x1bb", f.worker.input.drain(&bytes));
+}
+
 test "SSH terminal service streams bounded bracketed paste without interleaving or reconnect replay" {
     var f: Fixture = .{};
     try f.init();
@@ -101,6 +212,79 @@ test "SSH terminal service streams bounded bracketed paste without interleaving 
     const receipt = (try service.takeWriteReceipt()).?;
     try std.testing.expectEqual(terminal.WriteFailure.stale_mode, receipt.failure.?);
     try std.testing.expectEqual(@as(usize, 0), f.worker.input.pending());
+}
+
+test "SSH terminal paste cleanup preserves composed snapshots during sustained output" {
+    const Document = @import("ui/terminal_document.zig").Document;
+    const Capture = struct {
+        fn settled(f: *Fixture, document: *Document) !terminal.TerminalSnapshot {
+            for (0..10000) |_| {
+                var snapshot = document.service().snapshot(a) catch |err| {
+                    if (err != error.WorkerBusy) return err;
+                    var delay: std.c.timespec = .{ .sec = 0, .nsec = 100_000 };
+                    _ = std.c.nanosleep(&delay, null);
+                    continue;
+                };
+                if (document.source_complete and document.search_task == null and
+                    document.source_cache.?.source_version == f.worker.vt.publishedVersion()) return snapshot;
+                snapshot.deinit(a);
+                var delay: std.c.timespec = .{ .sec = 0, .nsec = 100_000 };
+                _ = std.c.nanosleep(&delay, null);
+            }
+            return error.DocumentDidNotRefresh;
+        }
+    };
+    for ([_]bool{ false, true }) |stale_mode| {
+        var f: Fixture = .{};
+        try f.init();
+        defer f.deinit();
+        const service = f.provider.service();
+        var document = Document.init(a, service, owner);
+        defer document.deinit();
+        // Exercise the history-composition path that needs background captures,
+        // rather than a raw viewport snapshot which would hide this regression.
+        document.enabled = true;
+        _ = try f.worker.vt.feed("fixture> ");
+        var initial = try Capture.settled(&f, &document);
+        const initial_sequence = initial.output_sequence;
+        initial.deinit(a);
+
+        var paste = try service.preparePaste(a, "zip -r archive.zip hdf5");
+        defer paste.deinit(a);
+        _ = try service.commitPaste(paste, 1, false);
+        if (stale_mode) _ = try f.worker.vt.feed("\x1b[?2004h");
+        const receipt = try service.takeWriteReceipt();
+        if (stale_mode) {
+            try std.testing.expectEqual(terminal.WriteFailure.stale_mode, receipt.?.failure.?);
+            try std.testing.expectEqual(@as(usize, 0), f.worker.input.pending());
+        } else {
+            try std.testing.expect(receipt == null);
+            var bytes: [256]u8 = undefined;
+            try std.testing.expectEqualStrings(paste.text, f.worker.input.drain(&bytes));
+        }
+        try std.testing.expect(f.provider.pending_paste == null);
+
+        var sequence = initial_sequence;
+        for (0..8) |batch| {
+            // Each burst exceeds the bounded incremental tail, forcing another
+            // full capture after paste cleanup. Advance its budget without a sleep.
+            document.full_capture_eligible_at_ns = 0;
+            for (0..64) |_| _ = try f.worker.vt.feed("\r\n  adding: hdf5/example.c (deflated 70%)");
+            var marker_buffer: [64]u8 = undefined;
+            const marker = try std.fmt.bufPrint(&marker_buffer, "zip-output-{d}-done", .{batch});
+            _ = try f.worker.vt.feed("\r\n");
+            _ = try f.worker.vt.feed(marker);
+            var snapshot = try Capture.settled(&f, &document);
+            defer snapshot.deinit(a);
+            try std.testing.expect(snapshot.output_sequence > sequence);
+            try std.testing.expect(std.mem.indexOf(u8, snapshot.projection.graphemes, marker) != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.cached.?.text, marker) != null);
+            sequence = snapshot.output_sequence;
+        }
+        try std.testing.expect(document.background_scans >= 9);
+        f.provider.deinit();
+        try std.testing.expectError(error.SessionClosed, service.beginSearch());
+    }
 }
 
 test "SSH terminal service retains only ordinary reconnect input and keeps paste out of replay" {
@@ -164,6 +348,12 @@ test "SSH terminal structured resize waits for acknowledged geometry and matchin
     _ = try f.worker.text.publishOwnedProjection(try f.worker.vt.copyProjection(std.heap.page_allocator), 1);
     try service.resize(.{ .revision = 2, .cols = 100, .rows = 5 });
     try std.testing.expectError(error.WorkerBusy, service.snapshot(a));
+    // Surface.refresh acknowledges the pending generation before asking for
+    // matching cells. An old grid may remain readable but cannot hold the
+    // worker's next geometry/theme publication behind display backpressure.
+    try std.testing.expect(!f.worker.text.canPublish());
+    _ = f.worker.text.acknowledge(0);
+    try std.testing.expect(f.worker.text.canPublish());
     try f.worker.vt.resize(100, 5);
     const status = try service.status();
     try std.testing.expectEqual(@as(u64, 2), status.geometry.revision);
@@ -191,9 +381,10 @@ test "SSH terminal ended and disconnected presentation publishes theme without t
         const service = f.provider.service();
         f.worker.io.feed = .{ .engine = @import("vt/engine.zig").VtEngine.from(@import("vt/ghostty_adapter.zig").Adapter, &f.worker.vt), .text_slot = &f.worker.text };
         f.worker.text.enableStructured();
-        // Fill the slot to cover a theme request deferred behind the last
-        // output frames. Only the paused worker is allowed to publish.
-        for (0..3) |_| _ = try f.worker.text.publishOwnedProjection(try f.worker.vt.copyProjection(std.heap.page_allocator), 1);
+        // One unconsumed structured frame occupies the display handoff. Cover
+        // a theme request deferred behind it; only the paused worker publishes.
+        _ = try f.worker.text.publishOwnedProjection(try f.worker.vt.copyProjection(std.heap.page_allocator), 1);
+        try std.testing.expect(!f.worker.text.canPublish());
         if (shell_ended) f.thread.reconnect_control.ended(operation, .released, 0) else f.thread.reconnect_control.lost(operation, .released, error.ConnectionClosed);
         try service.setTheme(.{ .revision = 2, .foreground = 0xeeeeeeff, .background = 0x112233ff, .cursor = 0xffffffff, .selection = 0x666666ff, .ansi = @splat(0x777777ff) });
         f.worker.publishPendingPresentation();

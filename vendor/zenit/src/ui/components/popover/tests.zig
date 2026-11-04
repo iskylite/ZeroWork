@@ -1891,3 +1891,80 @@ test "Popover: split open — trigger click and Esc are proposals the parent can
     ctx.handleKeyDown(.escape, .{});
     try std.testing.expect(!open.peek());
 }
+
+test "Popover: hundreds of closed panels reserve no overlay slots and reuse capacity after exit" {
+    var ctx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer ctx.deinit();
+    const root = try box(ctx, .{ .width = .{ .px = 400 }, .height = .{ .px = 300 } }, .{});
+    ctx.root = root;
+    const scope = try Scope.init(std.testing.allocator, null, ctx.owner);
+    defer scope.dispose();
+
+    // More than the overlay stack's capacity: mounted rows must not consume
+    // interaction-depth slots for hints/menus that have never been opened.
+    var panels: [300]popover_mod.PopoverResult = undefined;
+    for (&panels, 0..) |*panel, i| {
+        panel.* = try Popover(.{
+            .trigger = @as(popover_mod.PopoverTrigger, if (i % 2 == 0) .hover else .click),
+            .enter_transition = .none,
+            .exit_transition = .none,
+            .detach_hidden_content = i % 3 != 0,
+        }).mount(scope, ctx);
+        try root.appendChild(std.testing.allocator, panel.wrapper);
+    }
+    try std.testing.expectEqual(@as(usize, 0), ctx.overlay_stack.layer_count);
+
+    for (&panels) |*panel| {
+        panel.open.?.set(true);
+        try std.testing.expectEqual(@as(usize, 1), ctx.overlay_stack.layer_count);
+        const handle = ctx.overlay_stack.topmost().?.handle;
+        try std.testing.expect(ctx.overlay_stack.findLayer(handle).?.content_node == panel.chrome);
+        panel.open.?.set(false);
+        // No-animation exits commit synchronously; the normal position hook
+        // then releases the registration, including attached hidden panels.
+        popoverBeforeRender(panel.chrome);
+        try std.testing.expectEqual(@as(usize, 0), ctx.overlay_stack.layer_count);
+        try std.testing.expect(ctx.overlay_stack.findLayer(handle) == null);
+        try std.testing.expectEqual(@as(i16, 100), ctx.overlay_stack.next_z);
+    }
+    // The first closed panel can reopen with a fresh live handle.
+    panels[0].open.?.set(true);
+    try std.testing.expectEqual(@as(usize, 1), ctx.overlay_stack.layer_count);
+    ctx.detachChild(root, panels[0].wrapper);
+    ctx.freeNode(panels[0].wrapper);
+    try std.testing.expectEqual(@as(usize, 0), ctx.overlay_stack.layer_count);
+}
+
+test "Popover: closing preserves the layer until fade completion then releases it for reopen" {
+    var ctx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer ctx.deinit();
+    ctx.setViewport(400, 300);
+    const root = try box(ctx, .{ .width = .{ .px = 400 }, .height = .{ .px = 300 } }, .{});
+    ctx.root = root;
+    const scope = try Scope.init(std.testing.allocator, null, ctx.owner);
+    defer scope.dispose();
+    const panel = try Popover(.{
+        .enter_transition = .fade_fast,
+        .exit_transition = .fade_fast,
+    }).mount(scope, ctx);
+    try root.appendChild(std.testing.allocator, panel.wrapper);
+    try panel.trigger.appendChild(std.testing.allocator, try box(ctx, .{ .width = .{ .px = 60 }, .height = .{ .px = 20 } }, .{}));
+    try panel.content.appendChild(std.testing.allocator, try box(ctx, .{ .width = .{ .px = 80 }, .height = .{ .px = 40 } }, .{}));
+    var now_ms = render_engine.current_frame_time_ms;
+    openPopoverForConsumeTest(ctx, panel, &now_ms);
+    const handle = ctx.overlay_stack.topmost().?.handle;
+    panel.open.?.set(false);
+    try std.testing.expectEqual(@as(usize, 1), ctx.overlay_stack.layer_count);
+    try std.testing.expectEqual(overlay_stack_mod.LayerState.exiting, ctx.overlay_stack.findLayer(handle).?.state);
+    try std.testing.expect(panel.content.parent != null);
+    stepFrames(ctx, &now_ms, 30);
+    try std.testing.expectEqual(@as(usize, 0), ctx.overlay_stack.layer_count);
+    try std.testing.expect(ctx.overlay_stack.findLayer(handle) == null);
+    try std.testing.expect(panel.content.parent == null);
+    panel.open.?.set(true);
+    const reopened = ctx.overlay_stack.topmost().?.handle;
+    try std.testing.expect(reopened.id != handle.id);
+    stepFrames(ctx, &now_ms, 30);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), panel.chrome.getOpacity(), 0.001);
+    try std.testing.expect(panel.open.?.peek());
+}

@@ -94,7 +94,7 @@ pub const Controller = struct {
         try authority.validate();
         if (!authority.conversation_id.eql(self.authority.conversation_id) or !authority.task_id.eql(self.authority.task_id)) return error.ScopeChanged;
         const state = self.store.findConversation(authority.conversation_id) orelse return error.ConversationNotFound;
-        if (state.closed or !state.owner.eql(authority.binding) or state.binding_revision != authority.binding_revision or self.bridge.policy_revision != self.config_revision or authority.grant_revision != self.authority.grant_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
+        if (state.closed or state.ended or !state.owner.eql(authority.binding) or state.binding_revision != authority.binding_revision or self.bridge.policy_revision != self.config_revision or authority.grant_revision != self.authority.grant_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
         self.authority = authority;
     }
     /// Called on the controller thread only after its worker joined. This is
@@ -109,7 +109,7 @@ pub const Controller = struct {
     fn validateAuthority(self: *Controller, context: host.Context) !void {
         if (!self.authority.eql(context) or self.bridge.policy_revision != self.config_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
         const state = self.store.findConversation(context.conversation_id) orelse return error.ConversationNotFound;
-        if (state.closed or !state.owner.eql(context.binding) or state.binding_revision != context.binding_revision) return error.BindingConflict;
+        if (state.closed or state.ended or !state.owner.eql(context.binding) or state.binding_revision != context.binding_revision) return error.BindingConflict;
         if (self.app.workspace.shutting_down or self.app.windowClosePending()) return error.WorkspaceClosed;
     }
     fn validateIdentity(self: *Controller, handle_: identity.SessionHandle, require_ready: bool) !u64 {
@@ -352,6 +352,17 @@ pub const Controller = struct {
         const route = @import("../ai/execution_routing.zig");
         return .{ .operation_id = request.operation_ref, .request_hash = route.digest(&request.operation_ref.bytes), .source = if (request.source) |source| .{ .session = source } else .{ .saved = request.saved_source.? }, .retention = request.retention, .policy = @fromBackingInt(@intCast(@backingInt(request.connection_policy))) };
     }
+    fn withExecutionReadiness(self: *Controller, original: lifecycle.Snapshot) lifecycle.Snapshot {
+        var snapshot = original;
+        const session_handle = snapshot.session orelse return snapshot;
+        const tab_id = self.app.legacyForHandle(session_handle) orelse return snapshot;
+        const tab = self.app.workspace.sessionTab(tab_id) orelse return snapshot;
+        const facts = @import("ai_host_queries.zig").trustedPtyInfo(self.app, tab, session_handle);
+        snapshot.execution_readiness = if (facts.ready) .ready else if (facts.failure) |failure| if (std.mem.eql(u8, failure, "ShellIntegrationPending") or std.mem.eql(u8, failure, "WorkerBusy")) .initializing else .unsupported else .initializing;
+        snapshot.completion_source = facts.completion_source;
+        return snapshot;
+    }
+
     pub fn adoptRouteSession(self: *Controller, context: host.Context, operation: identity.HostOperationId, snapshot: @import("../host/lifecycle_supervisor.zig").Snapshot) void {
         const broker = self.bridge.route_broker orelse return;
         const entry = self.app.lifecycle_supervisor.find(operation) orelse return;
@@ -492,13 +503,13 @@ pub const Controller = struct {
             .query_open => |operation| {
                 const snapshot = try self.app.queryOwnedSession(operation, call.context);
                 self.adoptRouteSession(call.context, operation, snapshot);
-                call.result = .{ .session = snapshot };
+                call.result = .{ .session = self.withExecutionReadiness(snapshot) };
             },
             .resolve_owned => |handle_| {
                 if (!self.inBinding(handle_)) return error.TargetNotAuthorized;
                 const snapshot = try self.app.resolveOwnedSession(handle_, call.context);
                 self.adoptRouteSession(call.context, snapshot.operation_ref, snapshot);
-                call.result = .{ .session = snapshot };
+                call.result = .{ .session = self.withExecutionReadiness(snapshot) };
             },
             .query_disconnect => |operation| call.result = .{ .mutation = disconnectReceipt(try self.app.querySessionDisconnect(operation, call.context)) },
             .authorize_open => |request| {
@@ -1137,7 +1148,7 @@ const ShellProductExecution = struct {
                 evidence = self.backend.preflight(invocation, prepared.?.command, prepared.?.command_hash) catch |err| {
                     // No dispatch occurs during preflight. A completed SSH
                     // interval can precede its next ready A/B prompt.
-                    if ((err != error.WorkerBusy and err != error.TerminalBusy) or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+                    if ((err != error.WorkerBusy and err != error.TerminalBusy and err != error.ShellPromptNotObserved) or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
                     try self.fixture.tick(self.controller.bridge);
                     continue;
                 };
@@ -1209,7 +1220,9 @@ const ShellProductExecution = struct {
                     try self.fixture.tick(self.controller.bridge);
                     continue;
                 }
-                try std.testing.expectEqual(error.TerminalBusy, err);
+                // The input lease is released, but clearing a draft does not
+                // establish the next shell-reported prompt boundary.
+                try std.testing.expectEqual(error.ShellPromptNotObserved, err);
                 return;
             };
             return error.DraftWasAuthorized;
@@ -1227,7 +1240,14 @@ const ShellProductExecution = struct {
     fn wait(self: *@This(), reference: []const u8, target: WaitFor) !host.Result {
         const deadline = @import("../platform/realtime.zig").monotonicNs() + 10 * std.time.ns_per_s;
         while (true) {
-            var result = try self.invoke("host.wait_execution", .{ .execution_ref = reference, .wait_ms = 50, .output_cursor = "0", .max_bytes = 8192 });
+            var result = self.invoke("host.wait_execution", .{ .execution_ref = reference, .wait_ms = 50, .output_cursor = "0", .max_bytes = 8192 }) catch |err| {
+                // A busy observation can exhaust this 50 ms read window.
+                // Retry only the read within the original overall deadline;
+                // never resubmit a command or assume foreground completion.
+                if (err != error.Timeout or @import("../platform/realtime.zig").monotonicNs() >= deadline) return err;
+                try self.fixture.tick(self.controller.bridge);
+                continue;
+            };
             errdefer result.deinit(a);
             var view = try std.json.parseFromSlice(View, a, result.blocks[0].structured, .{ .ignore_unknown_fields = true });
             const snapshot = view.value.snapshot;
@@ -1715,4 +1735,78 @@ test "lifecycle default shell integration opens SSH work terminal without helper
 // Include the narrow real Provider admission tests in the root test runner.
 test {
     _ = @import("../plugins/ssh/terminal_service.zig");
+}
+
+test "tab grouping running task refresh keeps target identity and expands real terminal scope at boundary" {
+    const a = std.testing.allocator;
+    const grouping = @import("../ai/tab_grouping.zig");
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const source = try fixture.local();
+    const target = try fixture.local();
+    const third = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    const source_context = try testContext(&store, source);
+    const context = try testContext(&store, target);
+    store.findConversation(context.conversation_id).?.phase = .running;
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    try bridge.prepare(fixture.app, target);
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .auto, .session_retention = .keep } });
+    defer controller.deinitAfterWorker();
+    const group = (try roster.join("drag running target", fixture.app.legacyForHandle(target).?, 0xff818cf8)).id;
+    _ = try roster.join("drag running target", fixture.app.legacyForHandle(source).?, 0xff818cf8);
+    const plan = try grouping.prepare(&store, .{ .source = source, .target = target, .group = group });
+    const Probe = struct {
+        cancelled: bool = false,
+        fn stop(raw: *anyopaque, _: grouping.Activity) void {
+            @as(*@This(), @ptrCast(@alignCast(raw))).cancelled = true;
+        }
+    };
+    var probe: Probe = .{};
+    try grouping.commit(&store, plan, &probe, Probe.stop);
+    try std.testing.expect(probe.cancelled);
+    try std.testing.expect(store.findConversation(source_context.conversation_id).?.ended);
+    // Already-issued calls retain their original context. The controller does
+    // not gain the expanded group authority until the next safe refresh.
+    try std.testing.expect(controller.authority.eql(context));
+    try std.testing.expectError(error.BindingConflict, controller.validateAuthority(context));
+    var next = context;
+    const moved = store.findConversation(context.conversation_id).?;
+    next.binding = moved.owner;
+    next.binding_revision = moved.binding_revision;
+    try controller.refreshAuthority(next);
+    try std.testing.expect(controller.authority.conversation_id.eql(context.conversation_id));
+    try std.testing.expect(controller.authority.task_id.eql(context.task_id));
+    try std.testing.expectEqual(assistants.Phase.running, moved.phase);
+    try std.testing.expect(controller.inBinding(target) and controller.inBinding(source) and !controller.inBinding(third));
+    var captured: scope.Scope = .{ .owner = moved.owner, .members = .{} };
+    captured.members.ids[0] = @backingInt(target.session_id);
+    captured.members.ids[1] = @backingInt(source.session_id);
+    captured.members.len = 2;
+    var prepared = Bridge.init(a);
+    defer prepared.deinit();
+    try prepared.prepareGroup(fixture.app, &roster, captured);
+    try bridge.replacePrepared(&prepared);
+    try std.testing.expectEqual(@as(usize, 2), bridge.captured_scope.?.members.len);
+    const revision = bridge.roster_revision;
+    _ = try roster.join("drag running target", fixture.app.legacyForHandle(third).?, 0xff818cf8);
+    const existing = try grouping.prepare(&store, .{ .source = third, .group = group });
+    try grouping.commit(&store, existing, &probe, Probe.stop);
+    try controller.refreshAuthority(next);
+    captured.members.ids[2] = @backingInt(third.session_id);
+    captured.members.len = 3;
+    var refreshed = Bridge.init(a);
+    defer refreshed.deinit();
+    try refreshed.prepareGroup(fixture.app, &roster, captured);
+    try bridge.replacePrepared(&refreshed);
+    try std.testing.expectEqual(revision + 1, bridge.roster_revision);
+    try std.testing.expectEqual(@as(usize, 3), bridge.captured_scope.?.members.len);
+    try std.testing.expect(controller.authority.conversation_id.eql(context.conversation_id));
+    try std.testing.expect(controller.authority.task_id.eql(context.task_id));
+    try std.testing.expect(controller.inBinding(third));
 }

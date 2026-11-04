@@ -2,4 +2,5 @@
 comptime {
     _ = @import("ui/terminal_document.zig");
     _ = @import("ui/history_cast.zig");
+    _ = @import("ui/history_reading.zig");
 }

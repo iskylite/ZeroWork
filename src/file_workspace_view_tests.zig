@@ -497,10 +497,10 @@ test "file workspace global theme material updates every card without replacing 
     f.settle();
     for (f.view.panes) |pane| {
         try std.testing.expectEqual(theme.current().surface_1, pane.root.getBackground());
-        try std.testing.expectEqual(theme.current().surface_1, pane.table.getBackground());
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, pane.table.getBackground());
         try std.testing.expectEqual(theme.current().fg_1, pane.title.getText().?.color);
         try std.testing.expectEqual(theme.current().warn_ink, pane.stale_notice.getText().?.color);
-        try std.testing.expectEqual(@as(u8, 255), pane.stale_notice.getBackground().a);
+        try std.testing.expectEqual(theme.current().well.a, pane.stale_notice.getBackground().a);
         try std.testing.expectEqual(@as(f32, 11.5), pane.path.state.text_display_node.?.getText().?.font_size);
     }
     try std.testing.expectEqual(theme.popupSelection(), f.row(.local, entries[2].absolute_path).getBackground());
@@ -676,7 +676,7 @@ test "file workspace right click records pointer anchor instead of toolbar" {
     try std.testing.expectEqual(std.meta.Tag(files.Action).context, f.record.tag);
 }
 
-test "file workspace drag can start from size column as well as filename" {
+test "file workspace drag cursor can start from size column as well as filename" {
     var f: Fixture = undefined;
     try f.init(1194, 794);
     defer f.deinit();
@@ -684,16 +684,47 @@ test "file workspace drag can start from size column as well as filename" {
     const size = find(f.row(.local, entries[2].absolute_path), "files.row.size").?.globalRect();
     const x = size.x + size.w / 2;
     const y = size.y + size.h / 2;
+    f.cx.handleMouseMove(x, y);
+    try std.testing.expectEqual(ui.CursorShape.grab, f.cx.current_cursor);
     f.cx.handleMouseDown(x, y, .{});
     f.settle();
     f.cx.handleMouseMove(x + 12, y);
     f.settle();
     try std.testing.expect(f.view.drag_source != null);
     try std.testing.expect(f.view.drag_ghost.style.display != .none);
+    try std.testing.expectEqual(ui.CursorShape.grabbing, f.cx.current_cursor);
     f.cx.handleKeyDown(.escape, .{});
     f.settle();
     try std.testing.expect(f.view.drag_source == null);
     try std.testing.expect(f.view.drag_ghost.style.display == .none);
+    try std.testing.expectEqual(ui.CursorShape.grab, f.cx.current_cursor);
+}
+
+test "file workspace drag cursor follows current transfer capability and excludes parent and checkbox" {
+    var f: Fixture = undefined;
+    try f.init(1194, 794);
+    defer f.deinit();
+    const handle = find(f.row(.local, entries[2].absolute_path), "files.row.drag").?;
+    const r = handle.globalRect();
+    f.cx.handleMouseMove(r.x + 50, r.y + r.h / 2);
+    try std.testing.expectEqual(ui.CursorShape.grab, f.cx.current_cursor);
+    const checkbox = find(f.row(.local, entries[2].absolute_path), "files.row.select").?.globalRect();
+    f.cx.handleMouseMove(checkbox.x + checkbox.w / 2, checkbox.y + checkbox.h / 2);
+    try std.testing.expect(f.cx.current_cursor != .grab);
+    const parent = find(f.row(.local, entries[0].absolute_path), "files.row.drag").?.globalRect();
+    f.cx.handleMouseMove(parent.x + 50, parent.y + parent.h / 2);
+    try std.testing.expect(f.cx.current_cursor != .grab);
+    for (0..3) |i| {
+        var next = f.current();
+        next.revision += 1;
+        next.panes[0].can_transfer = i != 0;
+        next.panes[0].state = if (i == 1) .stale else .ready;
+        try f.view.update(next);
+        f.settle();
+        const current = find(f.row(.local, entries[2].absolute_path), "files.row.drag").?.globalRect();
+        f.cx.handleMouseMove(current.x + 50, current.y + current.h / 2);
+        try std.testing.expectEqual(i == 2, f.cx.current_cursor == .grab);
+    }
 }
 
 test "retained file copy confirmation repaints all builtins and keeps frozen paths and options" {

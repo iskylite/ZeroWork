@@ -10,6 +10,7 @@ const encoder = @import("../../vt/ghostty_input.zig");
 
 pub const Provider = struct {
     native: *Native,
+    searches: @import("../../vt/search_executor.zig").Owner = .{},
     source: ReadSource,
     registered_binding: ?Binding = null,
     input_sequence: u64 = 0,
@@ -18,13 +19,40 @@ pub const Provider = struct {
     applied_theme: ?terminal.Theme = null,
     pending_paste: ?struct { bytes: []u8, offset: usize = 0, sequence: u64, mode: u64 } = null,
     pub fn deinit(self: *Provider) void {
+        self.searches.cancel();
+        self.clearPendingPaste();
+    }
+
+    // Paste completion must not retire the provider's background captures.
+    fn clearPendingPaste(self: *Provider) void {
         if (self.pending_paste) |p| self.native.allocator.free(p.bytes);
         self.pending_paste = null;
+    }
+
+    /// Called by SessionRuntime background release before VT destruction.
+    pub fn finishSearches(self: *Provider) void {
+        self.searches.finish();
+    }
+    pub fn disposeSearches(self: *Provider) void {
+        self.searches.deinit();
     }
 
     pub fn init(native: *Native, owner: Owner) Provider {
         const state = native.worker.vt.snapshot();
         return .{ .native = native, .source = .{ .adapter = &native.worker.vt, .owner = owner, .timeline = native.worker.timelinePtr() }, .geometry = .{ .revision = 1, .cols = state.cols, .rows = state.rows } };
+    }
+    pub fn rebindOwner(self: *Provider, owner: Owner) !void {
+        // Jobs borrow searches and VT addresses, never Provider.source. Keep
+        // the synchronization objects stable across reconnect generations.
+        self.searches.cancelCurrent();
+        const state = try self.native.worker.vt.trySnapshot();
+        self.clearPendingPaste();
+        self.source.owner = owner;
+        self.registered_binding = null;
+        self.input_sequence = 0;
+        self.geometry = .{ .revision = 1, .cols = state.cols, .rows = state.rows };
+        self.pending_geometry = null;
+        self.applied_theme = null;
     }
     /// The domain host supplies the actual live binding after ready. The
     /// pre-ready renderer's document binding never becomes AI authority.
@@ -115,6 +143,7 @@ pub const Provider = struct {
         defer if (execution_locked) self.native.worker.execution_mutex.unlock();
         self.native.worker.text.timing.accepted(sequence, self.native.worker.input.write_index.load(.acquire) + bytes.len);
         if (bytes.len != 0) self.native.worker.replay.submit(&self.native.worker.input, bytes, if (self.writable()) .application else .ordinary, @import("../../vt/reconnect_replay.zig").InputMode.from(self.native.worker.vt.modes)) catch |err| return if (err == error.Full) error.InputFull else err;
+        if (execution_locked and self.writable()) self.native.worker.observeOrdinaryInput(bytes);
         self.input_sequence = sequence;
         return .{ .input_sequence = sequence, .queued_bytes = bytes.len };
     }
@@ -179,7 +208,7 @@ pub const Provider = struct {
             if (!self.writable() or state.mode_revision != p.mode) {
                 const sequence = p.sequence;
                 const mode = p.mode;
-                self.deinit();
+                self.clearPendingPaste();
                 return .{ .input_sequence = sequence, .mode_revision = mode, .consumed_bytes = 0, .state = .failed, .failure = .stale_mode };
             }
             const count = @min(p.bytes.len - p.offset, self.native.worker.input.freeCapacity());
@@ -192,7 +221,7 @@ pub const Provider = struct {
                 self.native.worker.replay.submit(&self.native.worker.input, p.bytes[p.offset..][0..count], .application, .{}) catch |err| return if (err == error.Full) error.WorkerBusy else err;
                 p.offset += count;
             }
-            if (p.offset == p.bytes.len) self.deinit();
+            if (p.offset == p.bytes.len) self.clearPendingPaste();
         }
         // Replay owns actual delivery accounting. Queue admission is never
         // reported as transport completion.
@@ -227,6 +256,14 @@ pub const Provider = struct {
         self.pending_paste = .{ .bytes = bytes, .sequence = sequence, .mode = paste.mode_revision };
         self.input_sequence = sequence;
         return .{ .input_sequence = sequence, .queued_bytes = bytes.len };
+    }
+    fn searchAsync(raw: *anyopaque, binding: Binding) !*terminal.SearchTask {
+        const self = try get(raw, binding);
+        return self.searches.begin(&self.native.worker.vt, self.source.owner);
+    }
+    fn searchTail(raw: *anyopaque, binding: Binding, request: terminal.SearchTail, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
+        const self = try get(raw, binding);
+        return .{ .owner = self.source.owner, .document = try self.native.worker.vt.searchTail(allocator, request.start_row, request.max_rows, request.version) };
     }
     fn searchSnapshot(raw: *anyopaque, binding: Binding, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
         const self = try get(raw, binding);
@@ -273,6 +310,10 @@ pub const Provider = struct {
         const self = try get(raw, binding);
         if (self.native.worker.execution == null and self.native.worker.shell_execution == null) return .{ .owner = self.source.owner, .failure = "IntegrationUnavailable" };
         return self.native.worker.executionSnapshot();
+    }
+    fn executionSnapshotFor(raw: *anyopaque, binding: Binding, id: @import("../../host/identity.zig").ExecutionId) !terminal.execution.Snapshot {
+        const self = try get(raw, binding);
+        return self.native.worker.executionSnapshotFor(id);
     }
     fn commandHistorySnapshot(raw: *anyopaque, binding: Binding, allocator: std.mem.Allocator) !terminal.CommandHistorySnapshot {
         const self = try get(raw, binding);
@@ -340,7 +381,7 @@ pub const Provider = struct {
         const self = try get(raw, binding);
         return self.native.worker.readExecutionOutput(id, allocator, cursor, max_bytes);
     }
-    const vtable: terminal.Service.VTable = .{ .command_history_snapshot = commandHistorySnapshot, .recording_identity = recordingIdentity, .content_query = contentQuery, .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .execution_input = executionInput, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .application_record = applicationRecord };
+    const vtable: terminal.Service.VTable = .{ .command_history_snapshot = commandHistorySnapshot, .recording_identity = recordingIdentity, .content_query = contentQuery, .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_snapshot_for = executionSnapshotFor, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .execution_input = executionInput, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .search_async = searchAsync, .search_tail = searchTail, .application_record = applicationRecord };
 };
 
 test "SSH terminal provider preserves the registered binding and rejects a different owner" {
@@ -396,6 +437,8 @@ const PasteFixture = struct {
     }
     fn deinit(self: *@This()) void {
         self.provider.deinit();
+        self.provider.finishSearches();
+        self.provider.disposeSearches();
         self.worker.shell_execution.?.deinit();
         self.worker.input.deinit(a);
         self.worker.replay.deinit();

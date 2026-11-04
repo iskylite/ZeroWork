@@ -10,38 +10,60 @@ pub const View = struct {
     title: *ui.Node = undefined,
     entries: *ui.Node = undefined,
     snapshot: []const u8 = "",
+    job: u64 = 0,
+    anchor_id: ?u32 = null,
+    viewport: *ui.Node = undefined,
+    content: *ui.Node = undefined,
     colors: theme.Colors = undefined,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .open = try scope.createSignal(bool, false), .colors = theme.current() });
         try scope.onCleanup(View, self, cleanup);
-        const modal = try ui.widgets.Modal(.{ .open = self.open, .width = 520, .max_height = 242, .background = theme.current().overlay, .overlay_color = ui.Color.TRANSPARENT, .close_on_overlay = false, .on_open_change = cx.on(View, self, changed) }).mount(scope, cx);
-        if (!modal.portaled) try cx.root.?.appendChild(cx.allocator, modal.overlay);
-        self.dialog = modal.dialog;
+        const popover = try ui.widgets.Popover(.{
+            .open = self.open,
+            .trigger = .manual,
+            .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } },
+            .position = .top_end,
+            .offset = .{ .static = 8 },
+            .width = @as(f32, 520),
+            .max_height = @as(f32, 242),
+            .constrain_width_to_viewport = true,
+            .viewport_padding = @as(f32, 8),
+            .a11y_role = .dialog,
+            .on_open_change = cx.on(View, self, changed),
+        }).mount(scope, cx);
+        popover.wrapper.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } });
+        try cx.root.?.appendChild(cx.allocator, popover.wrapper);
+        self.dialog = popover.chrome;
         self.dialog.setStyleInline(cx.allocator, S.dialog(cx.tokens));
-        try self.dialog.insertChildBefore(cx.allocator, try ui.boxStyled(cx, @import("transfer_styles.zig").topFade, .{}), modal.body);
+        const body = try ui.boxStyled(cx, S.body, .{});
+        try self.dialog.appendChild(cx.allocator, try ui.boxStyled(cx, @import("transfer_styles.zig").topFade, .{}));
+        try self.dialog.appendChild(cx.allocator, body);
         try self.dialog.appendChild(cx.allocator, try ui.boxStyled(cx, @import("transfer_styles.zig").grip, .{}));
         self.dialog.meta.ownership.meta.test_id = "transfer.events.dialog";
-        modal.body.setStyleInline(cx.allocator, S.body(cx.tokens));
         const head = try ui.boxStyled(cx, S.row, .{});
         try head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("file-clock").?, theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }));
         self.title = try ui.textStyled(cx, S.title, "任务事件");
         try head.appendChild(cx.allocator, self.title);
         try head.appendChild(cx.allocator, try ui.spacer(cx));
-        const x = try ui.widgets.Button(.{ .icon_asset = ui.icons.x, .icon_only = true, .a11y_label = "关闭任务事件", .variant = .ghost, .on_click = cx.on(View, self, close), .base_style = S.button(22) }).mount(scope, cx);
+        const x = try ui.widgets.Button(.{ .icon_asset = ui.icons.x, .icon_only = true, .a11y_label = "关闭任务事件", .variant = .ghost, .on_click = cx.on(View, self, close), .base_style = S.button(22) }).mount(popover.scope, cx);
         x.meta.ownership.meta.test_id = "transfer.events.dismiss";
         try head.appendChild(cx.allocator, x);
-        try modal.body.appendChild(cx.allocator, head);
-        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
+        try body.appendChild(cx.allocator, head);
+        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(popover.scope, cx);
         scroll.container.setStyleInline(cx.allocator, S.viewport(cx.tokens));
         scroll.container.meta.ownership.meta.test_id = "transfer.events.viewport";
         self.entries = try ui.boxStyled(cx, S.eventList, .{});
         self.entries.meta.ownership.meta.test_id = "transfer.events.entries";
         try scroll.content.appendChild(cx.allocator, self.entries);
-        try modal.body.appendChild(cx.allocator, scroll.container);
-        try @import("compact_overlay_layout.zig").mount(cx, scope, self.dialog, scroll.container, scroll.content, 58, 184, null, 0);
+        try body.appendChild(cx.allocator, scroll.container);
+        self.viewport = scroll.container;
+        self.content = scroll.content;
+        try cx.addAfterLayoutHook(self, layout);
         return self;
     }
-    pub fn show(self: *View, job: u64, entries: []const u8) !void {
+    pub fn show(self: *View, job: u64, entries: []const u8, anchor: *ui.Node) !void {
+        self.job = job;
+        self.anchor_id = anchor.id;
         var buffer: [80]u8 = undefined;
         try self.title.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "任务事件 · #{d}", .{job}));
         const snapshot = try self.cx.allocator.dupe(u8, entries);
@@ -65,6 +87,50 @@ pub const View = struct {
         self.dialog.setStyleInline(self.cx.allocator, S.dialog(self.cx.tokens));
         self.open.set(true);
     }
+    /// Virtual-list refreshes replace buttons. Retain only the current node ID.
+    pub fn reanchor(self: *View, job: u64, anchor: *ui.Node) void {
+        if (self.job == job) self.anchor_id = anchor.id;
+    }
+    fn findAnchor(self: *View) ?*ui.Node {
+        return findNode(self.cx.root orelse return null, self.anchor_id orelse return null);
+    }
+    fn findNode(node: *ui.Node, wanted: u32) ?*ui.Node {
+        if (node.id == wanted) return node;
+        for (node.children.items) |child| if (findNode(child, wanted)) |found| return found;
+        return null;
+    }
+    fn anchorRect(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+        const self: *View = @ptrCast(@alignCast(raw));
+        const node = self.findAnchor() orelse return .{ .x = -1e6, .y = -1e6, .w = 0, .h = 0 };
+        const rect = node.globalRect();
+        return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    }
+    fn layout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *View = @ptrCast(@alignCast(raw));
+        if (!self.open.peek()) return .done;
+        const anchor = self.findAnchor() orelse {
+            self.close();
+            return .done;
+        };
+        if (!anchor.isDisplayedInTree()) {
+            self.close();
+            return .done;
+        }
+        const rect = anchor.globalRect();
+        const top = self.cx.safe_area_top + 8;
+        const bottom = self.cx.viewport.height - self.cx.safe_area_bottom - 8;
+        // A freshly rebuilt virtual row is measured in the next layout round.
+        if (rect.w <= 0 or rect.h <= 0) return .done;
+        // Reserve chrome and the anchor gap; only event rows scroll when space is tight.
+        const available = @max(rect.y - top - 8, bottom - rect.y - rect.h - 8);
+        const height = @min(@max(16, self.content.globalRect().h), @max(0, @min(184, available - 58)));
+        const total = height + 58;
+        if (self.dialog.style.height == .px and @abs(self.dialog.style.height.px - total) < 0.1 and
+            self.viewport.style.height == .px and @abs(self.viewport.style.height.px - height) < 0.1) return .done;
+        self.viewport.setStyleInline(self.cx.allocator, .{ .height = .{ .px = height } });
+        self.dialog.setStyleInline(self.cx.allocator, .{ .height = .{ .px = total } });
+        return .needs_layout;
+    }
     pub fn retheme(self: *View) void {
         @import("transfer_styles.zig").repaint(self.dialog, self.colors);
         self.colors = theme.current();
@@ -77,6 +143,7 @@ pub const View = struct {
         self.open.set(open);
     }
     fn cleanup(self: *View) void {
+        self.cx.removeAfterLayoutHook(self);
         self.cx.allocator.free(self.snapshot);
     }
 };

@@ -192,7 +192,8 @@ test "auxiliary appearance owns window textures and copies material path for loc
     try std.testing.expectApproxEqAbs(@as(f32, 100), rect.y, 0.1);
     try std.testing.expectEqual(@as(usize, 1), spy.uploads);
     try std.testing.expectEqual(@as(f32, 12), appearance.view.blur.style.backdrop_blur());
-    try std.testing.expectEqual(theme.baseColors().app.withAlpha(128), appearance.view.veil.getBackground());
+    try std.testing.expectEqual(theme.baseColors().app.withAlpha(255), appearance.view.veil.getBackground());
+    try std.testing.expectEqual(@as(f32, 0.5), appearance.view.veil.getOpacity());
 }
 
 test "auxiliary appearance retains last texture and reports a failed revision once until retry" {

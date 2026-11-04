@@ -31,6 +31,10 @@ test "fetch_url std.Io gate blocks the actual sockaddr before the underlying dia
     const private = try Io.net.IpAddress.parseIp4("169.254.169.254", 80);
     try std.testing.expectError(error.AccessDenied, private.connect(filtered, .{ .mode = .stream }));
     try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    gateway.proxy = .{ .kind = .http, .host = "127.0.0.1", .port = 7890 };
+    try std.testing.expectError(error.AccessDenied, private.connect(filtered, .{ .mode = .stream }));
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    gateway.proxy = null;
     const public = try Io.net.IpAddress.parseIp4("1.1.1.1", 443);
     try std.testing.expectError(error.ConnectionRefused, public.connect(filtered, .{ .mode = .stream }));
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
@@ -75,22 +79,19 @@ test "fetch_url Zig streaming enforces 2MiB compressed and 4MiB decoded independ
     }
 }
 
-test "fetch_url std.http production route reports the real configured proxy without bypass" {
+test "fetch_url std.http production route fetches through the configured system proxy" {
     const Policy = struct {
         fn allow(_: *anyopaque, _: []const u8) net.Code {
             return .ok;
         }
     };
     var flag: u8 = 0;
-    var result = net.fetch(std.testing.allocator, std.testing.io, .{ .context = &flag, .authorize = Policy.allow }, "https://example.com/", null);
+    const override = if (std.c.getenv("ZEROWORK_FETCH_TEST_URL")) |value| std.mem.sliceTo(value, 0) else null;
+    var result = net.fetch(std.testing.allocator, std.testing.io, .{ .context = &flag, .authorize = Policy.allow }, override orelse "https://example.com/", null);
     defer result.deinit(std.testing.allocator);
-    // On a direct-route test machine this call may legitimately perform real
-    // public I/O. In this environment the actual system proxy must fail closed.
-    if (result.code == .capability) {
-        try std.testing.expect(!result.request_sent and result.local_released and result.http_status == 0);
-    } else {
-        try std.testing.expect(result.code == .ok and result.request_sent and result.http_status == 200);
-    }
+    if (result.code != .ok) std.debug.print("fetch result code={s} stage={d} status={d} sent={}\n", .{ @tagName(result.code), result.stage, result.http_status, result.request_sent });
+    try std.testing.expect(result.code == .ok and result.request_sent and result.http_status == 200);
     try std.testing.expect(result.elapsed_ms < net.total_ms + 1000);
     try std.testing.expect(result.observed_at > 0);
+    if (override != null) std.debug.print("HTTP {d}, {d} received bytes, request_sent={}\n", .{ result.http_status, result.received_bytes, result.request_sent });
 }

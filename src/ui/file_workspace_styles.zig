@@ -81,7 +81,7 @@ pub fn pathInput() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 30 }, .flex = 1, .min_width = 0, .padding = .{}, .border = .{ .width = 0 }, .background = ui.Color.TRANSPARENT };
 }
 pub fn table(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .min_width = 0, .direction = .column, .background = theme.current().surface_1, .border = .{ .radius = 0 }, .overflow = .hidden, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .min_width = 0, .direction = .column, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 0 }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn headerClip(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = header_height }, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true };

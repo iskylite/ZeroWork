@@ -208,6 +208,28 @@ fn waitingFirstFrame(h: *Harness) bool {
     return h.runtime().controller.poll().video == .awaiting_frame;
 }
 
+test "BMC efficiency runtime close drains its encoder before releasing frame ownership" {
+    const h = try Harness.create();
+    defer h.destroy();
+    h.fixture.allow_begin.store(true, .release);
+    h.fixture.allow_frame.store(true, .release);
+    try h.pollUntil(gotFrame);
+    const runtime = h.runtime();
+    try T.expect(runtime.ai_control.asynchronous_encoding);
+    try T.expectError(error.ImageEncodingPending, runtime.ai_control.screenshot(runtime.aiBinding(), a, .{}));
+    const next_observation = runtime.ai_control.next_observation;
+    _ = runtime.close();
+    const deadline = runtime_api.monotonicMs() + 3000;
+    while (runtime.receipt() != .released) {
+        if (runtime_api.monotonicMs() >= deadline) return error.FixtureTimeout;
+        pause();
+    }
+    try T.expect(runtime.ai_control.encoding == null);
+    try T.expect(runtime.ai_control.cached_image.snapshot == null);
+    try T.expectEqual(next_observation, runtime.ai_control.next_observation);
+    // Harness.destroy checks all frame-budget reservations are released.
+}
+
 test "BMC plugin runtime publishes bindings before authentication and first frame" {
     const h = try Harness.create();
     defer h.destroy();
@@ -495,7 +517,8 @@ test "BMC plugin runtime preserves read tools and cannot enable management write
     const boot = try b.borrow(svc.BootService, svc.boot_key, runtime.owner);
     try T.expectEqual(svc.Reason.permission_denied, boot.apply(b.context, .{ .execution = execution, .baseline = .{}, .target = "Pxe" }).rejected);
     const manifest = h.plugin.manifest();
-    try T.expectEqual(@as(usize, 7), manifest.tools.len);
+    try T.expectEqual(tools.definitions.len, manifest.tools.len);
+    try T.expect(manifest.tools.len <= ai.max_plugin_tools);
     for (manifest.tool_definitions, 0..) |definition, index| {
         try ai.validateDefinition(definition);
         if (index < 3) {

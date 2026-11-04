@@ -1,4 +1,5 @@
 const std = @import("std");
+const applog = @import("../platform/applog.zig");
 const identity = @import("identity.zig");
 const operations = @import("operation.zig");
 const plugins = @import("plugin_registry.zig");
@@ -1640,6 +1641,7 @@ pub const SessionHost = struct {
         const key = try self.journal.begin(.{ .session = handle }, entry.attempt);
         entry.close_operation = key;
         entry.hooks = hooks;
+        applog.info(.workspace, "session close begin session={d} generation={d} operation={d}", .{ @backingInt(handle.session_id), handle.generation, key.operation_id });
         self.capabilityChanged(handle);
         entry.state = .closing;
         try self.advanceClose(entry);
@@ -1703,6 +1705,7 @@ pub const SessionHost = struct {
     fn advanceClose(self: *SessionHost, entry: *Entry) !void {
         while (true) {
             const key = entry.close_operation.?;
+            applog.info(.workspace, "session close step session={d} generation={d} operation={d} step={s}", .{ @backingInt(entry.handle.session_id), entry.handle.generation, key.operation_id, @tagName(entry.close_step) });
             const result: CloseReceipt = if (entry.close_step == .close_protocol) blk: {
                 // A cancelled/failed factory retains cleanup ownership until its
                 // receipt. Do not concurrently close those same resources again.
@@ -1712,9 +1715,9 @@ pub const SessionHost = struct {
                     .not_started, .releasing => .awaiting,
                 };
                 const adapter = self.factory(entry);
-                break :blk adapter.vtable.close(adapter.context, entry.handle, key) catch .unknown;
+                break :blk adapter.vtable.close(adapter.context, entry.handle, key) catch |err| closeError(entry, err);
             } else if (hookFor(entry.hooks, entry.close_step)) |hook|
-                hook.run(hook.context, entry.handle, key) catch .unknown
+                hook.run(hook.context, entry.handle, key) catch |err| closeError(entry, err)
             else
                 .released;
             if (result != .released) {
@@ -1731,8 +1734,14 @@ pub const SessionHost = struct {
 
     fn recordCloseWait(self: *SessionHost, entry: *Entry, receipt: CloseReceipt) !void {
         const unknown = receipt == .unknown;
+        applog.info(.workspace, "session close wait session={d} generation={d} operation={d} step={s} receipt={s}", .{ @backingInt(entry.handle.session_id), entry.handle.generation, entry.close_operation.?.operation_id, @tagName(entry.close_step), @tagName(receipt) });
         _ = try self.journal.publish(entry.close_operation.?, if (unknown) .cleanup_unknown else .cleanup_progress, @tagName(entry.close_step), null);
         entry.state = if (unknown) .cleanup_unknown else .closing;
+    }
+
+    fn closeError(entry: *const Entry, err: anyerror) CloseReceipt {
+        applog.warn(.workspace, "session close error session={d} generation={d} operation={d} step={s} error={s}", .{ @backingInt(entry.handle.session_id), entry.handle.generation, entry.close_operation.?.operation_id, @tagName(entry.close_step), @errorName(err) });
+        return .unknown;
     }
 
     fn finishClose(self: *SessionHost, entry: *Entry) !void {
@@ -1743,6 +1752,7 @@ pub const SessionHost = struct {
         entry.capability_revision +|= 1;
         entry.attachment = null;
         entry.state = .closed;
+        applog.info(.workspace, "session close released session={d} generation={d} operation={d}", .{ @backingInt(entry.handle.session_id), entry.handle.generation, entry.close_operation.?.operation_id });
     }
 
     fn startAdapter(self: *SessionHost, entry: *Entry) !void {

@@ -433,7 +433,8 @@ pub const Host = struct {
                 if (value.phase != .ready) return;
                 var buffer: [128]u8 = undefined;
                 const command = std.fmt.bufPrint(&buffer, "export ALL_PROXY=socks5://127.0.0.1:{d}", .{value.local_port}) catch return;
-                _ = ui.platform_services.clipboardSetText(self.cx.system_sdk, command);
+                const success = ui.platform_services.clipboardSetText(self.cx.system_sdk, command);
+                if (self.info) |info| info.copy_feedback.report(success);
             },
         }
         self.updateInfo();

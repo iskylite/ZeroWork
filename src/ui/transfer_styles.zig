@@ -140,7 +140,7 @@ pub const v3_card_height: f32 = row_height;
 pub const v3_card_pitch: f32 = row_pitch;
 pub fn v3Panel(global: bool) ui.BoxStyle {
     // Transparent HTML border consumes 1px in addition to the 12px padding.
-    return .{ .width = .{ .px = if (global) 720 else 680 }, .height = .{ .px = 199 }, .direction = .column, .padding = ui.Padding.all(13), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11 }, .overflow = .hidden, .flex_shrink = 0, .hit_behavior = .@"opaque" };
+    return .{ .width = .{ .px = if (global) 640 else 560 }, .height = .{ .px = 199 }, .direction = .column, .padding = ui.Padding.all(13), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11 }, .overflow = .hidden, .flex_shrink = 0, .hit_behavior = .@"opaque" };
 }
 pub fn v3EmptyState() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .top = 8, .bottom = 8, .left = 4, .right = 4 }, .overflow = .hidden };

@@ -60,6 +60,11 @@ try{
   await click('notifications.history.pending');await click('notifications.history.close');await absent('notifications.unread');
   report.cases.push({theme,status:'passed',checks:['ordinary errors stay local','one banner','three shared sources form one incident','two pending incidents','dismiss and view preserve pending','empty and pending-only histories hide the clear button and footer','resolved history shows clear; clearing hides the footer again','source recovery updates in place','recent filter and clear resolved','68px rows and bounded minimum window']});
  }
+ stage='hover timeout';await h.resizeWindow(1440,900);await click('fixture.application-risk');
+ const toast=await visible('notifications.toast.0');await h.mouseMove(toast.rect.x+20,toast.rect.y+20);await h.sleep(8500);await visible('notifications.toast.0');
+ await h.mouseMove(5,5);await h.sleep(8500);await absent('notifications.toast.0');
+ await click('toolbar.notifications');await visible('notifications.history.record');await click('notifications.history.close');
+ report.cases.push({status:'passed',checks:['application-risk toast pauses on actual hover, expires after pointer leaves, and retains its pending history']});
  report.status='passed';
 }catch(e){report.status='failed';report.error=stage+': '+String(e);await h.screenshot(join(out,'failure.png')).catch(()=>{});await writeFile(join(out,'failure-tree.json'),JSON.stringify(await h.tree(),null,2)).catch(()=>{});process.exitCode=1;}
 finally{await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await ended;await log.close();await rm(iso,{recursive:true,force:true});}

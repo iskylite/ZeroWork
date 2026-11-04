@@ -5,7 +5,9 @@ const std = @import("std");
 const Io = std.Io;
 const provider = @import("provider.zig");
 const darwin = @import("../platform/darwin_url_network.zig");
-pub const Code = enum(c_int) { ok, invalid, not_allowed, capability, denied, approval, scope_changed, dns, connect, tls, timeout, redirect, too_large, unsupported, http, cancelled, network, memory };
+const proxy_config = @import("../platform/darwin_url_proxy.zig");
+const proxy_tunnel = @import("fetch_url_proxy.zig");
+pub const Code = enum(c_int) { ok, invalid, not_allowed, capability, proxy_configuration, proxy_unsupported, proxy_connect, proxy_auth, denied, approval, scope_changed, dns, connect, tls, timeout, redirect, too_large, unsupported, http, cancelled, network, memory };
 pub const receive_limit = 2 * 1024 * 1024;
 pub const decode_limit = 4 * 1024 * 1024;
 pub const total_ms = 15_000;
@@ -163,6 +165,8 @@ pub const NetworkIo = struct {
     sent: std.atomic.Value(bool) = .init(false),
     track_request: std.atomic.Value(bool) = .init(false),
     stage: std.atomic.Value(c_int) = .init(2),
+    proxy: ?proxy_config.Proxy = null,
+    proxy_failure: std.atomic.Value(Code) = .init(.ok),
     const table: Io.VTable = block: {
         @setEvalBranchQuota(10000);
         var value: Io.VTable = undefined;
@@ -217,6 +221,18 @@ pub const NetworkIo = struct {
             return error.AccessDenied;
         }
         self.stage.store(3, .release);
+        if (self.proxy) |proxy| {
+            self.stage.store(7, .release);
+            const socket = self.connectProxy(proxy, address.*, options) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                self.base.checkCancel() catch return error.Canceled;
+                self.proxy_failure.store(if (err == error.ProxyAuthenticationFailed) .proxy_auth else .proxy_connect, .release);
+                return error.ConnectionRefused;
+            };
+            self.proxy_failure.store(.ok, .release);
+            self.stage.store(3, .release);
+            return socket;
+        }
         const socket = try self.base.vtable.netConnectIp(self.base.userdata, address, options);
         errdefer self.base.vtable.netClose(self.base.userdata, &.{socket});
         if (!darwin.peerMatches(socket.handle, address.*)) {
@@ -224,6 +240,26 @@ pub const NetworkIo = struct {
             return error.AccessDenied;
         }
         return socket;
+    }
+    fn connectProxy(self: *NetworkIo, proxy: proxy_config.Proxy, target: Io.net.IpAddress, options: Io.net.IpAddress.ConnectOptions) !Io.net.Socket {
+        // Only this explicitly configured endpoint bypasses the public dial
+        // filter. Target DNS and the numeric CONNECT/SOCKS destination do not.
+        const hostname = try std.heap.page_allocator.dupeSentinel(u8, proxy.host, 0);
+        defer std.heap.page_allocator.free(hostname);
+        const addresses = try darwin.resolve(hostname, cancelled, self);
+        for (addresses.values[0..addresses.count]) |value| {
+            var endpoint = value;
+            endpoint.setPort(proxy.port);
+            const socket = self.base.vtable.netConnectIp(self.base.userdata, &endpoint, options) catch |err| {
+                if (err == error.Canceled) return err;
+                continue;
+            };
+            errdefer self.base.vtable.netClose(self.base.userdata, &.{socket});
+            if (!darwin.peerMatches(socket.handle, endpoint)) return error.ProxyConnectionFailed;
+            try proxy_tunnel.handshake(self.base, socket, proxy, target);
+            return socket;
+        }
+        return error.ProxyConnectionFailed;
     }
     fn operate(raw: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
         const self = fromRaw(raw);
@@ -289,11 +325,14 @@ const Job = struct {
     fn run(self: *Job) void {
         defer self.done.store(true, .release);
         self.fetch() catch |err| {
-            self.result.code = if (self.network.blocked.load(.acquire)) .not_allowed else switch (err) {
+            const proxy_failure = self.network.proxy_failure.load(.acquire);
+            self.result.code = if (self.network.blocked.load(.acquire)) .not_allowed else if (proxy_failure != .ok) proxy_failure else switch (err) {
                 error.OutOfMemory => .memory,
                 error.Canceled => .cancelled,
                 error.UrlNotAllowed => .not_allowed,
                 error.InvalidUrl => .invalid,
+                error.ProxyConfigurationUnavailable, error.InvalidProxy => .proxy_configuration,
+                error.UnsupportedProxy => .proxy_unsupported,
                 error.UnknownHostName, error.NoAddressReturned, error.NameServerFailure => .dns,
                 error.TlsInitializationFailed, error.CertificateBundleLoadFailure => .tls,
                 error.ConnectionRefused, error.HostUnreachable, error.NetworkUnreachable => .connect,
@@ -317,12 +356,11 @@ const Job = struct {
             self.result.stage = 1;
             self.result.code = self.policy.authorize(self.policy.context, current);
             if (self.result.code != .ok) return;
-            const zero = try self.a.dupeSentinel(u8, current, 0);
-            defer self.a.free(zero);
-            if (darwin.proxyRequired(zero)) {
-                self.result.code = .capability;
-                return;
-            }
+            var proxy_arena = std.heap.ArenaAllocator.init(self.a);
+            defer proxy_arena.deinit();
+            self.result.stage = 6;
+            self.network.proxy = try proxy_config.route(proxy_arena.allocator(), current, NetworkIo.cancelled, &self.network);
+            defer self.network.proxy = null;
             const uri = try std.Uri.parse(current);
             var redirected_from: ?[]const u8 = null;
             defer if (redirected_from) |old| self.a.free(old);
@@ -349,7 +387,7 @@ const Job = struct {
                 client.connection_pool.release(connection, io);
                 return;
             }
-            var request = try client.request(.GET, uri, .{ .connection = connection, .keep_alive = false, .redirect_behavior = .unhandled, .headers = .{ .authorization = .omit, .user_agent = .{ .override = "ZeroWork/0.3.0-rc3 (public text fetch)" } } });
+            var request = try client.request(.GET, uri, .{ .connection = connection, .keep_alive = false, .redirect_behavior = .unhandled, .headers = .{ .authorization = .omit, .user_agent = .{ .override = "ZeroWork/0.3.0-rc16 (public text fetch)" } } });
             owned_connection = false;
             // Also close without draining when response parsing fails before
             // receiveHead has populated its keep-alive state.

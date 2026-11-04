@@ -315,6 +315,11 @@ const Job = struct {
     // —— 仅在引擎锁下访问的发布簿记 ——
     emitted: bool = false,
     emitted_done: u64 = 0,
+    source_read_bytes: std.atomic.Value(u64) = .init(0),
+    source_read_total: std.atomic.Value(u64) = .init(0),
+    source_read_speed: std.atomic.Value(u64) = .init(0),
+    source_read_active: std.atomic.Value(bool) = .init(false),
+    emitted_source_read: ?manager.SourceReadProgress = null,
     reported_state: ?manager.EngineState = null,
     reported_cleanup: ?manager.JobCleanup = null,
     reported_verification: u64 = 0,
@@ -1723,17 +1728,24 @@ pub const SftpEngine = struct {
             // placeholder zero here would reject the later metadata result.
             if (!job.total_ready.load(.acquire)) continue;
             const done = job.done.load(.acquire);
+            const source_read: ?manager.SourceReadProgress = if (job.source_read_active.load(.acquire)) .{
+                .done_bytes = job.source_read_bytes.load(.acquire),
+                .total_bytes = job.source_read_total.load(.acquire),
+                .speed_bps = job.source_read_speed.load(.acquire),
+            } else null;
             const conflict_revision = job.conflict_revision.load(.acquire);
             const skipped_bytes = job.skipped_bytes.load(.acquire);
-            if (!job.emitted or done != job.emitted_done or job.emitted_verification != diagnostic.revision or job.emitted_conflict != conflict_revision or job.emitted_skipped != skipped_bytes) {
+            if (!job.emitted or !std.meta.eql(source_read, job.emitted_source_read) or done != job.emitted_done or job.emitted_verification != diagnostic.revision or job.emitted_conflict != conflict_revision or job.emitted_skipped != skipped_bytes) {
                 job.emitted_conflict = conflict_revision;
                 job.emitted_skipped = skipped_bytes;
                 job.emitted = true;
                 job.emitted_done = done;
+                job.emitted_source_read = source_read;
                 job.emitted_verification = diagnostic.revision;
                 event = .{
                     .job = job.id,
                     .done_bytes = done,
+                    .source_read = source_read,
                     .total_bytes = job.total.load(.acquire),
                     .speed_bps = job.speed.load(.acquire),
                     .state = .running,
@@ -2194,6 +2206,10 @@ pub const SftpEngine = struct {
             // job, and every exit closes it before publishing a checkpoint.
             file.source_cache = createSourceCache() catch null;
         }
+        job.source_read_bytes.store(0, .release);
+        job.source_read_total.store(file.size, .release);
+        job.source_read_speed.store(0, .release);
+        job.source_read_active.store(true, .release);
         rt.phase = .source_scan;
     }
 
@@ -2215,6 +2231,9 @@ pub const SftpEngine = struct {
             };
             rt.scan_hash.update(file.buffer[0..count]);
             rt.scan_offset += count;
+            job.source_read_bytes.store(rt.scan_offset, .release);
+            const elapsed = nowMs() -| job.started_ms;
+            job.source_read_speed.store(if (elapsed > 0) rt.scan_offset *| 1000 / elapsed else 0, .release);
             return;
         }
         const after = if (job.spec.direction == .upload)
@@ -2227,6 +2246,7 @@ pub const SftpEngine = struct {
         if (file.fingerprint) |original| {
             if (!std.mem.eql(u8, &original.sha256, &digest)) return error.SourceChanged;
         } else file.fingerprint = .{ .stamp = after, .sha256 = digest };
+        job.source_read_active.store(false, .release);
         rt.phase = .source_close;
     }
 
@@ -6203,4 +6223,30 @@ test "sftp staged preflight pause releases scratch and safely restarts source va
     try std.testing.expectEqual(manager.JobCleanup.released, SftpEngine.cleanupOf(resumed));
     try std.testing.expect(resumed.runtime.file.source_cache == null);
     try expectFileBytes(local.dir, "a", &bytes);
+}
+
+test "source read publishes changing progress before any destination bytes without endless drain" {
+    const a = std.testing.allocator;
+    var engine: SftpEngine = .{ .allocator = a };
+    defer engine.jobs.deinit(a);
+    var job: Job = .{ .id = 1, .spec = undefined };
+    job.total.store(1024, .release);
+    job.total_ready.store(true, .release);
+    job.source_read_total.store(1024, .release);
+    job.source_read_active.store(true, .release);
+    try engine.jobs.append(a, &job);
+    try std.testing.expectEqual(@as(u64, 0), engine.poll().?.done_bytes);
+    try std.testing.expect(engine.poll() == null);
+    job.source_read_bytes.store(512, .release);
+    job.source_read_speed.store(256, .release);
+    const reading = engine.poll().?;
+    try std.testing.expectEqual(@as(u64, 0), reading.done_bytes);
+    try std.testing.expectEqual(@as(u64, 512), reading.source_read.?.done_bytes);
+    try std.testing.expectEqual(@as(u64, 256), reading.source_read.?.speed_bps);
+    try std.testing.expect(engine.poll() == null);
+    job.source_read_active.store(false, .release);
+    const saving = engine.poll().?;
+    try std.testing.expect(saving.source_read == null);
+    try std.testing.expectEqual(@as(u64, 0), saving.done_bytes);
+    try std.testing.expect(engine.poll() == null);
 }

@@ -11,6 +11,7 @@ pub const g = struct {
     pub const row: f32 = 52;
     pub const control: f32 = 32;
     pub const control_width: f32 = 220;
+    pub const font_control_width: f32 = 280;
     pub const icon: f32 = 16;
     pub const tile_height: f32 = 56;
     pub const thumbnail_width: f32 = 40;
@@ -80,7 +81,7 @@ pub fn previewBadge(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn tile(width: f32, selected: bool) ButtonStyle {
     var s = plainButton(width, g.tile_height, selected);
-    s.background = if (selected) theme.popupSelection() else theme.current().well;
+    s.background = if (selected) base.selectionBackground(false) else theme.current().well;
     s.corner_radius = 8;
     s.direction = .row;
     s.align_items = .center;

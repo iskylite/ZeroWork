@@ -201,10 +201,10 @@ try {
   await waitFor(async()=>text((await query("transfer.task.status")).find(shown))==="已完成"||(await query("transfer.conflict")).some(shown)||null,180000);
   if((await query("transfer.conflict")).some(shown)){
    await capture("06-fin-recovery-conflict");
-   await click("transfer.conflict.overwrite");await click("transfer.conflict.apply");
+   await click("transfer.conflict.overwrite");
    await visible("transfer.conflict.confirm.paths");await capture("07-fin-recovery-explicit-overwrite");
    await click("transfer.conflict.apply");
-   report.checks.push("Post-FIN uncertain partial requires explicit two-step overwrite before fresh transfer");
+   report.checks.push("Post-FIN uncertain partial shows exact targets and requires one explicit overwrite confirmation before fresh transfer");
   }
   await waitFor(async()=>text((await query("transfer.task.status")).find(shown))==="已完成"||null,180000);
   report.recovered_peer=JSON.parse(await readFile(join(peerOut,"state.json"),"utf8"));

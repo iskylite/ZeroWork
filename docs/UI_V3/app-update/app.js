@@ -79,7 +79,7 @@ function content(){
 }
 function paint({focus=true}={}){
   state=model.state;
-  $('#current-version').textContent=model.installed?'当前版本 0.3.0':'当前版本 0.3.0-rc1';
+  $('#current-version').textContent=`${model.installed?'0.3.0':'0.3.0-rc1'} · main@1a2b3c4d5e6f* · 2026-11-04 18:00:00 +0800`;
   $('#version-badge').textContent=model.installed?'已是最新':'有新版本';$('#available-title').textContent=model.installed?'你正在使用最新版本':'0.3.0 正式版可用';
   $('#open-update').textContent=model.installed?'已是最新':model.operation==='downloading'?'查看下载':model.operation==='verifying'?'查看校验':'查看更新';$('#open-update').disabled=model.installed;
   $('#check').disabled=model.operation==='downloading'||model.operation==='verifying'||model.intent;

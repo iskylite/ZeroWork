@@ -1,5 +1,20 @@
 const std = @import("std");
-pub const Effort = enum { low, medium, high, xhigh, max, none, ultra };
+pub const Effort = enum {
+    low,
+    medium,
+    high,
+    xhigh,
+    max,
+    none,
+    ultra,
+
+    pub fn lowestSupported(supported: [7]bool) ?Effort {
+        for ([_]Effort{ .none, .low, .medium, .high, .xhigh, .max, .ultra }) |effort| {
+            if (supported[@backingInt(effort)]) return effort;
+        }
+        return null;
+    }
+};
 pub const Role = enum { user, assistant, tool };
 pub const Tool = @import("tool_scope.zig").Tool;
 pub const max_plugin_tool_definitions = 16;
@@ -53,14 +68,40 @@ pub const Message = struct {
     role: Role = .user,
     content: []const u8,
     images: []const @import("image_attachments.zig").ContentRef = &.{},
+    /// Retained evidence, never serialized as image input. Offload decisions
+    /// belong to this occurrence and survive history copies/model changes.
+    offloaded_images: []const OffloadedImage = &.{},
+    image_owner: ?@import("../host/identity.zig").SessionHandle = null,
+    /// Crop/coordinate mapping identity. Equal pixels do not merge different mappings.
+    image_transform: u64 = 0,
     tool_calls: []const ToolCall = &.{},
     tool_call_id: ?[]const u8 = null,
+};
+pub const OffloadedImage = struct {
+    reference: @import("image_attachments.zig").ContentRef,
+    owner: ?@import("../host/identity.zig").SessionHandle = null,
 };
 pub const CancelToken = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     /// Borrowed for this operation only. The source and its thread-safe poll
     /// must outlive every consumer, including child work through its join.
-    source: ?struct { context: *const anyopaque, poll: *const fn (*const anyopaque) bool } = null,
+    source: ?struct {
+        context: *const anyopaque,
+        poll: *const fn (*const anyopaque) bool,
+        /// Human decisions suspend the active-run budget, not Stop or scope checks.
+        user_wait: ?*const fn (*const anyopaque, bool) void = null,
+    } = null,
+    pub const UserWait = struct {
+        token: ?*const CancelToken,
+        pub fn end(self: UserWait) void {
+            if (self.token) |token| if (token.source) |source| if (source.user_wait) |notify| notify(source.context, false);
+        }
+    };
+    /// Worker-owned guard. Always end it, including rejection and cancellation.
+    pub fn beginUserWait(self: ?*const CancelToken) UserWait {
+        if (self) |token| if (token.source) |source| if (source.user_wait) |notify| notify(source.context, true);
+        return .{ .token = self };
+    }
     pub fn cancel(self: *CancelToken) void {
         self.cancelled.store(true, .release);
     }
@@ -84,9 +125,12 @@ pub const ChatRequest = struct {
     /// Explicit conservative admission reservation for image-capable custom
     /// models whose tokenizer is not known locally; never reported as usage.
     image_token_reservation: ?u32 = null,
+    image_token_max_width: ?u32 = null,
+    image_token_max_height: ?u32 = null,
     vision: bool = false,
     max_output: u32 = 4096,
-    /// Total automatic-run budget across provider/tool rounds and retries.
+    /// Active automatic-run budget across provider/tool rounds and retries.
+    /// Time awaiting an explicit user decision does not consume this budget.
     /// An explicit manual answer retry starts a new budget, retaining results.
     timeout_ms: u32 = 10 * 60_000,
     /// Stream inactivity limit, reset by received bytes.

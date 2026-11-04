@@ -63,8 +63,9 @@ pub fn setDirtyNotifyCallback(notify: ?DirtyNotifyFn) void {
 /// Flip generation counter for the loose interaction bits (pipeline.interaction / hit.geometry /
 /// hit.semantics). These bits don't bubble, so they could only be found by a full-tree recursive
 /// scan (subtreeHasLooseInteractionDirty, once the largest single item in frame-structure
-/// sampling). Every set/clear site bumps this generation; scans memoize by (root, generation) and
-/// any flip auto-invalidates, so semantics are exactly equivalent to a fresh scan each time. Any
+/// sampling). Every actual bit change bumps this generation; repeated marks and clears of clean
+/// bits leave it unchanged. Scans memoize by (root, generation), so any flip invalidates the memo
+/// while a paint-only tick over a settled hidden subtree can retain it. Any
 /// new write site for these bits must bump it too (core.zig memo comments share this contract).
 pub var g_loose_interaction_gen: u64 = 1;
 
@@ -74,7 +75,7 @@ pub inline fn bumpLooseInteractionGen() void {
 
 pub fn markLayoutDirty(self: *Node) void {
     if (self.frame_state.state_bits.dirty.core.layout) return;
-    bumpLooseInteractionGen();
+    if (!self.frame_state.state_bits.dirty.hit.geometry) bumpLooseInteractionGen();
     self.invalidateCustomClipGeometryCache();
     self.meta.per_frame.caches.versions.content +%= 1;
     self.meta.per_frame.caches.versions.composite +%= 1;
@@ -102,7 +103,7 @@ pub fn markLayoutDirty(self: *Node) void {
 /// Mark self and parent layout dirty. Used when child sizing properties (width/height) dynamically
 /// change, requiring parent container to re-run layoutChildren to recalculate child sizes.
 pub fn markSizingDirty(self: *Node) void {
-    bumpLooseInteractionGen();
+    if (!self.frame_state.state_bits.dirty.hit.geometry) bumpLooseInteractionGen();
     self.invalidateCustomClipGeometryCache();
     self.meta.per_frame.caches.versions.content +%= 1;
     self.meta.per_frame.caches.versions.composite +%= 1;
@@ -177,7 +178,8 @@ pub fn markOrderDirty(self: *Node) void {
 }
 
 pub fn markInteractionDirty(self: *Node) void {
-    bumpLooseInteractionGen();
+    const loose = self.frame_state.state_bits.dirty;
+    if (!loose.pipeline.interaction or !loose.hit.geometry or !loose.hit.semantics) bumpLooseInteractionGen();
     self.invalidateCustomClipGeometryCache();
     if (!self.frame_state.state_bits.dirty.pipeline.interaction) {
         self.frame_state.state_bits.dirty.pipeline.interaction = true;
@@ -199,8 +201,6 @@ pub fn markInteractionDirty(self: *Node) void {
 }
 
 pub fn markHitSemanticsDirty(self: *Node) void {
-    bumpLooseInteractionGen();
-    self.frame_state.state_bits.dirty.hit.semantics = true;
     markInteractionDirty(self);
 }
 

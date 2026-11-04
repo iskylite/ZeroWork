@@ -8,6 +8,10 @@ const Cx = core.Cx;
 const NodeHandle = core.NodeHandle;
 const Node = core.Node;
 
+test {
+    _ = @import("cx_runtime_index_tests.zig");
+}
+
 fn rebuildInteractionIndex(self: *Cx) !void {
     self.perf.interaction_full_rebuild_count += 1;
     try self.interaction_index.rebuild(self.root, &self.node_registry);
@@ -166,6 +170,8 @@ pub fn rebuildRuntimeIndexesForTest(self: *Cx) !void {
 }
 
 fn rebuildRuntimeStateRecursive(self: *Cx, node: *Node) !void {
+    const loose = node.frame_state.state_bits.dirty;
+    if (loose.pipeline.interaction or loose.hit.geometry or loose.hit.semantics) @import("node_dirty.zig").bumpLooseInteractionGen();
     node.frame_state.state_bits.dirty.runtime.dirty = false;
     node.frame_state.state_bits.dirty.runtime.subtree_dirty = false;
     node.frame_state.state_bits.dirty.runtime.full_rebuild = false;
@@ -177,7 +183,6 @@ fn rebuildRuntimeStateRecursive(self: *Cx, node: *Node) !void {
     node.frame_state.state_bits.dirty.hit.geometry = false;
     node.frame_state.state_bits.dirty.hit.semantics = false;
     node.frame_state.state_bits.dirty.hit.structure = false;
-    @import("node_dirty.zig").bumpLooseInteractionGen();
     const generation = try self.node_registry.trackGeneration(node);
     try self.node_registry.entries.put(node.id, .{ .ptr = node, .generation = generation });
     try self.focus_manager.appendFocusableUnsorted(node);
@@ -273,7 +278,8 @@ fn clearOrderDirtyRecursive(self: *Cx, node: *Node) void {
 }
 
 fn clearInteractionDirtyRecursive(self: *Cx, node: *Node) void {
-    @import("node_dirty.zig").bumpLooseInteractionGen();
+    const loose = node.frame_state.state_bits.dirty;
+    if (loose.pipeline.interaction or loose.hit.geometry or loose.hit.semantics) @import("node_dirty.zig").bumpLooseInteractionGen();
     node.frame_state.state_bits.dirty.pipeline.interaction = false;
     node.frame_state.state_bits.dirty.pipeline.subtree_interaction = false;
     node.frame_state.state_bits.dirty.hit.geometry = false;

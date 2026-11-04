@@ -47,12 +47,12 @@ pub const Bridge = struct {
         var terminal = tab.terminal orelse return error.ServiceUnavailable;
         const surface = terminal.terminal_surface orelse return error.ServiceUnavailable;
         if (!surface.owner.eql(owner)) return error.StaleSession;
-        var lines = try surface.service.readLines(.{ .max_lines = 1024, .max_bytes = 16384 }, allocator);
+        var lines = try surface.service.contentQuery(.{ .max_lines = 1024, .max_bytes = 16384 }, allocator);
         defer lines.deinit(allocator);
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(allocator);
         for (lines.lines) |line| {
-            try text.appendSlice(allocator, line);
+            try text.appendSlice(allocator, line.text);
             try text.append(allocator, '\n');
         }
         var directory = try app.localCwd(id, allocator);
@@ -60,7 +60,10 @@ pub const Bridge = struct {
         const cwd = if (directory) |value| value.value else null;
         const selection = terminal.copySelectionText(allocator) catch null;
         defer if (selection) |value| allocator.free(value);
-        return @import("../ai/session_snapshot_context.zig").assembleText(allocator, text.items, .{ .host = "本机 · zsh" }, cwd, selection, redact, context_window);
+        var assembled = try @import("../ai/session_snapshot_context.zig").assembleText(allocator, text.items, .{ .host = "本机 · zsh" }, cwd, selection, redact, context_window);
+        errdefer assembled.deinit(allocator);
+        try @import("../ai/session_snapshot_context.zig").annotate(allocator, &assembled, lines);
+        return assembled;
     }
     pub fn init(allocator: std.mem.Allocator) Bridge {
         return .{ .allocator = allocator };

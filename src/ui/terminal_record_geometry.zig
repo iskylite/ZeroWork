@@ -11,6 +11,7 @@ pub const marker_width: f32 = 56.5390625;
 pub const command_inset: f32 = marker_width + 10;
 pub const result_inset: f32 = 19;
 pub const Layout = struct {
+    donation_qr: ?@import("donation_qr.zig").Slice = null,
     y: ?f32 = null,
     before: f32 = 0,
     after: f32 = 0,

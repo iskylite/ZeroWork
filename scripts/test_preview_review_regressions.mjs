@@ -420,9 +420,27 @@ function feedbackPolicyFixture(){
  const document={addEventListener(){},querySelector:()=>host,createElement:()=>new Node(),head:{append(){}},currentScript:{src:'http://localhost/notification-policy.js'}};
  const context={document,URL,URLSearchParams,Event,location:{search:'',origin:'http://localhost'},MutationObserver:class{observe(){}},setTimeout(fn,ms){const id=timers.length;timers.push({fn,ms,due:clock+ms,cancelled:false,done:false});return id;},clearTimeout(id){if(timers[id])timers[id].cancelled=true;}};context.window=context;context.parent=context;
  vm.createContext(context);vm.runInContext(source('shared/feedback.js'),context);vm.runInContext(source('shared/notification-policy.js'),context);
- const publish=(key,incidentKey,revision=1)=>context.V3Feedback.publish({key,incidentKey,revision,kind:'connection_failed',title:'Title '+key,detail:'Detail '+key,source:key,requiresAction:true,timeSensitive:true,locate(){}},{focused:true,sourceVisible:false});
+ const publish=(key,incidentKey,revision=1,kind='connection_failed')=>context.V3Feedback.publish({key,incidentKey,revision,kind,title:'Title '+key,detail:'Detail '+key,source:key,requiresAction:true,timeSensitive:true,locate(){}},{focused:true,sourceVisible:false});
  return{context,host,timers,publish,advance(ms){const end=clock+ms;for(;;){const next=timers.filter(t=>!t.cancelled&&!t.done&&t.due<=end).sort((a,b)=>a.due-b.due)[0];if(!next)break;clock=next.due;next.done=true;next.fn();}clock=end;}};
 }
+
+test('application risk banner expires without deleting or resolving the notification',()=>{
+ const f=feedbackPolicyFixture(),first=f.publish('A','risk',1,'application_risk');
+ assert.equal(f.timers.at(-1).ms,8000);f.advance(7999);assert.equal(first.node.isConnected,true);
+ f.advance(1);assert.equal(first.node.isConnected,false);
+ assert.equal(f.context.V3Feedback.notificationSnapshot().pending,1);
+ assert.equal(f.context.V3Feedback.notificationSnapshot().items.length,1);
+ assert.equal(f.publish('A','risk',2,'application_risk').node,null);
+ f.context.V3Feedback.clearResolved();assert.equal(f.context.V3Feedback.notificationSnapshot().items.length,1);
+});
+
+test('closing an application risk banner keeps its notification in the list',()=>{
+ const f=feedbackPolicyFixture(),first=f.publish('A','risk',1,'application_risk');
+ const close=first.node.querySelector('[data-feedback-close]');close.onclick();close.dispatchEvent(new Event('click'));
+ assert.equal(first.node.isConnected,false);
+ assert.equal(f.context.V3Feedback.notificationSnapshot().pending,1);
+ assert.equal(f.context.V3Feedback.notificationSnapshot().items.length,1);
+});
 
 test('production feedback timeout followed by an incident migration never creates another banner',()=>{
  const f=feedbackPolicyFixture();f.publish('A','existing');const first=f.publish('B','old'),timer=f.timers.at(-1);assert.equal(timer.ms,8000);

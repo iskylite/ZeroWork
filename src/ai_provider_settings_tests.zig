@@ -8,6 +8,7 @@ const Controller = @import("config/settings_controller.zig").Controller;
 const Fixture = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
+    view_scope: *ui.Scope,
     controller: Controller,
     mounted: *view.ProviderView,
     saving: *ui.Signal(bool),
@@ -37,7 +38,18 @@ const Fixture = struct {
         self.controller = try Controller.init(std.testing.allocator, value);
         self.saving = try self.scope.createSignal(bool, false);
         self.changes = 0;
-        self.mounted = try view.ProviderView.mountWithHooks(self.cx, self.scope, &self.controller, .{ .context = self, .changed = changed, .saving = self.saving });
+        self.view_scope = try self.scope.childScope();
+        self.mounted = try view.ProviderView.mountWithHooks(self.cx, self.view_scope, &self.controller, .{ .context = self, .changed = changed, .saving = self.saving });
+        try self.cx.root.?.appendChild(self.cx.allocator, self.mounted.root);
+        self.frame();
+    }
+    fn remount(self: *Fixture) !void {
+        const old = self.mounted.root;
+        self.cx.detachChild(self.cx.root.?, old);
+        self.view_scope.dispose();
+        self.cx.destroyDetached(old);
+        self.view_scope = try self.scope.childScope();
+        self.mounted = try view.ProviderView.mountWithHooks(self.cx, self.view_scope, &self.controller, .{ .context = self, .changed = changed, .saving = self.saving });
         try self.cx.root.?.appendChild(self.cx.allocator, self.mounted.root);
         self.frame();
     }
@@ -51,6 +63,7 @@ const Fixture = struct {
         self.changes += 1;
     }
     fn frame(self: *Fixture) void {
+        self.cx.requestRedraw();
         self.cx.advanceFrameClock();
         _ = self.cx.render();
     }
@@ -113,7 +126,7 @@ test "provider enabled status stays readable in every builtin at maximum transpa
         defer f.deinit();
         const badge = byId(f.mounted.root, "settings.ai.provider.0.status").?;
         const background = badge.getBackground();
-        try std.testing.expectEqual(@as(u8, 255), background.a);
+        try std.testing.expectEqual(theme.popupInset(), background);
         const ink = badge.getText().?.color;
         const low = @min(statusLuminance(ink), statusLuminance(background));
         const high = @max(statusLuminance(ink), statusLuminance(background));
@@ -166,16 +179,23 @@ test "native provider invalid endpoint retains raw typed value footer gate and f
     try std.testing.expectEqual(@import("config/settings_controller.zig").State.dirty_invalid, f.controller.state());
     try std.testing.expect(!f.controller.canSave());
     try std.testing.expect(f.changes > 0);
-    // Closing and reopening an accordion rebuilds its nodes without losing invalid raw.
+    f.frame();
+    try std.testing.expect(endpoint.has_error);
+    const invalid_node = byId(f.mounted.root, "settings.ai.provider.0.endpoint").?;
+    const colors = @import("ui/app_theme.zig");
+    try std.testing.expectEqual(if (endpoint.focused) colors.states().error_focus else colors.states().tag_danger, invalid_node.getBackground());
+    // Closing and reopening retains the input instance and its invalid raw draft.
     f.clickId("settings.ai.provider.0.header");
     f.clickId("settings.ai.provider.0.header");
     const restored = f.input("settings.ai.provider.0.endpoint");
-    _ = endpoint; // the previous view's pointer is intentionally not reused after rebuild.
     try std.testing.expectEqualStrings("gateway-without-scheme", restored.getText());
     f.cx.setFocus(byId(f.mounted.root, "settings.ai.provider.0.endpoint").?);
     try std.testing.expect(f.mounted.consumeEscape());
     try std.testing.expectEqualStrings("https://example.test/v1/messages", restored.getText());
     try std.testing.expectEqual(@import("config/settings_controller.zig").State.clean, f.controller.state());
+    f.frame();
+    try std.testing.expect(!restored.has_error);
+    try std.testing.expectEqual(if (restored.focused) colors.states().focus else colors.popupInset(), byId(f.mounted.root, "settings.ai.provider.0.endpoint").?.getBackground());
     try std.testing.expect(!f.mounted.consumeEscape());
 }
 
@@ -218,8 +238,6 @@ test "native provider create local Ollama form saves vision independently and re
     const model = f.controller.model.value.ai.providers[0].models[0];
     try std.testing.expect(model.vision and !model.reasoning);
     try std.testing.expectEqualStrings("", f.controller.model.value.ai.providers[0].api_key);
-    try std.testing.expect(!f.controller.model.value.ai.providers[0].enabled);
-    f.clickId("settings.ai.provider.0.enabled");
     try std.testing.expect(f.controller.model.value.ai.providers[0].enabled);
     // Explicit enable initializes a missing default; selection remains the same draft transaction.
     try f.controller.selectProvider("Production Gateway");
@@ -300,8 +318,7 @@ test "native provider disclosure accepts actual Cx pointer independently of enab
     const header = byId(f.mounted.root, "settings.ai.provider.0.header").?;
     const rect = header.globalRect();
     f.cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
-    f.frame();
-    f.frame();
+    for (0..4) |_| f.frame();
     try std.testing.expect(!(f.controller.ai_fields.provider_open.get(0) orelse true));
     try std.testing.expect(f.controller.model.value.ai.providers[0].enabled);
     try std.testing.expectApproxEqAbs(@as(f32, 64), byId(f.mounted.root, "settings.ai.provider.0.card").?.globalRect().h, 0.1);
@@ -367,8 +384,9 @@ fn configureInactive(f: *Fixture, index: usize, name: []const u8) !void {
     p.models[0] = .{ .id = "fixture-model", .context_window = 8192, .default = true };
     p.model_count = 1;
     try f.controller.editProviders(owned.value.ai);
-    f.clickId("settings.ai.provider.0.header");
-    f.clickId("settings.ai.provider.0.header");
+    // A direct structural fixture edit must explicitly refresh the view.
+    // Folding no longer acts as an accidental form rebuild.
+    try f.remount();
 }
 
 test "native provider explicit enable protects the last default and selects an enabled replacement" {
@@ -383,11 +401,11 @@ test "native provider explicit enable protects the last default and selects an e
     f.clickId("settings.ai.provider.0.enabled");
     try std.testing.expect(f.controller.model.value.ai.providers[0].enabled);
     try std.testing.expectEqualStrings("first", f.controller.model.value.ai.default_provider);
-    const folded = f.controller.ai_fields.provider_open.get(0);
+    const folded = f.controller.ai_fields.provider_open.get(0) orelse true;
     f.clickId("settings.ai.provider.0.enabled");
     try std.testing.expect(f.controller.model.value.ai.providers[0].enabled);
     try std.testing.expectEqualStrings(draft.problemText(error.DefaultProtected), f.mounted.error_text);
-    try std.testing.expectEqual(folded, f.controller.ai_fields.provider_open.get(0));
+    try std.testing.expectEqual(folded, f.controller.ai_fields.provider_open.get(0) orelse true);
     f.clickId("settings.ai.provider.1.enabled");
     try std.testing.expect(f.controller.model.value.ai.providers[1].enabled);
     f.clickId("settings.ai.provider.0.enabled");
@@ -467,4 +485,69 @@ test "native provider long model choice preserves the catalog trigger and chevro
     try std.testing.expectEqual(@as(f32, 12), chevron.w);
     try std.testing.expectEqual(@as(@TypeOf(label.getText().?.text_overflow), .ellipsis), label.getText().?.text_overflow);
     f.clickId("settings.ai.model.cancel");
+}
+
+test "native provider saves enabled connection without models and discovers models later" {
+    var f: Fixture = undefined;
+    try f.init(false);
+    defer f.deinit();
+    f.clickId("settings.ai.add_provider");
+    try std.testing.expect(f.controller.model.value.ai.providers[0].enabled);
+    f.replace("settings.ai.provider.0.name", "Empty Gateway");
+    f.replace("settings.ai.provider.0.endpoint", "http://127.0.0.1:11434/v1");
+    try std.testing.expectEqual(@as(usize, 0), f.controller.model.value.ai.providers[0].model_count);
+    try std.testing.expect(f.controller.canSave());
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var target = try @import("config/runtime_config.zig").RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "settings.toml");
+    defer target.deinit();
+    try f.controller.save(std.testing.io, tmp.dir, &target);
+    try std.testing.expect(target.value.ai.providers[0].enabled);
+    try std.testing.expectEqual(@as(usize, 0), target.value.ai.providers[0].model_count);
+}
+
+test "provider folds animate without rebuilding forms or notifying settings changes" {
+    var f: Fixture = undefined;
+    try f.initWithCount(true, 2);
+    defer f.deinit();
+    try f.cx.setTestFrameStep(16);
+    const header = byId(f.mounted.root, "settings.ai.provider.0.header").?;
+    const second = byId(f.mounted.root, "settings.ai.provider.1.header").?;
+    const endpoint = byId(f.mounted.root, "settings.ai.provider.0.endpoint").?;
+    const card = byId(f.mounted.root, "settings.ai.provider.0.card").?;
+    const content = byId(card, "accordion.content").?;
+    const scope = f.mounted.render_scope;
+    f.replace("settings.ai.provider.0.endpoint", "invalid-raw-value");
+    f.frame();
+    const open_height = content.globalRect().h;
+    const changes = f.changes;
+    const toggle = struct {
+        fn run(node: *ui.Node) void {
+            _ = node.behavior.events.on_event.?(.{ .key_down = .{ .key = .space } }, node.behavior.events.event_context);
+        }
+    }.run;
+    toggle(header);
+    f.frame();
+    f.frame();
+    try std.testing.expect(content.globalRect().h > 0 and content.globalRect().h < open_height);
+    const partial = content.globalRect().h;
+    toggle(header);
+    f.frame();
+    try std.testing.expect(content.globalRect().h >= partial - 0.1);
+    for (0..30) |_| f.frame();
+    try std.testing.expectApproxEqAbs(open_height, content.globalRect().h, 0.2);
+    toggle(header);
+    for (0..30) |_| f.frame();
+    try std.testing.expectApproxEqAbs(@as(f32, 0), content.globalRect().h, 0.1);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").current().well, card.getBackground());
+    try std.testing.expectEqual(@as(u16, 600), header.children.items[2].children.items[0].getText().?.font_weight);
+    toggle(second);
+    for (0..30) |_| f.frame();
+    try std.testing.expect(second.behavior.interaction.a11y.?.expanded.?);
+    try std.testing.expectEqual(scope, f.mounted.render_scope);
+    try std.testing.expect(!f.mounted.pending);
+    try std.testing.expectEqual(changes, f.changes);
+    try std.testing.expectEqual(endpoint, byId(f.mounted.root, "settings.ai.provider.0.endpoint").?);
+    try std.testing.expectEqualStrings("invalid-raw-value", f.input("settings.ai.provider.0.endpoint").getText());
+    try std.testing.expect(!f.controller.canSave());
 }

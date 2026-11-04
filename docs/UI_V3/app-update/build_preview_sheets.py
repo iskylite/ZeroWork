@@ -3,10 +3,11 @@ from pathlib import Path
 from html import escape
 import json
 import re
+import tempfile
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
-OUT = ROOT / 'previews'
+OUT = Path(tempfile.gettempdir()) / 'zerowork-app-update-previews'
 PALETTES = json.loads((ROOT.parent / 'theme-presets.json').read_text())['themes']
 THEMES = ('dark', 'light', 'sauber')
 FONT = 'Inter,-apple-system,BlinkMacSystemFont,PingFang SC,sans-serif'

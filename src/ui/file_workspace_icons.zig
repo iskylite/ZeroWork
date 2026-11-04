@@ -1,4 +1,4 @@
-//! Same Material Icon Theme subset as docs/UI_V3/assets/file-icons (MIT).
+//! Same Material Icon Theme subset as assets/file-icons (MIT).
 //! Source and full license remain in that directory. These embedded SVG bytes
 //! preserve the reference colors; they are content, not theme-tinted chrome.
 const std = @import("std");

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ZeroWork · 终端状态与命令历史</title>
-  <link rel="stylesheet" href="../theme-tokens.css?v=261a8c344116">
-  <link rel="stylesheet" href="terminal-enhancement.css?v=20261031-r6">
+  <link rel="stylesheet" href="../theme-tokens.css?v=d326647094aa">
+  <link rel="stylesheet" href="terminal-enhancement.css?v=20261103-r7">
 </head>
 <body data-theme="dark">
 <main id="app" aria-label="ZeroWork 终端设计原型">
@@ -27,7 +27,7 @@
     <section class="terminal-pane content" id="terminal-pane" aria-label="SSH 终端">
       <div class="terminal-scroll" id="terminal-scroll" tabindex="0" aria-label="终端内容；中键打开菜单，输入 @ 打开内置指令">
         <div class="terminal-document" id="terminal-document">
-          <div id="terminal-gutter" class="terminal-gutter" aria-label="命令状态与时间；不属于终端文本"></div>
+          <div id="terminal-gutter" class="terminal-gutter" aria-label="时间；不属于终端文本"></div>
           <pre id="terminal-text" aria-label="原始终端文本"></pre>
           <div id="command-metadata-layer" class="command-metadata-layer" aria-hidden="true"></div>
         </div>
@@ -64,6 +64,6 @@
     </section>
   </div>
 </main>
-<script src="terminal-enhancement.js?v=20261031-r5"></script>
+<script src="terminal-enhancement.js?v=20261103-r7"></script>
 </body>
 </html>

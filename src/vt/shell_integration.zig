@@ -6,7 +6,11 @@ const std = @import("std");
 pub const bash = @embedFile("shell/integration.bash");
 pub const zsh = @embedFile("shell/integration.zsh");
 pub const fragment_bytes = 128;
+/// Logical payload per receipt. Encoded bytes and the bounded reader prelude
+/// fit the 16 KiB transport budget; physical lines stay below PTY limits.
+pub const initialization_batch_bytes = 8 * 1024;
 pub const receiver = @embedFile("shell/receive.sh");
+pub const fast_receiver = @embedFile("shell/receive_fast.sh");
 
 /// The first command must run before it can disable remote echo. Hold only
 /// that startup window, then remove complete copies of our known command.
@@ -140,15 +144,20 @@ pub const EchoFilter = struct {
 };
 
 /// Startup transport: one bootstrap line starts a temporary silent receiver.
-/// Each following short line is sent only after the caller receives
+/// Each following batch of short lines is sent only after the caller receives
 /// its matching nonce/sequence/size ACK. ACK is flow
 /// control, not command completion or authentication. Only the final eval
 /// installs hooks; A/B after that command establish shell-reported readiness.
 /// Free every returned line, then the outer slice.
 pub fn initializerChunks(allocator: std.mem.Allocator, nonce: []const u8) ![][]u8 {
+    return contextInitializerChunks(allocator, nonce);
+}
+pub fn contextInitializerChunks(allocator: std.mem.Allocator, nonce: []const u8) ![][]u8 {
     if (nonce.len == 0 or nonce.len > 32) return error.InvalidNonce;
     for (nonce) |byte| if (!std.ascii.isHex(byte)) return error.InvalidNonce;
-    const script = try initializer(allocator);
+    const hooks = try initializer(allocator);
+    defer allocator.free(hooks);
+    const script = try std.fmt.allocPrint(allocator, "__zw_attach_id='{s}';{s}", .{ nonce, hooks });
     defer allocator.free(script);
     var lines: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -171,7 +180,7 @@ pub fn initializerChunks(allocator: std.mem.Allocator, nonce: []const u8) ![][]u
     try appendAck(&first, allocator, nonce, 1, fragment_bytes);
     try first.appendSlice(allocator, ";_zwR ${BASH_VERSION:+-n}${ZSH_VERSION:+-k} ");
     try appendAnsiQuoted(&first, allocator, nonce);
-    try first.appendSlice(allocator, "||_zwO=0;builtin unset -f _zwR;if test \"${_zwO-}${_zwD-}\" = 11;then builtin eval \"$_zwP\";builtin printf %s \"$_zwA\";fi;builtin unset _zwT _zwI _zwA _zwL _zwC _zwO _zwP _zwD\n");
+    try first.appendSlice(allocator, "||_zwD=0;builtin unset -f _zwR _zwG;[[ ${_zwD-} = 1 ]]&&{ builtin eval \"$_zwP\";builtin printf %s \"$_zwA\";};builtin unset _zwT _zwI _zwA _zwL _zwC _zwP _zwD _zwF\n");
     const header = try first.toOwnedSlice(allocator);
     lines.append(allocator, header) catch |err| {
         allocator.free(header);
@@ -179,20 +188,32 @@ pub fn initializerChunks(allocator: std.mem.Allocator, nonce: []const u8) ![][]u
     };
     var offset: usize = 0;
     while (offset < script.len) {
-        const fragment = script[offset..@min(script.len, offset + fragment_bytes)];
+        const batch_end = @min(script.len, offset + initialization_batch_bytes);
+        const batch_size = batch_end - offset;
         var line: std.ArrayList(u8) = .empty;
         errdefer line.deinit(allocator);
-        try line.appendSlice(allocator, if (offset == 0) "_zwP=" else "_zwP+=");
-        try appendAnsiQuoted(&line, allocator, fragment);
-        try line.appendSlice(allocator, "; _zwA=");
-        try appendAck(&line, allocator, nonce, lines.items.len + 1, fragment.len);
-        try line.append(allocator, '\n');
+        // Upgrade only after the startup ACK disabled echo and canonical input.
+        // The transport prelude stays in this batch; it needs no extra RTT.
+        if (offset == 0) try appendReceiverUpgrade(&line, allocator);
+        while (offset < batch_end) {
+            const fragment = script[offset..@min(batch_end, offset + fragment_bytes)];
+            // The receiver emits nothing between lines; acknowledge only once
+            // all fragments in this batch have been read and appended.
+            try line.appendSlice(allocator, "_zwA=;");
+            try line.appendSlice(allocator, if (offset == 0) "_zwP=" else "_zwP+=");
+            try appendAnsiQuoted(&line, allocator, fragment);
+            offset += fragment.len;
+            if (offset == batch_end) {
+                try line.appendSlice(allocator, "; _zwA=");
+                try appendAck(&line, allocator, nonce, lines.items.len + 1, batch_size);
+            }
+            try line.append(allocator, '\n');
+        }
         const owned = try line.toOwnedSlice(allocator);
         lines.append(allocator, owned) catch |err| {
             allocator.free(owned);
             return err;
         };
-        offset += fragment.len;
     }
     var final: std.ArrayList(u8) = .empty;
     errdefer final.deinit(allocator);
@@ -217,12 +238,36 @@ pub fn initializerChunks(allocator: std.mem.Allocator, nonce: []const u8) ![][]u
 pub fn initializer(allocator: std.mem.Allocator) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
-    try output.appendSlice(allocator, "if test -n \"${BASH_VERSION-}\"; then builtin eval ");
+    try output.appendSlice(allocator, "if test -n \"${TMUX-}${STY-}\"; then builtin printf '\\e]133;P;zw_reject=%s;reason=UnsupportedMultiplexer\\a' \"${__zw_attach_id-}\"; elif test -n \"${BASH_VERSION-}\"; then builtin eval ");
     try appendQuoted(&output, allocator, bash);
     try output.appendSlice(allocator, "; elif test -n \"${ZSH_VERSION-}\"; then builtin eval ");
     try appendQuoted(&output, allocator, zsh);
-    try output.appendSlice(allocator, "; fi\n");
+    try output.appendSlice(allocator, "; else printf '\\033]133;P;zw_reject=%s;reason=UnsupportedShell\\007' \"${__zw_attach_id-}\"; fi\n");
     return output.toOwnedSlice(allocator);
+}
+
+fn appendReceiverUpgrade(output: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    var compact: std.ArrayList(u8) = .empty;
+    defer compact.deinit(allocator);
+    var source = std.mem.splitScalar(u8, fast_receiver, '\n');
+    while (source.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        try compact.appendSlice(allocator, line);
+        if (line[line.len - 1] != ';') try compact.append(allocator, ' ');
+    }
+    var offset: usize = 0;
+    while (offset < compact.items.len) {
+        const end = @min(compact.items.len, offset + fragment_bytes);
+        try output.appendSlice(allocator, if (offset == 0) "_zwA=;_zwF=" else "_zwF+=");
+        try appendAnsiQuoted(output, allocator, compact.items[offset..end]);
+        try output.append(allocator, '\n');
+        offset = end;
+    }
+    try output.appendSlice(allocator, "if test -n \"${ZSH_VERSION-}\";then builtin zmodload -e zsh/system 2>/dev/null||{ builtin zmodload zsh/system 2>/dev/null&&_zwI='builtin zmodload -u zsh/system||_zwD=0;'$_zwI;};fi\n" ++
+        "_zwB=;_zwI='builtin unset _zwB;'$_zwI\n" ++
+        "if test -n \"${BASH_VERSION-}\"||test \"$(builtin whence -w sysread)\" = 'sysread: builtin';then builtin eval \"$_zwF\";fi\n" ++
+        "builtin unset _zwF\n");
 }
 
 fn appendAck(output: *std.ArrayList(u8), allocator: std.mem.Allocator, nonce: []const u8, sequence: usize, size: usize) !void {
@@ -256,7 +301,7 @@ fn appendAnsiQuoted(output: *std.ArrayList(u8), allocator: std.mem.Allocator, va
 test "initializer uses bounded physical lines without terminal control bytes" {
     const input = try initializer(std.testing.allocator);
     defer std.testing.allocator.free(input);
-    try std.testing.expect(input.len < 32 * 1024);
+    try std.testing.expect(input.len < 8 * 1024);
     try std.testing.expectEqual(@as(u8, '\n'), input[input.len - 1]);
     var lines = std.mem.splitScalar(u8, input, '\n');
     while (lines.next()) |line| {
@@ -272,12 +317,19 @@ test "initialization chunks are bounded lines with nonce sequence and size" {
         for (chunks) |chunk| std.testing.allocator.free(chunk);
         std.testing.allocator.free(chunks);
     }
-    try std.testing.expect(chunks.len > 1 and chunks.len < 128);
+    // Current hooks fit one 8 KiB batch: bootstrap, payload, final receipt.
+    try std.testing.expectEqual(@as(usize, 3), chunks.len);
     for (chunks, 0..) |chunk, index| {
-        try std.testing.expect(chunk.len <= if (index == 0) @as(usize, 1023) else 512);
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, chunk, "\n"));
+        try std.testing.expect(chunk.len < 16 * 1024);
+        const physical_lines = std.mem.count(u8, chunk, "\n");
+        try std.testing.expect(physical_lines > 0 and physical_lines <= initialization_batch_bytes / fragment_bytes + 16);
+        var physical = std.mem.splitScalar(u8, chunk[0 .. chunk.len - 1], '\n');
+        while (physical.next()) |line| {
+            try std.testing.expect(line.len < if (index == 0) @as(usize, 1024) else 512);
+            for (line) |byte| try std.testing.expect(byte >= 32 and byte != 127);
+        }
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, chunk, "zw_init="));
         try std.testing.expect(std.mem.indexOf(u8, chunk, nonce) != null);
-        for (chunk[0 .. chunk.len - 1]) |byte| try std.testing.expect(byte >= 32 and byte != 127);
     }
     try std.testing.expectError(error.InvalidNonce, initializerChunks(std.testing.allocator, "x'; touch bad"));
     const long_nonce: [33]u8 = @splat('a');

@@ -34,6 +34,8 @@ const fixture =
     \\ public=subprocess.run(['/usr/bin/openssl','pkey','-in',str(d/'key.pem'),'-pubout'],capture_output=True,check=True).stdout
     \\ listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(4);listener.settimeout(15)
     \\ port=listener.getsockname()[1];reviewed=json.loads(sys.argv[3]);management_reviewed=json.loads(sys.argv[4])
+    \\ object_manager_links=sys.argv[2].startswith('object-')
+    \\ if object_manager_links: sys.argv[2]=sys.argv[2][len('object-'):]
     \\ observed=sys.argv[2]=='observed-partial'
     \\ readonly_modes={'firmware-progress','optional-malformed','optional-disconnect','cancel','mapped-read','missing-mapping','partial-mapping','missing-fields','manager-linked-system','broken-canonical','multiple-members','paged-members','partial-collection','missing-identity','observed-partial'}
     \\ broken_canonical_modes={'broken-canonical','multiple-members','paged-members','partial-collection','missing-identity'}
@@ -181,7 +183,7 @@ const fixture =
     \\        continue
     \\       assert method=='GET'
     \\       if path.endswith('/canonical') and sys.argv[2] in broken_canonical_modes:
-    \\        response(404,{'error':{'code':'Base.ResourceMissingAtURI'}});continue
+    \\        response(404,'not-a-resource' if object_manager_links else {'error':{'code':'Base.ResourceMissingAtURI'}});continue
     \\       system={'Id':'one','UUID':'synthetic-system','PowerState':'On','Actions':{'#ComputerSystem.Reset':{'target':'/redfish/v1/Systems/one/Actions/ComputerSystem.Reset','ResetType@Redfish.AllowableValues':['On','GracefulShutdown']}},'Boot':{'BootSourceOverrideEnabled':'Disabled','BootSourceOverrideTarget':'None','BootSourceOverrideMode':'UEFI','BootSourceOverrideEnabled@Redfish.AllowableValues':['Disabled','Once'],'BootSourceOverrideTarget@Redfish.AllowableValues':['None','Pxe'],'BootSourceOverrideMode@Redfish.AllowableValues':['UEFI'],'BootOrder':['Boot%04X'%i for i in range(20)]},'Links':{'ManagedBy':[{'@odata.id':'/redfish/v1/Managers/one'}]}}
     \\       system['@odata.id']='/redfish/v1/Systems/canonical' if sys.argv[2]=='manager-linked-system' else path
     \\       if sys.argv[2]=='partial-mapping': system['error']={'code':'Base.Error'}
@@ -215,6 +217,7 @@ const fixture =
     \\       if sys.argv[2]=='manager-linked-system' or sys.argv[2] in broken_canonical_modes: manager['Links']['ManagerForServers']=[{'@odata.id':'/redfish/v1/Systems/canonical'}]
     \\       if sys.argv[2] in ('firmware-progress','optional-malformed','optional-disconnect','optional-changed-cert'): manager['FirmwareVersion']='1.80'
     \\       if sys.argv[2]=='missing-mapping': manager.pop('Links')
+    \\       if object_manager_links and 'Links' in manager: manager['Links']['ManagerForServers']=manager['Links']['ManagerForServers'][0]
     \\       response(200,manager)
     \\      elif path.endswith('/SecurityService'): response(200,{'EnableAuthConfirm':False})
     \\      elif path=='/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions':
@@ -536,13 +539,16 @@ const Worker = struct {
 
 const Mode = enum { firmware_progress, optional_malformed, optional_disconnect, optional_changed_cert, graceful, cancel, untrusted, missing_headers, mixed, logout_timeout, idle_management, cleanup_changed_cert, partial_video, mapped_read, missing_mapping, partial_mapping, missing_fields, manager_linked_system, broken_canonical, multiple_members, paged_members, partial_collection, missing_identity, observed_partial };
 fn endToEnd(mode: Mode) !void {
+    return endToEndWithManagerLink(mode, false);
+}
+fn endToEndWithManagerLink(mode: Mode, object_manager_links: bool) !void {
     const optional_failure = mode == .optional_malformed or mode == .optional_disconnect or mode == .optional_changed_cert;
     const cancel_after_begin = switch (mode) {
         .firmware_progress, .optional_malformed, .optional_disconnect, .cancel, .logout_timeout, .mapped_read, .missing_mapping, .partial_mapping, .missing_fields, .manager_linked_system, .broken_canonical, .multiple_members, .paged_members, .partial_collection, .missing_identity, .observed_partial => true,
         else => false,
     };
     const no_trust_reply = mode == .untrusted;
-    var server = try Fixture.start(switch (mode) {
+    const fixture_mode = switch (mode) {
         .firmware_progress => "firmware-progress",
         .optional_malformed => "optional-malformed",
         .optional_disconnect => "optional-disconnect",
@@ -567,7 +573,10 @@ fn endToEnd(mode: Mode) !void {
         .partial_collection => "partial-collection",
         .missing_identity => "missing-identity",
         .observed_partial => "observed-partial",
-    });
+    };
+    const server_mode = if (object_manager_links) try std.fmt.allocPrint(a, "object-{s}", .{fixture_mode}) else try a.dupe(u8, fixture_mode);
+    defer a.free(server_mode);
+    var server = try Fixture.start(server_mode);
     defer server.deinit();
     var memory: credentials.MemoryBackend = .{};
     defer memory.deinit();
@@ -792,6 +801,23 @@ fn endToEnd(mode: Mode) !void {
         // Twenty separately sourced BootOption reads can retire early WEB
         // events from the intentionally bounded progress ring.
         if (mode != .observed_partial) try std.testing.expect(saw_web);
+        if (mode == .observed_partial) {
+            const issue = observed.discovery_issue.?;
+            try std.testing.expectEqual(@as(?u16, 404), issue.http_status);
+            try std.testing.expectEqual(progress.Code.manager_system_link_missing, issue.code);
+            try std.testing.expectEqualStrings("/redfish/v1/Systems/broken-alias", issue.context.?.resource_path.?.text());
+            try std.testing.expectEqualStrings("/redfish/v1/Managers/manager-B", issue.context.?.source_path.?.text());
+            try std.testing.expectEqualStrings("/Links/ManagerForServers", issue.context.?.source_property.?.text());
+            try std.testing.expect(std.mem.indexOf(u8, issue.context.?.response_errors.?.text(), "Base.1.19.ResourceNotFound") != null);
+            var mapping_checked = false;
+            for (observed.events[0..observed.event_count]) |event| if (event.code == .mapping_system_document_rejected) {
+                mapping_checked = true;
+                try std.testing.expectEqual(@as(?u16, 404), event.context.?.http_status);
+                try std.testing.expectEqualStrings("/redfish/v1/Systems/broken-alias", event.context.?.resource_path.?.text());
+                try std.testing.expectEqualStrings("Base.1.19.ResourceNotFound", event.context.?.response_errors.?.text());
+            };
+            try std.testing.expect(mapping_checked);
+        }
         if (mode == .firmware_progress) {
             var firmware_verified = false;
             var confirmations: usize = 0;
@@ -830,7 +856,7 @@ fn endToEnd(mode: Mode) !void {
     try std.testing.expectEqual(progress.Stage.cleanup, final_progress.stage);
     const safe_log = try std.json.Stringify.valueAlloc(a, final_progress, .{});
     defer a.free(safe_log);
-    for ([_][]const u8{ payload.endpoint.host, payload.username, reference, &server.password, "X-Auth-Token", "Location", "/redfish/", "/Oem/", "own-web", "own-kvm" }) |secret_or_identifier| try std.testing.expect(std.mem.indexOf(u8, safe_log, secret_or_identifier) == null);
+    for ([_][]const u8{ payload.endpoint.host, payload.username, reference, &server.password, "X-Auth-Token", "Location", "/SessionService/Sessions/", "own-web", "own-kvm" }) |secret_or_identifier| try std.testing.expect(std.mem.indexOf(u8, safe_log, secret_or_identifier) == null);
     if (remote_release == .confirmed) {
         var confirmed: usize = 0;
         for (final_progress.events[0..final_progress.event_count]) |event| if (event.code == .remote_logout_confirmed) {
@@ -859,6 +885,12 @@ pub fn liveBackendScenario(scenario: LiveBackendScenario) !void {
     });
 }
 
+test "BMC native driver object ManagerForServers retains valid collection reads and verified mapping" {
+    try endToEndWithManagerLink(.mapped_read, true);
+}
+test "BMC native driver object ManagerForServers 404 preserves collection address fields and cleanup" {
+    try endToEndWithManagerLink(.broken_canonical, true);
+}
 test "BMC native driver live-shaped all REST WEB headers header-only KVM token separated logout tokens and Success envelope" {
     try endToEnd(.graceful);
 }

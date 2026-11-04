@@ -49,6 +49,9 @@ test "OS cache persists only the tag and isolates endpoint changes" {
     try std.testing.expectEqualStrings("ubuntu", bytes);
     save(a, io, hosts_path, host, .unknown);
     try std.testing.expectEqual(Kind.ubuntu, load(a, io, hosts_path, host));
+    save(a, io, hosts_path, host, .linux);
+    save(a, io, hosts_path, host, .kylin);
+    try std.testing.expectEqual(Kind.kylin, load(a, io, hosts_path, host));
     host.host = "other.test";
     try std.testing.expectEqual(Kind.unknown, load(a, io, hosts_path, host));
 }

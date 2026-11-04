@@ -1,13 +1,69 @@
 const std = @import("std");
 const ui = @import("ui");
 const view = @import("config/settings_content_view.zig");
+const settings_styles = @import("config/settings_styles.zig");
 comptime {
     _ = @import("application_data_cleanup_ui_tests.zig");
+}
+test "settings card and interaction colors remain distinct across builtin themes" {
+    const theme = settings_styles.theme;
+    const color_contract = @import("ui/theme_states.zig");
+    const previous = theme.currentName();
+    const material = theme.materialParameters();
+    defer {
+        _ = theme.setMaterialParameters(material.transparency, material.blur);
+        theme.select(previous);
+    }
+    for (@import("config/theme_presets.zig").ids) |id| {
+        errdefer std.debug.print("settings contrast: {s}\n", .{id});
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        for ([_]f32{ 0, 50, 100 }) |transparency| {
+            _ = theme.setMaterialParameters(transparency, 0);
+            const colors = theme.current();
+            const parent = colors.overlay.withAlpha(255);
+            const card = theme.patchPaint(theme.settingsCard().withAlpha(theme.layerAlpha(2)), parent);
+            const hovered = theme.patchPaint(settings_styles.cardHover(), card);
+            const selected = theme.patchPaint(settings_styles.selectionBackground(false), parent);
+            const selected_hover = theme.patchPaint(settings_styles.selectionBackground(true), parent);
+            try std.testing.expect(color_contract.contrast(card, parent) >= 1.18);
+            try std.testing.expect(color_contract.contrast(hovered, card) >= 1.05);
+            try std.testing.expect(color_contract.contrast(selected, parent) >= 1.12);
+            try std.testing.expect(color_contract.contrast(selected_hover, selected) >= 1.03);
+            try std.testing.expect(color_contract.contrast(hovered, colors.fg_2) >= 4.5);
+            try std.testing.expect(color_contract.contrast(selected_hover, colors.fg_1) >= 4.5);
+        }
+    }
 }
 test "settings content mount is analyzed for all page branches" {
     const Fn = *const fn (*ui.Cx, *ui.Scope, *@import("config/settings_controller.zig").Controller, view.Hooks) anyerror!*ui.Node;
     const mount: Fn = view.mountContent;
     std.mem.doNotOptimizeAway(mount);
+}
+
+test "settings header interaction is released with its accordion before page theme publication" {
+    const a = std.testing.allocator;
+    const controls = @import("config/settings_parts/settings_controls.zig");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const item = try ui.widgets.AccordionItem(.{ .title = "设置", .expanded = true }).mount(scope, cx);
+    _ = try controls.sectionHeader(cx, scope, item, ui.icons.settings, true, "设置摘要", "settings.lifecycle");
+    try cx.root.?.appendChild(a, item.item);
+    cx.layout();
+    _ = cx.render();
+    item.header.behavior.events.on_hover.?.invoke();
+    try std.testing.expectEqual(settings_styles.cardHover(), item.header.getBackground());
+    cx.detachChild(cx.root.?, item.item);
+    cx.destroyDetached(item.item);
+    // The parent page remains alive, as during a settings rebuild. Publishing
+    // a theme must not call a style observer against the destroyed header.
+    cx.setTheme(&ui.theme.light);
+    cx.setTheme(&ui.theme.dark);
+    cx.layout();
+    _ = cx.render();
 }
 fn changed(_: *anyopaque) void {}
 fn request(_: *anyopaque, _: view.Key, _: *ui.Node) void {}
@@ -237,7 +293,7 @@ test "appearance font chooser retains its family while another input replaces th
         const mounted = try f.mount();
         const trigger = byId(mounted.root, "settings.field.font_family").?;
         const select: *ui.widgets.select.SelectState = @ptrCast(@alignCast(trigger.behavior.events.event_context.?));
-        const label = if (std.mem.eql(u8, family, "Fira Code")) "Fira Code · 内置" else family;
+        const label = family;
 
         // Real input edits replace the complete owned draft without remounting
         // this Select. Its initial selection and custom row must outlive that draft.
@@ -259,10 +315,13 @@ test "appearance font chooser retains its family while another input replaces th
         // both its label and its value after multiple snapshot replacements.
         for ([_][]const u8{ "Menlo", family }) |next| {
             var chosen = false;
-            for (select.options, select.option_nodes) |option, node| {
+            for (select.options, 0..) |option, index| {
                 if (!std.mem.eql(u8, option.value, next)) continue;
                 if (std.mem.eql(u8, next, family)) try std.testing.expectEqualStrings(label, option.label);
-                _ = node.behavior.events.on_event.?(.{ .click = .{ .x = 0, .y = 0 } }, node.behavior.events.event_context);
+                // Use the real keyboard path; font rows now live in a scroll viewport.
+                _ = select.focus_target.behavior.events.on_key_down.?(.home, .{}, select.focus_target.behavior.events.key_context);
+                for (0..index) |_| _ = select.focus_target.behavior.events.on_key_down.?(.down, .{}, select.focus_target.behavior.events.key_context);
+                _ = select.focus_target.behavior.events.on_key_down.?(.@"return", .{}, select.focus_target.behavior.events.key_context);
                 chosen = true;
                 break;
             }
@@ -270,6 +329,40 @@ test "appearance font chooser retains its family while another input replaces th
             try std.testing.expectEqualStrings(next, f.controller.model.value.ui.font_family);
         }
         try std.testing.expectEqualStrings(label, search.getText());
+    }
+}
+
+test "appearance font chooser lists available families and retains only the saved missing family" {
+    const fonts = @import("config/appearance_font.zig");
+    var installed = try fonts.installedMonospaceFamilies(std.testing.allocator);
+    defer installed.deinit();
+    const missing = "ZeroWorkMissingCatalogFont";
+    for ([_][]const u8{ "Menlo", missing }) |selected| {
+        var f: AppearanceFixture = undefined;
+        try f.init();
+        defer f.deinit();
+        f.controller.folded_sections = 0;
+        try f.controller.editKey("ui", "font_family", .{ .text = selected });
+        const mounted = try f.mount();
+        const trigger = byId(mounted.root, "settings.field.font_family").?;
+        const select: *ui.widgets.select.SelectState = @ptrCast(@alignCast(trigger.behavior.events.event_context.?));
+        try std.testing.expect(select.virtual != null);
+        try std.testing.expectEqual(select.options.len, select.virtual.?.item_count);
+        var found_selected = false;
+        for (select.options, 0..) |option, i| {
+            if (std.mem.eql(u8, option.value, "custom")) continue;
+            try std.testing.expect(option.icon != null);
+            try std.testing.expectEqualStrings(option.value, option.label);
+            try std.testing.expect(fonts.isBundled(option.value) or fonts.isInstalled(option.value) or std.mem.eql(u8, option.value, selected));
+            found_selected = found_selected or std.mem.eql(u8, option.value, selected);
+            for (select.options[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, previous.value, option.value));
+        }
+        try std.testing.expect(found_selected);
+        for (installed.names) |name| {
+            var found = false;
+            for (select.options) |option| found = found or std.mem.eql(u8, option.value, name);
+            try std.testing.expect(found);
+        }
     }
 }
 
@@ -408,9 +501,9 @@ test "appearance geometry uses V3 card padding and 32 pixel field controls" {
     const font = byId(mounted.root, "settings.appearance.font").?.globalRect();
     const family = byId(mounted.root, "settings.field.font_family").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 626), font.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 390), family.x - font.x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 330), family.x - font.x, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 58), family.y - font.y, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 220), family.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 280), family.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 32), family.h, 0.1);
     const material = byId(mounted.root, "settings.appearance.materials").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 48), byId(mounted.root, "settings.materials.header").?.globalRect().h, 0.1);
@@ -691,10 +784,10 @@ test "global material settings keep flat sections and shared chooser roles while
         try f.controller.setSearch("font");
         try f.controller.editKey("ui", "font_size", .{ .unsigned = 15 });
         const mounted = try f.mount();
-        try std.testing.expectEqual(theme.current().surface_1, mounted.root.getBackground());
-        // Current Bridge font section 355:1290687 has no fill. Sections
-        // share the main surface; only fields and the chooser add a layer.
-        try std.testing.expectEqual(theme.current().surface_2, byId(mounted.root, "settings.appearance.font").?.getBackground());
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, mounted.root.getBackground());
+        // The shared window supplies the page background; sections retain a
+        // distinct theme-derived card surface.
+        try std.testing.expectEqual(theme.settingsCard(), byId(mounted.root, "settings.appearance.font").?.getBackground());
         const family = byId(mounted.root, "settings.field.font_family").?;
         try std.testing.expectEqual(theme.current().well, family.getBackground());
         _ = f.cx.render();
@@ -716,7 +809,7 @@ test "global material settings keep flat sections and shared chooser roles while
         const rebuilt = try f.mount();
         try std.testing.expectEqualStrings("97", inputFor(rebuilt, "settings.field.font_size").getText());
         try std.testing.expectEqual(@as(u16, 15), f.controller.model.value.ui.font_size);
-        try std.testing.expectEqual(theme.current().surface_1.a, rebuilt.root.getBackground().a);
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, rebuilt.root.getBackground());
         try std.testing.expect(rebuilt.save_button.behavior.interaction.a11y.?.disabled);
     }
 }
@@ -763,7 +856,7 @@ test "settings search repaints its retained translucent input after material rea
         view.styles.paintSearch(cx, &input);
         cx.layout();
         try std.testing.expectEqual(theme.popupInset(), input.input_container.getBackground());
-        try std.testing.expectEqual(@as(u8, 255), input.input_container.getBackground().a);
+        try std.testing.expectEqual(theme.current().well.a, input.input_container.getBackground().a);
         try std.testing.expectEqual(id, input.input_container.id);
         try std.testing.expectEqual(rect, input.node.globalRect());
         try std.testing.expectEqualStrings("背景", query.peek());
@@ -847,6 +940,7 @@ test "native settings SSH uses precise accordion and inline control geometry" {
     try f.init();
     defer f.deinit();
     f.controller.model.selectPage(2);
+    f.controller.folded_sections &= ~(@as(u64, 1) << 8);
     const mounted = try f.mount();
     const connection = byId(mounted.root, "settings.ssh.connection").?;
     const reconnect = byId(mounted.root, "settings.ssh.reconnect").?;
@@ -973,6 +1067,31 @@ test "native settings shortcut chips show all 27 actions and request a single ed
     try std.testing.expectEqual(@as(usize, 25), probe.request_count);
     try std.testing.expectApproxEqAbs(@as(f32, 110), byId(mounted.root, "settings.key.tab_9").?.globalRect().w, 0.1);
     try std.testing.expect(!f.controller.model.dirty);
+}
+
+test "native settings shortcut hover hint closes when its retained page is hidden" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.cx.setTestFrameStep(100);
+    f.controller.folded_sections = 0;
+    var probe: SettingsProbe = .{};
+    const mounted = try probe.mount(&f, 1);
+    const button = byId(mounted.root, "settings.key.new_tab").?;
+    const rect = button.globalRect();
+    f.cx.handleMouseMove(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    for (0..12) |_| {
+        f.cx.advanceFrameClock();
+        _ = f.cx.render();
+    }
+    const tip = byId(f.cx.root.?, "settings.key.tooltip.new_tab").?;
+    try std.testing.expect(tip.getOpacity() > 0.9);
+    mounted.root.setDisplay(.none);
+    for (0..12) |_| {
+        f.cx.advanceFrameClock();
+        _ = f.cx.render();
+    }
+    try std.testing.expect(tip.getOpacity() < 0.01);
 }
 
 test "native settings cross category search retains invalid draft and restores the original page" {
@@ -1220,4 +1339,103 @@ test "command info global toggle participates in the saved appearance draft" {
     clickButton(toggle);
     try std.testing.expect(f.controller.model.value.ui.command_info);
     try std.testing.expect(!f.controller.model.dirty);
+}
+
+fn foldFrame(cx: *ui.Cx) void {
+    // Explicitly drive deterministic frames; production wakes via a real timer.
+    cx.requestRedraw();
+    cx.advanceFrameClock();
+    _ = cx.render();
+}
+fn foldHeader(header: *ui.Node) void {
+    _ = header.behavior.events.on_event.?(.{ .key_down = .{ .key = .space } }, header.behavior.events.event_context);
+}
+
+test "settings folds animate locally and keep fields summaries and accessory alignment" {
+    const pages = [_]usize{ 0, 2, 5 };
+    const headers = [_][]const u8{ "settings.materials.header", "settings.ssh.connection.header", "已内置" };
+    const summaries = [_][]const u8{ "settings.appearance.materials.summary", "settings.ssh.connection.summary", "已内置.summary" };
+    for (pages, headers, summaries) |page, header_id, summary_id| {
+        var f: AppearanceFixture = undefined;
+        try f.init();
+        defer f.deinit();
+        try f.cx.setTestFrameStep(16);
+        f.controller.model.selectPage(page);
+        f.controller.folded_sections = 0;
+        const plugins = [_]@import("host/plugin_registry.zig").PluginManifest{
+            .{ .id = "ssh", .display_name = "SSH", .plugin_version = "1.0", .origin = .builtin, .workspace_kind = "terminal", .content_renderer = "terminal" },
+        };
+        if (page == 5) f.controller.plugin_page.registry_source = .{ .published = .{ .entries = &plugins, .renderers = &.{} } };
+        const mounted = try f.mount();
+        foldFrame(f.cx);
+        const header = byId(mounted.root, header_id) orelse {
+            std.debug.print("missing fold header page={d} id={s}\n", .{ page, header_id });
+            return error.MissingFoldHeader;
+        };
+        // Builtin plugin card is initially collapsed by the existing policy.
+        if (!header.behavior.interaction.a11y.?.expanded.?) {
+            foldHeader(header);
+            for (0..30) |_| foldFrame(f.cx);
+        }
+        const item = header.parent.?;
+        const content = byId(item, "accordion.content").?;
+        const open_height = content.globalRect().h;
+        try std.testing.expect(open_height > 0);
+        const field = if (page == 2) byId(mounted.root, "settings.field.keepalive_sec") else null;
+        if (field) |node| replaceInput(@ptrCast(@alignCast(node.behavior.events.event_context.?)), "47");
+        const changes_before = f.rebuilds;
+        foldHeader(header);
+        foldFrame(f.cx);
+        foldFrame(f.cx);
+        try std.testing.expect(content.globalRect().h > 0);
+        try std.testing.expect(content.globalRect().h < open_height);
+        try std.testing.expect(header.globalRect().h > 48 and header.globalRect().h < 62);
+        // Reverse before collapse completes; the same instance animates back.
+        const partial = content.globalRect().h;
+        foldHeader(header);
+        foldFrame(f.cx);
+        try std.testing.expect(content.globalRect().h >= partial - 0.1);
+        for (0..30) |_| foldFrame(f.cx);
+        try std.testing.expectApproxEqAbs(open_height, content.globalRect().h, 0.2);
+        try std.testing.expect(byId(mounted.root, summary_id).?.style.display == .none);
+        foldHeader(header);
+        for (0..30) |_| foldFrame(f.cx);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), content.globalRect().h, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 62), header.globalRect().h, 0.1);
+        try std.testing.expect(byId(mounted.root, summary_id).?.style.display != .none);
+        try std.testing.expectEqual(changes_before, f.rebuilds);
+        try std.testing.expectEqual(header, byId(mounted.root, header_id).?);
+        if (field) |node| {
+            try std.testing.expectEqual(node, byId(mounted.root, "settings.field.keepalive_sec").?);
+            const input: *ui.widgets.input.TextInputState = @ptrCast(@alignCast(node.behavior.events.event_context.?));
+            try std.testing.expectEqualStrings("47", input.getText());
+        }
+        if (page == 0) {
+            const toggle = byId(mounted.root, "settings.toggle.enabled").?.globalRect();
+            try std.testing.expectApproxEqAbs(header.globalRect().y + header.globalRect().h / 2, toggle.y + toggle.h / 2, 0.1);
+        }
+    }
+}
+
+test "settings folds respect reduced motion without remounting" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.controller.model.selectPage(2);
+    f.controller.folded_sections = 0;
+    f.cx.reduced_motion = true;
+    const mounted = try f.mount();
+    foldFrame(f.cx);
+    const header = byId(mounted.root, "settings.ssh.connection.header").?;
+    const content = byId(header.parent.?, "accordion.content").?;
+    const open_height = content.globalRect().h;
+    foldHeader(header);
+    foldFrame(f.cx);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), content.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 62), header.globalRect().h, 0.1);
+    foldHeader(header);
+    foldFrame(f.cx);
+    try std.testing.expectApproxEqAbs(open_height, content.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 48), header.globalRect().h, 0.1);
+    try std.testing.expectEqual(@as(usize, 0), f.rebuilds);
 }

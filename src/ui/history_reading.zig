@@ -193,7 +193,7 @@ pub const Model = struct {
         return if (self.maximum > 0) self.offset / self.maximum else 1;
     }
     pub fn locate(self: *Model, byte: usize) void {
-        for (self.anchors.items) |anchor| if (byte >= anchor.start and (byte < anchor.end or anchor.start == anchor.end)) {
+        for (self.anchors.items) |anchor| if (byte >= anchor.start and (byte < anchor.end or (anchor.start == anchor.end and byte == anchor.start))) {
             self.offset = @min(self.maximum, anchor.y);
             self.resolve();
             return;
@@ -285,4 +285,18 @@ test "history reading shares a logical line across recorded grid reflow" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, reading.text.items, "abcdefghijk"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, reading.text.items, "second"));
     try std.testing.expect(std.mem.indexOf(u8, reading.text.items, "last") != null);
+}
+
+test "builtin_records history search reaches text after empty QR presentation rows" {
+    const a = std.testing.allocator;
+    var reading: Model = .{ .allocator = a, .maximum = 44, .row_height = 22 };
+    defer reading.deinit();
+    try reading.anchors.appendSlice(a, &.{
+        .{ .frame_index = 0, .row = 0, .start = 0, .end = 0, .y = 0, .extent = 22, .timestamp = null, .frame_time = 0, .has_document = true },
+        .{ .frame_index = 0, .row = 1, .start = 1, .end = 1, .y = 22, .extent = 22, .timestamp = null, .frame_time = 0, .has_document = true },
+        .{ .frame_index = 0, .row = 2, .start = 2, .end = 10, .y = 44, .extent = 22, .timestamp = null, .frame_time = 0, .has_document = true },
+    });
+    reading.locate(4);
+    try std.testing.expectEqual(@as(usize, 2), reading.position.anchor);
+    try std.testing.expectEqual(@as(usize, 2), reading.position.row);
 }

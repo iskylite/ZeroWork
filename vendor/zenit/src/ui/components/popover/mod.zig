@@ -365,7 +365,9 @@ pub const PopoverBuilder = struct {
             cx.freeNode(popover_content);
         };
         popover_content.meta.ownership.meta.component_name = "PopoverContent";
-        const layer_handle = try cx.overlay_stack.push(.{
+        // Closed popovers retain their content/Scope, but reserve no overlay slot.
+        // Registration happens on open and lasts through the complete exit animation.
+        const layer_config: overlay_stack_mod.LayerConfig = .{
             .kind = .non_modal,
             .dismiss = .{
                 .outside_click = if (p.close_on_outside_click and p.trigger != .hover)
@@ -380,37 +382,12 @@ pub const PopoverBuilder = struct {
             .on_dismiss_request = core.Cx.simpleHandler(PopoverOpen.hide, open_ctl),
             .trigger_node = trigger_node,
             .tier = p.tier,
-        });
-        var layer_registered = false;
-        errdefer if (!layer_registered) cx.overlay_stack.removePermanently(layer_handle);
-        // z_index allocated by overlay layer (layer registers with trigger_node first, after
-        // node creation).
-        (try popover_content.style.ensureExtFallible(allocator)).z_index = layer_handle.z_index;
-
-        cx.overlay_stack.bindFloatingContent(allocator, layer_handle, popover_content);
-
-        const cleanup_ctx = try resource_allocator.create(PopoverCleanupCtx);
-        cleanup_ctx.* = .{ .handle = layer_handle, .cx = cx };
-        my_scope.adoptResource(@ptrCast(cleanup_ctx), struct {
-            fn cleanup(ptr: *anyopaque, alloc: Allocator) void {
-                const ctx: *PopoverCleanupCtx = @ptrCast(@alignCast(ptr));
-                ctx.cx.overlay_stack.removePermanently(ctx.handle);
-                alloc.destroy(ctx);
-            }
-        }.cleanup) catch |err| {
-            resource_allocator.destroy(cleanup_ctx);
-            return err;
         };
-        layer_registered = true;
-
         popover_content.style.width = .{ .px = 0 };
         popover_content.style.height = .{ .px = 0 };
         popover_content.style.overflow_hidden = true;
-        popover_content.setOpacityRaw(if (p.prewarm_hidden_layout) HIDDEN_OPACITY else 0);
-        cx.overlay_stack.commitExit(layer_handle);
-        popover_content.style.width = .{ .px = 0 };
-        popover_content.style.height = .{ .px = 0 };
-        popover_content.style.overflow_hidden = true;
+        popover_content.setOpacityRaw(0);
+        popover_content.setHitTestVisible(false);
 
         // Portalization: floating content, regardless of trigger mode, always mounts directly to
         // cx.popover_portal_root (App.mount creates it before building the user tree). The wrapper
@@ -431,13 +408,14 @@ pub const PopoverBuilder = struct {
             .parent = content_portal,
             .content = popover_content,
             .cx = cx,
-            .layer_handle = layer_handle,
+            .layer_config = layer_config,
             .detach_hidden_content = p.detach_hidden_content,
             .portaled = true,
         };
-        my_scope.adoptResource(@ptrCast(mount_ctx), struct {
+        my_scope.registerResource(@ptrCast(mount_ctx), struct {
             fn cleanup(ptr: *anyopaque, alloc: Allocator) void {
                 const ctx: *DetachedContentCtx = @ptrCast(@alignCast(ptr));
+                if (ctx.layer_handle) |handle| ctx.cx.overlay_stack.removePermanently(handle);
                 // Under portal, content on portal root (outside caller subtree), scope dispose
                 // doesn't
                 // free via caller tree, must detach first then release detached; otherwise portal
@@ -456,6 +434,9 @@ pub const PopoverBuilder = struct {
             return err;
         };
         content_registered = true;
+        // Preserve mount's error channel for initially open components. Later
+        // user-triggered opens cannot throw through the reactive effect.
+        if (is_open.peek()) _ = try ensurePopoverLayer(mount_ctx);
 
         // Determine the caller's content mount point by size_policy. .fit_or_scroll: nest a
         // ScrollArea
@@ -504,7 +485,6 @@ pub const PopoverBuilder = struct {
             .is_open = is_open,
             .target_width = effective_target_width,
             .cx = cx,
-            .layer_handle = layer_handle,
             .fit_or_scroll = fit_or_scroll_flag,
             .fit_h = effective_fit_h,
             .mount_ctx = mount_ctx,
@@ -516,15 +496,19 @@ pub const PopoverBuilder = struct {
         }, struct {
             fn update(c: anytype) void {
                 if (c.is_open.get()) {
+                    const handle = ensurePopoverLayer(c.mount_ctx) catch |err| {
+                        std.log.warn("popover open: {s}", .{@errorName(err)});
+                        return;
+                    };
                     ensurePopoverContentAttached(c.mount_ctx);
-                    c.cx.overlay_stack.reactivate(c.layer_handle);
+                    c.cx.overlay_stack.reactivate(handle);
                     // Re-open mid-exit animation: reactivate only handles suspended layers; exiting
                     // layers
                     // must pull back to entering, else animation finishes commitExit writes
                     // just-set true
                     // visible back to false (same Modal/Sheet handling).
-                    if (c.cx.overlay_stack.findLayer(c.layer_handle)) |layer| {
-                        if (layer.state == .exiting) c.cx.overlay_stack.cancelExit(c.layer_handle, .entering);
+                    if (c.cx.overlay_stack.findLayer(handle)) |layer| {
+                        if (layer.state == .exiting) c.cx.overlay_stack.cancelExit(handle, .entering);
                     }
                     var sizing_changed = false;
                     // size_policy=.fit_or_scroll: popover_content fixed px (max_width/max_height),
@@ -599,7 +583,7 @@ pub const PopoverBuilder = struct {
                     c.popover.markRenderDirty();
                     c.popover.markCompositeDirty();
                 } else {
-                    c.cx.overlay_stack.beginExit(c.layer_handle);
+                    if (c.mount_ctx.layer_handle) |handle| c.cx.overlay_stack.beginExit(handle);
                 }
                 c.cx.needs_redraw = true;
             }
@@ -618,7 +602,7 @@ pub const PopoverBuilder = struct {
             .trigger_node = trigger_node,
             .effective_anchor = effective_anchor,
             .is_open = is_open,
-            .layer_handle = layer_handle,
+            .layer_handle = .{ .id = 0, .z_index = 0 },
             .pos = p.position,
             .offset = p.offset,
             .cx = cx,
@@ -680,16 +664,12 @@ pub const PopoverBuilder = struct {
 
 // ========== Internal helpers ==========
 
-const PopoverCleanupCtx = struct {
-    handle: overlay_stack_mod.LayerHandle,
-    cx: *Cx,
-};
-
 const DetachedContentCtx = struct {
     parent: *Node,
     content: *Node,
     cx: *Cx,
-    layer_handle: overlay_stack_mod.LayerHandle,
+    layer_handle: ?overlay_stack_mod.LayerHandle = null,
+    layer_config: overlay_stack_mod.LayerConfig,
     detach_hidden_content: bool,
     /// Content on popover_portal_root (not caller subtree), on dispose must manually detach.
     portaled: bool = false,
@@ -705,12 +685,26 @@ fn ensurePopoverContentAttached(ctx: *DetachedContentCtx) void {
     ctx.cx.needs_redraw = true;
 }
 
+fn ensurePopoverLayer(ctx: *DetachedContentCtx) !overlay_stack_mod.LayerHandle {
+    if (ctx.layer_handle) |handle| return handle;
+    const handle = try ctx.cx.overlay_stack.push(ctx.layer_config);
+    ctx.layer_handle = handle;
+    ctx.cx.overlay_stack.bindFloatingContent(ctx.cx.allocator, handle, ctx.content);
+    // Opening from a trigger must not be dismissed by that same event.
+    if (ctx.cx.overlay_stack.findLayer(handle)) |layer| layer.skip_outside_click_frame = true;
+    ctx.content.markRuntimeIndexFullRebuild();
+    return handle;
+}
+
 fn detachPopoverContentIfSuspended(ctx: *DetachedContentCtx) void {
-    if (!ctx.detach_hidden_content) return;
-    if (ctx.content.parent == null) return;
-    if (ctx.cx.overlay_stack.findLayer(ctx.layer_handle)) |layer| {
-        if (!layer.suspended) return;
+    if (ctx.layer_handle) |handle| {
+        if (ctx.cx.overlay_stack.findLayer(handle)) |layer| {
+            if (!layer.suspended) return;
+        }
+        ctx.cx.overlay_stack.removePermanently(handle);
+        ctx.layer_handle = null;
     }
+    if (!ctx.detach_hidden_content or ctx.content.parent == null) return;
     ctx.cx.detachChildRetained(ctx.parent, ctx.content);
     ctx.cx.needs_redraw = true;
 }
@@ -978,6 +972,9 @@ fn applyAutosizeMaxHeight(ctx: *PopoverPositionCtx, auto_opt: ?floating.Autosize
 
 pub fn popoverBeforeRender(node: *Node) void {
     const ctx: *PopoverPositionCtx = @ptrCast(@alignCast(node.meta.per_frame.hooks.slots.anim_state orelse return));
+    if (ctx.mount_ctx) |mount_ctx| {
+        ctx.layer_handle = mount_ctx.layer_handle orelse .{ .id = 0, .z_index = 0 };
+    }
     const overlay_visual_in_progress = ctx.popover.frame_state.state_bits.flags.manual_opacity_animation_active or
         ctx.popover.frame_state.state_bits.flags.manual_transform_animation_active or
         ((ctx.popover.getOpacity() > (HIDDEN_OPACITY + 0.0001) and ctx.popover.getOpacity() < 0.999) or
@@ -992,19 +989,19 @@ pub fn popoverBeforeRender(node: *Node) void {
 
     if (!ctx.is_open.peek()) {
         if (ctx.mount_ctx) |mount_ctx| {
-            if (ctx.cx.overlay_stack.findLayer(ctx.layer_handle)) |layer| {
-                if (layer.suspended) {
-                    // An exit with `.none` commits synchronously, so this can
-                    // be the first closed-frame callback. Reset placement
-                    // readiness before detaching; otherwise reopen skips the
-                    // entry-ready branch and retains commitExit's opacity=0.
-                    ctx.active_position = ctx.pos;
-                    ctx.entry_ready = false;
-                    ctx.is_visible = false;
-                    if (!ctx.prewarm_hidden_layout) ctx.prewarmed_ready = false;
-                    detachPopoverContentIfSuspended(mount_ctx);
-                    return;
-                }
+            const suspended = if (mount_ctx.layer_handle) |handle| blk: {
+                const layer = ctx.cx.overlay_stack.findLayer(handle) orelse break :blk true;
+                break :blk layer.suspended;
+            } else true;
+            if (suspended) {
+                // Keep geometry/caches for reopening, but release the registration
+                // only after the exit controller has hidden and restored focus.
+                ctx.active_position = ctx.pos;
+                ctx.entry_ready = false;
+                ctx.is_visible = false;
+                if (!ctx.prewarm_hidden_layout) ctx.prewarmed_ready = false;
+                detachPopoverContentIfSuspended(mount_ctx);
+                return;
             }
         }
         if (popoverDebugEnabled()) {

@@ -1,5 +1,6 @@
 //! Bounded, memory-only connection telemetry. Writers accept only enums,
-//! numeric metadata and Zig error values: never device text, URLs or secrets.
+//! numeric metadata, reviewed Redfish paths/message IDs and Zig error values.
+//! Headers, bodies, query strings and session identifiers never enter logs.
 //! Each attempt owns one heap-stable Tracker; snapshots are copied under its
 //! lock and contain no pointers into network/parser/worker-owned buffers.
 const std = @import("std");
@@ -33,9 +34,45 @@ pub const Validity = enum { valid, partial_with_error, unavailable };
 pub const Resource = enum { none, management_route, video_route, service_root, public_script, session_service, web_session, managers_collection, manager, systems_collection, system, other_redfish, kvm_session, websocket };
 pub const Channel = enum { management, video, ssh };
 pub const Method = enum { none, get, post, patch, delete };
-/// Reviewed path templates only. Resource/session identifiers, query strings,
-/// request headers and bodies never enter telemetry.
+/// Session paths remain templates; ordinary resources also carry an owned path.
 pub const RequestPath = enum { none, service_root, public_script, session_service, web_sessions, web_session, managers, manager, systems, system, kvm_session, websocket, other_redfish };
+pub fn LogText(comptime limit: usize) type {
+    return struct {
+        bytes: [limit]u8 = @splat(0),
+        len: u16 = 0,
+        pub fn init(value: []const u8) ?@This() {
+            if (value.len > limit) return null;
+            var result: @This() = .{};
+            @memcpy(result.bytes[0..value.len], value);
+            result.len = @intCast(value.len);
+            return result;
+        }
+        pub fn text(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
+        }
+        pub fn jsonStringify(self: *const @This(), writer: *std.json.Stringify) !void {
+            try writer.write(self.text());
+        }
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const value = try std.json.innerParse([]const u8, allocator, source, options);
+            return init(value) orelse error.Overflow;
+        }
+    };
+}
+pub const ResourcePath = LogText(4096);
+pub const ResponseErrors = LogText(1024);
+/// Copy only validated Redfish path bytes. All SessionService descendants are
+/// excluded, including OEM session resources. Never retain queries or fragments.
+pub fn resourcePath(target: []const u8) ?ResourcePath {
+    const path = target[0 .. std.mem.indexOfAny(u8, target, "?#") orelse target.len];
+    if (!std.mem.startsWith(u8, path, "/redfish/v1/") and !std.mem.eql(u8, path, "/redfish/v1")) return null;
+    var segments = std.mem.splitScalar(u8, path, '/');
+    while (segments.next()) |segment| {
+        if (std.ascii.eqlIgnoreCase(segment, "SessionService") or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return null;
+    }
+    for (path) |byte| if (byte <= 0x20 or byte >= 0x7f or std.mem.indexOfScalar(u8, "%\\", byte) != null) return null;
+    return ResourcePath.init(path);
+}
 pub const Phase = enum { none, connect, ssh_tunnel, ssh_handshake, ssh_host_key, ssh_authentication, tls_handshake, request_send, response_headers, response_body, response_validate };
 pub const Context = struct {
     channel: Channel = .management,
@@ -45,6 +82,11 @@ pub const Context = struct {
     ssh_hops: ?u8 = null,
     method: Method = .none,
     path: RequestPath = .none,
+    resource_path: ?ResourcePath = null,
+    source_path: ?ResourcePath = null,
+    /// Locally selected schema property; never arbitrary device text.
+    source_property: ?LogText(128) = null,
+    response_errors: ?ResponseErrors = null,
     phase: Phase = .none,
     http_status: ?u16 = null,
     /// HTTP entity bytes received, before any optional content decompression.
@@ -63,6 +105,11 @@ pub const Code = enum {
     request_started,
     request_completed,
     management_discovery_incomplete,
+    resource_response_rejected,
+    resource_response_partial,
+    resource_fields_available,
+    advertised_resource_missing,
+    manager_system_link_missing,
     mapping_verified,
     mapping_manager_document_rejected,
     mapping_manager_servers_not_single,
@@ -123,6 +170,8 @@ pub const Snapshot = struct {
     failure_code: ?[]const u8 = null,
     /// First failure survives cleanup events and bounded-ring eviction.
     failure_event: ?Event = null,
+    /// Preserve the first optional discovery problem across successful reads.
+    discovery_issue: ?Event = null,
     /// Oldest first; only events[0..event_count] contain published events.
     events: [capacity]Event = @splat(.{}),
     event_count: u8 = 0,
@@ -246,6 +295,8 @@ pub const Tracker = struct {
         var published = event;
         published.sequence = self.value.revision;
         published.at_unix_ms = event.at_unix_ms orelse self.wallTime();
+        if (self.value.discovery_issue == null and event.stage == .redfish_discovery and
+            (event.error_code != null or (if (event.validity) |validity| validity != .valid else false))) self.value.discovery_issue = published;
         const count: usize = self.value.event_count;
         if (count == capacity) {
             std.mem.copyForwards(Event, self.value.events[0 .. capacity - 1], self.value.events[1..]);
@@ -384,6 +435,11 @@ pub fn codeLabel(code: Code) []const u8 {
         .request_started => "请求已开始",
         .request_completed => "请求已完成",
         .management_discovery_incomplete => "管理资源发现未完成",
+        .resource_response_rejected => "资源读取失败",
+        .resource_response_partial => "所需管理信息未完整获取或校验未通过",
+        .resource_fields_available => "所需管理信息已获取（设备附带诊断）",
+        .advertised_resource_missing => "设备声明的资源链接返回404",
+        .manager_system_link_missing => "管理器声明的系统链接返回404（不代表系统集合读取失败）",
         .mapping_verified => "管理器与系统映射已验证",
         .mapping_manager_document_rejected => "系统映射未验证：管理器文档不可用",
         .mapping_manager_servers_not_single => "系统映射未验证：管理器系统关系不唯一",

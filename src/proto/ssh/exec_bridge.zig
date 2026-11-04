@@ -55,6 +55,13 @@ pub const SshExecBridge = struct {
         internal.call_id = std.math.maxInt(u64);
         return self.submit(command, internal, true);
     }
+    /// Separate provider metadata identity: path completion may overlap the OS probe.
+    pub fn pathDiagnostic(self: *SshExecBridge, command: []const u8, opts: bridge.ExecOpts) !bridge.ExecHandle {
+        var internal = opts;
+        internal.call_id = std.math.maxInt(u64) - 1;
+        internal.key = self.session.resource_key;
+        return self.submit(command, internal, true);
+    }
     pub fn exec(self: *SshExecBridge, command: []const u8, opts: bridge.ExecOpts) !bridge.ExecHandle {
         if (opts.call_id == std.math.maxInt(u64)) return error.InvalidCallId;
         return self.submit(command, opts, false);

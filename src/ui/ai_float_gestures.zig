@@ -31,7 +31,7 @@ pub const View = struct {
         grip.behavior.interaction.pointer_down_focus = .preserve;
         grip.behavior.events.on_event_capture = gripCapture;
         grip.behavior.events.capture_context = self;
-        grip.setStyleInline(cx.allocator, .{ .hit_behavior = .@"opaque", .cursor = .grab });
+        grip.setStyleInline(cx.allocator, .{ .hit_behavior = .@"opaque", .cursor = .default });
         for (edges, 0..) |edge, index| {
             const node = try ui.box(cx, S.handle(edge, 600, 456), .{});
             self.handles[index] = node;
@@ -85,6 +85,7 @@ pub const View = struct {
         const rect = self.model.rect(self.pane, self.window);
         const enabled = self.bounds_ready and self.model.visible and self.model.expanded and !self.model.maximized and rect.width > 0 and rect.height > 0;
         for (self.bindings) |binding| if (binding) |value| value.setEnabled(enabled);
+        self.grip.setCursor(if (enabled) .grab else .default);
         for (self.handles, edges) |node, edge| {
             node.setDisplay(if (enabled) .flex else .none);
             node.setStyleInline(self.cx.allocator, S.handle(edge, rect.width, rect.height));

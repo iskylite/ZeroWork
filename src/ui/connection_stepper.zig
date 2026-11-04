@@ -20,10 +20,14 @@ pub fn row(cx: *ui.Cx) !*ui.Node {
     return root;
 }
 
+fn connector(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .flex = 1, .height = .{ .px = 1 }, .background = S.theme.current().border, .flex_shrink = 0, .margin = .{ .left = 20, .right = 20 } };
+}
+
 pub fn append(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node, index: usize, id: []const u8, disabled: *ui.Signal(bool), style: *ui.Signal(ui.BoxStyle), clicked: ui.Handler(void)) !Entry {
     const labels = [_][]const u8{ "连接与认证", "连接路径", "核对与测试" };
     if (index != 0) {
-        const line = try ui.box(cx, .{ .width = .fill(), .flex = 1, .height = .{ .px = 1 }, .background = S.theme.current().border, .flex_shrink = 0, .margin = .{ .left = 20, .right = 20 } }, .{});
+        const line = try ui.boxStyled(cx, connector, .{});
         line.meta.ownership.meta.test_id = if (index == 1) "wizard.steps.connector.0" else "wizard.steps.connector.1";
         try root.appendChild(cx.allocator, line);
     }

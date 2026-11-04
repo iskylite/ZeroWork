@@ -3048,6 +3048,34 @@ static BOOL chromePointInNativeButton(WindowWrapper *w, NSPoint p) {
 }
 
 
+// Both event entry points use the same hit decision for dragging and zooming.
+// Native controls and the published UI hit scene always retain their clicks.
+static BOOL handleTitlebarMouseDown(WindowWrapper *w, NSEvent *event) {
+    if (w.chromeFullscreenTransition || (w.window.styleMask & NSWindowStyleMaskFullScreen)) return NO;
+    NSView *content = w.window.contentView;
+    NSPoint p = [content convertPoint:event.locationInWindow fromView:nil];
+    if (chromePointInNativeButton(w, p)) return NO;
+    float x = (float)p.x;
+    float y = (float)(content.bounds.size.height - p.y);
+    if (w.chromeHitCallback) {
+        if (w.chromeHitCallback(w.chromeHitContext, x, y) != 2) return NO;
+    } else {
+        if (y < 0 || y >= w.titlebarDragHeight) return NO;
+        // With a real hit callback, include gaps between the right-hand actions.
+        // The fixed right inset remains the fallback for rectangular titlebars.
+        float right = w.titlebarHitCallback ? 5 : MAX(5, w.titlebarDragRightInset);
+        if (x <= 78 || x >= content.bounds.size.width - right) return NO;
+        if (w.titlebarHitCallback && w.titlebarHitCallback(w.titlebarHitContext, x, y)) return NO;
+    }
+    if (event.clickCount == 2) {
+        // Match the existing maximize action. AppKit retains the restore frame.
+        [w.window zoom:nil];
+    } else {
+        [w.window performWindowDragWithEvent:event];
+    }
+    return YES;
+}
+
 // Opt-in native lifecycle journal, inherited by zdoc. No project/document text.
 // Global notification logging survives delegate removal during a hard destroy.
 static const char *zenitFullscreenTracePath(void) {
@@ -4684,6 +4712,14 @@ static NSTextInputContext *synchronizeTextInputSource(WindowWrapper *target,
         return context;
     }
 
+    // The source identifier can lag behind its first setMarkedText callback.
+    // An existing composition proves this context is already serving the IME;
+    // rebinding here would discard its first letter before the next key.
+    if (target.metalView.hasMarkedText) {
+        target.lastKeyboardInputSource = selected;
+        return context;
+    }
+
     macos_ime_discard((__bridge void *)target);
     [context invalidateCharacterCoordinates];
     const BOOL wasFirstResponder = target.window.firstResponder == target.metalView;
@@ -4876,40 +4912,7 @@ int macos_poll_events(void* window_ptr) {
             // track mouse button state (route to target) + push queue
             switch (event.type) {
                 case NSEventTypeLeftMouseDown: {
-                    if (target.chromeHitCallback) {
-                        NSPoint p=[target.window.contentView convertPoint:event.locationInWindow fromView:nil];
-                        float y=(float)(target.window.contentView.bounds.size.height-p.y);
-                        if (!chromePointInNativeButton(target,p) && target.chromeHitCallback(target.chromeHitContext,(float)p.x,y)==2 && !(target.window.styleMask & NSWindowStyleMaskFullScreen)) {
-                            [target.window performWindowDragWithEvent:event];
-                            break;
-                        }
-                    }
-                    // custom TitleBar drag: if click in drag area, trigger window drag
-                    // not pass to Zig
-                    if (!target.chromeHitCallback && target.titlebarDragHeight > 0) {
-                        NSRect contentFrame = [target.window.contentView frame];
-                        NSPoint loc = [event locationInWindow];
-                        float y_from_top = (float)(contentFrame.size.height - loc.y);
-                        if (y_from_top < target.titlebarDragHeight && y_from_top >= 0) {
-                            float x = (float)loc.x;
-                            float w = (float)contentFrame.size.width;
-                            // exclude traffic lights (left 78px), window edge resize zones (each
-                            // 5px, avoid system resize), right action buttons
-                            // (titlebarDragRightInset).
-                            float resize_inset = 5.0f;
-                            float right_inset = target.titlebarDragRightInset > 0 ? target.titlebarDragRightInset : resize_inset;
-                            if (x > 78 && x < (w - right_inset)) {
-                                int on_control = 0;
-                                if (target.titlebarHitCallback) {
-                                    on_control = target.titlebarHitCallback(target.titlebarHitContext, x, y_from_top);
-                                }
-                                if (!on_control) {
-                                    [target.window performWindowDragWithEvent:event];
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    if (handleTitlebarMouseDown(target, event)) break;
                     if (zenitAutomationEnvironment("ZENIT_DEBUG_MOUSEEV")) {
                         fprintf(stderr, "[mouseev] DOWN ts=%.3f click=%ld pressure=%.2f win=%ld subtype=%ld\n",
                                 event.timestamp, (long)event.clickCount, event.pressure,
@@ -5176,6 +5179,37 @@ void macos_get_input_queue_metrics(unsigned long long* mouse_move_coalesced,
     if (ime_preedit_coalesced) *ime_preedit_coalesced = g_ime_preedit_coalesced_count;
 }
 
+// macOS 14 has no public diagonal cursor. Rotate the system resize artwork
+// into a centered, padded image, preserving its outline and Retina rendering.
+static NSCursor *diagonalResizeFallback(BOOL nwse) {
+    static NSCursor *cursors[2];
+    const NSUInteger index = nwse ? 0 : 1;
+    if (!cursors[index]) {
+        NSImage *source = NSCursor.resizeLeftRightCursor.image;
+        const CGFloat side = ceil(hypot(source.size.width, source.size.height));
+        NSImage *image = [NSImage imageWithSize:NSMakeSize(side, side) flipped:NO
+            drawingHandler:^BOOL(NSRect rect) {
+                NSAffineTransform *transform = [NSAffineTransform transform];
+                [transform translateXBy:side / 2 yBy:side / 2];
+                [transform rotateByDegrees:nwse ? -45 : 45];
+                [transform concat];
+                [source drawInRect:NSMakeRect(-source.size.width / 2, -source.size.height / 2,
+                    source.size.width, source.size.height)];
+                return YES;
+            }];
+        cursors[index] = [[NSCursor alloc] initWithImage:image hotSpot:NSMakePoint(side / 2, side / 2)];
+    }
+    return cursors[index];
+}
+
+static NSCursor *diagonalResizeCursor(BOOL nwse) {
+    if (@available(macOS 15.0, *)) {
+        return [NSCursor frameResizeCursorFromPosition:nwse ? NSCursorFrameResizePositionTopLeft : NSCursorFrameResizePositionTopRight
+            inDirections:NSCursorFrameResizeDirectionsAll];
+    }
+    return diagonalResizeFallback(nwse);
+}
+
 // Set mouse cursor shape. shape matches the Zig CursorShape enum:
 // 0=inherit(noop), 1=default, 2=pointer, 3=text, 4=crosshair,
 // 5=move, 6=not_allowed, 7=grab, 8=grabbing, 9=ew_resize,
@@ -5198,9 +5232,8 @@ void macos_set_cursor_shape(void *window_ptr, int shape) {
             case 8:  cursor = [NSCursor closedHandCursor]; break;
             case 9:  cursor = [NSCursor resizeLeftRightCursor]; break;
             case 10: cursor = [NSCursor resizeUpDownCursor]; break;
-            case 11: // nwse_resize - macOS no direct API, use arrow
-            case 12: // nesw_resize
-                     cursor = [NSCursor arrowCursor]; break;
+            case 11: cursor = diagonalResizeCursor(YES); break; // nwse_resize
+            case 12: cursor = diagonalResizeCursor(NO); break;  // nesw_resize
             case 13: cursor = [NSCursor resizeLeftRightCursor]; break;  // col_resize
             case 14: cursor = [NSCursor resizeUpDownCursor]; break;     // row_resize
             case 15: // wait - use system busy cursor (private API unavailable, arrow)
@@ -6220,35 +6253,7 @@ static void pumpAppEventsWithTimeout(uint32_t timeout_ms) {
             // mouse/scroll event handling (route to target)
             switch (event.type) {
                 case NSEventTypeLeftMouseDown: {
-                    if (target.chromeHitCallback) {
-                        NSPoint p=[target.window.contentView convertPoint:event.locationInWindow fromView:nil];
-                        float y=(float)(target.window.contentView.bounds.size.height-p.y);
-                        if (!chromePointInNativeButton(target,p) && target.chromeHitCallback(target.chromeHitContext,(float)p.x,y)==2 && !(target.window.styleMask & NSWindowStyleMaskFullScreen)) {
-                            [target.window performWindowDragWithEvent:event];
-                            break;
-                        }
-                    }
-                    if (!target.chromeHitCallback && target.titlebarDragHeight > 0) {
-                        NSRect contentFrame = [target.window.contentView frame];
-                        NSPoint loc = [event locationInWindow];
-                        float y_from_top = (float)(contentFrame.size.height - loc.y);
-                        if (y_from_top < target.titlebarDragHeight && y_from_top >= 0) {
-                            float x = (float)loc.x;
-                            float w = (float)contentFrame.size.width;
-                            float resize_inset = 5.0f;
-                            float right_inset = target.titlebarDragRightInset > 0 ? target.titlebarDragRightInset : resize_inset;
-                            if (x > 78 && x < (w - right_inset)) {
-                                int on_control = 0;
-                                if (target.titlebarHitCallback) {
-                                    on_control = target.titlebarHitCallback(target.titlebarHitContext, x, y_from_top);
-                                }
-                                if (!on_control) {
-                                    [target.window performWindowDragWithEvent:event];
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    if (handleTitlebarMouseDown(target, event)) break;
                     if (zenitAutomationEnvironment("ZENIT_DEBUG_MOUSEEV")) {
                         fprintf(stderr, "[mouseev] DOWN ts=%.3f click=%ld pressure=%.2f win=%ld subtype=%ld\n",
                                 event.timestamp, (long)event.clickCount, event.pressure,

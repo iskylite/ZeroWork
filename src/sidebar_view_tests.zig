@@ -198,14 +198,13 @@ test "sidebar native chrome gives unused action space back to host names" {
     try std.testing.expectApproxEqAbs(@as(f32, 12), v.search_box.globalRect().y, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
     const before = row.name.globalRect().w;
-    const protocol = find(row.node, "sidebar.host.protocol").?;
-    const protocol_width = protocol.globalRect().w;
+    try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
     const rect = row.node.globalRect();
     h.cx.handleMouseMove(rect.x + 20, rect.y + 12);
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(row.route.style.display), .flex), row.route.style.display);
-    try std.testing.expect(protocol.style.display == .none);
-    try std.testing.expectApproxEqAbs(before + protocol_width + 6 - (V.styles.action_size + 4), row.name.globalRect().w, 0.1);
+    try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
+    try std.testing.expectApproxEqAbs(before - (V.styles.action_size + 4), row.name.globalRect().w, 0.1);
     h.click(find(row.node, "sidebar.host.connect").?);
     try std.testing.expectEqual(@as(usize, 1), c.connected);
     try std.testing.expect(find(row.node, "sidebar.host.edit") == null);
@@ -255,17 +254,16 @@ test "sidebar host hover exposes only connect without activating the row" {
     const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "ScaleX40-AI01", .detail = "root@192.0.2.1:22", .route = "本机 → 跳板 → ScaleX40-AI01", .hops = 1, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
     try column.appendChild(h.cx.allocator, row.node);
     h.frames();
-    const protocol = find(row.node, "sidebar.host.protocol").?;
-    try std.testing.expect(protocol.style.display == .flex);
+    try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
     const rect = row.node.globalRect();
     h.cx.handleMouseMove(rect.x + 10, rect.y + 12);
     h.frames();
     try std.testing.expect(row.hot);
     try std.testing.expect(row.actions.style.display == .flex);
-    try std.testing.expect(protocol.style.display == .none);
+    try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
     h.cx.handleMouseMove(800, 700);
     h.frames();
-    try std.testing.expect(protocol.style.display == .flex);
+    try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
     h.cx.handleMouseMove(rect.x + 10, rect.y + 12);
     h.frames();
     for ([_][]const u8{"sidebar.host.connect"}) |id| {
@@ -305,6 +303,51 @@ test "sidebar native group menu freezes revision and never changes persistent co
     h.frames();
     try std.testing.expectApproxEqAbs(@as(f32, 258), row.menu.content.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 199), row.menu.content.globalRect().h, 0.1);
+    for (row.menu.content.children.items[1..]) |item| {
+        const icon = item.children.items[0].globalRect();
+        const label = item.children.items[1].globalRect();
+        try std.testing.expectApproxEqAbs(item.globalRect().x + 6, icon.x, 0.1);
+        try std.testing.expectApproxEqAbs(icon.x + 20, label.x, 0.1);
+    }
+}
+test "sidebar group hover actions remain inside the header" {
+    const h = try H.init();
+    defer h.deinit();
+    var capture: Capture = .{};
+    const reference: V.GroupRef = .{ .id = @fromBackingInt(42), .revision = 7 };
+    const row = try V.GroupRow.mount(h.cx, h.scope, .{ .reference = reference, .name = "Long group name for a narrow sidebar", .count = 2, .collapsed = false }, capture.bridge());
+    try h.root.appendChild(h.cx.allocator, row.root);
+    for ([_]f32{ 200, 218, 434 }) |width| {
+        row.root.setStyleInline(h.cx.allocator, .{ .width = .{ .px = width } });
+        h.frames();
+        const header = row.header.globalRect();
+        h.cx.handleMouseMove(header.x + 12, header.y + header.h / 2);
+        h.frames();
+        const plus = find(row.header, "sidebar.group.new").?.globalRect();
+        const more = find(row.header, "sidebar.group.more").?.globalRect();
+        try std.testing.expectApproxEqAbs(@as(f32, 24), plus.w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 24), more.w, 0.1);
+        try std.testing.expect(plus.x >= header.x and plus.x + plus.w <= more.x);
+        try std.testing.expect(more.x + more.w <= header.x + header.w - 8 + 0.1);
+    }
+    h.click(find(row.header, "sidebar.group.more").?);
+    try std.testing.expect(row.menu.open.?.peek());
+    try std.testing.expect(capture.group_action == null);
+    row.menu.close.invoke();
+    h.frames();
+    h.click(find(row.header, "sidebar.group.new").?);
+    try std.testing.expectEqual(@as(usize, 1), capture.new_host);
+    try std.testing.expectEqual(reference, capture.group.?);
+    try std.testing.expect(capture.group_action == null);
+    h.cx.setFocus(find(row.header, "sidebar.group.more").?);
+    h.cx.handleKeyDown(.@"return", .{});
+    h.frames();
+    try std.testing.expect(row.menu.open.?.peek());
+    try std.testing.expect(capture.group_action == null);
+    row.menu.close.invoke();
+    h.frames();
+    h.click(row.header);
+    try std.testing.expectEqual(V.GroupAction.toggle_collapsed, capture.group_action.?);
 }
 test "sidebar native group count renders digits without ellipsis at prototype badge geometry" {
     const h = try H.init();
@@ -601,7 +644,7 @@ test "main workspace sidebar follows V3 measured group search and footer geometr
         try std.testing.expectApproxEqAbs(@as(f32, 13), row.node.globalRect().x, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 212), row.node.globalRect().w, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
-        try std.testing.expectEqualStrings("SSH", find(row.node, "sidebar.host.protocol").?.children.items[0].getText().?.content);
+        try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
         try std.testing.expectEqualStrings("0", find(row.node, "sidebar.host.hops").?.getText().?.content);
         try std.testing.expectEqual(V.styles.tail_width, row.trailing.globalRect().w);
 
@@ -647,7 +690,7 @@ test "sidebar production mount follows V3 borderless footer without SVG texture 
     try std.testing.expect(h.cx.svg_textures.loader == null);
 }
 
-test "sidebar icons share Tab selection and keep theme ink across session state changes in three themes" {
+test "sidebar icons share Tab artwork and keep source colours across session state changes in three themes" {
     const Icon = @import("ui/session_icon.zig");
     const previous = T.currentName();
     defer T.select(previous);
@@ -662,17 +705,18 @@ test "sidebar icons share Tab selection and keep theme ink across session state 
             row.node.setStyleInline(h.cx.allocator, .{ .width = .{ .px = 202 } });
             h.frames();
             const tab_icon = Icon.forTab(kind == .local, false, kind != .file);
+            const host_ink = if (kind == .local) ui.Color.hex(0xa1a1aa) else T.current().fg_2;
             try std.testing.expectEqual(tab_icon.icon_id.?, row.dot.getIcon().?.icon_id);
-            try std.testing.expectEqual(T.current().fg_2, row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(host_ink, row.dot.getIcon().?.tint);
             row.setSelected(true);
             h.frames();
-            try std.testing.expectEqual(T.current().fg_2, row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(host_ink, row.dot.getIcon().?.tint);
             row.setOnline(true);
             h.frames();
-            try std.testing.expectEqual(T.current().fg_2, row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(host_ink, row.dot.getIcon().?.tint);
             row.setOnline(false);
             h.frames();
-            try std.testing.expectEqual(T.current().fg_2, row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(host_ink, row.dot.getIcon().?.tint);
             try std.testing.expectApproxEqAbs(@as(f32, 18), row.dot.globalRect().w, 0.1);
             try std.testing.expectApproxEqAbs(@as(f32, 18), row.dot.globalRect().h, 0.1);
         }
@@ -780,6 +824,30 @@ test "sidebar Rocky discovery replaces cached Linux texture and tab retains stat
     try std.testing.expect(ui.Color.eql(status, tab.getIcon().?.tint));
 }
 
+test "domestic OS discovery replaces uploaded host and tab textures" {
+    const icons = @import("ui/session_icon.zig");
+    const h = try H.init();
+    defer h.deinit();
+    const host = try ui.iconTint(h.cx, icons.forHost(.{}, "ssh", .linux), ui.Color.WHITE, V.styles.icon(18));
+    const tab = try ui.iconTint(h.cx, icons.forOs(.linux).?, T.current().ok_ink, V.styles.icon(14));
+    try h.root.appendChild(h.cx.allocator, host);
+    try h.root.appendChild(h.cx.allocator, tab);
+    // The renderer has already uploaded the previously cached Linux artwork.
+    host.setIcon(null);
+    host.setImage(.{ .texture_id = 1, .tint = ui.Color.WHITE });
+    icons.setHostNode(host, .{}, "ssh", .kylin);
+    icons.setNode(tab, .kylin);
+    try std.testing.expect(host.getImage() == null);
+    try std.testing.expectEqual(icons.forHost(.{}, "ssh", .kylin).icon_id.?, host.getIcon().?.icon_id);
+    try std.testing.expectEqual(icons.forOs(.kylin).?.icon_id.?, tab.getIcon().?.icon_id);
+    // A later discovery must also replace a tab's uploaded distribution logo.
+    tab.setIcon(null);
+    tab.setImage(.{ .texture_id = 2, .tint = ui.Color.WHITE });
+    icons.setNode(tab, .uos);
+    try std.testing.expect(tab.getImage() == null);
+    try std.testing.expectEqual(icons.forOs(.uos).?.icon_id.?, tab.getIcon().?.icon_id);
+}
+
 test "reported input typography and narrow host hover geometry" {
     const h = try H.init();
     defer h.deinit();
@@ -804,7 +872,7 @@ test "reported input typography and narrow host hover geometry" {
         const actions = row.actions.globalRect();
         const route = row.route.globalRect();
         try std.testing.expect(route.x + route.w + 3.9 <= actions.x);
-        try std.testing.expectEqualStrings("SSH", find(row.node, "sidebar.host.protocol").?.children.items[0].getText().?.content);
+        try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
         try std.testing.expect(row.route.style.display == .flex);
         try std.testing.expect(row.name.globalRect().w > 0);
         try std.testing.expect(row.name.globalRect().x + row.name.globalRect().w <= route.x + 0.1);

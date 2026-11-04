@@ -46,7 +46,7 @@ pub fn userBubbleMaxWidth(content_width: f32) f32 {
     return @max(0, content_width) * 0.75;
 }
 pub fn userBubble(content_width: f32) ui.BoxStyle {
-    // Theme action hue with the global overlay alpha, shared with HTML.
+    // Message cards live on the L1 assistant and use L2 material, shared with HTML.
     const paint = theme.userBubblePaint();
     const start = paint.from;
     const end = paint.to;
@@ -107,4 +107,26 @@ pub const heading_font_size: f32 = 13;
 /// Match the floating shell's lower corners without rounding the divider edge.
 pub fn finishComposer(cx: *ui.Cx, node: *ui.Node) void {
     node.style.ensureExtPanic(cx.allocator).corner_radius = .{ .each = .{ 10, 10, 10, 10 } };
+}
+
+// The header stays outside the bounded, independently scrollable code area.
+pub const code_max_height: f32 = 136;
+pub const code_header_height: f32 = 28;
+pub fn codeBlock() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .max_height = code_header_height + code_max_height, .direction = .column, .background = theme.popupInset(), .border = .{ .radius = 6 }, .overflow = .hidden, .flex_shrink = 0 };
+}
+pub fn codeToolbar() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = code_header_height }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 6 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+}
+pub fn codeLanguage() ui.TextStyle {
+    return .{ .font_size = 10.5, .font_weight = 600, .line_height = 16.0 / 10.5, .color = theme.current().fg_2, .selectable = false, .text_overflow = .ellipsis };
+}
+pub fn textSelection() ui.Color {
+    return theme.current().accent_ink.withAlpha(80);
+}
+
+pub fn codeWrapButton(wrapped: bool) ButtonStyle {
+    var style = windowControl();
+    if (wrapped) style.background = theme.current().accent_ink.withAlpha(40);
+    return style;
 }

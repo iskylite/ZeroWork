@@ -6,6 +6,7 @@ const loop = @import("ai/tool_loop.zig");
 const View = @import("ui/ai_tool_results_view.zig");
 const a = std.testing.allocator;
 test {
+    _ = @import("ai/execution_result_projection.zig");
     _ = @import("ui/ai_card_scroll.zig");
     _ = @import("ui/ai_tool_header_projection.zig");
 }
@@ -13,6 +14,32 @@ fn find(node: *ui.Node, id: []const u8) ?*ui.Node {
     if (node.meta.ownership.meta.test_id) |test_id| if (std.mem.eql(u8, test_id, id)) return node;
     for (node.children.items) |child| if (find(child, id)) |result| return result;
     return null;
+}
+test "fetch_url result view explains legacy capability rejection and retains it in history" {
+    var store = facts.Store.init(a);
+    defer store.deinit();
+    const identity = @import("host/identity.zig");
+    const context: @import("ai/host_tools.zig").Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    var run = loop.Loop.init(a, .{ .owner = context.binding, .members = .{} }, 1, .{});
+    const blocks = try a.alloc(@import("ai/host_tools.zig").Block, 1);
+    blocks[0] = .{ .structured = try a.dupe(u8, "{\"code\":\"CapabilityUnavailable\",\"stage\":\"network_policy\",\"recovery_hint\":\"HTTP 运行时不可用\"}") };
+    try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = context.binding, .turn_id = 1, .call_id = "legacy-fetch" }, .name = "host__fetch_uurl", .arguments = "{\"url\":\"https://example.com/\"}", .arguments_hash = @splat(1), .dispatched = true, .host_result = .{ .status = .rejected, .blocks = blocks, .receipt = .{ .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = 1, .binding_revision = 1 } } });
+    _ = try store.capture(&run, &.{});
+    run.deinit();
+    var copy = try store.cloneTurns(&.{.{ .user = false, .text = @constCast("done"), .turn = .{ .id = 1 } }});
+    defer copy.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const state = try View.State.mount(cx, scope, copy.records.items[0]);
+    cx.root = state.root;
+    const status = find(state.root, "ai.tool.result.status").?.getText().?.content;
+    try std.testing.expect(std.mem.indexOf(u8, status, "能力不可用") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status, "已拒绝") == null);
+    const diagnostic = find(state.root, "ai.tool.result.diagnostic").?.getText().?.content;
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic, "CapabilityUnavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic, "HTTP 运行时不可用") != null);
 }
 test "tool result view shows actual mixed target facts after source ledger destruction with bounded internal scrolling" {
     var store = facts.Store.init(a);
@@ -57,8 +84,10 @@ test "tool result view shows actual mixed target facts after source ledger destr
     const summary_rect = find(root, "ai.tool.result.status").?.globalRect();
     const elapsed_rect = find(root, "ai.tool.result.elapsed").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 38), title_rect.x - card_rect.x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 84), title_rect.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 128), summary_rect.x - card_rect.x, 0.1);
+    const separator_rect = find(root, "ai.tool.result.separator").?.globalRect();
+    try std.testing.expect(title_rect.w < 84);
+    try std.testing.expectApproxEqAbs(@as(f32, 6), separator_rect.x - title_rect.x - title_rect.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 6), summary_rect.x - separator_rect.x - separator_rect.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 44), elapsed_rect.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 12), card_rect.x + card_rect.w - elapsed_rect.x - elapsed_rect.w, 0.1);
     const target_button = find(root, "ai.tool.result.target.101").?;
@@ -75,16 +104,16 @@ test "tool result view shows actual mixed target facts after source ledger destr
     // Attach before assertions so any failure still destroys the complete native tree.
     try root.appendChild(a, state.root);
     const disclosure = find(state.root, "ai.tool.result.disclosure").?;
-    try std.testing.expectEqual(@as(f32, 1), state.status_icon.?.getOpacity());
-    try std.testing.expectEqual(@as(f32, 0), state.disclosure_icon.?.getOpacity());
+    try std.testing.expectEqual(@as(f32, 0), state.status_icon.?.getOpacity());
+    try std.testing.expectEqual(@as(f32, 1), state.disclosure_icon.?.getOpacity());
     disclosure.parent.?.behavior.events.on_hover.?.invoke();
     cx.layout();
     try std.testing.expectEqual(@as(f32, 0), state.status_icon.?.getOpacity());
     try std.testing.expectEqual(@as(f32, 1), state.disclosure_icon.?.getOpacity());
     disclosure.parent.?.behavior.events.on_leave.?.invoke();
     cx.layout();
-    try std.testing.expectEqual(@as(f32, 1), state.status_icon.?.getOpacity());
-    try std.testing.expectEqual(@as(f32, 0), state.disclosure_icon.?.getOpacity());
+    try std.testing.expectEqual(@as(f32, 0), state.status_icon.?.getOpacity());
+    try std.testing.expectEqual(@as(f32, 1), state.disclosure_icon.?.getOpacity());
 
     try state.select(1);
     try std.testing.expectEqualStrings("actual partial output", state.stdout.getText().?.content);
@@ -114,7 +143,7 @@ test "tool header projection owns long Chinese text across assembled approval an
     defer scope.dispose();
     cx.root = try ui.box(cx, .{ .width = .{ .px = 332 }, .height = .fill(), .direction = .column }, .{});
     var headers: [5]*ui.Node = undefined;
-    const prefixes = [_][]const u8{ "准备中", "", "待确认", "已批准", "已批准" };
+    const prefixes = [_][]const u8{ "准备中", "进行中", "待确认", "进行中", "已完成" };
     inline for (.{ .assembling, .running, .approval, .approved, .succeeded }, 0..) |phase, index| {
         try events.apply(a, &steps, .{ .call_id = "same-call", .name = "host.run_in_terminal", .command = if (index == 0) "{\"command\":\"装配中" else if (index == 1) raw else "", .phase = phase, .at_ms = index * 10 });
         const step = &steps.items[0];
@@ -138,6 +167,29 @@ test "tool header projection owns long Chinese text across assembled approval an
         try std.testing.expectEqual(.ellipsis, header.getText().?.text_overflow);
     }
     try std.testing.expectEqualStrings("工具调用", Step.title("fixture_private__tool_identity"));
+}
+
+test "tool header projection keeps terminal status ahead of approval and preserves an already projected error" {
+    const Step = @import("ui/ai_step_view.zig");
+    for ([_]struct { phase: @import("ai/step_events.zig").Phase, status: []const u8 }{
+        .{ .phase = .failed, .status = "失败" },
+        .{ .phase = .cancelled, .status = "已取消" },
+        .{ .phase = .rejected, .status = "已拒绝" },
+        .{ .phase = .succeeded, .status = "已完成" },
+    }) |case| {
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        var expanded = false;
+        cx.root = try Step.mount(cx, scope, .{ .title = "执行命令", .tool_name = "host.run_command", .projection = "{\"command\":\"pwd\"}", .detail = "实际详情", .decision = true, .phase = case.phase, .elapsed_ms = 10, .expanded = &expanded });
+        const expected = try std.fmt.allocPrint(a, "{s} · pwd", .{case.status});
+        defer a.free(expected);
+        try std.testing.expectEqualStrings(expected, find(cx.root.?, "ai.step.projection").?.getText().?.content);
+        const failure = try Step.mount(cx, scope, .{ .title = "执行命令", .tool_name = "host.run_command", .projection = "请求失败 · 未执行 · InvalidArguments", .projection_is_status = true, .detail = "完整错误与参数", .phase = .failed, .elapsed_ms = 0, .show_elapsed = false, .expanded = &expanded });
+        try cx.root.?.appendChild(a, failure);
+        try std.testing.expectEqualStrings("请求失败 · 未执行 · InvalidArguments", find(failure, "ai.step.projection").?.getText().?.content);
+    }
 }
 
 const HeaderSdk = @typeInfo(@typeInfo(@FieldType(ui.Cx, "system_sdk")).optional.child).pointer.child;
@@ -180,7 +232,7 @@ test "tool header projection leaves real result arguments and clipboard content 
     cx.layout();
     _ = cx.render();
     try std.testing.expectEqualStrings("创建会话组", find(state.root, "ai.tool.result.title").?.getText().?.content);
-    try std.testing.expectEqualStrings("已批准 · 部署检查与生产环境", find(state.root, "ai.tool.result.status").?.getText().?.content);
+    try std.testing.expectEqualStrings("结果待核实 · 部署检查与生产环境", find(state.root, "ai.tool.result.status").?.getText().?.content);
     try std.testing.expectEqualStrings(raw, find(state.root, "ai.tool.result.command").?.getText().?.content);
     find(state.root, "ai.tool.result.copy_command").?.behavior.events.on_click.?.invoke();
     // Preserve the existing clipboard formatting, including every real field;
@@ -229,7 +281,7 @@ test "tool header projection keeps the real group reference type through query c
     const view = try View.State.mount(cx, scope, record);
     cx.root = view.root;
     try std.testing.expectEqualStrings("列出组成员", find(view.root, "ai.tool.result.title").?.getText().?.content);
-    try std.testing.expectEqualStrings("会话组 #1", find(view.root, "ai.tool.result.status").?.getText().?.content);
+    try std.testing.expectEqualStrings("成功 · 会话组 #1", find(view.root, "ai.tool.result.status").?.getText().?.content);
 }
 
 test "tool header projection gives real broker approval targets friendly labels without changing the subject hash or copied detail" {
@@ -306,6 +358,112 @@ test "tool result view formatting preserves raw inputs and handles incomplete JS
     const binary = try F.format(a, &.{ 0xff, 0x00 });
     defer a.free(binary);
     try std.testing.expectEqualStrings("base64: /wA=", binary);
+}
+
+test "tool result view observation timeout survives capture and distinguishes permission rejection" {
+    const tools = @import("ai/plugin_tools.zig");
+    for ([_]struct { code: []const u8, label: []const u8 }{
+        .{ .code = "ObservationExpired", .label = "画面观察超时 · 未发送" },
+        .{ .code = "ObservationInvalidated", .label = "画面观察已失效 · 未发送" },
+        .{ .code = "FreshObservationRequired", .label = "需要重新截图 · 未发送" },
+        .{ .code = "HumanInputActive", .label = "人工操作中 · 未发送" },
+        .{ .code = "RemoteInputUnavailable", .label = "远程输入不可用 · 未发送" },
+        .{ .code = "StaleAutomationAuthority", .label = "自动操作授权已失效 · 未发送" },
+        .{ .code = "AutomationBudgetExceeded", .label = "自动操作额度已用尽 · 未发送" },
+        .{ .code = "CoordinateOutOfBounds", .label = "画面坐标超出范围 · 未发送" },
+        .{ .code = "ToolApprovalRejected", .label = "已拒绝" },
+    }) |case| {
+        var store = facts.Store.init(a);
+        defer store.deinit();
+        var run = loop.Loop.init(a, .{ .owner = .{ .session = 101 }, .members = .{} }, 8, .{});
+        const blocks = try a.alloc(tools.ContentBlock, 1);
+        blocks[0] = .{ .structured = try std.json.Stringify.valueAlloc(a, .{ .error_code = case.code, .dispatch = false }, .{}) };
+        const results = try a.alloc(tools.ToolResult, 1);
+        results[0] = .{ .status = .rejected, .blocks = blocks, .receipt = .{ .owner = .{ .session_id = @fromBackingInt(101), .generation = 4 }, .operation_id = 42 } };
+        try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = .{ .session = 101 }, .turn_id = 8, .call_id = "observation-timeout" }, .name = "bmc_uikvm__keyboard", .arguments = "{\"session_ids\":[101]}", .arguments_hash = @splat(1), .dispatched = true, .generic_results = results });
+        _ = try store.capture(&run, &.{});
+        run.deinit();
+        var cloned = try store.cloneTurns(&.{.{ .user = false, .text = @constCast(""), .turn = .{ .id = 8 } }});
+        defer cloned.deinit();
+        store.deinit();
+        store = facts.Store.init(a);
+        const record = cloned.records.items[0];
+        try std.testing.expectEqualStrings(case.code, record.targets[0].result.error_code.?);
+        for ([_]f32{ 572, 332 }) |width| {
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            cx.setViewport(width, 480);
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            const state = try View.State.mount(cx, scope, record);
+            cx.root = state.root;
+            cx.root.?.setStyleInline(a, .{ .width = .{ .px = width } });
+            cx.layout();
+            _ = cx.render();
+            const header = find(state.root, "ai.tool.result.status").?.getText().?.content;
+            try std.testing.expect(std.mem.startsWith(u8, header, case.label));
+            try std.testing.expect(std.mem.startsWith(u8, state.feedback.getText().?.content, case.label));
+            const target = find(state.root, "ai.tool.result.target.101").?;
+            try std.testing.expect(std.mem.indexOf(u8, target.behavior.interaction.a11y.?.label.?, case.label) != null);
+            if (record.targets[0].feedback) |info| {
+                const diagnostic = state.diagnostic.?.getText().?.content;
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, info.message) != null);
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, info.next_step) != null);
+                const row = target.children.items[target.children.items.len - 1];
+                const status = row.children.items[row.children.items.len - 1].globalRect();
+                try std.testing.expect(status.x + status.w <= target.globalRect().x + target.globalRect().w + 0.1);
+            }
+            const summary = find(state.root, "ai.tool.result.status").?.globalRect();
+            const elapsed = find(state.root, "ai.tool.result.elapsed").?.globalRect();
+            try std.testing.expect(summary.w > 0 and summary.x + summary.w <= elapsed.x);
+        }
+    }
+}
+
+test "tool result view KVM receipts distinguish queued sent cancelled and unknown without claiming remote success" {
+    const tools = @import("ai/plugin_tools.zig");
+    for ([_]struct { state: []const u8, status: tools.Status, label: []const u8, remote_effect_unknown: ?bool = null, error_code: ?[]const u8 = null }{
+        .{ .state = "queued", .status = .succeeded, .label = "输入已排队" },
+        .{ .state = "sent", .status = .succeeded, .label = "输入已发送 · 效果待确认" },
+        .{ .state = "cancelled_unsent", .status = .succeeded, .label = "输入已取消 · 未发送" },
+        .{ .state = "partial_unknown", .status = .outcome_unknown, .label = "输入结果待核实" },
+        .{ .state = "sent", .status = .outcome_unknown, .label = "输入结果待核实" },
+        .{ .state = "sent", .status = .outcome_unknown, .remote_effect_unknown = false, .label = "输入结果待核实" },
+        .{ .state = "rejected", .status = .outcome_unknown, .remote_effect_unknown = false, .error_code = "ObservationExpired", .label = "输入结果待核实" },
+    }) |case| {
+        var store = facts.Store.init(a);
+        defer store.deinit();
+        var run = loop.Loop.init(a, .{ .owner = .{ .session = 101 }, .members = .{} }, 8, .{});
+        const blocks = try a.alloc(tools.ContentBlock, 1);
+        blocks[0] = .{ .structured = try std.json.Stringify.valueAlloc(a, .{ .state = case.state, .error_code = case.error_code, .remote_effect_verified = false }, .{}) };
+        const results = try a.alloc(tools.ToolResult, 1);
+        results[0] = .{ .status = case.status, .blocks = blocks, .receipt = .{ .owner = .{ .session_id = @fromBackingInt(101), .generation = 4 }, .operation_id = 42, .remote_effect_unknown = case.remote_effect_unknown orelse (case.status == .outcome_unknown) } };
+        try results[0].validate(results[0].receipt.owner, 42);
+        try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = .{ .session = 101 }, .turn_id = 8, .call_id = "kvm-receipt" }, .name = "bmc_uikvm__operation_ustatus", .arguments = "{\"session_ids\":[101]}", .arguments_hash = @splat(1), .dispatched = true, .generic_results = results });
+        _ = try store.capture(&run, &.{});
+        run.deinit();
+        const record = store.records.items[0];
+        var buffer: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(case.label, record.summary(&buffer));
+        for ([_]f32{ 572, 332 }) |width| {
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            cx.setViewport(width, 480);
+            cx.reduced_motion = true;
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            record.expanded = true;
+            const state = try View.State.mount(cx, scope, record);
+            cx.root = state.root;
+            state.root.setStyleInline(a, .{ .width = .{ .px = width } });
+            cx.layout();
+            _ = cx.render();
+            try std.testing.expect(std.mem.startsWith(u8, find(state.root, "ai.tool.result.status").?.getText().?.content, case.label));
+            try std.testing.expectEqualStrings(case.label, state.feedback.getText().?.content);
+            try std.testing.expect(std.mem.indexOf(u8, state.diagnostic.?.getText().?.content, "下一步：") != null);
+            try std.testing.expect(state.body.globalRect().h <= 150);
+        }
+    }
 }
 
 test "tool result view generic image and structured receipts never invent terminal metadata" {
@@ -447,21 +605,23 @@ test "tool result headers preserve status title projection and elapsed across th
                 const icon = find(state.root, "ai.tool.result.icon").?.globalRect();
                 const projection = find(state.root, "ai.tool.result.status").?.globalRect();
                 const elapsed = find(state.root, "ai.tool.result.elapsed").?.globalRect();
-                try std.testing.expectEqualStrings("执行命令", find(state.root, "ai.tool.result.title").?.getText().?.content);
+                try std.testing.expectEqualStrings("在终端中执行命令", find(state.root, "ai.tool.result.title").?.getText().?.content);
                 try std.testing.expect(icon.x + icon.w <= title.x);
                 try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 1);
                 try std.testing.expect(projection.w > 0 and projection.x >= title.x + title.w);
                 try std.testing.expect(elapsed.x >= projection.x + projection.w and elapsed.x + elapsed.w <= width);
                 try std.testing.expect(state.body.globalRect().h <= 150);
                 try std.testing.expect(state.footer.globalRect().y >= state.body.globalRect().y + state.body.globalRect().h);
-                if (status == .unknown) try std.testing.expectEqual(ui.icons.get("circle-help").?.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
-                if (status == .succeeded) try std.testing.expectEqual(ui.icons.check.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+                try std.testing.expectEqual(ui.icons.terminal.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+                try std.testing.expectEqual(@as(f32, 0), state.status_icon.?.getOpacity());
+                try std.testing.expectEqual(@as(f32, 1), state.disclosure_icon.?.getOpacity());
+                try std.testing.expectEqual(ui.icons.chevron_down.icon_id.?, state.disclosure_icon.?.getIcon().?.icon_id);
             }
         }
     }
 }
 
-test "tool result unknown cleanup takes precedence over a successful process icon" {
+test "tool result unknown cleanup keeps warning color and explicit feedback on its command icon" {
     var target = [_]facts.Target{.{ .result = .{ .session_id = 101, .status = .succeeded, .local_released = false } }};
     var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "cleanup-unknown", .name = "run_command", .arguments = "{}", .command = "true", .arguments_hash = @splat(0), .targets = &target, .dispatched = true };
     defer record.deinit();
@@ -471,7 +631,8 @@ test "tool result unknown cleanup takes precedence over a successful process ico
     defer scope.dispose();
     const state = try View.State.mount(cx, scope, &record);
     cx.root = state.root;
-    try std.testing.expectEqual(ui.icons.get("circle-help").?.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+    try std.testing.expectEqual(ui.icons.get("code").?.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").current().warn, state.status_icon.?.getIcon().?.tint);
     try std.testing.expectEqualStrings("清理待核实", state.feedback.getText().?.content);
 }
 
@@ -490,7 +651,7 @@ test "tool step phases keep icon and title on one header line at narrow width" {
             const scope = try ui.Scope.init(a, null, cx.owner);
             defer scope.dispose();
             var expanded = false;
-            cx.root = try Step.mount(cx, scope, .{ .title = "创建会话组", .projection = "生产环境 · long-target.example.net", .detail = "完整执行详情", .phase = phase, .elapsed_ms = 42, .expanded = &expanded });
+            cx.root = try Step.mount(cx, scope, .{ .title = "创建会话组", .tool_name = "host.create_group", .projection = "生产环境 · long-target.example.net", .detail = "完整执行详情", .phase = phase, .elapsed_ms = 42, .expanded = &expanded });
             cx.root.?.setStyleInline(a, .{ .width = .{ .px = 332 } });
             for (0..4) |_| {
                 cx.layout();
@@ -502,8 +663,60 @@ test "tool step phases keep icon and title on one header line at narrow width" {
             try std.testing.expect(icon.x + icon.w <= title.x);
             try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 1);
             try std.testing.expect(projection.w > 0 and projection.x >= title.x + title.w);
+            const separator = find(cx.root.?, "ai.step.separator").?.globalRect();
+            try std.testing.expectApproxEqAbs(@as(f32, 6), separator.x - title.x - title.w, 0.1);
+            try std.testing.expectApproxEqAbs(@as(f32, 6), projection.x - separator.x - separator.w, 0.1);
             try std.testing.expectEqual(@as(f32, 32), cx.root.?.globalRect().h);
         }
+    }
+}
+
+test "tool step disclosure swaps activity icons on hover and keeps the left arrow while expanded" {
+    const Step = @import("ui/ai_step_view.zig");
+    for ([_]struct { name: ?[]const u8, icon: ui.SvgAsset }{
+        .{ .name = null, .icon = ui.icons.get("brain").? },
+        .{ .name = "host.run_command", .icon = ui.icons.get("code").? },
+        .{ .name = "read_file", .icon = ui.icons.get("file-text").? },
+        .{ .name = "host.run_in_terminal", .icon = ui.icons.terminal },
+        .{ .name = "bmc_ikvm.screenshot", .icon = ui.icons.get("monitor").? },
+    }) |kind| {
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        cx.setViewport(572, 480);
+        cx.reduced_motion = true;
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        var expanded = false;
+        cx.root = try Step.mount(cx, scope, .{ .title = "步骤", .tool_name = kind.name, .projection = "执行摘要", .detail = "完整内容", .phase = .succeeded, .elapsed_ms = 42, .expanded = &expanded });
+        cx.root.?.setStyleInline(a, .{ .width = .{ .px = 572 } });
+        cx.layout();
+        _ = cx.render();
+        const header = find(cx.root.?, "ai.step.header").?;
+        const activity = find(cx.root.?, "ai.step.status").?;
+        const arrow = find(cx.root.?, "ai.step.disclosure").?;
+        const title = find(cx.root.?, "ai.step.title").?.globalRect();
+        try std.testing.expectEqual(kind.icon.icon_id.?, activity.getIcon().?.icon_id);
+        try std.testing.expectEqual(@as(f32, 1), activity.getOpacity());
+        try std.testing.expectEqual(@as(f32, 0), arrow.getOpacity());
+        try std.testing.expectEqual(activity.globalRect(), arrow.globalRect());
+        const rect = header.globalRect();
+        cx.handleMouseMove(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        try std.testing.expectEqual(@as(f32, 0), activity.getOpacity());
+        try std.testing.expectEqual(@as(f32, 1), arrow.getOpacity());
+        try std.testing.expectEqual(ui.icons.chevron_right.icon_id.?, arrow.getIcon().?.icon_id);
+        cx.handleClick(rect.x + 15, rect.y + rect.h / 2);
+        cx.handleMouseMove(571, 479);
+        try std.testing.expect(expanded);
+        try std.testing.expectEqual(@as(f32, 1), arrow.getOpacity());
+        try std.testing.expectEqual(ui.icons.chevron_down.icon_id.?, arrow.getIcon().?.icon_id);
+        try std.testing.expect(header.behavior.interaction.a11y.?.expanded.?);
+        cx.layout();
+        try std.testing.expectEqual(title, find(cx.root.?, "ai.step.title").?.globalRect());
+        cx.handleClick(rect.x + 15, rect.y + rect.h / 2);
+        cx.handleMouseMove(571, 479);
+        try std.testing.expect(!expanded);
+        try std.testing.expectEqual(@as(f32, 1), activity.getOpacity());
+        try std.testing.expectEqual(@as(f32, 0), arrow.getOpacity());
     }
 }
 
@@ -515,7 +728,7 @@ test "tool step waiting approval shows a stable pending label without execution 
     const scope = try ui.Scope.init(a, null, cx.owner);
     defer scope.dispose();
     var expanded = false;
-    cx.root = try Step.mount(cx, scope, .{ .title = "执行命令", .projection = "待确认 · printf state; false", .detail = "等待你确认", .phase = .approval, .elapsed_ms = 28_400, .expanded = &expanded });
+    cx.root = try Step.mount(cx, scope, .{ .title = "执行命令", .tool_name = "host.run_command", .projection = "{\"command\":\"printf state; false\"}", .detail = "等待你确认", .phase = .approval, .elapsed_ms = 28_400, .expanded = &expanded });
     for (0..4) |_| {
         cx.frame_time_ms += 1000;
         cx.layout();
@@ -523,7 +736,7 @@ test "tool step waiting approval shows a stable pending label without execution 
     }
     try std.testing.expect(find(cx.root.?, "ai.step.spinner") == null);
     try std.testing.expectEqualStrings("待确认", find(cx.root.?, "ai.step.elapsed").?.getText().?.content);
-    try std.testing.expectEqual(ui.icons.get("hand").?.icon_id.?, find(cx.root.?, "ai.step.status").?.getIcon().?.icon_id);
+    try std.testing.expectEqual(ui.icons.get("code").?.icon_id.?, find(cx.root.?, "ai.step.status").?.getIcon().?.icon_id);
     try std.testing.expectEqualStrings("待确认 · printf state; false", find(cx.root.?, "ai.step.projection").?.getText().?.content);
 }
 
@@ -533,7 +746,7 @@ test "tool titles cover all registered host discovery lifecycle and execution ac
     for (@import("ai/host_lifecycle.zig").contributions) |item| try std.testing.expect(titles.title(item.definition.id) != null);
     for (@import("ai/host_execution.zig").contributions) |item| try std.testing.expect(titles.title(item.definition.id) != null);
     try std.testing.expectEqualStrings("新建会话", titles.title("host.open_session").?);
-    try std.testing.expectEqualStrings("停止执行", titles.title("host.stop_execution").?);
+    try std.testing.expectEqualStrings("停止命令执行", titles.title("host.stop_execution").?);
 }
 
 test "tool result multiline command remains reachable in the bounded details viewport" {
@@ -575,13 +788,7 @@ test "tool result undispatched cancellation rejection and unknown never show suc
             else => unreachable,
         };
         try std.testing.expectEqualStrings(label, state.feedback.getText().?.content);
-        const icon = switch (@as(loop.Status, status)) {
-            .rejected => ui.icons.get("circle-alert").?,
-            .cancelled => ui.icons.get("square").?,
-            .unknown => ui.icons.get("circle-help").?,
-            else => unreachable,
-        };
-        try std.testing.expectEqual(icon.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+        try std.testing.expectEqual(ui.icons.get("server").?.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
     }
 }
 
@@ -708,18 +915,18 @@ test "execution input Store to view keeps saved execution facts after later rece
             try View.appendForOwner(cx, scope, cx.root.?, &store, .{ .group = 7 });
             settleCard(cx);
             const original = find(cx.root.?, store.records.items[0].testId()).?;
-            try std.testing.expectEqualStrings("最近观测 · 前台已结束 · 观测片段已保存", find(original, "ai.execution.result.summary").?.getText().?.content);
-            try std.testing.expectEqualStrings("前台已结束 · 退出码 0 · 后台任务仍需核实", find(original, "ai.execution.result.process").?.getText().?.content);
+            try std.testing.expectEqualStrings("命令已结束", find(original, "ai.execution.result.summary").?.getText().?.content);
+            try std.testing.expectEqualStrings("退出码 0", find(original, "ai.execution.result.process").?.getText().?.content);
             try std.testing.expectEqualStrings("RECORDED_EXECUTION_END\n", find(original, "ai.execution.result.terminal_output").?.getText().?.content);
-            try std.testing.expectEqualStrings("同一终端观测片段 · 已保存", find(original, "ai.execution.result.output_scope").?.getText().?.content);
+            try std.testing.expectEqualStrings("本次终端输出 · 已保存", find(original, "ai.execution.result.output_scope").?.getText().?.content);
             try std.testing.expectEqualStrings("printf original-command", find(original, "ai.execution.result.command").?.getText().?.content);
             try std.testing.expectEqualStrings(initial, store.records.items[0].host.?.content);
             try std.testing.expectEqualStrings(complete, store.records.items[1].host.?.content);
             try std.testing.expectEqualStrings("INITIAL_OUTPUT", store.records.items[0].execution.?.terminal_output);
             const input_card = find(cx.root.?, store.records.items[2].testId()).?;
             try std.testing.expectEqualStrings("输入结果 · 输入已消费", find(input_card, "ai.execution.result.summary").?.getText().?.content);
-            try std.testing.expectEqualStrings("输入类型 · 宿主安全输入", find(input_card, "ai.execution.result.input_type").?.getText().?.content);
-            try std.testing.expectEqualStrings("输入序号 5 · 等待序号 3", find(input_card, "ai.execution.result.input_sequence").?.getText().?.content);
+            try std.testing.expectEqualStrings("输入类型 · 安全输入", find(input_card, "ai.execution.result.input_type").?.getText().?.content);
+            try std.testing.expect(find(input_card, "ai.execution.result.input_sequence") == null);
             inline for (.{ "process", "terminal_output", "output_label", "copy_output", "copy_command", "stop", "takeover", "view_terminal" }) |suffix| try std.testing.expect(find(input_card, "ai.execution.result." ++ suffix) == null);
             const title = find(input_card, "ai.execution.result.title").?.globalRect();
             const icon = find(input_card, "ai.execution.result.icon").?.globalRect();
@@ -727,8 +934,10 @@ test "execution input Store to view keeps saved execution facts after later rece
             try std.testing.expectEqual(@as(f32, 0), input_card.style.border.width);
             try std.testing.expectEqual(@as(u8, 255), find(input_card, "ai.execution.result.summary").?.getText().?.color.a);
             try expectNoInputSecret(cx.root.?);
+            store.records.items[0].execution_details_expanded = true;
             var clone = try store.cloneTurns(&.{.{ .user = false, .text = @constCast(""), .turn = .{ .id = 42 } }});
             defer clone.deinit();
+            try std.testing.expect(clone.records.items[0].execution_details_expanded);
             try std.testing.expect(clone.executionProjection(clone.records.items[0]).?.intervalRecorded());
             try std.testing.expectEqualStrings("输入已消费", clone.executionProjection(clone.records.items[2]).?.statusLabel());
         }
@@ -742,7 +951,7 @@ test "execution input Store to view preserves queued pending cancelled failed an
     for ([_]struct { stage: ?Stage, kind: terminal.InputKind = .host_secret, status: Status = .succeeded, label: []const u8, failure: bool = false }{
         .{ .stage = .written, .kind = .text, .label = "输入结果 · 输入已写入终端" },
         .{ .stage = .queued, .label = "输入结果 · 输入已排队" },
-        .{ .stage = .awaiting_host_secret, .label = "输入结果 · 等待宿主安全输入" },
+        .{ .stage = .awaiting_host_secret, .label = "输入结果 · 等待安全输入" },
         .{ .stage = .cancelled_unsent, .label = "输入结果 · 输入未提交 · 已取消" },
         .{ .stage = .outcome_unknown, .label = "输入结果 · 输入结果待核实", .failure = true },
         .{ .stage = .consumed, .status = .outcome_unknown, .label = "输入结果 · 输入结果待核实", .failure = true },
@@ -764,7 +973,7 @@ test "execution input Store to view preserves queued pending cancelled failed an
         defer scope.dispose();
         cx.root = try @import("ui/ai_execution_result_view.zig").mount(cx, scope, &store, store.records.items[0], null, null);
         try std.testing.expectEqualStrings(case.label, find(cx.root.?, "ai.execution.result.summary").?.getText().?.content);
-        if (case.kind == .text) try std.testing.expectEqualStrings("输入序号 5 · 普通终端输入", find(cx.root.?, "ai.execution.result.input_sequence").?.getText().?.content);
+        try std.testing.expect(find(cx.root.?, "ai.execution.result.input_sequence") == null);
         try std.testing.expectEqual(case.failure, find(cx.root.?, "ai.execution.result.failure") != null);
         if (case.failure) try std.testing.expectEqualStrings("InputAcknowledgementUnknown", store.records.items[0].execution.?.failure.?);
         try std.testing.expect(find(cx.root.?, "ai.execution.result.output_label") == null);
@@ -783,6 +992,7 @@ test "execution result native card preserves real target recording output and re
         theme.select(name);
         for ([_]f32{ 572, 332 }) |width| {
             var record = executionFixture(.running, long_output);
+            record.expanded = false;
             defer record.deinit();
             var store = facts.Store.init(a);
             defer store.records.deinit(a);
@@ -791,6 +1001,7 @@ test "execution result native card preserves real target recording output and re
             const cx = try ui.Cx.init(a, std.testing.io);
             defer cx.deinit();
             cx.setTheme(theme.widgetTheme(name));
+            cx.reduced_motion = true;
             cx.setViewport(width, 480);
             const scope = try ui.Scope.init(a, null, cx.owner);
             defer scope.dispose();
@@ -801,15 +1012,30 @@ test "execution result native card preserves real target recording output and re
                 cx.layout();
                 _ = cx.render();
             }
+            try std.testing.expect(!record.expanded);
+            try std.testing.expectEqual(@as(f32, 32), root.globalRect().h);
+            try std.testing.expect(find(root, "ai.execution.result.elapsed").?.style.display == .none);
+            find(root, "ai.execution.result.header").?.behavior.events.on_click.?.invoke();
+            settleCard(cx);
+            try std.testing.expect(record.expanded);
+            try std.testing.expect(root.globalRect().h > 32);
+            try std.testing.expect(find(root, "ai.execution.result.elapsed").?.style.display == .flex);
             const title = find(root, "ai.execution.result.title").?.globalRect();
             const icon = find(root, "ai.execution.result.icon").?.globalRect();
+            const separator = find(root, "ai.execution.result.separator").?.globalRect();
+            const summary = find(root, "ai.execution.result.summary").?.globalRect();
+            const elapsed = find(root, "ai.execution.result.elapsed").?;
+            try std.testing.expectEqual(ui.TextAlign.end, elapsed.getText().?.text_align);
+            try std.testing.expectApproxEqAbs(@as(f32, 6), separator.x - title.x - title.w, 0.1);
+            try std.testing.expectApproxEqAbs(@as(f32, 6), summary.x - separator.x - separator.w, 0.1);
+            try std.testing.expectApproxEqAbs(width - 12, elapsed.globalRect().x + elapsed.globalRect().w, 0.1);
             const body = find(root, "ai.execution.result.details").?.globalRect();
             const footer = find(root, "ai.execution.result.footer").?.globalRect();
             try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 0.1);
             try std.testing.expect(icon.x + icon.w < title.x);
             try std.testing.expectEqual(@as(f32, 150), body.h);
             try std.testing.expect(footer.y >= body.y + body.h and footer.y + footer.h <= 480);
-            try std.testing.expectEqualStrings("最近观测 · 运行中", find(root, "ai.execution.result.summary").?.getText().?.content);
+            try std.testing.expectEqualStrings("运行中", find(root, "ai.execution.result.summary").?.getText().?.content);
             try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.target").?.getText().?.content, record.execution.?.target_label) != null);
             try std.testing.expectEqualStrings(long_output, find(root, "ai.execution.result.terminal_output").?.getText().?.content);
             try std.testing.expect(find(root, "ai.execution.result.process") == null);
@@ -820,13 +1046,25 @@ test "execution result native card preserves real target recording output and re
                 try std.testing.expect(rect.x >= footer.x and rect.x + rect.w <= footer.x + footer.w + 0.1);
                 try std.testing.expect(label.x >= rect.x and label.x + label.w <= rect.x + rect.w + 0.1);
             }
-            const recording_before = find(root, "ai.execution.result.recording_id").?.globalRect();
+            const output_before = find(root, "ai.execution.result.terminal_output").?.globalRect();
             cx.handleScroll(.{ .x = body.x + body.w / 2, .y = body.y + body.h / 2, .dy = -100000, .dx = 0 });
             cx.layout();
-            const recording = find(root, "ai.execution.result.recording_id").?.globalRect();
-            try std.testing.expect(recording.y < recording_before.y);
-            try std.testing.expect(recording.y >= body.y and recording.y + recording.h <= body.y + body.h + 0.1);
+            try std.testing.expect(find(root, "ai.execution.result.terminal_output").?.globalRect().y < output_before.y);
             try std.testing.expectEqual(footer, find(root, "ai.execution.result.footer").?.globalRect());
+            const collection = find(root, "ai.execution.result.collection_details").?;
+            try std.testing.expect(collection.style.display == .none);
+            find(root, "ai.execution.result.details_toggle").?.behavior.events.on_click.?.invoke();
+            cx.layout();
+            try std.testing.expect(record.execution_details_expanded);
+            try std.testing.expect(collection.style.display == .flex);
+            const metadata = collection.globalRect();
+            cx.handleScroll(.{ .x = metadata.x + 10, .y = metadata.y + metadata.h / 2, .dy = -100000, .dx = 0 });
+            cx.layout();
+            const recording = find(root, "ai.execution.result.recording_id").?.globalRect();
+            try std.testing.expect(recording.y >= metadata.y and recording.y + recording.h <= metadata.y + metadata.h + 0.1);
+            find(root, "ai.execution.result.details_toggle").?.behavior.events.on_click.?.invoke();
+            cx.layout();
+            try std.testing.expect(!record.execution_details_expanded);
             find(root, "ai.execution.result.view_terminal").?.behavior.events.on_click.?.invoke();
             try std.testing.expectEqual(@as(usize, 1), recorder.calls);
             try std.testing.expect(recorder.target.?.session.eql(record.execution.?.target.?));
@@ -920,7 +1158,7 @@ test "execution result preflight refusal shows user readable reason without raw 
         cx.layout();
         _ = cx.render();
     }
-    try std.testing.expectEqualStrings("最近观测 · 未执行 · 已拒绝", find(cx.root.?, "ai.execution.result.summary").?.getText().?.content);
+    try std.testing.expectEqualStrings("未执行 · 已拒绝", find(cx.root.?, "ai.execution.result.summary").?.getText().?.content);
     try std.testing.expectEqualStrings("当前终端的执行能力不可用。", find(cx.root.?, "ai.execution.result.failure").?.getText().?.content);
     try std.testing.expect(find(cx.root.?, "ai.execution.result.target").?.globalRect().w > 0);
     try std.testing.expect(find(cx.root.?, "ai.execution.result.execution_id") == null);
@@ -972,19 +1210,21 @@ test "execution interval native result separates saved observation foreground fa
             cx.layout();
             _ = cx.render();
         }
-        try std.testing.expectEqualStrings("同一终端观测片段", find(root, "ai.execution.result.output_label").?.getText().?.content);
+        try std.testing.expect(find(root, "ai.execution.result.collection_details").?.style.display == .none);
+        try std.testing.expectEqual(case.attribution == .concurrent_observed, find(root, "ai.execution.result.uncertainty") != null);
+        try std.testing.expectEqualStrings("终端输出", find(root, "ai.execution.result.output_label").?.getText().?.content);
         try std.testing.expectEqualStrings(projection.attributionLabel(), find(root, "ai.execution.result.output_attribution").?.getText().?.content);
-        try std.testing.expectEqualStrings(if (case.saved) "同一终端观测片段 · 已保存" else if (case.failed) "同一终端观测片段 · 保存失败" else "同一终端观测片段 · 保存待确认", find(root, "ai.execution.result.output_scope").?.getText().?.content);
-        try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.output_limit").?.getText().?.content, "后台输出可能在前台结束后继续") != null);
+        try std.testing.expectEqualStrings(if (case.saved) "本次终端输出 · 已保存" else if (case.failed) "本次终端输出 · 保存失败" else "本次终端输出 · 保存待确认", find(root, "ai.execution.result.output_scope").?.getText().?.content);
+        try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.output_limit").?.getText().?.content, "后台任务可能继续输出") != null);
         try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.summary").?.getText().?.content, "封存") == null);
         if (case.exit) |code| {
-            const expected = try std.fmt.allocPrint(a, "{s} · 退出码 {d}", .{ if (case.source == .shell_reported) "Shell 报告" else "前台已结束", code });
+            const expected = try std.fmt.allocPrint(a, "退出码 {d}", .{code});
             defer a.free(expected);
             try std.testing.expectEqualStrings(expected, find(root, "ai.execution.result.process").?.getText().?.content);
             if (code != 0 and !case.failed) try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.summary").?.getText().?.content, "执行失败") != null);
         } else {
             try std.testing.expect(find(root, "ai.execution.result.process") == null);
-            try std.testing.expectEqualStrings("最近观测 · 用户已接管 · 命令继续运行", find(root, "ai.execution.result.summary").?.getText().?.content);
+            try std.testing.expectEqualStrings("用户已接管 · 命令继续运行", find(root, "ai.execution.result.summary").?.getText().?.content);
         }
         try std.testing.expect(find(root, "ai.execution.result.stop") == null and find(root, "ai.execution.result.takeover") == null);
         find(root, "ai.execution.result.view_terminal").?.behavior.events.on_click.?.invoke();
@@ -1117,4 +1357,46 @@ test "tool step undispatched request does not invent an execution duration" {
     cx.layout();
     try std.testing.expect(find(cx.root.?, "ai.step.elapsed").?.style.display == .none);
     try std.testing.expectEqualStrings("工具请求", find(cx.root.?, "ai.step.title").?.getText().?.content);
+}
+
+test "tool action live and result cards share parameter labels while identifiers stay in disclosure" {
+    const Step = @import("ui/ai_step_view.zig");
+    const raw = "{\"session_ids\":[101],\"observation_id\":1,\"action\":\"click\",\"count\":2,\"x\":20,\"y\":30}";
+    var encoded: [64]u8 = undefined;
+    const name = try @import("ai/plugin_tools.zig").encodeName(&encoded, "bmc_ikvm.pointer");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 700);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .{ .px = 520 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    var expanded = false;
+    const live = try Step.mount(cx, scope, .{ .title = "工具调用", .tool_name = name, .tool_arguments = raw, .projection = "请求失败 · 未执行", .projection_is_status = true, .detail = "完整调用详情", .phase = .failed, .elapsed_ms = 0, .expanded = &expanded });
+    try root.appendChild(a, live);
+    var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "action-card", .name = name, .arguments = raw, .command = raw, .arguments_hash = @splat(7), .targets = &.{}, .dispatched = false };
+    defer record.deinit();
+    const result = try View.State.mount(cx, scope, &record);
+    try root.appendChild(a, result.root);
+    for (0..4) |_| {
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectEqualStrings("双击远程画面", find(live, "ai.step.title").?.getText().?.content);
+    try std.testing.expectEqualStrings("双击远程画面", find(result.root, "ai.tool.result.title").?.getText().?.content);
+    try std.testing.expectEqualStrings("工具：bmc_ikvm.pointer", find(live, "ai.step.tool_id").?.getText().?.content);
+    try std.testing.expectEqualStrings("工具：bmc_ikvm.pointer", find(result.root, "ai.tool.result.tool").?.getText().?.content);
+    try std.testing.expectEqual(@as(f32, 32), live.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 32), result.root.globalRect().h);
+    try std.testing.expectEqualStrings(raw, find(result.root, "ai.tool.result.command").?.getText().?.content);
+    try std.testing.expectEqualStrings(raw, record.arguments);
+    find(live, "ai.step.header").?.behavior.events.on_click.?.invoke();
+    find(result.root, "ai.tool.result.header").?.behavior.events.on_click.?.invoke();
+    for (0..16) |_| {
+        cx.frame_time_ms += 20;
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expect(live.globalRect().h > 32);
+    try std.testing.expect(result.root.globalRect().h > 32);
 }

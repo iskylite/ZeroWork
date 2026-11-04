@@ -265,18 +265,29 @@ fn nativeSendStreamUnbounded(raw: *anyopaque, plan: http.RequestPlan, body: []co
         headers[header_count] = .{ .name = "anthropic-version", .value = "2023-06-01" };
         header_count += 1;
     }
-    var http_request = try client.request(plan.method, uri, .{ .extra_headers = headers[0..header_count] });
+    var http_request = try client.request(plan.method, uri, .{ .extra_headers = headers[0..header_count], .redirect_behavior = .unhandled });
     defer http_request.deinit();
     if (plan.method == .GET) try http_request.sendBodiless() else try http_request.sendBodyComplete(@constCast(body));
     var response = try http_request.receiveHead(&.{});
     const status: u16 = @backingInt(response.head.status);
     @import("tool_trace.zig").emit(.{ .event = "provider_http_response", .status = status });
+    // Never let the HTTP client turn an authenticated POST into a GET or
+    // forward its credentials to a redirected endpoint.
+    if (status >= 300 and status < 400) {
+        context.diagnostic.captureRedirect(status, response.head.location, plan.api_key);
+        if (http_request.connection) |connection| connection.closing = true;
+        return error.EndpointRedirect;
+    }
     var retry_after_ms: ?u32 = null;
+    var html_content_type = false;
     var header_iterator = response.head.iterateHeaders();
     while (header_iterator.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "retry-after")) {
             retry_after_ms = http.parseRetryAfter(header.value);
-            break;
+        }
+        if (std.ascii.eqlIgnoreCase(header.name, "content-type")) {
+            const media_type = std.mem.trim(u8, header.value[0 .. std.mem.indexOfScalar(u8, header.value, ';') orelse header.value.len], " \t");
+            html_content_type = std.ascii.eqlIgnoreCase(media_type, "text/html") or std.ascii.eqlIgnoreCase(media_type, "application/xhtml+xml");
         }
     }
     // A rate-limit response is already fully classified from its head. Do
@@ -299,8 +310,14 @@ fn nativeSendStreamUnbounded(raw: *anyopaque, plan: http.RequestPlan, body: []co
         if (http_request.connection) |connection| connection.closing = true;
         return .{ .status = status, .retry_after_ms = retry_after_ms };
     }
+    if (html_content_type) {
+        context.diagnostic.captureMessage(status, "", plan.api_key);
+        if (http_request.connection) |connection| connection.closing = true;
+        return error.HtmlResponse;
+    }
     const reader = response.reader(&.{});
     var total: usize = 0;
+    var html: http.HtmlGuard = .{};
     var chunk: [4096]u8 = undefined;
     while (true) {
         if (plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
@@ -314,12 +331,81 @@ fn nativeSendStreamUnbounded(raw: *anyopaque, plan: http.RequestPlan, body: []co
         const bytes = writer.buffered();
         if (bytes.len > max_response_bytes - total) return error.ResponseTooLarge;
         total += bytes.len;
+        if (html.feed(bytes)) {
+            context.diagnostic.captureMessage(status, "", plan.api_key);
+            if (http_request.connection) |connection| connection.closing = true;
+            return error.HtmlResponse;
+        }
         if (bytes.len != 0) try sink(sink_ctx, bytes);
     }
     return .{ .status = status, .retry_after_ms = retry_after_ms };
 }
 
 pub const Error = error{ ResponseTooLarge, RequestRejected, ProviderFailure, Cancelled, Timeout };
+
+test "native HTTP rejects gateway redirects and HTML for model lists and chat streams" {
+    const Fixture = struct {
+        status: u16,
+        content_type: []const u8,
+        payload: []const u8,
+        io: std.Io,
+        server: std.Io.net.Server,
+        method: std.http.Method,
+        fn serve(self: *@This()) !void {
+            const connection = try self.server.accept(self.io);
+            defer connection.close(self.io);
+            var buffer: [8192]u8 = undefined;
+            var reader = connection.reader(self.io, &buffer);
+            const request_line = try reader.interface.takeDelimiterInclusive('\n');
+            try std.testing.expect(std.mem.startsWith(u8, request_line, if (self.method == .GET) "GET /api/gw/v1/models " else "POST /api/gw/v1/chat/completions "));
+            var length: usize = 0;
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (std.ascii.startsWithIgnoreCase(line, "content-length:")) length = try std.fmt.parseInt(usize, std.mem.trim(u8, line[15..], " \r\n"), 10);
+                if (std.mem.eql(u8, line, "\r\n")) break;
+            }
+            try reader.interface.discardAll(length);
+            var writer = connection.writer(self.io, &.{});
+            // A large declared redirect body ensures rejection uses the head
+            // immediately instead of waiting for or replaying the request.
+            try writer.interface.print("HTTP/1.1 {d} Fixture\r\nLocation: /management/?key=fixture-key\r\n{s}Content-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ self.status, self.content_type, if (self.status >= 300) @as(usize, 9999) else self.payload.len, self.payload });
+            try writer.interface.flush();
+        }
+        fn receive(_: *anyopaque, _: []const u8) !void {}
+    };
+    for ([_]std.http.Method{ .GET, .POST }) |method| {
+        for ([_]struct { status: u16 = 200, content_type: []const u8 = "", payload: []const u8 = "", failure: anyerror }{
+            .{ .status = 301, .failure = error.EndpointRedirect },
+            .{ .status = 302, .failure = error.EndpointRedirect },
+            .{ .status = 303, .failure = error.EndpointRedirect },
+            .{ .status = 307, .failure = error.EndpointRedirect },
+            .{ .status = 308, .failure = error.EndpointRedirect },
+            .{ .content_type = "Content-Type: text/html; charset=utf-8\r\n", .payload = "management", .failure = error.HtmlResponse },
+            .{ .content_type = "Content-Type: application/xhtml+xml\r\n", .payload = "management", .failure = error.HtmlResponse },
+            .{ .payload = " \r\n<!DOCTYPE html><html>management</html>", .failure = error.HtmlResponse },
+        }) |item| {
+            const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+            var fixture: Fixture = .{ .status = item.status, .content_type = item.content_type, .payload = item.payload, .io = std.testing.io, .server = try address.listen(std.testing.io, .{}), .method = method };
+            defer fixture.server.deinit(std.testing.io);
+            var serving = try std.Io.concurrent(std.testing.io, Fixture.serve, .{&fixture});
+            defer _ = serving.cancel(std.testing.io) catch {};
+            var endpoint_buffer: [128]u8 = undefined;
+            const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}/api/gw/v1/{s}", .{ fixture.server.socket.address.getPort(), if (method == .GET) "models" else "chat/completions" });
+            var context: NativeContext = .{ .io = std.testing.io };
+            const t = native(&context);
+            const plan: http.RequestPlan = .{ .method = method, .endpoint = endpoint, .auth_style = .bearer, .api_key = "fixture-key", .timeout_ms = 3000 };
+            if (method == .GET) {
+                try std.testing.expectError(item.failure, t.send(t.ctx, plan, "", std.testing.allocator));
+            } else {
+                try std.testing.expectError(item.failure, t.send_stream.?(t.ctx, plan, "{}", std.testing.allocator, Fixture.receive, undefined));
+            }
+            try serving.await(std.testing.io);
+            try std.testing.expectEqual(item.status, context.diagnostic.status);
+            try std.testing.expect(std.mem.indexOf(u8, context.diagnostic.message[0..context.diagnostic.len], "fixture-key") == null);
+            if (item.failure == error.EndpointRedirect) try std.testing.expectEqualStrings("/management/", context.diagnostic.message[0..context.diagnostic.len]);
+        }
+    }
+}
 
 test "native HTTP authentication requires an explicit key before opening a connection" {
     var context: NativeContext = .{ .io = std.testing.io };
@@ -354,6 +440,8 @@ pub fn request(allocator: std.mem.Allocator, transport: Transport, config: provi
         return error.RequestRejected;
     }
     if (classification.kind == .provider_error or classification.kind == .malformed) return error.ProviderFailure;
+    var html: http.HtmlGuard = .{};
+    if (html.feed(response.body)) return error.HtmlResponse;
     return response;
 }
 
@@ -389,11 +477,13 @@ pub fn requestStream(allocator: std.mem.Allocator, transport: Transport, config:
         ctx: *anyopaque,
         cancel: ?*provider.CancelToken,
         total: usize = 0,
+        html: http.HtmlGuard = .{},
         fn receive(raw: *anyopaque, bytes: []const u8) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             if (self.cancel) |token| if (token.isCancelled()) return error.Cancelled;
             if (bytes.len > max_response_bytes - self.total) return error.ResponseTooLarge;
             self.total += bytes.len;
+            if (self.html.feed(bytes)) return error.HtmlResponse;
             try self.sink(self.ctx, bytes);
             if (self.cancel) |token| if (token.isCancelled()) return error.Cancelled;
         }
@@ -437,6 +527,94 @@ test "injected provider transport classifies successful response" {
 test "injected provider transport rejects retryable status" {
     var mock: Mock = .{ .status = 429, .body = "retry" };
     try std.testing.expectError(error.RequestRejected, request(std.testing.allocator, .{ .ctx = &mock, .send = Mock.send }, provider_config.defaults(.openai_compat), .{ .model = "m", .effort = .low, .system = "", .messages = &.{} }));
+}
+
+test "native protocol base URLs resolve buffered chat streaming chat and model lists consistently" {
+    const Fixture = struct {
+        io: std.Io,
+        server: std.Io.net.Server,
+        kind: registry.Kind,
+        fn serve(self: *@This()) !void {
+            for (0..3) |index| {
+                const connection = try self.server.accept(self.io);
+                defer connection.close(self.io);
+                var buffer: [8192]u8 = undefined;
+                var reader = connection.reader(self.io, &buffer);
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                const path: []const u8 = if (index == 2) switch (self.kind) {
+                    .openai_compat => "/tenant/proxy/models?route=blue",
+                    .anthropic => "/tenant/proxy/v1/models?route=blue",
+                    .ollama => "/tenant/proxy/api/tags?route=blue",
+                } else switch (self.kind) {
+                    .openai_compat => "/tenant/proxy/chat/completions?route=blue",
+                    .anthropic => "/tenant/proxy/v1/messages?route=blue",
+                    .ollama => "/tenant/proxy/api/chat?route=blue",
+                };
+                var expected: [256]u8 = undefined;
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s} {s} HTTP/1.1\r\n", .{ if (index == 2) "GET" else "POST", path }), line);
+                var length: usize = 0;
+                var authenticated = false;
+                while (true) {
+                    const header = try reader.interface.takeDelimiterInclusive('\n');
+                    if (std.ascii.startsWithIgnoreCase(header, "content-length:")) length = try std.fmt.parseInt(usize, std.mem.trim(u8, header[15..], " \r\n"), 10);
+                    if (std.mem.eql(u8, header, if (self.kind == .anthropic) "x-api-key: fixture-key\r\n" else "authorization: Bearer fixture-key\r\n")) authenticated = true;
+                    if (std.mem.eql(u8, header, "\r\n")) break;
+                }
+                try std.testing.expect(authenticated);
+                try std.testing.expect(if (index == 2) length == 0 else length > 0);
+                try reader.interface.discardAll(length);
+                const payload = if (index != 2) "fixture reply" else if (self.kind == .ollama) "{\"models\":[{\"name\":\"fixture\"}]}" else "{\"data\":[{\"id\":\"fixture\"}]}";
+                var writer = connection.writer(self.io, &.{});
+                try writer.interface.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ payload.len, payload });
+                try writer.interface.flush();
+            }
+        }
+    };
+    const Capture = struct {
+        text: std.ArrayList(u8) = .empty,
+        fn receive(raw: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try self.text.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+    const a = std.testing.allocator;
+    for (std.enums.values(registry.Kind)) |kind| {
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        var fixture: Fixture = .{ .io = std.testing.io, .server = try address.listen(std.testing.io, .{}), .kind = kind };
+        defer fixture.server.deinit(std.testing.io);
+        var serving = try std.Io.concurrent(std.testing.io, Fixture.serve, .{&fixture});
+        defer _ = serving.cancel(std.testing.io) catch {};
+        var endpoint_buffer: [128]u8 = undefined;
+        var config = provider_config.defaults(kind);
+        config.endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}/tenant/proxy/?route=blue", .{fixture.server.socket.address.getPort()});
+        config.auth = if (kind == .anthropic) .{ .anthropic_memory = "fixture-key" } else .{ .bearer_memory = "fixture-key" };
+        var context: NativeContext = .{ .io = std.testing.io };
+        const t = native(&context);
+        const chat: provider.ChatRequest = .{ .model = "fixture", .system = "", .messages = &.{.{ .content = "hello" }}, .timeout_ms = 3000 };
+        var response = try request(a, t, config, chat);
+        defer response.deinit(a);
+        try std.testing.expectEqualStrings("fixture reply", response.body);
+        var capture: Capture = .{};
+        defer capture.text.deinit(a);
+        const streamed = try requestStream(a, t, config, chat, Capture.receive, &capture);
+        try std.testing.expectEqual(@as(u16, 200), streamed.status);
+        try std.testing.expectEqualStrings("fixture reply", capture.text.items);
+        const catalog = @import("model_catalog.zig");
+        const models_url = try catalog.endpoint(a, config.endpoint, kind);
+        defer a.free(models_url);
+        var plan = try http.plan(config);
+        plan.method = .GET;
+        plan.endpoint = models_url;
+        plan.accept = "application/json";
+        plan.timeout_ms = 3000;
+        var listed = try t.send(t.ctx, plan, "", a);
+        defer listed.deinit(a);
+        var models = try catalog.Catalog.parse(a, listed.body, if (kind == .ollama) .ollama else .endpoint);
+        defer models.deinit();
+        try std.testing.expectEqual(@as(usize, 1), models.entries.len);
+        try std.testing.expectEqualStrings("fixture", models.entries[0].id);
+        try serving.await(std.testing.io);
+    }
 }
 
 test "retry hint survives rejected response and resets before next attempt" {
@@ -563,7 +741,7 @@ test "native loopback 429 stalled error body resumes a real HTTP request" {
     try std.testing.expectEqualStrings("recovered", manager.cards.cards.items[0].text);
 }
 
-test "native HTTP stream emits text before EOF and retains fragmented UTF8 and usage" {
+test "native HTTP gateway stream resolves its base URL and retains incremental UTF8 and usage" {
     const Fixture = struct {
         io: std.Io,
         server: std.Io.net.Server,
@@ -601,6 +779,8 @@ test "native HTTP stream emits text before EOF and retains fragmented UTF8 and u
             defer connection.close(self.io);
             var buffer: [8192]u8 = undefined;
             var reader = connection.reader(self.io, &buffer);
+            const request_line = try reader.interface.takeDelimiterInclusive('\n');
+            try std.testing.expectEqualStrings("POST /api/gw/chat/completions HTTP/1.1\r\n", request_line);
             var content_length: usize = 0;
             while (true) {
                 const line = try reader.interface.takeDelimiterInclusive('\n');
@@ -639,7 +819,7 @@ test "native HTTP stream emits text before EOF and retains fragmented UTF8 and u
     // Keep the configured wire protocol identical to the stream decoder.
     var config = provider_config.defaults(.openai_compat);
     config.auth = .{ .bearer_memory = "fixture-only-key" };
-    config.endpoint = try std.fmt.bufPrint(&endpoint_buf, "http://127.0.0.1:{d}/v1/chat/completions", .{fixture.server.socket.address.getPort()});
+    config.endpoint = try std.fmt.bufPrint(&endpoint_buf, "http://127.0.0.1:{d}/api/gw", .{fixture.server.socket.address.getPort()});
     var context: NativeContext = .{ .io = std.testing.io };
     var client = @import("provider_client.zig").Client.native(std.testing.allocator, &context, .openai_compat);
     const stats = (try client.chatWithStats(config, .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 3000 }, Fixture.receive, &fixture)).?;

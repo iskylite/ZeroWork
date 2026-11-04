@@ -31,11 +31,13 @@ for(const [role,p0] of Object.entries(bases)){
 let checks=0;
 for(const palette of Object.values(presets.themes)){
  const values=new Map(),events={};
- const surface=parent=>{const paint=new Map();return {isConnected:true,parentElement:parent,dataset:{},style:{getPropertyValue:k=>paint.get(k)||'',setProperty:(k,v)=>paint.set(k,v)},closest(){return this;}};};
- const shell=surface(null),menu=surface(null),hint=surface(menu),surfaces=[shell,menu,hint];
+ const surface=(parent,hostedSettings=false,card=false)=>{const paint=new Map();return {isConnected:true,parentElement:parent,dataset:{},style:{getPropertyValue:k=>paint.get(k)||'',setProperty:(k,v)=>paint.set(k,v)},matches(selector){return hostedSettings&&selector==='.settings-window'||card&&selector.includes('.host-group');},closest(){return this;}};};
+ const shell=surface(null),menu=surface(null),hint=surface(menu),surfaces=[shell,menu,hint],settings=surface(null,true),settingsMenu=surface(settings),settingsTip=surface(settingsMenu),group=surface(null,false,true),groupTip=surface(group),allSurfaces=[...surfaces,settings,settingsMenu,settingsTip,group,groupTip];
+ const notification=surface(null),notificationCenter=surface(menu);
+ for(const node of [notification,notificationCenter]){const matches=node.matches;node.matches=selector=>selector.includes('.zw-notification-center')||matches(selector);allSurfaces.push(node);}
  const root={classList:{add(){}}};
  const body={style:{setProperty:(k,v)=>values.set(k,String(v))},dataset:{}};
- const document={body,documentElement:{dataset:{},style:{}},currentScript:null,querySelector:s=>s.startsWith('#desktop,')?root:null,querySelectorAll:s=>s.startsWith('.popover,')?surfaces:[],addEventListener:(k,v)=>events[k]=v};
+ const document={body,documentElement:{dataset:{},style:{}},currentScript:null,querySelector:s=>s.startsWith('#desktop,')?root:null,querySelectorAll:s=>s.startsWith('.popover,')?allSurfaces:[],addEventListener:(k,v)=>events[k]=v};
  const window={addEventListener(){}};
  const context={document,window,parent:window,location:{href:'http://fixture.test/?embed',search:'?embed',origin:'http://fixture.test'},URL,URLSearchParams,localStorage:{getItem:()=>null},MutationObserver:class{observe(){}},getComputedStyle:()=>({colorScheme:'dark',getPropertyValue:k=>palette[k]||''})};
  vm.runInNewContext(source,context);
@@ -47,16 +49,29 @@ for(const palette of Object.values(presets.themes)){
    const m=limits[role],expected=Math.round(255*(1-Math.min(m,p0+spans[role]*t/100)));
    assert.equal(values.get('--'+role+'-alpha'),(100*expected/255).toFixed(4)+'%');
    if(t===0)assert.equal(palette['--'+role].slice(-2),expected.toString(16).padStart(2,'0'));
-   if(['surface-1','surface-2','well','overlay'].includes(role))alpha.push(expected);
+   if(['surface-2','well','overlay'].includes(role))alpha.push(expected);
    checks++;
   }
   assert(alpha.every((v,i)=>i===0||v>alpha[i-1]));
+  assert.equal(group.dataset.materialLevel,'1','host cards and independent assistant surfaces share L1');
+  assert.equal(group.dataset.materialKind,'card');
+  assert.equal(groupTip.dataset.materialLevel,'2','host-card tooltip belongs above its actual card');
+  assert.equal(settings.dataset.materialLevel,'1');
+  assert.equal(settings.style.getPropertyValue('--layer-background'),'transparent','embedded settings keeps its semantic boundary without a second fill');
+  assert.equal(settingsMenu.dataset.materialLevel,'2');
+  assert.equal(settingsTip.dataset.materialLevel,'3');
+  for(const node of [notification,notificationCenter]){
+   assert.equal(node.dataset.materialLevel,'4','global notifications keep the highest material tier regardless of owner');
+   const alpha=Math.round(255*(t===0?1:0.5));
+   assert(node.style.getPropertyValue('--layer-background').includes((100*alpha/255).toFixed(4)+'%'));
+  }
   assert.equal(values.get('--material-blur'),b+'px');
   assert.equal(values.get('--overlay-blur'),Math.max(12,b)+'px');
-  assert(['#fff','#101014'].includes(values.get('--bubble-fg')));
+  assert(['#ffffff','#000000'].includes(values.get('--bubble-fg')));
   for(const [index,node] of surfaces.entries()){
-   const level=index+1,definition=presets.materialProjection.floatingLevels[level===3?'3+':String(level)];
-   const alpha=Math.round(255*(1-(definition.baseTransparency+definition.sliderTransparencySpan*t/100)));
+   const level=index+1,definition=presets.materialProjection.floatingLevels[String(level)];
+   const q=definition.sliderTransparencySpan,parentQ=(6-level)/5;
+   const alpha=Math.round(255*(t===0?1:1-q/parentQ));
    assert.equal(node.dataset.materialLevel,String(level));
    assert(node.style.getPropertyValue('--layer-background').includes((100*alpha/255).toFixed(4)+'%'),`L${level} background`);
   }

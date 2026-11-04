@@ -17,6 +17,7 @@ pub const Feedback = struct {
 /// Local admission failures must not be presented as a connection/stream loss.
 pub fn budgetFailureMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.ContextCompactionFailed => "上下文压缩失败，原始上下文、输入和附件已保留；已停止自动重试，可手动重试压缩或更换模型",
         error.UnknownImageBudget, error.InvalidImageTokenReservation => "图片预算配置无效，已保留答复和工具结果，请检查模型的图片预算设置",
         error.ToolContextBudget, error.ContextBudgetExceeded => "上下文已超过当前模型窗口（含图片的保守预留，非实际 Token 用量），已保留答复和工具结果，请压缩上下文或新建会话",
         error.ToolTranscriptLimit => "对话上下文已达保留上限，已完成工具不会重放，请新建会话继续",

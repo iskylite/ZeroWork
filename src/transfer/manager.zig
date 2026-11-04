@@ -62,6 +62,8 @@ pub const Verification = struct {
 };
 
 /// Engine progress is cumulative. `done_bytes` must never decrease or exceed `total_bytes`.
+pub const SourceReadProgress = struct { done_bytes: u64, total_bytes: u64, speed_bps: u64 = 0 };
+
 pub const EngineProgress = struct {
     job: EngineJobId,
     done_bytes: u64,
@@ -75,6 +77,7 @@ pub const EngineProgress = struct {
     skipped_files: u32 = 0,
     skipped_bytes: u64 = 0,
     conflict_waiting: bool = false,
+    source_read: ?SourceReadProgress = null,
 };
 
 pub const TransferEngine = struct {
@@ -118,6 +121,7 @@ pub const Progress = struct {
     skipped_files: u32 = 0,
     skipped_bytes: u64 = 0,
     conflict_waiting: bool = false,
+    source_read: ?SourceReadProgress = null,
 };
 
 pub const RetryPolicy = struct {
@@ -258,6 +262,7 @@ const Job = struct {
     skipped_files: u32 = 0,
     skipped_bytes: u64 = 0,
     conflict_waiting: bool = false,
+    source_read: ?SourceReadProgress = null,
     protocol_fault: bool = false,
     resume_pending: bool = false,
     retained_owner: ?identity.TransferOwner = null,
@@ -803,6 +808,7 @@ pub const Manager = struct {
         // A paused receipt already queued before a cancel upgrade cannot
         // acknowledge the later cancellation or its temporary-file policy.
         const cancelled_after_pause = job.state == .cancelling and event.state == .paused;
+        job.source_read = event.source_read;
         job.verification = event.verification;
         job.skipped_files = event.skipped_files;
         job.skipped_bytes = event.skipped_bytes;
@@ -902,5 +908,6 @@ fn snapshot(job: Job) Progress {
         .skipped_files = job.skipped_files,
         .skipped_bytes = job.skipped_bytes,
         .conflict_waiting = job.conflict_waiting,
+        .source_read = job.source_read,
     };
 }

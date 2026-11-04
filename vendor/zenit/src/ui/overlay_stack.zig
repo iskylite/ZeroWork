@@ -257,13 +257,10 @@ pub const OverlayResult = struct {
 // ========== OverlayStack ==========
 
 pub const OverlayStack = struct {
-    /// Layer capacity 256: suspended Tooltip/Popover occupy a slot from mount, so layer count grows
-    /// with mounted UI components, not interaction depth (an app chrome of ~15 layers plus two
-    /// editors
-    /// of ~16 each exceeds 32 and hits TooManyLayers). Lifting the limit entirely (ArrayList) is
-    /// deferred with the focus_scope refactor. Per-slot traversal is a null check; 256-slot
-    /// per-frame
-    /// cost is negligible.
+    /// Capacity for registered layers, including layers completing their exit animation.
+    /// Tooltip/Popover register on open and release after exit; closed component count
+    /// therefore does not consume this budget. Other retained layer kinds must manage
+    /// their registrations explicitly. Growing the limit is not a substitute for cleanup.
     const MAX_LAYERS = 256;
 
     layers: [MAX_LAYERS]?OverlayLayer = @as([MAX_LAYERS]?OverlayLayer, @splat(null)),

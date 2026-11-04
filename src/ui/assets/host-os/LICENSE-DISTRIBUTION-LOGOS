@@ -1,0 +1,95 @@
+EulerOS logos
+
+EulerOS, EulerOS Linux, and the EulerOS logo, either separately or in combination, are hereinafter referred to as "EulerOS Trademarks" and are trademarks of The EulerOS Project, registered in the United Kingdom and other countries.
+
+The redhat-logos package ("Package") contains images that are or include the EulerOS Trademarks and EulerOS trade dress.  You are granted the right to use the Package only during the normal operation of software programs that call upon the Package.  No other copyright or trademark license is granted herein.
+
+NO WARRANTY.  THIS PACKAGE IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND INTELLECTUAL PROPERTY NONINFRINGEMENT ARE DISCLAIMED.  IN NO EVENT SHALL THE CENTOS PROJECT BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS PACKAGE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+BC-Linux logos
+
+The openEuler trademark, logo and other signs (collectively as “openEuler 
+Signs”) belong to openEuler Community. The openEulers Signs are in the 
+openEuler-logos folder. Users are licensed to use the openEuler-logos 
+folder during the normal operation of the unmodified openEuler Software. 
+And Users are also allowed to reproduce and distribute openEuler-logos 
+folder as a part of an unmodified openEuler Software. Users must remove 
+all the openEuler Signs in the openEuler-logos folder before distributing 
+a derivative work of openEuler Software.
+
+The openEuler-logos folder is provided without warranties of any kind, 
+either express or implied. In no event shall any contributor or owner of 
+the openEuler-logos folder be liable to you for any damages, including, 
+but not limited to any direct, or indirect, special or consequential 
+damages arising from your use or inability to use the openEuler-logos 
+folder or any openEuler Signs in it, no matter how it’s caused or based on 
+which legal theory, even if advised of the possibility of such damages.
+
+
+Ubuntu Kylin system theme (shared Kylin figure)
+
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: ubuntukylin-theme
+Upstream-Contact: Ubuntu Kylin Members <ubuntukylin-members@lists.launchpad.net>
+Source:https://launchpad.net/ubuntukylin-theme
+
+Files: *
+Copyright: 2014, National University of Defense Technology(NUDT) & Kylin Ltd
+License: GPL-3
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 3 of the License.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>
+ .
+ On Debian systems, the complete text of the GNU General
+ Public License version 3 can be found in "/usr/share/common-licenses/GPL-3".
+
+
+Loongnix system theme package
+
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: loongnix-theme
+Source: <url://example.com>
+
+Files: *
+Copyright: <years> <put author's name and email here>
+           <years> <likewise for another author>
+License: <special license>
+ <Put the license of the package here indented by 1 space>
+ <This follows the format of Description: lines in control file>
+ .
+ <Including paragraphs>
+
+# If you want to use GPL v2 or later for the /debian/* files use 
+# the following clauses, or change it to suit. Delete these two lines
+Files: debian/*
+Copyright: 2024 loongson <loongson@loongson-pc>
+License: GPL-2+
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/>
+ .
+ On Debian systems, the complete text of the GNU General
+ Public License version 2 can be found in "/usr/share/common-licenses/GPL-2".
+
+# Please also look if there are files or directories which have a
+# different copyright/license attached and list them here.
+# Please avoid picking licenses with terms that are more restrictive than the
+# packaged work, as it may make Debian's contributions unacceptable upstream.

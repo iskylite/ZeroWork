@@ -60,6 +60,10 @@ const Harness = struct {
     fn deinit(self: *Harness) void {
         self.context.close();
         self.control.close();
+        while (!self.control.drainEncoding()) {
+            const delay: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+            _ = std.c.nanosleep(&delay, null);
+        }
         self.input.close();
         self.table.deinit();
         self.history.deinit();
@@ -187,8 +191,8 @@ fn expectRejection(result: api.ToolResult, code: []const u8) !void {
     try T.expect(!parsed.value.object.get("image_generated").?.bool);
 }
 
-test "BMC AI gateway preserves read IDs and has seven schema effect matched tools without management writes" {
-    try T.expectEqual(@as(usize, 7), tools.definitions.len);
+test "BMC AI gateway preserves read IDs and has eight schema effect matched tools without management writes" {
+    try T.expectEqual(@as(usize, 8), tools.definitions.len);
     try T.expectEqualStrings("bmc_ikvm.read_power_state", tools.definitions[0].id);
     try T.expectEqualStrings("bmc_ikvm.read_boot", tools.definitions[1].id);
     try T.expectEqualStrings("bmc_ikvm.describe_frame", tools.definitions[2].id);
@@ -201,7 +205,108 @@ test "BMC AI gateway preserves read IDs and has seven schema effect matched tool
     try T.expectEqual(api.Effect.remote_input, tools.definitions[4].effect);
     try T.expectEqual(api.Effect.remote_input, tools.definitions[5].effect);
     try T.expectEqual(api.Effect.read_state, tools.definitions[6].effect);
-    try T.expect(try api.needsApproval(tools.definitions[3], .{ .full_control = true }));
+    try T.expect(try api.needsApproval(tools.definitions[3], .{}));
+    try T.expect(!(try api.needsApproval(tools.definitions[3], .{ .full_control = true })));
+    try T.expect(!(try api.needsApproval(tools.definitions[3], .{ .engine = .{ .mode = .auto } })));
+    try T.expectError(error.ToolExecutionDenied, api.needsApproval(tools.definitions[3], .{ .full_control = true, .allow_read = false }));
+}
+
+const SnapshotCopyFixture = struct {
+    fn source(allocator: std.mem.Allocator) !*console.Snapshot {
+        const value = try allocator.create(console.Snapshot);
+        const text = try allocator.dupe(u8, &@as([1024]u8, @splat('c')));
+        var path: [4096]u8 = @splat('p');
+        const prefix = "/redfish/v1/Systems/";
+        @memcpy(path[0..prefix.len], prefix);
+        value.* = .{
+            .owner = owner,
+            .operation = .{ .owner = .{ .session = owner }, .operation_id = 1 },
+            .name = text,
+            .target = text,
+            .route_summary = text,
+            .failure_code = text,
+            .input = .{ .input_epoch = 1, .control_generation = 1, .transport_generation = 1, .connected = true, .controlled = true, .focused = false, .capture_paused = true, .queued = 0, .remote_unconfirmed = false },
+        };
+        value.progress.failure_code = text;
+        value.progress.event_count = console.progress.capacity;
+        for (&value.progress.events, 0..) |*event, i| event.* = .{
+            .sequence = i + 1,
+            .stage = .redfish_discovery,
+            .error_code = text,
+            .context = .{
+                .resource_path = console.progress.resourcePath(&path),
+                .source_path = console.progress.resourcePath(&path),
+                .source_property = console.progress.LogText(128).init("BootSourceOverrideTarget"),
+                .response_errors = console.progress.ResponseErrors.init(text),
+                .http_status = 404,
+            },
+        };
+        value.progress.failure_event = value.progress.events[0];
+        value.progress.discovery_issue = value.progress.events[console.progress.capacity - 1];
+        return value;
+    }
+    fn expectText(text: []const u8) !void {
+        try T.expectEqual(@as(usize, 1024), text.len);
+        for (text) |byte| try T.expectEqual(@as(u8, 'c'), byte);
+    }
+    fn copy(allocator: std.mem.Allocator, value: *const console.Snapshot) !void {
+        var snapshot = try console.OwnedSnapshot.init(allocator, value.*);
+        defer snapshot.deinit();
+        try expectText(snapshot.value.name);
+        try expectText(snapshot.value.progress.events[console.progress.capacity - 1].error_code.?);
+    }
+};
+
+test "BMC AI console snapshot full telemetry copies on a small stack and owns all borrowed strings" {
+    var source_arena: std.heap.ArenaAllocator = .init(a);
+    defer source_arena.deinit();
+    const source = try SnapshotCopyFixture.source(source_arena.allocator());
+    const Worker = struct {
+        source: *const console.Snapshot,
+        output: *console.OwnedSnapshot,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.output.* = console.OwnedSnapshot.init(a, self.source.*) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    };
+    const snapshot = try a.create(console.OwnedSnapshot);
+    defer a.destroy(snapshot);
+    var worker: Worker = .{ .source = source, .output = snapshot };
+    // The previous generic JSON parse needed a single frame larger than 6 MiB.
+    // Keep the production copy usable on a smaller worker stack as well.
+    const thread = try std.Thread.spawn(.{ .stack_size = 4 * 1024 * 1024 }, Worker.run, .{&worker});
+    thread.join();
+    if (worker.failure) |err| return err;
+    defer snapshot.deinit();
+    @memset(@constCast(source.name), 'x');
+    source.progress = .{};
+    source_arena.deinit();
+    source_arena = .init(a);
+    const value = &snapshot.value;
+    for ([_][]const u8{ value.name, value.target, value.route_summary, value.failure_code.?, value.progress.failure_code.?, value.progress.failure_event.?.error_code.?, value.progress.discovery_issue.?.error_code.? }) |text| try SnapshotCopyFixture.expectText(text);
+    try T.expectEqual(@as(u8, console.progress.capacity), value.progress.event_count);
+    for (&value.progress.events, 0..) |*event, i| {
+        try T.expectEqual(@as(u64, i + 1), event.sequence);
+        try SnapshotCopyFixture.expectText(event.error_code.?);
+        const context = &event.context.?;
+        try T.expectEqual(@as(u16, 404), context.http_status.?);
+        try T.expectEqual(@as(usize, 4096), context.resource_path.?.text().len);
+        try T.expect(std.mem.startsWith(u8, context.resource_path.?.text(), "/redfish/v1/Systems/"));
+        try T.expectEqualStrings(context.resource_path.?.text(), context.source_path.?.text());
+        try T.expectEqualStrings("BootSourceOverrideTarget", context.source_property.?.text());
+        try SnapshotCopyFixture.expectText(context.response_errors.?.text());
+    }
+}
+
+test "BMC AI console snapshot allocation failures release partial copies" {
+    var source_arena: std.heap.ArenaAllocator = .init(a);
+    defer source_arena.deinit();
+    const source = try SnapshotCopyFixture.source(source_arena.allocator());
+    try T.checkAllAllocationFailures(a, SnapshotCopyFixture.copy, .{source});
+    try SnapshotCopyFixture.expectText(source.progress.failure_code.?);
 }
 
 test "BMC AI describe frame reports real connection stages and requires a current complete frame" {
@@ -354,6 +459,29 @@ test "BMC AI gateway queues then reports real RFB sent and consumes operation wi
     try T.expectEqual(@as(usize, 6), h.wire_length);
 }
 
+test "BMC AI gateway observation timeout explains unsent input without claiming permission rejection" {
+    var h: Harness = .{};
+    try h.init();
+    defer h.deinit();
+    const observation = try h.observe(1);
+    for (&h.control.observations) |*slot| if (slot.*) |*value| {
+        if (value.id == observation) value.valid_until_monotonic_ms = value.captured_monotonic_ms;
+    };
+    const rejected = try h.move(observation, 2);
+    defer release(rejected);
+    try T.expectEqual(api.Status.rejected, rejected[0].status);
+    try expectRejection(rejected[0], "ObservationExpired");
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, rejected[0].blocks[0].structured, .{});
+    defer parsed.deinit();
+    try T.expectEqualStrings("画面观察已超过有效期。", parsed.value.object.get("message").?.string);
+    const next_step = parsed.value.object.get("next_step").?.string;
+    try T.expect(std.mem.indexOf(u8, next_step, "重新截图") != null);
+    try T.expect(std.mem.indexOf(u8, next_step, "授权") == null);
+    try T.expect(!parsed.value.object.get("automatic_action_replay_allowed").?.bool);
+    try T.expect(h.grant.?.proof.valid());
+    try T.expectEqual(@as(usize, 0), h.wire_length);
+}
+
 test "BMC AI gateway geometry pending returns a structured wait without image or input" {
     var h: Harness = .{};
     try h.init();
@@ -375,8 +503,36 @@ test "BMC AI gateway geometry pending returns a structured wait without image or
     defer release(rejected);
     try T.expectEqual(api.Status.rejected, rejected[0].status);
     try expectRejection(rejected[0], "FrameGeometryPending");
+    const input_state = try std.json.parseFromSlice(std.json.Value, a, rejected[0].blocks[0].structured, .{});
+    defer input_state.deinit();
+    try T.expectEqualStrings("rejected", input_state.value.object.get("state").?.string);
+    try T.expect(!input_state.value.object.get("retry_read_only").?.bool);
+    try T.expect(rejected[0].observation_retry_ms == null);
     try T.expect(h.grant.?.proof.valid());
     try T.expectEqual(@as(usize, 0), h.wire_length);
+}
+
+test "BMC AI gateway screenshot wait finalizes deadline and preserves immediate unavailability" {
+    const feedback = @import("ai/kvm_tool_feedback.zig");
+    for ([_]bool{ false, true }) |waited| {
+        var h: Harness = .{};
+        try h.init();
+        defer h.deinit();
+        try h.input.beginGeometryChange(1);
+        const results = try h.execute("bmc_ikvm.screenshot", "{\"session_ids\":[83]}", 1);
+        defer release(results);
+        try feedback.finishWait(a, "bmc_ikvm.screenshot", &results[0], waited);
+        const value = try std.json.parseFromSlice(std.json.Value, a, results[0].blocks[0].structured, .{});
+        defer value.deinit();
+        try T.expectEqualStrings(if (waited) "ObservationWaitTimedOut" else "FrameGeometryPending", value.value.object.get("error_code").?.string);
+        try T.expectEqualStrings(if (waited) "timed_out" else "failed", value.value.object.get("state").?.string);
+        if (waited) try T.expectEqualStrings("FrameGeometryPending", value.value.object.get("cause_code").?.string);
+        try T.expect(!value.value.object.get("dispatch").?.bool);
+        try T.expect(!value.value.object.get("image_generated").?.bool);
+        try T.expect(!value.value.object.get("automatic_action_replay_allowed").?.bool);
+        try T.expect(results[0].observation_retry_ms == null);
+        try T.expectEqual(@as(usize, 0), h.wire_length);
+    }
 }
 
 test "BMC AI gateway human lease rejects automation and takeover cancels queued input with fresh epoch" {
@@ -389,7 +545,8 @@ test "BMC AI gateway human lease rejects automation and takeover cancels queued 
     const human = try h.context.acquire(.human_focus, 9);
     const denied = try h.move(first, 2);
     defer release(denied);
-    try T.expectEqual(api.Status.cancelled_unsent, denied[0].status);
+    try T.expectEqual(api.Status.rejected, denied[0].status);
+    try expectRejection(denied[0], "HumanInputActive");
     try T.expectEqual(@as(usize, 1), h.dispatches);
     try T.expect(h.context.automation == null);
     h.context.release(human);
@@ -453,8 +610,36 @@ test "BMC AI gateway invocation effect cannot grant input without a real current
     var call: api.Invocation = .{ .owner = owner, .operation_id = 1, .tool_id = "bmc_ikvm.pointer", .effect = .read_state, .arguments = arguments.value, .arguments_json = "", .arguments_hash = @splat(0) };
     try T.expectError(error.ToolPermissionDenied, Harness.handle(&h, call, a));
     call.effect = .remote_input;
-    try T.expectError(error.ToolPermissionDenied, Harness.handle(&h, call, a));
+    var rejected = try Harness.handle(&h, call, a);
+    defer rejected.deinit(a);
+    try T.expectEqual(api.Status.rejected, rejected.status);
+    try expectRejection(rejected, "ToolPermissionDenied");
     try T.expectEqual(@as(usize, 0), h.wire_length);
+}
+
+test "BMC AI gateway malformed parameters return actionable model diagnostics before dispatch" {
+    const loop = @import("ai/tool_loop.zig");
+    const Host = struct {
+        fn execute(_: *anyopaque, _: loop.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop.Outcome {
+            return error.UnexpectedDispatch;
+        }
+    };
+    var h: Harness = .{};
+    try h.init();
+    defer h.deinit();
+    var run = loop.Loop.init(a, captured, 1, .{});
+    defer run.deinit();
+    try run.start(.{ .model = "fixture", .system = "", .messages = &.{}, .tool_table = &h.table });
+    try run.complete("", &.{.{ .id = "invalid-kvm", .name = "bmc_uikvm__keyboard", .arguments = "{\"session_ids\":[83],\"observation_id\":1,\"action\":\"text\",\"text\":\"非 ASCII\",\"layout\":\"us_ascii\"}" }}, .{ .context = &h, .execute = Host.execute }, .{}, 1, null);
+    const result = try std.json.parseFromSlice(std.json.Value, a, run.records.items[0].result_body.?, .{});
+    defer result.deinit();
+    try T.expectEqualStrings("InvalidToolArguments", result.value.object.get("error_code").?.string);
+    try T.expectEqualStrings("rejected", result.value.object.get("state").?.string);
+    try T.expect(result.value.object.get("message").?.string.len > 0);
+    try T.expect(std.mem.indexOf(u8, result.value.object.get("next_step").?.string, "修正请求") != null);
+    try T.expect(!result.value.object.get("dispatch").?.bool);
+    try T.expect(!run.records.items[0].dispatched);
+    try T.expectEqual(@as(usize, 0), h.dispatches);
 }
 
 test "BMC AI gateway stale control observation is a structured zero dispatch rejection" {
@@ -527,4 +712,165 @@ test "BMC AI gateway worker proof revocation unlocks guard before the transport 
     try T.expectEqual(@as(usize, 0), h.wire_length);
     // Restore a consumer whose lifetime includes Harness.deinit.
     try h.context.setConsumer(.{ .context = &h.input, .consume = Harness.consume });
+}
+
+test "BMC efficiency frame cache reuses exact pixels but creates fresh observations" {
+    var h: Harness = .{};
+    try h.init();
+    defer h.deinit();
+    var first = try h.control.screenshot(h.control.binding(), a, .{});
+    defer first.deinit();
+    var second = try h.control.screenshot(h.control.binding(), a, .{});
+    defer second.deinit();
+    try T.expect(first.id != second.id);
+    try T.expect(first.image_ref.snapshot == second.image_ref.snapshot);
+    _ = try h.frame.publishComplete(2, 2, &.{ 1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255 }, Harness.nowMs(&h) * std.time.ns_per_ms);
+    var third = try h.control.screenshot(h.control.binding(), a, .{});
+    defer third.deinit();
+    try T.expect(third.sequence > second.sequence);
+    try T.expect(first.image_ref.snapshot == third.image_ref.snapshot);
+    try T.expectEqual(@as(usize, 1), h.control.encoded_images);
+    try T.expectEqual(@as(usize, 2), h.control.reused_images);
+    _ = try h.frame.publishComplete(2, 2, &.{ 99, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255 }, Harness.nowMs(&h) * std.time.ns_per_ms);
+    var changed = try h.control.screenshot(h.control.binding(), a, .{});
+    defer changed.deinit();
+    try T.expect(first.image_ref.snapshot != changed.image_ref.snapshot);
+    try T.expectEqual(@as(usize, 2), h.control.encoded_images);
+    try T.expectError(error.UnknownOperation, h.control.screenshot(h.control.binding(), a, .{ .after_operation_id = 99 }));
+}
+
+test "BMC efficiency text input compiles 256 ASCII characters without Enter" {
+    const automation = @import("plugins/bmc_ikvm/automation_input.zig");
+    const text: [256]u8 = @splat('A');
+    const batch = try automation.compile(.{ .text = try automation.Text.init(&text, .us_ascii) });
+    try T.expectEqual(@as(u16, 1024), batch.count);
+    for (batch.events[0..batch.count]) |event| if (event == .key) try T.expect(event.key.keysym != 0xff0d);
+    const too_long: [257]u8 = @splat('A');
+    try T.expectError(error.InvalidTextLength, automation.Text.init(&too_long, .us_ascii));
+    try T.expectError(error.UnsupportedText, automation.compile(.{ .text = try automation.Text.init("a\nb", .us_ascii) }));
+}
+
+test "BMC efficiency 256 byte text uses bounded sender turns and never replays a partial takeover" {
+    for ([_]bool{ false, true }) |takeover| {
+        var h: Harness = .{};
+        try h.init();
+        defer h.deinit();
+        const observation = try h.observe(1);
+        const text: [256]u8 = @splat('A');
+        const args = try std.fmt.allocPrint(a, "{{\"session_ids\":[83],\"observation_id\":{d},\"action\":\"text\",\"layout\":\"us_ascii\",\"text\":\"{s}\"}}", .{ observation, text });
+        defer a.free(args);
+        const accepted = try h.execute("bmc_ikvm.keyboard", args, 2);
+        defer release(accepted);
+        try T.expectEqual(api.Status.succeeded, accepted[0].status);
+        var messages: usize = 0;
+        for (0..20) |turn| {
+            h.wire_length = 0;
+            try h.pump();
+            try T.expect(h.wire_length <= 64 * 8 and h.wire_length % 8 == 0);
+            var offset: usize = 0;
+            while (offset < h.wire_length) : (offset += 8) {
+                try T.expectEqual(@as(u8, 4), h.wire_bytes[offset]);
+                try T.expect(std.mem.readInt(u32, h.wire_bytes[offset + 4 ..][0..4], .big) != 0xff0d);
+            }
+            messages += h.wire_length / 8;
+            if (takeover and turn == 0) h.context.takeHumanControl();
+        }
+        const receipt = try h.input.automationStatus(h.input.binding(), 2);
+        try T.expectEqual(@as(usize, if (takeover) 64 else 1024), messages);
+        try T.expectEqual(@as(u16, @intCast(messages)), receipt.sent_events);
+        try T.expectEqual(@as(u16, 1024), receipt.total_events);
+        try T.expectEqual(if (takeover) control.automation.Status.outcome_unknown else control.automation.Status.sent, receipt.status);
+    }
+}
+
+test "BMC efficiency full resolution reuse retains one encoding and matching decoded pixels" {
+    var h: Harness = .{};
+    h.budget = budgets.Budget.init(64 * 1024 * 1024);
+    try h.init();
+    defer h.deinit();
+    const pixels = try a.alloc(u8, 1920 * 1200 * 4);
+    defer a.free(pixels);
+    for (0..1200) |y| for (0..1920) |x| {
+        const offset = (y * 1920 + x) * 4;
+        pixels[offset] = @intCast(x % 256);
+        pixels[offset + 1] = @intCast(y % 256);
+        pixels[offset + 2] = @intCast((x + y) % 256);
+        pixels[offset + 3] = 255;
+    };
+    _ = try h.frame.publishComplete(1920, 1200, pixels, Harness.nowMs(&h) * std.time.ns_per_ms);
+    const started = @import("platform/realtime.zig").monotonicNs();
+    var first = try h.control.screenshot(h.control.binding(), a, .{});
+    defer first.deinit();
+    const encoded = @import("platform/realtime.zig").monotonicNs();
+    var second = try h.control.screenshot(h.control.binding(), a, .{});
+    defer second.deinit();
+    const reused = @import("platform/realtime.zig").monotonicNs();
+    try T.expect(first.image_ref.snapshot == second.image_ref.snapshot);
+    try T.expectEqual(@as(usize, 1), h.control.encoded_images);
+    const saved = first.image_ref.content().?;
+    var decoded = try @import("ai/image_attachments.zig").ContentRef.create(a, "check.png", saved.bytes, 0, .{});
+    defer decoded.release();
+    try T.expectEqualSlices(u8, saved.pixels, decoded.content().?.pixels);
+    if (std.c.getenv("ZEROWORK_AI_EFFICIENCY_PROFILE") != null) std.debug.print("KVM 1920x1200 encode_us={d} reuse_us={d} encoded_bytes={d} cache_bytes={d}\n", .{ @divTrunc(encoded - started, 1000), @divTrunc(reused - encoded, 1000), saved.bytes.len, h.control.cache_reservation.?.bytes });
+}
+
+test "BMC efficiency asynchronous encoding settles once and close drains without publishing stale observations" {
+    var h: Harness = .{};
+    h.budget = budgets.Budget.init(64 * 1024 * 1024);
+    try h.init();
+    defer h.deinit();
+    h.control.asynchronous_encoding = true;
+    try T.expectError(error.ImageEncodingPending, h.control.screenshot(h.control.binding(), a, .{}));
+    const deadline = Harness.nowMs(&h) + 3000;
+    var result: ?control.Observation = null;
+    while (result == null) {
+        result = h.control.screenshot(h.control.binding(), a, .{}) catch |err| switch (err) {
+            error.ImageEncodingPending => null,
+            else => return err,
+        };
+        if (Harness.nowMs(&h) >= deadline) return error.EncodingTimedOut;
+        const delay: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&delay, null);
+    }
+    result.?.deinit();
+    try T.expectEqual(@as(usize, 1), h.control.encoded_images);
+    try T.expect(h.control.encoding == null);
+    const original = h.control.cached_image.snapshot;
+    _ = try h.frame.publishComplete(2, 2, &.{ 1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255 }, Harness.nowMs(&h) * std.time.ns_per_ms);
+    try T.expectError(error.ImageEncodingPending, h.control.screenshot(h.control.binding(), a, .{}));
+    // A result prepared before a different input operation is never published,
+    // even when its pixels happen to equal a later frame.
+    h.control.encoding.?.operation_id = 123;
+    while (!h.control.encoding.?.done.load(.acquire)) {
+        if (Harness.nowMs(&h) >= deadline) return error.EncodingTimedOut;
+        const delay: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&delay, null);
+    }
+    try T.expectError(error.ObservationInvalidated, h.control.screenshot(h.control.binding(), a, .{}));
+    result = null;
+    while (result == null) {
+        result = h.control.screenshot(h.control.binding(), a, .{}) catch |err| switch (err) {
+            error.ImageEncodingPending => null,
+            else => return err,
+        };
+        if (Harness.nowMs(&h) >= deadline) return error.EncodingTimedOut;
+        const delay: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&delay, null);
+    }
+    try T.expect(result.?.image_ref.snapshot == original);
+    result.?.deinit();
+    try T.expectEqual(@as(usize, 1), h.control.encoded_images);
+    try T.expectEqual(@as(usize, 1), h.control.reused_images);
+    _ = try h.frame.publishComplete(2, 2, &.{ 9, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255 }, Harness.nowMs(&h) * std.time.ns_per_ms);
+    try T.expectError(error.ImageEncodingPending, h.control.screenshot(h.control.binding(), a, .{}));
+    const next_observation = h.control.next_observation;
+    h.control.close();
+    try T.expectError(error.OwnerClosed, h.control.screenshot(h.control.binding(), a, .{}));
+    while (!h.control.drainEncoding()) {
+        if (Harness.nowMs(&h) >= deadline) return error.EncodingTimedOut;
+        const delay: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&delay, null);
+    }
+    try T.expectEqual(next_observation, h.control.next_observation);
+    try T.expect(h.control.cached_image.snapshot == null);
 }

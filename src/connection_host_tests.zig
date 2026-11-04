@@ -623,8 +623,11 @@ test "connection host shared trust bridge keeps once save and replacement decisi
     request.kind = .host_key_changed;
     try bridge.sync(&host, request, .{ .host_key = key }, callbacks, 5);
     try std.testing.expect(std.mem.indexOf(u8, host.snapshot(0, null).?.payload.material, "SHA256:old") != null);
-    try std.testing.expectError(error.InvalidChallengeConfirmation, host.submitAnswer(adapter.Bridge.owner(original), 3, 2, .{ .fields = &.{"YES"} }, 6));
-    try host.submitAnswer(adapter.Bridge.owner(original), 3, 2, .{ .fields = &.{"yes"} }, 6);
+    try std.testing.expectEqual(@as(usize, 0), host.snapshot(0, null).?.payload.fields.len);
+    try std.testing.expectEqual(@as(usize, 0), host.snapshot(0, null).?.payload.choices.len);
+    try std.testing.expectEqualStrings("替换密钥并继续", host.snapshot(0, null).?.payload.submit_label);
+    try std.testing.expectEqual(@as(usize, 2), observer.calls);
+    try host.submitAnswer(adapter.Bridge.owner(original), 3, 2, .{ .trust_material = true }, 6);
     try bridge.sync(&host, request, .{}, callbacks, 6);
     try std.testing.expectEqual(@as(usize, 3), observer.calls);
     try std.testing.expectEqual(@as(usize, 1), observer.once);

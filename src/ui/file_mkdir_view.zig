@@ -16,6 +16,8 @@ pub const View = struct {
     model: *Controller.Controller,
     raw: *ui.Signal([]const u8),
     create_disabled: *ui.Signal(bool),
+    cancel_hint: *ui.Signal([]const u8),
+    hints_visible: *ui.Signal(bool),
     editor: *ui.Node = undefined,
     result: *ui.Node = undefined,
     input: ui.widgets.input.InputResult = undefined,
@@ -37,7 +39,7 @@ pub const View = struct {
     last_clip_height: f32 = -1,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, pane: *Files.Pane, model: *Controller.Controller) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .pane = pane, .model = model, .raw = try scope.createText("", .{}), .create_disabled = try scope.createSignal(bool, true) });
+        const self = try scope.createState(View, .{ .cx = cx, .pane = pane, .model = model, .raw = try scope.createText("", .{}), .create_disabled = try scope.createSignal(bool, true), .cancel_hint = try scope.createText("取消新建文件夹（Esc）", .{}), .hints_visible = try scope.createSignal(bool, false) });
         try scope.onCleanup(View, self, cleanup);
         self.editor = try ui.boxStyled(cx, S.editor, .{});
         self.editor.meta.ownership.meta.test_id = "files.mkdir.editor";
@@ -71,10 +73,10 @@ pub const View = struct {
         try self.result.appendChild(cx.allocator, actions);
         self.cancel = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 16), .a11y_label = "取消当前操作", .base_style = try S.theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{}), .on_click = cx.on(View, self, dismiss) }).mount(scope, cx);
         self.cancel.meta.ownership.meta.test_id = "files.mkdir.cancel";
-        try actions.appendChild(cx.allocator, try tooltip(cx, scope, self.cancel, "取消当前操作"));
+        try actions.appendChild(cx.allocator, try tooltip(cx, scope, self.cancel, self.cancel_hint, "files.mkdir.cancel.tooltip", self.hints_visible));
         self.create = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.folder_plus, .icon_size = @as(f32, 16), .a11y_label = "创建文件夹", .base_style = try S.theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{}), .disabled = self.create_disabled, .on_click = cx.on(View, self, submit) }).mount(scope, cx);
         self.create.meta.ownership.meta.test_id = "files.mkdir.create";
-        self.create_wrapper = try tooltip(cx, scope, self.create, "创建文件夹");
+        self.create_wrapper = try tooltip(cx, scope, self.create, "创建文件夹（Enter）", "files.mkdir.create.tooltip", self.hints_visible);
         try actions.appendChild(cx.allocator, self.create_wrapper);
         try pane.installDraft(self.editor, self.result);
         try cx.addAfterLayoutHook(self, afterLayout);
@@ -99,6 +101,7 @@ pub const View = struct {
         self.failure = null;
         self.local_error = null;
         self.shown = true;
+        self.hints_visible.set(true);
         self.focus_pending = true;
         self.last_revision = 0;
         self.last_clip_height = -1;
@@ -177,6 +180,7 @@ pub const View = struct {
     pub fn dismiss(self: *View) void {
         if (!self.shown) return;
         self.shown = false;
+        self.hints_visible.set(false);
         self.focus_pending = false;
         self.locate_pending = false;
         if (self.cx.focused_node) |node| if (descendant(self.editor, node) or descendant(self.result, node)) self.cx.clearFocus();
@@ -186,6 +190,8 @@ pub const View = struct {
         const original = self.frozen orelse return;
         const name = self.raw.peek();
         const readonly = self.pending() or self.phase == .succeeded or self.phase == .created_refresh_failed;
+        self.cancel_hint.set(if (self.pending()) "收起创建状态（Esc），创建继续" else if (readonly) "关闭创建结果（Esc）" else "取消新建文件夹（Esc）");
+        self.cancel.behavior.interaction.a11y.?.label = self.cancel_hint.peek();
         self.input.state.readonly = readonly;
         self.input.input_container.behavior.interaction.a11y.?.readonly = readonly;
         self.input.state.dirty = true;
@@ -205,7 +211,7 @@ pub const View = struct {
         const target = try std.fmt.bufPrint(&target_buffer, "{s}{s}{s}{s}", .{ original.directory, if (std.mem.endsWith(u8, original.directory, "/")) @as([]const u8, "") else "/", name, if (name.len == 0) @as([]const u8, "") else "/" });
         try self.path.setTextContent(self.cx.allocator, target);
         var title: []const u8 = "";
-        var feedback: []const u8 = "Enter 创建 · Esc 取消";
+        var feedback: []const u8 = "";
         var danger = false;
         if (self.phase == .succeeded) {
             title = try std.fmt.bufPrint(&title_buffer, "已创建 {s}", .{name});
@@ -216,10 +222,8 @@ pub const View = struct {
             danger = true;
         } else if (self.phase == .creating) {
             title = "正在创建目录…";
-            feedback = "等待创建结果";
         } else if (self.phase == .refreshing) {
             title = "目录已创建，正在刷新…";
-            feedback = "等待目录列表";
         } else if (duplicate) {
             title = try std.fmt.bufPrint(&title_buffer, "名称已存在 · {s}", .{name});
             feedback = "请修改名称";
@@ -311,9 +315,7 @@ fn failureText(failure: Controller.MkdirFailure) []const u8 {
     };
 }
 
-fn tooltip(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, text: []const u8) !*ui.Node {
-    const result = try ui.widgets.Tooltip(.{ .text = text, .open_delay_ms = @as(f32, 450) }).mount(scope, cx);
-    result.wrapper.setStyleInline(cx.allocator, S.tooltip());
-    try result.trigger.appendChild(cx.allocator, node);
+fn tooltip(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, text: anytype, id: []const u8, visible: *ui.Signal(bool)) !*ui.Node {
+    const result = try @import("control_hint.zig").mount(cx, scope, node, text, .{ .id = id, .layout = S.tooltip(), .visible = visible });
     return result.wrapper;
 }

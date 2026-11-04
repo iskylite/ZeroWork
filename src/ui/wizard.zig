@@ -370,6 +370,7 @@ pub const Wizard = struct {
         const colors = S.theme.current();
         self.painted_colors = colors;
         if (self.modal) |node| node.setStyleInline(self.alloc, .{ .background = colors.overlay });
+        if (self.footer) |footer| footer.setBackground(S.footer().background.?);
         if (self.title) |node| node.setTextColor(colors.fg_1);
         if (self.protocol_select) |select| {
             var style = S.input();

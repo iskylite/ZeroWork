@@ -64,21 +64,15 @@ try{
  await h.screenshot(join(out,'compact-approval.png'));await h.resizeWindow(1200,900);
 
  const footerTime=()=>h.query('ai.turn.elapsed').then((n:any)=>text(n));
- const beforeTime=await footerTime();await h.sleep(1400);assert.equal(await footerTime(),beforeTime,'processing clock pauses during approval');
+ const beforeTime=await footerTime();
+ const dwellMs=Number(process.env.ZW_APPROVAL_WAIT_MS??1400);
+ for(let elapsed=0;elapsed<dwellMs;elapsed+=1000)await h.sleep(Math.min(1000,dwellMs-elapsed));
+ assert.equal(await footerTime(),beforeTime,'processing clock pauses during approval');
  assert.equal(requests,requestCount,'provider must not continue while waiting');
  await h.screenshot(join(out,'waiting-approval.png'));await writeFile(join(out,'waiting-approval.tree.json'),JSON.stringify(await h.query('ai.panel'),null,2));
- if(process.env.ZW_APPROVAL_EXPIRY_CHECK==='1'){
-  await h.waitFor(async()=>text(await h.query('ai.host_approval.state')).includes('已过期')||null,135000);
-  assert.equal(requests,requestCount,'expiry must not start another provider round or approval');
-  assert.equal(await readFile(marker,'utf8').catch(()=>null),null);
-  assert.equal(await footerTime(),beforeTime);
-  await h.screenshot(join(out,'expired-approval.png'));
-  await click('ai.host_approval.accept');
-  await h.waitFor(async()=>text(await h.query('ai.host_approval.state')).includes('待确认')||null,5000);
-  assert.equal(requests,requestCount,'renewal alone does not resume the flow');
-  assert.equal(await readFile(marker,'utf8').catch(()=>null),null,'renewal must not approve or execute');
- }
+ assert(text(await h.query('ai.host_approval.state')).includes('待确认'));
+ assert(!text(await h.query('ai.host_approval')).includes('重新确认'));
  await click('ai.host_approval.accept');await h.waitFor(async()=>text(await h.query('ai.panel')).includes('APPROVAL_NATIVE_FINISHED')||null,30000);assert.equal(failed,null);assert.equal(await readFile(marker,'utf8'),'once');await h.screenshot(join(out,'approved-result.png'));
- report.status='passed';report.checks=['model prose precedes inline approval','no execution step or PTY write before approval','processing clock excludes approval wait','provider remains paused while waiting',...(process.env.ZW_APPROVAL_EXPIRY_CHECK==='1'?['expired approval remains paused without retry','explicit renewal still requires separate approval']:[]),'approval executes the Local command exactly once and resumes the provider'];
+ report.status='passed';report.waited_ms=dwellMs;report.checks=['model prose precedes inline approval','no execution step or PTY write before approval','processing clock excludes approval wait','provider remains paused while waiting','no expiry or renewal state','approval executes the Local command exactly once and resumes the provider'];
 }catch(err){report.status='failed';report.error=String(err);await h.screenshot(join(out,'failure.png')).catch(()=>{});await writeFile(join(out,'failure.tree.json'),JSON.stringify(await h.tree(),null,2)).catch(()=>{});process.exitCode=1}
 finally{app.kill('SIGTERM');await new Promise<void>(r=>{if(app.exitCode!==null||app.signalCode!==null)return r();app.once('close',()=>r());setTimeout(()=>{app.kill('SIGKILL');r()},3000)});server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await log.close();await rm(iso,{recursive:true,force:true});await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report))}

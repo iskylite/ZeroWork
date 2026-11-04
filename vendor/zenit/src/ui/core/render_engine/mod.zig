@@ -42,15 +42,18 @@ const ChildOrderRestore = struct {
     original: []*Node,
 };
 
-/// Stable-sort sibling paint order for the duration of a render pass. The
+/// Prepare sibling paint order and cache boundaries in one tree traversal. The
 /// logical Node tree is restored before renderNode returns, so layout and
 /// caller-owned child order remain unchanged while every paint/cache path sees
-/// the same ordering.
-fn sortSubtreeChildrenByZ(
+/// the same ordering. Boundary flags may be written directly, so rebuild their
+/// frame-local index even when geometry and content were retained.
+fn prepareRenderTree(
     cx: *RenderContext,
     node: *Node,
     restores: *std.ArrayList(ChildOrderRestore),
-) !void {
+    ancestor_has_boundary: bool,
+    blocked: *id_hash.U32HashMapUnmanaged(void),
+) !bool {
     const children = node.children.items;
     var needs_sort = false;
     if (children.len > 1) {
@@ -77,7 +80,15 @@ fn sortSubtreeChildrenByZ(
         }.lessThan);
     }
 
-    for (children) |child| try sortSubtreeChildrenByZ(cx, child, restores);
+    const self_is_boundary = node.frame_state.state_bits.flags.disable_render_cache;
+    var subtree_has_boundary = self_is_boundary;
+    for (children) |child| {
+        if (try prepareRenderTree(cx, child, restores, ancestor_has_boundary or self_is_boundary, blocked)) {
+            subtree_has_boundary = true;
+        }
+    }
+    if (ancestor_has_boundary or subtree_has_boundary) try blocked.put(cx.frame_allocator, node.id, {});
+    return subtree_has_boundary;
 }
 
 fn restoreChildOrders(restores: *const std.ArrayList(ChildOrderRestore)) void {
@@ -808,26 +819,6 @@ fn hookScopeIsSelfOnly(node: *Node, exec_state: *const NodeExecutionState, paren
     return true;
 }
 
-fn indexRenderCacheBoundaries(
-    allocator: Allocator,
-    node: *Node,
-    ancestor_has_boundary: bool,
-    blocked: *id_hash.U32HashMapUnmanaged(void),
-) !bool {
-    const self_is_boundary = node.frame_state.state_bits.flags.disable_render_cache;
-    var subtree_has_boundary = self_is_boundary;
-    for (node.children.items) |child| {
-        if (try indexRenderCacheBoundaries(
-            allocator,
-            child,
-            ancestor_has_boundary or self_is_boundary,
-            blocked,
-        )) subtree_has_boundary = true;
-    }
-    if (ancestor_has_boundary or subtree_has_boundary) try blocked.put(allocator, node.id, {});
-    return subtree_has_boundary;
-}
-
 fn nodeEligibleForSubtreePayloadCache(cx: *const RenderContext, node: *Node, runtime: scene_runtime_mod.SceneNodeRuntime) bool {
     // Reject cheap local conditions before consulting the frame boundary
     // index. The index is built once in O(N), avoiding a repeated ancestor +
@@ -1306,13 +1297,6 @@ fn prebuildDisplayPayloads(
     inherited_force_linear_text: bool,
     parent_effect_id: u32,
 ) !void {
-    var boundary_blocked = id_hash.U32HashMapUnmanaged(void){};
-    defer boundary_blocked.deinit(cx.frame_allocator);
-    _ = try indexRenderCacheBoundaries(cx.frame_allocator, node, false, &boundary_blocked);
-    const previous_boundary_index = cx.render_cache_boundary_blocked;
-    cx.render_cache_boundary_blocked = &boundary_blocked;
-    defer cx.render_cache_boundary_blocked = previous_boundary_index;
-
     try prebuildDisplayPayloadSubtrees(
         cx,
         node,
@@ -1734,35 +1718,30 @@ fn buildRetainedSubtree(
     }
 }
 
-fn syncPromotedLayerIds(cx: *RenderContext) void {
-    var it = cx.scene_runtime.nodes.iterator();
-    while (it.next()) |entry| {
-        const root_layer_state = cx.layer_tree.planQueryRootNode(entry.key_ptr.*);
-        entry.value_ptr.promoted_layer_id = root_layer_state.promoted_layer_id;
-        entry.value_ptr.promoted_surface_flags.surface_valid = root_layer_state.frame_flags.surface_valid;
-        entry.value_ptr.promoted_surface_flags.reused_this_frame = root_layer_state.frame_flags.reused_this_frame;
-        entry.value_ptr.promoted_surface_flags.rebuilt_this_frame = root_layer_state.frame_flags.rebuilt_this_frame;
-        entry.value_ptr.promoted_surface_flags.invalidated_by_descendant_this_frame = root_layer_state.frame_flags.invalidated_by_descendant_this_frame;
-        entry.value_ptr.promoted_surface_flags.invalidated_by_self_this_frame = root_layer_state.frame_flags.invalidated_by_self_this_frame;
-        entry.value_ptr.promoted_surface_flags.descendant_scoped_rebuild_candidate_this_frame = root_layer_state.frame_flags.descendant_scoped_rebuild_candidate_this_frame;
-    }
-}
-
-fn syncPromotedDescendantState(cx: *RenderContext, node: *Node) bool {
-    const self_has_promoted_layer = cx.layer_tree.planQueryRootNode(node.id).promoted_layer_id != INVALID_ID;
+/// Promotion and descendant summaries share one postorder pass and one plan
+/// query per rendered node. buildRetainedSubtree skips an entire branch when
+/// its root has no visible render state, so it cannot contribute a promoted
+/// descendant. Do not walk those hidden/offscreen Node trees a second time.
+fn syncPromotedState(cx: *RenderContext, node: *Node) bool {
+    const runtime = cx.scene_runtime.nodes.getPtr(node.id) orelse return false;
+    const state = cx.layer_tree.planQueryRootNode(node.id);
+    runtime.promoted_layer_id = state.promoted_layer_id;
+    runtime.promoted_surface_flags.surface_valid = state.frame_flags.surface_valid;
+    runtime.promoted_surface_flags.reused_this_frame = state.frame_flags.reused_this_frame;
+    runtime.promoted_surface_flags.rebuilt_this_frame = state.frame_flags.rebuilt_this_frame;
+    runtime.promoted_surface_flags.invalidated_by_descendant_this_frame = state.frame_flags.invalidated_by_descendant_this_frame;
+    runtime.promoted_surface_flags.invalidated_by_self_this_frame = state.frame_flags.invalidated_by_self_this_frame;
+    runtime.promoted_surface_flags.descendant_scoped_rebuild_candidate_this_frame = state.frame_flags.descendant_scoped_rebuild_candidate_this_frame;
     var descendant_has_promoted = false;
 
     for (node.children.items) |child| {
-        if (syncPromotedDescendantState(cx, child)) {
+        if (syncPromotedState(cx, child)) {
             descendant_has_promoted = true;
         }
     }
 
-    if (cx.scene_runtime.nodes.getPtr(node.id)) |runtime| {
-        runtime.has_promoted_descendant_subtree = descendant_has_promoted;
-    }
-
-    return self_has_promoted_layer or descendant_has_promoted;
+    runtime.has_promoted_descendant_subtree = descendant_has_promoted;
+    return state.promoted_layer_id != INVALID_ID or descendant_has_promoted;
 }
 
 fn buildNodeExecutionState(
@@ -2004,6 +1983,14 @@ fn renderChildWithParentClip(
 }
 
 fn clearSkippedInvisibleSubtreeDirty(node: *Node) void {
+    // Once an invisible branch is clean it cannot contribute paint or keep
+    // the frame gate awake. Do not walk its entire retained content on every
+    // unrelated terminal update. A dirty isolation island below a clean
+    // hidden ancestor may remain dirty: revealing that ancestor invalidates
+    // its paint, and the island is rebuilt when it can actually contribute.
+    const dirty = node.frame_state.state_bits.dirty;
+    if (!dirty.core.render and !dirty.core.subtree_render and
+        !dirty.pipeline.composite and !dirty.pipeline.subtree_composite) return;
     node.frame_state.state_bits.dirty.core.render = false;
     node.frame_state.state_bits.dirty.core.subtree_render = false;
     node.frame_state.state_bits.dirty.pipeline.composite = false;
@@ -3128,7 +3115,12 @@ pub fn renderNode(cx: *RenderContext, node: *Node) anyerror!void {
     beginRetainedFrame(cx);
     var child_order_restores: std.ArrayList(ChildOrderRestore) = .empty;
     defer restoreChildOrders(&child_order_restores);
-    try sortSubtreeChildrenByZ(cx, node, &child_order_restores);
+    var boundary_blocked = id_hash.U32HashMapUnmanaged(void){};
+    defer boundary_blocked.deinit(cx.frame_allocator);
+    _ = try prepareRenderTree(cx, node, &child_order_restores, false, &boundary_blocked);
+    const previous_boundary_index = cx.render_cache_boundary_blocked;
+    cx.render_cache_boundary_blocked = &boundary_blocked;
+    defer cx.render_cache_boundary_blocked = previous_boundary_index;
     buildRetainedSubtree(cx, node, Transform2D.identity(), null, 0, INVALID_ID, INVALID_ID, Transform2D.identity());
     cx.layer_tree.planBuildFromPropertyTree(
         cx.property_tree.effects.items,
@@ -3136,12 +3128,10 @@ pub fn renderNode(cx: *RenderContext, node: *Node) anyerror!void {
         cx.property_tree.transforms.items,
         cx.scene_runtime,
     );
-    // Both passes visit every node to copy plan-layer promotion into its runtime
-    // record. With no promoted plan layer they would write back exactly the defaults
+    // With no promoted plan layer this pass would write back exactly the defaults
     // `appendRetainedMetadata` stored this frame (records are rebuilt every frame).
     if (cx.layer_tree.frame_promoted_count != 0) {
-        syncPromotedLayerIds(cx);
-        _ = syncPromotedDescendantState(cx, node);
+        _ = syncPromotedState(cx, node);
     }
     try prebuildDisplayPayloads(cx, node, Transform2D.identity(), null, false, INVALID_ID);
     const r = renderNodeTransform(cx, node, Transform2D.identity(), null, false, 0, INVALID_ID, INVALID_ID);

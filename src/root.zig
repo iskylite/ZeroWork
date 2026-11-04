@@ -13,18 +13,25 @@ pub const lifecycle_journal = @import("ai/lifecycle_journal.zig");
 pub const canonical_arguments = @import("ai/canonical_arguments.zig");
 pub const host_queries = @import("ai/host_queries.zig");
 comptime {
+    _ = @import("ui/copy_button.zig");
     _ = @import("host_recording_queries_tests.zig");
     _ = @import("ai_inventory_grant_tests.zig");
     _ = @import("host_secret_store_tests.zig");
     _ = @import("ui/ai_recording_query_access.zig");
 }
 test {
+    _ = @import("ui/application_host.zig");
+    _ = @import("ai/execution_result_projection.zig");
+    _ = @import("ai/image_offload.zig");
+    _ = @import("ai/context_compaction.zig");
+    _ = @import("bmc_ai_tool_tests.zig");
     _ = canonical_arguments;
     _ = lifecycle_journal;
     _ = host_queries;
     _ = @import("ui/ai_tools.zig");
     _ = @import("ui/ai_lifecycle_controller.zig");
     _ = @import("ai/lifecycle_runtime_tests.zig");
+    _ = @import("ai/lifecycle_runtime.zig");
     _ = @import("ai/host_approval.zig");
     _ = @import("ai/fetch_url.zig");
     _ = @import("ui/ai_execution_backend.zig");

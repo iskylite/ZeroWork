@@ -226,8 +226,8 @@ pub const Registry = struct {
 
     pub fn clone(self: *const Registry, backing: std.mem.Allocator) !Registry {
         var result: Registry = .{ .arena = .init(backing), .hosts = &.{}, .revision = self.revision, .connection_ids = self.connection_ids, .group_ids = self.group_ids, .needs_migration = self.needs_migration, .source_hash = self.source_hash };
-        result.unknown_fields = try cloneStrings(result.arena.allocator(), self.unknown_fields);
         errdefer result.deinit();
+        result.unknown_fields = try cloneStrings(result.arena.allocator(), self.unknown_fields);
         const allocator = result.arena.allocator();
         result.hosts = try allocator.alloc(HostConfig, self.hosts.len);
         for (self.hosts, result.hosts) |host, *target| target.* = try cloneConfig(allocator, host);
@@ -1162,6 +1162,22 @@ fn cloneStrings(allocator: std.mem.Allocator, old: []const []const u8) ![]const 
     const next = try allocator.alloc([]const u8, old.len);
     for (old, next) |item, *target| target.* = try allocator.dupe(u8, item);
     return next;
+}
+
+test "registry snapshot clone releases partial extension fields on allocation failure" {
+    const a = std.testing.allocator;
+    const large = @as([8192]u8, @splat('x'));
+    var source: Registry = .{ .arena = .init(a), .hosts = &.{}, .unknown_fields = &.{ &large, &large } };
+    defer source.deinit();
+    const Scenario = struct {
+        fn copy(allocator: std.mem.Allocator, original: *const Registry) !void {
+            var owned = try original.clone(allocator);
+            defer owned.deinit();
+            try std.testing.expectEqual(@as(usize, 2), owned.unknown_fields.len);
+            for (original.unknown_fields, owned.unknown_fields) |before, after| try std.testing.expectEqualStrings(before, after);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(a, Scenario.copy, .{&source});
 }
 
 test "unknown provider, future payload and unknown fields survive clone and canonical round trip" {

@@ -653,6 +653,11 @@ test "BMC controller refuses early control and refresh until RFB negotiation com
     try T.expect(controller.poll().failure == null);
 }
 
+fn pollController(controller: *console.Controller, buffer: *console.Snapshot) *const console.Snapshot {
+    controller.pollInto(buffer);
+    return buffer;
+}
+
 test "BMC controller cancellation immediately closes input while preserving held release or remote uncertainty" {
     for ([_]bool{ false, true }) |reject_cancelled_writes| {
         var budget = budgets.Budget.init(128 * 1024 * 1024);
@@ -661,6 +666,8 @@ test "BMC controller cancellation immediately closes input while preserving held
         defer backend.deinit();
         var journal = try ledger.Journal.init(a, backend.backend());
         defer journal.deinit();
+        const state_buffer = try a.create(console.Snapshot);
+        defer a.destroy(state_buffer);
         const controller = try console.Controller.create(a, owner, key, .{ .endpoint = .{ .host = "bmc.invalid" }, .username = "operator" }, null, &budget, &journal, null);
         var bytes = try handshake(1, 1);
         defer bytes.deinit(a);
@@ -679,23 +686,23 @@ test "BMC controller cancellation immediately closes input while preserving held
         defer {
             fixture.read_hold.store(false, .release);
             controller.cancel();
-            while (!controller.poll().worker_exited) std.atomic.spinLoopHint();
+            while (!pollController(controller, state_buffer).worker_exited) std.atomic.spinLoopHint();
             controller.deinit() catch unreachable;
         }
         fixture.begin_release.store(true, .release);
         try controller.startSynthetic(selected, fixture.driver());
-        while (controller.poll().published_frames == 0) std.atomic.spinLoopHint();
+        while (pollController(controller, state_buffer).published_frames == 0) std.atomic.spinLoopHint();
         controller.remote_input.setFocus(true);
         const binding = controller.inputBinding();
         try T.expect(controller.remote_input.submit(binding, controller.remote_input.command(1, .{ .key = .{ .keysym = 'a', .down = true } })) == .accepted);
         try T.expect(controller.remote_input.submit(binding, controller.remote_input.command(2, .{ .pointer = .{ .x = 0, .y = 0, .buttons = 1 } })) == .accepted);
-        while (controller.poll().input.last_sent_input_sequence != 2) std.atomic.spinLoopHint();
+        while (pollController(controller, state_buffer).input.last_sent_input_sequence != 2) std.atomic.spinLoopHint();
         fixture.read_hold.store(true, .release);
         while (!fixture.read_blocked.load(.acquire)) std.atomic.spinLoopHint();
-        try T.expect(controller.poll().rfb_ready and controller.poll().control_request != null);
+        try T.expect(pollController(controller, state_buffer).rfb_ready and pollController(controller, state_buffer).control_request != null);
 
         controller.cancel();
-        const cancelled = controller.poll();
+        const cancelled = pollController(controller, state_buffer).*;
         try T.expect(!cancelled.input.controlled and !cancelled.input.focused and cancelled.input.capture_paused);
         try T.expect(!cancelled.rfb_ready and cancelled.control_request == null);
         try T.expectEqual(video.rfb.ControlState.read_only, cancelled.control);
@@ -706,8 +713,8 @@ test "BMC controller cancellation immediately closes input while preserving held
         try T.expectEqual(@as(u8, 1), controller.remote_input.pressed_buttons);
         try T.expect(controller.remote_input.release_pending);
         fixture.read_hold.store(false, .release);
-        while (!controller.poll().worker_exited) std.atomic.spinLoopHint();
-        const closed = controller.poll();
+        while (!pollController(controller, state_buffer).worker_exited) std.atomic.spinLoopHint();
+        const closed = pollController(controller, state_buffer).*;
         try T.expect(closed.failure == null);
         try T.expectEqual(console.Cleanup.released, closed.cleanup);
         try T.expectEqual(reject_cancelled_writes, closed.input.remote_unconfirmed);
@@ -1018,6 +1025,8 @@ test "BMC controller keeps video streaming while cancelled management HTTP drain
     defer journal.deinit();
     var arbiter = actions.Arbiter.init(a);
     defer arbiter.deinit();
+    const state_buffer = try a.create(console.Snapshot);
+    defer a.destroy(state_buffer);
     const controller = try console.Controller.createForTest(a, owner, key, .{ .endpoint = .{ .host = "bmc.invalid" }, .username = "operator" }, null, &budget, &journal, arbiter.facade(owner));
     var bytes = try handshake(1, 1);
     defer bytes.deinit(a);
@@ -1031,7 +1040,7 @@ test "BMC controller keeps video streaming while cancelled management HTTP drain
     var fixture: DelayedManagementFixture = .{ .worker = .{ .creator = std.Thread.getCurrentId(), .inbound = packet.items }, .manager = &controller.manager };
     defer {
         controller.cancel();
-        while (!controller.poll().worker_exited) std.atomic.spinLoopHint();
+        while (!pollController(controller, state_buffer).worker_exited) std.atomic.spinLoopHint();
         controller.deinit() catch unreachable;
     }
     fixture.worker.begin_release.store(true, .release);
@@ -1039,7 +1048,7 @@ test "BMC controller keeps video streaming while cancelled management HTTP drain
     std.crypto.hash.sha2.Sha256.hash("fixture", &digest, .{});
     const selected = try profile.syntheticForTest(identityFixture(), .{ .firmware = "1.80", .identity_fixture_sha256 = @splat(1), .public_key_pem = "fixture", .public_key_sha256 = digest, .public_key_source = "fixture", .web_login_schema_verified = true, .kvm_login_schema_verified = true, .ws_subprotocol_echo_verified = true, .oem_handshake_verified = true, .web_logout = .own_session_location, .kvm_logout = .own_session_location });
     try controller.startSynthetic(selected, fixture.driver());
-    while (controller.poll().published_frames == 0) std.atomic.spinLoopHint();
+    while (pollController(controller, state_buffer).published_frames == 0) std.atomic.spinLoopHint();
     const binding = controller.powerBinding();
     const api = try binding.borrow(svc.PowerService, svc.power_key, owner);
     const first: svc.PowerExecutionRequest = .{ .execution = execution(51), .action = .force_off };
@@ -1052,15 +1061,15 @@ test "BMC controller keeps video streaming while cancelled management HTTP drain
         var result = try api.result(binding.context, first.execution.call, first.execution.operation, a);
         defer result.deinit();
         if (result.value.phase == .outcome_unknown) break;
-        if (controller.poll().worker_exited) return error.VideoStopped;
+        if (pollController(controller, state_buffer).worker_exited) return error.VideoStopped;
         std.atomic.spinLoopHint();
     } else return error.FixtureTimedOut;
     try T.expectEqual(@as(usize, 1), fixture.dispatches.load(.acquire));
-    try T.expectEqual(console.VideoState.streaming, controller.poll().video);
+    try T.expectEqual(console.VideoState.streaming, pollController(controller, state_buffer).video);
     fixture.allow_completion.store(true, .release);
     try fixture.awaitDispatches(controller, 2);
     try T.expectEqual(@as(usize, 1), fixture.completions.load(.acquire));
-    const state = controller.poll();
+    const state = pollController(controller, state_buffer).*;
     try T.expect(state.failure == null);
     try T.expect(!state.worker_exited);
     try T.expectEqual(console.VideoState.streaming, state.video);

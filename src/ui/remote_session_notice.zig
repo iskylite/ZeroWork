@@ -48,19 +48,19 @@ pub const Snapshot = struct {
     }
     pub fn detail(self: Snapshot, buffer: []u8) []const u8 {
         if ((self.failure != null and self.failure.? == error.ShellInitializationFailed) and self.cleanup == .released) return if (self.initialization_confirmation)
-            "可确认仅本次跳过初始化后重连；全局和主机设置保持不变。未执行或重放业务命令"
+            "可确认仅本次跳过初始化后重连；全局和主机设置保持不变。连接后将执行启动命令"
         else
-            "将使用新连接重新初始化；未执行或重放业务命令";
+            "将使用新连接重新初始化，成功后执行启动命令";
         if (self.state != .connected and self.state != .reconnecting and self.cleanup != .released) return if (self.cleanup == .unknown)
             "历史输出仍可查看；资源释放结果未知，暂时无法重连"
         else
             "历史输出仍可查看；正在释放旧连接，请稍候再重连";
         if (self.state == .disconnected or self.state == .retry_failed) if (self.auto_retry_seconds) |seconds| {
-            return std.fmt.bufPrint(buffer, "历史输出仍可查看；将在 {d} 秒后自动重连，也可点击立即重连", .{seconds}) catch "历史输出仍可查看；即将自动重连，也可点击立即重连";
+            return std.fmt.bufPrint(buffer, "历史输出仍可查看；将在 {d} 秒后自动重连", .{seconds}) catch "历史输出仍可查看；即将自动重连";
         };
         const text: []const u8 = switch (self.state) {
             .connected => "",
-            .exited => "历史输出仍可查看，继续使用请重新连接",
+            .exited => "历史输出仍可查看",
             .disconnected => "历史输出仍可查看，请检查网络后重新连接",
             .reconnecting => if (self.buffer_input) "历史输出仍可查看；已开启输入缓冲，键入内容将在重连后发送" else "历史输出仍可查看，连接恢复后即可继续输入",
             .retry_failed => "历史输出仍可查看，请检查网络或连接设置后重试",

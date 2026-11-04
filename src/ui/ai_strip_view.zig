@@ -35,9 +35,6 @@ pub const View = struct {
     pub fn update(self: *View, pane: ?ui.ComputedRect, visible: bool, state: State, phase: usize, expanded: bool) void {
         self.root.setDisplay(if (visible and pane != null) .flex else .none);
         const rect = pane orelse return;
-        self.root.style.align_items = .center;
-        self.root.style.justify = .center;
-        self.root.style.gap = 0;
         const parent = (self.root.parent orelse return).globalRect();
         const x = rect.x + (rect.w - S.width) / 2 - parent.x;
         const y = rect.y + rect.h - parent.y;
@@ -47,8 +44,11 @@ pub const View = struct {
             self.root.markLayoutDirty();
             self.root.markRenderDirty();
         }
-        self.lip.setStyleInline(self.cx.allocator, S.activeLip(expanded or self.hovered.get()));
-        for (self.dots, 0..) |dot, index| dot.setStyleInline(self.cx.allocator, .{ .background = S.color(state, index, phase) });
+        if (S.activeLip(expanded or self.hovered.get()).background) |paint| if (!ui.Color.eql(self.lip.getBackground(), paint)) self.lip.setBackground(paint);
+        for (self.dots, 0..) |dot, index| {
+            const paint = S.color(state, index, phase);
+            if (!ui.Color.eql(dot.getBackground(), paint)) dot.setBackground(paint);
+        }
         if (visible and (state == .working or state == .approval)) self.cx.scheduleRedrawAfterNs(200 * 1_000_000);
     }
 };

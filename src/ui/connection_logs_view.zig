@@ -62,6 +62,7 @@ pub const View = struct {
     feedback: *ui.Node = undefined,
     bottom_button: *ui.Node = undefined,
     copy_button: *ui.Node = undefined,
+    copy_feedback: *@import("copy_button.zig").Button = undefined,
     close_button: *ui.Node = undefined,
     focus_pending: bool = false,
     following: bool = true,
@@ -235,6 +236,7 @@ pub const View = struct {
         const copy_context = try self.action(scope, .copy);
         self.copy_button = try ui.widgets.Button(.{ .label = "复制日志", .variant = .primary, .disabled = self.copy_disabled, .base_style = S.button(112, 34, true), .on_click = self.cx.on(Action, copy_context, Action.click) }).mount(scope, self.cx);
         try @import("app_theme.zig").stylePrimary(self.cx, scope, self.copy_button, self.copy_disabled);
+        self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, self.copy_button);
         self.copy_button.meta.ownership.meta.test_id = "connection.logs.copy";
         try self.footer.appendChild(self.cx.allocator, self.copy_button);
         const done_context = try self.action(scope, .close);
@@ -290,6 +292,7 @@ pub const View = struct {
         try writeRecords(writer, source.records);
     }
     fn copyFeedback(self: *View, success: bool) void {
+        self.copy_feedback.report(success);
         self.feedback.setTextContent(self.cx.allocator, if (success) "已复制连接日志" else "复制失败，请重试") catch {};
         self.cx.requestRedraw();
     }

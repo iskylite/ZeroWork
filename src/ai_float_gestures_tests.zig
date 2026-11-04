@@ -82,9 +82,14 @@ test "AI float actual Cx grip drag commits and Escape or window blur rolls geome
     try f.init();
     defer f.deinit();
     const initial = f.model.rect(pane, window);
+    const grip = f.grip.globalRect();
+    f.cx.handleMouseMove(grip.x + grip.w / 2, grip.y + grip.h / 2);
+    try std.testing.expectEqual(ui.CursorShape.grab, f.cx.current_cursor);
     f.begin(f.grip, 80, 50);
     try std.testing.expect(f.view.bindings[0].?.isDragging());
+    try std.testing.expectEqual(ui.CursorShape.grabbing, f.cx.current_cursor);
     f.finish();
+    try std.testing.expectEqual(ui.CursorShape.grab, f.cx.current_cursor);
     try std.testing.expectEqual(initial.x + 80, f.model.desired.?.x);
     try std.testing.expectEqual(initial.y + 50, f.model.desired.?.y);
     const committed = f.model.geometry();
@@ -102,7 +107,7 @@ test "AI float actual Cx grip drag commits and Escape or window blur rolls geome
     try std.testing.expect(f.view.active == null);
 }
 
-test "AI float actual Cx all four edges and corners resize without capturing central text input" {
+test "AI float actual Cx all four edges and corners resize with cursor feedback without capturing central text input" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -112,8 +117,13 @@ test "AI float actual Cx all four edges and corners resize without capturing cen
         f.layout();
         const dx: f32 = if (edge.west()) -40 else if (edge.east()) 40 else 0;
         const dy: f32 = if (edge.north()) -20 else if (edge.south()) 20 else 0;
+        const expected_cursor = @import("ui/ai_float_gesture_styles.zig").cursor(edge);
+        const handle = f.view.handles[index].globalRect();
+        f.cx.handleMouseMove(handle.x + handle.w / 2, handle.y + handle.h / 2);
+        try std.testing.expectEqual(expected_cursor, f.cx.current_cursor);
         f.begin(f.view.handles[index], dx, dy);
         try std.testing.expect(f.view.bindings[index + 1].?.isDragging());
+        try std.testing.expectEqual(expected_cursor, f.cx.current_cursor);
         f.finish();
         const result = f.model.rect(pane, window);
         try std.testing.expectEqual(initial.width + if (dx == 0) @as(f32, 0) else 40, result.width);
@@ -123,6 +133,8 @@ test "AI float actual Cx all four edges and corners resize without capturing cen
     }
     const geometry = f.model.geometry();
     const input = f.input.input_container.globalRect();
+    f.cx.handleMouseMove(input.x + 20, input.y + input.h / 2);
+    try std.testing.expectEqual(ui.CursorShape.text, f.cx.current_cursor);
     f.cx.handleMouseDown(input.x + 20, input.y + input.h / 2, .{});
     f.cx.handleMouseMove(input.x + 100, input.y + input.h / 2);
     f.finish();
@@ -131,7 +143,7 @@ test "AI float actual Cx all four edges and corners resize without capturing cen
     try std.testing.expectEqual(geometry, f.model.geometry());
 }
 
-test "AI float double click resets only position maximize restores size and owner cancel discards late pointer" {
+test "AI float double click resets only position maximize restores size and cursor and owner cancel discards late pointer" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -152,9 +164,13 @@ test "AI float double click resets only position maximize restores size and owne
     f.layout();
     try std.testing.expectEqual(float.safeBounds(pane, window), f.model.rect(pane, window));
     for (f.view.handles) |handle| try std.testing.expect(!handle.isDisplayedInTree());
+    const maximized_grip = f.grip.globalRect();
+    f.cx.handleMouseMove(maximized_grip.x + maximized_grip.w / 2, maximized_grip.y + maximized_grip.h / 2);
+    try std.testing.expectEqual(ui.CursorShape.default, f.cx.current_cursor);
     f.view.toggleMaximized();
     f.layout();
     try std.testing.expectEqual(reset, f.model.rect(pane, window));
+    try std.testing.expectEqual(ui.CursorShape.grab, f.grip.style.cursor);
     f.begin(f.grip, 50, 20);
     f.view.cancel(); // Host calls this before moving its per-owner model state.
     const archived = f.model;
@@ -164,6 +180,20 @@ test "AI float double click resets only position maximize restores size and owne
     f.finish();
     try std.testing.expect(f.model.desired == null);
     try std.testing.expectEqual(reset, archived.desired.?);
+}
+
+test "AI float cursor covers each straight edge along its full resize strip" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const shapes = [_]ui.CursorShape{ .ns_resize, .ns_resize, .ew_resize, .ew_resize };
+    for (f.view.handles[0..4], shapes, 0..) |node, expected, index| {
+        const r = node.globalRect();
+        for ([_]f32{ 0.05, 0.5, 0.95 }) |fraction| {
+            f.cx.handleMouseMove(r.x + r.w * (if (index < 2) fraction else 0.5), r.y + r.h * (if (index < 2) 0.5 else fraction));
+            try std.testing.expectEqual(expected, f.cx.current_cursor);
+        }
+    }
 }
 
 test "AI float scope teardown cancels an active resize and clears its native event bindings" {

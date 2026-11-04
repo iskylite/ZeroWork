@@ -54,12 +54,11 @@ pub const Options = struct {
     /// Frozen for this attempt. Authentication and own-session cleanup are
     /// separate; this policy controls power/boot management IO dispatch.
     management_policy: svc.ManagementPolicy = .read_only,
-    /// Stable per-attempt memory; worker only records safe scalar metadata.
+    /// Stable per-attempt memory; worker records owned, sanitized diagnostics.
     progress: ?*progress.Tracker = null,
 };
 pub const RemoteRelease = enum { not_created, awaiting, confirmed, unknown };
-/// Safe, one-time discovery summary. No device URI, identity or response text
-/// is exposed; callers acquire it only after the worker publishes the result.
+/// One-time discovery summary with owned, sanitized resource diagnostics.
 pub const MappingRejection = enum {
     manager_document_rejected,
     manager_servers_not_single,
@@ -80,6 +79,7 @@ pub const DiscoveryDiagnostics = struct {
     mapping_verified: bool = false,
     mapping_error: ?anyerror = null,
     mapping_rejection: ?MappingRejection = null,
+    mapping_context: ?progress.Context = null,
     mapping_system_status: ?u16 = null,
     mapping_system_validity: ?svc.Validity = null,
     management_target_verified: bool = false,
@@ -88,12 +88,14 @@ pub const DiscoveryDiagnostics = struct {
     resource_association_method: ?ResourceAssociationMethod = null,
     readonly_system_projection: bool = false,
     readonly_rejection: ?progress.Code = null,
+    readonly_context: ?progress.Context = null,
     readonly_collection_count: usize = 0,
     readonly_member_count: usize = 0,
     readonly_collection_status: ?u16 = null,
     readonly_collection_validity: ?svc.Validity = null,
     readonly_system_status: ?u16 = null,
     readonly_system_validity: ?svc.Validity = null,
+    readonly_system_log_validity: ?progress.Validity = null,
     readonly_system_identity_present: bool = false,
 };
 pub const LogoutStage = enum { not_created, own_reference_unavailable, management_unavailable, request_build_failed, transaction_failed, response_parse_failed, response_rejected, confirmed, connection_failed };
@@ -453,12 +455,12 @@ pub const NativeDriver = struct {
         self.progressStage(.redfish_discovery);
         while (self.discovery.?.next()) |pending| {
             self.readDiscoveryResource(pending) catch |err| {
+                if (err != error.Cancelled) self.progressNote(.{ .code = .management_discovery_incomplete, .resource = resourceKind(pending.kind), .err = err });
                 // Probes report their discovery result. A console can keep
                 // its authenticated video path without management metadata;
                 // cancellation and allocation failures remain terminal.
                 if (self.probe_only or err == error.Cancelled or err == error.OutOfMemory) return err;
                 self.management_discovery_error = err;
-                self.progressNote(.{ .code = .management_discovery_incomplete, .resource = resourceKind(pending.kind), .err = err });
                 // A partially consumed HTTP response cannot share a stream
                 // with OEM authentication. Reconnect only to the same endpoint
                 // and authorize only this attempt's already accepted peer.
@@ -468,11 +470,26 @@ pub const NativeDriver = struct {
         }
     }
     fn readDiscoveryResource(self: *NativeDriver, pending: redfish.ReadRequest) !void {
-        var response = try self.request("GET", pending.uri, &.{}, "");
+        const source_path = if (pending.source_uri) |uri| progress.resourcePath(uri) else null;
+        const source_property = if (pending.source != .none) progress.LogText(128).init(pending.source.property()) else null;
+        var request_context = discoveryContext(pending.uri, null);
+        request_context.source_path = source_path;
+        request_context.source_property = source_property;
+        self.progressContext(request_context);
+        var response = try self.requestInternal("GET", pending.uri, &.{}, "", null, request_context);
         defer response.deinit();
         try self.discovery.?.ingest(pending, response.response.status, response.response.body(), response.response.header("ETag"), timestamp() / std.time.ns_per_ms);
         const observed_doc = self.discovery.?.find(pending.uri);
-        self.progressResponse(resourceKind(pending.kind), response.response.status, if (observed_doc) |doc| doc.validity else null);
+        var context = response.context;
+        context.source_path = source_path;
+        context.source_property = source_property;
+        if (observed_doc) |doc| context.response_errors = responseErrors(doc.*);
+        const validity = if (observed_doc) |doc| readLogValidity(self.allocator, self.discovery.?.origin, pending.kind, doc.*) else null;
+        self.progressNote(.{ .resource = resourceKind(pending.kind), .http_status = response.response.status, .validity = validity, .context = context, .code = if (validity) |value| switch (value) {
+            .unavailable => if (response.response.status == 404 and pending.source == .manager_for_servers) .manager_system_link_missing else if (response.response.status == 404 and pending.source != .none) .advertised_resource_missing else .resource_response_rejected,
+            .partial_with_error => .resource_response_partial,
+            .valid => if (context.response_errors != null) .resource_fields_available else .none,
+        } else .none });
     }
     fn readFirmwareEvidence(self: *NativeDriver) !void {
         self.progressStage(.firmware_confirmation);
@@ -808,7 +825,7 @@ pub const NativeDriver = struct {
             (selected.boot.state.enabled != null and selected.boot.enabled_evidence.validity == .valid) or
             (selected.boot.state.target != null and selected.boot.target_evidence.validity == .valid) or
             (selected.boot.state.mode != null and selected.boot.mode_evidence.validity == .valid);
-        if (!self.diagnostics.management_available) self.progressNote(.{ .code = .management_fields_unavailable, .resource = .system });
+        if (!self.diagnostics.management_available) self.progressNote(.{ .code = .management_fields_unavailable, .resource = .system, .context = if (self.discovery.?.find(selected.power.state.evidence.source_uri)) |doc| documentContext(doc.*) else .{} });
         if (self.adapter) |adapter| try adapter.setSnapshots(selected.power, selected.boot, true);
     }
     /// A corroborated resource association, or a unique collection member,
@@ -832,6 +849,7 @@ pub const NativeDriver = struct {
             diagnostic.readonly_collection_count = collections;
             diagnostic.readonly_collection_status = resource.doc.status;
             diagnostic.readonly_collection_validity = resource.doc.validity;
+            diagnostic.readonly_context = documentContext(resource.doc);
             if (!resource.doc.resourceAvailable() or !resource.doc.fieldAccepted("/Members")) {
                 diagnostic.readonly_rejection = .readonly_collection_rejected;
                 return null;
@@ -861,12 +879,15 @@ pub const NativeDriver = struct {
             diagnostic.readonly_rejection = .readonly_members_not_single;
             return null;
         };
+        diagnostic.readonly_context = discoveryContext(uri, null);
         const doc = discovery.find(uri) orelse {
             diagnostic.readonly_rejection = .readonly_member_missing;
             return null;
         };
+        diagnostic.readonly_context = documentContext(doc.*);
         diagnostic.readonly_system_status = doc.status;
         diagnostic.readonly_system_validity = doc.validity;
+        diagnostic.readonly_system_log_validity = readLogValidity(self.allocator, discovery.origin, .system, doc.*);
         if (!doc.resourceAvailable()) {
             diagnostic.readonly_rejection = .readonly_member_rejected;
             return null;
@@ -911,25 +932,36 @@ pub const NativeDriver = struct {
             .invalid_relationship => .mapping_invalid_relationship,
             .profile_evidence_unverified => .mapping_profile_evidence_unverified,
             .ambiguous_mapping => .mapping_ambiguous,
-        }, .resource = .system, .http_status = diagnostic.mapping_system_status, .validity = if (diagnostic.mapping_system_validity) |v| @fromBackingInt(@intCast(@backingInt(v))) else null });
-        if (diagnostic.mapping_verified) self.progressNote(.{ .code = .mapping_verified, .resource = .system });
-        if (diagnostic.readonly_rejection) |code| self.progressNote(.{ .code = code, .resource = .systems_collection, .http_status = diagnostic.readonly_collection_status, .validity = if (diagnostic.readonly_collection_validity) |v| @fromBackingInt(@intCast(@backingInt(v))) else null, .count = @intCast(@min(diagnostic.readonly_member_count, std.math.maxInt(u16))) });
-        if (diagnostic.readonly_system_status) |status| self.progressResponse(.system, status, diagnostic.readonly_system_validity);
-        if (diagnostic.readonly_system_projection) self.progressNote(.{ .code = .readonly_projection_available, .resource = .system });
+        }, .resource = switch (rejection) {
+            .manager_document_rejected, .manager_servers_not_single => .manager,
+            else => .system,
+        }, .context = diagnostic.mapping_context orelse .{}, .err = diagnostic.mapping_error, .validity = if (diagnostic.mapping_system_validity) |v| @fromBackingInt(@intCast(@backingInt(v))) else null });
+        if (diagnostic.mapping_verified) self.progressNote(.{ .code = .mapping_verified, .resource = .system, .context = .{} });
+        if (diagnostic.readonly_rejection) |code| self.progressNote(.{ .code = code, .resource = switch (code) {
+            .readonly_member_missing, .readonly_member_rejected, .readonly_system_invalid, .readonly_identity_missing => .system,
+            else => .systems_collection,
+        }, .context = diagnostic.readonly_context orelse .{}, .count = @intCast(@min(diagnostic.readonly_member_count, std.math.maxInt(u16))) });
+        if (diagnostic.readonly_system_status) |status| self.progressNote(.{ .resource = .system, .http_status = status, .validity = diagnostic.readonly_system_log_validity, .code = if (diagnostic.readonly_system_log_validity == .valid and diagnostic.readonly_system_validity == .partial_with_error) .resource_fields_available else .none, .context = diagnostic.readonly_context orelse .{} });
+        if (diagnostic.readonly_system_projection) self.progressNote(.{ .code = .readonly_projection_available, .resource = .system, .context = diagnostic.readonly_context orelse .{} });
     }
     /// Diagnose an already-rejected proof without changing Discovery's rules.
-    /// This static stage summary must never include device links or identities.
+    /// Copy the actual rejected resource, never the last unrelated request.
     fn mappingRejection(self: *NativeDriver, manager: redfish.Document, diagnostic: *DiscoveryDiagnostics) MappingRejection {
+        diagnostic.mapping_context = documentContext(manager);
         if (!self.selected.value.evidence.oem_handshake_verified) return .profile_evidence_unverified;
         if (!manager.resourceAvailable()) return .manager_document_rejected;
         const links = redfish.member(manager.value, "Links") orelse return .manager_servers_not_single;
-        const managed = redfish.member(links, "ManagerForServers") orelse return .manager_servers_not_single;
-        if (managed != .array or managed.array.items.len != 1) return .manager_servers_not_single;
-        const reference = redfish.text(managed.array.items[0], "@odata.id") orelse return .invalid_relationship;
         const discovery = &self.discovery.?;
-        const uri = redfish.resourceUri(self.allocator, discovery.origin, reference) catch return .invalid_relationship;
-        defer self.allocator.free(uri);
+        const managed = redfish.managerForServers(discovery.arena.allocator(), discovery.origin, redfish.member(links, "ManagerForServers")) catch return .invalid_relationship;
+        if (managed.len != 1) return .manager_servers_not_single;
+        const uri = managed[0];
+        diagnostic.mapping_context = discoveryContext(uri, null);
+        diagnostic.mapping_context.?.source_path = progress.resourcePath(manager.uri);
+        diagnostic.mapping_context.?.source_property = progress.LogText(128).init(redfish.LinkSource.manager_for_servers.property());
         const system = discovery.find(uri) orelse return .system_missing;
+        diagnostic.mapping_context = documentContext(system.*);
+        diagnostic.mapping_context.?.source_path = progress.resourcePath(manager.uri);
+        diagnostic.mapping_context.?.source_property = progress.LogText(128).init(redfish.LinkSource.manager_for_servers.property());
         diagnostic.mapping_system_status = system.status;
         diagnostic.mapping_system_validity = system.validity;
         if (!system.resourceAvailable()) return .system_document_rejected;
@@ -980,13 +1012,18 @@ pub const NativeDriver = struct {
         return .{ .allocator = self.allocator, .bytes = try http.buildRequest(self.allocator, method, self.origin(), path, headers[0..count], body) };
     }
     fn request(self: *NativeDriver, method: []const u8, uri: []const u8, headers: []const http.Header, body: []const u8) !Transaction {
-        return self.requestInternal(method, uri, headers, body, null);
+        return self.requestInternal(method, uri, headers, body, null, null);
     }
     fn createSessionRequest(self: *NativeDriver, uri: []const u8, headers: []const http.Header, body: []const u8, release: *RemoteRelease) !Transaction {
-        return self.requestInternal("POST", uri, headers, body, release);
+        return self.requestInternal("POST", uri, headers, body, release, null);
     }
-    fn requestInternal(self: *NativeDriver, method: []const u8, uri: []const u8, headers: []const http.Header, body: []const u8, creation: ?*RemoteRelease) !Transaction {
+    fn requestInternal(self: *NativeDriver, method: []const u8, uri: []const u8, headers: []const http.Header, body: []const u8, creation: ?*RemoteRelease, source: ?progress.Context) !Transaction {
         var transaction = self.newTransaction(try self.build(method, uri, headers, body), 0);
+        if (source) |context| {
+            transaction.context.source_path = context.source_path;
+            transaction.context.source_property = context.source_property;
+            self.progressContext(transaction.context);
+        }
         errdefer {
             // A partially/fully dispatched create can succeed even when its
             // response or session token is lost. Never call that not_created.
@@ -1487,8 +1524,7 @@ test "BMC SSH route diagnostics restore the BMC target only after the final jump
 }
 
 /// Classify the locally built request before its credential-bearing storage is
-/// wiped. Only fixed enum templates survive; no actual resource ID or query is
-/// copied into connection diagnostics.
+/// wiped. Ordinary resource paths are copied; session IDs and queries are omitted.
 fn requestContext(bytes: []const u8) progress.Context {
     var parts = std.mem.splitScalar(u8, bytes, ' ');
     const method = parts.next() orelse "";
@@ -1496,6 +1532,7 @@ fn requestContext(bytes: []const u8) progress.Context {
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
     return .{
         .method = if (std.mem.eql(u8, method, "GET")) .get else if (std.mem.eql(u8, method, "POST")) .post else if (std.mem.eql(u8, method, "PATCH")) .patch else if (std.mem.eql(u8, method, "DELETE")) .delete else .none,
+        .resource_path = progress.resourcePath(path),
         .path = if (std.mem.eql(u8, path, "/redfish/v1/") or std.mem.eql(u8, path, "/redfish/v1"))
             .service_root
         else if (std.mem.eql(u8, path, profile.sugon_public_material_path))
@@ -1528,16 +1565,275 @@ fn requestContext(bytes: []const u8) progress.Context {
 fn isDirectMemberPath(path: []const u8, prefix: []const u8) bool {
     return std.mem.startsWith(u8, path, prefix) and path.len > prefix.len and std.mem.indexOfScalar(u8, path[prefix.len..], '/') == null;
 }
-test "BMC native HTTP diagnostics retain only reviewed request templates without identifiers query headers or body" {
-    const context = requestContext("GET /redfish/v1/Systems/private-system?private-query HTTP/1.1\r\nX-Auth-Token: private-token\r\n\r\nprivate-body");
+test "BMC native HTTP diagnostics retain actual resource paths without session identifiers query headers or body" {
+    const context = requestContext("GET /redfish/v1/Systems/node-B?private-query HTTP/1.1\r\nX-Auth-Token: private-token\r\n\r\nprivate-body");
     try std.testing.expectEqual(progress.Method.get, context.method);
     try std.testing.expectEqual(progress.RequestPath.system, context.path);
+    try std.testing.expectEqualStrings("/redfish/v1/Systems/node-B", context.resource_path.?.text());
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
     defer std.testing.allocator.free(encoded);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "private-") == null);
     const child = requestContext("GET /redfish/v1/Managers/private-manager/SecurityService HTTP/1.1\r\n\r\n");
     // A subresource must not be mislabeled as its Manager parent.
     try std.testing.expectEqual(progress.RequestPath.other_redfish, child.path);
+    try std.testing.expectEqualStrings("/redfish/v1/Managers/private-manager/SecurityService", child.resource_path.?.text());
+    for ([_][]const u8{
+        "GET /redfish/v1/SessionService/Sessions/private-session?private-token HTTP/1.1\r\n\r\n",
+        "POST /redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/private-kvm HTTP/1.1\r\n\r\nprivate-password",
+        "GET /redfish/v1/sessionservice/Sessions/private-session HTTP/1.1\r\n\r\n",
+    }) |request_bytes| {
+        const session = requestContext(request_bytes);
+        try std.testing.expect(session.resource_path == null);
+        const safe = try std.json.Stringify.valueAlloc(std.testing.allocator, session, .{});
+        defer std.testing.allocator.free(safe);
+        try std.testing.expect(std.mem.indexOf(u8, safe, "private-") == null);
+    }
+}
+
+test "BMC native resource errors copy registry IDs and omit sensitive response strings" {
+    const a = std.testing.allocator;
+    var doc = try redfish.Document.parse(a, "/redfish/v1/Systems/node-B", 200,
+        \\{"@Message.ExtendedInfo":[{"MessageId":"Base.1.19.InternalError","Message":"private-password","MessageArgs":["private-token"],"Severity":"Critical"}],"Boot":{"BootSourceOverrideTarget@Message.ExtendedInfo":[{"MessageId":"Base.1.19.PropertyValueError","Message":"private-token"}]},"Password":"private-password"}
+    , null, 0);
+    const context = documentContext(doc);
+    doc.deinit();
+    try std.testing.expectEqualStrings("Base.1.19.InternalError, Base.1.19.PropertyValueError", context.response_errors.?.text());
+    try std.testing.expectEqualStrings("/redfish/v1/Systems/node-B", context.resource_path.?.text());
+    const encoded = try std.json.Stringify.valueAlloc(a, context, .{});
+    defer a.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "private-") == null);
+    var rejected = try redfish.Document.parse(a, "/redfish/v1/Systems/missing", 404, "{\"error\":{\"code\":\"Base.1.19.ResourceNotFound\",\"message\":\"private-token\"}}", null, 0);
+    defer rejected.deinit();
+    try std.testing.expectEqualStrings("Base.1.19.ResourceNotFound", responseErrors(rejected).?.text());
+}
+test "BMC native HTTP 200 reads require usable fields before treating device diagnostics as information" {
+    const a = std.testing.allocator;
+    var origin_arena: std.heap.ArenaAllocator = .init(a);
+    defer origin_arena.deinit();
+    const origin = try redfish.Origin.init(origin_arena.allocator(), .{ .host = "fixture.invalid" });
+    const body =
+        \\{"Id":"node-B","PowerState":"On","Boot":{"BootSourceOverrideEnabled":"Disabled","BootSourceOverrideTarget":"None","BootSourceOverrideMode":"UEFI","BootOrder":["Boot0001"]},"@Message.ExtendedInfo":[{"MessageId":"Base.1.19.InternalError","Severity":"Critical","RelatedProperties":[]}]}
+    ;
+    var doc = try redfish.Document.parse(a, "/redfish/v1/Systems/node-B", 200, body, null, 0);
+    defer doc.deinit();
+    try std.testing.expectEqual(progress.Validity.valid, readLogValidity(a, origin, .system, doc));
+    try std.testing.expectEqual(svc.Validity.partial_with_error, doc.validity);
+    doc.value.object.getPtr("PowerState").?.* = .{ .string = try doc.arena.allocator().dupe(u8, "Unknown") };
+    try std.testing.expectEqual(progress.Validity.partial_with_error, readLogValidity(a, origin, .system, doc));
+    doc.value.object.getPtr("PowerState").?.* = .{ .string = try doc.arena.allocator().dupe(u8, "On") };
+    const boot = doc.value.object.getPtr("Boot").?;
+    boot.object.getPtr("BootOrder").?.* = .{ .integer = 1 };
+    try std.testing.expectEqual(progress.Validity.partial_with_error, readLogValidity(a, origin, .system, doc));
+    var scoped = try redfish.Document.parse(a, doc.uri, 200,
+        \\{"Id":"node-B","PowerState":"On","Boot":{"BootSourceOverrideEnabled":"Disabled","BootSourceOverrideTarget":"None","BootSourceOverrideMode":"UEFI"},"@Message.ExtendedInfo":[{"MessageId":"Base.1.19.InternalError","Severity":"Critical","RelatedProperties":["#/PowerState"]}]}
+    , null, 0);
+    defer scoped.deinit();
+    try std.testing.expectEqual(progress.Validity.partial_with_error, readLogValidity(a, origin, .system, scoped));
+    var rejected = try redfish.Document.parse(a, doc.uri, 200, "{\"error\":{\"code\":\"Base.1.19.InternalError\"}}", null, 0);
+    defer rejected.deinit();
+    try std.testing.expectEqual(progress.Validity.unavailable, readLogValidity(a, origin, .system, rejected));
+    var missing = try redfish.Document.parse(a, doc.uri, 200, "{}", null, 0);
+    defer missing.deinit();
+    try std.testing.expectEqual(progress.Validity.partial_with_error, readLogValidity(a, origin, .system, missing));
+}
+/// Log the result of the information read, independently of object-level
+/// diagnostics. Keep protocol evidence and write authorization unchanged.
+fn readLogValidity(allocator: std.mem.Allocator, origin: redfish.Origin, kind: redfish.ResourceKind, doc: redfish.Document) progress.Validity {
+    if (!doc.resourceAvailable()) return .unavailable;
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    switch (kind) {
+        .root => {
+            _ = redfish.parseRoot(a, origin, doc) catch return .partial_with_error;
+            return .valid;
+        },
+        .systems, .managers, .boot_options => {
+            _ = redfish.parseCollection(a, origin, doc) catch return .partial_with_error;
+            return .valid;
+        },
+        .manager => {
+            if (!logTextAvailable(doc, "/Id", redfish.text(doc.value, "Id"))) return .partial_with_error;
+            if (redfish.member(doc.value, "FirmwareVersion") != null and !logTextAvailable(doc, "/FirmwareVersion", redfish.text(doc.value, "FirmwareVersion"))) return .partial_with_error;
+            const links = redfish.member(doc.value, "Links");
+            if (if (links) |value| redfish.member(value, "ManagerForServers") else null) |managed| {
+                if (!doc.fieldAccepted("/Links/ManagerForServers")) return .partial_with_error;
+                _ = redfish.managerForServers(a, origin, managed) catch return .partial_with_error;
+            }
+            return .valid;
+        },
+        .chassis => {
+            if (!logTextAvailable(doc, "/Id", redfish.text(doc.value, "Id"))) return .partial_with_error;
+            const links = redfish.member(doc.value, "Links") orelse return .partial_with_error;
+            if (!logLinksAvailable(a, origin, doc, "/Links/ComputerSystems", redfish.member(links, "ComputerSystems"), true) or
+                !logLinksAvailable(a, origin, doc, "/Links/ManagedBy", redfish.member(links, "ManagedBy"), true)) return .partial_with_error;
+            return .valid;
+        },
+        .security => return if (redfish.secondaryAuth(doc) != .unknown) .valid else .partial_with_error,
+        .action_info => {
+            var action_snapshot: svc.PowerSnapshot = .{};
+            redfish.applyActionInfo(a, &action_snapshot, doc) catch return .partial_with_error;
+            return if (action_snapshot.reset_types.value != null and action_snapshot.reset_types.evidence.validity == .valid) .valid else .partial_with_error;
+        },
+        .boot_option => {
+            if (!logTextAvailable(doc, "/BootOptionReference", redfish.text(doc.value, "BootOptionReference"))) return .partial_with_error;
+            if (redfish.member(doc.value, "DisplayName") != null and !logTextAvailable(doc, "/DisplayName", redfish.text(doc.value, "DisplayName"))) return .partial_with_error;
+            return .valid;
+        },
+        .session_service => {
+            if (!doc.fieldAccepted("/Sessions")) return .partial_with_error;
+            _ = redfish.resourceUri(a, origin, redfish.link(doc.value, "Sessions") orelse return .partial_with_error) catch return .partial_with_error;
+            return .valid;
+        },
+        .system, .settings => {},
+    }
+    const system = redfish.parseSystem(a, origin, doc) catch return .partial_with_error;
+    if (kind == .system) {
+        if (system.power.system_identity.len == 0) return .partial_with_error;
+        for ([_]svc.Evidence{ system.power.state.evidence, system.boot.enabled_evidence, system.boot.target_evidence, system.boot.mode_evidence }) |evidence| {
+            if (evidence.validity != .valid) return .partial_with_error;
+        }
+    } else {
+        if (system.boot.state.enabled == null and system.boot.state.target == null and system.boot.state.mode == null) return .partial_with_error;
+    }
+    // Missing optional properties are allowed. A supplied property must pass
+    // the same scope and type validation used by the management consumers.
+    const optional = .{
+        .{ "/Boot/BootSourceOverrideEnabled", system.boot.enabled_evidence },
+        .{ "/Boot/BootSourceOverrideTarget", system.boot.target_evidence },
+        .{ "/Boot/BootSourceOverrideMode", system.boot.mode_evidence },
+        .{ "/LastResetTime", system.power.last_reset_time.evidence },
+        .{ "/Actions/#ComputerSystem.Reset/ResetType@Redfish.AllowableValues", system.power.reset_types.evidence },
+        .{ "/Boot/BootSourceOverrideEnabled@Redfish.AllowableValues", system.boot.allowed_enabled.evidence },
+        .{ "/Boot/BootSourceOverrideTarget@Redfish.AllowableValues", system.boot.allowed_targets.evidence },
+        .{ "/Boot/BootSourceOverrideMode@Redfish.AllowableValues", system.boot.allowed_modes.evidence },
+        .{ "/Boot/BootOrder", system.boot.boot_order.evidence },
+        .{ "/Boot/AliasBootOrder", system.boot.alias_boot_order.evidence },
+    };
+    inline for (optional) |field| {
+        if (doc.fieldEvidence(field[0]).validity != .unavailable and field[1].validity != .valid) return .partial_with_error;
+    }
+    return .valid;
+}
+test "BMC native management read logs validate each resource kind with and without unrelated diagnostics" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const origin = try redfish.Origin.init(arena.allocator(), .{ .host = "fixture.invalid" });
+    const vectors = [_]struct { kind: redfish.ResourceKind, body: []const u8 }{
+        .{ .kind = .root, .body = "{\"Systems\":{\"@odata.id\":\"/redfish/v1/Systems\"},\"Managers\":{\"@odata.id\":\"/redfish/v1/Managers\"},\"SessionService\":{\"@odata.id\":\"/redfish/v1/SessionService\"}}" },
+        .{ .kind = .systems, .body = "{\"Members\":[]}" },
+        .{ .kind = .managers, .body = "{\"Members\":[]}" },
+        .{ .kind = .boot_options, .body = "{\"Members\":[]}" },
+        .{ .kind = .manager, .body = "{\"Id\":\"bmc-1\",\"FirmwareVersion\":\"1.80\",\"Links\":{\"ManagerForServers\":[{\"@odata.id\":\"/redfish/v1/Systems/system\"}]}}" },
+        .{ .kind = .manager, .body = "{\"Id\":\"bmc-1\",\"FirmwareVersion\":\"1.80\",\"Links\":{\"ManagerForServers\":{\"@odata.id\":\"/redfish/v1/Systems/system\"}}}" },
+        .{ .kind = .chassis, .body = "{\"Id\":\"chassis-1\",\"Links\":{\"ComputerSystems\":[{\"@odata.id\":\"/redfish/v1/Systems/1\"}],\"ManagedBy\":[{\"@odata.id\":\"/redfish/v1/Managers/bmc-1\"}]}}" },
+        .{ .kind = .security, .body = "{\"EnableAuthConfirm\":false}" },
+        .{ .kind = .action_info, .body = "{\"Parameters\":[{\"Name\":\"ResetType\",\"AllowableValues\":[\"On\",\"ForceOff\"]}]}" },
+        .{ .kind = .boot_option, .body = "{\"BootOptionReference\":\"Boot0001\",\"DisplayName\":\"PXE\"}" },
+        .{ .kind = .settings, .body = "{\"Boot\":{\"BootSourceOverrideMode\":\"UEFI\"}}" },
+        .{ .kind = .session_service, .body = "{\"Sessions\":{\"@odata.id\":\"/redfish/v1/SessionService/Sessions\"}}" },
+    };
+    for (vectors) |vector| {
+        for ([_]bool{ false, true }) |diagnostic| {
+            const body = if (diagnostic) try std.fmt.allocPrint(a, "{{{s},\"@Message.ExtendedInfo\":[{{\"MessageId\":\"Base.1.19.InternalError\",\"Severity\":\"Critical\",\"RelatedProperties\":[]}}]}}", .{vector.body[1 .. vector.body.len - 1]}) else try a.dupe(u8, vector.body);
+            defer a.free(body);
+            var doc = try redfish.Document.parse(a, "/redfish/v1/fixture", 200, body, null, 0);
+            defer doc.deinit();
+            try std.testing.expectEqual(progress.Validity.valid, readLogValidity(a, origin, vector.kind, doc));
+        }
+        var missing = try redfish.Document.parse(a, "/redfish/v1/fixture", 200, "{}", null, 0);
+        defer missing.deinit();
+        try std.testing.expectEqual(progress.Validity.partial_with_error, readLogValidity(a, origin, vector.kind, missing));
+    }
+    const bad = [_]struct { kind: redfish.ResourceKind, body: []const u8 }{
+        .{ .kind = .security, .body = "{\"EnableAuthConfirm\":\"false\"}" },
+        .{ .kind = .systems, .body = "{\"Members\":{}}" },
+        .{ .kind = .manager, .body = "{\"Id\":\"bmc-1\",\"Links\":{\"ManagerForServers\":[{\"@odata.id\":\"https://other.invalid/redfish/v1/Systems/1\"}]}}" },
+        .{ .kind = .boot_option, .body = "{\"BootOptionReference\":\"Boot0001\",\"BootOptionReference@Message.ExtendedInfo\":[{\"MessageId\":\"Base.1.19.InternalError\",\"Severity\":\"Critical\"}]}" },
+        .{ .kind = .action_info, .body = "{\"Parameters\":[{\"Name\":\"ResetType\",\"AllowableValues\":1}]}" },
+        .{ .kind = .settings, .body = "{\"Boot\":{\"BootSourceOverrideMode\":\"Invalid\"}}" },
+    };
+    for (bad) |vector| {
+        var doc = try redfish.Document.parse(a, "/redfish/v1/fixture", 200, vector.body, null, 0);
+        defer doc.deinit();
+        try std.testing.expectEqual(progress.Validity.partial_with_error, readLogValidity(a, origin, vector.kind, doc));
+    }
+}
+fn logTextAvailable(doc: redfish.Document, path: []const u8, value: ?[]const u8) bool {
+    const text = value orelse return false;
+    return doc.fieldAccepted(path) and std.mem.trim(u8, text, " \t\r\n").len != 0 and text.len <= 4096;
+}
+fn logLinksAvailable(a: std.mem.Allocator, origin: redfish.Origin, doc: redfish.Document, path: []const u8, value: ?std.json.Value, required: bool) bool {
+    const links = value orelse return !required;
+    if (!doc.fieldAccepted(path) or links != .array or links.array.items.len > redfish.max_collection_members or (required and links.array.items.len == 0)) return false;
+    for (links.array.items) |item| {
+        _ = redfish.resourceUri(a, origin, redfish.text(item, "@odata.id") orelse return false) catch return false;
+    }
+    return true;
+}
+fn discoveryContext(uri: []const u8, status: ?u16) progress.Context {
+    return .{ .method = .get, .path = if (std.mem.eql(u8, uri, "/redfish/v1/SessionService")) .session_service else .other_redfish, .resource_path = progress.resourcePath(uri), .phase = if (status != null) .response_validate else .request_send, .http_status = status };
+}
+fn documentContext(doc: redfish.Document) progress.Context {
+    var context = discoveryContext(doc.uri, doc.status);
+    context.response_errors = responseErrors(doc);
+    return context;
+}
+/// Only registry identifiers are copied. Message, MessageArgs, headers and
+/// arbitrary response strings may contain credentials and are never logged.
+fn responseErrors(doc: redfish.Document) ?progress.ResponseErrors {
+    if (doc.validity == .valid) return null;
+    var result: progress.ResponseErrors = .{};
+    var budget: usize = 4096;
+    collectResponseErrors(doc.value, &result, 0, &budget);
+    return if (result.len == 0) null else result;
+}
+fn appendResponseError(result: *progress.ResponseErrors, id: []const u8) void {
+    if (id.len == 0 or id.len > 128) return;
+    var parts = std.mem.splitScalar(u8, id, '.');
+    const registry = parts.next() orelse return;
+    const major = parts.next() orelse return;
+    const minor = parts.next() orelse return;
+    const key = parts.next() orelse return;
+    if (parts.next() != null or registry.len == 0 or major.len == 0 or minor.len == 0 or key.len == 0) return;
+    for (registry) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_') return;
+    for (major) |byte| if (!std.ascii.isDigit(byte)) return;
+    for (minor) |byte| if (!std.ascii.isDigit(byte)) return;
+    for (key) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_') return;
+    var existing = std.mem.splitSequence(u8, result.text(), ", ");
+    while (existing.next()) |value| if (std.mem.eql(u8, value, id)) return;
+    const separator: []const u8 = if (result.len == 0) "" else ", ";
+    if (result.len + separator.len + id.len > result.bytes.len) return;
+    @memcpy(result.bytes[result.len..][0..separator.len], separator);
+    result.len += @intCast(separator.len);
+    @memcpy(result.bytes[result.len..][0..id.len], id);
+    result.len += @intCast(id.len);
+}
+fn collectResponseErrors(value: std.json.Value, result: *progress.ResponseErrors, depth: usize, budget: *usize) void {
+    if (depth > 16 or budget.* == 0) return;
+    budget.* -= 1;
+    switch (value) {
+        .object => |object| {
+            if (redfish.member(value, "error")) |envelope| if (redfish.text(envelope, "code")) |id| appendResponseError(result, id);
+            var it = object.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.endsWith(u8, entry.key_ptr.*, "@Message.ExtendedInfo") and entry.value_ptr.* == .array) {
+                    for (entry.value_ptr.array.items) |message| {
+                        if (budget.* == 0) return;
+                        budget.* -= 1;
+                        if (redfish.text(message, "MessageId")) |id| appendResponseError(result, id);
+                    }
+                } else collectResponseErrors(entry.value_ptr.*, result, depth + 1, budget);
+                if (budget.* == 0) return;
+            }
+        },
+        .array => |array| for (array.items) |item| {
+            collectResponseErrors(item, result, depth + 1, budget);
+            if (budget.* == 0) return;
+        },
+        else => {},
+    }
 }
 fn resourceKind(kind: redfish.ResourceKind) progress.Resource {
     return switch (kind) {

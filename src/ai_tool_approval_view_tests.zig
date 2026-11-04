@@ -375,7 +375,7 @@ test "AI generic tool approval names the tool call and never invents a working d
     approval.sequence = 12;
     approval.tool_id = "run_command";
     try f.view.update(approval);
-    try std.testing.expectEqualStrings("请求执行命令", f.node("ai.approval.title").getText().?.content);
+    try std.testing.expectEqualStrings("执行命令", f.node("ai.approval.title").getText().?.content);
     try std.testing.expect(std.mem.endsWith(u8, f.view.identity.getText().?.content, "目录 未知"));
 }
 
@@ -403,7 +403,8 @@ test "AI approval long target stays readable in body with fixed header and decis
         try std.testing.expect(std.mem.indexOf(u8, f.view.identity.getText().?.content, source.cwd.?) != null);
         try std.testing.expect(f.view.identity.globalRect().h > 0);
         try std.testing.expectEqual(.flex, f.node("ai.approval.copy_targets").style.display);
-        try std.testing.expectEqual(@as(u8, 255), f.view.card.getBackground().a);
+        // This isolated component has no window-level material policy.
+        try std.testing.expectEqual(theme.popupAction(), f.view.card.getBackground());
         try f.visibleActions();
     }
 }
@@ -490,7 +491,8 @@ test "host approval all subjects keep icons titles and fixed decisions aligned a
                 try std.testing.expect(accept.y >= body.y + body.h);
                 try std.testing.expect(accept.x > reject.x and accept.x + accept.w <= width);
                 try std.testing.expect(accept.y + accept.h <= 360);
-                try std.testing.expectEqual(@as(u8, 255), view.card.getBackground().a);
+                // Layer opacity is verified separately with the production material policy.
+                try std.testing.expectEqual(theme.popupAction(), view.card.getBackground());
                 try std.testing.expectEqualStrings(detail, view.requested_url.?);
                 if (kind == .network_url) {
                     const viewport = find(view.root, "ai.host_approval.url_viewport").?;
@@ -652,4 +654,81 @@ test "retained ai_tool_approval_view_tests paint matches a fresh mount in every 
         errdefer std.debug.print("theme={s}\n", .{id});
         try support.expectPaintEqual(retained.view.root, fresh.view.root);
     }
+}
+
+test "AI approval cards follow L2 material opacity without fading text or decisions" {
+    const theme = @import("ui/app_theme.zig");
+    const materials = @import("ui/layer_materials.zig");
+    const Host = @import("ui/ai_host_approval_view.zig");
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    const Callback = struct {
+        fn decide(_: *anyopaque, _: u64, _: [32]u8, _: bool) !void {}
+    };
+    inline for (.{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        for ([_]f32{ 0, 50, 100 }) |transparency| {
+            _ = theme.setMaterialParameters(transparency, 0);
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            cx.setTheme(theme.widgetTheme(name));
+            cx.setViewport(600, 900);
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            // Match the real AI floating surface (L1); layout wrappers add no layer.
+            cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .background = theme.current().overlay }, .{});
+            materials.card(cx.root.?, .custom);
+            try materials.Policy.mount(cx, scope);
+            const tool = try ApprovalView.View.mount(cx, scope, .{ .context = cx, .decide = Callback.decide });
+            const host = try Host.View.mount(cx, scope, .{ .context = cx, .on_decision = Callback.decide });
+            try cx.root.?.appendChild(a, tool.root);
+            try cx.root.?.appendChild(a, host.root);
+            try tool.update(Fixture.source(1, "pwd"));
+            try host.update(hostSnapshot(.terminal_command, "pwd"));
+            for (0..4) |_| {
+                cx.layout();
+                _ = cx.render();
+            }
+            const expected = theme.popupAction().withAlpha(theme.layerAlpha(2));
+            try std.testing.expectEqual(expected, tool.card.getBackground());
+            try std.testing.expectEqual(expected, host.card.getBackground());
+            try std.testing.expectEqual(@as(u8, 255), tool.title.getText().?.color.a);
+            try std.testing.expectEqual(@as(u8, 255), host.title.getText().?.color.a);
+            try std.testing.expect(!tool.decision_pending.peek() and !host.decision_pending.peek());
+        }
+    }
+}
+
+test "tool action approval shows parameter action with tool identity only in details and keeps exact subject" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const raw = "{\"session_ids\":[101],\"observation_id\":1,\"action\":\"chord\",\"keys\":[65507,99]}";
+    var approval = Fixture.source(51, raw);
+    approval.tool_id = "bmc_ikvm.keyboard";
+    approval.target = "bmc_ikvm";
+    approval.cwd = null;
+    try f.view.update(approval);
+    f.settle();
+    try std.testing.expectEqualStrings("发送组合键 Ctrl + C", f.node("ai.approval.title").getText().?.content);
+    try std.testing.expectEqualStrings("会话 #101", f.node("ai.approval.target").getText().?.content);
+    try std.testing.expectEqualStrings("工具：bmc_ikvm.keyboard", f.node("ai.approval.tool").getText().?.content);
+    try std.testing.expect(isDescendant(f.view.body, f.node("ai.approval.tool")));
+    try std.testing.expectEqualStrings(raw, f.view.command_owned.?);
+    try std.testing.expectEqual(approval.arguments_hash, f.view.arguments_hash);
+    const impact = f.node("ai.approval.impact_notice").globalRect();
+    const body = f.view.body.globalRect();
+    try std.testing.expect(impact.y + impact.h <= body.y + body.h + 0.1);
+    try f.visibleActions();
+    approval.sequence += 1;
+    approval.tool_id = "bmc_ikvm.screenshot";
+    approval.command = "{\"session_ids\":[101]}";
+    try f.view.update(approval);
+    f.settle();
+    try std.testing.expectEqualStrings("读取远程画面", f.view.title.getText().?.content);
+    try std.testing.expectEqualStrings("工具：bmc_ikvm.screenshot", f.view.tool_detail.getText().?.content);
 }

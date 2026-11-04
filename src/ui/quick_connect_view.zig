@@ -80,6 +80,8 @@ pub const View = struct {
     port_value: *ui.Signal([]const u8),
     hint: *ui.Node,
     primary: *ui.Node,
+    primary_hint: *ui.Signal([]const u8) = undefined,
+    primary_hint_enabled: *ui.Signal(bool) = undefined,
     secondary: *ui.Node,
     primary_label: *ui.Signal([]const u8),
     secondary_label: *ui.Signal([]const u8),
@@ -120,7 +122,8 @@ pub const View = struct {
         self.title.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 16), .a11y_label = "关闭快速连接", .base_style = S.iconButton(), .on_click = cx.on(View, self, hide) }).mount(popup.scope, cx);
         close.meta.ownership.meta.test_id = "quick.close";
-        try header.appendChild(cx.allocator, close);
+        const close_hint = try @import("control_hint.zig").mount(cx, popup.scope, close, "关闭快速连接（Esc）", .{ .id = "quick.close.tooltip", .layout = .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 }, .visible = open });
+        try header.appendChild(cx.allocator, close_hint.wrapper);
         self.body = try ui.box(cx, S.body(), .{});
         try self.chrome.appendChild(cx.allocator, self.body);
         self.input = try ui.widgets.Input(.{ .value = query, .placeholder = "搜索主机或输入 SSH 目标", .embedded = true, .leading_icon_asset = ui.icons.search, .on_change = cx.on(View, self, queryChanged), .on_submit = cx.on(View, self, inputSubmit) }).mountResult(popup.scope, cx);
@@ -176,7 +179,7 @@ pub const View = struct {
         self.host_input = try self.field(field_row, "目标地址", "quick.host", self.host_value, 330);
         self.port_input = try self.field(field_row, "端口", "quick.port", self.port_value, 146);
         self.user_input = try self.field(self.temporary_area, "登录用户", "quick.user", self.user_value, null);
-        self.hint = try label(cx, self.body, "点击即连接 · 上下选择后 Enter · Esc 关闭", 10.5, 400, true);
+        self.hint = try label(cx, self.body, "↑↓ 选择 · Enter 连接", 10.5, 400, true);
         self.hint.setStyleInline(cx.allocator, S.line(16));
         const gap = try ui.box(cx, S.line(2), .{});
         try self.body.appendChild(cx.allocator, gap);
@@ -195,7 +198,10 @@ pub const View = struct {
         self.primary = try ui.widgets.Button(.{ .label = self.primary_label, .variant = .primary, .disabled = self.disabled, .base_style = S.button(true, false), .on_click = cx.on(View, self, primaryClicked) }).mount(popup.scope, cx);
         try @import("app_theme.zig").stylePrimary(cx, popup.scope, self.primary, self.disabled);
         self.primary.meta.ownership.meta.test_id = "quick.submit";
-        try footer.appendChild(cx.allocator, self.primary);
+        self.primary_hint = try popup.scope.createText("连接所选主机（Enter）", .{});
+        self.primary_hint_enabled = try popup.scope.createSignal(bool, true);
+        const primary_hint = try @import("control_hint.zig").mount(cx, popup.scope, self.primary, self.primary_hint, .{ .id = "quick.submit.tooltip", .width = 320, .visible = open, .enabled = self.primary_hint_enabled });
+        try footer.appendChild(cx.allocator, primary_hint.wrapper);
         self.failure = try label(cx, self.body, "", 11, 400, true);
         self.failure.setTextColor(S.theme.current().danger_ink);
         self.failure.setDisplay(.none);
@@ -376,7 +382,8 @@ pub const View = struct {
             const caption = try std.fmt.allocPrint(self.cx.allocator, "已保存的主机 · {d} 个结果", .{self.matches.items.len});
             defer self.cx.allocator.free(caption);
             try self.result_label.setTextContent(self.cx.allocator, caption);
-            try self.hint.setTextContent(self.cx.allocator, "点击即连接 · 上下选择后 Enter · Esc 关闭");
+            try self.hint.setTextContent(self.cx.allocator, "↑↓ 选择 · Enter 连接");
+            self.primary_hint.set("连接所选主机（Enter）");
             self.primary_label.set("连接所选主机");
             self.secondary_label.set("新建主机配置");
             self.disabled.set(self.selected == null);
@@ -394,12 +401,13 @@ pub const View = struct {
             const message = if (invalid) try self.cx.allocator.dupe(u8, if (std.mem.eql(u8, invalidTitle(parts), "端口无效")) "端口必须为 1 至 65535 之间的整数。修正后才可连接。" else "请输入登录用户和有效的目标地址。") else try std.fmt.allocPrint(self.cx.allocator, "本次直接连接 {s}@{s}:{s}，不写入已保存的主机列表。", .{ parts.user, parts.host, parts.port });
             defer self.cx.allocator.free(message);
             try self.notice_message.setTextContent(self.cx.allocator, message);
-            try self.hint.setTextContent(self.cx.allocator, "默认直连并先尝试 SSH Agent；需要凭据时为此目标继续认证。");
+            self.primary_hint.set("连接临时目标（Enter）。默认直连并先尝试 SSH Agent；需要凭据时继续认证。");
             self.primary_label.set("连接临时目标");
             self.secondary_label.set(if (invalid) "修改输入" else "保存为主机配置");
             self.disabled.set(invalid);
         }
         const no_match = self.mode == .saved and self.matches.items.len == 0;
+        self.primary_hint_enabled.set(!no_match);
         const searching = std.mem.trim(u8, query, " \t\r\n").len > 0;
         self.empty_icon.setDisplay(if (searching) .none else .flex);
         self.empty_search_icon.setDisplay(if (searching) .flex else .none);
@@ -409,12 +417,13 @@ pub const View = struct {
         self.input.input_container.setStyleInline(self.cx.allocator, S.inputContent(40, searching));
         self.saved_area.setDisplay(if (self.mode == .saved and !no_match) .flex else .none);
         self.empty_area.setDisplay(if (no_match) .flex else .none);
-        self.hint.setDisplay(if (no_match) .none else .flex);
+        self.hint.setDisplay(if (self.mode == .saved and !no_match) .flex else .none);
         self.leading_spacer.setDisplay(if (no_match) .flex else .none);
         self.middle_spacer.setDisplay(if (no_match) .none else .flex);
         self.body.setStyleInline(self.cx.allocator, .{ .padding = .{ .top = 8, .left = 16, .right = 16, .bottom = if (no_match) 18 else 16 } });
         if (no_match) {
             try self.title.setTextContent(self.cx.allocator, "快速连接");
+            self.primary_hint.set("新建主机配置");
             self.primary_label.set("新建主机配置");
             self.secondary_label.set("关闭");
             self.disabled.set(false);

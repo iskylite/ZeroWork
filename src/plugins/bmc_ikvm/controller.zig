@@ -131,11 +131,15 @@ pub const Controller = struct {
         errdefer plan.deinit();
         const self = try a.create(Controller);
         errdefer a.destroy(self);
-        var remote_input = input.Service.init(owner);
-        self.* = .{ .allocator = a, .config = config, .plan = plan, .owner = owner, .operation = operation, .framebuffer = frames.Service.init(a, owner, budget), .remote_input = remote_input, .manager = undefined, .creator_thread = std.Thread.getCurrentId(), .state = .{ .owner = owner, .operation = operation, .input = try remote_input.snapshot(remote_input.binding()) } };
-        self.connection_progress = progress.Tracker.init(@intCast(hops.len));
+        self.initialize(a, owner, operation, config, plan, budget, @intCast(hops.len));
+        self.state.input = try self.remote_input.snapshot(self.remote_input.binding());
         try self.manager.initWithPolicy(a, owner, self.config.value.endpoint, journal, facade, if (payload.display.read_only_requested) .read_only else policy);
         return self;
+    }
+    // Keep the large aggregate initializer out of the fallible creation frame.
+    fn initialize(self: *Controller, a: std.mem.Allocator, owner: svc.identity.SessionHandle, operation: svc.OperationKey, config: svc.Owned(model.Payload), plan: route.Plan, budget: *budgets.Budget, hops: u8) void {
+        self.* = .{ .allocator = a, .config = config, .plan = plan, .owner = owner, .operation = operation, .framebuffer = frames.Service.init(a, owner, budget), .remote_input = input.Service.init(owner), .manager = undefined, .creator_thread = std.Thread.getCurrentId(), .state = .{ .owner = owner, .operation = operation, .input = undefined } };
+        self.connection_progress = progress.Tracker.init(hops);
     }
     pub fn start(self: *Controller, identity: profile.Identity, driver: Driver) !void {
         const selected = profile.select(identity) catch |err| {
@@ -169,8 +173,15 @@ pub const Controller = struct {
         thread.detach();
     }
     pub fn poll(self: *Controller) Snapshot {
+        var state: Snapshot = undefined;
+        self.pollInto(&state);
+        return state;
+    }
+    /// Copy into caller-owned storage so polling loops can reuse one buffer
+    /// without reserving a full diagnostic snapshot at every call site.
+    pub fn pollInto(self: *Controller, state: *Snapshot) void {
         self.lock();
-        var state = self.state;
+        state.* = self.state;
         self.unlock();
         state.input = self.remote_input.snapshot(self.remote_input.binding()) catch state.input;
         if (self.cancel_requested.load(.acquire)) {
@@ -180,7 +191,6 @@ pub const Controller = struct {
         }
         state.worker_exited = self.worker_exited.load(.acquire);
         state.progress = self.connection_progress.snapshot();
-        return state;
     }
     pub fn cancel(self: *Controller) void {
         self.cancel_requested.store(true, .release);

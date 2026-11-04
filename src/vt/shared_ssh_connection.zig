@@ -46,6 +46,7 @@ pub const Connection = struct {
     pending_next: ?*Connection = null,
     cleanup_running: std.atomic.Value(bool) = .init(false),
     refs: std.atomic.Value(usize) = .init(1),
+    closing_refs: usize = 0,
     broken: bool = false,
     pending_term: ?[:0]u8 = null,
     shell_cleanup: ?*ShellCleanup = null,
@@ -187,6 +188,24 @@ pub const Connection = struct {
         self.lock();
         defer self.unlock();
         return !self.broken and self.native.state == .active and self.native.handle != null and self.native.socket_fd >= 0;
+    }
+    /// Called under mutex, after this borrower's IO thread has joined. A lease
+    /// not enrolled here (including another window or pending open) still pins
+    /// the transport. Only the last closing borrower may abort the whole parent.
+    pub fn closeBorrower(self: *Connection) void {
+        self.closing_refs += 1;
+    }
+
+    pub fn allBorrowersClosing(self: *const Connection) bool {
+        return self.closing_refs != 0 and self.closing_refs == self.refs.load(.acquire);
+    }
+
+    pub fn releaseClosedBorrower(self: *Connection) void {
+        self.lock();
+        std.debug.assert(self.closing_refs != 0);
+        self.closing_refs -= 1;
+        self.unlock();
+        release(self);
     }
     /// Caller holds mutex. Failed construction must never retain a borrowed
     /// Session in an attempt ledger after its connection lease goes away.
@@ -402,6 +421,22 @@ pub const Connection = struct {
         self.mutex.unlock();
     }
 };
+
+test "shared close waits for every borrower and outstanding lease" {
+    var group: Connection = .{ .allocator = std.testing.allocator, .library = .{ .active = false }, .native = .{ .state = .closed }, .refs = .init(3) };
+    try std.testing.expect(!group.allBorrowersClosing());
+    group.closeBorrower();
+    try std.testing.expect(!group.allBorrowersClosing());
+    group.closeBorrower();
+    try std.testing.expect(!group.allBorrowersClosing());
+    // A third live window or a pending shell-open lease must remain isolated.
+    group.closeBorrower();
+    try std.testing.expect(group.allBorrowersClosing());
+    _ = group.refs.fetchAdd(1, .monotonic);
+    try std.testing.expect(!group.allBorrowersClosing());
+    _ = group.refs.fetchSub(1, .acq_rel);
+    try std.testing.expect(group.allBorrowersClosing());
+}
 
 test "queued shared shell timeout preserves another native open and transport" {
     const a = std.testing.allocator;

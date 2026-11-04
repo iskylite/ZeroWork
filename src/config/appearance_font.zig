@@ -50,9 +50,9 @@ pub fn installedMonospaceFamilies(allocator: std.mem.Allocator) !InstalledFamili
             for (names[0..@intCast(@max(0, @min(copied, count)))]) |maybe_name| {
                 const native = maybe_name orelse continue;
                 const name = std.mem.span(native);
-                if (name.len == 0 or name.len > family_name_capacity or !std.unicode.utf8ValidateSlice(name)) continue;
+                if (name.len == 0 or name.len > family_name_capacity or !std.unicode.utf8ValidateSlice(name) or !isInstalled(name)) continue;
                 var info: platform.FamilyInfo = undefined;
-                if (platform.coretext_family_info(native, &info) != 0 or info.classification != 5 or info.has_latin == 0 or info.is_symbolic != 0) continue;
+                if (platform.coretext_family_info(native, &info) != 0 or info.has_latin == 0 or info.is_symbolic != 0 or !hasMonospaceAscii(native)) continue;
                 const owned = try allocator.dupe(u8, name);
                 errdefer allocator.free(owned);
                 try result.append(allocator, owned);
@@ -65,6 +65,28 @@ pub fn installedMonospaceFamilies(allocator: std.mem.Allocator) !InstalledFamili
         }
     }.less);
     return .{ .allocator = allocator, .names = try result.toOwnedSlice(allocator) };
+}
+
+/// Terminal cells need equal printable ASCII advances. Nerd Font patching and
+/// some coding fonts omit the native monospace trait; measure the actual face
+/// instead of treating that metadata flag as the source of truth.
+fn hasMonospaceAscii(family: [*:0]const u8) bool {
+    const name = platform.CFStringCreateWithCString(null, family, platform.utf8) orelse return false;
+    defer platform.CFRelease(name);
+    const font = platform.CTFontCreateWithName(name, 24, null) orelse return false;
+    defer platform.CFRelease(font);
+    var characters: [95]u16 = undefined;
+    for (&characters, 0..) |*character, i| character.* = @intCast(0x20 + i);
+    var glyphs: [95]u16 = undefined;
+    if (platform.CTFontGetGlyphsForCharacters(font, &characters, &glyphs, glyphs.len) == 0) return false;
+    var advances: [95]platform.Size = undefined;
+    _ = platform.CTFontGetAdvancesForGlyphs(font, 0, &glyphs, &advances, glyphs.len);
+    const width = advances[0].width;
+    if (!std.math.isFinite(width) or width <= 0) return false;
+    for (advances) |advance| {
+        if (!std.math.isFinite(advance.width) or @abs(advance.width - width) > 0.01) return false;
+    }
+    return true;
 }
 
 pub fn isInstalled(family: []const u8) bool {
@@ -256,6 +278,11 @@ const platform = struct {
         has_latin: c_int,
         lang: [16]u8,
     };
+    const Size = extern struct { width: f64, height: f64 };
+    extern "CoreFoundation" fn CFStringCreateWithCString(allocator: ?*const anyopaque, text: [*:0]const u8, encoding: u32) ?*const anyopaque;
+    extern "CoreText" fn CTFontCreateWithName(name: *const anyopaque, size: f64, matrix: ?*const anyopaque) ?*const anyopaque;
+    extern "CoreText" fn CTFontGetGlyphsForCharacters(font: *const anyopaque, characters: [*]const u16, glyphs: [*]u16, count: isize) u8;
+    extern "CoreText" fn CTFontGetAdvancesForGlyphs(font: *const anyopaque, orientation: u32, glyphs: [*]const u16, advances: [*]Size, count: isize) f64;
     extern fn coretext_family_count() c_int;
     extern fn coretext_copy_family_names(out: [*]?[*:0]u8, capacity: c_int) c_int;
     extern fn coretext_family_info(family: [*:0]const u8, out: *FamilyInfo) c_int;
@@ -357,4 +384,24 @@ test "installed monospace catalog keeps real native families and owned sorted na
         found_menlo = found_menlo or std.mem.eql(u8, name, "Menlo");
     }
     if (builtin.os.tag == .macos) try std.testing.expect(found_menlo);
+}
+
+test "terminal font catalog measures ASCII widths without requiring the monospace metadata flag" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try std.testing.expect(hasMonospaceAscii("Menlo"));
+    try std.testing.expect(!hasMonospaceAscii("Helvetica Neue"));
+    var installed = try installedMonospaceFamilies(std.testing.allocator);
+    defer installed.deinit();
+    for ([_][:0]const u8{ "Comic Code Ligatures", "FiraCode Nerd Font", "JetBrainsMono Nerd Font", "OperatorMono Nerd Font", "Maple Mono NF", "Operator Mono" }) |family| {
+        if (!isInstalled(family)) continue;
+        try std.testing.expect(hasMonospaceAscii(family));
+        var found = false;
+        for (installed.names) |name| found = found or std.mem.eql(u8, name, family);
+        try std.testing.expect(found);
+    }
+    for (installed.names) |name| {
+        const native = try std.testing.allocator.dupeSentinel(u8, name, 0);
+        defer std.testing.allocator.free(native);
+        try std.testing.expect(hasMonospaceAscii(native));
+    }
 }

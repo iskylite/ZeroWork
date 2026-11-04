@@ -86,7 +86,7 @@ const Fixture = struct {
         for (&detail, 0..) |*byte, index| byte.* = word[index % word.len];
         const action_id = self.notice_host.registerAction(owner, .view_result, .{ .context = self, .invoke = action }) catch return;
         const label = "View the complete retained operation result with its original owner and verification details";
-        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = self.operation, .event_revision = 1, .phase = .failed, .severity = .failure, .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true }, .title = "Long persistent notification", .detail = &detail, .actions = &.{ .{ .kind = .view_result, .action_id = action_id, .label = label }, .{ .kind = .view_result, .action_id = action_id, .label = label }, .{ .kind = .view_result, .action_id = action_id, .label = label } } }, host.localClock() catch return) catch return;
+        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = self.operation, .event_revision = 1, .phase = .failed, .severity = .failure, .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true }, .title = "Long application risk notification", .detail = &detail, .actions = &.{ .{ .kind = .view_result, .action_id = action_id, .label = label }, .{ .kind = .view_result, .action_id = action_id, .label = label }, .{ .kind = .view_result, .action_id = action_id, .label = label } } }, host.localClock() catch return) catch return;
         self.cx.requestRedraw();
     }
     fn normal(self: *Fixture) void {
@@ -112,6 +112,23 @@ const Fixture = struct {
     }
     fn failure(self: *Fixture) void {
         self.publish(true, false);
+    }
+    fn applicationRisk(self: *Fixture) void {
+        self.operation += 1;
+        _ = self.notice_host.coordinator.publishNotification(.{
+            .definition_id = "fixture.feedback",
+            .owner = .{ .window_id = 1, .content = owner },
+            .operation_id = self.operation,
+            .event_revision = 1,
+            .phase = .failed,
+            .severity = .failure,
+            .title = "工作记录无法继续保存",
+            .owner_name = "ZeroWork",
+            .detail = "存储位置不可写，继续工作可能无法保留完整记录。请检查可用空间和权限。",
+            .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true },
+            .actions = &.{.{ .kind = .locate_owner, .label = "查看来源" }},
+        }, host.localClock() catch return) catch return;
+        self.cx.requestRedraw();
     }
     fn connectionFailure(self: *Fixture) void {
         self.operation += 1;
@@ -166,7 +183,7 @@ const Fixture = struct {
             count += 1;
         }
         // Match the application's host: an open notification list is an
-        // overlay obstacle, including for persistent failure toasts.
+        // overlay obstacle, including for application-risk toasts.
         if (self.history) |history| if (history.open.peek()) {
             avoid[count] = history.root.globalRect();
             count += 1;
@@ -180,6 +197,7 @@ const Fixture = struct {
     fn cleanup(self: *Fixture) void {
         if (self.command_hint) |hint| hint.destroy();
         self.notice_host.coordinator.deinit();
+        self.notice_host.activity.deinit();
         self.notice_host.actions.deinit(self.cx.allocator);
         self.notice_host.windows.deinit(self.cx.allocator);
     }
@@ -195,7 +213,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     try root.appendChild(cx.allocator, obstacle);
     const result = try ui.text(cx, "尚未查看结果", .{ .font_size = 12, .color = theme.current().fg_1 });
     result.meta.ownership.meta.test_id = "fixture.result";
-    const self = try scope.createState(Fixture, .{ .cx = cx, .root = root, .notice_host = .{ .allocator = cx.allocator, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(cx.allocator, .{ .quiet_hours = "00:00-00:00" }, .{}) }, .obstacle = obstacle, .result = result });
+    const self = try scope.createState(Fixture, .{ .cx = cx, .root = root, .notice_host = .{ .allocator = cx.allocator, .activity = .{ .allocator = cx.allocator }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(cx.allocator, .{ .quiet_hours = "00:00-00:00" }, .{}) }, .obstacle = obstacle, .result = result });
     try scope.onCleanup(Fixture, self, Fixture.cleanup);
     try self.notice_host.coordinator.registerDefinition(.{ .id = "fixture.feedback", .category = .operation_result, .default_channels = .{ .system = false, .attention = false } });
     _ = try self.notice_host.registerWindow(.{ .context = self, .owns = Fixture.owns, .activate = Fixture.activate, .feedback = Fixture.feedback, .owner_name = Fixture.ownerName });
@@ -213,6 +231,9 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
         if (comptime std.mem.eql(u8, spec.id, "fixture.local")) self.local_anchor = button;
         try row.appendChild(cx.allocator, button);
     }
+    const risk = try ui.widgets.Button(.{ .label = "应用级错误", .on_click = cx.on(Fixture, self, Fixture.applicationRisk) }).mount(scope, cx);
+    risk.meta.ownership.meta.test_id = "fixture.application-risk";
+    try row.appendChild(cx.allocator, risk);
     inline for ([_]Spec{ .{ .label = "Dark", .id = "fixture.theme.dark", .callback = Fixture.dark }, .{ .label = "Light", .id = "fixture.theme.light", .callback = Fixture.light }, .{ .label = "Sauber", .id = "fixture.theme.sauber", .callback = Fixture.sauber } }) |spec| {
         const button = try ui.widgets.Button(.{ .label = spec.label, .on_click = cx.on(Fixture, self, spec.callback) }).mount(scope, cx);
         button.meta.ownership.meta.test_id = spec.id;

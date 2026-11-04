@@ -76,6 +76,10 @@ pub const FeedBridge = struct {
             return;
         }
         const slot = self.text_slot orelse return;
+        if (!slot.canPublish()) {
+            self.republish_pending = true;
+            return;
+        }
         // Uniform cadence for BOTH paths: an owed retry must also wait out
         // the interval. An earlier "pending bypasses the check" variant let
         // the event-driven step loop (≈2ms under floods) publish hundreds of
@@ -92,7 +96,9 @@ pub const FeedBridge = struct {
             self.republish_pending = false;
         } else |err| {
             self.republish_pending = true;
-            std.log.warn("[feed] text frame publish deferred: {s}", .{@errorName(err)});
+            // Consumer backpressure is expected and retried after its wake;
+            // logging every output batch would itself create flood overhead.
+            if (err != error.ConsumerBehind) std.log.warn("[feed] text frame publish deferred: {s}", .{@errorName(err)});
         }
     }
 
@@ -125,7 +131,7 @@ pub const FeedBridge = struct {
         slot.timing.published(snapshot.output_sequence);
         self.last_publish_ms = now_ms;
         self.republish_pending = false;
-        @import("../platform/presentation_wakeup.zig").notify();
+        slot.notifyPresentation();
     }
 
     fn publishTextFrameInner(self: *FeedBridge, slot: *TextSlot) !void {
@@ -142,7 +148,7 @@ pub const FeedBridge = struct {
             self.publication = .{ .text_generation = generation, .output_sequence = projection.output_sequence, .vt_version = projection.version };
             self.publication_lock.store(false, .release);
             slot.timing.published(projection.output_sequence);
-            @import("../platform/presentation_wakeup.zig").notify();
+            slot.notifyPresentation();
             return;
         }
         const snapshot = self.engine.snapshot();
@@ -170,7 +176,7 @@ pub const FeedBridge = struct {
         slot.timing.published(snapshot.output_sequence);
         // TextSlot's wake can already have been handled before this receipt
         // was committed. Notify again so the main thread can observe both.
-        @import("../platform/presentation_wakeup.zig").notify();
+        slot.notifyPresentation();
         self.republish_pending = false;
     }
 };
@@ -365,4 +371,32 @@ test "deferred burst publication uses display deadline instead of idle transport
     try std.testing.expectEqual(@as(u32, 50), feed.publicationTimeout(50, 109));
     _ = slot.acknowledge(0);
     try std.testing.expectEqual(@as(u32, 0), feed.publicationTimeout(50, 109));
+}
+
+test "structured feed coalesces projection work until consumption and still publishes the final bytes" {
+    const a = std.testing.allocator;
+    var adapter = try @import("ghostty_adapter.zig").Adapter.init(a, 2, 20);
+    defer adapter.destroy();
+    var text = try TextSlot.init(a, 4096);
+    defer text.deinit(a);
+    text.enableStructured();
+    var bridge: FeedBridge = .{ .engine = VtEngine.from(@import("ghostty_adapter.zig").Adapter, &adapter), .text_slot = &text };
+    _ = try bridge.feedAndPublish("first", 100);
+    const first = text.generation.load(.acquire);
+    _ = try bridge.feedAndPublish("-second", 110);
+    _ = try bridge.feedAndPublish("-tail", 120);
+    try std.testing.expect(bridge.republish_pending);
+    try std.testing.expectEqual(@as(u64, 3), adapter.snapshot().output_sequence);
+    try std.testing.expectEqual(first, text.generation.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 50), bridge.publicationTimeout(50, 120));
+    _ = text.acknowledge(0);
+    try std.testing.expectEqual(@as(u32, 0), bridge.publicationTimeout(50, 120));
+    bridge.publishCurrentText(120);
+    try std.testing.expect(!bridge.republish_pending);
+    try std.testing.expectEqual(first + 1, text.generation.load(.acquire));
+    const frame = try text.projections.acquire();
+    defer frame.release();
+    try std.testing.expectEqual(@as(u64, 3), frame.projection.output_sequence);
+    try std.testing.expectEqual(adapter.snapshot().version, frame.projection.version);
+    try std.testing.expect(std.mem.indexOf(u8, frame.projection.graphemes, "first-second-tail") != null);
 }

@@ -53,8 +53,8 @@ const Live = struct {
     fn refresh(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *@This() = @ptrCast(@alignCast(raw));
         var changed = false;
-        var version_buffer: [160]u8 = undefined;
-        const version = std.fmt.bufPrint(&version_buffer, "当前版本 {s}", .{read(self.bound, "current_version", "—")}) catch "当前版本 —";
+        var version_buffer: [1024]u8 = undefined;
+        const version = std.fmt.bufPrint(&version_buffer, "{s} · {s}", .{ read(self.bound, "current_version", "—"), read(self.bound, "version_metadata", "构建信息未知") }) catch "版本信息未知";
         changed = self.text(self.version, version) or changed;
         changed = self.text(self.badge, read(self.bound, "version_badge", "待检查")) or changed;
         changed = self.text(self.title, read(self.bound, "available_title", "检查是否有可用的新版本")) or changed;
@@ -112,6 +112,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try identity.appendChild(cx.allocator, title);
         _ = try ink(cx, title, "ZeroWork", 17, 24, 650, "fg_1");
         live.version = try ink(cx, title, "", 11, 18, 400, "fg_2");
+        live.version.?.meta.ownership.meta.test_id = "settings.updates.version_text";
         const badge = try ui.boxStyled(cx, S.badge, .{});
         badge.meta.ownership.meta.test_id = "settings.updates.badge";
         try identity.appendChild(cx.allocator, badge);

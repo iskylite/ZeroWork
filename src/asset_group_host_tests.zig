@@ -315,3 +315,40 @@ test "asset group host created receipt cannot add a host to a changed group" {
     try std.testing.expectEqualStrings("原分组", f.view.source.?.value.name);
     try std.testing.expectEqualStrings("已改名分组", f.registry.groups[0].name);
 }
+
+test "asset group host preset colors preview a draft cancel cleanly and persist only on save" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const reference = try f.create("颜色测试");
+    try f.view.show(.color, try f.snapshot(reference));
+    f.settle();
+    try std.testing.expectEqual(@as(f32, 243), f.view.dialog.globalRect().h);
+    try std.testing.expect(f.view.palette.buttons[1].behavior.interaction.a11y.?.pressed);
+    f.click(f.view.palette.buttons[4]);
+    try std.testing.expectEqualStrings("#67b88b", f.view.value.peek());
+    try std.testing.expectEqualStrings("#67b88b", f.view.input.state.getText());
+    try std.testing.expectEqual(ui.Color.hex(0x67b88b), f.view.color_preview.getBackground());
+    try std.testing.expectEqualStrings("#6366f1", f.registry.groups[0].color);
+    f.click(f.view.secondary);
+    try std.testing.expectEqualStrings("#6366f1", f.registry.groups[0].color);
+    try f.view.show(.color, try f.snapshot(reference));
+    f.settle();
+    // Keyboard users can select a swatch and then save the same draft.
+    f.enter(f.view.palette.buttons[11]);
+    try std.testing.expectEqualStrings("#94a3b8", f.view.value.peek());
+    f.click(f.view.primary);
+    try std.testing.expect(!f.view.isVisible());
+    var saved = try store.loadHosts(std.testing.io, f.tmp.dir, a, "hosts.toml");
+    defer saved.deinit();
+    try std.testing.expectEqualStrings("#94a3b8", saved.groups[0].color);
+    const current: Group.GroupRef = .{ .id = f.registry.groups[0].group_id, .revision = f.registry.groups[0].revision };
+    try f.view.show(.color, try f.snapshot(current));
+    f.settle();
+    f.view.value.set("invalid");
+    f.click(f.view.primary);
+    try std.testing.expectEqual(error.InvalidGroupColor, f.view.failure.?);
+    f.click(f.view.palette.buttons[6]);
+    try std.testing.expect(f.view.failure == null);
+    try std.testing.expectEqualStrings("#e2ad67", f.view.value.peek());
+}

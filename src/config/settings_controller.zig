@@ -59,7 +59,7 @@ pub const Controller = struct {
     search_query: []const u8 = "",
     search_return_page: ?usize = null,
     scroll_offsets: [9]f32 = @splat(0),
-    folded_sections: u64 = std.math.maxInt(u64) & ~(@as(u64, 1) | (@as(u64, 1) << 3) | (@as(u64, 1) << 4) | (@as(u64, 1) << 8) | (@as(u64, 1) << 16) | (@as(u64, 1) << 48) | (@as(u64, 1) << 56) | (@as(u64, 1) << 59)),
+    folded_sections: u64 = std.math.maxInt(u64),
     plugin_page: plugins.State,
     background: material.Draft,
     theme_library: themes.LibraryState,
@@ -216,7 +216,7 @@ pub const Controller = struct {
             ai_draft.validate(self.model.value.ai) catch return .dirty_invalid;
             ai_draft.validateDefault(self.model.value.ai, self.original.value.ai) catch return .dirty_invalid;
         }
-        if (self.ai_fields.new_provider) |i| if (i >= self.model.value.ai.provider_count or !ai_draft.eligible(self.model.value.ai.providers[i])) return .dirty_invalid;
+        if (self.ai_fields.new_provider) |i| if (i >= self.model.value.ai.provider_count or !ai_draft.connectionValid(self.model.value.ai.providers[i])) return .dirty_invalid;
         if (self.ai_fields.new_model) |new| {
             if (new.provider >= self.model.value.ai.provider_count) return .dirty_invalid;
             const p = self.model.value.ai.providers[new.provider];
@@ -429,6 +429,28 @@ pub const Controller = struct {
         try self.ensureEditable();
         var candidate = self.model.value;
         candidate.ai = ai;
+        var ready_default = false;
+        for (ai.providers[0..ai.provider_count]) |p| if (p.enabled and ai_draft.eligible(p) and std.mem.eql(u8, ai.default_provider, ai_draft.providerName(p))) {
+            ready_default = true;
+        };
+        if (!ready_default) for (ai.providers[0..ai.provider_count]) |p| {
+            if (p.enabled and ai_draft.eligible(p)) {
+                candidate.ai.default_provider = ai_draft.providerName(p);
+                break;
+            }
+        };
+        if (!ready_default) {
+            var configured_default = false;
+            for (candidate.ai.providers[0..candidate.ai.provider_count]) |p| if (p.enabled and ai_draft.connectionValid(p) and std.mem.eql(u8, candidate.ai.default_provider, ai_draft.providerName(p))) {
+                configured_default = true;
+            };
+            if (!configured_default) for (candidate.ai.providers[0..candidate.ai.provider_count]) |p| {
+                if (p.enabled and ai_draft.connectionValid(p)) {
+                    candidate.ai.default_provider = ai_draft.providerName(p);
+                    break;
+                }
+            };
+        }
         try candidate.validate();
         const owned = try runtime.Snapshot.init(self.allocator, candidate);
         if (self.draft) |*old| old.deinit();

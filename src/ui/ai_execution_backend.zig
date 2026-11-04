@@ -81,17 +81,38 @@ const InputAuthority = struct {
     authorized: bool = false,
     automation: ?Content.Lease = null,
 };
+fn validateShellExpectation(arguments: std.json.Value, shell: execution.ShellContext) !void {
+    if (arguments != .object) return error.InvalidArguments;
+    const id = arguments.object.get("shell_id");
+    const revision = arguments.object.get("shell_revision");
+    if (id == null and revision == null) {
+        if (shell.id != null and shell.depth != 0) return error.ShellContextRequired;
+        return;
+    }
+    if (id == null or revision == null or id.? != .string or revision.? != .integer or revision.?.integer < 0) return error.InvalidArguments;
+    const current = shell.id orelse return error.ShellContextChanged;
+    if (!std.mem.eql(u8, id.?.string, &current) or revision.?.integer != shell.revision) return error.ShellContextChanged;
+}
 const Boundary = struct {
     handle: identity.SessionHandle,
     service: terminal.Service,
     capability_revision: u64,
     ownership_revision: u64,
     membership_revision: u64,
+    shell: execution.ShellContext,
     execution_revision: u64,
     input_epoch: u64,
     next_input: u64,
     input: InputAuthority,
 };
+pub const AttachmentPrepared = struct {
+    boundary: Boundary,
+    expected: execution.ShellAttachment,
+    key_hash: [32]u8,
+    subject: approvals.Subject,
+    duplicate: bool = false,
+};
+const AttachmentRecord = struct { context: host.Context, key_hash: [32]u8, arguments_hash: [32]u8, target: identity.SessionHandle };
 const Admission = struct {
     context: host.Context,
     operation_id: u64,
@@ -121,6 +142,7 @@ pub const Init = struct {
     approval: *approvals.Broker,
 };
 pub const Context = struct {
+    attachments: [capacity]?AttachmentRecord = @splat(null),
     secret_host: ?SecretHost = null,
     app: *Application,
     roster: *Roster,
@@ -135,7 +157,7 @@ pub const Context = struct {
         return .{ .secret_host = options.secret_host, .app = options.app, .roster = options.roster, .store = options.store, .lookup_context = options.lookup_context, .lookup_task = options.lookup_task, .approval = options.approval };
     }
     pub fn backend(self: *Context) supervisor.Backend {
-        return .{ .context = self, .authorize = authorize, .resolve = resolve, .terminal_call = terminalCall, .handed_to_user = handedToUser, .authorize_input = authorizeInput, .request_secret = requestSecret, .authorize_read = authorizeRead };
+        return .{ .context = self, .authorize = authorize, .resolve = resolve, .retained_shell_snapshots = true, .terminal_call = terminalCall, .handed_to_user = handedToUser, .authorize_input = authorizeInput, .request_secret = requestSecret, .authorize_read = authorizeRead };
     }
     /// Trusted UI close acceptance, before releasing the terminal view/native
     /// service. Block future input and return each admitted original Task once;
@@ -180,7 +202,7 @@ pub const Context = struct {
     /// the original Task and a current member; cleanup grants no new input.
     pub fn validateInvocationScope(self: *Context, invocation: host.Invocation) !void {
         const controller = try self.current(invocation.context, true);
-        if (std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal")) {
+        if (std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal") or std.mem.eql(u8, invocation.tool_id, "host.attach_shell")) {
             const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
             if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
             return;
@@ -218,6 +240,7 @@ pub const Context = struct {
         const controller = try self.current(invocation.context, false);
         const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
         const boundary = try self.captureBoundary(controller, handle, true, false, hash);
+        try validateShellExpectation(invocation.arguments, boundary.shell);
         try checkForbidden(command);
         const evidence = try describe(invocation.context, boundary);
         const record: Admission = .{ .context = invocation.context, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .call_hash = execution.digest(invocation.call_id), .arguments_hash = invocation.arguments_hash, .canonical_hash = invocation.canonical_arguments_hash, .command_hash = hash, .boundary = boundary, .evidence = evidence };
@@ -233,6 +256,68 @@ pub const Context = struct {
         };
         self.admissions[empty orelse return error.ExecutionLimit] = record;
         return evidence;
+    }
+    /// Attachment intentionally does not require an already integrated prompt.
+    /// It has the same scope/permission checks and a separate fresh-screen fence.
+    pub fn preflightAttachment(self: *Context, invocation: host.Invocation) !AttachmentPrepared {
+        const request = try @import("../ai/shell_attachment.zig").parse(invocation);
+        const controller = try self.current(invocation.context, false);
+        const handle = try parseSession(invocation.context, request.reference);
+        const boundary = try self.captureBoundaryMode(controller, handle, true, false, execution.digest("@shell attach"), true);
+        const key_hash = execution.digest(request.key);
+        var duplicate = false;
+        for (self.attachments) |item| if (item) |record| if (record.context.eql(invocation.context) and std.mem.eql(u8, &record.key_hash, &key_hash)) {
+            if (!record.target.eql(handle) or !std.mem.eql(u8, &record.arguments_hash, &invocation.canonical_arguments_hash)) return error.IdempotencyConflict;
+            duplicate = true;
+        };
+        if (!duplicate) {
+            const snapshot = try boundary.service.executionSnapshot();
+            if (!std.meta.eql(snapshot.shell.id, request.evidence.shell_id) or snapshot.shell.revision != request.evidence.shell_revision) return error.ShellContextChanged;
+            const status = try boundary.service.status();
+            if (snapshot.input_epoch != request.evidence.input_epoch or status.output_sequence != request.evidence.output_sequence) return error.ShellAttachmentStale;
+            if (snapshot.grant) |grant| if (!grant.task_id.eql(invocation.context.task_id)) return error.TerminalBusy;
+        }
+        return .{ .boundary = boundary, .expected = request.evidence, .key_hash = key_hash, .duplicate = duplicate, .subject = .{ .kind = .terminal_command, .target = request.reference, .detail = "@shell attach", .impact = try string(invocation.arguments, "prompt_evidence") } };
+    }
+    pub fn dispatchAttachment(self: *Context, invocation: host.Invocation, prepared: AttachmentPrepared, permit: approvals.Permit, allocator: std.mem.Allocator) !host.Result {
+        const controller = try self.current(invocation.context, false);
+        if (self.approval.authorizeSubject(permit, invocation, prepared.subject, controller.config_revision) != .allow) return error.PermissionDenied;
+        const now = try self.captureBoundaryMode(controller, prepared.boundary.handle, true, false, execution.digest("@shell attach"), true);
+        if (!sameService(now.service, prepared.boundary.service) or now.membership_revision != prepared.boundary.membership_revision or now.ownership_revision != prepared.boundary.ownership_revision or !std.meta.eql(now.input, prepared.boundary.input)) return error.ScopeChanged;
+        if (!prepared.duplicate) {
+            const slot = for (&self.attachments) |*item| {
+                if (item.* == null) break item;
+            } else return error.RecordingExecutionCapacity;
+            const legacy = self.app.legacyForHandle(now.handle) orelse return error.StaleReference;
+            const tab = self.app.workspace.sessionTab(legacy) orelse return error.StaleReference;
+            const runtime = tab.runtime orelse return error.UnsupportedShell;
+            try runtime.attachShell(prepared.expected);
+            slot.* = .{ .context = invocation.context, .key_hash = prepared.key_hash, .arguments_hash = invocation.canonical_arguments_hash, .target = now.handle };
+        }
+        const attached = prepared.duplicate and now.shell.prompt_ready == true;
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .state = if (attached) "attached" else "attaching", .initialized = attached, .duplicate = prepared.duplicate, .next_tool = "host.get_session", .instruction = "接入申请已受理。等待 control.shell_context.prompt_ready 后继续；原业务命令若已发送或结果未知，先读终端核验，不要重发。" }, .{});
+        errdefer allocator.free(body);
+        const blocks = try allocator.alloc(host.Block, 1);
+        blocks[0] = .{ .structured = body };
+        return .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision, .side_effect_started = !prepared.duplicate } };
+    }
+    /// Read-only progress of the original attachment. Called on the controller
+    /// scheduler; the worker owns the bounded wait and cancellation.
+    pub fn pollAttachment(self: *Context, invocation: host.Invocation, prepared: AttachmentPrepared, allocator: std.mem.Allocator, timed_out: bool) !?host.Result {
+        const controller = try self.current(invocation.context, false);
+        const now = try self.captureBoundaryMode(controller, prepared.boundary.handle, true, false, execution.digest("@shell attach"), true);
+        if (!sameService(now.service, prepared.boundary.service) or now.membership_revision != prepared.boundary.membership_revision or now.ownership_revision != prepared.boundary.ownership_revision) return error.ScopeChanged;
+        const snapshot = try now.service.executionSnapshot();
+        const ready = snapshot.interactive_execution and snapshot.shell.prompt_ready == true;
+        const failed = if (snapshot.failure) |failure| std.mem.eql(u8, failure, "UnsupportedShell") or std.mem.eql(u8, failure, "UnsupportedMultiplexer") or std.mem.eql(u8, failure, "ShellHooksConflict") else false;
+        if (!ready and !failed and !timed_out) return null;
+        var temporary = std.heap.ArenaAllocator.init(allocator);
+        defer temporary.deinit();
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .state = if (ready) "attached" else if (failed) "failed" else "attaching", .initialized = ready, .timed_out = timed_out and !ready, .shell_context = .{ .id = if (snapshot.shell.id) |id| @as(?[]const u8, try temporary.allocator().dupe(u8, &id)) else null, .revision = snapshot.shell.revision, .prompt_ready = snapshot.shell.prompt_ready }, .input_epoch = snapshot.input_epoch, .failure = snapshot.failure, .next_tool = if (ready) "host.run_in_terminal" else "host.read_terminal", .business_command_sent = false }, .{});
+        errdefer allocator.free(body);
+        const blocks = try allocator.alloc(host.Block, 1);
+        blocks[0] = .{ .structured = body };
+        return .{ .status = if (failed) .failed else .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision, .side_effect_started = !prepared.duplicate } };
     }
     pub fn validateApproval(self: *Context, invocation: host.Invocation, command: []const u8, hash: [32]u8) !void {
         const record = self.admission(invocation) orelse return error.ApprovalRequired;
@@ -272,10 +357,11 @@ pub const Context = struct {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
             const a = arena.allocator();
-            const detail = if (is_secret) try a.dupe(u8, "安全宿主输入请求（内容仅宿主可见）") else if (invocation.arguments.object.get("text")) |text| try a.dupe(u8, text.string) else try a.dupe(u8, "按下 Enter（提交已接收的当前行）");
+            const detail = if (is_secret) try a.dupe(u8, "安全输入请求（内容不会发送给 AI）") else if (invocation.arguments.object.get("text")) |text| try a.dupe(u8, text.string) else try a.dupe(u8, "按下 Enter（提交已接收的当前行）");
             const target = try a.dupe(u8, reference);
-            const impact = try std.fmt.allocPrint(a, "{s}；终端 {d}/{d}，输入授权 {d}，epoch {d}，能力序号 {d}，已接收输入序号 {d}。本次输入可能影响后续命令行为。", .{ if (is_secret) "宿主安全输入" else if (wait.kind == .terminal_stream) "向当前终端发送普通输入；写入成功不证明程序已消费" else "向受控行输入程序发送内容", @backingInt(record.boundary.handle.session_id), record.boundary.handle.generation, grant.fence, grant.input_epoch, wait.sequence, if (snapshot.input_receipt) |receipt| receipt.input_sequence else 0 });
-            return .{ .arena = arena, .subject = .{ .kind = .terminal_command, .target = target, .detail = detail, .impact = impact } };
+            const impact = try std.fmt.allocPrint(a, "{s}。本次输入可能影响后续命令行为。", .{if (is_secret) "通过安全输入窗口提交，内容不会发送给 AI" else if (wait.kind == .terminal_stream) "向当前终端发送输入；发送成功不代表程序已处理" else "向当前等待输入的程序发送内容"});
+            const evidence = try std.json.Stringify.valueAlloc(a, .{ .execution_id = id, .grant = grant, .wait = wait, .prior_input_sequence = if (snapshot.input_receipt) |receipt| receipt.input_sequence else 0 }, .{});
+            return .{ .arena = arena, .subject = .{ .kind = .terminal_command, .target = target, .detail = detail, .impact = impact, .evidence_hash = execution.digest(evidence) } };
         };
         return error.TargetNotAuthorized;
     }
@@ -430,6 +516,9 @@ pub const Context = struct {
         return .{ .instance = input.context_instance, .revision = input.authorization_revision, .authorized = input.authorized, .automation = input.automation };
     }
     fn captureBoundary(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, handed_to_user: bool, command_hash: [32]u8) !Boundary {
+        return self.captureBoundaryMode(controller, handle, idle, handed_to_user, command_hash, false);
+    }
+    fn captureBoundaryMode(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, handed_to_user: bool, command_hash: [32]u8, attaching: bool) !Boundary {
         if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
         const legacy = self.app.legacyForHandle(handle) orelse return error.StaleReference;
         const state = self.app.sessions.queryState(handle) orelse return error.StaleReference;
@@ -452,11 +541,11 @@ pub const Context = struct {
         const capability_revision = self.app.sessions.capabilityRevisionFor(handle) orelse return error.CapabilityUnavailable;
         const snapshot = try service.executionSnapshot();
         if (!snapshot.owner.eql(handle)) return error.StaleReference;
-        if (!snapshot.interactive_execution or service.vtable.execution_request == null or service.vtable.execution_renew == null or service.vtable.execution_revoke == null or service.vtable.execution_output == null) return error.IntegrationUnavailable;
-        if (idle and (!snapshot.input_ready or snapshot.grant != null)) return error.TerminalBusy;
+        if (!attaching and (!snapshot.interactive_execution or service.vtable.execution_request == null or service.vtable.execution_renew == null or service.vtable.execution_revoke == null or service.vtable.execution_output == null)) return error.IntegrationUnavailable;
+        if (idle and !attaching) try @import("../host/terminal_execution.zig").requireReadyInput(snapshot);
         const input = try self.inputAuthority(handle);
         if (idle and input.automation != null) return error.LeaseConflict;
-        return .{ .handle = handle, .service = service, .capability_revision = capability_revision, .ownership_revision = ownership_revision, .membership_revision = membership_revision, .execution_revision = snapshot.revision, .input_epoch = snapshot.input_epoch, .next_input = next_input, .input = input };
+        return .{ .handle = handle, .service = service, .capability_revision = capability_revision, .ownership_revision = ownership_revision, .membership_revision = membership_revision, .shell = snapshot.shell, .execution_revision = snapshot.revision, .input_epoch = snapshot.input_epoch, .next_input = next_input, .input = input };
     }
     fn admission(self: *Context, invocation: host.Invocation) ?*Admission {
         for (&self.admissions) |*item| if (item.*) |*value| if (value.context.eql(invocation.context) and value.operation_id == invocation.operation_id and value.turn_id == invocation.turn_id and std.mem.eql(u8, &value.call_hash, &execution.digest(invocation.call_id)) and std.mem.eql(u8, &value.arguments_hash, &invocation.arguments_hash) and std.mem.eql(u8, &value.canonical_hash, &invocation.canonical_arguments_hash)) return value;
@@ -489,6 +578,7 @@ pub const Context = struct {
             if (!idle) return self.restrictToCleanup(record);
             return error.StaleInputLease;
         }
+        if (idle and (!std.meta.eql(now.shell.id, before.shell.id) or now.shell.revision != before.shell.revision)) return error.ShellContextChanged;
         if (idle and (now.membership_revision != before.membership_revision or now.execution_revision != before.execution_revision or now.input_epoch != before.input_epoch or now.next_input != before.next_input)) return error.InputConflict;
         return now.service;
     }
@@ -610,7 +700,7 @@ pub const Context = struct {
                 for (self.admissions) |item| if (item) |record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(value.grant.execution_id) and record.context.task_id.eql(value.grant.task_id) and sameService(record.boundary.service, service)) return supervisor.performTerminal(service, action);
                 return error.StaleFence;
             },
-            .snapshot, .output => return supervisor.performTerminal(service, action),
+            .snapshot, .snapshot_for, .output => return supervisor.performTerminal(service, action),
         }
     }
     fn handedToUser(raw: *anyopaque, handle: identity.SessionHandle) !void {
@@ -660,7 +750,10 @@ fn validateInputInvocation(invocation: host.Invocation) !void {
     if (!std.mem.eql(u8, &digest, &invocation.canonical_arguments_hash) or !std.mem.eql(u8, &execution.digest(invocation.arguments_json), &invocation.arguments_hash)) return error.InvalidArguments;
 }
 fn validateRun(invocation: host.Invocation) !void {
-    if (invocation.authority != .execution_control or !std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal") or invocation.arguments != .object or invocation.arguments.object.count() != 3) return error.InvalidArguments;
+    if (invocation.authority != .execution_control or !std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal") or invocation.arguments != .object) return error.InvalidArguments;
+    const expected = @as(usize, 3) + @intFromBool(invocation.arguments.object.contains("shell_id")) + @intFromBool(invocation.arguments.object.contains("shell_revision")) + @intFromBool(invocation.arguments.object.contains("wait_ms"));
+    if (invocation.arguments.object.count() != expected) return error.InvalidArguments;
+    if (invocation.arguments.object.get("wait_ms")) |value| if (value != .integer or value.integer < 0 or value.integer > 30000) return error.InvalidArguments;
     const reference = try string(invocation.arguments, "session_ref");
     const key = try string(invocation.arguments, "request_key");
     _ = try string(invocation.arguments, "command");
@@ -676,12 +769,7 @@ fn validateNormalized(invocation: host.Invocation, command: []const u8, hash: [3
     if (!std.mem.eql(u8, &digest, &invocation.canonical_arguments_hash) or !std.mem.eql(u8, &execution.digest(invocation.arguments_json), &invocation.arguments_hash)) return error.InvalidArguments;
 }
 fn checkForbidden(command: []const u8) !void {
-    // PTY shell aliases/functions/PATH are not proved by an exec prefix list.
-    // Keep the existing forbidden rules, and require exact approval for every
-    // other command, including seemingly read-only prefixes and auto mode.
-    const trimmed = std.mem.trim(u8, command, " \t\n");
-    var lines = std.mem.tokenizeAny(u8, trimmed, "\n;|&");
-    while (lines.next()) |line| if (@import("../ai/permission.zig").classify(.{}, std.mem.trim(u8, line, " \t"), true) == .deny_exec_copy_only) return error.PermissionDenied;
+    if (@import("../ai/permission.zig").classifyTerminal(.{}, command, true) == .deny_exec_copy_only) return error.PermissionDenied;
 }
 fn subject(invocation: host.Invocation, command: []const u8, impact: []const u8) approvals.Subject {
     return .{ .kind = .terminal_command, .target = string(invocation.arguments, "session_ref") catch "", .detail = command, .impact = impact };
@@ -709,4 +797,42 @@ fn describe(_: host.Context, _: Boundary) !ApprovalEvidence {
 
 test {
     _ = @import("ai_execution_backend_tests.zig");
+}
+
+test "efficiency execution backend accepts bounded wait without weakening strict argument validation" {
+    const a = std.testing.allocator;
+    const ctx: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    for ([_][]const u8{ "2000", "0", "30000", "-1", "30001", "\"2000\"" }, 0..) |wait, index| {
+        const json = try std.fmt.allocPrint(a, "{{\"session_ref\":\"s1:test\",\"command\":\"echo test\",\"request_key\":\"once\",\"wait_ms\":{s}}}", .{wait});
+        defer a.free(json);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+        defer parsed.deinit();
+        const invocation: host.Invocation = .{ .context = ctx, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "wait-run", .tool_id = "host.run_in_terminal", .arguments = parsed.value, .arguments_json = json, .arguments_hash = execution.digest(json), .canonical_arguments_hash = try canonical.digest(a, parsed.value) };
+        if (index < 3) try validateRun(invocation) else try std.testing.expectError(error.InvalidArguments, validateRun(invocation));
+    }
+}
+
+test "nested shell execution requires the observed instance and revision" {
+    const a = std.testing.allocator;
+    var shell: execution.ShellContext = .{ .id = "11111111111111111111111111111111".*, .revision = 7, .depth = 1 };
+    try std.testing.expectError(error.ShellContextRequired, validateShellExpectation(.{ .object = .empty }, shell));
+    const args = try std.json.parseFromSlice(std.json.Value, a, "{\"shell_id\":\"11111111111111111111111111111111\",\"shell_revision\":7}", .{});
+    defer args.deinit();
+    try validateShellExpectation(args.value, shell);
+    shell.revision += 1;
+    try std.testing.expectError(error.ShellContextChanged, validateShellExpectation(args.value, shell));
+    shell.depth = 0;
+    try validateShellExpectation(.{ .object = .empty }, shell);
+}
+
+test "nested shell execution normalization retains the optional layer arguments" {
+    const a = std.testing.allocator;
+    const json = "{\"session_ref\":\"session\",\"command\":\"pwd\",\"request_key\":\"once\",\"shell_id\":\"11111111111111111111111111111111\",\"shell_revision\":2}";
+    const arguments = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer arguments.deinit();
+    const invocation: host.Invocation = .{ .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 }, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "run", .tool_id = "host.run_in_terminal", .arguments = arguments.value, .arguments_json = json, .arguments_hash = execution.digest(json), .canonical_arguments_hash = try canonical.digest(a, arguments.value) };
+    var prepared = try prepare(invocation, a);
+    defer prepared.deinit();
+    try std.testing.expectEqualStrings("pwd", prepared.command);
+    try std.testing.expectEqual(@as(i64, 2), prepared.invocation.arguments.object.get("shell_revision").?.integer);
 }

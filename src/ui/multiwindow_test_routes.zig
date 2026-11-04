@@ -25,6 +25,7 @@ fn route(path: []const u8, body: []const u8, _: []u8) ?[]const u8 {
     if (!zenit.test_harness.enabled) return null;
     if (std.mem.eql(u8, path, "/zerowork/update")) if (update_route) |handle| return handle(body, &response_buffer);
     if (std.mem.eql(u8, path, "/zerowork/menu-bar")) return @import("../platform/menu_bar.zig").testSnapshot(&response_buffer);
+    if (std.mem.eql(u8, path, "/zerowork/tab-icons")) return tabIconsSnapshot();
     if (std.mem.eql(u8, path, "/zerowork/terminal")) return terminalRoute(body);
     if (!std.mem.eql(u8, path, "/zerowork/windows")) return null;
     const app_domain = domain orelse return "{\"ok\":false}";
@@ -88,6 +89,8 @@ fn route(path: []const u8, body: []const u8, _: []u8) ?[]const u8 {
             .shared_registry = host.sessions == &app_domain.sessions,
             .shared_local_adapter = host.local_adapter == app_domain.local_adapter,
             .closing = host.windowClosePending(),
+            .frame_count = host.workspace.cx.frame_count,
+            .tree_nodes = if (host.workspace.cx.root) |root| treeNodeCount(root) else 0,
         }, .{}, &writer) catch return "{\"ok\":false,\"error\":\"SnapshotCapacityExceeded\"}";
     }
     writer.writeAll("],\"sessions\":[") catch return "{\"ok\":false,\"error\":\"SnapshotCapacityExceeded\"}";
@@ -150,9 +153,34 @@ fn route(path: []const u8, body: []const u8, _: []u8) ?[]const u8 {
     return writer.buffered();
 }
 
+fn tabIconsSnapshot() []const u8 {
+    const app_domain = domain orelse return "[]";
+    var writer = std.Io.Writer.fixed(&response_buffer);
+    writer.writeByte('[') catch return "[]";
+    var count: usize = 0;
+    for (app_domain.attachments.items) |host| {
+        const workspace = host.workspace;
+        for (workspace.tab_nodes.items) |node| {
+            const at = workspace.model.indexOf(node.tab_id) orelse continue;
+            const item = workspace.tabPresentation(workspace.model.tabs.items[at].owner) orelse continue;
+            if (count != 0) writer.writeByte(',') catch return "[]";
+            count += 1;
+            std.json.Stringify.value(.{ .window = @backingInt(host.window_id), .tab = @backingInt(item.tab_id), .title = item.title, .state = @tagName(workspace.tabIconState(item.tab_id)), .icon = item.icon_id, .tint = item.icon_tint, .backdrop = item.icon_backdrop, .original = item.icon_original, .bouncing = item.icon_bouncing, .offset = node.type_icon.style.translate_y, .rendered_background = node.type_icon.getBackground(), .rendered_shape = @tagName(node.type_icon.style.shape()), .rendered_vector_fill = node.type_icon.getLayoutOutput().vector.fill.path != null }, .{}, &writer) catch return "[]";
+        }
+    }
+    writer.writeByte(']') catch return "[]";
+    return writer.buffer[0..writer.end];
+}
+
 fn findNative(windows: *zenit.MultiWindowApp, cx: *@import("ui").Cx) ?*zenit.App {
     for (windows.windows.items) |managed| if (managed.app.cx == cx) return managed.app;
     return null;
+}
+
+fn treeNodeCount(node: *const @import("ui").Node) usize {
+    var count: usize = 1;
+    for (node.children.items) |child| count += treeNodeCount(child);
+    return count;
 }
 
 fn closeReleased(app_domain: *application.Domain, key: @import("../host/operation.zig").OperationKey) bool {
@@ -193,7 +221,7 @@ fn terminalRoute(body: []const u8) []const u8 {
         if (runtime) |windows| for (app_domain.attachments.items) |host| {
             if (findNative(windows, host.workspace.cx)) |app| cpu_max = @max(cpu_max, app.renderer.timing_ring.cpuPercentile(100));
         };
-        std.json.Stringify.value(.{ .ok = true, .background_search_tasks = @import("../vt/search_task.zig").live_count.load(.monotonic), .idle_reclaim_runs = app_domain.idle_reclaim_runs, .idle_reclaim_running = pending, .idle_trimmed_bytes = app_domain.idle_trimmed_bytes, .display_capacity_bytes = capacity, .scratch_capacity_bytes = scratch_capacity, .cpu_max_us = cpu_max }, .{}, &writer) catch return "{\"ok\":false}";
+        std.json.Stringify.value(.{ .ok = true, .background_search_tasks = @import("../vt/search_task.zig").live_count.load(.monotonic), .search_executor = @import("../vt/search_executor.zig").stats(), .idle_reclaim_runs = app_domain.idle_reclaim_runs, .idle_reclaim_running = pending, .idle_trimmed_bytes = app_domain.idle_trimmed_bytes, .display_capacity_bytes = capacity, .scratch_capacity_bytes = scratch_capacity, .cpu_max_us = cpu_max }, .{}, &writer) catch return "{\"ok\":false}";
         return writer.buffered();
     }
     const host = for (app_domain.attachments.items) |candidate| {
@@ -235,6 +263,12 @@ fn terminalRoute(body: []const u8) []const u8 {
         .composite_search_pending = surface.composite.search_task != null,
         .composite_last_composed_rows = surface.composite.last_composed_rows,
         .glyphs_pending = surface.glyphs_pending,
+        .search_open = view.search_open,
+        .search_matches = view.search.matches.items.len,
+        .search_background_scans = view.service_search_background_scans,
+        .search_synchronous_scans = view.service_search_synchronous_scans,
+        .search_cancelled = view.service_search_cancelled,
+        .search_task_pending = view.service_search_task != null,
         .input_during_hydration = surface.input_during_hydration,
         .glyph_nodes = blk: {
             var count: usize = 0;

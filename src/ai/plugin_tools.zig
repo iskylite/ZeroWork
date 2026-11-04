@@ -11,6 +11,8 @@ pub const max_plugin_request_tools = @import("provider.zig").max_plugin_tool_def
 pub const max_host_request_tools = @import("provider.zig").max_host_tool_definitions;
 pub const max_request_tools = max_plugin_request_tools + max_host_request_tools;
 pub const Effect = enum { read_state, observe_image, remote_input, resource_write };
+// `always_confirm` is retained as a legacy manifest spelling. Automatic
+// execution overrides both confirmation policies after deny/capability gates.
 pub const ApprovalPolicy = enum { read_only, confirm, always_confirm };
 pub const ToolDefinition = struct {
     id: []const u8,
@@ -53,6 +55,11 @@ pub const ToolResult = struct {
     status: Status,
     blocks: []const ContentBlock = &.{},
     receipt: Receipt,
+    /// Host-only bounded retry hint for an observation that produced no pixels.
+    /// It never authorizes repeating an input or a resource write.
+    observation_retry_ms: ?u16 = null,
+    /// Internal image preparation may wait even when no new-frame wait was requested.
+    observation_preparing: bool = false,
     /// All handlers allocate blocks/text through the invocation allocator and
     /// return owned image references. Both result cards and providers retain the
     /// same immutable references; neither receives a filesystem path as pixels.
@@ -292,7 +299,9 @@ pub const RequestTable = struct {
             const name = try encodeName(&encoded, definition.id);
             for (entries[0..index]) |entry| if (std.mem.eql(u8, entry.provider_name, name)) return error.ToolDefinitionConflict;
             var owned_definition = try copyDefinition(a, definition);
-            if (std.mem.eql(u8, definition.id, "host.read_terminal") and terminal_targets.len != 0) owned_definition.schema = try terminalSourceSchema(a, definition.schema, terminal_targets, context);
+            const terminal_source = @import("host_terminal_queries.zig").supports(definition.id) or
+                std.mem.eql(u8, definition.id, "host.run_in_terminal") or std.mem.eql(u8, definition.id, "host.attach_shell");
+            if (terminal_source and terminal_targets.len != 0) owned_definition.schema = try terminalSourceSchema(a, definition.schema, terminal_targets, context);
             entries[index] = .{ .definition = owned_definition, .provider_name = try a.dupe(u8, name), .targets = &.{}, .authority = contribution.authority };
         }
         table.entries = entries;
@@ -379,15 +388,17 @@ pub fn needsApproval(definition: ToolDefinition, policy: Policy) !bool {
     if (!policy.allow_input and definition.effect == .remote_input) return error.ToolExecutionDenied;
     if (!policy.allow_write and definition.effect == .resource_write) return error.ToolExecutionDenied;
     return switch (definition.approval_policy) {
-        .always_confirm => true,
-        .confirm => !policy.full_control,
+        .always_confirm, .confirm => !(policy.full_control or policy.engine.mode == .auto),
         .read_only => false,
     };
 }
 pub fn callNeedsApproval(call: ParsedCall, policy: Policy, grouped: bool) !bool {
     const basic = try needsApproval(call.entry.definition, policy);
-    if (call.entry.definition.approval_policy == .always_confirm) return true;
-    if (call.entry.definition.evaluate_policy) |evaluate| return evaluate(call.json.value, policy, grouped);
+    if (call.entry.definition.evaluate_policy) |evaluate| {
+        var effective = policy;
+        if (policy.full_control) effective.engine.mode = .auto;
+        return evaluate(call.json.value, effective, grouped);
+    }
     return basic;
 }
 pub const ApprovalTicket = struct {
@@ -399,6 +410,8 @@ pub const ApprovalTicket = struct {
     expires_at_ms: i64,
     used: bool = false,
     approved: bool = false,
+    /// A waiter released by a policy change has no user approval to retain.
+    policy_bypass: bool = false,
     const FrozenTarget = struct { owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(0) }, capability_revision: u64 = 0, policy_revision: u64 = 0, service_revision_hash: u64 = 0 };
     pub fn create(table: *const RequestTable, call: ParsedCall, now_ms: i64, ttl_ms: u32) !ApprovalTicket {
         if (ttl_ms == 0 or ttl_ms > 300_000) return error.InvalidApprovalExpiry;
@@ -407,6 +420,13 @@ pub const ApprovalTicket = struct {
             const target = entryTarget(call.entry, id).?;
             ticket.targets[index] = .{ .owner = target.owner, .capability_revision = target.capability_revision, .policy_revision = target.policy_revision, .service_revision_hash = serviceRevisionHash(target.services) };
         }
+        return ticket;
+    }
+    /// AI user confirmation has no TTL. Identity/hash/service revisions and
+    /// one-use consumption are still validated immediately before dispatch.
+    pub fn waiting(table: *const RequestTable, call: ParsedCall) !ApprovalTicket {
+        var ticket = try create(table, call, 0, 1);
+        ticket.expires_at_ms = std.math.maxInt(i64);
         return ticket;
     }
     pub fn approve(self: *ApprovalTicket) void {
@@ -588,7 +608,7 @@ pub fn providerDefinitions(table: *const RequestTable, allocator: std.mem.Alloca
 /// Builtin tools advertise the same captured target bounds in every provider
 /// path. Dispatch still validates the target binding, generation and live scope.
 fn builtinTargetSchema(allocator: std.mem.Allocator, entry: Entry, ids: []const u64) ![]const u8 {
-    if (entry.authority != .session_targets or !legacyName(entry.definition.id)) return entry.definition.schema;
+    if (entry.authority != .session_targets) return entry.definition.schema;
     return narrowSessionSchema(allocator, entry.definition.schema, ids);
 }
 
@@ -692,24 +712,34 @@ pub const Runtime = struct {
             reserved.ids[reserved.len] = id;
             reserved.len += 1;
         }
-        if (try callNeedsApproval(parsed, self.current_policy(self.context), invocation.table.captured_scope.owner == .group)) {
-            ticket = try ApprovalTicket.create(invocation.table, parsed, self.now_ms(self.context), 60_000);
-            for (parsed.targets.slice()) |id| {
-                const owner = entryTarget(parsed.entry, id).?.owner;
-                try self.operations.transition(owner, invocation.operation_id, .pending_approval, "");
-            }
-            const ask = self.approval orelse return error.ToolApprovalRequired;
-            if (!try ask(self.context, invocation, &ticket.?, cancel)) {
-                for (parsed.targets.slice()) |id| {
+        var waited = false;
+        while (true) {
+            if (try callNeedsApproval(parsed, self.current_policy(self.context), invocation.table.captured_scope.owner == .group)) {
+                ticket = try ApprovalTicket.waiting(invocation.table, parsed);
+                if (!waited) for (parsed.targets.slice()) |id| {
                     const owner = entryTarget(parsed.entry, id).?.owner;
-                    try self.operations.transition(owner, invocation.operation_id, .rejected, "rejected");
+                    try self.operations.transition(owner, invocation.operation_id, .pending_approval, "");
+                };
+                waited = true;
+                const ask = self.approval orelse return error.ToolApprovalRequired;
+                if (!try ask(self.context, invocation, &ticket.?, cancel)) {
+                    for (parsed.targets.slice()) |id| {
+                        const owner = entryTarget(parsed.entry, id).?.owner;
+                        try self.operations.transition(owner, invocation.operation_id, .rejected, "rejected");
+                    }
+                    return error.ToolApprovalRejected;
                 }
-                return error.ToolApprovalRejected;
+                if (!ticket.?.policy_bypass) ticket.?.approve();
             }
-            ticket.?.approve();
+            if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
+            authorize(invocation.table, parsed, try self.live_scope(self.context), try self.live_members(self.context), self.current_policy(self.context), if (ticket) |*value| value else null, self.now_ms(self.context)) catch |err| switch (err) {
+                // A concurrent auto -> confirm change must wait for a real user
+                // decision, never turn an automatic bypass into a retained grant.
+                error.ToolApprovalRequired => continue,
+                else => return err,
+            };
+            break;
         }
-        if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
-        try authorize(invocation.table, parsed, try self.live_scope(self.context), try self.live_members(self.context), self.current_policy(self.context), if (ticket) |*value| value else null, self.now_ms(self.context));
         if (ticket != null) for (parsed.targets.slice()) |id| {
             const owner = entryTarget(parsed.entry, id).?.owner;
             try self.operations.transition(owner, invocation.operation_id, .approved, "");
@@ -736,7 +766,7 @@ pub const Runtime = struct {
             preflight(invocation.table, parsed, try self.live_scope(self.context), try self.live_members(self.context)) catch |err| {
                 try self.operations.cancel(target.owner, invocation.operation_id);
                 try self.operations.resourcesReleased(target.owner, invocation.operation_id);
-                result.* = try dispatchFailure(allocator, target.owner, invocation.operation_id, err, false);
+                result.* = try dispatchFailure(allocator, target.owner, invocation.operation_id, parsed.entry.definition.id, err, false);
                 initialized += 1;
                 continue;
             };
@@ -747,7 +777,7 @@ pub const Runtime = struct {
                 const was_sent = stage == .sent or stage == .verifying or stage == .outcome_unknown;
                 try self.operations.cancel(target.owner, invocation.operation_id);
                 uncertain = was_sent;
-                result.* = try dispatchFailure(allocator, target.owner, invocation.operation_id, err, was_sent);
+                result.* = try dispatchFailure(allocator, target.owner, invocation.operation_id, parsed.entry.definition.id, err, was_sent);
                 initialized += 1;
                 if (result.receipt.local_released) try self.operations.resourcesReleased(target.owner, invocation.operation_id);
                 @import("tool_trace.zig").emit(.{ .event = "dynamic_result", .call_id = invocation.call_id, .tool_id = parsed.entry.definition.id, .owner = target.owner, .operation_id = invocation.operation_id, .status = result.status, .local_released = result.receipt.local_released, .remote_effect_unknown = result.receipt.remote_effect_unknown });
@@ -775,8 +805,9 @@ pub const Runtime = struct {
 // Controller preflight errors must reach both the result card and the model.
 // In particular, approval does not imply a focused window or an input lease.
 // Preserve the dispatch boundary: a handler failure after markSent is unknown.
-fn dispatchFailure(allocator: std.mem.Allocator, owner: identity.SessionHandle, operation_id: u64, err: anyerror, started: bool) !ToolResult {
-    const bytes = try std.json.Stringify.valueAlloc(allocator, .{
+fn dispatchFailure(allocator: std.mem.Allocator, owner: identity.SessionHandle, operation_id: u64, tool_id: []const u8, err: anyerror, started: bool) !ToolResult {
+    const detail = if (!started) try @import("kvm_tool_feedback.zig").preflightBody(allocator, tool_id, @errorName(err), &.{@backingInt(owner.session_id)}) else null;
+    const bytes = detail orelse try std.json.Stringify.valueAlloc(allocator, .{
         .error_code = @errorName(err),
         .stage = if (started) "dispatch" else "preflight",
         .side_effect_started = started,
@@ -786,7 +817,25 @@ fn dispatchFailure(allocator: std.mem.Allocator, owner: identity.SessionHandle, 
     errdefer allocator.free(bytes);
     const blocks = try allocator.alloc(ContentBlock, 1);
     blocks[0] = .{ .structured = bytes };
-    return .{ .status = if (started) .outcome_unknown else .cancelled_unsent, .blocks = blocks, .receipt = .{ .owner = owner, .operation_id = operation_id, .remote_effect_unknown = started } };
+    return .{ .status = if (started) .outcome_unknown else if (detail != null) .rejected else .cancelled_unsent, .blocks = blocks, .receipt = .{ .owner = owner, .operation_id = operation_id, .remote_effect_unknown = started } };
+}
+
+test "BMC AI preflight feedback never converts post dispatch uncertainty into unsent rejection" {
+    const a = std.testing.allocator;
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(83), .generation = 1 };
+    for ([_]bool{ false, true }) |started| {
+        var result = try dispatchFailure(a, owner, 1, "bmc_ikvm.keyboard", error.WindowNotFocused, started);
+        defer result.deinit(a);
+        try std.testing.expectEqual(if (started) Status.outcome_unknown else Status.rejected, result.status);
+        try std.testing.expectEqual(started, result.receipt.remote_effect_unknown);
+        const body = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+        defer body.deinit();
+        try std.testing.expectEqual(started, body.value.object.get("side_effect_started").?.bool);
+        if (!started) {
+            try std.testing.expect(!body.value.object.get("dispatch").?.bool);
+            try std.testing.expect(std.mem.indexOf(u8, body.value.object.get("next_step").?.string, "激活目标窗口") != null);
+        }
+    }
 }
 
 test {
@@ -800,4 +849,18 @@ pub fn markSent(store: *@import("../host/operation_store.zig").Store, owner: ide
 
 test {
     _ = @import("plugin_gateway_live_tests.zig");
+}
+
+test "efficiency all session target schemas advertise captured ids without relaxing constraints" {
+    const a = std.testing.allocator;
+    const input = @import("../plugins/bmc_ikvm/tools.zig").screenshot_schema;
+    const wire = try narrowSessionSchema(a, input, &.{171});
+    defer a.free(wire);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, wire, .{});
+    defer parsed.deinit();
+    const targets = parsed.value.object.get("properties").?.object.get("session_ids").?.object;
+    try std.testing.expectEqual(@as(i64, 1), targets.get("maxItems").?.integer);
+    const ids = targets.get("items").?.object.get("enum").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), ids.len);
+    try std.testing.expectEqual(@as(i64, 171), ids[0].integer);
 }

@@ -4,7 +4,7 @@ import argparse, fcntl, json, logging, os, select, signal, socket, struct, subpr
 from pathlib import Path
 import paramiko
 logging.getLogger('paramiko').setLevel(logging.CRITICAL)
-p = argparse.ArgumentParser(); p.add_argument('--out', required=True); p.add_argument('--hold-request', choices=['open','pty','shell']); p.add_argument('--drop-after-eof', action='store_true'); args = p.parse_args()
+p = argparse.ArgumentParser(); p.add_argument('--out', required=True); p.add_argument('--hold-request', choices=['open','pty','shell']); p.add_argument('--drop-after-eof', action='store_true'); p.add_argument('--hold-close', action='store_true'); args = p.parse_args()
 out = Path(args.out); out.mkdir(parents=True)
 (out / '.zshrc').write_text("bindkey -e\nPS1='sshrecords%# '\n")
 stop = threading.Event()
@@ -74,6 +74,9 @@ def serve(connection,index):
         cid=int.from_bytes(data[1:5],'big') if len(data)>=5 else -1
         if server.held and cid==server.held[1] and kind==(91 if server.held[0]=='open' else 99):
             server.pending_message = message
+            return
+        if args.hold_close and kind==97 and cid in server.pty_ids:
+            (out/f'held-close-{index}-{cid}.json').write_text(json.dumps(dict(transport=index,channel=cid)))
             return
         if args.drop_after_eof and kind==97 and cid in server.pty_ids and len(server.pty_ids)>1:
             (out/'held-eof-close.json').write_text(json.dumps(dict(channel=cid)))

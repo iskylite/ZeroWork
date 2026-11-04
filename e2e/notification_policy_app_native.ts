@@ -21,11 +21,18 @@ try{
  await h.waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await h.resizeWindow(1280,720);
  await click('workspace.empty.local');await visible('terminal.surface');await h.sleep(1000);
  const terminal=await visible('terminal.surface');await h.clickAt(terminal.rect.x+30,terminal.rect.y+30);await h.type_('zerowork_missing_notification_policy_command');await h.key('return');
- await visible('terminal.ai-error-hint');await absent('notifications.toast.0');await absent('notifications.unread');await capture('local-command-error');
- await click('terminal.ai-error-hint.dismiss');await click('toolbar.notifications');await visible('notifications.history.empty');await absent('notifications.history.record');await capture('local-error-no-global-record');
+ await h.mouseMove(5,5);await visible('terminal.ai-error-hint');await absent('notifications.toast.0');await absent('notifications.unread');await capture('local-command-error');
+ await h.sleep(6000);await visible('terminal.ai-error-hint');await absent('terminal.ai-error-hint');await capture('local-command-error-expired');
+ await click('toolbar.notifications');await visible('notifications.history.empty');await absent('notifications.history.record');await capture('local-error-no-global-record');
  await click('notifications.history.recent');await visible('notifications.history.empty');await absent('notifications.history.record');
- await click('notifications.history.close');await h.key('w',{cmd:true});await click('toolbar.notifications');await visible('notifications.history.empty');await absent('notifications.unread');
- report.checks=['real shell failure shows local AI analysis hint','ordinary command failure produces no global banner or unread','dismissing local hint does not add pending or recent records','closing source does not recreate global history'];report.status='passed';
+ await click('notifications.history.close');
+ await h.clickAt(terminal.rect.x+30,terminal.rect.y+30);await h.type_('zerowork_missing_notification_hover_command');await h.key('return');
+ const hint=await visible('terminal.ai-error-hint');await h.mouseMove(hint.rect.x+hint.rect.w/2,hint.rect.y+hint.rect.h/2);await h.sleep(8500);await visible('terminal.ai-error-hint');
+ await h.mouseMove(5,5);await h.sleep(6000);await visible('terminal.ai-error-hint');await absent('terminal.ai-error-hint');
+ await h.key('w',{cmd:true});await click('toolbar.notifications');await visible('notifications.history.empty');await absent('notifications.unread');await click('notifications.history.close');
+ await click('workspace.empty.local');const nextTerminal=await visible('terminal.surface');await h.clickAt(nextTerminal.rect.x+30,nextTerminal.rect.y+30);await h.type_('zerowork_missing_notification_ask_ai_command');await h.key('return');await visible('terminal.ai-error-hint');await click('terminal.ai-error-hint.open');await visible('ai.panel');
+ assert((await h.inputState('ai.prompt')).buffer.includes('请分析这条命令失败的原因'));await absent('terminal.ai-error-hint');await capture('local-command-error-ask-ai');
+ report.checks=['real shell failure shows local AI analysis hint and automatically closes after eight seconds','hover keeps the hint visible and leaving restarts the timeout','ask AI opens a draft before timeout','ordinary command failure produces no global banner, unread, pending or recent record','closing source does not recreate global history'];report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await capture('failure').catch(()=>{});process.exitCode=1;}
 finally{await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await Promise.race([ended,h.sleep(2000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended;}await log.close();await rm(iso,{recursive:true,force:true});}
 console.log(JSON.stringify({status:report.status,out,error:report.error}));

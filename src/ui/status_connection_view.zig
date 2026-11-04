@@ -89,6 +89,7 @@ pub const View = struct {
     feedback_label: *ui.Node = undefined,
     logs_button: *ui.Node = undefined,
     copy_button: *ui.Node = undefined,
+    copy_feedback: *@import("copy_button.zig").Button = undefined,
     reconnect_button: *ui.Node = undefined,
     close_button: *ui.Node = undefined,
     scroll: ui.widgets.ScrollAreaResult = undefined,
@@ -270,6 +271,7 @@ pub const View = struct {
         self.footer = actions;
         actions.meta.ownership.meta.test_id = "status.connection.footer";
         self.copy_button = try self.textButton(scope, actions, .copy, "复制信息", "status.connection.copy", 90, true, null);
+        self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, self.copy_button);
         self.logs_button = try self.button(scope, actions, .logs, "连接日志", "status.connection.logs", ui.icons.get("file-text").?, 28, true, self.logs_disabled);
         self.feedback_label = try label(self.cx, actions, "", S.infoText(true), S.feedbackBox());
         self.reconnect_button = try self.textButton(scope, actions, .reconnect, "重新连接", "status.connection.reconnect", 88, true, self.reconnect_disabled);
@@ -363,6 +365,7 @@ pub const View = struct {
         self.feedback("已复制信息", true);
     }
     fn feedback(self: *View, text: []const u8, success: bool) void {
+        self.copy_feedback.report(success);
         self.feedback_label.setTextContent(self.cx.allocator, text) catch {};
         self.feedback_label.setTextColor(if (success) @import("socks_info_styles.zig").text(.success) else S.theme.current().danger_ink);
         self.cx.requestRedraw();

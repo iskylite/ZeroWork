@@ -33,7 +33,7 @@ pub const contributions = [_]host.Contribution{
         .id = "host.create_host",
         .effect = .resource_write,
         .approval_policy = .always_confirm,
-        .description = "After an exact host confirmation, save a new SSH host in the saved host list and return its source_ref and stable operation_ref. The required request_key is scoped to this conversation/task/tool: the same key and canonical arguments return the original operation and saved asset, changed arguments return IdempotencyConflict. Saving does not connect or execute commands. Then use open_session with new_only in the current group; a single-session conversation must first create_group. Supply only static configuration. Passwords, private key contents, passphrases and credential references are forbidden; authentication secrets must be entered in the host's secure connection UI. Existing hosts cannot be edited, deleted or overwritten. After an unknown outcome inspect the original operation and saved catalog; never replay the save or use a new key/name to recover the reply.",
+        .description = "After exact host authorization under the current permission mode, save a new SSH host in the saved host list and return its source_ref and stable operation_ref. The required request_key is scoped to this conversation/task/tool: the same key and canonical arguments return the original operation and saved asset, changed arguments return IdempotencyConflict. Saving does not connect or execute commands. Then use open_session with new_only in the current group; a single-session conversation must first create_group. Supply only static configuration. Passwords, private key contents, passphrases and credential references are forbidden; authentication secrets must be entered in the host's secure connection UI. Existing hosts cannot be edited, deleted or overwritten. After an unknown outcome inspect the original operation and saved catalog; never replay the save or use a new key/name to recover the reply.",
         .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":120},\"protocol\":{\"type\":\"string\",\"enum\":[\"ssh\"]},\"host\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":255},\"port\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65535},\"user\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"auth_mode\":{\"type\":\"string\",\"enum\":[\"agent\",\"password\",\"private_key\"]},\"identity_file\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"name\",\"host\",\"user\",\"request_key\"]}",
     } },
 };
@@ -113,7 +113,7 @@ pub fn parse(invocation: host.Invocation) !Request {
 pub const Prepared = struct {
     detail: []const u8,
     pub fn subject(self: Prepared) approval.Subject {
-        return .{ .kind = .lifecycle, .target = "host.create_host", .detail = self.detail, .impact = "将此 SSH 主机保存到主机列表；密码和私钥口令由宿主安全界面输入。保存后可在当前绑定组中新建工作会话。" };
+        return .{ .kind = .lifecycle, .target = "host.create_host", .detail = self.detail, .impact = "将此 SSH 主机保存到主机列表；密码和私钥口令通过安全窗口输入。保存后可在当前绑定组中新建工作会话。" };
     }
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
         allocator.free(self.detail);

@@ -401,6 +401,22 @@ pub const Archive = struct {
         return plans.items.len;
     }
 
+    /// Deletes exactly one captured closed record. Shared read leases protect
+    /// open archive tabs and exports; index replacement preserves newer sessions.
+    pub fn removeRecord(self: *Archive, descriptor: Descriptor) !void {
+        if (isActiveRecord(descriptor.archive_key)) return error.RecordBusy;
+        if (descriptor.manifest_path) |path| {
+            const current = try manifest.load(self.allocator, self.io, self.dir, path);
+            defer current.deinit();
+            if (!std.mem.eql(u8, current.value.archive_key, descriptor.archive_key) or current.value.manifest_revision != descriptor.manifest_revision) return error.StaleArchiveRevision;
+        }
+        var plan = try makeRemovalPlanAt(self.allocator, self.io, self.dir, descriptor.entry.cast_path, descriptor.manifest_path);
+        defer plan.deinit();
+        try plan.remove(self.io, self.dir, "UserRemoved");
+        const entry = descriptor.entry;
+        try self.removeEntries(&.{.{ .id = entry.id, .started_ms = entry.started_ms, .cast_path = entry.cast_path }});
+    }
+
     /// Explicit cleanup supplies only paths it has successfully removed while
     /// holding RemovalGuards. Preserve entries appended after its plan froze.
     pub fn removeEntries(self: *Archive, keys: []const EntryKey) !void {
@@ -637,6 +653,7 @@ pub const Descriptor = struct {
     failure: ?[]const u8 = null,
     manifest_path: ?[]const u8 = null,
     can_open: bool = true,
+    can_export: bool = false,
     display: manifest.Display = .{},
     document: ?manifest.Manifest = null,
 };
@@ -819,7 +836,7 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
             descriptor.coverage = .partial;
             descriptor.failure = "AbnormalTermination";
         }
-        if (descriptor.can_open) {
+        if (descriptor.entry.cast_path.len > 0 and descriptor.coverage != .unavailable and descriptor.replayability != .unsupported) {
             const data = manifest.openManaged(archive.io, archive.dir, descriptor.entry.cast_path) catch |err| {
                 descriptor.can_open = false;
                 descriptor.failure = @errorName(err);
@@ -827,6 +844,7 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
                 continue;
             };
             data.close(archive.io);
+            descriptor.can_export = true;
         }
         var duplicate = false;
         for (out.entries.items) |existing| if (std.mem.eql(u8, existing.archive_key, descriptor.archive_key)) {
@@ -857,7 +875,10 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
         descriptor.entry.user = try owned.dupe(u8, entry.user);
         descriptor.entry.cast_path = try owned.dupe(u8, entry.cast_path);
         descriptor.title = descriptor.entry.host;
-        if (manifest.openManaged(archive.io, archive.dir, entry.cast_path)) |file| file.close(archive.io) else |err| {
+        if (manifest.openManaged(archive.io, archive.dir, entry.cast_path)) |file| {
+            file.close(archive.io);
+            descriptor.can_export = true;
+        } else |err| {
             descriptor.can_open = false;
             descriptor.failure = @errorName(err);
         }
@@ -1210,6 +1231,7 @@ test "archive retained export pins and verifies content without granting accurat
     var record = try archive.resolveRecord(std.testing.allocator, .{ .recording_id = "22222222222222222222222222222222" });
     defer record.deinit();
     try std.testing.expect(!record.descriptor.can_open);
+    try std.testing.expect(record.descriptor.can_export);
     try std.testing.expectError(error.RecordingUnavailable, archive.acquireRecord(std.testing.allocator, record.descriptor));
     var lease = try archive.acquireRecordForExport(std.testing.allocator, record.descriptor);
     defer lease.deinit();
@@ -1226,6 +1248,12 @@ test "archive retained export pins and verifies content without granting accurat
     rejected = record.descriptor;
     rejected.replayability = .unsupported;
     try std.testing.expectError(error.RecordingUnavailable, archive.acquireRecordForExport(std.testing.allocator, rejected));
+    try tmp.dir.deleteFile(std.testing.io, cast_path);
+    var missing = try archive.loadCatalog(std.testing.allocator);
+    defer missing.deinit();
+    try std.testing.expect(!missing.entries.items[0].can_export);
+    try archive.removeRecord(record.descriptor);
+    try std.testing.expectError(error.RecordRemoved, archive.resolveRecord(std.testing.allocator, .{ .archive_key = record.descriptor.archive_key }));
 }
 
 /// A non-recorded terminal still owns one stable catalog identity. The caller
@@ -1357,4 +1385,34 @@ test "archive catalog rejects cumulative metadata beyond its budget without retu
     @memset(title, 'x');
     for (0..3) |index| _ = try archive.publishMetadata(.{ .identity = MetadataIdentity.generate(), .owner = .{ .session_id = @fromBackingInt(index + 1) }, .source_kind = .local, .started_ms = 1, .ended_ms = 2, .initial_cols = 80, .initial_rows = 24, .display = .{ .title = title }, .reason = .RecordingDisabled });
     try std.testing.expectError(error.CatalogLimit, archive.loadCatalog(std.testing.allocator));
+}
+
+test "archive explicit deletion preserves new entries and refuses a leased recording" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var archive: Archive = .{ .allocator = std.testing.allocator, .io = std.testing.io, .dir = tmp.dir };
+    const entry: Entry = .{ .id = 1, .started_ms = 1, .ended_ms = 2, .duration_ms = 1, .host = "h", .user = "u", .cast_path = "logs/history/one.cast" };
+    try archive.append(entry);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = entry.cast_path, .data = "recorded output" });
+    var catalog = try archive.loadCatalog(std.testing.allocator);
+    defer catalog.deinit();
+    const descriptor = catalog.entries.items[0];
+    try std.testing.expect(descriptor.can_open and descriptor.can_export);
+    var lease = try acquireLease(std.testing.allocator, std.testing.io, tmp.dir, entry.cast_path);
+    defer lease.deinit();
+    try std.testing.expectError(error.RecordBusy, archive.removeRecord(descriptor));
+    var next = entry;
+    next.id = 2;
+    next.cast_path = "logs/history/two.cast";
+    try archive.append(next);
+    lease.deinit();
+    try archive.removeRecord(descriptor);
+    var remaining = try archive.load(std.testing.allocator);
+    defer archive.freeEntries(&remaining);
+    try std.testing.expectEqual(@as(usize, 1), remaining.items.len);
+    try std.testing.expectEqual(@as(u64, 2), remaining.items[0].id);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, entry.cast_path, .{}));
+    var refreshed = try archive.loadCatalog(std.testing.allocator);
+    defer refreshed.deinit();
+    try std.testing.expect(!refreshed.entries.items[0].can_export);
 }

@@ -49,7 +49,8 @@ pub fn validate(request: provider.ChatRequest) !usize {
         for (message.images) |reference| {
             const content = reference.content() orelse return error.EmptyAttachmentResult;
             if (content.bytes.len > images.max_bytes) return error.ImageTooLarge;
-            const reserved = tokens(request.model, content) catch |err| if (err == error.UnknownImageBudget) @as(usize, request.image_token_reservation orelse unknown_model_reservation) else return err;
+            const within_calibration = if (request.image_token_max_width) |width| if (request.image_token_max_height) |height| content.width <= width and content.height <= height else false else request.image_token_max_height == null;
+            const reserved = tokens(request.model, content) catch |err| if (err == error.UnknownImageBudget) @as(usize, if (within_calibration) request.image_token_reservation orelse unknown_model_reservation else unknown_model_reservation) else return err;
             if (reserved == 0 or reserved > max_reservation) return error.UnknownImageBudget;
             total = std.math.add(usize, total, reserved) catch return error.RequestTooLarge;
         }

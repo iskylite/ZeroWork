@@ -69,6 +69,31 @@ pub fn copyPixels(a: std.mem.Allocator, snapshot: frames.Snapshot, mapping: Tran
     return bytes;
 }
 
+/// Exact output-pixel comparison on an existing immutable frame lease. A new
+/// sequence can carry identical pixels; no encoding/allocation is needed then.
+pub fn matchesPixels(snapshot: frames.Snapshot, mapping: Transform, content: images.Content) bool {
+    if (content.width != mapping.output_width or content.height != mapping.output_height or snapshot.stride < @as(usize, snapshot.width) * 4) return false;
+    if (mapping.region.width == mapping.output_width and mapping.region.height == mapping.output_height) {
+        const row_bytes = @as(usize, mapping.output_width) * 4;
+        for (0..mapping.output_height) |y| {
+            const source = (@as(usize, mapping.region.y) + y) * snapshot.stride + @as(usize, mapping.region.x) * 4;
+            const destination = y * row_bytes;
+            if (source + row_bytes > snapshot.pixels.len or destination + row_bytes > content.pixels.len or !std.mem.eql(u8, snapshot.pixels[source..][0..row_bytes], content.pixels[destination..][0..row_bytes])) return false;
+        }
+        return true;
+    }
+    for (0..mapping.output_height) |y| {
+        const sy = mapping.region.y + @as(u32, @intCast(@as(u64, y) * mapping.region.height / mapping.output_height));
+        for (0..mapping.output_width) |x| {
+            const sx = mapping.region.x + @as(u32, @intCast(@as(u64, x) * mapping.region.width / mapping.output_width));
+            const source = @as(usize, sy) * snapshot.stride + @as(usize, sx) * 4;
+            const destination = (y * mapping.output_width + x) * 4;
+            if (source + 4 > snapshot.pixels.len or destination + 4 > content.pixels.len or !std.mem.eql(u8, snapshot.pixels[source..][0..4], content.pixels[destination..][0..4])) return false;
+        }
+    }
+    return true;
+}
+
 const Ref = *const anyopaque;
 extern "c" fn CFDataCreateMutable(?Ref, isize) ?Ref;
 extern "c" fn CFDataGetLength(Ref) isize;
@@ -86,7 +111,7 @@ extern "c" fn CFStringCreateWithCString(?Ref, [*:0]const u8, u32) ?Ref;
 /// filesystem path and must not be serialized to a provider as image content.
 pub fn capture(a: std.mem.Allocator, snapshot: frames.Snapshot, mapping: Transform, captured_ms: u64) !images.ContentRef {
     const pixels = try copyPixels(a, snapshot, mapping);
-    defer a.free(pixels);
+    errdefer a.free(pixels);
     const space = CGColorSpaceCreateDeviceRGB() orelse return error.OutOfMemory;
     defer CFRelease(space);
     const provider = CGDataProviderCreateWithData(null, pixels.ptr, pixels.len, null) orelse return error.OutOfMemory;
@@ -104,5 +129,5 @@ pub fn capture(a: std.mem.Allocator, snapshot: frames.Snapshot, mapping: Transfo
     const length = CFDataGetLength(data);
     if (length <= 0) return error.InvalidImage;
     if (length > images.max_bytes) return error.ImageTooLarge;
-    return images.ContentRef.create(a, "bmc_ikvm:remote-frame", CFDataGetBytePtr(data)[0..@intCast(length)], std.math.cast(i64, captured_ms) orelse return error.InvalidCaptureTime, .{ .dimension = max_width, .pixels = max_width * max_height });
+    return images.ContentRef.fromHostPng(a, CFDataGetBytePtr(data)[0..@intCast(length)], pixels, mapping.output_width, mapping.output_height, std.math.cast(i64, captured_ms) orelse return error.InvalidCaptureTime);
 }

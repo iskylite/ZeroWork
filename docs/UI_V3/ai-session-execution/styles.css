@@ -48,11 +48,17 @@
 :is(#patch-root,[data-execution-patch]) .tool-detail.wide{max-height:150px}
 /* Same-PTY result facts share the existing single card surface and bounded body. */
 #assistant[data-execution-patch] .interval-result>summary>strong{width:84px;flex:none}
+#assistant[data-execution-patch] .interval-result:not([open])>summary>small{display:none}
 #assistant[data-execution-patch] .interval-result>summary>.ap-projection{font-family:inherit}
 #assistant[data-execution-patch] .interval-result>.tool-detail{display:flex;flex-direction:column;gap:6px;padding:4px 12px 8px;font-size:10.5px;line-height:16px}
 #assistant[data-execution-patch] .interval-result>.tool-detail>*{flex-shrink:0}
 #assistant[data-execution-patch] .interval-result .execution-fact{color:var(--muted);overflow-wrap:anywhere}
 #assistant[data-execution-patch] .interval-result .execution-recording{font-family:var(--mono)}
+#assistant[data-execution-patch] .interval-result .execution-uncertainty{color:var(--warn-ink)}
+#assistant[data-execution-patch] .execution-collection{width:100%;font-size:10.5px;line-height:16px}
+#assistant[data-execution-patch] .execution-collection>summary{display:flex;width:fit-content;height:28px;align-items:center;padding:4px 8px;cursor:pointer;color:var(--patch-action-ink,var(--accent-ink))}
+#assistant[data-execution-patch] .execution-collection-body{display:flex;flex-direction:column;gap:6px;padding:4px 3px 8px;max-height:150px;overflow:auto}
+
 #assistant[data-execution-patch] .interval-result .code-block{padding:4px;line-height:16px}
 :is(#patch-root,[data-execution-patch]) .identity-grid{display:grid;grid-template-columns:40px minmax(0,1fr) 40px minmax(0,1fr);gap:3px 8px;margin-bottom:6px;font-size:10.5px}
 :is(#patch-root,[data-execution-patch]) .identity-grid dt{color:var(--muted)}
@@ -201,3 +207,12 @@ body[data-viewport="compact"] :is(#patch-root,[data-execution-patch]) .approval-
 #assistant[data-execution-patch] :is(.tool-card,.cleanup-row) .text-button,
 #assistant[data-execution-patch] .tool-card .result-row>.accent,
 #assistant[data-execution-patch] .host-notice-source{color:var(--patch-action-ink,var(--accent))}
+
+/* Existing native builtin result record: 14/22 mono, accent tint, 4px marker. */
+.shell-attach-record{margin:14px 0;padding:12px 14px;border-radius:9px;background:color-mix(in srgb,var(--accent) 8%,transparent);font:14px/22px var(--mono)}
+.shell-attach-record header{display:flex;align-items:center;gap:10px;color:var(--accent-ink);min-width:0}
+.shell-attach-record header>span{padding:0 5px;border-radius:4px;background:color-mix(in srgb,var(--accent) 12%,transparent);font:10px/18px Inter,sans-serif}
+.shell-attach-record time{margin-left:auto;color:var(--fg-2);font:11px/22px var(--mono)}
+.shell-attach-record p{margin:10px 0 0;color:var(--ok-ink);white-space:normal;overflow-wrap:anywhere}
+
+#assistant[data-execution-patch] .shell-process>.tool-detail{max-height:none;overflow:visible;display:flex;flex-direction:column;gap:6px}

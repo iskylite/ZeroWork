@@ -16,7 +16,7 @@ pub fn width(kind: Kind) f32 {
 pub fn height(kind: Kind) f32 {
     return switch (kind) {
         .attachment => 166,
-        .permission => 194,
+        .permission => 150,
         .model => 321.5,
         .effort => 86,
         .usage => 156,
@@ -77,6 +77,17 @@ pub fn label(w: f32, h: f32) ui.BoxStyle {
 }
 pub fn flexibleLabel(h: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = h }, .flex = 1, .min_width = 0 };
+}
+pub fn modelName() ui.BoxStyle {
+    var result = flexibleLabel(16);
+    result.overflow = .hidden;
+    return result;
+}
+pub fn reasoningHeader() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 16.5 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
+}
+pub fn sliderTrackInk() ui.Color {
+    return theme.current().fg_3.withAlpha(110);
 }
 pub fn wrapper() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 }, .padding = .{}, .gap = 0 };
@@ -167,7 +178,7 @@ pub fn usageSwatch(index: usize) ui.BoxStyle {
 }
 
 pub fn modelCard(h: f32) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = h }, .direction = .column, .padding = ui.Padding.all(6), .gap = 2, .background = theme.popupAction(), .border = .{ .radius = 8 }, .flex_shrink = 0, .min_height = 0 };
+    return .{ .width = .fill(), .height = .{ .px = h }, .direction = .column, .padding = ui.Padding.all(6), .gap = 2, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0, .min_height = 0 };
 }
 pub fn modelHeader() ui.BoxStyle {
     var s = header();
@@ -229,7 +240,7 @@ pub fn compactModelWidth(model_width: f32, effort_width: f32, vision: bool) f32 
     return 32 + (if (vision) @as(f32, 20) else 0) + model_width + (if (effort_width > 0) effort_width + 4 else 0);
 }
 pub fn compactModelLabel(width_value: f32, _: bool) ui.BoxStyle {
-    return .{ .position = .relative, .inset = .{}, .width = .{ .px = width_value }, .height = .{ .px = 14 }, .max_width = 100, .min_width = 0, .overflow = .hidden, .flex_shrink = 1 };
+    return .{ .position = .relative, .inset = .{}, .width = .{ .px = width_value }, .height = .{ .px = 14 }, .min_width = width_value, .flex_shrink = 0 };
 }
 pub fn compactEffortLabel(_: f32, _: f32, _: bool) ui.BoxStyle {
     return .{ .position = .relative, .inset = .{}, .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .flex_shrink = 0 };

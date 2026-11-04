@@ -5,6 +5,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 requests = []
 class Model(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
+    def do_GET(self):
+        assert self.path == '/v1/models'
+        body = json.dumps({'data': [{'id': 'alpha', 'context_window': 32768, 'reasoning': False, 'vision': False}, {'id': 'beta', 'context_window': 65536, 'reasoning': False, 'vision': False}]}).encode()
+        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         requests.append({'path': self.path, 'body': body})
@@ -25,10 +29,11 @@ class Model(http.server.BaseHTTPRequestHandler):
             encoded = body['messages'][1]['content']
             if isinstance(encoded, list): encoded = next(x['text'] for x in encoded if x.get('type') == 'text')
             assert json.loads(encoded)['historical_transcript'], 'summary must receive the complete quoted transcript'
-            assert 'OLD_RAW_CONTEXT' in json.dumps(body['messages'])
-            assert 'RECENT_FIRST' not in json.dumps(body['messages'])
-        if self.path == '/failure':
+            if self.path not in ['/batch', '/worker-failure', '/limit']: assert 'OLD_RAW_CONTEXT' in json.dumps(body['messages'])
+            if self.path != '/budget': assert 'RECENT_FIRST' not in json.dumps(body['messages'])
+        if self.path in ['/failure', '/worker-failure']:
             self.send_response(400); self.end_headers(); return
+        if self.path == '/limit': text = 'BLOCK_MEMORY ' * 1250
         if self.path == '/empty': text = ''
         if self.path == '/acknowledgement': text = '已记录。'
         if self.path == '/larger': text = 'NO_REDUCTION ' * 200
@@ -42,6 +47,8 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
     result = subprocess.run(['zig','test','src/compaction_e2e_tests.zig','-lc','-framework','CoreFoundation','-framework','CoreGraphics','-framework','ImageIO','--test-filter','compaction real'], cwd=ROOT)
     assert result.returncode == 0
+    assert sum(x['path'] == '/worker-failure' for x in requests) == 1, 'failed worker compaction must not retry unchanged input'
+    assert sum(x['path'] == '/limit' for x in requests) == 4
     assert any(x['path'] == '/next' for x in requests)
     print(json.dumps({'status':'passed','requests':[x['path'] for x in requests], 'assertions':['real HTTP summary','next request uses memory and retained turns','visible history unchanged','failure/cancel/stale owner/conversation/revision/generation/transcript/busy unchanged','empty/non-reducing/over-budget summaries rejected','old image pixels summarized and recent images retained; nonvision fails unchanged']}, indent=2))
 finally: server.shutdown()

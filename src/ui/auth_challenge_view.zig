@@ -94,6 +94,7 @@ pub const View = struct {
     header_icon: *ui.Node = undefined,
     header_close: *ui.Node = undefined,
     header_close_icon: *ui.Node = undefined,
+    close_hint_open: ?*ui.Signal(bool) = null,
     cancel_label: *ui.Node = undefined,
     trust_once_label: ?*ui.Node = null,
     identity_name: *ui.Node = undefined,
@@ -225,6 +226,7 @@ pub const View = struct {
     pub fn hide(self: *View) void {
         if (!self.visible and !self.open.peek()) return;
         self.clearFields();
+        if (self.close_hint_open) |open| open.set(false);
         self.visible = false;
         self.open.set(false);
         self.root.setDisplay(.none);
@@ -311,7 +313,7 @@ pub const View = struct {
                 const snapshot = self.snapshot orelse return .stop;
                 // The two explicit trust actions cannot be collapsed into an
                 // implicit default by a parent key handler.
-                if (snapshot.kind != .host_key_unknown) self.submit();
+                if (!isHostKey(snapshot.kind)) self.submit();
             },
             else => return .ignored,
         }
@@ -330,7 +332,7 @@ pub const View = struct {
         for (self.fields[0..self.field_count], 0..) |field, index| answers[index] = field.input.state.getText();
         const reply: auth.Reply = switch (snapshot.kind) {
             .host_key_unknown => .trust_save,
-            .host_key_changed => .{ .replace_host_key = answers[0] },
+            .host_key_changed => .{ .replace_host_key = "yes" },
             else => .{ .answers = answers[0..self.field_count] },
         };
         self.send(reply);
@@ -378,7 +380,6 @@ pub const View = struct {
         if (isHostKey(snapshot.kind)) {
             if (self.details.algorithm.len == 0 or self.details.fingerprint.len == 0) return false;
             if (snapshot.kind == .host_key_changed and (self.details.previous_algorithm.len == 0 or self.details.previous_fingerprint.len == 0 or self.details.store_path.len == 0)) return false;
-            if (snapshot.kind == .host_key_changed) return self.field_count == 1 and std.mem.eql(u8, self.fields[0].input.state.getText(), "yes");
             return self.details.store_path.len != 0;
         }
         if (self.field_count == 0) return false;
@@ -460,7 +461,9 @@ pub const View = struct {
         try close.appendChild(self.cx.allocator, self.header_close_icon);
         close.setStyleInline(self.cx.allocator, S.close());
         close.meta.ownership.meta.test_id = "auth.challenge.close";
-        try header.appendChild(self.cx.allocator, close);
+        const close_hint = try @import("control_hint.zig").mount(self.cx, content_scope, close, "取消认证并停止本次连接", .{ .id = "auth.challenge.close.tooltip", .layout = .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .flex_shrink = 0 } });
+        self.close_hint_open = close_hint.open;
+        try header.appendChild(self.cx.allocator, close_hint.wrapper);
         try form.appendChild(self.cx.allocator, header);
         const body = try ui.box(self.cx, S.body(), .{});
         try form.appendChild(self.cx.allocator, body);
@@ -503,8 +506,6 @@ pub const View = struct {
                 _ = try self.label(stack, "仅本次信任不会写入记录；保存并继续会记住核对的密钥。", S.text(11, 400, false));
             },
             .host_key_changed => {
-                try self.addField(stack, "输入小写 yes，确认替换已保存的密钥", false, 32);
-                _ = try self.label(stack, "只有完整输入 yes 后，才可替换密钥并继续连接。", S.text(10.5, 400, false));
                 _ = try self.label(stack, "取消会保留原密钥记录，并取消本次连接。", S.text(11, 400, false));
             },
             else => {
@@ -636,8 +637,8 @@ pub const View = struct {
             .host_key_changed => "服务器密钥与已保存记录不同",
         };
         var detail: []const u8 = switch (snapshot.kind) {
-            .password, .private_key_passphrase => "凭据仅用于当前认证；取消会停止本次连接。",
-            .keyboard_interactive => "请按服务器提示填写；填写后仍需提交。",
+            .password, .private_key_passphrase => "凭据仅用于当前认证。",
+            .keyboard_interactive => "",
             .host_key_unknown => "请通过可信渠道核对服务器指纹后，再决定是否继续。",
             .host_key_changed => "这可能是服务器重装，也可能是连接被冒充。请先核对新指纹。",
         };
@@ -670,6 +671,7 @@ pub const View = struct {
         }
         try self.notice_title.setTextContent(self.cx.allocator, title);
         try self.notice_detail.setTextContent(self.cx.allocator, detail);
+        self.notice_detail.setDisplay(if (detail.len == 0) .none else .flex);
         const failure = self.local_failure != null or snapshot.state == .failed or expired(snapshot);
         self.notice_title.setTextColor(if (failure) S.theme.current().danger_ink else S.theme.current().fg_1);
         try self.submit_label.setTextContent(self.cx.allocator, if (self.pending or snapshot.state == .submitting) "正在提交…" else submitFor(snapshot.kind));
@@ -694,6 +696,7 @@ pub const View = struct {
         }
     }
     fn clearForm(self: *View) void {
+        self.close_hint_open = null;
         if (self.content_scope) |scope| scope.dispose();
         self.content_scope = null;
         if (self.form) |node| {

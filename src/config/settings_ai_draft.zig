@@ -170,13 +170,13 @@ pub fn assign(ai: *config.Ai, address: Address, text: []const u8) !void {
     }
 }
 
-/// Configuration edits never enable a provider. The explicit switch owns that transition.
+/// Enabled providers may await model discovery; only ready models can be selected.
 pub fn setEnabled(ai: *config.Ai, index: usize, enabled: bool) !void {
     if (index >= ai.provider_count) return error.UnknownProvider;
     const p = &ai.providers[index];
     if (enabled) {
         if (std.mem.trim(u8, p.name, " \t\r\n").len == 0) return error.EmptyProviderName;
-        if (!eligible(p.*)) return error.IncompleteProvider;
+        if (!connectionValid(p.*)) return error.IncompleteProvider;
         p.enabled = true;
         var valid_default = false;
         for (ai.providers[0..ai.provider_count]) |other| if (other.enabled and eligible(other) and std.mem.eql(u8, providerName(other), ai.default_provider)) {
@@ -203,6 +203,9 @@ pub fn modelValid(model: config.AiModel) bool {
     }
     return true;
 }
+pub fn connectionValid(p: config.AiProvider) bool {
+    return std.mem.trim(u8, p.name, " \t\r\n").len > 0 and endpointValid(p.endpoint) and (p.api_key.len > 0 or @import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint));
+}
 pub fn eligible(p: config.AiProvider) bool {
     if (!endpointValid(p.endpoint) or p.model_count == 0 or p.model_count > p.models.len or (p.api_key.len == 0 and !@import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint))) return false;
     for (p.models[0..p.model_count]) |model| if (!modelValid(model)) return false;
@@ -220,7 +223,8 @@ pub fn validate(ai: config.Ai) !void {
             if (!modelValid(model)) return error.InvalidModel;
             for (p.models[0..j]) |other| if (std.mem.eql(u8, model.id, other.id)) return error.DuplicateModelId;
         }
-        if (!eligible(p)) return error.IncompleteProvider;
+        if (!connectionValid(p)) return error.IncompleteProvider;
+        if (p.model_count == 0) continue;
         var default_models: usize = 0;
         for (p.models[0..p.model_count]) |model| if (model.default) {
             default_models += 1;

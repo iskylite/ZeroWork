@@ -23,6 +23,23 @@ pub const Options = struct {
     inventory_grant: ?inventory.Grant = null,
 };
 
+/// Bounded, non-secret facts captured with the same authority as discovery.
+/// This is a planning hint; every later read/action still revalidates live state.
+pub fn requestSummary(app: *Application, roster: ?*@import("group_model.zig").Roster, options: Options, cursor_key: [32]u8, context: host.Context, allocator: std.mem.Allocator) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const snapshot = try captureSnapshot(app, roster, context.binding, options, cursor_key, context, @import("../platform/realtime.zig").milliseconds(app), a);
+    const Item = struct { session_ref: []const u8, session_id: u64, generation: u64, protocol: []const u8, ready: bool, connected: bool, read_terminal: bool, batch_execution: bool, interactive_execution: bool, interactive_state: []const u8, failure: ?[]const u8, completion_source: @import("../host/terminal_execution.zig").CompletionSource, shell_id: ?[]const u8, shell_revision: u64, prompt_ready: ?bool };
+    var items: std.ArrayList(Item) = .empty;
+    for (snapshot.sessions) |session| {
+        if (items.items.len == 8) break;
+        if (session.metadata_only) continue;
+        try items.append(a, .{ .session_ref = try queries.sessionRef(a, context, session.handle), .session_id = @backingInt(session.handle.session_id), .generation = session.handle.generation, .protocol = session.protocol, .ready = session.ready, .connected = session.connected, .read_terminal = session.read_terminal, .batch_execution = session.batch_execution, .interactive_execution = session.trusted_pty_execution, .interactive_state = session.trusted_pty_state, .failure = session.trusted_pty_failure, .completion_source = session.completion_source, .shell_id = if (session.shell.id) |id| try a.dupe(u8, &id) else null, .shell_revision = session.shell.revision, .prompt_ready = session.shell.prompt_ready });
+    }
+    return std.json.Stringify.valueAlloc(allocator, .{ .binding = context.binding, .binding_revision = context.binding_revision, .observed_at = snapshot.observed_at, .execution_mode = options.execution_policy.execution_mode, .targets = items.items, .truncated = snapshot.sessions.len > items.items.len, .meaning = "Captured planning metadata only. Use exact advertised references directly when the target is unambiguous; discover only missing facts. Live gates remain authoritative." }, .{ .emit_null_optional_fields = false });
+}
+
 pub fn execute(app: *Application, roster: ?*@import("group_model.zig").Roster, initial: @import("../ai/tool_scope.zig").Owner, options: Options, cursor_key: [32]u8, invocation: host.Invocation, allocator: std.mem.Allocator) !host.Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -79,7 +96,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
         const resource = app.lifecycle_supervisor.resource(handle);
         const facts = if (ready) serviceMetadata(app, tab, handle) else ServiceMetadata{};
         const owned = if (resource) |entry| entry.request.context.conversation_id.eql(context.conversation_id) and entry.request.context.task_id.eql(context.task_id) and entry.snapshot.ownership == .created_task else false;
-        try sessions.append(a, .{ .handle = handle, .title = basic.title, .protocol = state.protocol_id, .state = basic.state, .ready = ready, .connected = basic.connected, .connection_state = basic.connection_state, .closing = tab.closing, .read_terminal = read_terminal, .batch_execution = batch_execution, .trusted_pty_execution = pty.ready, .trusted_pty_state = pty.state, .trusted_pty_failure = pty.failure, .completion_source = pty.completion_source, .saved_source = associatedAsset(app, handle), .task_owned = owned, .ownership = if (resource) |entry| entry.snapshot.ownership else .borrowed_user, .ownership_revision = if (resource) |entry| entry.snapshot.ownership_revision else 0, .retention = if (resource) |entry| entry.snapshot.retention else null, .recording_id = facts.recording_id, .recording_generation = facts.recording_generation, .recording_unavailable_reason = facts.recording_unavailable_reason, .control_state = facts.control_state, .has_control_lease = facts.has_control_lease, .input_ready = facts.input_ready, .local_released = facts.local_released, .capability_revision = app.sessions.capabilityRevisionFor(handle) orelse 0 });
+        try sessions.append(a, .{ .handle = handle, .title = basic.title, .protocol = state.protocol_id, .state = basic.state, .ready = ready, .connected = basic.connected, .connection_state = basic.connection_state, .closing = tab.closing, .read_terminal = read_terminal, .batch_execution = batch_execution, .trusted_pty_execution = pty.ready, .trusted_pty_state = pty.state, .trusted_pty_failure = pty.failure, .completion_source = pty.completion_source, .saved_source = associatedAsset(app, handle), .task_owned = owned, .ownership = if (resource) |entry| entry.snapshot.ownership else .borrowed_user, .ownership_revision = if (resource) |entry| entry.snapshot.ownership_revision else 0, .retention = if (resource) |entry| entry.snapshot.retention else null, .recording_id = facts.recording_id, .recording_generation = facts.recording_generation, .recording_unavailable_reason = facts.recording_unavailable_reason, .control_state = facts.control_state, .has_control_lease = facts.has_control_lease, .shell = facts.shell, .shell_switch = facts.shell_switch, .input_epoch = facts.input_epoch, .output_sequence = facts.output_sequence, .input_ready = facts.input_ready, .local_released = facts.local_released, .capability_revision = app.sessions.capabilityRevisionFor(handle) orelse 0 });
     }
     // Completed host close receipts retain this conversation/binding's exact
     // historical metadata across Tasks, regardless of task-owned status.
@@ -252,6 +269,10 @@ const ServiceMetadata = struct {
     recording_unavailable_reason: ?[]const u8 = null,
     control_state: ?[]const u8 = null,
     has_control_lease: bool = false,
+    shell: @import("../host/terminal_execution.zig").ShellContext = .{},
+    shell_switch: @import("../vt/shell_switch.zig").Notice = .{},
+    input_epoch: ?u64 = null,
+    output_sequence: ?u64 = null,
     input_ready: ?bool = null,
     local_released: ?bool = null,
 };
@@ -277,7 +298,11 @@ fn serviceMetadata(app: *Application, tab: *const SessionTab, handle: identity.S
     }
     metadata.control_state = @tagName(facts.state);
     metadata.has_control_lease = facts.grant != null;
-    metadata.input_ready = facts.input_ready;
+    metadata.shell = facts.shell;
+    metadata.shell_switch = facts.shell_switch;
+    metadata.input_epoch = facts.input_epoch;
+    if (service.status()) |status| metadata.output_sequence = status.output_sequence else |_| {}
+    metadata.input_ready = facts.input_ready and (facts.shell.prompt_ready orelse true);
     metadata.local_released = facts.local_released;
     return metadata;
 }
@@ -292,8 +317,8 @@ test "host query PTY discovery uses the registered execution catalog identity" {
     try std.testing.expect(!executionToolsAvailable(&queries.contributions));
 }
 
-const PtyInfo = struct { ready: bool = false, state: []const u8 = "unavailable", failure: ?[]const u8 = null, completion_source: terminal.execution.CompletionSource = .unknown };
-fn trustedPtyInfo(app: *Application, tab: *const SessionTab, handle: identity.SessionHandle) PtyInfo {
+pub const PtyInfo = struct { ready: bool = false, state: []const u8 = "unavailable", failure: ?[]const u8 = null, completion_source: terminal.execution.CompletionSource = .unknown };
+pub fn trustedPtyInfo(app: *Application, tab: *const SessionTab, handle: identity.SessionHandle) PtyInfo {
     const service = if (tab.terminal) |view| if (view.terminal_surface) |surface| blk: {
         if (!surface.owner.eql(handle)) return .{};
         break :blk surface.service;

@@ -21,11 +21,13 @@ fn inputPresentation(key: Key, label: []const u8) struct { label: []const u8, un
 
 /// Arrange the native Accordion parts once for every settings page. The title
 /// and its description share a flexible column in either fold state.
-pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionItemResult, icon: ui.SvgAsset, expanded: bool, summary: []const u8, id: []const u8) !*ui.Node {
+pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionItemResult, icon: ui.SvgAsset, expanded: bool, summary: []const u8, id: []const u8) !*SectionHeading {
+    @import("../../ui/layer_materials.zig").card(result.item, .settings_card);
     result.item.setStyleInline(cx.allocator, S.sectionState(expanded));
     result.item.setBorderWidth(0);
     result.header.setStyleInline(cx.allocator, S.summaryHeader(expanded, summary.len != 0));
     result.header.setBorderWidth(0);
+    try bindHeaderInteraction(cx, result.item.meta.ownership.scope.scope orelse scope, result.header);
 
     result.header.removeChild(result.chevron);
     result.header.removeChild(result.title);
@@ -50,7 +52,98 @@ pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionI
     try heading.appendChild(cx.allocator, summary_node);
     result.chevron.setStyleInline(cx.allocator, S.sectionChevron(undefined));
     try result.header.appendChild(cx.allocator, result.chevron);
-    return summary_node;
+    const owner_scope = result.item.meta.ownership.scope.scope orelse scope;
+    const state = try owner_scope.createState(SectionHeading, .{ .cx = cx, .header = result.header, .title = result.title, .summary = summary_node, .expanded = expanded });
+    try cx.addAfterLayoutHook(state, SectionHeading.afterLayout);
+    try owner_scope.onCleanup(SectionHeading, state, SectionHeading.cleanup);
+    return state;
+}
+
+/// Keep the title/summary transition local to the mounted Accordion. Its body
+/// and chevron use the shared settings Accordion motion.
+pub const SectionHeading = struct {
+    cx: *ui.Cx,
+    header: *ui.Node,
+    title: *ui.Node,
+    summary: *ui.Node,
+    expanded: bool,
+    accessory: ?*ui.Node = null,
+    animating: bool = false,
+    height: @import("../../ui/layout_motion.zig").Height = .{},
+
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *SectionHeading = @ptrCast(@alignCast(raw));
+        const expanded = self.header.behavior.interaction.a11y.?.expanded.?;
+        const has_summary = self.summary.getText().?.content.len != 0;
+        if (expanded != self.expanded) {
+            const current = self.header.globalRect().h;
+            self.height = .{ .value = current, .target = current, .from = current, .started = self.cx.frame_time_ms };
+            self.expanded = expanded;
+            self.animating = true;
+            self.header.setStyle(self.cx.allocator, .min_height, @as(f32, 48));
+            self.header.setStyle(self.cx.allocator, .height, .{ .px = current });
+            // Accordion's generic title weights do not apply to settings titles.
+            if (self.title.getText()) |old| {
+                var title = old;
+                title.font_weight = 700;
+                self.title.setText(title);
+            }
+        }
+        const show_summary = has_summary and (!expanded or self.animating);
+        if ((self.summary.style.display != .none) != show_summary) {
+            self.summary.setDisplay(if (show_summary) .flex else .none);
+            return .needs_layout;
+        }
+        var changed = false;
+        if (self.animating) {
+            const summary_height = self.title.globalRect().h + self.title.parent.?.style.gap + self.header.style.padding.vertical() + self.summary.globalRect().h;
+            const target = if (expanded or !has_summary) @as(f32, 48) else @max(S.geometry.section_summary_header, summary_height);
+            const height = self.height.sample(self.cx, target, true);
+            self.animating = @abs(height - target) >= 0.1;
+            if (self.header.style.height != .px or @abs(self.header.style.height.px - height) > 0.05) {
+                self.header.setStyle(self.cx.allocator, .height, .{ .px = height });
+                changed = true;
+            }
+            const opacity = if (!has_summary) @as(f32, 0) else std.math.clamp((height - 48) / @max(1, summary_height - 48), 0, 1);
+            if (@abs(self.summary.getOpacity() - opacity) > 0.001) self.summary.setStyle(self.cx.allocator, .opacity, opacity);
+        }
+        if (!self.animating) {
+            const minimum: f32 = if (!expanded and has_summary) S.geometry.section_summary_header else 48;
+            if (self.header.style.height != .fit or self.header.style.min_height() != minimum) {
+                self.header.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
+                self.header.setStyle(self.cx.allocator, .min_height, minimum);
+                changed = true;
+            }
+            if (self.summary.getOpacity() != 1) self.summary.setStyle(self.cx.allocator, .opacity, @as(f32, 1));
+            if (expanded and self.summary.style.display != .none) {
+                self.summary.setDisplay(.none);
+                changed = true;
+            }
+        }
+        if (self.accessory) |accessory| {
+            const top = (self.header.globalRect().h - accessory.globalRect().h) / 2;
+            if (@abs(accessory.style.ext.?.inset.top.px - top) > 0.05) {
+                accessory.setStyle(self.cx.allocator, .inset, .{ .right = .{ .px = 36 }, .top = .{ .px = top } });
+                changed = true;
+            }
+        }
+        return if (changed) .needs_layout else .done;
+    }
+    fn cleanup(self: *SectionHeading) void {
+        self.cx.removeAfterLayoutHook(self);
+    }
+};
+
+pub fn bindHeaderInteraction(cx: *ui.Cx, scope: *ui.Scope, header: *ui.Node) !void {
+    const hovered = try ui.hooks.useHover(scope, header);
+    const focused = try ui.hooks.useFocusState(scope, cx, header);
+    try scope.createEffect(.{ .cx = cx, .scope = scope, .header = header, .hovered = hovered, .focused = focused.visible, .publication = try cx.themeSignal(scope) }, struct {
+        fn run(ctx: anytype) void {
+            if (ctx.scope.willBeDisposedAfterReactiveCallback()) return;
+            _ = ctx.publication.get();
+            ctx.header.setStyle(ctx.cx.allocator, .background, if (ctx.hovered.get() or ctx.focused.get()) S.cardHover() else ui.Color.TRANSPARENT);
+        }
+    }.run);
 }
 
 pub fn owned(scope: *ui.Scope, text: []const u8) ![]const u8 {
@@ -139,16 +232,16 @@ pub const Page = struct {
     }
     pub fn section(self: *Page, title: []const u8, description: []const u8, icon: ui.SvgAsset, bit: u6, id: []const u8, summary: ?Summary) !*Section {
         const self_section = try self.bound.scope.allocator.create(Section);
-        self_section.* = .{ .page = self, .bit = bit, .root = undefined, .body = undefined, .header = undefined, .expanded = undefined, .summary = summary, .description = description, .title = title, .summary_node = undefined };
+        self_section.* = .{ .page = self, .bit = bit, .root = undefined, .body = undefined, .header = undefined, .expanded = undefined, .summary = summary, .description = description, .title = title, .heading = undefined };
         try self.bound.scope.onCleanup(Section, self_section, Section.cleanup);
         const query = self.bound.controller.search_query;
         const expanded = query.len != 0 or self.bound.controller.folded_sections & (@as(u64, 1) << bit) == 0;
         self_section.expanded = try self.bound.scope.createSignal(bool, expanded);
-        const result = try ui.widgets.AccordionItem(.{ .title = title, .expanded = ui.split(self_section.expanded, self.cx.on(Section, self_section, Section.fold)), .variant = .ghost }).mount(self.bound.scope, self.cx);
+        const result = try @import("../settings_accordion.zig").item(.{ .title = title, .expanded = ui.split(self_section.expanded, self.cx.on(Section, self_section, Section.fold)), .variant = .ghost }).mount(self.bound.scope, self.cx);
         self_section.root = result.item;
         self_section.body = result.body;
         self_section.header = result.header;
-        self_section.summary_node = try sectionHeader(self.cx, self.bound.scope, result, icon, expanded, description, id);
+        self_section.heading = try sectionHeader(self.cx, self.bound.scope, result, icon, expanded, description, id);
         result.item.meta.ownership.meta.test_id = id;
         result.header.meta.ownership.meta.test_id = try stableId(self.bound.scope, id, ".header");
         if (self.bound.controller.state() == .saving) {
@@ -180,7 +273,7 @@ pub const Section = struct {
     summary: ?Summary,
     description: []const u8,
     title: []const u8,
-    summary_node: *ui.Node,
+    heading: *SectionHeading,
     fn cleanup(self: *Section) void {
         self.page.bound.scope.allocator.destroy(self);
     }
@@ -190,16 +283,12 @@ pub const Section = struct {
         self.expanded.set(open);
         const mask = @as(u64, 1) << self.bit;
         if (open) bound.controller.folded_sections &= ~mask else bound.controller.folded_sections |= mask;
-        bound.hooks.changed(bound.hooks.context);
+        bound.cx.requestRedraw();
     }
     fn refresh(self: *Section) void {
         var buffer: [512]u8 = undefined;
         const text = if (self.summary) |render| render(self.page.bound.controller.model.value, &buffer) catch self.description else self.description;
-        self.summary_node.setTextContent(self.page.cx.allocator, text) catch {};
-        const expanded = self.expanded.peek();
-        self.summary_node.setDisplay(if (!expanded and text.len != 0) .flex else .none);
-        self.header.setStyleInline(self.page.cx.allocator, S.summaryHeader(expanded, text.len != 0));
-        self.root.setStyleInline(self.page.cx.allocator, S.sectionState(expanded));
+        self.heading.summary.setTextContent(self.page.cx.allocator, text) catch {};
         self.root.setBorderWidth(0);
         self.header.setBorderWidth(0);
 
@@ -299,11 +388,12 @@ pub const Section = struct {
         click.* = .{ .page = self.page, .action = action };
         try self.page.bound.scope.onCleanup(ActionClick, click, ActionClick.cleanup);
         const state = self.page.actionState(action);
-        const tip = try ui.widgets.Tooltip(.{ .text = state.reason orelse label, .open_delay_ms = 450 }).mount(self.page.bound.scope, self.page.cx);
         const node = try ui.widgets.Button(.{ .label = action_label, .icon_asset = icon, .icon_size = @as(f32, 14), .a11y_label = state.reason orelse action_label, .variant = .secondary, .disabled = self.page.bound.controller.state() == .saving or !state.enabled, .on_click = self.page.cx.on(ActionClick, click, ActionClick.run), .base_style = S.actionControl(action == .clear_logs or action == .clear_all), .hover_style = S.buttonHover() }).mount(self.page.bound.scope, self.page.cx);
         node.meta.ownership.meta.test_id = id;
-        try tip.trigger.appendChild(self.page.cx.allocator, node);
-        try row.appendChild(self.page.cx.allocator, tip.wrapper);
+        if (state.reason) |reason| {
+            const tip = try @import("../../ui/control_hint.zig").mount(self.page.cx, self.page.bound.scope, node, reason, .{ .id = try stableId(self.page.bound.scope, id, ".tooltip") });
+            try row.appendChild(self.page.cx.allocator, tip.wrapper);
+        } else try row.appendChild(self.page.cx.allocator, node);
         try self.body.appendChild(self.page.cx.allocator, row);
     }
     pub fn directory(self: *Section, key: Key, label: []const u8) !void {
@@ -432,9 +522,7 @@ const Field = struct {
         self.error_label.setDisplay(if (problem != null) .flex else .none);
         self.error_label.setTextContent(self.page.cx.allocator, if (problem) |err| problemText(self.key, err) else "") catch {};
         if (self.input_result) |input| {
-            input.input_container.setBorderWidth(0);
-            input.input_container.setBackground(if (problem != null) S.theme.current().danger.withAlpha(23) else S.theme.current().well);
-            input.input_container.setBorderColor(ui.Color.TRANSPARENT);
+            S.theme.paintInputValidation(input, problem != null);
         }
     }
     fn edit(self: *Field, text: []const u8) void {

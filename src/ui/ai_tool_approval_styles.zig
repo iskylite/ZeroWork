@@ -24,7 +24,7 @@ pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 26.5 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .justify = .end, .gap = 6 };
 }
 pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = theme.current().fg_1 };
+    return .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .text_overflow = .ellipsis, .color = theme.current().fg_1 };
 }
 pub fn secondary(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 20.625 / 11.0, .color = theme.current().fg_2, .wrap = .word };

@@ -7,6 +7,7 @@ const theme = @import("app_theme.zig");
 const S = @import("command_error_hint_styles.zig");
 const T = @import("terminal_styles.zig");
 const N = @import("notification_styles.zig");
+const timeout_ms: u64 = 8000;
 
 pub const View = struct {
     cx: *ui.Cx,
@@ -25,6 +26,7 @@ pub const View = struct {
     model: policy.Model,
     handler: ?policy.Handler = null,
     colors: ?theme.Colors = null,
+    timeout_deadline_ms: ?u64 = null,
     pub fn create(cx: *ui.Cx, parent: *ui.Node) !*View {
         const self = try cx.allocator.create(View);
         errdefer cx.allocator.destroy(self);
@@ -75,10 +77,15 @@ pub const View = struct {
         try actions.appendChild(cx.allocator, open);
         root.setDisplay(.none);
         self.* = .{ .cx = cx, .scope = scope, .root = root, .icon = icon, .title = title, .detail = detail, .exit_tag = exit_tag, .command = command, .output = output, .close = close, .close_icon = close_icon, .open = open, .open_text = open_text, .model = policy.Model.init(cx.allocator) };
+        root.behavior.events.on_hover = cx.on(View, self, pointerChanged);
+        root.behavior.events.on_leave = cx.on(View, self, pointerChanged);
+        try cx.addAfterLayoutHook(self, afterLayout);
+        errdefer cx.removeAfterLayoutHook(self);
         try parent.appendChild(cx.allocator, root);
         return self;
     }
     pub fn destroy(self: *View) void {
+        self.cx.removeAfterLayoutHook(self);
         self.scope.dispose();
         self.model.deinit();
         if (self.root.parent) |parent| self.cx.detachChild(parent, self.root);
@@ -88,7 +95,10 @@ pub const View = struct {
     pub fn configure(self: *View, owner: SessionHandle, enabled: bool, handler: ?policy.Handler) void {
         self.model.configure(owner, enabled and handler != null);
         self.handler = handler;
-        if (self.model.pending == null) self.root.setDisplay(.none);
+        if (self.model.pending == null) {
+            self.timeout_deadline_ms = null;
+            self.root.setDisplay(.none);
+        }
         self.retheme();
     }
     pub fn observe(self: *View, owner: SessionHandle, projection: *const vt.Projection) !void {
@@ -114,17 +124,20 @@ pub const View = struct {
             var buffer: [64]u8 = undefined;
             try self.detail.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "退出码 {d}", .{hint.exit_code}));
             self.colors = null; // Repaint the tag even when only the exit code changed.
+            self.timeout_deadline_ms = null;
             self.root.setDisplay(.flex);
             self.cx.requestRedraw();
         }
         self.retheme();
     }
     pub fn dismiss(self: *View) void {
+        self.timeout_deadline_ms = null;
         self.model.dismiss();
         self.root.setDisplay(.none);
         self.cx.requestRedraw();
     }
     pub fn resetFacts(self: *View) void {
+        self.timeout_deadline_ms = null;
         self.model.resetFacts();
         self.root.setDisplay(.none);
         self.cx.requestRedraw();
@@ -135,6 +148,36 @@ pub const View = struct {
         const hint = self.model.current(pending.owner, pending.command_id) orelse return;
         handler.on_open(handler.context, hint) catch return;
         self.dismiss();
+    }
+    /// Count only while the hint is visible and not being interacted with.
+    /// Resuming gives the user the full action window, like global notices.
+    pub fn updateTimeoutAt(self: *View, now: u64) void {
+        if (self.model.pending == null) {
+            self.timeout_deadline_ms = null;
+            return;
+        }
+        const hovered = if (self.cx.hovered_node) |node| (node == self.root or node.isDescendantOf(self.root)) and self.root.globalRect().contains(self.cx.mouse_x, self.cx.mouse_y) else false;
+        const focused = if (self.cx.focus_manager.getFocused()) |node| node == self.root or node.isDescendantOf(self.root) else false;
+        if (!self.cx.window_active or hovered or focused or @import("material_geometry.zig").snapshot(self.cx, self.root) == null) {
+            self.timeout_deadline_ms = null;
+            return;
+        }
+        const deadline = self.timeout_deadline_ms orelse now +| timeout_ms;
+        self.timeout_deadline_ms = deadline;
+        if (now >= deadline) {
+            self.dismiss();
+            return;
+        }
+        self.cx.scheduleRedrawAfterNs((deadline - now) * std.time.ns_per_ms);
+    }
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *View = @ptrCast(@alignCast(raw));
+        const nanos = @import("../platform/realtime.zig").monotonicNs();
+        self.updateTimeoutAt(@intCast(@divFloor(@max(0, nanos), std.time.ns_per_ms)));
+        return .done;
+    }
+    fn pointerChanged(self: *View) void {
+        self.cx.requestRedraw();
     }
     pub fn retheme(self: *View) void {
         const c = theme.current();

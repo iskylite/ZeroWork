@@ -23,11 +23,13 @@ pub const Invalid = struct {
 
 pub const Command = union(enum) {
     help: void,
+    dots: void,
+    shell: enum { status, attach },
     upload: ?[]const u8,
     download: Download,
     ai: []const u8,
     group: []const u8,
-    /// @new uses the active host; no host argument is accepted.
+    /// Empty uses the active host; --pick opens saved hosts, otherwise an exact host name.
     new_session: []const u8,
     duplicate: void,
     pin: void,
@@ -60,6 +62,11 @@ pub fn parse(line: []const u8) Command {
         if (rest.len != 0) return invalid(name, .unexpected_parameter);
         return .{ .download = .{ .remote_path = remote.value } };
     }
+    if (eq(name, "@shell")) {
+        if (args.len == 0 or eq(args, "status")) return .{ .shell = .status };
+        if (eq(args, "attach")) return .{ .shell = .attach };
+        return invalid(name, .unexpected_parameter);
+    }
     if (eq(name, "@ai")) return .{ .ai = args };
     if (eq(name, "@grp")) return .{ .group = unquote(args) orelse return invalid(name, .invalid_path) };
     if (eq(name, "@theme")) return .{ .theme = if (args.len == 0) null else unquote(args) orelse return invalid(name, .invalid_path) };
@@ -77,9 +84,10 @@ pub fn parse(line: []const u8) Command {
         if (port != null and (port.? == 0 or !enabled)) return invalid(name, .invalid_port);
         return .{ .socks = .{ .enabled = enabled, .port = port } };
     }
+    if (eq(name, "@new")) return .{ .new_session = if (args.len == 0) "" else unquote(args) orelse return invalid(name, .invalid_path) };
     if (args.len != 0) return invalid(name, .unexpected_parameter);
     if (eq(name, "@help")) return .help;
-    if (eq(name, "@new")) return .{ .new_session = "" };
+    if (eq(name, "@dots")) return .dots;
     if (eq(name, "@dup")) return .duplicate;
     if (eq(name, "@pin")) return .pin;
     if (eq(name, "@log")) return .{ .log = null };
@@ -93,6 +101,13 @@ test "command history builtins stay client local and validate switches" {
     try std.testing.expectEqual(@as(?bool, false), parse("@history off").command_history);
     try std.testing.expect(parse("@history invalid") == .invalid);
     try std.testing.expectEqualStrings("@history on", parse("@@history on").literal);
+}
+
+test "dots donation command stays local and rejects parameters" {
+    try std.testing.expect(parse("@dots") == .dots);
+    try std.testing.expect(parse("@DOTS  ") == .dots);
+    try std.testing.expect(parse("@dots extra") == .invalid);
+    try std.testing.expectEqualStrings("@dots", parse("@@dots").literal);
 }
 
 fn eq(a: []const u8, b: []const u8) bool {
@@ -161,7 +176,7 @@ test "old invented aliases and invalid parameters do not become actions" {
     try std.testing.expectEqualStrings(" @up", parse(" @up").not_command);
     try std.testing.expectEqualStrings("echo @up", parse("echo @up").not_command);
     try std.testing.expectEqual(Invalid.Reason.unexpected_parameter, parse("@log export.cast").invalid.reason);
-    try std.testing.expectEqual(Invalid.Reason.unexpected_parameter, parse("@new db").invalid.reason);
+    try std.testing.expectEqualStrings("db", parse("@new db").new_session);
     try std.testing.expectEqual(Invalid.Reason.missing_parameter, parse("@grp").invalid.reason);
     try std.testing.expectEqual(Invalid.Reason.missing_parameter, parse("@dl").invalid.reason);
     try std.testing.expectEqual(Invalid.Reason.invalid_switch, parse("@sync yes").invalid.reason);
@@ -178,4 +193,16 @@ test "timestamp toggles without parameters and quoted group names are unwrapped"
     try std.testing.expect(parse("@ts on").timestamp.?);
     try std.testing.expect(!parse("@ts off").timestamp.?);
     try std.testing.expectEqualStrings("生产组 A", parse("@grp \"生产组 A\"").group);
+}
+
+test "nested shell builtin requires an explicit attach action" {
+    try std.testing.expectEqual(Command{ .shell = .status }, parse("@shell"));
+    try std.testing.expectEqual(Command{ .shell = .attach }, parse("@shell attach"));
+    try std.testing.expect(parse("@shell force") == .invalid);
+    try std.testing.expect(parse("@@shell attach") == .literal);
+}
+
+test "new session accepts exact saved host or picker without forwarding to shell" {
+    try std.testing.expectEqualStrings("--pick", parse("@new --pick").new_session);
+    try std.testing.expectEqualStrings("生产主机 A", parse("@new \"生产主机 A\"").new_session);
 }

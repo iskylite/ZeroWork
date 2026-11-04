@@ -584,10 +584,8 @@ pub fn tickBeforeRender(node: *Node, offset_x: f32, offset_y: f32, clip_opt: ?Co
             (child.frame_state.frame_local.runtime.transitions == null or !child.frame_state.frame_local.runtime.transitions.?.any_active) and
             (child.frame_state.frame_local.runtime.commands == null or child.frame_state.frame_local.runtime.commands.?.count == 0))
         {
-            if (subtreeHasActiveAnimation(child)) {
-                tickOffscreenAnimationsInSubtree(child, allocator, now_ms);
-                if (isRetiring(node)) return true;
-            }
+            tickOffscreenAnimationsInSubtree(child, allocator, now_ms);
+            if (isRetiring(node)) return true;
             continue;
         }
 
@@ -641,9 +639,9 @@ fn clearHiddenSubtreeDirty(node: *Node) void {
     node.frame_state.state_bits.dirty.core.subtree_render = false;
     node.frame_state.state_bits.dirty.pipeline.composite = false;
     node.frame_state.state_bits.dirty.pipeline.subtree_composite = false;
+    if (node.frame_state.state_bits.dirty.pipeline.interaction) tick_node_dirty.bumpLooseInteractionGen();
     node.frame_state.state_bits.dirty.pipeline.interaction = false;
     node.frame_state.state_bits.dirty.pipeline.subtree_interaction = false;
-    tick_node_dirty.bumpLooseInteractionGen();
 
     for (node.children.items) |child| {
         clearHiddenSubtreeDirty(child);
@@ -655,9 +653,9 @@ fn clearHiddenSubtreeSceneDirty(node: *Node) void {
     node.frame_state.state_bits.dirty.core.subtree_render = false;
     node.frame_state.state_bits.dirty.pipeline.composite = false;
     node.frame_state.state_bits.dirty.pipeline.subtree_composite = false;
+    if (node.frame_state.state_bits.dirty.pipeline.interaction) tick_node_dirty.bumpLooseInteractionGen();
     node.frame_state.state_bits.dirty.pipeline.interaction = false;
     node.frame_state.state_bits.dirty.pipeline.subtree_interaction = false;
-    tick_node_dirty.bumpLooseInteractionGen();
 
     for (node.children.items) |child| {
         clearHiddenSubtreeSceneDirty(child);
@@ -665,19 +663,37 @@ fn clearHiddenSubtreeSceneDirty(node: *Node) void {
 }
 
 /// Recursively advance active animations in out-of-viewport subtree to
-/// prevent stuck-active state disabling idle-skip.
+/// prevent stuck-active state disabling idle-skip. Visit each child once:
+/// pre-scanning every child for an active descendant revisits a deep branch
+/// once per ancestor (quadratic when the only animation is near its leaf).
+/// No cross-frame summary is cached; completion callbacks may mutate siblings
+/// or start another animation during this traversal.
 fn tickOffscreenAnimationsInSubtree(node: *Node, allocator: Allocator, now_ms: f64) void {
     if (isRetiring(node)) return;
+    // Static hidden content is common: a read-only scan is cheaper than the
+    // mutation-safe tick traversal. Check once here, never at every ancestor.
+    if (!subtreeHasActiveAnimation(node)) return;
+    _ = tickOffscreenAnimationBranch(node, allocator, now_ms);
+}
+
+/// The parent was checked before entering this branch. Only an animation tick
+/// can run user callbacks here; inactive nodes need no ancestor retirement walk.
+/// Return whether a tick ran so parents recheck lifetime after possible callbacks.
+fn tickOffscreenAnimationBranch(node: *Node, allocator: Allocator, now_ms: f64) bool {
+    if (node.pending_free_cx != null or node.freeing) return false;
+    var ticked = false;
     if (node.frame_state.frame_local.runtime.transitions) |slots| {
         if (slots.any_active) {
+            ticked = true;
             _ = tickTransitions(node, slots, allocator, now_ms);
-            if (isRetiring(node)) return;
+            if (isRetiring(node)) return true;
         }
     }
     if (node.frame_state.frame_local.runtime.commands) |anims| {
         if (nodeAnimationsActive(anims)) {
+            ticked = true;
             _ = anims.tick(node, allocator, now_ms);
-            if (isRetiring(node)) return;
+            if (isRetiring(node)) return true;
         }
         if (anims.count == 0) {
             anims.deinit();
@@ -691,10 +707,12 @@ fn tickOffscreenAnimationsInSubtree(node: *Node, allocator: Allocator, now_ms: f
         defer {
             if (child_idx < node.children.items.len and node.children.items[child_idx] == child) child_idx += 1;
         }
-        if (!subtreeHasActiveAnimation(child)) continue;
-        tickOffscreenAnimationsInSubtree(child, allocator, now_ms);
-        if (isRetiring(node)) return;
+        if (tickOffscreenAnimationBranch(child, allocator, now_ms)) {
+            ticked = true;
+            if (isRetiring(node)) return true;
+        }
     }
+    return ticked;
 }
 
 fn nodeAnimationsActive(anims: *const @import("../../animation/node_animator.zig").NodeAnimations) bool {

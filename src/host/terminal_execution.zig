@@ -53,10 +53,35 @@ pub const InputReceipt = struct {
     stage: enum { awaiting_host_secret, queued, written, consumed, cancelled_unsent, outcome_unknown },
     accepted_bytes: usize = 0,
 };
+/// Cooperative shell identity within one PTY, not authenticated host identity.
+pub const ShellContext = struct {
+    id: ?[32]u8 = null,
+    parent_id: ?[32]u8 = null,
+    revision: u64 = 0,
+    depth: u8 = 0,
+    kind: enum { unknown, bash, zsh } = .unknown,
+    reported_host: [96]u8 = @splat(0),
+    reported_host_len: u8 = 0,
+    reported_user: [64]u8 = @splat(0),
+    reported_user_len: u8 = 0,
+    suspended: bool = false,
+    prompt_ready: ?bool = null,
+};
+/// Fresh model-observed terminal evidence, checked atomically with attachment.
+/// This is an admission fence, not proof that screen text is a Shell prompt.
+pub const ShellAttachment = struct {
+    task_id: identity.TaskId,
+    shell_id: ?[32]u8,
+    shell_revision: u64,
+    input_epoch: u64,
+    output_sequence: u64,
+};
 pub const Request = struct {
     execution_id: identity.ExecutionId,
     task_id: identity.TaskId,
     expected_input_epoch: u64,
+    expected_shell_id: ?[32]u8 = null,
+    expected_shell_revision: u64 = 0,
     ownership_revision: u64,
     /// Already normalized bytes displayed by approval and bound to its hash.
     command: []const u8,
@@ -76,6 +101,8 @@ pub const Output = struct {
 pub const ProcessReceipt = struct { exit_code: ?u8 = null, signal: ?u8 = null, foreground_finished: bool = false, background_jobs: bool = false, background_jobs_unknown: bool = false };
 pub const Boundary = struct { raw_offset: u64, sequence: u64, event_sequence: u64 = 0 };
 pub const Snapshot = struct {
+    shell_switch: @import("../vt/shell_switch.zig").Notice = .{},
+    shell: ShellContext = .{},
     owner: identity.SessionHandle,
     completion_source: CompletionSource = .unknown,
     execution_id: ?identity.ExecutionId = null,
@@ -122,6 +149,32 @@ pub const Snapshot = struct {
     interval_saved: bool = false,
     failure: ?[]const u8 = null,
 };
+
+/// Lack of a shell prompt event is not evidence of a competing input owner.
+/// In particular an unintegrated nested SSH shell cannot emit the outer
+/// shell's next A/B event, even when it is visibly idle.
+pub fn requireReadyInput(snapshot: Snapshot) !void {
+    if (snapshot.grant != null or !snapshot.local_released) return error.TerminalBusy;
+    if (!snapshot.input_ready or snapshot.shell.prompt_ready == false) {
+        if (snapshot.completion_source == .shell_reported) return error.ShellPromptNotObserved;
+        return error.TerminalBusy;
+    }
+}
+
+test "terminal readiness distinguishes missing nested shell prompt from held input" {
+    var snapshot: Snapshot = .{ .owner = .{ .session_id = @fromBackingInt(1) }, .completion_source = .shell_reported, .input_ready = false };
+    try std.testing.expectError(error.ShellPromptNotObserved, requireReadyInput(snapshot));
+    snapshot.local_released = false;
+    try std.testing.expectError(error.TerminalBusy, requireReadyInput(snapshot));
+    snapshot.local_released = true;
+    snapshot.input_ready = true;
+    try requireReadyInput(snapshot);
+    snapshot.input_handed_off = true;
+    snapshot.shell.prompt_ready = false;
+    try std.testing.expectError(error.ShellPromptNotObserved, requireReadyInput(snapshot));
+    snapshot.shell.prompt_ready = true;
+    try requireReadyInput(snapshot);
+}
 /// Non-secret immutable/monotonic facts persisted beside the execution's
 /// original journal key. Native-written never means foreground-consumed.
 pub const PublicReceipt = struct {

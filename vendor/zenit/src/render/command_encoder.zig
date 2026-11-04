@@ -998,7 +998,13 @@ pub const RenderCommandEncoder = struct {
     /// (opacity/transform/draw_*) are **intentionally excluded**: they only affect compositing, and
     /// retained exists to save work when "content is unchanged, only transform/opacity changed".
     pub fn computeRetainedContentHashes(self: *RenderCommandEncoder, commands: anytype) void {
-        retained_plan.scan(self, commands);
+        retained_plan.scan(self, commands, self);
+    }
+
+    pub fn imageContentRevision(self: *const RenderCommandEncoder, handle: u64) ?u64 {
+        if (handle > std.math.maxInt(u32)) return null;
+        const renderer = self.image_renderer orelse return null;
+        return renderer.textureContentRevision(@intCast(handle));
     }
 
     /// Feed paint command's **pixel-affecting** fields into fingerprint. Overfeed OK (extra

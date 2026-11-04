@@ -78,6 +78,7 @@ pub const View = struct {
             const card = try scope.createState(Card, .{ .view = self });
             slot.* = card;
             card.root = try ui.boxStyled(cx, S.card, .{});
+            @import("layer_materials.zig").card(card.root, .control);
             card.root.meta.ownership.meta.test_id = "ai.image";
             _ = ui.clickable(card.root, cx.on(Card, card, Card.open));
             card.root.behavior.interaction.a11y = .{ .role = .button, .label = "查看图片" };
@@ -103,7 +104,7 @@ pub const View = struct {
         }
         _ = preview_parent;
         self.modal_open = try scope.createSignal(bool, false);
-        self.modal = try ui.widgets.Modal(.{ .open = self.modal_open, .width = 800, .max_height = cx.viewport.height, .overlay_color = ui.Color.TRANSPARENT, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        self.modal = try ui.widgets.Modal(.{ .open = self.modal_open, .background = S.theme.current().overlay, .width = 800, .max_height = cx.viewport.height, .overlay_color = ui.Color.TRANSPARENT, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         if (!self.modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, self.modal.overlay);
         self.panel = self.modal.dialog;
         self.modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .padding = ui.Padding.all(18), .gap = 12, .direction = .column, .min_height = 0 });

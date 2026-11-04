@@ -1,4 +1,4 @@
-//! System CFHost/CFNetwork interop for the native Zig URL reader. HTTP/TLS,
+//! System CFHost interop for the native Zig URL reader. HTTP/TLS,
 //! URLs, IP policy, decompression and budgets remain in fetch_url_transport.
 const std = @import("std");
 const IpAddress = std.Io.net.IpAddress;
@@ -9,17 +9,10 @@ const StreamError = extern struct { domain: isize = 0, code: c_int = 0 };
 const Context = extern struct { version: isize = 0, info: ?*anyopaque, retain: ?Ref = null, release: ?Ref = null, describe: ?Ref = null };
 extern "c" fn CFStringCreateWithCString(?Ref, [*:0]const u8, u32) ?Ref;
 extern "c" fn CFRelease(Ref) void;
-extern "c" fn CFEqual(Ref, Ref) u8;
-extern "c" fn CFURLCreateWithBytes(?Ref, [*]const u8, isize, u32, ?Ref) ?Ref;
 extern "c" fn CFArrayGetCount(Ref) isize;
 extern "c" fn CFArrayGetValueAtIndex(Ref, isize) ?Ref;
-extern "c" fn CFDictionaryGetValue(Ref, Ref) ?Ref;
 extern "c" fn CFDataGetLength(Ref) isize;
 extern "c" fn CFDataGetBytePtr(Ref) ?[*]const u8;
-extern "c" fn CFNetworkCopySystemProxySettings() ?Ref;
-extern "c" fn CFNetworkCopyProxiesForURL(Ref, Ref) ?Ref;
-extern "c" const kCFProxyTypeKey: Ref;
-extern "c" const kCFProxyTypeNone: Ref;
 extern "c" fn CFHostCreateWithName(?Ref, Ref) ?Host;
 extern "c" fn CFHostSetClient(Host, ?*const fn (Host, c_int, ?*const StreamError, ?*anyopaque) callconv(.c) void, ?*Context) u8;
 extern "c" fn CFHostScheduleWithRunLoop(Host, Ref, Ref) void;
@@ -30,28 +23,6 @@ extern "c" fn CFHostGetAddressing(Host, *u8) ?Ref;
 extern "c" fn CFRunLoopGetCurrent() Ref;
 extern "c" fn CFRunLoopRunInMode(Ref, f64, u8) c_int;
 
-pub fn proxyRequired(url: [:0]const u8) bool {
-    // An environment proxy is part of the route too. NO_PROXY handling is
-    // deliberately conservative until a constrained proxy route is supported.
-    for ([_][:0]const u8{ "http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY" }) |key| {
-        if (std.c.getenv(key)) |value| if (value[0] != 0) return true;
-    }
-    const settings = CFNetworkCopySystemProxySettings() orelse return true;
-    defer CFRelease(settings);
-    const target = CFURLCreateWithBytes(null, url.ptr, @intCast(url.len), utf8, null) orelse return true;
-    defer CFRelease(target);
-    const proxies = CFNetworkCopyProxiesForURL(target, settings) orelse return true;
-    defer CFRelease(proxies);
-    const count = CFArrayGetCount(proxies);
-    if (count == 0) return true;
-    var index: isize = 0;
-    while (index < count) : (index += 1) {
-        const item = CFArrayGetValueAtIndex(proxies, index) orelse return true;
-        const kind = CFDictionaryGetValue(item, kCFProxyTypeKey) orelse return true;
-        if (CFEqual(kind, kCFProxyTypeNone) == 0) return true;
-    }
-    return false;
-}
 fn fromSockaddr(bytes: []const u8) ?IpAddress {
     if (bytes.len < @sizeOf(std.c.sockaddr)) return null;
     const family = bytes[1];

@@ -119,7 +119,7 @@ test "transfer conflict view has exact default geometry and no automatic selecti
     try std.testing.expectEqual(@as(usize, 0), f.pauses);
 }
 
-test "transfer conflict view keeps rename draft across four choices and same key polling then sends exact request once" {
+test "transfer conflict view keeps rename draft across choices and same key polling then sends exact request once" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -132,7 +132,6 @@ test "transfer conflict view keeps rename draft across four choices and same key
     try std.testing.expectApproxEqAbs(@as(f32, 1), f.view.primary.getOpacity(), 0.001);
     f.click(f.view.rows[0]);
     f.click(f.view.rows[2]);
-    f.click(f.view.rows[3]);
     f.click(f.view.rows[1]);
     try f.view.show(source());
     f.settle();
@@ -149,6 +148,29 @@ test "transfer conflict view keeps rename draft across four choices and same key
     try f.view.show(source());
     f.click(f.view.primary);
     try std.testing.expectEqual(@as(usize, 1), f.decisions);
+}
+
+test "transfer conflict view selecting overwrite prepares targets then one confirmation click approves the exact ticket" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.click(f.view.checkbox);
+    f.click(f.view.rows[3]);
+    try std.testing.expectEqual(@as(usize, 1), f.decisions);
+    try std.testing.expectEqual(domain.Choice.overwrite, f.last.?.select.selection.choice.?);
+    try std.testing.expect(f.last.?.select.selection.apply_to_remaining);
+    try std.testing.expect(f.view.pending);
+    f.click(f.view.primary);
+    try std.testing.expectEqual(@as(usize, 1), f.decisions);
+    const targets = [_]domain.OverwriteTarget{.{ .key = key_, .path = "/srv/releases/release.tar.gz", .version = target_version }};
+    try f.view.show(confirmation(.upload, 23, &targets));
+    f.settle();
+    f.click(f.view.primary);
+    try std.testing.expectEqual(@as(usize, 2), f.decisions);
+    try std.testing.expectEqual(@as(u64, 23), f.last.?.confirm_overwrite.ticket.id);
+    try std.testing.expect(std.meta.eql(key_, f.last.?.key()));
+    f.click(f.view.primary);
+    try std.testing.expectEqual(@as(usize, 2), f.decisions);
 }
 
 fn findText(node: *ui.Node, text: []const u8) ?*ui.Node {

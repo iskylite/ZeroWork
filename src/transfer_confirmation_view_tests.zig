@@ -125,6 +125,11 @@ fn hasText(node: *ui.Node, value: []const u8) bool {
     for (node.children.items) |child| if (hasText(child, value)) return true;
     return false;
 }
+fn editable(node: *ui.Node) ?*ui.Node {
+    if (node.behavior.interaction.text_input_client != null) return node;
+    for (node.children.items) |child| if (editable(child)) |found| return found;
+    return null;
+}
 fn testOwner() identity.SessionHandle {
     return .{ .session_id = @fromBackingInt(101), .generation = 7 };
 }
@@ -135,7 +140,7 @@ test "transfer confirmation actual Modal exact three cards and source fields" {
     var c: Capture = .{};
     const h = try H.init(&c, 1000, 800);
     defer h.deinit();
-    for ([_]struct { mode: P.Data.Mode, drop: bool, height: f32 }{ .{ .mode = .upload, .drop = false, .height = 367.5 }, .{ .mode = .download, .drop = false, .height = 383.5 }, .{ .mode = .upload, .drop = true, .height = 341.5 } }) |variant| {
+    for ([_]struct { mode: P.Data.Mode, drop: bool, height: f32 }{ .{ .mode = .upload, .drop = false, .height = 341.5 }, .{ .mode = .download, .drop = false, .height = 383.5 }, .{ .mode = .upload, .drop = true, .height = 315.5 } }) |variant| {
         h.panel.show(.{ .mode = variant.mode, .presentation = if (variant.drop) P.Data.Presentation.drop else P.Data.Presentation.command, .owner = testOwner(), .host_name = "生产机", .endpoint = "root@192.0.2.10:22", .link_text = "经真实跳板", .sources = &.{"/tmp/a b,c.tar"}, .remote_dir = "/srv", .local_dir = "/tmp", .rename = if (variant.mode == .download) "release.tar" else "" });
         // Reproduce the native diagnostic: the shared Modal body resolves to
         // its default 16px inset after the panel's first mount-time styling.
@@ -174,8 +179,23 @@ test "transfer confirmation actual Modal exact three cards and source fields" {
         for ([_][]const u8{ "使用此会话的连接传输", "切换页签后仍使用此目标", "提交前确认", "同名文件会逐项询问；传输归属于上方目标会话。" }) |removed| try std.testing.expect(!hasText(h.panel.card, removed));
         try std.testing.expectApproxEqAbs(@as(f32, 32), h.panel.source_rows.children.items[0].globalRect().h, 0.1);
         try std.testing.expect(!h.panel.disabled.peek());
+        try std.testing.expect(!hasText(h.panel.card, "跟随打开时的终端目录"));
+        const remote_hint = h.panel.remote_tip;
+        if (variant.mode == .upload) {
+            h.cx.focus_manager.setFocusWithReason(editable(h.panel.remote_row).?, .tab);
+            h.frames();
+            try std.testing.expect(remote_hint.open.?.peek());
+            try std.testing.expect(hasText(remote_hint.content, "初始值来自打开时的终端目录，可修改。"));
+            try h.panel.setRemoteStatus("正在读取当前终端目录…");
+            h.frames();
+            try std.testing.expect(h.panel.remote_hint.style.display == .flex);
+            try std.testing.expect(hasText(h.panel.card, "正在读取当前终端目录…"));
+            try h.panel.setRemoteStatus("未能读取当前目录，请在终端空闲时重新执行 @up");
+            try std.testing.expect(hasText(h.panel.card, "未能读取当前目录，请在终端空闲时重新执行 @up"));
+        }
         h.panel.hide();
         h.frames();
+        try std.testing.expect(!remote_hint.open.?.peek());
     }
 }
 test "transfer confirmation real replace remove preserve other sources and reject stale dialog" {

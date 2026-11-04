@@ -32,6 +32,7 @@ pub const Adapter = struct {
     view_store: ViewStore,
     row_metadata: RowMetadata.Store,
     command_metadata: CommandMetadata.Store,
+    shell_semantics_enabled: bool = true,
     wall_clock_ms: *const fn () i64 = wallClockMs,
     /// Last shell-reported working directory. Owned by the adapter and only
     /// replaced while `mutex` is held (the Ghostty callback runs inline from
@@ -63,7 +64,7 @@ pub const Adapter = struct {
     /// snapshots through VtEngine. Ghostty's own contract requires the
     /// terminal to stay unmutated during a selection-format call, so the
     /// granularity is one adapter-wide lock.
-    mutex: std.atomic.Mutex = .unlocked,
+    mutex: @import("native_mutex.zig").Mutex,
 
     pub fn init(allocator: std.mem.Allocator, rows: u16, cols: u16) !Adapter {
         var terminal: c.GhosttyTerminal = null;
@@ -78,14 +79,16 @@ pub const Adapter = struct {
         if (c.ghostty_render_state_new(null, &state) != c.GHOSTTY_SUCCESS) return error.GhosttyRenderStateInitFailed;
         errdefer c.ghostty_render_state_free(state);
         const cells = try allocator.alloc(Cell, @as(usize, rows) * cols);
+        errdefer allocator.free(cells);
+        const mutex = try @import("native_mutex.zig").Mutex.init(allocator);
         @memset(cells, Cell.blank());
-        return .{ .allocator = allocator, .terminal = terminal, .render_state = state, .rows = rows, .cols = cols, .cells = cells, .modes = projection.modes(terminal), .view_store = .{ .allocator = allocator }, .row_metadata = .{ .allocator = allocator }, .command_metadata = .{ .allocator = allocator } };
+        return .{ .allocator = allocator, .terminal = terminal, .render_state = state, .rows = rows, .cols = cols, .cells = cells, .modes = projection.modes(terminal), .view_store = .{ .allocator = allocator }, .row_metadata = .{ .allocator = allocator }, .command_metadata = .{ .allocator = allocator }, .mutex = mutex };
     }
 
     /// Zero means unlimited. Ghostty uses a null pointer for unlimited;
     /// a numeric zero would disable scrollback instead.
     pub fn setScrollbackLimit(self: *Adapter, limit: u32) !void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         var lines: usize = limit;
         if (c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, null) != c.GHOSTTY_SUCCESS or
@@ -106,6 +109,7 @@ pub const Adapter = struct {
         c.ghostty_render_state_free(self.render_state);
         c.ghostty_terminal_free(self.terminal);
         self.search_scratch.deinit();
+        self.mutex.deinit();
         self.* = undefined;
     }
 
@@ -166,6 +170,7 @@ pub const Adapter = struct {
             c.GHOSTTY_SEMANTIC_PROMPT_COMMAND_END => .command_end,
             else => return,
         };
+        if (!self.shell_semantics_enabled) return;
         const text = if (event.command.ptr != null) event.command.ptr[0..event.command.len] else "";
         self.command_metadata.observe(self.terminal, self.rows, self.cols, kind, text, if (event.has_exit_code) event.exit_code else null, self.wall_clock_ms(), localMonotonicNs());
         self.recordEvent(kind, text, if (event.has_exit_code) event.exit_code else null);
@@ -193,7 +198,7 @@ pub const Adapter = struct {
 
     /// Return an owned snapshot of the shell cwd. The caller owns the result.
     pub fn copyCwd(self: *Adapter, allocator: std.mem.Allocator) !?[]u8 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return if (self.cwd_owned) |cwd| try allocator.dupe(u8, cwd) else null;
     }
@@ -207,7 +212,7 @@ pub const Adapter = struct {
 
     /// Discard the previous prompt's path before an explicit shell report.
     pub fn clearCwd(self: *Adapter) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         if (self.cwd_owned) |value| self.allocator.free(value);
         self.cwd_owned = null;
@@ -216,14 +221,23 @@ pub const Adapter = struct {
     /// Called by the transport owner only for an execution it actually submits.
     /// The next primary C consumes this association once and requires an exact
     /// match with the complete command observed by Ghostty.
+    pub fn selectShellSemantics(self: *Adapter, id: ?[32]u8, enabled: bool) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.shell_semantics_enabled = enabled;
+        if (enabled) if (id) |shell| self.command_metadata.selectShell(self.terminal, self.cols, shell) catch {
+            self.shell_semantics_enabled = false;
+            self.command_metadata.truncated = true;
+        };
+    }
     pub fn registerAiSubmission(self: *Adapter, execution_id: @import("../host/identity.zig").ExecutionId, command: []const u8) !void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         try self.command_metadata.registerAiSubmission(execution_id, command);
     }
 
     pub fn cancelAiSubmission(self: *Adapter, execution_id: @import("../host/identity.zig").ExecutionId) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         self.command_metadata.cancelAiSubmission(execution_id);
     }
@@ -231,7 +245,7 @@ pub const Adapter = struct {
     /// Call before changing recording generation so observers retain the old
     /// shell's unknown completion with that shell's existing recording identity.
     pub fn abandonCommands(self: *Adapter) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         self.command_metadata.abandon(self.terminal, self.cols);
         self.refreshVersions();
@@ -240,7 +254,7 @@ pub const Adapter = struct {
     /// Observer runs inline with native parsing while this adapter is guarded.
     /// Its command text is borrowed and it must not call back into the adapter.
     pub fn setCommandObserver(self: *Adapter, observer: ?engine.CommandObserver) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         self.command_metadata.observer = observer;
     }
@@ -294,7 +308,7 @@ pub const Adapter = struct {
     }
 
     pub fn feed(self: *Adapter, bytes: []const u8) !engine.FeedResult {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         self.configureCallbacks();
         const before = self.snapshotLocked().cursor;
@@ -325,7 +339,7 @@ pub const Adapter = struct {
 
     pub fn resize(self: *Adapter, cols: u16, rows: u16) !void {
         if (cols == 0 or rows == 0) return error.InvalidDimensions;
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         const next = try self.allocator.alloc(Cell, @as(usize, rows) * cols);
         var installed = false;
@@ -353,7 +367,7 @@ pub const Adapter = struct {
     }
 
     pub fn snapshot(self: *Adapter) engine.Snapshot {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return self.snapshotLocked();
     }
@@ -405,7 +419,7 @@ pub const Adapter = struct {
         self.published_event_sequence.store(self.event_sequence, .release);
     }
     pub fn copyProjection(self: *Adapter, allocator: std.mem.Allocator) !engine.Projection {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return self.copyProjectionLocked(allocator);
     }
@@ -427,7 +441,7 @@ pub const Adapter = struct {
     /// overrides remain owned by Ghostty and take precedence until reset.
     pub fn setTheme(self: *Adapter, theme: engine.Theme) !void {
         if (theme.revision == 0) return error.InvalidTheme;
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return self.setThemeLocked(theme);
     }
@@ -461,7 +475,7 @@ pub const Adapter = struct {
     }
     /// Only the transport executor drains replies; this never writes a PTY.
     pub fn readReply(self: *Adapter, buffer: []u8) !usize {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         if (buffer.len == 0) return error.InvalidBuffer;
         const count = @min(buffer.len, self.replies.items.len - self.reply_offset);
@@ -474,7 +488,7 @@ pub const Adapter = struct {
         return count;
     }
     pub fn encodeKey(self: *Adapter, event: @import("input_event.zig").KeyEvent, allocator: std.mem.Allocator) ![]u8 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return self.encodeKeyLocked(event, allocator);
     }
@@ -487,44 +501,72 @@ pub const Adapter = struct {
         return @import("ghostty_input.zig").keyForType(self.terminal, event, allocator, self.terminal_type);
     }
     pub fn encodeMouse(self: *Adapter, event: @import("input_event.zig").MouseEvent, allocator: std.mem.Allocator) ![]u8 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return @import("ghostty_input.zig").mouse(self.terminal, event, allocator);
     }
     pub fn createAnchor(self: *Adapter, point: view_types.Point) !view_types.AnchorId {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return self.view_store.create(self.terminal, self.cols, point);
     }
     pub fn resolveAnchor(self: *Adapter, id: view_types.AnchorId) !?view_types.AnchorPosition {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return self.view_store.resolve(id);
     }
     pub fn releaseAnchor(self: *Adapter, id: view_types.AnchorId) !void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return self.view_store.release(id);
     }
     pub fn selectionFromAnchors(self: *Adapter, selected: view_types.Selection, allocator: std.mem.Allocator, max_bytes: usize) ![]u8 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return self.view_store.selectionText(self.terminal, self.cols, selected, allocator, max_bytes);
     }
     pub fn scroll(self: *Adapter, request: view_types.Scroll) !void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         try self.view_store.scroll(self.terminal, request);
         try self.refreshLocked();
         self.refreshVersions();
     }
     pub fn readLines(self: *Adapter, limits: view_types.LineLimits, allocator: std.mem.Allocator) !view_types.Lines {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         return @import("ghostty_view.zig").readLines(self.terminal, self.cols, limits, allocator);
     }
+    pub const PreparedSearch = struct {
+        state: @import("ghostty_search.zig").Prepared,
+        stamps: RowMetadata.Store.SearchStamps,
+        shape: @import("search_task.zig").Shape,
+        pub fn finish(self: *PreparedSearch, allocator: std.mem.Allocator, cancelled: *const std.atomic.Value(bool)) !@import("search_snapshot.zig").Document {
+            const document = try self.state.finish(allocator, cancelled);
+            self.stamps.annotate(document.rows);
+            return document;
+        }
+        pub fn deinit(self: *PreparedSearch) void {
+            self.state.deinit();
+            self.* = undefined;
+        }
+    };
+    /// Called by the bounded CPU executor, never by the UI or SSH IO owner.
+    /// Terminal-exclusive copying is separated from UTF-8/style expansion.
+    pub fn prepareSearch(self: *Adapter) !PreparedSearch {
+        return self.prepareSearchCancelable(null);
+    }
+    pub fn prepareSearchCancelable(self: *Adapter, cancelled: ?*const std.atomic.Value(bool)) !PreparedSearch {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (cancelled) |flag| if (flag.load(.acquire)) return error.Cancelled;
+        var viewport = try self.copyProjectionLocked(std.heap.page_allocator);
+        defer viewport.deinit(std.heap.page_allocator);
+        const stamps = self.row_metadata.captureSearchStamps(self.terminal);
+        return .{ .state = try @import("ghostty_search.zig").Prepared.capture(self), .stamps = stamps, .shape = @import("search_task.zig").Shape.from(&viewport) };
+    }
     pub fn searchSnapshot(self: *Adapter, allocator: std.mem.Allocator) !@import("search_snapshot.zig").Document {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         const document = try @import("ghostty_search.zig").capture(self, allocator);
         self.row_metadata.annotateSearch(self.terminal, document.rows);
@@ -536,7 +578,7 @@ pub const Adapter = struct {
         return @import("content_query.zig").capture(self, owner, request, allocator);
     }
     pub fn searchTail(self: *Adapter, allocator: std.mem.Allocator, start: u32, max_rows: u16, version: u64) !@import("search_snapshot.zig").Document {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        if (!self.mutex.tryLock()) return error.WorkerBusy;
         defer self.mutex.unlock();
         if (self.version != version) return error.StaleProjection;
         const document = try @import("ghostty_search.zig").captureRange(self, allocator, start, max_rows);
@@ -544,14 +586,14 @@ pub const Adapter = struct {
         return document;
     }
     pub fn recordSubmission(self: *Adapter) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         self.row_metadata.submitted(self.terminal, self.rows, self.wall_clock_ms());
         self.refreshVersions();
     }
 
     pub fn lineAt(self: *Adapter, row: u64) ?engine.LineView {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         if (row >= self.rows) return null;
         if (self.cells_dirty) self.refreshLocked() catch return null;
@@ -562,7 +604,7 @@ pub const Adapter = struct {
     /// Search uses the complete active screen, including retained scrollback.
     /// Selection copying below continues to use viewport coordinates.
     pub fn searchText(self: *Adapter, allocator: std.mem.Allocator) ![]u8 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         var formatter: c.GhosttyFormatter = null;
         const options: c.GhosttyFormatterTerminalOptions = .{
@@ -586,7 +628,7 @@ pub const Adapter = struct {
     }
 
     pub fn viewportOffset(self: *Adapter) u64 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         var bar: c.GhosttyTerminalScrollbar = .{};
         if (c.ghostty_terminal_get(self.terminal, c.GHOSTTY_TERMINAL_DATA_SCROLLBAR, @ptrCast(&bar)) != c.GHOSTTY_SUCCESS) return 0;
@@ -595,7 +637,7 @@ pub const Adapter = struct {
 
     /// A missing native scrollbar report is unknown, never an assumed tail.
     pub fn viewportAtTail(self: *Adapter) ?bool {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         var bar: c.GhosttyTerminalScrollbar = .{};
         if (c.ghostty_terminal_get(self.terminal, c.GHOSTTY_TERMINAL_DATA_SCROLLBAR, @ptrCast(&bar)) != c.GHOSTTY_SUCCESS) return null;
@@ -603,7 +645,7 @@ pub const Adapter = struct {
     }
 
     pub fn scrollToRow(self: *Adapter, row: usize) !void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         c.ghostty_terminal_scroll_viewport(self.terminal, .{ .tag = c.GHOSTTY_SCROLL_VIEWPORT_ROW, .value = .{ .row = row } });
         try self.refreshLocked();
@@ -611,7 +653,7 @@ pub const Adapter = struct {
     }
 
     pub fn selectionText(self: *Adapter, selection: engine.Selection, _: engine.CopyMode, allocator: std.mem.Allocator) ![]u8 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         if (self.rows == 0 or self.cols == 0) return allocator.alloc(u8, 0);
 
@@ -688,7 +730,7 @@ pub const Adapter = struct {
     }
 
     pub fn setOscCallback(self: *Adapter, callback: ?engine.OscCallback) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lock();
         defer self.mutex.unlock();
         self.osc_callback = callback;
         self.configureCallbacks();
@@ -771,6 +813,16 @@ test "Ghostty adapter initializes and resizes" {
     try adapter.resize(16, 6);
     try std.testing.expectEqual(@as(u16, 16), adapter.cols);
     try std.testing.expectEqual(@as(u16, 6), adapter.rows);
+}
+
+test "Ghostty adapter initialization releases cells if its stable native mutex allocation fails" {
+    const Fixture = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var adapter = try Adapter.init(allocator, 2, 8);
+            defer adapter.destroy();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.run, .{});
 }
 
 test "Ghostty adapter reports cursor position" {

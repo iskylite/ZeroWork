@@ -112,6 +112,83 @@ const management_collection = "{\"Members\":[{\"@odata.id\":\"/redfish/v1/System
 const management_manager = "{\"@odata.id\":\"/redfish/v1/Managers/B\",\"@odata.type\":\"#Manager.v1_18_0.Manager\",\"Id\":\"B\",\"SecurityService\":{\"@odata.id\":\"/redfish/v1/Managers/B/SecurityService\"}}";
 const management_system = "{\"@odata.id\":\"/redfish/v1/Systems/node-B\",\"@odata.type\":\"#ComputerSystem.v1_22_0.ComputerSystem\",\"Id\":\"node-B\",\"UUID\":\"fixture-uuid-B\",\"PowerState\":\"On\",\"Actions\":{\"#ComputerSystem.Reset\":{\"target\":\"/redfish/v1/Systems/node-B/Actions/ComputerSystem.Reset\",\"ResetType@Redfish.AllowableValues\":[\"GracefulShutdown\"]}},\"Boot\":{\"BootSourceOverrideEnabled\":\"Disabled\",\"BootSourceOverrideTarget\":\"None\",\"BootSourceOverrideMode\":\"UEFI\",\"BootSourceOverrideEnabled@Redfish.AllowableValues\":[\"Disabled\",\"Once\"],\"BootSourceOverrideTarget@Redfish.AllowableValues\":[\"None\",\"Pxe\"]},\"Links\":{\"ManagedBy\":[{\"@odata.id\":\"/redfish/v1/Managers/B\"}],\"Chassis\":[{\"@odata.id\":\"/redfish/v1/Chassis/rack-X\"}]}}";
 
+test "BMC Redfish compatibility ManagerForServers object and array preserve collection reads when the advertised target is 404" {
+    for ([_]bool{ false, true }) |array| {
+        for ([_]bool{ false, true }) |missing| {
+            const target = if (missing) "/redfish/v1/Systems/canonical" else "/redfish/v1/Systems/node-B";
+            const relation = try std.fmt.allocPrint(a, "{s}{{\"@odata.id\":\"{s}\"}}{s}", .{ if (array) "[" else "", target, if (array) "]" else "" });
+            defer a.free(relation);
+            const manager = try std.fmt.allocPrint(a, "{{\"@odata.id\":\"/redfish/v1/Managers/B\",\"Id\":\"B\",\"Links\":{{\"ManagerForServers\":{s}}}}}", .{relation});
+            defer a.free(manager);
+            var discovery = try (MappingFixture{ .root = management_root, .collection = management_collection, .manager = manager, .second = management_system }).discover();
+            defer discovery.deinit();
+            try discovery.proveManagementTarget();
+            try std.testing.expectEqualStrings("/redfish/v1/Systems/node-B", discovery.management_system.?);
+            const selected = try discovery.system(discovery.management_system.?, .{});
+            try std.testing.expectEqualStrings("/redfish/v1/Systems/node-B", selected.power.state.evidence.source_uri);
+            try std.testing.expectEqual(svc.PowerState.on, selected.power.state.value.?);
+            try std.testing.expectEqualStrings("Disabled", selected.boot.state.enabled.?);
+            try std.testing.expectEqualStrings("None", selected.boot.state.target.?);
+            try std.testing.expectEqualStrings("UEFI", selected.boot.state.mode.?);
+            try std.testing.expectEqual(svc.Validity.valid, selected.power.state.evidence.validity);
+            try std.testing.expectEqual(svc.Validity.valid, selected.boot.target_evidence.validity);
+            try std.testing.expect(!selected.power.capability.write_granted and !selected.boot.capability.write_requestable);
+            if (missing) {
+                try std.testing.expectEqual(@as(u16, 404), discovery.find(target).?.status);
+                try std.testing.expectError(error.MappingUnverified, discovery.proveKvmMapping("/redfish/v1/Managers/B", "/kvm/0", true));
+                try std.testing.expect(discovery.mapping_system == null);
+                var found_source = false;
+                for (discovery.queue.items) |request| if (std.mem.eql(u8, request.uri, target)) {
+                    found_source = true;
+                    try std.testing.expectEqual(redfish.LinkSource.manager_for_servers, request.source);
+                };
+                try std.testing.expect(found_source);
+            } else {
+                try discovery.proveKvmMapping("/redfish/v1/Managers/B", "/kvm/0", true);
+                try std.testing.expectEqualStrings("/redfish/v1/Systems/node-B", discovery.mapping_system.?);
+            }
+        }
+    }
+}
+
+test "BMC Redfish compatibility ManagerForServers normalization rejects malformed foreign and ambiguous relationships" {
+    for ([_][]const u8{
+        "{}",                                                                 "null",                                                                 "42",                                                "{\"@odata.id\":42}",
+        "{\"@odata.id\":\"https://evil.invalid/redfish/v1/Systems/node-B\"}", "[{\"@odata.id\":\"https://evil.invalid/redfish/v1/Systems/node-B\"}]", "{\"@odata.id\":\"/redfish/v1/Systems/../node-B\"}",
+    }) |relation| {
+        const manager = try std.fmt.allocPrint(a, "{{\"@odata.id\":\"/redfish/v1/Managers/B\",\"Id\":\"B\",\"Links\":{{\"ManagerForServers\":{s}}}}}", .{relation});
+        defer a.free(manager);
+        var discovery = try (MappingFixture{ .root = management_root, .collection = management_collection, .manager = manager, .second = management_system }).discover();
+        defer discovery.deinit();
+        if (discovery.proveManagementTarget()) |_| return error.UnexpectedManagementTarget else |_| {}
+        try std.testing.expect(discovery.management_system == null and discovery.mapping_system == null);
+        for (discovery.queue.items) |request| try std.testing.expect(std.mem.indexOf(u8, request.uri, "evil.invalid") == null);
+    }
+    const manager = "{\"Id\":\"B\",\"Links\":{\"ManagerForServers\":[{\"@odata.id\":\"/redfish/v1/Systems/node-A\"},{\"@odata.id\":\"/redfish/v1/Systems/node-B\"}]}}";
+    var ambiguous = try (MappingFixture{ .root = management_root, .manager = manager, .second = management_system }).discover();
+    defer ambiguous.deinit();
+    try std.testing.expectError(error.ManagementTargetAmbiguous, ambiguous.proveManagementTarget());
+    try std.testing.expectError(error.MappingAmbiguous, ambiguous.proveKvmMapping("/redfish/v1/Managers/B", "/kvm/0", true));
+    try std.testing.expect(ambiguous.management_system == null and ambiguous.mapping_system == null);
+}
+
+test "BMC Redfish compatibility ManagerForServers malformed 404 bodies cannot interrupt valid collection reads" {
+    for ([_][]const u8{ "<html>Not Found</html>", "[]", "{invalid" }) |body| {
+        const manager = "{\"Id\":\"B\",\"Links\":{\"ManagerForServers\":{\"@odata.id\":\"/redfish/v1/Systems/canonical\"}}}";
+        var discovery = try (MappingFixture{ .root = management_root, .collection = management_collection, .manager = manager, .second = management_system, .canonical = body }).discover();
+        defer discovery.deinit();
+        const missing = discovery.find("/redfish/v1/Systems/canonical").?;
+        try std.testing.expectEqual(@as(u16, 404), missing.status);
+        try std.testing.expectEqual(svc.Validity.unavailable, missing.validity);
+        try discovery.proveManagementTarget();
+        try std.testing.expectEqualStrings("/redfish/v1/Systems/node-B", discovery.management_system.?);
+        const selected = try discovery.system(discovery.management_system.?, .{});
+        try std.testing.expectEqual(svc.PowerState.on, selected.power.state.value.?);
+        try std.testing.expectEqualStrings("None", selected.boot.state.target.?);
+        try std.testing.expect(!selected.power.capability.write_granted);
+    }
+}
+
 test "BMC Redfish compatibility standard management needs no OEM KVM mapping" {
     for ([_][]const u8{
         management_manager,
@@ -279,6 +356,19 @@ fn discoverObserved() !redfish.Discovery {
 test "BMC Redfish compatibility observed object diagnostic preserves independently bound valid management fields" {
     var discovery = try discoverObserved();
     defer discovery.deinit();
+    var saw_advertised_missing_target = false;
+    for (discovery.queue.items) |request| {
+        if (!std.mem.eql(u8, request.uri, "/redfish/v1/Systems/broken-alias")) continue;
+        saw_advertised_missing_target = true;
+        try std.testing.expectEqual(redfish.LinkSource.manager_for_servers, request.source);
+        try std.testing.expectEqualStrings("/redfish/v1/Managers/manager-B", request.source_uri.?);
+        try std.testing.expectEqual(@as(u16, 404), discovery.find(request.uri).?.status);
+        const manager = discovery.find(request.source_uri.?).?;
+        const links = redfish.member(manager.value, "Links").?;
+        const advertised = redfish.member(links, "ManagerForServers").?.array.items[0];
+        try std.testing.expectEqualStrings(request.uri, redfish.text(advertised, "@odata.id").?);
+    }
+    try std.testing.expect(saw_advertised_missing_target);
     const association = try discovery.proveResourceAssociation();
     try std.testing.expectEqualStrings("/redfish/v1/Systems/node-B", association.system_uri);
     try std.testing.expectEqualStrings("/redfish/v1/Managers/manager-B", association.manager_uri);

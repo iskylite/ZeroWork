@@ -10,7 +10,8 @@ pub fn height(mode: Mode) f32 {
         .create => 135,
         .created => 130,
         .delete_empty => 200,
-        .rename, .color => 135,
+        .rename => 135,
+        .color => 243,
     };
 }
 pub fn panel(mode: Mode, viewport: ui.Size, field_error: bool, notice_error: bool) ui.BoxStyle {
@@ -33,6 +34,12 @@ pub const footer = common.footer;
 pub const summary = common.target;
 pub fn field(show_error: bool) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = if (show_error) 74 else 53 }, .direction = .column, .gap = 5, .flex_shrink = 0 };
+}
+pub fn colorField(show_error: bool) ui.BoxStyle {
+    var result = field(show_error);
+    result.height = .{ .px = if (show_error) 182 else 161 };
+    result.gap = 7;
+    return result;
 }
 pub fn input() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 12, .right = 12 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };

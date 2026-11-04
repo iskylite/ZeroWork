@@ -44,35 +44,35 @@ var material_blur: f32 = 0;
 pub const StateColors = @import("theme_states.zig").Palette;
 const StateCache = struct { colors: Colors, states: StateColors };
 var state_cache: [2]?StateCache = .{ null, null };
-/// Published component-state palette. Material opacity never fades these
-/// interaction fills; their own foreground/state contracts remain intact.
+/// L1 tonal state backgrounds follow their material roles; semantic foregrounds
+/// and primary/danger actions retain their original opacity.
 pub fn states() StateColors {
-    return stateColors(baseColors());
+    return stateColors(current());
 }
 fn stateColors(colors_: Colors) StateColors {
     var normalized = colors_;
     inline for (@typeInfo(Colors).@"struct".field_names) |role|
         @field(normalized, role).a = 255;
     for (state_cache) |cached| if (cached) |entry| {
-        if (std.meta.eql(entry.colors, normalized)) return entry.states;
+        if (std.meta.eql(entry.colors, normalized)) return @import("theme_states.zig").materialize(entry.states, colors_);
     };
     const result = @import("theme_states.zig").derive(normalized);
     state_cache[1] = state_cache[0];
     state_cache[0] = .{ .colors = normalized, .states = result };
-    return result;
+    return @import("theme_states.zig").materialize(result, colors_);
 }
 
 /// Maximum background transparency by role, not opacity and not tree opacity.
-/// Lower layers reveal more of the shared window backdrop; overlays stay readable.
+/// The four shell cards follow the slider exactly; internal/floating roles retain their curves.
 /// Current visual contract and native captures: docs/UI_V3/LAYER_MATERIALS.md.
-/// Each role keeps its readable minimum opacity at the slider limit.
+/// Shell opacity is 1-T with no readability floor or image-dependent adjustment.
 pub const material_ratio = struct {
-    pub const surface_1: f32 = 0.95;
-    pub const surface_2: f32 = 0.90;
-    pub const well: f32 = 0.80;
-    pub const overlay: f32 = 0.16;
-    pub const hover: f32 = 0.75;
-    pub const tab_on: f32 = 0.65;
+    pub const surface_1: f32 = 1.0;
+    pub const surface_2: f32 = 0.9;
+    pub const well: f32 = 0.84;
+    pub const overlay: f32 = 0.5;
+    pub const hover: f32 = 0.9;
+    pub const tab_on: f32 = 0.82;
 };
 
 pub fn setMaterialParameters(transparency: f32, blur: f32) bool {
@@ -89,34 +89,33 @@ pub fn materialParameters() struct { transparency: f32, blur: f32 } {
 }
 /// Final T=0 background values (transparency P; alpha8 is opacity):
 /// role        P before quantization    alpha8   actual opacity
-/// surface_1   44.67778560%              141      55.294118%
-/// surface_2   30.56901120%              177      69.411765%
-/// well        21.16316160%              201      78.823529%
-/// overlay     4.00000000%               245      96.078431%
-/// hover       23.51462400%              195      76.470588%
-/// tab_on      16.46023680%              213      83.529412%
+/// surface_1   0%                       255     100%
+/// surface_2   72.00000000%              71       27.843137%
+/// well        64.00000000%              92       36.078431%
+/// overlay     0%                       255      100%
+/// hover       82.00000000%              46       18.039216%
+/// tab_on      68.00000000%              82       32.156863%
 pub const material_transparency_base = struct {
-    pub const surface_1: f32 = 0.446777856;
-    pub const surface_2: f32 = 0.305690112;
-    pub const well: f32 = 0.211631616;
-    pub const overlay: f32 = 0.04;
-    pub const hover: f32 = 0.235146240;
-    pub const tab_on: f32 = 0.164602368;
+    pub const surface_1: f32 = 0;
+    pub const surface_2: f32 = 0.72;
+    pub const well: f32 = 0.64;
+    pub const overlay: f32 = 0;
+    pub const hover: f32 = 0.82;
+    pub const tab_on: f32 = 0.68;
 };
 
 /// Final transparency increment across the full slider range, capped per role.
 pub const material_transparency_span = struct {
-    pub const surface_1: f32 = 0.670166784;
-    pub const surface_2: f32 = 0.752467968;
-    pub const well: f32 = 0.728953344;
-    pub const overlay: f32 = 0.12;
-    pub const hover: f32 = 0.646652160;
-    pub const tab_on: f32 = 0.599622912;
+    pub const surface_1: f32 = 1.0;
+    pub const surface_2: f32 = 0.18;
+    pub const well: f32 = 0.2;
+    pub const overlay: f32 = 0.5;
+    pub const hover: f32 = 0.08;
+    pub const tab_on: f32 = 0.14;
 };
 const material_roles = .{ "surface_1", "surface_2", "well", "overlay", "hover", "tab_on" };
 const MaterialAlphaCache = struct { palette: Colors, transparency: f32, image_visible: bool, alphas: [6]u8 };
 var material_alpha_cache: ?MaterialAlphaCache = null;
-const image_text_contrast: f64 = 4.65;
 
 fn unadjustedMaterialAlpha(comptime role: []const u8) u8 {
     const base = @field(material_transparency_base, role);
@@ -124,70 +123,12 @@ fn unadjustedMaterialAlpha(comptime role: []const u8) u8 {
     const transparency = @min(@field(material_ratio, role), base + span * material_transparency / 100);
     return @intFromFloat(@round(255 * (1 - transparency)));
 }
-fn imageBackdropBounds(palette: Colors) [2]ui.Color {
-    const veil = palette.app.withAlpha(@intFromFloat(@round((100 - material_transparency) * 255 / 100)));
-    return .{ patchPaint(veil, ui.Color.BLACK), patchPaint(veil, ui.Color.WHITE) };
-}
-fn builtinTerminalForeground(palette: Colors) ?ui.Color {
-    // UI and raw terminal inks remain independent. Resolve this derived guard
-    // only on an image-cache miss; no terminal token is published or rewritten.
-    inline for (@import("../config/theme_presets.zig").ids) |id| {
-        if (std.meta.eql(palette, tokenColors(@import("../config/theme_registry.zig").builtinTokens(id))))
-            return tokenColor(@import("../config/theme_presets.zig").terminalDefaults(id).?.foreground);
-    }
-    return null;
-}
-fn readableImageSurface(palette: Colors, surface: ui.Color, parents: [2]ui.Color, terminal_foreground: ?ui.Color) bool {
-    const a = patchPaint(surface, parents[0]);
-    const b = patchPaint(surface, parents[1]);
-    const lower = @min(luminance(a), luminance(b));
-    const upper = @max(luminance(a), luminance(b));
-    inline for (.{ "fg_1", "fg_2", "fg_3", "accent_ink", "ok_ink", "warn_ink", "danger_ink" }) |role| {
-        const ink = @field(palette, role);
-        const ink_luminance = luminance(ink);
-        // Every possible image pixel lies in this luminance interval. Endpoints
-        // alone are insufficient when an ink falls inside the interval.
-        if (ink_luminance >= lower and ink_luminance <= upper) return false;
-        if (@min(contrast(ink, a), contrast(ink, b)) < image_text_contrast) return false;
-    }
-    if (terminal_foreground) |ink| {
-        // The current terminal input row already adds this accent tint in
-        // terminal_styles.zig. Protect the unchanged raw default foreground on
-        // that actual final paint as well as on the plain pane background.
-        const highlighted_a = patchPaint(palette.action_accent.withAlpha(15), a);
-        const highlighted_b = patchPaint(palette.action_accent.withAlpha(15), b);
-        const ink_luminance = luminance(ink);
-        const terminal_lower = @min(lower, @min(luminance(highlighted_a), luminance(highlighted_b)));
-        const terminal_upper = @max(upper, @max(luminance(highlighted_a), luminance(highlighted_b)));
-        if (ink_luminance >= terminal_lower and ink_luminance <= terminal_upper) return false;
-        for ([_]ui.Color{ a, b, highlighted_a, highlighted_b }) |background|
-            if (contrast(ink, background) < image_text_contrast) return false;
-    }
-    return true;
-}
 fn materialAlphas(palette: Colors) [6]u8 {
     if (material_alpha_cache) |cached| {
         if (cached.transparency == material_transparency and cached.image_visible == material_visible and std.meta.eql(cached.palette, palette)) return cached.alphas;
     }
     var alphas: [6]u8 = undefined;
-    const terminal_foreground = if (material_visible) builtinTerminalForeground(palette) else null;
-    inline for (material_roles, 0..) |role, index| {
-        const original = unadjustedMaterialAlpha(role);
-        alphas[index] = original;
-        if (material_visible or std.mem.eql(u8, role, "overlay")) {
-            // Floating L1 surfaces can also cover bright/dark app content above
-            // the image veil. Other chrome uses the veiled-image bounds.
-            const parents: [2]ui.Color = if (comptime std.mem.eql(u8, role, "overlay")) .{ ui.Color.BLACK, ui.Color.WHITE } else imageBackdropBounds(palette);
-            const surface = @field(palette, role);
-            var low: u16 = original;
-            var high: u16 = 255;
-            while (low < high) {
-                const middle = low + (high - low) / 2;
-                if (readableImageSurface(palette, surface.withAlpha(@intCast(middle)), parents, if (comptime std.mem.eql(u8, role, "surface_1")) terminal_foreground else null)) high = middle else low = middle + 1;
-            }
-            alphas[index] = @intCast(low);
-        }
-    }
+    inline for (material_roles, 0..) |role, index| alphas[index] = unadjustedMaterialAlpha(role);
     material_alpha_cache = .{ .palette = palette, .transparency = material_transparency, .image_visible = material_visible, .alphas = alphas };
     return alphas;
 }
@@ -198,17 +139,29 @@ pub fn materialAlpha(comptime role: []const u8) u8 {
     @compileError("unknown material role: " ++ role);
 }
 
-/// Floating surface level, independent of widget kind and numeric z-index.
-/// L1 preserves the existing material; L2 transmits 1–4%; L3+ is opaque.
+/// Final wallpaper transmission, rather than the alpha of each overlapping fill.
+/// L0..L4 retain 100/80/60/40/20% of the configured transmission; L4+ caps.
+pub fn layerTransmission(level: usize) f32 {
+    return @as(f32, @floatFromInt(5 - @min(level, 4))) / 5;
+}
+pub fn layerFinalAlpha(level: usize) u8 {
+    return @intFromFloat(@round(255 * (1 - material_transparency / 100 * layerTransmission(level))));
+}
+/// Source-over fill over the immediately preceding material level.
 pub fn layerAlpha(level: usize) u8 {
-    return switch (level) {
-        0, 1 => materialAlpha("overlay"),
-        2 => @max(materialAlpha("overlay"), @as(u8, @intFromFloat(@round(255 * (1 - (0.01 + 0.03 * material_transparency / 100)))))),
-        else => 255,
-    };
+    if (level == 0) return layerFinalAlpha(0);
+    if (material_transparency == 0) return 255;
+    return @intFromFloat(@round(255 * (1 - layerTransmission(level) / layerTransmission(level - 1))));
 }
 pub fn layerBackground(level: usize) ui.Color {
     return baseColors().overlay.withAlpha(layerAlpha(level));
+}
+/// Keep settings cards visually distinct over their shared window background
+/// while the material policy retains ownership of the actual layer alpha.
+pub fn settingsCard() ui.Color {
+    const c = current();
+    const opacity = @as(f32, @floatFromInt(layerAlpha(2))) / 255;
+    return ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), @min(1, 0.12 / opacity)).withAlpha(c.surface_2.a);
 }
 /// Keep retained surface paint in sync with the same publication as widget tokens.
 /// Only overlay surfaces filter the backdrop; foreground opacity is untouched.
@@ -272,7 +225,7 @@ pub fn stylePrimary(cx: *ui.Cx, scope: *ui.Scope, button: *ui.Node, disabled: ?*
 /// Blur already-painted window content behind overlays, never their foreground.
 /// Even when the configured background blur is zero, use 12 logical px to suppress
 /// lower-layer text ghosting. This samples app content, not the desktop.
-/// Quiet, opaque content surface inside an overlay; independent of wallpaper alpha.
+/// Quiet inline field fill, composited over its containing L0 or floating surface.
 fn insetColor(c: Colors) ui.Color {
     return stateColors(c).control;
 }
@@ -330,7 +283,7 @@ pub fn patchPaint(foreground: ui.Color, background: ui.Color) ui.Color {
 }
 /// Repaint retained UI-derived fills without treating terminal selection as UI chrome.
 pub fn remapUiSurface(color: ui.Color, previous: Colors) ?ui.Color {
-    const old_bubble = cachedBubblePaint(previous, previous.overlay.a, &previous_bubble_paint_cache);
+    const old_bubble = cachedBubblePaint(previous, if (previous.overlay.a == 255) 255 else 64, &previous_bubble_paint_cache);
     if (ui.Color.eql(color, old_bubble.from)) return userBubblePaint().from;
     if (ui.Color.eql(color, old_bubble.to)) return userBubblePaint().to;
     if (ui.Color.eql(color, insetColor(previous))) return popupInset();
@@ -360,6 +313,17 @@ pub fn overlayPaint() ui.BoxStyle {
 /// The Input keeps its editing, focus, accessibility and composition handlers.
 pub fn styleInput(input: ui.widgets.input.InputResult) void {
     input.input_container.addBeforeRender(paintInputChrome);
+}
+/// Settings forms own validation labels but share focus/disabled/error fills.
+pub fn paintInputValidation(input: ui.widgets.input.InputResult, invalid: bool) void {
+    if (input.state.has_error != invalid) {
+        input.state.has_error = invalid;
+        input.state.dirty = true;
+        input.input_container.markRenderDirty();
+    }
+    if (input.input_container.behavior.interaction.a11y) |*attrs| attrs.invalid = invalid;
+    input.input_container.setBorderWidth(0);
+    paintInputChrome(input.input_container);
 }
 fn inputSelectionBackground(c: Colors) ui.Color {
     const focused_bg = stateColors(c).focus;
@@ -449,15 +413,15 @@ pub fn overlayGlass() ui.GlassParams {
     return .{ .backdrop_blur = @max(12, material_blur), .capture_current_target = false, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 };
 }
 
-test "global material parameters derive role ratios with readable overlay at endpoints" {
+test "global material parameters and actual depth follow the slider at endpoints" {
     const saved = materialParameters();
     defer _ = setMaterialParameters(saved.transparency, saved.blur);
-    for ([_]f32{ 0, 25, 75, 100 }, [_]u8{ 245, 237, 222, 214 }) |percent, overlay_alpha| {
+    for ([_]f32{ 0, 25, 75, 100 }, [_]u8{ 255, 223, 159, 128 }) |percent, overlay_alpha| {
         _ = setMaterialParameters(percent, percent * 0.5);
         try std.testing.expectEqual(overlay_alpha, unadjustedMaterialAlpha("overlay"));
-        try std.testing.expect(current().overlay.a >= overlay_alpha);
-        try std.testing.expect(current().overlay.a >= 214);
-        try std.testing.expect(current().surface_1.a < current().surface_2.a);
+        try std.testing.expectEqual(overlay_alpha, current().overlay.a);
+        try std.testing.expectEqual(@as(u8, if (percent == 0) 255 else 51), layerAlpha(1));
+        try std.testing.expectEqual(@as(u8, @intFromFloat(@round(255 * (1 - percent / 100)))), current().surface_1.a);
         try std.testing.expect(current().surface_2.a < current().well.a);
         try std.testing.expect(current().well.a < current().overlay.a);
         try std.testing.expectEqual(@max(12, percent * 0.5), overlayGlass().backdrop_blur);
@@ -465,7 +429,7 @@ test "global material parameters derive role ratios with readable overlay at end
     }
     _ = setMaterialParameters(75, 0);
     try std.testing.expectEqual(@as(f32, 12), overlayGlass().backdrop_blur);
-    try std.testing.expect(current().overlay.a >= 222);
+    try std.testing.expectEqual(@as(u8, 159), current().overlay.a);
 }
 
 /// A successfully loaded image enables the chrome readability floor. Floating
@@ -519,7 +483,7 @@ var previous_bubble_paint_cache: ?BubblePaintCache = null;
 const bubble_min_contrast: f64 = 4.85;
 
 pub fn userBubblePaint() BubblePaint {
-    return cachedBubblePaint(baseColors(), materialAlpha("overlay"), &bubble_paint_cache);
+    return cachedBubblePaint(baseColors(), layerAlpha(2), &bubble_paint_cache);
 }
 fn cachedBubblePaint(palette: Colors, alpha: u8, cache: *?BubblePaintCache) BubblePaint {
     if (cache.*) |cached| {
@@ -835,8 +799,10 @@ test "theme state contract covers every builtin and matches the editable design 
         const expected = themes.get(id).?.object;
         inline for (@typeInfo(StateColors).@"struct".field_names) |role| {
             const value = expected.get(role).?.string;
-            try std.testing.expectEqual(hex(try std.fmt.parseInt(u24, value[1..], 16)), @field(s, role));
+            try std.testing.expectEqual(hex(try std.fmt.parseInt(u24, value[1..], 16)), @field(s, role).withAlpha(255));
         }
+        inline for (contract.material_roles) |mapping|
+            try std.testing.expectEqual(@field(current(), mapping[1]).a, @field(s, mapping[0]).a);
         const pairs = [_][2]ui.Color{ .{ s.hover, s.action }, .{ s.pressed, s.hover }, .{ s.selected_hover, s.selected }, .{ s.disabled, s.control } };
         for (pairs) |pair| try std.testing.expect(contrast(pair[0], pair[1]) >= contract.state_min);
         for ([_][2]ui.Color{ .{ s.focus, s.control }, .{ s.drop_target, s.selected }, .{ s.error_focus, s.tag_danger } }) |pair|
@@ -928,8 +894,8 @@ test "layer hierarchy keeps fields and actions readable without perimeter outlin
             _ = setMaterialParameters(transparency, 0);
             const c = current();
             const tokens = widgetTheme(currentName()).tokens.color;
-            try std.testing.expectEqual(@as(u8, 255), tokens.input_bg.a);
-            try std.testing.expectEqual(@as(u8, 255), tokens.button_secondary_bg.a);
+            try std.testing.expectEqual(c.well.a, tokens.input_bg.a);
+            try std.testing.expectEqual(c.surface_2.a, tokens.button_secondary_bg.a);
             try std.testing.expectEqual(@as(u8, 255), tokens.checkbox_bg.a);
             try std.testing.expectEqual(ui.Color.TRANSPARENT, tokens.border_focus);
             try std.testing.expectEqual(ui.Color.TRANSPARENT, tokens.input_border);
@@ -1024,6 +990,8 @@ test "builtin terminal selection preserves readable default ink through RGBA com
         for ([_]bool{ false, true }) |image| {
             _ = setMaterialVisible(image);
             for ([_]f32{ 0, 50, 100 }) |transparency| {
+                // User-controlled shell transparency may expose arbitrary image RGB.
+                if (image and transparency > 0) continue;
                 _ = setMaterialParameters(transparency, 0);
                 const palette = baseColors();
                 const c = current();
@@ -1042,7 +1010,7 @@ test "builtin terminal selection preserves readable default ink through RGBA com
     }
 }
 
-test "image material floor covers the complete parent interval and invalidates on palette transparency and visibility" {
+test "material depths stay exact across palette transparency and image visibility" {
     const previous = applied_colors;
     const visible = material_visible;
     const parameters = materialParameters();
@@ -1059,30 +1027,19 @@ test "image material floor covers the complete parent interval and invalidates o
         selectTokens(@import("../config/theme_registry.zig").builtinTokens(id));
         for ([_]f32{ 0, 50, 100 }) |transparency| {
             _ = setMaterialParameters(transparency, 0);
-            const palette = baseColors();
             const c = current();
-            inline for (material_roles) |role| {
-                const surface = @field(c, role);
-                try std.testing.expect(surface.a >= unadjustedMaterialAlpha(role));
-                for ([_]u8{ 0, 64, 128, 192, 255 }) |gray| {
-                    const pixel = ui.Color.rgba(gray, gray, gray, 255);
-                    const parent = if (comptime std.mem.eql(u8, role, "overlay")) pixel else patchPaint(palette.app.withAlpha(@intFromFloat(@round((100 - transparency) * 255 / 100))), pixel);
-                    const painted = patchPaint(surface, parent);
-                    inline for (.{ "fg_1", "fg_2", "fg_3", "accent_ink", "ok_ink", "warn_ink", "danger_ink" }) |ink|
-                        try std.testing.expect(contrast(@field(c, ink), painted) >= 4.5);
-                    if (comptime std.mem.eql(u8, role, "surface_1")) {
-                        const terminal_ink = tokenColor(@import("../config/theme_presets.zig").terminalDefaults(id).?.foreground);
-                        try std.testing.expect(contrast(terminal_ink, painted) >= 4.5);
-                        try std.testing.expect(contrast(terminal_ink, patchPaint(c.action_accent.withAlpha(15), painted)) >= 4.5);
-                    }
+            inline for (material_roles) |role| try std.testing.expectEqual(unadjustedMaterialAlpha(role), @field(c, role).a);
+            for (0..5) |level| {
+                const expected = 1 - transparency / 100 * layerTransmission(level);
+                try std.testing.expectEqual(@as(u8, @intFromFloat(@round(255 * expected))), layerFinalAlpha(level));
+                if (level > 0 and transparency > 0) {
+                    const under = 1 - transparency / 100 * layerTransmission(level - 1);
+                    const own = @as(f32, @floatFromInt(layerAlpha(level))) / 255;
+                    try std.testing.expectApproxEqAbs(expected, under + (1 - under) * own, 0.002);
                 }
             }
             _ = setMaterialVisible(false);
-            inline for (material_roles) |role| {
-                if (comptime std.mem.eql(u8, role, "overlay")) {
-                    try std.testing.expect(materialAlpha(role) >= unadjustedMaterialAlpha(role));
-                } else try std.testing.expectEqual(unadjustedMaterialAlpha(role), materialAlpha(role));
-            }
+            inline for (material_roles) |role| try std.testing.expectEqual(unadjustedMaterialAlpha(role), materialAlpha(role));
             _ = setMaterialVisible(true);
             try std.testing.expectEqual(c, current());
         }
@@ -1116,14 +1073,14 @@ test "execution PATCH opt-in ink covers actual approval impact and history warni
             const unmodified = current();
             const widgets = widgetTheme(currentName()).*;
             const approval_styles = @import("ai_tool_approval_styles.zig");
-            const impact = patchPaint(approval_styles.impactNotice(widgetTheme(currentName())).background.?, approval_styles.panel(widgetTheme(currentName())).background.?);
+            const impact = patchPaint(approval_styles.impactNotice(widgetTheme(currentName())).background.?, patchPaint(approval_styles.panel(widgetTheme(currentName())).background.?, unmodified.overlay.withAlpha(255)));
             const impact_ink = patchInk(unmodified.warn_ink, &.{impact});
             try std.testing.expect(contrast(impact_ink, impact) >= 4.5);
             if (contrast(unmodified.warn_ink, impact) >= 4.5) try std.testing.expectEqual(unmodified.warn_ink, impact_ink);
             const veil = palette.app.withAlpha(@intFromFloat(@round((100 - transparency) * 255 / 100)));
             const history_backgrounds = [_]ui.Color{
-                patchPaint(unmodified.overlay, patchPaint(veil, ui.Color.BLACK)),
-                patchPaint(unmodified.overlay, patchPaint(veil, ui.Color.WHITE)),
+                patchPaint(unmodified.overlay, palette.app.withAlpha(255)),
+                patchPaint(unmodified.overlay, patchPaint(veil, palette.app.withAlpha(255))),
             };
             const history_ink = patchInk(unmodified.warn_ink, &history_backgrounds);
             for (history_backgrounds) |background| try std.testing.expect(contrast(history_ink, background) >= 4.5);
@@ -1137,7 +1094,7 @@ test "execution PATCH opt-in ink covers actual approval impact and history warni
     }
 }
 
-test "floating overlay protects all builtin inks over arbitrary RGB without an image" {
+test "floating material preserves requested alpha and semantic inks without an image" {
     const previous = applied_colors;
     const visible = material_visible;
     const parameters = materialParameters();
@@ -1153,11 +1110,9 @@ test "floating overlay protects all builtin inks over arbitrary RGB without an i
         for ([_]f32{ 0, 50, 100 }) |transparency| {
             _ = setMaterialParameters(transparency, 0);
             const c = current();
-            for ([_]u8{ 0, 64, 128, 192, 255 }) |gray| {
-                const background = patchPaint(c.overlay, ui.Color.rgba(gray, gray, gray, 255));
-                inline for (.{ "fg_1", "fg_2", "fg_3", "accent_ink", "ok_ink", "warn_ink", "danger_ink" }) |ink|
-                    try std.testing.expect(contrast(@field(c, ink), background) >= 4.5);
-            }
+            try std.testing.expectEqual(materialAlpha("overlay"), c.overlay.a);
+            inline for (.{ "fg_1", "fg_2", "fg_3", "accent_ink", "ok_ink", "warn_ink", "danger_ink" }) |ink|
+                try std.testing.expectEqual(@field(baseColors(), ink), @field(c, ink));
             const paint = userBubblePaint();
             try std.testing.expect(bubbleContrast(paint.foreground, paint.from, paint.to, baseColors().overlay.withAlpha(255)) >= bubble_min_contrast);
         }
@@ -1188,7 +1143,7 @@ test "user bubble paints cover the full gradient and cache every palette and alp
     const registry = @import("../config/theme_registry.zig");
     inline for (@import("../config/theme_presets.zig").ids) |id| {
         const palette = tokenColors(registry.builtinTokens(id));
-        for ([_]u8{ 245, 230, 214 }) |alpha| {
+        for ([_]u8{ 245, 230, 214, 92, 66, 41 }) |alpha| {
             const paint = deriveBubblePaint(palette, alpha);
             try std.testing.expectEqual(alpha, paint.from.a);
             try std.testing.expectEqual(alpha, paint.to.a);
@@ -1214,8 +1169,8 @@ test "user bubble paints cover the full gradient and cache every palette and alp
     try std.testing.expect(!std.meta.eql(a, b));
     _ = setMaterialParameters(100, 0);
     const c = userBubblePaint();
-    try std.testing.expectEqual(materialAlpha("overlay"), c.from.a);
-    try std.testing.expect(c.from.a >= 214);
+    try std.testing.expectEqual(layerAlpha(2), c.from.a);
+    try std.testing.expect(c.from.a < a.from.a);
     try std.testing.expect(!std.meta.eql(b, c));
 }
 

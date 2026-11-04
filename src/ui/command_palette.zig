@@ -349,6 +349,18 @@ pub const Palette = struct {
                 return .none;
             },
             .adopt, .execute => {
+                // Enter on a complete typed builtin dispatches that exact
+                // input, including arguments, independently of suggestions.
+                if (key == .execute) {
+                    const end = std.mem.indexOfAny(u8, self.query.items, " \t") orelse self.query.items.len;
+                    for (builtin.catalog) |entry| if (std.ascii.eqlIgnoreCase(entry.name[1..], self.query.items[0..end])) {
+                        self.adopt_buf.clearRetainingCapacity();
+                        self.adopt_buf.append(gpa, '@') catch return .none;
+                        self.adopt_buf.appendSlice(gpa, self.query.items) catch return .none;
+                        self.close();
+                        return .execute;
+                    };
+                }
                 if (self.match_count == 0) {
                     self.close();
                     return .close;
@@ -429,6 +441,16 @@ pub const Palette = struct {
     }
 };
 
+test "complete typed shell attach dispatches exact arguments without selecting a suggestion" {
+    var palette: Palette = .{};
+    defer palette.deinit(std.testing.allocator);
+    palette.open();
+    for ("shell attach") |byte| _ = palette.handleChar(std.testing.allocator, &.{byte});
+    try std.testing.expectEqual(KeyResult.execute, palette.handleKey(std.testing.allocator, .execute));
+    try std.testing.expectEqualStrings("@shell attach", palette.adoptedText().?);
+    try std.testing.expectEqual(builtin.Command{ .shell = .attach }, builtin.parse(palette.adoptedText().?));
+}
+
 fn matchesQuery(entry: builtin.Entry, query: []const u8) bool {
     const name = entry.name[1..]; // 去掉前导 '@'
     if (query.len == 0) return true;
@@ -458,7 +480,7 @@ pub const Editor = struct {
     text: std.ArrayList(u8) = .empty,
     caret: usize = 0,
 
-    pub const Key = enum { left, right, home, end, backspace, delete, execute, escape, clear };
+    pub const Key = enum { left, right, home, end, backspace, delete, word_left, word_right, delete_word, kill_start, kill_end, execute, escape, clear };
     pub const Result = enum { edited, execute, invalid, cancel };
 
     pub fn deinit(self: *Editor, gpa: std.mem.Allocator) void {
@@ -505,6 +527,21 @@ pub const Editor = struct {
             .right => self.caret = nextCodepoint(self.text.items, self.caret),
             .home => self.caret = 0,
             .end => self.caret = self.text.items.len,
+            .word_left => self.caret = self.wordStart(),
+            .word_right => {
+                while (self.caret < self.text.items.len and std.ascii.isWhitespace(self.text.items[self.caret])) self.caret += 1;
+                while (self.caret < self.text.items.len and !std.ascii.isWhitespace(self.text.items[self.caret])) self.caret = nextCodepoint(self.text.items, self.caret);
+            },
+            .delete_word => {
+                const start = self.wordStart();
+                self.removeRange(start, self.caret);
+                self.caret = start;
+            },
+            .kill_start => {
+                self.removeRange(0, self.caret);
+                self.caret = 0;
+            },
+            .kill_end => self.removeRange(self.caret, self.text.items.len),
             .backspace => {
                 const start = previousCodepoint(self.text.items, self.caret);
                 self.removeRange(start, self.caret);
@@ -523,6 +560,13 @@ pub const Editor = struct {
         if (end <= start) return;
         std.mem.copyForwards(u8, self.text.items[start..], self.text.items[end..]);
         self.text.shrinkRetainingCapacity(self.text.items.len - (end - start));
+    }
+
+    fn wordStart(self: *Editor) usize {
+        var at = self.caret;
+        while (at > 0 and std.ascii.isWhitespace(self.text.items[at - 1])) at -= 1;
+        while (at > 0 and !std.ascii.isWhitespace(self.text.items[at - 1])) at = previousCodepoint(self.text.items, at);
+        return at;
     }
 
     fn previousCodepoint(text: []const u8, at: usize) usize {

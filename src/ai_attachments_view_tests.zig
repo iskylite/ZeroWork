@@ -249,9 +249,38 @@ test "AI attachments changing owner invalidates the old preview without touching
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
+test "AI attachments preview resize preserves the material owned background" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.dark);
+    _ = theme.setMaterialParameters(75, 24);
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.add("/preview.txt", "captured");
+    try f.view.update(&f.draft);
+    f.settle();
+    try f.view.openPreview(id);
+    f.settle();
+    const material = theme.layerBackground(2);
+    f.view.preview_panel.setBackground(material);
+    f.cx.setViewport(860, 480);
+    f.settle();
+    try std.testing.expectEqual(material, f.view.preview_panel.getBackground());
+    try std.testing.expectEqualStrings("captured", f.view.preview_label.getText().?.content);
+}
+
 test "AI attachments horizontal rail keeps all entries on one row and theme changes retain geometry and captured preview" {
     const original_theme = theme.currentName();
-    defer theme.select(original_theme);
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(original_theme);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -268,15 +297,17 @@ test "AI attachments horizontal rail keeps all entries on one row and theme chan
     try std.testing.expectApproxEqAbs(cards[0].globalRect().y, cards[3].globalRect().y, 0.1);
     try f.view.openPreview(first);
     f.settle();
-    for ([_]theme.Name{ .light, .dark, .sauber }) |name| {
-        theme.select(name);
-        f.cx.setTheme(if (name == .light) &ui.theme.light else &ui.theme.dark);
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        _ = theme.setMaterialParameters(75, 24);
+        f.cx.setTheme(theme.widgetTheme(theme.currentName()));
         // Match the host's theme publication, including two custom palettes
         // which share the SDK dark token pointer.
         f.cx.requestRedraw();
         f.settle();
         const card = find(f.view.root, "ai.attachment.local_text").?;
-        try std.testing.expect(ui.Color.eql(theme.current().surface_2, card.getBackground()));
+        try std.testing.expect(ui.Color.eql(theme.popupInset(), card.getBackground()));
+        try std.testing.expectEqual(theme.current().overlay, f.view.preview_panel.getBackground());
         try std.testing.expectApproxEqAbs(card.globalRect().x + 6, find(card, "ai.attachment.open").?.globalRect().x, 0.1);
         try std.testing.expectEqualStrings("captured", f.view.preview_label.getText().?.content);
         try std.testing.expect(f.view.preview_body.container.globalRect().h > 400);
@@ -490,7 +521,7 @@ test "AI attachments V3 context modal preserves source and independent body scro
     try std.testing.expect(panel.globalRect().h >= 260);
     try std.testing.expect(f.view.preview_body.container.globalRect().h > 400);
     try std.testing.expect(f.view.preview_body.container.globalRect().y > panel.globalRect().y);
-    try std.testing.expectEqual(theme.current().overlay.withAlpha(245), panel.getBackground());
+    try std.testing.expectEqual(theme.current().overlay, panel.getBackground());
     try std.testing.expectEqualStrings("captured inline candidate", f.view.preview_reference.content().?.bytes);
     for ([_]theme.Name{ .light, .dark, .sauber }) |name| {
         theme.select(name);
@@ -499,7 +530,7 @@ test "AI attachments V3 context modal preserves source and independent body scro
         f.settle();
         try std.testing.expectEqual(ui.types.Display.none, f.conversation.?.style.display);
         try std.testing.expectEqual(ui.types.Display.flex, f.inline_holder.?.style.display);
-        try std.testing.expectEqual(theme.current().overlay.withAlpha(245), panel.getBackground());
+        try std.testing.expectEqual(theme.current().overlay, panel.getBackground());
     }
     f.click(find(panel, "ai.attachment.preview.keep").?);
     try std.testing.expectEqual(@as(usize, 1), f.attaches);

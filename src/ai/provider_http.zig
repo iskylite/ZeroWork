@@ -16,17 +16,30 @@ pub const Diagnostic = struct {
         const problem = parsed.value.object.get("error") orelse parsed.value;
         const value = if (problem == .object) problem.object.get("message") orelse return else problem;
         if (value != .string) return;
+        self.captureMessage(status, value.string, key);
+    }
+    pub fn captureMessage(self: *Diagnostic, status: u16, message: []const u8, key: ?[]const u8) void {
+        self.* = .{ .status = status };
         // Do not show a response that reflects the request credential.
-        if (key) |secret| if (secret.len != 0 and std.mem.indexOf(u8, value.string, secret) != null) return;
-        const text = value.string[0..@min(value.string.len, self.message.len)];
+        if (key) |secret| if (secret.len != 0 and std.mem.indexOf(u8, message, secret) != null) return;
+        const text = message[0..@min(message.len, self.message.len)];
         for (text) |byte| if (byte >= 32 or byte == '\n' or byte == '\t') {
             self.message[self.len] = byte;
             self.len += 1;
         };
         while (self.len > 0 and !std.unicode.utf8ValidateSlice(self.message[0..self.len])) self.len -= 1;
     }
+    pub fn captureRedirect(self: *Diagnostic, status: u16, location: ?[]const u8, key: ?[]const u8) void {
+        self.* = .{ .status = status };
+        const raw = location orelse return;
+        const target = raw[0 .. std.mem.indexOfAny(u8, raw, "?#") orelse raw.len];
+        const uri = std.Uri.parse(target) catch (std.Uri.parseAfterScheme("", target) catch return);
+        if (uri.user != null or uri.password != null) return;
+        self.captureMessage(status, target, key);
+    }
     pub fn format(self: *const Diagnostic, buffer: []u8, err: anyerror) []const u8 {
-        const summary: []const u8 = switch (self.status) {
+        const summary: []const u8 = if (err == error.HtmlResponse) "该地址返回网页，请检查 HTTPS 和 API Base URL（如 /v1）" else if (err == error.InvalidModelResponse) "未收到完整有效的模型对话响应" else switch (self.status) {
+            300...399 => "接口发生重定向，请检查 HTTPS 和 API 路径",
             400, 422 => "服务端拒绝请求参数",
             401 => "鉴权失败，请检查 API Key",
             403 => "当前凭据无访问权限",
@@ -36,7 +49,7 @@ pub const Diagnostic = struct {
             500...503, 505...599 => "模型服务暂不可用",
             else => "请求失败",
         };
-        return if (self.status != 0) std.fmt.bufPrint(buffer, "HTTP {d} · {s}{s}{s}", .{ self.status, summary, if (self.len > 0) "\n" else "", self.message[0..self.len] }) catch @errorName(err) else if (err == error.Timeout) "请求超时 · 模型长时间未返回新内容" else std.fmt.bufPrint(buffer, "请求失败 · {s}", .{@errorName(err)}) catch @errorName(err);
+        return if (self.status != 0) std.fmt.bufPrint(buffer, "HTTP {d} · {s}{s}{s}", .{ self.status, summary, if (self.len > 0) "\n" else "", self.message[0..self.len] }) catch @errorName(err) else if (err == error.Timeout) "请求超时 · 模型长时间未返回新内容" else if (err == error.HtmlResponse or err == error.InvalidModelResponse) summary else std.fmt.bufPrint(buffer, "请求失败 · {s}", .{@errorName(err)}) catch @errorName(err);
     }
 };
 
@@ -77,31 +90,105 @@ pub fn isLoopbackHttp(endpoint: []const u8) bool {
     return std.mem.eql(u8, value, "localhost") or std.mem.eql(u8, value, "127.0.0.1") or std.mem.eql(u8, value, "[::1]") or std.mem.eql(u8, value, "::1");
 }
 
-/// Accept a provider base URL as well as an explicit protocol endpoint.
-/// Custom paths and query strings remain explicit and are never rewritten.
-pub fn chatEndpoint(allocator: std.mem.Allocator, kind: registry.Kind, endpoint: []const u8) ![]u8 {
-    const uri = try std.Uri.parse(endpoint);
-    const path = switch (uri.path) {
-        .raw => |v| v,
-        .percent_encoded => |v| v,
-    };
-    const base = std.mem.trimEnd(u8, endpoint, "/");
-    if (uri.query != null or uri.fragment != null) return allocator.dupe(u8, endpoint);
-    const suffix: []const u8 = switch (kind) {
-        .openai_compat => if (path.len == 0 or std.mem.eql(u8, path, "/")) "/v1/chat/completions" else if (std.mem.eql(u8, std.mem.trimEnd(u8, path, "/"), "/v1")) "/chat/completions" else "",
-        .anthropic => if (path.len == 0 or std.mem.eql(u8, path, "/")) "/v1/messages" else if (std.mem.eql(u8, std.mem.trimEnd(u8, path, "/"), "/v1")) "/messages" else "",
-        .ollama => if (path.len == 0 or std.mem.eql(u8, path, "/")) "/api/chat" else if (std.mem.eql(u8, std.mem.trimEnd(u8, path, "/"), "/api")) "/chat" else "",
-    };
-    return if (suffix.len == 0) allocator.dupe(u8, endpoint) else std.mem.concat(allocator, u8, &.{ base, suffix });
-}
+pub const chatEndpoint = @import("provider_endpoint.zig").chatEndpoint;
+pub const modelsEndpoint = @import("provider_endpoint.zig").modelsEndpoint;
 
-test "chat endpoint supports base URLs and preserves explicit gateway paths" {
+/// Inspect only the response prefix, including across arbitrarily split chunks.
+pub const HtmlGuard = struct {
+    prefix: [256]u8 = undefined,
+    len: usize = 0,
+    pub fn feed(self: *HtmlGuard, bytes: []const u8) bool {
+        const n = @min(bytes.len, self.prefix.len - self.len);
+        @memcpy(self.prefix[self.len..][0..n], bytes[0..n]);
+        self.len += n;
+        var start: []const u8 = self.prefix[0..self.len];
+        if (std.mem.startsWith(u8, start, "\xef\xbb\xbf")) start = start[3..];
+        start = std.mem.trimStart(u8, start, " \t\r\n");
+        return std.ascii.startsWithIgnoreCase(start, "<!doctype html") or std.ascii.startsWithIgnoreCase(start, "<html");
+    }
+};
+
+test "chat endpoint supports base URLs and preserves explicit protocol endpoints" {
     const a = std.testing.allocator;
-    for ([_][2][]const u8{ .{ "https://gateway.test", "https://gateway.test/v1/chat/completions" }, .{ "https://gateway.test/v1/", "https://gateway.test/v1/chat/completions" }, .{ "https://gateway.test/custom/chat?x=1", "https://gateway.test/custom/chat?x=1" } }) |pair| {
+    for ([_][2][]const u8{ .{ "https://gateway.test", "https://gateway.test/v1/chat/completions" }, .{ "https://gateway.test/v1/", "https://gateway.test/v1/chat/completions" }, .{ "https://gateway.test/custom/chat?x=1", "https://gateway.test/custom/chat/chat/completions?x=1" } }) |pair| {
         const actual = try chatEndpoint(a, .openai_compat, pair[0]);
         defer a.free(actual);
         try std.testing.expectEqualStrings(pair[1], actual);
     }
+}
+
+test "provider endpoints share gateway prefixes queries and protocol suffixes" {
+    const a = std.testing.allocator;
+    for ([_]struct { kind: registry.Kind = .openai_compat, input: []const u8, chat: []const u8, models: []const u8 }{
+        .{ .input = "https://gateway.test/", .chat = "https://gateway.test/v1/chat/completions", .models = "https://gateway.test/v1/models" },
+        .{ .input = "https://api.scnet.cn/api/gw", .chat = "https://api.scnet.cn/api/gw/chat/completions", .models = "https://api.scnet.cn/api/gw/models" },
+        .{ .input = "https://api.scnet.cn/api/gw/", .chat = "https://api.scnet.cn/api/gw/chat/completions", .models = "https://api.scnet.cn/api/gw/models" },
+        .{ .input = "https://api.scnet.cn/api/gw/?x=1", .chat = "https://api.scnet.cn/api/gw/chat/completions?x=1", .models = "https://api.scnet.cn/api/gw/models?x=1" },
+        .{ .input = "https://api.scnet.cn/api/gw/chat/completions?x=1", .chat = "https://api.scnet.cn/api/gw/chat/completions?x=1", .models = "https://api.scnet.cn/api/gw/models?x=1" },
+        .{ .input = "https://api.scnet.cn/api/gw/v1", .chat = "https://api.scnet.cn/api/gw/v1/chat/completions", .models = "https://api.scnet.cn/api/gw/v1/models" },
+        .{ .input = "https://gateway.test/api/gw/v1/?x=1", .chat = "https://gateway.test/api/gw/v1/chat/completions?x=1", .models = "https://gateway.test/api/gw/v1/models?x=1" },
+        .{ .input = "https://gateway.test/api/gw/v1/chat/completions?x=1", .chat = "https://gateway.test/api/gw/v1/chat/completions?x=1", .models = "https://gateway.test/api/gw/v1/models?x=1" },
+        .{ .input = "https://gateway.test/api/gw", .chat = "https://gateway.test/api/gw/chat/completions", .models = "https://gateway.test/api/gw/models" },
+        .{ .input = "https://gateway.test/custom/chat?x=1", .chat = "https://gateway.test/custom/chat/chat/completions?x=1", .models = "https://gateway.test/custom/chat/models?x=1" },
+        .{ .input = "https://gateway.test/tenant/proxy/", .chat = "https://gateway.test/tenant/proxy/chat/completions", .models = "https://gateway.test/tenant/proxy/models" },
+        .{ .input = "https://gateway.test/tenant/proxy/chat/completions/?next=/v1/messages", .chat = "https://gateway.test/tenant/proxy/chat/completions?next=/v1/messages", .models = "https://gateway.test/tenant/proxy/models?next=/v1/messages" },
+        .{ .input = "https://gateway.test/chat/completions", .chat = "https://gateway.test/chat/completions", .models = "https://gateway.test/models" },
+        .{ .input = "https://gateway.test/chat/completions-extra?next=/chat/completions", .chat = "https://gateway.test/chat/completions-extra/chat/completions?next=/chat/completions", .models = "https://gateway.test/chat/completions-extra/models?next=/chat/completions" },
+        .{ .kind = .anthropic, .input = "https://gateway.test/", .chat = "https://gateway.test/v1/messages", .models = "https://gateway.test/v1/models" },
+        .{ .kind = .anthropic, .input = "https://gateway.test/tenant/anthropic/?x=1", .chat = "https://gateway.test/tenant/anthropic/v1/messages?x=1", .models = "https://gateway.test/tenant/anthropic/v1/models?x=1" },
+        .{ .kind = .anthropic, .input = "https://gateway.test/proxy/v1/", .chat = "https://gateway.test/proxy/v1/messages", .models = "https://gateway.test/proxy/v1/models" },
+        .{ .kind = .anthropic, .input = "https://gateway.test/proxy/v1/messages", .chat = "https://gateway.test/proxy/v1/messages", .models = "https://gateway.test/proxy/v1/models" },
+        .{ .kind = .anthropic, .input = "https://gateway.test/custom/messages/?x=1", .chat = "https://gateway.test/custom/messages?x=1", .models = "https://gateway.test/custom/models?x=1" },
+        .{ .kind = .anthropic, .input = "https://gateway.test/proxy/messages-extra", .chat = "https://gateway.test/proxy/messages-extra/v1/messages", .models = "https://gateway.test/proxy/messages-extra/v1/models" },
+        .{ .kind = .ollama, .input = "http://localhost:11434/", .chat = "http://localhost:11434/api/chat", .models = "http://localhost:11434/api/tags" },
+        .{ .kind = .ollama, .input = "http://localhost:11434/tenant/proxy/?x=1", .chat = "http://localhost:11434/tenant/proxy/api/chat?x=1", .models = "http://localhost:11434/tenant/proxy/api/tags?x=1" },
+        .{ .kind = .ollama, .input = "http://localhost:11434/proxy/api/", .chat = "http://localhost:11434/proxy/api/chat", .models = "http://localhost:11434/proxy/api/tags" },
+        .{ .kind = .ollama, .input = "http://localhost:11434/proxy/api/chat", .chat = "http://localhost:11434/proxy/api/chat", .models = "http://localhost:11434/proxy/api/tags" },
+        .{ .kind = .ollama, .input = "http://localhost:11434/custom/chat/?x=1", .chat = "http://localhost:11434/custom/chat?x=1", .models = "http://localhost:11434/custom/tags?x=1" },
+        .{ .kind = .ollama, .input = "http://localhost:11434/proxy/chat-extra", .chat = "http://localhost:11434/proxy/chat-extra/api/chat", .models = "http://localhost:11434/proxy/chat-extra/api/tags" },
+    }) |item| {
+        const chat = try chatEndpoint(a, item.kind, item.input);
+        defer a.free(chat);
+        const models = try modelsEndpoint(a, item.kind, item.input);
+        defer a.free(models);
+        try std.testing.expectEqualStrings(item.chat, chat);
+        try std.testing.expectEqualStrings(item.models, models);
+        const repeated_chat = try chatEndpoint(a, item.kind, chat);
+        defer a.free(repeated_chat);
+        const models_from_chat = try modelsEndpoint(a, item.kind, chat);
+        defer a.free(models_from_chat);
+        const repeated_models = try modelsEndpoint(a, item.kind, models);
+        defer a.free(repeated_models);
+        try std.testing.expectEqualStrings(item.chat, repeated_chat);
+        try std.testing.expectEqualStrings(item.models, models_from_chat);
+        try std.testing.expectEqualStrings(item.models, repeated_models);
+    }
+}
+
+test "provider diagnostics explain redirects HTML and invalid chat without leaking credentials" {
+    var d: Diagnostic = .{};
+    var buffer: [1400]u8 = undefined;
+    d.captureRedirect(301, "https://gateway.test/api/gw/?api_key=secret#secret", "secret");
+    try std.testing.expectEqualStrings("https://gateway.test/api/gw/", d.message[0..d.len]);
+    try std.testing.expect(std.mem.indexOf(u8, d.format(&buffer, error.EndpointRedirect), "接口发生重定向") != null);
+    for ([_][]const u8{ "https://user:password@gateway.test/", "https://gateway.test/secret" }) |url| {
+        d.captureRedirect(302, url, "secret");
+        try std.testing.expectEqual(@as(usize, 0), d.len);
+    }
+    d.captureMessage(200, "", null);
+    try std.testing.expect(std.mem.indexOf(u8, d.format(&buffer, error.HtmlResponse), "返回网页") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d.format(&buffer, error.InvalidModelResponse), "完整有效") != null);
+}
+
+test "HTML response detection handles split prefixes BOM whitespace and case" {
+    for ([_][]const u8{ "<!DOCTYPE html><html>", "\xef\xbb\xbf \r\n<HtMl>", " \n<html lang=\"zh\">" }) |body| {
+        var guard: HtmlGuard = .{};
+        var detected = false;
+        for (body) |byte| detected = guard.feed(&.{byte}) or detected;
+        try std.testing.expect(detected);
+    }
+    var guard: HtmlGuard = .{};
+    try std.testing.expect(!guard.feed("data: {\"choices\":[{\"delta\":{\"content\":\"<html>\"}}]}\n\n"));
 }
 test "provider diagnostic shows structured failures without credentials" {
     var diagnostic: Diagnostic = .{};

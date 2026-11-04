@@ -25,6 +25,7 @@ const patchWorkspace = (() => {
       if (prior.has(18)) work.draft=prior.get(18).draft;
       if (options.handedOff && prior.has(18)) work.log=prior.get(18).log;
       if (options.existing && options.pty && !source.log.some(entry=>entry.command===command.command)) source.log.push(command);
+      if(options.shellScene?.startsWith('shell-')){source.user='user';source.shellHost='compute-02';source.cwd='/home/user/work';source.log=[{kind:'text',text:'deploy@app-prod-01 zerowork $ ssh compute-02'},{kind:'text',text:options.shellScene==='shell-waiting'?'user@compute-02’s password:':'Last login: Tue Nov 3 2026'}];}
       sessions = [source];
       if (options.group && !options.closed) sessions.push(work);
       groups = options.group ? [{id:3,name:'部署检查',members:options.closed?[7]:[7,18],direction:'row'}] : [];
@@ -35,6 +36,10 @@ const patchWorkspace = (() => {
       active=7;groupMode=options.group;historyOn=false;approvals={};broadcast=false;theme=options.theme;
       document.body.dataset.theme=theme;
       render();
+    }
+    if(options.shellScene==='shell-manual'){
+      const input=document.querySelector('#content .input-row');
+      if(input&&!document.querySelector('[data-testid="shell-manual-result"]'))input.insertAdjacentHTML('beforebegin','<section class="shell-attach-record" data-testid="shell-manual-result"><header><span>ZeroWork</span><code>@shell attach</code><time>2026-11-03 12:00:00</time></header><p>✓ 当前 Shell 已接入，可继续让 AI 执行。普通切层后由 AI 接入；@shell attach 可手动恢复。</p></section>');
     }
     paintControl();
   }
@@ -70,7 +75,11 @@ const patchWorkspace = (() => {
     'mode-menu': '输入框运行方式',
     exec: '批处理命令结果',
     ask: '运行方式与执行审批',
-    'ask-expired': '审批已过期 · 流程暂停',
+    'shell-notice': 'Shell · 普通切层候选',
+    'shell-attached': 'Shell · AI 自动接入完成',
+    'shell-recovery': 'Shell · 漏判后自动恢复',
+    'shell-waiting': 'Shell · 等待认证',
+    'shell-manual': 'Shell · 直接输入恢复',
     'pty-running': '新 PTY · 运行中',
     'pty-waiting': 'PTY · 等待输入',
     takeover: 'PTY · 用户已接管',
@@ -123,11 +132,12 @@ const patchWorkspace = (() => {
   if (saved.overrideEnd !== 'inherit' && !POLICIES[saved.overrideEnd]) saved.overrideEnd = 'inherit';
   if (saved.settingsDraft && (!MODES[saved.settingsDraft.globalMode] || !POLICIES[saved.settingsDraft.endPolicy])) saved.settingsDraft = null;
   const params = new URLSearchParams(location.search);
-  let scene = SCENES[params.get('state')] ? params.get('state') : 'pty-running';
+  const requestedScene = params.get('state') === 'ask-expired' ? 'ask' : params.get('state');
+  let scene = SCENES[requestedScene] ? requestedScene : 'pty-running';
   let theme = ['dark', 'light', 'sauber'].includes(params.get('theme')) ? params.get('theme') : 'dark';
   let viewport = params.get('viewport') === 'compact' ? 'compact' : 'default';
   let menuOpen = scene === 'mode-menu';
-  assistantOpen = !scene.startsWith('settings');
+  assistantOpen = !scene.startsWith('settings') && scene!=='shell-manual';
   let fixtureRequested = true;
   let settingsOpen = scene.startsWith('settings');
   let settingsDraft = saved.settingsDraft || { globalMode: saved.globalMode, endPolicy: saved.endPolicy };
@@ -138,7 +148,7 @@ const patchWorkspace = (() => {
   let showProcess = false;
   let focusedPane = null;
   let groupWasExisting = params.get('group') === 'existing';
-  let actualTarget = params.get('target') === 'existing' ? 'existing' : 'new';
+  let actualTarget = scene.startsWith('shell-') || params.get('target') === 'existing' ? 'existing' : 'new';
   let takeoverWaiting = scene === 'takeover';
   let takeoverRoundStopped = false;
   let toastText = '';
@@ -160,9 +170,10 @@ const patchWorkspace = (() => {
     if (next === 'history' || next === 'cleanup') actualTarget = 'new';
     fixtureRequested = true;
     scene = next; menuOpen = next === 'mode-menu'; settingsOpen = next.startsWith('settings');
-    assistantOpen = !settingsOpen; showProcess = false; focusedPane = next === 'history' ? 'log' : null;
+    assistantOpen = !settingsOpen && next!=='shell-manual'; showProcess = false; focusedPane = next === 'history' ? 'log' : null;
     saveFailed = next === 'settings-error'; simulateSaveFailure = next === 'settings-error';
     if (next === 'cleanup') cleanupState = 'ready';
+    if (next.startsWith('shell-')) actualTarget = 'existing';
     setURL(); render();
   }
   function flash(message) {
@@ -173,7 +184,7 @@ const patchWorkspace = (() => {
     app.querySelector('.toast')?.remove();
     if (toastText) app.insertAdjacentHTML('beforeend', `<div class="toast" role="status" data-testid="prototype-toast">${icon('check')}${esc(toastText)}</div>`);
   }
-  const isPTY = () => !['settings', 'settings-error', 'exec', 'ask', 'ask-expired', 'mode-menu'].includes(scene);
+  const isPTY = () => !['settings', 'settings-error', 'exec', 'ask', 'mode-menu'].includes(scene);
   const isActive = () => ['pty-running', 'pty-waiting'].includes(scene);
   const isControlling = () => isActive() || scene === 'pty-stopping';
   const isUnverified = () => ['pty-stopping','pty-unknown'].includes(scene);
@@ -203,7 +214,7 @@ const patchWorkspace = (() => {
       card.style.setProperty('--patch-action-ink','rgb('+value.join(' ')+')');
     }
   }
-  function hostNotice(text) { return `<div class="host-notice" role="note" aria-label="外部消息 · 宿主更新" data-testid="host-notice"><div><span class="host-notice-source">${icon('external')}外部消息<span>宿主更新</span></span><span class="host-notice-text">${text}</span></div></div>`; }
+  function hostNotice(text) { return `<div class="host-notice" role="note" aria-label="外部消息" data-testid="host-notice"><div><span class="host-notice-source">${icon('external')}外部消息</span><span class="host-notice-text">${text}</span></div></div>`; }
   function statusSlot(status) {
     const glyph = ({ running:'loader', waiting:'loader', done:'check', unknown:'alert', failed:'x', rejected:'x', cancelled:'stop', taken:'hand' })[status] || 'info';
     return `<span class="ap-state-toggle"><span class="ap-status">${['alert','info'].includes(glyph) ? icon(glyph) : V3AI.icon(glyph)}</span><span class="ap-chevron">›</span></span>`;
@@ -225,11 +236,12 @@ const patchWorkspace = (() => {
     const attribution = scene === 'pty-concurrent' ? '观察到并发写入 · 输出可能混有其他程序内容' : scene === 'pty-unverified' || !savedInterval ? '输出归属未确认' : '未观察到并发写入 · 输出归属未确认';
     const command = pty ? './deploy/check-release.sh --interactive' : 'git status --short && ./deploy/check-release.sh --check';
     const output = pty ? `Checking release 0.2.6…\n✓ Package checksum verified\n✓ Database connection ready\n${waiting ? 'Restart zerowork-api service? [y/N]' : taken ? takeoverWaiting ? 'Restart zerowork-api service? [y/N]' : 'Checking service health…' : unverified ? 'Checking service health…' : ended ? nonzero ? 'Release check failed.' : '✓ Service health: healthy\nRelease checks passed.' : 'Checking service health…'}` : ' M deploy/production.env\n✓ Package checksum verified\n✓ Database connection ready\nRelease checks passed.';
-    const outcome = unverified ? (scene==='pty-stopping'?'停止已请求 · 等待执行结果':'结果待核实') : recordingFailed ? '记录保存失败' : sealing ? '正在保存观测片段' : active ? (waiting ? '等待终端输入' : '运行中') : taken ? '用户已接管 · 命令继续运行' : savedInterval ? nonzero ? '前台已结束 · 执行失败' : '前台已结束 · 观测片段已保存' : '已完成';
+    const outcome = unverified ? (scene==='pty-stopping'?'停止已请求 · 等待执行结果':'结果待核实') : recordingFailed ? '命令执行失败' : sealing ? '命令已结束' : active ? (waiting ? '等待终端输入' : '运行中') : taken ? '用户已接管 · 命令继续运行' : savedInterval ? nonzero ? '命令执行失败' : '命令已结束' : '已完成';
     const actions = pty ? `<button class="text-button" data-patch-act="view-terminal" data-testid="view-terminal">${isClosed() ? '查看记录' : '查看终端'}</button><button class="text-button" data-patch-act="process" data-testid="view-process">查看过程</button>${active ? `<button class="text-button" data-patch-act="stop" data-testid="stop-card">停止执行</button><button class="text-button" data-patch-act="takeover" data-testid="takeover-card">接管输入</button>${waiting ? '<button class="text-button" data-patch-act="confirm-input" data-testid="confirm-pty-input">允许输入 y</button>' : ''}` : ''}${iconButton('copy','复制本次观测片段','copy-command')}` : '<span>命令结果已保留</span><button class="text-button" data-patch-act="copy-command" data-testid="copy-command-result">复制输出</button><button class="text-button" data-patch-act="copy-command-text" data-testid="copy-command-text">复制命令</button>';
-    const intervalFacts = pty ? `<div class="execution-fact" data-testid="execution-target">目标 · deploy@app-prod-01.example.net:2222 · 会话 #${actualTarget === 'existing' ? 7 : 18}</div>${savedInterval || sealing || recordingFailed ? `<div class="execution-fact" data-testid="execution-process">前台已结束 · 退出码 ${nonzero ? 7 : 0}</div>` : ''}${taken ? '<div class="execution-fact">输入权已交给用户；当前命令与输出观察可继续。</div>' : ''}<div class="execution-fact" data-testid="execution-output-scope">同一终端观测片段 · ${savedInterval ? '已保存' : recordingFailed ? '保存失败' : '保存待确认'}</div><div class="execution-fact" data-testid="execution-output-attribution">${attribution}</div>${scene === 'pty-concurrent' ? '<div class="execution-fact">检测到后台任务。</div>' : scene === 'pty-unverified' ? '<div class="execution-fact">并发观察未在时限内完成。</div>' : ''}<div class="execution-fact" data-testid="execution-output-limit">该片段仅覆盖本次观测区间；其他程序可写入同一终端，后台输出可能在前台结束后继续。</div>` : identity(false);
-    return toolCard({ id: pty ? 'pty-command-card' : 'exec-command-card', name: '执行命令', type: pty ? '' : '批处理', projection: pty ? `最近观测 · ${outcome}` : command, elapsed: active ? '3.2s' : '6.8s', status: scene === 'pty-unknown' ? 'unknown' : nonzero ? 'failed' : recordingFailed ? 'unknown' : taken ? 'taken' : waiting || unverified || sealing ? 'waiting' : active ? 'running' : 'done', open: true, extraClass: pty ? 'interval-result' : '',
-      detail: `${intervalFacts}<pre class="code-block" data-copy-command="${esc(command)}">$ ${esc(command)}</pre><div class="output-label">${pty ? '同一终端观测片段' : 'stdout'}</div><pre class="code-block" data-copy-output>${esc(output)}</pre>${!pty ? '<div class="output-label">stderr</div><pre class="code-block muted">（无输出）</pre><div class="result-row"><span class="good">已完成</span><span>exit 0</span><span>elapsed 6.8s</span><span>exec-24</span></div>' : '<div class="execution-fact execution-recording">记录 · 72caa8de1cc0436ea818599430082006</div>'}`, actions });
+    const intervalFacts = pty ? `<div class="execution-fact" data-testid="execution-target">目标 · deploy@app-prod-01.example.net:2222 · 会话 #${actualTarget === 'existing' ? 7 : 18}</div>${savedInterval || sealing || recordingFailed ? `<div class="execution-fact" data-testid="execution-process">退出码 ${nonzero ? 7 : 0}</div>` : ''}${taken ? '<div class="execution-fact">输入权已交给用户；当前命令与输出观察可继续。</div>' : ''}${scene === 'pty-concurrent' ? '<div class="execution-uncertainty">检测到其他程序可能写入终端，输出可能包含其他程序的内容。</div>' : scene === 'pty-unverified' ? '<div class="execution-uncertainty">未能确认输出来源，请结合原终端核实结果。</div>' : ''}${recordingFailed ? '<div class="execution-uncertainty">终端记录保存失败，可查看原终端。</div>' : ''}` : identity(false);
+    const collectionDetails = pty ? `<details class="execution-collection" data-testid="execution-collection"><summary>详情</summary><div class="execution-collection-body"><div class="execution-fact" data-testid="execution-output-scope">本次终端输出 · ${savedInterval ? '已保存' : recordingFailed ? '保存失败' : '保存待确认'}</div><div class="execution-fact" data-testid="execution-output-attribution">${attribution}</div>${scene === 'pty-concurrent' ? '<div class="execution-fact">检测到后台任务。</div>' : scene === 'pty-unverified' ? '<div class="execution-fact">并发观察未在时限内完成。</div>' : ''}<div class="execution-fact" data-testid="execution-output-limit">仅保存本次采集期间的终端输出，可能包含其他程序的内容；后台任务可能继续输出。</div><div class="execution-fact execution-recording">记录 · 72caa8de1cc0436ea818599430082006</div></div></details>` : '';
+    return toolCard({ id: pty ? 'pty-command-card' : 'exec-command-card', name: pty ? '执行交互命令' : '执行命令', type: pty ? '' : '批处理', projection: pty ? outcome : command, elapsed: active ? '3.2s' : '6.8s', status: scene === 'pty-unknown' ? 'unknown' : nonzero ? 'failed' : recordingFailed || ['pty-unverified','pty-concurrent'].includes(scene) ? 'unknown' : taken ? 'taken' : waiting || unverified || sealing ? 'waiting' : active ? 'running' : 'done', open: !pty, extraClass: pty ? 'interval-result' : '',
+      detail: `${intervalFacts}<pre class="code-block" data-copy-command="${esc(command)}">$ ${esc(command)}</pre><div class="output-label">${pty ? '终端输出' : 'stdout'}</div><pre class="code-block" data-copy-output>${esc(output)}</pre>${!pty ? '<div class="output-label">stderr</div><pre class="code-block muted">（无输出）</pre><div class="result-row"><span class="good">已完成</span><span>exit 0</span><span>elapsed 6.8s</span><span>exec-24</span></div>' : ''}`, actions: actions + collectionDetails });
   }
   function setupCards() {
     if (actualTarget === 'existing') return '';
@@ -239,7 +251,7 @@ const patchWorkspace = (() => {
     const paths = { exec: '批处理', attach: '现有 PTY', new: '新建 PTY' };
     const target = askPath === 'exec' ? '独立 exec · deploy@10.20.1.18' : askPath === 'attach' ? '用户终端 · session-07（已有）' : hasGroup() ? '当前组新建 AI · 部署检查' : '将当前会话建组，再新建工作会话';
     const impact = askPath === 'exec' ? '读取部署检查结果；不改变终端输入权。' : askPath === 'attach' ? 'AI 临时持有当前 session-07 的输入权，可随时接管；不会创建会话或会话组。' : hasGroup() ? '在当前组新建任务会话；用户终端继续接收输入。' : '将 session-07 正式加入新会话组，再新建 session-18；原会话继续接收输入。';
-    return `<section class="approval" data-testid="execution-approval"><div class="approval-head">${icon('alert')}<strong>选择运行方式并确认执行</strong></div><div class="approval-body"><div class="approval-paths" role="group" aria-label="本次运行方式">${Object.entries(paths).map(([key, label]) => `<button class="${askPath === key ? 'selected' : ''}" data-patch-act="ask-path" data-value="${key}" aria-pressed="${askPath === key}" data-testid="approval-path-${key}">${label}</button>`).join('')}</div><div class="approval-target">目标：${target}<br>目录：/srv/zerowork</div><pre class="code-block">./deploy/check-release.sh ${askPath === 'exec' ? '--check' : '--interactive'}</pre><p>${impact}</p></div><div class="approval-footer"><button class="button subtle" data-patch-act="reject-execution" data-testid="reject-execution">拒绝</button><button class="button primary" data-patch-act="${scene === 'ask-expired' ? 'renew-execution' : 'approve-execution'}" data-testid="approve-execution">${scene === 'ask-expired' ? '重新确认' : '确认并执行'}</button></div></section>`;
+    return `<section class="approval" data-testid="execution-approval"><div class="approval-head">${icon('alert')}<strong>选择运行方式并确认执行</strong></div><div class="approval-body"><div class="approval-paths" role="group" aria-label="本次运行方式">${Object.entries(paths).map(([key, label]) => `<button class="${askPath === key ? 'selected' : ''}" data-patch-act="ask-path" data-value="${key}" aria-pressed="${askPath === key}" data-testid="approval-path-${key}">${label}</button>`).join('')}</div><div class="approval-target">目标：${target}<br>目录：/srv/zerowork</div><pre class="code-block">./deploy/check-release.sh ${askPath === 'exec' ? '--check' : '--interactive'}</pre><p>${impact}</p></div><div class="approval-footer"><button class="button subtle" data-patch-act="reject-execution" data-testid="reject-execution">拒绝</button><button class="button primary" data-patch-act="approve-execution" data-testid="approve-execution">确认并执行</button></div></section>`;
   }
   function workingControlCard() {
     return `<div class="cleanup-row" data-testid="working-control"><div><span class="cleanup-title">${icon('terminal')}<strong>执行仍在进行</strong></span><small>模型答复结束后，前台程序仍可继续运行。</small></div><button class="button subtle" data-patch-act="stop" data-testid="working-stop">停止执行</button><button class="button secondary" data-patch-act="takeover" data-testid="working-takeover">接管终端</button></div>`;
@@ -249,8 +261,20 @@ const patchWorkspace = (() => {
     const label = labels[cleanupState];
     return `<div class="cleanup-row" data-state="${cleanupState}" data-testid="cleanup-status"><div><span class="cleanup-title">${icon(cleanupState === 'pending' ? 'alert' : cleanupState === 'cleaned' ? 'check' : cleanupState === 'kept' ? 'hand' : 'terminal')}<strong>${label[0]}</strong></span><small>${label[1]} 原会话与会话组保持打开。</small></div>${cleanupState === 'ready' ? '<button class="button subtle" data-patch-act="keep-session" data-testid="keep-task-session">交给我保留</button><button class="button secondary" data-patch-act="close-task" data-testid="close-task-session">关闭任务会话</button>' : cleanupState === 'pending' ? '<button class="text-button" data-patch-act="verify-cleanup" data-testid="verify-cleanup">核实状态</button>' : cleanupState === 'cleaned' ? '<button class="text-button" data-patch-act="view-terminal">查看记录</button>' : '<button class="text-button" data-patch-act="close-task">关闭任务会话</button>'}</div>`;
   }
+  function shellTranscript() {
+    const waiting=scene==='shell-waiting',manual=scene==='shell-manual',recovery=scene==='shell-recovery';
+    const complete=['shell-attached','shell-recovery','shell-manual'].includes(scene);
+    const note='<div class="assistant-answer answer">'+(recovery?'业务命令尚未发送。我先查看当前终端，确认是否需要接入。':manual?'@shell attach 已直接提交，无需先选择候选项。':'切换命令已提交，我先读取当前终端，确认是否已进入目标 Shell。')+'</div>';
+    const screen=toolCard({id:'shell-screen',name:'读取终端片段',projection:waiting?'user@compute-02 的密码：':'[user@compute-02 work]$ ',elapsed:'0.1s',status:'done',detail:'<pre class="code-block">'+(waiting?'user@compute-02’s password:':'[user@compute-02 work]$ ')+'</pre>'});
+    const failed=recovery?toolCard({id:'shell-unsent',name:'执行交互命令',projection:'请求失败 · 未执行',elapsed:'0.1s',status:'failed',open:true,detail:'<p>尚未收到当前层的输入就绪事件。原业务命令没有发送，读取终端后恢复接入。</p><pre class="code-block">ShellPromptNotObserved</pre>'}):'';
+    const attach=waiting?'':toolCard({id:'shell-attach',name:'接入当前 Shell',projection:complete?'已接入 · bash · 已接入层级 2':'正在等待当前 Shell 接入回执',elapsed:complete?'1.2s':'0.6s',status:complete?'done':'running',open:true,detail:'<p>保留当前目录和环境，沿用现有 PTY。'+(manual?'完整内置指令直接 Enter 即可执行，无需选择候选项。':'根据最新终端内容确认空 Shell 提示符后，AI 调用同一内置接入能力。')+'</p>'});
+    const answer=waiting?'终端正在等待认证，尚未进入目标 Shell。完成认证后，我会重新读取终端并接入。':complete?'当前 Shell 已接入，可以继续原任务。已经发送或结果未知的命令会先核验，不自动重跑。':'切换命令已提交。我先查看当前终端，确认进入目标 Shell 后再接入。';
+    const group=toolCard({id:'shell-process',extraClass:'shell-process',name:'终端接入',projection:(waiting?'1':recovery?'3':'2')+' 个步骤',elapsed:complete?'1.5s':'0.6s',status:waiting?'done':recovery?'failed':complete?'done':'running',open:true,detail:failed+screen+attach});
+    return '<div class="assistant-question ap-user-bubble question">进入 compute-02 后继续检查运行错误。</div>'+note+group+'<div class="assistant-answer answer">'+answer+'</div>'+turnStatus(!complete&&!waiting);
+  }
   function transcript() {
-    if (scene === 'ask' || scene === 'ask-expired') return `<div class="assistant-question ap-user-bubble question">帮我检查 0.2.6 的部署环境。</div><div class="assistant-answer answer">我会在 app-prod-01 检查发布环境和服务状态。</div>${approvalCard()}<div class="turn-status"><span>${scene === 'ask-expired' ? '审批已过期 · 流程暂停' : '等待确认 · 流程暂停'}</span><span>· 处理用时 1 秒</span></div>`;
+    if(scene.startsWith('shell-'))return shellTranscript();
+    if (scene === 'ask') return `<div class="assistant-question ap-user-bubble question">帮我检查 0.2.6 的部署环境。</div><div class="assistant-answer answer">我会在 app-prod-01 检查发布环境和服务状态。</div>${approvalCard()}<div class="turn-status"><span>等待确认 · 流程暂停</span><span>· 处理用时 1 秒</span></div>`;
     if (scene === 'exec') return `<div class="assistant-question ap-user-bubble question">检查部署环境，不要占用我的终端。</div>${commandCard(false)}<div class="assistant-answer answer">检查通过。发现一处尚未提交的部署配置，请发布前核对。</div>${turnStatus(false)}`;
     if (scene === 'mode-menu') return `<div class="assistant-question ap-user-bubble question">检查 0.2.6 的部署环境。</div><div class="assistant-answer answer">在这里选择当前对话的运行方式。当前沿用全局设置：${MODES[saved.globalMode][0]}。</div>${turnStatus(false)}`;
     let notices = actualTarget === 'existing' ? hostNotice('<strong>已使用现有终端</strong> · session-07 输入权交给 AI') : groupWasExisting ? hostNotice('<strong>已在当前组新建会话</strong> · AI · 部署检查') : hostNotice('<strong>已创建会话组</strong> · 部署检查 · 原会话保留');
@@ -260,7 +284,7 @@ const patchWorkspace = (() => {
     return `<div class="assistant-question ap-user-bubble question">检查 0.2.6 的部署环境，保留执行过程。</div>${notices}${setupCards()}${commandCard(true)}${isActive() ? workingControlCard() : ''}${scene==='pty-stopping'?'<button class="text-button" data-patch-act="verify-stop" data-testid="verify-stop">核实停止状态</button>':''}${scene==='pty-sealing'?'<button class="text-button" data-patch-act="seal-record" data-testid="seal-record">确认观测片段保存收据</button>':''}${scene === 'pty-done' ? actualTarget === 'existing' ? '<div class="assistant-answer answer">检查已结束，已有终端的输入权已交还。该会话随任务保留。</div>' : '<div class="assistant-answer answer">检查已结束，本次终端观测片段已保存。</div><div class="cleanup-row"><div><span class="cleanup-title">' + icon('terminal') + '<strong>任务会话 · session-18</strong></span><small>当前策略：' + esc(POLICIES[currentPolicy()]) + (currentPolicy() === 'auto_idle' ? ' · 空闲状态待核实' : '') + '</small></div><button class="text-button" data-patch-act="open-cleanup">处理任务会话</button></div>' : ''}${scene === 'cleanup' ? cleanupCard() : ''}${scene === 'takeover' ? '<div class="assistant-answer answer">输入权已交给用户，当前命令与 AI 回合继续。我仍可查看原执行、在其他终端工作；再次输入原终端前会重新请求允许。</div>' : ''}${turnStatus(isActive())}`;
   }
   function turnStatus(running) {
-    return `<div class="turn-status">${icon('sparkles')}<span class="label">${scene==='pty-stopping'?'停止请求待核实':scene==='pty-unknown'?'AI控制已结束 · 执行结果未知':scene==='pty-sealing'?'前台已结束 · 片段保存中':running ? scene === 'pty-waiting' ? '等待确认输入' : '正在检查部署环境' : scene === 'takeover' ? (takeoverRoundStopped ? 'AI 回合已停止' : 'AI 回合继续') : '回合结束'}</span><span>·</span><span>${running ? '3.2 秒' : '6.8 秒'}</span><span>·</span><span>Token 1,286</span></div>`;
+    return `<div class="turn-status">${icon('sparkles')}<span class="label">${scene==='pty-stopping'?'停止请求待核实':scene==='pty-unknown'?'AI控制已结束 · 执行结果未知':scene==='pty-sealing'?'前台已结束 · 片段保存中':running ? scene.startsWith('shell-') ? '正在确认并接入 Shell' : scene === 'pty-waiting' ? '等待确认输入' : '正在检查部署环境' : scene === 'takeover' ? (takeoverRoundStopped ? 'AI 回合已停止' : 'AI 回合继续') : '回合结束'}</span><span>·</span><span>${running ? '3.2 秒' : '6.8 秒'}</span><span>·</span><span>Token 1,286</span></div>`;
   }
   function modeMenu() {
     if (!menuOpen) return '';
@@ -321,12 +345,12 @@ const patchWorkspace = (() => {
     document.body.dataset.theme = theme; document.body.dataset.viewport = viewport;
     document.querySelector('#review-state').innerHTML = Object.entries(SCENES).map(([key, value]) => `<option value="${key}" ${scene === key ? 'selected' : ''}>${value}</option>`).join('');
     document.querySelector('#review-theme').value = theme; document.querySelector('#review-viewport').value = viewport;
-    patchWorkspace.sync({group:hasGroup(),closed:isClosed(),existing:actualTarget==='existing',controlled:isControlling(),pty:isPTY(),waiting:scene==='pty-waiting'||(scene==='takeover'&&takeoverWaiting),handedOff:scene==='takeover',running:isActive()||isUnverified(),theme,size:viewport});
+    patchWorkspace.sync({group:hasGroup(),closed:isClosed(),existing:actualTarget==='existing',controlled:isControlling(),shellScene:scene,pty:!scene.startsWith('shell-')&&isPTY(),waiting:scene==='pty-waiting'||(scene==='takeover'&&takeoverWaiting),handedOff:scene==='takeover',running:isActive()||isUnverified(),theme,size:viewport});
     const d=aiData();
     if(fixtureRequested||d.executionPatch){
       d.executionPatch=true;d.messages=[transcript()];d.draft=saved.draft;
       d.running=isActive()||(scene==='takeover'&&!takeoverRoundStopped);d.stopping=scene==='pty-stopping';
-      d.prototypePrimaryState=(scene==='ask'||scene==='ask-expired')?'approval':'send';
+      d.prototypePrimaryState=(scene==='ask')?'approval':'send';
       fixtureRequested=false;
     }
     app.innerHTML = settings() + processPanel();
@@ -365,7 +389,6 @@ const patchWorkspace = (() => {
       case 'toggle-mode': menuOpen = !menuOpen; render(); if (menuOpen) workspaceApp.querySelector('.mode-option.selected')?.focus(); break;
       case 'close-menu': menuOpen = false; render(); workspaceApp.querySelector('[data-testid="run-mode-trigger"]')?.focus(); break;
       case 'mode-select': saved.override = button.dataset.value; persist(); menuOpen = false; render(); flash(saved.override === 'inherit' ? `已沿用全局：${MODES[saved.globalMode][0]}` : `当前对话：${MODES[saved.override][0]}`); workspaceApp.querySelector('[data-testid="run-mode-trigger"]')?.focus(); break;
-      case 'renew-execution': go('ask'); break;
       case 'ask-path': askPath = button.dataset.value; render(); workspaceApp.querySelector(`[data-testid="approval-path-${askPath}"]`)?.focus(); break;
       case 'approve-execution': actualTarget = askPath === 'attach' ? 'existing' : 'new'; go(askPath === 'exec' ? 'exec' : 'pty-running'); flash('已批准本次执行'); break;
       case 'reject-execution': go('mode-menu'); menuOpen = false; render(); flash('本次执行已拒绝'); break;
@@ -420,6 +443,11 @@ const patchWorkspace = (() => {
     if (event.target.id === 'override-end-policy') { saved.overrideEnd = event.target.value; persist(); flash('当前对话任务结束策略已保存'); }
   });
   document.querySelector('#review-state').addEventListener('change', event => go(event.target.value));
+  document.querySelector('#content').addEventListener('keydown',event=>{
+    if(event.key==='Enter'&&event.target.matches('.command-input')&&event.target.value.trim()==='@shell attach'){
+      event.preventDefault();event.stopImmediatePropagation();go('shell-manual');
+    }
+  },true);
   document.querySelector('#review-theme').addEventListener('change', event => { theme = event.target.value; setURL(); render(); });
   document.querySelector('#review-viewport').addEventListener('change', event => { viewport = event.target.value; setURL(); render(); });
   document.querySelector('[data-patch-act="reset"]').addEventListener('click', () => {

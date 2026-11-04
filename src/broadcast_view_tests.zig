@@ -65,6 +65,7 @@ test "broadcast view owns member text and selects only an enabled recipient thro
     try f.init();
     defer f.deinit();
     try f.show(2);
+    try std.testing.expectEqualStrings("", f.view.minimum.getText().?.content);
     try std.testing.expectEqualStrings("copied-member", f.view.current.?.snapshot.members[0].name);
     const check = find(f.cx.root.?, "group.broadcast.member.2.select").?;
     const rect = check.globalRect();
@@ -74,9 +75,10 @@ test "broadcast view owns member text and selects only an enabled recipient thro
     try std.testing.expectEqual(@as(usize, 1), f.selects);
     try std.testing.expect(!f.selected);
     const source = find(f.cx.root.?, "group.broadcast.member.1.select").?;
-    try std.testing.expect(source.behavior.interaction.a11y.?.disabled);
+    try std.testing.expect(!source.behavior.interaction.a11y.?.disabled);
     try f.show(1);
     try std.testing.expect(f.view.disabled.peek());
+    try std.testing.expectEqualStrings("没有在线可写会话", f.view.minimum.getText().?.content);
 }
 test "broadcast view follows its actual anchor through resize and closes when the trigger disappears" {
     var f: Fixture = undefined;

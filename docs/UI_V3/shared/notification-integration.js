@@ -28,6 +28,6 @@
   },{capture:true});
   // Explicitly published review fixtures use this same host, center and routes.
   window.V3NotificationHost={open:()=>center.open(),locate};
-  if(V3Feedback.notificationReviewMode){const url=new URL(location.href);url.searchParams.set('notification-review','1');history.replaceState(null,'',url);document.body.dataset.size='compact';document.querySelector('#size').value='compact';const script=document.createElement('script');script.src=new URL('../notifications/review.js',base).href;document.body.append(script);}
+  if(V3Feedback.notificationReviewMode){const url=new URL(location.href);url.searchParams.set('notification-review','1');history.replaceState(null,'',url);document.body.dataset.size='compact';document.querySelector('#size').value='compact';const script=document.createElement('script');script.src=new URL('../notifications/review.js?v=2576fcc4e42e',base).href;document.body.append(script);}
   if(V3Feedback.notificationCenterInitiallyOpen)center.open();
 })();

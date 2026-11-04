@@ -201,6 +201,7 @@ pub const Service = struct {
         execution_secret: ?*const fn (*anyopaque, session.ServiceHandle, execution.SecretAction) anyerror!execution.InputReceipt = null,
         execution_input: ?*const fn (*anyopaque, session.ServiceHandle, execution.InputRequest) anyerror!execution.InputReceipt = null,
         execution_output: ?*const fn (*anyopaque, session.ServiceHandle, identity.ExecutionId, std.mem.Allocator, u64, usize) anyerror!execution.Output = null,
+        execution_snapshot_for: ?*const fn (*anyopaque, session.ServiceHandle, identity.ExecutionId) anyerror!execution.Snapshot = null,
         execution_snapshot: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!execution.Snapshot = null,
         execution_request: ?*const fn (*anyopaque, session.ServiceHandle, execution.Request) anyerror!void = null,
         execution_renew: ?*const fn (*anyopaque, session.ServiceHandle, execution.Grant) anyerror!void = null,
@@ -262,6 +263,10 @@ pub const Service = struct {
             else => self.binding.origin_session orelse return error.InvalidOwner,
         } };
         return call(self.context, self.binding);
+    }
+    pub fn executionSnapshotFor(self: Service, id: identity.ExecutionId) !execution.Snapshot {
+        if (self.vtable.execution_snapshot_for) |call| return call(self.context, self.binding, id);
+        return self.executionSnapshot();
     }
     pub fn executionRequest(self: Service, request: execution.Request) !void {
         const call = self.vtable.execution_request orelse return error.IntegrationUnavailable;

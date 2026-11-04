@@ -28,5 +28,6 @@ comptime {
     _ = @import("bmc_ai_observation_tests.zig");
     _ = @import("bmc_ai_input_tests.zig");
     _ = @import("bmc_ai_tool_tests.zig");
+    _ = @import("bmc_snapshot_copy_tests.zig");
     _ = @import("ui/plugin_window_host.zig");
 }

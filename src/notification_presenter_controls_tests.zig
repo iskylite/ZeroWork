@@ -4,6 +4,93 @@ const host = @import("host/notification_host.zig");
 const Presenter = @import("ui/notification_presenter.zig").Presenter;
 const a = std.testing.allocator;
 
+test "notification closed history badge does not request another idle frame" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+        notice.activity.deinit();
+    }
+    const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
+    try cx.root.?.appendChild(a, trigger);
+    _ = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
+    const hook = cx.after_layout_hooks.items[cx.after_layout_hooks.items.len - 1];
+    for (0..32) |_| {
+        cx.frame_count += 1;
+        cx.frame_time_ms += 16;
+        _ = cx.render();
+    }
+    try std.testing.expect(!cx.hasPendingSceneWork());
+    _ = hook.run(hook.ctx, 0, false);
+    try std.testing.expect(!cx.hasPendingSceneWork());
+}
+
+test "notification global material stays at the highest tier across assistant overlap" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.dark);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+        notice.activity.deinit();
+    }
+    const assistant = try ui.boxStyled(cx, @import("ui/ai_assistant_styles.zig").panel, .{});
+    assistant.setStyleInline(a, .{ .position = .absolute, .inset = .{ .left = .{ .px = 400 }, .top = .{ .px = 40 } }, .width = .{ .px = 280 }, .height = .{ .px = 240 } });
+    try cx.root.?.appendChild(a, assistant);
+    const view = try Presenter.mount(cx, scope, &notice, @fromBackingInt(1));
+    try @import("ui/layer_materials.zig").Policy.mount(cx, scope);
+    _ = try notice.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } }, .operation_id = 1, .event_revision = 1, .phase = .failed, .title = "Global risk", .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true } }, .{ .monotonic_ms = 0, .local_minute = 0 });
+    for ([_]f32{ 0, 50, 75, 100 }) |t| {
+        _ = theme.setMaterialParameters(t, 0);
+        for ([_]bool{ false, true }) |shown| {
+            assistant.setDisplay(if (shown) .flex else .none);
+            const card = view.slots[0].root;
+            // Exact background transmission without the blur transition at edges.
+            assistant.setStyleInline(a, .{ .glass = .{ .backdrop_blur = 0 } });
+            card.setStyleInline(a, .{ .glass = .{ .backdrop_blur = 0 } });
+            for (0..8) |_| {
+                try view.update(0, true, null, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } });
+                cx.layout();
+                _ = cx.render();
+            }
+            const rect = card.globalRect();
+            try std.testing.expect(rect.w > 0 and rect.h > 0);
+            const compensation = historyNode(card, "appearance.material.compensation");
+            _ = cx.render();
+            for ([_]f32{ 32, rect.w - 32 }) |local_x| {
+                const x = rect.x + local_x;
+                const local_y: f32 = 30.25;
+                var transmission = t / 100;
+                const lower = assistant.globalRect();
+                if (shown and x >= lower.x and x < lower.x + lower.w) transmission *= 1 - @as(f32, @floatFromInt(assistant.getBackground().a)) / 255;
+                transmission *= 1 - @as(f32, @floatFromInt(card.getBackground().a)) / 255;
+                if (compensation) |paint| for (paint.children.items) |patch| {
+                    if (patch.style.display == .none) continue;
+                    const area = patch.globalRect();
+                    if (x >= area.x and x < area.x + area.w and rect.y + local_y >= area.y and rect.y + local_y < area.y + area.h) transmission *= 1 - @as(f32, @floatFromInt(patch.getBackground().a)) / 255;
+                };
+                try std.testing.expectApproxEqAbs(t / 100 * 0.2, transmission, 0.003);
+            }
+        }
+    }
+}
+
 test "notification replacement and action revision cancel an old press before dispatch" {
     const Probe = struct {
         calls: usize = 0,
@@ -307,7 +394,7 @@ test "notification history evicts oldest facts without rejecting new ones and re
     try std.testing.expectEqual(@as(usize, 0), coordinator.presentation_count);
 }
 
-test "notification countdown follows actual timer pauses and excludes persistent errors" {
+test "notification countdown pauses and application risk expires while retaining its fact" {
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     cx.setViewport(860, 480);
@@ -324,14 +411,76 @@ test "notification countdown follows actual timer pauses and excludes persistent
     _ = try notice_host.coordinator.publishNotification(.{ .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1, .event_revision = 1, .phase = .succeeded, .title = "Done", .actions = &.{.{ .kind = .view_result, .label = "View" }} }, .{ .monotonic_ms = 0, .local_minute = 0 });
     const placement = @import("ui/notification_presenter.zig").Placement{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } };
     try view.update(0, true, owner, placement);
+    for (0..3) |_| {
+        cx.layout();
+        try view.update(0, true, owner, placement);
+    }
     try view.update(2300, true, owner, placement);
     try std.testing.expectEqualStrings("6 秒后关闭", view.slots[0].countdown.getText().?.content);
-    view.slots[0].hovered = true;
+    const card = view.slots[0].root.globalRect();
+    try std.testing.expect(card.w > 0 and card.h > 0);
+    cx.mouse_x = card.x + 10;
+    cx.mouse_y = card.y + 10;
+    cx.hovered_node = view.slots[0].close;
     try view.update(7300, true, owner, placement);
     try std.testing.expectEqualStrings("6 秒后关闭", view.slots[0].countdown.getText().?.content);
-    _ = try notice_host.coordinator.publishNotification(.{ .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 2, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failed" }, .{ .monotonic_ms = 7300, .local_minute = 0 });
+    // The framework can retain the old hover node after the pointer leaves.
+    cx.mouse_x = 0;
+    cx.mouse_y = 0;
+    try view.update(7300, true, owner, placement);
+    try std.testing.expect(!notice_host.coordinator.recordFor(view.slots[0].fact_id.?).?.paused);
+    const risk = try notice_host.coordinator.publishNotification(.{ .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 2, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failed" }, .{ .monotonic_ms = 7300, .local_minute = 0 });
     try view.update(7300, true, owner, placement);
     try std.testing.expect(view.slots[0].countdown.style.display == .none);
+    cx.hovered_node = null;
+    try view.update(7300, true, owner, placement);
+    try view.update(11_299, true, owner, placement);
+    try std.testing.expectEqual(risk.fact_id, view.slots[0].fact_id.?);
+    try view.update(11_300, true, owner, placement);
+    try std.testing.expectEqual(@as(?u64, null), view.slots[0].fact_id);
+    try std.testing.expect(notice_host.coordinator.recordFor(risk.fact_id).?.pending());
+}
+
+test "notification close control hides the banner without deleting the pending record" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+        notice.activity.deinit();
+    }
+    const view = try Presenter.mount(cx, scope, &notice, @fromBackingInt(1));
+    const published = try notice.coordinator.publishNotification(.{
+        .definition_id = "host.feedback",
+        .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } },
+        .operation_id = 1,
+        .event_revision = 1,
+        .phase = .failed,
+        .severity = .failure,
+        .title = "无法保存记录",
+        .detail = "磁盘已满",
+        .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true },
+    }, .{ .monotonic_ms = 0, .local_minute = 0 });
+    const placement = @import("ui/notification_presenter.zig").Placement{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } };
+    for (0..6) |_| {
+        try view.update(0, true, null, placement);
+        cx.layout();
+    }
+    const close = view.slots[0].close.globalRect();
+    try std.testing.expect(close.w > 0 and close.h > 0);
+    cx.handleMouseDown(close.x + close.w / 2, close.y + close.h / 2, .{});
+    cx.handleMouseUp(close.x + close.w / 2, close.y + close.h / 2);
+    try view.update(1, true, null, placement);
+    try std.testing.expectEqual(@as(?u64, null), view.slots[0].fact_id);
+    const record = notice.coordinator.recordFor(published.fact_id).?;
+    try std.testing.expectEqual(host.notifications.Presentation.hidden, record.presentation);
+    try std.testing.expect(record.pending());
+    try std.testing.expectEqualStrings("磁盘已满", record.event.detail);
+    try std.testing.expectEqual(@as(usize, 1), notice.coordinator.historyCount(true));
 }
 
 test "notification history compact rows retain full long detail behind an explicit expandable control" {

@@ -1,24 +1,25 @@
-//! Compact first-line AI origin tag. Matches terminal-enhancement.css .meta-ai;
-//! its existing metadata parent still owns visibility, hover and copy exclusion.
+//! One compact first-line metadata tag; AI is a plain origin label inside it.
+//! Matches terminal-enhancement.css; the parent owns hover and copy exclusion.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 
-pub const ai_height: f32 = 16;
-pub const ai_padding: f32 = 4;
-pub const ai_radius: f32 = 4;
+pub const metadata_height: f32 = 18;
+pub const metadata_padding: f32 = 6;
+pub const metadata_radius: f32 = 4;
+pub const metadata_gap: f32 = 8;
 pub const ai_font_size: f32 = 10;
-pub const metadata_gap: f32 = 10;
-pub const status_inset: f32 = 2;
-/// The two narrower gaps compensate the tag's 8px horizontal padding, keeping
-/// the first-row group as compact as its preceding plain-text AI treatment.
-pub const ai_metadata_gap: f32 = 6;
 
-pub fn aiTag(row_height: f32) ui.BoxStyle {
-    return .{ .width = .{ .fit = .{} }, .height = .{ .px = @min(ai_height, row_height) }, .padding = .{ .left = ai_padding, .right = ai_padding }, .corner_radius = ai_radius, .align_items = .center, .justify = .center, .background = theme.popupSelection(), .flex_shrink = 0, .hit_behavior = .pass_through };
+pub fn metadataTop(row_height: f32) f32 {
+    return @max(0, (row_height - metadata_height) / 2);
 }
-/// The library Badge fixes its solid status palette and capsule recipe during
-/// theme application. This presentation-only tag uses the application's existing
-/// soft badge surface, so a noninteractive text primitive owns this small style.
+pub fn metadataTag(row_height: f32) ui.BoxStyle {
+    const colors = theme.current();
+    return .{ .position = .absolute, .inset = .{ .right = .{ .px = 0 }, .top = .{ .px = metadataTop(row_height) } }, .width = .{ .fit = .{} }, .height = .{ .px = @min(metadata_height, row_height) }, .direction = .row, .align_items = .center, .gap = metadata_gap, .padding = .{ .left = metadata_padding, .right = metadata_padding }, .corner_radius = metadata_radius, .background = colors.surface_2.withAlpha(255), .flex_shrink = 0, .hit_behavior = .pass_through, .z_index = 4 };
+}
+pub fn aiTag(row_height: f32) ui.BoxStyle {
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = @min(14, row_height) }, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .flex_shrink = 0, .hit_behavior = .pass_through };
+}
+/// The presentation-only origin label shares its parent's tag surface.
 pub fn mountAiTag(cx: *ui.Cx, family_id: u16, row_height: f32) !*ui.Node {
     const tag = try ui.text(cx, "AI", .{ .font_size = ai_font_size, .selectable = false });
     tag.meta.ownership.meta.component_name = "CommandAiTag";

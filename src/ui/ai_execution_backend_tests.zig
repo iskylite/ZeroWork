@@ -722,7 +722,7 @@ test "execution backend controlled input requires separate exact approval and re
             if (err == error.WorkerBusy) continue;
             return err;
         };
-        if (waiting.input_wait != null) break;
+        if (waiting.input_wait) |wait| if (wait.kind == .controlled_line) break;
         if (waiting.failure != null or @import("../platform/realtime.zig").monotonicNs() >= deadline) return error.InputWaitTimeout;
     }
     const raw = try std.fmt.allocPrint(a, "{{\"execution_ref\":\"x1:{s}\",\"request_key\":\"backend-input\",\"text\":\"normal answer\"}}", .{std.fmt.bytesToHex(id.bytes, .lower)});
@@ -757,9 +757,49 @@ test "execution backend controlled input requires separate exact approval and re
         };
         break;
     }
-    // A new accepted line changes the input impact even though this is still
-    // the same foreground helper and wait/fence. The earlier permit is stale.
+    while (true) {
+        const after = accepted.service.executionSnapshot() catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() >= deadline) return err;
+            try fixture.tick();
+            continue;
+        };
+        if (after.input_receipt) |receipt| if (receipt.input_sequence == 99) {
+            try std.testing.expectEqualDeep(waiting.grant, after.grant);
+            try std.testing.expectEqualDeep(waiting.input_wait, after.input_wait);
+            break;
+        };
+        if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.InterveningInputNotObserved;
+        try fixture.tick();
+    }
+    // Identical display text and the same consumer/grant do not make a permit
+    // current after another line was admitted. Only semantic evidence changes.
+    var fresh_prepared = fresh: while (true) {
+        break :fresh ctx.preflightInput(invocation, a) catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() >= deadline) return err;
+            try fixture.tick();
+            continue;
+        };
+    };
+    defer fresh_prepared.deinit();
+    try std.testing.expectEqualStrings(input_prepared.subject.detail, fresh_prepared.subject.detail);
+    try std.testing.expectEqualStrings(input_prepared.subject.impact, fresh_prepared.subject.impact);
+    try std.testing.expect(!std.meta.eql(input_prepared.subject.evidence_hash, fresh_prepared.subject.evidence_hash));
     try expectBusyError(&fixture, api.authorize_input.?, .{ api.context, invocation, target, id, input }, error.ScopeChanged);
+    broker.finish(permit);
+    const fresh_permit = try broker.beginSubject(invocation, fresh_prepared.subject, 1, a);
+    defer broker.finish(fresh_permit);
+    try broker.decide(fresh_permit.sequence, fresh_permit.arguments_hash, true);
+    invocation.approval_sequence = fresh_permit.sequence;
+    var next_input = input;
+    next_input.input_sequence = 100;
+    while (true) {
+        api.authorize_input.?(api.context, invocation, target, id, next_input) catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() >= deadline) return err;
+            try fixture.tick();
+            continue;
+        };
+        break;
+    }
     var secret_observation = input;
     secret_observation.kind = .host_secret;
     secret_observation.text = "";

@@ -82,6 +82,7 @@ pub const rows = [_]Row{
     .{ .label = "重命名冲突", .section = "transfer", .key = "conflict_policy" },
     .{ .label = "完成后系统通知", .section = "notify", .key = "transfer_done" },
     .{ .label = "默认权限模式", .section = "ai", .key = "permission_mode" },
+    .{ .label = "步骤默认显示", .section = "ai", .key = "step_display" },
     .{ .label = "默认运行方式", .section = "ai", .key = "execution_mode" },
     .{ .label = "任务会话处理", .section = "ai", .key = "session_retention" },
     .{ .label = "隐藏连接身份", .section = "ai", .key = "redact_ip" },
@@ -90,7 +91,7 @@ pub const rows = [_]Row{
     .{ .label = "断线与重连", .section = "notify", .key = "reconnect" },
     .{ .label = "AI 诊断就绪", .section = "notify", .key = "ai_ready" },
     .{ .label = "终端 Bell", .section = "notify", .key = "bell" },
-    .{ .label = "非活跃标签圆点", .section = "notify", .key = "tab_dot" },
+    .{ .label = "后台标签图标跳动", .section = "notify", .key = "tab_dot" },
     .{ .label = "勿扰时段", .section = "notify", .key = "quiet_hours" },
     .{ .label = "配置目录", .section = "data", .key = "config_dir" },
     .{ .label = "环形缓冲上限", .section = "log", .key = "ring_mb" },
@@ -191,7 +192,7 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     const heading = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .column, .gap = 4 }, .{});
     const searching = std.mem.trim(u8, controller.search_query, " \t\r\n").len != 0;
     try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "搜索结果" else controller.model.page().name, .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = styles.theme.current().fg_1 }));
-    try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "在全部设置分类中查找，输入内容不会改变折叠偏好。" else controller.model.page().description, .{ .font_size = 11, .color = styles.theme.current().fg_2 }));
+    try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "在全部设置分类中查找，输入内容不会改变折叠偏好。" else controller.model.page().description, .{ .font_size = 11, .color = styles.secondaryInk() }));
     try header.appendChild(cx.allocator, heading);
     const help_text = controller.model.page().description;
     const help = try ui.widgets.Tooltip(.{ .text = help_text, .open_delay_ms = 450 }).mount(scope, cx);
@@ -530,6 +531,7 @@ pub const Binding = struct {
         }
         return switch (value) {
             .text => |text| blk: {
+                if (std.mem.eql(u8, key.key, "step_display")) break :blk if (std.mem.eql(u8, text, "expanded")) "展开" else "折叠";
                 if (std.mem.eql(u8, key.key, "execution_mode")) break :blk config.executionModeLabel(self.controller.model.value.ai.execution_mode);
                 if (std.mem.eql(u8, key.key, "session_retention")) break :blk config.sessionRetentionLabel(self.controller.model.value.ai.session_retention);
                 if (std.mem.eql(u8, key.key, "permission_mode")) break :blk if (std.mem.eql(u8, text, "auto")) "自动执行" else "确认后执行";
@@ -556,7 +558,6 @@ pub const Binding = struct {
         const click = try cx.allocator.create(ActionClick);
         click.* = .{ .binding = self, .action = action };
         try self.scope.onCleanup(ActionClick, click, ActionClick.cleanup);
-        const tip = try ui.widgets.Tooltip(.{ .text = label, .open_delay_ms = 450 }).mount(self.scope, cx);
         var style = styles.textButton();
         style.height = .{ .px = 32 };
         style.padding = .{ .left = 8, .right = 8 };
@@ -578,8 +579,7 @@ pub const Binding = struct {
                 args.node.setStyleInline(args.bound.cx.allocator, .{ .background = from, .gradient = .{ .from = from, .to = to, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
             }
         }.run);
-        try tip.trigger.appendChild(cx.allocator, node);
-        return .{ .wrapper = tip.wrapper, .button = node };
+        return .{ .wrapper = node, .button = node };
     }
     pub fn themeSelected(self: *Binding, name: []const u8) bool {
         return std.mem.eql(u8, self.controller.model.value.ui.theme, name);

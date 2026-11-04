@@ -27,6 +27,18 @@ pub fn group(registry: *const hosts.Registry, expected: GroupRef) !hosts.AssetGr
     if (value.revision != expected.revision) return error.RevisionConflict;
     return value;
 }
+
+/// A host draft may outlive presentation or membership changes to its group.
+/// Keep its captured identity when the name is unchanged; require the user to
+/// choose again if that group was renamed or removed. An explicitly edited
+/// group is resolved independently by the normal host-creation path.
+pub fn hostDraftGroup(registry: *const hosts.Registry, captured: GroupRef, name: ?[]const u8, edited: bool) !?hosts.identity.AssetGroupId {
+    if (edited) return null;
+    const index = registry.groupIndex(captured.id) orelse return error.StaleGroup;
+    const current = registry.groups[index];
+    if (!std.mem.eql(u8, current.name, name orelse "")) return error.StaleGroup;
+    return current.group_id;
+}
 pub fn colorValid(value: []const u8) bool {
     if (value.len != 7 or value[0] != '#') return false;
     for (value[1..]) |byte| if (!std.ascii.isHex(byte)) return false;

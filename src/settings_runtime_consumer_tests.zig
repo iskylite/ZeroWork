@@ -208,7 +208,14 @@ test "settings runtime AI selected provider effort redaction and permission feed
     const whitelist: []const []const u8 = &.{"fixture read"};
     try std.testing.expectEqual(permission.Verdict.need_confirm, permission.classify(.{ .mode = .confirm, .whitelist = whitelist }, command, false));
     try std.testing.expectEqual(permission.Verdict.allow_auto, permission.classify(.{ .mode = .auto, .whitelist = whitelist }, command, false));
-    try std.testing.expectEqual(permission.Verdict.need_confirm, permission.classify(.{ .mode = .auto, .whitelist = whitelist }, "fixture read; touch /tmp/never-executed", false));
+    // Automatic mode allows non-blocked compound commands; confirm mode still
+    // requires approval, and deny rules take precedence over either mode.
+    const compound = "fixture read; touch /tmp/never-executed";
+    try std.testing.expectEqual(permission.Verdict.allow_auto, permission.classify(.{ .mode = .auto, .whitelist = whitelist }, compound, false));
+    try std.testing.expectEqual(permission.Verdict.need_confirm, permission.classify(.{ .mode = .confirm, .whitelist = whitelist }, compound, false));
+    for ([_]permission.Mode{ .confirm, .auto }) |mode| {
+        try std.testing.expectEqual(permission.Verdict.deny_exec_copy_only, permission.classify(.{ .mode = mode, .whitelist = whitelist }, "fixture read; shutdown now", false));
+    }
 }
 
 test "settings runtime saved retention controls actual Recording close pruning" {

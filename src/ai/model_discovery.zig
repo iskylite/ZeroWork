@@ -4,12 +4,24 @@ const config = @import("../config/config.zig");
 const catalog = @import("model_catalog.zig");
 const transport = @import("provider_transport.zig");
 const http = @import("provider_http.zig");
+pub const list_refresh_seconds = 5 * 60;
+fn automaticList(p: config.AiProvider) bool {
+    return p.model_count == 0 and p.model.len == 0;
+}
+fn hasAutomaticList(ai: config.Ai) bool {
+    for (ai.providers[0..@min(ai.provider_count, ai.providers.len)]) |p| {
+        if (p.enabled and p.endpoint.len != 0 and automaticList(p)) return true;
+    }
+    return false;
+}
 pub const ModelMetadata = struct { id: []const u8, reasoning_known: bool, vision_known: bool };
 pub const Service = struct {
     job: ?*Job = null,
     current: ?*Job = null,
     generation: u64 = 0,
     next_refresh: i64 = 0,
+    next_list_refresh: i64 = 0,
+    list_refresh_requested: bool = false,
     revision: u64 = 0,
     request_error: ?anyerror = null,
     diagnostic: http.Diagnostic = .{},
@@ -42,6 +54,7 @@ pub const Service = struct {
         selected.enabled = true;
         selected.models = &.{};
         selected.model_count = 0;
+        selected.model = "";
         const job = try Job.create(.{ .providers = @constCast(&[_]config.AiProvider{selected}), .provider_count = 1 }, revision);
         errdefer job.destroy();
         job.require_list = true;
@@ -82,7 +95,16 @@ pub const Service = struct {
         } else job.destroy();
         return true;
     }
-    /// now is monotonic seconds supplied by the host.
+    /// Opening the picker only queues work; poll starts it at the UI safe point.
+    /// An in-flight discovery already supplies a fresh list, so openings coalesce.
+    pub fn refreshLists(self: *Service) void {
+        if (self.job == null) self.list_refresh_requested = true;
+    }
+    pub fn refreshDelaySeconds(self: *const Service, ai: config.Ai, now: i64) u64 {
+        const due = if (hasAutomaticList(ai)) @min(self.next_refresh, self.next_list_refresh) else self.next_refresh;
+        return @intCast(@max(1, due - now));
+    }
+    /// now is seconds supplied by the host.
     pub fn poll(self: *Service, ai: config.Ai, revision: u64, now: i64) !bool {
         var changed = false;
         if (self.job) |job| if (job.done.load(.acquire)) {
@@ -94,17 +116,24 @@ pub const Service = struct {
                 self.generation +|= 1;
                 changed = true;
             } else {
+                const only_lists = job.only_automatic_lists;
                 job.destroy();
-                self.next_refresh = @min(self.next_refresh, now + 300);
+                if (only_lists) self.next_list_refresh = @min(self.next_list_refresh, now + list_refresh_seconds) else self.next_refresh = @min(self.next_refresh, now + 300);
             }
         };
-        if (self.job == null and (self.revision != revision or now >= self.next_refresh)) {
-            const job = try Job.create(ai, revision);
-            errdefer job.destroy();
-            job.thread = try std.Thread.spawn(.{}, Job.run, .{job});
-            self.job = job;
-            self.revision = revision;
-            self.next_refresh = now + catalog.refresh_seconds;
+        if (self.job == null) {
+            const full_refresh = self.revision != revision or now >= self.next_refresh;
+            const list_refresh = hasAutomaticList(ai) and (self.list_refresh_requested or now >= self.next_list_refresh);
+            self.list_refresh_requested = false;
+            if (full_refresh or list_refresh) {
+                const job = try Job.createRefresh(ai, self.effective(ai, revision), revision, !full_refresh);
+                errdefer job.destroy();
+                job.thread = try std.Thread.spawn(.{}, Job.run, .{job});
+                self.job = job;
+                self.revision = revision;
+                if (full_refresh) self.next_refresh = now + catalog.refresh_seconds;
+                self.next_list_refresh = now + list_refresh_seconds;
+            }
         }
         return changed;
     }
@@ -118,6 +147,8 @@ const Job = struct {
     done: std.atomic.Value(bool) = .init(false),
     success: bool = false,
     require_list: bool = false,
+    only_automatic_lists: bool = false,
+    automatic_lists: []const bool = &.{},
     probe: bool = false,
     failure: ?anyerror = null,
     diagnostic: http.Diagnostic = .{},
@@ -139,6 +170,15 @@ const Job = struct {
             for (p.models) |*m| m.id = try a.dupe(u8, m.id);
         }
         return self;
+    }
+    fn createRefresh(source: config.Ai, previous: config.Ai, revision: u64, only_automatic_lists: bool) !*Job {
+        const job = try Job.create(if (only_automatic_lists) previous else source, revision);
+        errdefer job.destroy();
+        const automatic = try job.arena.allocator().alloc(bool, job.ai.provider_count);
+        for (automatic, source.providers[0..job.ai.provider_count]) |*value, p| value.* = automaticList(p);
+        job.automatic_lists = automatic;
+        job.only_automatic_lists = only_automatic_lists;
+        return job;
     }
     fn destroy(self: *Job) void {
         self.arena.deinit();
@@ -170,16 +210,13 @@ const Job = struct {
         var io: std.Io.Threaded = .init(std.heap.c_allocator, .{});
         defer io.deinit();
         var context: transport.NativeContext = .{ .io = io.io() };
+        defer if (context.diagnostic.status != 0) {
+            self.diagnostic = context.diagnostic;
+        };
         const t = transport.native(&context);
         const provider_config = @import("provider_config.zig");
         const resolved = try provider_config.fromSettings(self.ai);
-        var plan = try http.plan(resolved);
-        plan.endpoint = try http.chatEndpoint(self.arena.allocator(), resolved.kind, resolved.endpoint);
-        plan.cancel = &self.cancel;
-        plan.timeout_ms = 30000;
-        const messages = [_]@import("provider.zig").Message{.{ .content = "Reply with OK." }};
-        const body = try http.requestBody(self.arena.allocator(), resolved.kind, .{ .model = resolved.model, .system = "", .messages = &messages, .max_output = 32 }, resolved.context_window);
-        _ = try self.fetch(t, plan, body);
+        try probeChat(self.arena.allocator(), t, resolved, &self.cancel, &self.diagnostic);
         self.success = true;
     }
     fn discover(self: *Job) !void {
@@ -191,7 +228,8 @@ const Job = struct {
         var fallback: ?catalog.Catalog = null;
         defer if (fallback) |*c| c.deinit();
         var fallback_attempted = false;
-        for (self.ai.providers) |*p| {
+        for (self.ai.providers, 0..) |*p, provider_index| {
+            if (self.only_automatic_lists and !self.automatic_lists[provider_index]) continue;
             if (self.cancel.isCancelled()) return error.Cancelled;
             if (!p.enabled or p.endpoint.len == 0) continue;
             const url = try catalog.endpoint(a, p.endpoint, p.kind);
@@ -232,9 +270,16 @@ const Job = struct {
             }
             if (remote != null) self.success = true;
             defer if (remote) |*c| c.deinit();
+            if (self.only_automatic_lists and remote == null) continue;
             var models: std.ArrayList(config.AiModel) = .empty;
-            try models.appendSlice(a, p.models);
-            if (remote) |r| for (r.entries) |entry| {
+            // A short refresh starts from the published snapshot. Replace an
+            // automatic list only on a valid response; failures keep its old list.
+            const replace_list = self.only_automatic_lists and remote != null;
+            if (!replace_list) try models.appendSlice(a, p.models);
+            if (models.items.len == 0 and p.model.len != 0) try models.append(a, .{ .id = p.model, .context_window = p.context_window, .default = true, .efforts = @splat(false) });
+            // A configured list is authoritative. Only an unconfigured provider
+            // adopts the remote list; both paths still receive capability metadata.
+            if (models.items.len == 0) if (remote) |r| for (r.entries) |entry| {
                 var exists = false;
                 for (models.items) |m| if (std.mem.eql(u8, m.id, entry.id)) {
                     exists = true;
@@ -253,7 +298,7 @@ const Job = struct {
                 var capability: catalog.Capability = .{};
                 if (remote) |r| capability = r.resolve("", m.id) orelse .{};
                 if (p.kind == .ollama) {
-                    const show_url = try std.fmt.allocPrint(a, "{s}/show", .{url[0 .. url.len - 5]});
+                    const show_url = try @import("provider_endpoint.zig").ollamaShowEndpoint(a, p.endpoint);
                     const show_body = try std.json.Stringify.valueAlloc(a, .{ .model = m.id }, .{});
                     var show_plan = plan;
                     show_plan.method = .POST;
@@ -315,6 +360,270 @@ const Job = struct {
         }
     }
 };
+
+test "model discovery preserves configured models and discovers all only when unconfigured" {
+    const Fixture = struct {
+        io: std.Io,
+        server: std.Io.net.Server,
+        fn serve(self: *@This()) !void {
+            const connection = try self.server.accept(self.io);
+            defer connection.close(self.io);
+            var buffer: [4096]u8 = undefined;
+            var reader = connection.reader(self.io, &buffer);
+            const request_line = try reader.interface.takeDelimiterInclusive('\n');
+            try std.testing.expectEqualStrings("GET /proxy/models HTTP/1.1\r\n", request_line);
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (std.mem.eql(u8, line, "\r\n")) break;
+            }
+            // Full metadata keeps this regression entirely on loopback.
+            const payload =
+                \\{"data":[{"id":"other","context_window":32768,"reasoning":false,"vision":false},{"id":"chosen","context_window":131072,"reasoning":true,"reasoning_levels":["low"],"vision":true},{"id":"other","context_window":32768,"reasoning":false,"vision":false}]}
+            ;
+            var writer = connection.writer(self.io, &.{});
+            try writer.interface.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ payload.len, payload });
+            try writer.interface.flush();
+        }
+    };
+    for ([_]struct { count: usize, legacy: bool = false, expected: []const []const u8 }{
+        .{ .count = 1, .expected = &.{"chosen"} },
+        .{ .count = 2, .expected = &.{ "chosen", "other" } },
+        .{ .count = 0, .expected = &.{ "other", "chosen" } },
+        .{ .count = 0, .legacy = true, .expected = &.{"chosen"} },
+    }) |case| {
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        var fixture: Fixture = .{ .io = std.testing.io, .server = try address.listen(std.testing.io, .{}) };
+        defer fixture.server.deinit(std.testing.io);
+        var serving = try std.Io.concurrent(std.testing.io, Fixture.serve, .{&fixture});
+        defer _ = serving.cancel(std.testing.io) catch {};
+        var endpoint_buffer: [128]u8 = undefined;
+        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}/proxy", .{fixture.server.socket.address.getPort()});
+        var configured = [_]config.AiModel{
+            .{ .id = "chosen", .context_window = 8192, .default = true },
+            .{ .id = "other", .context_window = 8192 },
+        };
+        var providers = [_]config.AiProvider{.{ .name = "gateway", .kind = .openai_compat, .enabled = true, .endpoint = endpoint, .api_key = "fixture-key", .models = &configured, .model_count = case.count, .model = if (case.legacy) "chosen" else "", .context_window = 8192 }};
+        const source: config.Ai = .{ .default_provider = "gateway", .providers = &providers, .provider_count = 1 };
+        var service: Service = .{};
+        defer service.deinit();
+        const job = try Job.create(source, 7);
+        service.current = job;
+        try job.discover();
+        try serving.await(std.testing.io);
+        try std.testing.expect(job.success);
+        const effective = service.effective(source, 7);
+        const actual = effective.providers[0];
+        try std.testing.expectEqual(case.expected.len, actual.model_count);
+        for (case.expected, actual.models) |expected, model| try std.testing.expectEqualStrings(expected, model.id);
+        const selection = @import("provider_config.zig");
+        const chosen = try selection.fromSettingsSelection(effective, .{ .provider_id = "gateway", .model_id = "chosen" });
+        try std.testing.expectEqual(@as(u32, 131072), chosen.context_window);
+        try std.testing.expect(chosen.vision);
+        for (actual.models) |model| if (std.mem.eql(u8, model.id, "chosen")) {
+            try std.testing.expect(model.reasoning and model.efforts[0]);
+            if (case.expected.len == 1) try std.testing.expect(model.default);
+        };
+        if (case.expected.len == 1) {
+            try std.testing.expectError(error.UnknownModel, selection.fromSettingsSelection(effective, .{ .provider_id = "gateway", .model_id = "other" }));
+        } else _ = try selection.fromSettingsSelection(effective, .{ .provider_id = "gateway", .model_id = "other" });
+        // Discovery is runtime-only and cannot rewrite the user's saved list.
+        try std.testing.expectEqual(case.count, source.providers[0].model_count);
+        try std.testing.expectEqual(@as(u32, 8192), configured[0].context_window);
+        const stale = service.effective(source, 8);
+        try std.testing.expectEqual(case.count, stale.providers[0].model_count);
+    }
+}
+
+test "model discovery refreshes automatic lists in five minutes and on picker open" {
+    const Fixture = struct {
+        io: std.Io,
+        server: std.Io.net.Server,
+        fn serve(self: *@This()) !void {
+            for (0..6) |index| {
+                const connection = try self.server.accept(self.io);
+                defer connection.close(self.io);
+                var buffer: [4096]u8 = undefined;
+                var reader = connection.reader(self.io, &buffer);
+                _ = try reader.interface.takeDelimiterInclusive('\n');
+                const payload = switch (index) {
+                    0, 3 => "{\"data\":[{\"id\":\"old\",\"context_window\":64000,\"reasoning\":false,\"vision\":false}]}",
+                    1 => "{\"data\":[{\"id\":\"manual\",\"context_window\":128000,\"reasoning\":false,\"vision\":false}]}",
+                    2 => "{\"data\":[{\"id\":\"new\",\"context_window\":64000,\"reasoning\":false,\"vision\":false}]}",
+                    else => "{\"data\":[]}",
+                };
+                var writer = connection.writer(self.io, &.{});
+                try writer.interface.print("HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ if (index == 4) "503 Unavailable" else "200 OK", payload.len, payload });
+                try writer.interface.flush();
+            }
+        }
+        fn finish(service: *Service, source: config.Ai, now: i64) !bool {
+            for (0..10000) |_| {
+                if (service.job.?.done.load(.acquire)) return service.poll(source, 7, now);
+                var unused: [0]std.c.pollfd = .{};
+                _ = std.c.poll(&unused, 0, 1);
+            }
+            return error.DiscoveryTimeout;
+        }
+    };
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var fixture: Fixture = .{ .io = std.testing.io, .server = try address.listen(std.testing.io, .{}) };
+    defer fixture.server.deinit(std.testing.io);
+    var serving = try std.Io.concurrent(std.testing.io, Fixture.serve, .{&fixture});
+    defer _ = serving.cancel(std.testing.io) catch {};
+    var endpoint_buffer: [128]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}/v1", .{fixture.server.socket.address.getPort()});
+    var manual = [_]config.AiModel{.{ .id = "manual", .context_window = 8192 }};
+    var providers = [_]config.AiProvider{
+        .{ .name = "automatic", .enabled = true, .endpoint = endpoint },
+        .{ .name = "configured", .enabled = true, .endpoint = endpoint, .models = &manual, .model_count = 1 },
+    };
+    const source: config.Ai = .{ .providers = &providers, .provider_count = providers.len };
+    var service: Service = .{};
+    defer service.deinit();
+    try std.testing.expect(!try service.poll(source, 7, 1000));
+    service.refreshLists(); // Opening during an in-flight request must not queue another.
+    try std.testing.expect(!service.list_refresh_requested);
+    try std.testing.expect(try Fixture.finish(&service, source, 1000));
+    try std.testing.expectEqual(@as(i64, 1300), service.next_list_refresh);
+    try std.testing.expectEqual(@as(u64, 300), service.refreshDelaySeconds(source, 1000));
+    try std.testing.expectEqualStrings("old", service.effective(source, 7).providers[0].models[0].id);
+    try std.testing.expect(!try service.poll(source, 7, 1299));
+    try std.testing.expect(!service.busy());
+    try std.testing.expect(!try service.poll(source, 7, 1300));
+    try std.testing.expect(service.job.?.only_automatic_lists);
+    try std.testing.expect(try Fixture.finish(&service, source, 1300));
+    try std.testing.expectEqualStrings("new", service.effective(source, 7).providers[0].models[0].id);
+    // The configured provider retains discovered metadata without another request.
+    try std.testing.expectEqual(@as(u32, 128000), service.effective(source, 7).providers[1].models[0].context_window);
+    try std.testing.expectEqual(@as(i64, 1000 + catalog.refresh_seconds), service.next_refresh);
+    service.refreshLists();
+    try std.testing.expect(!try service.poll(source, 7, 1301));
+    try std.testing.expect(try Fixture.finish(&service, source, 1301));
+    try std.testing.expectEqualStrings("old", service.effective(source, 7).providers[0].models[0].id);
+    service.refreshLists();
+    try std.testing.expect(!try service.poll(source, 7, 1302));
+    try std.testing.expect(!try Fixture.finish(&service, source, 1302));
+    try std.testing.expectEqualStrings("old", service.effective(source, 7).providers[0].models[0].id);
+    service.refreshLists();
+    try std.testing.expect(!try service.poll(source, 7, 1303));
+    try std.testing.expect(try Fixture.finish(&service, source, 1303));
+    try std.testing.expectEqual(@as(usize, 0), service.effective(source, 7).providers[0].model_count);
+    try serving.await(std.testing.io);
+    // With only a configured provider, opening the picker keeps the daily cadence.
+    const configured: config.Ai = .{ .providers = providers[1..], .provider_count = 1 };
+    var configured_service: Service = .{ .revision = 7, .next_refresh = 87400 };
+    defer configured_service.deinit();
+    configured_service.refreshLists();
+    try std.testing.expect(!try configured_service.poll(configured, 7, 1304));
+    try std.testing.expect(!configured_service.busy());
+    try std.testing.expectEqual(@as(u64, 86096), configured_service.refreshDelaySeconds(configured, 1304));
+}
+
+/// Use the production request path and protocol decoder, but require a real
+/// completed answer before reporting a successful settings test.
+fn probeChat(a: std.mem.Allocator, t: transport.Transport, resolved: @import("provider_config.zig").ProviderConfig, cancel: ?*@import("provider.zig").CancelToken, diagnostic: *http.Diagnostic) !void {
+    const provider = @import("provider.zig");
+    const json = @import("provider_json.zig");
+    const Probe = struct {
+        diagnostic: *http.Diagnostic,
+        key: ?[]const u8,
+        content: bool = false,
+        done: bool = false,
+        failed: bool = false,
+        fn receive(raw: *anyopaque, delta: provider.Delta) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (delta) {
+                .text, .thinking => |text| self.content = self.content or text.len != 0,
+                .tool_plan => self.content = true,
+                .done => self.done = true,
+                .err => |message| {
+                    self.failed = true;
+                    self.diagnostic.captureMessage(200, message, self.key);
+                },
+            }
+        }
+        fn chunk(raw: *anyopaque, bytes: []const u8) !void {
+            const stream: *json.Stream = @ptrCast(@alignCast(raw));
+            try stream.feed(bytes);
+        }
+    };
+    const key: ?[]const u8 = switch (resolved.auth) {
+        .bearer_memory, .anthropic_memory => |value| value,
+        .none => null,
+    };
+    var probe: Probe = .{ .diagnostic = diagnostic, .key = key };
+    const kind: json.StreamKind = switch (resolved.kind) {
+        .openai_compat => .openai_compat,
+        .anthropic => .anthropic,
+        .ollama => .ollama,
+    };
+    var stream = json.Stream.initWithKind(a, kind, Probe.receive, &probe);
+    defer stream.deinit();
+    const messages = [_]provider.Message{.{ .content = "Reply with OK." }};
+    _ = try transport.requestStream(a, t, resolved, .{ .model = resolved.model, .system = "", .messages = &messages, .max_output = 32, .timeout_ms = 30000, .cancel = cancel }, Probe.chunk, &stream);
+    try stream.finish();
+    if (probe.failed or !probe.done or !probe.content) {
+        if (diagnostic.status == 0) diagnostic.captureMessage(200, "", key);
+        return error.InvalidModelResponse;
+    }
+}
+
+test "model probe validates completed protocol responses instead of HTTP success" {
+    const Mock = struct {
+        body: []const u8,
+        status: u16 = 200,
+        calls: usize = 0,
+        fn send(raw: *anyopaque, plan: http.RequestPlan, body: []const u8, a: std.mem.Allocator) !transport.Response {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            try std.testing.expectEqual(std.http.Method.POST, plan.method);
+            try std.testing.expect(std.mem.endsWith(u8, plan.endpoint, switch (plan.auth_style) {
+                .bearer => "/api/gw/v1/chat/completions",
+                .anthropic_key => "/api/gw/v1/messages",
+                .none => "/api/gw/api/chat",
+            }));
+            try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":true") != null);
+            return .{ .status = self.status, .body = try a.dupe(u8, self.body) };
+        }
+    };
+    const openai_ok = "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n";
+    for ([_]struct { kind: @import("registry.zig").Kind = .openai_compat, body: []const u8, status: u16 = 200, failure: ?anyerror = null }{
+        .{ .body = openai_ok },
+        .{ .body = "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\n" },
+        .{ .kind = .anthropic, .body = "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"OK\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n" },
+        .{ .kind = .ollama, .body = "{\"message\":{\"content\":\"OK\"},\"done\":true}\n" },
+        .{ .body = "", .failure = error.InvalidModelResponse },
+        .{ .body = "{}", .failure = error.InvalidModelResponse },
+        .{ .body = "data: [DONE]\n\n", .failure = error.InvalidModelResponse },
+        .{ .body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n", .failure = error.InvalidModelResponse },
+        .{ .body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n", .failure = error.InvalidModelResponse },
+        .{ .body = "data: {bad-json}\n\n", .failure = error.InvalidModelResponse },
+        .{ .body = "data: {\"error\":{\"message\":\"fixture-key rejected\"}}\n\n", .failure = error.InvalidModelResponse },
+        .{ .body = "<!DOCTYPE html><html>management</html>", .failure = error.HtmlResponse },
+        .{ .body = "{}", .status = 403, .failure = error.ProviderFailure },
+        .{ .kind = .ollama, .body = "{\"message\":{\"content\":\"partial\"},\"done\":false}\n", .failure = error.InvalidModelResponse },
+    }) |item| {
+        var mock: Mock = .{ .body = item.body, .status = item.status };
+        var resolved = @import("provider_config.zig").defaults(item.kind);
+        resolved.endpoint = if (item.kind == .ollama) "http://localhost/api/gw/api" else "https://gateway.test/api/gw/v1";
+        resolved.auth = switch (item.kind) {
+            .openai_compat => .{ .bearer_memory = "fixture-key" },
+            .anthropic => .{ .anthropic_memory = "fixture-key" },
+            .ollama => .none,
+        };
+        var diagnostic: http.Diagnostic = .{};
+        const result = probeChat(std.testing.allocator, .{ .ctx = &mock, .send = Mock.send }, resolved, null, &diagnostic);
+        if (item.failure) |err| try std.testing.expectError(err, result) else try result;
+        try std.testing.expectEqual(@as(usize, 1), mock.calls);
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.message[0..diagnostic.len], "fixture-key") == null);
+    }
+    var mock: Mock = .{ .body = openai_ok };
+    var cancel: @import("provider.zig").CancelToken = .{};
+    cancel.cancel();
+    var diagnostic: http.Diagnostic = .{};
+    try std.testing.expectError(error.Cancelled, probeChat(std.testing.allocator, .{ .ctx = &mock, .send = Mock.send }, @import("provider_config.zig").defaults(.openai_compat), &cancel, &diagnostic));
+    try std.testing.expectEqual(@as(usize, 0), mock.calls);
+}
 fn sameHost(a: []const u8, b: []const u8) bool {
     const aa = std.Uri.parse(a) catch return false;
     const bb = std.Uri.parse(b) catch return false;

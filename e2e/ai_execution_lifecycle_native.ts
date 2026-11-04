@@ -52,6 +52,7 @@ const key='native-execution-'+randomBytes(8).toString('hex');
 const frame=(delta:any)=>'data: '+JSON.stringify({choices:[{index:0,delta}]})+'\n\n';
 const wireName=(id:string)=>['run_command','read_terminal'].includes(id)?id:id.replaceAll('_','_u').replaceAll('.','__');
 const emitted=new Map<string,any>(),observations=new Map<string,any>(),requests:any[]=[];
+const fullHostResults=new Map<string,any>();
 let fixtureFailure:string|null=null,activeCall:any=null,finalEmitted=false;
 let initialContext:any,groupContext:any,initialSession:any,ownedSession:any,executionRef:string|null=null,recorded:any;
 const exists=async(path:string)=>{try{await access(path);return true}catch{return false}};
@@ -63,7 +64,11 @@ const payload=(envelope:any)=>{
 };
 const result=(results:Map<string,any>,id:string,success=true)=>{
  const envelope=results.get(id);if(!envelope)return null;
- const body=payload(envelope);observations.set(id,{envelope,body,at:new Date().toISOString()});
+ const modelBody=payload(envelope),full=fullHostResults.get(id);
+ // Native receipts come from the original host result, independently of the
+ // compact provider view. Never reconstruct native evidence from model text.
+ const body=full?payload(full):modelBody;observations.set(id,{envelope,body,model_body:modelBody,at:new Date().toISOString()});
+ if(modelBody.snapshot&&full){assert.equal(modelBody.snapshot.state,body.snapshot.state);assert.equal(modelBody.snapshot.execution_id,body.snapshot.execution_id);assert(!('grant' in modelBody.snapshot));assert(!('submit_sequence' in modelBody.snapshot));}
  if(takeoverOnly&&id.startsWith('takeover-')&&success){
   if(envelope.status!=='succeeded')recordFailure('product','tool-result',`${id} returned ${envelope.status}`,{id,envelope,body});
   else if(body.snapshot&&['cancelled_unsent','outcome_unknown','recording_degraded'].includes(body.state))recordFailure('product','execution-state',`${id} observed ${body.state}: ${body.snapshot.failure??'unknown reason'}`,{id,envelope,body});
@@ -135,6 +140,7 @@ const server=createServer(async(req,res)=>{
  try{
   if(req.method!=='POST'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({data:[{id:'execution-lifecycle-fixture'}]}));return}
   let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);validateWire(body);
+  for(const line of(await readFile(join(out,'app.log'),'utf8')).split('\n')){const start=line.indexOf('AI_TOOL_TRACE ');if(start<0)continue;try{const event=JSON.parse(line.slice(start+14));if(event.event==='host_result')fullHostResults.set(event.call_id,event.result)}catch{}}
   // A real single-to-group handoff adds a host-authored user notice. Keep the
   // fixture's explicit task marker as the boundary across that genuine notice.
   const userIndex=body.messages.findLastIndex((m:any)=>m.role==='user'&&/\[E-(LIFE|STOP|AFTER|CLOSE|NEGATIVE|TAKEOVER)\]/.test(String(m.content)));
@@ -261,15 +267,15 @@ const server=createServer(async(req,res)=>{
    assert.equal(groupContext.conversation_id,initialContext.conversation_id);assert.equal(groupContext.task_id,initialContext.task_id);assert.equal(groupContext.binding_ref,group.group_ref);assert(groupContext.binding_revision>initialContext.binding_revision);
    const opened=result(results,'life-open');if(!opened)return emit(body,res,'life-open','host.open_session',{group_ref:groupContext.binding_ref,source_ref:initialSession.session_ref,connection_policy:'new_only',retention:'ask',request_key:key+'-open'});
    assert.equal(opened.ownership,'created_task');assert.equal(opened.retention,'ask');assert(opened.session_ref&&opened.operation_ref);assert.notEqual(opened.session_ref,initialSession.session_ref);
-   const ready=result(results,'life-ready');if(!ready)return emit(body,res,'life-ready','host.wait_session_ready',{operation_ref:opened.operation_ref,after_revision:opened.source_revision,wait_ms:30000});
+   const ready=result(results,'life-ready');if(!ready)return emit(body,res,'life-ready','host.wait_session_ready',{operation_ref:opened.operation_ref,wait_for:'interactive',wait_ms:30000});
    assert.equal(ready.state,'ready');assert.equal(ready.membership_committed,true);assert.equal(ready.ownership,'created_task');
    ownedSession=ready;assert.equal(ownedSession.session_ref,opened.session_ref);
-   const run=result(results,'life-run');if(!run)return emit(body,res,'life-run','host.run_in_terminal',{session_ref:ownedSession.session_ref,command,request_key:key+'-run'});
+   const run=result(results,'life-run');if(!run)return emit(body,res,'life-run','host.run_in_terminal',{session_ref:ownedSession.session_ref,command,request_key:key+'-run',wait_ms:2000});
    assert(run.execution_ref);executionRef=run.execution_ref;
-   let state=result(results,'life-wait');if(!state)return emit(body,res,'life-wait','host.wait_execution',{execution_ref:executionRef,after_revision:run.source_revision,wait_ms:30000,max_bytes:8192});
+   let state=run.state==='interval_recorded'?run:result(results,'life-wait');if(!state)return emit(body,res,'life-wait','host.wait_execution',{execution_ref:executionRef,until:'terminal',wait_ms:30000,max_bytes:8192});
    for(let i=1;state.state!=='interval_recorded'&&i<30;i++){
     assert(!['cancelled_unsent','outcome_unknown','handed_off','recording_degraded'].includes(state.state),JSON.stringify(state));
-    const id='life-wait-'+i,next=result(results,id);if(!next)return emit(body,res,id,'host.wait_execution',{execution_ref:executionRef,after_revision:state.source_revision,wait_ms:30000,max_bytes:8192});state=next;
+    const id='life-wait-'+i,next=result(results,id);if(!next)return emit(body,res,id,'host.wait_execution',{execution_ref:executionRef,until:'terminal',wait_ms:30000,max_bytes:8192});state=next;
    }
    assertIntervalRecorded(state);recorded=state;assert.equal(await readFile(markerFile,'utf8'),marker+'\n','one native write only');
    return finish(res,stage);
@@ -282,7 +288,7 @@ const server=createServer(async(req,res)=>{
   assert.equal(inventory.sessions.length,1,'TaskFinish must close only the owned terminal');assert.equal(inventory.sessions[0].session_ref,initialSession.session_ref);assert.equal(inventory.sessions[0].ready,true);
   if(stage==='STOP')return emit(body,res,'stop-run','host.run_in_terminal',{session_ref:initialSession.session_ref,command:stopCommand,request_key:key+'-stop'});
   const old=result(results,'after-old-execution',false);if(!old)return emit(body,res,'after-old-execution','host.get_execution',{execution_ref:executionRef,max_bytes:1024});
-  assertHostRejected(results.get('after-old-execution'),'ExecutionNotFound');
+  assertHostRejected(results.get('after-old-execution'),'TargetNotAuthorized');
   assert.equal(await exists(stopFile),false);assert.equal(await readFile(markerFile,'utf8'),marker+'\n');return finish(res,stage);
  }catch(error){if(takeoverOnly){if(error instanceof AcceptanceFailure)recordFailure(error.category,error.phase,error.message,error.evidence);else recordFailure('verification','provider-fixture-assertion',String(error),{active_call:activeCall})}fixtureFailure??=String(error);await writeFile(join(out,'fixture-failure.txt'),fixtureFailure);if(!res.headersSent)res.writeHead(500);res.end()}
 });
@@ -307,7 +313,21 @@ const cardNode=(card:any,id:string)=>flat(card).find((node:any)=>node.test_id===
 const executionCard=(commandMarker:string,reference:string,id?:string,expectedSummary?:string)=>h.waitFor(async()=>{
  const roots=id?await h.query(id):flat(await h.query('ai.panel')).filter((node:any)=>/^ai\.tool\.result\.\d+\./.test(node.test_id??''));
  const command=Object.values(takeoverCommands).find(value=>value.includes(commandMarker));
- return roots.find((card:any)=>shown(card)&&(command?text(cardNode(card,'ai.execution.result.command'))===queryText(command):text(cardNode(card,'ai.execution.result.command')).includes(commandMarker))&&text(cardNode(card,'ai.execution.result.execution_id')).includes(reference)&&(!expectedSummary||text(cardNode(card,'ai.execution.result.summary')).includes(expectedSummary)))??null;
+ for(const card of roots){
+  if(shown(card)&&cardNode(card,'ai.execution.result.header')&&card.rect.h<=32.1){
+   const revealed=await revealCardAction(card.test_id,'ai.execution.result.header');
+   assert((await h.clickAt(revealed.node.rect.x+20,revealed.node.rect.y+revealed.node.rect.h/2)).ok);
+   return null;
+  }
+  if(!shown(card)||!(command?text(cardNode(card,'ai.execution.result.command'))===queryText(command):text(cardNode(card,'ai.execution.result.command')).includes(commandMarker))||expectedSummary&&!text(cardNode(card,'ai.execution.result.summary')).includes(expectedSummary))continue;
+  if(!cardNode(card,'ai.execution.result.execution_id')){
+   const revealed=await revealCardAction(card.test_id,'ai.execution.result.details_toggle');
+   assert((await h.clickAt(revealed.node.rect.x+revealed.node.rect.w/2,revealed.node.rect.y+revealed.node.rect.h/2)).ok);
+   return null;
+  }
+  if(text(cardNode(card,'ai.execution.result.execution_id')).includes(reference))return card;
+ }
+ return null;
 },15000);
 const executionCardFacts=(card:any)=>({id:card.test_id,output_scope:text(cardNode(card,'ai.execution.result.output_scope')),output_attribution:text(cardNode(card,'ai.execution.result.output_attribution')),output_attribution_reason:text(cardNode(card,'ai.execution.result.output_attribution_reason')),output_limit:text(cardNode(card,'ai.execution.result.output_limit')),output_label:text(cardNode(card,'ai.execution.result.output_label')),summary:text(cardNode(card,'ai.execution.result.summary')),command:text(cardNode(card,'ai.execution.result.command')),execution_id:text(cardNode(card,'ai.execution.result.execution_id')),target:text(cardNode(card,'ai.execution.result.target')),process:cardNode(card,'ai.execution.result.process')?text(cardNode(card,'ai.execution.result.process')):null,output:text(cardNode(card,'ai.execution.result.terminal_output')),recording_id:text(cardNode(card,'ai.execution.result.recording_id')),stop:!!cardNode(card,'ai.execution.result.stop'),takeover:!!cardNode(card,'ai.execution.result.takeover'),view_terminal:!!cardNode(card,'ai.execution.result.view_terminal'),copy_recording:!!cardNode(card,'ai.execution.result.copy_recording'),copy_output:!!cardNode(card,'ai.execution.result.copy_output')});
 const revealCardAction=async(id:string,action:string)=>{
@@ -324,12 +344,12 @@ const copyNative=async(node:any,label:string)=>{
  return(await promisify(execFile)('/usr/bin/pbpaste',[],{encoding:'utf8'})).stdout;
 };
 const assertIntervalCardScope=(facts:any,snapshot?:any)=>{
- assert(facts.output_scope.startsWith('同一终端观测片段 · '),'card must identify its observed PTY interval');
- assert(facts.output_label.includes('同一终端观测片段'));
- assert(facts.output_limit.includes('仅覆盖本次观测区间')&&facts.output_limit.includes('其他程序')&&facts.output_limit.includes('后台输出可能在前台结束后继续'),'card must state the interval/output limits');
+ assert(facts.output_scope.startsWith('本次终端输出 · '),'card must identify its observed PTY interval');
+ assert(facts.output_label==='终端输出');
+ assert(facts.output_limit.includes('仅保存本次采集期间')&&facts.output_limit.includes('其他程序')&&facts.output_limit.includes('后台任务可能继续输出'),'card must state the interval/output limits');
  const attribution:any={unverified:'输出归属未确认',no_concurrent_owner_observed:'未观察到并发写入 · 输出归属未确认',concurrent_observed:'观察到并发写入 · 输出可能混有其他程序内容'};
  assert(Object.values(attribution).includes(facts.output_attribution));
- if(snapshot){assert.equal(facts.output_attribution,attribution[snapshot.output_attribution]);assert.equal(facts.output_scope,snapshot.interval_saved?'同一终端观测片段 · 已保存':'同一终端观测片段 · 保存待确认')}
+ if(snapshot){assert.equal(facts.output_attribution,attribution[snapshot.output_attribution]);assert.equal(facts.output_scope,snapshot.interval_saved?'本次终端输出 · 已保存':'本次终端输出 · 保存待确认')}
  assert(!/完整输出|输出完整|记录已封存/.test([facts.summary,facts.output_label,facts.output_scope,facts.output_limit].join(' ')),'an observed interval must not claim exact complete output');
 };
 const visible=(id:string)=>h.waitFor(async()=>{assert.equal(fixtureFailure,null);return(await h.query(id)).find(shown)??null},20000);
@@ -402,7 +422,7 @@ try{acceptance:{
    }
    if(takeoverHeld?.kind==='diagnostic_failure')throw new AcceptanceFailure('product',takeoverState.primary_failure.phase,takeoverState.primary_failure.reason,takeoverState.failure_snapshots);
    if(takeoverHeld?.kind==='active_confirmed'){
-     await visible('ai.stop');const initialCardA=await executionCard(takeoverMarkerA,takeoverState.execution_a),initialCardB=await executionCard(takeoverMarkerB,takeoverState.execution_b);takeoverState.ui_card_ids={a:initialCardA.test_id,b:initialCardB.test_id};takeoverState.ui_cards_initial=[executionCardFacts(initialCardA),executionCardFacts(initialCardB)];for(const card of takeoverState.ui_cards_initial){assert(card.summary.includes('最近观测')&&card.summary.includes('运行中'));assertIntervalCardScope(card);assert(!card.summary.includes('已完成'));assert(!card.process?.includes('退出码'))}await click('ai.collapse');
+     await visible('ai.stop');const initialCardA=await executionCard(takeoverMarkerA,takeoverState.execution_a),initialCardB=await executionCard(takeoverMarkerB,takeoverState.execution_b);takeoverState.ui_card_ids={a:initialCardA.test_id,b:initialCardB.test_id};takeoverState.ui_cards_initial=[executionCardFacts(initialCardA),executionCardFacts(initialCardB)];for(const card of takeoverState.ui_cards_initial){assert(card.summary.includes('运行中'));assertIntervalCardScope(card);assert(!card.summary.includes('已完成'));assert(!card.process?.includes('退出码'))}await click('ai.collapse');
      const a=takeoverState.session_a.session_id,b=takeoverState.session_b.session_id;assert.notEqual(a,b);
      const paneA=await controlledPane(a),paneB=await controlledPane(b);takeoverState.control_tags_before=[];
      for(const[id,pane]of[[a,paneA],[b,paneB]]as const){const right=pane.surface.rect.x+pane.surface.rect.w-pane.tag.rect.x-pane.tag.rect.w,bottom=pane.surface.rect.y+pane.surface.rect.h-pane.tag.rect.y-pane.tag.rect.h;assert(Math.abs(pane.tag.rect.h-28)<=.5);assert(Math.abs(right-12)<=.5);assert(Math.abs(bottom-10)<=.5);assert.equal(text(pane.title),'AI 控制 • 只读');takeoverState.control_tags_before.push({session_id:id,surface:pane.surface.rect,tag:pane.tag.rect,right,bottom,title:text(pane.title),button:pane.button.rect})}
@@ -449,7 +469,7 @@ try{acceptance:{
   }
   await writeFile(join(out,'takeover-recording-manifests.json'),JSON.stringify(manifests,null,2));takeoverState.provider_requests=requests.length;report.takeover=takeoverState;
   const finalCards=[{marker:takeoverMarkerA,reference:takeoverState.execution_a,id:takeoverState.ui_card_ids.a,command:takeoverCommands.a,session:takeoverState.session_a.session_id,snapshot:takeoverState.finished_original_a.snapshot},{marker:takeoverMarkerB,reference:takeoverState.execution_b,id:takeoverState.ui_card_ids.b,command:takeoverCommands.b,session:takeoverState.session_b.session_id,snapshot:takeoverState.finished_b.snapshot},{marker:takeoverFreshMarker,reference:takeoverState.fresh_execution_a,id:undefined,command:takeoverCommands.fresh,session:takeoverState.session_a.session_id,snapshot:takeoverState.finished_fresh_a.snapshot}];takeoverState.ui_cards_final=[];
-  for(const expected of finalCards){const card=await executionCard(expected.marker,expected.reference,expected.id,'前台已结束 · 观测片段已保存'),facts=executionCardFacts(card);assertIntervalCardScope(facts,expected.snapshot);assert.equal(facts.command,queryText(expected.command));assert(facts.target.endsWith('#'+expected.session));assert(facts.process?.includes('前台已结束 · 退出码 0'));const revealed=await revealCardAction(card.test_id,'ai.execution.result.copy_output');const complete_output=await copyNative(revealed.node,'saved interval output copy');assert(complete_output.includes(expected.marker),'the real native copy must expose the marker beyond the bounded query preview');Object.assign(facts,{complete_output});const recording=Array.isArray(expected.snapshot.recording_id)?Buffer.from(expected.snapshot.recording_id).toString('utf8'):expected.snapshot.recording_id;assert(facts.recording_id.includes(recording));assert(!facts.stop&&!facts.takeover);assert(facts.view_terminal&&facts.copy_recording&&facts.copy_output);takeoverState.ui_cards_final.push(facts);await capture('takeover-06-final-interval-'+expected.reference.slice(3,11))}
+  for(const expected of finalCards){const card=await executionCard(expected.marker,expected.reference,expected.id,'命令已结束'),facts=executionCardFacts(card);assertIntervalCardScope(facts,expected.snapshot);assert.equal(facts.command,queryText(expected.command));assert(facts.target.endsWith('#'+expected.session));assert(facts.process?.includes('退出码 0'));const revealed=await revealCardAction(card.test_id,'ai.execution.result.copy_output');const complete_output=await copyNative(revealed.node,'saved interval output copy');assert(complete_output.includes(expected.marker),'the real native copy must expose the marker beyond the bounded query preview');Object.assign(facts,{complete_output});const recording=Array.isArray(expected.snapshot.recording_id)?Buffer.from(expected.snapshot.recording_id).toString('utf8'):expected.snapshot.recording_id;assert(facts.recording_id.includes(recording));assert(!facts.stop&&!facts.takeover);assert(facts.view_terminal&&facts.copy_recording&&facts.copy_output);takeoverState.ui_cards_final.push(facts);await capture('takeover-06-final-interval-'+expected.reference.slice(3,11))}
   report.checks.push('A real same-Task Local builtin read and a second Local zselect loop run under independent approved execution grants','Native multi-target takeover selects only Session A: its input_handed_off/input_ready/local_released become true while Session B keeps its original live AI grant and running foreground','The original provider stream survives handoff, receives the host input_handoff notice in the original CID/Task, continues real get_execution calls and eventually emits final text','Normal terminal surface input ends the original builtin read; its original execution remains observable through true foreground exit, END and a durably saved same-PTY interval','A fresh exact approval runs another command in the same handed-off Session; the old execution keeps its saved interval and original identity and the new grant clears input_handed_off','All three original executions finish naturally with real saved PTY intervals, without stop_execution, provider cancellation, command replay or guard bypass');
   report.checks.push('The exact original run cards preserve command and execution identity while real get/wait results update the active handoff state, remove only A controls and retain B controls; only true foreground-finished interval receipts render exit 0, output and the real recording ID');
   assert.equal((await h.query('groups.pane.title')).filter(shown).length,3,'all real sessions remain until explicit normal close');await capture('takeover-06-final-same-task-and-recorded-intervals');await normalClose();report.status='passed_takeover_only';break acceptance;
@@ -496,7 +516,7 @@ try{acceptance:{
    assert.equal(await exists(markerFile),false,'command must have zero writes before its approval');
    if(activeCall.name==='host.run_in_terminal'){
     assert.equal(activeCall.id,'life-run');assert.equal(summary,normalizedCommand,'approval must show normalized command');
-    assert.equal(text(await visible('ai.host_approval.title')),'执行命令');await capture('03-command-pending-zero-write');
+    assert.equal(text(await visible('ai.host_approval.title')),'请求执行命令');await capture('03-command-pending-zero-write');
    }else{assert(['life-create-group','life-open'].includes(activeCall.id),activeCall.id);await capture(activeCall.id==='life-create-group'?'01-group-pending':'02-owned-session-pending')}
    approved.add(activeCall.id);await click('ai.host_approval.accept');
   }return null;

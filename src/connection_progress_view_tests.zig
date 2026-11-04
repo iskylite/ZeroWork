@@ -29,15 +29,15 @@ test "connection progress focus uses a filled surface without control outlines" 
     try f.show(f.snapshot(&direct));
     f.cx.focus_manager.setFocusWithReason(f.view.toggle_button, .click);
     _ = f.cx.render();
-    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_active, f.view.toggle_button.getBackground());
+    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_focus, f.view.toggle_button.getBackground());
     f.cx.focus_manager.setFocusWithReason(f.view.toggle_button, .tab);
     _ = f.cx.render();
     try std.testing.expect(f.view.toggle_button.style.outline() == null);
-    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_active, f.view.toggle_button.getBackground());
+    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_focus, f.view.toggle_button.getBackground());
     f.record(0, 1, .transport, .started);
     try f.show(f.snapshot(&direct));
     _ = f.cx.render();
-    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_active, f.view.toggle_button.getBackground());
+    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_focus, f.view.toggle_button.getBackground());
     try std.testing.expect(!ui.Color.eql(f.view.cancel_button.?.getBackground(), f.view.footer.getBackground()));
     try std.testing.expectEqual(@as(f32, 96), f.view.cancel_button.?.globalRect().w);
     try std.testing.expectEqual(@as(f32, 32), f.view.cancel_button.?.globalRect().h);
@@ -51,6 +51,17 @@ test "connection progress full values survive updates and keyboard tooltips clos
     try f.show(f.snapshot(&hops));
     const full = "Production database with a long name\noperations-administrator@[2001:db8:1234:5678:abcd:ef01:2345:6789]:2222";
     try std.testing.expectEqualStrings(full, f.view.identity_tip_label.getText().?.content);
+    try std.testing.expectEqualStrings("", f.view.footer_hint.getText().?.content);
+    try std.testing.expectEqualStrings("", f.view.log_help.getText().?.content);
+    const close = f.view.close_icon.?.parent.?;
+    const copy = f.view.copy_icon.?.parent.?;
+    close.behavior.events.on_focus.?.invoke();
+    try std.testing.expect(f.view.action_tips[0].open.?.peek());
+    try std.testing.expectEqualStrings("关闭窗口将取消本次连接", f.view.action_tips[0].content.children.items[0].getText().?.content);
+    close.behavior.events.on_blur.?.invoke();
+    try std.testing.expect(!f.view.action_tips[0].open.?.peek());
+    copy.behavior.events.on_focus.?.invoke();
+    try std.testing.expectEqualStrings("复制连接日志，日志不含凭据", f.view.action_tips[1].content.children.items[0].getText().?.content);
     const slot = &f.view.slots[1];
     slot.node.behavior.events.on_focus.?.invoke();
     try std.testing.expect(slot.tip_open.peek());
@@ -67,6 +78,13 @@ test "connection progress full values survive updates and keyboard tooltips clos
     f.view.hide();
     try std.testing.expect(!slot.tip_open.peek());
     try std.testing.expect(!f.view.identity_tip_open.peek());
+    try std.testing.expect(!f.view.action_tips[1].open.?.peek());
+    var failed = f.snapshot(&hops);
+    failed.state = .failed;
+    failed.cleanup = .releasing;
+    try f.show(failed);
+    try std.testing.expectEqualStrings("关闭连接结果", f.view.action_tips[0].content.children.items[0].getText().?.content);
+    try std.testing.expectEqualStrings("正在结束上一次连接…", f.view.footer_hint.getText().?.content);
 }
 
 const Fixture = struct {
@@ -411,6 +429,7 @@ test "connection progress view log follow pauses on scroll new rows stay pending
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
+    try f.cx.setTestFrameStep(16);
     const hops = [_]P.Hop{ route[0], direct[0] };
     for ([_]P.progress.Phase{ .transport, .handshake, .host_key, .authentication, .ready }) |phase| {
         f.record(0, 2, phase, .started);
@@ -453,8 +472,20 @@ test "connection progress view log follow pauses on scroll new rows stay pending
     try std.testing.expect(f.view.filter == null);
     f.cx.setViewport(860, 480);
     try f.show(f.snapshot(&hops));
+    // Disclosure height and Modal entrance animate. Assert the compact layout
+    // after both finish, using virtual frames rather than wall-clock sleeps.
+    for (0..60) |_| {
+        f.cx.requestRedraw();
+        f.cx.advanceFrameClock();
+        _ = f.cx.render();
+        if (!f.view.logs_disclosure.animating and !f.cx.overlay_stack.hasActiveAnimations()) break;
+    }
+    try std.testing.expect(!f.view.logs_disclosure.animating);
+    try std.testing.expect(!f.cx.overlay_stack.hasActiveAnimations());
     try std.testing.expectEqual(@as(f32, 464), f.view.dialog.globalRect().h);
     try std.testing.expectApproxEqAbs(f.view.dialog.globalRect().y + f.view.dialog.globalRect().h, f.view.footer.globalRect().y + f.view.footer.globalRect().h, 0.01);
+    try std.testing.expect(f.view.dialog.globalRect().y >= 8);
+    try std.testing.expect(f.view.footer.globalRect().y + f.view.footer.globalRect().h <= 472);
 }
 
 test "connection progress viewport width changes preserve reachable actions at unchanged height" {
@@ -478,6 +509,35 @@ test "connection progress viewport width changes preserve reachable actions at u
     const panel = f.view.dialog.globalRect();
     const cancel = f.view.cancel_button.?.globalRect();
     try std.testing.expect(cancel.x >= panel.x and cancel.x + cancel.w <= panel.x + panel.w);
+}
+
+test "SFTP progress snapshot refresh fits a bounded UI stack and retains owned diagnostics" {
+    const Worker = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.check() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn check(_: *@This()) !void {
+            const f = try a.create(Fixture);
+            defer a.destroy(f);
+            try f.init();
+            defer f.deinit();
+            const snapshot = try a.create(P.Snapshot);
+            defer a.destroy(snapshot);
+            f.record(0, 1, .transport, .started);
+            snapshot.* = .{ .key = key, .hops = &direct, .journal = f.journal.snapshot(), .file_session = true, .activity = "正在读取 SFTP 初始目录…", .local_ready = true };
+            for (0..16) |_| try f.view.show(snapshot.*);
+            snapshot.journal.entries[0].host[0] = 'x';
+            try std.testing.expectEqualStrings("db.example", f.view.source.?.value.journal.entries[0].hostSlice());
+            try std.testing.expect(f.view.isVisible());
+        }
+    };
+    var worker: Worker = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 2 * 1024 * 1024 }, Worker.run, .{&worker});
+    thread.join();
+    if (worker.failure) |err| return err;
 }
 
 test "SFTP progress keeps failure code and permits retry only after actual cleanup" {

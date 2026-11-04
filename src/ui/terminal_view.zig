@@ -141,7 +141,7 @@ pub const TerminalViewNode = struct {
     terminal_font_family: ?[]u8 = null,
     terminal_font_family_id: u16 = 0,
     cursor_style: CursorStyle = .block,
-    input_line_highlight: bool = false,
+    input_line_highlight: bool = true,
     input_highlight_node: ?*ui.Node = null,
     input_highlight_bar: ?*ui.Node = null,
     terminal_line_height: f32 = terminal_line_height_default,
@@ -167,7 +167,7 @@ pub const TerminalViewNode = struct {
     record_times: [max_grid_rows]?*ui.Node = @splat(null),
     record_states: [max_grid_rows]?*ui.Node = @splat(null),
     record_backgrounds: [max_grid_rows]?*ui.Node = @splat(null),
-    history_command_states: [max_grid_rows]?*ui.Node = @splat(null),
+    record_qrs: [max_grid_rows]@import("donation_qr_view.zig").View = @splat(.{}),
     history_command_info: [max_grid_rows]?*ui.Node = @splat(null),
     history_command_ids: [max_grid_rows]?u64 = @splat(null),
     history_command_cover: [max_grid_rows]?u64 = @splat(null),
@@ -225,6 +225,7 @@ pub const TerminalViewNode = struct {
     ghost_cache: OverlayCache = .{},
     palette: command_palette.Palette = .{},
     local_editor: command_palette.Editor = .{},
+    builtin_completion: @import("builtin_completion.zig").State = .{},
     parameter_panel: ?*ui.Node = null,
     parameter_cache: OverlayCache = .{},
     parameter_color: ?ui.Color = null,
@@ -234,6 +235,9 @@ pub const TerminalViewNode = struct {
     command_record_retry: bool = false,
     command_message: ?*ui.Node = null,
     command_message_text: ?*ui.Node = null,
+    shell_attach_pending: bool = false,
+    shell_attach_record: ?u64 = null,
+    shell_attach_owner: ?SessionHandle = null,
     line: command_palette.LineTracker = .{},
     local_input_node: *ui.Node,
     local_input_cache: OverlayCache = .{},
@@ -274,6 +278,9 @@ pub const TerminalViewNode = struct {
     history_reading: ?@import("history_reading.zig").Model = null,
     history_reading_height: f32 = 0,
     history_reading_width: f32 = 0,
+    history_reading_top: ?usize = null,
+    // Borrowed only during renderFrameContent; the retained row layouts are copied.
+    history_reading_presentation: ?[]const history_replay.Timeline.PresentationRow = null,
     history_notice: ?*ui.Node = null,
     profile_frame: u64 = 0,
     profile_refresh_calls: u64 = 0,
@@ -297,6 +304,12 @@ pub const TerminalViewNode = struct {
     search_view: ?terminal_search.View = null,
     search_marks: std.ArrayList(*ui.Node) = .empty,
     service_search: ?terminal_service.SearchSnapshot = null,
+    service_search_task: ?*terminal_service.SearchTask = null,
+    service_search_shape: ?@import("../vt/search_task.zig").Shape = null,
+    service_search_last_full_ms: ?f64 = null,
+    service_search_background_scans: u64 = 0,
+    service_search_synchronous_scans: u64 = 0,
+    service_search_cancelled: u64 = 0,
     search_anchor: ?terminal_service.Anchor = null,
     search_locate_pending: bool = false,
     error_hint: ?*@import("command_error_hint_view.zig").View = null,
@@ -320,6 +333,7 @@ pub const TerminalViewNode = struct {
         context: ?*anyopaque = null,
         on_command: *const fn (context: ?*anyopaque, command: []const u8, executed: bool) void,
         on_command_from: ?*const fn (?*anyopaque, *TerminalViewNode, []const u8, bool) void = null,
+        parameter_candidates: ?*const fn (?*anyopaque, []const u8, std.mem.Allocator) anyerror![]const []const u8 = null,
     };
 
     pub const CmdCMode = enum { smart, copy_only, signal_only };
@@ -361,7 +375,7 @@ pub const TerminalViewNode = struct {
         try title.appendChild(cx.allocator, title_icon);
         try title.appendChild(cx.allocator, title_text);
         try bar.appendChild(cx.allocator, title);
-        const track = try ui.box(cx, .{ .height = .{ .px = 12 }, .width = .fill(), .background = c.well, .border = .{ .radius = 6 } }, .{});
+        const track = try ui.box(cx, .{ .cursor = .pointer, .height = .{ .px = 12 }, .width = .fill(), .background = c.well, .border = .{ .radius = 6 } }, .{});
         track.meta.ownership.meta.test_id = "terminal.history.track";
         const fill = try ui.box(cx, .{ .height = .{ .px = 12 }, .width = .{ .percent = 100 }, .background = c.accent, .border = .{ .radius = 6 } }, .{});
         fill.setTransformOrigin(cx.allocator, .{ .x = .{ .px = 0 }, .y = .{ .px = 0 } });
@@ -437,6 +451,7 @@ pub const TerminalViewNode = struct {
             self.rows_box.setDisplay(.none);
         }
         self.history_search_top = null;
+        self.history_reading_top = null;
         self.history_dragging = false;
         self.selection.clear();
         if (self.history_bar) |bar| bar.setDisplay(.none);
@@ -446,9 +461,9 @@ pub const TerminalViewNode = struct {
         if (self.history.latest()) |entry| _ = self.renderFrame(self.cx, text_frame.decode(entry.wire).?) catch {};
         if (self.terminal_surface != null) {
             for (self.record_markers) |maybe| if (maybe) |node| node.setDisplay(.none);
+            for (&self.record_qrs) |*qr| qr.hide();
             for (self.record_times) |maybe| if (maybe) |node| node.setDisplay(.none);
             for (self.record_states) |maybe| if (maybe) |node| node.setDisplay(.none);
-            for (self.history_command_states) |maybe| if (maybe) |node| node.setDisplay(.none);
             for (self.history_command_info) |maybe| if (maybe) |node| node.setDisplay(.none);
             for (self.timestamp_nodes) |maybe| if (maybe) |node| node.setDisplay(.none);
         } else if (self.legacy_document != null and self.legacy_document.?.composed()) {
@@ -462,10 +477,7 @@ pub const TerminalViewNode = struct {
     /// rather than the live worker selection API.
     fn copyHistorySelection(self: *TerminalViewNode, selection: @import("../vt/engine.zig").Selection, allocator: std.mem.Allocator) ![]u8 {
         const entry = self.history.current() orelse return allocator.alloc(u8, 0);
-        if (self.history_reading != null and self.history_search_wire.items.len > 0 and self.history_search_top != null) {
-            const visible = text_frame.decode(self.history_search_wire.items) orelse return error.InvalidFrame;
-            return extractFrameSelection(visible, selection, allocator);
-        }
+        if (self.history_reading_top != null) return self.copyReadingSelection(selection, allocator);
         if (entry.search) |document| if (entry.presentation.len > 0) {
             var first_row: ?usize = null;
             var last_row: ?usize = null;
@@ -504,6 +516,41 @@ pub const TerminalViewNode = struct {
         return extractFrameSelection(frame, selection, allocator);
     }
 
+    fn copyReadingSelection(self: *TerminalViewNode, selection: @import("../vt/engine.zig").Selection, allocator: std.mem.Allocator) ![]u8 {
+        const reading = self.history_reading orelse return error.StaleSelection;
+        const top = self.history_reading_top orelse return error.StaleSelection;
+        const first = top + selection.start_row;
+        const last = top + selection.end_row;
+        if (first > last or last >= reading.anchors.items.len) return error.StaleSelection;
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(allocator);
+        for (reading.anchors.items[first .. last + 1], first..) |anchor, index| {
+            const entry = self.history.frames.items[anchor.frame_index];
+            if (index > first) {
+                const previous = reading.anchors.items[index - 1];
+                const continuation = anchor.has_document and previous.has_document and std.meta.eql(entry.search.?.rows[anchor.row].logical_id, self.history.frames.items[previous.frame_index].search.?.rows[previous.row].logical_id);
+                if (self.local_state.block_selection or !continuation) try output.append(allocator, '\n');
+            }
+            const left = if (self.local_state.block_selection) @min(selection.start_col, selection.end_col) else if (index == first) selection.start_col else 0;
+            const right = if (self.local_state.block_selection) @max(selection.start_col, selection.end_col) +| 1 else if (index == last) selection.end_col +| 1 else std.math.maxInt(u16);
+            if (anchor.has_document) {
+                const document = entry.search.?;
+                for (document.spans) |span| {
+                    if (span.row < anchor.row) continue;
+                    if (span.row > anchor.row) break;
+                    if (span.columns(left, right)) |clipped| try output.appendSlice(allocator, document.text[clipped.start..clipped.end]);
+                }
+            } else {
+                const source = text_frame.decode(entry.wire) orelse return error.InvalidFrame;
+                const copied = try extractFrameSelection(source, .{ .start_row = anchor.row, .end_row = anchor.row, .start_col = left, .end_col = right }, allocator);
+                defer allocator.free(copied);
+                try output.appendSlice(allocator, copied);
+            }
+            if (output.items.len > 1024 * 1024) return error.SelectionTooLarge;
+        }
+        return output.toOwnedSlice(allocator);
+    }
+
     fn recordingHistory(self: *TerminalViewNode) *history_replay.Timeline {
         return if (self.history_live) |*live| live else &self.history;
     }
@@ -524,22 +571,108 @@ pub const TerminalViewNode = struct {
         if (reading.anchors.items.len == 0) return;
         const position = reading.position;
         self.history.selected = position.frame_index;
-        const anchor = reading.anchors.items[position.anchor];
+        self.history_reading_top = position.anchor;
+        self.history_search_top = null;
+        self.history_display_skip = 0;
         self.rows_box.style.padding.top = self.historyContentPadding().top - position.pixel;
         self.selection.clear();
-        if (anchor.has_document) {
-            try self.renderHistoryDocumentRow(@intCast(anchor.row));
-        } else {
-            self.history_search_top = null;
-            self.history_legacy_start = self.history.legacyOffset(position.frame_index);
-            const entry = self.history.current().?;
-            const painted = try @import("history_colors.zig").frame(self.cx.allocator, entry, self.terminal_theme);
-            defer painted.deinit(self.cx.allocator);
-            _ = try self.renderFrame(self.cx, painted.frame);
+
+        // The reading index can cross frame boundaries within one viewport.
+        // Paint each indexed row from its retained witness, including rows
+        // after an older frame's blank tail, rather than repainting one frame.
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(self.cx.allocator);
+        var spans: std.ArrayList(text_frame.WireSpan) = .empty;
+        defer spans.deinit(self.cx.allocator);
+        var presentation: [max_grid_rows]history_replay.Timeline.PresentationRow = undefined;
+        var count: usize = 0;
+        var cols: u16 = 1;
+        const origin = reading.anchors.items[position.anchor].y;
+        for (reading.anchors.items[position.anchor..]) |anchor| {
+            if (count == max_grid_rows or (count > 0 and anchor.y >= reading.offset + reading.viewport)) break;
+            const entry = self.history.frames.items[anchor.frame_index];
+            const recorded = text_frame.decode(entry.wire) orelse return error.InvalidFrame;
+            cols = @max(cols, recorded.cols);
+            if (count > 0) try output.append(self.cx.allocator, '\n');
+            var meta: history_replay.Timeline.PresentationRow = .{ .y = @intCast(count), .id = .{ 0, anchor.row }, .kind = 0, .state = 0, .timestamp = anchor.timestamp };
+            if (anchor.has_document) {
+                const document = entry.search.?;
+                const row = document.rows[anchor.row];
+                meta = .{ .layout = row.presentation, .y = @intCast(count), .id = row.id, .kind = row.application_kind, .state = row.application_state, .timestamp = row.timestamp_ms };
+                var lo: usize = 0;
+                var hi = document.spans.len;
+                while (lo < hi) {
+                    const mid = lo + (hi - lo) / 2;
+                    if (document.spans[mid].row < anchor.row) lo = mid + 1 else hi = mid;
+                }
+                var column: u16 = 0;
+                for (document.spans[lo..]) |cell| {
+                    if (cell.row != anchor.row) break;
+                    if (cell.col > column) try output.appendNTimes(self.cx.allocator, ' ', cell.col - column);
+                    const at = output.items.len;
+                    try output.appendSlice(self.cx.allocator, document.text[cell.start..cell.end]);
+                    column = cell.col + cell.width;
+                    const style = @import("history_colors.zig").resolve(cell, row.application_kind, self.terminal_theme, entry.reverse_colors);
+                    try appendHistoryStyle(self.cx.allocator, &spans, at, output.items.len, style);
+                }
+            } else {
+                if (anchor.row < entry.presentation.len) {
+                    meta = entry.presentation[anchor.row];
+                    meta.y = @intCast(count);
+                }
+                var start: usize = 0;
+                for (0..anchor.row) |_| start = (std.mem.indexOfScalarPos(u8, recorded.text, start, '\n') orelse return error.InvalidFrame) + 1;
+                const end = std.mem.indexOfScalarPos(u8, recorded.text, start, '\n') orelse recorded.text.len;
+                const at = output.items.len;
+                try output.appendSlice(self.cx.allocator, recorded.text[start..end]);
+                const painted = try @import("history_colors.zig").frame(self.cx.allocator, entry, self.terminal_theme);
+                defer painted.deinit(self.cx.allocator);
+                for (painted.frame.spans) |span| {
+                    const from = @max(start, span.start);
+                    const to = @min(end, span.end);
+                    if (to <= from) continue;
+                    try appendHistoryStyle(self.cx.allocator, &spans, at + from - start, at + to - start, .{ .color = span.color, .bg = span.bg, .flags = span.flags });
+                }
+            }
+            const glyph_y = anchor.y - origin + meta.layout.before;
+            meta.layout.article_y += glyph_y - (meta.layout.y orelse @as(f32, @floatFromInt(anchor.row)) * self.cell_height);
+            meta.layout.y = glyph_y;
+            presentation[count] = meta;
+            count += 1;
         }
+        self.history_search_wire.clearRetainingCapacity();
+        const style_bytes = spans.items.len * text_frame.span_wire_bytes;
+        try self.history_search_wire.resize(self.cx.allocator, text_frame.header_bytes + style_bytes + output.items.len);
+        text_frame.encodeHeader(self.history_search_wire.items[0..text_frame.header_bytes], .{ .visible = false }, cols, @intCast(count), spans.items.len, output.items.len);
+        for (spans.items, 0..) |span, index| {
+            const at = text_frame.header_bytes + index * text_frame.span_wire_bytes;
+            const bytes = self.history_search_wire.items[at..][0..text_frame.span_wire_bytes];
+            std.mem.writeInt(u32, bytes[0..4], span.start, .little);
+            std.mem.writeInt(u32, bytes[4..8], span.end, .little);
+            std.mem.writeInt(u32, bytes[8..12], span.color, .little);
+            std.mem.writeInt(u32, bytes[12..16], span.bg, .little);
+            std.mem.writeInt(u32, bytes[16..20], span.flags, .little);
+        }
+        @memcpy(self.history_search_wire.items[text_frame.header_bytes + style_bytes ..], output.items);
+        self.history_reading_presentation = presentation[0..count];
+        defer self.history_reading_presentation = null;
+        _ = try self.renderFrameContent(self.cx, text_frame.decode(self.history_search_wire.items) orelse return error.InvalidFrame);
         self.updateHistoryPosition();
         self.updateMetrics();
+        if (self.search_open) try self.refreshSearchMarks();
         self.cx.requestRedraw();
+    }
+    fn appendHistoryStyle(allocator: std.mem.Allocator, spans: *std.ArrayList(text_frame.WireSpan), start: usize, end: usize, style: @import("history_colors.zig").Style) !void {
+        if (style.color == 0 and style.bg == 0 and style.flags == 0) return;
+        if (spans.items.len > 0) {
+            const previous = &spans.items[spans.items.len - 1];
+            if (previous.end == start and previous.color == style.color and previous.bg == style.bg and previous.flags == style.flags) {
+                previous.end = @intCast(end);
+                return;
+            }
+        }
+        if (spans.items.len == std.math.maxInt(u16)) return error.SearchTooLarge;
+        try spans.append(allocator, .{ .start = @intCast(start), .end = @intCast(end), .color = style.color, .bg = style.bg, .flags = style.flags });
     }
     fn updateHistoryPosition(self: *TerminalViewNode) void {
         const reading = if (self.history_reading) |*value| value else return;
@@ -682,6 +815,7 @@ pub const TerminalViewNode = struct {
         self.cx.requestRedraw();
     }
     pub fn closeSearch(self: *TerminalViewNode) void {
+        self.cancelServiceSearch();
         self.search_open = false;
         self.search.close();
         self.search_locate_pending = false;
@@ -768,11 +902,98 @@ pub const TerminalViewNode = struct {
         };
         self.search_anchor = null;
     }
+    fn cancelServiceSearch(self: *TerminalViewNode) void {
+        if (self.service_search_task) |task| {
+            task.cancelled.store(true, .release);
+            task.release();
+            self.service_search_task = null;
+            self.service_search_cancelled += 1;
+        }
+    }
     fn clearServiceSearch(self: *TerminalViewNode) void {
+        self.cancelServiceSearch();
         self.releaseSearchAnchor();
-        if (self.service_search) |*snapshot| snapshot.deinit(self.cx.allocator);
+        if (self.service_search) |*snapshot| snapshot.deinit(std.heap.page_allocator);
         self.service_search = null;
+        self.service_search_shape = null;
+        self.service_search_last_full_ms = null;
         self.search_locate_pending = false;
+    }
+    fn serviceSearchSnapshot(self: *TerminalViewNode, surface: *TerminalSurface) !terminal_service.SearchSnapshot {
+        if (self.service_search_task) |task| {
+            if (!task.done.load(.acquire)) {
+                self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                return error.WorkerBusy;
+            }
+            self.service_search_task = null;
+            defer task.release();
+            if (task.cancelled.load(.acquire)) return error.Cancelled;
+            var result = task.take() orelse return task.failure orelse error.SearchUnavailable;
+            const displayed = surface.snapshot orelse {
+                result.document.deinit(std.heap.page_allocator);
+                return error.WorkerBusy;
+            };
+            if (!result.owner.eql(surface.owner) or !result.shape.matches(&displayed.projection)) {
+                result.document.deinit(std.heap.page_allocator);
+                self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                return error.StaleProjection;
+            }
+            return .{ .owner = result.owner, .document = result.document };
+        }
+        const displayed = surface.snapshot orelse return error.WorkerBusy;
+        // Prefer a bounded tail to another full capture. A stale publication
+        // retries this tail; it must not flood the CPU queue with full scans.
+        if (self.service_search) |*previous| if (self.service_search_shape) |shape| {
+            const source = &previous.document;
+            if (shape.matches(&displayed.projection) and source.source_version < displayed.projection.version and source.rows.len >= displayed.projection.rows and displayed.projection.scrollback.total_rows >= source.rows.len) {
+                var start = source.rows.len - displayed.projection.rows;
+                if (start > 0) start -= 1;
+                const limit = displayed.projection.rows *| 2 +| 1;
+                while (start > 0 and source.rows.len - start <= limit and !std.meta.eql(source.rows[start].id, source.rows[start].logical_id)) start -= 1;
+                if (surface.service.searchTail(.{ .start_row = @intCast(start), .max_rows = limit, .version = displayed.projection.version }, std.heap.page_allocator)) |value| {
+                    var tail = value;
+                    defer tail.deinit(std.heap.page_allocator);
+                    if (tail.owner.eql(surface.owner) and tail.document.rows.len > 0 and (start == 0 or std.meta.eql(tail.document.rows[0].id, source.rows[start].id))) {
+                        try @import("../vt/search_snapshot.zig").spliceTail(source, std.heap.page_allocator, start, &tail.document);
+                        const moved = previous.*;
+                        self.service_search = null;
+                        return moved;
+                    }
+                } else |err| switch (err) {
+                    error.WorkerBusy, error.StaleProjection => {
+                        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                        return error.WorkerBusy;
+                    },
+                    else => {},
+                }
+            }
+        };
+        // Full-history refresh while the source is streaming has a fixed CPU
+        // budget. Existing snapshot matches remain visible; native anchors
+        // still validate the exact source version before changing selection.
+        if (self.service_search != null) if (self.service_search_last_full_ms) |last| {
+            if (self.cx.frame_time_ms - last < 200) {
+                self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                return error.WorkerBusy;
+            }
+        };
+        const task = surface.service.beginSearch() catch |err| switch (err) {
+            error.SearchAsyncUnavailable => {
+                self.service_search_synchronous_scans += 1;
+                return surface.service.searchSnapshot(std.heap.page_allocator);
+            },
+            error.WorkerBusy => {
+                self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                return err;
+            },
+            else => return err,
+        };
+        self.service_search_task = task;
+        self.service_search_background_scans += 1;
+        self.service_search_last_full_ms = self.cx.frame_time_ms;
+        if (task.done.load(.acquire)) return self.serviceSearchSnapshot(surface);
+        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        return error.WorkerBusy;
     }
     fn refreshServiceSearch(self: *TerminalViewNode) !void {
         const surface = self.terminal_surface orelse return;
@@ -784,14 +1005,19 @@ pub const TerminalViewNode = struct {
                 return;
             }
         }
-        var next = try surface.service.searchSnapshot(self.cx.allocator);
-        errdefer next.deinit(self.cx.allocator);
+        var next = try self.serviceSearchSnapshot(surface);
+        errdefer next.deinit(std.heap.page_allocator);
         if (!next.owner.eql(surface.owner)) return error.StaleOwner;
-        const retained = if (self.search_anchor) |anchor| surface.service.resolveAnchor(anchor) catch |err| switch (err) {
+        var retained = if (self.search_anchor) |anchor| surface.service.resolveAnchor(anchor) catch |err| switch (err) {
             error.WorkerBusy => return err,
             else => null,
         } else null;
-        if (retained) |point| if (point.source_version != next.document.source_version) return error.StaleProjection;
+        // A tracked anchor can be newer than an immutable async capture.
+        // Publish the coherent captured matches without mapping future row
+        // coordinates onto it; locate still refuses stale native versions.
+        if (retained) |point| if (point.source_version != next.document.source_version) {
+            retained = null;
+        };
         try self.search.setSource(next.document.text);
         var restored = false;
         if (retained) |point| {
@@ -817,8 +1043,9 @@ pub const TerminalViewNode = struct {
             self.releaseSearchAnchor();
             self.search.current = 0;
         }
-        if (self.service_search) |*previous| previous.deinit(self.cx.allocator);
+        if (self.service_search) |*previous| previous.deinit(std.heap.page_allocator);
         self.service_search = next;
+        self.service_search_shape = @import("../vt/search_task.zig").Shape.from(&displayed.projection);
         if (self.search_view) |*view| view.refresh();
         if (next.document.source_version != displayed.projection.version) surface.force_snapshot = true;
         if (self.search_locate_pending) if (self.search.currentIndex()) |index| if (self.search.match(index)) |hit| try self.locateServiceSearch(surface, hit);
@@ -846,6 +1073,7 @@ pub const TerminalViewNode = struct {
     fn refreshSearchMarks(self: *TerminalViewNode) !void {
         for (self.search_marks.items) |mark| mark.setDisplay(.none);
         if (!self.search_open or self.search.query.items.len == 0) return;
+        if (self.history_reading_top != null) return self.refreshReadingSearchMarks();
         if (self.history.current()) |entry| {
             if (entry.search) |document| return self.refreshHistorySearchMarks(&document);
         }
@@ -960,6 +1188,54 @@ pub const TerminalViewNode = struct {
         self.selection.clear();
         self.history_display_skip = 0;
         _ = try self.renderFrameContent(self.cx, text_frame.decode(self.history_search_wire.items).?);
+    }
+
+    fn refreshReadingSearchMarks(self: *TerminalViewNode) !void {
+        const reading = self.history_reading orelse return;
+        const top = self.history_reading_top orelse return;
+        const root = self.root.globalRect();
+        var used: usize = 0;
+        const end = @min(reading.anchors.items.len, top + self.frame_rows);
+        for (reading.anchors.items[top..end], 0..) |anchor, row_index| {
+            for (self.search.matches.items, 0..) |hit, index| {
+                const from = @max(hit.start, anchor.start);
+                const to = @min(hit.end, anchor.end);
+                if (to <= from) continue;
+                var col = displayCellWidth(reading.text.items[anchor.start..from]);
+                var width = displayCellWidth(reading.text.items[from..to]);
+                if (anchor.has_document) {
+                    const document = self.history.frames.items[anchor.frame_index].search.?;
+                    const source = document.rows[anchor.row];
+                    const first = document.spanAt(source.start + from - anchor.start) orelse continue;
+                    const last = document.spanAt(source.start + to - anchor.start - 1) orelse continue;
+                    col = first.col;
+                    width = last.col + last.width - first.col;
+                }
+                const mark = if (used < self.search_marks.items.len) self.search_marks.items[used] else block: {
+                    const node = try ui.box(self.cx, .{ .position = .absolute, .z_index = 8, .hit_behavior = .pass_through }, .{});
+                    try node.appendChild(self.cx.allocator, try ui.text(self.cx, "", .{ .use_monospace_font = true }));
+                    try self.root.appendChild(self.cx.allocator, node);
+                    try self.search_marks.append(self.cx.allocator, node);
+                    break :block node;
+                };
+                const current = index == self.search.current;
+                @import("builtin_records_styles.zig").place(self.cx, mark, self.metrics.origin_x - root.x + self.row_layouts[row_index].shift_x + @as(f32, @floatFromInt(col)) * self.cell_width, self.metrics.origin_y - root.y + self.presentationRowY(row_index), @as(f32, @floatFromInt(width)) * self.cell_width, self.cell_height);
+                mark.setBackground(if (current) app_theme.states().search_current else app_theme.states().search_match);
+                const label = mark.children.items[0];
+                try label.setTextContent(self.cx.allocator, reading.text.items[from..to]);
+                var props = label.getText().?;
+                props.color = if (current) app_theme.states().search_current_ink else app_theme.states().search_match_ink;
+                props.font_size = self.terminal_font_size;
+                props.font_family = self.terminal_font_family_id;
+                props.use_monospace_font = self.terminal_font_family_id == 0;
+                props.monospace_char_width = self.cell_width;
+                props.line_height = self.terminal_line_height;
+                label.setText(props);
+                @import("builtin_records_styles.zig").place(self.cx, label, 0, 0, @as(f32, @floatFromInt(width)) * self.cell_width, self.cell_height);
+                mark.setDisplay(.flex);
+                used += 1;
+            }
+        }
     }
 
     fn refreshHistorySearchMarks(self: *TerminalViewNode, document: *const @import("../vt/search_snapshot.zig").Document) !void {
@@ -1099,6 +1375,7 @@ pub const TerminalViewNode = struct {
             // Borderless by design: the terminal pane blends into the page.
             // Focus feedback comes from the tab bar highlight, not a frame.
             .border = .{ .width = 0, .color = cx.tokens.tokens.color.border, .radius = 10 },
+            .cursor = .text,
         }, .{});
         root.meta.ownership.meta.test_id = "terminal.input";
         // Monospace + explicit advance: terminal column semantics (1 cell =
@@ -1312,22 +1589,98 @@ pub const TerminalViewNode = struct {
         return next;
     }
 
+    fn shellMessage(self: *TerminalViewNode, state: CommandRecordState, text: []const u8) void {
+        if (self.active_command_record) |id| if (self.commandRecordOwner()) |owner| {
+            _ = self.finishCommandRecord(owner, id, state, text);
+        };
+        if (self.terminal_surface == null and self.legacy_document == null) self.showInlineCommandMessage(text);
+    }
+    fn finishShellAttachment(self: *TerminalViewNode, state: CommandRecordState, text: []const u8) void {
+        self.shell_attach_pending = false;
+        if (self.shell_attach_record) |id| if (self.shell_attach_owner) |owner| {
+            _ = self.finishCommandRecord(owner, id, state, text);
+        };
+        self.shell_attach_record = null;
+        self.shell_attach_owner = null;
+        if (self.terminal_surface == null and self.legacy_document == null) self.showInlineCommandMessage(text);
+    }
+    fn refreshShellAttachment(self: *TerminalViewNode) void {
+        if (!self.shell_attach_pending) return;
+        const worker = self.worker orelse {
+            self.shell_attach_pending = false;
+            return;
+        };
+        const service = worker.terminalService() catch return;
+        const snapshot = service.executionSnapshot() catch return;
+        if (snapshot.failure) |reason| {
+            if (std.mem.eql(u8, reason, "ShellIntegrationPending")) return;
+            self.finishShellAttachment(.failure, @import("../ai/step_failure.zig").explanation(reason));
+        } else if ((snapshot.input_ready and (snapshot.shell.prompt_ready orelse true))) {
+            self.finishShellAttachment(.success, "当前 Shell 已就绪，可继续让 AI 执行命令。进入其他 Shell 后，AI 会尝试连接，也可使用 @shell attach 手动连接。");
+        }
+    }
     fn applyLocalCommand(self: *TerminalViewNode, command: builtin_commands.Command) bool {
         switch (command) {
+            .dots => return true,
+            .shell => |action| {
+                const worker = self.worker orelse {
+                    self.shellMessage(.failure, "当前会话不支持远程 Shell 接入；请在 SSH 终端中使用 @shell attach。");
+                    return true;
+                };
+                if (action == .attach) {
+                    worker.attachCurrentShell() catch |err| {
+                        self.shellMessage(.failure, @import("../ai/step_failure.zig").explanation(@errorName(err)));
+                        return true;
+                    };
+                    self.shell_attach_pending = true;
+                    self.shell_attach_record = self.active_command_record;
+                    self.shell_attach_owner = self.commandRecordOwner();
+                    self.shellMessage(.pending, "正在接入当前 Shell…保留当前目录和环境；完成前请暂缓输入。使用 @shell 查看结果。");
+                } else {
+                    const service = worker.terminalService() catch {
+                        self.shellMessage(.failure, "当前会话的终端服务不可用。");
+                        return true;
+                    };
+                    const snapshot = service.executionSnapshot() catch {
+                        self.shellMessage(.failure, "Shell 状态正在更新，请稍后使用 @shell 查看。");
+                        return true;
+                    };
+                    var buffer: [384]u8 = undefined;
+                    const message = if (snapshot.failure) |reason| @import("../ai/step_failure.zig").explanation(reason) else if (!(snapshot.input_ready and (snapshot.shell.prompt_ready orelse true))) "尚未确认当前 Shell 已准备好接收命令。若已进入 SSH、su、bash 或容器内的 Shell，请确认停在空提示符后执行 @shell attach。" else std.fmt.bufPrint(&buffer, "当前 Shell 已就绪 · {s} · 已接入层级 {d}。进入新层后可用 @shell attach 接入；退出后自动恢复已接入父层。", .{ @tagName(snapshot.shell.kind), snapshot.shell.depth + 1 }) catch "当前 Shell 已就绪";
+                    self.shellMessage(if ((snapshot.input_ready and (snapshot.shell.prompt_ready orelse true))) .success else .failure, message);
+                }
+                return true;
+            },
             .log => {
-                if (self.history.latest() == null) return false;
+                if (self.history.latest() == null) {
+                    self.command_record_retry = false;
+                    return false;
+                }
                 // Finalize this record before freezing the history selection,
                 // so @log does not replay its own stale pending state.
-                if (self.active_command_record) |id| if (self.commandRecordOwner()) |owner| {
-                    _ = self.finishCommandRecord(owner, id, .success, "已打开会话历史");
-                };
+                if (!self.command_record_retry) {
+                    if (self.active_command_record) |id| if (self.commandRecordOwner()) |owner| {
+                        _ = self.finishCommandRecord(owner, id, .success, "已打开会话历史");
+                    };
+                }
                 if (self.terminal_surface) |surface| {
                     if (surface.service.snapshot(self.cx.allocator)) |value| {
                         var captured = value;
                         defer captured.deinit(self.cx.allocator);
                         self.captureHistoryProjection(surface, &captured.projection) catch {};
-                    } else |_| {}
+                    } else |err| switch (err) {
+                        error.WorkerBusy, error.StaleProjection, error.SnapshotUnavailable => {
+                            self.command_record_retry = true;
+                            self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+                            return false;
+                        },
+                        else => {
+                            self.command_record_retry = false;
+                            return false;
+                        },
+                    }
                 }
+                self.command_record_retry = false;
                 return self.openHistory();
             },
             .timestamp => |enabled| {
@@ -1865,6 +2218,55 @@ pub const TerminalViewNode = struct {
         }
         return onWorkerEvent(event, self);
     }
+    fn localEditorKey(key: ui.events.KeyCode, modifiers: ui.events.Modifiers) ?command_palette.Editor.Key {
+        if (modifiers.ctrl and !modifiers.super and !modifiers.alt) return switch (key) {
+            .a => .home,
+            .e => .end,
+            .b => .left,
+            .f => .right,
+            .h => .backspace,
+            .d => .delete,
+            .w => .delete_word,
+            .u => .kill_start,
+            .k => .kill_end,
+            .c => .escape,
+            else => null,
+        };
+        return switch (key) {
+            .left => if (modifiers.alt) .word_left else .left,
+            .right => if (modifiers.alt) .word_right else .right,
+            .home => .home,
+            .end => .end,
+            .delete => if (modifiers.alt) .delete_word else .backspace,
+            .forward_delete => .delete,
+            .escape => .escape,
+            else => null,
+        };
+    }
+
+    // Editing starts with the exact text typed in the palette, including
+    // incomplete command names. Shell editing keys never escape to the PTY.
+    fn adoptPaletteDraft(self: *TerminalViewNode) bool {
+        const text = std.mem.concat(self.cx.allocator, u8, &.{ "@", self.palette.query.items }) catch return false;
+        defer self.cx.allocator.free(text);
+        self.local_editor.adopt(self.cx.allocator, text) catch return false;
+        self.closeCommandPalette();
+        return true;
+    }
+    fn editPaletteKey(self: *TerminalViewNode, key: ui.events.KeyCode, modifiers: ui.events.Modifiers) bool {
+        if (!self.palette.isOpen()) return false;
+        if (key == .tab and std.mem.indexOfAny(u8, self.palette.query.items, " \t") != null) {
+            if (self.adoptPaletteDraft()) _ = self.completeBuiltinParameter(modifiers.shift);
+            self.renderLocalInput();
+            return true;
+        }
+        if (!(modifiers.ctrl or modifiers.alt or key == .home or key == .end or key == .left or key == .forward_delete)) return false;
+        const mapped = localEditorKey(key, modifiers) orelse return false;
+        if (self.adoptPaletteDraft()) _ = self.local_editor.key(mapped);
+        self.renderLocalInput();
+        return true;
+    }
+
     fn serviceEditKey(raw: *anyopaque, key: ui.events.KeyCode, modifiers: ui.events.Modifiers) bool {
         const self: *TerminalViewNode = @ptrCast(@alignCast(raw));
         const surface = self.terminal_surface orelse return false;
@@ -1893,24 +2295,16 @@ pub const TerminalViewNode = struct {
             return true;
         }
         if (self.local_editor.active) {
-            if (key == .tab and self.completeParameter(modifiers.shift)) return true;
+            if (key == .tab and (self.completeBuiltinParameter(modifiers.shift))) return true;
             if (key == .@"return") self.executeLocalCommand() else {
-                const mapped: ?command_palette.Editor.Key = switch (key) {
-                    .left => .left,
-                    .right => .right,
-                    .home => .home,
-                    .end => .end,
-                    .delete => .backspace,
-                    .forward_delete => .delete,
-                    .escape => .escape,
-                    else => null,
-                };
+                const mapped = localEditorKey(key, modifiers);
                 if (mapped) |value| _ = self.local_editor.key(value);
                 if (!self.local_editor.active and self.trusted_lease != 0) self.requestTrusted(.end, "") catch |err| surface.showError(err);
                 self.renderLocalInput();
             }
             return true;
         }
+        if (self.editPaletteKey(key, modifiers)) return true;
         if (self.palette.isOpen()) {
             if (key == .tab) {
                 _ = self.palette.handleKey(self.cx.allocator, .adopt);
@@ -2490,29 +2884,32 @@ pub const TerminalViewNode = struct {
         self.executeLocalCommandChecked();
     }
     fn executeLocalCommandChecked(self: *TerminalViewNode) void {
-        self.active_command_record = self.beginCommandRecord(self.local_editor.text.items);
+        const parsed = builtin_commands.parse(self.local_editor.text.items);
+        // A snapshot retry keeps the original @log record and local input.
+        if (!(parsed == .log and self.command_record_retry and self.active_command_record != null)) self.active_command_record = self.beginCommandRecord(self.local_editor.text.items);
         if (self.active_command_record == null and !self.clientCommandsOffline() and (self.terminal_surface != null or self.legacy_document != null)) {
             if (self.command_record_retry) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
             return;
         }
-        const parsed = builtin_commands.parse(self.local_editor.text.items);
         // Display-only commands are intrinsically session-local. @sync must
         // reach the workspace observer for frozen group approval. Other commands use the
         // existing workspace observer (which owns cross-session actions).
         if (switch (parsed) {
-            .timestamp, .log => true,
+            .timestamp, .log, .shell, .dots => true,
             else => false,
         }) {
             const applied = self.applyLocalCommand(parsed);
-            if (applied) {
+            if (!applied and parsed == .log and self.command_record_retry) return;
+            if (applied and parsed != .shell and parsed != .log) {
                 if (self.active_command_record) |id| if (self.commandRecordOwner()) |owner| {
                     _ = self.finishCommandRecord(owner, id, .success, switch (parsed) {
                         .timestamp => if (self.local_state.timestamp_gutter) "已开启时间戳" else "已关闭时间戳",
                         .log => "已打开会话历史",
+                        .dots => @import("donation_qr.zig").hint,
                         else => "已执行",
                     });
                 };
-            } else self.showCommandMessage(switch (parsed) {
+            } else if (!applied) self.showCommandMessage(switch (parsed) {
                 .log => "@log：当前没有可回放的历史记录。",
                 .theme => "@theme：主题名称无效，可用 default、dark-pro、solarized-dark、dracula、catppuccin-mocha。",
                 else => "内置指令执行失败。",
@@ -2575,8 +2972,9 @@ pub const TerminalViewNode = struct {
             };
             return;
         }
-        // Legacy worker views have no modern document service. Keep their
-        // existing diagnostics separate from the modern composite transcript.
+        self.showInlineCommandMessage(text);
+    }
+    fn showInlineCommandMessage(self: *TerminalViewNode, text: []const u8) void {
         if (self.command_message_text == null) {
             const label = ui.text(self.cx, "", .{ .font_size = self.terminal_font_size, .color = app_theme.current().fg_1, .use_monospace_font = true, .wrap = .word }) catch return;
             label.setStyleInline(self.cx.allocator, .{ .position = .absolute, .z_index = 4, .hit_behavior = .pass_through });
@@ -2611,12 +3009,122 @@ pub const TerminalViewNode = struct {
         self.renderLocalInput();
     }
 
+    fn completeBuiltinParameter(self: *TerminalViewNode, reverse: bool) bool {
+        if (std.mem.indexOfAny(u8, self.local_editor.text.items, " \t") == null) {
+            const supported = for ([_][]const u8{ "@up", "@dl", "@theme", "@new", "@grp", "@shell", "@history", "@sync", "@ts", "@socks" }) |name| {
+                if (std.mem.eql(u8, name, self.local_editor.text.items)) break true;
+            } else false;
+            if (!supported) return false;
+            _ = self.local_editor.insert(self.cx.allocator, " ") catch return true;
+        }
+        const path = @import("builtin_completion.zig").State.path(self.local_editor.text.items) orelse return false;
+        const end = std.mem.indexOfAny(u8, self.local_editor.text.items, " \t").?;
+        const name = self.local_editor.text.items[0..end];
+        const text = self.local_editor.text.items;
+        const before_closing_quote = self.local_editor.caret + 1 == text.len and (text[self.local_editor.caret] == '"' or text[self.local_editor.caret] == '\'');
+        if (self.local_editor.caret != text.len and !before_closing_quote) return true;
+        const state = &self.builtin_completion;
+        if (state.call != null or state.waiting_cwd) return true;
+        if (state.applied) |applied| if (std.mem.eql(u8, applied, self.local_editor.text.items)) {
+            // A uniquely completed directory is the next completion root.
+            if (!(std.mem.endsWith(u8, path, "/") and !state.prefix_only)) {
+                self.applyBuiltinCompletion(reverse, false);
+                return true;
+            }
+        };
+        state.deinit(self.cx.allocator);
+        state.draft = self.cx.allocator.dupe(u8, self.local_editor.text.items) catch return true;
+        if (std.mem.eql(u8, name, "@dl")) {
+            const worker = self.worker orelse return true;
+            // The interactive shell owns cwd; an exec channel starts in the
+            // login directory. Refresh it asynchronously before metadata exec.
+            worker.requestCurrentDirectory() catch {
+                self.showInlineCommandMessage("暂时无法读取远程目录，请重试 Tab。");
+                return true;
+            };
+            state.waiting_cwd = true;
+            state.started_ms = wallClockMs();
+            state.reverse = reverse;
+            self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            return true;
+        }
+        if (std.mem.eql(u8, name, "@up")) {
+            state.candidates = @import("builtin_completion.zig").localPaths(self.cx.allocator, self.cx.io, path) catch {
+                self.showInlineCommandMessage("无法读取本地目录，请检查路径后重试 Tab。");
+                return true;
+            };
+        } else {
+            var arena = std.heap.ArenaAllocator.init(self.cx.allocator);
+            defer arena.deinit();
+            const choices: []const []const u8 = if (std.mem.eql(u8, name, "@shell")) &.{ "status", "attach" } else if (self.parameterCommand() != null) &.{ "on", "off" } else choices: {
+                const observer = self.palette_observer orelse return false;
+                const callback = observer.parameter_candidates orelse return false;
+                break :choices callback(observer.context, name, arena.allocator()) catch return true;
+            };
+            var bytes: std.ArrayList(u8) = .empty;
+            defer bytes.deinit(self.cx.allocator);
+            for (choices) |value| {
+                if (!std.mem.startsWith(u8, value, path)) continue;
+                bytes.appendSlice(self.cx.allocator, value) catch return true;
+                bytes.append(self.cx.allocator, 0) catch return true;
+            }
+            state.candidates = bytes.toOwnedSlice(self.cx.allocator) catch return true;
+        }
+        self.applyBuiltinCompletion(reverse, true);
+        return true;
+    }
+    fn applyBuiltinCompletion(self: *TerminalViewNode, reverse: bool, common: bool) void {
+        const next = (self.builtin_completion.next(self.cx.allocator, reverse, common) catch null) orelse return;
+        defer self.cx.allocator.free(next);
+        self.local_editor.adopt(self.cx.allocator, next) catch return;
+        const path = @import("builtin_completion.zig").State.path(next) orelse "";
+        if ((self.builtin_completion.prefix_only or std.mem.endsWith(u8, path, "/")) and next.len > 0 and (next[next.len - 1] == '"' or next[next.len - 1] == '\'')) self.local_editor.caret -= 1;
+        self.hideCommandMessage();
+        self.renderLocalInput();
+    }
+    fn pollBuiltinCompletion(self: *TerminalViewNode) void {
+        const state = &self.builtin_completion;
+        if (state.waiting_cwd) {
+            if (!self.local_editor.active or !std.mem.eql(u8, state.draft.?, self.local_editor.text.items)) {
+                state.deinit(self.cx.allocator);
+                return;
+            }
+            const worker = self.worker orelse return;
+            const path = @import("builtin_completion.zig").State.path(state.draft.?) orelse return;
+            state.call = worker.completeRemotePath(path) catch |err| {
+                if ((err == error.CurrentDirectoryUnavailable or err == error.WorkerBusy) and wallClockMs() -| state.started_ms < 5000) {
+                    self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                    return;
+                }
+                state.waiting_cwd = false;
+                self.showInlineCommandMessage("无法补全远程路径，请在终端空闲时重试 Tab。");
+                return;
+            };
+            state.waiting_cwd = false;
+        }
+        const call = state.call orelse return;
+        if (!state.consumed) {
+            const result = call.bridge.poll(call.handle) orelse {
+                self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                return;
+            };
+            state.consumed = true;
+            if (self.local_editor.active and std.mem.eql(u8, state.draft.?, self.local_editor.text.items)) {
+                if (result.status == .completed and result.exit_code == 0 and !result.truncated) {
+                    state.candidates = self.cx.allocator.dupe(u8, result.stdout) catch null;
+                    self.applyBuiltinCompletion(state.reverse, true);
+                } else self.showInlineCommandMessage("远程路径补全失败，请检查目录权限后重试 Tab。");
+            }
+        }
+        if ((call.bridge.closeCall(call.handle) catch .releasing) == .released) state.call = null else self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+    }
+
     fn parameterCommand(self: *TerminalViewNode) ?[]const u8 {
         if (!self.local_editor.active) return null;
         const text = self.local_editor.text.items;
         const end = std.mem.indexOfAny(u8, text, " \t") orelse text.len;
         const name = text[0..end];
-        for ([_][]const u8{ "@sync", "@ts", "@socks" }) |command| if (std.mem.eql(u8, name, command)) return name;
+        for ([_][]const u8{ "@sync", "@ts", "@socks", "@history" }) |command| if (std.mem.eql(u8, name, command)) return name;
         return null;
     }
     const ParameterClick = struct {
@@ -2751,6 +3259,7 @@ pub const TerminalViewNode = struct {
     }
 
     pub fn setCommandInfoVisible(self: *TerminalViewNode, visible: bool) void {
+        if (self.command_info_visible == visible) return;
         self.command_info_visible = visible;
         if (self.terminal_surface) |surface| surface.setCommandInfoVisible(visible);
         self.updateHistoricalCommandHover();
@@ -3087,6 +3596,7 @@ pub const TerminalViewNode = struct {
         const surface = self.terminal_surface orelse return false;
         surface.configure(self.surfaceOptions());
         const changed = try surface.refresh(expected_owner, active);
+        if (surface.composite.sourceRetryDelayNs()) |delay| self.cx.scheduleRedrawAfterNs(@max(8 * std.time.ns_per_ms, delay));
         self.profile_surface_us += (@import("terminal_document.zig").Document.profileNow() -| started) / 1000;
         if (surface.snapshot) |snapshot| {
             if (self.history.selected == null) {
@@ -3110,6 +3620,7 @@ pub const TerminalViewNode = struct {
             if (self.error_hint) |hint| try hint.observe(snapshot.owner, &snapshot.projection);
         }
         self.refreshTrustedEdit();
+        self.pollBuiltinCompletion();
         if (self.command_record_retry and self.local_editor.active) {
             switch (builtin_commands.parse(self.local_editor.text.items)) {
                 .invalid, .not_command, .upload, .download, .socks => self.executeLocalCommand(),
@@ -3827,6 +4338,14 @@ pub const TerminalViewNode = struct {
         cx.allocator.destroy(hook);
     }
 
+    fn scheduleWorkerFallback(self: *TerminalViewNode) void {
+        // Native surfaces own their caret, pending recording/search/glyph and
+        // input deadlines. Output and lifecycle changes wake through worker
+        // publications; an idle native pane needs no extra polling frame.
+        // The legacy renderer still relies on this tick for its cursor.
+        if (self.terminal_surface == null) self.cx.scheduleRedrawAfterNs(250 * std.time.ns_per_ms);
+    }
+
     const FrameHook = struct {
         view: *TerminalViewNode,
         cx: *ui.Cx,
@@ -3877,6 +4396,7 @@ pub const TerminalViewNode = struct {
             //    stall the display for one frame; they must never be confused
             //    with connection failures.
             const consumed = self.consume();
+            view.refreshShellAttachment();
 
             // 2. Session state transitions (unchanged policy).
             const connection = self.thread.reconnectSnapshot() orelse return .done;
@@ -4013,9 +4533,7 @@ pub const TerminalViewNode = struct {
                 self.perf_last_log_ms = t0;
             }
 
-            // Output publications wake the main loop. This is only a lifecycle,
-            // reconnect and cursor fallback, not the terminal frame clock.
-            self.cx.scheduleRedrawAfterNs(250 * std.time.ns_per_ms);
+            view.scheduleWorkerFallback();
             return .done;
         }
     };
@@ -4078,20 +4596,11 @@ pub const TerminalViewNode = struct {
         if (view.history.selected != null) return .handled;
         if (view.preedit != null) return .handled;
         if (view.local_editor.active) {
-            if (key == .tab and view.completeParameter(modifiers.shift)) return .handled;
+            if (key == .tab and (view.completeBuiltinParameter(modifiers.shift))) return .handled;
             if (key == .@"return") {
                 view.executeLocalCommand();
             } else {
-                const editor_key: ?command_palette.Editor.Key = switch (key) {
-                    .left => .left,
-                    .right => .right,
-                    .home => .home,
-                    .end => .end,
-                    .delete => .backspace,
-                    .forward_delete => .delete,
-                    .escape => .escape,
-                    else => null,
-                };
+                const editor_key = localEditorKey(key, modifiers);
                 if (editor_key) |input| _ = view.local_editor.key(input);
                 view.renderLocalInput();
             }
@@ -4115,6 +4624,7 @@ pub const TerminalViewNode = struct {
 
         // @ 命令面板优先接管导航键（↑↓/→/↵/Esc/Backspace，裸键）；
         // .forward（Tab/←/翻页/修饰组合…）继续走下面的终端正常路径。
+        if (view.editPaletteKey(key, modifiers)) return .handled;
         if (view.palette.isOpen()) {
             if (key == .tab) {
                 _ = view.palette.handleKey(view.cx.allocator, .adopt);
@@ -4242,7 +4752,8 @@ pub const TerminalViewNode = struct {
     fn refreshLegacyTimestamps(self: *TerminalViewNode) void {
         if (self.terminal_surface != null and self.history.selected == null) return;
         const width = self.legacyGutterWidth();
-        self.rows_box.style.padding.top = self.historyContentPadding().top;
+        // Timestamp refresh must keep the same fractional origin as replay rows.
+        self.rows_box.style.padding.top = self.historyContentPadding().top - (if (self.history_reading) |reading| reading.position.pixel else 0);
         self.rows_box.style.padding.bottom = self.historyContentPadding().bottom;
         self.rows_box.style.padding.left = width + self.historyContentPadding().left;
         self.rows_box.style.padding.right = self.historyContentPadding().right;
@@ -4525,6 +5036,7 @@ pub const TerminalViewNode = struct {
         }
         self.completion_rows.deinit(cx.allocator);
         self.completion_scope.dispose();
+        self.builtin_completion.deinit(cx.allocator);
         self.local_editor.deinit(cx.allocator);
         self.line.deinit(cx.allocator);
         // Detach while the Input's event contexts are still alive: clearing
@@ -4651,7 +5163,6 @@ pub const TerminalViewNode = struct {
         const vt = @import("../vt/snapshot.zig");
         const annotations = @import("command_annotations.zig");
         const c = app_theme.current();
-        for (self.history_command_states) |maybe| if (maybe) |node| node.setDisplay(.none);
         for (self.history_command_info) |maybe| if (maybe) |node| node.setDisplay(.none);
         self.history_command_ids = @splat(null);
         self.history_command_cover = @splat(null);
@@ -4687,28 +5198,11 @@ pub const TerminalViewNode = struct {
                 };
                 if (!std.meta.eql(row.id, start_id)) continue;
                 const y = self.rows_box.style.padding.top + self.presentationRowY(index);
-                if (self.history_command_states[index] == null) {
-                    const label = try ui.text(self.cx, "", .{ .font_size = 10.5, .selectable = false });
-                    label.meta.ownership.meta.test_id = "terminal.command.status";
-                    label.setStyleInline(self.cx.allocator, .{ .position = .absolute, .hit_behavior = .pass_through, .z_index = 4 });
-                    try self.rows_box.appendChild(self.cx.allocator, label);
-                    self.history_command_states[index] = label;
-                }
-                const state = self.history_command_states[index].?;
-                try state.setTextContent(self.cx.allocator, annotations.glyph(command.state));
-                state.setTextColor(switch (command.state) {
-                    .running => c.accent,
-                    .succeeded => c.ok_ink,
-                    .failed => c.danger,
-                    .unknown => c.fg_3,
-                });
-                @import("builtin_records_styles.zig").place(self.cx, state, self.rows_box.style.padding.left - 17, y, 12, self.cell_height);
-                state.setDisplay(.flex);
                 if (self.history_command_info[index] == null) {
-                    const group = try ui.box(self.cx, .{ .position = .absolute, .height = .{ .px = self.cell_height }, .padding = .{ .left = 12 }, .direction = .row, .align_items = .center, .hit_behavior = .pass_through, .z_index = 4 }, .{});
+                    const group = try ui.box(self.cx, @import("command_annotation_styles.zig").metadataTag(self.cell_height), .{});
                     group.meta.ownership.meta.test_id = "terminal.command.metadata";
                     const tag = try @import("command_annotation_styles.zig").mountAiTag(self.cx, 0, self.cell_height);
-                    const detail = try ui.text(self.cx, "", .{ .font_size = 10.5, .use_monospace_font = true, .selectable = false });
+                    const detail = try ui.text(self.cx, "", .{ .font_size = 10.5, .line_height = 14.0 / 10.5, .use_monospace_font = true, .selectable = false });
                     detail.meta.ownership.meta.test_id = "terminal.command.metadata.detail";
                     try group.appendChild(self.cx.allocator, tag);
                     try group.appendChild(self.cx.allocator, detail);
@@ -4719,16 +5213,15 @@ pub const TerminalViewNode = struct {
                 var elapsed: [40]u8 = undefined;
                 var code: [24]u8 = undefined;
                 var text: [110]u8 = undefined;
-                const code_text = if (command.exit_code) |exit| try std.fmt.bufPrint(&code, "{s} {d}", .{ annotations.glyph(command.state), exit }) else "—";
+                const code_text = if (command.exit_code) |exit| try std.fmt.bufPrint(&code, "EXIT {d}", .{exit}) else "—";
                 const tag = label.children.items[0];
                 tag.setDisplay(if (command.ai_execution_id != null) .flex else .none);
                 @import("command_annotation_styles.zig").applyAiTag(self.cx, tag, 0, self.cell_height);
-                label.setStyle(self.cx.allocator, .gap, if (command.ai_execution_id != null) @import("command_annotation_styles.zig").ai_metadata_gap else @import("command_annotation_styles.zig").metadata_gap);
+                label.setStyleInline(self.cx.allocator, @import("command_annotation_styles.zig").metadataTag(self.cell_height));
                 const detail = label.children.items[1];
                 try detail.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&text, "{s}  {s}", .{ code_text, try annotations.duration(&elapsed, command.elapsed_ms) }));
                 detail.setTextColor(c.fg_2);
-                label.setBackground(ui.Color.TRANSPARENT);
-                label.setStyleInline(self.cx.allocator, .{ .inset = .{ .right = .{ .px = self.rows_box.style.padding.right }, .top = .{ .px = y } } });
+                label.setStyleInline(self.cx.allocator, .{ .inset = .{ .right = .{ .px = self.rows_box.style.padding.right }, .top = .{ .px = y + @import("command_annotation_styles.zig").metadataTop(self.cell_height) } } });
                 self.history_command_ids[index] = command.id;
             }
         }
@@ -4738,6 +5231,7 @@ pub const TerminalViewNode = struct {
         self.rows_box.style.padding.left = self.legacyGutterWidth() + self.historyContentPadding().left;
         self.rows_box.style.padding.right = self.historyContentPadding().right;
         const styles = @import("builtin_records_styles.zig");
+        for (&self.record_qrs) |*qr| qr.hide();
         for (self.record_markers) |maybe| if (maybe) |node| node.setDisplay(.none);
         for (self.record_times) |maybe| if (maybe) |node| node.setDisplay(.none);
         for (self.record_states) |maybe| if (maybe) |node| node.setDisplay(.none);
@@ -4767,6 +5261,7 @@ pub const TerminalViewNode = struct {
             self.row_layouts[at] = layout;
             const y = self.rows_box.style.padding.top + self.presentationRowY(at);
             styles.place(self.cx, node, x + layout.shift_x, y, @max(1, self.root.rectFromWorldOrFallback().w - x - self.rows_box.style.padding.right - layout.shift_x), self.cell_height);
+            if (layout.donation_qr) |slice| try self.record_qrs[at].update(self.cx, self.rows_box, slice, x + @import("terminal_record_geometry.zig").result_inset, y, self.cell_height);
             if (row.kind == 0) continue;
             node.meta.ownership.meta.test_id = if (row.kind == 1) "terminal.command.record" else "terminal.command.output";
             const first_visible = at == 0 or self.row_layouts[at - 1].article_y != layout.article_y or self.row_layouts[at - 1].article_height == 0;
@@ -4988,7 +5483,9 @@ pub const TerminalViewNode = struct {
                 if (node.style.display != .none) node.setDisplay(.none);
             }
         }
-        if (self.history.current()) |entry| {
+        if (self.history_reading_presentation) |presentation| {
+            try self.renderRecordDecorations(presentation);
+        } else if (self.history.current()) |entry| {
             if (self.history_search_top) |top| {
                 if (entry.search) |document| {
                     var mapped: [max_grid_rows]history_replay.Timeline.PresentationRow = undefined;
@@ -5058,6 +5555,7 @@ pub const TerminalViewNode = struct {
 };
 
 test {
+    _ = @import("builtin_completion.zig");
     _ = @import("terminal_surface_tests.zig");
 }
 
@@ -5155,6 +5653,7 @@ fn placeOverlay(node: *ui.Node, cache: *OverlayCache, x: f32, y: f32, w: f32, h:
     if (cache.placed and
         @abs(cache.x - x) < 0.01 and @abs(cache.y - y) < 0.01 and
         @abs(cache.w - w) < 0.01 and @abs(cache.h - h) < 0.01) return;
+    const resized = !cache.placed or cache.w != w or cache.h != h;
     cache.* = .{ .placed = true, .x = x, .y = y, .w = w, .h = h };
     // Absolute-positioned with inset 0: translate is the cheapest way to move
     // it and needs no layout pass (same pattern as the devtools overlay).
@@ -5163,6 +5662,9 @@ fn placeOverlay(node: *ui.Node, cache: *OverlayCache, x: f32, y: f32, w: f32, h:
     node.style.translate_y = y;
     node.style.width = .{ .px = @max(w, 1) };
     node.style.height = .{ .px = @max(h, 1) };
+    // Translation only changes composition; a new size must also update the
+    // retained layout rect, otherwise an upward popup can cover its caret line.
+    if (resized) node.markLayoutDirty();
     node.markCompositePropDirty();
     node.markRenderDirty();
 }
@@ -5369,7 +5871,8 @@ test "Figma command catalogue mounts exact card rows and viewport" {
     try std.testing.expectApproxEqAbs(card.y + 42, viewport.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 406), viewport.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 200), viewport.h, 0.01);
-    try std.testing.expectEqual(@as(usize, 15), view.palette_rows.items.len);
+    const entries = @import("command_catalog.zig").entries;
+    try std.testing.expectEqual(entries.len, view.palette_rows.items.len);
     const first = view.palette_rows.items[0].globalRect();
     const second = view.palette_rows.items[1].globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 400), first.w, 0.01);
@@ -5380,7 +5883,9 @@ test "Figma command catalogue mounts exact card rows and viewport" {
     try std.testing.expectApproxEqAbs(@as(f32, 16), footer.h, 0.01);
     const count = view.palette_count_text;
     const count_props = count.getText().?;
-    try std.testing.expectEqualStrings("共15项", count_props.content);
+    var count_buffer: [64]u8 = undefined;
+    const expected_count = try std.fmt.bufPrint(&count_buffer, "共{d}项", .{entries.len});
+    try std.testing.expectEqualStrings(expected_count, count_props.content);
     try std.testing.expectEqual(@as(f32, 0), count.style.flex_shrink);
     const count_width = cx.text.measureTextWidth(count_props.content, count_props.font_size, count_props.font_weight, false);
     try std.testing.expect(count.globalRect().w + 0.01 >= count_width);
@@ -5392,7 +5897,7 @@ test "Figma command catalogue mounts exact card rows and viewport" {
     _ = cx.render();
     var rendered_full_count = false;
     for (cx.display_list.items.items) |item| switch (item) {
-        .text_run => |run| if (std.mem.eql(u8, run.content, "共15项")) {
+        .text_run => |run| if (std.mem.eql(u8, run.content, expected_count)) {
             rendered_full_count = true;
         },
         else => {},
@@ -5426,6 +5931,33 @@ test "Figma command catalogue mounts exact card rows and viewport" {
     try std.testing.expectEqualStrings("@dl ", view.local_editor.text.items);
 }
 
+test "command popup resize updates actual bounds before moving above caret" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 450);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    _ = cx.render();
+    var cache: OverlayCache = .{};
+    placeOverlay(view.palette_panel, &cache, 20, 20, 430, 276);
+    _ = cx.render();
+    // Keep the retained card visible while filtering/repositioning. Its row
+    // viewport has an independent layout boundary, so it cannot resize the card.
+    const anchor: f32 = 350;
+    const placement = popupPlacement(8, 442, anchor, 20, 106);
+    placeOverlay(view.palette_panel, &cache, 20, placement.y, 430, placement.height);
+    _ = cx.render();
+    const card = view.palette_panel.globalRect();
+    try std.testing.expectApproxEqAbs(placement.height, card.h, 0.01);
+    try std.testing.expect(card.y + card.h <= anchor - 4);
+    // Widening/height growth follows the same layout path.
+    placeOverlay(view.palette_panel, &cache, 20, 20, 500, 276);
+    _ = cx.render();
+    try std.testing.expectApproxEqAbs(@as(f32, 500), view.palette_panel.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 276), view.palette_panel.globalRect().h, 0.01);
+}
+
 test "command card keeps all matches scrollable and fits short pane" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
@@ -5456,6 +5988,69 @@ test "command card keeps all matches scrollable and fits short pane" {
     _ = view.palette.handleKey(cx.allocator, .escape);
     view.renderCommandPalette();
     try std.testing.expect(!view.palette_cache.placed);
+}
+
+test "command card pointer wheel scrolls retained candidates without terminal fallthrough" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 600);
+    const scope = try ui.Scope.init(cx.allocator, null, cx.owner);
+    defer scope.dispose();
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.attachSearch(scope);
+    const Sink = struct {
+        count: usize = 0,
+        fn scroll(_: ui.events.ScrollEvent, raw: ?*anyopaque) ui.events.EventResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.count += 1;
+            return .stop;
+        }
+    };
+    var sink: Sink = .{};
+    view.root.behavior.events.event_context = &sink;
+    view.root.behavior.events.on_scroll = Sink.scroll;
+    _ = cx.render();
+    view.updateMetrics();
+    view.openCommandPalette();
+    for (0..4) |_| {
+        cx.advanceFrameClock();
+        _ = cx.render();
+    }
+    const viewport = view.palette_scroll.container.globalRect();
+    const x = viewport.x + 30;
+    const y = viewport.y + viewport.h / 2;
+    cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = -80 });
+    cx.advanceFrameClock();
+    _ = cx.render();
+    try std.testing.expect(view.palette_scroll.state.scroll_y > 0);
+    const offset = view.palette_scroll.state.scroll_y;
+    view.renderCommandPalette();
+    try std.testing.expectEqual(offset, view.palette_scroll.state.scroll_y);
+    cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = -100000 });
+    cx.advanceFrameClock();
+    _ = cx.render();
+    cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = -20 });
+    try std.testing.expectEqual(@as(usize, 0), sink.count);
+    cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = 100000 });
+    cx.advanceFrameClock();
+    _ = cx.render();
+    cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = -60, .phase = .began });
+    cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = -60, .phase = .changed });
+    cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = 0, .phase = .ended });
+    cx.advanceFrameClock();
+    _ = cx.render();
+    try std.testing.expect(view.palette_scroll.state.scroll_y > 0);
+    try std.testing.expectEqual(@as(usize, 0), sink.count);
+    // Click a visible row after scrolling: hit mapping includes the scroll offset.
+    const first_index: usize = @intFromFloat(@ceil(view.palette_scroll.state.scroll_y / overlay_styles.catalogue_row_pitch));
+    const row = view.palette_rows.items[first_index].globalRect();
+    const expected = view.palette.matchAt(first_index).name;
+    cx.handleMouseDown(row.x + 8, row.y + row.h / 2, .{});
+    cx.handleMouseUp(row.x + 8, row.y + row.h / 2);
+    try std.testing.expect(!view.palette.isOpen());
+    try std.testing.expect(std.mem.startsWith(u8, view.local_editor.text.items, expected));
 }
 
 test "terminal overlay global command paint follows hidden and visible publication without replacing rows" {
@@ -6760,7 +7355,7 @@ test "terminal wire styles preserve explicit black and white" {
     try std.testing.expectEqual(ui.Color.WHITE, spans[0].bg_color.?);
 }
 
-test "history track follows window pointer coordinates and captures drag outside track" {
+test "history track cursor follows window pointer coordinates and captures drag outside track" {
     const a = std.testing.allocator;
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
@@ -6793,6 +7388,8 @@ test "history track follows window pointer coordinates and captures drag outside
     const rect = view.history_track.?.globalRect();
     try std.testing.expect(rect.x > 240);
     const y = rect.y + rect.h / 2;
+    cx.handleMouseMove(rect.x + rect.w * 0.25, y);
+    try std.testing.expectEqual(ui.CursorShape.pointer, cx.current_cursor);
     cx.handleMouseDownEx(rect.x + rect.w * 0.25, y, .left, .{});
     try std.testing.expect(view.history_dragging);
     try std.testing.expectEqual(@as(?usize, 1), view.history.selected);
@@ -6867,6 +7464,40 @@ test "custom command input sizes its text and caret advance with the actual pain
     try std.testing.expect(painter.calls >= 2);
 }
 
+test "SSH worker fallback retains the legacy cursor deadline" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    try std.testing.expect(cx.nextWakeDelayNs() == null);
+    view.scheduleWorkerFallback();
+    const delay = cx.nextWakeDelayNs() orelse return error.MissingLegacyCursorDeadline;
+    try std.testing.expect(delay <= 250 * std.time.ns_per_ms);
+    try std.testing.expect(delay > 0);
+}
+
+test "SSH worker fallback adds no native idle deadline and preserves pending work" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(4, 16);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    try view.bindTerminalService(transport.service());
+    try std.testing.expect(cx.nextWakeDelayNs() == null);
+    view.scheduleWorkerFallback();
+    try std.testing.expect(cx.nextWakeDelayNs() == null);
+    // Existing native pending work must retain its own earlier wakeup.
+    cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+    view.scheduleWorkerFallback();
+    const delay = cx.nextWakeDelayNs() orelse return error.MissingNativeWorkDeadline;
+    try std.testing.expect(delay <= 8 * std.time.ns_per_ms);
+}
+
 test "disconnected terminal frame errors log once and resume after recovery" {
     const Runtime = @import("../host/runtime_service.zig").Runtime;
     const Callbacks = struct {
@@ -6924,6 +7555,167 @@ test "disconnected terminal frame errors log once and resume after recovery" {
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, bytes, "StaleOwner"));
 }
 
+test "terminal async search keyboard entry consumes older coherent results and cancels pending work" {
+    const fixture = @import("terminal_surface_tests.zig");
+    const work = @import("../vt/search_task.zig");
+    const before = work.live_count.load(.acquire);
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(4, 30);
+    defer transport.deinit();
+    transport.async_search = true;
+    try transport.controller.feedOutput(fixture.owner, 1, "old needle\r\nsecond", 100);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 180);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try view.search.setQuery("needle");
+    view.focus();
+    _ = TerminalViewNode.onWorkerKeyDown(.f, .{ .ctrl = true, .super = true }, &view);
+    try std.testing.expect(view.search_open);
+    try std.testing.expect(view.service_search_task != null);
+    for (0..8) |_| _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expectEqual(@as(u64, 1), view.service_search_background_scans);
+    try std.testing.expectEqual(@as(u64, 0), view.service_search_synchronous_scans);
+    try transport.completeSearch();
+    try transport.controller.feedOutput(fixture.owner, 2, "\r\nlate output", 200);
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expectEqual(@as(usize, 1), view.search.matches.items.len);
+    try std.testing.expect(view.service_search_task == null);
+    try std.testing.expect(std.mem.indexOf(u8, view.service_search.?.document.text, "late output") == null);
+    try std.testing.expect(view.service_search.?.document.source_version < view.terminal_surface.?.snapshot.?.projection.version);
+    view.clearServiceSearch();
+    view.openSearch();
+    const cancelled = transport.search_job.?;
+    view.closeSearch();
+    try std.testing.expect(cancelled.cancelled.load(.acquire));
+    try std.testing.expect(view.service_search_task == null);
+    try std.testing.expectEqual(@as(u64, 1), view.service_search_cancelled);
+    try transport.completeSearch();
+    try std.testing.expectEqual(before, work.live_count.load(.acquire));
+}
+
+test "terminal async search retains composite application records without synchronous VT scans" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(5, 45);
+    defer transport.deinit();
+    transport.async_search = true;
+    try transport.controller.feedOutput(fixture.owner, 1, "native needle\r\nprompt%", 100);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 220);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    try view.bindTerminalService(transport.service());
+    const surface = view.terminal_surface.?;
+    const record = try surface.composite.begin("@help", 1000);
+    try surface.composite.finish(fixture.owner, record, .success, "application needle");
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try view.search.setQuery("needle");
+    view.focus();
+    _ = TerminalViewNode.onWorkerKeyDown(.f, .{ .ctrl = true, .super = true }, &view);
+    try std.testing.expect(transport.search_job != null);
+    try transport.completeSearch();
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expectEqual(@as(u64, 0), surface.composite.synchronous_scans);
+    try std.testing.expectEqual(@as(u64, 0), view.service_search_synchronous_scans);
+    try std.testing.expectEqual(@as(usize, 2), view.search.matches.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, view.service_search.?.document.text, "application needle") != null);
+    const hit = view.search.matches.items[1];
+    const point = view.service_search.?.document.point(hit.start).?;
+    const anchor = try surface.service.createAnchor(point);
+    defer surface.service.releaseAnchor(anchor) catch {};
+    const resolved = (try surface.service.resolveAnchor(anchor)).?;
+    try std.testing.expectEqual(point.row, resolved.row);
+    try std.testing.expectEqual(point.source_version, resolved.source_version);
+}
+
+test "terminal async search composite progresses when output outruns every bounded tail" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(5, 45);
+    defer transport.deinit();
+    transport.async_search = true;
+    try transport.vt.setScrollbackLimit(5000);
+    try transport.controller.feedOutput(fixture.owner, 1, "native needle\r\nprompt%", 100);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 220);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    try view.bindTerminalService(transport.service());
+    const surface = view.terminal_surface.?;
+    const doc = &surface.composite;
+    const record = try doc.begin("@help", 1000);
+    try doc.finish(fixture.owner, record, .success, "application needle");
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try transport.completeSearch();
+    const captured_version = transport.vt.publishedVersion();
+    var burst: std.ArrayList(u8) = .empty;
+    defer burst.deinit(std.testing.allocator);
+    for (0..80) |_| try burst.appendSlice(std.testing.allocator, "\r\nnew output exceeding tail");
+    try transport.controller.feedOutput(fixture.owner, 2, burst.items, 200);
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expect(doc.source_complete);
+    try std.testing.expectEqual(captured_version, doc.source_cache.?.source_version);
+    try std.testing.expect(std.mem.indexOf(u8, doc.cached.?.text, "application needle") != null);
+    try std.testing.expect(doc.source_retry_at_ns != null);
+    try std.testing.expect(transport.search_job == null);
+    try std.testing.expect(cx.nextWakeDelayNs() != null);
+    doc.source_retry_at_ns = 0;
+    transport.busy = true;
+    cx.next_redraw_scheduled_at = null;
+    cx.next_redraw_delay_ns = null;
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expect(cx.nextWakeDelayNs().? > std.time.ns_per_ms);
+    transport.busy = false;
+    doc.source_retry_at_ns = doc.full_capture_eligible_at_ns;
+    try view.search.setQuery("needle");
+    view.openSearch();
+    try std.testing.expectEqual(@as(usize, 2), view.search.matches.items.len);
+    const revision = doc.revision;
+    for (3..11) |sequence| {
+        try transport.controller.feedOutput(fixture.owner, sequence, burst.items, @intCast(sequence * 100));
+        _ = try view.refreshTerminalService(fixture.owner, false);
+    }
+    try std.testing.expectEqual(@as(u64, 1), doc.background_scans);
+    try std.testing.expectEqual(revision, doc.revision);
+    try std.testing.expect(doc.source_complete);
+    // Advance the capture budget without sleeping in the test. A completion
+    // again overtaken by output still replaces the ready cache and progresses.
+    doc.full_capture_eligible_at_ns = 0;
+    doc.source_retry_at_ns = 0;
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expect(transport.search_job != null);
+    try transport.completeSearch();
+    try transport.controller.feedOutput(fixture.owner, 11, burst.items, 1100);
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expect(doc.source_complete);
+    try std.testing.expect(doc.source_cache.?.source_version > captured_version);
+    try std.testing.expect(std.mem.indexOf(u8, doc.cached.?.text, "application needle") != null);
+    try std.testing.expectEqual(@as(u64, 2), doc.background_scans);
+    try std.testing.expectEqual(@as(u64, 0), doc.synchronous_scans);
+    try std.testing.expectEqual(@as(u64, 0), view.service_search_synchronous_scans);
+    const hit = view.service_search.?.document.point(view.search.matches.items[1].start).?;
+    // Cached composite coordinates can be old; native-anchor creation must
+    // either validate their version or reject them, never target a new row.
+    if (surface.service.createAnchor(hit)) |anchor| {
+        defer surface.service.releaseAnchor(anchor) catch {};
+        const position = (try surface.service.resolveAnchor(anchor)).?;
+        try std.testing.expectEqual(hit.row, position.row);
+        try std.testing.expectEqual(hit.source_version, position.source_version);
+    } else |err| try std.testing.expectEqual(error.StaleProjection, err);
+}
+
 test "history archive Escape closes search but never exits the read-only document" {
     const a = std.testing.allocator;
     const cx = try ui.Cx.init(a, std.testing.io);
@@ -6977,6 +7769,127 @@ test "history active reading freezes the retained range while live output keeps 
     try std.testing.expectEqualStrings("live-after---", text_frame.decode(view.history.latest().?.wire).?.text);
     try std.testing.expect(view.openHistory());
     try std.testing.expectEqual(@as(usize, 2), view.history.frames.items.len);
+}
+
+test "history replay paints a viewport across blank and structured frame witnesses" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 700);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 24, 80);
+    defer adapter.destroy();
+    var initial = try adapter.copyProjection(a);
+    defer initial.deinit(a);
+    try view.history.appendProjection(10, &initial);
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+    var document = @import("terminal_document.zig").Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    const id = try document.begin("@dots", 20);
+    try document.finish(source.owner, id, .success, @import("donation_qr.zig").hint);
+    var latest = try document.service().snapshot(a);
+    defer latest.deinit(a);
+    try view.history.appendProjection(20, &latest.projection);
+    const captured = try document.service().searchSnapshot(a);
+    view.history.attachSearch(captured.document);
+    cx.layout();
+    try std.testing.expect(view.openHistory());
+    // The viewport begins in the older blank frame and continues into the
+    // later application record. Painting only the first witness was blank.
+    try std.testing.expect(view.history.current().?.search == null);
+    var saw_hint = false;
+    var qr_slices: usize = 0;
+    for (view.row_texts[0..view.frame_rows]) |text| if (std.mem.indexOf(u8, text, @import("donation_qr.zig").hint) != null) {
+        saw_hint = true;
+    };
+    for (view.record_qrs[0..view.frame_rows]) |qr| if (qr.root != null) {
+        qr_slices += 1;
+    };
+    try std.testing.expect(saw_hint);
+    try std.testing.expectEqual(@as(usize, 10), qr_slices);
+    view.openSearch();
+    try view.search.setQuery("@dots");
+    view.locateSearch();
+    var row: ?usize = null;
+    for (view.row_texts[0..view.frame_rows], 0..) |text, index| if (std.mem.indexOf(u8, text, "@dots")) |_| {
+        row = index;
+        break;
+    };
+    const index = row orelse return error.MissingHistorySearchResult;
+    const text = view.row_texts[index];
+    const col: u16 = @intCast(std.mem.indexOf(u8, text, "@dots").?);
+    const copied = try view.copyHistorySelection(.{ .start_row = index, .end_row = index, .start_col = col, .end_col = col + 4 }, a);
+    defer a.free(copied);
+    try std.testing.expectEqualStrings("@dots", copied);
+    try std.testing.expect(view.search_marks.items.len > 0);
+    cx.layout();
+    const mark = view.search_marks.items[0];
+    try std.testing.expectApproxEqAbs(view.row_nodes[index].?.globalRect().y, mark.globalRect().y, 0.01);
+    const label = mark.children.items[0].getText().?;
+    try std.testing.expectEqual(view.terminal_font_family_id, label.font_family);
+    try std.testing.expectEqual(view.cell_width, label.monospace_char_width);
+}
+
+test "history log waits for the current snapshot without duplicating its record" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 700);
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 24, 80);
+    defer adapter.destroy();
+    const Source = @import("terminal_document_source.zig").Source;
+    const Fixture = struct {
+        source: Source,
+        calls: usize = 0,
+        fatal: bool = false,
+        fn snapshot(raw: *anyopaque, binding: @import("../host/session_host.zig").ServiceHandle, allocator: std.mem.Allocator) !terminal_service.TerminalSnapshot {
+            const source: *Source = @ptrCast(@alignCast(raw));
+            const self: *@This() = @fieldParentPtr("source", source);
+            self.calls += 1;
+            if (self.calls == 2) return error.WorkerBusy;
+            if (self.fatal and self.calls > 2) return error.StaleOwner;
+            const original = source.service();
+            return original.vtable.snapshot(raw, binding, allocator);
+        }
+    };
+    var fixture: Fixture = .{ .source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } } };
+    var service = fixture.source.service();
+    var vtable = service.vtable.*;
+    vtable.snapshot = Fixture.snapshot;
+    service.vtable = &vtable;
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    try view.bindTerminalService(service);
+    var initial = try adapter.copyProjection(a);
+    defer initial.deinit(a);
+    try view.history.appendProjection(10, &initial);
+    try view.local_editor.adopt(a, "@log");
+    view.executeLocalCommandChecked();
+    try std.testing.expect(view.command_record_retry);
+    try std.testing.expect(view.local_editor.active);
+    try std.testing.expect(view.history.selected == null);
+    const surface = view.terminal_surface.?;
+    try std.testing.expectEqual(@as(usize, 1), surface.composite.records.items.len);
+    const id = view.active_command_record;
+    view.executeLocalCommandChecked();
+    try std.testing.expect(!view.command_record_retry);
+    try std.testing.expect(!view.local_editor.active);
+    try std.testing.expect(view.history.selected != null);
+    try std.testing.expectEqual(@as(usize, 1), surface.composite.records.items.len);
+    try std.testing.expectEqual(id, view.active_command_record);
+    view.closeHistory();
+    fixture.calls = 0;
+    fixture.fatal = true;
+    try view.local_editor.adopt(a, "@log");
+    view.executeLocalCommandChecked();
+    try std.testing.expect(view.command_record_retry);
+    view.executeLocalCommandChecked();
+    try std.testing.expect(!view.command_record_retry);
+    try std.testing.expect(!view.local_editor.active);
+    try std.testing.expect(view.history.selected == null);
 }
 
 test "history track Escape exits active reading and preserves an archive document" {
@@ -7041,20 +7954,19 @@ test "terminal command annotations preserve grid copy hover wrapped rows and dis
     try std.testing.expectEqual(@as(u16, 28), surface.snapshot.?.projection.cols);
     const row_index = value.screen_row.? - surface.snapshot.?.projection.scrollback.viewport_offset;
     const row = &surface.rows.items[row_index];
-    try std.testing.expect(row.command_state != null and row.command_info != null);
-    try std.testing.expectEqual(ui.Color.TRANSPARENT, row.command_info.?.getBackground());
+    try std.testing.expect(row.command_info != null);
+    try std.testing.expectEqual(app_theme.popupInset(), row.command_info.?.getBackground());
     try std.testing.expectEqualStrings("AI", row.command_ai.?.getText().?.content);
     try std.testing.expectEqualStrings("CommandAiTag", row.command_ai.?.meta.ownership.meta.component_name.?);
     try std.testing.expect(row.command_ai.?.style.height.px <= surface.options.row_height);
-    // A real theme application must not replace the compact soft tag with the
-    // stock status Badge's wider solid capsule after its initial mount.
+    // A theme application preserves the single metadata tag and plain AI label.
     cx.setTheme(&ui.theme.light);
     _ = cx.render();
-    try std.testing.expectEqual(@as(f32, 4), row.command_ai.?.style.padding.left);
-    try std.testing.expectEqual(@as(f32, 4), row.command_ai.?.style.padding.right);
-    try std.testing.expectEqual(app_theme.popupSelection(), row.command_ai.?.getBackground());
-    try std.testing.expectEqual(ui.Color.TRANSPARENT, row.command_info.?.getBackground());
-    try std.testing.expectEqualStrings("7", row.command_code.?.getText().?.content);
+    try std.testing.expectEqual(@as(f32, 0), row.command_ai.?.style.padding.left);
+    try std.testing.expectEqual(@as(f32, 0), row.command_ai.?.style.padding.right);
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, row.command_ai.?.getBackground());
+    try std.testing.expectEqual(app_theme.popupInset(), row.command_info.?.getBackground());
+    try std.testing.expectEqualStrings("EXIT 7", row.command_code.?.getText().?.content);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "AI") == null);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "×") == null);
     const wrapped = value.screen_row.? + 1;
@@ -7071,7 +7983,9 @@ test "terminal command annotations preserve grid copy hover wrapped rows and dis
     view.setCommandInfoVisible(false);
     _ = try view.refreshTerminalService(fixture.owner, false);
     try std.testing.expect(row.command_info.?.style.display == .none);
-    try std.testing.expect(row.command_state.?.style.display == .flex);
+    cx.needs_redraw = false;
+    view.setCommandInfoVisible(false);
+    try std.testing.expect(!cx.needs_redraw);
     try std.testing.expectEqual(@as(usize, 1), view.commandHistory().len);
     const before = transport.written.items.len;
     try std.testing.expect(view.locateCommand(value.id));
@@ -7079,7 +7993,6 @@ test "terminal command annotations preserve grid copy hover wrapped rows and dis
     try transport.controller.feedOutput(fixture.owner, 2, "\x1b[?1049hALT", 110);
     _ = try view.refreshTerminalService(fixture.owner, false);
     for (surface.rows.items) |next| {
-        if (next.command_state) |node| try std.testing.expect(node.style.display == .none);
         if (next.command_info) |node| try std.testing.expect(node.style.display == .none);
     }
 }
@@ -7169,7 +8082,7 @@ test "terminal command archive restores first row annotations and locates its re
     try std.testing.expect(view.locateCommand(1));
     var seen = false;
     for (view.history_command_info) |maybe| if (maybe) |node| {
-        try std.testing.expectEqual(ui.Color.TRANSPARENT, node.getBackground());
+        try std.testing.expectEqual(app_theme.popupInset(), node.getBackground());
         const tag = node.children.items[0];
         if (tag.style.display == .none) continue;
         try std.testing.expectEqualStrings("CommandAiTag", tag.meta.ownership.meta.component_name.?);
@@ -7182,9 +8095,56 @@ test "terminal command archive restores first row annotations and locates its re
     try std.testing.expect(seen);
     view.setCommandInfoVisible(false);
     for (view.history_command_info) |maybe| if (maybe) |node| try std.testing.expect(node.style.display == .none);
-    var state_visible = false;
-    for (view.history_command_states) |maybe| if (maybe) |node| {
-        if (node.style.display == .flex) state_visible = true;
-    };
-    try std.testing.expect(state_visible);
+}
+
+test "builtin editor shares shell editing keys and completes each parameter domain without PTY writes" {
+    const a = std.testing.allocator;
+    var fixture: ClipboardTestWorker = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 400);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    view.bindWorker(fixture.presentation());
+    cx.root = view.root;
+    var transport: @import("terminal_surface_tests.zig").FakeTransport = undefined;
+    try transport.init(4, 80);
+    defer transport.deinit();
+    try view.bindTerminalService(transport.service());
+    cx.setFocus(view.root);
+    _ = cx.render();
+    for ([_][]const u8{ "@dl", "@up", "@ai", "@new", "@grp", "@theme", "@shell", "@history" }) |name| {
+        const draft = try std.fmt.allocPrint(a, "{s} 中文 tail", .{name});
+        defer a.free(draft);
+        try view.local_editor.adopt(a, draft);
+        cx.handleKeyDown(.w, .{ .ctrl = true });
+        const expected = try std.fmt.allocPrint(a, "{s} 中文 ", .{name});
+        defer a.free(expected);
+        try std.testing.expectEqualStrings(expected, view.local_editor.text.items);
+        cx.handleKeyDown(.a, .{ .ctrl = true });
+        try std.testing.expectEqual(@as(usize, 0), view.local_editor.caret);
+        cx.handleKeyDown(.e, .{ .ctrl = true });
+        try std.testing.expectEqual(view.local_editor.text.items.len, view.local_editor.caret);
+        cx.handleKeyDown(.w, .{ .ctrl = true });
+        cx.handleKeyDown(.a, .{ .ctrl = true });
+        cx.handleKeyDown(.f, .{ .ctrl = true });
+        cx.handleKeyDown(.k, .{ .ctrl = true });
+        try std.testing.expectEqualStrings("@", view.local_editor.text.items);
+    }
+    for ([_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "@history o", .expected = "@history o" },
+        .{ .input = "@shell a", .expected = "@shell attach" },
+        .{ .input = "@ts of", .expected = "@ts off" },
+    }) |item| {
+        try view.local_editor.adopt(a, item.input);
+        cx.handleKeyDown(.tab, .{});
+        if (std.mem.eql(u8, item.input, "@history o")) {
+            try std.testing.expectEqualStrings("@history on", view.local_editor.text.items);
+            cx.handleKeyDown(.tab, .{});
+            try std.testing.expectEqualStrings("@history off", view.local_editor.text.items);
+        } else try std.testing.expectEqualStrings(item.expected, view.local_editor.text.items);
+    }
+    try std.testing.expectEqualStrings("", transport.written.items);
 }

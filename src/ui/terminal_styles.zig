@@ -26,7 +26,7 @@ pub fn timestampWidth(cx: *ui.Cx, family_id: u16) f32 {
 }
 
 pub fn surface(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .column, .overflow = .hidden };
+    return .{ .width = .fill(), .height = .fill(), .direction = .column, .overflow = .hidden, .cursor = .text };
 }
 /// PATCH §12: controls belong to the exact terminal pane, above its canvas.
 pub fn aiControlTag(_: *const ui.ThemeTokens) ui.BoxStyle {

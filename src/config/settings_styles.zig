@@ -59,7 +59,7 @@ pub const geometry = struct {
 };
 
 pub fn content(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{}, .background = theme.current().surface_1, .border = .{ .radius = geometry.card_radius }, .min_width = 0 };
+    return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{}, .background = ui.Color.TRANSPARENT, .border = .{ .radius = geometry.card_radius }, .min_width = 0 };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = geometry.header_height }, .direction = .row, .gap = geometry.header_gap, .align_items = .start, .padding = .{ .left = 5, .right = 5, .top = 4, .bottom = 16 }, .flex_shrink = 0 };
@@ -203,11 +203,17 @@ pub fn shortcutButton(width: f32, compact: bool) ButtonStyle {
 pub fn label(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 12, .font_weight = 500, .line_height = 1.5, .color = theme.current().fg_1 };
 }
+/// Strengthen supporting copy when the shared settings surface reveals more
+/// of the background; leave the opaque theme palette unchanged.
+pub fn secondaryInk() ui.Color {
+    const c = theme.current();
+    return ui.Color.lerp(c.fg_2, c.fg_1, @min(1, theme.materialParameters().transparency / 50));
+}
 pub fn value(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11.5, .font_weight = 400, .line_height = 17.0 / 11.5, .color = theme.current().fg_2 };
+    return .{ .font_size = 11.5, .font_weight = 400, .line_height = 17.0 / 11.5, .color = secondaryInk() };
 }
 pub fn note(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .font_weight = 400, .line_height = 16.0 / 11.0, .color = theme.current().fg_2 };
+    return .{ .font_size = 11, .font_weight = 400, .line_height = 16.0 / 11.0, .color = secondaryInk() };
 }
 pub fn errorNote(t: *const ui.ThemeTokens) ui.TextStyle {
     var style = note(t);
@@ -224,7 +230,7 @@ pub fn sectionState(expanded: bool) ui.BoxStyle {
     style.border = .{ .width = 0, .side_widths = .{ 0, 0, 0, 0 }, .radius = geometry.section_radius };
     style.shadow = .{ .blur = 0, .color = ui.Color.TRANSPARENT };
     _ = expanded;
-    style.background = theme.current().surface_2;
+    style.background = theme.settingsCard();
     style.overflow_hidden = true;
     style.gap = 0;
     return style;
@@ -237,7 +243,6 @@ pub fn sectionTitle(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn summaryHeader(expanded: bool, has_summary: bool) ui.BoxStyle {
     var style = sectionHeader(undefined);
-    style.background = theme.current().surface_2;
     style.border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 0 };
     style.overflow_hidden = true;
     style.height = .{ .fit = .{} };
@@ -272,6 +277,24 @@ pub fn textButton() ButtonStyle {
 }
 pub fn buttonHover() ButtonStyle {
     return .{ .background = theme.states().hover };
+}
+
+/// Use a light or dark translucent wash for hover so the feedback stays
+/// legible even when a wallpaper changes the window's apparent background.
+pub fn interactionHover() ui.Color {
+    const c = theme.current();
+    const dark = @as(u32, c.app.r) * 299 + @as(u32, c.app.g) * 587 + @as(u32, c.app.b) * 114 < 128000;
+    return (if (dark) ui.Color.WHITE else ui.Color.BLACK).withAlpha(16);
+}
+pub fn cardHover() ui.Color {
+    return theme.current().accent.withAlpha(32);
+}
+pub fn selectionBackground(hovered: bool) ui.Color {
+    const c = theme.current();
+    return ui.Color.lerp(c.overlay.withAlpha(255), c.accent.withAlpha(255), if (hovered) 0.9 else 0.7).withAlpha(c.tab_on.a);
+}
+pub fn selectionHover(selected: bool) ui.BoxStyle {
+    return .{ .background = if (selected) selectionBackground(true) else interactionHover() };
 }
 
 // Protocol-planning facts share the Figma row geometry without turning a
@@ -350,7 +373,7 @@ pub fn pluginNoticeText(tone: PluginNoticeTone) ui.TextStyle {
 }
 
 pub fn sectionSummary(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .font_weight = 400, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .wrap = .word };
+    return .{ .font_size = 11, .font_weight = 400, .line_height = 16.0 / 11.0, .color = secondaryInk(), .wrap = .word };
 }
 
 // Frozen V3 model row and native dialog layout.

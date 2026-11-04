@@ -29,6 +29,145 @@ const text = ui.text;
 const spacer = ui.spacer;
 const clickable = ui.clickable;
 
+test "hidden layout: settled branches skip visible sibling reflow and new descendants still settle" {
+    const layout = @import("layout_engine.zig");
+    const cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(240, 100);
+    const root = try box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const hidden = try box(cx, .{ .display = .none }, .{});
+    try root.appendChild(cx.allocator, hidden);
+    for (0..256) |_| try hidden.appendChild(cx.allocator, try box(cx, .{ .width = .{ .px = 8 }, .height = .{ .px = 8 } }, .{}));
+    const visible = try text(cx, "short", .{});
+    try root.appendChild(cx.allocator, visible);
+    cx.layout();
+    const settled = layout.hidden_settle_visits;
+    try std.testing.expect(hidden.children.items[255].frame_state.state_bits.flags.is_mounted);
+    try visible.setTextContent(cx.allocator, "longer visible sibling causes parent reflow");
+    cx.layout();
+    try std.testing.expectEqual(settled, layout.hidden_settle_visits);
+    const extra = try box(cx, .{ .width = .{ .px = 12 }, .height = .{ .px = 9 } }, .{});
+    try hidden.appendChild(cx.allocator, extra);
+    cx.layout();
+    try std.testing.expect(extra.frame_state.state_bits.flags.is_mounted);
+    try std.testing.expect(!extra.frame_state.state_bits.dirty.core.layout);
+    try std.testing.expect(layout.hidden_settle_visits > settled);
+    hidden.setDisplay(.flex);
+    cx.layout();
+    try std.testing.expectApproxEqAbs(@as(f32, 12), extra.rectFromWorldOrFallback().w, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 9), extra.rectFromWorldOrFallback().h, 0.001);
+}
+
+test "hidden layout: newly mounted descendants cross layout isolation after sibling reflow" {
+    const cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(240, 100);
+    const root = try box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const hidden = try box(cx, .{ .display = .none }, .{});
+    try root.appendChild(cx.allocator, hidden);
+    const island = try box(cx, .{ .width = .{ .px = 80 }, .height = .{ .px = 40 }, .layout_isolation = true }, .{});
+    try hidden.appendChild(cx.allocator, island);
+    const inner = try box(cx, .{ .width = .{ .px = 60 }, .height = .{ .px = 30 } }, .{});
+    try island.appendChild(cx.allocator, inner);
+    const visible = try text(cx, "short", .{});
+    try root.appendChild(cx.allocator, visible);
+    cx.layout();
+    const extra = try box(cx, .{ .width = .{ .px = 12 }, .height = .{ .px = 9 } }, .{});
+    try inner.appendChild(cx.allocator, extra);
+    try std.testing.expect(!hidden.frame_state.state_bits.dirty.core.subtree_layout);
+    try visible.setTextContent(cx.allocator, "visible reflow also settles hidden mount callbacks");
+    cx.layout();
+    try std.testing.expect(extra.frame_state.state_bits.flags.is_mounted);
+    try std.testing.expect(!extra.frame_state.state_bits.dirty.core.layout);
+}
+
+test "fixed bounds text: changed glyphs repaint without relayout or rebuilding hit indexes" {
+    const cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(240, 100);
+    const root = try box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const run = try text(cx, "123", .{ .font_size = 14, .monospace_char_width = 8 });
+    run.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 64 }, .height = .{ .px = 22 } });
+    try root.appendChild(cx.allocator, run);
+    _ = cx.render();
+    const rect = run.globalRect();
+    const generation = run.meta.per_frame.caches.versions.content;
+    var props = run.getText().?;
+    props.content = "世界456";
+    run.setTextFixedBounds(props);
+    try std.testing.expect(run.meta.per_frame.caches.versions.content != generation);
+    try std.testing.expect(!root.frame_state.state_bits.dirty.core.subtree_layout);
+    try std.testing.expect(!run.frame_state.state_bits.dirty.hit.geometry);
+    cx.advanceFrameClock();
+    _ = cx.render();
+    try std.testing.expectEqual(rect, run.globalRect());
+    try std.testing.expectEqual(@as(u32, 0), cx.perf.interaction_full_rebuild_count);
+    try std.testing.expectEqual(@as(u32, 0), cx.perf.interaction_partial_rebuild_count);
+    var painted = false;
+    for (cx.display_list.items.items) |item| switch (item) {
+        .text_run => |r| if (std.mem.eql(u8, r.content, "世界456")) {
+            painted = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(painted);
+    // A later ordinary text update retains normal intrinsic sizing semantics.
+    props.content = "ordinary";
+    run.setText(props);
+    try std.testing.expect(root.frame_state.state_bits.dirty.core.subtree_layout);
+}
+
+test "fixed bounds text: changing back to fit invalidates prior intrinsic measurements" {
+    const cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(240, 100);
+    const root = try box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const run = try text(cx, "123", .{ .font_size = 14, .monospace_char_width = 8 });
+    run.setStyleInline(cx.allocator, .{ .position = .absolute, .height = .{ .px = 22 } });
+    try root.appendChild(cx.allocator, run);
+    _ = cx.render();
+    const short_w = run.globalRect().w;
+    run.setStyle(cx.allocator, .width, .{ .px = 64 });
+    _ = cx.render();
+    var props = run.getText().?;
+    props.content = "1234567890123456";
+    run.setTextFixedBounds(props);
+    _ = cx.render();
+    try std.testing.expectApproxEqAbs(@as(f32, 64), run.globalRect().w, 0.01);
+    run.setStyle(cx.allocator, .width, .{ .fit = .{} });
+    _ = cx.render();
+    try std.testing.expect(run.globalRect().w > short_w * 3);
+    try std.testing.expect(run.globalRect().w > 64);
+}
+
+test "fixed bounds text: fit and wrapped text retain their reflow contract" {
+    const cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(240, 100);
+    const root = try box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const run = try text(cx, "short", .{ .font_size = 14 });
+    try root.appendChild(cx.allocator, run);
+    _ = cx.render();
+    var props = run.getText().?;
+    props.content = "a longer intrinsic label";
+    run.setTextFixedBounds(props);
+    try std.testing.expect(root.frame_state.state_bits.dirty.core.subtree_layout);
+    _ = cx.render();
+    run.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 80 }, .height = .{ .px = 40 } });
+    props = run.getText().?;
+    props.wrap = .word;
+    run.setText(props);
+    _ = cx.render();
+    props.content = "wrapped text must keep rebuilding its line breaks";
+    run.setTextFixedBounds(props);
+    try std.testing.expect(root.frame_state.state_bits.dirty.core.subtree_layout);
+}
+
 test "idle partial interaction rebuild also drains loose geometry in another branch" {
     const cx = try Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
@@ -7712,6 +7851,35 @@ test "render: fully transparent skipped child clears stale render/composite dirt
     try std.testing.expect(!hidden_text.frame_state.state_bits.dirty.core.subtree_render);
     try std.testing.expect(!hidden_text.frame_state.state_bits.dirty.pipeline.composite);
     try std.testing.expect(!hidden_text.frame_state.state_bits.dirty.pipeline.subtree_composite);
+}
+
+test "render: revealing a hidden isolation island paints its latest content" {
+    const cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(240, 100);
+    const root = try box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const hidden = try box(cx, .{ .width = .{ .px = 80 }, .height = .{ .px = 40 }, .opacity = 0 }, .{});
+    const island = try box(cx, .{ .width = .{ .px = 80 }, .height = .{ .px = 40 }, .layout_isolation = true }, .{});
+    const ink = try box(cx, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .background = Color.rgb(200, 10, 20) }, .{});
+    try root.appendChild(cx.allocator, hidden);
+    try hidden.appendChild(cx.allocator, island);
+    try island.appendChild(cx.allocator, ink);
+    _ = cx.render();
+    ink.setBackground(Color.rgb(10, 200, 20));
+    root.markRenderDirty();
+    _ = cx.render();
+    try std.testing.expect(!cx.hasPendingSceneWork());
+    hidden.setOpacity(1);
+    _ = cx.render();
+    var painted = false;
+    for (cx.display_list.items.items) |item| switch (item) {
+        .fill_rect => |rect| if (rect.color.g == 200 and rect.color.r == 10) {
+            painted = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(painted);
 }
 
 test "Cx: parent scale propagates to hit testing" {
@@ -15504,6 +15672,115 @@ test "hook scope: hook 摘除后不得 splice 到陈旧缓存条目" {
         try std.testing.expectApproxEqAbs(r.geom.w, it.geom.w, 0.01);
         try std.testing.expectApproxEqAbs(r.geom.h, it.geom.h, 0.01);
     }
+}
+
+test "render traversal: promotion summaries follow visible branches across frames" {
+    var cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(320, 200);
+
+    const root = try box(cx, .{ .width = .{ .px = 320 }, .height = .{ .px = 200 } }, .{});
+    const first = try box(cx, .{ .width = .{ .px = 80 }, .height = .{ .px = 40 }, .background = Color.rgb(20, 40, 60) }, .{});
+    first.style.ensureExtPanic(cx.allocator).composited_group = true;
+    const branch = try box(cx, .{ .width = .{ .px = 100 }, .height = .{ .px = 60 }, .display = .none }, .{});
+    const second = try box(cx, .{ .width = .{ .px = 80 }, .height = .{ .px = 40 }, .background = Color.rgb(60, 40, 20) }, .{});
+    second.style.ensureExtPanic(cx.allocator).composited_group = true;
+    try branch.appendChild(cx.allocator, second);
+    try root.appendChild(cx.allocator, first);
+    try root.appendChild(cx.allocator, branch);
+    cx.root = root;
+
+    _ = cx.render();
+    try std.testing.expect(cx.scene_runtime.get(first.id).?.promoted_layer_id != ui.SceneRuntimeInvalidId);
+    try std.testing.expect(cx.scene_runtime.get(root.id).?.has_promoted_descendant_subtree);
+    try std.testing.expect(cx.scene_runtime.get(branch.id) == null);
+    try std.testing.expect(cx.scene_runtime.get(second.id) == null);
+
+    first.setDisplay(.none);
+    branch.setDisplay(.flex);
+    cx.frame_time_ms = 16;
+    _ = cx.render();
+    try std.testing.expect(cx.scene_runtime.get(first.id) == null);
+    try std.testing.expect(cx.scene_runtime.get(second.id).?.promoted_layer_id != ui.SceneRuntimeInvalidId);
+    try std.testing.expect(cx.scene_runtime.get(branch.id).?.has_promoted_descendant_subtree);
+    try std.testing.expect(cx.scene_runtime.get(root.id).?.has_promoted_descendant_subtree);
+
+    branch.setDisplay(.none);
+    cx.frame_time_ms = 32;
+    _ = cx.render();
+    try std.testing.expectEqual(@as(u32, 0), cx.layer_tree.frame_promoted_count);
+    try std.testing.expect(!cx.scene_runtime.get(root.id).?.has_promoted_descendant_subtree);
+}
+
+test "render traversal: deep transparent branches finish descendant animations" {
+    var cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(120, 80);
+    const root = try box(cx, .{ .width = .{ .px = 120 }, .height = .{ .px = 80 } }, .{});
+    const hidden = try box(cx, .{ .width = .{ .px = 80 }, .height = .{ .px = 40 }, .opacity = 0 }, .{});
+    try root.appendChild(cx.allocator, hidden);
+    var leaf = hidden;
+    for (0..40) |_| {
+        const child = try box(cx, .{ .width = .{ .px = 60 }, .height = .{ .px = 30 } }, .{});
+        try leaf.appendChild(cx.allocator, child);
+        leaf = child;
+    }
+    cx.root = root;
+    _ = cx.render(); // Establish this Cx's clock before scheduling the animation.
+    ui.animateNode(leaf, cx.allocator, .{
+        .prop = .opacity,
+        .from = 0.2,
+        .to = 1,
+        .duration = 1,
+        .easing = .linear,
+    });
+    cx.frame_time_ms = 500;
+    _ = cx.render();
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), leaf.getOpacity(), 0.01);
+    cx.frame_time_ms = 1000;
+    _ = cx.render();
+    try std.testing.expectApproxEqAbs(@as(f32, 1), leaf.getOpacity(), 0.01);
+    try std.testing.expect(leaf.frame_state.frame_local.runtime.commands == null);
+}
+
+test "render traversal: hidden animation callback retiring an ancestor stops sibling callbacks" {
+    var cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(120, 80);
+    const root = try box(cx, .{ .width = .{ .px = 120 }, .height = .{ .px = 80 } }, .{});
+    const hidden = try box(cx, .{ .width = .{ .px = 80 }, .height = .{ .px = 40 }, .opacity = 0 }, .{});
+    const first = try box(cx, .{ .width = .{ .px = 20 }, .height = .{ .px = 10 } }, .{});
+    const second = try box(cx, .{ .width = .{ .px = 20 }, .height = .{ .px = 10 } }, .{});
+    try hidden.appendChild(cx.allocator, first);
+    try hidden.appendChild(cx.allocator, second);
+    try root.appendChild(cx.allocator, hidden);
+    cx.root = root;
+    _ = cx.render();
+    const State = struct {
+        cx: *Cx,
+        root: *Node,
+        hidden: *Node,
+        first_calls: usize = 0,
+        second_calls: usize = 0,
+        fn retire(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.first_calls += 1;
+            self.cx.detachChild(self.root, self.hidden);
+            self.cx.freeNode(self.hidden);
+        }
+        fn count(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.second_calls += 1;
+        }
+    };
+    var state = State{ .cx = cx, .root = root, .hidden = hidden };
+    ui.animateNode(first, cx.allocator, .{ .prop = .opacity, .from = 0.2, .to = 1, .duration = 1, .on_complete = State.retire, .on_complete_ctx = &state });
+    ui.animateNode(second, cx.allocator, .{ .prop = .opacity, .from = 0.2, .to = 1, .duration = 1, .on_complete = State.count, .on_complete_ctx = &state });
+    cx.frame_time_ms = 1000;
+    _ = cx.render();
+    try std.testing.expectEqual(@as(usize, 1), state.first_calls);
+    try std.testing.expectEqual(@as(usize, 0), state.second_calls);
+    try std.testing.expectEqual(@as(usize, 0), root.children.items.len);
 }
 
 test "subtree payload cache isolates a disable_render_cache boundary in both directions" {

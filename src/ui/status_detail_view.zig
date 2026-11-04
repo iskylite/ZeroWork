@@ -211,7 +211,6 @@ pub const View = struct {
             .encoding => {
                 try self.info(ui.icons.check, if (source.encoding == .utf8) "UTF-8" else "编码未知", if (source.encoding == .utf8) "当前" else "未知");
                 try self.info(ui.icons.get("languages").?, "Unicode 与输入法", null);
-                try self.info(ui.icons.get("lock-keyhole").?, "其他编码", "暂不可用");
             },
             .more => {
                 var items: [4]model.Kind = undefined;

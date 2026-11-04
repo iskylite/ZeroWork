@@ -23,6 +23,10 @@ pub const Source = struct {
         const self = try get(raw, binding);
         return .{ .owner = self.owner, .geometry_revision = 1, .input_revision = 1, .read_only = true, .eof_seen = false, .projection = try self.adapter.tryCopyProjection(allocator) };
     }
+    fn searchTail(raw: *anyopaque, binding: Binding, request: terminal.SearchTail, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
+        const self = try get(raw, binding);
+        return .{ .owner = self.owner, .document = try self.adapter.searchTail(allocator, request.start_row, request.max_rows, request.version) };
+    }
     fn searchSnapshot(raw: *anyopaque, binding: Binding, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
         const self = try get(raw, binding);
         return .{ .owner = self.owner, .document = try self.adapter.searchSnapshot(allocator) };
@@ -102,5 +106,5 @@ pub const Source = struct {
         if (!record.owner.eql(self.owner)) return error.StaleOwner;
         if (self.timeline) |timeline| try timeline.appendApplication(record, 0);
     }
-    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .application_record = applicationRecord };
+    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .search_tail = searchTail, .application_record = applicationRecord };
 };

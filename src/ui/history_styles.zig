@@ -2,10 +2,10 @@
 const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
-pub const row_height: f32 = 60;
+pub const row_height: f32 = 66;
 pub const row_gap: f32 = 0;
 pub fn card() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .top = .{ .px = 50 } }, .width = .{ .px = 440 }, .padding = ui.Padding.all(16), .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 12 }, .hit_behavior = .@"opaque", .overflow = .hidden, .flex_shrink = 0 };
+    return .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .top = .{ .px = 50 } }, .width = .{ .px = 480 }, .padding = ui.Padding.all(16), .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 12 }, .hit_behavior = .@"opaque", .overflow = .hidden, .flex_shrink = 0 };
 }
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .margin = .{ .bottom = 12 }, .gap = 8, .flex_shrink = 0 };
@@ -14,13 +14,28 @@ pub fn list() ui.BoxStyle {
     return .{ .width = .fill(), .direction = .column, .gap = row_gap, .padding = .ZERO };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .row, .align_items = .start, .padding = .{ .left = 9, .right = 9, .top = 10, .bottom = 10 }, .gap = 10, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .row, .align_items = .start, .padding = .{ .left = 9, .right = 9, .top = 8, .bottom = 8 }, .gap = 10, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn metadata() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 12, .flex_shrink = 0 };
 }
 pub fn actions() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .justify = .end, .gap = 8, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 };
+}
+pub fn rowActions() ui.BoxStyle {
+    return .{ .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 };
+}
+pub fn rowAction() ui.BoxStyle {
+    return .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = .ZERO, .border = .{ .radius = 6 }, .flex_shrink = 0 };
+}
+// Reuse the application's existing static status Tag geometry and state tokens.
+pub fn statusTag(tone: u8) ui.BoxStyle {
+    return @import("notification_styles.zig").statusTag(tone);
+}
+pub fn statusText(tone: u8) ui.TextStyle {
+    var result = text(11, 400, true);
+    result.color = @import("notification_styles.zig").statusInk(tone);
+    return result;
 }
 pub fn button() ui.BoxStyle {
     return .{ .width = .{ .px = 72 }, .height = .{ .px = 30 }, .padding = ui.Padding.all(0), .border = .{ .radius = 8 }, .font_size = 12, .font_weight = 500, .flex_shrink = 0 };
@@ -64,4 +79,14 @@ fn remap(value: ui.Color, previous: theme.Colors) ui.Color {
     const current = theme.current();
     inline for (@typeInfo(theme.Colors).@"struct".field_names) |field| if (ui.Color.eql(value, @field(previous, field))) return @field(current, field);
     return value;
+}
+
+pub fn confirmationChrome(tokens: *const ui.ThemeTokens) ui.BoxStyle {
+    return @import("ai_close_confirmation_styles.zig").chrome(tokens);
+}
+pub fn confirmationBody() ui.BoxStyle {
+    return .{ .width = .fill(), .direction = .column, .padding = ui.Padding.all(12), .gap = 6, .flex_shrink = 0 };
+}
+pub fn emptyBody(height: f32) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = height }, .direction = .column, .justify = .center, .align_items = .center, .gap = 6, .padding = ui.Padding.all(16), .flex_shrink = 0 };
 }

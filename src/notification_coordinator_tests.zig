@@ -6,6 +6,53 @@ const owner: notifications.Owner = .{ .session = .{ .session_id = @fromBackingIn
 const other: notifications.Owner = .{ .session = .{ .session_id = @fromBackingInt(21), .generation = 4 } };
 const day: notifications.Clock = .{ .local_minute = 12 * 60, .monotonic_ms = 0 };
 
+test "notification application risk expires or closes without removing its pending fact" {
+    const actions = [_]notifications.NotificationAction{.{ .kind = .locate_owner, .label = "查看来源" }};
+    for ([_]bool{ false, true }) |with_action| {
+        var value = try notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{});
+        defer value.deinit();
+        var risk: notifications.NotificationEvent = .{
+            .definition_id = "host.feedback",
+            .owner = .{ .window_id = 1, .content = owner },
+            .operation_id = 1,
+            .event_revision = 1,
+            .phase = .failed,
+            .severity = .failure,
+            .title = "记录无法保存",
+            .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true },
+            .actions = if (with_action) &actions else &.{},
+        };
+        const id = (try value.publishNotification(risk, day)).fact_id;
+        const duration: u64 = if (with_action) 8000 else 4000;
+        var visible: [3]*const notifications.NotificationRecord = undefined;
+        try std.testing.expectEqual(@as(usize, 1), value.visibleNotifications(1, 0, true, &visible));
+        try std.testing.expect(visible[0].priorityRisk());
+        try std.testing.expectEqual(@as(usize, 1), value.visibleNotifications(1, duration - 1, true, &visible));
+        value.pauseNotification(id, true);
+        try std.testing.expectEqual(@as(usize, 1), value.visibleNotifications(1, duration + 10_000, true, &visible));
+        value.pauseNotification(id, false);
+        try std.testing.expectEqual(@as(usize, 1), value.visibleNotifications(1, duration + 10_000, true, &visible));
+        try std.testing.expectEqual(@as(usize, 0), value.visibleNotifications(1, duration * 2 + 10_000, true, &visible));
+        try std.testing.expectEqual(notifications.Presentation.expired, value.recordFor(id).?.presentation);
+        try std.testing.expect(value.recordFor(id).?.pending());
+        try std.testing.expectEqual(@as(usize, 1), value.historyCount(true));
+        value.clearHistory();
+        try std.testing.expect(value.recordFor(id).?.pending());
+        risk.event_revision = 2;
+        _ = try value.publishNotification(risk, .{ .local_minute = 0, .monotonic_ms = duration * 2 + 10_001 });
+        try std.testing.expectEqual(@as(usize, 0), value.visibleNotifications(1, duration * 2 + 10_001, true, &visible));
+
+        risk.operation_id = 2;
+        risk.event_revision = 1;
+        const second = (try value.publishNotification(risk, .{ .local_minute = 0, .monotonic_ms = duration * 2 + 10_002 })).fact_id;
+        try std.testing.expectEqual(@as(usize, 1), value.visibleNotifications(1, duration * 2 + 10_002, true, &visible));
+        value.dismissNotification(second);
+        try std.testing.expectEqual(notifications.Presentation.hidden, value.recordFor(second).?.presentation);
+        try std.testing.expect(value.recordFor(second).?.pending());
+        try std.testing.expectEqual(@as(usize, 2), value.historyCount(true));
+    }
+}
+
 const Platform = struct {
     notifications_sent: usize = 0,
     bells: usize = 0,

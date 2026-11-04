@@ -122,10 +122,10 @@ pub const View = struct {
     log_scroll: ?ui.widgets.ScrollAreaResult = null,
     log_detail: ?*ui.Node = null,
     log_empty: ?*ui.Node = null,
-    log_rows: [console.progress.capacity + 1]?*ui.Node = @splat(null),
-    log_timestamps: [console.progress.capacity + 1]?*ui.Node = @splat(null),
-    log_messages: [console.progress.capacity + 1]?*ui.Node = @splat(null),
-    log_durations: [console.progress.capacity + 1]?*ui.Node = @splat(null),
+    log_rows: [vm.log_capacity]?*ui.Node = @splat(null),
+    log_timestamps: [vm.log_capacity]?*ui.Node = @splat(null),
+    log_messages: [vm.log_capacity]?*ui.Node = @splat(null),
+    log_durations: [vm.log_capacity]?*ui.Node = @splat(null),
     log_route_text: ?*ui.Node = null,
     log_revision: ?u64 = null,
     log_layout_pending: bool = false,
@@ -133,7 +133,7 @@ pub const View = struct {
     log_scroll_pending: bool = false,
     log_follow_latest: bool = true,
     log_anchor: ?struct { sequence: u64, inside: f32, fallback: f32 } = null,
-    log_sequences: [console.progress.capacity + 1]u64 = @splat(0),
+    log_sequences: [vm.log_capacity]u64 = @splat(0),
     log_count: usize = 0,
     waiting_bounds: ?WaitingBounds = null,
     log_bounds: ?LogBounds = null,
@@ -1596,7 +1596,7 @@ const ChordAction = struct {
             self.view.input_sequence += 1;
             const result = submit_chord(binding.context, binding, .{ .session_handle = self.view.mount_request.owner, .binding_generation = binding.generation, .input_sequence = self.view.input_sequence, .input_epoch = snapshot.explicit_input_epoch, .control_generation = snapshot.control_generation, .transport_generation = snapshot.transport_generation, .chord = self.chord });
             if (result != .accepted) self.view.showMessage("按键未发送；请检查当前控制权。");
-        } else self.view.showMessage("当前宿主尚未提供按键菜单的安全发送入口。");
+        } else self.view.showMessage("当前无法发送此组合键。");
     }
 };
 const ReplyAction = struct {
@@ -1964,11 +1964,15 @@ fn mountConnectionLog(state: *View) !void {
         if (header.children.items.len != 0) {
             header.children.items[0].setStyleInline(cx.allocator, .{ .font_size = 13, .font_weight = 700 });
             setTextLayout(header.children.items[0], 20.0 / 13.0, .start);
-            header.children.items[header.children.items.len - 1].meta.ownership.meta.test_id = "bmc.connection_log.close";
+            const close = header.children.items[header.children.items.len - 1];
+            close.meta.ownership.meta.test_id = "bmc.connection_log.close";
+            cx.detachChild(header, close);
+            const close_hint = try @import("../../ui/control_hint.zig").mount(cx, scope, close, "关闭日志，连接继续", .{ .id = "bmc.connection_log.close.tooltip", .visible = state.log_open.? });
+            try header.appendChild(cx.allocator, close_hint.wrapper);
         }
     }
     state.log_modal = modal;
-    const hint = try ui.textStyled(cx, S.hint, "仅本会话最近 32 条脱敏事件。关闭日志不会取消连接。");
+    const hint = try ui.textStyled(cx, S.hint, "最近 32 条脱敏事件 · 当前会话");
     hint.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
     try modal.body.appendChild(cx.allocator, hint);
     state.log_route_text = try ui.textStyled(cx, S.progressRoute, "");
@@ -2053,12 +2057,11 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
                 button.meta.ownership.meta.test_id = id;
                 try state.control_request_row.?.appendChild(cx.allocator, button);
             }
-            try parent.appendChild(cx.allocator, try ui.textStyled(cx, S.hint, "点击画面后路由键鼠。⌃⌥Esc 始终本地释放；Command 映射为远端 Super。"));
             state.message = try ui.textStyled(cx, S.hint, "");
             try parent.appendChild(cx.allocator, state.message.?);
         },
         .keys => {
-            try parent.appendChild(cx.allocator, try ui.textStyled(cx, S.hint, "每次点击发送一次。需要已获控制权；不会自动抢占。"));
+            try parent.appendChild(cx.allocator, try ui.textStyled(cx, S.hint, "需要已获控制权；不会自动抢占。"));
             try chordButton(state, scope, parent, "Ctrl + Alt + Delete", "bmc.keys.ctrl_alt_delete", &.{ 0xffe3, 0xffe9, 0xffff });
             for (0..6) |row_index| {
                 const row = try ui.hstackStyled(cx, S.keyRow, .{});
@@ -2088,18 +2091,18 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
             try row.appendChild(cx.allocator, fit);
             const original = try ui.widgets.Button(.{ .label = "100%", .variant = .ghost, .base_style = state.original_style, .on_click = cx.on(View, state, View.original) }).mount(scope, cx);
             original.meta.ownership.meta.test_id = "bmc.display.original";
-            try row.appendChild(cx.allocator, original);
-            try parent.appendChild(cx.allocator, try ui.textStyled(cx, S.hint, "100% · 逻辑原尺寸。超出区域可在释放键鼠后滚动。"));
+            const original_hint = try @import("../../ui/control_hint.zig").mount(cx, scope, original, "按逻辑原尺寸显示。超出区域可在释放键鼠后滚动。", .{ .id = "bmc.display.original.tooltip", .width = 300, .visible = state.open[@backingInt(Menu.display)] });
+            try row.appendChild(cx.allocator, original_hint.wrapper);
             const fullscreen = try ui.widgets.Button(.{ .label = state.fullscreen_label, .variant = .secondary, .base_style = S.action(), .on_click = cx.on(View, state, View.fullscreen) }).mount(scope, cx);
             fullscreen.meta.ownership.meta.test_id = "bmc.display.fullscreen";
             try parent.appendChild(cx.allocator, fullscreen);
             const fps_toggle = try ui.widgets.Switch(.{ .label = "显示 FPS", .checked = state.show_fps, .on_change = cx.on(View, state, View.fpsChanged) }).mount(scope, cx);
             fps_toggle.meta.ownership.meta.test_id = "bmc.display.fps";
-            try parent.appendChild(cx.allocator, fps_toggle);
+            const fps_hint = try @import("../../ui/control_hint.zig").mount(cx, scope, fps_toggle, "显示：每秒提交到窗口的新视频帧数。\n解码：每秒发布的完整视频帧数。\n无新帧不一定表示卡顿。", .{ .id = "bmc.display.fps.tooltip", .layout = .{ .width = .fill(), .flex_shrink = 0 }, .width = 320, .visible = state.open[@backingInt(Menu.display)] });
+            try parent.appendChild(cx.allocator, fps_hint.wrapper);
             state.fps_detail = try ui.textStyled(cx, S.hint, "等待视频帧统计");
             state.fps_detail.?.meta.ownership.meta.test_id = "bmc.fps.detail";
             try parent.appendChild(cx.allocator, state.fps_detail.?);
-            try parent.appendChild(cx.allocator, try ui.textStyled(cx, S.hint, "显示：新视频帧提交至窗口的频率。解码：完整视频帧发布频率。无新帧不一定表示卡顿。"));
             _ = try actionButton(state, scope, parent, "请求完整视频帧", "bmc.display.refresh", null, View.refreshVideo);
             _ = try actionButton(state, scope, parent, "连接日志", "bmc.display.connection_log", null, View.showLog);
         },
@@ -2177,7 +2180,10 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
 fn actionButton(state: *View, scope: *ui.Scope, parent: *ui.Node, label: []const u8, id: []const u8, disabled: ?*ui.Signal(bool), comptime action: fn (*View) void) !*ui.Node {
     const button = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false }, .base_style = S.action(), .focus_ring = ui.FocusRingConfig{ .width = 0 }, .on_click = state.mount_request.cx.on(View, state, action) }).mount(scope, state.mount_request.cx);
     button.meta.ownership.meta.test_id = id;
-    try parent.appendChild(state.mount_request.cx.allocator, button);
+    if (std.mem.eql(u8, id, "bmc.control.capture")) {
+        const hint = try @import("../../ui/control_hint.zig").mount(state.mount_request.cx, scope, button, "点击画面后路由键鼠。Command 映射为远端 Super。", .{ .id = "bmc.control.capture.tooltip", .width = 300, .visible = state.open[@backingInt(Menu.control)] });
+        try parent.appendChild(state.mount_request.cx.allocator, hint.wrapper);
+    } else try parent.appendChild(state.mount_request.cx.allocator, button);
     return button;
 }
 fn progressButton(state: *View, parent: *ui.Node, label: []const u8, id: []const u8, disabled: ?*ui.Signal(bool), comptime action: fn (*View) void) !*ui.Node {

@@ -233,6 +233,8 @@ pub fn scrollbarEventHandler(event: Event, context: ?*anyopaque) EventResult {
             state.bonus_velocity = 0;
             state.onScrollActivity();
             ctx.cx.setPointerCapture(sb);
+            // The capture-scoped lease also keeps the hand outside the thumb.
+            _ = ctx.cx.acquireCursor(sb, .grabbing) catch return .stop;
             return .stop;
         },
         .mouse_up => {
@@ -274,6 +276,7 @@ pub fn scrollbarHEventHandler(event: Event, context: ?*anyopaque) EventResult {
             state.bonus_velocity_x = 0;
             state.onScrollActivity();
             ctx.cx.setPointerCapture(scrollbar_h);
+            _ = ctx.cx.acquireCursor(scrollbar_h, .grabbing) catch return .stop;
             return .stop;
         },
         .mouse_up => {

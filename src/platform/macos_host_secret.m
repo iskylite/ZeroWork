@@ -31,7 +31,7 @@ static NSColor *zw_secret_color(uint32_t c, BOOL foreground) {
         _secret = mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
         if (_secret == MAP_FAILED) { _secret = NULL; return nil; }
         if (mlock(_secret, 4096) != 0) { munmap(_secret, 4096); _secret = NULL; return nil; }
-        self.accessibilityLabel = @"本次宿主安全输入";
+        self.accessibilityLabel = @"本次安全输入";
     }
     return self;
 }
@@ -163,9 +163,9 @@ void *zw_host_secret_open(const char *metadata, const ZWSecretTheme *theme) {
     NSColor *fg = zw_secret_color(theme->foreground, YES), *secondary = zw_secret_color(theme->secondary, YES);
     NSImageView *icon = [[NSImageView alloc] initWithFrame:NSMakeRect(20,209,18,18)];
     icon.image = [NSImage imageWithSystemSymbolName:@"lock.shield" accessibilityDescription:@"安全输入"]; icon.contentTintColor = fg; [body addSubview:icon];
-    zw_secret_label(body,@"本次宿主安全输入",NSMakeRect(46,207,354,22),15,NSFontWeightSemibold,fg);
+    zw_secret_label(body,@"本次安全输入",NSMakeRect(46,207,354,22),15,NSFontWeightSemibold,fg);
     zw_secret_label(body,[NSString stringWithUTF8String:metadata],NSMakeRect(20,163,380,36),11,NSFontWeightRegular,secondary);
-    zw_secret_label(body,@"仅消费并清除，不执行认证。AI 不可见，60 秒过期。",NSMakeRect(20,135,380,20),12,NSFontWeightRegular,secondary);
+    zw_secret_label(body,@"提交后安全清除，输入内容不会发送给 AI。",NSMakeRect(20,135,380,20),12,NSFontWeightRegular,secondary);
     collector.field = [[ZWSecretField alloc] initWithFrame:NSMakeRect(20,85,380,40)];
     if (!collector.field) return NULL;
     collector.field.ink = fg; collector.field.well = zw_secret_color(theme->well, NO); [body addSubview:collector.field];

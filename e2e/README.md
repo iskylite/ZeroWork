@@ -55,6 +55,8 @@ App历史自动提示专项：构建最新test-mode二进制后，运行 `node e
 
 传输浅卡片与关闭专项使用 `zig build transfer-controls-preview -Dtest-mode=true -Dtransfer-preview-presentation=global_popover`（另可选`session_popover`、`session_tray`），然后 `node e2e/transfer_controls_native.ts /absolute/bin/transfer-controls-preview /tmp/transfer-controls-new-run fixture`；tray模式用末参数`tray`，正式应用关闭检查用正式test-mode二进制及末参数`main`。该fixture复用生产renderer和按钮，仅使用合成任务。必须检查76px卡片（84px排列节距、3px进度）主行及元信息完整可见、默认不显示复选框、管理后选择、按钮直接展开、450ms hover分组详情及完成上传复制路径、SFTP按owner及上传/下载方向分列、无任务隐藏且不占位、卡片之间无细线分割、X后面板隐藏及重新打开后的第二次关闭，不能只验发送click成功。
 
+传输入口、轮播和未读角标专项：先执行 `zig build -Dtest-mode=true -j2`，再运行 `ZW_TEST_PYTHON=/absolute/python-with-paramiko node e2e/transfer_entrypoints_native.ts /absolute/bin/zerowork /absolute/fresh-output --live-transfers`。同一命令增加 `--foreground` 验证前台底栏直接展示后清除角标，会激活独立临时数据窗口；默认后台模式验证未查看角标 2 → 打开列表清零 → 新任务角标 1 → 再次查看清零。两种模式均使用自建 loopback SFTP、实际上传和接收端 SHA-256，核对 3 秒轮播、进度／速度／数量、悬停不弹窗、两个入口共用右上角浮窗、860×480、任务完成后不恢复角标和正常 Quit。Runner 设置 `ZENIT_E2E_REAL_ACTIVATION=1`，避免 Harness 默认的活动外观模拟掩盖真实前后台状态。SFTP 栈溢出定向回归为 `zig build test-ui -Dui-test-filter='SFTP progress' -j2`，包括 2 MB 栈上的连续刷新与快照独立性检查。
+
 通用结构回归：`zig build test-ui -Dui-test-filter='UI constraints' -j2`。其他模块专项及未通过边界见，不能将单个runner通过称为所有操作全绿。
 
 ## 私有实机输入与证据
@@ -67,9 +69,18 @@ AI gateway 专项默认跳过；明确开启后必须同时提供 `ZEROWORK_AI_G
 
 ## 保留的旧认证组件与端口转发回归
 
-旧 `auth_challenge_view` 当前没有生产调用入口。使用 `zig build auth-challenge-preview -Dtest-mode=true` 构建隔离原生验收窗口，再运行 `node e2e/legacy_auth_native.ts /tmp/legacy-auth-new-run dark`（另测 `light`）。窗口复用真实 View 和 InteractiveBridge，覆盖五种认证、标准／最小尺寸、输入遮罩、提交／取消、首次密钥三个决定，以及变更密钥必须完整输入 `yes` 的限制；不建立 SSH、不写信任记录或钥匙串。图标与三主题重着色由 `zig build test-ui -Dui-test-filter='auth challenge'` 验证。
+旧 `auth_challenge_view` 当前没有生产调用入口。使用 `zig build auth-challenge-preview -Dtest-mode=true` 构建隔离原生验收窗口，再运行 `node e2e/legacy_auth_native.ts /tmp/legacy-auth-new-run dark`（另测 `light`）。窗口复用真实 View 和 InteractiveBridge，覆盖五种认证、标准／最小尺寸、输入遮罩、提交／取消、首次密钥三个决定，以及变更密钥无需输入确认词、点击一次确认即可替换；不建立 SSH、不写信任记录或钥匙串。图标与三主题重着色由 `zig build test-ui -Dui-test-filter='auth challenge'` 验证。
 
 生产转发完整回归使用 `node e2e/forward_controls_native.ts /tmp/forward-new-run dark`（另测 `light`）。只点击一次主机入口；同一 SSH transport 应包含一个 PTY channel 和一个只读系统识别 channel。对端仅将与生产 `remote_os.command` 完全相同的探测记为 `os_probe` 并拒绝执行，其他 exec 仍导致验收失败。三种转发均需完成 8192 字节精确往返、停止后拒绝连接；收尾保留原始 peer trace，再检查唯一 transport、通道数和流量，不能靠删除失败断言通过。
 
 
 历史PATCH局部回归：`node e2e/patch_history_native.ts zig-out/bin/zerowork /tmp/zerowork-history-review`。先构建最新test-mode二进制；runner只在独立临时数据目录写种子cast/索引，通过主机菜单打开归档，核对Esc、搜索后Esc、1440×900及860×480卡片与内容，保存真实Metal截图。它不连接SSH，也不代表真实远端resize、正常Quit或完整新PATCH已验收。
+
+## 2026-11-04 AI 会话效率验证
+
+契约和实际结果见 [AI_SESSION_EFFICIENCY.md](../docs/DESIGN/AI_SESSION_EFFICIENCY.md)。定向核心回归：`zig build test -Dtest-filter=efficiency -j2`、`zig build test -Dtest-filter='image offload' -j2`、`zig build test-bmc -j2`。Local 原生验收 `ai_execution_lifecycle_native.ts` 使用 interactive readiness、同调用短等待及 terminal wait；分别核对模型精简结果、test-mode 原始 host_result 与落盘 journal/recording，避免用模型文本替代原生执行证据。SSH 使用 `ssh_shell_execution_loopback.py` 的 nominal/nested 模式；KVM 渲染使用 `bmc_kvm_video_frames_native.ts`。实机连接与真实模型渠道另行记录，不以这些隔离 fixture 冒充。
+
+普通受控输入可用 `ZW_AI_TEST_INPUT_ONLY=1` 运行 `ai_execution_input_native.ts`，同时提供 `ZW_AI_TEST_PREFIX` 和与该构建一致的 `ZW_AI_TEST_EXPECTED_SHA256`。该模式核对真实两段文本、单独 Enter、同 key 不重写、模型 consumed 回执与原始 host/journal 证据，正常退出；不打开独立安全输入收集器，也不宣称完成默认三阶段的全部验收。默认完整模式继续保留三个阶段及真实 CUA 安全输入要求。
+
+
+会话组控件集成验证：先构建 `zig build -Dtest-mode=true -j2`，再运行 `node e2e/session_group_controls_native.ts --binary /absolute/path/to/zerowork --expected-sha <该二进制的SHA256> --out /absolute/empty/evidence`。Runner 使用独立配置、三个真实 Local PTY 和自建回收的 loopback 端口，验证候选滚动、排序／取消、连续拖动建组／入组、独立广播的真实 PID 输入分发、当前成员取消、批量开关、小窗口及选主机新建后保留组。`--pointer-handoff 1` 另建独立原生 App，分别在排序和组右键阶段写入 handoff.json；执行所列 CUA 动作后才写对应 done 标记。未实际执行不能写标记冒充通过。截图人工查看与报告断言分别记录，真实 SSH 重连和 IME 不由此 Runner 证明。

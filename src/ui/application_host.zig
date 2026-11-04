@@ -179,6 +179,7 @@ const Mapping = struct {
     failure: [384]u8 = undefined,
     failure_len: usize = 0,
     waiting: ?Waiting = null,
+    close_log_ns: i128 = 0,
     acknowledged_step: ?CloseStep = null,
     content_pending: bool = false,
     local_retired: bool = false,
@@ -1533,6 +1534,7 @@ pub const ApplicationHost = struct {
         try self.windows.completeClose(close.ticket);
         _ = self.workspace.endWindowCloseBatch(close.ticket.request);
         close.state = .closed;
+        @import("../platform/applog.zig").info(.workspace, "window close complete window={d} operation={d}", .{ @backingInt(self.window_id), close.key.operation_id });
     }
 
     pub fn cancelWindowClose(self: *ApplicationHost) !bool {
@@ -2093,6 +2095,11 @@ pub const ApplicationHost = struct {
                 }
             }
             if (mapping.waiting) |waiting| {
+                const close_now = @import("../platform/realtime.zig").monotonicNs();
+                if (mapping.close_log_ns == 0 or close_now - mapping.close_log_ns >= 5 * std.time.ns_per_s) {
+                    mapping.close_log_ns = close_now;
+                    @import("../platform/applog.zig").info(.workspace, "session close pending session={d} generation={d} operation={d} step={s} unknown={any} content_pending={any}", .{ @backingInt(mapping.handle.session_id), mapping.handle.generation, waiting.key.operation_id, @tagName(waiting.step), waiting.unknown, mapping.content_pending });
+                }
                 if (!waiting.unknown) {
                     mapping.waiting = null;
                     const receipt = self.runCloseStep(mapping, waiting.key, waiting.step, true);
@@ -2147,7 +2154,10 @@ pub const ApplicationHost = struct {
             } else if (close.state == .draining) {
                 if (self.windowTargetsReleased(close.targets) and self.fileCreatesReleased()) {
                     const files_released = if (self.file_plugin) |plugin| plugin.shutdown(plugin.context) == .released else true;
-                    if (files_released) close.state = .ready;
+                    if (files_released) {
+                        close.state = .ready;
+                        @import("../platform/applog.zig").info(.workspace, "window close ready window={d} operation={d}", .{ @backingInt(self.window_id), close.key.operation_id });
+                    }
                 }
             }
             // A native close may start after layout, including in an empty
@@ -2205,7 +2215,7 @@ pub const ApplicationHost = struct {
 
     fn syncSshReconnect(self: *ApplicationHost, mapping: *Mapping) !bool {
         if (mapping.source == null) return false;
-        if (!mapping.failed_received) if (self.workspace.connectionProgress(mapping.create_operation)) |progress| {
+        if (!mapping.failed_received) if (self.workspace.connectionLifecycle(mapping.create_operation)) |progress| {
             if (progress.finished and progress.failure != null) {
                 mapping.recordFailure(@errorName(progress.failure.?));
                 mapping.cleanup_received = progress.cleanup == .released;
@@ -2430,6 +2440,7 @@ pub const ApplicationHost = struct {
         }
         const key = try self.sessions.journal.begin(.app, null);
         self.window_close = .{ .ticket = ticket, .key = key, .targets = targets };
+        @import("../platform/applog.zig").info(.workspace, "window close begin window={d} operation={d} targets={d}", .{ @backingInt(self.window_id), key.operation_id, targets.len });
         return key;
     }
 
@@ -3610,8 +3621,11 @@ test "task finish real Local records observed intervals and retains unverified a
             _ = try surface.refresh(owner, true);
             try surface.queueText("x");
             while (surface.user_input_revision == 0) {
-                try surface.pump();
                 try fixture.tick();
+                // Pump retains bytes rejected by a stale VT mode. The native
+                // render loop refreshes that snapshot before its next retry.
+                _ = try surface.refresh(owner, true);
+                try surface.pump();
                 if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.UserInputNotAccepted;
             }
         }
@@ -3853,6 +3867,58 @@ const ReceiptTestAdapter = struct {
         return .awaiting;
     }
 };
+
+test "SSH reconnect polls lifecycle failure and cleanup without diagnostic snapshots" {
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(71), .generation = 3 };
+    const key: OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 81, .attempt_id = 2 };
+    var source = try freezeSource(std.testing.allocator, .{ .name = "target", .host = "target.invalid", .user = "tester" }, .{}, &.{}, 17, 0, "");
+    defer source.deinit();
+    var mapping: Mapping = .{ .handle = owner, .create_operation = key, .legacy_id = 31, .legacy_generation = 1, .tab_id = @fromBackingInt(7), .owner = .{ .session = owner }, .source = source };
+    var tab: workspace_mod.SessionTab = undefined;
+    tab.id = mapping.legacy_id;
+    tab.generation = mapping.legacy_generation;
+    tab.runtime = null;
+    var job: @import("../plugins/ssh/connect_job.zig").ConnectJob = undefined;
+    job.ticket = tab.ticket();
+    job.operation_key = key;
+    job.ready = .init(false);
+    job.cancelled = .init(false);
+    job.cleanup_unknown = false;
+    job.automatic_retry_deadline_ns = null;
+    job.resource_ledger = try @import("../proto/ssh/session.zig").ResourceLedger.init(key, 1);
+    var tabs = [_]*workspace_mod.SessionTab{&tab};
+    var jobs = [_]*@import("../plugins/ssh/connect_job.zig").ConnectJob{&job};
+    var workspace: workspace_mod.Workspace = undefined;
+    workspace.tabs = .empty;
+    workspace.tabs.items = &tabs;
+    workspace.connect_jobs = .empty;
+    workspace.connect_jobs.items = &jobs;
+    var app: ApplicationHost = undefined;
+    app.workspace = &workspace;
+    try std.testing.expect(!try app.syncSshReconnect(&mapping));
+    try std.testing.expect(!mapping.failed_received);
+
+    job.err = error.AuthenticationFailed;
+    job.ready.store(true, .release);
+    job.automatic_retry_deadline_ns = 1;
+    try std.testing.expect(!try app.syncSshReconnect(&mapping));
+    try std.testing.expect(!mapping.failed_received);
+    job.automatic_retry_deadline_ns = null;
+    try std.testing.expect(job.resource_ledger.record(key, 0, .transport, .owned));
+    try std.testing.expect(job.resource_ledger.record(key, 0, .transport, .unknown));
+    try std.testing.expect(!try app.syncSshReconnect(&mapping));
+    try std.testing.expect(mapping.failed_received and mapping.cleanup_unknown_received and !mapping.cleanup_received);
+    try std.testing.expectEqualStrings("AuthenticationFailed", mapping.failure[0..mapping.failure_len]);
+
+    mapping.failed_received = false;
+    try std.testing.expect(job.resource_ledger.record(key, 0, .transport, .released));
+    try std.testing.expect(!try app.syncSshReconnect(&mapping));
+    try std.testing.expect(mapping.failed_received and mapping.cleanup_received and !mapping.cleanup_unknown_received);
+    mapping.failed_received = false;
+    mapping.create_operation.attempt_id = 1;
+    try std.testing.expect(!try app.syncSshReconnect(&mapping));
+    try std.testing.expect(!mapping.failed_received);
+}
 
 test "cancelled SSH late ready never attaches and unknown cleanup retains retry gate" {
     const Pending = struct {

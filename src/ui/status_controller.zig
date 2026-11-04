@@ -146,7 +146,7 @@ pub const Controller = struct {
         var items: [4]Kind = undefined;
         const desired: f32 = switch (open.kind) {
             .grid, .rtt => 186,
-            .encoding => 148,
+            .encoding => 116,
             .readonly => 184,
             .more => 52 + 32 * @as(f32, @floatFromInt(self.moreItems(&items, open.narrow_more).len)),
             .identity => 272, // Shared connection header, summary and labeled facts.
@@ -223,12 +223,12 @@ test "status rejects local RTT and writable history and invalidates old focus" {
     _ = try controller.toggle(.encoding, .{ .x = 800, .y = 170, .width = 26, .height = 26 }, 51, false);
     const placed = try controller.placement(.{ .width = 860, .height = 480 });
     try std.testing.expectEqual(@as(f32, 492), placed.x);
-    try std.testing.expectEqual(@as(f32, 16), placed.y);
-    try std.testing.expectEqual(@as(f32, 148), placed.height);
+    try std.testing.expectEqual(@as(f32, 48), placed.y);
+    try std.testing.expectEqual(@as(f32, 116), placed.height);
     try controller.updateAnchor(value.owner, .{ .x = 800, .y = 154, .width = 26, .height = 26 });
     const constrained = try controller.placement(.{ .width = 860, .height = 480 });
-    try std.testing.expectEqual(@as(f32, 8), constrained.y);
-    try std.testing.expectEqual(@as(f32, 140), constrained.height);
+    try std.testing.expectEqual(@as(f32, 32), constrained.y);
+    try std.testing.expectEqual(@as(f32, 116), constrained.height);
     try std.testing.expectEqual(@as(f32, 148), constrained.y + constrained.height);
     controller.invalidate(value.owner);
     try std.testing.expect(controller.close() == null);

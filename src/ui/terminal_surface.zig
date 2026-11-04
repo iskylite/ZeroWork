@@ -34,13 +34,13 @@ pub const Options = struct {
 const Glyph = struct { node: *ui.Node, background: ?*ui.Node = null, overline: ?*ui.Node = null, double_underline: ?*ui.Node = null };
 const Row = struct {
     root: *ui.Node,
+    donation_qr: @import("donation_qr_view.zig").View = .{},
     test_id: []u8,
     time: ?*ui.Node = null,
     record_time: ?*ui.Node = null,
     selected: *ui.Node,
     marker: ?*ui.Node = null,
     status_icon: ?*ui.Node = null,
-    command_state: ?*ui.Node = null,
     command_info: ?*ui.Node = null,
     command_ai: ?*ui.Node = null,
     command_code: ?*ui.Node = null,
@@ -206,7 +206,10 @@ pub const Surface = struct {
         message.setDisplay(.none);
         self.* = .{ .cx = cx, .host = host, .root = root, .viewport = viewport, .service = service, .owner = owner, .options = owned_options, .timestamp_width = S.timestampWidth(cx, options.family_id), .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
         self.service = self.composite.service();
-        if (service.textSlot()) |slot| slot.enableStructured() else |_| {}
+        if (service.textSlot()) |slot| {
+            slot.bindPresentationTarget(@import("../platform/presentation_wakeup.zig").targetForWindow(@intFromPtr(cx)));
+            slot.enableStructured();
+        } else |_| {}
         self.scrollbar = try @import("terminal_scrollbar.zig").mount(cx, root);
         try host.appendChild(cx.allocator, root);
         if (@import("../vt/input_timing.zig").enabled) {
@@ -432,6 +435,7 @@ pub const Surface = struct {
             }
             return err;
         };
+        slot.bindPresentationTarget(@import("../platform/presentation_wakeup.zig").targetForWindow(@intFromPtr(self.cx)));
         defer if (self.composite.search_task != null) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
         var changed = self.force_snapshot or self.snapshot == null or self.composite.searchReady();
         if (slot.acknowledge(self.slot_generation)) |generation| {
@@ -614,7 +618,7 @@ pub const Surface = struct {
         const projection = &self.snapshot.?.projection;
         // OSC default-background changes affect cell color resolution, while the
         // terminal canvas always exposes the shared application background.
-        self.root.setBackground(ui.Color.TRANSPARENT);
+        if (self.root.getBackground().a != 0) self.root.setBackground(ui.Color.TRANSPARENT);
         const bounds = self.root.rectFromWorldOrFallback();
         try absolute(self.cx, self.viewport, 0, self.contentPadding().top, bounds.w, @min(@max(0, bounds.h - self.contentPadding().top - self.contentPadding().bottom), @as(f32, @floatFromInt(projection.rows)) * self.options.row_height));
         const row_width = @max(0, bounds.w - self.contentPadding().left - self.contentPadding().right);
@@ -665,6 +669,9 @@ pub const Surface = struct {
             row.layout = value.presentation;
             const row_y = self.presentationY(value.viewport_y);
             try absolute(self.cx, row.root, self.contentPadding().left, row_y, row_width, self.options.row_height);
+            if (value.presentation.donation_qr) |slice| {
+                try row.donation_qr.update(self.cx, row.root, slice, self.bodyX() + @import("terminal_record_geometry.zig").result_inset, 0, self.options.row_height);
+            } else row.donation_qr.hide();
             const first_article = value.application_record_id != 0 and (value.viewport_y == 0 or projection.visible_rows[value.viewport_y - 1].application_record_id != value.application_record_id);
             if (first_article) {
                 if (row.article == null) {
@@ -758,7 +765,9 @@ pub const Surface = struct {
         try self.renderCaret();
         try self.buildDocument();
         if (self.timing) |trace| trace.applied(self.snapshot.?.output_sequence);
-        self.cx.requestRedraw();
+        // Changed text, geometry and caret nodes already mark the scene dirty.
+        // During the host's layout hook this frame paints them immediately;
+        // requesting a second frame here kept idle caret ticks repainting twice.
     }
     pub fn setCommandInfoVisible(self: *Surface, visible: bool) void {
         if (self.command_info_visible == visible) return;
@@ -810,7 +819,7 @@ pub const Surface = struct {
         };
     }
     fn annotationText(self: *Surface, text: []const u8, id: []const u8) !*ui.Node {
-        const node = try ui.text(self.cx, text, .{ .font_size = 10.5, .line_height = self.options.row_height / 10.5, .color = @import("app_theme.zig").current().fg_2, .font_family = self.options.family_id, .use_monospace_font = self.options.family_id == 0, .selectable = false });
+        const node = try ui.text(self.cx, text, .{ .font_size = 10.5, .line_height = 14.0 / 10.5, .color = @import("app_theme.zig").current().fg_2, .font_family = self.options.family_id, .use_monospace_font = self.options.family_id == 0, .selectable = false });
         node.meta.ownership.meta.test_id = id;
         return node;
     }
@@ -819,26 +828,13 @@ pub const Surface = struct {
         for (projection.visible_rows) |value| {
             const row = &self.rows.items[value.viewport_y];
             row.command_id = null;
-            if (row.command_state) |node| node.setDisplay(.none);
             if (row.command_info) |node| node.setDisplay(.none);
             if (projection.modes.alternate_screen or value.application_kind != 0) continue;
             const command = self.commandEvidence(self.commandAtRow(projection.scrollback.viewport_offset + value.viewport_y) orelse continue);
             row.command_id = command.id;
-            if (row.command_state == null) {
-                row.command_state = try self.annotationText("", "terminal.command.status");
-                try row.root.appendChild(self.cx.allocator, row.command_state.?);
-                (try row.command_state.?.style.ensureExtFallible(self.cx.allocator)).z_index = 4;
-            }
-            const state = row.command_state.?;
-            state.setDisplay(.flex);
-            try state.setTextContent(self.cx.allocator, annotations.glyph(command.state));
-            state.setTextColor(commandColor(command.state));
-            // Existing content padding provides this gutter. Neither the
-            // timestamp column nor the terminal's grid width is changed.
-            try absolute(self.cx, state, -@min(17, self.contentPadding().left - 1) + @import("command_annotation_styles.zig").status_inset, 0, 12, self.options.row_height);
             if (!self.command_info_visible) continue;
             if (row.command_info == null) {
-                const group = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .right = .{ .px = 0 }, .top = .{ .px = 0 } }, .height = .{ .px = self.options.row_height }, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .left = 12 }, .background = ui.Color.TRANSPARENT, .hit_behavior = .pass_through, .z_index = 4 }, .{});
+                const group = try ui.box(self.cx, @import("command_annotation_styles.zig").metadataTag(self.options.row_height), .{});
                 group.meta.ownership.meta.test_id = "terminal.command.metadata";
                 const ai = try @import("command_annotation_styles.zig").mountAiTag(self.cx, self.options.family_id, self.options.row_height);
                 const code = try self.annotationText("", "terminal.command.metadata.code");
@@ -854,16 +850,14 @@ pub const Surface = struct {
             }
             row.command_ai.?.setDisplay(if (command.ai_execution_id != null) .flex else .none);
             @import("command_annotation_styles.zig").applyAiTag(self.cx, row.command_ai.?, self.options.family_id, self.options.row_height);
-            row.command_info.?.setStyle(self.cx.allocator, .gap, if (command.ai_execution_id != null) @import("command_annotation_styles.zig").ai_metadata_gap else @import("command_annotation_styles.zig").metadata_gap);
+            row.command_info.?.setStyleInline(self.cx.allocator, @import("command_annotation_styles.zig").metadataTag(self.options.row_height));
             var code_buffer: [32]u8 = undefined;
-            const code = if (command.exit_code) |exit| try std.fmt.bufPrint(&code_buffer, "{d}", .{exit}) else "—";
+            const code = if (command.exit_code) |exit| try std.fmt.bufPrint(&code_buffer, "EXIT {d}", .{exit}) else "—";
             try row.command_code.?.setTextContent(self.cx.allocator, code);
             row.command_code.?.setTextColor(commandColor(command.state));
             var elapsed_buffer: [40]u8 = undefined;
             try row.command_elapsed.?.setTextContent(self.cx.allocator, try annotations.duration(&elapsed_buffer, self.commandElapsed(command)));
             row.command_elapsed.?.setTextColor(@import("app_theme.zig").current().fg_2);
-            // Share the terminal's glass material without adding an opaque tile.
-            row.command_info.?.setBackground(ui.Color.TRANSPARENT);
             row.command_info.?.setDisplay(.flex);
         }
         self.updateCommandHover();
@@ -997,7 +991,7 @@ pub const Surface = struct {
             }, .underline_thickness = 1 };
             props.spans = spans;
             props.spans_owned = spans.len > 0;
-            glyph.node.setText(props);
+            glyph.node.setTextFixedBounds(props);
             published = true;
             const has_background = cell.background != .default or cell.attributes & (1 << 4) != 0 or projection.modes.reverse_colors;
             // Cell backgrounds belong below the selection; text stays above it.

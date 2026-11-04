@@ -690,6 +690,46 @@ test "terminal surface native input queues once across busy service and exposes 
     try std.testing.expectError(error.ReadOnlyTerminal, surface.queueText("no"));
 }
 
+test "terminal Option arrows route word navigation and preserve other modifiers and Kitty events" {
+    var transport: FakeTransport = undefined;
+    try transport.init(3, 24);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 160);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    cx.setFocus(view.root);
+    const key_down = view.root.behavior.events.on_key_down.?;
+    const context = view.root.behavior.events.key_context;
+    _ = key_down(.left, .{ .alt = true }, context);
+    _ = key_down(.right, .{ .alt = true }, context);
+    _ = key_down(.left, .{}, context);
+    _ = key_down(.right, .{}, context);
+    _ = key_down(.left, .{ .alt = true, .shift = true }, context);
+    _ = key_down(.right, .{ .alt = true, .ctrl = true }, context);
+    _ = key_down(.right, .{ .alt = true, .super = true }, context);
+    try std.testing.expectEqualStrings("\x1bb\x1bf\x1b[D\x1b[C\x1b[1;4D\x1b[1;7C", transport.written.items);
+    transport.written.clearRetainingCapacity();
+    // Input-method composition must not leak navigation into the shell.
+    const on_event = view.root.behavior.events.on_event.?;
+    const event_context = view.root.behavior.events.event_context;
+    _ = on_event(.{ .ime_preedit = .{ .text = "候选" } }, event_context);
+    _ = key_down(.left, .{ .alt = true }, context);
+    try std.testing.expectEqualStrings("", transport.written.items);
+    _ = on_event(.{ .ime_preedit = .{ .text = "" } }, event_context);
+    try transport.controller.feedOutput(owner, 1, "\x1b[>3u", 1);
+    _ = try view.refreshTerminalService(owner, false);
+    _ = key_down(.left, .{ .alt = true }, context);
+    _ = key_down(.right, .{ .alt = true }, context);
+    _ = on_event(.{ .key_up = .{ .key = .left, .modifiers = .{ .alt = true } } }, event_context);
+    try std.testing.expectEqualStrings("\x1b[1;3:1D\x1b[1;3:1C\x1b[1;3:3D", transport.written.items);
+}
+
 test "terminal surface queued text owns its copy across pump receipt backpressure" {
     var transport: FakeTransport = undefined;
     try transport.init(3, 16);
@@ -1600,7 +1640,7 @@ test "history search uses complete retained VT source and locates offscreen soft
     _ = cx.render();
     try std.testing.expectEqual(@as(usize, 1), view.search.count());
     try std.testing.expectEqual(@as(?@import("../host/identity.zig").HistoryId, @fromBackingInt(@intCast(91))), view.history.history_id);
-    try std.testing.expect(view.history_search_top != null);
+    try std.testing.expect(view.history_reading_top != null);
     try std.testing.expect(std.mem.indexOf(u8, text_frameForTest(view.history_search_wire.items), "界") != null);
     const painted_frame = @import("../vt/text_frame.zig").decode(view.history_search_wire.items).?;
     try std.testing.expect(painted_frame.spans.len > 0);
@@ -2178,8 +2218,15 @@ test "builtin document sends an oversized wrapped logical tail to the background
     try transport.controller.feedOutput(owner, 2, "\r\nnext", 2);
     var next = try doc.service().snapshot(a);
     next.deinit(a);
+    try std.testing.expectEqual(@as(u64, 1), doc.background_scans);
+    try std.testing.expect(doc.source_complete);
+    try std.testing.expect(doc.source_retry_at_ns != null);
+    doc.full_capture_eligible_at_ns = 0;
+    doc.source_retry_at_ns = 0;
+    var pending = try doc.service().snapshot(a);
+    pending.deinit(a);
     try std.testing.expectEqual(@as(u64, 2), doc.background_scans);
-    try std.testing.expect(!doc.source_complete);
+    try std.testing.expect(doc.source_complete);
     try transport.completeSearch();
     var ready = try doc.service().snapshot(a);
     ready.deinit(a);

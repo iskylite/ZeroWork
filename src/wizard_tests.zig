@@ -20,6 +20,7 @@ const SaveFixture = struct {
     reentry_blocked: bool = false,
     transient_secret_received: bool = false,
     cancel_calls: usize = 0,
+    captured_group: ?@import("config/asset_group_actions.zig").GroupRef = null,
     assets: [1]mod.Draft,
 
     fn init(self: *SaveFixture, protocol: mod.Protocol) !void {
@@ -88,12 +89,94 @@ const SaveFixture = struct {
         value.totp_secret = null;
         var transaction = try store.HostsTransaction.init(a, &self.registry);
         defer transaction.deinit();
+        if (self.captured_group) |reference| {
+            value.asset_group_id = try @import("config/asset_group_actions.zig").hostDraftGroup(&transaction.candidate.?, reference, value.group, self.wizard.group_edited);
+        }
         const owner = if (draft.source_owner) |expected| try transaction.candidate.?.update(expected, value) else try transaction.candidate.?.add(value);
         try transaction.commit(std.testing.io, self.tmp.dir, self.path, &self.registry);
         self.commits += 1;
         return .{ .owner = owner, .open_failure = self.open_failure };
     }
 };
+
+test "wizard saves host and optional password after captured group presentation changes" {
+    const groups = @import("config/asset_group_actions.zig");
+    for ([_]bool{ false, true }) |remember| {
+        var f: SaveFixture = undefined;
+        try f.init(.ssh);
+        defer f.deinit();
+        const created = try groups.apply(a, std.testing.io, f.tmp.dir, f.path, &f.registry, .{ .create = .{ .name = "Target group" } });
+        f.captured_group = created.group.?;
+        f.wizard.loadDraft(.{ .name = "offline", .host = "192.0.2.10", .user = "root", .group = "Target group", .password = "fixture-password", .save_password = remember });
+        _ = try groups.apply(a, std.testing.io, f.tmp.dir, f.path, &f.registry, .{ .toggle_collapsed = f.captured_group.? });
+        SaveFixture.activate(f.wizard.next1_btn.?);
+        SaveFixture.activate(f.wizard.next2_btn.?);
+        SaveFixture.activate(f.wizard.save_only_btn.?);
+        try std.testing.expectEqual(@as(usize, 1), f.commits);
+        try std.testing.expectEqual(@as(usize, 0), f.open_calls);
+        var saved = try store.loadHosts(std.testing.io, f.tmp.dir, a, f.path);
+        defer saved.deinit();
+        const host = try saved.get(f.wizard.source_owner.?);
+        try std.testing.expectEqual(f.captured_group.?.id, host.asset_group_id.?);
+        if (remember) {
+            try std.testing.expect(host.password_ref != null);
+            try std.testing.expectEqualStrings("fixture-password", host.password.?);
+            const encoded = try f.tmp.dir.readFileAlloc(std.testing.io, f.path, a, .limited(store.max_config_bytes));
+            defer a.free(encoded);
+            try std.testing.expect(std.mem.indexOf(u8, encoded, "fixture-password") == null);
+        } else try std.testing.expect(host.password == null and host.password_ref == null);
+    }
+}
+
+test "wizard captured group rejects rename or deletion unless the group is edited" {
+    const groups = @import("config/asset_group_actions.zig");
+    var registry: hosts.Registry = .{ .arena = .init(a), .hosts = &.{} };
+    defer registry.deinit();
+    const id = try registry.addGroup("Original", "#6366f1");
+    const reference: groups.GroupRef = .{ .id = id, .revision = registry.groups[0].revision };
+    const revision = try registry.updateGroup(id, reference.revision, "Renamed", "#6366f1", false);
+    try std.testing.expectError(error.StaleGroup, groups.hostDraftGroup(&registry, reference, "Original", false));
+    try std.testing.expect((try groups.hostDraftGroup(&registry, reference, "Other", true)) == null);
+    try registry.removeEmptyGroup(id, revision);
+    try std.testing.expectError(error.StaleGroup, groups.hostDraftGroup(&registry, reference, "Original", false));
+    try std.testing.expect((try groups.hostDraftGroup(&registry, reference, null, true)) == null);
+}
+
+test "wizard retains renamed group draft and saves after choosing another group" {
+    const groups = @import("config/asset_group_actions.zig");
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    const original = try groups.apply(a, std.testing.io, f.tmp.dir, f.path, &f.registry, .{ .create = .{ .name = "Original" } });
+    const replacement = try groups.apply(a, std.testing.io, f.tmp.dir, f.path, &f.registry, .{ .create = .{ .name = "Replacement" } });
+    f.captured_group = original.group.?;
+    f.wizard.loadDraft(.{ .name = "offline", .host = "192.0.2.10", .user = "root", .group = "Original" });
+    _ = try groups.apply(a, std.testing.io, f.tmp.dir, f.path, &f.registry, .{ .rename = .{ .group = original.group.?, .name = "Renamed" } });
+    SaveFixture.activate(f.wizard.next1_btn.?);
+    SaveFixture.activate(f.wizard.next2_btn.?);
+    SaveFixture.activate(f.wizard.save_only_btn.?);
+    try std.testing.expectEqual(error.StaleGroup, f.wizard.save_failure.?.cause);
+    try std.testing.expect(std.mem.indexOf(u8, f.wizard.save_error_node.?.getText().?.content, "重新选择分组") != null);
+    try std.testing.expect(f.wizard.isVisible());
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.step.identity").?);
+    try f.wizard.setGroups(&.{ "Renamed", "Replacement" });
+    feedbackFrames(&f);
+    f.cx.setFocus(findId(f.wizard.root.?, "wizard.group.pick").?);
+    f.cx.handleKeyDown(.down, .{});
+    feedbackFrames(&f);
+    f.cx.handleKeyDown(.home, .{});
+    f.cx.handleKeyDown(.down, .{});
+    f.cx.handleKeyDown(.down, .{});
+    f.cx.handleKeyDown(.@"return", .{});
+    feedbackFrames(&f);
+    try std.testing.expect(f.wizard.group_edited);
+    try std.testing.expectEqualStrings("Replacement", f.wizard.currentDraft().group.?);
+    SaveFixture.activate(f.wizard.next1_btn.?);
+    SaveFixture.activate(f.wizard.next2_btn.?);
+    SaveFixture.activate(f.wizard.save_only_btn.?);
+    try std.testing.expectEqual(@as(usize, 1), f.commits);
+    try std.testing.expectEqual(replacement.group.?.id, f.registry.hosts[f.registry.hosts.len - 1].asset_group_id.?);
+}
 
 test "wizard save accepts valid untested or failed-test drafts and freezes complete protocol options" {
     for ([_]mod.Protocol{ .ssh, .sftp }) |protocol| {
@@ -760,6 +843,69 @@ test "wizard review actual pointer reaches test action in fixed footer with curr
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
+test "wizard retained backgrounds match initial styles for embedded and standalone SSH SFTP editors" {
+    const theme = @import("ui/app_theme.zig");
+    const S = @import("ui/wizard_styles.zig");
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    for ([_]bool{ false, true }) |embedded| {
+        for ([_]mod.Protocol{ .ssh, .sftp }) |protocol| {
+            theme.select(.dark);
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            try cx.setTestFrameStep(100);
+            cx.setViewport(1440, 900);
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+            const publication = try cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
+            var editor: mod.RemoteEditor = .{ .embedded = embedded, .protocol = protocol };
+            try cx.root.?.appendChild(a, try editor.mount(cx, scope));
+            editor.loadDraft(.{ .name = "背景验证", .host = "example.test", .user = "deploy", .protocol = protocol });
+            editor.show();
+            const root_id = editor.modal.?.id;
+            for (@import("config/theme_presets.zig").ids) |id| {
+                for ([_]f32{ 0, 75 }) |transparency| {
+                    errdefer std.debug.print("retained editor: {s}, embedded={}, T={d}\n", .{ id, embedded, transparency });
+                    theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+                    _ = theme.setMaterialParameters(transparency, 24);
+                    publication.publish(cx, theme.widgetTheme(theme.currentName()));
+                    for (0..4) |_| {
+                        cx.advanceFrameClock();
+                        _ = cx.render();
+                    }
+                    try std.testing.expectEqual(root_id, editor.modal.?.id);
+                    try std.testing.expectEqual(if (embedded) ui.Color.TRANSPARENT else theme.current().overlay, editor.modal.?.getBackground());
+                    try std.testing.expectEqual(ui.Color.TRANSPARENT, editor.stepper.?.getBackground());
+                    try std.testing.expectEqual(S.footer().background.?, editor.footer.?.getBackground());
+                    try std.testing.expectEqual(S.copyFooter().background.?, editor.copy_footer.?.getBackground());
+                    try std.testing.expectEqual(S.reviewIdentity().background.?, editor.summary_card.?.getBackground());
+                    try std.testing.expectEqual(S.reviewRoute().background.?, editor.summary_route_card.?.getBackground());
+                    try std.testing.expectEqual(S.testResult(undefined).background.?, editor.review_test_card.?.getBackground());
+                    try std.testing.expectEqual(S.testLogs().background.?, editor.test_logs_area.getBackground());
+                    for (editor.selects.items) |select| try std.testing.expectEqual(S.input().background.?, select.trigger.getBackground());
+                    const menu = editor.selects.items[0].chrome;
+                    const menu_material = theme.layerBackground(2);
+                    menu.setBackground(menu_material);
+                    cx.requestRedraw();
+                    cx.advanceFrameClock();
+                    _ = cx.render();
+                    try std.testing.expectEqual(menu_material, menu.getBackground());
+                    for ([_][]const u8{ "wizard.steps.connector.0", "wizard.steps.connector.1" }) |test_id| try std.testing.expectEqual(theme.current().border, findId(editor.root.?, test_id).?.getBackground());
+                    editor.hide();
+                    editor.show();
+                    try std.testing.expectEqualStrings("背景验证", editor.currentDraft().name);
+                    try std.testing.expectEqual(ui.Color.TRANSPARENT, editor.stepper.?.getBackground());
+                }
+            }
+        }
+    }
+}
+
 test "SFTP wizard stepper uses current badges and completed checks after navigation and theme change" {
     const theme = @import("ui/app_theme.zig");
     const previous = theme.currentName();
@@ -1122,6 +1268,7 @@ test "wizard V3 group select retains registry empty groups and replaced snapshot
     try f.wizard.setGroups(&.{"Empty group"});
     try std.testing.expectEqual(@as(usize, 2), f.wizard.group_options.?.peek().len);
     f.wizard.loadDraft(.{ .name = "target", .host = "target.example", .user = "ops" });
+    try std.testing.expect(!f.wizard.group_edited);
     f.wizard.show();
     feedbackFrames(&f);
     const group = findId(f.wizard.root.?, "wizard.group.pick").?;
@@ -1132,12 +1279,14 @@ test "wizard V3 group select retains registry empty groups and replaced snapshot
     f.cx.handleKeyDown(.@"return", .{});
     feedbackFrames(&f);
     try std.testing.expectEqualStrings("Empty group", f.wizard.currentDraft().group.?);
+    try std.testing.expect(f.wizard.group_edited);
     try f.wizard.setGroups(&.{});
     try std.testing.expectEqualStrings("Empty group", f.wizard.currentDraft().group.?);
     var grouped = f.assets;
     grouped[0].group = "Empty group";
     try f.wizard.setAssets(&grouped);
     f.wizard.loadDraft(.{ .source_owner = grouped[0].source_owner, .name = "envelope", .host = "target.example", .user = "ops" });
+    try std.testing.expect(!f.wizard.group_edited);
     try std.testing.expectEqualStrings("Empty group", f.wizard.currentDraft().group.?);
     feedbackFrames(&f);
     f.cx.setFocus(group);

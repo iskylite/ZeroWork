@@ -348,6 +348,7 @@ pub const Runtime = struct {
         self.* = .{ .allocator = a, .owner = request.handle, .operation = request.key, .context = context, .name = name, .target = target, .route_summary = route_summary, .controller = control, .ai_control = ai.Service.init(request.handle, &control.framebuffer, &control.remote_input), .bridge = ChallengeBridge.init(a, request.handle, request.key, context.challenges), .management_policy = policy };
         self.bridge.management_policy = policy;
         self.ai_control.refresh = .{ .context = self, .request = requestAiRefresh };
+        self.ai_control.asynchronous_encoding = true;
         self.ai_control.on_stop = .{ .context = self, .revoke_lease = revokeAiLease };
         if (context.presentation.input) |input_context| {
             if (!input_context.owner.eql(request.handle)) return error.StaleHostContext;
@@ -394,8 +395,9 @@ pub const Runtime = struct {
         return self.receipt();
     }
     pub fn receipt(self: *Runtime) sessions.CloseReceipt {
+        const image_released = if (self.stopping) self.ai_control.drainEncoding() else true;
         const state = self.controller.poll();
-        const current_receipt: sessions.CloseReceipt = if (state.worker_exited and state.cleanup == .released) .released else if (state.cleanup == .unknown) .unknown else .awaiting;
+        const current_receipt: sessions.CloseReceipt = if (state.worker_exited and state.cleanup == .released and image_released) .released else if (state.cleanup == .unknown) .unknown else .awaiting;
         if (current_receipt == .released) if (self.backend) |backend| {
             // Worker exit is the acquire barrier for native diagnostics.
             self.remote_web_logout = backend.diagnostics.web_logout;

@@ -16,6 +16,7 @@ pub const Point = image.Point;
 pub const Transform = image.Transform;
 pub const max_observation_age_ms: u32 = 15_000;
 pub const ScreenshotRequest = struct {
+    after_operation_id: ?u64 = null,
     region: ?Region = null,
     max_width: u32 = image.max_width,
     max_height: u32 = image.max_height,
@@ -77,6 +78,40 @@ pub const Stop = struct { context: *anyopaque, revoke_lease: *const fn (*anyopaq
 /// independently lock their shared worker state. Encoding is synchronous and
 /// deliberately capped at 1920×1200 until a host worker result lease is added.
 pub const Service = struct {
+    const EncodeJob = struct {
+        allocator: std.mem.Allocator,
+        lease: frames.FrameLease,
+        mapping: Transform,
+        input: remote.Snapshot,
+        captured_ms: u64,
+        revision: u64,
+        operation_id: u64,
+        reservation: @import("../../host/frame_budget.zig").Reservation,
+        thread: ?std.Thread = null,
+        done: std.atomic.Value(bool) = .init(false),
+        result: images.ContentRef = .{},
+        candidate: images.ContentRef = .{},
+        reused: bool = false,
+        failure: ?anyerror = null,
+        fn run(self: *EncodeJob) void {
+            self.reused = if (self.candidate.content()) |cached| image.matchesPixels(self.lease.snapshot, self.mapping, cached) else false;
+            self.result = if (self.reused) self.candidate.retain() else image.capture(self.allocator, self.lease.snapshot, self.mapping, self.captured_ms) catch |err| blk: {
+                self.failure = err;
+                break :blk .{};
+            };
+            // Snapshot pixels are never read after this release. Only scalar
+            // frame metadata and the independent encoded image survive.
+            self.lease.release();
+            self.done.store(true, .release);
+        }
+        fn destroy(self: *EncodeJob) void {
+            self.thread.?.join(); // Called only after the acquire done barrier.
+            self.result.release();
+            self.candidate.release();
+            self.reservation.release();
+            self.allocator.destroy(self);
+        }
+    };
     pub const observation_capacity = 32;
     const InputState = struct { transport_generation: u64, control_generation: u64, connected: bool, controlled: bool };
     owner: identity.SessionHandle,
@@ -94,6 +129,17 @@ pub const Service = struct {
     refresh_fence_operation_id: u64 = 0,
     refresh_fence_sequence: u64 = 0,
     closed: bool = false,
+    cached_image: images.ContentRef = .{},
+    cached_mapping: ?Transform = null,
+    cached_generation: u64 = 0,
+    cached_sequence: u64 = 0,
+    cache_reservation: ?@import("../../host/frame_budget.zig").Reservation = null,
+    encoded_images: usize = 0,
+    reused_images: usize = 0,
+    /// Enabled by the production Runtime, which drains jobs before destruction.
+    asynchronous_encoding: bool = false,
+    encoding: ?*EncodeJob = null,
+    encoding_revision: u64 = 1,
 
     pub fn init(owner: identity.SessionHandle, framebuffer: *frames.Service, input: *remote.Service) Service {
         return .{ .owner = owner, .framebuffer = framebuffer, .input = input };
@@ -102,7 +148,9 @@ pub const Service = struct {
         return typed.Binding.init(Interface, key, self, &vtable, self.owner, 1);
     }
     pub fn screenshot(self: *Service, binding_value: typed.Binding, a: std.mem.Allocator, request: ScreenshotRequest) !Observation {
+        _ = a; // Image storage belongs to the runtime, not a caller's temporary arena.
         try self.validate(binding_value);
+        if (request.after_operation_id) |operation| if (operation == 0 or operation != self.last_operation_id) return error.UnknownOperation;
         _ = try self.poll();
         const last_receipt = if (self.last_operation_id != 0) try self.input.automationStatus(self.input.binding(), self.last_operation_id) else null;
         if (last_receipt) |receipt| if (receipt.status == .accepted) return error.OperationPending;
@@ -122,7 +170,7 @@ pub const Service = struct {
             },
         };
         defer lease.release();
-        const snapshot = lease.snapshot;
+        var snapshot = lease.snapshot;
         if (!snapshot.session_handle.eql(self.owner)) return error.StaleFrame;
         if (input.geometry_generation != 0 and snapshot.frame_generation != input.geometry_generation) return error.FrameGeometryPending;
         const mapping = try image.transform(snapshot.width, snapshot.height, request.region, request.max_width, request.max_height);
@@ -132,8 +180,29 @@ pub const Service = struct {
                 if (snapshot.sequence <= self.refresh_fence_sequence or (receipt.sent_monotonic_ns != 0 and snapshot.received_monotonic_ns < receipt.sent_monotonic_ns)) return error.PostActionFramePending;
             }
         }
-        const now = self.clock.milliseconds(self.clock.context);
-        const reference = try image.capture(a, snapshot, mapping, now);
+        var now = self.clock.milliseconds(self.clock.context);
+        var prepared: ?images.ContentRef = null;
+        var prepared_reused = false;
+        if (self.encoding) |job| {
+            if (!job.done.load(.acquire)) return error.ImageEncodingPending;
+            self.encoding = null;
+            defer job.destroy();
+            if (job.revision != self.encoding_revision or job.operation_id != self.last_operation_id or job.lease.snapshot.frame_generation != snapshot.frame_generation or !std.meta.eql(job.mapping, mapping) or job.input.transport_generation != input.transport_generation or job.input.control_generation != input.control_generation or job.input.input_epoch != input.input_epoch or job.input.geometry_generation != input.geometry_generation) return error.ObservationInvalidated;
+            if (job.failure) |failure| return failure;
+            if (now -| job.captured_ms >= request.max_age_ms) return error.ObservationInvalidated;
+            snapshot = job.lease.snapshot; // Metadata only; encoded pixels own their storage.
+            now = job.captured_ms;
+            prepared = job.result;
+            prepared_reused = job.reused;
+            job.result = .{};
+        }
+        const reuse = prepared_reused or (prepared == null and if (self.cached_mapping) |cached| self.cached_generation == snapshot.frame_generation and std.meta.eql(cached, mapping) and (self.cached_sequence == snapshot.sequence or (!self.asynchronous_encoding and image.matchesPixels(snapshot, mapping, self.cached_image.content().?))) else false);
+        if (prepared == null and !reuse and self.asynchronous_encoding) {
+            try self.startEncoding(&lease, mapping, input, now);
+            return error.ImageEncodingPending;
+        }
+        const reference = prepared orelse if (reuse) self.cached_image.retain() else try image.capture(self.framebuffer.allocator, snapshot, mapping, now);
+        if (reuse) self.reused_images += 1 else self.encoded_images += 1;
         var result: Observation = .{
             .id = self.next_observation,
             .owner = self.owner,
@@ -171,6 +240,17 @@ pub const Service = struct {
             result.deinit();
             return error.ObservationInvalidated;
         }
+        if (!reuse) {
+            self.clearImageCache();
+            const pixels = reference.content().?;
+            if (self.framebuffer.budget.reserve(self.owner, pixels.bytes.len + pixels.pixels.len, .decode)) |reservation| {
+                self.cache_reservation = reservation;
+                self.cached_image = reference.retain();
+                self.cached_mapping = mapping;
+                self.cached_generation = snapshot.frame_generation;
+            } else |_| {} // Observation remains valid when cache capacity is unavailable.
+        }
+        self.cached_sequence = snapshot.sequence;
         var metadata = result;
         metadata.image_ref = .{};
         self.observations[self.next_slot] = metadata;
@@ -207,6 +287,10 @@ pub const Service = struct {
     /// Runtime polls this on its owner thread. Calls also synchronize before
     /// capturing/dispatching, closing the gap between two main-loop polls.
     pub fn poll(self: *Service) !bool {
+        if (self.encoding) |job| if (job.done.load(.acquire) and (job.revision != self.encoding_revision or self.clock.milliseconds(self.clock.context) -| job.captured_ms >= max_observation_age_ms)) {
+            self.encoding = null;
+            job.destroy();
+        };
         if (self.closed) return false;
         var changed = self.syncInput(try self.input.snapshot(self.input.binding()));
         if (self.last_operation_id != 0 and self.refresh_fence_operation_id != self.last_operation_id) {
@@ -266,7 +350,42 @@ pub const Service = struct {
         self.input.revokeAutomation(.closed);
     }
     fn invalidate(self: *Service) void {
+        self.encoding_revision +|= 1;
         self.observations = @splat(null);
+        self.clearImageCache();
+    }
+    /// Nonblocking shutdown barrier. Runtime must retain this service and its
+    /// framebuffer/budget until the independent encoder has released its lease.
+    pub fn drainEncoding(self: *Service) bool {
+        const job = self.encoding orelse return true;
+        if (!job.done.load(.acquire)) return false;
+        self.encoding = null;
+        job.destroy();
+        return true;
+    }
+    fn startEncoding(self: *Service, lease: *frames.FrameLease, mapping: Transform, input: remote.Snapshot, captured_ms: u64) !void {
+        const a = self.framebuffer.allocator;
+        // RGBA output plus native PNG data and the final immutable PNG copy.
+        // Source-frame bytes already have their own framebuffer reservation.
+        const bytes = @as(usize, mapping.output_width) * mapping.output_height * 4 * 3 + 1024 * 1024;
+        var reservation = try self.framebuffer.budget.reserve(self.owner, bytes, .decode);
+        errdefer reservation.release();
+        const job = try a.create(EncodeJob);
+        errdefer a.destroy(job);
+        job.* = .{ .allocator = a, .lease = lease.*, .mapping = mapping, .input = input, .captured_ms = captured_ms, .revision = self.encoding_revision, .operation_id = self.last_operation_id, .reservation = reservation };
+        if (self.cached_mapping) |cached| if (self.cached_generation == lease.snapshot.frame_generation and std.meta.eql(cached, mapping)) {
+            job.candidate = self.cached_image.retain();
+        };
+        errdefer job.candidate.release();
+        job.thread = try std.Thread.spawn(.{}, EncodeJob.run, .{job});
+        lease.token = 0;
+        self.encoding = job;
+    }
+    fn clearImageCache(self: *Service) void {
+        self.cached_image.release();
+        self.cached_mapping = null;
+        if (self.cache_reservation) |*reservation| reservation.release();
+        self.cache_reservation = null;
     }
     fn find(self: *Service, id: u64) ?Observation {
         for (self.observations) |slot| if (slot) |observation| if (observation.id == id) return observation;

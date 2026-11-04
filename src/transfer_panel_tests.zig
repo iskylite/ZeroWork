@@ -17,6 +17,8 @@ comptime {
     _ = @import("ui/wizard.zig");
     _ = @import("plugins/remote/editor.zig");
     _ = @import("ui/workspace.zig");
+    _ = @import("ui/session_os_cache.zig");
+    _ = @import("ui/session_icon.zig");
     _ = @import("file_application_host_tests.zig");
     _ = @import("notification_presenter_controls_tests.zig");
 }

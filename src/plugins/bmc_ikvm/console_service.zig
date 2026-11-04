@@ -47,7 +47,39 @@ pub const Snapshot = struct {
     remote_web_logout: enum { not_created, awaiting, confirmed, unknown } = .not_created,
     remote_kvm_logout: enum { not_created, awaiting, confirmed, unknown } = .not_created,
 };
-pub const OwnedSnapshot = services.Owned(Snapshot);
+pub const OwnedSnapshot = struct {
+    arena: std.heap.ArenaAllocator,
+    value: Snapshot,
+    pub fn init(allocator: std.mem.Allocator, value: Snapshot) !OwnedSnapshot {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        errdefer arena.deinit();
+        // Telemetry owns its bounded paths/IDs by value. Copy its few borrowed
+        // strings directly: parsing the large event array through generic JSON
+        // creates an excessive stack frame in Debug builds.
+        var result = value;
+        try copyStrings(arena.allocator(), &result);
+        return .{ .arena = arena, .value = result };
+    }
+    // Keep allocation failures in a small !void frame. Handling each failure in
+    // init's large !OwnedSnapshot return frame multiplies Debug stack storage.
+    fn copyStrings(a: std.mem.Allocator, result: *Snapshot) !void {
+        result.name = try a.dupe(u8, result.name);
+        result.target = try a.dupe(u8, result.target);
+        result.route_summary = try a.dupe(u8, result.route_summary);
+        result.failure_code = try copyOptional(a, result.failure_code);
+        result.progress.failure_code = try copyOptional(a, result.progress.failure_code);
+        if (result.progress.failure_event) |*event| event.error_code = try copyOptional(a, event.error_code);
+        if (result.progress.discovery_issue) |*event| event.error_code = try copyOptional(a, event.error_code);
+        for (&result.progress.events) |*event| event.error_code = try copyOptional(a, event.error_code);
+    }
+    pub fn deinit(self: *OwnedSnapshot) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+    fn copyOptional(allocator: std.mem.Allocator, text: ?[]const u8) !?[]const u8 {
+        return if (text) |value| try allocator.dupe(u8, value) else null;
+    }
+};
 pub const Interface = struct {
     snapshot: *const fn (*anyopaque, typed.Binding, std.mem.Allocator) anyerror!OwnedSnapshot,
     request_control: *const fn (*anyopaque, typed.Binding) anyerror!void,

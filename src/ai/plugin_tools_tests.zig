@@ -214,7 +214,7 @@ test "API2 immutable request schemas validate generic values and each selected m
     try std.testing.expectError(error.InvalidToolArguments, table.parse(a, name, "{\"session_ids\":[101,101],\"value\":3}"));
 }
 
-test "API2 approval freezes parameters generation revisions expiry and is consumed once in full control" {
+test "API2 confirm approval freezes parameters generation revisions expiry and is consumed once" {
     const a = std.testing.allocator;
     var fake: Fake = .{};
     var members = [_]tools.Member{member(&fake, 101, &.{binding})};
@@ -222,7 +222,7 @@ test "API2 approval freezes parameters generation revisions expiry and is consum
     defer table.deinit();
     var call = try table.parse(a, table.entries[0].provider_name, "{\"session_ids\":[101],\"value\":3}");
     defer call.deinit();
-    try std.testing.expectError(error.ToolApprovalRequired, tools.authorize(&table, call, captured, &members, .{ .full_control = true }, null, 100));
+    try std.testing.expectError(error.ToolApprovalRequired, tools.authorize(&table, call, captured, &members, .{}, null, 100));
     var ticket = try tools.ApprovalTicket.create(&table, call, 100, 1000);
     ticket.approve();
     members[0].owner.generation += 1;
@@ -235,14 +235,14 @@ test "API2 approval freezes parameters generation revisions expiry and is consum
     defer changed.deinit();
     try std.testing.expectError(error.ToolApprovalChanged, tools.authorize(&table, changed, captured, &members, .{}, &ticket, 101));
     try std.testing.expectError(error.ToolApprovalExpired, tools.authorize(&table, call, captured, &members, .{}, &ticket, 1100));
-    try tools.authorize(&table, call, captured, &members, .{ .full_control = true }, &ticket, 101);
+    try tools.authorize(&table, call, captured, &members, .{}, &ticket, 101);
     try std.testing.expectError(error.ToolApprovalAlreadyUsed, tools.authorize(&table, call, captured, &members, .{}, &ticket, 102));
     try std.testing.expectEqual(@as(usize, 0), fake.count);
 }
 
 test "API2 runtime rejects denial and cancellation without effects and never replays unknown" {
     const a = std.testing.allocator;
-    var fake: Fake = .{ .approve = false, .policy = .{ .full_control = true } };
+    var fake: Fake = .{ .approve = false };
     const members = [_]tools.Member{member(&fake, 101, &.{binding})};
     fake.members = &members;
     var table = try tools.RequestTable.init(a, captured, &.{definition()}, &members);
@@ -639,4 +639,91 @@ test "API2 unknown vision budget keeps observation input new observation and ans
     try std.testing.expectEqual(@as(usize, 1), run.messages.items[10].images.len);
     try std.testing.expectEqual(@as(usize, 4), fixture.observations);
     try std.testing.expectEqual(@as(usize, 1), fixture.inputs);
+}
+
+test "live permission runtime reasks when auto bypass is revoked before dispatch" {
+    const a = std.testing.allocator;
+    const Fixture = struct {
+        fake: Fake = .{},
+        asks: usize = 0,
+        fn ask(raw: *anyopaque, _: tools.DynamicInvocation, ticket: *tools.ApprovalTicket, _: ?*@import("provider.zig").CancelToken) !bool {
+            const fake: *Fake = @ptrCast(@alignCast(raw));
+            const self: *@This() = @fieldParentPtr("fake", fake);
+            self.asks += 1;
+            if (self.asks == 1) {
+                // The waiter observed auto, but confirm was restored before
+                // Runtime's final authority check. No user decision exists.
+                ticket.policy_bypass = true;
+                fake.policy.full_control = false;
+                return true;
+            }
+            return false;
+        }
+    };
+    var fixture: Fixture = .{};
+    const fake = &fixture.fake;
+    var members = [_]tools.Member{member(fake, 101, &.{binding})};
+    var def = definition();
+    def.approval_policy = .confirm;
+    var table = try tools.RequestTable.init(a, captured, &.{def}, &members);
+    defer table.deinit();
+    var call = try table.parse(a, table.entries[0].provider_name, "{\"session_ids\":[101],\"value\":3}");
+    defer call.deinit();
+    fake.members = &members;
+    var history = operations.Store.init(a);
+    defer history.deinit();
+    var runtime = fake.runtime(&history);
+    runtime.approval = Fixture.ask;
+    const invocation: tools.DynamicInvocation = .{ .table = &table, .parsed = call, .turn_id = 1, .call_id = "live-revoked", .arguments = "{\"session_ids\":[101],\"value\":3}", .operation_id = 1 };
+    try std.testing.expectError(error.ToolApprovalRejected, runtime.execute(invocation, a, null));
+    try std.testing.expectEqual(@as(usize, 2), fixture.asks);
+    try std.testing.expectEqual(@as(usize, 0), fake.count);
+}
+
+test "API2 automatic permission covers both confirmation policies and keeps deny gates" {
+    const a = std.testing.allocator;
+    for ([_]tools.ApprovalPolicy{ .confirm, .always_confirm }) |confirmation| {
+        for ([_]tools.Effect{ .resource_write, .remote_input, .observe_image }) |effect| {
+            var fake: Fake = .{ .approve = false, .policy = .{ .engine = .{ .mode = .auto } } };
+            const members = [_]tools.Member{ member(&fake, 101, &.{binding}), member(&fake, 102, &.{binding}) };
+            fake.members = &members;
+            var def = definition();
+            def.approval_policy = confirmation;
+            def.effect = effect;
+            var table = try tools.RequestTable.init(a, captured, &.{def}, &members);
+            defer table.deinit();
+            var call = try table.parse(a, table.entries[0].provider_name, "{\"session_ids\":[101,102],\"value\":3}");
+            defer call.deinit();
+            var history = operations.Store.init(a);
+            defer history.deinit();
+            const invocation: tools.DynamicInvocation = .{ .table = &table, .parsed = call, .turn_id = 1, .call_id = "auto-group-write", .arguments = "{\"session_ids\":[101,102],\"value\":3}", .operation_id = 1 };
+            const results = try fake.runtime(&history).execute(invocation, a, null);
+            defer a.free(results);
+            defer for (results) |*result| result.deinit(a);
+            try std.testing.expectEqual(@as(usize, 2), fake.count);
+            try std.testing.expectEqual(@as(usize, 2), results.len);
+            for (results) |result| try std.testing.expectEqual(tools.Status.succeeded, result.status);
+            const denied: tools.Policy = .{ .engine = .{ .mode = .auto }, .full_control = true, .allow_write = false, .allow_input = false, .allow_read = false };
+            try std.testing.expectError(error.ToolExecutionDenied, tools.needsApproval(def, denied));
+        }
+    }
+}
+
+test "API2 user approval waits indefinitely while exact authority and one use remain enforced" {
+    const a = std.testing.allocator;
+    var fake: Fake = .{};
+    var members = [_]tools.Member{member(&fake, 101, &.{binding})};
+    var table = try tools.RequestTable.init(a, captured, &.{definition()}, &members);
+    defer table.deinit();
+    var call = try table.parse(a, table.entries[0].provider_name, "{\"session_ids\":[101],\"value\":3}");
+    defer call.deinit();
+    var ticket = try tools.ApprovalTicket.waiting(&table, call);
+    ticket.approve();
+    const later = 30 * 24 * 60 * 60 * 1000;
+    members[0].owner.generation += 1;
+    try std.testing.expectError(error.StaleToolAuthority, tools.authorize(&table, call, captured, &members, .{}, &ticket, later));
+    members[0].owner.generation -= 1;
+    try tools.authorize(&table, call, captured, &members, .{}, &ticket, later);
+    try std.testing.expectError(error.ToolApprovalAlreadyUsed, tools.authorize(&table, call, captured, &members, .{}, &ticket, later + 1));
+    try std.testing.expectEqual(@as(usize, 0), fake.count);
 }

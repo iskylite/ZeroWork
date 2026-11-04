@@ -58,6 +58,8 @@ pub const View = struct {
     scope: *ui.Scope,
     material: ?*@import("background_layers.zig").View = null,
     callbacks: Callbacks,
+    copy_feedback: ?*@import("copy_button.zig").Button = null,
+    fingerprint_feedback: ?*@import("copy_button.zig").Button = null,
     /// Append once to the window root. Popover content itself is portaled.
     root: *ui.Node = undefined,
     chrome: *ui.Node = undefined,
@@ -313,8 +315,11 @@ pub const View = struct {
         const header = try ui.box(self.cx, S.chainHeader(), .{});
         try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.network, S.theme.current().accent, S.icon(16)));
         self.source_label = try label(self.cx, header, if (snapshot.source == .@"test") "连接链路 · 最近检测" else "连接链路", S.chainTitle(), .{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0 });
-        self.source_status = try label(self.cx, header, state.text, S.text(12, 500, 18, false), .{ .width = .{ .px = 40 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
-        self.source_status.?.setTextColor(if (state.online) @import("socks_info_styles.zig").text(.success) else S.theme.current().fg_2);
+        self.source_status = null;
+        if (!state.online) {
+            self.source_status = try label(self.cx, header, state.text, S.text(12, 500, 18, false), .{ .width = .{ .px = 40 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+            self.source_status.?.setTextColor(S.theme.current().fg_2);
+        }
         try header.appendChild(self.cx.allocator, try self.iconAction(scope, .close, ui.icons.x, "关闭连接链路", "connection.details.close", false, null, 28, false));
         try self.chrome.appendChild(self.cx.allocator, header);
         try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.spacer(12), .{}));
@@ -413,6 +418,8 @@ pub const View = struct {
         const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = name, .disabled = disabled, .base_style = S.action(size, surface), .hover_style = S.hover(), .on_click = self.cx.on(Action, context, Action.click) }).mount(scope, self.cx);
         button.meta.ownership.meta.test_id = id;
         try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, if (disabled) S.theme.current().fg_3 else S.theme.current().fg_2, S.icon(16)));
+        if (kind == .copy) self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, button);
+        if (kind == .fingerprint) self.fingerprint_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, button);
         return iconTooltip(self.cx, scope, button, name);
     }
 
@@ -522,15 +529,19 @@ pub const View = struct {
         if (!self.visible) return;
         const copy = self.callbacks.copy orelse return;
         const text = self.report(self.cx.allocator) catch {
-            self.feedback = "复制失败，请重试";
-            return;
-        };
-        defer self.cx.allocator.free(text);
-        copy(self.callbacks.context, snapshot.key, text) catch {
+            if (self.copy_feedback) |button| button.report(false);
             self.feedback = "复制失败，请重试";
             self.refreshFeedback();
             return;
         };
+        defer self.cx.allocator.free(text);
+        copy(self.callbacks.context, snapshot.key, text) catch {
+            if (self.copy_feedback) |button| button.report(false);
+            self.feedback = "复制失败，请重试";
+            self.refreshFeedback();
+            return;
+        };
+        if (self.copy_feedback) |button| button.report(true);
         self.feedback = "已复制链路";
         self.refreshFeedback();
     }
@@ -541,10 +552,12 @@ pub const View = struct {
         const fingerprint = snapshot.hops[self.selection.?.hop].metadata.fingerprint.slice();
         if (fingerprint.len == 0) return;
         copy(self.callbacks.context, snapshot.key, fingerprint) catch {
+            if (self.fingerprint_feedback) |button| button.report(false);
             self.feedback = "复制失败，请重试";
             self.refreshFeedback();
             return;
         };
+        if (self.fingerprint_feedback) |button| button.report(true);
         self.feedback = "已复制指纹";
         self.refreshFeedback();
     }
@@ -699,15 +712,17 @@ fn chainStatus(snapshot: Snapshot) ChainState {
     var all_online = true;
     var all_released = true;
     var releasing = false;
+    var negotiating = false;
     var any_released = false;
     for (snapshot.hops[0..snapshot.hop_count]) |hop| {
         all_online = all_online and hop.status == .online;
         all_released = all_released and (hop.status == .released or hop.status == .not_attempted);
         releasing = releasing or hop.status == .releasing;
+        negotiating = negotiating or hop.status == .negotiating;
         any_released = any_released or hop.status == .released;
     }
     if (all_online and snapshot.source == .session) return .{ .text = "在线", .online = true };
-    return .{ .text = if (releasing) "释放中" else if (all_released and any_released) "已释放" else if (snapshot.source == .@"test") "检测中" else "未连接", .online = false };
+    return .{ .text = if (releasing) "释放中" else if (all_released and any_released) "已释放" else if (snapshot.source == .@"test") "检测中" else if (negotiating) "连接中" else "未连接", .online = false };
 }
 fn canSample(snapshot: Snapshot) bool {
     if (snapshot.source != .session) return false;

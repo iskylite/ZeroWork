@@ -42,12 +42,13 @@ pub const Chord = struct {
     }
 };
 pub const Layout = enum { us_ascii };
+pub const max_text_bytes = 256;
 pub const Text = struct {
-    bytes: [64]u8 = @splat(0),
-    length: u8,
+    bytes: [max_text_bytes]u8 = @splat(0),
+    length: u16,
     layout: Layout = .us_ascii,
     pub fn init(bytes: []const u8, layout: Layout) !Text {
-        if (bytes.len == 0 or bytes.len > 64) return error.InvalidTextLength;
+        if (bytes.len == 0 or bytes.len > max_text_bytes) return error.InvalidTextLength;
         var result: Text = .{ .length = @intCast(bytes.len), .layout = layout };
         @memcpy(result.bytes[0..bytes.len], bytes);
         return result;
@@ -80,7 +81,7 @@ pub const Key = struct { keysym: u32, down: bool };
 pub const Pointer = struct { x: u16, y: u16, buttons: u8 };
 pub const Event = union(enum) { key: Key, pointer: Pointer };
 pub const Batch = struct {
-    pub const capacity = 256;
+    pub const capacity = max_text_bytes * 4;
     events: [capacity]Event = undefined,
     count: u16 = 0,
     pub fn fingerprint(self: *const Batch) [32]u8 {

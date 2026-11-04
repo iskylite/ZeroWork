@@ -94,6 +94,7 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, key, "default_provider")) return setText(&value.ai.default_provider, next);
         if (std.mem.eql(u8, key, "execution_mode")) return setEnum(config.ExecutionMode, &value.ai.execution_mode, next);
         if (std.mem.eql(u8, key, "session_retention")) return setEnum(config.SessionRetention, &value.ai.session_retention, next);
+        if (std.mem.eql(u8, key, "step_display")) return setEnum(config.StepDisplay, &value.ai.step_display, next);
         if (std.mem.eql(u8, key, "permission_mode")) {
             const text = switch (next) {
                 .text => |v| v,
@@ -225,6 +226,7 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
         if (std.mem.eql(u8, key, "default_provider")) return .{ .text = value.ai.default_provider };
         if (std.mem.eql(u8, key, "execution_mode")) return .{ .text = @tagName(value.ai.execution_mode) };
         if (std.mem.eql(u8, key, "session_retention")) return .{ .text = @tagName(value.ai.session_retention) };
+        if (std.mem.eql(u8, key, "step_display")) return .{ .text = @tagName(value.ai.step_display) };
         if (std.mem.eql(u8, key, "permission_mode")) return .{ .text = @tagName(value.ai.permission_mode) };
         if (std.mem.eql(u8, key, "error_hint")) return .{ .boolean = value.ai.error_hint };
         if (std.mem.eql(u8, key, "redact_ip")) return .{ .boolean = value.ai.redact_ip };
@@ -330,4 +332,12 @@ test "execution policy settings mutate only validated fields and preserve permis
     try std.testing.expectError(error.InvalidType, writeConfig(&value, "ai", "session_retention", .{ .boolean = true }));
     try std.testing.expectEqualStrings("attached_pty", read(value, "ai", "execution_mode").?.text);
     try std.testing.expectEqualStrings("keep", read(value, "ai", "session_retention").?.text);
+}
+
+test "AI step aggregation settings edit and read the persisted display mode" {
+    var value: config.Config = .{};
+    try writeConfig(&value, "ai", "step_display", .{ .text = "expanded" });
+    try std.testing.expectEqualStrings("expanded", read(value, "ai", "step_display").?.text);
+    try std.testing.expectEqual(config.StepDisplay.expanded, value.ai.step_display);
+    try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ai", "step_display", .{ .text = "other" }));
 }

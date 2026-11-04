@@ -9,7 +9,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const query = bound.controller.search_query;
     if (binding.matches(query, "事件提醒 通知 传输完成 断线 重连 AI 助手 回合 结束 终端 Bell 声音 transfer_done reconnect ai_ready bell")) {
         const section = try page.section("事件提醒", "后台事件与终端声音", ui.icons.bell, 48, "settings.notifications.events", null);
-        try section.toggle(.{ .section = "notify", .key = "transfer_done" }, "后台传输完成", "仅离开应用时提醒；已有保存值继续生效。", null);
+        try section.toggle(.{ .section = "notify", .key = "transfer_done" }, "后台传输完成", "仅离开应用时提醒。", null);
         try section.toggle(.{ .section = "notify", .key = "reconnect" }, "持续连接故障", "断线后自动重连停止并影响工作时提醒。", null);
         try section.toggle(.{ .section = "notify", .key = "ai_ready" }, "后台 AI 任务完成", "默认关闭；仅最终答复完成且离开应用时提醒。", null);
         try section.toggle(.{ .section = "notify", .key = "bell" }, "终端 Bell 声音", "", null);
@@ -26,11 +26,6 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 8 });
         try labels.appendChild(cx.allocator, status_row);
         try row.appendChild(cx.allocator, labels);
-        const tip = try ui.widgets.Tooltip(.{ .text = "当前版本尚未提供测试通知", .open_delay_ms = 450 }).mount(bound.scope, cx);
-        const button = try ui.widgets.Button(.{ .label = "测试通知", .disabled = true, .a11y_label = "当前版本尚未提供测试通知", .variant = .secondary, .base_style = controls.S.actionControl(false) }).mount(bound.scope, cx);
-        button.meta.ownership.meta.test_id = "settings.notifications.test";
-        try tip.trigger.appendChild(cx.allocator, button);
-        try row.appendChild(cx.allocator, tip.wrapper);
         try permission_panel.appendChild(cx.allocator, row);
         try section.body.appendChild(cx.allocator, permission_panel);
     }

@@ -58,6 +58,13 @@ pub const Thread = struct {
         try self.reconnect_control.requestWithInitialization(previous, next, skip);
         self.explicit_disconnect_active.store(false, .release);
     }
+    pub fn requestReconnectConfigured(self: *Thread, previous: OperationKey, next: OperationKey, skip: bool, configuration: reconnect.Configuration) !void {
+        if (self.stop_requested.load(.acquire)) return error.WorkerStopped;
+        var owned = try reconnect.ConfigurationSnapshot.init(self.worker.allocator, configuration);
+        errdefer owned.deinit();
+        try self.reconnect_control.requestConfigured(previous, next, skip, owned);
+        self.explicit_disconnect_active.store(false, .release);
+    }
 
     pub fn preflightExplicitDisconnect(self: *Thread, expected: OperationKey) !u64 {
         return self.checkExplicitDisconnect(expected, false);
@@ -191,12 +198,13 @@ pub const Thread = struct {
                     failure = err;
                     break;
                 };
-                const grant = self.reconnect_control.take() orelse {
+                var grant = self.reconnect_control.take() orelse {
                     pause();
                     continue;
                 };
+                defer if (grant.configuration) |*configuration| configuration.deinit();
                 self.worker.reconnect.authorized();
-                self.worker.rebuildForOperationWithInitialization(grant.previous, grant.next, grant.skip_shell_initialization) catch |err| {
+                self.worker.rebuildForOperationConfigured(grant.previous, grant.next, grant.skip_shell_initialization, if (grant.configuration) |configuration| configuration.value else null) catch |err| {
                     failure = err;
                     break;
                 };

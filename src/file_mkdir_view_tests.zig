@@ -232,6 +232,7 @@ test "file mkdir UI real toolbar and Enter creates once refreshes and locates wi
     try f.init();
     defer f.stop();
     const original = try openLocal(&f, 71);
+    try std.testing.expectEqualStrings("", paneNode(&f, original.owner, "files.mkdir.feedback").getText().?.content);
     const model = f.presentation.modelFor(original.owner).?;
     const before = model.projection().?;
     const remote_stamp = before.panes[1].stamp;
@@ -347,6 +348,7 @@ test "file mkdir UI close after submit does not reopen or duplicate mkdir and na
     try enterName(&f, original.owner, "closed-after-submit");
     f.cx.handleKeyDown(.@"return", .{});
     const key = model.mkdirStatus(.local).?.key;
+    try std.testing.expectEqualStrings("收起创建状态（Esc），创建继续", paneNode(&f, original.owner, "files.mkdir.cancel").behavior.interaction.a11y.?.label.?);
     // The accepted request stays owned by Controller; dismissing does not
     // silently repeat it, roll back its directory, or reopen on its late result.
     f.cx.handleKeyDown(.escape, .{});

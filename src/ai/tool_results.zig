@@ -4,12 +4,14 @@ const std = @import("std");
 const loop = @import("tool_loop.zig");
 const scope = @import("tool_scope.zig");
 const identity = @import("../host/identity.zig");
+const kvm_feedback = @import("kvm_tool_feedback.zig");
+const fetch_feedback = @import("fetch_url_feedback.zig");
 pub const Source = struct { owner: identity.SessionHandle, label: []const u8 };
-pub const Target = struct { result: loop.TargetResult, source: ?identity.SessionHandle = null, label: []const u8 = "", operation_id: ?u64 = null };
+pub const Target = struct { result: loop.TargetResult, source: ?identity.SessionHandle = null, label: []const u8 = "", operation_id: ?u64 = null, feedback: ?kvm_feedback.Feedback = null };
 pub const execution_projection = @import("execution_result_projection.zig");
 pub const ExecutionProjection = execution_projection.Projection;
 pub const ExecutionActionTarget = execution_projection.ActionTarget;
-pub const HostFact = struct { status: @import("plugin_tools.zig").Status, receipt: @import("host_tools.zig").Receipt, content: []const u8 };
+pub const HostFact = struct { status: @import("plugin_tools.zig").Status, receipt: @import("host_tools.zig").Receipt, content: []const u8, fetch: ?fetch_feedback.Feedback = null };
 /// Presentation position survives view rebuilds and may outlive its source
 /// record briefly while rollback disposes the old native tree.
 pub const ScrollPositions = struct {
@@ -44,6 +46,7 @@ pub const Record = struct {
     host: ?HostFact = null,
     execution: ?ExecutionProjection = null,
     execution_view_initialized: bool = false,
+    execution_details_expanded: bool = false,
     images: []const @import("image_attachments.zig").ContentRef = &.{},
     error_code: ?[]const u8 = null,
     error_status: ?loop.Status = null,
@@ -68,6 +71,7 @@ pub const Record = struct {
         return self.test_id[0..self.test_id_len];
     }
     pub fn summary(self: *const Record, buffer: []u8) []const u8 {
+        if (self.host) |fact| if (fact.fetch) |feedback| return feedback.label;
         if (self.host) |fact| return switch (fact.status) {
             .succeeded => "成功",
             .failed => "失败",
@@ -75,6 +79,9 @@ pub const Record = struct {
             .cancelled_unsent => "已取消",
             .outcome_unknown => "结果待核实",
         };
+        if (self.targets.len == 1 and self.targets[0].result.local_released) {
+            if (self.targets[0].feedback) |info| return info.label;
+        }
         var succeeded: usize = 0;
         var unknown: usize = 0;
         var cancelled: usize = 0;
@@ -125,12 +132,18 @@ pub const Store = struct {
     fn recount(self: *Store) void {
         self.retained_bytes = 0;
         self.retained_image_bytes = 0;
-        for (self.records.items) |record| {
+        for (self.records.items, 0..) |record, ri| {
             self.retained_bytes += record.name.len + record.arguments.len * 2 + record.call_id.len + 1024;
             if (record.host) |fact| self.retained_bytes += fact.content.len;
             if (record.execution) |execution| self.retained_bytes += execution.retainedBytes();
             for (record.targets) |target| self.retained_bytes += target.result.stdout.len + target.result.stderr.len + target.label.len + (if (target.result.cwd) |cwd| cwd.len else 0) + (if (target.result.error_code) |code| code.len else 0);
-            for (record.images) |ref| if (ref.content()) |content| {
+            for (record.images, 0..) |ref, ii| if (ref.content()) |content| {
+                const seen = found: {
+                    for (self.records.items[0..ri]) |prior| for (prior.images) |image| if (image.snapshot == ref.snapshot) break :found true;
+                    for (record.images[0..ii]) |image| if (image.snapshot == ref.snapshot) break :found true;
+                    break :found false;
+                };
+                if (seen) continue;
                 self.retained_image_bytes += content.bytes.len + content.pixels.len;
             };
         }
@@ -177,15 +190,22 @@ pub const Store = struct {
             for (copy.images) |ref| _ = ref.retain();
             copy.error_code = if (record.error_code) |code| try a.dupe(u8, code) else null;
             copy.error_status = record.error_status;
-            if (record.host) |fact| copy.host = .{ .status = fact.status, .receipt = fact.receipt, .content = try a.dupe(u8, fact.content) };
+            if (record.host) |fact| copy.host = .{ .status = fact.status, .receipt = fact.receipt, .content = try a.dupe(u8, fact.content), .fetch = try fetch_feedback.project(a, record.name, fact.content) };
             if (record.execution) |execution| copy.execution = try execution.clone(a);
             copy.execution_view_initialized = record.execution_view_initialized;
+            copy.execution_details_expanded = record.execution_details_expanded;
             copy.expanded = record.expanded;
             copy.selected = record.selected;
             if (record.scroll_positions) |positions| (try copy.scrollPositions(self.allocator)).offsets = positions.offsets;
             copy.total_elapsed_ms = record.total_elapsed_ms;
             copy.decision = record.decision;
-            for (copy.targets, record.targets) |*target, original| target.operation_id = original.operation_id;
+            for (copy.targets, record.targets) |*target, original| {
+                target.operation_id = original.operation_id;
+                if (original.feedback) |info| {
+                    target.feedback = info;
+                    target.feedback.?.label = try a.dupe(u8, info.label);
+                }
+            }
         }
         result.recount();
         return result;
@@ -238,6 +258,11 @@ pub const Store = struct {
     /// Capacity is preflighted for the entire ledger; failure retains the old
     /// Loop for inspection and must prevent starting a new request.
     pub fn capture(self: *Store, run: *const loop.Loop, sources: []const Source) !bool {
+        var physical_images = std.AutoHashMap(usize, void).init(self.allocator);
+        defer physical_images.deinit();
+        for (self.records.items) |record| for (record.images) |reference| if (reference.snapshot) |snapshot| {
+            try physical_images.put(@intFromPtr(snapshot), {});
+        };
         var needed: usize = 0;
         var needed_images: usize = 0;
         var added: usize = 0;
@@ -255,7 +280,7 @@ pub const Store = struct {
             if (record.generic_results) |results| for (results) |result| for (result.blocks) |block| switch (block) {
                 .text, .structured => |bytes| needed += bytes.len,
                 .image_ref => |reference| if (reference.content()) |content| {
-                    needed_images += content.bytes.len + content.pixels.len;
+                    if (!(try physical_images.getOrPut(@intFromPtr(reference.snapshot.?))).found_existing) needed_images += content.bytes.len + content.pixels.len;
                 },
             };
             if (record.outcome) |outcome| for (outcome.targets) |target| {
@@ -341,6 +366,25 @@ pub const Store = struct {
                     .cancelled_unsent => .cancelled,
                     .outcome_unknown => .unknown,
                 }, .stdout = try text.toOwnedSlice(a), .local_released = result.receipt.local_released, .remote_effect_unknown = result.receipt.remote_effect_unknown }, .source = result.receipt.owner, .operation_id = result.receipt.operation_id };
+                for (result.blocks) |block| {
+                    if (block != .structured) continue;
+                    if (try kvm_feedback.project(a, record.name, block.structured)) |info| {
+                        target.feedback = info;
+                        break;
+                    }
+                }
+                if ((result.status == .outcome_unknown or result.receipt.remote_effect_unknown) and kvm_feedback.isTool(record.name)) {
+                    if (target.feedback) |info| a.free(info.label);
+                    target.feedback = try kvm_feedback.project(a, record.name, "{\"state\":\"partial_unknown\"}");
+                }
+                if (result.status != .succeeded) for (result.blocks) |block| {
+                    if (block != .structured) continue;
+                    const failure = std.json.parseFromSliceLeaky(struct { error_code: ?[]const u8 = null }, a, block.structured, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch continue;
+                    if (failure.error_code) |code| {
+                        target.result.error_code = code;
+                        break;
+                    }
+                };
                 if (@import("plugin_tools.zig").legacyName(record.name)) for (result.blocks) |block| {
                     if (block != .structured) continue;
                     const original = std.json.parseFromSlice(loop.TargetResult, a, block.structured, .{ .allocate = .alloc_always }) catch continue;
@@ -360,7 +404,8 @@ pub const Store = struct {
                     .text, .structured => |bytes| bytes,
                 });
             }
-            host_fact = .{ .status = result.status, .receipt = result.receipt, .content = try text.toOwnedSlice(a) };
+            const content = try text.toOwnedSlice(a);
+            host_fact = .{ .status = result.status, .receipt = result.receipt, .content = content, .fetch = try fetch_feedback.project(a, record.name, content) };
         } else if (record.result_body) |body| {
             const json = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch null;
             if (json) |value| if (value.value == .object) {
@@ -452,15 +497,24 @@ test "tool result store budgets full resolution observations separately from lat
     const two_images = store.retained_image_bytes;
     store.recount();
     try std.testing.expectEqual(two_images, store.retained_image_bytes);
-    // Reusing an immutable ref avoids allocating 128 MiB in this test; every
-    // retained occurrence is still conservatively charged to the image limit.
+    // Shared snapshots are charged once, while distinct physical images still
+    // exhaust the finite image store independently of the later text exchange.
+    try Append.imageRecord(&run, first, 2);
+    try std.testing.expect(try store.capture(&run, &.{}));
+    try std.testing.expectEqual(two_images, store.retained_image_bytes);
     const image_size = first.content().?.bytes.len + first.content().?.pixels.len;
     const admitted = Store.max_image_bytes / image_size;
-    for (2..admitted) |index| try Append.imageRecord(&run, first, index);
+    for (2..admitted) |index| {
+        var distinct = try image.capture(a, snapshot, mapping, index + 10);
+        defer distinct.release();
+        try Append.imageRecord(&run, distinct, index + 1);
+    }
     try std.testing.expect(try store.capture(&run, &.{}));
-    try Append.imageRecord(&run, first, admitted);
+    var overflow = try image.capture(a, snapshot, mapping, 999);
+    defer overflow.release();
+    try Append.imageRecord(&run, overflow, admitted + 1);
     try std.testing.expectError(error.ToolResultStoreCapacity, store.capture(&run, &.{}));
-    try std.testing.expectEqual(admitted + 1, store.records.items.len);
+    try std.testing.expectEqual(admitted + 2, store.records.items.len);
     store.keepTurns(&.{});
     try std.testing.expectEqual(@as(usize, 0), store.retained_bytes);
     try std.testing.expectEqual(@as(usize, 0), store.retained_image_bytes);

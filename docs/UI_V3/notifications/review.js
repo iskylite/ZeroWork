@@ -11,7 +11,7 @@
     transfer_blocked:{kind:'transfer_blocked',title:'备份传输已中断',source:'prod-web-01',detail:'备份批次因访问权限不足停止，尚未完成的文件保留在任务中。',requiresAction:true,timeSensitive:true,description:'仅整个后台批次停止、需要介入时升级；普通单文件失败留在任务行。'},
     task_waiting:{kind:'task_waiting',title:'后台任务等待你确认',source:'prod-web-01',detail:'部署检查需要一次必要确认才能继续，请回到原操作查看完整目标和影响。',requiresAction:true,timeSensitive:true,description:'原卡保留；用户离开且任务确实被阻塞时提醒一次。全局只定位，不批准。'},
     outcome_unknown:{kind:'outcome_unknown',title:'变更命令的结果需要核查',source:'prod-web-01',detail:'命令已派发后连接中断，当前影响尚未确认。核查前不重放原命令。',requiresAction:true,timeSensitive:true,description:'有副作用且需要及时核查的未知结果可升级；普通读取失败不升级。'},
-    application_risk:{kind:'application_risk',title:'工作记录无法继续保存',source:'ZeroWork',detail:'存储位置不可写，继续工作可能无法保留完整记录。请检查可用空间和权限。',requiresAction:true,timeSensitive:true,description:'应用级持续风险使用持久提醒；关闭横幅不解除风险，待处理项继续保留。'},
+    application_risk:{kind:'application_risk',title:'工作记录无法继续保存',source:'ZeroWork',detail:'存储位置不可写，继续工作可能无法保留完整记录。请检查可用空间和权限。',requiresAction:true,timeSensitive:true,description:'应用级风险横幅自动收起；关闭横幅不解除风险，待处理项继续保留。'},
     completion:{kind:'completion',title:'备份任务已完成',source:'prod-web-01',description:'默认仅更新任务状态；离开应用且主动开启完成提醒后，才生成一次系统提醒。'},
     outage:{kind:'connection_failed',title:'共享连接中断，自动恢复已停止',requiresAction:true,timeSensitive:true,description:'同一共享链路导致的三个会话故障合并为一项；不会排队连弹三条。'}
   };

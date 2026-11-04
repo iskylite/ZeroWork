@@ -24,7 +24,6 @@ pub const View = struct {
     title_icon: *ui.Node = undefined,
     title: *ui.Node = undefined,
     notice: *ui.Node = undefined,
-    explanation: *ui.Node = undefined,
     colors: theme.Colors = undefined,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
@@ -47,7 +46,9 @@ pub const View = struct {
         try head.appendChild(cx.allocator, try ui.spacer(cx));
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .a11y_label = "取消关闭本地会话", .on_click = cx.on(View, self, cancel) }).mount(scope, cx);
         close.setStyleInline(cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .border = .{ .radius = 7 } });
-        try head.appendChild(cx.allocator, close);
+        close.meta.ownership.meta.test_id = "local.close.dismiss";
+        const close_hint = try @import("control_hint.zig").mount(cx, scope, close, "取消关闭，返回原终端；进程继续运行", .{ .id = "local.close.dismiss.tooltip", .visible = open });
+        try head.appendChild(cx.allocator, close_hint.wrapper);
         try modal.body.appendChild(cx.allocator, head);
         self.identity = try self.label(modal.body, "", 18, styles.text(12, true));
         const risk = try ui.box(cx, styles.risk(), .{});
@@ -66,7 +67,6 @@ pub const View = struct {
         try scroll.content.appendChild(cx.allocator, extra_text);
         try modal.body.appendChild(cx.allocator, scroll.container);
         self.notice = try self.label(modal.body, "关闭将结束该本地会话及其进程。历史记录保留。", 18, styles.text(12, false));
-        self.explanation = try self.label(modal.body, "取消会回到原终端，进程继续运行。", 16, styles.text(11, false));
         const actions = try ui.box(cx, styles.row(30), .{});
         try actions.appendChild(cx.allocator, try ui.spacer(cx));
         self.cancel_button = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .on_click = cx.on(View, self, cancel) }).mount(scope, cx);
@@ -106,7 +106,7 @@ pub const View = struct {
                 },
                 .idle_shell => {
                     title = "本地 shell 仍在运行";
-                    detail = "关闭将结束本地 shell";
+                    detail = "";
                 },
                 .not_running => {
                     title = "本地进程已结束";
@@ -119,6 +119,7 @@ pub const View = struct {
         }
         try self.risk_title.setTextContent(self.cx.allocator, title);
         try self.risk_detail.setTextContent(self.cx.allocator, detail);
+        self.risk_detail.setDisplay(if (detail.len == 0) .none else .flex);
         const bytes = extra.writer.buffered();
         try self.extra_text.setTextContent(self.cx.allocator, bytes);
         self.extra.setDisplay(if (bytes.len == 0) .none else .flex);
@@ -137,7 +138,7 @@ pub const View = struct {
         self.confirm_button.setStyleInline(self.cx.allocator, styles.button(112, true));
         _ = self.title_icon.setTint(c.accent);
         for ([_]*ui.Node{ self.title, self.identity, self.risk_title }) |node| node.setTextColor(c.fg_1);
-        for ([_]*ui.Node{ self.risk_detail, self.extra_text, self.notice, self.explanation }) |node| node.setTextColor(c.fg_2);
+        for ([_]*ui.Node{ self.risk_detail, self.extra_text, self.notice }) |node| node.setTextColor(c.fg_2);
         self.colors = c;
         self.cx.requestRedraw();
     }

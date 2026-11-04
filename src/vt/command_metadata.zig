@@ -89,22 +89,65 @@ fn elapsedMs(started_ns: i128, now_ns: i128) ?u64 {
 }
 
 pub const Store = struct {
+    const PendingAi = struct { id: ExecutionId, command: []u8 };
+    const Shell = struct { id: ?[32]u8, pending_input: Anchor = .{}, active_id: ?u64 = null, pending_ai: ?PendingAi = null };
+
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
     pending_input: Anchor = .{},
     active_id: ?u64 = null,
     next_id: u64 = 1,
     truncated: bool = false,
-    pending_ai: ?struct { id: ExecutionId, command: []u8 } = null,
+    shell_id: ?[32]u8 = null,
+    shells: std.ArrayList(Shell) = .empty,
+    pending_ai: ?PendingAi = null,
     observer: ?@import("engine.zig").CommandObserver = null,
 
     pub fn deinit(self: *Store) void {
+        for (self.shells.items) |*shell| {
+            shell.pending_input.deinit();
+            if (shell.pending_ai) |pending| self.allocator.free(pending.command);
+        }
+        self.shells.deinit(self.allocator);
         self.pending_input.deinit();
         self.clearAiSubmission();
         for (self.entries.items) |*entry| entry.deinit(self.allocator);
         self.entries.deinit(self.allocator);
     }
 
+    /// One global history, with independent open command/input pairings for
+    /// every integrated Shell. Child D must not finish the parent's ssh/su.
+    pub fn selectShell(self: *Store, terminal: c.GhosttyTerminal, cols: u16, id: [32]u8) !void {
+        if (self.shell_id == null) {
+            self.shell_id = id;
+            return;
+        }
+        if (std.meta.eql(self.shell_id, @as(?[32]u8, id))) return;
+        var index: ?usize = null;
+        for (self.shells.items, 0..) |shell, i| if (std.meta.eql(shell.id, @as(?[32]u8, id))) {
+            index = i;
+            break;
+        };
+        if (index != null) {
+            // Returning to a known ancestor can close a child whose `exit`
+            // never emits D. Retain unknown evidence instead of running forever.
+            if (self.active_id) |active| for (self.entries.items) |*entry| if (entry.value.id == active and entry.value.state == .running) {
+                entry.value.state = .unknown;
+                if (self.observer) |observer| observer.changed(observer.context, projected(entry.*, terminal, cols));
+                break;
+            };
+        }
+        if (index == null) {
+            if (self.shells.items.len >= 64) return error.ShellContextLimit;
+            try self.shells.append(self.allocator, .{ .id = id });
+            index = self.shells.items.len - 1;
+        }
+        const next = &self.shells.items[index.?];
+        std.mem.swap(?[32]u8, &self.shell_id, &next.id);
+        std.mem.swap(Anchor, &self.pending_input, &next.pending_input);
+        std.mem.swap(?u64, &self.active_id, &next.active_id);
+        std.mem.swap(?PendingAi, &self.pending_ai, &next.pending_ai);
+    }
     pub fn registerAiSubmission(self: *Store, execution_id: ExecutionId, command: []const u8) !void {
         if (self.pending_ai != null) return error.AiSubmissionPending;
         const text = std.mem.trimEnd(u8, command, "\r\n");
@@ -125,6 +168,12 @@ pub const Store = struct {
         self.pending_input.deinit();
         self.clearAiSubmission();
         self.active_id = null;
+        self.shell_id = null;
+        for (self.shells.items) |*shell| {
+            shell.pending_input.deinit();
+            if (shell.pending_ai) |pending| self.allocator.free(pending.command);
+        }
+        self.shells.clearRetainingCapacity();
         for (self.entries.items) |*entry| if (entry.value.state == .running) {
             entry.value.state = .unknown;
             if (self.observer) |observer| observer.changed(observer.context, projected(entry.*, terminal, cols));

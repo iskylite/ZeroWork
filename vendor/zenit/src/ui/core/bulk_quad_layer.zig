@@ -250,13 +250,13 @@ pub const BulkQuadLayer = struct {
         const at_tail = insert_at == null or insert_at.? == host.display_list.items.items.len;
         if (at_tail) {
             try host.display_list.items.ensureUnusedCapacity(
-                host.allocator,
+                host.display_list.allocator,
                 self.quads.items.len * MAX_ITEMS_PER_QUAD,
             );
             for (self.quads.items) |q| {
                 // Shared lower with two other degrade paths; three separate writes tech debt, field
                 // adds inevitably miss one (shadow/per-side nearly missed).
-                try appendQuadItems(&host.display_list.items, host.allocator, q, clip_cache.headerFor(host, q, header));
+                try appendQuadItems(&host.display_list.items, host.display_list.allocator, q, clip_cache.headerFor(host, q, header));
             }
             return;
         }
@@ -270,7 +270,7 @@ pub const BulkQuadLayer = struct {
             try appendQuadItems(&staged, host.allocator, q, clip_cache.headerFor(host, q, header));
         }
         if (staged.items.len == 0) return;
-        try host.display_list.items.insertSlice(host.allocator, insert_at.?, staged.items);
+        try host.display_list.items.insertSlice(host.display_list.allocator, insert_at.?, staged.items);
     }
 
     /// Batch layer insertion point: after anchor static content, before interactive overlay.
@@ -434,7 +434,7 @@ pub const BulkQuadLayer = struct {
         }
 
         host.display_list.items.clearRetainingCapacity();
-        try host.display_list.items.appendSlice(host.allocator, merged.items);
+        try host.display_list.items.appendSlice(host.display_list.allocator, merged.items);
     }
 
     /// Each display item in anchor subtree's owning Node z_index (null if unowned). Once per

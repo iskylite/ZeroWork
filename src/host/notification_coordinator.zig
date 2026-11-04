@@ -255,7 +255,7 @@ pub const Coordinator = struct {
             replacement.remaining_ms = record.remaining_ms;
             replacement.paused = record.paused;
             self.history_revision +|= 1;
-            // Reconcile persistent unknown/error in place. A dismissed toast
+            // Reconcile an existing unknown/error in place. A dismissed toast
             // remains dismissed; updates never steal focus or recreate it.
             replacement.system = record.system;
             replacement.system_event_id = record.system_event_id;
@@ -415,7 +415,7 @@ pub const Coordinator = struct {
     }
     pub fn pauseNotification(self: *Coordinator, fact_id: u64, paused: bool) void {
         for (self.notification_records.items) |*record| if (record.fact_id == fact_id) {
-            if (record.paused and !paused and !record.persistent()) record.remaining_ms = if (record.event.actions.len > 0) 8000 else 4000;
+            if (record.paused and !paused) record.remaining_ms = if (record.event.actions.len > 0) 8000 else 4000;
             record.paused = paused;
             return;
         };
@@ -455,16 +455,14 @@ pub const Coordinator = struct {
                 continue;
             }
             const has_slot = focused and visible < 1 and self.open_centers == 0;
-            if (!record.persistent()) {
-                const elapsed = now_ms -| record.last_tick_ms;
-                if (record.presentation == .visible and has_slot and !record.paused) record.remaining_ms -|= elapsed;
-                record.last_tick_ms = now_ms;
-                if (record.remaining_ms == 0) {
-                    record.presentation = .expired;
-                    self.dequeue(id);
-                    continue;
-                }
-            } else record.last_tick_ms = now_ms;
+            const elapsed = now_ms -| record.last_tick_ms;
+            if (record.presentation == .visible and has_slot and !record.paused) record.remaining_ms -|= elapsed;
+            record.last_tick_ms = now_ms;
+            if (record.remaining_ms == 0) {
+                record.presentation = .expired;
+                self.dequeue(id);
+                continue;
+            }
             if (has_slot) {
                 record.presentation = .visible;
                 output[visible] = record;
@@ -490,7 +488,7 @@ pub const Coordinator = struct {
                     index += 1;
                     continue;
                 }
-                if (old.persistent() and !incoming.persistent()) {
+                if (old.priorityRisk() and !incoming.priorityRisk()) {
                     self.dismissNotification(fact_id);
                     return;
                 }
@@ -501,7 +499,7 @@ pub const Coordinator = struct {
             var victim: usize = 0;
             // Prefer an old info/success presentation. Facts remain retained.
             for (self.presentation_queue[0..self.presentation_count], 0..) |id, i| if (self.recordFor(id)) |record| {
-                if (!record.persistent()) {
+                if (!record.priorityRisk()) {
                     victim = i;
                     break;
                 }
@@ -514,9 +512,9 @@ pub const Coordinator = struct {
             self.dequeue(removed);
         }
         var insertion = self.presentation_count;
-        if (self.recordFor(fact_id)) |incoming| if (incoming.persistent()) {
+        if (self.recordFor(fact_id)) |incoming| if (incoming.priorityRisk()) {
             for (self.presentation_queue[0..self.presentation_count], 0..) |id, index| {
-                if (self.recordFor(id)) |record| if (!record.persistent()) {
+                if (self.recordFor(id)) |record| if (!record.priorityRisk()) {
                     insertion = index;
                     break;
                 };
@@ -751,7 +749,9 @@ pub const NotificationRecord = struct {
     pub fn pending(self: NotificationRecord) bool {
         return self.listed and !self.owner_ended and self.event.attention.requires_action and !self.event.attention.resolved;
     }
-    pub fn persistent(self: NotificationRecord) bool {
+    /// Application risks have presentation priority even though their banner
+    /// expires; the underlying pending fact remains until its source resolves.
+    pub fn priorityRisk(self: NotificationRecord) bool {
         return self.pending() and self.event.attention.kind == .application_risk;
     }
 };

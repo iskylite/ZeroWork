@@ -4,6 +4,64 @@ const progress = @import("plugins/bmc_ikvm/connection_progress.zig");
 const probe = @import("plugins/bmc_ikvm/probe.zig");
 const contract = @import("host/probe_contract.zig");
 
+test "BMC connection progress usable HTTP 200 fields with device diagnostics do not mark reads as warnings" {
+    const vm = @import("plugins/bmc_ikvm/view_model.zig");
+    var tracker = progress.Tracker.initAt(0, 0);
+    tracker.setStageAt(.redfish_discovery, 1);
+    tracker.noteAt(.{ .code = .resource_fields_available, .http_status = 200, .validity = .valid, .context = .{ .method = .get, .resource_path = progress.resourcePath("/redfish/v1/Systems/node-B"), .response_errors = progress.ResponseErrors.init("Base.1.19.InternalError") } }, 2);
+    tracker.setStageAt(.oem_session, 3);
+    const snapshot = tracker.snapshotAt(4);
+    try std.testing.expect(snapshot.discovery_issue == null);
+    var projection: vm.ProgressProjection = .{};
+    projection.observe(snapshot);
+    try std.testing.expectEqual(vm.StepState.done, projection.state(snapshot, .management));
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try vm.writeConnectionLog(&writer.writer, snapshot);
+    for ([_][]const u8{ "所需管理信息已获取", "设备附带诊断/MessageId", "Base.1.19.InternalError", "HTTP 200", "有效" }) |expected| try std.testing.expect(std.mem.indexOf(u8, writer.written(), expected) != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "部分结果") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "资源读取失败") == null);
+}
+
+test "BMC connection progress 404 identifies the device advertised link without claiming the canonical read failed" {
+    const vm = @import("plugins/bmc_ikvm/view_model.zig");
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try vm.writeLogMessage(&writer.writer, .{ .stage = .redfish_discovery, .code = .manager_system_link_missing, .http_status = 404, .validity = .unavailable, .context = .{ .method = .get, .resource_path = progress.resourcePath("/redfish/v1/Systems/system"), .source_path = progress.resourcePath("/redfish/v1/Managers/bmc-1"), .source_property = progress.LogText(128).init("/Links/ManagerForServers"), .response_errors = progress.ResponseErrors.init("Base.1.19.ResourceNotFound") } }, null);
+    for ([_][]const u8{ "GET /redfish/v1/Systems/system", "链接来源：/redfish/v1/Managers/bmc-1 的 /Links/ManagerForServers", "管理器声明的系统链接返回404", "不代表系统集合读取失败", "HTTP 404", "Base.1.19.ResourceNotFound" }) |expected| try std.testing.expect(std.mem.indexOf(u8, writer.written(), expected) != null);
+}
+
+test "BMC connection progress actual management paths errors and HTTP status survive rollover without secrets" {
+    const vm = @import("plugins/bmc_ikvm/view_model.zig");
+    var tracker = progress.Tracker.initAt(0, 0);
+    tracker.setStageAt(.redfish_discovery, 1);
+    var path: [4096]u8 = @splat('x');
+    const prefix = "/redfish/v1/Systems/node-B/BootOptions/";
+    @memcpy(path[0..prefix.len], prefix);
+    const context: progress.Context = .{ .method = .get, .path = .other_redfish, .resource_path = progress.resourcePath(&path), .phase = .response_validate, .http_status = 404, .response_errors = progress.ResponseErrors.init("Base.1.19.ResourceNotFound") };
+    tracker.noteAt(.{ .code = .resource_response_rejected, .validity = .unavailable, .http_status = 404, .context = context }, 2);
+    @memset(&path, 'z');
+    for (0..40) |i| tracker.noteAt(.{ .resource = .other_redfish, .http_status = 200, .validity = .valid, .context = .{} }, i + 3);
+    const snapshot = tracker.snapshotAt(50);
+    const entries = vm.connectionLogEvents(snapshot);
+    try std.testing.expectEqual(@as(usize, progress.capacity + 1), entries.count);
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try vm.writeConnectionLog(&writer.writer, snapshot);
+    for ([_][]const u8{ prefix, "HTTP 404（资源不存在）", "Base.1.19.ResourceNotFound", "资源读取失败", "保留的管理资源异常" }) |expected| try std.testing.expect(std.mem.indexOf(u8, writer.written(), expected) != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "zzzz") == null);
+    try std.testing.expectEqual(@as(u16, 4096), snapshot.discovery_issue.?.context.?.resource_path.?.len);
+    writer.clearRetainingCapacity();
+    try vm.writeStepDiagnostics(&writer.writer, snapshot, .management);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "Base.1.19.ResourceNotFound") != null);
+    writer.clearRetainingCapacity();
+    try vm.writeLogMessage(&writer.writer, .{ .stage = .redfish_discovery, .error_code = "HttpTimeout", .context = .{ .method = .get, .path = .systems, .resource_path = progress.resourcePath("/redfish/v1/Systems?token=private-token"), .phase = .response_headers } }, null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "HTTP 状态不可用") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "HttpTimeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "private-token") == null);
+    for ([_][]const u8{ "/redfish/v1/SessionService/Sessions/secret", "/redfish/v1/Systems/%73ecret", "/redfish/v1/Systems/../secret", "/redfish/v1/Systems/secret\nheader" }) |unsafe| try std.testing.expect(progress.resourcePath(unsafe) == null);
+}
+
 test "BMC connection progress measures monotonic phase and total time and marks human waits" {
     var tracker = progress.Tracker.initAt(3, 10_000);
     tracker.setStageAt(.route, 10_100);

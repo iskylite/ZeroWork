@@ -8,6 +8,54 @@ const Source = @import("ui/terminal_document_source.zig").Source;
 const a = std.testing.allocator;
 const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(81), .generation = 2 };
 const context: host.Context = .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = .{ .session = 81 }, .binding_revision = 1, .grant_revision = 1 };
+
+test "efficiency terminal observation and attachment control share a stable fence" {
+    const Fixture = struct {
+        source: Source,
+        output_sequence: u64 = 9,
+        change_during_read: bool = false,
+        fn capture(raw: *anyopaque, _: @import("host/session_host.zig").ServiceHandle, request: terminal.ContentRequest, allocator: std.mem.Allocator) !terminal.ContentCapture {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.change_during_read) self.output_sequence += 1;
+            return self.source.adapter.contentQuery(owner, request, allocator);
+        }
+        fn executionSnapshot(_: *anyopaque, _: @import("host/session_host.zig").ServiceHandle) !terminal.execution.Snapshot {
+            return .{ .owner = owner, .state = .idle, .input_epoch = 7, .input_ready = true, .shell = .{ .id = "0123456789abcdef0123456789abcdef".*, .revision = 3, .prompt_ready = true } };
+        }
+        fn status(raw: *anyopaque, _: @import("host/session_host.zig").ServiceHandle) !terminal.Status {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .owner = owner, .writable = true, .eof_seen = false, .geometry = .{ .revision = 1, .cols = 20, .rows = 3 }, .output_sequence = self.output_sequence, .pending_input_bytes = 0 };
+        }
+    };
+    var adapter = try Adapter.init(a, 3, 20);
+    defer adapter.destroy();
+    _ = try adapter.feed("test prompt> ");
+    var fixture: Fixture = .{ .source = .{ .adapter = &adapter, .owner = owner } };
+    var hooks = fixture.source.service().vtable.*;
+    hooks.content_query = Fixture.capture;
+    hooks.execution_snapshot = Fixture.executionSnapshot;
+    hooks.status = Fixture.status;
+    var s = snapshot(&fixture.source, &hooks);
+    s.source.service.context = &fixture;
+    const reference = try ref();
+    defer a.free(reference);
+    var arguments = try args(reference, ",\"include_control\":true");
+    defer arguments.deinit();
+    var read = try queries.execute(s, call("host.read_terminal", arguments.value), null, 0, a);
+    defer read.deinit(a);
+    var body = try parsed(read.blocks[0].structured);
+    defer body.deinit();
+    const control = body.value.object.get("control").?.object;
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef", control.get("shell_context").?.object.get("id").?.string);
+    try std.testing.expectEqual(@as(i64, 9), control.get("output_sequence").?.integer);
+    try std.testing.expectEqual(@as(i64, 7), control.get("input_epoch").?.integer);
+    try std.testing.expect(control.get("observation_only").?.bool);
+    fixture.change_during_read = true;
+    try std.testing.expectError(error.ShellAttachmentStale, queries.execute(s, call("host.read_terminal", arguments.value), null, 0, a));
+    var historical = try parsed("{\"recording_ref\":\"r1:test\",\"include_control\":true}");
+    defer historical.deinit();
+    try std.testing.expectError(error.InvalidRange, queries.parse("host.read_terminal", historical.value));
+}
 fn call(tool: []const u8, arguments: std.json.Value) host.Invocation {
     return .{ .context = context, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "call-1", .tool_id = tool, .arguments = arguments, .arguments_json = "", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
 }

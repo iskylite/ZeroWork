@@ -64,7 +64,6 @@ pub const Step = struct {
     decision: ?bool = null,
     expanded: bool = false,
     text_offset: usize = 0,
-    approval_expired: bool = false,
     activity_started_ms: ?u64 = null,
     activity_approval_baseline_ms: u64 = 0,
     pub fn deinit(self: *Step, a: std.mem.Allocator) void {
@@ -80,7 +79,7 @@ pub const Step = struct {
         errdefer a.free(name);
         const command = try a.dupe(u8, self.command);
         errdefer a.free(command);
-        return .{ .call_id = id, .name = name, .command = command, .detail = try a.dupe(u8, self.detail), .phase = self.phase, .started_ms = self.started_ms, .ended_ms = self.ended_ms, .approval_started_ms = self.approval_started_ms, .approval_elapsed_ms = self.approval_elapsed_ms, .decision = self.decision, .expanded = self.expanded, .text_offset = self.text_offset, .approval_expired = self.approval_expired, .activity_started_ms = self.activity_started_ms, .activity_approval_baseline_ms = self.activity_approval_baseline_ms };
+        return .{ .call_id = id, .name = name, .command = command, .detail = try a.dupe(u8, self.detail), .phase = self.phase, .started_ms = self.started_ms, .ended_ms = self.ended_ms, .approval_started_ms = self.approval_started_ms, .approval_elapsed_ms = self.approval_elapsed_ms, .decision = self.decision, .expanded = self.expanded, .text_offset = self.text_offset, .activity_started_ms = self.activity_started_ms, .activity_approval_baseline_ms = self.activity_approval_baseline_ms };
     }
     /// Tool activity excludes time waiting for the user's approval. Terminal
     /// runtime is separately projected from the actual execution snapshot.

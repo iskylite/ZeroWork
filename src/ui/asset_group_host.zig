@@ -7,6 +7,7 @@ const Sidebar = @import("sidebar_view.zig");
 const Owned = @import("session_lifecycle.zig").Snapshot;
 pub const actions = @import("../config/asset_group_actions.zig");
 const S = @import("asset_group_styles.zig");
+const palette = @import("color_palette.zig");
 pub const GroupRef = actions.GroupRef;
 pub const Mode = S.Mode;
 pub const NewHost = struct {
@@ -57,6 +58,9 @@ pub const View = struct {
     field: *ui.Node = undefined,
     field_label: *ui.Node = undefined,
     input: ui.widgets.input.InputResult = undefined,
+    palette: *palette.View = undefined,
+    custom_label: *ui.Node = undefined,
+    color_preview: *ui.Node = undefined,
     helper: *ui.Node = undefined,
     notice: *ui.Node = undefined,
     notice_title: *ui.Node = undefined,
@@ -111,12 +115,21 @@ pub const View = struct {
         try body.appendChild(cx.allocator, self.summary);
         self.field = try ui.box(cx, S.field(false), .{});
         self.field_label = try self.label(self.field, "分组名称", 16, S.text(11, 500, false));
+        self.palette = try palette.View.mount(cx, scope, "asset.group.color", self.disabled, .{ .context = self, .choose = chooseColor });
+        try self.field.appendChild(cx.allocator, self.palette.root);
+        self.custom_label = try self.label(self.field, "自定义颜色 · #RRGGBB", 16, S.text(11, 400, false));
+        const input_row = try ui.box(cx, S.row(32, 8), .{});
+        self.color_preview = try ui.box(cx, @import("color_palette_styles.zig").swatch(0x6366f1), .{});
+        self.color_preview.meta.ownership.meta.test_id = "asset.group.color.preview";
+        try input_row.appendChild(cx.allocator, self.color_preview);
         self.input = try ui.widgets.Input(.{ .value = self.value, .disabled = self.disabled, .on_change = cx.on(View, self, changed), .on_submit = cx.on(View, self, inputSubmit) }).mountResult(scope, cx);
         @import("app_theme.zig").styleInput(self.input);
         self.input.input_container.setStyleInline(cx.allocator, S.input());
         self.input.input_container.meta.ownership.meta.test_id = "asset.group.input";
         S.tuneInput(&self.input);
-        try self.field.appendChild(cx.allocator, self.input.node);
+        self.input.node.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        try input_row.appendChild(cx.allocator, self.input.node);
+        try self.field.appendChild(cx.allocator, input_row);
         self.helper = try self.label(self.field, "", 16, S.text(10.5, 400, false));
         self.helper.meta.ownership.meta.test_id = "asset.group.error";
         try body.appendChild(cx.allocator, self.field);
@@ -201,6 +214,17 @@ pub const View = struct {
         self.pending_new_host = true;
         self.cx.requestRedraw();
     }
+    fn chooseColor(raw: *anyopaque, color: u32) void {
+        const self: *View = @ptrCast(@alignCast(raw));
+        if (!self.isVisible() or self.mode != .color or self.disabled.peek()) return;
+        for (palette.colors, palette.labels) |preset, hex| if (preset == color) {
+            self.value.set(hex);
+            _ = self.input.state.setText(hex);
+            self.failure = null;
+            self.refresh() catch {};
+            return;
+        };
+    }
     fn changed(self: *View, _: []const u8) void {
         self.failure = null;
         self.refresh() catch {};
@@ -260,7 +284,14 @@ pub const View = struct {
         self.dialog.setStyleInline(self.cx.allocator, S.panel(self.mode, self.cx.viewport, self.fieldError(), self.failure != null and !self.fieldError()));
         self.summary.setStyleInline(self.cx.allocator, S.summary());
         self.summary.setDisplay(if (self.mode == .delete_empty or self.mode == .created) .flex else .none);
-        self.field.setStyleInline(self.cx.allocator, S.field(self.fieldError()));
+        self.field.setStyleInline(self.cx.allocator, if (self.mode == .color) S.colorField(self.fieldError()) else S.field(self.fieldError()));
+        self.palette.root.setDisplay(if (self.mode == .color) .flex else .none);
+        self.custom_label.setDisplay(if (self.mode == .color) .flex else .none);
+        self.color_preview.setDisplay(if (self.mode == .color) .flex else .none);
+        self.custom_label.setTextColor(c.fg_2);
+        const selected_color: ?u32 = if (actions.colorValid(self.value.peek())) std.fmt.parseInt(u24, self.value.peek()[1..], 16) catch null else null;
+        self.palette.select(if (self.mode == .color) selected_color else null);
+        self.color_preview.setBackground(if (selected_color) |color| ui.Color.hex(@intCast(color)) else c.well);
         self.helper.setDisplay(if (self.fieldError()) .flex else .none);
         self.notice.setDisplay(if (self.mode == .delete_empty or (self.failure != null and !self.fieldError())) .flex else .none);
         self.notice.setStyleInline(self.cx.allocator, S.notice(self.mode, self.failure != null));
@@ -366,7 +397,7 @@ pub const View = struct {
         if (resized or !std.meta.eql(self.colors, S.theme.current())) self.refresh() catch {};
         if (self.focus_pending and self.isVisible() and self.dialog.globalRect().w > 0) {
             self.focus_pending = false;
-            self.cx.setFocus(if (self.mode == .delete_empty) self.secondary else if (self.mode == .created) self.primary else self.input.input_container);
+            self.cx.setFocus(if (self.mode == .delete_empty) self.secondary else if (self.mode == .created) self.primary else if (self.mode == .color) self.palette.buttons[0] else self.input.input_container);
         }
         return if (resized) .needs_layout else .done;
     }

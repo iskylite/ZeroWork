@@ -28,6 +28,8 @@ pub var layout_depth_limit_hits: u64 = 0;
 /// **silently wrong layout** (shrink not applied => overflow; grid not laid out), so this counter
 /// makes OOM distinguishable from a layout bug.
 pub var layout_alloc_failure_hits: u64 = 0;
+/// Nodes whose hidden layout state was actually settled (excludes clean cuts).
+pub var hidden_settle_visits: u64 = 0;
 var g_layout_recursion_depth: usize = 0;
 
 /// display: none—node and subtree don't participate in layout (no space, gap excluded, no parent
@@ -56,8 +58,19 @@ fn collapseDisplayNone(node: *Node) void {
 
 /// Recursion (depth limit, not width; wide subtrees won't miss dirty-bit clearing).
 fn settleHiddenSubtree(n: *Node, depth: usize) void {
+    // A visible sibling's relayout can visit this hidden branch every frame.
+    // Dirty layout bubbles unless an isolation boundary stops it. A structural
+    // epoch also catches new unmounted descendants below those boundaries.
+    // Geometry is still collapsed by the caller.
+    const structure = Node.treeStructureRevision();
+    if (!n.frame_state.state_bits.dirty.core.layout and
+        !n.frame_state.state_bits.dirty.core.subtree_layout and
+        n.frame_state.state_bits.flags.is_mounted and
+        n.meta.per_frame.caches.versions.hidden_layout_structure == structure) return;
+    hidden_settle_visits +|= 1;
     n.frame_state.state_bits.dirty.core.layout = false;
     n.frame_state.state_bits.dirty.core.subtree_layout = false;
+    n.meta.per_frame.caches.versions.hidden_layout_structure = structure;
     node_mod.fireMountIfNeeded(n);
     if (depth >= max_layout_recursion_depth) return;
     for (n.children.items) |c| settleHiddenSubtree(c, depth + 1);

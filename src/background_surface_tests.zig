@@ -6,6 +6,196 @@ const assets = @import("config/background_asset.zig");
 const theme = @import("ui/app_theme.zig");
 const shell = @import("ui/shell_styles.zig");
 
+test "terminal fixed grid glyph replacement preserves geometry and interaction indexes" {
+    const fixture = @import("ui/terminal_surface_tests.zig");
+    const View = @import("ui/terminal_view.zig").TerminalViewNode;
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(4, 16);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 400);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    try transport.controller.feedOutput(fixture.owner, 1, "0000", 100);
+    for (0..4) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = try view.refreshTerminalService(fixture.owner, false);
+        _ = cx.render();
+    }
+    const surface = view.terminal_surface.?;
+    const glyph = surface.rows.items[0].glyphs.items[0].node;
+    const previous = glyph.globalRect();
+    try transport.controller.feedOutput(fixture.owner, 2, "\r1111", 200);
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expect(surface.rows.items[0].glyphs.items[0].node == glyph);
+    try std.testing.expectEqualStrings("1111", glyph.getText().?.content);
+    try std.testing.expect(!glyph.frame_state.state_bits.dirty.core.layout);
+    try std.testing.expect(!glyph.frame_state.state_bits.dirty.hit.geometry);
+    try std.testing.expect(glyph.frame_state.state_bits.dirty.core.render);
+    try expectRect(previous, glyph.globalRect());
+}
+
+test "retained window panel leaves closed tree and reopens with the same state and order" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 400);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const panel = try ui.box(cx, .{ .position = .absolute, .width = .{ .px = 200 }, .height = .{ .px = 100 } }, .{});
+    try cx.root.?.appendChild(cx.allocator, panel);
+    const text = try ui.text(cx, "retained draft", .{});
+    try panel.appendChild(cx.allocator, text);
+    const sibling = try ui.box(cx, .{}, .{});
+    try cx.root.?.appendChild(cx.allocator, sibling);
+    const original_id = panel.id;
+    panel.setDisplay(.none);
+    _ = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, cx.root.?, panel);
+    try std.testing.expect(panel.parent == null);
+    try std.testing.expectEqual(@as(usize, 1), cx.root.?.children.items.len);
+    try text.setTextContent(cx.allocator, "changed while closed");
+    panel.setDisplay(.flex);
+    cx.requestRedraw();
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        _ = cx.render();
+    }
+    try std.testing.expect(panel.parent == cx.root);
+    try std.testing.expect(cx.root.?.children.items[0] == panel);
+    try std.testing.expectEqual(original_id, panel.id);
+    try std.testing.expectEqualStrings("changed while closed", text.getText().?.content);
+    panel.setDisplay(.none);
+    cx.requestRedraw();
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        _ = cx.render();
+    }
+    try std.testing.expect(panel.parent == null);
+    // Scope disposal frees this now-detached branch; testing allocator checks
+    // its retained text and descendants along with the panel ownership cell.
+}
+
+test "retained window panel disposes while attached without owning the root twice" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const panel = try ui.box(cx, .{}, .{});
+    try cx.root.?.appendChild(cx.allocator, panel);
+    _ = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, cx.root.?, panel);
+    try std.testing.expect(panel.parent == cx.root);
+}
+
+test "retained window panel cleanup tolerates a parent-owned branch already freed" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{}, .{});
+    const panel = try ui.box(cx, .{}, .{});
+    try cx.root.?.appendChild(cx.allocator, panel);
+    _ = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, cx.root.?, panel);
+    cx.detachChild(cx.root.?, panel);
+    cx.destroyDetached(panel);
+    // The retained owner holds only a tracked identity; cleanup must not read
+    // the old allocation or free it twice on a failed window construction path.
+}
+
+test "retained window panel revokes capture focus and old input handles across reopening" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 400);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const panel = try ui.box(cx, .{ .width = .{ .px = 200 }, .height = .{ .px = 100 } }, .{});
+    const editor = try ui.widgets.Input(.{}).mountResult(scope, cx);
+    try panel.appendChild(cx.allocator, editor.node);
+    try cx.root.?.appendChild(cx.allocator, panel);
+    _ = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, cx.root.?, panel);
+    cx.advanceFrameClock();
+    _ = cx.render();
+    const previous = cx.node_registry.handleFor(editor.input_container);
+    cx.setFocus(editor.input_container);
+    cx.setPointerCapture(editor.input_container);
+    try std.testing.expect(cx.dispatcher.hasPointerCapture());
+    panel.setDisplay(.none);
+    cx.advanceFrameClock();
+    cx.requestRedraw();
+    _ = cx.render();
+    try std.testing.expect(panel.parent == null);
+    try std.testing.expect(cx.focus_manager.getFocused() == null);
+    try std.testing.expect(!cx.dispatcher.hasPointerCapture());
+    try std.testing.expect(cx.node_registry.resolve(previous, null) == null);
+    panel.setDisplay(.flex);
+    cx.advanceFrameClock();
+    cx.requestRedraw();
+    _ = cx.render();
+    try std.testing.expect(panel.parent == cx.root);
+    try std.testing.expect(cx.node_registry.resolve(previous, null) == null);
+    try std.testing.expect(cx.node_registry.resolve(cx.node_registry.handleFor(editor.input_container), null) == editor.input_container);
+}
+
+test "retained window panel restores opening focus after its registry is rebuilt" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 400);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const panel = try ui.box(cx, .{ .width = .{ .px = 200 }, .height = .{ .px = 100 } }, .{});
+    const editor = try ui.widgets.Input(.{ .placeholder = "retained editor" }).mountResult(scope, cx);
+    try panel.appendChild(cx.allocator, editor.node);
+    try cx.root.?.appendChild(cx.allocator, panel);
+    panel.setDisplay(.none);
+    const retained = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, cx.root.?, panel);
+    retained.focusWhenAttached(editor.input_container);
+    panel.setDisplay(.flex);
+    cx.requestRedraw();
+    for (0..5) |_| {
+        cx.advanceFrameClock();
+        cx.requestRedraw();
+        _ = cx.render();
+    }
+    try std.testing.expect(cx.focus_manager.getFocused() == editor.input_container);
+}
+
+test "retained window panel does not steal focus after a newer outside focus request" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 400);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const outside = try ui.widgets.Input(.{}).mountResult(scope, cx);
+    try cx.root.?.appendChild(cx.allocator, outside.node);
+    const panel = try ui.box(cx, .{ .width = .{ .px = 200 }, .height = .{ .px = 100 } }, .{});
+    const editor = try ui.widgets.Input(.{}).mountResult(scope, cx);
+    try panel.appendChild(cx.allocator, editor.node);
+    try cx.root.?.appendChild(cx.allocator, panel);
+    panel.setDisplay(.none);
+    const retained = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, cx.root.?, panel);
+    for (0..2) |_| {
+        cx.advanceFrameClock();
+        _ = cx.render();
+    }
+    retained.focusWhenAttached(editor.input_container);
+    cx.setFocus(outside.input_container);
+    panel.setDisplay(.flex);
+    cx.requestRedraw();
+    for (0..5) |_| {
+        cx.advanceFrameClock();
+        cx.requestRedraw();
+        _ = cx.render();
+    }
+    try std.testing.expect(cx.focus_manager.getFocused() == outside.input_container);
+}
+
 const Window = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -96,7 +286,7 @@ test "background preview reveals image at full global transparency and blurs its
     w.source.root.setStyleInline(w.cx.allocator, .{ .composited_group = true });
     var materials: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture" } };
     const image: layers.Image = .{ .id = 777, .width = 640, .height = 256 };
-    var previous_alpha: u8 = 255;
+    var previous_opacity: f32 = 1;
     for ([_]f32{ 0, 50, 100 }) |transparency| {
         materials.background.transparency = transparency;
         for ([_]u8{ 0, 24, 96 }) |blur| {
@@ -104,9 +294,12 @@ test "background preview reveals image at full global transparency and blurs its
             try w.source.update(image, materials, 1440, 900);
             _ = w.frame();
             const veil = w.source.veil.getBackground();
-            try std.testing.expect(veil.a <= previous_alpha);
-            previous_alpha = veil.a;
-            try std.testing.expectEqual(@as(u8, @intFromFloat(@round((100 - transparency) * 255 / 100))), veil.a);
+            const opacity = w.source.veil.getOpacity();
+            try std.testing.expect(opacity <= previous_opacity);
+            previous_opacity = opacity;
+            try std.testing.expectEqual(@as(u8, 255), veil.a);
+            try std.testing.expectEqual(1 - transparency / 100, opacity);
+            try std.testing.expect(w.source.veil.style.composited_group());
             const glass = w.source.blur.style.glass_params().?;
             try std.testing.expect(glass.capture_current_target);
             try std.testing.expect(glass.capture_clamp);
@@ -185,7 +378,7 @@ test "global base remains visible without an enabled decoded image and removes s
             try std.testing.expectEqual(theme.baseColors().app, w.source.root.getBackground());
             try std.testing.expectEqual(.none, w.source.images.style.display);
             try std.testing.expectEqual(.none, w.source.blur.style.display);
-            try std.testing.expectEqual(.none, w.source.veil.style.display);
+            try std.testing.expectEqual(.flex, w.source.veil.style.display);
         }
     }
 }

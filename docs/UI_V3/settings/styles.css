@@ -189,3 +189,27 @@ body[data-integrated-settings] .future-only{display:none}
 
 input[type=checkbox]:focus-visible{box-shadow:none;filter:brightness(.85)}
 .source-indicator:focus-visible,.setting-hint:focus-visible{outline:0;background:var(--popup-selected)}
+
+/* Settings cards share the window surface; interactive states stay distinguishable. */
+.settings-window{
+  --muted:color-mix(in srgb,var(--fg-2) calc(100% - min(100%,200% * var(--material-transparency,0))),var(--fg-1));
+  --settings-selected-base:color-mix(in srgb,var(--overlay-base) 30%,var(--accent-base));
+  --settings-hover:light-dark(rgb(0 0 0 / 6.2745%),rgb(255 255 255 / 6.2745%));
+  --settings-card-hover:color-mix(in srgb,var(--accent-base) 12.5490%,transparent);
+  --settings-selected:color-mix(in srgb,var(--settings-selected-base) var(--tab-on-alpha),transparent);
+  --settings-selected-hover:color-mix(in srgb,color-mix(in srgb,var(--overlay-base) 10%,var(--accent-base)) var(--tab-on-alpha),transparent);
+}
+.settings-window .settings-layout nav button:not(.active):is(:hover,:focus-visible),
+.settings-window .theme-tile:not(.chosen):is(:hover,:focus-visible){background:var(--settings-hover)!important}
+.settings-window :is(.card-fold,.provider-fold):is(:hover,:focus-visible){background:var(--settings-card-hover)!important}
+.settings-window .settings-layout nav button.active,
+.settings-window .theme-tile.chosen{background:var(--settings-selected)!important}
+.settings-window .settings-layout nav button.active:is(:hover,:focus-visible),
+.settings-window .theme-tile.chosen:is(:hover,:focus-visible){background:var(--settings-selected-hover)!important}
+
+.setting-hint.shortcut-hint{width:auto;height:auto}.shortcut-hint .hint-text{left:auto;right:0;width:220px}.shortcut-hint:focus-within .hint-text{display:block}
+
+.choice-name{display:flex;align-items:center;gap:8px;min-width:0}.choice-name .font-source{display:flex;flex-shrink:0;color:var(--text-secondary,var(--muted))}.choice-name .font-source svg{width:16px;height:16px}
+
+/* Font names need the same 280px width in the trigger and floating list. */
+.field-control:has(#font_family){width:280px}

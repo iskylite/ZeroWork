@@ -5,17 +5,35 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-10-30-native-panel-input-modal-ax` (upstream revision and license unchanged)
+- Local patch revision: `2026-11-04-ime-source-transition` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
-- Canonical source files: `3506` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `2156b84ac08ffc1ab3571aab8b81eba6275b744905f1a7db8e5031c7953cb0c8`
+- Canonical source files: `3507` (tracked sources plus declared working-tree additions)
+- Canonical tracked-tree SHA-256: `62ffc6cfa13314d38668380d63df506d93f641dd9e59a2b5196560c90a3acee7`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
 
-Latest local patch gives an explicitly registered native panel ownership of this application's keyboard events until submit, cancel or expiry. Only the opt-in panel receives AppKit responder delivery; other windows retain the existing Metal dispatcher. The panel is weakly held, a second live claimant is rejected, and releasing an old panel cannot clear another owner. The real secure collector keeps SecureEventInput and NSWindowSharingNone. No toolchain or license changes.
+The latest local patch preserves an active IME composition when AppKit publishes the changed input-source identifier after its first marked-text callback. A native input-pump regression covers retaining the first letter and input context across the next key. Upstream revision, license and toolchain are unchanged.
+
+The preceding local patch adds an explicit `SelectProps.virtualize` option, allowing the font picker to use a scrollable virtual viewport below the automatic 200-option threshold. Upstream revision, license and toolchain are unchanged.
+
+Streaming texture uploads now advance a content revision used by retained layer and damage fingerprints; unversioned external textures conservatively disable enclosing retained caches. This keeps KVM frames current without changing the upstream revision, toolchain or license.
+
+Latest local patch adds `Node.setTextFixedBounds` for absolute, fixed-pixel, single-line leaf text: content still invalidates shaping/paint while unchanged bounds avoid layout and hit-index rebuilding. Other sizing modes retain ordinary invalidation. Settled hidden branches skip repeated layout/paint work, with dirty and tree-structure changes invalidating that shortcut. Select replaces its 64-option selection mask with dynamic storage, virtualizes more than 200 options, and exposes reactive `option_style` for eager and reused rows; keyboard, accessibility, controlled selection and allocation-failure cleanup are covered by targeted regressions. No toolchain or license changes.
+
+Interaction dirty generation now advances only when the relevant bit actually changes. Repeated marks and clean hidden/runtime clears preserve the existing observation memo across windows, while real geometry, event semantics, reveal and membership changes still invalidate it. No new cross-frame cache or skipped registry update is introduced.
+
+The preceding local patch exposes the existing monotonic node-tree structure revision through `Node.treeStructureRevision()`. ZeroWork uses it to invalidate its retained material-surface index after append/detach/reorder without scanning the entire tree every frame. It does not change node lifetime, layout, rendering or toolchain semantics.
+
+The preceding local patch gives both ScrollArea scrollbar thumbs a grab cursor and capture-scoped grabbing cursor, including when the pointer leaves the thumb. Capture release restores the cursor of the underlying target. No API, toolchain or license changes.
+
+The preceding local patch maps diagonal resize shapes to public AppKit frame resize cursors on macOS 15 and later, with cached rotated system resize artwork on macOS 14. Native cursor coverage checks both diagonal images, centered hotspots, drag hands, axis resizing and reset. No API, toolchain or license changes.
+
+The preceding local patch handles titlebar blank-area double clicks in the shared native event pump with AppKit zoom/restore. Published control hits and native buttons retain ownership, action gaps use live hit testing, and fullscreen/transition states cannot zoom or drag. Native regression coverage verifies restore geometry and sibling-window isolation. No API, toolchain or license changes.
+
+The preceding local patch gives an explicitly registered native panel ownership of this application's keyboard events until submit, cancel or expiry. Only the opt-in panel receives AppKit responder delivery; other windows retain the existing Metal dispatcher. The panel is weakly held, a second live claimant is rejected, and releasing an old panel cannot clear another owner. The real secure collector keeps SecureEventInput and NSWindowSharingNone. No toolchain or license changes.
 
 The preceding local patch adds `Cx.trimIdleRenderCapacity` for idle windows: it releases spare display-item capacity, defers arena shrinking until the normal frame boundary, and preserves live replay payloads and reusable font/GPU caches. Frame and display-list scratch use page-backed allocation. Opt-in frame profiling also attributes after-layout callbacks and renderer setup/text warming; formal builds retain the existing automation boundary.
 
@@ -28,6 +46,8 @@ The previous local patch keeps placeholders visually neutral for required-but-em
 Local adaptations are included in the canonical hash: optional independent Select dropdown width and positioning (existing defaults preserved), bounded/wrapping Tooltip content through public optional properties (defaults preserve the existing API and behavior), native close confirmation/commit/completion and IME handling, rendering and hit-test fixes, idle interaction-geometry drainage, material subtree cache ranges, safe focus cleanup, legacy hidden-control window configuration, fixed ASCII grid positioning for explicitly configured terminal faces, and the compile-time automation boundary that removes all process environment overrides from formal macOS App builds. The upstream repository metadata is not required for building this snapshot. Run `python3 scripts/verify_vendor_zenit.py` to verify the exact vendored tree.
 
 Terminal acceptance additionally extends only the compile-time test Harness: mouse requests can specify left/middle/right buttons and key names resolve the existing KeyCode enum, allowing F1–F12 and editing keys through the production dispatcher. No VT injection or screen-state override is added; formal builds retain their existing automation boundary. No toolchain or license changes.
+
+The resource-scheduling patch combines frame-local z-order/cache-boundary preparation and promoted-layer descendant synchronization, and removes repeated subtree searches when advancing hidden animations. Popover/Tooltip register an overlay layer only while open or exiting; closing releases the registration while preserving reusable content and Scope. Display-list buffers consistently use their owning allocator, including BulkQuad insertions. These changes preserve rendering, focus, animation, lifetime and public API contracts; no cross-frame cache or UI worker-thread access is introduced.
 
 ## Ghostty VT
 

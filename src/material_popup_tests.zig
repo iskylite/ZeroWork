@@ -26,6 +26,9 @@ fn contains(rect: ui.ComputedRect, x: f32, y: f32) bool {
 
 test "AI sessions retained native rows follow every builtin theme publication" {
     const Sessions = @import("ui/ai_sessions_view.zig");
+    const parameters = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    _ = theme.setMaterialParameters(50, 24);
     const previous = theme.currentName();
     defer theme.select(previous);
     const a = std.testing.allocator;
@@ -36,14 +39,17 @@ test "AI sessions retained native rows follow every builtin theme publication" {
     const scope = try ui.Scope.init(a, null, cx.owner);
     defer scope.dispose();
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    try @import("ui/layer_materials.zig").Policy.mount(cx, scope);
+    const assistant = try ui.boxStyled(cx, @import("ui/ai_assistant_styles.zig").panel, .{});
+    try cx.root.?.appendChild(a, assistant);
     const anchor = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
-    try cx.root.?.appendChild(a, anchor);
+    try assistant.appendChild(a, anchor);
     var context: u8 = 0;
     const callbacks = struct {
         fn ignore(_: *anyopaque, _: u64) void {}
     };
     const list = try Sessions.View.mount(cx, scope, anchor, .{ .context = &context, .select = callbacks.ignore, .request_close = callbacks.ignore, .remove = callbacks.ignore });
-    try cx.root.?.appendChild(a, list.root);
+    try assistant.appendChild(a, list.root);
     try list.show(&.{ .{ .id = 1, .title = "等待审批", .owner = "当前终端", .active = true, .phase = .approval }, .{ .id = 2, .title = "正在运行", .owner = "当前终端", .phase = .running } });
     const row = findTestId(list.content, "ai.session.row.1").?;
     const publication = try cx.bindState(shell.ThemePublication, .{});
@@ -53,7 +59,9 @@ test "AI sessions retained native rows follow every builtin theme publication" {
         _ = frame(cx);
         try std.testing.expect(list.open.peek());
         try std.testing.expectEqual(row, findTestId(list.content, "ai.session.row.1").?);
-        try std.testing.expectEqual(theme.current().overlay, list.chrome.getBackground());
+        try std.testing.expectEqual(theme.layerBackground(2), list.chrome.getBackground());
+        try std.testing.expectEqual(@as(f32, 24), list.chrome.style.backdrop_blur());
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, list.surface.getBackground());
         try std.testing.expectEqual(theme.current().warn_ink, findTestId(list.content, "ai.session.status.approval").?.getIcon().?.tint);
         try std.testing.expectEqual(theme.current().accent_ink, findTestId(list.content, "ai.session.status.running").?.getIcon().?.tint);
     }
@@ -307,14 +315,16 @@ test "global material component roles preserve readable bubble paints and materi
             try std.testing.expectEqual(paint.from, user.gradient.?.from);
             try std.testing.expectEqual(paint.to, user.gradient.?.to);
             try std.testing.expectEqual(paint.foreground, bubble.userBubbleForeground());
-            try std.testing.expectEqual(c.overlay.a, paint.from.a);
-            try std.testing.expectEqual(c.overlay.a, paint.to.a);
+            try std.testing.expectEqual(theme.layerAlpha(2), paint.from.a);
+            try std.testing.expectEqual(theme.layerAlpha(2), paint.to.a);
             try std.testing.expectEqual(ui.Color.TRANSPARENT, recent.recent().background);
-            try std.testing.expectEqual(c.surface_2, strip.lip(theme.widgetTheme(theme.currentName())).background);
-            try std.testing.expectEqual(@max(12, theme.materialParameters().blur), strip.lip(theme.widgetTheme(theme.currentName())).glass.?.backdrop_blur);
+            // The AI entry has no separate foreground fill or local glass;
+            // its opaque L0 shape is owned by the shared canvas group.
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, strip.lip(theme.widgetTheme(theme.currentName())).background);
+            try std.testing.expect(strip.lip(theme.widgetTheme(theme.currentName())).glass == null);
             for ([_]bool{ false, true }) |active| {
-                try std.testing.expectEqual(c.surface_2.a, strip.activeLip(active).gradient.?.from.a);
-                try std.testing.expectEqual(c.surface_2.a, strip.activeLip(active).gradient.?.to.a);
+                try std.testing.expectEqual(ui.Color.TRANSPARENT, strip.activeLip(active).background);
+                try std.testing.expect(strip.activeLip(active).gradient == null);
             }
             // Destructive actions retain a separate theme warning hue, at full fill.
             try std.testing.expectEqual(c.action_danger, close.button(112, true).background);

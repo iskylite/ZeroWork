@@ -84,6 +84,7 @@ pub const View = struct {
         try trigger.appendChild(cx.allocator, popup.wrapper);
         self.scope = popup.scope;
         self.root = popup.content;
+        @import("layer_materials.zig").card(self.root, .global_notification);
         self.root.meta.ownership.meta.test_id = "notifications.history";
         self.root.setStyleInline(cx.allocator, S.panel());
         const heading = try ui.box(cx, S.heading(), .{});
@@ -341,7 +342,8 @@ pub const View = struct {
             const root = self.cx.root orelse return;
             const max_height = @min(320, @max(S.collapsed_height, root.globalRect().h - 140));
             const content_height = self.scroll.content.globalRect().h;
-            self.scroll.container.setStyle(self.cx.allocator, .height, .{ .px = @min(max_height, @max(S.collapsed_height, content_height)) });
+            const height: ui.Sizing = .{ .px = @min(max_height, @max(S.collapsed_height, content_height)) };
+            if (!std.meta.eql(self.scroll.container.style.height, height)) self.scroll.container.setStyle(self.cx.allocator, .height, height);
             if (!self.was_open) self.cx.setFocus(self.close_button);
         }
         self.was_open = opened;
@@ -352,8 +354,9 @@ pub const View = struct {
             try self.badge_text.setTextContent(self.cx.allocator, if (pending == 0) "" else if (pending > 99) "99+" else try std.fmt.bufPrint(&buffer, "{d}", .{pending}));
             self.badge.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (pending == 0) 6 else if (pending > 99) 20 else 14 }, .height = .{ .px = if (pending == 0) 6 else 14 }, .align_items = .center, .justify = .center, .border = .{ .radius = if (pending == 0) 3 else 7 } });
         }
-        self.badge.setBackground(if (pending == 0) colors.accent else theme.popupSelection());
-        self.badge_text.setTextColor(colors.fg_1);
+        const badge_color = if (pending == 0) colors.accent else theme.popupSelection();
+        if (!ui.Color.eql(self.badge.getBackground(), badge_color)) self.badge.setBackground(badge_color);
+        if (self.badge_text.getText()) |text| if (!ui.Color.eql(text.color, colors.fg_1)) self.badge_text.setTextColor(colors.fg_1);
         self.badge.setDisplay(if (pending > 0 or self.host.coordinator.unreadHistoryCount() > 0) .flex else .none);
     }
     fn cleanup(self: *View) void {

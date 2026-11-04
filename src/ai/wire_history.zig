@@ -5,7 +5,11 @@ const std = @import("std");
 const provider = @import("provider.zig");
 const images = @import("image_attachments.zig");
 
+var next_revision = std.atomic.Value(u64).init(1);
+
 pub const History = struct {
+    /// Stable identity of this immutable transcript, including replacements of equal length.
+    revision: u64 = 0,
     arena: ?std.heap.ArenaAllocator = null,
     messages: []const provider.Message = &.{},
     failure: ?anyerror = null,
@@ -19,6 +23,10 @@ pub const History = struct {
     pub fn deinit(self: *History) void {
         for (self.messages) |message| for (message.images) |reference| {
             var owned = reference;
+            owned.release();
+        };
+        for (self.messages) |message| for (message.offloaded_images) |image| {
+            var owned = image.reference;
             owned.release();
         };
         if (self.arena) |*arena| arena.deinit();
@@ -44,6 +52,8 @@ pub const History = struct {
         // dangling assistant call as reusable context or invent its result.
         try @import("provider_http.zig").validateToolMessages(.{ .model = "", .system = "", .messages = source });
         var text_bytes: usize = final_text.len;
+        var physical_images = std.AutoHashMap(usize, void).init(allocator);
+        defer physical_images.deinit();
         var image_bytes: usize = 0;
         var image_pixels: usize = 0;
         for (source) |message| {
@@ -52,12 +62,19 @@ pub const History = struct {
             for (message.tool_calls) |call| text_bytes = std.math.add(usize, text_bytes, call.id.len + call.name.len + call.arguments.len + 64) catch return error.ToolTranscriptLimit;
             for (message.images) |reference| {
                 const image = reference.content() orelse return error.EmptyAttachmentResult;
+                if ((try physical_images.getOrPut(@intFromPtr(reference.snapshot.?))).found_existing) continue;
+                image_bytes = std.math.add(usize, image_bytes, image.bytes.len) catch return error.ToolTranscriptLimit;
+                image_pixels = std.math.add(usize, image_pixels, @as(usize, image.width) * image.height) catch return error.ToolTranscriptLimit;
+            }
+            for (message.offloaded_images) |entry| {
+                const image = entry.reference.content() orelse return error.EmptyAttachmentResult;
+                if ((try physical_images.getOrPut(@intFromPtr(entry.reference.snapshot.?))).found_existing) continue;
                 image_bytes = std.math.add(usize, image_bytes, image.bytes.len) catch return error.ToolTranscriptLimit;
                 image_pixels = std.math.add(usize, image_pixels, @as(usize, image.width) * image.height) catch return error.ToolTranscriptLimit;
             }
         }
         if (text_bytes > max_text_bytes or image_bytes > max_image_bytes or image_pixels > max_image_pixels) return error.ToolTranscriptLimit;
-        var result: History = .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+        var result: History = .{ .arena = std.heap.ArenaAllocator.init(allocator), .revision = next_revision.fetchAdd(1, .monotonic) };
         errdefer result.deinit();
         const a = result.arena.?.allocator();
         const messages = try a.alloc(provider.Message, count);
@@ -69,7 +86,9 @@ pub const History = struct {
             for (message.tool_calls, calls) |call, *clone| clone.* = .{ .id = try a.dupe(u8, call.id), .name = try a.dupe(u8, call.name), .arguments = try a.dupe(u8, call.arguments) };
             owned.tool_calls = calls;
             owned.images = try a.dupe(images.ContentRef, message.images);
+            owned.offloaded_images = try a.dupe(provider.OffloadedImage, message.offloaded_images);
             for (owned.images) |reference| _ = reference.retain();
+            for (owned.offloaded_images) |image| _ = image.reference.retain();
             messages[index] = owned;
             result.messages = messages[0 .. index + 1];
         }

@@ -8,6 +8,7 @@ const options = @import("preview_options");
 var selected_theme: []const u8 = "dark";
 var transparency: f32 = 0;
 var ai_sessions_scene: bool = false;
+var status_transfer_scene: bool = false;
 const Fixture = struct {
     panel: ?*V.Panel = null,
     fn reopen(self: *Fixture) void {
@@ -20,6 +21,36 @@ const Fixture = struct {
         std.debug.print("TRANSFER_CONTROLS_FIXTURE action={s} job={d}\n", .{ @tagName(requested), target.job });
     }
 };
+fn statusSamples(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node) !void {
+    const status = @import("ui/status_transfer_view.zig");
+    const heading = try ui.text(cx, "底栏传输控件", .{ .font_size = 24, .font_weight = 600, .color = theme.current().fg_1 });
+    heading.setStyleInline(cx.allocator, .{ .margin = .{ .left = 24, .top = 24 } });
+    try root.appendChild(cx.allocator, heading);
+    const examples = [_]struct { title: []const u8, value: status.Summary }{
+        .{ .title = "下载中", .value = .{ .name = "hdf5_cpu+dtk.zip", .percent = "46%", .rate = "8.4 MiB/s", .counts = "3", .fraction = 0.46 } },
+        .{ .title = "长文件名", .value = .{ .name = "ubuntucloud_D91D1F2900_20260728225100.tgz", .percent = "72%", .rate = "12.6 MiB/s", .counts = "5", .fraction = 0.72 } },
+        .{ .title = "上传中", .value = .{ .name = "release.tar.gz", .percent = "31%", .rate = "4.2 MiB/s", .counts = "3", .fraction = 0.31, .upload = true } },
+        .{ .title = "等待首个数据包", .value = .{ .name = "hdf5_cpu+dtk.zip", .percent = "连接中", .counts = "1", .phase = .waiting } },
+        .{ .title = "全部完成", .value = .{ .name = "hdf5_cpu+dtk.zip", .percent = "100%", .counts = "1", .fraction = 1, .phase = .completed } },
+        .{ .title = "空闲", .value = .{ .name = "传输 · 空闲", .phase = .idle } },
+        .{ .title = "窄窗口 240px", .value = .{ .name = "ubuntucloud_D91D1F2900_20260728225100.tgz", .percent = "72%", .rate = "12.6 MiB/s", .counts = "5", .fraction = 0.72 } },
+    };
+    const list = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 24 }, .top = .{ .px = 90 } }, .width = .{ .px = 500 }, .direction = .column, .gap = 24 }, .{});
+    try root.appendChild(cx.allocator, list);
+    for (examples, 0..) |example, i| {
+        const group = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 8 }, .{});
+        try list.appendChild(cx.allocator, group);
+        try group.appendChild(cx.allocator, try ui.text(cx, example.title, .{ .font_size = 14, .font_weight = 500, .color = theme.current().fg_1 }));
+        const bar = try ui.box(cx, .{ .width = .{ .px = if (i == 6) 240 else 300 }, .height = .{ .px = 26 }, .direction = .row, .align_items = .center }, .{});
+        bar.meta.ownership.meta.test_id = "workspace.statusbar";
+        try group.appendChild(cx.allocator, bar);
+        const slot = try ui.box(cx, .{ .height = .fill(), .direction = .row }, .{});
+        try bar.appendChild(cx.allocator, slot);
+        const ticker = try status.View.mount(cx, scope, null);
+        try slot.appendChild(cx.allocator, ticker.root);
+        ticker.updateSummary(example.value);
+    }
+}
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     var registry = try @import("config/theme_registry.zig").Registry.init(cx.allocator);
     defer registry.deinit();
@@ -28,6 +59,10 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     _ = theme.setMaterialParameters(transparency, 0);
     cx.setTheme(theme.widgetTheme(theme.currentName()));
     const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .background = theme.baseColors().app }, .{});
+    if (status_transfer_scene) {
+        try statusSamples(cx, scope, root);
+        return root;
+    }
     if (ai_sessions_scene) {
         const anchor = try ui.box(cx, .{ .position = .absolute, .inset = .{ .top = .{ .px = 32 }, .left = .{ .px = 160 } }, .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
         try root.appendChild(cx.allocator, anchor);
@@ -61,7 +96,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     } else try root.appendChild(cx.allocator, panel.root);
     const owner: @import("host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 1 };
     const second: @import("host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(102), .generation = 1 };
-    const names = [_][]const u8{ "release.tar.gz", "worker.stdout.log", "worker.yaml", "config.production.json", "db-backup.sql.gz", "checksums.txt", "healthcheck.txt", "release-second-session.tar.gz" };
+    const names = [_][]const u8{ "release.tar.gz", "worker.stdout.log", "production-database-backup-with-a-very-long-filename-20261104.tar.gz", "config.production.json", "db-backup.sql.gz", "checksums.txt", "healthcheck.txt", "release-second-session.tar.gz" };
     const phases = [_]V.Phase{ .running, .running, .queued, .paused, .failed, .succeeded, .succeeded, .queued };
     var tasks: [8]V.Task = undefined;
     for (&tasks, 0..) |*task, i| task.* = .{
@@ -90,12 +125,12 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--ai-sessions")) ai_sessions_scene = true else if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = arg[8..] else if (std.mem.startsWith(u8, arg, "--transparency=")) transparency = try std.fmt.parseFloat(f32, arg[15..]) else return error.InvalidFixtureArgument;
+        if (std.mem.eql(u8, arg, "--status-transfer")) status_transfer_scene = true else if (std.mem.eql(u8, arg, "--ai-sessions")) ai_sessions_scene = true else if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = arg[8..] else if (std.mem.startsWith(u8, arg, "--transparency=")) transparency = try std.fmt.parseFloat(f32, arg[15..]) else return error.InvalidFixtureArgument;
     }
     var io: std.Io.Threaded = .init(std.heap.c_allocator, .{});
     defer io.deinit();
     @import("platform/applog.zig").init(.{}, io.io());
-    const app = try App.init(std.heap.c_allocator, .{ .io = io.io(), .window = .{ .width = 860, .height = 480, .title = "ZeroWork · Figma 传输控件预览", .titlebar = .custom_inset, .titlebar_height = 40 } });
+    const app = try App.init(std.heap.c_allocator, .{ .io = io.io(), .window = .{ .width = if (status_transfer_scene) 1000 else 860, .height = if (status_transfer_scene) 700 else 480, .title = "ZeroWork · Figma 传输控件预览", .titlebar = .custom_inset, .titlebar_height = 40 } });
     defer app.deinit();
     try app.runWith(mount);
 }

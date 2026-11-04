@@ -31,10 +31,14 @@ class Peer(paramiko.ServerInterface):
         self.fixture = fixture
 
     def get_allowed_auths(self, user):
-        return "password"
+        return "publickey,password" if self.fixture.mode == "nested" else "password"
 
     def check_auth_password(self, user, password):
         return paramiko.AUTH_SUCCESSFUL if user == "shell-fixture" and password == "fixture-only" else paramiko.AUTH_FAILED
+
+    def check_auth_publickey(self, user, key):
+        expected = getattr(self.fixture, "client_key", None)
+        return paramiko.AUTH_SUCCESSFUL if expected is not None and user == "shell-fixture" and key == expected else paramiko.AUTH_FAILED
 
     def check_channel_request(self, kind, channel_id):
         self.fixture.actions.append([channel_id, "channel", kind])
@@ -55,7 +59,10 @@ class Peer(paramiko.ServerInterface):
 
     def check_channel_exec_request(self, channel, command):
         # Existing Worker OS detection is not command execution under test.
-        if command == b'sh -c "uname -s; cat /etc/os-release" || cmd /c ver':
+        if command in (
+            b'sh -c "uname -s; cat /etc/os-release" || cmd /c ver',
+            b'sh -c "uname -s || exit; if test -r /etc/os-release; then cat /etc/os-release; elif test -r /usr/lib/os-release; then cat /usr/lib/os-release; fi" || cmd /c ver',
+        ):
             self.fixture.actions.append([channel.chanid, "os-diagnostic"])
 
             def diagnostic():
@@ -82,6 +89,11 @@ class Fixture:
             kind = "bash" if Path(shell).name == "bash" else "zsh"
             script = Path(__file__).resolve().parents[1] / "src/vt/shell" / ("integration." + kind)
             (Path(home) / (".bashrc" if kind == "bash" else ".zshrc")).write_bytes(script.read_bytes())
+        if mode == "nested":
+            self.client_key = paramiko.RSAKey.generate(2048)
+            key_path = Path(home) / "nested-test-key"
+            self.client_key.write_private_key_file(str(key_path))
+            key_path.chmod(0o600)
         self.initial_home_files = {path.name: path.read_bytes() for path in Path(home).iterdir()}
         self.actions, self.errors, self.jobs, self.transports = [], [], [], []
         self.inputs, self.outputs = bytearray(), bytearray()
@@ -231,8 +243,8 @@ def execute(args, shell, mode, output):
         shell_channels = [entry[0] for entry in fixture.actions if entry[1] == "shell"]
         checks = {
             "runner_passed": result.returncode == 0 and "SHELL_EXECUTION_PASS" in result.stderr,
-            "expected_shell_channels": len(shell_channels) == (2 if mode == "init-retry-success" else 3 if mode == "init-retry-fail" else 1),
-            "expected_transport_count": len(fixture.transports) == (2 if mode == "init-retry-success" else 3 if mode == "init-retry-fail" else 1),
+            "expected_shell_channels": len(shell_channels) == (2 if mode in {"init-retry-success", "nested"} else 3 if mode in {"init-retry-fail", "reconnect-startup"} else 1),
+            "expected_transport_count": len(fixture.transports) == (2 if mode in {"init-retry-success", "nested"} else 3 if mode in {"init-retry-fail", "reconnect-startup"} else 1),
             "no_remote_upload_or_exec": not fixture.errors,
             "no_shell_configuration_written": {path.name: path.read_bytes() for path in home.iterdir()} == fixture.initial_home_files,
         }
@@ -241,6 +253,11 @@ def execute(args, shell, mode, output):
             checks["initializer_echo_absent_from_vt_and_recording"] = all(
                 marker in result.stderr for marker in
                 ("INITIALIZER_ECHO_PASS vt=true", "INITIALIZER_ECHO_PASS recording=true"))
+        if mode == "attach-timeout":
+            checks["abort_barrier_and_retry"] = "nonce_barrier=true retry_same_pty=true no_payload_echo=true" in result.stderr
+            checks["abort_payload_not_echoed"] = b"_zwP+=" not in fixture.outputs
+        if mode == "nested":
+            checks["nested_scope_exercised"] = "manual_attach=true three_layers=true observed_attach=true parent_restored=true stale_rejected=true parent_observer=true actual_nested_ssh=true" in result.stderr
         if mode == "disconnect":
             checks["command_not_replayed"] = fixture.inputs.count(b"DISCONNECT_%s") == 1
         if mode == "recording-unavailable":
@@ -251,11 +268,17 @@ def execute(args, shell, mode, output):
         if mode in {"existing", "disabled-existing"}:
             checks["zero_initialization_bytes"] = b"__zw_osc" not in fixture.inputs and b"BASH_VERSION" not in fixture.inputs
         if mode.startswith("init-retry-"):
-            checks["no_startup_or_business_replay"] = b"NEVER_REPLAY_STARTUP" not in fixture.inputs and b"NEVER_REPLAY_INITIAL" not in fixture.inputs
+            checks["startup_in_successful_shell_only"] = fixture.inputs.count(b"echo CONFIGURED_STARTUP") == 1
+            checks["no_one_time_input_replay"] = b"NEVER_REPLAY_INITIAL" not in fixture.inputs
             checks["ordinary_command_sent_once"] = fixture.inputs.count(b"RECOVERY_%s") == 1
             checks["initializer_once_per_enabled_generation"] = fixture.inputs.count(b"_zwR()") == 2
             if mode == "init-retry-success":
                 checks["new_generation_ai_recorded"] = "reconnected_ai_recorded=true" in result.stderr
+        if mode == "reconnect-startup":
+            checks["startup_once_in_each_shell"] = all(fixture.inputs.count(("export ZW_STARTUP=" + value).encode()) == 1 for value in ("one", "two", "three"))
+            checks["one_time_input_once"] = fixture.inputs.count(b"INITIAL_%s") == 1
+            checks["initialization_obeys_current_settings"] = fixture.inputs.count(b"_zwR()") == 2
+            checks["new_shell_environment"] = all(("ENV_" + value + "_/tmp").encode() in fixture.outputs for value in ("one", "two", "three"))
         if mode == "history-reopen":
             checks["durable_repeated_history"] = "repeated=3 ai=2 manual=1 manifest=true archive_reopened=true" in result.stderr
         manifests = list(Path(directory).rglob("*.session.json"))
@@ -280,7 +303,7 @@ def main():
     parser.add_argument("--runner", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--shell", action="append", choices=["/bin/bash", "/bin/zsh"])
-    parser.add_argument("--mode", choices=["nominal", "disconnect", "recording-unavailable", "disabled", "existing", "disabled-existing", "history-reopen", "init-retry-success", "init-retry-fail"])
+    parser.add_argument("--mode", choices=["nominal", "disconnect", "recording-unavailable", "disabled", "existing", "disabled-existing", "history-reopen", "init-retry-success", "init-retry-fail", "reconnect-startup", "nested", "attach-timeout"])
     args = parser.parse_args()
     reports = []
     for shell in args.shell or ["/bin/bash", "/bin/zsh"]:

@@ -131,10 +131,27 @@ test "BMC AI input rejects stale binding transport control epoch proof and expir
             5 => stale.proof.lease.id += 1,
             else => stale.expires_at_ms = 1,
         }
-        try T.expectError(if (field < 2) error.StaleBinding else error.StaleAutomationAuthority, fixture.service.submitAutomation(fixture.service.binding(), stale, request));
+        try T.expectError(if (field < 2) error.StaleBinding else if (field == 6) error.ObservationExpired else error.StaleAutomationAuthority, fixture.service.submitAutomation(fixture.service.binding(), stale, request));
     }
     fixture.service.setFocus(true);
     try T.expectError(error.HumanInputActive, fixture.service.submitAutomation(fixture.service.binding(), authority, request));
+    try T.expectEqual(@as(usize, 0), fixture.service.automation_count);
+}
+
+test "BMC AI input admission distinguishes expired observation from expired budget and revoked authority" {
+    var fixture: Fixture = .{};
+    try fixture.init();
+    const authority = try fixture.authority();
+    const request: ai.Request = .{ .operation_id = 1, .action = .{ .pointer_move = .{ .x = 4, .y = 5 } } };
+    var expired = authority;
+    expired.expires_at_ms = 1;
+    try T.expectError(error.ObservationExpired, fixture.service.submitAutomation(fixture.service.binding(), expired, request));
+    fixture.service.automation_budget_lease = authority.proof.lease;
+    fixture.service.automation_budget_started_ms = std.math.maxInt(u64);
+    try T.expectError(error.AutomationBudgetExceeded, fixture.service.submitAutomation(fixture.service.binding(), authority, request));
+    fixture.service.automation_budget_lease = null;
+    fixture.cancel.store(true, .release);
+    try T.expectError(error.StaleAutomationAuthority, fixture.service.submitAutomation(fixture.service.binding(), authority, request));
     try T.expectEqual(@as(usize, 0), fixture.service.automation_count);
 }
 

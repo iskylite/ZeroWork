@@ -115,7 +115,7 @@ const Backend = struct {
         const target: *Target = @ptrCast(@alignCast(facade.context));
         switch (action) {
             .input => return error.UnsupportedInteraction,
-            .snapshot => {
+            .snapshot, .snapshot_for => {
                 if (target.revoked and self.permit_drain and !target.snapshot.local_released) {
                     target.snapshot.local_released = true;
                     target.snapshot.input_ready = true;

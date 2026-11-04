@@ -620,7 +620,9 @@ fn collectNotificationObstacles(cx: *ui.Cx, node: *ui.Node, avoid: []ui.Computed
         if (bounds.w <= 0.1 or bounds.h <= 0.1) return;
     }
     if (node.meta.ownership.meta.test_id) |id| {
-        const floating = [_][]const u8{ "ai.panel", "settings.panel", "settings.confirmation", "connection.progress", "wizard.dialog", "transfer.manager", "transfer.session", "transfer.confirmation", "transfer.conflict", "connection.details", "status.connection", "status.detail", "status.theme", "session.menu", "files.context.menu", "files.history.menu", "asset.action", "asset.group.dialog", "tabs.rename" };
+        // The assistant is workspace content beneath global notifications.
+        // Its expanded/maximized bounds must not suppress an admitted banner.
+        const floating = [_][]const u8{ "settings.panel", "settings.confirmation", "connection.progress", "wizard.dialog", "transfer.manager", "transfer.session", "transfer.confirmation", "transfer.conflict", "connection.details", "status.connection", "status.detail", "status.theme", "session.menu", "files.context.menu", "files.history.menu", "asset.action", "asset.group.dialog", "tabs.rename" };
         for (floating) |known| if (std.mem.eql(u8, id, known)) {
             const rect = node.globalRect();
             if (rect.w > 0 and rect.h > 0) {

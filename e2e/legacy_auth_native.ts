@@ -33,7 +33,7 @@ try{
    await start(kind);await click('auth.challenge.submit');await outcome('trust_save');
    await start(kind);await click('auth.challenge.cancel');await outcome('cancelled');report.checks.push('Unknown host-key Enter does not trust; once/save/cancel emit distinct scoped bridge decisions');
   }else if(kind==='host_key_changed'){
-   await fill('no');await click('auth.challenge.submit');assert.equal(text(await visible('legacy.auth.outcome')),'pending');await h.key('return');assert.equal(text(await visible('legacy.auth.outcome')),'pending');await click('auth.challenge.answer.0');await h.key('a',{cmd:true});await h.type_('yes');await cap('host-key-changed-yes');await click('auth.challenge.submit');await outcome('replace_host_key');report.checks.push('Changed key rejects arbitrary input and Enter; explicit yes enables replacement');
+   assert(!(await h.query('auth.challenge.answer.0')).some(shown),'Changed-key confirmation has no text input');await h.key('return');assert.equal(text(await visible('legacy.auth.outcome')),'pending');await click('auth.challenge.submit');await outcome('replace_host_key');await start(kind);await click('auth.challenge.cancel');await outcome('cancelled');report.checks.push('Changed key needs one explicit click with no typed confirmation; Enter does not replace and Cancel stays available');
   }else{
    const value=kind==='keyboard_interactive'?'123456':'owned-fixture-secret';await fill(value);
    assert(!text(await visible('auth.challenge.modal')).includes(value),'Input should stay masked');

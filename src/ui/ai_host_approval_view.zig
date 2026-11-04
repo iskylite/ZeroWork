@@ -9,11 +9,12 @@ const theme = @import("app_theme.zig");
 pub const Callbacks = struct {
     context: *anyopaque,
     on_decision: *const fn (*anyopaque, u64, [32]u8, bool) anyerror!void,
-    on_renew: ?*const fn (*anyopaque, u64, [32]u8) anyerror!void = null,
     on_route: ?*const fn (*anyopaque, u64, [32]u8, approval.routing.Route) anyerror!void = null,
 };
 pub const View = struct {
     cx: *ui.Cx,
+    url_copy_feedback: *@import("copy_button.zig").Button = undefined,
+    summary_copy_feedback: *@import("copy_button.zig").Button = undefined,
     root: *ui.Node,
     card: *ui.Node,
     body: *ui.Node,
@@ -25,6 +26,7 @@ pub const View = struct {
     summary_row: *ui.Node,
     feedback: *ui.Node,
     source: *ui.Node,
+    tool_detail: *ui.Node = undefined,
     route_row: *ui.Node = undefined,
     route_reason: *ui.Node = undefined,
     route_buttons: [3]*ui.Signal(S.ButtonStyle) = undefined,
@@ -41,7 +43,6 @@ pub const View = struct {
     operation_id: u64 = 0,
     arguments_hash: [32]u8 = @splat(0),
     requested_url: ?[]u8 = null,
-    expired: bool = false,
     state_label: *ui.Node = undefined,
     accept_text: *ui.Signal([]const u8) = undefined,
     decision_pending: *ui.Signal(bool),
@@ -62,6 +63,7 @@ pub const View = struct {
         self.root.meta.ownership.meta.test_id = "ai.host_approval";
         self.root.setDisplay(.none);
         self.card = try ui.boxStyled(cx, panelStyle, .{});
+        @import("layer_materials.zig").card(self.card, .action);
         self.card.meta.ownership.meta.test_id = "ai.host_approval.card";
         try self.root.appendChild(cx.allocator, self.card);
         const header = try ui.boxStyled(cx, S.header, .{});
@@ -95,6 +97,10 @@ pub const View = struct {
         scroll.container.meta.ownership.meta.test_id = "ai.host_approval.details";
         scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
         try self.card.appendChild(cx.allocator, scroll.container);
+        self.tool_detail = try ui.textStyled(cx, S.secondary, "");
+        self.tool_detail.meta.ownership.meta.test_id = "ai.host_approval.tool";
+        self.tool_detail.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0 });
+        try scroll.content.appendChild(cx.allocator, self.tool_detail);
         const source = try ui.textStyled(cx, S.secondary, "来源 · 本机网络 · HTTP/HTTPS GET");
         self.source = source;
         source.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20.625 }, .flex_shrink = 0 });
@@ -130,7 +136,8 @@ pub const View = struct {
         self.url.meta.ownership.meta.test_id = "ai.host_approval.url";
         try address_scroll.content.appendChild(cx.allocator, self.url);
         try self.network_row.appendChild(cx.allocator, address_scroll.container);
-        const address_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制完整请求 URL", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
+        self.url_copy_feedback = try @import("copy_button.zig").Button.mount(cx, scope, .{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制完整请求 URL", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyUrl) });
+        const address_copy = self.url_copy_feedback.node;
         address_copy.meta.ownership.meta.test_id = "ai.host_approval.copy_url";
         try self.network_row.appendChild(cx.allocator, address_copy);
         const url_row = try ui.boxStyled(cx, summaryRowStyle, .{});
@@ -149,7 +156,8 @@ pub const View = struct {
         self.summary.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.summary.meta.ownership.meta.test_id = "ai.host_approval.summary";
         try url_scroll.content.appendChild(cx.allocator, self.summary);
-        const copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = self.copy_label, .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
+        self.summary_copy_feedback = try @import("copy_button.zig").Button.mount(cx, scope, .{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = self.copy_label, .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyUrl) });
+        const copy = self.summary_copy_feedback.node;
         self.copy = copy;
         copy.meta.ownership.meta.test_id = "ai.host_approval.copy";
         try url_row.appendChild(cx.allocator, copy);
@@ -216,11 +224,12 @@ pub const View = struct {
             }
             const interaction = std.mem.eql(u8, pending.tool.text(), "host.send_execution_input");
             const saving_host = std.mem.eql(u8, pending.tool.text(), "host.create_host");
-            try self.title.setTextContent(self.cx.allocator, switch (pending.kind) {
-                .network_url => "获取网页",
-                .lifecycle => if (saving_host) "保存新主机" else "管理会话",
-                .terminal_command => if (interaction) "请求交互输入" else "请求执行命令",
-            });
+            const action_title = try @import("ai_tool_titles.zig").action(self.cx.allocator, pending.tool.text(), pending.detail.text());
+            defer self.cx.allocator.free(action_title);
+            try self.title.setTextContent(self.cx.allocator, action_title);
+            const tool_detail = try @import("ai_tool_titles.zig").detail(self.cx.allocator, pending.tool.text());
+            defer self.cx.allocator.free(tool_detail);
+            try self.tool_detail.setTextContent(self.cx.allocator, tool_detail);
             self.network_icon.setDisplay(if (pending.kind == .network_url) .flex else .none);
             self.lifecycle_icon.setDisplay(if (pending.kind == .lifecycle) .flex else .none);
             self.terminal_icon.setDisplay(if (pending.kind == .terminal_command) .flex else .none);
@@ -237,13 +246,13 @@ pub const View = struct {
             self.copy_label.set(if (pending.kind == .network_url) "复制完整请求 URL" else "复制完整操作详情");
             try self.source.setTextContent(self.cx.allocator, switch (pending.kind) {
                 .network_url => "来源 · 本机网络 · HTTP/HTTPS GET",
-                .lifecycle => "来源 · 当前对话 · 宿主管理操作",
+                .lifecycle => "来源 · 当前对话 · 会话管理",
                 .terminal_command => if (interaction) "来源 · 已授权执行 · 受控交互输入" else "来源 · 当前对话 · 交互式终端命令",
             });
             try self.feedback.setTextContent(self.cx.allocator, if (pending.impact.len != 0) pending.impact.text() else switch (pending.kind) {
                 .network_url => impact_copy,
-                .lifecycle => "仅批准本调用列明的对象与操作。实际身份、授权和保留影响会在派发前复验。",
-                .terminal_command => "仅批准本调用列明的终端与命令。实际运行方式、目标和输入状态会在派发前复验。",
+                .lifecycle => "仅批准本调用列明的对象与操作。",
+                .terminal_command => "仅批准本调用列明的终端与命令。",
             });
             if (self.requested_url) |old| self.cx.allocator.free(old);
             self.requested_url = url;
@@ -253,15 +262,13 @@ pub const View = struct {
             self.arguments_hash = pending.arguments_hash;
             self.decision_pending.set(false);
         }
-        if (self.expired != pending.expired) self.decision_pending.set(false);
-        self.expired = pending.expired;
-        self.accept_text.set(if (pending.expired) "重新确认" else "批准此调用");
-        self.accept_label.set(if (pending.expired) "重新确认此请求" else switch (pending.kind) {
+        self.accept_text.set("批准此调用");
+        self.accept_label.set(switch (pending.kind) {
             .network_url => "批准这次本机网络读取",
             .lifecycle => if (std.mem.eql(u8, pending.tool.text(), "host.create_host")) "批准保存这台主机" else "批准这次会话管理操作",
             .terminal_command => if (std.mem.eql(u8, pending.tool.text(), "host.send_execution_input")) "批准这次受控输入" else "批准这次终端命令",
         });
-        try self.state_label.setTextContent(self.cx.allocator, if (pending.expired) "已过期 · 流程暂停" else "待确认");
+        try self.state_label.setTextContent(self.cx.allocator, "待确认");
         const has_routes = pending.route != null and pending.route.?.selectable;
         self.route_row.setDisplay(if (has_routes) .flex else .none);
         self.route_reason.setDisplay(if (has_routes) .flex else .none);
@@ -281,15 +288,6 @@ pub const View = struct {
     fn decision(self: *View, approved: bool) void {
         const sequence = self.sequence orelse return;
         if (self.decision_pending.peek()) return;
-        if (approved and self.expired) {
-            const renew = self.callbacks.on_renew orelse return;
-            renew(self.callbacks.context, sequence, self.arguments_hash) catch |err| {
-                self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
-                return;
-            };
-            self.cx.requestRedraw();
-            return;
-        }
         self.callbacks.on_decision(self.callbacks.context, sequence, self.arguments_hash, approved) catch |err| {
             self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
             return;
@@ -308,7 +306,7 @@ pub const View = struct {
         };
         self.route_selected = route;
         for (self.route_buttons, 0..) |signal, index| signal.set(R.button(index == @backingInt(route)));
-        self.feedback.setTextContent(self.cx.allocator, if (route == .new_terminal) "以卡片所列会话为来源新建工作终端，创建前会单独确认。本次只批准这一条命令。" else "只批准上述完整命令、实际目标及所选运行方式；派发前复验权限。") catch {};
+        self.feedback.setTextContent(self.cx.allocator, if (route == .new_terminal) "以卡片所列会话为来源新建工作终端，创建前会单独确认。本次只批准这一条命令。" else "只批准上述完整命令、目标及所选运行方式。") catch {};
         self.cx.requestRedraw();
     }
     fn chooseBatch(self: *View) void {
@@ -328,7 +326,9 @@ pub const View = struct {
     }
     fn copyUrl(self: *View) void {
         const url = self.requested_url orelse return;
-        _ = ui.platform_services.clipboardSetText(self.cx.system_sdk, url);
+        const success = ui.platform_services.clipboardSetText(self.cx.system_sdk, url);
+        self.url_copy_feedback.report(success);
+        self.summary_copy_feedback.report(success);
     }
     fn cleanup(self: *View) void {
         if (self.requested_url) |url| self.cx.allocator.free(url);
@@ -342,7 +342,7 @@ pub const impact_copy = "本机将发送完整 URL（含路径和查询参数）
 fn impactTextStyle(tokens: *const ui.ThemeTokens) ui.TextStyle {
     var style = S.impact(tokens);
     const colors = theme.current();
-    style.color = theme.patchInk(colors.warn_ink, &.{theme.patchPaint(colors.warn.withAlpha(20), theme.popupAction())});
+    style.color = theme.patchInk(colors.warn_ink, &.{theme.patchPaint(colors.warn.withAlpha(20), theme.patchPaint(theme.popupAction(), colors.overlay.withAlpha(255)))});
     return style;
 }
 

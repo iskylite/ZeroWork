@@ -31,6 +31,7 @@ fn nextValue(value: config.Config, entry: @TypeOf(schema.fields[0])) !values.Val
         .{ .section = "ai", .key = "permission_mode", .text = "auto" },
         .{ .section = "ai", .key = "execution_mode", .text = "new_pty" },
         .{ .section = "ai", .key = "session_retention", .text = "keep" },
+        .{ .section = "ai", .key = "step_display", .text = "expanded" },
         .{ .section = "notify", .key = "quiet_hours", .text = "23:00-07:00" },
         .{ .section = "log", .key = "export_format", .text = "txt" },
         .{ .section = "ui.materials.background", .key = "path", .text = "/fixture/settings-background.png" },
@@ -39,6 +40,7 @@ fn nextValue(value: config.Config, entry: @TypeOf(schema.fields[0])) !values.Val
         .{ .section = "ui.materials.background", .key = "alignment_y", .text = "top" },
     };
     for (choices) |choice| if (std.mem.eql(u8, entry.section, choice.section) and std.mem.eql(u8, entry.key, choice.key)) return .{ .text = choice.text };
+    std.debug.print("missing audit value for {s}.{s}\n", .{ entry.section, entry.key });
     return error.MissingAuditValue;
 }
 

@@ -323,3 +323,18 @@ test "Tooltip: mount 在任意分配点失败时不泄漏（sweep）" {
         }
     }.m);
 }
+
+test "Tooltip: large host lists do not reserve closed overlay slots" {
+    var ctx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer ctx.deinit();
+    const root = try box(ctx, .{}, .{});
+    ctx.root = root;
+    const scope = try Scope.init(std.testing.allocator, null, ctx.owner);
+    defer scope.dispose();
+    // 120 hosts with two hints plus chrome tips previously exhausted 256.
+    for (0..300) |_| {
+        const tip = try Tooltip(.{ .text = "Host detail" }).mount(scope, ctx);
+        try root.appendChild(std.testing.allocator, tip.wrapper);
+    }
+    try std.testing.expectEqual(@as(usize, 0), ctx.overlay_stack.layer_count);
+}

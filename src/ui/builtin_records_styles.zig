@@ -2,6 +2,12 @@
 //! command/result copy and exported source text never include these labels.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
+pub fn donationQr(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .position = .absolute, .background = ui.arb.hex(0xffffff), .overflow = .hidden, .hit_behavior = .pass_through };
+}
+pub fn donationModule(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .position = .absolute, .background = ui.arb.hex(0x000000), .hit_behavior = .pass_through };
+}
 pub const marker_width: f32 = @import("terminal_record_geometry.zig").marker_width;
 pub const marker_height: f32 = 18;
 pub const marker_size: f32 = 10;

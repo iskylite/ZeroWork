@@ -269,10 +269,12 @@ fn mountImpl(props: ScrollAreaProps, scope: *Scope, cx: *Cx) !ScrollAreaResult {
         // Scrollbar attaches its own handler for hitTest hit + drag interaction handling
         scrollbar_v.behavior.events.on_event = scrollbarEventHandler;
         scrollbar_v.behavior.events.event_context = event_ctx;
+        scrollbar_v.setCursor(.grab);
 
         // Horizontal scrollbar attaches handler
         scrollbar_h.behavior.events.on_event = scrollbarHEventHandler;
         scrollbar_h.behavior.events.event_context = event_ctx;
+        scrollbar_h.setCursor(.grab);
 
         // Reverse: node freed before scope (e.g., ancestor freeNode releases container children,
         // but

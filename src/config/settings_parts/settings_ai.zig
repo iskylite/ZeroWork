@@ -12,7 +12,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     if (matchesProviders(query)) try page.root.appendChild(cx.allocator, try bound.providers(cx));
     if (binding.matches(query, "权限 确认 执行 自动执行 permission_mode")) {
         const section = try page.section("权限", "执行前的默认确认方式", ui.icons.shield, 24, "settings.ai.permissions", null);
-        try section.select(.{ .section = "ai", .key = "permission_mode" }, "默认权限模式", "确认后执行：写操作逐次确认。自动执行：在允许范围内自动运行，组内写操作仍需确认。", &[_]ui.widgets.SelectOption{ .{ .value = "confirm", .label = "确认后执行" }, .{ .value = "auto", .label = "自动执行" } }, null);
+        try section.select(.{ .section = "ai", .key = "permission_mode" }, "默认权限模式", "确认后执行：部分读取自动进行，其余按策略判断。自动执行：授权范围内可自动运行命令和工具，包括组内写操作；禁止项不可执行。", &[_]ui.widgets.SelectOption{ .{ .value = "confirm", .label = "确认后执行" }, .{ .value = "auto", .label = "自动执行" } }, null);
     }
     if (binding.matches(query, "运行方式 执行 批处理 交互 附加现有 PTY 新建 PTY 自行判断 每次询问 execution_mode 保留 任务结束 空闲后关闭 保留任务会话 session_retention")) {
         const section = try page.section("运行方式", "全局默认；对话可以单独调整", ui.icons.terminal, 28, "settings.ai.execution", null);
@@ -38,7 +38,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.readonly("图片上限", "最多 4 张 · 单张 10 MB");
         try section.readonly("本地文本上限", "UTF-8 · 64 KiB");
     }
-    if (binding.matches(query, "其他行为 默认 Provider 错误 提示 error_hint default_provider")) {
+    if (binding.matches(query, "其他行为 默认 Provider 错误 提示 error_hint default_provider 步骤默认显示 步骤 聚合 折叠 展开 step_display")) {
         const section = try page.section("其他行为", "默认服务提供方与错误提示", ui.icons.settings, 27, "settings.ai.behavior", null);
         const options = try bound.scope.allocator.alloc(ui.widgets.SelectOption, bound.controller.model.value.ai.provider_count);
         defer bound.scope.allocator.free(options);
@@ -50,6 +50,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             count += 1;
         }
         if (count != 0) try section.select(.{ .section = "ai", .key = "default_provider" }, "默认服务提供方", "新对话默认使用的模型服务。", options[0..count], null);
+        try section.select(.{ .section = "ai", .key = "step_display" }, "步骤默认显示", "只决定新步骤组的初始状态；已有组和手动收展状态保持不变。", &[_]ui.widgets.SelectOption{ .{ .value = "collapsed", .label = "折叠", .test_id = "settings.step_display.collapsed" }, .{ .value = "expanded", .label = "展开", .test_id = "settings.step_display.expanded" } }, null);
         try section.toggle(.{ .section = "ai", .key = "error_hint" }, "错误轻提示", "命令失败时显示助手入口。", null);
     }
     return page.finish();

@@ -1598,6 +1598,26 @@
       "overlay-base": "#302e3d"
     }
   },
+  "stateMaterials": {
+    "control": "well",
+    "action": "surface-2",
+    "disabled": "hover",
+    "hover": "hover",
+    "pressed": "well",
+    "focus": "tab-on",
+    "selected": "tab-on",
+    "selected_hover": "well",
+    "drop_target": "well",
+    "tag": "well",
+    "tag_ok": "well",
+    "tag_warn": "well",
+    "tag_danger": "well",
+    "error_focus": "well",
+    "feedback_info": "well",
+    "feedback_ok": "well",
+    "feedback_warn": "well",
+    "feedback_danger": "well"
+  },
   "materials": {
     "transparencyDefaultPercent": 0,
     "blurDefaultPx": 0,
@@ -1606,55 +1626,62 @@
     "ordinaryBlurMultiplier": 0,
     "imageAlpha": "1-transparencyPercent/100",
     "imageSwitchGatesMaterial": false,
-    "baseAlphaPolicy": "RGB from theme; effective alpha derived from global T, not multiplied by imported palette alpha",
+    "baseAlphaPolicy": "RGB from theme; shell canvas and four opaque fills composite together at 1-T, foregrounds stay opaque; other role alpha is not multiplied by imported palette alpha",
     "maximumTransparency": {
-      "surface-1": 0.95,
+      "surface-1": 1,
       "surface-2": 0.9,
-      "well": 0.8,
-      "overlay": 0.16,
-      "hover": 0.75,
-      "tab-on": 0.65,
+      "well": 0.84,
+      "overlay": 0.5,
+      "hover": 0.9,
+      "tab-on": 0.82,
       "card-deep": 0.9,
-      "card-deep-ft": 0.8
+      "card-deep-ft": 0.84
     },
     "overlayBlur": "max(12,blurPx)",
     "baseTransparency": {
-      "surface-1": 0.446777856,
-      "surface-2": 0.305690112,
-      "well": 0.211631616,
-      "overlay": 0.04,
-      "hover": 0.23514624,
-      "tab-on": 0.164602368,
-      "card-deep": 0.305690112,
-      "card-deep-ft": 0.211631616
+      "surface-1": 0,
+      "surface-2": 0.72,
+      "well": 0.64,
+      "overlay": 0,
+      "hover": 0.82,
+      "tab-on": 0.68,
+      "card-deep": 0.72,
+      "card-deep-ft": 0.64
     },
     "sliderTransparencySpan": {
-      "surface-1": 0.670166784,
-      "surface-2": 0.752467968,
-      "well": 0.728953344,
-      "overlay": 0.12,
-      "hover": 0.64665216,
-      "tab-on": 0.599622912,
-      "card-deep": 0.752467968,
-      "card-deep-ft": 0.728953344
+      "surface-1": 1,
+      "surface-2": 0.18,
+      "well": 0.2,
+      "overlay": 0.5,
+      "hover": 0.08,
+      "tab-on": 0.14,
+      "card-deep": 0.18,
+      "card-deep-ft": 0.2
     },
     "floatingLevels": {
       "1": {
-        "baseTransparency": 0.04,
-        "sliderTransparencySpan": 0.12,
-        "maximumTransparency": 0.16
+        "baseTransparency": 0,
+        "sliderTransparencySpan": 0.8,
+        "maximumTransparency": 0.8
       },
       "2": {
-        "baseTransparency": 0.01,
-        "sliderTransparencySpan": 0.03,
-        "maximumTransparency": 0.04
-      },
-      "3+": {
         "baseTransparency": 0,
-        "sliderTransparencySpan": 0,
-        "maximumTransparency": 0
+        "sliderTransparencySpan": 0.6,
+        "maximumTransparency": 0.6
+      },
+      "3": {
+        "baseTransparency": 0,
+        "sliderTransparencySpan": 0.4,
+        "maximumTransparency": 0.4
+      },
+      "4+": {
+        "baseTransparency": 0,
+        "sliderTransparencySpan": 0.2,
+        "maximumTransparency": 0.2
       }
-    }
+    },
+    "surfaceDepth": "L0 canvas; each painted card or float adds one actual surface; layout wrappers add none",
+    "compositing": "Final transmission T*(5-min(L,4))/5; source-over fill 1-Q(L)/Q(L-1); portals compensate for spatially uncovered owners"
   },
   "terminalSelection": {
     "dark": {

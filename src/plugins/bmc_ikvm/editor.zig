@@ -634,10 +634,8 @@ pub const EditorView = struct {
         self.group_options.?.set(try options.toOwnedSlice(a));
         self.group_value.?.set(if (self.draft.?.group_id) |id| try std.fmt.allocPrint(a, "group:{d}", .{@backingInt(id)}) else "none");
     }
-    fn refreshRoutes(self: *EditorView) !void {
+    fn paintAccess(self: *EditorView) void {
         const draft = &self.draft.?;
-        const a = self.alloc();
-        self.route_editor.?.setDisplay(if (draft.routed) .flex else .none);
         for (self.access_styles, 0..) |style, i| {
             const selected = draft.routed == (i == 1);
             var value = S.host.accessChoice(selected);
@@ -647,6 +645,12 @@ pub const EditorView = struct {
             self.access_titles[i].?.setTextColor(if (selected) S.theme.current().accent_ink else S.theme.current().fg_1);
             if (self.access_nodes[i].?.behavior.interaction.a11y) |*a11y| a11y.pressed = selected;
         }
+    }
+    fn refreshRoutes(self: *EditorView) !void {
+        const draft = &self.draft.?;
+        const a = self.alloc();
+        self.route_editor.?.setDisplay(if (draft.routed) .flex else .none);
+        self.paintAccess();
         var hash = std.hash.Wyhash.init(0);
         if (self.mount.connection_configs) |resolver| hash.update(std.mem.asBytes(&resolver.registry.revision));
         hash.update(std.mem.asBytes(&draft.route_count));
@@ -931,7 +935,7 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     try test_head.appendChild(cx.allocator, try ui.spacer(cx));
     try button(self, test_head, "测试管理连接", "bmc.editor.probe", false, self.locked.?, EditorView.testConnection);
     try review.appendChild(cx.allocator, test_head);
-    try review.appendChild(cx.allocator, try ui.textStyled(cx, S.feedback, "测试仅验证管理连接，打开控制台后才验证视频；可跳过测试直接保存或连接。"));
+    try review.appendChild(cx.allocator, try ui.textStyled(cx, S.feedback, "仅测试管理连接；视频在打开控制台后验证。"));
     const feedback_area = try ui.boxStyled(cx, S.feedbackArea, .{});
     feedback_area.meta.ownership.meta.test_id = "bmc.editor.feedback";
     self.message = try ui.textStyled(cx, S.feedback, if (mount.initial != null) "保存的修改在下次新建连接时生效" else "尚未测试");
@@ -989,6 +993,14 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     try self.refreshGroups();
     try self.refreshRoutes();
     self.applyStep();
+    try scope.createEffect(.{ .editor = self, .publication = try cx.themeSignal(scope) }, struct {
+        fn paint(ctx: anytype) void {
+            _ = ctx.publication.get();
+            if (ctx.editor.draft == null) return;
+            ctx.editor.applyStep();
+            ctx.editor.paintAccess();
+        }
+    }.paint);
     try cx.addAfterLayoutHook(self, EditorView.tick);
     self.hook_registered = true;
     return .{ .context = self, .vtable = &vtable, .handles_actions = true };
@@ -1113,9 +1125,7 @@ fn skinSelect(editor: *EditorView, result: ui.widgets.SelectResult, id: []const 
     result.panel.addBeforeRender(paintActionTypography);
     try editor.selects.append(allocator, result);
 }
-fn button(editor: *EditorView, parent: *ui.Node, label: []const u8, id: []const u8, primary: bool, disabled: *ui.Signal(bool), comptime clicked: *const fn (*EditorView) void) !void {
-    const cx = editor.mount.cx;
-    const label_source: ui.Source([]const u8) = if (std.mem.eql(u8, id, "bmc.editor.probe")) .{ .signal = editor.probe_label.? } else if (std.mem.eql(u8, id, "bmc.editor.advanced")) .{ .signal = editor.advanced_label.? } else .{ .value = label };
+fn actionStyle(primary: bool, id: []const u8) ui.BoxStyle {
     var action_style = S.action(primary);
     if (std.mem.startsWith(u8, id, "bmc.editor.review.edit_") or std.mem.eql(u8, id, "bmc.editor.advanced")) {
         action_style.height = .{ .px = 24 };
@@ -1123,7 +1133,12 @@ fn button(editor: *EditorView, parent: *ui.Node, label: []const u8, id: []const 
         action_style.background = ui.Color.TRANSPARENT;
         action_style.text_color = if (std.mem.eql(u8, id, "bmc.editor.advanced")) S.theme.current().fg_2 else S.theme.current().accent_ink;
     }
-    const node = try ui.widgets.Button(.{ .label = label_source, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .ghost), .disabled = disabled, .base_style = action_style, .on_click = cx.on(EditorView, editor, clicked) }).mount(editor.mount.scope, cx);
+    return action_style;
+}
+fn button(editor: *EditorView, parent: *ui.Node, label: []const u8, id: []const u8, primary: bool, disabled: *ui.Signal(bool), comptime clicked: *const fn (*EditorView) void) !void {
+    const cx = editor.mount.cx;
+    const label_source: ui.Source([]const u8) = if (std.mem.eql(u8, id, "bmc.editor.probe")) .{ .signal = editor.probe_label.? } else if (std.mem.eql(u8, id, "bmc.editor.advanced")) .{ .signal = editor.advanced_label.? } else .{ .value = label };
+    const node = try ui.widgets.Button(.{ .label = label_source, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .ghost), .disabled = disabled, .base_style = try S.theme.paintSignal(ui.BoxStyle, cx, editor.mount.scope, actionStyle, .{ primary, id }), .on_click = cx.on(EditorView, editor, clicked) }).mount(editor.mount.scope, cx);
     node.meta.ownership.meta.test_id = id;
     if (std.mem.eql(u8, id, "bmc.editor.back")) editor.back_button = node;
     if (std.mem.eql(u8, id, "bmc.editor.next")) editor.next_button = node;

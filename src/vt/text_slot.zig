@@ -3,12 +3,11 @@ const std = @import("std");
 /// SPSC text handoff: the worker publishes an owned UTF-8 terminal frame and
 /// the UI consumes it without touching the worker-owned VT engine.
 ///
-/// Buffer depth is 3 (triple buffering). Depth 2 left exactly one frame of
-/// slack: whenever the UI missed a single vsync (window drag, heavy frame),
-/// the worker's next publish hit ConsumerBehind and the frame waited a full
-/// worker poll (~50ms) for retry — perceived as periodic micro-stutter during
-/// continuous output like `dmesg -T`. Depth 3 absorbs a missed UI tick: the
-/// worker keeps publishing while the UI catches up on the next frame.
+/// Legacy byte frames retain triple buffering. Structured projections use an
+/// immutable latest-frame handoff and allow one unconsumed publication; further
+/// output is parsed and coalesced before the next projection. Both consumers
+/// wake their producer when acknowledging, so a pending final update resumes
+/// promptly instead of waiting for the transport's idle poll timeout.
 pub const TextSlot = struct {
     /// Slot capacity shared by the producer buffers and the UI-side scratch
     /// destination. Keeping them equal guarantees take() never fails with
@@ -28,6 +27,7 @@ pub const TextSlot = struct {
     lengths: [depth]usize = @splat(0),
     generation: std.atomic.Value(u64) = .init(0),
     consumed: std.atomic.Value(u64) = .init(0),
+    presentation_target: std.atomic.Value(@import("../platform/presentation_wakeup.zig").Target) = .init(0),
 
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !TextSlot {
         if (capacity == 0) return error.InvalidCapacity;
@@ -53,6 +53,14 @@ pub const TextSlot = struct {
         self.projection_requested.store(true, .release);
         if (self.producer_wakeup) |wake| wake.notify();
     }
+    /// Main-thread binding. The producer sees only a numeric generation token;
+    /// it never borrows UI storage. Moving a pane binds its new window here.
+    pub fn bindPresentationTarget(self: *TextSlot, target: @import("../platform/presentation_wakeup.zig").Target) void {
+        if (self.presentation_target.load(.acquire) != target) self.presentation_target.store(target, .release);
+    }
+    pub fn notifyPresentation(self: *TextSlot) void {
+        @import("../platform/presentation_wakeup.zig").notifyTarget(self.presentation_target.load(.acquire));
+    }
     pub fn publishOwnedProjection(self: *TextSlot, projection: @import("snapshot.zig").Projection, geometry_revision: u64) !u64 {
         if (!self.canPublish()) return error.ConsumerBehind;
         try self.projections.publish(projection, geometry_revision);
@@ -64,13 +72,15 @@ pub const TextSlot = struct {
         return self.publishParts(&.{bytes});
     }
 
-    /// Producer-side capacity probe: true when a publish would fit right now.
-    /// Lets the worker skip the expensive full-viewport projection when the
-    /// UI is already a full ring behind (projection-then-fail wasted the CPU
-    /// that drove the periodic stutter under continuous output).
+    /// Structured frames are immutable latest snapshots: one unconsumed frame
+    /// already owes a UI wake. Wait for that consumer before projecting again,
+    /// then publish the newest VT state. The legacy byte handoff retains its
+    /// triple buffer. This bounds projection work to actual consumption without
+    /// lowering the 120Hz publication ceiling or delaying bytes/recording.
     pub fn canPublish(self: *TextSlot) bool {
         const current = self.generation.load(.monotonic);
-        return current -% self.consumed.load(.acquire) < depth;
+        const allowance: u64 = if (self.structured.load(.acquire)) 1 else depth;
+        return current -% self.consumed.load(.acquire) < allowance;
     }
 
     /// Publishes several slices as one contiguous generation. Lets the worker
@@ -81,7 +91,7 @@ pub const TextSlot = struct {
         for (parts) |part| total += part.len;
         if (total > self.buffers[0].len) return error.TooLarge;
         const current = self.generation.load(.monotonic);
-        if (current -% self.consumed.load(.acquire) >= depth) return error.ConsumerBehind;
+        if (!self.canPublish()) return error.ConsumerBehind;
         const next = current +% 1;
         const index: usize = @intCast(next % depth);
         var offset: usize = 0;
@@ -91,7 +101,7 @@ pub const TextSlot = struct {
         }
         self.lengths[index] = total;
         self.generation.store(next, .release);
-        @import("../platform/presentation_wakeup.zig").notify();
+        self.notifyPresentation();
         return next;
     }
 
@@ -100,9 +110,10 @@ pub const TextSlot = struct {
     pub fn acknowledge(self: *TextSlot, seen: u64) ?u64 {
         const current = self.generation.load(.acquire);
         if (current == seen) return null;
-        const was_full = current -% self.consumed.load(.monotonic) >= depth;
         self.consumed.store(current, .release);
-        if (was_full) if (self.producer_wakeup) |wake| wake.notify();
+        // A coalesced burst tail may be waiting behind this very frame even
+        // when the legacy ring has spare capacity. Wake it at acknowledgement.
+        if (self.producer_wakeup) |wake| wake.notify();
         return current;
     }
 
@@ -114,11 +125,34 @@ pub const TextSlot = struct {
         if (length > destination.len) return error.DestinationTooSmall;
         @memcpy(destination[0..length], self.buffers[index][0..length]);
         self.consumed.store(current, .release);
+        if (self.producer_wakeup) |wake| wake.notify();
         return .{ .generation = current, .text = destination[0..length] };
     }
 };
 
 pub const Snapshot = struct { generation: u64, text: []const u8 };
+
+test "text slot presentation follows its window across pane transfer" {
+    const presentation = @import("../platform/presentation_wakeup.zig");
+    _ = presentation.take();
+    const first = presentation.registerWindow(9001);
+    defer presentation.unregisterWindow(9001, first);
+    const second = presentation.registerWindow(9002);
+    defer presentation.unregisterWindow(9002, second);
+    var slot = try TextSlot.init(std.testing.allocator, 16);
+    defer slot.deinit(std.testing.allocator);
+    slot.bindPresentationTarget(first);
+    const generation = try slot.publish("first window");
+    try std.testing.expect(!presentation.take());
+    try std.testing.expect(presentation.takeWindow(9001));
+    try std.testing.expect(!presentation.takeWindow(9002));
+    _ = slot.acknowledge(generation - 1);
+    slot.bindPresentationTarget(second);
+    _ = try slot.publish("moved pane");
+    try std.testing.expect(!presentation.take());
+    try std.testing.expect(!presentation.takeWindow(9001));
+    try std.testing.expect(presentation.takeWindow(9002));
+}
 
 test "text slot hands off frames without exposing worker storage" {
     var slot = try TextSlot.init(std.testing.allocator, 32);
@@ -184,4 +218,41 @@ test "structured consumer acknowledges latest generation without copying and rel
     _ = try slot.publish("next");
     var bytes: [8]u8 = undefined;
     try std.testing.expectEqualStrings("next", (try slot.take(latest, &bytes)).?.text);
+}
+
+test "structured publication waits for its consumer while legacy frames keep triple buffering" {
+    var slot = try TextSlot.init(std.testing.allocator, 8);
+    defer slot.deinit(std.testing.allocator);
+    slot.enableStructured();
+    const first = try slot.publish("first");
+    try std.testing.expect(!slot.canPublish());
+    try std.testing.expectError(error.ConsumerBehind, slot.publish("unused"));
+    try std.testing.expectEqual(first, slot.acknowledge(0).?);
+    try std.testing.expect(slot.canPublish());
+    const last = try slot.publish("tail");
+    var bytes: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("tail", (try slot.take(first, &bytes)).?.text);
+    try std.testing.expect(slot.canPublish());
+    try std.testing.expect(slot.acknowledge(last) == null);
+}
+
+test "consumption wakes the waiting producer even before the legacy ring is full" {
+    var wake = try @import("../platform/wakeup.zig").Wakeup.init();
+    defer wake.deinit();
+    var slot = try TextSlot.init(std.testing.allocator, 8);
+    defer slot.deinit(std.testing.allocator);
+    slot.producer_wakeup = &wake;
+    slot.enableStructured();
+    wake.drain();
+    const generation = try slot.publish("first");
+    _ = slot.acknowledge(0);
+    var fds = [_]std.c.pollfd{.{ .fd = wake.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&fds, 1, 0));
+    wake.drain();
+    try std.testing.expect(slot.acknowledge(generation) == null);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.poll(&fds, 1, 0));
+    _ = try slot.publish("tail");
+    var bytes: [8]u8 = undefined;
+    _ = try slot.take(generation, &bytes);
+    try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&fds, 1, 0));
 }

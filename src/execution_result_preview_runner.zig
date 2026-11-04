@@ -8,7 +8,7 @@ const facts = @import("ai/tool_results.zig");
 const terminal = @import("host/terminal_execution.zig");
 const identity = @import("host/identity.zig");
 const Execution = @import("ui/ai_execution_result_view.zig");
-const Fixture = enum { running, sealed, failed, interval_recorded, interval_unverified, interval_concurrent, interval_failed, input_consumed, input_unknown, recording_failed, unknown, handed_off, sealing, cancelled, missing, refused };
+const Fixture = enum { running, sealed, failed, interval_recorded, interval_unverified, interval_concurrent, interval_failed, interval_shell, interval_background, interval_signal, interval_no_exit, input_consumed, input_unknown, recording_failed, unknown, handed_off, sealing, cancelled, missing, refused };
 var fixture: Fixture = .running;
 var preview_theme: []const u8 = "dark";
 var transparency: f32 = 0;
@@ -48,11 +48,11 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     const reference = try std.fmt.allocPrint(cx.allocator, "x1:{s}", .{std.fmt.bytesToHex(exec.bytes, .lower)});
     defer cx.allocator.free(reference);
     const input_fixture = fixture == .input_consumed or fixture == .input_unknown;
-    const saved_interval = fixture == .interval_recorded or fixture == .interval_unverified or fixture == .interval_concurrent or fixture == .interval_failed or input_fixture;
+    const saved_interval = fixture == .interval_recorded or fixture == .interval_unverified or fixture == .interval_concurrent or fixture == .interval_failed or fixture == .interval_shell or fixture == .interval_background or fixture == .interval_signal or fixture == .interval_no_exit or input_fixture;
     var snapshot: terminal.Snapshot = .{ .owner = target, .execution_id = exec, .state = switch (fixture) {
         .running, .handed_off => .running,
         .sealed, .failed => .sealed,
-        .interval_recorded, .interval_unverified, .interval_concurrent, .interval_failed, .input_consumed, .input_unknown => .interval_recorded,
+        .interval_recorded, .interval_unverified, .interval_concurrent, .interval_failed, .interval_shell, .interval_background, .interval_signal, .interval_no_exit, .input_consumed, .input_unknown => .interval_recorded,
         .recording_failed => .recording_degraded,
         .unknown, .missing, .refused => .outcome_unknown,
         .sealing => .recording_sealing,
@@ -60,7 +60,16 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     }, .elapsed_ms = 6789, .recording_id = if (fixture == .cancelled or fixture == .missing) null else std.fmt.bytesToHex(recording.bytes, .lower), .input_handed_off = fixture == .handed_off, .remote_effect_unknown = fixture == .unknown, .recording_settled = fixture == .sealed or fixture == .failed or saved_interval, .output_scope = if (fixture == .sealed or fixture == .failed) .exact else .session_interval, .output_attribution = if (fixture == .interval_concurrent) .concurrent_observed else if (fixture == .interval_recorded or fixture == .interval_failed) .no_concurrent_owner_observed else .unverified, .output_attribution_reason = if (fixture == .interval_unverified) "OutputObservationDeadline" else if (fixture == .interval_concurrent) "BackgroundJobsObserved" else null, .interval_saved = saved_interval, .recording_failed = fixture == .recording_failed };
     if (fixture == .running) snapshot.grant = .{ .execution_id = exec, .task_id = context.task_id, .fence = 8, .input_epoch = 3, .ownership_revision = 2 };
     if (fixture == .sealed or fixture == .failed) snapshot.process = .{ .foreground_finished = true, .exit_code = if (fixture == .failed) 7 else 0 };
-    if (saved_interval or fixture == .recording_failed) snapshot.process = .{ .foreground_finished = true, .exit_code = if (fixture == .interval_failed or fixture == .recording_failed) 7 else 0 };
+    if (saved_interval or fixture == .recording_failed) snapshot.process = .{ .foreground_finished = true, .exit_code = if (fixture == .interval_failed) 7 else 0 };
+    if (fixture == .recording_failed) snapshot.failure = "RecordingUnavailable";
+    if (fixture == .interval_shell) {
+        snapshot.completion_source = .shell_reported;
+        snapshot.process.?.background_jobs_unknown = true;
+        snapshot.output_attribution_reason = "OutputProcessIdentityUnknown";
+    }
+    if (fixture == .interval_background) snapshot.process.?.background_jobs = true;
+    if (fixture == .interval_signal) snapshot.process.?.signal = 15;
+    if (fixture == .interval_no_exit) snapshot.process.?.exit_code = null;
     const output = if (long_output) try std.mem.join(cx.allocator, "\n", &@as([40][]const u8, @splat("ACTUAL_TERMINAL_OUTPUT · selected execution, original spacing and a long line for horizontal scrolling"))) else try cx.allocator.dupe(u8, "Checking release…\nACTUAL_TERMINAL_OUTPUT\nOutput boundary retained.");
     defer cx.allocator.free(output);
     const content = if (fixture == .refused) try cx.allocator.dupe(u8, "{\"error_code\":\"IntegrationUnavailable\",\"side_effect_started\":false,\"local_released\":true,\"remote_effect_unknown\":false}") else if (fixture == .missing) try cx.allocator.dupe(u8, "{\"status\":\"failed\",\"error_code\":\"HostToolGatewayUnavailable\"}") else try std.json.Stringify.valueAlloc(cx.allocator, .{ .execution_ref = reference, .snapshot = snapshot, .recording_ref = if (snapshot.recording_id) |*id| @as([]const u8, id) else null, .output = if (fixture == .cancelled) "" else output, .output_available = fixture != .cancelled, .gap = false, .truncated = long_output, .stop_requested = false }, .{});
@@ -82,7 +91,6 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
         _ = try preview.store.capture(&run, &.{});
     }
     const record = preview.store.records.items[0];
-    record.expanded = true;
     const card = try Execution.mount(cx, scope, &preview.store, record, .{ .context = preview, .perform = Preview.perform }, null);
     card.meta.ownership.meta.test_id = "execution_result.preview.card";
     try root.appendChild(cx.allocator, card);

@@ -172,7 +172,7 @@ test "dispatch rejects stale membership before contacting any remote target" {
     try std.testing.expectEqual(@as(usize, 2), fake.count);
 }
 
-test "approval never overrides blacklist and group writes require approval" {
+test "approval never overrides blacklist including compounds and group writes require approval" {
     const Fake = struct {
         count: usize = 0,
         fn invoke(raw: *anyopaque, _: Tool, _: u64, _: []const u8, _: u32) !void {
@@ -185,7 +185,9 @@ test "approval never overrides blacklist and group writes require approval" {
     const dispatcher: Dispatcher = .{ .ctx = &fake, .invoke = Fake.invoke };
     var call: Call = .{ .tool = .run_command, .command = "touch /tmp/file", .targets = try scope.validate(&.{101}) };
     try std.testing.expectError(error.ToolApprovalRequired, dispatcher.dispatch(scope, scope, call, .{}, false));
-    call.command = "rm -rf /";
-    try std.testing.expectError(error.ToolExecutionDenied, dispatcher.dispatch(scope, scope, call, .{}, true));
+    for ([_][]const u8{ "rm -rf /", "printf safe; rm -rf /tmp/fixture", "if true; then shutdown now; fi" }) |command| {
+        call.command = command;
+        try std.testing.expectError(error.ToolExecutionDenied, dispatcher.dispatch(scope, scope, call, .{ .mode = .auto }, true));
+    }
     try std.testing.expectEqual(@as(usize, 0), fake.count);
 }

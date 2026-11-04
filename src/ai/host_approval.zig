@@ -4,7 +4,8 @@ const std = @import("std");
 const host = @import("host_tools.zig");
 const provider = @import("provider.zig");
 const fetch = @import("fetch_url.zig");
-pub const lifetime_ms: i64 = 120_000;
+/// User decisions have no clock expiry; live identity and policy gates still apply.
+pub const waiting_expiry_ms: i64 = std.math.maxInt(i64);
 pub const routing = @import("execution_routing.zig");
 pub const RouteSelection = struct {
     proposed: routing.Route,
@@ -22,6 +23,8 @@ pub const Subject = struct {
     detail: []const u8,
     impact: []const u8 = "",
     route: ?RouteSelection = null,
+    /// Trusted semantic state bound to approval; never displayed as UI copy.
+    evidence_hash: ?[32]u8 = null,
 };
 fn Fixed(comptime capacity: usize) type {
     return struct {
@@ -40,6 +43,7 @@ fn Fixed(comptime capacity: usize) type {
 }
 /// A value snapshot owns all its text. Safe to copy while the worker cancels.
 pub const Snapshot = struct {
+    evidence_hash: ?[32]u8 = null,
     kind: SubjectKind,
     route: ?struct { proposed: routing.Route, choice: routing.Choice, target: @import("../host/identity.zig").SessionHandle, selectable: bool, reason: Fixed(1024) } = null,
     target: Fixed(8192),
@@ -60,10 +64,12 @@ pub const Snapshot = struct {
     created_at_ms: i64,
     expires_at_ms: i64,
     expired: bool = false,
+    requires_user_input: bool = false,
 };
 pub const Permit = struct { sequence: u64, arguments_hash: [32]u8 };
+const permission = @import("permission.zig");
 const State = enum { pending, approved, rejected };
-const Entry = struct { snapshot: Snapshot, state: State = .pending };
+const Entry = struct { snapshot: Snapshot, state: State = .pending, policy_approved: bool = false };
 pub const Broker = struct {
     mutex: std.atomic.Mutex = .unlocked,
     execution_route: routing.State = .{},
@@ -72,6 +78,7 @@ pub const Broker = struct {
     sequence: u64 = 0,
     stopped: bool = false,
     entry: ?Entry = null,
+    permission_policy: ?permission.Engine = null,
     /// Tests may inject a monotonic clock; production uses the native clock.
     clock_context: ?*anyopaque = null,
     clock: *const fn (?*anyopaque) i64 = monotonicMs,
@@ -88,10 +95,48 @@ pub const Broker = struct {
         if (network_policy_revision == 0) return error.InvalidHostAuthority;
         self.lock();
         defer self.mutex.unlock();
-        if (self.live_context == null or !self.live_context.?.eql(context) or self.network_policy_revision != network_policy_revision) self.entry = null;
+        if (self.live_context == null or !self.live_context.?.eql(context) or self.network_policy_revision != network_policy_revision) {
+            self.entry = null;
+            self.permission_policy = null;
+        }
         self.live_context = context;
         self.network_policy_revision = network_policy_revision;
         self.stopped = false;
+    }
+    /// One live permission mode governs command, input, lifecycle and URL
+    /// approval. Exact target/argument permits and user decisions are preserved.
+    pub fn updatePermissionPolicy(self: *Broker, engine: permission.Engine) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.permission_policy = engine;
+        self.reconsiderLocked();
+    }
+    fn reconsiderLocked(self: *Broker) void {
+        const entry = if (self.entry) |*value| value else return;
+        if (entry.state == .rejected or (entry.state == .approved and !entry.policy_approved)) return;
+        const policy = self.permission_policy orelse return;
+        const saved = &entry.snapshot;
+        const route_decided = if (saved.route) |route| !route.selectable and route.choice.route == route.proposed else true;
+        const automatic = policy.mode == .auto and route_decided and !saved.requires_user_input and switch (saved.kind) {
+            .network_url, .lifecycle => true,
+            .terminal_command => blk: {
+                const tool = saved.tool.text();
+                if (!std.mem.eql(u8, tool, "host.run_in_terminal") and !std.mem.eql(u8, tool, "run_command") and !std.mem.eql(u8, tool, "host.send_execution_input") and !std.mem.eql(u8, tool, "host.attach_shell")) break :blk false;
+                break :blk permission.classifyTerminal(policy, saved.detail.text(), saved.context.binding == .group) == .allow_auto;
+            },
+        };
+        if (automatic) {
+            // This exact host-issued permit still passes the normal target,
+            // command hash, scope and dispatch checks. It is not a user grant
+            // that can be carried into a different execution route.
+            entry.state = .approved;
+            entry.policy_approved = true;
+            saved.created_at_ms = self.now();
+            saved.expires_at_ms = waiting_expiry_ms;
+        } else if (entry.policy_approved) {
+            entry.state = .pending;
+            entry.policy_approved = false;
+        }
     }
     /// Main thread and Stop/close may call this without joining the worker.
     /// Invalidate granted permits too, so cancellation cannot leave a live grant.
@@ -131,7 +176,9 @@ pub const Broker = struct {
         const canonical = if (subject.kind == .network_url) try fetch.normalizeUrl(allocator, subject.target) else try allocator.dupe(u8, "");
         defer allocator.free(canonical);
         var frozen: Snapshot = .{
+            .evidence_hash = subject.evidence_hash,
             .kind = subject.kind,
+            .requires_user_input = subject.kind == .terminal_command and args.object.get("host_secret_request") != null,
             .route = if (subject.route) |route| .{ .proposed = route.proposed, .choice = route.choice, .target = route.target, .selectable = route.selectable, .reason = try Fixed(1024).init(route.reason) } else null,
             .target = try Fixed(8192).init(subject.target),
             .detail = try Fixed(65534).init(subject.detail),
@@ -159,12 +206,13 @@ pub const Broker = struct {
         self.sequence = std.math.add(u64, self.sequence, 1) catch return error.ApprovalSequenceExhausted;
         frozen.sequence = self.sequence;
         frozen.created_at_ms = self.now();
-        frozen.expires_at_ms = std.math.add(i64, frozen.created_at_ms, lifetime_ms) catch return error.ApprovalSequenceExhausted;
+        frozen.expires_at_ms = waiting_expiry_ms;
         self.entry = .{ .snapshot = frozen };
+        self.reconsiderLocked();
         return .{ .sequence = frozen.sequence, .arguments_hash = raw_hash };
     }
-    /// Waits outside all mailbox/UI/Bridge locks. On cancel/reject/expiry, the
-    /// pending entry is removed before this function returns.
+    /// Waits outside all mailbox/UI/Bridge locks until a decision, Stop or scope
+    /// invalidation. Time alone never removes the pending request.
     pub fn request(self: *Broker, invocation: host.Invocation, exact_url: []const u8, network_revision: u64, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !Permit {
         return self.requestSubject(invocation, .{ .kind = .network_url, .target = exact_url, .detail = exact_url }, network_revision, allocator, cancel);
     }
@@ -172,17 +220,20 @@ pub const Broker = struct {
         if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
         const permit = try self.beginSubject(invocation, subject, policy_revision, allocator);
         errdefer self.finish(permit);
+        try self.waitForDecision(permit, cancel);
+        return permit;
+    }
+    pub fn waitForDecision(self: *Broker, permit: Permit, cancel: ?*provider.CancelToken) !void {
+        const waiting = provider.CancelToken.beginUserWait(cancel);
+        defer waiting.end();
         while (true) {
             if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
-            // Expiry keeps this exact call suspended; only the user can renew
-            // or reject it. Never turn a missing decision into a model retry.
+            // Keep the same frozen request until the user decides. Scope and
+            // cancellation remain effective for the entire wait.
             const polled = self.poll(permit);
             if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
-            const approved = polled catch |err| switch (err) {
-                error.ToolApprovalExpired => false,
-                else => return err,
-            };
-            if (approved) return permit;
+            const approved = try polled;
+            if (approved) return;
             @import("retry.zig").wait(10, cancel) catch return error.CancelledBeforeDispatch;
         }
     }
@@ -194,12 +245,6 @@ pub const Broker = struct {
         const entry = self.entry orelse return error.ScopeChanged;
         if (!matches(entry.snapshot, permit)) return error.StaleApproval;
         if (entry.state == .rejected) return error.ToolApprovalRejected;
-        if (self.now() >= entry.snapshot.expires_at_ms) {
-            // A decision delivered just before expiry may be observed later.
-            // Keep it visible and require renewal instead of hiding a waiter.
-            if (entry.state == .approved) self.entry.?.state = .pending;
-            return error.ToolApprovalExpired;
-        }
         return switch (entry.state) {
             .pending => false,
             .approved => true,
@@ -213,29 +258,20 @@ pub const Broker = struct {
         const entry = self.entry orelse return null;
         if (self.stopped or entry.state != .pending) return null;
         var result = entry.snapshot;
-        result.expired = self.now() >= result.expires_at_ms;
+        result.expired = false;
         return result;
     }
     pub fn decide(self: *Broker, sequence: u64, hash: [32]u8, approved: bool) !void {
         self.lock();
         defer self.mutex.unlock();
         const entry = if (self.entry) |*item| item else return error.StaleApproval;
-        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash) or (approved and self.now() >= entry.snapshot.expires_at_ms)) return error.StaleApproval;
+        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash)) return error.StaleApproval;
         if (approved) {
             if (entry.snapshot.route) |route| try self.execution_route.select(entry.snapshot.context, route.choice, entry.snapshot.detail.text(), true);
         }
         if (!approved and entry.snapshot.route != null) self.execution_route.revoke();
         entry.state = if (approved) .approved else .rejected;
-    }
-    /// Explicit renewal never grants approval. The same frozen request must
-    /// still be approved separately and revalidated at dispatch.
-    pub fn renew(self: *Broker, sequence: u64, hash: [32]u8) !void {
-        self.lock();
-        defer self.mutex.unlock();
-        const entry = if (self.entry) |*value| value else return error.StaleApproval;
-        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash) or self.now() < entry.snapshot.expires_at_ms) return error.StaleApproval;
-        entry.snapshot.created_at_ms = self.now();
-        entry.snapshot.expires_at_ms = std.math.add(i64, self.now(), lifetime_ms) catch return error.ApprovalSequenceExhausted;
+        entry.policy_approved = false;
     }
     /// Selection changes the pending card only. One subsequent approve action
     /// binds it to this command; cancel never mints a selection grant.
@@ -243,7 +279,7 @@ pub const Broker = struct {
         self.lock();
         defer self.mutex.unlock();
         const entry = if (self.entry) |*value| value else return error.StaleApproval;
-        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash) or self.now() >= entry.snapshot.expires_at_ms) return error.StaleApproval;
+        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash)) return error.StaleApproval;
         const selection = if (entry.snapshot.route) |*value| value else return error.RouteSelectionUnavailable;
         if (!selection.selectable) return error.RouteSelectionUnavailable;
         selection.choice.route = route;
@@ -252,7 +288,7 @@ pub const Broker = struct {
         self.lock();
         defer self.mutex.unlock();
         const entry = self.entry orelse return error.StaleApproval;
-        if (self.stopped or !matches(entry.snapshot, permit) or entry.state != .approved or self.now() >= entry.snapshot.expires_at_ms) return error.StaleApproval;
+        if (self.stopped or !matches(entry.snapshot, permit) or entry.state != .approved) return error.StaleApproval;
         return if (entry.snapshot.route) |route| route.choice else error.RouteSelectionUnavailable;
     }
     /// A later real tool call can reuse a prior exact route+command approval.
@@ -267,9 +303,17 @@ pub const Broker = struct {
         defer self.mutex.unlock();
         if (self.entry) |*entry| if (matches(entry.snapshot, permit)) {
             entry.state = .approved;
+            entry.policy_approved = false;
             return permit;
         };
         return error.ScopeChanged;
+    }
+    pub fn approvalIsAutomatic(self: *Broker, permit: Permit) !bool {
+        self.lock();
+        defer self.mutex.unlock();
+        const entry = self.entry orelse return error.StaleApproval;
+        if (self.stopped or !matches(entry.snapshot, permit) or entry.state != .approved) return error.StaleApproval;
+        return entry.policy_approved;
     }
     pub fn finish(self: *Broker, permit: Permit) void {
         self.lock();
@@ -281,36 +325,38 @@ pub const Broker = struct {
     /// Read-only dispatch gate. No UI, waits, allocation or grant creation.
     /// A redirect to another URL requires a fresh precise approval.
     pub fn authorize(self: *Broker, permit: Permit, invocation: host.Invocation, url: []const u8, network_revision: u64) fetch.Decision {
-        return self.authorizeInner(permit, invocation, .network_url, url, null, null, network_revision);
+        return self.authorizeInner(permit, invocation, .network_url, url, null, null, null, network_revision);
     }
     pub fn authorizeSubject(self: *Broker, permit: Permit, invocation: host.Invocation, subject: Subject, policy_revision: u64) fetch.Decision {
-        return self.authorizeInner(permit, invocation, subject.kind, subject.target, subject.detail, subject.impact, policy_revision);
+        return self.authorizeInner(permit, invocation, subject.kind, subject.target, subject.detail, subject.impact, subject.evidence_hash, policy_revision);
     }
-    /// Preserve the exact approval deadline across an asynchronous deployment.
-    pub fn authorizedSubjectExpiry(self: *Broker, permit: Permit, invocation: host.Invocation, subject: Subject, policy_revision: u64) ?i64 {
+    fn authorizeInner(self: *Broker, permit: Permit, invocation: host.Invocation, kind: SubjectKind, target: []const u8, detail: ?[]const u8, impact: ?[]const u8, evidence_hash: ?[32]u8, network_revision: u64) fetch.Decision {
         self.lock();
         defer self.mutex.unlock();
-        if (self.authorizeInnerLocked(permit, invocation, subject.kind, subject.target, subject.detail, subject.impact, policy_revision) != .allow) return null;
-        return self.entry.?.snapshot.expires_at_ms;
+        return self.authorizeInnerLocked(permit, invocation, kind, target, detail, impact, evidence_hash, network_revision);
     }
-    fn authorizeInner(self: *Broker, permit: Permit, invocation: host.Invocation, kind: SubjectKind, target: []const u8, detail: ?[]const u8, impact: ?[]const u8, network_revision: u64) fetch.Decision {
-        self.lock();
-        defer self.mutex.unlock();
-        return self.authorizeInnerLocked(permit, invocation, kind, target, detail, impact, network_revision);
-    }
-    fn authorizeInnerLocked(self: *Broker, permit: Permit, invocation: host.Invocation, kind: SubjectKind, target: []const u8, detail: ?[]const u8, impact: ?[]const u8, network_revision: u64) fetch.Decision {
+    fn authorizeInnerLocked(self: *Broker, permit: Permit, invocation: host.Invocation, kind: SubjectKind, target: []const u8, detail: ?[]const u8, impact: ?[]const u8, evidence_hash: ?[32]u8, network_revision: u64) fetch.Decision {
         if (self.stopped or self.live_context == null or !self.live_context.?.eql(invocation.context) or self.network_policy_revision != network_revision) return .scope_changed;
         const entry = self.entry orelse return .approval_required;
         const saved = entry.snapshot;
         if (saved.kind != kind) return .scope_changed;
+        if (!std.meta.eql(saved.evidence_hash, evidence_hash)) return .scope_changed;
         if (saved.route) |route| if (route.choice.route != route.proposed) return .scope_changed;
         if (!matches(saved, permit) or !saved.context.eql(invocation.context) or saved.authority != invocation.authority or saved.operation_id != invocation.operation_id or saved.turn_id != invocation.turn_id or saved.network_policy_revision != network_revision or !std.mem.eql(u8, saved.tool.text(), invocation.tool_id) or !std.mem.eql(u8, saved.call.text(), invocation.call_id) or !std.mem.eql(u8, &saved.arguments_hash, &invocation.arguments_hash) or !std.mem.eql(u8, &saved.canonical_arguments_hash, &invocation.canonical_arguments_hash)) return .scope_changed;
-        if (self.now() >= saved.expires_at_ms) return .approval_required;
         var raw_hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(invocation.arguments_json, &raw_hash, .{});
         if (!std.mem.eql(u8, &saved.arguments_hash, &raw_hash)) return .scope_changed;
         if (kind == .network_url and detail == null) {
-            if (!std.mem.eql(u8, saved.canonical_url.text(), target)) return .approval_required;
+            if (!std.mem.eql(u8, saved.canonical_url.text(), target)) {
+                if (entry.state != .approved or self.permission_policy == null or self.permission_policy.?.mode != .auto) return .approval_required;
+                // Redirects share this exact live call's automatic permission.
+                // Keep the transport's scheme, credential and public-address
+                // restrictions, using bounded stack storage without network IO.
+                var scratch: [16384]u8 = undefined;
+                var fixed = std.heap.FixedBufferAllocator.init(&scratch);
+                const normalized = fetch.normalizeUrl(fixed.allocator(), target) catch return .denied;
+                if (!std.mem.eql(u8, normalized, target)) return .denied;
+            }
         } else if (!std.mem.eql(u8, saved.target.text(), target)) return .approval_required;
         if (detail) |text| if (!std.mem.eql(u8, saved.detail.text(), text)) return .scope_changed;
         if (impact) |text| if (!std.mem.eql(u8, saved.impact.text(), text)) return .scope_changed;

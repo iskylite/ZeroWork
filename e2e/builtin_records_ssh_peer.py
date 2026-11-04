@@ -21,6 +21,7 @@ import paramiko
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 parser = argparse.ArgumentParser()
 parser.add_argument("--out", required=True)
+parser.add_argument("--allow-path-completion", action="store_true", help="Allow only the product read-only path metadata command inside the test root")
 parser.add_argument("--plain-bash", action="store_true", help="Run ordinary bash without OSC 133 prompt markers")
 parser.add_argument("--reject-password", action="store_true", help="Reject fixture authentication without advertising a retry method")
 parser.add_argument("--sftp-root", type=Path, help="Allow SFTP reads/writes only inside this disposable test directory")
@@ -59,6 +60,24 @@ class Server(paramiko.ServerInterface):
             except OSError: pass
         return True
     def check_channel_shell_request(self, _): self.shell.set(); return True
+    def check_channel_exec_request(self, channel, command):
+        import shlex
+        text = command.decode('utf-8')
+        if not (args.allow_path_completion and root and text.startswith("cd '") and '; zw_p=' in text and "printf '%s\\000'" in text):
+            return False
+        try:
+            directory = Path(shlex.split(text.split('; zw_p=', 1)[0])[1]).resolve()
+            if not directory.is_relative_to(root): return False
+        except (ValueError, IndexError): return False
+        def run():
+            result = subprocess.run(['/bin/sh', '-c', text], cwd=root, capture_output=True, timeout=8, env={**os.environ, 'HOME':str(root)})
+            try:
+                channel.sendall(result.stdout)
+                if result.stderr: channel.sendall_stderr(result.stderr)
+                channel.send_exit_status(result.returncode); channel.close()
+            except OSError: pass
+        threading.Thread(target=run, daemon=True).start()
+        return True
 
 class Handle(paramiko.SFTPHandle):
     def stat(self):

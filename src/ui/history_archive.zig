@@ -127,8 +127,77 @@ pub const CatalogJob = struct {
         std.heap.c_allocator.destroy(self);
     }
 };
+/// The confirmation owns stable keys, never row indexes or UI memory.
+/// New records arriving after the confirmation are outside this frozen set.
+pub const DeleteJob = struct {
+    const Target = struct { key: []u8, revision: u64 };
+    archive: Archive.Archive,
+    targets: std.ArrayList(Target) = .empty,
+    thread: ?std.Thread = null,
+    done: std.atomic.Value(bool) = .init(false),
+    deleted: usize = 0,
+    failed: usize = 0,
+    failure: ?anyerror = null,
+    pub fn prepare(archive: Archive.Archive) !*DeleteJob {
+        const self = try std.heap.c_allocator.create(DeleteJob);
+        self.* = .{ .archive = archive };
+        self.archive.allocator = std.heap.c_allocator;
+        return self;
+    }
+    pub fn add(self: *DeleteJob, descriptor: Archive.Descriptor) !void {
+        const key = try std.heap.c_allocator.dupe(u8, descriptor.archive_key);
+        errdefer std.heap.c_allocator.free(key);
+        try self.targets.append(std.heap.c_allocator, .{ .key = key, .revision = descriptor.manifest_revision });
+    }
+    pub fn start(self: *DeleteJob) !void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+    pub fn deinit(self: *DeleteJob) void {
+        if (self.thread) |thread| thread.join();
+        for (self.targets.items) |target| std.heap.c_allocator.free(target.key);
+        self.targets.deinit(std.heap.c_allocator);
+        std.heap.c_allocator.destroy(self);
+    }
+    fn run(self: *DeleteJob) void {
+        self.execute() catch |err| {
+            self.failure = err;
+            self.failed = self.targets.items.len - self.deleted;
+        };
+        self.done.store(true, .release);
+        wake.notify();
+    }
+    fn execute(self: *DeleteJob) !void {
+        var catalog = try self.archive.loadCatalog(std.heap.c_allocator);
+        defer catalog.deinit();
+        for (self.targets.items) |target| {
+            var found = false;
+            for (catalog.entries.items) |descriptor| {
+                if (!std.mem.eql(u8, target.key, descriptor.archive_key)) continue;
+                found = true;
+                if (target.revision != descriptor.manifest_revision) {
+                    self.failed += 1;
+                    self.failure = error.StaleArchiveRevision;
+                    break;
+                }
+                self.archive.removeRecord(descriptor) catch |err| {
+                    self.failed += 1;
+                    self.failure = err;
+                    break;
+                };
+                self.deleted += 1;
+                break;
+            }
+            if (!found) {
+                self.failed += 1;
+                self.failure = error.RecordNotFound;
+            }
+        }
+    }
+};
+
 pub fn errorText(err: anyerror) []const u8 {
     return switch (err) {
+        error.RecordBusy => "该记录正在查看、导出或录制中，请关闭后重试",
         error.Cancelled => "已取消加载",
         error.HistoryLoadBusy => "正在加载其他历史记录，请稍后重试",
         error.FileNotFound, error.RecordNotFound => "历史录制文件不存在",

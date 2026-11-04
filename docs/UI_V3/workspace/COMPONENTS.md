@@ -4,14 +4,14 @@
 
 | 功能组件 id | 来源 renderer/controller | 核心选择器 | 可操作状态/参数 |
 | --- | --- | --- | --- |
-| shell-tabs | renderTabs → V3.tab | #tabs,.titlebar | 点击/右键/关闭/拖序；mode=local/ssh/group；theme |
+| shell-tabs | renderTabs → V3.tab | #tabs,.titlebar | 点击/会话与组右键/关闭/边缘拖序/中央拖入组或建组；常驻左色条＋仅活动底线；mode=local/ssh/group；theme |
 | host-sidebar | renderHosts, showHostMenu, showWorkspaceTooltip | #sidebar, #tooltip, #context-menu | sidebar=expanded/collapsed；hosts=layout、sidebar-width=220/238/480 检查直连/多跳与长名称；默认36px路由区，悬停/焦点保留路由并增加72px操作区；搜索/折叠/右键/连接；隔离页只有原侧栏折叠按钮，整机只显示顶栏折叠钮 |
-| terminal-input | terminalPane, inputCommand, commandKey |.terminal-scroll,.command-input,.command-palette | mode=local/ssh；直接输入、@补全、参数、右键粘贴与中键菜单 |
+| terminal-input | terminalPane, inputCommand, commandKey |.terminal-scroll,.command-input,.command-palette | mode=local/ssh；直接输入、@补全与鼠标滚动候选、参数、@new 主机名／--pick、右键粘贴与中键菜单 |
 | command-record | logMarkup, appRecord, execute |.app-command,.command-input | mode=ssh；@ts/@help/未知命令可生成成功或失败记录；与Shell文档同起点 |
 | session-menus | showHostMenu, showTabMenu, showTerminalMenu, menu | #context-menu | menu=host/tab/terminal；mode=local/ssh；真实复制配置、新会话、搜索、历史与导出入口；禁用能力保留状态 |
 | connection-status | renderStatus, identityPopover | #statusbar, #popover | mode=ssh/local；state=failed；延迟与状态同一组件 |
 | connection-route | connectionNodes, chainPopover, testConnectionRoute | #popover, #modal-root | mode=ssh；state=failed；查看节点、编辑、测试、取消；测试冻结原路径与owner |
-| broadcast | broadcastPopover | #popover | mode=group打开组；未入组有创建入口；source/receiver确认与禁用状态 |
+| broadcast | broadcastPopover | #popover | mode=group打开组；未入组有创建入口；成员独立勾选（含当前输入）、卡片自身开关、底栏全部开启／关闭；任一参与成员发起输入，在线可写状态与计数共用同一投影 |
 | port-forward | forwardPopover, forwardList, socksError | #popover, #modal-root | mode=ssh/local；添加/暂停/删除/冲突，非SSH有能力说明 |
 | transfer | transferPopover, transfersDialog, queueJob | #popover, #modal-root | 摘要→真实任务管理器→任务操作；来源模型与全局投影共享 |
 | ai | renderAssistant, positionAssistant, aiData | #assistant, #ai-edge | 拖动、三窗控、历史/新对话、模型/权限/附件/用量、提问/批准/停止；mode=ssh/local/ai-error/ai-unconfigured |

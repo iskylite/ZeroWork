@@ -19,7 +19,6 @@ pub fn mount(cx: *ui.Cx, parent: *ui.Node, text: []const u8) !*ui.Node {
     title.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 20 }, .flex_shrink = 0 });
     title.meta.ownership.meta.test_id = "ai.host_notice.title";
     try header.appendChild(cx.allocator, title);
-    try header.appendChild(cx.allocator, try ui.textStyled(cx, sourceStyle, "宿主更新"));
     const body = try ui.textStyled(cx, bodyStyle, text);
     body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .margin = .{ .left = 22 }, .flex_shrink = 0 });
     body.meta.ownership.meta.test_id = "ai.host_notice.body";
@@ -34,9 +33,6 @@ fn headerStyle(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 fn titleStyle(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = theme.current().accent_ink };
-}
-fn sourceStyle(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = theme.current().fg_2 };
 }
 fn bodyStyle(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 12, .line_height = 18.0 / 12.0, .color = theme.current().fg_2, .wrap = .word };

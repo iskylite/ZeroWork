@@ -92,6 +92,13 @@ test "reconnect state is readable across threads" {
 const OperationKey = @import("../host/operation.zig").OperationKey;
 const ReleaseReceipt = @import("../proto/ssh/session.zig").ReleaseReceipt;
 
+/// Resolved on the UI thread for each new shell, then copied into its grant.
+pub const Configuration = struct {
+    startup_commands: []const []const u8 = &.{},
+    auto_shell_integration: bool = true,
+};
+pub const ConfigurationSnapshot = @import("../ui/session_lifecycle.zig").Snapshot(Configuration);
+
 /// One host-issued grant crosses into the existing IO owner. No native call,
 /// ID allocation or network wait runs while this short mailbox lock is held.
 pub const Control = struct {
@@ -109,7 +116,7 @@ pub const Control = struct {
         /// True only after this generation's startup gate has completed.
         shell_initialized: bool = false,
     };
-    pub const Grant = struct { previous: OperationKey, next: OperationKey, skip_shell_initialization: bool = false };
+    pub const Grant = struct { previous: OperationKey, next: OperationKey, skip_shell_initialization: bool = false, configuration: ?ConfigurationSnapshot = null };
     mutex: std.atomic.Value(bool) = .init(false),
     value: Snapshot,
     grant: ?Grant = null,
@@ -148,12 +155,17 @@ pub const Control = struct {
         self.value.cleanup = receipt;
         self.value.failure = null;
         self.value.exit_code = exit_code;
+        if (self.grant) |*grant| if (grant.configuration) |*configuration| configuration.deinit();
         self.grant = null;
     }
     pub fn request(self: *Control, previous: OperationKey, next: OperationKey) !void {
         return self.requestWithInitialization(previous, next, false);
     }
     pub fn requestWithInitialization(self: *Control, previous: OperationKey, next: OperationKey, skip: bool) !void {
+        return self.requestConfigured(previous, next, skip, null);
+    }
+    /// A successful request transfers ownership of configuration to the IO owner.
+    pub fn requestConfigured(self: *Control, previous: OperationKey, next: OperationKey, skip: bool, configuration: ?ConfigurationSnapshot) !void {
         self.lock();
         defer self.unlock();
         if (self.value.key == null or !self.value.key.?.eql(previous)) return error.StaleOperation;
@@ -165,7 +177,7 @@ pub const Control = struct {
             previous.owner.session.generation == std.math.maxInt(u64) or next.owner.session.generation != previous.owner.session.generation + 1 or
             previous.attempt_id == null or previous.attempt_id.? == std.math.maxInt(u64) or next.attempt_id != previous.attempt_id.? + 1 or
             next.operation_id == previous.operation_id) return error.InvalidOperation;
-        self.grant = .{ .previous = previous, .next = next, .skip_shell_initialization = skip };
+        self.grant = .{ .previous = previous, .next = next, .skip_shell_initialization = skip, .configuration = configuration };
         self.value.phase = .connecting;
     }
     pub fn initialized(self: *Control, key: ?OperationKey) void {
@@ -206,6 +218,7 @@ pub const Control = struct {
         self.lock();
         defer self.unlock();
         self.value.phase = .closed;
+        if (self.grant) |*grant| if (grant.configuration) |*configuration| configuration.deinit();
         self.grant = null;
     }
 };
@@ -333,4 +346,32 @@ test "initialization bypass is explicit generation-bound single-use and unavaila
     try std.testing.expectEqual(Control.Phase.ready, control.snapshot().phase);
     control.lost(next, .released, error.ShellInitializationFailed);
     try std.testing.expectError(error.StaleOperation, control.requestWithInitialization(first, next, true));
+}
+
+test "reconnect grant owns a configuration snapshot until consumed or closed" {
+    const first: OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(7) } }, .operation_id = 1, .attempt_id = 1 };
+    var next = first;
+    next.owner.session.generation += 1;
+    next.operation_id += 1;
+    next.attempt_id = 2;
+    var control = Control.init(first);
+    control.lost(first, .released, error.ConnectionClosed);
+    var command = [_]u8{ 'p', 'w', 'd' };
+    const commands = [_][]const u8{&command};
+    const owned = try ConfigurationSnapshot.init(std.testing.allocator, .{ .startup_commands = &commands, .auto_shell_integration = false });
+    try control.requestConfigured(first, next, false, owned);
+    command[0] = 'X';
+    var grant = control.take().?;
+    defer grant.configuration.?.deinit();
+    try std.testing.expectEqualStrings("pwd", grant.configuration.?.value.startup_commands[0]);
+    try std.testing.expect(!grant.configuration.?.value.auto_shell_integration);
+    control.lost(next, .released, error.ConnectionClosed);
+    var third = next;
+    third.owner.session.generation += 1;
+    third.operation_id += 1;
+    third.attempt_id = 3;
+    const cancelled = try ConfigurationSnapshot.init(std.testing.allocator, .{ .startup_commands = &commands });
+    try control.requestConfigured(next, third, false, cancelled);
+    control.close();
+    try std.testing.expect(control.take() == null);
 }

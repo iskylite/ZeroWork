@@ -45,7 +45,7 @@ pub const Bridge = struct {
                 defer answer.deinit();
                 const reply: auth.Reply = switch (current.kind) {
                     .host_key_unknown => if (answer.value == .choice and std.mem.eql(u8, answer.value.choice, "trust_once")) .trust_once else if (answer.value == .choice and std.mem.eql(u8, answer.value.choice, "trust_save")) .trust_save else return error.InvalidChallengeResponse,
-                    .host_key_changed => if (answer.value == .fields and answer.value.fields.len == 1) .{ .replace_host_key = answer.value.fields[0] } else return error.InvalidChallengeResponse,
+                    .host_key_changed => if (answer.value == .trust_material and answer.value.trust_material) .{ .replace_host_key = "yes" } else return error.InvalidChallengeResponse,
                     else => if (answer.value == .fields) .{ .answers = answer.value.fields } else return error.InvalidChallengeResponse,
                 };
                 if (answer.save_password and current.kind == .password and answer.value == .fields and answer.value.fields.len == 1) {
@@ -102,8 +102,6 @@ pub const Bridge = struct {
             },
             .host_key_changed => {
                 payload.detail = "服务器密钥与已保存记录不同。请先通过可信渠道核对新指纹，取消将保留原记录。";
-                fields[0] = .{ .label = "输入小写 yes，确认替换已保存的密钥", .secret = false, .max_bytes = 3, .confirmation = "yes" };
-                payload.fields = fields[0..1];
             },
             else => {
                 if (request.prompt_count == 0) return error.InvalidChallengePrompt;

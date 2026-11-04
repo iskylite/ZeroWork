@@ -2,8 +2,9 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 
-pub const colors = [_]u32{ 0x818cf8, 0x67b88b, 0xe2ad67, 0xdf8598, 0x87bde8 };
-pub const labels = [_][]const u8{ "#818cf8", "#67b88b", "#e2ad67", "#df8598", "#87bde8" };
+const palette = @import("color_palette.zig");
+pub const colors = palette.colors;
+pub const labels = palette.labels;
 pub const Hooks = struct {
     context: *anyopaque,
     // Return false when the captured tab no longer exists or is closing.
@@ -19,7 +20,7 @@ pub const View = struct {
     open: *ui.Signal(bool),
     owner: u64 = 0,
     anchor_id: ?u32 = null,
-    buttons: [colors.len]*ui.Node = undefined,
+    palette: *palette.View = undefined,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
         const self = try cx.allocator.create(View);
@@ -46,15 +47,8 @@ pub const View = struct {
         try close.appendChild(cx.allocator, try theme.icon(cx, ui.icons.x, "fg_2", .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
         try heading.appendChild(cx.allocator, close);
         try body.appendChild(cx.allocator, heading);
-        const choices = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 38 }, .direction = .row, .gap = 10, .padding = ui.Padding.all(5), .flex_shrink = 0 }, .{});
-        try body.appendChild(cx.allocator, choices);
-        inline for (colors, labels, 0..) |color, label, index| {
-            const action = try popup.scope.createState(Choice, .{ .view = self, .color = color });
-            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = label, .focus_ring = .{ .color = theme.current().accent, .width = 1.5, .offset = 2 }, .hover_style = .{ .background = ui.Color.hex(color) }, .pressed_style = .{ .background = ui.Color.hex(color) }, .base_style = .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .background = ui.Color.hex(color), .border = .{ .radius = 7 }, .flex_shrink = 0 }, .on_click = cx.on(Choice, action, Choice.choose) }).mount(popup.scope, cx);
-            button.meta.ownership.meta.test_id = "tabs.color." ++ label[1..];
-            self.buttons[index] = button;
-            try choices.appendChild(cx.allocator, button);
-        }
+        self.palette = try palette.View.mount(cx, popup.scope, "tabs.color", try popup.scope.createSignal(bool, false), .{ .context = self, .choose = chooseColor });
+        try body.appendChild(cx.allocator, self.palette.root);
         return self;
     }
 
@@ -64,7 +58,7 @@ pub const View = struct {
         self.chrome.setStyleInline(self.cx.allocator, panel());
         self.title.setTextColor(theme.current().fg_1);
         self.open.set(true);
-        self.cx.setFocus(self.buttons[0]);
+        self.cx.setFocus(self.palette.buttons[0]);
         self.cx.requestRedraw();
     }
     pub fn hide(self: *View) void {
@@ -93,15 +87,12 @@ pub const View = struct {
     }
 };
 
-const Choice = struct {
-    view: *View,
-    color: u32,
-    fn choose(self: *Choice) void {
-        if (!self.view.isOpen()) return;
-        _ = self.view.hooks.commit(self.view.hooks.context, self.view.owner, self.color);
-        self.view.hide();
-    }
-};
+fn chooseColor(raw: *anyopaque, color: u32) void {
+    const self: *View = @ptrCast(@alignCast(raw));
+    if (!self.isOpen()) return;
+    _ = self.hooks.commit(self.hooks.context, self.owner, color);
+    self.hide();
+}
 fn find(node: *ui.Node, id: u32) ?*ui.Node {
     if (node.id == id) return node;
     for (node.children.items) |child| if (find(child, id)) |result| return result;

@@ -17,7 +17,7 @@ pub const Recording = struct {
     boundaries: std.ArrayList(Marker) = .empty,
     failure: ?[]const u8 = null,
     committed_path: ?[]u8 = null,
-    const Range = struct { id: [32]u8, generation: u64, completion_source: execution.CompletionSource = .unknown, start: manifest.Position, end: ?manifest.Position = null, start_fence: ?u64 = null, end_fence: ?u64 = null, process: ?execution.ProcessReceipt = null, attribution: execution.OutputAttribution = .unverified, reason: ?[]const u8 = null, saved: bool = false, failure: ?[]const u8 = null, evidence: manifest.Evidence = .pending };
+    const Range = struct { shell_id: ?[32]u8 = null, id: [32]u8, generation: u64, completion_source: execution.CompletionSource = .unknown, start: manifest.Position, end: ?manifest.Position = null, start_fence: ?u64 = null, end_fence: ?u64 = null, process: ?execution.ProcessReceipt = null, attribution: execution.OutputAttribution = .unverified, reason: ?[]const u8 = null, saved: bool = false, failure: ?[]const u8 = null, evidence: manifest.Evidence = .pending };
     const Marker = struct { position: manifest.Position, consumed: bool = false };
     pub const Barrier = struct { recording_id: [32]u8, generation: u64, revision: u64 };
     pub const BoundaryReceipt = struct { position: manifest.Position, revision: u64 };
@@ -77,12 +77,21 @@ pub const Recording = struct {
         return position;
     }
     pub fn startBarrier(self: *Recording, id: identity.ExecutionId, total: u64) !Barrier {
+        return self.startShellBarrier(id, total, null, &.{});
+    }
+    pub fn startShellBarrier(self: *Recording, id: identity.ExecutionId, total: u64, shell_id: ?[32]u8, parent_executions: []const identity.ExecutionId) !Barrier {
         if (self.failure != null) return error.RecordingDegraded;
         if (self.ranges.items.len >= 128) return error.RecordingExecutionCapacity;
-        for (self.ranges.items) |range| if (range.end == null and range.evidence == .pending) return error.OperationBusy;
+        for (self.ranges.items) |range| if (range.end == null and range.evidence == .pending) {
+            const parent = for (parent_executions) |execution_id| {
+                const text = std.fmt.bytesToHex(execution_id.bytes, .lower);
+                if (std.mem.eql(u8, &range.id, &text)) break true;
+            } else false;
+            if (shell_id == null or range.shell_id == null or std.meta.eql(shell_id, range.shell_id) or !parent) return error.OperationBusy;
+        };
         var frozen = try self.options.timeline.?.snapshotWithAllocator(self.allocator);
         defer frozen.deinit();
-        try self.ranges.append(self.allocator, .{ .id = std.fmt.bytesToHex(id.bytes, .lower), .generation = self.options.generations[self.options.generations.len - 1].recording_generation, .start = .{ .raw_offset = total, .event_sequence = frozen.next_event_sequence -| 1 } });
+        try self.ranges.append(self.allocator, .{ .shell_id = shell_id, .id = std.fmt.bytesToHex(id.bytes, .lower), .generation = self.options.generations[self.options.generations.len - 1].recording_generation, .start = .{ .raw_offset = total, .event_sequence = frozen.next_event_sequence -| 1 } });
         const revision = try self.persist(total, null);
         return .{ .recording_id = std.fmt.bytesToHex(self.options.recording_id.bytes, .lower), .generation = self.options.generations[self.options.generations.len - 1].recording_generation, .revision = revision };
     }
@@ -138,7 +147,7 @@ pub const Recording = struct {
     }
     pub fn rangeValues(self: *Recording, buffer: []manifest.ExecutionRange) []const manifest.ExecutionRange {
         std.debug.assert(buffer.len >= self.ranges.items.len);
-        for (self.ranges.items, buffer[0..self.ranges.items.len]) |*range, *value| value.* = .{ .execution_id = &range.id, .completion_source = range.completion_source, .recording_generation = range.generation, .start = range.start, .end = range.end, .start_boundary_sequence = range.start_fence, .end_boundary_sequence = range.end_fence, .output_scope = .session_interval, .completion_evidence = range.evidence, .process_receipt = range.process, .output_attribution = range.attribution, .output_attribution_reason = range.reason, .interval_saved = range.saved, .failure = range.failure };
+        for (self.ranges.items, buffer[0..self.ranges.items.len]) |*range, *value| value.* = .{ .execution_id = &range.id, .shell_context_id = if (range.shell_id) |*shell| shell else null, .completion_source = range.completion_source, .recording_generation = range.generation, .start = range.start, .end = range.end, .start_boundary_sequence = range.start_fence, .end_boundary_sequence = range.end_fence, .output_scope = .session_interval, .completion_evidence = range.evidence, .process_receipt = range.process, .output_attribution = range.attribution, .output_attribution_reason = range.reason, .interval_saved = range.saved, .failure = range.failure };
         return buffer[0..self.ranges.items.len];
     }
     pub fn persist(self: *Recording, total: u64, ended_ms: ?i64) !u64 {
@@ -195,4 +204,33 @@ test "command history reconnect recording keeps old ranges in their original gen
     try std.testing.expectEqualStrings("SessionReconnected", document.value.execution_ranges[0].failure.?);
     try std.testing.expectEqual(@as(u64, 2), document.value.execution_ranges[1].recording_generation);
     try std.testing.expectError(error.InvalidRecordingGeneration, rec.beginGeneration(&.{first}));
+}
+
+test "nested shell recording permits only declared ancestor intervals" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var timeline = try Timeline.init(a, 16, 8192);
+    defer timeline.deinit();
+    const key = identity.ArchiveKey.generate();
+    const key_text = std.fmt.bytesToHex(key.bytes, .lower);
+    defer @import("session_archive.zig").setActiveRecord(&key_text, false) catch {};
+    const generation: manifest.Generation = .{ .session_id = 17, .session_generation = 1, .initial_cols = 20, .initial_rows = 4, .receive_time_origin = 10, .event_sequence_start = 1 };
+    const options: recording.Options = .{ .recording_id = .generate(), .archive_key = key, .generations = &.{generation}, .cast_path = "logs/history/nested-commands.cast", .started_ms = 10, .display = .{}, .timeline = &timeline };
+    try recording.reserve(a, std.testing.io, tmp.dir, options);
+    var rec = try Recording.init(a, std.testing.io, tmp.dir, options);
+    defer rec.deinit();
+    const parent = identity.ExecutionId.generate();
+    const child = identity.ExecutionId.generate();
+    const parent_shell = "11111111111111111111111111111111".*;
+    const child_shell = "22222222222222222222222222222222".*;
+    _ = try rec.startShellBarrier(parent, 0, parent_shell, &.{});
+    try std.testing.expectError(error.OperationBusy, rec.startShellBarrier(child, 0, child_shell, &.{}));
+    try std.testing.expectError(error.OperationBusy, rec.startShellBarrier(child, 0, parent_shell, &.{parent}));
+    _ = try rec.startShellBarrier(child, 0, child_shell, &.{parent});
+    var ranges: [2]manifest.ExecutionRange = undefined;
+    const values = rec.rangeValues(&ranges);
+    try std.testing.expectEqualStrings(&parent_shell, values[0].shell_context_id.?);
+    try std.testing.expectEqualStrings(&child_shell, values[1].shell_context_id.?);
+    try std.testing.expect(values[0].end == null and values[1].end == null);
 }

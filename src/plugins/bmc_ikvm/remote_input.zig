@@ -366,12 +366,18 @@ pub const Service = struct {
         if (self.automation_uncertain_lease) |lease| if (std.meta.eql(lease, authority.proof.lease)) return error.InputOutcomeUnknown;
         if (self.focused or self.count != 0 or self.explicit_count != 0 or self.active != null) return error.HumanInputActive;
         if (self.automation_authority == null and !self.release_pending and (self.pressed_count != 0 or self.pressed_buttons != 0)) return error.HumanInputActive;
-        if (!self.automationAuthorityValid(authority)) return error.StaleAutomationAuthority;
+        // Keep admission diagnostics as precise as the earlier observation
+        // check, including an expiry crossed between validation and submission.
+        const now = monotonicMs();
+        if (now == 0) return error.InputClockUnavailable;
+        if (now >= authority.expires_at_ms) return error.ObservationExpired;
+        if (self.automation_budget_lease) |lease| if (std.meta.eql(lease, authority.proof.lease)) {
+            if (now < self.automation_budget_started_ms or now - self.automation_budget_started_ms >= 600_000) return error.AutomationBudgetExceeded;
+        };
+        if (!self.automationAuthorityCurrent(authority)) return error.StaleAutomationAuthority;
         if (self.remote_unconfirmed) return error.RemoteInputUnconfirmed;
         if (self.automation_authority) |prior| if (!std.meta.eql(prior.proof.lease, authority.proof.lease)) return error.AutomationLeaseActive;
         if (self.automation_count == automation_capacity) return error.QueueFull;
-        const now = monotonicMs();
-        if (now == 0) return error.InputClockUnavailable;
         if (self.automation_budget_lease == null or !std.meta.eql(self.automation_budget_lease.?, authority.proof.lease)) {
             self.automation_budget_lease = authority.proof.lease;
             self.automation_budget_started_ms = now;
@@ -768,6 +774,9 @@ pub const Service = struct {
         if (self.automation_budget_lease) |lease| if (std.meta.eql(lease, authority.proof.lease)) {
             if (checked_ms < self.automation_budget_started_ms or checked_ms - self.automation_budget_started_ms >= 600_000) return false;
         };
+        return self.automationAuthorityCurrent(authority);
+    }
+    fn automationAuthorityCurrent(self: *Service, authority: automation.Authority) bool {
         return !self.closed and self.connected and self.controlled and !self.focused and !self.geometry_pending and (self.geometry_generation == 0 or authority.geometry_generation == self.geometry_generation) and authority.owner.eql(self.owner) and authority.binding_generation == self.owner.generation and authority.transport_generation == self.transport_generation and authority.control_generation == self.control_generation and authority.input_epoch == self.input_epoch and authority.proof.lease.kind == .automation and authority.proof.lease.owner.eql(self.owner) and authority.proof.lease.id != 0 and authority.proof.lease.context_instance != 0 and authority.proof.validate(authority.proof.context, authority.proof.lease);
     }
     fn automationRecord(self: *Service, operation_id: u64) ?*AutomationRecord {

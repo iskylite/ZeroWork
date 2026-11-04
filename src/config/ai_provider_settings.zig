@@ -38,7 +38,6 @@ pub const ProviderView = struct {
     editor_node: ?*ui.Node = null,
     error_text: []const u8 = "",
     error_node: ?*ui.Node = null,
-    header_tip: ?*ui.Signal(bool) = null,
     model_editor: ?*ModelEditor = null,
     discovery: Discovery = .{},
     model_test: Discovery = .{},
@@ -59,6 +58,7 @@ pub const ProviderView = struct {
     pub fn mountWithHooks(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: Hooks) !*ProviderView {
         const self = try scope.allocator.create(ProviderView);
         self.* = .{ .root = try ui.boxStyled(cx, S.column, .{}), .scope = scope, .cx = cx, .controller = controller, .hooks = hooks, .disabled = hooks.saving orelse try scope.createSignal(bool, controller.state() == .saving) };
+        @import("../ui/layer_materials.zig").card(self.root, .settings_card);
         self.root.meta.ownership.meta.test_id = "settings.ai.providers";
         try scope.onCleanup(ProviderView, self, cleanup);
         try self.rebuild();
@@ -209,10 +209,7 @@ pub const ProviderView = struct {
         if (self.model_editor) |editor| {
             return editor.consumeEscape();
         }
-        if (self.header_tip) |open| if (open.peek()) {
-            open.set(false);
-            return true;
-        };
+
         for (self.tips.items) |open| if (open.peek()) {
             open.set(false);
             return true;
@@ -241,21 +238,12 @@ pub const ProviderView = struct {
     /// Shared add action used by the V3 Provider card header.
     pub fn mountAddProviderAction(self: *ProviderView, scope: *ui.Scope, cx: *ui.Cx) !*ui.Node {
         const action_scope = try scope.childScope();
-        const open = try action_scope.createSignal(bool, false);
-        self.header_tip = open;
-        const tip = try ui.widgets.Tooltip(.{ .text = "添加服务商", .open = open, .position = .top, .open_delay_ms = 450, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1, .font_size = 10.5 }).mount(action_scope, cx);
         const action_click = try action_scope.allocator.create(Click);
         action_click.* = .{ .view = self, .action = .add_provider, .provider = 0, .model = 0 };
         try action_scope.onCleanup(Click, action_click, Click.cleanup);
         const button = try ui.widgets.Button(.{ .label = "新增服务提供方", .icon_asset = ui.icons.plus, .icon_size = @as(f32, 14), .a11y_label = "新增服务提供方", .disabled = self.disabled, .on_click = cx.on(Click, action_click, Click.run), .base_style = S.actionControl(false), .hover_style = S.buttonHover() }).mount(action_scope, cx);
         button.meta.ownership.meta.test_id = "settings.ai.add_provider";
-        const focus = try action_scope.allocator.create(TipFocus);
-        focus.* = .{ .view = self, .open = open };
-        try action_scope.onCleanup(TipFocus, focus, TipFocus.cleanup);
-        button.behavior.events.on_focus = .{ .callback = TipFocus.focus, .context = focus };
-        button.behavior.events.on_blur = .{ .callback = TipFocus.blur, .context = focus };
-        try tip.trigger.appendChild(cx.allocator, button);
-        return tip.wrapper;
+        return button;
     }
     fn rebuild(self: *ProviderView) !void {
         self.editor_node = null;
@@ -268,7 +256,6 @@ pub const ProviderView = struct {
         self.tips.clearRetainingCapacity();
         self.selects.clearRetainingCapacity();
         self.buttons.clearRetainingCapacity();
-        self.header_tip = null;
         if (self.render_scope) |old| old.dispose();
         self.render_scope = null;
         while (self.root.children.items.len > 0) {
@@ -278,7 +265,7 @@ pub const ProviderView = struct {
         }
         self.render_scope = try self.scope.childScope();
         const count = self.controller.model.value.ai.provider_count;
-        self.root.setStyleInline(self.cx.allocator, .{ .background = S.theme.current().surface_2, .border = .{ .radius = 11 }, .gap = 0, .min_width = 0 });
+        self.root.setStyleInline(self.cx.allocator, .{ .background = S.theme.settingsCard(), .border = .{ .radius = 11 }, .gap = 0, .min_width = 0 });
         const heading = try ui.box(self.cx, .{ .width = .fill(), .min_height = 70, .direction = .row, .padding = .{ .left = 16, .right = 16, .top = 15, .bottom = 14 }, .gap = 10, .align_items = .center, .flex_shrink = 0, .min_width = 0 }, .{});
         const description = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .direction = .column, .gap = 3, .min_width = 0 }, .{});
         const title = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .gap = 7, .align_items = .center }, .{});
@@ -385,9 +372,11 @@ pub const ProviderView = struct {
         const p = self.controller.model.value.ai.providers[i];
         const open = self.controller.ai_fields.provider_open.get(i) orelse (i == 0);
         const result = try self.accordion(.provider, i, 0, displayName(p), open, 64, false);
+        @import("../ui/layer_materials.zig").card(result.item, .custom);
         result.item.meta.ownership.meta.test_id = try self.id(i, null, "card");
         result.item.setStyleInline(self.cx.allocator, .{ .position = .relative, .background = providerBackground(open), .border = .{ .radius = 8 }, .gap = 0, .flex_shrink = 0, .min_width = 0 });
-        result.header.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 64 }, .padding = .{ .left = 12, .right = 112, .top = 12, .bottom = 12 }, .gap = 9, .min_width = 0 });
+        result.header.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 64 }, .padding = .{ .left = 12, .right = 112, .top = 12, .bottom = 12 }, .gap = 9, .min_width = 0, .border = .{ .width = 0, .radius = 8 } });
+        try controls.bindHeaderInteraction(self.cx, self.render_scope.?, result.header);
         result.header.removeChild(result.title);
         result.header.removeChild(result.chevron);
         result.chevron.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
@@ -530,6 +519,7 @@ pub const ProviderView = struct {
     fn modelCard(self: *ProviderView, i: usize, j: usize) !*ui.Node {
         const model = self.controller.model.value.ai.providers[i].models[j];
         const root = try ui.box(self.cx, S.modelListRow(), .{});
+        @import("../ui/layer_materials.zig").card(root, .well);
         root.meta.ownership.meta.test_id = try self.id(i, j, "card");
         const logo = try Brand.mount(self.cx, Brand.model(model.id), Brand.basename(model.id), 30);
         logo.meta.ownership.meta.test_id = try self.id(i, j, "logo");
@@ -710,9 +700,11 @@ pub const ProviderView = struct {
     fn accordion(self: *ProviderView, kind: Fold.Kind, i: usize, j: usize, title: []const u8, open: bool, height: f32, section: bool) !Accordion {
         const scope = self.render_scope.?;
         const fold = try scope.allocator.create(Fold);
-        fold.* = .{ .view = self, .kind = kind, .provider = i, .model = j, .open = try scope.createSignal(bool, open) };
+        fold.* = .{ .view = self, .kind = kind, .provider = i, .model = j, .open = try scope.createSignal(bool, open), .item = undefined, .title = undefined };
         try scope.onCleanup(Fold, fold, Fold.cleanup);
-        const result = try ui.widgets.AccordionItem(.{ .title = try controls.owned(scope, title), .expanded = ui.split(fold.open, self.cx.on(Fold, fold, Fold.change)), .variant = .ghost }).mount(scope, self.cx);
+        const result = try @import("settings_accordion.zig").item(.{ .title = try controls.owned(scope, title), .expanded = ui.split(fold.open, self.cx.on(Fold, fold, Fold.change)), .variant = .ghost }).mount(scope, self.cx);
+        fold.item = result.item;
+        fold.title = result.title;
         result.item.setStyleInline(self.cx.allocator, if (section) S.section(undefined) else S.column(undefined));
         result.item.style.gap = if (open) (if (kind == .provider) @as(f32, 4) else 6) else 0;
         result.header.setStyleInline(self.cx.allocator, S.sectionHeader(undefined));
@@ -883,9 +875,7 @@ const Field = struct {
         const problem = if (raw) |value| value.problem else null;
         self.error_node.setTextContent(self.view.cx.allocator, if (problem) |err| draft.problemText(err) else "") catch {};
         self.error_node.setDisplay(if (problem != null) .flex else .none);
-        self.input.input_container.setBorderWidth(0);
-        self.input.input_container.setBackground(if (problem != null) S.theme.current().danger.withAlpha(23) else S.theme.current().well);
-        self.input.input_container.setBorderColor(if (problem != null) S.theme.current().danger_ink else S.theme.current().well_border);
+        S.theme.paintInputValidation(self.input, problem != null);
     }
     fn edit(self: *Field, text: []const u8) void {
         if (self.view.disabled.peek()) return;
@@ -920,6 +910,8 @@ const Fold = struct {
     provider: usize,
     model: usize,
     open: *ui.Signal(bool),
+    item: *ui.Node,
+    title: *ui.Node,
     fn cleanup(self: *Fold) void {
         self.view.scope.allocator.destroy(self);
     }
@@ -940,7 +932,17 @@ const Fold = struct {
             .existing => state.existing_open = value,
         }
         self.open.set(value);
-        if (self.kind != .existing) self.view.schedule();
+        if (self.kind == .provider) {
+            self.item.setStyle(self.view.cx.allocator, .background, providerBackground(value));
+            if (self.title.getText()) |old| {
+                var title = old;
+                title.font_weight = 600;
+                self.title.setText(title);
+            }
+        } else if (self.kind != .existing) {
+            self.view.schedule();
+        }
+        self.view.cx.requestRedraw();
     }
 };
 const Action = enum { fetch_models, toggle_provider, edit_model, add_provider, cancel_provider, delete_provider, add_model, cancel_model, delete_model, default_provider, default_model, reasoning, vision, effort0, effort1, effort2, effort3, effort4, kind };
@@ -994,7 +996,7 @@ const Click = struct {
                 const i = ai.provider_count;
                 const next = allocator.alloc(config.AiProvider, i + 1) catch return;
                 @memcpy(next[0..i], ai.providers[0..i]);
-                next[i] = .{};
+                next[i] = .{ .enabled = true };
                 ai.providers = next;
                 ai.provider_count += 1;
                 v.controller.editProviders(ai.*) catch return;
@@ -1032,7 +1034,6 @@ const Click = struct {
                         next[j].default = j == 0;
                         p.models = next;
                         p.model_count += 1;
-                        p.enabled = false;
                         v.controller.editProviders(ai.*) catch return;
                         v.controller.ai_fields.new_model = .{ .provider = self.provider, .model = j };
                         v.controller.ai_fields.model_open.put(v.scope.allocator, draft.modelKey(self.provider, j), true) catch return;

@@ -64,7 +64,7 @@ pub fn render(cx: *ui.Cx, scope: *ui.Scope, dialog: *ui.Node, body: *ui.Node, pr
     } else {
         try label(cx, scroll.content, "将关闭全部成员，包括它们的独立页签。", styles.notice(), styles.text(true));
         try label(cx, scroll.content, "停止命令、AI 与 SOCKS；传输暂停并保留。", styles.notice(), styles.note());
-        try label(cx, scroll.content, "取消不会断开；已关闭的成员不能自动恢复。", .{ .width = .fill(), .flex_shrink = 0 }, styles.note());
+        try label(cx, scroll.content, "已关闭的成员不能自动恢复。", .{ .width = .fill(), .flex_shrink = 0 }, styles.note());
     }
     try body.appendChild(cx.allocator, scroll.container);
     const actions = try ui.box(cx, styles.actions(props.partial), .{});

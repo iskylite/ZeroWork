@@ -18,6 +18,7 @@ pub const Request = struct {
     operation: ?identity.HostOperationId = null,
     after_revision: ?u64 = null,
     wait_ms: u32 = 1000,
+    wait_for: enum { revision, transport, interactive } = .revision,
     interactive_execution: bool = false,
 };
 const session = "\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
@@ -39,7 +40,7 @@ pub const contributions = [_]host.Contribution{
     contribution("disconnect_session", "Disconnect only an exact supported session after explicit user approval and impact preflight. Returns pending/disconnected/outcome_unknown from the original IO owner; preserves its tab, context and records, disables automatic reconnect, and revokes old execution/input grants. Active execution/transfer/forward references block it. Same request_key queries the original receipt and never redispatches; Local sessions return NotSupported.", session ++ "," ++ key, "\"session_ref\",\"request_key\""),
     contribution("reconnect_session", "Explicitly request a new connection generation for an authorized session using the specified connection policy. Old execution/session refs do not revive. Requires user connection authorization; no automatic replay after unknown outcomes.", session ++ "," ++ policy ++ "," ++ key, "\"session_ref\",\"connection_policy\",\"request_key\""),
     contribution("set_session_retention", "Set retention only for this task's owned session that remains in the current binding. Cannot acquire borrowed resources or undo user takeover. keep revokes old automatic cleanup plans. Same request_key returns the original decision receipt.", session ++ "," ++ retention ++ "," ++ key, "\"session_ref\",\"retention\",\"request_key\""),
-    contribution("wait_session_ready", "Observe only this task's owned opening operation or session. Exactly one of operation_ref/session_ref is required. Bounded wait returns the current state and timed_out, never reconnects, creates, dispatches a command, or treats timeout as completion.", session ++ ",\"operation_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"after_revision\":{\"type\":\"integer\",\"minimum\":1},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}", ""),
+    contribution("wait_session_ready", "Observe only this task's owned opening operation or session. Exactly one of operation_ref/session_ref is required. Optional wait_for=transport/interactive waits for that capability rather than any revision; legacy revision behavior remains. Bounded wait returns the current state and timed_out, never reconnects, creates, dispatches a command, or treats timeout as completion.", session ++ ",\"wait_for\":{\"type\":\"string\",\"enum\":[\"revision\",\"transport\",\"interactive\"]},\"operation_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"after_revision\":{\"type\":\"integer\",\"minimum\":1},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}", ""),
 };
 pub fn supports(tool: []const u8) bool {
     return kind(tool) != null;
@@ -115,7 +116,7 @@ pub fn parse(invocation: host.Invocation) !Request {
         .close_session, .disconnect_session => allowed = &.{ "session_ref", "request_key" },
         .reconnect_session => allowed = &.{ "session_ref", "connection_policy", "request_key" },
         .set_session_retention => allowed = &.{ "session_ref", "retention", "request_key" },
-        .wait_session_ready => allowed = &.{ "operation_ref", "session_ref", "after_revision", "wait_ms" },
+        .wait_session_ready => allowed = &.{ "operation_ref", "session_ref", "after_revision", "wait_ms", "wait_for" },
     }
     for (args.object.keys()) |field| {
         for (allowed) |candidate| if (std.mem.eql(u8, field, candidate)) break else {} else return error.InvalidArguments;
@@ -149,6 +150,10 @@ pub fn parse(invocation: host.Invocation) !Request {
     if (operation == .open_session or operation == .reconnect_session) request.connection_policy = std.meta.stringToEnum(lifecycle.ConnectionPolicy, try text(args, "connection_policy")) orelse return error.InvalidArguments;
     if (operation == .set_session_retention or args.object.get("retention") != null) request.retention = std.meta.stringToEnum(lifecycle.Retention, try text(args, "retention")) orelse return error.InvalidArguments;
     if (operation == .wait_session_ready) {
+        if (args.object.get("wait_for")) |value| {
+            if (value != .string) return error.InvalidArguments;
+            request.wait_for = std.meta.stringToEnum(@TypeOf(request.wait_for), value.string) orelse return error.InvalidArguments;
+        }
         const op = args.object.get("operation_ref") != null;
         const sess = args.object.get("session_ref") != null;
         if (op == sess) return error.InvalidArguments;

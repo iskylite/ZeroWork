@@ -33,7 +33,7 @@ let dialogType='global',draftGlobal=true;
 const metadataVisible=()=>mode==='local'?preferences.global:(preferences.host??preferences.global);
 function renderMetadata(){
  const layer=$('command-metadata-layer');layer.hidden=!metadataVisible();
- layer.innerHTML=commands.map(c=>`<span class="command-metadata" data-meta="${c.id}">${c.ai?'<span class="meta-ai">AI</span>':''}<span class="meta-code ${c.status}">${c.code===null?'—':c.code}</span><span>${c.duration}</span></span>`).join('');
+ layer.innerHTML=commands.map(c=>`<span class="command-metadata" data-meta="${c.id}">${c.ai?'<span class="meta-ai">AI</span>':''}<span class="meta-code ${c.status}">${c.code===null?'—':`EXIT ${c.code}`}</span><span>${c.duration}</span></span>`).join('');
 }
 
 function row(text,time='',command=null,kind='output',html=null){rows.push({text,time,command,kind,html});}
@@ -54,7 +54,7 @@ function renderTerminal(){
  row('Watching 4 routes · press Ctrl-C to stop','10:25:18');row('');
  row('200  GET /health          12 ms','10:25:18');row('200  GET /api/version     24 ms','10:25:18');row('200  GET /api/status      19 ms','10:25:18');row('504  GET /api/reports   5001 ms','10:25:18');row('200  GET /health          10 ms','10:25:23');row('200  GET /api/version     21 ms','10:25:23');row('');
  $('terminal-text').innerHTML=rows.map((r,i)=>`<span class="vt-line" data-row="${i}" data-kind="${r.kind}" ${r.command?`id="command-${r.command.id}" data-command="${r.command.id}"`:''}>${r.html||escapeHtml(r.text)}\n</span>`).join('')+'<span class="terminal-caret" aria-hidden="true"></span>';
- $('terminal-gutter').innerHTML=rows.map((r,i)=>!r.time?'':`<div class="gutter-row" data-for-row="${i}">${r.command?`<button class="gutter-mark ${r.command.status}" data-detail="${r.command.id}" aria-label="命令 ${r.command.id} 详情">${icon(r.command.status==='success'?'check':r.command.status)}</button>`:'<span class="gutter-mark blank"></span>'}<time>${r.time}</time></div>`).join('');
+ $('terminal-gutter').innerHTML=rows.map((r,i)=>!r.time?'':`<div class="gutter-row" data-for-row="${i}"><time>${r.time}</time></div>`).join('');
  $('terminal-pane').setAttribute('aria-label',mode==='ssh'?'SSH 终端':'本地 zsh 终端');
  $('connection-label').textContent=mode==='ssh'?'SSH 已连接':'本地 zsh';$('latency').textContent=mode==='ssh'?'18 ms':'';$('history-session').textContent=mode==='ssh'?'staging-01':'本地终端';
  $('ai-control').hidden=states[mode].takeover;

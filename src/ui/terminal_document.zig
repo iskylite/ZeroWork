@@ -8,7 +8,7 @@ const identity = @import("../host/identity.zig");
 const record_geometry = @import("terminal_record_geometry.zig");
 const unicode = @import("generated_ghostty_vt");
 pub const State = enum { pending, success, failure };
-const Record = struct { id: u64, anchor: terminal.Anchor, command: []u8, output: []u8, state: State, timestamp: i64, record_dirty: bool = true, updated_at: i64 = 0 };
+const Record = struct { id: u64, anchor: terminal.Anchor, command: []u8, output: []u8, state: State, timestamp: i64, row_id: ?vt.RowId = null, record_dirty: bool = true, updated_at: i64 = 0 };
 const RestoreId = struct { owner: identity.SessionHandle, external: u64, local: u64 };
 const Ref = struct { id: u64, row: vt.RowId, col: u16, alternate: bool };
 const Meta = struct { id: u64 = 0, kind: enum { shell, command, success, failure, pending } = .shell, timestamp: ?i64 = null, state: State = .pending };
@@ -31,6 +31,8 @@ pub const Document = struct {
     source_shape: ?@import("../vt/search_task.zig").Shape = null,
     source_complete: bool = false,
     search_task: ?*terminal.SearchTask = null,
+    full_capture_eligible_at_ns: u64 = 0,
+    source_retry_at_ns: ?u64 = null,
     search_failure: ?struct { err: anyerror, rows: u64, shape: @import("../vt/search_task.zig").Shape } = null,
     source_map: std.ArrayList(u32) = .empty,
     map_base: u32 = 0,
@@ -202,7 +204,11 @@ pub const Document = struct {
         while (self.records.items.len >= 256 or self.bytes + owned.len + output.len > 1024 * 1024) self.evict();
         const id = self.next_id;
         self.next_id = try std.math.add(u64, id, 1);
-        self.records.appendAssumeCapacity(.{ .id = id, .anchor = anchor, .command = owned, .output = output, .state = .pending, .timestamp = timestamp });
+        const native_row = screen_row orelse @as(u32, @intCast(snap.projection.scrollback.total_rows -| snap.projection.rows + snap.projection.active_cursor.row));
+        const row_id = for (snap.projection.visible_rows) |row| {
+            if (snap.projection.scrollback.viewport_offset + row.viewport_y == native_row) break row.id;
+        } else @as(?vt.RowId, null);
+        self.records.appendAssumeCapacity(.{ .id = id, .anchor = anchor, .command = owned, .output = output, .state = .pending, .timestamp = timestamp, .row_id = row_id });
         self.bytes += owned.len + output.len;
         self.enabled = true;
         _ = self.flushRecording();
@@ -214,6 +220,7 @@ pub const Document = struct {
         if (self.source_cache == null and self.search_task == null) {
             if (self.raw.beginSearch()) |task| {
                 self.search_task = task;
+                self.full_capture_eligible_at_ns = profileNow() + 200 * std.time.ns_per_ms;
                 self.background_scans += 1;
             } else |_| {}
         }
@@ -343,7 +350,10 @@ pub const Document = struct {
         return self;
     }
     pub fn searchReady(self: *const Document) bool {
-        return if (self.search_task) |task| task.done.load(.acquire) else false;
+        return (if (self.search_task) |task| task.done.load(.acquire) else false) or (if (self.source_retry_at_ns) |at| profileNow() >= at else false);
+    }
+    pub fn sourceRetryDelayNs(self: *const Document) ?u64 {
+        return if (self.source_retry_at_ns) |at| at -| profileNow() else null;
     }
     fn rebuild(self: *Document, native: *const terminal.TerminalSnapshot) !void {
         var arrived = false;
@@ -358,6 +368,8 @@ pub const Document = struct {
                     self.source_shape = result.shape;
                     self.source_complete = true;
                     self.pending_patch_start = null;
+                    self.source_version = 0;
+                    self.tail_cache = null;
                     self.search_failure = null;
                 } else {
                     var stale = result.document;
@@ -404,8 +416,13 @@ pub const Document = struct {
         if (!fresh) {
             const failed = if (self.search_failure) |failure| failure.rows == native.projection.scrollback.total_rows and failure.shape.matches(&native.projection) else false;
             if (self.search_task == null and !failed) {
-                if (self.raw.beginSearch()) |task| {
+                const now = profileNow();
+                if (now < self.full_capture_eligible_at_ns and self.source_complete and self.source_shape != null and self.source_shape.?.matches(&native.projection) and native.projection.scrollback.total_rows >= self.source_cache.?.rows.len) {
+                    self.source_retry_at_ns = self.full_capture_eligible_at_ns;
+                } else if (self.raw.beginSearch()) |task| {
                     self.search_task = task;
+                    self.full_capture_eligible_at_ns = now + 200 * std.time.ns_per_ms;
+                    self.source_retry_at_ns = null;
                     self.search_failure = null;
                     self.background_scans += 1;
                 } else |err| switch (err) {
@@ -422,20 +439,31 @@ pub const Document = struct {
                         self.synchronous_scans += 1;
                         fresh = true;
                     },
-                    error.WorkerBusy => return error.WorkerBusy,
+                    error.WorkerBusy => {
+                        self.source_retry_at_ns = now + 16 * std.time.ns_per_ms;
+                        if (!self.source_complete) return error.WorkerBusy;
+                    },
                     else => return err,
                 }
             }
             if (!fresh) {
-                const preview = try search.fromProjection(self.cache_allocator, &native.projection);
-                if (self.source_cache) |*old| old.deinit(self.cache_allocator);
-                self.source_cache = preview;
-                self.source_complete = false;
-                patch_start = null;
-                self.pending_patch_start = null;
-                self.source_shape = @import("../vt/search_task.zig").Shape.from(&native.projection);
+                if (self.source_complete and self.source_shape != null and self.source_shape.?.matches(&native.projection) and native.projection.scrollback.total_rows >= self.source_cache.?.rows.len) {
+                    // A coherent completed capture remains useful when output
+                    // outruns a bounded tail. Publish it once and retain it
+                    // while the next throttled capture catches up.
+                    if (!arrived and self.cached != null and self.source_version != 0) return;
+                } else {
+                    const preview = try search.fromProjection(self.cache_allocator, &native.projection);
+                    if (self.source_cache) |*old| old.deinit(self.cache_allocator);
+                    self.source_cache = preview;
+                    self.source_complete = false;
+                    patch_start = null;
+                    self.pending_patch_start = null;
+                    self.source_shape = @import("../vt/search_task.zig").Shape.from(&native.projection);
+                }
             }
         }
+        if (fresh) self.source_retry_at_ns = null;
         try self.compose(&self.source_cache.?, native, patch_start);
         self.pending_patch_start = null;
     }
@@ -443,10 +471,27 @@ pub const Document = struct {
         const started = profileNow();
         defer self.profile_compose_us = (profileNow() -| started) / 1000;
         var positions: [256]?u32 = @splat(null);
-        for (self.records.items, 0..) |r, i| {
+        for (self.records.items, 0..) |*r, i| {
             const p = try self.raw.resolveAnchor(r.anchor);
             if (p) |point| if (!point.alternate_screen) {
-                positions[i] = point.row;
+                if (point.source_version == doc.source_version) {
+                    positions[i] = point.row;
+                    for (doc.rows) |row| if (row.screen_row == point.row) {
+                        r.row_id = row.id;
+                        break;
+                    };
+                } else {
+                    // Never apply current screen coordinates to an older
+                    // capture. Resolve by stable row identity across output.
+                    for (native.projection.visible_rows) |row| if (native.projection.scrollback.viewport_offset + row.viewport_y == point.row) {
+                        r.row_id = row.id;
+                        break;
+                    };
+                    if (r.row_id) |id| for (doc.rows) |row| if (std.meta.eql(row.id, id)) {
+                        positions[i] = row.screen_row;
+                        break;
+                    };
+                }
             };
         }
         const base: u32 = if (doc.rows.len > 0) doc.rows[0].screen_row else 0;
@@ -501,11 +546,13 @@ pub const Document = struct {
             try map.append(self.cache_allocator, @intCast(rows.items.len));
             for (self.records.items, 0..) |record, ri| if (positions[ri] != null and positions[ri].? == r.screen_row) {
                 try self.appendApp(&text, &rows, &spans, &meta, record, record.command, .command, native.projection.cols, 0);
+                const donation = record.state == .success and @import("donation_qr.zig").isCommand(record.command);
+                if (donation) try self.appendDonationQr(&text, &rows, &meta, record, native.projection.cols);
                 try self.appendApp(&text, &rows, &spans, &meta, record, record.output, switch (record.state) {
                     .pending => .pending,
                     .success => .success,
                     .failure => .failure,
-                }, native.projection.cols, 1);
+                }, native.projection.cols, if (donation) 3 else 1);
             };
             if (rows.items.len > 0 and (index == 0 or !std.meta.eql(doc.rows[index - 1].logical_id, r.logical_id) or meta.items[meta.items.len - 1].kind != .shell)) try text.append(self.cache_allocator, '\n');
             const body_start: u32 = @intCast(text.items.len);
@@ -583,9 +630,12 @@ pub const Document = struct {
             while (group_end < owned_rows.len and meta.items[group_end].id == meta.items[group_start].id) : (group_end += 1) {}
             const top = owned_rows[group_start].presentation.y.? - record_geometry.padding_top;
             const bottom = owned_rows[group_end - 1].presentation.y.? + self.row_height + record_geometry.padding_bottom;
+            const donation = for (owned_rows[group_start..group_end]) |r| {
+                if (r.presentation.donation_qr != null) break true;
+            } else false;
             for (owned_rows[group_start..group_end]) |*r| {
                 r.presentation.article_y = top;
-                r.presentation.article_height = bottom - top;
+                r.presentation.article_height = if (donation) 0 else bottom - top;
             }
             group_start = group_end;
         }
@@ -595,7 +645,7 @@ pub const Document = struct {
         self.source_map = map;
         map = .empty;
         self.map_base = base;
-        self.source_version = native.projection.version;
+        self.source_version = doc.source_version;
         if (scroll_anchor) |anchor| {
             if (self.top >= prefix) for (owned_rows[prefix..], prefix..) |row, i| {
                 if (std.meta.eql(row.id, anchor)) {
@@ -607,7 +657,7 @@ pub const Document = struct {
         self.last_composed_rows = owned_rows.len - prefix;
         if (!self.source_complete) self.preview_rebuilds += 1 else if (patch_start != null) self.incremental_rebuilds += 1 else self.full_rebuilds += 1;
         self.tail_cache = null;
-        if (tailFingerprint(&native.projection)) |fingerprint| {
+        if (doc.source_version == native.projection.version) if (tailFingerprint(&native.projection)) |fingerprint| {
             const cursor_id = native.projection.visible_rows[native.projection.cursor.row].id;
             for (owned_rows[prefix..], prefix..) |row, i| if (std.meta.eql(row.id, cursor_id) and self.metadata.items[i].kind == .shell) {
                 var trailing_blank = true;
@@ -618,7 +668,7 @@ pub const Document = struct {
                 if (trailing_blank) self.tail_cache = .{ .fingerprint = fingerprint, .row = i };
                 break;
             };
-        }
+        };
     }
     pub fn profileNow() u64 {
         var ts: std.c.timespec = undefined;
@@ -715,6 +765,18 @@ pub const Document = struct {
         self.tail_updates += 1;
         return true;
     }
+    fn appendDonationQr(self: *Document, text: *std.ArrayList(u8), rows: *std.ArrayList(search.Row), meta: *std.ArrayList(Meta), record: Record, cols: u16) !void {
+        const qr = @import("donation_qr.zig");
+        const scale = qr.scaleForWidth(@as(f32, @floatFromInt(cols)) * self.cell_width - record_geometry.result_inset);
+        const count: usize = @intFromFloat(@ceil(qr.extent * scale / self.row_height));
+        for (0..count) |line| {
+            try text.append(self.cache_allocator, '\n');
+            const at: u32 = @intCast(text.items.len);
+            const id: vt.RowId = .{ std.math.maxInt(u64) - record.id, (2 << 32) | @as(u64, @intCast(line)) };
+            try rows.append(self.cache_allocator, .{ .id = id, .logical_id = id, .screen_row = @intCast(rows.items.len), .start = at, .end = at, .application_kind = @backingInt(@as(@FieldType(Meta, "kind"), .success)), .application_state = @backingInt(record.state), .timestamp_ms = record.timestamp, .presentation = .{ .donation_qr = .{ .offset = @as(f32, @floatFromInt(line)) * self.row_height, .scale = scale } } });
+            try meta.append(self.cache_allocator, .{ .id = record.id, .kind = .success, .timestamp = record.timestamp, .state = record.state });
+        }
+    }
     fn appendApp(self: *Document, text: *std.ArrayList(u8), rows: *std.ArrayList(search.Row), spans: *std.ArrayList(search.Span), meta: *std.ArrayList(Meta), record: Record, value: []const u8, kind: @FieldType(Meta, "kind"), cols: u16, section: u64) !void {
         // App text is measured with the same public grapheme rules as the
         // terminal, without feeding any application bytes into a VT.
@@ -739,7 +801,7 @@ pub const Document = struct {
             if (rows.items.len > 0 and hard_break) try text.append(self.cache_allocator, '\n');
             const start: u32 = @intCast(text.items.len);
             const index: u32 = @intCast(rows.items.len);
-            var col: u16 = if (section == 1) @min(self.result_inset_cells, cols -| 1) else if (line == 0 and cols > self.command_inset_cells + 5) self.command_inset_cells else 0;
+            var col: u16 = if (section != 0) @min(self.result_inset_cells, cols -| 1) else if (line == 0 and cols > self.command_inset_cells + 5) self.command_inset_cells else 0;
             const line_cols = cols;
             while (offset < value.len and value[offset] != '\n') {
                 var measured: u8 = 0;
@@ -1023,12 +1085,40 @@ pub const Document = struct {
         defer native.deinit(self.allocator);
         try self.rebuild(&native);
         if (!self.source_complete) return if (self.search_failure) |failure| failure.err else error.WorkerBusy;
+        return self.copySearch(allocator);
+    }
+    fn copySearch(self: *Document, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
         const doc = self.cached.?;
         const text = try allocator.dupe(u8, doc.text);
         errdefer allocator.free(text);
         const rows = try allocator.dupe(search.Row, doc.rows);
         errdefer allocator.free(rows);
         return .{ .owner = self.owner, .document = .{ .source_version = self.revision, .alternate_screen = false, .text = text, .rows = rows, .spans = try allocator.dupe(search.Span, doc.spans) } };
+    }
+    fn beginSearch(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding)) !*terminal.SearchTask {
+        const self = try checked(raw, binding);
+        if (!self.composed() or self.alternate) return self.raw.beginSearch();
+        // Composition owns UI-only application records. Its existing source
+        // task captures raw VT history in the CPU pool; only clone the ready
+        // owned composite here, never return a raw snapshot without records.
+        var native = try self.raw.snapshot(self.allocator);
+        defer native.deinit(self.allocator);
+        try self.rebuild(&native);
+        if (!self.source_complete) return if (self.search_failure) |failure| failure.err else error.WorkerBusy;
+        const work = @import("../vt/search_task.zig");
+        var result = try self.copySearch(work.allocator);
+        errdefer result.deinit(work.allocator);
+        const task = try terminal.SearchTask.create(self.owner);
+        task.finish(.{ .owner = self.owner, .document = result.document, .shape = work.Shape.from(&native.projection) }, null);
+        task.release(); // producer completed synchronously from an owned cache
+        return task;
+    }
+    fn searchTail(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), request: terminal.SearchTail, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
+        const self = try checked(raw, binding);
+        if (!self.composed() or self.alternate) return self.raw.searchTail(request, allocator);
+        // Composite row indices include application records and cannot be
+        // forwarded to the raw provider's native screen coordinates.
+        return error.FullSearchRequired;
     }
     fn contentQuery(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), request: terminal.ContentRequest, allocator: std.mem.Allocator) !terminal.ContentCapture {
         const self = try checked(raw, binding);
@@ -1161,8 +1251,45 @@ pub const Document = struct {
     fn recordingDisplay(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), display: @import("../vt/recording_manifest.zig").Display) !void {
         return (try checked(raw, binding)).raw.setRecordingDisplay(display);
     }
-    const vtable: terminal.Service.VTable = .{ .command_history_snapshot = commandHistorySnapshot, .recording_identity = recordingIdentity, .content_query = contentQuery, .execution_input = executionInput, .execution_secret = executionSecret, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .recording_display = recordingDisplay };
+    const vtable: terminal.Service.VTable = .{ .command_history_snapshot = commandHistorySnapshot, .recording_identity = recordingIdentity, .content_query = contentQuery, .execution_input = executionInput, .execution_secret = executionSecret, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot, .search_async = beginSearch, .search_tail = searchTail, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .recording_display = recordingDisplay };
 };
+
+test "builtin_records dots QR stays out of PTY text and survives resize and restoration" {
+    const a = std.testing.allocator;
+    const qr = @import("donation_qr.zig");
+    const Adapter = @import("../vt/ghostty_adapter.zig").Adapter;
+    var adapter = try Adapter.init(a, 24, 80);
+    defer adapter.destroy();
+    _ = try adapter.feed("prompt% ");
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    // Restore uses the same path as a recorded application event on replay.
+    try document.restore(.{ .id = 77, .owner = source.owner, .timestamp_ms = 1234, .command = "@dots", .output = qr.hint, .state = .success });
+    var captured = try document.service().searchSnapshot(a);
+    defer captured.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, captured.document.text, qr.hint) != null);
+    var qr_rows: usize = 0;
+    for (captured.document.rows) |row| if (row.presentation.donation_qr) |slice| {
+        try std.testing.expectEqual(@as(f32, 5), slice.scale);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(qr_rows)) * document.row_height, slice.offset);
+        qr_rows += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 10), qr_rows);
+    var raw = try source.service().searchSnapshot(a);
+    defer raw.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, raw.document.text, "@dots") == null);
+    try std.testing.expect(std.mem.indexOf(u8, raw.document.text, qr.hint) == null);
+    try adapter.resize(20, 24);
+    var narrow = try document.service().searchSnapshot(a);
+    defer narrow.deinit(a);
+    var saw_qr = false;
+    for (narrow.document.rows) |row| if (row.presentation.donation_qr) |slice| {
+        saw_qr = true;
+        try std.testing.expect(slice.scale * qr.extent + record_geometry.result_inset <= 20 * document.cell_width);
+    };
+    try std.testing.expect(saw_qr);
+}
 
 test "builtin_records native rows and app rows share ordered search selection and scroll" {
     const a = std.testing.allocator;

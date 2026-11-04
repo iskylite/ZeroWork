@@ -26,12 +26,16 @@ pub fn fingerprint(messages: []const p.Message) u64 {
             hash.update(call.arguments);
         }
         for (m.images) |image| std.hash.autoHash(&hash, image);
+        std.hash.autoHash(&hash, m.image_transform);
+        std.hash.autoHash(&hash, m.image_owner);
+        for (m.offloaded_images) |image| std.hash.autoHash(&hash, image);
     }
     return hash.final();
 }
 /// Retain the last two complete user turns. Cutting only at an ordinary user
 /// message preserves assistant call/result and observation/image pairs.
 pub fn cutoff(messages: []const p.Message) ?usize {
+    if (pendingImageCut(messages)) |cut| return if (cut > 0) cut else null;
     var users: usize = 0;
     var index = messages.len;
     while (index > 0) {
@@ -39,14 +43,60 @@ pub fn cutoff(messages: []const p.Message) ?usize {
         if (messages[index].role == .user) {
             users += 1;
             if (users == 2) {
-                // An existing memory plus the same two retained turns contains
-                // no additional older conversation to compact again.
-                if (index == 1 and std.mem.startsWith(u8, messages[0].content, memory_prefix)) return null;
-                return if (index > 0) index else null;
+                // If retained turns themselves are large, fold them into memory too.
+                if (index == 1 and std.mem.startsWith(u8, messages[0].content, memory_prefix)) return messages.len;
+                if (index > 0) return index;
+                break;
             }
         }
     }
+    // A short conversation can still contain many large tool observations.
+    // Summarize its complete, finished turn rather than gating on user count.
+    if (messages.len == 0 or (messages.len == 1 and std.mem.startsWith(u8, messages[0].content, memory_prefix))) return null;
+    return messages.len;
+}
+fn pendingImageCut(messages: []const p.Message) ?usize {
+    if (messages.len == 0) return null;
+    var index = messages.len;
+    var pending_images = false;
+    while (index > 0) {
+        index -= 1;
+        const message = messages[index];
+        if (message.role == .assistant) return if (pending_images and message.tool_calls.len > 0) index else null;
+        pending_images = pending_images or message.images.len > 0;
+        if (message.role == .user) return if (pending_images) index else null;
+    }
     return null;
+}
+pub fn reachesThreshold(input: usize, output: usize, window: u32) bool {
+    return window > 0 and input +| output >= (@as(usize, window) * 9 + 9) / 10;
+}
+/// Worker-only synchronous path, used between complete tool batches.
+pub fn compactNow(config: pc.ProviderConfig, messages: []const p.Message, reserve: usize, cancel: ?*p.CancelToken) !History {
+    const cut = try budgetCutoff(config, messages, reserve);
+    const job = try Job.create(config, .{ .owner = .{ .session = 0 }, .conversation = 0, .revision = 0 }, messages, cut);
+    defer job.destroy();
+    job.reserve_tokens = reserve;
+    if (cancel) |token| job.cancel.source = .{ .context = token, .poll = struct {
+        fn poll(raw: *const anyopaque) bool {
+            const t: *const p.CancelToken = @ptrCast(@alignCast(raw));
+            return t.isCancelled();
+        }
+    }.poll };
+    try job.generate();
+    const result = job.result;
+    job.result = .{};
+    return result;
+}
+fn budgetCutoff(config: pc.ProviderConfig, messages: []const p.Message, reserve: usize) !usize {
+    const cut = cutoff(messages) orelse return error.InsufficientContext;
+    const request = config.chatRequest(.{ .model = config.model, .system = "", .messages = messages[cut..], .tool_images = config.vision });
+    const retained = @import("local_text_request.zig").inputTokens(request) catch return cut;
+    if (reachesThreshold(retained +| reserve, 4096, config.context_window)) {
+        if (pendingImageCut(messages) != null) return error.ContextBudgetExceeded;
+        return messages.len;
+    }
+    return cut;
 }
 pub const Service = struct {
     job: ?*Job = null,
@@ -74,7 +124,7 @@ pub const Service = struct {
     }
     pub fn startReserved(self: *Service, config: pc.ProviderConfig, identity: Identity, history: *const History, reserve_tokens: usize) !void {
         if (self.job != null) return error.CompactionBusy;
-        const cut = cutoff(history.messages) orelse return error.InsufficientContext;
+        const cut = try budgetCutoff(config, history.messages, reserve_tokens);
         if (history.failure) |err| return err;
         const job = try Job.create(config, identity, history.messages, cut);
         errdefer job.destroy();
@@ -150,6 +200,7 @@ const Job = struct {
     done: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
     saw_done: bool = false,
+    summary_requests: usize = 0,
     fn create(config: pc.ProviderConfig, identity: Identity, source: []const p.Message, cut: usize) !*Job {
         const self = try std.heap.c_allocator.create(Job);
         self.* = .{ .arena = .init(std.heap.c_allocator), .config = config, .identity = identity, .source_hash = fingerprint(source), .cut = cut };
@@ -197,6 +248,62 @@ const Job = struct {
             self.failure = err;
         };
     }
+    fn summarize(self: *Job, client: *@import("provider_client.zig").Client, source: []const p.Message) anyerror![]const u8 {
+        if (self.cancel.isCancelled()) return error.Cancelled;
+        if (self.summary_requests >= 32) return error.CompactionRequestLimit;
+        const a = self.arena.allocator();
+        const Entry = struct { role: []const u8, content: []const u8, tool_calls: []const p.ToolCall, tool_call_id: ?[]const u8 };
+        var entries: std.ArrayList(Entry) = .empty;
+        var images: std.ArrayList(@import("image_attachments.zig").ContentRef) = .empty;
+        var source_bytes: usize = 0;
+        for (source) |message| {
+            source_bytes +|= message.content.len;
+            for (message.tool_calls) |call| source_bytes +|= call.id.len +| call.name.len +| call.arguments.len;
+            try entries.append(a, .{ .role = @tagName(message.role), .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id });
+            try images.appendSlice(a, message.images);
+        }
+        const transcript = try std.json.Stringify.valueAlloc(a, .{ .historical_transcript = entries.items }, .{});
+        const messages = [_]p.Message{.{ .role = .user, .content = transcript, .images = images.items }};
+        const request = self.config.chatRequest(.{ .model = self.config.model, .system = instruction, .messages = &messages, .tool_images = self.config.vision, .max_output = @min(2048, self.config.context_window / 4), .cancel = &self.cancel });
+        @import("local_text_request.zig").checkContext(request, self.config.context_window) catch |err| {
+            if (err != error.ContextBudgetExceeded and err != error.InvalidImageMessage) return err;
+            var pieces: [2]p.Message = undefined;
+            var split_source = source;
+            if (source.len == 1) {
+                pieces = .{ source[0], source[0] };
+                pieces[1].content = "";
+                pieces[1].tool_calls = &.{};
+                if (source[0].images.len > 1) {
+                    const mid = source[0].images.len / 2;
+                    pieces[0].images = source[0].images[0..mid];
+                    pieces[1].images = source[0].images[mid..];
+                } else {
+                    var mid = source[0].content.len / 2;
+                    while (mid > 0 and (source[0].content[mid] & 0xc0) == 0x80) mid -= 1;
+                    if (mid == 0) return err;
+                    pieces[0].content = source[0].content[0..mid];
+                    pieces[1].content = source[0].content[mid..];
+                    pieces[1].images = &.{};
+                }
+                split_source = &pieces;
+            }
+            const mid = split_source.len / 2;
+            const left = try self.summarize(client, split_source[0..mid]);
+            const right = try self.summarize(client, split_source[mid..]);
+            const combined = try std.fmt.allocPrint(a, "{s}\n{s}", .{ left, right });
+            if (images.items.len == 0 and combined.len >= source_bytes) return error.SummaryDidNotReduceContext;
+            return self.summarize(client, &.{.{ .content = combined }});
+        };
+        self.output = .empty;
+        self.saw_done = false;
+        self.summary_requests += 1;
+        _ = try client.chatWithStats(self.config, request, sink, self);
+        if (self.cancel.isCancelled()) return error.Cancelled;
+        if (self.failure) |err| return err;
+        const summary = std.mem.trim(u8, self.output.items, " \t\r\n");
+        if (!self.saw_done or summary.len == 0 or acknowledgementOnly(summary)) return error.EmptySummary;
+        return summary;
+    }
     fn generate(self: *Job) !void {
         var io: std.Io.Threaded = .init(std.heap.c_allocator, .{});
         defer io.deinit();
@@ -207,30 +314,10 @@ const Job = struct {
             .openai_compat => .openai_compat,
         });
         const a = self.arena.allocator();
-        // Historical roles are quoted data, not active conversational turns.
-        // Keeping them as live messages can make a summarizer continue an old
-        // “reply only OK” instruction instead of producing memory.
-        const Entry = struct { role: []const u8, content: []const u8, tool_calls: []const p.ToolCall, tool_call_id: ?[]const u8 };
-        var entries: std.ArrayList(Entry) = .empty;
-        var images: std.ArrayList(@import("image_attachments.zig").ContentRef) = .empty;
-        for (self.source.messages[0..self.cut]) |message| {
-            try entries.append(a, .{ .role = @tagName(message.role), .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id });
-            try images.appendSlice(a, message.images);
-        }
-        const transcript = try std.json.Stringify.valueAlloc(a, .{ .historical_transcript = entries.items }, .{});
-        const summary_messages = [_]p.Message{.{ .role = .user, .content = transcript, .images = images.items }};
-        const summary_request = self.config.chatRequest(.{ .model = self.config.model, .system = instruction, .messages = &summary_messages, .tool_images = self.config.vision, .max_output = @min(2048, self.config.context_window / 4), .cancel = &self.cancel });
-        // Original pixels travel to a vision-capable summarizer. Unsupported
-        // image inputs fail explicitly; no silent metadata-only substitution.
-        try @import("local_text_request.zig").checkContext(summary_request, self.config.context_window);
-        _ = try client.chatWithStats(self.config, summary_request, sink, self);
-        if (self.cancel.isCancelled()) return error.Cancelled;
-        if (self.failure) |err| return err;
-        const summary = std.mem.trim(u8, self.output.items, " \t\r\n");
-        if (!self.saw_done or summary.len == 0) return error.EmptySummary;
-        if (acknowledgementOnly(summary)) return error.EmptySummary;
+        const summary = try self.summarize(&client, self.source.messages[0..self.cut]);
         var messages: std.ArrayList(p.Message) = .empty;
         try messages.append(a, .{ .role = .user, .content = try std.fmt.allocPrint(a, "{s}{s}", .{ memory_prefix, summary }) });
+        try @import("image_offload.zig").retainCompacted(a, self.source.messages[0..self.cut], &messages.items[0]);
         try messages.appendSlice(a, self.source.messages[self.cut..]);
         const budget = @import("local_text_request.zig");
         const before_request = self.config.chatRequest(.{ .model = self.config.model, .system = "", .messages = self.source.messages, .tool_images = self.config.vision });
@@ -251,5 +338,26 @@ test "compaction retains complete recent tool and image turns" {
     const messages = [_]p.Message{ .{ .content = "old" }, .{ .role = .assistant, .content = "old reply" }, .{ .content = "recent" }, .{ .role = .assistant, .content = "", .tool_calls = &.{.{ .id = "id", .name = "read_terminal", .arguments = "{}" }} }, .{ .role = .tool, .content = "result", .tool_call_id = "id" }, .{ .content = "latest" }, .{ .role = .assistant, .content = "latest reply" } };
     try std.testing.expectEqual(@as(usize, 2), cutoff(&messages).?);
     try @import("provider_http.zig").validateToolMessages(.{ .model = "", .system = "", .messages = messages[cutoff(&messages).?..] });
-    try std.testing.expect(cutoff(messages[2..]) == null);
+    try std.testing.expectEqual(@as(usize, messages.len - 2), cutoff(messages[2..]).?);
+}
+
+test "compaction threshold includes output headroom and short tool conversations" {
+    try std.testing.expect(!reachesThreshold(859, 40, 1000));
+    try std.testing.expect(reachesThreshold(860, 40, 1000));
+    try std.testing.expect(reachesThreshold(1050, 40, 1000));
+    const messages = [_]p.Message{ .{ .content = "observe" }, .{ .role = .assistant, .content = "", .tool_calls = &.{.{ .id = "one", .name = "observe", .arguments = "{}" }} }, .{ .role = .tool, .content = "large observation", .tool_call_id = "one" } };
+    try std.testing.expectEqual(messages.len, cutoff(&messages).?);
+    try std.testing.expect(cutoff(&.{.{ .content = memory_prefix ++ "already summarized" }}) == null);
+}
+
+test "efficiency compaction retains unread image tool batch with its original calls" {
+    const images = @import("image_attachments.zig");
+    const messages = [_]p.Message{
+        .{ .content = "original task" },
+        .{ .role = .assistant, .content = "", .tool_calls = &.{.{ .id = "observe", .name = "screen", .arguments = "{}" }} },
+        .{ .role = .tool, .content = "new pixels", .tool_call_id = "observe", .images = &.{@as(images.ContentRef, .{})} },
+    };
+    try std.testing.expectEqual(@as(usize, 1), cutoff(&messages).?);
+    try @import("provider_http.zig").validateToolMessages(.{ .model = "", .system = "", .messages = messages[1..] });
+    try std.testing.expect(cutoff(&.{.{ .content = "only image", .images = &.{@as(images.ContentRef, .{})} }}) == null);
 }

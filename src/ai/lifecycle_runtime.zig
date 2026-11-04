@@ -426,15 +426,35 @@ pub const Runtime = struct {
         var snapshot = queried.result.session;
         const initial_revision = request.after_revision orelse snapshot.revision;
         const deadline = now() + request.wait_ms;
-        while ((snapshot.state == .queued or snapshot.state == .prepared or snapshot.state == .opening) and snapshot.revision <= initial_revision and now() < deadline) {
-            @import("retry.zig").wait(@min(@as(u32, 10), request.wait_ms), cancel) catch return error.CancelledBeforeDispatch;
+        while (sessionPending(snapshot, request.wait_for) and (request.wait_for != .revision or snapshot.revision <= initial_revision) and now() < deadline) {
+            @import("retry.zig").wait(@min(@as(u32, 50), request.wait_ms), cancel) catch return error.CancelledBeforeDispatch;
             queried = try self.controllerCall(scheduler, invocation.context, .{ .query_open = snapshot.operation_ref }, cancel);
             if (queried.result != .session) return error.InvalidControllerReceipt;
             snapshot = queried.result.session;
         }
-        return sessionResult(a, invocation, snapshot.operation_ref, snapshot, now() >= deadline and (snapshot.state == .queued or snapshot.state == .prepared or snapshot.state == .opening) and snapshot.revision <= initial_revision, false);
+        return sessionResult(a, invocation, snapshot.operation_ref, snapshot, now() >= deadline and sessionPending(snapshot, request.wait_for) and (request.wait_for != .revision or snapshot.revision <= initial_revision), false);
     }
 };
+fn sessionPending(snapshot: lifecycle.Snapshot, wait_for: @TypeOf(@as(tools.Request, undefined).wait_for)) bool {
+    if (snapshot.state == .queued or snapshot.state == .prepared or snapshot.state == .opening) return true;
+    return snapshot.state == .ready and wait_for == .interactive and (snapshot.execution_readiness == .unknown or snapshot.execution_readiness == .initializing);
+}
+
+test "efficiency interactive readiness waits beyond transport without changing legacy revision semantics" {
+    var snapshot: lifecycle.Snapshot = .{ .operation_ref = .generate(), .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 }, .group = .{ .id = @fromBackingInt(1) }, .retention = .keep };
+    try std.testing.expect(sessionPending(snapshot, .transport));
+    snapshot.state = .ready;
+    snapshot.execution_readiness = .initializing;
+    try std.testing.expect(!sessionPending(snapshot, .revision));
+    try std.testing.expect(!sessionPending(snapshot, .transport));
+    try std.testing.expect(sessionPending(snapshot, .interactive));
+    snapshot.execution_readiness = .ready;
+    try std.testing.expect(!sessionPending(snapshot, .interactive));
+    snapshot.execution_readiness = .unsupported;
+    try std.testing.expect(!sessionPending(snapshot, .interactive));
+    snapshot.state = .failed;
+    try std.testing.expect(!sessionPending(snapshot, .interactive));
+}
 fn lifecycleSubject(invocation: host.Invocation, authorized: Authorized, buffer: *[2048]u8) approvals.Subject {
     const kind = tools.kind(invocation.tool_id).?;
     const retention = @import("../config/config.zig").sessionRetentionLabel(authorized.retention);
@@ -528,7 +548,7 @@ fn recordResult(a: std.mem.Allocator, invocation: host.Invocation, record: journ
 fn sessionResult(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, snapshot: lifecycle.Snapshot, timed_out: bool, reused: bool) !host.Result {
     if (!snapshot.context.conversation_id.eql(invocation.context.conversation_id) or !snapshot.context.task_id.eql(invocation.context.task_id)) return error.InvalidControllerReceipt;
     if ((std.mem.eql(u8, invocation.tool_id, "host.open_session") or std.mem.eql(u8, invocation.tool_id, "host.wait_session_ready")) and !snapshot.operation_ref.eql(operation)) return error.InvalidControllerReceipt;
-    return jsonResult(a, invocation, .succeeded, .{ .operation_ref = try tools.operationRef(a, invocation.context, operation), .session_ref = if (snapshot.session) |session| try queries.sessionRef(a, invocation.context, session) else null, .group_ref = try queries.groupRef(a, invocation.context, @backingInt(snapshot.group.id)), .state = if (snapshot.state == .prepared) "opening" else @tagName(snapshot.state), .source_ref = if (snapshot.source) |source| try queries.sessionRef(a, invocation.context, source) else if (snapshot.saved_source) |source| try tools.connectionRef(a, invocation.context, source) else @as(?[]const u8, null), .ownership = @tagName(snapshot.ownership), .ownership_revision = snapshot.ownership_revision, .retention = @tagName(snapshot.retention), .membership_committed = snapshot.membership_committed, .source_revision = snapshot.revision, .error_code = snapshot.error_code, .timed_out = timed_out, .idempotent_reuse = reused, .local_released = snapshot.local_released, .remote_effect_unknown = snapshot.remote_effect_unknown, .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .truncated = false, .next_cursor = @as(?[]const u8, null) }, !std.mem.eql(u8, invocation.tool_id, "host.wait_session_ready"), false);
+    return jsonResult(a, invocation, .succeeded, .{ .operation_ref = try tools.operationRef(a, invocation.context, operation), .session_ref = if (snapshot.session) |session| try queries.sessionRef(a, invocation.context, session) else null, .group_ref = try queries.groupRef(a, invocation.context, @backingInt(snapshot.group.id)), .state = if (snapshot.state == .prepared) "opening" else @tagName(snapshot.state), .execution_readiness = snapshot.execution_readiness, .completion_source = snapshot.completion_source, .source_ref = if (snapshot.source) |source| try queries.sessionRef(a, invocation.context, source) else if (snapshot.saved_source) |source| try tools.connectionRef(a, invocation.context, source) else @as(?[]const u8, null), .ownership = @tagName(snapshot.ownership), .ownership_revision = snapshot.ownership_revision, .retention = @tagName(snapshot.retention), .membership_committed = snapshot.membership_committed, .source_revision = snapshot.revision, .error_code = snapshot.error_code, .timed_out = timed_out, .idempotent_reuse = reused, .local_released = snapshot.local_released, .remote_effect_unknown = snapshot.remote_effect_unknown, .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .truncated = false, .next_cursor = @as(?[]const u8, null) }, !std.mem.eql(u8, invocation.tool_id, "host.wait_session_ready"), false);
 }
 fn failureResult(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, err: anyerror, started: bool) !host.Result {
     return jsonResult(a, invocation, if (started) .outcome_unknown else if (err == error.CancelledBeforeDispatch) .cancelled_unsent else if (err == error.ToolApprovalRejected) .rejected else .failed, .{ .code = @errorName(err), .stage = if (started) "outcome_unknown" else "preflight", .retryable = false, .operation_ref = try tools.operationRef(a, invocation.context, operation), .side_effect_started = started, .local_released = !started, .remote_effect_unknown = started, .recovery_hint = if (started) "Inspect the original operation; never redispatch an unknown effect." else "No effect was dispatched; inspect and correct the rejected request." }, started, started);

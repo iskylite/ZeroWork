@@ -63,6 +63,7 @@ const TextureSlot = struct {
     width: u32,
     height: u32,
     mip_level_count: u32,
+    content_revision: u64 = 0,
     atlas_page_index: u16 = 0,
     sampling_max: [2]f32 = .{ 0, 0 },
     uv_rect: [4]f32 = .{ 0, 0, 1, 1 },
@@ -380,6 +381,9 @@ pub const ImageTextureStore = struct {
         if (rgba.len != expected) return error.InvalidPixelData;
         var texture = slot.owned_texture.?;
         try texture.writeRegion(0, 0, 0, slot.width, slot.height, rgba, slot.width * 4);
+        const stored = &self.textures[id & SLOT_MASK].?;
+        stored.content_revision +%= 1;
+        if (stored.content_revision == 0) stored.content_revision = 1;
     }
 
     /// Resident RGBA8 texel bytes, including exact mip dimensions and atlas pages.
@@ -730,6 +734,17 @@ pub const ImageRenderer = struct {
     pub fn getTextureSize(self: *const ImageRenderer, id: TextureId) ?[2]u32 {
         const slot = self.resolveTextureSlot(id) orelse return null;
         return .{ slot.width, slot.height };
+    }
+
+    /// External bindings can change without notifying this store. A missing
+    /// revision means enclosing retained surfaces must not reuse their pixels.
+    pub fn textureContentRevision(self: *const ImageRenderer, id: TextureId) ?u64 {
+        const slot = self.resolveTextureSlot(id) orelse return null;
+        return switch (slot.kind) {
+            .standalone, .atlas_region => 0,
+            .stream => slot.content_revision,
+            .external => null,
+        };
     }
 
     fn clearInstances(self: *ImageRenderer) void {

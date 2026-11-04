@@ -6,11 +6,12 @@ const S = @import("ai_tool_approval_styles.zig");
 const theme = @import("app_theme.zig");
 pub const Callbacks = struct {
     context: *anyopaque,
-    renew: ?*const fn (*anyopaque, u64, [32]u8) anyerror!void = null,
     decide: *const fn (*anyopaque, u64, [32]u8, bool) anyerror!void,
 };
 pub const View = struct {
     cx: *ui.Cx,
+    target_copy_feedback: *@import("copy_button.zig").Button = undefined,
+    command_copy_feedback: *@import("copy_button.zig").Button = undefined,
     root: *ui.Node,
     card: *ui.Node,
     body: *ui.Node,
@@ -22,9 +23,11 @@ pub const View = struct {
     group_mode: bool = false,
     card_height: f32 = 167.625,
     identity: *ui.Node,
+    tool_detail: *ui.Node = undefined,
     header_identity: *ui.Node,
     title: *ui.Node,
     command_copy: *ui.Node,
+    command_copy_label: *ui.Signal([]const u8) = undefined,
     command: *ui.Node,
     feedback: *ui.Node,
     callbacks: Callbacks,
@@ -32,7 +35,6 @@ pub const View = struct {
     arguments_hash: [32]u8 = @splat(0),
     command_owned: ?[]u8 = null,
     expanded: bool = true,
-    expired: bool = false,
     state_label: *ui.Node = undefined,
     accept_text: *ui.Signal([]const u8) = undefined,
     decision_pending: *ui.Signal(bool),
@@ -47,6 +49,7 @@ pub const View = struct {
         self.root.meta.ownership.meta.test_id = "ai.approval";
         self.root.setDisplay(.none);
         self.card = try ui.boxStyled(cx, S.panel, .{});
+        @import("layer_materials.zig").card(self.card, .action);
         try self.root.appendChild(cx.allocator, self.card);
         const header = try ui.boxStyled(cx, S.header, .{});
         try self.card.appendChild(cx.allocator, header);
@@ -55,7 +58,7 @@ pub const View = struct {
         try header.appendChild(cx.allocator, disclosure);
         self.title = try ui.textStyled(cx, S.title, "工具调用");
         self.title.meta.ownership.meta.test_id = "ai.approval.title";
-        self.title.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .flex_shrink = 0 });
+        self.title.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .max_width = 220, .min_width = 0, .flex_shrink = 1 });
         try header.appendChild(cx.allocator, self.title);
         self.header_identity = try ui.textStyled(cx, S.headerIdentity, "");
         self.header_identity.meta.ownership.meta.test_id = "ai.approval.target";
@@ -66,7 +69,8 @@ pub const View = struct {
         state.meta.ownership.meta.test_id = "ai.approval.state";
         state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = ui.Color.TRANSPARENT, .corner_radius = 5, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, state);
-        self.target_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制全部目标信息", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyTargets) }).mount(scope, cx);
+        self.target_copy_feedback = try @import("copy_button.zig").Button.mount(cx, scope, .{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制全部目标信息", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyTargets) });
+        self.target_copy = self.target_copy_feedback.node;
         self.target_copy.meta.ownership.meta.test_id = "ai.approval.copy_targets";
         self.target_copy.setDisplay(.none);
         try header.appendChild(cx.allocator, self.target_copy);
@@ -81,6 +85,11 @@ pub const View = struct {
         self.identity.meta.ownership.meta.test_id = "ai.approval.group_targets";
         self.identity.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20.625 }, .flex_shrink = 0 });
         try scroll.content.appendChild(cx.allocator, self.identity);
+        self.tool_detail = try ui.textStyled(cx, S.secondary, "");
+        self.tool_detail.meta.ownership.meta.test_id = "ai.approval.tool";
+        self.tool_detail.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20.625 }, .flex_shrink = 0 });
+        self.tool_detail.setDisplay(.none);
+        try scroll.content.appendChild(cx.allocator, self.tool_detail);
         const command_row = try ui.boxStyled(cx, S.commandRow, .{});
         try scroll.content.appendChild(cx.allocator, command_row);
         const command_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .height = 27 }).mount(scope, cx);
@@ -95,7 +104,9 @@ pub const View = struct {
         self.command.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.command.meta.ownership.meta.test_id = "ai.approval.command";
         try command_scroll.content.appendChild(cx.allocator, self.command);
-        const copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 16), .a11y_label = "复制完整命令", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyCommand) }).mount(scope, cx);
+        self.command_copy_label = try scope.createText("复制完整命令", .{});
+        self.command_copy_feedback = try @import("copy_button.zig").Button.mount(cx, scope, .{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 16), .a11y_label = self.command_copy_label, .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyCommand) });
+        const copy = self.command_copy_feedback.node;
         self.command_copy = copy;
         copy.meta.ownership.meta.test_id = "ai.approval.copy";
         try command_row.appendChild(cx.allocator, copy);
@@ -147,12 +158,22 @@ pub const View = struct {
             const command = try self.cx.allocator.dupe(u8, source.command);
             errdefer self.cx.allocator.free(command);
             const terminal = source.tool_id == null or std.mem.eql(u8, source.tool_id.?, "run_command");
-            try self.title.setTextContent(self.cx.allocator, if (terminal) "请求执行命令" else @import("ai_tool_titles.zig").title(source.tool_id.?) orelse "工具调用");
-            if (self.command_copy.behavior.interaction.a11y) |*attrs| attrs.label = if (terminal) "复制完整命令" else "复制调用参数";
+            const action_title = try @import("ai_tool_titles.zig").action(self.cx.allocator, source.tool_id orelse "run_command", source.command);
+            defer self.cx.allocator.free(action_title);
+            try self.title.setTextContent(self.cx.allocator, action_title);
+            if (source.tool_id) |name| {
+                const tool_detail = try @import("ai_tool_titles.zig").detail(self.cx.allocator, name);
+                defer self.cx.allocator.free(tool_detail);
+                try self.tool_detail.setTextContent(self.cx.allocator, tool_detail);
+            }
+            self.tool_detail.setDisplay(if (source.tool_id != null) .flex else .none);
+            self.command_copy_label.set(if (terminal) "复制完整命令" else "复制调用参数");
             const target = if (source.group) try self.cx.allocator.dupe(u8, source.target) else if (source.cwd != null or terminal) try std.fmt.allocPrint(self.cx.allocator, "{s} · #{d} · 目录 {s}", .{ source.target, @backingInt(source.owner.session_id), source.cwd orelse "未知" }) else try std.fmt.allocPrint(self.cx.allocator, "{s} · #{d}", .{ source.target, @backingInt(source.owner.session_id) });
             defer self.cx.allocator.free(target);
             try self.identity.setTextContent(self.cx.allocator, target);
-            try self.header_identity.setTextContent(self.cx.allocator, if (source.group) "全部目标" else source.target);
+            const header_target = if (!source.group and std.mem.eql(u8, source.target, "bmc_ikvm")) try std.fmt.allocPrint(self.cx.allocator, "会话 #{d}", .{@backingInt(source.owner.session_id)}) else try self.cx.allocator.dupe(u8, if (source.group) "全部目标" else source.target);
+            defer self.cx.allocator.free(header_target);
+            try self.header_identity.setTextContent(self.cx.allocator, header_target);
             try self.command.setTextContent(self.cx.allocator, command);
             try self.feedback.setTextContent(self.cx.allocator, if (source.group) (if (terminal) "影响 · 上述全部目标各执行一次此命令；写入及业务影响尚未核实。" else "影响 · 上述全部目标各执行一次此调用；写入及业务影响尚未核实。") else "影响 · 尚未核实");
             const target_copy = try self.cx.allocator.dupe(u8, target);
@@ -166,12 +187,11 @@ pub const View = struct {
             self.expanded = true;
             self.decision_pending.set(false);
         }
-        if (self.expired != source.expired) self.decision_pending.set(false);
-        self.expired = source.expired;
-        self.accept_text.set(if (source.expired) "重新确认" else "批准此调用");
-        try self.state_label.setTextContent(self.cx.allocator, if (source.expired) "已过期 · 流程暂停" else "待确认");
+        self.accept_text.set("批准此调用");
+        try self.state_label.setTextContent(self.cx.allocator, "待确认");
         self.body.setDisplay(.flex);
-        const desired: f32 = if (source.group) 207.625 else 167.625;
+        const tool_height: f32 = if (source.tool_id != null) 20.625 else 0;
+        const desired: f32 = (if (source.group) @as(f32, 207.625) else 167.625) + tool_height;
         self.card_height = desired;
         self.target_copy.setDisplay(.flex);
         self.footer.setDisplay(.flex);
@@ -181,7 +201,7 @@ pub const View = struct {
         self.root.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = 14, .right = 14, .top = 9 } });
         self.identity.setDisplay(.flex);
         self.identity.setStyleInline(self.cx.allocator, .{ .height = .{ .fit = .{} } });
-        self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (source.group) 130.625 else 90.625 } });
+        self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = (if (source.group) @as(f32, 130.625) else 90.625) + tool_height } });
         if (self.card.style.height != .px or self.card.style.height.px != desired) self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired } });
         self.root.setDisplay(.flex);
     }
@@ -201,15 +221,6 @@ pub const View = struct {
     fn decision(self: *View, approved: bool) void {
         const sequence = self.sequence orelse return;
         if (self.decision_pending.peek()) return;
-        if (approved and self.expired) {
-            const renew = self.callbacks.renew orelse return;
-            renew(self.callbacks.context, sequence, self.arguments_hash) catch |err| {
-                self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
-                return;
-            };
-            self.cx.requestRedraw();
-            return;
-        }
         self.callbacks.decide(self.callbacks.context, sequence, self.arguments_hash, approved) catch |err| {
             self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
             return;
@@ -224,11 +235,11 @@ pub const View = struct {
     }
     fn copyCommand(self: *View) void {
         const command = self.command_owned orelse return;
-        _ = ui.platform_services.clipboardSetText(self.cx.system_sdk, command);
+        self.command_copy_feedback.copy(command);
     }
     fn copyTargets(self: *View) void {
         const targets = self.target_owned orelse return;
-        _ = ui.platform_services.clipboardSetText(self.cx.system_sdk, targets);
+        self.target_copy_feedback.copy(targets);
     }
     fn cleanup(self: *View) void {
         if (self.target_owned) |owned| self.cx.allocator.free(owned);

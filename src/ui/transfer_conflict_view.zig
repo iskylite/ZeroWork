@@ -1,5 +1,6 @@
 //! Frozen conflict decisions only. The host owns re-stat, authorization, IO,
-//! pause and receipts. Selecting a radio never dispatches a transfer decision.
+//! pause and receipts. Selecting overwrite prepares its frozen target list;
+//! only the confirmation button authorizes replacement.
 const std = @import("std");
 const ui = @import("ui");
 const transfer = @import("../transfer/manager.zig");
@@ -361,6 +362,7 @@ pub const View = struct {
         self.dirty = true;
         self.flush() catch {};
         if (self.choice() == .save_as) self.cx.setFocus(self.input.input_container);
+        if (self.choice() == .overwrite) self.submit();
     }
     fn renamed(self: *View, _: []const u8) void {
         if (!self.visible or self.pending) return;
@@ -521,7 +523,7 @@ pub const View = struct {
             try self.metadata.setTextContent(self.cx.allocator, metadata);
             if (self.choice() == .keep_both and prompt.suggested_path != null) {
                 try self.hint.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "将保留为 {s}", .{prompt.suggested_path.?}));
-            } else try self.hint.setTextContent(self.cx.allocator, if (self.pending) "正在核对原目标…" else "覆盖须再次确认；未选择时不写入。");
+            } else try self.hint.setTextContent(self.cx.allocator, if (self.pending) "正在核对原目标…" else "选择覆盖后查看目标文件，点击一次确认即可执行。");
             self.primary_label.set("应用选择");
         }
         const remote = self.mode == .remote_confirmation;

@@ -7,7 +7,9 @@ const events = @import("../ai/step_events.zig");
 pub const Props = struct {
     title: []const u8,
     projection: []const u8,
+    projection_is_status: bool = false,
     tool_name: ?[]const u8 = null,
+    tool_arguments: ?[]const u8 = null,
     decision: ?bool = null,
     detail: []const u8,
     copy_detail: bool = true,
@@ -25,8 +27,7 @@ const State = struct {
     root: *ui.Node,
     body: *ui.Node,
     disclosure: *@import("layout_motion.zig").Disclosure,
-    status: *ui.Node,
-    chevron: *ui.Node,
+    indicator: *@import("ai_step_disclosure.zig").Indicator,
     clock: *ui.Node,
     mounted_ms: u64,
     last_tick_ms: u64 = 0,
@@ -52,6 +53,7 @@ const State = struct {
     }
     fn tick(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *State = @ptrCast(@alignCast(raw));
+        if (@import("material_geometry.zig").snapshot(self.cx, self.root) == null) return .done;
         if (self.props.expanded.*) if (self.follow) |*follow| {
             if (self.restore_scroll) {
                 const content_height = follow.scroll.content.globalRect().h;
@@ -79,61 +81,45 @@ const State = struct {
         self.clock.setTextContent(self.cx.allocator, value) catch return .done;
         return .needs_layout;
     }
-    fn hover(self: *State) void {
-        self.status.setOpacityRaw(0);
-        self.chevron.setOpacityRaw(1);
-    }
-    fn leave(self: *State) void {
-        self.status.setOpacityRaw(1);
-        self.chevron.setOpacityRaw(0);
-    }
     fn toggle(self: *State) void {
         self.props.expanded.* = !self.props.expanded.*;
         self.disclosure.setExpanded(self.props.expanded.*);
-        self.chevron.setTextContent(self.cx.allocator, if (self.props.expanded.*) "⌄" else "›") catch {};
+        self.indicator.setExpanded(self.props.expanded.*);
         if (self.props.on_toggle) |callback| callback.invoke();
         self.cx.requestRedraw();
     }
 };
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     const root = try ui.boxStyled(cx, S.card, .{});
+    @import("layer_materials.zig").card(root, .action);
     root.setStyleInline(cx.allocator, .{ .height = .{ .fit = .{} } });
     root.meta.ownership.meta.test_id = props.test_id;
     const header = try ui.widgets.Button(.{ .variant = .ghost, .label = "", .a11y_label = props.title, .base_style = S.ButtonStyle{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .background = ui.Color.TRANSPARENT, .corner_radius = 9, .flex_shrink = 0 } }).mount(scope, cx);
     header.setStyleInline(cx.allocator, S.header(cx.tokens));
     header.meta.ownership.meta.test_id = "ai.step.header";
     for (header.children.items) |child| child.setDisplay(.none);
-    const slot = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 }, .{});
     const palette = theme.current();
-    const spinning = props.phase == .assembling or props.phase == .running or props.phase == .approved;
-    const status = if (spinning) try ui.widgets.Spinner(.{ .size = 14, .stroke_width = 1.6, .color = palette.fg_2 }).mount(scope, cx) else try ui.iconTint(cx, switch (props.phase) {
-        .succeeded => ui.icons.check,
-        .approval => ui.icons.get("hand").?,
-        .failed, .rejected => ui.icons.get("circle-alert").?,
-        .cancelled => ui.icons.get("square").?,
-        else => ui.icons.get("loader-circle").?,
-    }, switch (props.phase) {
+    const indicator = try @import("ai_step_disclosure.zig").Indicator.mount(cx, scope, header, props.tool_name, switch (props.phase) {
         .succeeded => palette.ok,
         .failed, .rejected => palette.warn,
         else => palette.fg_2,
-    }, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
-    status.meta.ownership.meta.test_id = if (spinning) "ai.step.spinner" else "ai.step.status";
-    status.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 4 }, .top = .{ .px = 4 } } });
-    const chevron = try ui.text(cx, if (props.expanded.*) "⌄" else "›", .{ .font_size = 16, .color = palette.fg_2 });
-    chevron.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 4 }, .top = .{ .px = 0 } }, .width = .{ .px = 14 }, .height = .{ .px = 22 } });
-    chevron.setOpacityRaw(0);
-    try slot.appendChild(cx.allocator, status);
-    try slot.appendChild(cx.allocator, chevron);
-    try header.appendChild(cx.allocator, slot);
-    const title_node = try ui.textStyled(cx, S.title, props.title);
-    title_node.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .max_width = 128, .height = .{ .px = 18 }, .flex_shrink = 0 });
+    }, props.expanded.*, "ai.step.status", "ai.step.disclosure");
+    const action_title = if (props.tool_name) |name| try @import("ai_tool_titles.zig").action(cx.allocator, name, props.tool_arguments orelse props.projection) else try cx.allocator.dupe(u8, props.title);
+    defer cx.allocator.free(action_title);
+    if (header.behavior.interaction.a11y) |*attrs| attrs.label = (try scope.createText(action_title, .{})).peek();
+    const title_node = try ui.textStyled(cx, S.title, action_title);
+    title_node.setStyleInline(cx.allocator, S.headerTitle(cx.tokens));
     title_node.meta.ownership.meta.test_id = "ai.step.title";
     try header.appendChild(cx.allocator, title_node);
-    const status_label: ?[]const u8 = if (props.phase == .assembling) "准备中" else if (props.phase == .approval) "待确认" else if (props.decision) |approved| if (approved) "已批准" else "已拒绝" else null;
-    const projected = if (props.tool_name) |name| try @import("ai_tool_header_projection.zig").projectWithStatus(cx.allocator, name, props.projection, status_label) else null;
-    defer if (projected) |value| cx.allocator.free(value);
+    const separator = try ui.boxStyled(cx, S.headerSeparator, .{});
+    separator.meta.ownership.meta.test_id = "ai.step.separator";
+    try header.appendChild(cx.allocator, separator);
+    const header_projection = @import("ai_tool_header_projection.zig");
+    const status_label = header_projection.phaseLabel(props.phase);
+    const projected = if (props.projection_is_status) try cx.allocator.dupe(u8, props.projection) else if (props.tool_name) |name| try header_projection.projectWithStatus(cx.allocator, name, props.projection, status_label) else try header_projection.withStatus(cx.allocator, props.projection, status_label);
+    defer cx.allocator.free(projected);
     // The actual zenit text builder copies this temporary into node ownership.
-    const projection = try ui.text(cx, projected orelse props.projection, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = palette.fg_2, .text_overflow = .ellipsis });
+    const projection = try ui.text(cx, projected, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = if (props.phase == .failed or props.phase == .rejected) palette.warn else palette.fg_2, .text_overflow = .ellipsis });
     projection.setStyleInline(cx.allocator, S.headerSummary(cx.tokens));
     projection.meta.ownership.meta.test_id = "ai.step.projection";
     try header.appendChild(cx.allocator, projection);
@@ -152,46 +138,46 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     @import("ai_card_scroll.zig").containVertical(scroll);
     scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{ .max = 150 } }, .flex_shrink = 0 });
     scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
+    if (props.tool_name) |name| {
+        if (!std.mem.startsWith(u8, props.detail, "工具：")) {
+            const tool_detail = try @import("ai_tool_titles.zig").detail(cx.allocator, name);
+            defer cx.allocator.free(tool_detail);
+            const tool = try ui.textStyled(cx, S.text, tool_detail);
+            tool.meta.ownership.meta.test_id = "ai.step.tool_id";
+            try scroll.content.appendChild(cx.allocator, tool);
+        }
+    }
     const text = try ui.text(cx, props.detail, .{ .font_size = 11, .wrap = .word, .line_height = 16.0 / 11.0, .color = palette.fg_2 });
     try scroll.content.appendChild(cx.allocator, text);
     scroll.container.meta.ownership.meta.test_id = "ai.step.details";
     text.meta.ownership.meta.test_id = "ai.step.detail";
     if (props.copy_detail and props.detail.len > 0) {
         const copy = try scope.createState(Copy, .{ .cx = cx, .text = try scope.createText(props.detail, .{}) });
-        const copy_button = try ui.widgets.Button(.{ .label = "复制", .variant = .ghost, .on_click = cx.on(Copy, copy, Copy.run) }).mount(scope, cx);
+        copy.button = try @import("copy_button.zig").Button.mount(cx, scope, .{ .label = "复制", .variant = .ghost, .on_click = cx.on(Copy, copy, Copy.run) });
+        const copy_button = copy.button.node;
         copy_button.meta.ownership.meta.test_id = "ai.step.copy";
         try scroll.content.appendChild(cx.allocator, copy_button);
     }
+    try @import("ai_text_selection.zig").attach(cx, scope, scroll.content);
     const disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, scroll.container, props.expanded.*);
     try root.appendChild(cx.allocator, disclosure.root);
-    const state = try state_scope.createState(State, .{ .cx = cx, .props = props, .root = root, .body = scroll.container, .disclosure = disclosure, .status = status, .chevron = chevron, .clock = clock, .mounted_ms = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)), .follow = if (props.scroll_position) |position| .{ .scroll = scroll, .following = position.following } else null });
+    const state = try state_scope.createState(State, .{ .cx = cx, .props = props, .root = root, .body = scroll.container, .disclosure = disclosure, .indicator = indicator, .clock = clock, .mounted_ms = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)), .follow = if (props.scroll_position) |position| .{ .scroll = scroll, .following = position.following } else null });
     if (props.scroll_position != null or props.phase == .assembling or props.phase == .running or props.phase == .approval or props.phase == .approved) {
         try cx.addAfterLayoutHook(state, State.tick);
         try state_scope.onCleanup(State, state, State.release);
         if (props.scroll_position) |position| position.retain();
     }
     _ = ui.clickable(header, cx.on(State, state, State.toggle));
-    const hovered = try ui.hooks.useHover(scope, header);
-    const focused = try ui.hooks.useFocusState(scope, cx, header);
-    try scope.createEffect(.{ .hovered = hovered, .focused = focused.visible, .state = state }, struct {
-        fn run(ctx: anytype) void {
-            if (ctx.hovered.get() or ctx.focused.get()) ctx.state.hover() else ctx.state.leave();
-        }
-    }.run);
     return root;
 }
 const Copy = struct {
     cx: *ui.Cx,
     text: *ui.Signal([]const u8),
+    button: *@import("copy_button.zig").Button = undefined,
     fn run(self: *Copy) void {
-        _ = ui.platform_services.clipboardSetText(self.cx.system_sdk, self.text.peek());
+        self.button.copy(self.text.peek());
     }
 };
 pub fn title(name: []const u8) []const u8 {
-    if (@import("ai_tool_titles.zig").title(name)) |label| return label;
-    if (std.mem.eql(u8, name, "run_command")) return "执行命令";
-    if (std.mem.eql(u8, name, "read_terminal")) return "读取终端";
-    if (std.mem.eql(u8, name, "read_remote_file")) return "读取远程文件";
-    if (std.mem.eql(u8, name, "list_remote_files")) return "列出远程文件";
-    return "工具调用";
+    return @import("ai_tool_titles.zig").title(name) orelse "工具调用";
 }

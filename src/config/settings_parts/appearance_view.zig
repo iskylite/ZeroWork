@@ -44,14 +44,14 @@ fn textFill(node: *ui.Node) void {
     node.style.flex = 1;
 }
 
-const Card = struct { root: *ui.Node, body: *ui.Node, header: *ui.Node };
+const Card = struct { root: *ui.Node, body: *ui.Node, header: *ui.Node, heading: *controls.SectionHeading };
 fn card(cx: *ui.Cx, bound: *binding.Binding, title: []const u8, summary: []const u8, asset: ui.SvgAsset, bit: u6, test_id: []const u8) !Card {
     const fold = try bound.scope.allocator.create(Fold);
     fold.* = .{ .bound = bound, .bit = bit };
     try bound.scope.onCleanup(Fold, fold, Fold.cleanup);
     const expanded = bound.controller.search_query.len != 0 or bound.controller.folded_sections & (@as(u64, 1) << bit) == 0;
-    const result = try ui.widgets.AccordionItem(.{ .title = title, .expanded = expanded, .variant = .ghost, .on_change = cx.on(Fold, fold, Fold.change) }).mount(bound.scope, cx);
-    _ = try controls.sectionHeader(cx, bound.scope, result, asset, expanded, summary, test_id);
+    const result = try @import("../settings_accordion.zig").item(.{ .title = title, .expanded = expanded, .variant = .ghost, .on_change = cx.on(Fold, fold, Fold.change) }).mount(bound.scope, cx);
+    const heading = try controls.sectionHeader(cx, bound.scope, result, asset, expanded, summary, test_id);
     result.item.meta.ownership.meta.test_id = test_id;
     result.header.meta.ownership.meta.test_id = try id(bound.scope, test_id, ".header");
     if (disabled(bound) or bound.controller.search_query.len != 0) {
@@ -61,7 +61,7 @@ fn card(cx: *ui.Cx, bound: *binding.Binding, title: []const u8, summary: []const
     result.body.setStyleInline(cx.allocator, S.column(undefined));
     result.body.style.padding = .{ .left = 16, .right = 16, .bottom = 8 };
     result.body.style.gap = 0;
-    return .{ .root = result.item, .body = result.body, .header = result.header };
+    return .{ .root = result.item, .body = result.body, .header = result.header, .heading = heading };
 }
 const Fold = struct {
     bound: *binding.Binding,
@@ -73,7 +73,7 @@ const Fold = struct {
         if (disabled(self.bound) or self.bound.controller.search_query.len != 0) return;
         const mask = @as(u64, 1) << self.bit;
         if (open) self.bound.controller.folded_sections &= ~mask else self.bound.controller.folded_sections |= mask;
-        changed(self.bound);
+        self.bound.cx.requestRedraw();
     }
 };
 
@@ -175,10 +175,11 @@ fn iconButton(cx: *ui.Cx, scope: *ui.Scope, bound: *binding.Binding, kind: Click
 }
 fn textAction(cx: *ui.Cx, bound: *binding.Binding, kind: Click.Kind, stable_id: []const u8, label: []const u8, tooltip: []const u8, test_id: []const u8, danger: bool, is_disabled: bool) !*ui.Node {
     const action = try Click.create(bound.scope, bound, kind, stable_id);
-    const tip = try ui.widgets.Tooltip(.{ .text = tooltip, .open_delay_ms = 450 }).mount(bound.scope, cx);
     const button = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = is_disabled, .on_click = cx.on(Click, action, Click.activate), .base_style = .{ .height = .{ .px = 28 }, .padding = .{ .top = 5, .bottom = 5 }, .font_size = 11, .font_weight = 400, .text_color = if (is_disabled) S.theme.current().fg_3 else if (danger) S.theme.current().danger_ink else S.theme.current().accent_ink, .opacity = 1 }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
     button.meta.ownership.meta.test_id = test_id;
     button.addBeforeRender(explanationOpacity);
+    if (tooltip.len == 0 or std.mem.eql(u8, label, tooltip)) return button;
+    const tip = try ui.widgets.Tooltip(.{ .text = tooltip, .open_delay_ms = 450 }).mount(bound.scope, cx);
     try tip.trigger.appendChild(cx.allocator, button);
     return tip.wrapper;
 }
@@ -259,7 +260,7 @@ fn themeStrip(cx: *ui.Cx, bound: *binding.Binding, host: *Context) !*ui.Node {
         const selected = std.mem.eql(u8, bound.controller.model.value.ui.theme, record.id);
         if (selected) selected_index = record_index;
         const choose = try Click.create(bound.scope, bound, .select_theme, record.id);
-        const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = record.theme.name, .disabled = disabled(bound), .on_click = cx.on(Click, choose, Click.activate), .base_style = .{ .width = .{ .px = 150 }, .height = .{ .px = 75 }, .padding = ui.Padding.all(6), .background = if (selected) S.theme.popupSelection() else S.theme.current().well, .corner_radius = 9, .border_width = 0 }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
+        const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = record.theme.name, .disabled = disabled(bound), .on_click = cx.on(Click, choose, Click.activate), .base_style = .{ .width = .{ .px = 150 }, .height = .{ .px = 75 }, .padding = ui.Padding.all(6), .background = if (selected) S.base.selectionBackground(false) else S.theme.current().well, .corner_radius = 9, .border_width = 0 }, .hover_style = S.base.selectionHover(selected), .pressed_style = S.base.selectionHover(selected) }).mount(bound.scope, cx);
         button.setStyleInline(cx.allocator, .{ .direction = .column, .align_items = .stretch, .justify = .start, .gap = 5, .flex_shrink = 0 });
         button.meta.ownership.meta.test_id = try id(bound.scope, "settings.theme.", record.id);
         if (button.behavior.interaction.a11y) |*access| {
@@ -533,8 +534,10 @@ const ThemeGrid = struct {
         const wrapper = try ui.box(cx, .{ .width = .{ .px = width }, .height = .{ .px = 56 }, .flex_shrink = 0 }, .{});
         const choose = try Click.create(scope, self.bound, .select_theme, record.id);
         const selected = std.mem.eql(u8, c.model.value.ui.theme, record.id);
-        const button = try ui.widgets.Button(.{ .a11y_label = record.theme.name, .variant = .ghost, .disabled = disabled(self.bound), .on_click = cx.on(Click, choose, Click.activate), .base_style = S.tile(width, selected), .hover_style = S.base.buttonHover() }).mount(scope, cx);
-        button.setStyleInline(cx.allocator, S.tile(width, selected));
+        const button = try ui.widgets.Button(.{ .a11y_label = record.theme.name, .variant = .ghost, .disabled = disabled(self.bound), .on_click = cx.on(Click, choose, Click.activate), .base_style = S.tile(width, selected), .hover_style = S.base.selectionHover(selected), .pressed_style = S.base.selectionHover(selected) }).mount(scope, cx);
+        var layout = S.tile(width, selected);
+        layout.background = null;
+        button.setStyleInline(cx.allocator, layout);
         if (button.behavior.interaction.a11y) |*access| {
             access.selected = selected;
             access.pressed = selected;
@@ -672,9 +675,7 @@ const Field = struct {
     fn refresh(self: *Field) void {
         const problem = self.bound.controller.raw_fields[schema.find(self.key.section, self.key.key).?].problem;
         self.error_box.setDisplay(if (problem != null) .flex else .none);
-        self.input.input_container.setBorderWidth(0);
-        self.input.input_container.setBackground(if (problem != null) S.theme.current().danger.withAlpha(23) else S.theme.current().well);
-        self.input.input_container.setBorderColor(ui.Color.TRANSPARENT);
+        S.theme.paintInputValidation(self.input, problem != null);
         self.error_label.setTextContent(self.cx.allocator, if (problem) |err| fieldProblem(self.key, err) else "") catch {};
     }
     fn escape(self: *Field) void {
@@ -831,7 +832,7 @@ fn fontSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             }
         } else {
             const control = try fontChooser(cx, bound);
-            try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体族", "未安装所选字体时将使用替代字体；缺失字符由系统补足。", control));
+            try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体族", "方盒图标：内置字体；显示器图标：系统已安装；警告图标：已保存但未安装。缺失字体使用替代字体。", control));
         }
     }
     if (matchesFontField(query, "font_size", "字体大小", "")) {
@@ -862,8 +863,9 @@ fn fontSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
 const FontChoice = struct {
     bound: *binding.Binding,
     selected: *ui.Signal(?[]const u8),
-    options: [64]ui.widgets.SelectOption = undefined,
+    options: []ui.widgets.SelectOption = &.{},
     fn cleanup(self: *FontChoice) void {
+        self.bound.scope.allocator.free(self.options);
         self.bound.scope.allocator.destroy(self);
     }
     fn propose(self: *FontChoice, value: ?[]const u8) void {
@@ -888,6 +890,11 @@ const FontChoice = struct {
     }
 };
 
+fn fontSourceIcon(family: []const u8) ui.SvgAsset {
+    const fonts = @import("../appearance_font.zig");
+    return if (fonts.isBundled(family)) ui.icons.package else if (fonts.isInstalled(family)) ui.icons.monitor else ui.icons.triangle_alert;
+}
+
 fn fontChooser(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const fonts = @import("../appearance_font.zig");
     // Any valid edit replaces the controller's snapshot while this Select can
@@ -896,42 +903,43 @@ fn fontChooser(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const state = try bound.scope.allocator.create(FontChoice);
     state.* = .{ .bound = bound, .selected = try bound.scope.createSignal(?[]const u8, selected) };
     try bound.scope.onCleanup(FontChoice, state, FontChoice.cleanup);
+    var installed = try fonts.installedMonospaceFamilies(bound.scope.allocator);
+    defer installed.deinit();
+    state.options = try bound.scope.allocator.alloc(ui.widgets.SelectOption, fonts.families.len + installed.names.len + 2);
     var found = false;
     var count: usize = 0;
     for (fonts.families) |family| {
+        // Suggestions only establish ordering; unavailable fonts are not choices.
+        if (!fonts.isBundled(family) and !fonts.isInstalled(family)) continue;
         found = found or std.mem.eql(u8, selected, family);
-        const label = if (fonts.isBundled(family) or !fonts.isInstalled(family)) blk: {
-            const text = try std.fmt.allocPrint(bound.scope.allocator, "{s} · {s}", .{ family, if (fonts.isBundled(family)) "内置" else "未安装" });
-            defer bound.scope.allocator.free(text);
-            break :blk try owned(bound.scope, text);
-        } else family;
-        state.options[count] = .{ .value = family, .label = label, .test_id = try id(bound.scope, "settings.option.font_family.", family) };
+        state.options[count] = .{ .value = family, .label = family, .icon = fontSourceIcon(family), .test_id = try id(bound.scope, "settings.option.font_family.", family) };
         count += 1;
     }
-    // Select's public limit is 64 options. Reserve slots for the current custom
-    // family and custom input; all remaining installed names remain enterable.
-    var installed = try fonts.installedMonospaceFamilies(bound.scope.allocator);
-    defer installed.deinit();
     for (installed.names) |family| {
-        if (count >= state.options.len - 2) break;
         var duplicate = false;
         for (state.options[0..count]) |option| duplicate = duplicate or std.mem.eql(u8, family, option.value);
         if (duplicate) continue;
         const name = try owned(bound.scope, family);
-        state.options[count] = .{ .value = name, .label = name, .test_id = try id(bound.scope, "settings.option.font_family.", name) };
+        state.options[count] = .{ .value = name, .label = name, .icon = fontSourceIcon(name), .test_id = try id(bound.scope, "settings.option.font_family.", name) };
         found = found or std.mem.eql(u8, selected, family);
         count += 1;
     }
+    // Retain a saved/custom family even after uninstalling it, so its identity
+    // and explicit preview fallback stay visible until the user changes it.
     if (!found) {
-        state.options[count] = .{ .value = selected, .label = selected };
+        state.options[count] = .{ .value = selected, .label = selected, .icon = fontSourceIcon(selected), .test_id = try id(bound.scope, "settings.option.font_family.", selected) };
         count += 1;
     }
-    state.options[count] = .{ .value = "custom", .label = "自定义字体…", .test_id = "settings.option.font_family.custom" };
+    state.options[count] = .{ .value = "custom", .label = "自定义字体…", .icon = ui.icons.plus, .test_id = "settings.option.font_family.custom" };
     count += 1;
-    const result = try ui.widgets.Select(.{ .options = state.options[0..count], .value = ui.split(state.selected, cx.on(FontChoice, state, FontChoice.propose)), .width = @as(f32, 220), .dropdown_width = @as(f32, 280), .max_dropdown_height = @as(f32, 240), .searchable = true, .placeholder = "搜索字体…", .disabled = disabled(bound), .on_change = cx.on(FontChoice, state, FontChoice.change) }).mount(bound.scope, cx);
-    result.wrapper.setStyleInline(cx.allocator, .{ .width = .{ .px = 220 }, .flex_shrink = 0, .min_width = 0 });
-    result.trigger.setStyleInline(cx.allocator, S.base.fieldControl(undefined));
+    const result = try ui.widgets.Select(.{ .options = state.options[0..count], .value = ui.split(state.selected, cx.on(FontChoice, state, FontChoice.propose)), .width = S.g.font_control_width, .max_dropdown_height = @as(f32, 240), .searchable = true, .virtualize = true, .leading_icon = fontSourceIcon(selected), .placeholder = "搜索字体…", .disabled = disabled(bound), .on_change = cx.on(FontChoice, state, FontChoice.change) }).mount(bound.scope, cx);
+    // Fit the 280px trigger so fieldRow does not apply the standard 220/210px field sizing.
+    result.wrapper.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .flex_shrink = 0, .min_width = 0 });
+    var trigger_style = S.base.fieldControl(undefined);
+    trigger_style.width = .{ .px = S.g.font_control_width };
+    result.trigger.setStyleInline(cx.allocator, trigger_style);
     result.trigger.meta.ownership.meta.test_id = "settings.field.font_family";
+    result.panel.meta.ownership.meta.test_id = "settings.font.options";
     if (result.search_input) |input| input.meta.ownership.meta.test_id = "settings.font.search";
     S.base.tuneSelect(result);
     try result.scope.createEffect(.{ .chrome = result.chrome, .publication = try cx.themeSignal(bound.scope) }, struct {
@@ -1135,6 +1143,7 @@ fn materialSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     section.root.setStyleInline(cx.allocator, .{ .position = .relative });
     toggle_node.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 36 }, .top = .{ .px = if (bound.controller.search_query.len != 0 or bound.controller.folded_sections & (@as(u64, 1) << 1) == 0) @as(f32, 15) else 22 } } });
     section.header.children.items[1].style.padding.right = 46;
+    section.heading.accessory = toggle_node;
     try section.root.appendChild(cx.allocator, toggle_node);
     const root = section.body;
     if (!background.enabled) try root.appendChild(cx.allocator, try notice(cx, "背景图片已关闭。透明度和模糊仍对界面生效。", false));

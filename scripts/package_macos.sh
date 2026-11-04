@@ -8,8 +8,6 @@ python3 scripts/update_manifest.py verify-key
 VERSION=$(python3 -c 'import pathlib,re; print(re.search(r"\.version\s*=\s*\"([^\"]+)\"", pathlib.Path("build.zig.zon").read_text()).group(1))')
 OUT="${1:-$ROOT/dist}"
 DMG="$OUT/ZeroWork-$VERSION-arm64.dmg"
-ZIP="$OUT/ZeroWork-$VERSION-arm64.zip"
-[ ! -e "$ZIP" ] || { echo "Refusing to overwrite $ZIP" >&2; exit 1; }
 [ ! -e "$DMG" ] || { echo "Refusing to overwrite $DMG" >&2; exit 1; }
 STAGING=$(mktemp -d "${TMPDIR:-/tmp}/zerowork-package.XXXXXX")
 trap 'rm -rf "$STAGING"' EXIT HUP INT TERM
@@ -88,15 +86,4 @@ TXT
 hdiutil create -volname "ZeroWork $VERSION" -srcfolder "$STAGING/image" -format UDZO "$DMG"
 hdiutil verify "$DMG"
 (cd "$OUT" && shasum -a 256 "ZeroWork-$VERSION-arm64.dmg" > "ZeroWork-$VERSION-arm64.dmg.sha256")
-# Keep exactly the app at ZIP root; do not include the DMG image symlinks/docs.
-ditto -c -k --keepParent --norsrc --noextattr "$APP" "$ZIP"
-(cd "$OUT" && shasum -a 256 "ZeroWork-$VERSION-arm64.zip" > "ZeroWork-$VERSION-arm64.zip.sha256")
-case "$VERSION" in
-  *-*) echo "Prerelease ZIP created; stable update feed is intentionally not generated" ;;
-  *) if [ -n "${UPDATE_RELEASE_NOTES:-}" ]; then
-       python3 scripts/update_manifest.py manifest "$ZIP" --version "$VERSION" --notes "$UPDATE_RELEASE_NOTES"
-     else
-       python3 scripts/update_manifest.py manifest "$ZIP" --version "$VERSION"
-     fi ;;
-esac
-echo "Created $DMG and $ZIP"
+echo "Created $DMG"

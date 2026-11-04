@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>宿主操作审批</title><link rel="stylesheet" href="../theme-tokens.css?v=261a8c344116">
+<title>宿主操作审批</title><link rel="stylesheet" href="../theme-tokens.css?v=d326647094aa">
 <style>
 /* Parameter height stays intrinsic (37–105px) across every theme publication. */
 *{box-sizing:border-box}body{margin:0;background:var(--bg-app);font:11px/1.65 Inter,-apple-system,BlinkMacSystemFont,sans-serif;color:var(--fg)}
@@ -20,18 +20,18 @@ if(params.has('long'))url.textContent='https://example.com/docs/'+('release-note
 const kind=params.get('kind');if(kind==='lifecycle'||kind==='terminal_command'){
  card.dataset.kind=kind;document.querySelector('.approval-head strong').textContent=kind==='lifecycle'?'管理会话':'执行命令';document.querySelector('.target').textContent=kind==='lifecycle'?'当前组 · 排障':'工作终端 · app-prod-01';
  document.querySelector('.subject-icon').innerHTML=kind==='lifecycle'?'<path d="m12 3 10 6-10 6L2 9 12 3Zm-10 12 10 6 10-6M2 12l10 6 10-6"/>':'<path d="m4 6 6 6-6 6M12 18h8"/>';
- document.querySelector('.source').hidden=false;document.querySelector('.source').textContent=kind==='lifecycle'?'来源 · 当前对话 · 宿主管理操作':'来源 · 当前对话 · 交互式终端命令';document.querySelector('.url-row').hidden=true;document.querySelector('.summary-row').hidden=false;
+ document.querySelector('.source').hidden=false;document.querySelector('.source').textContent=kind==='lifecycle'?'来源 · 当前对话 · 会话管理':'来源 · 当前对话 · 交互式终端命令';document.querySelector('.url-row').hidden=true;document.querySelector('.summary-row').hidden=false;
  document.querySelector('.summary').textContent=kind==='lifecycle'?'从现有 SSH 会话复用连接，新建工作终端；空闲后关闭。':'pwd; git status --short';document.querySelector('.impact span').textContent=kind==='lifecycle'?'将创建本任务的工作终端并加入当前组；不执行命令，不关闭来源会话。':'在当前工作终端提交此命令，输出保留在终端记录中。';
 }
 if(params.get('route')==='ask'){
  card.dataset.routing='ask';document.querySelector('.route-row').hidden=false;document.querySelector('.route-reason').hidden=false;
- document.querySelectorAll('[data-route]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-route]').forEach(node=>node.setAttribute('aria-pressed',String(node===button)));document.querySelector('.impact span').textContent=button.dataset.route==='new_terminal'?'来源 · 当前会话 app-prod-01；将新建本任务工作终端，创建操作另行精确确认。此批准只覆盖上述命令。':'仅在所选方式和上述实际目标执行这一条完整命令；派发前复验权限。';});
+ document.querySelectorAll('[data-route]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-route]').forEach(node=>node.setAttribute('aria-pressed',String(node===button)));document.querySelector('.impact span').textContent=button.dataset.route==='new_terminal'?'来源 · 当前会话 app-prod-01；将新建本任务工作终端，创建操作另行精确确认。此批准只覆盖上述命令。':'仅在所选方式和上述目标执行这一条完整命令。';});
 }
 document.querySelectorAll('.copy').forEach(button=>button.onclick=()=>navigator.clipboard?.writeText(kind==='lifecycle'||kind==='terminal_command'?document.querySelector('.summary').textContent:url.textContent));
-let expired=params.has('expired');
-function approvalState(){document.querySelector('.state').textContent=expired?'已过期 · 流程暂停':'待确认';document.querySelector('[data-decision="approve"]').textContent=expired?'重新确认':'批准此调用';}
+// User decisions wait until explicit approval, rejection or cancellation.
+function approvalState(){document.querySelector('.state').textContent='待确认';document.querySelector('[data-decision="approve"]').textContent='批准此调用';}
 approvalState();
-document.querySelectorAll('[data-decision]').forEach(button=>button.onclick=()=>{if(button.dataset.decision==='approve'&&expired){expired=false;approvalState();return;}document.querySelector('.state').textContent=button.dataset.decision==='approve'?'已批准':'已拒绝';document.querySelectorAll('[data-decision]').forEach(node=>node.disabled=true)});
+document.querySelectorAll('[data-decision]').forEach(button=>button.onclick=()=>{document.querySelector('.state').textContent=button.dataset.decision==='approve'?'已批准':'已拒绝';document.querySelectorAll('[data-decision]').forEach(node=>node.disabled=true)});
 if(params.has('measure'))addEventListener('DOMContentLoaded',()=>{const data={viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio}};for(const selector of ['.assistant','.approval','.approval-head','.subject-icon','.body','.url-row','.url','.summary-scroll','.route-row','.route-reason','.route-row button','.impact','.footer','.footer button']){const node=document.querySelector(selector),style=getComputedStyle(node),rect=node.getBoundingClientRect();data[selector]={x:rect.x,y:rect.y,width:rect.width,height:rect.height,font:style.font,padding:style.padding,gap:style.gap,background:style.backgroundColor,border:style.border,outline:style.outline};}const output=document.createElement('section');output.id='approval-measurements';for(const [key,value]of Object.entries(data)){const row=document.createElement('pre');row.textContent=key+' '+JSON.stringify(value);row.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:11px/16px monospace;margin:10px';output.append(row)}document.body.append(output)});
-</script><script src="../shared/global-background.js?v=9d6006ea3295"></script>
+</script><script src="../shared/global-background.js?v=cae6fccd2aff"></script>
 </body></html>

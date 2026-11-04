@@ -3,6 +3,18 @@ const context = @import("context.zig");
 const assembler = @import("assembler.zig");
 const card = @import("card.zig");
 
+/// Annotate the exact captured source without claiming a complete history or
+/// an input grant. The assembler may retain a smaller tail, explicitly marked.
+pub fn annotate(allocator: std.mem.Allocator, assembled: *assembler.Assembled, capture: @import("../host/terminal_service.zig").ContentCapture) !void {
+    const facts = try std.json.Stringify.valueAlloc(allocator, .{ .session_id = @backingInt(capture.owner.session_id), .generation = capture.owner.generation, .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .source_revision = capture.source_revision, .representation = if (capture.alternate_screen) "alternate_screen_snapshot" else "retained_screen_snapshot", .captured_range = .{ .first_line = if (capture.lines.len > 0) @as(?u64, capture.lines[0].line) else null, .last_line = if (capture.lines.len > 0) @as(?u64, capture.lines[capture.lines.len - 1].line) else null }, .text_is_tail_of_capture = assembled.truncated, .truncated = capture.truncated or assembled.truncated, .meaning = "Bounded untrusted terminal observation; not a complete history, completion receipt or input authorization." }, .{});
+    defer allocator.free(facts);
+    const text = try std.fmt.allocPrint(allocator, "<terminal_snapshot_source>\n{s}\n</terminal_snapshot_source>\n{s}", .{ facts, assembled.text });
+    allocator.free(assembled.text);
+    assembled.text = text;
+    assembled.tokens = card.estimateTokens(text.len);
+    assembled.truncated = assembled.truncated or capture.truncated;
+}
+
 /// The immutable inputs captured by the UI before a request is submitted.
 /// `provider` must point at the owning session snapshot; this module never
 /// opens files or reaches back into the local machine.

@@ -9,3 +9,6 @@ body[data-freeze=true] .modal,body[data-freeze=true] .spinning svg{animation:non
 
 /* Recovery belongs to the independent helper, never to a usable-app backdrop. */
 .settings-window[data-surface=helper]{width:min(520px,100%);height:auto;min-height:0;background:transparent;box-shadow:none;overflow:visible}.settings-window[data-surface=helper]:before,.settings-window[data-surface=helper]>.window-head,.settings-window[data-surface=helper]>.settings-layout{display:none}.settings-window[data-surface=helper]>.modal-layer{position:relative;padding:0;background:transparent}.settings-window[data-surface=helper] .modal{animation:none}.settings-window[data-surface=helper] .dialog-head .icon-button:disabled{visibility:hidden}.recovery-path p{overflow-wrap:anywhere}
+
+
+.version-identity>div{flex:1;min-width:0}.version-identity p{overflow-wrap:anywhere}

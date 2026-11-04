@@ -160,6 +160,8 @@ pub const Broker = struct {
         } else false;
     }
     pub fn wait(self: *Broker, ticket: Ticket, cancel: ?*provider.CancelToken) !void {
+        const waiting = provider.CancelToken.beginUserWait(cancel);
+        defer waiting.end();
         errdefer self.finish(ticket);
         while (true) {
             if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;

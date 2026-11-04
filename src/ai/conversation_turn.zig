@@ -75,6 +75,7 @@ pub const Turn = struct {
     after: wire.History = .{},
     answer: []u8 = &.{},
     timeline: std.ArrayList(TimelineItem) = .empty,
+    step_groups: std.ArrayList(*@import("step_groups.zig").State) = .empty,
     open_segment: ?usize = null,
     round_timeline_len: usize = 0,
     round_steps_len: usize = 0,
@@ -94,6 +95,8 @@ pub const Turn = struct {
         a.free(self.answer);
         for (self.timeline.items) |item| item.deinit(a);
         self.timeline.deinit(a);
+        for (self.step_groups.items) |group| group.release();
+        self.step_groups.deinit(a);
         self.prose.deinit(a);
         self.thinking.deinit(a);
         if (self.thinking_scroll) |scroll| scroll.release();
@@ -151,6 +154,16 @@ pub const Turn = struct {
                 self.round_thinking_offset = self.thinking.items.len;
             },
             .reset => {
+                // Groups created by the discarded attempt must not donate their
+                // disclosure state to a new attempt at the same timeline index.
+                var kept_groups: usize = 0;
+                for (self.step_groups.items) |group| {
+                    if (group.first < self.round_timeline_len) {
+                        self.step_groups.items[kept_groups] = group;
+                        kept_groups += 1;
+                    } else group.release();
+                }
+                self.step_groups.shrinkRetainingCapacity(kept_groups);
                 self.open_segment = null;
                 var retained = self.round_timeline_len;
                 for (self.timeline.items[self.round_timeline_len..]) |item| {
@@ -217,6 +230,13 @@ pub const Turn = struct {
             const copy = try item.clone(a);
             result.timeline.append(a, copy) catch |err| {
                 copy.deinit(a);
+                return err;
+            };
+        }
+        for (self.step_groups.items) |group| {
+            const copy = try @import("step_groups.zig").State.create(a, group.first, group.expanded);
+            result.step_groups.append(a, copy) catch |err| {
+                copy.release();
                 return err;
             };
         }

@@ -43,6 +43,9 @@ pub const Task = struct {
         self.result = null;
         return result;
     }
+    pub fn retain(self: *Task) void {
+        _ = self.references.fetchAdd(1, .monotonic);
+    }
     pub fn release(self: *Task) void {
         if (self.references.fetchSub(1, .acq_rel) != 1) return;
         if (self.result) |*result| result.document.deinit(allocator);

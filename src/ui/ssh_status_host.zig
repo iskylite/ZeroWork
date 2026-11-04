@@ -256,6 +256,9 @@ pub const Host = struct {
     revision: u64 = 0,
     theme_hook: ?struct { context: *anyopaque, show: *const fn (*anyopaque, *ui.Node) void } = null,
     colors: ?S.theme.Colors = null,
+    projection_kind: enum { initial, terminal, file, graphical } = .initial,
+    graphical: ?@import("../host/plugin_ui_contract.zig").ConnectionStatus = null,
+    layout_metrics: [3]f32 = @splat(-1),
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*Host {
         const self = try cx.allocator.create(Host);
@@ -281,13 +284,20 @@ pub const Host = struct {
     }
     pub fn updateActive(self: *Host, next: ?Active) !void {
         const controls = self.controls orelse return;
+        const metrics = [3]f32{ controls.bar.globalRect().w, controls.theme_button.globalRect().w, controls.progress_slot.globalRect().w };
+        if (self.projection_kind == .terminal and std.meta.eql(self.active, next) and self.projectionUnchanged(metrics)) {
+            // Open detail views still receive their own positioning/flush;
+            // an unchanged status projection must not repaint hidden controls.
+            try self.flushDetails();
+            return;
+        }
         controls.identity_button.behavior.events.on_click = .{ .context = self, .callback = showIdentity };
         controls.progress_slot.setDisplay(.flex);
         if (next) |source| {
             try Details.validate(source.details);
             if (source.details.key.owner != .session) return error.InvalidOwner;
         }
-        const owner_changed = if (next) |source| if (self.active) |previous| !source.details.key.eql(previous.details.key) else true else true;
+        const owner_changed = self.projection_kind != .terminal or (if (next) |source| if (self.active) |previous| !source.details.key.eql(previous.details.key) else true else self.active != null);
         if (owner_changed) self.info.dismiss();
         const changed = !std.meta.eql(next, self.active);
         self.active = next;
@@ -338,9 +348,13 @@ pub const Host = struct {
             if (self.detail.controller.source) |source| self.detail.invalidate(source.value.owner);
         }
         try self.finishUpdate();
+        self.projection_kind = .terminal;
+        self.layout_metrics = metrics;
     }
     pub fn updateFile(self: *Host, next: FileActive) !void {
         const controls = self.controls orelse return;
+        const metrics = self.layoutMetrics();
+        if (self.projection_kind == .file and self.file_active != null and std.meta.eql(self.file_active.?, next) and self.projectionUnchanged(metrics)) return self.flushDetails();
         controls.identity_button.behavior.events.on_click = .{ .context = self, .callback = showIdentity };
         controls.progress_slot.setDisplay(.flex);
         self.info.dismiss();
@@ -372,10 +386,14 @@ pub const Host = struct {
             };
         }
         try self.finishUpdate();
+        self.projection_kind = .file;
+        self.layout_metrics = metrics;
     }
     /// Keep the original status bar and trim terminal/file-only entries for
     /// graphical sessions. Their original route action opens native diagnostics.
     pub fn updateGraphical(self: *Host, next: @import("../host/plugin_ui_contract.zig").ConnectionStatus) !void {
+        const metrics = self.layoutMetrics();
+        if (self.projection_kind == .graphical and self.graphical != null and std.meta.eql(self.graphical.?, next) and self.projectionUnchanged(metrics)) return self.flushDetails();
         try self.updateActive(null);
         const controls = self.controls orelse return;
         controls.disabled.set(false);
@@ -393,6 +411,23 @@ pub const Host = struct {
         for (controls.chain_button.children.items) |child| if (child.getIcon() != null) {
             _ = child.setTint(if (next.state == .online) S.theme.current().ok else S.theme.current().fg_3);
         };
+        self.graphical = next;
+        self.projection_kind = .graphical;
+        self.layout_metrics = metrics;
+    }
+    fn layoutMetrics(self: *Host) [3]f32 {
+        const controls = self.controls orelse return @splat(-1);
+        return .{ controls.bar.globalRect().w, controls.theme_button.globalRect().w, controls.progress_slot.globalRect().w };
+    }
+    fn projectionUnchanged(self: *Host, metrics_value: [3]f32) bool {
+        return self.colors != null and std.meta.eql(self.colors.?, S.theme.current()) and std.meta.eql(self.layout_metrics, metrics_value);
+    }
+    fn flushDetails(self: *Host) !void {
+        const controls = self.controls orelse return;
+        self.detail.reanchor(controls.bar.globalRect().y);
+        try self.detail.flush();
+        self.info.reanchor(controls.bar.globalRect().y);
+        try self.info.flush();
     }
     fn finishUpdate(self: *Host) !void {
         const controls = self.controls orelse return;

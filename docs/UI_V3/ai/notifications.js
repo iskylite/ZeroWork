@@ -18,7 +18,7 @@
   let draft = '检查部署日志，确认服务是否恢复。';
   let resolved = false, retries = 0, delivered = false, hasImage = true, compatibleModel = false, reminderNode = null, noticeSequence = 0;
   const question = '<div class="notice-question">检查部署日志，确认服务是否恢复。</div>';
-  const activity = (label,detail) => `<footer class="notice-lifecycle"><img src="../assets/ai/assistant-logo.png" alt=""><span>${esc(label)}</span><i></i><span>${esc(detail)}</span></footer>`;
+  const activity = (label,detail) => `<footer class="notice-lifecycle"><img src="../../../assets/macos/AiAssistant.png" alt=""><span>${esc(label)}</span><i></i><span>${esc(detail)}</span></footer>`;
   const action = (id,label,primary=false) => `<button type="button" data-action="${id}" class="${primary?'primary':''}">${label}</button>`;
   function commandCard(title,status,body,footer='') {
     return `<section class="notice-command" data-testid="ai-notice-step"><header>${V3AI.icon('terminal')}<strong>${esc(title)}</strong><span>${esc(status)}</span></header>${body}${footer?`<footer>${footer}</footer>`:''}</section>`;

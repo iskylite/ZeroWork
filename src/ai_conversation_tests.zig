@@ -72,7 +72,7 @@ test "AI conversation renders Markdown tables and live thought disclosure at nat
     try std.testing.expect(expanded);
     try std.testing.expectApproxEqAbs(@as(f32, 58), card.globalRect().h, 0.1);
     try std.testing.expect(find(card, "ai.step.copy") == null);
-    try std.testing.expectEqualStrings("核对当前时间", find(card, "ai.step.projection").?.getText().?.content);
+    try std.testing.expectEqualStrings("进行中 · 核对当前时间", find(card, "ai.step.projection").?.getText().?.content);
     const detail = find(card, "ai.step.detail").?;
     try detail.setTextContent(a, "first line\nsecond line\nthird line");
     cx.layout();
@@ -116,8 +116,7 @@ test "AI conversation table rows contain wrapped inline code at narrow widths" {
     cx.setViewport(600, 1200);
     const root = try ui.box(cx, .{ .width = .{ .px = 572 }, .height = .fill(), .direction = .column }, .{});
     cx.root = root;
-    const message = try @import("ui/ai_message_view.zig").mountWithWidth(cx, scope,
-        "| 文件 | 看起来是什么 |\n| --- | --- |\n" ++
+    const message = try @import("ui/ai_message_view.zig").mountWithWidth(cx, scope, "| 文件 | 看起来是什么 |\n| --- | --- |\n" ++
         "| `clusconf-4.5.2-11.20260915+git9751ee03.x86_64.rpm`、`clusconf.yaml` | 集群配置工具及其配置 |\n" ++
         "| `clusbench-4.5.1-1120.x86_64.rpm`、`clusbench.yaml` | 集群基准测试包及其配置 |\n" ++
         "| `cluskit-0.6.2-1...run`、`cluskit-0.6.2-3...run` | 两个版本的 cluskit 安装脚本 |\n\n后续正文", 572);
@@ -523,7 +522,7 @@ test "AI conversation activity label recovers when tool arguments fail before ho
     try std.testing.expectEqual(steps.Phase.failed, fixture.turn.steps.items[0].phase);
 }
 
-test "AI conversation processing time freezes through approval expiry and preserves message boundaries" {
+test "AI conversation processing time freezes through indefinite approval wait and preserves message boundaries" {
     const events = @import("ai/step_events.zig");
     const Status = @import("ui/ai_turn_status_view.zig");
     var turn: @import("ai/conversation_turn.zig").Turn = .{ .started_mono_ms = 1000 };
@@ -532,8 +531,7 @@ test "AI conversation processing time freezes through approval expiry and preser
     try events.apply(a, &turn.steps, .{ .call_id = "one", .name = "host.run_in_terminal", .phase = .assembling, .text_offset = turn.prose.items.len, .at_ms = 1200 });
     try events.apply(a, &turn.steps, .{ .call_id = "one", .phase = .approval, .at_ms = 2000 });
     try std.testing.expectEqual(@as(u64, 1000), Status.elapsedMs(&turn, 0, 122000));
-    turn.steps.items[0].approval_expired = true;
-    try std.testing.expectEqualStrings("审批已过期 · 流程暂停", Status.turnLabel(&turn).text);
+    try std.testing.expectEqualStrings("等待确认 · 流程暂停", Status.turnLabel(&turn).text);
     try std.testing.expectEqual(@as(u64, 1000), Status.elapsedMs(&turn, 0, 242000));
     try std.testing.expectEqual(@as(u64, 0), turn.steps.items[0].elapsedAt(242000));
     try events.apply(a, &turn.steps, .{ .call_id = "one", .phase = .approved, .at_ms = 242000 });
@@ -546,4 +544,183 @@ test "AI conversation processing time freezes through approval expiry and preser
     try std.testing.expectEqual(@as(usize, "先确认命令，再执行。".len), copy.steps.items[0].text_offset);
     try std.testing.expectEqual(@as(u64, 100), copy.steps.items[0].elapsedAt(300000));
     try std.testing.expectEqual(@as(u64, 1100), Status.elapsedMs(&copy, 0, 242100));
+}
+
+const aggregation = @import("ai/step_groups.zig");
+test {
+    _ = @import("ai/step_failure.zig");
+    _ = @import("host/terminal_execution.zig");
+}
+fn groupEvent(turn: *turns.Turn, event: steps.Event, expanded: bool) !void {
+    try turn.applyEvent(a, event);
+    try aggregation.sync(a, turn, expanded);
+}
+test "AI step aggregation groups one or more steps between prose, preserving defaults and manual state" {
+    var turn: turns.Turn = .{};
+    defer turn.deinit(a);
+    try groupEvent(&turn, .{ .kind = .text, .detail = "before", .phase = .running, .at_ms = 1 }, false);
+    try groupEvent(&turn, .{ .call_id = "read", .name = "read_terminal", .phase = .running, .at_ms = 2 }, false);
+    try std.testing.expectEqual(@as(usize, 1), turn.step_groups.items.len);
+    const first = turn.step_groups.items[0];
+    try std.testing.expect(!first.expanded);
+    first.expanded = true;
+    try groupEvent(&turn, .{ .call_id = "read", .phase = .succeeded, .at_ms = 5 }, false);
+    try groupEvent(&turn, .{ .kind = .round_start, .phase = .running, .at_ms = 6 }, false);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = "thought", .phase = .running, .at_ms = 7 }, false);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = " tail", .phase = .running, .at_ms = 8 }, false);
+    try std.testing.expect(first.expanded);
+    try std.testing.expectEqual(@as(usize, 1), turn.step_groups.items.len);
+    var summary = aggregation.summarize(&turn, 1, turn.timeline.items.len, 10);
+    try std.testing.expectEqual(@as(usize, 2), summary.count);
+    try std.testing.expectEqual(steps.Phase.running, summary.phase);
+    try std.testing.expectEqualStrings("thought tail", summary.latest.?.thinking.text.items);
+    try std.testing.expectEqualStrings("thought tail", summary.thinking_projection.?);
+    // Empty deltas do not end a group; a real model message does.
+    try groupEvent(&turn, .{ .kind = .text, .detail = " \n", .phase = .running, .at_ms = 9 }, false);
+    try std.testing.expectEqual(@as(usize, 1), turn.step_groups.items.len);
+    try groupEvent(&turn, .{ .kind = .text, .detail = "between", .phase = .running, .at_ms = 10 }, false);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = "second", .phase = .running, .at_ms = 11 }, true);
+    try std.testing.expectEqual(@as(usize, 2), turn.step_groups.items.len);
+    const second = turn.step_groups.items[1];
+    try std.testing.expect(second.expanded);
+    second.expanded = false;
+    try groupEvent(&turn, .{ .call_id = "search", .name = "run_command", .phase = .running, .at_ms = 12 }, true);
+    try groupEvent(&turn, .{ .call_id = "search", .phase = .succeeded, .at_ms = 14 }, true);
+    turn.finishSegment(14);
+    try aggregation.sync(a, &turn, true);
+    try std.testing.expect(!second.expanded);
+    try std.testing.expect(first.expanded);
+    summary = aggregation.summarize(&turn, second.first, turn.timeline.items.len, 14);
+    try std.testing.expectEqual(@as(usize, 2), summary.count);
+    try std.testing.expectEqual(steps.Phase.succeeded, summary.phase);
+    try std.testing.expectEqual(@as(u64, 3), summary.elapsed_ms);
+    try std.testing.expectEqual(@as(?[]const u8, null), summary.thinking_projection);
+}
+
+test "AI step aggregation projects only the current live thinking line" {
+    var turn: turns.Turn = .{ .sent_at_ms = 1 };
+    defer turn.deinit(a);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = "上一行\n正在核对最新错误\n\t ", .phase = .running, .at_ms = 2 }, false);
+    var summary = aggregation.summarize(&turn, 0, turn.timeline.items.len, 3);
+    try std.testing.expectEqualStrings("正在核对最新错误", summary.thinking_projection.?);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = "\n已定位新的线索", .phase = .running, .at_ms = 4 }, false);
+    summary = aggregation.summarize(&turn, 0, turn.timeline.items.len, 5);
+    try std.testing.expectEqualStrings("已定位新的线索", summary.thinking_projection.?);
+    try groupEvent(&turn, .{ .kind = .text, .detail = "继续执行检查。", .phase = .running, .at_ms = 6 }, false);
+    summary = aggregation.summarize(&turn, 0, aggregation.rangeEnd(&turn, 0), 7);
+    try std.testing.expectEqual(@as(?[]const u8, null), summary.thinking_projection);
+    try std.testing.expectEqual(@as(usize, 1), summary.count);
+}
+test "AI step aggregation keeps cloned disclosure independent and resets only discarded groups" {
+    var turn: turns.Turn = .{};
+    defer turn.deinit(a);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = "retained", .phase = .running, .at_ms = 1 }, true);
+    try groupEvent(&turn, .{ .kind = .text, .detail = "retained message", .phase = .running, .at_ms = 2 }, true);
+    try groupEvent(&turn, .{ .kind = .round_start, .phase = .running, .at_ms = 3 }, false);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = "discarded", .phase = .running, .at_ms = 4 }, false);
+    const discarded = turn.step_groups.items[1];
+    discarded.retain();
+    defer discarded.release();
+    var clone = try turn.clone(a);
+    defer clone.deinit(a);
+    try std.testing.expect(clone.step_groups.items[0] != turn.step_groups.items[0]);
+    clone.step_groups.items[0].expanded = false;
+    try std.testing.expect(turn.step_groups.items[0].expanded);
+    try groupEvent(&turn, .{ .kind = .reset, .phase = .running, .at_ms = 5 }, true);
+    try std.testing.expectEqual(@as(usize, 1), turn.step_groups.items.len);
+    try std.testing.expect(!discarded.expanded);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = "retry", .phase = .running, .at_ms = 6 }, true);
+    try std.testing.expectEqual(@as(usize, 2), turn.step_groups.items.len);
+    try std.testing.expect(turn.step_groups.items[1] != discarded);
+    try std.testing.expect(turn.step_groups.items[1].expanded);
+}
+test "AI step aggregation includes all settled outcomes and leaves only pending approvals outside" {
+    var turn: turns.Turn = .{};
+    defer turn.deinit(a);
+    try groupEvent(&turn, .{ .call_id = "approval", .name = "run_command", .phase = .approval, .at_ms = 1 }, false);
+    try std.testing.expectEqual(@as(usize, 0), turn.step_groups.items.len);
+    try groupEvent(&turn, .{ .call_id = "approval", .phase = .rejected, .at_ms = 2 }, false);
+    try std.testing.expectEqual(@as(usize, 1), turn.step_groups.items.len);
+    try groupEvent(&turn, .{ .call_id = "run", .name = "run_command", .phase = .running, .at_ms = 3 }, false);
+    try groupEvent(&turn, .{ .call_id = "run", .phase = .failed, .at_ms = 6 }, false);
+    try groupEvent(&turn, .{ .kind = .thinking, .detail = "investigate", .phase = .running, .at_ms = 7 }, false);
+    const summary = aggregation.summarize(&turn, 0, turn.timeline.items.len, 9);
+    try std.testing.expectEqual(@as(usize, 3), summary.count);
+    try std.testing.expectEqual(steps.Phase.failed, summary.phase);
+    try std.testing.expect(summary.live);
+    try groupEvent(&turn, .{ .call_id = "unsent", .name = "host.run_in_terminal", .phase = .failed, .at_ms = 10 }, false);
+    try groupEvent(&turn, .{ .call_id = "cancelled", .name = "host.run_in_terminal", .phase = .cancelled, .at_ms = 11 }, false);
+    try std.testing.expectEqual(@as(usize, 1), turn.step_groups.items.len);
+    try std.testing.expectEqual(@as(usize, 5), aggregation.summarize(&turn, 0, turn.timeline.items.len, 12).count);
+    try std.testing.expectEqual(steps.Phase.failed, aggregation.summarize(&turn, 0, turn.timeline.items.len, 12).phase);
+    try groupEvent(&turn, .{ .kind = .text, .detail = "model message", .phase = .running, .at_ms = 13 }, false);
+    try groupEvent(&turn, .{ .call_id = "next", .name = "read_terminal", .phase = .failed, .at_ms = 14 }, false);
+    try std.testing.expectEqual(@as(usize, 2), turn.step_groups.items.len);
+}
+test "AI step aggregation native disclosure keeps existing step cards and adds only soft edges" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.reduced_motion = true;
+    cx.setViewport(600, 456);
+    const root = try ui.box(cx, .{ .width = .{ .px = 570 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const group = try aggregation.State.create(a, 0, false);
+    defer group.release();
+    const view = try @import("ui/ai_step_group_view.zig").mount(cx, scope, .{ .group = group, .title = "思考", .projection = "1 个步骤", .phase = .succeeded, .elapsed_ms = 40 });
+    try root.appendChild(a, view.root);
+    var step_expanded = false;
+    const card = try @import("ui/ai_step_view.zig").mount(cx, scope, .{ .title = "思考", .projection = "original summary", .detail = "original thinking", .phase = .succeeded, .elapsed_ms = 40, .expanded = &step_expanded });
+    try view.content.appendChild(a, card);
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 32), view.root.globalRect().h, 0.1);
+    const header = find(view.root, "ai.step_group.header").?;
+    header.behavior.events.on_click.?.invoke();
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expect(group.expanded);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), card.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 76), view.root.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(card.globalRect().w, header.globalRect().w, 0.1);
+    try std.testing.expectEqualStrings("已完成 · original summary", find(card, "ai.step.projection").?.getText().?.content);
+    try std.testing.expect(find(card, "ai.step.separator") != null);
+    try std.testing.expectEqual(@as(f32, 0), view.root.style.border.width);
+    try std.testing.expectEqual(@as(u8, 0), view.root.getBackground().a);
+    try std.testing.expectApproxEqAbs(@as(f32, 6), find(view.root, "ai.step_group.edge.top").?.globalRect().h, 0.1);
+    const bottom_edge = find(view.root, "ai.step_group.edge.bottom").?.globalRect();
+    try std.testing.expect(bottom_edge.y >= card.globalRect().y + card.globalRect().h - 0.1);
+    // Appending cards grows the disclosure; there is no step-count/height cap,
+    // and the final card always ends above the soft bottom edge.
+    var extra_expanded = [_]bool{ false, false, false };
+    var last = card;
+    for (&extra_expanded) |*expanded| {
+        last = try @import("ui/ai_step_view.zig").mount(cx, scope, .{ .title = "搜索终端内容", .projection = "command not found", .detail = "unchanged result", .phase = .succeeded, .elapsed_ms = 10, .expanded = expanded });
+        try view.content.appendChild(a, last);
+    }
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 190), view.root.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), last.globalRect().h, 0.1);
+    try std.testing.expect(find(view.root, "ai.step_group.edge.bottom").?.globalRect().y >= last.globalRect().y + last.globalRect().h - 0.1);
+    find(card, "ai.step.header").?.behavior.events.on_click.?.invoke();
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expect(step_expanded);
+    header.behavior.events.on_click.?.invoke();
+    try std.testing.expect(!group.expanded);
+    try std.testing.expect(step_expanded);
 }

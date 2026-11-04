@@ -18,6 +18,9 @@ pub const Window = struct {
     owner_name: ?*const fn (*anyopaque, ContentOwner) []const u8 = null,
     result_presented: ?*const fn (*anyopaque, notifications.Kind, ContentOwner) bool = null,
     transfer_presented: ?*const fn (*anyopaque, u64) bool = null,
+    /// Main-loop maintenance, independent of whether this window paints.
+    /// Implementations request a frame only when presentation actually changes.
+    maintenance: ?*const fn (*anyopaque, bool) void = null,
 };
 pub const ReconnectResult = enum { disconnected, recovered, failed };
 pub const Details = struct { object: []const u8 = "", detail: []const u8 = "", incident_id: ?u64 = null };
@@ -57,6 +60,28 @@ pub const Host = struct {
     next_feedback: u64 = 1,
     last_failure: ?platform.Failure = null,
     authorization_feedback: ?[]const u8 = null,
+    last_maintenance_ms: ?u64 = null,
+
+    /// Preserve the bounded native receipt/status fallback without using a
+    /// redraw timer as a process event pump. No Cx is touched by native workers.
+    pub fn maintain(self: *Host, now_ms: u64) !bool {
+        if (self.last_maintenance_ms) |previous| {
+            if (now_ms -% previous < 250) return false;
+        }
+        self.last_maintenance_ms = now_ms;
+        var failure: ?anyerror = null;
+        const receipt = self.poll() catch |err| blk: {
+            failure = err;
+            break :blk Poll{};
+        };
+        for (self.windows.items) |window| {
+            if (window.value.maintenance) |run| run(window.value.context, receipt.settings_changed);
+        }
+        // Native notification failures must not stop terminal/recording/menu
+        // facts from advancing. Report the error after all live owners run.
+        if (failure) |err| return err;
+        return true;
+    }
 
     pub fn create(allocator: std.mem.Allocator, saved: config.Notify) !*Host {
         const self = try allocator.create(Host);

@@ -228,6 +228,7 @@ pub const View = struct {
     control_text: *ui.Node,
     test_button: *ui.Node,
     copy_button: *ui.Node,
+    copy_feedback: *@import("copy_button.zig").Button = undefined,
     config_button: *ui.Node,
     control_button: *ui.Node,
     pointer: *ui.Node,
@@ -310,7 +311,7 @@ pub const View = struct {
             .failed => "转发未运行，请检查错误后重试",
             .paused => "SSH 连接已断开，等待恢复",
             .stopping => "正在释放监听与连接，请稍候",
-            .off => if (self.has_rule) "配置已就绪，点击启动转发" else "添加规则后启动转发",
+            .off => if (self.has_rule) "配置已就绪" else "尚未配置转发规则",
         });
         self.test_disabled.set(data.state != .running or data.mode != .socks5);
         self.copy_button.setDisplay(if (self.has_rule and data.mode == .socks5) .flex else .none);
@@ -544,6 +545,7 @@ fn button(self: *View, parent: *ui.Node, label: []const u8, action: Action) !*ui
         if (action == .config) self.config_text = copy;
         try node.appendChild(self.cx.allocator, copy);
     }
+    if (action == .copy_export) self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, self.scope, node);
     if (action == .logs) node.meta.ownership.meta.test_id = "socks.info.logs";
     try parent.appendChild(self.cx.allocator, if (icon_only) try @import("connection_details_view.zig").iconTooltip(self.cx, self.scope, node, label) else node);
     return node;

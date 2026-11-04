@@ -538,3 +538,32 @@ test "command metadata native PS2 continuation preserves exact AI source and man
         try std.testing.expect(value.input_end_row.? > value.screen_row.?);
     }
 }
+
+test "nested shell command metadata never completes a parent from child events" {
+    var adapter = try Adapter.init(allocator, 10, 60);
+    defer adapter.destroy();
+    const parent = "11111111111111111111111111111111".*;
+    const child = "22222222222222222222222222222222".*;
+    adapter.selectShellSemantics(parent, true);
+    _ = try adapter.feed("\x1b]133;A\x07$ \x1b]133;B\x07ssh child\r\n\x1b]133;C\x07");
+    adapter.selectShellSemantics(child, true);
+    // Initial precmd on the new shell does not finish ssh in its parent.
+    _ = try adapter.feed("\x1b]133;D;0\x07\x1b]133;A\x07child$ \x1b]133;B\x07pwd\r\n\x1b]133;C\x07/tmp\r\n\x1b]133;D;0\x07");
+    var middle = try adapter.copyProjection(allocator);
+    defer middle.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), middle.commands.len);
+    try std.testing.expectEqual(model.CommandState.running, middle.commands[0].state);
+    try std.testing.expectEqual(@as(?i32, null), middle.commands[0].exit_code);
+    try std.testing.expectEqual(model.CommandState.succeeded, middle.commands[1].state);
+    _ = try adapter.feed("\x1b]133;A\x07child$ \x1b]133;B\x07exit\r\n\x1b]133;C\x07");
+    adapter.selectShellSemantics(null, false);
+    _ = try adapter.feed("\x1b]133;D;9\x07");
+    adapter.selectShellSemantics(parent, true);
+    _ = try adapter.feed("\x1b]133;D;7\x07");
+    var result = try adapter.copyProjection(allocator);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(?i32, 7), result.commands[0].exit_code);
+    try std.testing.expectEqual(@as(?i32, 0), result.commands[1].exit_code);
+    try std.testing.expectEqual(model.CommandState.unknown, result.commands[2].state);
+    try std.testing.expectEqual(@as(?i32, null), result.commands[2].exit_code);
+}

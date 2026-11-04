@@ -200,13 +200,13 @@ test "status popover grid and encoding use exact live typography row spacing and
     f.view.hide();
     try f.show(.encoding, false);
     r = f.view.chrome.globalRect();
-    try std.testing.expectEqual(@as(f32, 148), r.h);
-    try std.testing.expectEqual(@as(usize, 3), f.view.rows.children.items.len);
+    try std.testing.expectEqual(@as(f32, 116), r.h);
+    try std.testing.expectEqual(@as(usize, 2), f.view.rows.children.items.len);
     try std.testing.expect(statusText(f.view.rows, "UTF-8"));
-    try std.testing.expect(statusText(f.view.rows, "其他编码"));
-    try std.testing.expect(statusText(f.view.rows, "暂不可用"));
-    try std.testing.expectApproxEqAbs(r.y + 110, f.view.rows.children.items[2].globalRect().y, 0.1);
-    f.click(f.view.rows.children.items[2]);
+    try std.testing.expect(!statusText(f.view.rows, "其他编码"));
+    try std.testing.expect(!statusText(f.view.rows, "暂不可用"));
+    try std.testing.expectApproxEqAbs(r.y + 78, f.view.rows.children.items[1].globalRect().y, 0.1);
+    f.click(f.view.rows.children.items[1]);
     try std.testing.expectEqual(@import("ui/status_controller.zig").Kind.encoding, f.view.controller.popover.?.kind);
 }
 

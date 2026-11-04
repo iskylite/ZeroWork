@@ -86,6 +86,11 @@ fn hasText(node: *ui.Node, value: []const u8) bool {
     for (node.children.items) |child| if (hasText(child, value)) return true;
     return false;
 }
+fn textNode(node: *ui.Node, value: []const u8) ?*ui.Node {
+    if (node.getText()) |text| if (std.mem.eql(u8, text.content, value)) return node;
+    for (node.children.items) |child| if (textNode(child, value)) |result| return result;
+    return null;
+}
 fn modelOption(node: *ui.Node, name: []const u8) ?*ui.Node {
     if (node.meta.ownership.meta.test_id) |id| if (std.mem.eql(u8, id, "ai.model.option")) {
         if (hasText(node, name)) return node;
@@ -149,7 +154,7 @@ test "AI composer grouped model list uses configured capabilities and a captured
     f.click(f.view.buttons[2]);
     const menu = find(f.cx.root.?, "ai.model.menu").?;
     const r = menu.globalRect();
-    try std.testing.expectEqual(@as(f32, 336), r.w);
+    try std.testing.expect(r.w < 336);
     try std.testing.expectEqual(@as(f32, 321.5), r.h);
     try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x, r.x, 0.1);
     try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().y - 6, r.y + r.h, 0.1);
@@ -207,7 +212,17 @@ test "AI composer permission labels preserve real confirm and auto modes and onl
     f.enter(f.view.buttons[1]);
     const menu = find(f.cx.root.?, "ai.permission.menu").?;
     try std.testing.expectEqual(@as(f32, 344), menu.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 194), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 150), menu.globalRect().h);
+    for ([_][]const u8{ "部分读取自动，其余按策略确认", "授权内自动执行（含组内写入）" }) |hint| {
+        const node = textNode(menu, hint) orelse return error.MissingPermissionHint;
+        const label = node.getText().?;
+        const measured = f.cx.text.measureTextWidth(label.content, label.font_size, label.font_weight, false);
+        const rect = node.globalRect();
+        const bounds = menu.globalRect();
+        try std.testing.expect(measured > 0 and measured <= rect.w);
+        try std.testing.expect(rect.x >= bounds.x and rect.x + rect.w <= bounds.x + bounds.w);
+        try std.testing.expect(rect.y >= bounds.y and rect.y + rect.h <= bounds.y + bounds.h);
+    }
     f.enter(find(menu, "ai.permission.auto").?);
     try std.testing.expectEqual(Controls.PermissionMode.auto, f.last.?.action.permission);
     try std.testing.expectEqualStrings("确认后执行", f.view.labels[1].?.getText().?.content);
@@ -231,7 +246,7 @@ test "AI composer inventory revocation exists only for a continuous current conv
     f.settle();
     f.enter(f.view.buttons[1]);
     const menu = find(f.cx.root.?, "ai.permission.menu").?;
-    try std.testing.expectEqual(@as(f32, 232), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 188), menu.globalRect().h);
     try std.testing.expect(hasText(f.view.inventory_revoke, "撤销会话列表授权"));
     const row = f.view.inventory_revoke.globalRect();
     const bounds = menu.globalRect();
@@ -245,7 +260,7 @@ test "AI composer inventory revocation exists only for a continuous current conv
     f.settle();
     try std.testing.expectEqual(.none, f.view.inventory_revoke.style.display);
     f.enter(f.view.buttons[1]);
-    try std.testing.expectEqual(@as(f32, 194), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 150), menu.globalRect().h);
 }
 
 test "AI composer running conversation permits only inventory revocation without enabling configuration changes" {
@@ -331,9 +346,9 @@ test "AI composer effort is a real slider whose keyboard skips unsupported model
     defer f.deinit();
     f.enter(f.view.buttons[2]);
     const menu = find(f.cx.root.?, "ai.model.menu").?;
-    try std.testing.expectEqual(@as(f32, 336), menu.globalRect().w);
+    try std.testing.expect(menu.globalRect().w < 336);
     try std.testing.expectEqual(@as(f32, 321.5), menu.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 266), f.view.slider_track.globalRect().w);
+    try std.testing.expectApproxEqAbs(menu.globalRect().w - 70, f.view.slider_track.globalRect().w, 0.1);
     try std.testing.expect(ui.Color.eql(Styles.theme.current().accent, f.view.slider_thumb.getBackground()));
     try std.testing.expectEqual(@as(usize, 2), f.view.reasoning_count);
     for (f.view.slider_markers[0..2], 0..) |marker, index| {
@@ -368,7 +383,7 @@ test "AI composer effort is a real slider whose keyboard skips unsupported model
     try std.testing.expect(f.view.disabled[3].peek());
 }
 
-test "AI composer default effort hides selection until an explicit effort is acknowledged" {
+test "AI composer missing effort selects the lowest supported level" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -377,23 +392,53 @@ test "AI composer default effort hides selection until an explicit effort is ack
     try f.view.update(snapshot);
     f.settle();
     f.enter(f.view.buttons[2]);
-    try std.testing.expectEqualStrings("推理强度 默认", f.view.effort_name.getText().?.content);
-    try std.testing.expectEqual(.none, f.view.slider_thumb.style.display);
+    try std.testing.expectEqualStrings("低", f.view.effort_name.getText().?.content);
+    try std.testing.expectEqualStrings("低", f.view.labels[3].?.getText().?.content);
+    const title = f.view.effort_title.globalRect();
+    const value = f.view.effort_name.globalRect();
+    try std.testing.expect(title.x + title.w + 7.9 <= value.x);
+    try std.testing.expect(!ui.Color.eql(f.view.slider_track.getBackground(), f.view.reasoning_card.getBackground()));
+    try std.testing.expectEqual(.flex, f.view.slider_thumb.style.display);
     try std.testing.expectEqual(.flex, f.view.slider_markers[0].style.display);
     const track = f.view.slider_track.globalRect();
     f.cx.handleMouseDown(track.x + 0.5, track.y + track.h / 2, .{});
     f.cx.handleMouseUp(track.x + 0.5, track.y + track.h / 2);
     f.settle();
     try std.testing.expectEqual(Controls.Effort.low, f.last.?.action.effort.value);
-    try std.testing.expectEqual(.none, f.view.slider_thumb.style.display);
+    try std.testing.expectEqual(.flex, f.view.slider_thumb.style.display);
     snapshot.effort = .low;
     try f.view.update(snapshot);
     f.settle();
     try std.testing.expectEqual(.flex, f.view.slider_thumb.style.display);
+    try std.testing.expectEqualStrings("低", f.view.effort_name.getText().?.content);
+    try std.testing.expectEqualStrings("低", f.view.labels[3].?.getText().?.content);
     snapshot.effort = null;
     try f.view.update(snapshot);
     f.settle();
+    try std.testing.expectEqual(.flex, f.view.slider_thumb.style.display);
+    f.models[0].efforts[0] = false;
+    snapshot.revision += 1;
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expectEqualStrings("高", f.view.effort_name.getText().?.content);
+}
+
+test "AI composer inherited unsupported effort remains visible until a supported level is selected" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var snapshot = f.snapshot();
+    snapshot.effort = .medium;
+    try f.view.update(snapshot);
+    f.settle();
+    f.enter(f.view.buttons[2]);
+    try std.testing.expectEqualStrings("档位不支持", f.view.effort_name.getText().?.content);
     try std.testing.expectEqual(.none, f.view.slider_thumb.style.display);
+    snapshot.effort = .high;
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expectEqualStrings("高", f.view.effort_name.getText().?.content);
+    try std.testing.expectEqual(.flex, f.view.slider_thumb.style.display);
 }
 
 test "AI composer identical polling preserves open list and Escape restores its trigger" {
@@ -538,8 +583,8 @@ test "AI composer model identities expose provider and ID and unconfigured model
     defer f.deinit();
     f.enter(f.view.buttons[2]);
     const alpha = modelOption(f.cx.root.?, "alpha").?;
-    try std.testing.expectEqualStrings("alpha\nlab · alpha\n配置上下文 200.0K tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.label.?);
-    try std.testing.expectEqualStrings("alpha\nlab · alpha\n配置上下文 200.0K tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.description.?);
+    try std.testing.expectEqualStrings("alpha\nlab · alpha\n上下文 200.0K tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.label.?);
+    try std.testing.expectEqualStrings("alpha\nlab · alpha\n上下文 200.0K tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.description.?);
     const Hook = struct {
         fn open(raw: *anyopaque) void {
             const fixture: *Fixture = @ptrCast(@alignCast(raw));
@@ -746,9 +791,23 @@ test "AI composer model metadata columns align across supported and unsupported 
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
+    f.models[0].id = "trae-cn/deepseek-v4.1-flash-with-an-extra-long-model-name";
+    var snapshot = f.snapshot();
+    snapshot.current.?.model_id = f.models[0].id;
+    snapshot.revision += 1;
+    try f.view.update(snapshot);
+    f.settle();
     f.click(f.view.buttons[2]);
-    const alpha = modelOption(f.cx.root.?, "alpha").?;
+    const alpha = modelOption(f.cx.root.?, f.models[0].id).?;
     const quiet = modelOption(f.cx.root.?, "quiet").?;
+    const name = find(alpha, "ai.model.name").?;
+    const context = find(alpha, "ai.model.context").?.globalRect();
+    try std.testing.expect(context.w < 64);
+    try std.testing.expect(name.style.overflow == .hidden);
+    try std.testing.expect(name.globalRect().w >= f.cx.text.measureTextWidth(f.models[0].id, 11, 400, false));
+    try std.testing.expect(name.globalRect().w < f.cx.text.measureTextWidth(f.models[0].id, 11, 400, false) + 2);
+    try std.testing.expect(name.globalRect().x + name.globalRect().w + 7.9 <= context.x);
+    try std.testing.expect(std.mem.indexOf(u8, alpha.behavior.interaction.a11y.?.description.?, f.models[0].id) != null);
     for ([_][]const u8{ "ai.model.context", "ai.model.reasoning", "ai.model.vision" }) |id| {
         const first = find(alpha, id).?.globalRect();
         const second = find(quiet, id).?.globalRect();
@@ -819,6 +878,8 @@ test "AI composer longest model and execution choices remain reachable at minimu
     f.view.root.setStyleInline(a, .{ .width = .{ .px = 492 } });
     f.settle();
     const row = f.view.root.globalRect();
+    try std.testing.expectEqualStrings(f.models[0].id, f.view.labels[2].?.getText().?.content);
+    try std.testing.expect(f.view.labels[2].?.globalRect().w < f.cx.text.measureTextWidth(f.models[0].id, 10, 400, false));
     try std.testing.expect(f.view.execution_compact);
     try std.testing.expectEqual(@as(f32, 24), f.view.buttons[5].globalRect().w);
     try std.testing.expectApproxEqAbs(row.x + row.w - 28, f.send.globalRect().x, 0.1);
@@ -868,6 +929,10 @@ test "AI composer menus keep owner based layers and title icon alignment across 
                 const popup = f.view.popups[index];
                 const panel = popup.widget.chrome;
                 try std.testing.expectEqual(theme.layerBackground(2), panel.getBackground());
+                if (index == 2) {
+                    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.model_card.getBackground());
+                    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.reasoning_card.getBackground());
+                }
                 try std.testing.expectEqual(@as(f32, 1), panel.getOpacity());
                 for (panel.style.border.resolvedWidths()) |edge| try std.testing.expectEqual(@as(f32, 0), edge);
                 if (panel.style.outline()) |outline| try std.testing.expectEqual(@as(f32, 0), outline.width);
@@ -922,4 +987,104 @@ test "hidden maintenance composer releases a revoked projection before reopening
     f.settle();
     try std.testing.expect(!f.view.clear_pending);
     try std.testing.expect(f.view.source == null);
+}
+
+test "AI composer model width follows the complete ID and expands again with available space" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const short_width = f.view.buttons[2].globalRect().w;
+    f.models[0].id = "antigravity/gemini-3.8-flash";
+    var source = f.snapshot();
+    source.revision += 1;
+    source.current.?.model_id = f.models[0].id;
+    try f.view.update(source);
+    f.settle();
+    const label = f.view.labels[2].?;
+    const full_width = @ceil(f.cx.text.measureTextWidth(f.models[0].id, 10, 400, false));
+    try std.testing.expectEqualStrings(f.models[0].id, label.getText().?.content);
+    try std.testing.expectApproxEqAbs(full_width, label.globalRect().w, 0.1);
+    try std.testing.expect(f.view.buttons[2].globalRect().w > short_width);
+    const natural_width = f.view.buttons[2].globalRect().w;
+    f.view.root.setStyleInline(a, .{ .width = .{ .px = 492 } });
+    f.settle();
+    try std.testing.expect(label.globalRect().w < full_width);
+    const row = f.view.root.globalRect();
+    try std.testing.expectApproxEqAbs(row.x + row.w - 28, f.send.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(label.globalRect().x + label.globalRect().w + 4, f.view.labels[3].?.globalRect().x, 0.1);
+    f.view.root.setStyleInline(a, .{ .width = .{ .px = 800 } });
+    f.settle();
+    try std.testing.expectApproxEqAbs(full_width, label.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(natural_width, f.view.buttons[2].globalRect().w, 0.1);
+}
+
+test "AI composer reasoning popup stays horizontally stable while effort labels change" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.models[0].efforts[4] = true;
+    var source = f.snapshot();
+    source.revision += 1;
+    try f.view.update(source);
+    f.settle();
+    f.click(f.view.buttons[2]);
+    const menu = find(f.cx.root.?, "ai.model.menu").?;
+    const initial = menu.globalRect();
+    for ([_]Controls.Effort{ .low, .high, .max, .high, .low }) |effort| {
+        source.effort = effort;
+        try f.view.update(source);
+        for (0..20) |_| {
+            f.cx.advanceFrameClock();
+            f.cx.layout();
+            _ = f.cx.render();
+            const rect = menu.globalRect();
+            try std.testing.expectApproxEqAbs(initial.x, rect.x, 0.1);
+            try std.testing.expectApproxEqAbs(initial.w, rect.w, 0.1);
+        }
+        try std.testing.expectEqualStrings(Controls.effortLabel(effort), f.view.labels[3].?.getText().?.content);
+        try std.testing.expect(f.view.isOpen());
+    }
+    // Stable while selecting, but still follows a moved composer.
+    f.panel.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 140 }, .top = .{ .px = 100 } } });
+    f.settle();
+    try std.testing.expectApproxEqAbs(initial.x + 40, menu.globalRect().x, 0.1);
+    source.effort = .max;
+    try f.view.update(source);
+    f.settle();
+    f.click(f.view.buttons[2]);
+    f.click(f.view.buttons[2]);
+    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x, menu.globalRect().x, 0.1);
+}
+
+test "AI composer model picker notifies on open and stays open across catalog refresh" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const Hook = struct {
+        fn opened(raw: *anyopaque) void {
+            const fixture: *Fixture = @ptrCast(@alignCast(raw));
+            fixture.calls += 1;
+        }
+    };
+    f.view.callbacks.models_opened = Hook.opened;
+    f.enter(f.view.buttons[2]);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    f.enter(f.view.buttons[2]);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    f.enter(f.view.buttons[2]);
+    try std.testing.expectEqual(@as(usize, 2), f.calls);
+    f.models[0].id = "refreshed";
+    var snapshot = f.snapshot();
+    snapshot.revision += 1;
+    snapshot.current = .{ .provider_id = "lab", .model_id = "refreshed" };
+    try f.view.update(snapshot);
+    f.view.preserveModelPopup();
+    f.settle();
+    try std.testing.expect(f.view.isOpen());
+    try std.testing.expectEqual(@as(usize, 2), f.calls);
+    try std.testing.expect(modelOption(f.cx.root.?, "alpha") == null);
+    const refreshed = modelOption(f.cx.root.?, "refreshed").?;
+    f.enter(refreshed);
+    try std.testing.expectEqual(@as(u64, 2), f.last.?.revision);
+    try std.testing.expectEqualStrings("refreshed", f.last.?.action.model.model_id);
 }

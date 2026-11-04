@@ -6,6 +6,35 @@ const terminal = @import("../host/terminal_execution.zig");
 const host = @import("host_tools.zig");
 const plugin = @import("plugin_tools.zig");
 
+/// Model-only projection. The original Result remains in the ledger and UI
+/// store; preserve outcome/recording/input facts while omitting dispatch internals.
+pub fn modelContent(a: std.mem.Allocator, name: []const u8, text: []const u8) ![]const u8 {
+    if (!std.mem.eql(u8, name, "host.run_in_terminal") and !std.mem.eql(u8, name, "host.get_execution") and !std.mem.eql(u8, name, "host.wait_execution")) return text;
+    const parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return text;
+    defer parsed.deinit();
+    if (parsed.value != .object) return text;
+    var root = parsed.value;
+    const snapshot = root.object.getPtr("snapshot") orelse return text;
+    if (snapshot.* != .object) return text;
+    var compact: std.json.ObjectMap = .empty;
+    defer compact.deinit(a);
+    for ([_][]const u8{ "owner", "execution_id", "state", "revision", "process", "completion_source", "interactive_execution", "input_ready", "input_wait", "input_receipt", "input_handed_off", "local_released", "remote_effect_unknown", "recording_id", "recording_settled", "recording_failed", "interval_saved", "output_scope", "output_attribution", "output_attribution_reason", "failure" }) |key| {
+        if (snapshot.object.get(key)) |value| try compact.put(a, key, value);
+    }
+    var shell: std.json.ObjectMap = .empty;
+    defer shell.deinit(a);
+    if (snapshot.object.get("shell")) |original| if (original == .object) {
+        for ([_][]const u8{ "id", "parent_id", "revision", "depth", "kind", "suspended", "prompt_ready", "reported_host", "reported_user" }) |key| if (original.object.get(key)) |value| {
+            try shell.put(a, key, if (value == .string) .{ .string = std.mem.trimEnd(u8, value.string, "\x00") } else value);
+        };
+        try compact.put(a, "shell", .{ .object = shell });
+    };
+    const grant = snapshot.object.get("grant");
+    try compact.put(a, "has_input_grant", .{ .bool = if (grant) |value| value != .null else false });
+    snapshot.* = .{ .object = compact };
+    return std.json.Stringify.valueAlloc(a, root, .{});
+}
+
 pub const ActionTarget = struct {
     conversation_id: identity.ConversationId,
     task_id: identity.TaskId,
@@ -91,7 +120,7 @@ pub const Projection = struct {
             if (self.remote_effect_unknown or self.call_status == .outcome_unknown) return "输入结果待核实";
             if (self.call_status == .failed) return "输入提交失败";
             return switch ((self.input_receipt orelse return "输入状态待核实").stage) {
-                .awaiting_host_secret => "等待宿主安全输入",
+                .awaiting_host_secret => "等待安全输入",
                 .queued => "输入已排队",
                 .written => "输入已写入终端",
                 .consumed => "输入已消费",
@@ -101,26 +130,40 @@ pub const Projection = struct {
         }
         if (self.call_status == .rejected) return "未执行 · 已拒绝";
         if (self.call_status == .cancelled_unsent) return "未派发 · 已取消";
-        if (self.remote_effect_unknown or self.state == .outcome_unknown) return "结果待核实";
+        if (self.remote_effect_unknown or self.state == .outcome_unknown or self.call_status == .outcome_unknown) return "结果待核实";
         if (self.not_dispatched) return "未执行 · 调用失败";
         if (self.stop_requested and self.active()) return "停止已请求 · 等待执行结果";
         if (self.input_handed_off and self.active()) return "用户已接管 · 命令继续运行";
+        // A process receipt describes the command result independently of output
+        // collection and recording. Saving a recording never proves execution.
+        if (self.process) |process| if (process.foreground_finished) {
+            if (process.signal != null or (process.exit_code != null and process.exit_code.? != 0)) return "命令执行失败";
+            return if (process.exit_code == 0) "命令已结束" else "命令已结束 · 退出状态未知";
+        };
         return switch (self.state orelse return if (self.call_status == .failed) "调用失败" else "执行状态待核实") {
             .unavailable => "执行不可用",
             .idle => "终端空闲",
             .preparing, .awaiting_start_boundary, .awaiting_accept => "准备执行",
             .awaiting_submit => "正在提交命令",
             .running => "运行中",
-            .process_finished => "前台已结束",
-            .output_draining => if (self.output_scope == .session_interval) "正在读取观测片段" else "正在收齐输出",
-            .recording_sealing => if (self.output_scope == .session_interval) "正在保存观测片段" else "正在封存记录",
-            .sealed => if (self.recording_failed) "记录保存失败" else if (!self.sealed()) "封存结果待核实" else if (self.process.?.signal != null or (self.process.?.exit_code != null and self.process.?.exit_code.? != 0)) "已结束 · 执行失败" else if (self.process.?.exit_code == 0) "已完成 · 记录已封存" else "前台已结束 · 记录已封存",
-            .interval_recorded => if (self.recording_failed) "记录保存失败" else if (!self.intervalRecorded()) "观测片段保存待核实" else if (self.process.?.signal != null or (self.process.?.exit_code != null and self.process.?.exit_code.? != 0)) "前台已结束 · 执行失败" else "前台已结束 · 观测片段已保存",
+            .process_finished, .sealed, .interval_recorded, .recording_degraded => "执行状态待核实",
+            .output_draining, .recording_sealing => "正在处理执行结果",
             .cancelled_unsent => "未派发 · 已取消",
             .handed_off => "输入权已交给用户",
             .outcome_unknown => "结果待核实",
-            .recording_degraded => "记录保存失败",
         };
+    }
+    pub fn outputWarning(self: Projection) ?[]const u8 {
+        if (self.process) |process| if (process.background_jobs) return "检测到后台任务，前台命令结束后仍可能继续运行。";
+        if (self.output_scope != .session_interval) return null;
+        if (self.output_attribution == .concurrent_observed) return "检测到其他程序可能写入终端，输出可能包含其他程序的内容。";
+        const reason = self.output_attribution_reason orelse return null;
+        if (std.mem.eql(u8, reason, "BackgroundJobsObserved")) return "检测到后台任务，前台命令结束后仍可能继续运行。";
+        if (std.mem.eql(u8, reason, "OutputObservationDeadline")) return "未能确认输出来源，请结合原终端核实结果。";
+        if (std.mem.eql(u8, reason, "BackgroundJobsUnknown")) return "未能确认后台任务状态，请查看原终端。";
+        // Generic PTY capability limits belong in details. In particular,
+        // background_jobs_unknown alone is set for ordinary SSH executions.
+        return null;
     }
     pub fn clone(self: Projection, allocator: std.mem.Allocator) !Projection {
         var copy = self;
@@ -324,7 +367,7 @@ test "execution interval projection preserves saved observation attribution and 
         try std.testing.expectEqual(.session_interval, result.output_scope);
         try std.testing.expectEqual(attribution, result.output_attribution);
         try std.testing.expectEqualStrings("BackgroundJobsObserved", result.output_attribution_reason.?);
-        try std.testing.expectEqualStrings("前台已结束 · 执行失败", result.statusLabel());
+        try std.testing.expectEqualStrings("命令执行失败", result.statusLabel());
         try std.testing.expectEqual(@as(?u8, 7), result.process.?.exit_code);
         try std.testing.expectEqualStrings("OBSERVED_PTY_BYTES", result.terminal_output);
         try std.testing.expect(result.actionTarget() != null and !result.canStop() and !result.canTakeover());
@@ -337,7 +380,7 @@ test "execution interval projection preserves saved observation attribution and 
         failed_recording.recording_failed = true;
         failed_recording.interval_saved = false;
         try std.testing.expect(!failed_recording.intervalRecorded());
-        try std.testing.expectEqualStrings("记录保存失败", failed_recording.statusLabel());
+        try std.testing.expectEqualStrings("命令执行失败", failed_recording.statusLabel());
         try std.testing.expectEqual(@as(?u8, 7), failed_recording.process.?.exit_code);
         var disconnected = result;
         disconnected.state = .outcome_unknown;
@@ -398,7 +441,7 @@ test "execution projection preserves shell report source and never calls a termi
     try std.testing.expectEqualStrings("", written.terminal_output);
 }
 
-test "execution interval projection never upgrades missing saved evidence or user takeover into completion" {
+test "execution interval projection keeps command completion independent of recording and user takeover" {
     var result: Projection = .{
         .conversation_id = .generate(),
         .task_id = .generate(),
@@ -417,10 +460,10 @@ test "execution interval projection never upgrades missing saved evidence or use
     result.recording_id = .generate();
     result.recording_settled = true;
     try std.testing.expect(!result.intervalRecorded());
-    try std.testing.expectEqualStrings("观测片段保存待核实", result.statusLabel());
+    try std.testing.expectEqualStrings("命令已结束", result.statusLabel());
     result.interval_saved = true;
     try std.testing.expect(result.intervalRecorded());
-    try std.testing.expectEqualStrings("前台已结束 · 观测片段已保存", result.statusLabel());
+    try std.testing.expectEqualStrings("命令已结束", result.statusLabel());
     result.output_scope = .exact;
     try std.testing.expect(!result.intervalRecorded());
 }
@@ -483,7 +526,7 @@ test "execution interval projection validates typed recovered journal receipt wi
     try std.testing.expect(recovered.target == null and recovered.actionTarget() == null and !recovered.canStop() and !recovered.canTakeover());
     record.execution_receipt.?.process.?.exit_code = 7;
     const failed = (try parse(a, "host.get_execution", "{}", .succeeded, call, try Fixture.body(a, record))).?;
-    try std.testing.expectEqualStrings("前台已结束 · 执行失败", failed.statusLabel());
+    try std.testing.expectEqualStrings("命令执行失败", failed.statusLabel());
     try std.testing.expectEqual(@as(?u8, 7), failed.process.?.exit_code);
     var exact = record;
     exact.execution_receipt.?.output_scope = .exact;
@@ -515,4 +558,57 @@ test "execution interval projection validates typed recovered journal receipt wi
     const snapshot_first = (try parse(a, "host.get_execution", "{}", .succeeded, call, "{\"snapshot\":{\"state\":\"running\",\"output_scope\":\"session_interval\"},\"execution_receipt\":{\"sealed\":true}}")).?;
     try std.testing.expectEqual(terminal.State.running, snapshot_first.state.?);
     try std.testing.expectEqual(.session_interval, snapshot_first.output_scope);
+}
+
+test "execution interval projection separates real uncertainty from generic PTY limits" {
+    var result: Projection = .{
+        .conversation_id = .generate(),
+        .task_id = .generate(),
+        .call_status = .succeeded,
+        .state = .interval_recorded,
+        .output_scope = .session_interval,
+        .process = .{ .foreground_finished = true, .exit_code = 0, .background_jobs_unknown = true },
+        .completion_source = .shell_reported,
+        .output_attribution_reason = "OutputProcessIdentityUnknown",
+    };
+    try std.testing.expectEqualStrings("命令已结束", result.statusLabel());
+    try std.testing.expect(result.outputWarning() == null);
+    result.output_attribution = .no_concurrent_owner_observed;
+    try std.testing.expect(result.outputWarning() == null);
+    result.output_attribution = .concurrent_observed;
+    try std.testing.expectEqualStrings("检测到其他程序可能写入终端，输出可能包含其他程序的内容。", result.outputWarning().?);
+    result.output_attribution = .unverified;
+    result.output_attribution_reason = "OutputObservationDeadline";
+    try std.testing.expect(result.outputWarning() != null);
+    result.output_attribution_reason = "BackgroundJobsUnknown";
+    try std.testing.expect(result.outputWarning() != null);
+    result.output_attribution_reason = null;
+    result.process.?.background_jobs = true;
+    try std.testing.expectEqualStrings("检测到后台任务，前台命令结束后仍可能继续运行。", result.outputWarning().?);
+    result.recording_failed = true;
+    result.state = .recording_degraded;
+    try std.testing.expectEqualStrings("命令已结束", result.statusLabel());
+    result.process.?.exit_code = null;
+    try std.testing.expectEqualStrings("命令已结束 · 退出状态未知", result.statusLabel());
+    result.process.?.exit_code = 0;
+    result.process.?.signal = 15;
+    try std.testing.expectEqualStrings("命令执行失败", result.statusLabel());
+    result.process = null;
+    try std.testing.expectEqualStrings("执行状态待核实", result.statusLabel());
+}
+
+test "efficiency model projection preserves outcome evidence without mutating original receipt" {
+    const a = std.testing.allocator;
+    const original = "{\"execution_ref\":\"x1:original\",\"output\":\"observed\",\"truncated\":false,\"snapshot\":{\"state\":\"running\",\"completion_source\":\"shell_reported\",\"remote_effect_unknown\":true,\"output_scope\":\"session_interval\",\"local_released\":false,\"submit_sequence\":100,\"input_receipt\":{\"input_sequence\":9,\"stage\":\"consumed\"},\"grant\":{\"task\":7}}}";
+    const compact = try modelContent(a, "host.get_execution", original);
+    defer a.free(compact);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, compact, .{});
+    defer parsed.deinit();
+    const snapshot = parsed.value.object.get("snapshot").?.object;
+    try std.testing.expect(snapshot.get("remote_effect_unknown").?.bool);
+    try std.testing.expect(snapshot.get("has_input_grant").?.bool);
+    try std.testing.expectEqualStrings("consumed", snapshot.get("input_receipt").?.object.get("stage").?.string);
+    try std.testing.expect(snapshot.get("grant") == null and snapshot.get("submit_sequence") == null);
+    try std.testing.expectEqualStrings("shell_reported", snapshot.get("completion_source").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, original, "submit_sequence") != null);
 }

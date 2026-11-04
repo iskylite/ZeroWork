@@ -1,10 +1,27 @@
 //! Global appearance regression checks on retained, real production views.
+comptime {
+    _ = @import("material_performance_tests.zig");
+}
 const std = @import("std");
 const ui = @import("ui");
 const theme = @import("ui/app_theme.zig");
 const publication = @import("ui/shell_styles.zig").ThemePublication;
 const Close = @import("ui/local_close_view.zig");
 const Transfer = @import("ui/transfer_panel.zig");
+
+test "material snapshot ignores content clipped by a collapsed accordion" {
+    const w = try Window.init();
+    defer w.deinit();
+    const clip = try ui.box(w.cx, .{ .width = .{ .px = 300 }, .height = .{ .px = 0 }, .overflow_hidden = true }, .{});
+    const child = try ui.box(w.cx, .{ .width = .{ .px = 200 }, .height = .{ .px = 60 } }, .{});
+    try clip.appendChild(w.cx.allocator, child);
+    try w.cx.root.?.appendChild(w.cx.allocator, clip);
+    w.frame();
+    try std.testing.expect(@import("ui/material_geometry.zig").snapshot(w.cx, child) == null);
+    clip.setStyle(w.cx.allocator, .height, .{ .px = 60 });
+    w.frame();
+    try std.testing.expect(@import("ui/material_geometry.zig").snapshot(w.cx, child) != null);
+}
 
 test "floating material follows portaled owners rather than widget kinds" {
     const previous = theme.currentName();
@@ -24,12 +41,14 @@ test "floating material follows portaled owners rather than widget kinds" {
     menu.chrome.setBorderColor(ui.Color.WHITE);
     try shell.appendChild(w.cx.allocator, menu.wrapper);
     const independent = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .enter_transition = .none, .exit_transition = .none, .width = 220 }).mount(w.scope, w.cx);
+    independent.wrapper.setStyleInline(w.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 1000 }, .top = .{ .px = 100 } } });
     try w.cx.root.?.appendChild(w.cx.allocator, independent.wrapper);
     const inner_card = try ui.box(w.cx, .{ .background = theme.popupInset(), .width = .fill(), .height = .{ .px = 32 } }, .{});
     try menu.content.appendChild(w.cx.allocator, inner_card);
     const hint = try ui.widgets.Tooltip(.{ .text = "Model metadata", .open = open }).mount(w.scope, w.cx);
     try inner_card.appendChild(w.cx.allocator, hint.wrapper);
     const root_hint = try ui.widgets.Tooltip(.{ .text = "Workspace metadata", .open = open }).mount(w.scope, w.cx);
+    root_hint.wrapper.setStyleInline(w.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 1000 }, .top = .{ .px = 650 } } });
     try w.cx.root.?.appendChild(w.cx.allocator, root_hint.wrapper);
     for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
         for ([_]f32{ 0, 25, 75, 100 }) |t| {
@@ -44,8 +63,8 @@ test "floating material follows portaled owners rather than widget kinds" {
             try std.testing.expectEqual(theme.layerBackground(1), independent.chrome.getBackground());
             try std.testing.expectEqual(ui.Color.TRANSPARENT, menu.chrome.style.border.color);
             try std.testing.expectEqual(@as(f32, 0), menu.chrome.style.outline().?.width);
-            try std.testing.expect(menu.chrome.getBackground().a > shell.getBackground().a);
-            try std.testing.expect(hint.content.getBackground().a > menu.chrome.getBackground().a);
+            try std.testing.expect(menu.chrome.getBackground().a >= shell.getBackground().a);
+            try std.testing.expect(hint.content.getBackground().a >= menu.chrome.getBackground().a);
             try std.testing.expectEqual(@as(f32, 12), hint.content.style.glass_params().?.backdrop_blur);
         }
     }
@@ -58,6 +77,7 @@ test "floating material follows portaled owners rather than widget kinds" {
     try std.testing.expectEqual(theme.layerBackground(3), hint.content.getBackground());
     // Reparenting the same widgets changes material, without remount or type change.
     w.cx.detachChild(shell, menu.wrapper);
+    menu.wrapper.setStyleInline(w.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 800 }, .top = .{ .px = 400 } } });
     try w.cx.root.?.appendChild(w.cx.allocator, menu.wrapper);
     w.frame();
     try std.testing.expectEqual(theme.layerBackground(1), menu.chrome.getBackground());
@@ -73,6 +93,56 @@ test "floating material follows portaled owners rather than widget kinds" {
     w.frame();
     try std.testing.expectEqual(theme.layerBackground(1), independent.chrome.getBackground());
     try std.testing.expectEqual(theme.layerBackground(2), hint.content.getBackground());
+}
+
+test "actual material cards count painted parents while transparent layout wrappers add no depth" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.sauber);
+    _ = theme.setMaterialParameters(50, 24);
+    const w = try Window.init();
+    defer w.deinit();
+    const materials = @import("ui/layer_materials.zig");
+    try materials.Policy.mount(w.cx, w.scope);
+    const group = try ui.box(w.cx, @import("ui/sidebar_styles.zig").groupCard(), .{});
+    materials.card(group, .surface_2);
+    try w.cx.root.?.appendChild(w.cx.allocator, group);
+    const assistant = try ui.boxStyled(w.cx, @import("ui/ai_assistant_styles.zig").panel, .{});
+    try w.cx.root.?.appendChild(w.cx.allocator, assistant);
+    const layout = try ui.box(w.cx, .{}, .{});
+    try assistant.appendChild(w.cx.allocator, layout);
+    const result = try ui.boxStyled(w.cx, @import("ui/ai_tool_results_styles.zig").card, .{});
+    materials.card(result, .action);
+    try layout.appendChild(w.cx.allocator, result);
+    const output = try ui.box(w.cx, .{ .background = theme.popupInset() }, .{});
+    materials.card(output, .control);
+    try result.appendChild(w.cx.allocator, output);
+    const open = try w.scope.createSignal(bool, true);
+    const hint = try ui.widgets.Tooltip(.{ .text = "Output detail", .open = open }).mount(w.scope, w.cx);
+    try output.appendChild(w.cx.allocator, hint.wrapper);
+    w.frame();
+    try std.testing.expectEqual(@as(u8, 51), group.getBackground().a);
+    try std.testing.expectEqual(group.getBackground().a, assistant.getBackground().a);
+    try std.testing.expectEqual(@as(u8, 64), result.getBackground().a);
+    try std.testing.expectEqual(@as(u8, 85), output.getBackground().a);
+    try std.testing.expectEqual(@as(u8, 128), hint.content.getBackground().a);
+    try std.testing.expectEqual(@as(u8, 0), layout.getBackground().a);
+    theme.select(.dark);
+    w.publish.publish(w.cx, theme.widgetTheme(.dark));
+    w.frame();
+    try std.testing.expectEqual(theme.current().surface_2.withAlpha(theme.layerAlpha(1)), group.getBackground());
+    try std.testing.expectEqual(theme.popupAction().withAlpha(theme.layerAlpha(2)), result.getBackground());
+    try std.testing.expectEqual(theme.popupInset().withAlpha(theme.layerAlpha(3)), output.getBackground());
+    _ = theme.setMaterialParameters(100, 0);
+    const file_card = try ui.boxStyled(w.cx, @import("ui/file_workspace_styles.zig").card, .{});
+    materials.card(file_card, .surface_1);
+    try w.cx.root.?.appendChild(w.cx.allocator, file_card);
+    w.frame();
+    try std.testing.expectEqual(@as(u8, 51), file_card.getBackground().a);
 }
 
 const Window = struct {
@@ -351,4 +421,99 @@ test "retained host approval paint matches every builtin without replacing its r
         try std.testing.expectEqual(request, retained.view.sequence);
         try std.testing.expectEqual(identity, retained.view.url);
     }
+}
+
+fn materialPatchTransmission(root: *ui.Node, x: f32, y: f32, transmission: *f32) usize {
+    var count: usize = 0;
+    for (root.children.items) |patch| {
+        if (patch.style.display == .none) continue;
+        const r = patch.globalRect();
+        if (x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h) {
+            transmission.* *= 1 - @as(f32, @floatFromInt(patch.getBackground().a)) / 255;
+            count += 1;
+        }
+    }
+    return count;
+}
+
+test "material portal crossing a rounded owner reaches one final opacity inside and outside" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.sauber);
+    _ = theme.setMaterialParameters(50, 0);
+    const w = try Window.init();
+    defer w.deinit();
+    const materials = @import("ui/layer_materials.zig");
+    try materials.Policy.mount(w.cx, w.scope);
+    const parent = try ui.box(w.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 200 }, .top = .{ .px = 200 } }, .width = .{ .px = 240 }, .height = .{ .px = 200 }, .border = .{ .radius = 24 }, .background = theme.current().surface_2 }, .{});
+    materials.card(parent, .surface_2);
+    try w.cx.root.?.appendChild(w.cx.allocator, parent);
+    const popup = try ui.box(w.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = -20 }, .top = .{ .px = -20 } }, .width = .{ .px = 340 }, .height = .{ .px = 140 }, .background = theme.popupAction(), .border = .{ .radius = 12 } }, .{});
+    materials.card(popup, .action);
+    try parent.appendChild(w.cx.allocator, popup);
+    w.frame();
+    const compensation = popup.children.items[0];
+    try std.testing.expectEqualStrings("appearance.material.compensation", compensation.meta.ownership.meta.test_id.?);
+    _ = w.cx.render();
+    const Case = struct { x: f32, y: f32, parent_covered: bool };
+    for ([_]Case{
+        .{ .x = 300.25, .y = 250.25, .parent_covered = true },
+        .{ .x = 480.25, .y = 250.25, .parent_covered = false },
+        .{ .x = 202.25, .y = 202.25, .parent_covered = false },
+    }) |point| {
+        var transmission: f32 = 0.5;
+        if (point.parent_covered) transmission *= 1 - @as(f32, @floatFromInt(parent.getBackground().a)) / 255;
+        transmission *= 1 - @as(f32, @floatFromInt(popup.getBackground().a)) / 255;
+        const extra_count = materialPatchTransmission(compensation, point.x, point.y, &transmission);
+        try std.testing.expectEqual(@as(usize, if (point.parent_covered) 0 else 1), extra_count);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.3), transmission, 0.002);
+    }
+    // Moving wholly inside removes correction without remounting foreground.
+    popup.setStyleInline(w.cx.allocator, .{ .inset = .{ .left = .{ .px = 40 }, .top = .{ .px = 40 } }, .width = .{ .px = 100 }, .height = .{ .px = 100 } });
+    w.frame();
+    try std.testing.expectEqual(@as(usize, 0), popup.children.items.len);
+}
+
+test "material overlapping sibling cards preserve one L1 opacity instead of stacking fills" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.sauber);
+    _ = theme.setMaterialParameters(50, 0);
+    const w = try Window.init();
+    defer w.deinit();
+    const materials = @import("ui/layer_materials.zig");
+    try materials.Policy.mount(w.cx, w.scope);
+    const lower = try ui.box(w.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 200 }, .top = .{ .px = 200 } }, .width = .{ .px = 240 }, .height = .{ .px = 200 }, .background = theme.current().surface_2 }, .{});
+    materials.card(lower, .surface_2);
+    try w.cx.root.?.appendChild(w.cx.allocator, lower);
+    const upper = try ui.box(w.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 300 }, .top = .{ .px = 180 } }, .width = .{ .px = 240 }, .height = .{ .px = 180 }, .background = theme.popupAction() }, .{});
+    materials.card(upper, .action);
+    try w.cx.root.?.appendChild(w.cx.allocator, upper);
+    w.frame();
+    try std.testing.expectEqual(@as(u8, 0), upper.getBackground().a);
+    const compensation = upper.children.items[0];
+    _ = w.cx.render();
+    for ([_]f32{ 350.25, 500.25 }) |x| {
+        var transmission: f32 = 0.5;
+        if (x < 440) transmission *= 1 - @as(f32, @floatFromInt(lower.getBackground().a)) / 255;
+        _ = materialPatchTransmission(compensation, x, 250.25, &transmission);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.4), transmission, 0.002);
+    }
+    // Bringing an existing card forward changes painting order without
+    // changing topology; the material index must follow the renderer.
+    lower.setStyle(w.cx.allocator, .z_index, 5);
+    w.frame();
+    try std.testing.expectEqual(theme.layerAlpha(1), upper.getBackground().a);
+    try std.testing.expectEqual(@as(u8, 0), lower.getBackground().a);
+    _ = theme.setMaterialParameters(0, 0);
+    w.frame();
+    try std.testing.expectEqual(@as(u8, 255), upper.getBackground().a);
 }

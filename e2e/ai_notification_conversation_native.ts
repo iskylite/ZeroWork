@@ -1,4 +1,6 @@
-/** Exact original-dialog routing through real native AI and notification UI. */
+/** Exact original-dialog routing through real native AI and notification UI.
+ * Pass --layers-only to check notification visibility and clicks over the assistant.
+ */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
@@ -42,7 +44,18 @@ try{
  await click('ai.session.new');await visible('ai.prompt');await click('ai.prompt');await h.type_('另一段对话的独立草稿');assert.equal((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
  const call=pending;pending=null;
  call.res.end(frame({tool_calls:[{index:0,id:'reminder-approval',type:'function',function:{name:'run_command',arguments:JSON.stringify({session_ids:[call.id],command:`mkdir '${join(iso,'should-not-be-created')}'`})}}]})+'data: [DONE]\n\n');
- await visible('notifications.unread');await click('toolbar.notifications');await visible('notifications.history.action');await capture('01-background-dialog-reminder');
+ await visible('notifications.unread');
+ for(const [width,height] of [[1440,900],[860,480]]){
+  await h.resizeWindow(width,height);
+  const toast=await visible('notifications.toast.0'),assistant=await visible('ai.panel');
+  assert(toast.rect.x<assistant.rect.x+assistant.rect.w&&toast.rect.x+toast.rect.w>assistant.rect.x&&toast.rect.y<assistant.rect.y+assistant.rect.h&&toast.rect.y+toast.rect.h>assistant.rect.y,'notification actually overlaps the maximized assistant');
+  await capture(`notification-above-assistant-${width}`);
+ }
+ await click('notifications.dismiss.0');await absent('notifications.toast.0');
+ assert((await visible('ai.panel')).rect.w>0,'dismiss reaches the notification while the assistant stays open');
+ report.checks.push('Global notification remains visible over the maximized assistant at 1440x900 and 860x480; its overlapping dismiss button works');
+ if(!process.argv.includes('--layers-only')){
+ await h.resizeWindow(1440,900);await click('toolbar.notifications');await visible('notifications.history.action');await capture('01-background-dialog-reminder');
  await click('notifications.history.action');await visible('ai.approval');await absent('notifications.history');await capture('02-exact-origin-approval');
  assert.notEqual((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
  await click('ai.approval.reject');await absent('ai.approval');await visible('ai.turn.complete');
@@ -55,6 +68,7 @@ try{
  assert.equal((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
  assert.equal(requests,3);await assert.rejects(stat(join(iso,'should-not-be-created')),{code:'ENOENT'});
  report.checks.push('Background approval reminder selects the original conversation, not the currently selected dialog','The other conversation retains its exact draft after switching back','Rejected approval returns the correlated tool result; no command is executed');
+ }
  report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);process.exitCode=1;await capture('failure').catch(()=>{});await writeFile(join(out,'failure-tree.json'),JSON.stringify(await h.tree(),null,2)).catch(()=>{});}
 finally{pending?.res.destroy();if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await ended;server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));await rm(iso,{recursive:true,force:true});}

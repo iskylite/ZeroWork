@@ -30,6 +30,8 @@ pub const View = struct {
     open: *ui.Signal(bool),
     content: *ui.Node,
     control: *ui.Node,
+    minimum: *ui.Node = undefined,
+    close_hint: *ui.Signal([]const u8) = undefined,
     control_label: *ui.Signal([]const u8),
     control_style: *ui.Signal(@FieldType(ui.widgets.ControlShellConfig, "style")),
     disabled: *ui.Signal(bool),
@@ -47,7 +49,7 @@ pub const View = struct {
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: @FieldType(View, "hooks")) !*View {
         const self = try cx.allocator.create(View);
-        self.* = .{ .cx = cx, .scope = undefined, .root = undefined, .open = try scope.createSignal(bool, false), .content = undefined, .control = undefined, .control_label = try scope.createText("开启广播", .{}), .control_style = try scope.createSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), S.control(true)), .disabled = try scope.createSignal(bool, false), .control_hover = try scope.createSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), S.controlHover(true)), .hooks = hooks };
+        self.* = .{ .cx = cx, .scope = undefined, .root = undefined, .open = try scope.createSignal(bool, false), .content = undefined, .control = undefined, .control_label = try scope.createText("全部开启", .{}), .control_style = try scope.createSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), S.control(true)), .disabled = try scope.createSignal(bool, false), .control_hover = try scope.createSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), S.controlHover(true)), .hooks = hooks };
         try scope.onCleanup(View, self, cleanup);
         const popup = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top_end, .open = self.open, .width = S.width, .max_height = S.maximum_height, .offset = .{ .static = @as(f32, 6) }, .constrain_width_to_viewport = true, .viewport_padding = 8, .on_open_change = cx.on(View, self, changed), .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } } }).mount(scope, cx);
         self.scope = popup.scope;
@@ -61,7 +63,9 @@ pub const View = struct {
         try head.appendChild(cx.allocator, try ui.spacer(cx));
         const close = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .variant = .ghost, .a11y_label = "收起广播信息", .base_style = try S.theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, self.scope, S.close, .{}), .hover_style = try S.theme.paintSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), cx, self.scope, S.controlHover, .{false}), .on_click = cx.on(View, self, hide) }).mount(self.scope, cx);
         close.meta.ownership.meta.test_id = "group.broadcast.close";
-        try head.appendChild(cx.allocator, close);
+        self.close_hint = try self.scope.createText("收起广播信息", .{});
+        const close_tip = try @import("control_hint.zig").mount(cx, self.scope, close, self.close_hint, .{ .id = "group.broadcast.close.tooltip", .visible = self.open, .layout = .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 } });
+        try head.appendChild(cx.allocator, close_tip.wrapper);
         try self.root.appendChild(cx.allocator, head);
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(self.scope, cx);
         scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_height = 0 });
@@ -71,7 +75,9 @@ pub const View = struct {
         try self.root.appendChild(cx.allocator, scroll.container);
         const footer = try ui.box(cx, S.row(), .{});
         footer.meta.ownership.meta.test_id = "group.broadcast.footer";
-        const minimum = try ui.textStyled(cx, S.secondaryText, "至少 2 个在线会话");
+        const minimum = try ui.textStyled(cx, S.secondaryText, "没有在线可写会话");
+        self.minimum = minimum;
+        minimum.meta.ownership.meta.test_id = "group.broadcast.requirement";
         minimum.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 16 } });
         try footer.appendChild(cx.allocator, minimum);
         self.control = try ui.widgets.Button(.{ .label = self.control_label, .variant = .primary, .base_style = self.control_style, .hover_style = self.control_hover, .disabled = self.disabled, .on_click = cx.on(View, self, accept) }).mount(self.scope, cx);
@@ -99,10 +105,12 @@ pub const View = struct {
         self.group_id = snapshot.group;
         self.running = snapshot.running;
         self.anchor_id = trigger.id;
-        self.control_label.set(if (snapshot.running) "关闭广播" else "开启广播");
+        self.control_label.set(if (snapshot.running) "全部关闭" else "全部开启");
         self.control_style.set(S.control(true));
         self.control_hover.set(S.controlHover(true));
         self.disabled.set(!snapshot.running and !snapshot.can_enable);
+        try self.minimum.setTextContent(self.cx.allocator, if (!snapshot.running and !snapshot.can_enable) "没有在线可写会话" else "");
+        self.close_hint.set(if (snapshot.running) "收起广播信息，广播继续" else "收起广播信息");
         if (!self.open.peek()) self.requested = true;
         self.root.markLayoutDirty();
         self.cx.requestRedraw();
@@ -170,7 +178,7 @@ pub const View = struct {
             row.meta.ownership.meta.test_id = try std.fmt.allocPrint(self.current.?.arena.allocator(), "group.broadcast.member.{d}", .{member.id});
             const action = try scope.createState(Selection, .{ .view = self, .group = snapshot.group, .owner = member.owner, .id = member.id });
             const selected = try scope.createSignal(bool, member.selected);
-            const check = try ui.widgets.Checkbox(.{ .checked = ui.split(selected, self.cx.on(Selection, action, Selection.changed)), .disabled = member.source or !member.available, .box_size = @as(f32, 14) }).mount(scope, self.cx);
+            const check = try ui.widgets.Checkbox(.{ .checked = ui.split(selected, self.cx.on(Selection, action, Selection.changed)), .disabled = !member.available, .box_size = @as(f32, 14) }).mount(scope, self.cx);
             check.meta.ownership.meta.test_id = try std.fmt.allocPrint(self.current.?.arena.allocator(), "group.broadcast.member.{d}.select", .{member.id});
             if (check.behavior.interaction.a11y) |*attrs| attrs.label = member.name;
             try row.appendChild(self.cx.allocator, check);
@@ -185,7 +193,7 @@ pub const View = struct {
             endpoint.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 14 }, .min_width = 0 });
             try identity.appendChild(self.cx.allocator, endpoint);
             try row.appendChild(self.cx.allocator, identity);
-            const state = if (!member.available) member.unavailable_reason else if (member.source) "当前输入" else if (member.selected) "参与" else "未参与";
+            const state = if (!member.available) member.unavailable_reason else if (member.source) (if (member.selected) "当前 · 参与" else "当前 · 未参与") else if (member.selected) "参与" else "未参与";
             try row.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.memberState, state));
             try members.appendChild(self.cx.allocator, row);
             if (self.focus_member == member.id) {
@@ -195,7 +203,7 @@ pub const View = struct {
         }
         try self.content.appendChild(self.cx.allocator, members);
         const note_box = try ui.boxStyled(self.cx, S.notePaint, .{});
-        const note = try ui.textStyled(self.cx, S.noteText, "在当前输入会话发送的 Shell 输入会同步到参与会话。内置指令不广播；新增或重连成员需重新开启确认。");
+        const note = try ui.textStyled(self.cx, S.noteText, "已开启的会话之间同步 Shell 输入，内置指令不广播。卡片按钮独立控制自身，底栏可批量控制；新增或重连会话可直接单独开启。");
         note.setStyleInline(self.cx.allocator, .{ .width = .fill() });
         try note_box.appendChild(self.cx.allocator, note);
         try self.content.appendChild(self.cx.allocator, note_box);

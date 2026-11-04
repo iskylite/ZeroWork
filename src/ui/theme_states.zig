@@ -66,6 +66,34 @@ pub const Palette = struct {
     search_current_ink: ui.Color,
 };
 
+/// Inline regions are L1 tonal fills above the shared L0 canvas. Their RGB
+/// semantics stay intact; only their own background alpha follows the role.
+pub const material_roles = .{
+    .{ "control", "well" },
+    .{ "action", "surface_2" },
+    .{ "disabled", "hover" },
+    .{ "hover", "hover" },
+    .{ "pressed", "well" },
+    .{ "focus", "tab_on" },
+    .{ "selected", "tab_on" },
+    .{ "selected_hover", "well" },
+    .{ "drop_target", "well" },
+    .{ "tag", "well" },
+    .{ "tag_ok", "well" },
+    .{ "tag_warn", "well" },
+    .{ "tag_danger", "well" },
+    .{ "error_focus", "well" },
+    .{ "feedback_info", "well" },
+    .{ "feedback_ok", "well" },
+    .{ "feedback_warn", "well" },
+    .{ "feedback_danger", "well" },
+};
+pub fn materialize(base: Palette, colors: anytype) Palette {
+    var value = base;
+    inline for (material_roles) |mapping| @field(value, mapping[0]).a = @field(colors, mapping[1]).a;
+    return value;
+}
+
 pub fn derive(c: anytype) Palette {
     const overlay = c.overlay.withAlpha(255);
     const well = c.well.withAlpha(255);

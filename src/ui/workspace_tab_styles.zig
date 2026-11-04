@@ -6,6 +6,13 @@ pub const gap: f32 = 4;
 pub const title_font: f32 = 12;
 pub const title_weight: u16 = 500;
 pub const attention_border_width: f32 = 0;
+pub const attention_duration_ms: f64 = 480;
+pub fn attentionOffset(elapsed_ms: f64) f32 {
+    const phase = @max(0, elapsed_ms);
+    if (phase >= attention_duration_ms) return 0;
+    const amplitude: f64 = if (phase < 240) 3 else 1.5;
+    return @floatCast(-amplitude * @sin(@mod(phase, 240) / 240 * @import("std").math.pi));
+}
 pub const picker_width: f32 = 420;
 pub const picker_height: f32 = 270;
 pub const picker_padding: f32 = 14;
@@ -19,7 +26,7 @@ pub fn strip() ui.BoxStyle {
 }
 pub fn tab(width: f32, active: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = if (active) .{ .blur = if (theme.currentName() == .dark) 8 else 6, .offset_y = if (theme.currentName() == .dark) 2 else 1, .color = c.shadow.withAlpha(if (theme.currentName() == .dark) 89 else 18) } else .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.tab_on else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 9 }, .flex_shrink = 0 };
+    return .{ .cursor = .grab, .shadow = if (active) .{ .blur = if (theme.currentName() == .dark) 8 else 6, .offset_y = if (theme.currentName() == .dark) 2 else 1, .color = c.shadow.withAlpha(if (theme.currentName() == .dark) 89 else 18) } else .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.tab_on else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn underline(width: f32) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .top = .{ .px = height - 5 } }, .width = .{ .px = width - 24 }, .height = .{ .px = 2 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };

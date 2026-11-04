@@ -178,6 +178,29 @@ const Fixture = struct {
             if (sequence == 31) event.* = .{ .sequence = sequence, .at_ms = 3000, .stage = .redfish_discovery, .kind = .diagnostic, .resource = .manager, .http_status = 404, .code = .mapping_manager_document_rejected, .validity = .partial_with_error };
             if (sequence >= 32) event.* = .{ .sequence = sequence, .at_ms = (sequence - 1) * 100, .stage = .redfish_discovery, .kind = .diagnostic, .resource = if (sequence > 32) .system else .systems_collection, .http_status = 404, .code = if (sequence > 32) .readonly_member_rejected else .readonly_collection_rejected, .validity = .partial_with_error, .error_code = if (sequence > 32) "LOCAL_GROWN_READONLY_REJECTED" else "LOCAL_FIXTURE_READONLY_REJECTED" };
         }
+        // Synthetic resource errors exercise the production log formatter.
+        for (&result.events) |*event| {
+            if (event.sequence == 30) {
+                event.code = .resource_fields_available;
+                event.count = null;
+                event.context = .{ .method = .get, .path = .system, .resource_path = console.progress.resourcePath("/redfish/v1/Systems/node-B"), .phase = .response_validate, .http_status = 200, .response_errors = console.progress.ResponseErrors.init("Base.1.19.InternalError") };
+            }
+            if (event.sequence < 31) continue;
+            if (event.sequence >= 32) {
+                event.code = .resource_response_rejected;
+                event.resource = .other_redfish;
+                event.validity = .unavailable;
+            }
+            event.context = .{ .method = .get, .path = .other_redfish, .resource_path = console.progress.resourcePath(if (event.sequence == 31) "/redfish/v1/Managers/bmc-1" else "/redfish/v1/Systems/node-B/BootOptions/Boot0001"), .phase = .response_validate, .http_status = 404, .response_errors = console.progress.ResponseErrors.init("Base.1.19.ResourceNotFound") };
+            if (event.sequence == 31) {
+                event.code = .manager_system_link_missing;
+                event.resource = .system;
+                event.validity = .unavailable;
+                event.context.?.resource_path = console.progress.resourcePath("/redfish/v1/Systems/system");
+                event.context.?.source_path = console.progress.resourcePath("/redfish/v1/Managers/bmc-1");
+                event.context.?.source_property = console.progress.LogText(128).init("/Links/ManagerForServers");
+            }
+        }
         if (self.progress_fixture) |fixture| {
             result.revision = fixture.revision;
             result.event_count = if (fixture.revision == 0) 0 else @min(fixture.event_count orelse result.event_count, console.progress.capacity);
@@ -521,6 +544,19 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
         const parsed = std.json.parseFromSlice(struct { state: State }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid fixture state\"}";
         defer parsed.deinit();
         self.applyState(parsed.value.state) catch return "{\"error\":\"fixture transition failed\"}";
+        return "{\"ok\":true}";
+    }
+    if (std.mem.eql(u8, path, "/app/bmc-fixture/frame")) {
+        const parsed = std.json.parseFromSlice(struct { red: u8, green: u8, blue: u8 }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid fixture frame\"}";
+        defer parsed.deinit();
+        const pixels = self.cx.allocator.alloc(u8, @as(usize, self.fb.width) * self.fb.height * 4) catch return "{\"error\":\"frame allocation failed\"}";
+        defer self.cx.allocator.free(pixels);
+        for (0..pixels.len / 4) |i| {
+            pixels[i * 4 ..][0..4].* = .{ parsed.value.red, parsed.value.green, parsed.value.blue, 255 };
+        }
+        _ = self.fb.publishComplete(self.fb.width, self.fb.height, pixels, 1) catch return "{\"error\":\"frame publication failed\"}";
+        if (!(self.fb.publishToSink(&self.sink) catch false)) return "{\"error\":\"frame submission failed\"}";
+        self.cx.requestRedraw();
         return "{\"ok\":true}";
     }
     if (std.mem.eql(u8, path, "/app/bmc-fixture/focus")) {

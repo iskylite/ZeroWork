@@ -38,6 +38,21 @@ pub fn keyForType(terminal: c.GhosttyTerminal, event: input.KeyEvent, allocator:
     if (c.ghostty_key_encoder_encode(encoder, native, buffer.ptr, buffer.len, &count) != c.GHOSTTY_SUCCESS) return error.InputEncodingFailed;
     var kitty_flags: u8 = 0;
     _ = c.ghostty_terminal_get(terminal, c.GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, @ptrCast(&kitty_flags));
+    // macOS word navigation is an app default, not a libghostty-vt binding.
+    // Rewrite only the plain Alt-arrow legacy sequence after mode-aware
+    // encoding, so composition, releases and negotiated Kitty input survive.
+    if (kitty_flags == 0 and event.modifiers.alt and !event.modifiers.shift and !event.modifiers.control and !event.modifiers.super and !event.consumed_modifiers.alt) {
+        const arrow: ?[]const u8 = switch (event.key) {
+            .arrow_left => "\x1b[1;3D",
+            .arrow_right => "\x1b[1;3C",
+            else => null,
+        };
+        if (arrow) |sequence| if (std.mem.eql(u8, buffer[0..count], sequence)) {
+            buffer[0] = 0x1b;
+            buffer[1] = if (event.key == .arrow_left) 'b' else 'f';
+            count = 2;
+        };
+    }
     if (count > 0 and kitty_flags == 0) if (@import("terminal_type.zig").legacyFunctionKey(terminal_type, event)) |bytes| {
         @memcpy(buffer[0..bytes.len], bytes);
         count = bytes.len;
