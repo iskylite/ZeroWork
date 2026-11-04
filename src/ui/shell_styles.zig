@@ -74,8 +74,55 @@ pub fn status(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn settingsBackdrop(_: *const ui.ThemeTokens) ui.BoxStyle {
     const color = if (theme.currentName() == .dark) ui.Color.BLACK else theme.baseColors().overlay;
-    return .{ .background = color.withAlpha(102) };
+    return .{
+        .position = .absolute,
+        .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } },
+        .width = .fill(),
+        .height = .fill(),
+        .z_index = 400,
+        .hit_behavior = .@"opaque",
+        .hit_roles = .{ .pointer = true, .scroll = true },
+        .direction = .column,
+        .align_items = .center,
+        .justify = .center,
+        .background = color.withAlpha(102),
+    };
 }
+
+test "light settings surfaces stay light across transparency and retained theme changes" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.dark);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const publication = try cx.bindState(ThemePublication, .{});
+    publication.publish(cx, theme.widgetTheme(.dark));
+    const backdrop = try ui.boxStyled(cx, settingsBackdrop, .{});
+    cx.root = backdrop;
+    const id = backdrop.id;
+    for ([_]theme.Name{ .light, .sauber, .dark }) |name| {
+        for ([_]f32{ 0, 50, 75, 100 }) |transparency| {
+            theme.select(name);
+            _ = theme.setMaterialParameters(transparency, 0);
+            publication.publish(cx, theme.widgetTheme(name));
+            try std.testing.expectEqual(id, backdrop.id);
+            try std.testing.expectEqual(@as(u8, 102), backdrop.getBackground().a);
+            if (name == .dark) {
+                try std.testing.expectEqual(ui.Color.BLACK.withAlpha(102), backdrop.getBackground());
+            } else {
+                try std.testing.expectEqual(theme.baseColors().overlay.withAlpha(102), backdrop.getBackground());
+                const card = theme.settingsCard();
+                try std.testing.expect(card.r > 210 and card.g > 210 and card.b > 210);
+                try std.testing.expectEqual(theme.current().surface_2.a, card.a);
+            }
+        }
+    }
+}
+
 pub fn settingsPanel(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
     return .{ .width = .{ .px = @import("v3_geometry.zig").settings_width }, .height = .{ .px = @import("v3_geometry.zig").settings_height }, .direction = .column, .gap = 0, .padding = .{}, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = c.shadow }, .hit_behavior = .@"opaque", .hit_roles = .{ .pointer = true, .scroll = true } };

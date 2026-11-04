@@ -10838,18 +10838,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try ai_panel.appendChild(cx.allocator, ai_card_box);
 
     // Frozen V3 settings: centered shell, independently scrolling navigation and content.
-    const settings_panel = try ui.boxStyled(cx, shell_styles.settingsBackdrop, ui.BoxStyle{
-        .position = .absolute,
-        .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } },
-        .width = .fill(),
-        .height = .fill(),
-        .z_index = 400,
-        .hit_behavior = .@"opaque",
-        .hit_roles = .{ .pointer = true, .scroll = true },
-        .direction = .column,
-        .align_items = .center,
-        .justify = .center,
-    });
+    const settings_panel = try ui.boxStyled(cx, shell_styles.settingsBackdrop, .{});
     settings_panel.meta.ownership.meta.test_id = "settings.overlay";
     settings_panel.setDisplay(.none);
     const settings_card = try ui.boxStyled(cx, shell_styles.settingsPanel, .{});
