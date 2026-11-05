@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>查看其他会话 · 按需授权</title><link rel="stylesheet" href="../theme-tokens.css?v=d326647094aa">
+<title>查看其他会话 · 按需授权</title><link rel="stylesheet" href="../theme-tokens.css?v=bbe0e3c70eb1">
 <style>
 *{box-sizing:border-box}body{margin:0;background:var(--bg-app);font:12px/18px Inter,-apple-system,BlinkMacSystemFont,sans-serif;color:var(--fg)}
 .assistant{width:min(600px,100%);padding:9px 14px;margin:40px auto 0;background:var(--layer-background,var(--overlay));backdrop-filter:blur(var(--overlay-blur));border-radius:11px}
@@ -12,7 +12,7 @@ button{height:26.5px;min-width:76px;flex:none;padding:4px 8px;border:0;border-ra
 .review{width:min(600px,100%);margin:16px auto;padding:0 14px;font-size:11px;color:var(--muted)}.review button{min-width:0;margin:4px 4px 0 0}.review output{display:block;margin-top:8px}
 </style>
 <body data-theme="dark">
-<div id="app"><main class="assistant"><section class="inventory" id="inventory" data-testid="ai.inventory_grant" hidden>
+<div id="app"><main class="assistant"><section class="inventory ap-card" id="inventory" data-testid="ai.inventory_grant" hidden>
 <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><strong>查看其他会话</strong></header>
 <p class="scope" id="target">工作区中打开的会话与会话组</p>
 <p id="detail">AI 需要查看已打开会话和会话组的名称、连接状态与分组。不会读取终端内容或执行命令。</p>

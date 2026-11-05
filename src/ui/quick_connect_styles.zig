@@ -4,10 +4,9 @@ pub const theme = @import("app_theme.zig");
 pub const width: f32 = 520;
 pub const row_height: f32 = 44;
 pub const row_gap: f32 = 6;
-/// Composite against the popup, independently of wallpaper transparency.
+/// Selection follows the shared state material without replacing its tint.
 pub fn selectedFill() ui.Color {
-    const c = theme.current();
-    return ui.Color.lerp(c.overlay.withAlpha(255), c.accent, if (theme.currentName() == .dark) 0.16 else 0.10);
+    return theme.popupSelection();
 }
 pub fn panel() ui.BoxStyle {
     return .{ .width = .{ .px = width }, .height = .{ .fit = .{} }, .direction = .column, .padding = .{}, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 48, .color = theme.current().shadow }, .overflow = .hidden, .flex_shrink = 0 };

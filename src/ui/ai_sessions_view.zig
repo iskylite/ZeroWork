@@ -2,8 +2,9 @@
 const ui = @import("ui");
 const S = @import("ai_sessions_styles.zig");
 const T = @import("app_theme.zig");
-pub const Entry = struct { id: u64, title: []const u8, owner: []const u8, detail: []const u8 = "", active: bool = false, phase: @import("../ai/assistant_store.zig").Phase = .idle };
-pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, u64) void, request_close: *const fn (*anyopaque, u64) void, remove: *const fn (*anyopaque, u64) void };
+pub const Action = enum { view, locate, restore, copy, copy_use, end, new, more };
+pub const Entry = struct { id: u64, title: []const u8, owner: []const u8, detail: []const u8 = "", active: bool = false, phase: @import("../ai/assistant_store.zig").Phase = .idle, bound: bool = false, ending: bool = false, can_restore: bool = false, can_copy: bool = false, can_remove: bool = true, first_use: bool = false };
+pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, u64) void, request_close: *const fn (*anyopaque, u64) void, remove: *const fn (*anyopaque, u64) void, act: ?*const fn (*anyopaque, u64, Action) void = null, confirmed: ?*const fn (*anyopaque, u64, bool) void = null };
 pub const View = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -24,13 +25,27 @@ pub const View = struct {
     dialog: *ui.Node,
     title_icon: *ui.Node = undefined,
     control_styles: [2]*ui.Signal(ui.BoxStyle),
+    confirmation_title: *ui.Node = undefined,
+    accept_label: *ui.Signal([]const u8) = undefined,
+    accept_disabled: *ui.Signal(bool) = undefined,
+    confirmation_operation: ?u64 = null,
+    history_open: *ui.Signal(bool) = undefined,
+    history_dialog: *ui.Node = undefined,
+    history_title: *ui.Node = undefined,
+    history_status: *ui.Node = undefined,
+    history_body: *ui.Node = undefined,
+    history_scroll: *ui.Node = undefined,
+    history_actions: *ui.Node = undefined,
+    history_scope: ?*ui.Scope = null,
+    history_entry: ?u64 = null,
+
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, anchor: *ui.Node, hooks: Hooks) !*View {
         const open = try scope.createSignal(bool, false);
         const confirmation = try scope.createSignal(bool, false);
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = anchor }, .position = .bottom_start, .offset = .{ .static = 6 }, .width = 440, .max_height = 160, .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8 }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = anchor }, .position = .bottom_start, .offset = .{ .static = 6 }, .width = 440, .max_height = 240, .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8 }).mount(scope, cx);
         popup.wrapper.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 }, .flex_shrink = 0 });
         popup.chrome.setStyleInline(cx.allocator, S.popover());
-        const scroll = try ui.widgets.ScrollArea(.{ .height = 168, .direction = .vertical, .rubber_band_y = false }).mount(popup.scope, cx);
+        const scroll = try ui.widgets.ScrollArea(.{ .height = 240, .direction = .vertical, .rubber_band_y = false }).mount(popup.scope, cx);
         scroll.container.setStyleInline(cx.allocator, S.listSurface());
         scroll.content.setStyleInline(cx.allocator, S.menu());
         scroll.container.meta.ownership.meta.test_id = "ai.sessions.menu";
@@ -47,7 +62,8 @@ pub const View = struct {
         self.title_icon = heading_icon;
         heading_icon.meta.ownership.meta.test_id = "ai.session.close.icon";
         try heading.appendChild(cx.allocator, heading_icon);
-        try heading.appendChild(cx.allocator, try ui.textStyled(cx, titleStyle, "关闭此 AI 会话？"));
+        self.confirmation_title = try ui.textStyled(cx, titleStyle, "删除此 AI 会话？");
+        try heading.appendChild(cx.allocator, self.confirmation_title);
         try modal.body.appendChild(cx.allocator, heading);
         self.detail = try ui.textStyled(cx, detailStyle, "将停止关联的任务、工具和请求。");
         try modal.body.appendChild(cx.allocator, self.detail);
@@ -55,28 +71,87 @@ pub const View = struct {
         const cancel = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .base_style = self.control_styles[0], .on_click = cx.on(View, self, cancelClose) }).mount(scope, cx);
         cancel.meta.ownership.meta.test_id = "ai.session.close.cancel";
         try actions.appendChild(cx.allocator, cancel);
-        const accept = try ui.widgets.Button(.{ .label = "关闭会话", .variant = .danger, .base_style = self.control_styles[1], .on_click = cx.on(View, self, acceptClose) }).mount(scope, cx);
+        self.accept_label = try scope.createText("删除会话", .{});
+        self.accept_disabled = try scope.createSignal(bool, false);
+        const accept = try ui.widgets.Button(.{ .label = self.accept_label, .disabled = self.accept_disabled, .variant = .danger, .base_style = self.control_styles[1], .on_click = cx.on(View, self, acceptClose) }).mount(scope, cx);
         accept.meta.ownership.meta.test_id = "ai.session.close.accept";
         try actions.appendChild(cx.allocator, accept);
         try modal.body.appendChild(cx.allocator, actions);
+        self.history_open = try scope.createSignal(bool, false);
+        const history_modal = try ui.widgets.Modal(.{ .open = self.history_open, .width = 600, .max_height = 480, .background = T.current().overlay }).mount(scope, cx);
+        if (!history_modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, history_modal.overlay);
+        self.history_dialog = history_modal.dialog;
+        history_modal.dialog.meta.ownership.meta.test_id = "ai.history";
+        history_modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 600 }, .max_width = 600, .background = T.current().overlay, .border = .{ .radius = 12 } });
+        history_modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .padding = ui.Padding.all(16), .gap = 12 });
+        const history_heading = try ui.box(cx, S.actions(), .{});
+        self.history_title = try ui.textStyled(cx, titleStyle, "AI 会话");
+        self.history_title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        try history_heading.appendChild(cx.allocator, self.history_title);
+        const history_close = try ui.widgets.Button(.{ .variant = .ghost, .label = "关闭", .base_style = @import("ai_pending_styles.zig").action(), .on_click = cx.on(View, self, closeHistory) }).mount(scope, cx);
+        history_close.meta.ownership.meta.test_id = "ai.history.close";
+        try history_heading.appendChild(cx.allocator, history_close);
+        try history_modal.body.appendChild(cx.allocator, history_heading);
+        self.history_status = try ui.textStyled(cx, detailStyle, "只读查看");
+        self.history_status.meta.ownership.meta.test_id = "ai.history.status";
+        try history_modal.body.appendChild(cx.allocator, self.history_status);
+        const history_scroll = try ui.widgets.ScrollArea(.{ .height = 220, .direction = .vertical }).mount(scope, cx);
+        history_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 220 }, .min_height = 0, .flex_shrink = 0 });
+        self.history_scroll = history_scroll.container;
+        self.history_body = try ui.textStyled(cx, detailStyle, "");
+        self.history_body.meta.ownership.meta.test_id = "ai.history.body";
+        self.history_body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0 });
+        try history_scroll.content.appendChild(cx.allocator, self.history_body);
+        try history_modal.body.appendChild(cx.allocator, history_scroll.container);
+        self.history_actions = try ui.box(cx, S.actions(), .{});
+        self.history_actions.setStyleInline(cx.allocator, .{ .height = .{ .fit = .{} }, .flex_wrap = .wrap });
+        try history_modal.body.appendChild(cx.allocator, self.history_actions);
+        try scope.createEffect(.{ .view = self, .open = confirmation }, struct {
+            fn apply(ctx: anytype) void {
+                if (!ctx.open.get()) if (ctx.view.confirmation_operation) |operation| {
+                    ctx.view.confirmation_operation = null;
+                    if (ctx.view.hooks.confirmed) |callback| callback(ctx.view.hooks.context, operation, false);
+                };
+            }
+        }.apply);
+
         try scope.createEffect(.{ .view = self, .publication = try cx.themeSignal(scope) }, struct {
             fn apply(ctx: anytype) void {
                 _ = ctx.publication.get();
                 ctx.view.retheme();
             }
         }.apply);
+        self.reflow();
         return self;
+    }
+    /// Native Modal is fixed-width by default; constrain our surfaces and give
+    /// the scrollable body only the space left by the real footer and heading.
+    pub fn reflow(self: *View) void {
+        const width = @max(0, self.cx.viewport.width - 32);
+        self.setPixels(self.dialog, true, @min(320, width));
+        self.setPixels(self.history_dialog, true, @min(600, width));
+        const fixed = 32 + 36 + 28 + @max(16, self.history_status.globalRect().h) + @max(28, self.history_actions.globalRect().h);
+        const body_height = @min(220, @max(0, self.cx.viewport.height - 32 - fixed));
+        self.setPixels(self.history_scroll, false, body_height);
+        self.setPixels(self.history_dialog, false, fixed + body_height);
+    }
+    fn setPixels(self: *View, node: *ui.Node, horizontal: bool, value: f32) void {
+        const old = if (horizontal) node.style.width else node.style.height;
+        if (old == .px and @abs(old.px - value) < 0.1) return;
+        node.setStyleInline(self.cx.allocator, if (horizontal) .{ .width = .{ .px = value } } else .{ .height = .{ .px = value } });
     }
     fn retheme(self: *View) void {
         const next = T.current();
         if (@import("std").meta.eql(self.painted_colors, next)) return;
         repaint(self.content, self.painted_colors);
         repaint(self.dialog, self.painted_colors);
+        repaint(self.history_dialog, self.painted_colors);
         self.chrome.setStyleInline(self.cx.allocator, S.popover());
         self.dialog.setStyleInline(self.cx.allocator, S.dialog());
         _ = self.title_icon.setTint(next.warn_ink);
         self.control_styles[0].set(S.control(false));
         self.control_styles[1].set(S.control(true));
+        self.reflow();
         self.painted_colors = next;
         self.cx.requestRedraw();
     }
@@ -116,10 +191,21 @@ pub const View = struct {
         self.open.set(false);
     }
     fn cancelClose(self: *View) void {
+        if (self.confirmation_operation) |operation| {
+            self.confirmation_operation = null;
+            if (self.hooks.confirmed) |callback| callback(self.hooks.context, operation, false);
+        }
         self.pending = null;
         self.confirmation.set(false);
     }
     fn acceptClose(self: *View) void {
+        if (self.accept_disabled.peek()) return;
+        if (self.confirmation_operation) |operation| {
+            self.confirmation_operation = null;
+            self.confirmation.set(false);
+            if (self.hooks.confirmed) |callback| callback(self.hooks.context, operation, true);
+            return;
+        }
         const id = self.pending orelse return;
         self.pending = null;
         self.confirmation.set(false);
@@ -127,12 +213,86 @@ pub const View = struct {
         self.hooks.remove(self.hooks.context, id);
     }
     pub fn confirm(self: *View, id: u64) void {
+        self.confirmation_operation = null;
+        self.confirmation_title.setTextContent(self.cx.allocator, "删除此 AI 会话？") catch return;
+        self.detail.setTextContent(self.cx.allocator, "将删除此会话及其历史。已绑定的会话须先结束并解绑。") catch return;
+        self.accept_label.set("删除会话");
+        self.accept_disabled.set(false);
         self.pending = id;
         _ = self.title_icon.setTint(T.current().warn_ink);
         self.dialog.setStyleInline(self.cx.allocator, S.dialog());
         self.control_styles[0].set(S.control(false));
         self.control_styles[1].set(S.control(true));
+        self.reflow();
         self.confirmation.set(true);
+    }
+    pub fn confirmOperation(self: *View, operation: u64, title: []const u8, label: []const u8) !void {
+        self.pending = null;
+        self.open.set(false);
+        self.history_open.set(false);
+        try self.confirmation_title.setTextContent(self.cx.allocator, title);
+        try self.detail.setTextContent(self.cx.allocator, "当前任务将停止，待处理消息暂停。历史和草稿保留，连接保持打开。");
+        self.accept_label.set(label);
+        self.accept_disabled.set(false);
+        self.dialog.setStyleInline(self.cx.allocator, .{ .height = .{ .fit = .{} } });
+        self.confirmation_operation = operation;
+        self.reflow();
+        self.confirmation.set(true);
+        self.cx.requestRedraw();
+    }
+    pub fn showProgress(self: *View, operation: u64) !void {
+        try self.confirmation_title.setTextContent(self.cx.allocator, "已绑定 · 正在停止当前任务");
+        try self.detail.setTextContent(self.cx.allocator, "正在等待资源释放。取消只取消后续恢复或使用副本，已受理的结束仍会完成；历史和草稿会保留。");
+        self.accept_label.set("等待释放…");
+        self.accept_disabled.set(true);
+        self.confirmation_operation = operation;
+        self.reflow();
+        self.confirmation.set(true);
+    }
+    fn closeHistory(self: *View) void {
+        self.history_open.set(false);
+    }
+    pub fn showHistory(self: *View, entry: Entry, text: []const u8) !void {
+        self.open.set(false);
+        try self.history_title.setTextContent(self.cx.allocator, entry.title);
+        try self.history_status.setTextContent(self.cx.allocator, if (entry.ending) "已绑定 · 正在停止任务 · 只读查看" else if (entry.bound) "已绑定 · 只读查看" else "未绑定 · 历史环境 · 只读查看");
+        try self.history_body.setTextContent(self.cx.allocator, if (text.len == 0) "此会话尚无已保存消息，草稿与待处理记录仍保留。" else text);
+        if (self.cx.pressed_node) |node| if (node.isDescendantOf(self.history_actions)) self.cx.cancelPointerInteractions(.explicit);
+        while (self.history_actions.children.items.len != 0) {
+            const child = self.history_actions.children.items[0];
+            self.cx.detachChild(self.history_actions, child);
+            self.cx.destroyDetached(child);
+        }
+        if (self.history_scope) |old| old.dispose();
+        const scope = try self.scope.childScope();
+        self.history_scope = scope;
+        self.history_entry = entry.id;
+        if (entry.can_copy) {
+            try self.historyButton(scope, entry.id, .copy, "复制，不使用", "ai.history.copy");
+            try self.historyButton(scope, entry.id, .copy_use, "复制到当前 Agent", "ai.history.copy_use");
+        }
+        if (entry.bound) {
+            try self.historyButton(scope, entry.id, .locate, "定位", "ai.history.locate");
+            if (entry.active and !entry.ending) try self.historyButton(scope, entry.id, .end, "结束并解绑", "ai.history.end");
+        } else if (entry.can_restore) try self.historyButton(scope, entry.id, .restore, if (entry.first_use) "使用到当前 Agent" else "恢复到当前 Agent", "ai.history.restore");
+        self.reflow();
+        self.history_open.set(true);
+        self.cx.requestRedraw();
+    }
+    const HistoryAction = struct {
+        view: *View,
+        id: u64,
+        action: Action,
+        fn run(self: *HistoryAction) void {
+            if (self.action == .end) self.view.history_open.set(false);
+            if (self.view.hooks.act) |act| act(self.view.hooks.context, self.id, self.action);
+        }
+    };
+    fn historyButton(self: *View, scope: *ui.Scope, id: u64, action: Action, label: []const u8, test_id: []const u8) !void {
+        const state = try scope.createState(HistoryAction, .{ .view = self, .id = id, .action = action });
+        const button = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .base_style = @import("ai_close_confirmation_styles.zig").button(false), .on_click = self.cx.on(HistoryAction, state, HistoryAction.run) }).mount(scope, self.cx);
+        button.meta.ownership.meta.test_id = test_id;
+        try self.history_actions.appendChild(self.cx.allocator, button);
     }
     const Row = struct {
         view: *View,
@@ -143,6 +303,7 @@ pub const View = struct {
         actions_start: ?*ui.Node = null,
         status_icon: ?*ui.Node = null,
         status_label: ?*ui.Signal([]const u8) = null,
+        action: Action = .view,
         fn event(event_value: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
             const self: *Row = @ptrCast(@alignCast(raw orelse return .ignored));
             if (event_value != .mouse_down or event_value.mouse_down.button != .left) return .ignored;
@@ -155,7 +316,10 @@ pub const View = struct {
         }
         fn select(self: *Row) void {
             self.view.open.set(false);
-            self.view.hooks.select(self.view.hooks.context, self.id);
+            if (self.view.hooks.act) |callback| callback(self.view.hooks.context, self.id, .view) else self.view.hooks.select(self.view.hooks.context, self.id);
+        }
+        fn act(self: *Row) void {
+            if (self.view.hooks.act) |callback| callback(self.view.hooks.context, self.id, self.action);
         }
         fn remove(self: *Row) void {
             self.view.hooks.request_close(self.view.hooks.context, self.id);
@@ -171,6 +335,13 @@ pub const View = struct {
         }
         const scope = try self.scope.childScope();
         self.rows = scope;
+        const arena = try scope.createState(@import("std").heap.ArenaAllocator, .init(self.cx.allocator));
+        try scope.onCleanup(@import("std").heap.ArenaAllocator, arena, struct {
+            fn cleanup(value: *@import("std").heap.ArenaAllocator) void {
+                value.deinit();
+            }
+        }.cleanup);
+        const data = arena.allocator();
         self.content.setStyleInline(self.cx.allocator, S.menu());
 
         const heading = try ui.box(self.cx, S.heading(), .{});
@@ -202,6 +373,7 @@ pub const View = struct {
         for (entries) |entry| {
             const state = try scope.createState(Row, .{ .view = self, .id = entry.id });
             const row = try ui.box(self.cx, S.row(), .{});
+            if (self.hooks.act != null) row.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 48 } });
             row.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&state.row_id, "ai.session.row.{d}", .{entry.id});
             row.behavior.events.on_event = Row.event;
             row.behavior.events.event_context = state;
@@ -220,30 +392,53 @@ pub const View = struct {
             try hint.trigger.appendChild(self.cx.allocator, state.status_icon.?);
             hint.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .flex_shrink = 0, .align_items = .center, .justify = .center });
             try row.appendChild(self.cx.allocator, hint.wrapper);
-            const copy = try ui.box(self.cx, .{ .width = .fill(), .min_width = 0, .direction = .row, .align_items = .center, .gap = 6 }, .{});
+            const copy = try ui.box(self.cx, .{ .width = .fill(), .min_width = 0, .direction = if (self.hooks.act != null) .column else .row, .align_items = .center, .gap = 6 }, .{});
             try row.appendChild(self.cx.allocator, copy);
             const title = try ui.text(self.cx, entry.title, S.text(true));
             title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16.5 }, .min_width = 0 });
             try copy.appendChild(self.cx.allocator, title);
-            const summary = try self.cx.allocator.dupe(u8, entry.owner);
+            const summary = if (self.hooks.act != null) try @import("std").fmt.allocPrint(self.cx.allocator, "{s} · {s}{s}", .{ if (entry.bound) "已绑定" else "未绑定", entry.owner, if (entry.ending) " · 正在停止任务" else "" }) else try self.cx.allocator.dupe(u8, entry.owner);
             defer self.cx.allocator.free(summary);
             const owner = try ui.text(self.cx, "", S.text(false));
             try owner.setTextContent(self.cx.allocator, summary);
-            owner.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 130 }, .min_width = 0, .height = .{ .px = 15 }, .flex_shrink = 1 });
+            owner.setStyleInline(self.cx.allocator, .{ .width = if (self.hooks.act != null) .fill() else .{ .px = 130 }, .min_width = 0, .height = .{ .px = 15 }, .flex_shrink = 1 });
             try copy.appendChild(self.cx.allocator, owner);
-            const select = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get("arrow-up-right").?, .icon_size = 14, .a11y_label = "继续此 AI 会话", .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .font_weight = 400, .text_color = T.current().accent_ink }), .hover_style = S.actionHover(false), .on_click = self.cx.on(Row, state, Row.select) }).mount(scope, self.cx);
+            const select = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get("arrow-up-right").?, .icon_size = 14, .a11y_label = "查看此 AI 会话", .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .font_weight = 400, .text_color = T.current().accent_ink }), .hover_style = S.actionHover(false), .on_click = self.cx.on(Row, state, Row.select) }).mount(scope, self.cx);
             select.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .text_color = T.current().accent_ink });
             state.actions_start = select;
             select.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&state.select_id, "ai.session.jump.{d}", .{entry.id});
             try row.appendChild(self.cx.allocator, select);
+            if (self.hooks.act != null) {
+                inline for (.{ .{ Action.locate, "↗", "locate" }, .{ Action.restore, "恢复", "restore" }, .{ Action.copy_use, "复制", "copy_use" } }) |spec| {
+                    const enabled = switch (spec[0]) {
+                        .locate => entry.bound,
+                        .restore => entry.can_restore,
+                        .copy_use => entry.can_copy,
+                        else => false,
+                    };
+                    if (enabled) {
+                        const action_state = try scope.createState(Row, .{ .view = self, .id = entry.id, .action = spec[0] });
+                        const action_button = try ui.widgets.Button(.{ .label = if (spec[0] == .restore and entry.first_use) "使用" else if (spec[0] == .copy_use) "复制并使用" else spec[1], .variant = .ghost, .a11y_label = if (spec[0] == .locate) "定位原持有者" else if (spec[0] == .copy_use) "复制并使用到当前 Agent" else if (entry.first_use) "使用到当前 Agent" else "恢复到当前 Agent", .base_style = @import("ai_pending_styles.zig").action(), .on_click = self.cx.on(Row, action_state, Row.act) }).mount(scope, self.cx);
+                        action_button.meta.ownership.meta.test_id = try @import("std").fmt.allocPrint(data, "ai.session.{s}.{d}", .{ spec[2], entry.id });
+                        try row.appendChild(self.cx.allocator, action_button);
+                    }
+                }
+            }
             const remove = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "删除 AI 会话", .hover_style = S.actionHover(true), .on_click = self.cx.on(Row, state, Row.remove) }).mount(scope, self.cx);
+            if (!entry.can_remove) remove.setDisplay(.none);
             remove.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{} });
             remove.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&state.delete_id, "ai.session.delete.{d}", .{entry.id});
             try remove.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("trash-2").?, T.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
             try row.appendChild(self.cx.allocator, remove);
             try self.content.appendChild(self.cx.allocator, row);
         }
-        self.desired_height = @min(160, 38 + if (entries.len == 0) @as(f32, 33) else @as(f32, @floatFromInt(entries.len)) * 30 + @as(f32, @floatFromInt(entries.len - 1)) * 2);
+        if (self.hooks.act != null and entries.len >= 50) {
+            const more = try scope.createState(HistoryAction, .{ .view = self, .id = 0, .action = .more });
+            const button = try ui.widgets.Button(.{ .label = "显示更多", .variant = .ghost, .on_click = self.cx.on(HistoryAction, more, HistoryAction.run) }).mount(scope, self.cx);
+            button.meta.ownership.meta.test_id = "ai.sessions.more";
+            try self.content.appendChild(self.cx.allocator, button);
+        }
+        self.desired_height = @min(if (self.hooks.act != null) @as(f32, 240) else 160, 38 + if (entries.len == 0) @as(f32, 33) else @as(f32, @floatFromInt(entries.len)) * (if (self.hooks.act != null) @as(f32, 48) else 30) + @as(f32, @floatFromInt(entries.len - 1)) * 2);
         self.surface.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.desired_height }, .display = .flex });
         ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
         self.open.set(true);

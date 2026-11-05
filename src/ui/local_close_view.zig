@@ -52,6 +52,7 @@ pub const View = struct {
         try modal.body.appendChild(cx.allocator, head);
         self.identity = try self.label(modal.body, "", 18, styles.text(12, true));
         const risk = try ui.box(cx, styles.risk(), .{});
+        @import("layer_materials.zig").card(risk, .action);
         self.risk = risk;
         self.risk_title = try self.label(risk, "", 18, styles.text(12, true));
         var detail_style = styles.text(11.5, false);

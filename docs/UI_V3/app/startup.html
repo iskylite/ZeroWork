@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZeroWork · 启动过渡</title>
+<link rel="stylesheet" href="../theme-tokens.css">
+<style>
+@font-face{font-family:Inter;src:url('../assets/fonts/InterVariable.ttf')}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}
+body{font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg-app);color:var(--fg-1)}
+#workspace{height:100%;display:grid;place-items:center;background:var(--bg-app)}
+#startup{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg-app);opacity:1;transition:opacity 180ms ease-out}
+#startup.dismissed{opacity:0;pointer-events:none}
+.identity{display:flex;flex-direction:column;align-items:center}
+.logo{width:80px;height:80px;object-fit:contain;margin-bottom:20px;animation:breathe 1600ms ease-in-out infinite}
+.name{font-size:18px;font-weight:600;line-height:24px;margin:0}
+.status{font-size:12px;font-weight:400;line-height:18px;color:var(--fg-2);margin:8px 0 0}
+@keyframes breathe{0%,100%{opacity:.72}50%{opacity:1}}
+@media(prefers-reduced-motion:reduce){.logo{animation:none}#startup{transition:none}}
+</style>
+<body data-theme="dark">
+<main id="workspace">工作区已就绪</main>
+<section id="startup" role="status" aria-label="正在启动 ZeroWork">
+  <div class="identity"><img class="logo" src="../../../assets/macos/AppIcon.png" alt=""><h1 class="name">ZeroWork</h1><p class="status">正在准备工作区…</p></div>
+</section>
+<script>
+const params=new URLSearchParams(location.search);document.body.dataset.theme=params.get('theme')||'dark';
+const state=params.get('state')||'loading';
+if(state==='ready'||state==='failure')requestAnimationFrame(()=>document.querySelector('#startup').classList.add('dismissed'));
+// The native version ends from resource completion/failure, with a 2 s ceiling;
+// loading stays visible here for editable inspection. No forced minimum duration.
+</script>
+</body>
+</html>

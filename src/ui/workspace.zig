@@ -342,10 +342,7 @@ pub const LocalState = enum { starting, running, exited, failed, closing, cleanu
 pub const TerminalTypographyConfig = @FieldType(config_mod.Config, "ui");
 
 fn fontWeight(name: []const u8) u16 {
-    if (std.mem.eql(u8, name, "bold")) return 700;
-    if (std.mem.eql(u8, name, "medium")) return 500;
-    if (std.mem.eql(u8, name, "light")) return 300;
-    return 400;
+    return @backingInt(@import("../config/font_weight.zig").parse(name) orelse .regular);
 }
 fn cursorStyle(name: []const u8) TerminalViewNode.CursorStyle {
     if (std.mem.eql(u8, name, "bar")) return .bar;

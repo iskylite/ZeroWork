@@ -181,8 +181,8 @@ test "native transfer semantic paints stay readable and retheme across all built
         h.cx.setTheme(theme.widgetTheme(theme.currentName()));
         p.retheme();
         h.frames();
-        try std.testing.expectEqual(theme.current().warn_ink, text(p.root, "已暂停").?.getText().?.color);
-        try std.testing.expectEqual(theme.current().ok_ink, text(p.root, "已完成").?.getText().?.color);
+        try std.testing.expectEqual(theme.current().warn_ink, text(p.root, "已暂停 40%").?.getText().?.color);
+        try std.testing.expectEqual(theme.current().ok_ink, text(p.root, "已完成 100%").?.getText().?.color);
         for ([_]usize{ 2, 3, 4 }) |index| {
             const label_ = p.counts_labels[index];
             const background = label_.parent.?.getBackground();
@@ -196,7 +196,7 @@ test "native transfer semantic paints stay readable and retheme across all built
         // The retained task is a derived fill, not a literal palette slot.
         const task_background = id(p.root, "transfer.task").?.getBackground();
         try std.testing.expectEqual(theme.popupInset(), task_background);
-        for ([_][]const u8{ "已暂停", "传输失败", "已完成" }) |label_| {
+        for ([_][]const u8{ "已暂停 40%", "传输失败 40%", "已完成 100%" }) |label_| {
             try std.testing.expect(paintContrast(text(p.root, label_).?.getText().?.color, task_background) >= 4.5);
         }
     }
@@ -1193,6 +1193,11 @@ test "transfer projection session management stays scoped and never opens the gl
     try std.testing.expect(id(p.root, "transfer.scope") == null);
     try std.testing.expect(id(p.root, "transfer.open.all") == null);
     try std.testing.expect(id(p.root, "transfer.task.select").?.style.display == .none);
+    const manage = id(p.root, "transfer.batch").?;
+    try std.testing.expectEqualStrings("管理任务", manage.behavior.interaction.a11y.?.label.?);
+    try std.testing.expect(!manage.behavior.interaction.a11y.?.pressed);
+    try std.testing.expect(text(manage, "管理") == null);
+    try std.testing.expectApproxEqAbs(@as(f32, 28), manage.globalRect().w, 0.01);
     const before = p.root.globalRect();
     const tools = id(p.root, "transfer.batch").?.globalRect();
     const states = p.counts_row.globalRect();
@@ -1200,6 +1205,9 @@ test "transfer projection session management stays scoped and never opens the gl
     click(h, id(p.root, "transfer.batch").?);
     h.frames();
     try std.testing.expect(p.batch_visible);
+    const finish = id(p.root, "transfer.batch").?;
+    try std.testing.expectEqualStrings("完成管理", finish.behavior.interaction.a11y.?.label.?);
+    try std.testing.expect(finish.behavior.interaction.a11y.?.pressed);
     try std.testing.expect(id(p.root, "transfer.task.select").?.style.display != .none);
     try std.testing.expectEqual(owner, p.selected_scope.session);
     try std.testing.expectEqual(before.x, p.root.globalRect().x);
@@ -1388,6 +1396,32 @@ test "transfer direction trays hide empty cards without layout and restore with 
     try std.testing.expectEqual(@as(@TypeOf(p.root.style.display), .flex), p.root.style.display);
 }
 
+test "transfer projection status retains percentages across running failure and completion" {
+    const h = try H.init(860, 480);
+    defer h.deinit();
+    var c: Capture = .{};
+    const p = try h.panel(&c, .global_popover);
+    const cases = [_]struct { phase: V.Phase, done: u64, total: ?u64, expected: []const u8 }{
+        .{ .phase = .running, .done = 74, .total = 100, .expected = "传输中 74%" },
+        .{ .phase = .failed, .done = 74, .total = 100, .expected = "传输失败 74%" },
+        .{ .phase = .paused, .done = 74, .total = 100, .expected = "已暂停 74%" },
+        .{ .phase = .succeeded, .done = 100, .total = 100, .expected = "已完成 100%" },
+        .{ .phase = .succeeded, .done = 0, .total = 0, .expected = "已完成 100%" },
+        .{ .phase = .succeeded, .done = 100, .total = null, .expected = "已完成 100%" },
+        .{ .phase = .failed, .done = 74, .total = null, .expected = "传输失败 —%" },
+        .{ .phase = .running, .done = 120, .total = 100, .expected = "传输中 100%" },
+    };
+    for (cases, 0..) |case, i| {
+        var task = row(1, 101, case.phase);
+        task.done_bytes = case.done;
+        task.total_bytes = case.total;
+        try p.update(.{ .revision = i + 1, .rows = &.{task} });
+        p.show();
+        h.frames();
+        try std.testing.expectEqualStrings(case.expected, id(p.root, "transfer.task.status").?.getText().?.content);
+    }
+}
+
 test "transfer projection status replaces duplicate path inside the card" {
     const h = try H.init(860, 480);
     defer h.deinit();
@@ -1400,7 +1434,7 @@ test "transfer projection status replaces duplicate path inside the card" {
     h.frames();
     const status_node = id(p.root, "transfer.task.status").?;
     const card = id(p.root, "transfer.task").?.globalRect();
-    try std.testing.expectEqualStrings("传输中", status_node.getText().?.content);
+    try std.testing.expectEqualStrings("传输中 40%", status_node.getText().?.content);
     try std.testing.expect(id(p.root, "transfer.task.location") == null);
     try std.testing.expect(status_node.globalRect().x + status_node.globalRect().w <= card.x + card.w);
     try std.testing.expect(id(p.root, "transfer.task.expand") == null);
@@ -1429,7 +1463,7 @@ test "transfer projection narrow SFTP card keeps all controls within 266px after
     try std.testing.expect(status.y > name.globalRect().y);
     try std.testing.expect(name.parent.?.style.overflow_hidden);
     try std.testing.expectEqualStrings(task.name, name.getText().?.content);
-    try std.testing.expectEqualStrings("传输中", status_node.getText().?.content);
+    try std.testing.expectEqualStrings("传输中 40%", status_node.getText().?.content);
     try std.testing.expect(id(p.root, "transfer.task.location") == null);
     for ([_][]const u8{ "transfer.task.primary", "transfer.task.copy_path", "transfer.task.events" }) |control| {
         const r = id(p.root, control).?.globalRect();
@@ -1702,5 +1736,73 @@ test "transfer projection speed switches units below one MiB" {
         const rate = id(p.root, "transfer.task.rate").?;
         try std.testing.expectEqualStrings(case.expected, rate.getText().?.content);
         try std.testing.expect(p.foot.style.display == .none);
+    }
+}
+
+test "material transfer task cards keep L2 fills and L3 detail ownership through theme changes" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    const h = try H.init(1440, 900);
+    defer h.deinit();
+    try @import("ui/layer_materials.zig").Policy.mount(h.cx, h.scope);
+    var c: Capture = .{};
+    const p = try h.panel(&c, .global_popover);
+    try p.update(.{ .revision = 1, .rows = &.{row(1, 101, .running)} });
+    p.show();
+    const publication = try h.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        for ([_]f32{ 0, 25, 75, 100 }) |t| {
+            theme.select(name);
+            _ = theme.setMaterialParameters(t, 24);
+            publication.publish(h.cx, theme.widgetTheme(name));
+            p.retheme();
+            h.frames();
+            const task = id(p.root, "transfer.task").?;
+            try std.testing.expectEqual(theme.current().accent.withAlpha(theme.layerAlpha(2)), task.getBackground());
+            const filename = id(p.root, "transfer.task.name").?;
+            click(h, filename);
+            h.frames();
+            const detail = id(h.root, "transfer.task.detail_popup").?;
+            try std.testing.expectEqual(theme.layerBackground(3), detail.getBackground());
+            h.cx.handleKeyDown(.escape, .{});
+            h.frames();
+        }
+    }
+}
+
+test "transfer startup failure projection preserves reason events and retry separately from manual pause" {
+    const h = try H.init(1040, 720);
+    defer h.deinit();
+    var capture: WindowLegacy = .{};
+    var manager = try backend.Manager.init(std.testing.allocator, .{ .ctx = &capture, .open = Engine.open, .cancel = Engine.cancel, .poll = Engine.poll }, 1, .{});
+    defer manager.deinit();
+    const binding: backend.ServiceHandle = .{ .resource_owner = .{ .session = handle(101, 1) }, .origin_session = handle(101, 1), .kind = .transfer, .binding_id = 90, .binding_generation = 1 };
+    const failed = try manager.enqueueWaitingBinding(.{ .session_id = 101, .transfer_binding = binding, .direction = .upload, .sources = &.{"/fixtures/failed.zip"}, .local_dir = "/fixtures", .remote_dir = "/srv" });
+    try manager.failWaitingBinding(failed, binding, .init("AuthFailed", "ssh_connect"));
+    const paused = try manager.enqueueWaitingBinding(.{ .session_id = 101, .transfer_binding = binding, .direction = .upload, .sources = &.{"/fixtures/paused.zip"}, .local_dir = "/fixtures", .remote_dir = "/srv" });
+    try manager.pause(paused);
+    const panel = try V.mountWindow(h.cx, h.scope, &manager, .{ .context = &capture, .action = WindowLegacy.action, .owner = WindowLegacy.ownerCall });
+    try h.root.appendChild(h.cx.allocator, panel.root);
+    panel.show();
+    try panel.refresh(1, .{ .window_chunks = 16, .chunk_kb = 64 });
+    h.frames();
+    try std.testing.expect(text(panel.root, "传输失败 —%") != null);
+    try std.testing.expect(text(panel.root, "SSH 认证失败") != null);
+    try std.testing.expect(text(panel.root, "已暂停 —%") != null);
+    for (panel.source.?.value.rows) |task| {
+        if (task.target.job == failed) {
+            try std.testing.expectEqual(V.Phase.failed, task.phase);
+            try std.testing.expect(V.allows(task.phase, .retry));
+            try std.testing.expect(!V.allows(task.phase, .resume_transfer));
+            try std.testing.expect(std.mem.indexOf(u8, task.events, "AuthFailed") != null);
+            try std.testing.expect(std.mem.indexOf(u8, task.events, "SSH 连接与认证") != null);
+        } else {
+            try std.testing.expectEqual(V.Phase.paused, task.phase);
+            try std.testing.expect(V.allows(task.phase, .resume_transfer));
+        }
     }
 }

@@ -87,6 +87,69 @@ void* coretext_create_font_from_path(const char* path, float size) {
     }
 }
 
+static NSDictionary *fontWeightAxis(CTFontRef font) {
+    NSArray *axes = (__bridge_transfer NSArray *)CTFontCopyVariationAxes(font);
+    for (NSDictionary *axis in axes) {
+        if ([axis[(id)kCTFontVariationAxisIdentifierKey] unsignedIntValue] != 0x77676874) continue;
+        double lo = [axis[(id)kCTFontVariationAxisMinimumValueKey] doubleValue];
+        double hi = [axis[(id)kCTFontVariationAxisMaximumValueKey] doubleValue];
+        double def = [axis[(id)kCTFontVariationAxisDefaultValueKey] doubleValue];
+        if (isfinite(lo) && isfinite(hi) && isfinite(def) && lo < hi && def >= lo && def <= hi) return axis;
+    }
+    return nil;
+}
+
+// Legacy GX axes (e.g. Skia's 0.48..3.2) are normalized to 100..900 with
+// the native default at 400. Standard OpenType wght axes keep their own range.
+static BOOL standardWeightAxis(NSDictionary *axis) {
+    double lo = [axis[(id)kCTFontVariationAxisMinimumValueKey] doubleValue];
+    double hi = [axis[(id)kCTFontVariationAxisMaximumValueKey] doubleValue];
+    return lo >= 0 && hi > 10 && hi <= 1000;
+}
+static double numericToAxisWeight(NSDictionary *axis, double value) {
+    if (standardWeightAxis(axis)) return value;
+    double lo = [axis[(id)kCTFontVariationAxisMinimumValueKey] doubleValue];
+    double hi = [axis[(id)kCTFontVariationAxisMaximumValueKey] doubleValue];
+    double def = [axis[(id)kCTFontVariationAxisDefaultValueKey] doubleValue];
+    return value <= 400 ? lo + (def-lo)*(value-100)/300 : def + (hi-def)*(value-400)/500;
+}
+int coretext_font_weight_range(const char *family, int *minimum, int *maximum, int *default_value) {
+    @autoreleasepool {
+        if (!family || !minimum || !maximum || !default_value) return 0;
+        NSString *name = [NSString stringWithUTF8String:family];
+        if (!name) return 0;
+        CTFontRef font = CTFontCreateWithName((__bridge CFStringRef)name, 16, NULL);
+        if (!font) return 0;
+        NSDictionary *axis = fontWeightAxis(font);
+        CFRelease(font);
+        if (!axis) return 0;
+        if (standardWeightAxis(axis)) {
+            *minimum = MAX(1, (int)ceil([axis[(id)kCTFontVariationAxisMinimumValueKey] doubleValue]));
+            *maximum = (int)floor([axis[(id)kCTFontVariationAxisMaximumValueKey] doubleValue]);
+            *default_value = (int)round([axis[(id)kCTFontVariationAxisDefaultValueKey] doubleValue]);
+        } else {
+            *minimum = 100; *maximum = 900; *default_value = 400;
+        }
+        return *minimum < *maximum;
+    }
+}
+double coretext_font_weight_value(void *font_ptr) {
+    @autoreleasepool {
+        CTFontRef font = (CTFontRef)font_ptr;
+        NSDictionary *axis = fontWeightAxis(font);
+        if (!axis) return -1;
+        NSDictionary *values = (__bridge_transfer NSDictionary *)CTFontCopyVariation(font);
+        NSNumber *value = values[@(0x77676874)] ?: axis[(id)kCTFontVariationAxisDefaultValueKey];
+        double native = value.doubleValue;
+        if (standardWeightAxis(axis)) return native;
+        double lo = [axis[(id)kCTFontVariationAxisMinimumValueKey] doubleValue];
+        double hi = [axis[(id)kCTFontVariationAxisMaximumValueKey] doubleValue];
+        double def = [axis[(id)kCTFontVariationAxisDefaultValueKey] doubleValue];
+        if (fabs(native-def) < 0.000001) return 400;
+        return native < def ? 100 + 300*(native-lo)/(def-lo) : 400 + 500*(native-def)/(hi-def);
+    }
+}
+
 /// Find a system font by family name, size, weight, and italic flag
 void* coretext_find_font(const char* family, float size, int weight, int italic) {
     @autoreleasepool {
@@ -147,6 +210,19 @@ void* coretext_find_font(const char* family, float size, int weight, int italic)
         if (!font) {
             NSLog(@"[CoreText] Failed to find font: %s", family);
             return NULL;
+        }
+
+        // Set the exact variable coordinate; weight traits alone pick named
+        // instances and can silently quantize intermediate numeric weights.
+        NSDictionary *axis = fontWeightAxis(font);
+        if (axis) {
+            NSDictionary *variation = @{ (id)kCTFontVariationAttribute: @{ @(0x77676874): @(numericToAxisWeight(axis, weight)) } };
+            CTFontDescriptorRef exact = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)variation);
+            CTFontRef varied = CTFontCreateCopyWithAttributes(font, size, NULL, exact);
+            CFRelease(exact);
+            CFRelease(font);
+            font = varied;
+            if (!font) return NULL;
         }
 
         // Verify returned font actually has italic trait
@@ -283,6 +359,11 @@ unsigned long long coretext_font_identity_hash(void* font) {
     h ^= sbits; h *= 1099511628211ULL;
     unsigned int traits = (unsigned int)CTFontGetSymbolicTraits(f);
     h ^= traits; h *= 1099511628211ULL;
+    double variable_weight = coretext_font_weight_value(font);
+    if (variable_weight >= 0) {
+        unsigned long long bits; memcpy(&bits, &variable_weight, sizeof(bits));
+        h ^= bits; h *= 1099511628211ULL;
+    }
     return h;
 }
 

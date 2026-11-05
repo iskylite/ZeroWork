@@ -270,6 +270,7 @@ test "real Local search editor keeps text keyboard and IME out of the original Z
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     cx.setViewport(700, 300);
+    try cx.setTestFrameStep(16);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
     defer scope.dispose();
@@ -297,7 +298,19 @@ test "real Local search editor keeps text keyboard and IME out of the original Z
     try std.testing.expect(tail.viewport_offset > 0);
     const input_before = view.terminal_surface.?.next_input;
     view.openSearch();
-    _ = cx.render();
+    // Search capture is asynchronous; drive the real view until it publishes
+    // the owned snapshot rather than assuming one render completes the worker.
+    const search_deadline = native.zw_local_monotonic_ms() + 5000;
+    while (view.service_search == null and native.zw_local_monotonic_ms() < search_deadline) {
+        cx.advanceFrameClock();
+        _ = try rig.adapter.drain(&rig.sessions);
+        _ = view.refreshTerminalService(accepted.handle, true) catch |err| switch (err) {
+            error.WorkerBusy => false,
+            else => return err,
+        };
+        _ = cx.render();
+        pause();
+    }
     try std.testing.expect(view.service_search != null);
     try std.testing.expect(view.service_search.?.owner.eql(accepted.handle));
     try std.testing.expect(std.mem.indexOf(u8, view.search.source.items, "__SEARCH_BASELINE__") != null);
@@ -316,9 +329,21 @@ test "real Local search editor keeps text keyboard and IME out of the original Z
     try std.testing.expect(view.search_anchor != null);
     try std.testing.expect(view.terminalSnapshot(accepted.handle).?.projection.scrollback.viewport_offset < tail.viewport_offset);
     var painted = false;
-    for (view.search_marks.items) |mark| if (mark.style.display != .none and mark.children.items.len > 0) {
-        if (std.mem.eql(u8, mark.children.items[0].getText().?.content, "__SEARCH_BASELINE__")) painted = true;
-    };
+    const paint_deadline = native.zw_local_monotonic_ms() + 5000;
+    while (!painted and native.zw_local_monotonic_ms() < paint_deadline) {
+        cx.advanceFrameClock();
+        _ = try rig.adapter.drain(&rig.sessions);
+        _ = view.refreshTerminalService(accepted.handle, true) catch |err| switch (err) {
+            error.WorkerBusy => false,
+            else => return err,
+        };
+        _ = cx.render();
+        for (view.search_marks.items) |mark| if (mark.style.display != .none and mark.children.items.len > 0) {
+            if (std.mem.eql(u8, mark.children.items[0].getText().?.content, "__SEARCH_BASELINE__")) painted = true;
+        };
+        if (!painted) pause();
+    }
+    if (!painted) std.debug.print("search paint unavailable: captured={?d} displayed={?d} marks={d} pending={any} frame_ms={d} last_full={?d}\n", .{ if (view.service_search) |v| v.document.source_version else null, if (view.terminalSnapshot(accepted.handle)) |v| v.projection.version else null, view.search_marks.items.len, view.search_locate_pending, cx.frame_time_ms, view.service_search_last_full_ms });
     try std.testing.expect(painted);
     // Reflow remaps the same native hit anchor, rather than retaining a row
     // number that could now address another line.

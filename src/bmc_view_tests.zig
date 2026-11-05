@@ -1576,6 +1576,97 @@ test "BMC view Cx resize refuses old texture until the published geometry is act
     try wire.expectPointer(wire.len - 6, 320, 240, 0);
 }
 
+test "BMC material nested summaries and progress content follow real surface owners while video HUD stays local" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    var service = remote.Service.init(owner);
+    try service.setConnected(true, 1);
+    try service.setControl(true, 2);
+    var h = try InputViewHarness.init(&service);
+    defer h.deinit();
+    try @import("ui/layer_materials.zig").Policy.mount(h.cx, h.scope);
+    var publication: @import("ui/shell_styles.zig").ThemePublication = .{};
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        for ([_]f32{ 0, 75, 100 }) |t| {
+            theme.select(name);
+            _ = theme.setMaterialParameters(t, 24);
+            publication.publish(h.cx, theme.widgetTheme(name));
+            for ([_]usize{ 3, 4 }) |index| {
+                h.view.open[index].set(true);
+                renderFrames(h.cx, 12);
+                const card = findById(h.view.menus[index].?.content, if (index == 3) "bmc.power.summary" else "bmc.boot.summary").?;
+                try std.testing.expectEqual(theme.current().well.withAlpha(theme.layerAlpha(2)), card.getBackground());
+                try std.testing.expectEqual(theme.current().fg_1, (if (index == 3) h.view.power_label else h.view.boot_label).?.getText().?.color);
+                h.view.open[index].set(false);
+                renderFrames(h.cx, 10);
+            }
+            h.view.log_open.?.set(true);
+            renderFrames(h.cx, 12);
+            try std.testing.expectEqual(theme.current().well.withAlpha(theme.layerAlpha(2)), h.view.log_route_text.?.getBackground());
+            try std.testing.expectEqual(theme.current().well.withAlpha(theme.layerAlpha(2)), h.view.log_scroll.?.container.getBackground());
+            try std.testing.expectEqual(theme.current().surface_2.withAlpha(theme.layerAlpha(2)), h.view.log_footer.?.getBackground());
+            h.view.log_open.?.set(false);
+            renderFrames(h.cx, 10);
+            h.fixture.route = .connecting;
+            h.fixture.video = .awaiting_frame;
+            try h.renderer.vtable.update(h.renderer.context, .{ .owner = owner, .revision = 1, .title = "Synthetic", .status = "" });
+            renderFrames(h.cx, 6);
+            const surface = findById(h.view.waiting.?, "bmc.progress.surface").?;
+            const route_card = findById(h.view.waiting.?, "bmc.progress.route").?;
+            try std.testing.expectEqual(surface, route_card.parent.?);
+            try std.testing.expectEqual(theme.layerAlpha(1), surface.getBackground().a);
+            try std.testing.expect(surface.style.glass_params().?.capture_current_target);
+            try std.testing.expectEqual(theme.current().well.withAlpha(theme.layerAlpha(2)), route_card.getBackground());
+            try std.testing.expectEqualDeep(h.view.waiting.?.globalRect(), surface.globalRect());
+            try std.testing.expectEqual(ui.Color.rgba(18, 20, 24, 199), h.view.fps_hud.?.getBackground());
+            h.fixture.route = .connected;
+            h.fixture.video = .streaming;
+            try h.renderer.vtable.update(h.renderer.context, .{ .owner = owner, .revision = 2, .title = "Synthetic", .status = "" });
+            renderFrames(h.cx, 6);
+            try std.testing.expectEqual(ui.Color.BLACK, h.view.viewport.?.getBackground());
+        }
+    }
+}
+
+test "BMC material retained FPS tooltip survives parent detach and reopen" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    var service = remote.Service.init(owner);
+    try service.setConnected(true, 1);
+    try service.setControl(true, 2);
+    var h = try InputViewHarness.init(&service);
+    defer h.deinit();
+    try @import("ui/layer_materials.zig").Policy.mount(h.cx, h.scope);
+    var publication: @import("ui/shell_styles.zig").ThemePublication = .{};
+    for ([_]theme.Name{ .light, .sauber, .dark }) |name| {
+        theme.select(name);
+        publication.publish(h.cx, theme.widgetTheme(name));
+        h.view.open[2].set(true);
+        renderFrames(h.cx, 12);
+        const control = findById(h.view.menus[2].?.content, "bmc.display.fps").?;
+        var ancestor = control.parent;
+        while (ancestor) |node| : (ancestor = node.parent) {
+            if (std.mem.eql(u8, node.meta.ownership.meta.component_name orelse "", "Tooltip")) {
+                node.behavior.events.on_hover.?.invoke();
+                break;
+            }
+        }
+        renderFrames(h.cx, 30);
+        const tip = findById(h.cx.root.?, "bmc.display.fps.tooltip") orelse return error.RetainedHelpMissing;
+        try std.testing.expect(tip.isDisplayedInTree());
+        try std.testing.expect(tip.getOpacity() > 0.98);
+        try std.testing.expectEqual(theme.current().fg_1, tip.children.items[0].getText().?.color);
+        h.view.open[2].set(false);
+        renderFrames(h.cx, 12);
+    }
+}
+
 test "BMC FPS HUD defaults on, preserves pointer routing and toggles without changing video bounds" {
     var service = remote.Service.init(owner);
     try service.setConnected(true, 1);
@@ -1653,6 +1744,21 @@ test "BMC Select keyboard highlight remains visible inside compact dropdown" {
     ui.widgets.scroll_area.setScrollY(scroll_ctx.state, content, 0);
     renderFrames(cx, 4);
     try std.testing.expectEqual(@as(f32, 0), scroll_ctx.state.scroll_y);
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    var publication: @import("ui/shell_styles.zig").ThemePublication = .{};
+    const retained_id = state.option_nodes[7].id;
+    for ([_]theme.Name{ .light, .sauber, .dark }) |name| {
+        theme.select(name);
+        publication.publish(cx, theme.widgetTheme(name));
+        renderFrames(cx, 6);
+        const label = state.option_nodes[7].children.items[0].children.items[0];
+        try std.testing.expectEqual(theme.current().fg_1, label.getText().?.color);
+        try std.testing.expectEqual(cx.tokens.tokens.color.bg_hover, state.colors.hover);
+        try std.testing.expectEqual(retained_id, state.option_nodes[7].id);
+        try std.testing.expectEqual(@as(?usize, 7), state.highlighted_index);
+    }
 }
 
 test "BMC view toolbar disconnect is owner bound and updates connection state" {

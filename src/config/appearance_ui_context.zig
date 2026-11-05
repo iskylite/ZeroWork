@@ -34,6 +34,7 @@ pub const Context = struct {
     custom_font_edit: bool = false,
     focus_custom_font: bool = false,
     selected_image_path: []const u8 = "",
+    runtime_image_path: []const u8 = "",
     /// The native renderer may mount the prepared background thumbnail. The
     /// view does not read a file or allocate a GPU texture itself.
     mount_image: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope, f32, f32) anyerror!*ui.Node = null,

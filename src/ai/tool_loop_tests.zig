@@ -346,7 +346,7 @@ const Script = struct {
 const ControlledHost = struct {
     count: usize = 0,
     script: ?*Script = null,
-    mode: enum { success, real_exec, uncertain, remote_unknown, throws, wait_approval, cancel_after_success, no_exit } = .success,
+    mode: enum { success, real_exec, uncertain, remote_unknown, cleanup_unknown, throws, wait_approval, cancel_after_success, no_exit } = .success,
     waiting: std.atomic.Value(bool) = .init(false),
     releases: usize = 0,
 
@@ -376,6 +376,7 @@ const ControlledHost = struct {
         if (self.mode == .real_exec) return self.realExec(invocation, allocator, cancel);
         if (self.mode == .cancel_after_success) cancel.?.cancel();
         if (self.mode == .remote_unknown) return loop_mod.Outcome.copy(allocator, &.{.{ .session_id = 101, .status = .cancelled, .transport = .ssh, .stdout = "original partial stdout", .local_released = true, .remote_effect_unknown = true }});
+        if (self.mode == .cleanup_unknown) return loop_mod.Outcome.copy(allocator, &.{.{ .session_id = 101, .status = .unknown, .transport = .ssh, .stdout = "completed output", .exit = 0, .local_released = false, .error_code = "SshCleanupUnknown" }});
         return loop_mod.Outcome.copy(allocator, &.{.{ .session_id = 101, .status = if (self.mode == .uncertain) .unknown else .succeeded, .transport = .local, .stdout = "actual-controlled-output", .exit = if (self.mode == .uncertain or self.mode == .no_exit) null else 0, .cwd = "/tmp", .local_released = true }});
     }
     fn realExec(self: *ControlledHost, invocation: loop_mod.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !loop_mod.Outcome {
@@ -738,10 +739,10 @@ test "binary stdout is preserved with explicit encoding and no fabricated exit" 
     try std.testing.expectEqualStrings("failed", target.get("status").?.string);
 }
 
-test "released SSH command with unknown remote effect blocks continuation and answer retry while retaining exact facts" {
+test "answer retry explains unknown SSH effects without replaying or changing exact facts" {
     var other = df;
     other.id = "must-not-dispatch";
-    var script: Script = .{ .rounds = &.{.{ .calls = &.{ df, other } }} };
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{ df, other } }, .{ .text = "已有部分输出，原操作结果仍待核实。" } } };
     defer script.deinit();
     var host: ControlledHost = .{ .mode = .remote_unknown };
     var manager = managerFor(&host);
@@ -752,7 +753,23 @@ test "released SSH command with unknown remote effect blocks continuation and an
     const run = manager.tool_run.?;
     try std.testing.expect(run.uncertain);
     try std.testing.expectError(error.ToolOutcomeUnknown, run.nextRequest());
-    try std.testing.expectError(error.ToolOutcomeUnknown, manager.resumeAnswer(script.interface(), null));
+    try run.verification_notes.appendSlice(run.arena.allocator(), "Verified original operation: local cleanup remains unknown.");
+    _ = try manager.resumeAnswer(script.interface(), null);
+    try std.testing.expectEqual(@as(usize, 1), host.count);
+    try std.testing.expectEqual(run, manager.tool_run.?);
+    try std.testing.expect(run.uncertain);
+    try std.testing.expectError(error.ToolOutcomeUnknown, run.nextRequest());
+    try std.testing.expectEqual(@as(u64, 77), manager.turn_id);
+    try std.testing.expectEqualStrings("frozen system", run.request.system);
+    const request = try std.json.parseFromSlice(std.json.Value, a, script.requests.items[1], .{});
+    defer request.deinit();
+    try std.testing.expect(request.value.object.get("tools") == null);
+    const wire = script.requests.items[1];
+    try std.testing.expect(std.mem.indexOf(u8, wire, "[Answer-only recovery]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "Verified original operation: local cleanup remains unknown.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "Partial output is not proof of completion") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "original partial stdout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "EarlierToolOutcomeUnknown") != null);
     const target = run.records.items[0].outcome.?.targets[0];
     try std.testing.expect(target.local_released and target.remote_effect_unknown);
     try std.testing.expectEqual(loop_mod.Status.cancelled, target.status);
@@ -764,6 +781,56 @@ test "released SSH command with unknown remote effect blocks continuation and an
     try std.testing.expect(encoded.get("remote_effect_unknown").?.bool);
     try std.testing.expectEqualStrings("cancelled", encoded.get("status").?.string);
     try std.testing.expect(!run.records.items[1].dispatched);
+}
+
+test "answer retry of unknown tools rejects new calls and preserves owner and budget gates" {
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .calls = &.{df} } } };
+    defer script.deinit();
+    var host: ControlledHost = .{ .mode = .throws };
+    var manager = managerFor(&host);
+    defer manager.deinit();
+    try std.testing.expectError(error.ToolOutcomeUnknown, manager.run(script.interface(), makeRequest(null)));
+    const run = manager.tool_run.?;
+    const body = try a.dupe(u8, run.records.items[0].result_body.?);
+    defer a.free(body);
+    manager.cooldown_deadline_ms = std.math.maxInt(u64);
+    try std.testing.expectError(error.ProviderCoolingDown, manager.resumeAnswer(script.interface(), null));
+    manager.cooldown_deadline_ms = 0;
+    manager.scope.?.owner = .{ .session = 102 };
+    try std.testing.expectError(error.ToolOwnerChanged, manager.resumeAnswer(script.interface(), null));
+    manager.scope = scope;
+    run.compaction_failure = error.ProviderFailure;
+    try std.testing.expectError(error.ContextCompactionFailed, manager.resumeAnswer(script.interface(), null));
+    run.compaction_failure = null;
+    run.limits.context_window = 1;
+    try std.testing.expectError(error.ContextFixedOverhead, manager.resumeAnswer(script.interface(), null));
+    run.limits.context_window = 200_000;
+    try std.testing.expectError(error.ToolInvocationDuringAnswerRetry, manager.resumeAnswer(script.interface(), null));
+    try std.testing.expectEqual(@as(usize, 1), host.count);
+    try std.testing.expectEqual(@as(usize, 2), script.index);
+    try std.testing.expect(run.uncertain);
+    try std.testing.expectEqualStrings(body, run.records.items[0].result_body.?);
+    try std.testing.expectEqualStrings("frozen system", run.request.system);
+}
+
+test "answer retry keeps known exit separate from unknown SSH cleanup" {
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .text = "命令已返回退出码 0，但资源清理仍待确认。" } } };
+    defer script.deinit();
+    var host: ControlledHost = .{ .mode = .cleanup_unknown };
+    var manager = managerFor(&host);
+    defer manager.deinit();
+    try std.testing.expectError(error.ToolOutcomeUnknown, manager.run(script.interface(), makeRequest(null)));
+    _ = try manager.resumeAnswer(script.interface(), null);
+    const run = manager.tool_run.?;
+    const target = run.records.items[0].outcome.?.targets[0];
+    try std.testing.expectEqual(@as(usize, 1), host.count);
+    try std.testing.expect(run.uncertain);
+    try std.testing.expectEqual(@as(?i32, 0), target.exit);
+    try std.testing.expectEqual(loop_mod.Status.unknown, target.status);
+    try std.testing.expect(!target.local_released and !target.remote_effect_unknown);
+    try std.testing.expectEqualStrings("completed output", target.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, script.requests.items[1], "SshCleanupUnknown") != null);
+    try std.testing.expectError(error.ToolOutcomeUnknown, run.nextRequest());
 }
 
 test "answer retry without tool capability keeps frozen scoped request and partial attempt" {
@@ -1077,4 +1144,15 @@ test "live permission manager rechecks calls in one batch and following rounds" 
     _ = try manager.run(script.interface(), .{ .model = "test", .system = "", .messages = &.{.{ .content = "permission test" }}, .tools = &definitions });
     try std.testing.expectEqual(@as(usize, 3), fixture.count);
     try std.testing.expectEqualSlices(permission.Verdict, &.{ .allow_auto, .allow_auto, .need_confirm }, &fixture.verdicts);
+}
+
+test "AI context budget tool overhead does not attempt first-turn compaction" {
+    var run = loop_mod.Loop.init(a, scope, 77, .{ .context_window = 256 });
+    defer run.deinit();
+    run.compaction_config = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:1/v1", .model = "fixture", .auth = .none, .context_window = 256 };
+    try std.testing.expectError(error.ContextFixedOverhead, run.start(.{ .model = "fixture", .system = "rules", .messages = &.{.{ .content = "look at terminal" }}, .tools = &definitions }));
+    try std.testing.expect(run.compaction_failure == null);
+    try std.testing.expectEqual(@as(usize, 0), run.round_index);
+    try std.testing.expectEqualStrings("look at terminal", run.messages.items[0].content);
+    try std.testing.expectError(error.ContextFixedOverhead, run.nextRequest());
 }

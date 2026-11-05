@@ -144,5 +144,5 @@ pub fn logRow() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 0, .hit_behavior = .@"opaque" };
 }
 pub fn diagnosticPanel() ui.BoxStyle {
-    return .{ .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(12), .gap = 8, .background = theme.current().overlay, .border = .{ .radius = 9, .width = 1, .color = theme.current().fg_2.withAlpha(20) } };
+    return .{ .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(12), .gap = 8, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 9, .width = 0 } };
 }

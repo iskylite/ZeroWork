@@ -3,8 +3,8 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 // Final workspace CSS: .terminal-scroll and .pane-group .terminal-scroll.
-pub fn contentPadding(grouped: bool) ui.Padding {
-    return if (grouped) .{ .top = 14, .right = 13, .bottom = 14, .left = 13 } else .{ .top = 18, .right = 20, .bottom = 18, .left = 20 };
+pub fn contentPadding(_: bool) ui.Padding {
+    return ui.Padding.all(4);
 }
 pub const timestamp_gap: f32 = 12;
 pub const timestamp_x: f32 = 0;

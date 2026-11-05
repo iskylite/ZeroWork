@@ -65,6 +65,8 @@ pub const Runtime = struct {
     receipt: std.atomic.Value(u8) = .init(@backingInt(readonly.ReleaseReceipt.awaiting)),
     done: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
+    /// Published with failure before phase's release-store.
+    failure_stage: ?[]const u8 = null,
     session: ?ssh.Session = null,
     auxiliary: bool = false,
     // Controller initializes this before closing's release-store. Thereafter
@@ -305,12 +307,14 @@ pub const Runtime = struct {
     fn run(self: *Runtime) void {
         self.session = self.connector.connect_fn(self.connector.ctx, &self.closing) catch |err| {
             self.failure = err;
+            self.failure_stage = "ssh_connect";
             self.phase.store(.failed, .release);
             self.finish();
             return;
         };
         if (self.session.?.state != .active or self.session.?.channel != null or self.session.?.handle == null or self.session.?.socket_fd < 0) {
             self.failure = error.InvalidTransferSession;
+            self.failure_stage = "ssh_connect";
             self.phase.store(.failed, .release);
             self.finish();
             return;
@@ -318,6 +322,7 @@ pub const Runtime = struct {
         if (!self.closing.load(.acquire)) {
             self.initializeSftp() catch |err| {
                 self.failure = err;
+                self.failure_stage = "sftp_init";
                 self.phase.store(.failed, .release);
                 self.finish();
                 return;

@@ -73,6 +73,7 @@ pub const Manager = struct {
         tool_rejected: ?*const fn (*anyopaque, provider.ToolCall, []const u8) anyerror!void = null,
     };
     allocator: std.mem.Allocator,
+    input: ?*@import("session_input.zig").Inbox = null,
     compaction_config: ?@import("provider_config.zig").ProviderConfig = null,
     observer: ?Observer = null,
     turn: turn_model.Turn,
@@ -201,7 +202,8 @@ pub const Manager = struct {
         try self.turn.begin();
         try self.turn.stream();
 
-        if (self.tool_host != null or (self.scope != null and request.tools.len == 0)) {
+        if (request.tools.len != 0 and self.tool_host == null) return error.ToolHostUnavailable;
+        if (self.input != null or self.tool_host != null or (self.scope != null and request.tools.len == 0)) {
             const scope = self.scope orelse return error.ToolScopeUnavailable;
             const loop = try self.allocator.create(tool_loop.Loop);
             loop.* = tool_loop.Loop.init(self.allocator, scope, self.turn_id, self.tool_limits);
@@ -218,11 +220,14 @@ pub const Manager = struct {
             self.tool_run = loop;
         } else if (request.tools.len != 0) return error.ToolHostUnavailable;
 
+        errdefer if (self.input != null) if (self.tool_run) |loop| loop.sealInterrupted() catch {};
         const frozen_policy_revision = self.policy_revision;
         var total: provider.ChatStats = .{};
         while (true) {
             try budget.check();
+            const input_revision = if (self.input != null) try self.consumeInputs() else 0;
             var current = if (self.tool_run) |loop| try loop.nextRequest() else request;
+            if (self.input) |inbox| self.tool_run.?.dispatch_gate = .{ .context = inbox, .revision = input_revision, .current = inputPlanCurrent };
             // Keep only the caller's token in the retained snapshot. This
             // bounded token borrows the active run and must never escape it.
             current.cancel = cancel;
@@ -235,6 +240,11 @@ pub const Manager = struct {
             total.output_tokens +|= stats.output_tokens;
             total.usage_reported = total.usage_reported and stats.usage_reported;
             if (self.pending_tools.items.len == 0 or self.tool_run == null) {
+                if (self.input) |inbox| if (!inbox.tryClose()) {
+                    const loop = self.tool_run.?;
+                    if (self.round_text.items.len != 0) loop.appendPrepared(try loop.prepareMessage(.{ .role = .assistant, .content = self.round_text.items }));
+                    continue;
+                };
                 try self.turn.done();
                 try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = self.command, .verdict = "stream_done", .target = request.model });
                 return total;
@@ -245,6 +255,26 @@ pub const Manager = struct {
             if (self.tool_host) |host| try self.tool_run.?.refreshAuthority(host, current.cancel);
             try budget.check();
         }
+    }
+
+    fn inputPlanCurrent(raw: *anyopaque, revision: u64) bool {
+        const inbox: *@import("session_input.zig").Inbox = @ptrCast(@alignCast(raw));
+        return inbox.planCurrent(revision);
+    }
+    fn consumeInputs(self: *Manager) !u64 {
+        const inbox = self.input.?;
+        const loop = self.tool_run.?;
+        inbox.lock();
+        defer inbox.unlock();
+        if (!inbox.admission) return error.Cancelled;
+        if (loop.round_index >= loop.limits.max_rounds) return error.ToolRoundLimit;
+        for (inbox.entries.items) |entry| {
+            if (entry.receipt.delivery != .accepted or entry.receipt.pause != null or entry.receipt.turn != inbox.active_turn or !entry.receipt.fence.eql(inbox.fence)) continue;
+            const prepared = try loop.prepareMessage(entry.payload.messages[0]);
+            try inbox.consumedLocked(entry, @as(u64, loop.round_index) + 1, loop.preparedTranscript(prepared));
+            loop.appendPrepared(prepared);
+        }
+        return inbox.revision;
     }
 
     /// An explicit answer-only retry preserves the original turn, transcript
@@ -269,7 +299,6 @@ pub const Manager = struct {
     fn resumeAnswerWithinBudget(self: *Manager, p: provider.Provider, loop: *tool_loop.Loop, budget: anytype, cancel: *provider.CancelToken) !provider.ChatStats {
         try budget.check();
         if (self.cooldownRemainingMs() != 0) return error.ProviderCoolingDown;
-        if (loop.uncertain and !loop.host_observation_only) return error.ToolOutcomeUnknown;
         if (self.turn_id != loop.turn_id or self.scope == null or !tool_scope.Owner.eql(self.scope.?.owner, loop.scope.owner)) return error.ToolOwnerChanged;
         if (self.turn.state != .idle) return error.InvalidTransition;
         try self.turn.begin();
@@ -281,6 +310,13 @@ pub const Manager = struct {
             observer.reset(observer.context);
             try budget.check();
         }
+        // Include recovery guidance in admission without changing the frozen
+        // system snapshot. Unknown receipts remain unknown after this answer.
+        const original_system = loop.request.system;
+        const answer_system = if (loop.uncertain) try std.fmt.allocPrint(self.allocator, "{s}\n\n[Answer-only recovery]\nGenerate an answer using only the retained transcript and tool results. No tools are available: do not request or replay any operation. Distinguish completed, failed, skipped and unknown results using the recorded receipts. Partial output is not proof of completion. Unknown remote effects or cleanup remain unverified; do not claim success or that cleanup finished. Explain missing evidence and any verification still needed.\nRead-only observations (they do not clear prior unknown outcomes):\n{s}", .{ original_system, loop.verification_notes.items }) else null;
+        defer if (answer_system) |text| self.allocator.free(text);
+        if (answer_system) |text| loop.request.system = text;
+        defer loop.request.system = original_system;
         try loop.checkRequestBudget();
         var resumed = loop.request;
         resumed.messages = loop.messages.items;
@@ -611,7 +647,11 @@ pub const Manager = struct {
                 if (!std.mem.eql(u8, old, tool_name)) return error.ToolNameChanged;
             } else tool.name = try self.allocator.dupe(u8, tool_name);
         }
-        if (arguments.len + tool.arguments.items.len > 64 * 1024) return error.ToolArgumentsTooLarge;
+        var argument_limit: usize = 64 * 1024;
+        if (self.tool_run) |active_loop| if (active_loop.tool_table) |*table| if (tool.name) |tool_name| if (table.lookup(tool_name)) |entry| {
+            argument_limit = entry.definition.max_argument_bytes;
+        };
+        if (arguments.len > argument_limit -| tool.arguments.items.len) return error.ToolArgumentsTooLarge;
         try tool.arguments.appendSlice(self.allocator, arguments);
         if (self.observer) |observer| try observer.delta(observer.context, .{ .tool_plan = .{ .index = index, .call_id = tool.call_id, .name = tool.name, .arguments = tool.arguments.items } });
     }

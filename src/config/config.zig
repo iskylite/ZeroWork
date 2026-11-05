@@ -125,12 +125,13 @@ pub const Config = struct {
         const background = self.ui.materials.background;
         try writer.print("[ui.materials]\nblur_px = {d}\n\n[ui.materials.background]\nenabled = {}\npath = ", .{ self.ui.materials.blur_px, background.enabled });
         try std.json.Stringify.value(background.path, .{}, &writer);
+        try writer.print("\nsource = \"{s}\"\norder = \"{s}\"\ninterval_minutes = {d}", .{ @tagName(background.source), @tagName(background.order), background.interval_minutes });
         try writer.print("\nfit = \"{s}\"\nalignment_x = \"{s}\"\nalignment_y = \"{s}\"\ntransparency = {d}\n\n", .{ @tagName(background.fit), @tagName(background.alignment_x), @tagName(background.alignment_y), background.transparency });
         try writer.print("[updates]\nauto_check = {}\n\n", .{self.updates.auto_check});
         try writer.print("[completion]\nenabled = {}\n\n", .{self.completion.enabled});
         try writer.print("[transfer]\ndedicated_connection = {}\nwindow_chunks = {d}\nchunk_kb = {d}\ndownload_dir = \"{s}\"\nverify_md5 = {}\nshared_pacing_kbps = {d}\nresume = {}\nmax_tasks = {d}\nconflict_policy = \"{s}\"\n\n", .{ self.transfer.dedicated_connection, self.transfer.window_chunks, self.transfer.chunk_kb, self.transfer.download_dir, self.transfer.verify_md5, self.transfer.shared_pacing_kbps, self.transfer.@"resume", self.transfer.max_tasks, self.transfer.conflict_policy });
         try writer.print("[ssh]\nkeepalive_sec = {d}\nreconnect_max = {d}\nreconnect_backoff = [{d},{d},{d},{d},{d}]\nconnect_timeout_sec = {d}\nterm = \"{s}\"\ncompression = {}\nauto_shell_integration = {}\nauto_reconnect = {}\nbuffer_input = {}\nsocks_port = {d}\nsocks_bind = \"{s}\"\notp_modal = {}\ntotp_autofill = {}\n\n", .{ self.ssh.keepalive_sec, self.ssh.reconnect_max, self.ssh.reconnect_backoff[0], self.ssh.reconnect_backoff[1], self.ssh.reconnect_backoff[2], self.ssh.reconnect_backoff[3], self.ssh.reconnect_backoff[4], self.ssh.connect_timeout_sec, self.ssh.term, self.ssh.compression, self.ssh.auto_shell_integration, self.ssh.auto_reconnect, self.ssh.buffer_input, self.ssh.socks_port, self.ssh.socks_bind, self.ssh.otp_modal, self.ssh.totp_autofill });
-        try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nstep_display = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), @tagName(self.ai.step_display), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
+        try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nfollow_up_mode = \"{s}\"\nstep_display = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), @tagName(self.ai.follow_up_mode), @tagName(self.ai.step_display), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
         var has_provider = false;
         for (self.ai.providers) |p| if (p.endpoint.len > 0 or p.api_key.len > 0 or p.api_key_ref != null or p.name.len > 0 or p.model_count > 0 or p.enabled) {
             has_provider = true;
@@ -211,7 +212,7 @@ pub const Config = struct {
             },
             .@"ui.materials.background" => {
                 const background = &self.ui.materials.background;
-                if (eq(key, "enabled")) background.enabled = try parseBool(value) else if (eq(key, "path")) background.path = try parseOwnedString(allocator, value) else if (eq(key, "fit")) background.fit = std.meta.stringToEnum(material.Fit, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "alignment_x")) background.alignment_x = std.meta.stringToEnum(material.Horizontal, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "alignment_y")) background.alignment_y = std.meta.stringToEnum(material.Vertical, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "transparency")) background.transparency = try parseFloat(value) else return error.UnknownKey;
+                if (eq(key, "source")) background.source = std.meta.stringToEnum(material.Source, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "order")) background.order = std.meta.stringToEnum(material.Order, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "interval_minutes")) background.interval_minutes = try parseInt(u16, value) else if (eq(key, "enabled")) background.enabled = try parseBool(value) else if (eq(key, "path")) background.path = try parseOwnedString(allocator, value) else if (eq(key, "fit")) background.fit = std.meta.stringToEnum(material.Fit, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "alignment_x")) background.alignment_x = std.meta.stringToEnum(material.Horizontal, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "alignment_y")) background.alignment_y = std.meta.stringToEnum(material.Vertical, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "transparency")) background.transparency = try parseFloat(value) else return error.UnknownKey;
             },
             .completion => {
                 if (eq(key, "enabled")) self.completion.enabled = try parseBool(value) else return error.UnknownKey;
@@ -223,7 +224,7 @@ pub const Config = struct {
                 if (eq(key, "keepalive_sec")) self.ssh.keepalive_sec = try parseInt(u16, value) else if (eq(key, "reconnect_max")) self.ssh.reconnect_max = try parseInt(u8, value) else if (eq(key, "reconnect_backoff")) self.ssh.reconnect_backoff = try parseBackoff(value) else if (eq(key, "connect_timeout_sec")) self.ssh.connect_timeout_sec = try parseInt(u16, value) else if (eq(key, "term")) self.ssh.term = try parseString(value) else if (eq(key, "compression")) self.ssh.compression = try parseBool(value) else if (eq(key, "auto_shell_integration")) self.ssh.auto_shell_integration = try parseBool(value) else if (eq(key, "auto_reconnect")) self.ssh.auto_reconnect = try parseBool(value) else if (eq(key, "buffer_input")) self.ssh.buffer_input = try parseBool(value) else if (eq(key, "socks_port")) self.ssh.socks_port = try parseInt(u16, value) else if (eq(key, "socks_bind")) self.ssh.socks_bind = try parseString(value) else if (eq(key, "otp_modal")) self.ssh.otp_modal = try parseBool(value) else if (eq(key, "totp_autofill")) self.ssh.totp_autofill = try parseBool(value) else return error.UnknownKey;
             },
             .ai => {
-                if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
+                if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
             },
             .log => {
                 if (eq(key, "ring_mb")) self.log.ring_mb = try parseInt(u16, value) else if (eq(key, "checkpoint_sec")) self.log.checkpoint_sec = try parseInt(u16, value) else if (eq(key, "retention_days")) self.log.retention_days = try parseInt(u16, value) else if (eq(key, "export_format")) self.log.export_format = try parseString(value) else return error.UnknownKey;
@@ -356,7 +357,7 @@ pub fn resetDefaults() Config {
     return value;
 }
 pub fn validFontWeight(value: []const u8) bool {
-    return eq(value, "light") or eq(value, "regular") or eq(value, "medium") or eq(value, "bold");
+    return @import("font_weight.zig").parse(value) != null;
 }
 pub fn validCursorStyle(value: []const u8) bool {
     return eq(value, "block") or eq(value, "bar") or eq(value, "underline");
@@ -424,8 +425,10 @@ pub const AiModel = struct {
 };
 pub const default_providers = [_]AiProvider{ .{ .kind = .anthropic }, .{ .kind = .openai_compat }, .{ .kind = .ollama } };
 pub const StepDisplay = enum { collapsed, expanded };
+pub const FollowUpMode = enum { queue, steer };
 
 pub const Ai = struct {
+    follow_up_mode: FollowUpMode = .steer,
     default_provider: []const u8 = "anthropic",
     permission_mode: PermissionMode = .confirm,
     step_display: StepDisplay = .collapsed,
@@ -541,7 +544,7 @@ test "default config matches the product baseline" {
 test "config parses and round trips the documented subset" {
     const source = "[ui]\ntheme = \"sauber\"\nfont_family = \"JetBrains Mono\"\nfont_size = 14\nfont_weight = \"regular\"\nline_height = 1.50\ncursor_style = \"block\"\nsidebar_collapsed = false\ninput_line_highlight = true\n\n[completion]\nenabled = true\n\n[transfer]\ndedicated_connection = true\nwindow_chunks = 16\nchunk_kb = 64\ndownload_dir = \"~/Downloads\"\nverify_md5 = false\nshared_pacing_kbps = 2048\n\n[ssh]\nkeepalive_sec = 30\nreconnect_max = 5\nreconnect_backoff = [1,2,4,8,16]\n\n[ai]\ndefault_provider = \"anthropic\"\npermission_mode = \"confirm\"\nredact_ip = false\nerror_hint = true\n\n[log]\nring_mb = 64\ncheckpoint_sec = 30\n";
     const first = try Config.parse(source);
-    var buffer: [2048]u8 = undefined;
+    var buffer: [4096]u8 = undefined;
     const encoded = try first.format(&buffer);
     const second = try Config.parse(encoded);
     try std.testing.expectEqual(first.ui.font_size, second.ui.font_size);

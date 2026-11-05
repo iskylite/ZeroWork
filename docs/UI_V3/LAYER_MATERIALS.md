@@ -117,3 +117,37 @@ ZW_LAYER_TEST_PREFIX=/tmp/zw-layer-materials-build node e2e/layer_materials_nati
 共享 Input 的底色与必要的焦点反馈、次级按钮和未选复选框由同一主题发布提供这些颜色。显式覆盖样式的终端搜索、资产表单、页签筛选、传输确认、AI 菜单、连接与 SOCKS 详情同步采用相同语义。保留节点重绘同时更新派生内容底色，保留文本、选择、焦点和业务状态。HTML 对应 `theme-tokens.css` 的 `--control-bg`、`--popup-action`、`--popup-selected`。
 
 本轮实际层级、覆盖范围及截图的可复现入口见上述验证方式；原生脚本为 `e2e/layer_materials_native.ts`，中间截图保存于运行时指定的仓库外目录。
+
+
+## 保留面板与内部卡片回归（2026-11-05）
+
+收起后从窗口树摘除的面板，在重新挂载时按错过的 theme version 重放当前主题，只更新原节点，不重建草稿或业务状态。通过 `Cx.replaySubtreeTheme` 使用与 `setTheme` 相同的主题钩子，且不再次发布整窗主题信号。材质边界不以背景 RGB 是否等于当前调色板判断；窗口背景 capture/blur 节点不计浮层，自定义视频进度表面保留其显式色调。
+
+AI Textarea 的内部文本、光标和选区使用独立的 tokens 快照，因此另外订阅主题发布并刷新原文档的渲染，保证隐藏期间切换主题后草稿颜色同步。
+
+恢复卡、会话清单授权卡、答复图片卡、代码块、传输任务卡、连接节点卡、关闭风险摘要和历史回溯条均声明实际材质边界。审批卡内部命令／详情视口继续递增一层。原始连接诊断由 portal chrome 独占背景，内容容器透明；快速连接选中行使用共享 popupSelection 状态材质。
+
+`zig build test-ui -Dui-test-filter=material -j2` 覆盖生产组件层级、隐藏主题切换和草稿保留。构建 test-mode 后运行 `node e2e/layer_regressions_native.ts /absolute/test-binary /tmp/zw-layer-regressions`，通过真实设置保存主题，检查首次打开及反复收起重开、三主题和 860×480 截图；同目录的 pixel-report.json 检查空白外壳区域确实透出背景，并且重复重开不累加背景实度。输入为 Harness 合成事件，不代表物理键盘或 IME 验收。
+
+## KVM 视频与 HUD 的原生分层验收（2026-11-05）
+
+KVM 预览窗口挂载与主应用相同的 `layer_materials.Policy`，使用生产 BMC View、原始 typed services 和真实 Metal FrameSink。视频像素及黑色留白保持独立，不跟随 UI 透明度改变。FPS 保留视频专用背景 `rgba(18,20,24,199/255)`，输入错误提示保留黑色 65% 底色，两者不拦截视频输入。
+
+进度卡的内容实际挂在玻璃表面之内，外层仅负责尺寸和阴影；路由摘要及展开的步骤诊断按实际父表面进入 L2。玻璃表面显式采样当前视频合成层（`capture_current_target=true`），避免在 `composited_group` 内采到窗口底图而变灰白。电源／启动摘要、连接日志的路由、列表和底栏补齐 L2 声明。
+
+关闭的 KVM 菜单和弹窗订阅主题发布，重放其保留内容；BMC Select 适配层同步内部 palette、当前标签和重建后的选项文字，保留值、键盘高亮和滚动。提示气泡的可见性检查通过当前 registry 中的稳定节点 ID 确认控件存活，避免父菜单摘除重开后因旧输入 generation 误关气泡；气泡自己的 Scope 同步脱离节点树后的背景与文字颜色，实际输入事件的 generation 校验不变。
+
+验收入口：
+
+```sh
+zig build bmc-kvm-preview -Dtest-mode=true -j2 --prefix /tmp/zw-kvm-material-build
+zig build test-bmc -Dtest-filter='BMC material' -j2
+zig build test-bmc -Dtest-filter='BMC view' -j2
+zig build test-bmc -Dtest-filter='BMC Select' -j2
+node e2e/bmc_material_layers_native.ts /tmp/zw-kvm-material-build/bin/bmc-kvm-preview /tmp/zw-kvm-material-evidence
+node e2e/bmc_kvm_video_frames_native.ts --binary /tmp/zw-kvm-material-build/bin/bmc-kvm-preview --out /tmp/zw-kvm-continuous-frames
+```
+
+原生矩阵在同一窗口中切换 Dark／Light／Sauber，覆盖 1440×900 与 860×480、T=0/75/100、黑白视频及 FPS、输入提示、五类菜单、嵌套下拉框、FPS 说明、启动顺序、断开确认、只读、无信号、中断旧帧、连接阶段、证书／凭据等待和失败。每次保存截图、实际背景／文字颜色、玻璃采样配置及层级补偿信息；`bmc_material_pixels.py` 检查原始视频、HUD 混色和进度卡采样，区分中断后仍显示的旧帧与无画面时的等待底色。截图仍需查看，不以样式数值代替 Metal 结果。此入口不建立 BMC 连接，不执行电源或启动写入，不代表真实设备连接、物理输入或 macOS 全屏验收。
+
+本轮最终矩阵通过 156 个截图状态、102 项像素断言及气泡／选项文字颜色检查，分层异常为零；另有 24 次连续视频呈现、每次三点的像素检查通过。生产组件回归覆盖真实父表面、原节点保留、提示三次重开与三主题切换，以及既有视频、滚动和输入行为。

@@ -36,7 +36,6 @@ python3 -m http.server 5179 --bind 127.0.0.1 --directory.
 | 连接与资产 | [连接弹窗](connection/index.html)、[资产管理](connection/index.html?open=none) | 身份/协议/认证、高级配置、多跳、核对测试、信任/失败/重试、分组 |
 | 设置 | [八分类设置](settings/index.html)、[Provider 与单行模型条](settings/index.html?state=ai-populated) | 搜索与设置事务、外观、快捷键、网络、传输、AI、插件、通知、数据 |
 | 远程桌面和 BMC iKVM | [KVM](kvm/index.html?protocol=kvm)、[VNC](kvm/index.html?protocol=vnc)、[RDP](kvm/index.html?protocol=rdp)、[FTP/FTPS](kvm/index.html?protocol=ftp) | 未来协议配置、视频与输入、控制权、显示、电源、启动、AI与异常 |
-| 本地笔记 | [笔记工作区](notes/index.html) | Markdown 双栏、分组与搜索、导入导出、草稿与失败、终端/AI联动 |
 | 公共组件 | [独立展板](components/index.html) | 输入/选择/按钮/导航/列表/任务/浮层/通知/工具区的标准状态 |
 
 是覆盖范围与验证状态的依据；[效果图清单](SCREENS.md)负责 HTML 状态入口，各模块 README 负责具体行为、状态和原生映射。模块页面是实际可点击产品稿，设计中心仅负责导航。

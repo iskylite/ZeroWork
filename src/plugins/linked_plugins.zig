@@ -26,7 +26,8 @@ fn bindings(comptime plugin_id: []const u8, comptime names: []const []const u8) 
         const value = blk: {
             var result = ai.builtinBindings(plugin_id, names);
             for (&result) |*binding| {
-                const kind: plugins.ServiceKind = if (std.mem.eql(u8, binding.definition_id, "run_command")) .exec else if (std.mem.eql(u8, binding.definition_id, "read_terminal")) .terminal else if (std.mem.eql(u8, binding.definition_id, "list_remote_files")) .directory else .file_read;
+                const kind: plugins.ServiceKind = if (std.mem.eql(u8, binding.definition_id, "run_command") or std.mem.startsWith(u8, binding.definition_id, "file.")) .exec else if (std.mem.eql(u8, binding.definition_id, "read_terminal")) .terminal else if (std.mem.eql(u8, binding.definition_id, "list_remote_files")) .directory else .file_read;
+                if (std.mem.startsWith(u8, binding.definition_id, "file.")) binding.handler = @import("../ai/terminal_file_tools.zig").invoke;
                 binding.required_services = switch (kind) {
                     .exec => plugins.legacyServiceDefinitions(&.{.exec}),
                     .terminal => plugins.legacyServiceDefinitions(&.{.terminal}),
@@ -103,10 +104,10 @@ pub fn registerAll(host: *plugins.PluginHost, adapters: []const sessions.Adapter
                 .sftp => plugins.legacyServiceDefinitions(&.{ .lifecycle, .auth, .route, .directory, .file_read, .transfer }),
                 .external => unreachable,
             },
-            .tool_definitions = &ai.builtin_definitions,
+            .tool_definitions = &(ai.builtin_definitions ++ @import("../ai/terminal_file_tools.zig").definitions),
             .tools = switch (descriptor.plugin_id) {
-                .local => bindings("local", &.{ "run_command", "read_terminal" }),
-                .ssh => bindings("ssh", &.{ "run_command", "read_terminal", "list_remote_files", "read_remote_file" }),
+                .local => bindings("local", &.{ "run_command", "read_terminal", "file.read_text", "file.write_text", "file.edit_text" }),
+                .ssh => bindings("ssh", &.{ "run_command", "read_terminal", "list_remote_files", "read_remote_file", "file.read_text", "file.write_text", "file.edit_text" }),
                 .sftp => bindings("sftp", &.{ "list_remote_files", "read_remote_file" }),
                 .external => unreachable,
             },

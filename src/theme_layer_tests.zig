@@ -517,3 +517,139 @@ test "material overlapping sibling cards preserve one L1 opacity instead of stac
     w.frame();
     try std.testing.expectEqual(@as(u8, 255), upper.getBackground().a);
 }
+
+test "material retained assistant replays missed themes before first open and after collapse" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.dark);
+    _ = theme.setMaterialParameters(0, 0);
+    const w = try Window.init();
+    defer w.deinit();
+    const holder = try ui.box(w.cx, .{ .position = .absolute, .width = .{ .px = 600 }, .height = .{ .px = 456 } }, .{});
+    const assistant = try ui.boxStyled(w.cx, @import("ui/ai_assistant_styles.zig").panel, .{});
+    const title = try ui.textStyled(w.cx, @import("ui/ai_assistant_styles.zig").title, "AI 助手");
+    try assistant.appendChild(w.cx.allocator, title);
+    const draft = try w.scope.createText("保留草稿", .{});
+    const editor = try ui.widgets.Textarea(.{ .value = draft, .borderless = true, .rows = 1 }).mountResult(w.scope, w.cx);
+    @import("ui/ai_composer_sizing.zig").configure(editor);
+    try @import("ui/ai_composer_sizing.zig").bindTheme(w.cx, w.scope, editor);
+    try assistant.appendChild(w.cx.allocator, editor.wrapper);
+    try holder.appendChild(w.cx.allocator, assistant);
+    try w.cx.root.?.appendChild(w.cx.allocator, holder);
+    holder.setDisplay(.none);
+    _ = try @import("ui/retained_panel.zig").Panel.mount(w.cx, w.scope, w.cx.root.?, holder);
+    try @import("ui/layer_materials.zig").Policy.mount(w.cx, w.scope);
+    const identity = assistant.id;
+    for ([_]theme.Name{ .light, .sauber, .dark }) |name| {
+        theme.select(name);
+        _ = theme.setMaterialParameters(75, 24);
+        w.publish.publish(w.cx, theme.widgetTheme(name));
+        holder.setDisplay(.flex);
+        const published_version = w.cx.theme_version;
+        w.frame();
+        try std.testing.expectEqual(published_version, w.cx.theme_version);
+        try std.testing.expectEqual(theme.layerBackground(1), assistant.getBackground());
+        try std.testing.expectEqual(theme.current().fg_1, title.getText().?.color);
+        try std.testing.expectEqual(@as(f32, 24), assistant.style.backdrop_blur());
+        try std.testing.expectEqual(identity, assistant.id);
+        try std.testing.expectEqualStrings("保留草稿", draft.peek());
+        try std.testing.expectEqual(theme.current().fg_1, editor.state.tokens.tokens.color.fg_primary);
+        try std.testing.expectEqual(theme.current().fg_1, findText(editor.wrapper, "保留草稿").?.getText().?.color);
+        holder.setDisplay(.none);
+        w.frame();
+        try std.testing.expect(holder.parent == null);
+    }
+}
+
+test "material floating identity survives stale palette RGB and ignores background capture" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.dark);
+    _ = theme.setMaterialParameters(100, 24);
+    const w = try Window.init();
+    defer w.deinit();
+    try @import("ui/layer_materials.zig").Policy.mount(w.cx, w.scope);
+    const stale = try ui.box(w.cx, .{ .width = .{ .px = 300 }, .height = .{ .px = 160 }, .background = theme.colors(.light).overlay, .glass = theme.overlayGlass() }, .{});
+    try w.cx.root.?.appendChild(w.cx.allocator, stale);
+    const capture = try ui.box(w.cx, .{ .width = .{ .px = 300 }, .height = .{ .px = 100 }, .background = ui.Color.TRANSPARENT, .glass = .{ .backdrop_blur = 24, .capture_current_target = true } }, .{});
+    try w.cx.root.?.appendChild(w.cx.allocator, capture);
+    w.frame();
+    try std.testing.expectEqual(theme.layerBackground(1), stale.getBackground());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, capture.getBackground());
+}
+
+test "material production recovery inventory images code and risk cards follow their real owners" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    const w = try Window.init();
+    defer w.deinit();
+    w.cx.setViewport(1440, 1600);
+    try @import("ui/layer_materials.zig").Policy.mount(w.cx, w.scope);
+    const assistant = try ui.boxStyled(w.cx, @import("ui/ai_assistant_styles.zig").panel, .{});
+    try w.cx.root.?.appendChild(w.cx.allocator, assistant);
+    const Callbacks = struct {
+        fn recover(_: *anyopaque, _: @import("ui/ai_recovery_view.zig").Envelope) void {}
+        fn close(_: *anyopaque, _: @import("ui/session_lifecycle.zig").SessionId, _: bool) void {}
+        fn inventory(_: *anyopaque, _: @import("ai/inventory_approval.zig").Ticket, _: @import("ai/inventory_approval.zig").Decision) !void {}
+        fn preview(_: *anyopaque, _: @import("ai/image_attachments.zig").ContentRef) !void {}
+    };
+    const recovery = try @import("ui/ai_recovery_view.zig").mount(w.cx, w.scope, .{ .ticket = .{ .owner = .{ .session = 1 }, .turn = 1 }, .reason = "请求失败", .retries = 0, .max_retries = 3, .retry_enabled = true, .regenerate_enabled = false, .cooldown_seconds = 0 }, .{ .context = w.cx, .enqueue = Callbacks.recover });
+    try assistant.appendChild(w.cx.allocator, recovery);
+    const inventory = try @import("ui/ai_inventory_grant_view.zig").View.mount(w.cx, w.scope, .{ .context = w.cx, .on_decision = Callbacks.inventory });
+    @import("ui/layer_materials.zig").overlay(inventory.root); // Isolation preserves its action role.
+    inventory.root.setDisplay(.flex);
+    try assistant.appendChild(w.cx.allocator, inventory.root);
+    const images = @import("ui/ai_transcript_images.zig");
+    var store: images.Store = .{ .allocator = w.cx.allocator };
+    defer store.deinit();
+    const image_card = try images.mount(w.cx, w.scope, .{ .store = &store, .source = null, .conversation = 1, .turn = 1, .app = null, .preview_context = w.cx, .preview = Callbacks.preview }, .{ .start = 0, .end = 1, .alt = "", .path = "/fixture.png" }, 570);
+    try assistant.appendChild(w.cx.allocator, image_card);
+    const message = try @import("ui/ai_message_view.zig").mountCode(w.cx, w.scope, "printf hello", "sh");
+    try assistant.appendChild(w.cx.allocator, message);
+    const code = findLayerTestNode(message, "ai.message.code").?;
+    const close = try Close.View.mount(w.cx, w.scope, .{ .context = w.cx, .resolve = Callbacks.close });
+    try close.show(1, null);
+    var terminal = try @import("ui/terminal_view.zig").TerminalViewNode.mount(w.cx);
+    defer terminal.releaseBuffers(w.cx);
+    try w.cx.root.?.appendChild(w.cx.allocator, terminal.root);
+    try terminal.attachSearch(w.scope);
+    terminal.history_bar.?.setDisplay(.flex);
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        for ([_]f32{ 0, 25, 75, 100 }) |t| {
+            theme.select(name);
+            _ = theme.setMaterialParameters(t, 24);
+            w.publish.publish(w.cx, theme.widgetTheme(name));
+            assistant.setStyleInline(w.cx.allocator, .{ .height = .{ .px = 1300 } });
+            w.frame();
+            const action = theme.popupAction().withAlpha(theme.layerAlpha(2));
+            const control = theme.popupInset().withAlpha(theme.layerAlpha(2));
+            try std.testing.expectEqual(action, recovery.getBackground());
+            try std.testing.expectEqual(action, inventory.root.getBackground());
+            try std.testing.expectEqual(control, image_card.getBackground());
+            try std.testing.expectEqual(control, code.getBackground());
+            try std.testing.expectEqual(theme.current().fg_1, findLayerTestNode(code, "ai.message.code.text").?.getText().?.color);
+            try std.testing.expectEqual(theme.current().fg_2, findLayerTestNode(code, "ai.message.code.language").?.getText().?.color);
+            try std.testing.expectEqual(action, close.risk.getBackground());
+            try std.testing.expectEqual(theme.current().surface_1.withAlpha(theme.layerAlpha(1)), terminal.history_bar.?.getBackground());
+            try std.testing.expectEqual(@as(u8, 255), recovery.children.items[0].children.items[1].getText().?.color.a);
+        }
+    }
+}
+
+fn findLayerTestNode(node: *ui.Node, id: []const u8) ?*ui.Node {
+    if (node.meta.ownership.meta.test_id) |value| if (std.mem.eql(u8, value, id)) return node;
+    for (node.children.items) |child| if (findLayerTestNode(child, id)) |found| return found;
+    return null;
+}

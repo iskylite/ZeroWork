@@ -567,7 +567,7 @@ test "SFTP progress keeps failure code and permits retry only after actual clean
     try std.testing.expectEqual(@as(usize, 1), f.retries);
 }
 
-test "connection progress native diagnostics are owned, filtered, copied and dismissed with their attempt" {
+test "material connection progress native diagnostics are owned, filtered, copied and dismissed with their attempt" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -585,6 +585,10 @@ test "connection progress native diagnostics are owned, filtered, copied and dis
     const expected = "尝试 1 · 第 2 跳 · SSH 握手\n时间未知 - handshake failed rc=-13 libssh2_code=-13 message=Failed getting banner - —\n";
     try std.testing.expectEqualStrings(expected, f.view.diagnostic_text.getText().?.content);
     try std.testing.expect(f.view.diagnostic_open.peek());
+    // Portal chrome owns the only material fill. Its content must not add an
+    // independent overlay or a perimeter line on top of that alpha.
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.diagnostic_panel.getBackground());
+    try std.testing.expectEqual(@as(f32, 0), f.view.diagnostic_panel.style.border.width);
     f.view.copyLogs();
     try std.testing.expect(std.mem.indexOf(u8, f.copied.?, "libssh2_code=-13") != null);
     // A different hop must never show this failure's diagnostic bubble.

@@ -208,6 +208,7 @@ test "file transfer host failure and unknown cleanup stay on original key until 
     var status = hooks.poll(hooks.context, f.request.binding, f.request.source.create_key);
     try std.testing.expect(status == .failed);
     try std.testing.expectEqualStrings("ControlledConnectFailure", status.failed.code);
+    try std.testing.expectEqualStrings("ssh_connect", status.failed.stage.?);
     try std.testing.expectEqual(operations.Cleanup.releasing, status.failed.cleanup);
     var forged = f.closeRequest();
     forged.operation.operation_id += 100;

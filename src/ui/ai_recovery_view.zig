@@ -7,11 +7,14 @@ pub const Envelope = struct { ticket: Ticket, action: Action };
 pub const Snapshot = struct {
     ticket: Ticket,
     reason: []const u8,
+    detail: ?[]const u8 = null,
     title: []const u8 = "请求失败",
     retries: u8,
     max_retries: u8,
     retry_enabled: bool,
     regenerate_enabled: bool,
+    retry_disabled_reason: ?[]const u8 = null,
+    regenerate_disabled_reason: ?[]const u8 = null,
     cooldown_seconds: u64,
     retained_answer: bool = true,
     has_tool_calls: bool = false,
@@ -26,6 +29,7 @@ const Click = struct {
 };
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*ui.Node {
     const root = try ui.boxStyled(cx, S.root, .{});
+    @import("layer_materials.zig").card(root, .action);
     root.meta.ownership.meta.test_id = "ai.recovery";
     const status = try ui.boxStyled(cx, S.statusRow, .{});
 
@@ -54,6 +58,17 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
     problem.meta.ownership.meta.test_id = "ai.recovery.reason";
     problem.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
     try body.appendChild(cx.allocator, problem);
+    const answer_hint = try ui.textStyled(cx, S.hint, "仅根据已有结果生成答复，不执行命令。");
+    answer_hint.meta.ownership.meta.test_id = "ai.recovery.answer.hint";
+    answer_hint.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+    try body.appendChild(cx.allocator, answer_hint);
+    if (!state.retry_enabled) if (state.retry_disabled_reason) |reason| try appendDisabledReason(cx, body, "ai.recovery.answer.disabled_reason", reason);
+    if (!state.regenerate_enabled and state.has_tool_calls) if (state.regenerate_disabled_reason) |reason| try appendDisabledReason(cx, body, "ai.recovery.regenerate.disabled_reason", reason);
+    if (state.cooldown_seconds != 0) {
+        const reason = try std.fmt.allocPrint(cx.allocator, "服务冷却中，{d} 秒后可重试。", .{state.cooldown_seconds});
+        defer cx.allocator.free(reason);
+        try appendDisabledReason(cx, body, "ai.recovery.cooldown", reason);
+    }
     try root.appendChild(cx.allocator, body);
     const row = try ui.boxStyled(cx, S.row, .{});
     const retained = if (state.retained_answer) "已保留部分答复" else "问题和附件已保留";
@@ -66,7 +81,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
     try row.appendChild(cx.allocator, action_row);
     for ([_]Action{ .edit, .regenerate, .answer }) |action| {
         const label: []const u8 = switch (action) {
-            .answer => "重试答复",
+            .answer => "仅重试答复",
             .edit => "编辑问题",
             .regenerate => "重新生成计划",
         };
@@ -83,7 +98,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
         };
         const click = try scope.createState(Click, .{ .actions = actions, .envelope = .{ .ticket = state.ticket, .action = action } });
         var cooldown: [64]u8 = undefined;
-        const action_label = if (action == .answer and state.cooldown_seconds != 0) try std.fmt.bufPrint(&cooldown, "重试答复 · {d}s", .{state.cooldown_seconds}) else label;
+        const action_label = if (action == .answer and state.cooldown_seconds != 0) try std.fmt.bufPrint(&cooldown, "仅重试答复 · {d}s", .{state.cooldown_seconds}) else label;
         var button_style = S.action(action == .answer, action == .edit, enabled);
         if (action == .answer and state.cooldown_seconds != 0) {
             button_style.width = .{ .fit = .{} };
@@ -99,16 +114,22 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
     details.container.setStyleInline(cx.allocator, S.details(cx.tokens));
     details.container.meta.ownership.meta.test_id = "ai.recovery.details";
     details.container.setDisplay(.none);
-    const full_reason = try ui.textStyled(cx, S.text, state.reason);
-    full_reason.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
-    try details.content.appendChild(cx.allocator, full_reason);
-    if (state.has_tool_calls) try details.content.appendChild(cx.allocator, try ui.textStyled(cx, S.text, "已完成调用不重放；未知写入先核查。"));
-    const disclosure = try scope.createState(Details, .{ .cx = cx, .content = details.container });
-    const toggle = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.chevron_down, .icon_size = @as(f32, 12), .a11y_label = "展开错误详情", .variant = .ghost, .base_style = @import("notification_history_styles.zig").expand(), .on_click = cx.on(Details, disclosure, Details.toggle) }).mount(scope, cx);
-    toggle.meta.ownership.meta.test_id = "ai.recovery.details.toggle";
-    toggle.behavior.interaction.a11y.?.expanded = false;
-    disclosure.button = toggle;
-    try status.appendChild(cx.allocator, toggle);
+    const raw_diagnostic = std.mem.trim(u8, state.detail orelse state.reason, " \t\r\n");
+    const diagnostic = if (std.mem.eql(u8, raw_diagnostic, first_line)) "" else if (std.mem.startsWith(u8, raw_diagnostic, first_line) and raw_diagnostic[first_line.len] == '\n') std.mem.trim(u8, raw_diagnostic[first_line.len + 1 ..], " \t\r\n") else raw_diagnostic;
+    if (diagnostic.len > 0) {
+        const full_reason = try ui.textStyled(cx, S.text, diagnostic);
+        full_reason.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+        try details.content.appendChild(cx.allocator, full_reason);
+    }
+    if (state.has_tool_calls) try details.content.appendChild(cx.allocator, try ui.textStyled(cx, S.text, "已完成调用不会重放；结果未知的操作需先核实。"));
+    if (details.content.children.items.len > 0) {
+        const disclosure = try scope.createState(Details, .{ .cx = cx, .content = details.container });
+        const toggle = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.chevron_down, .icon_size = @as(f32, 12), .a11y_label = "展开错误详情", .variant = .ghost, .base_style = @import("notification_history_styles.zig").expand(), .on_click = cx.on(Details, disclosure, Details.toggle) }).mount(scope, cx);
+        toggle.meta.ownership.meta.test_id = "ai.recovery.details.toggle";
+        toggle.behavior.interaction.a11y.?.expanded = false;
+        disclosure.button = toggle;
+        try status.appendChild(cx.allocator, toggle);
+    }
     try root.appendChild(cx.allocator, details.container);
     try root.appendChild(cx.allocator, row);
     return root;
@@ -130,3 +151,10 @@ const Details = struct {
         self.cx.requestRedraw();
     }
 };
+
+fn appendDisabledReason(cx: *ui.Cx, parent: *ui.Node, id: []const u8, reason: []const u8) !void {
+    const node = try ui.textStyled(cx, S.hint, reason);
+    node.meta.ownership.meta.test_id = id;
+    node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+    try parent.appendChild(cx.allocator, node);
+}

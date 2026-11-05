@@ -3,6 +3,9 @@ const operation = @import("../host/operation.zig");
 const session = @import("../host/session_host.zig");
 
 pub const ExecOpts = struct {
+    /// Host-owned file payload, copied before dispatch. null preserves the
+    /// ordinary command's input behavior; an empty slice explicitly sends EOF.
+    stdin: ?[]const u8 = null,
     timeout_ms: u32 = 30_000,
     capture_cap: u32 = 64 * 1024,
     key: ?operation.OperationKey = null,

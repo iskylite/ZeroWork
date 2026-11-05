@@ -132,3 +132,45 @@ test "AI request budget local text composition keeps every captured byte and rej
     try std.testing.expectError(error.InvalidContextWindow, R.checkContext(request, 0));
     try std.testing.expectEqual(@as(usize, 1), draft.items.items.len);
 }
+
+test "AI context budget counts complete dynamic and legacy tool declarations without per-tool padding" {
+    const budget = @import("ai/local_text_request.zig");
+    const definitions = [_]provider.ToolDefinition{
+        .{ .tool = .run_command, .session_ids = &.{101} },
+        .{ .session_ids = &.{}, .authority = .conversation_context, .dynamic = .{ .id = "host.context", .name = "host__context", .description = "Read \"context\"", .schema = "{\"type\":\"object\"}" } },
+    };
+    const request: provider.ChatRequest = .{ .model = "fixture", .system = "rules", .messages = &.{.{ .content = "question" }}, .tools = &definitions };
+    const body = try http.requestBody(std.testing.allocator, .openai_compat, request, 200_000);
+    defer std.testing.allocator.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const catalog = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value.object.get("tools").?, .{});
+    defer std.testing.allocator.free(catalog);
+    try std.testing.expectEqual(catalog.len, try http.toolCatalogBytes(&definitions));
+    try std.testing.expectEqual((catalog.len + 3) / 4, try budget.toolTokens(&definitions));
+    try std.testing.expectEqual(try budget.fixedTokens(request) + budget.draftTokens("question"), try budget.inputTokens(request));
+    try std.testing.expectEqual(@as(usize, 0), try budget.toolTokens(&.{}));
+    // Removing the declarations changes admission by exactly their measured cost.
+    var plain = request;
+    plain.tools = &.{};
+    try std.testing.expectEqual(try budget.toolTokens(&definitions), (try budget.inputTokens(request)) - (try budget.inputTokens(plain)));
+}
+
+test "AI context budget fixed overhead rejects before compaction and preserves history" {
+    const compaction = @import("ai/context_compaction.zig");
+    const History = @import("ai/wire_history.zig").History;
+    const budget = @import("ai/local_text_request.zig");
+    var history = try History.copy(std.testing.allocator, &.{.{ .content = "keep original history" }}, "");
+    defer history.deinit();
+    const original = compaction.fingerprint(history.messages);
+    var service: compaction.Service = .{};
+    defer service.deinit();
+    const config: @import("ai/provider_config.zig").ProviderConfig = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:1/v1", .model = "fixture", .auth = .none, .context_window = 8192 };
+    const identity: compaction.Identity = .{ .owner = .{ .session = 101 }, .conversation = 1, .revision = 1 };
+    // 6,145 fixed input + 2,048 output cannot fit, even with empty history.
+    try std.testing.expectError(error.ContextFixedOverhead, service.startReserved(config, identity, &history, 6145));
+    try std.testing.expect(service.job == null);
+    try std.testing.expectEqual(compaction.Status.idle, service.status);
+    try std.testing.expectEqual(original, compaction.fingerprint(history.messages));
+    try budget.checkFixedBudget(6144, budget.outputTokens(4096, 8192), 8192);
+}

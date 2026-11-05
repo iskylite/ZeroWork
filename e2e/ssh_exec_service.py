@@ -32,6 +32,7 @@ class Server(paramiko.ServerInterface):
         self.stderr_bytes = 0
         self.errors = []
         self.open_count = 0
+        self.input_bytes = bytearray()
 
     def check_auth_password(self, username, password):
         return paramiko.AUTH_SUCCESSFUL
@@ -64,7 +65,19 @@ class Server(paramiko.ServerInterface):
             try:
                 # Return this request's ACK before sending output/exit.
                 time.sleep(0.005)
-                if self.mode == "capture":
+                if self.mode in ("stdin", "stdin-empty"):
+                    deadline = time.monotonic() + 4
+                    while time.monotonic() < deadline and (not channel.eof_received or channel.recv_ready()):
+                        time.sleep(.002)
+                    expected = bytes(range(256)) * 512 if self.mode == "stdin" else b""
+                    if bytes(self.input_bytes) != expected or not channel.eof_received:
+                        self.errors.append("stdin bytes/EOF mismatch")
+                        channel.send_exit_status(1)
+                    else:
+                        channel.sendall(b"STDIN-OK\n")
+                        channel.send_exit_status(0)
+                    channel.close()
+                elif self.mode == "capture":
                     for _ in range(3 * 1024 * 1024 // 4096):
                         channel.sendall(b"A" * 4096)
                         self.stdout_bytes += 4096
@@ -119,7 +132,7 @@ def run_case(runner, key, mode, log_root=None):
     transports = []
     channels = []
     terminal_input = bytearray()
-    exec_input = bytearray()
+    exec_input = server.input_bytes
     held_closes = []
     held_request_acks = []
     pty_after = []
@@ -195,7 +208,8 @@ def run_case(runner, key, mode, log_root=None):
     expected_commands = [] if mode in ("queued-cancel", "open-cancel", "open-unknown") else [f"fixture-{mode}"]
     if mode == "cwd":
         expected_commands = ["cd '/tmp/a'\\''b\n$(not-a-command)' && fixture-cwd"]
-    passed = process is not None and process.returncode == 0 and "PASS " in output and server.commands == expected_commands and not terminal_input and not exec_input and not errors and not server.errors and not worker.is_alive() and not any(job.is_alive() for job in server.jobs)
+    expected_input = bytes(range(256)) * 512 if mode == "stdin" else b""
+    passed = process is not None and process.returncode == 0 and "PASS " in output and server.commands == expected_commands and not terminal_input and bytes(exec_input) == expected_input and not errors and not server.errors and not worker.is_alive() and not any(job.is_alive() for job in server.jobs)
     if mode == "capture":
         passed = passed and server.stdout_bytes == 3 * 1024 * 1024 and server.stderr_bytes == 3 * 1024 * 1024
     if mode in ("close-unknown", "request-unknown", "result-close-unknown"):
@@ -229,7 +243,7 @@ def main():
     log_root.mkdir(exist_ok=True)
     key = paramiko.RSAKey.generate(2048)
     cases = []
-    for mode in ("capture", "no-exit", "late-exit", "cancel", "timeout", "eof-timeout", "reject", "queued-cancel", "open-cancel", "open-unknown", "request-unknown", "close-unknown", "result-close-unknown", "cwd"):
+    for mode in ("stdin", "stdin-empty", "capture", "no-exit", "late-exit", "cancel", "timeout", "eof-timeout", "reject", "queued-cancel", "open-cancel", "open-unknown", "request-unknown", "close-unknown", "result-close-unknown", "cwd"):
         result = run_case(args.runner, key, mode, log_root)
         cases.append(result)
         print(f"{mode}: {'PASS' if result['passed'] else 'FAIL'} {result['output']}", flush=True)

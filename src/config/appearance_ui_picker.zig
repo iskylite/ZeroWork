@@ -37,9 +37,10 @@ pub fn dispatch(cx: *ui.Cx, worker: *Worker, controller: *Controller, registry: 
             if (worker.busy()) return error.AppearanceBusy;
             if (controller.draft_id != request.draft_id or controller.background.asset_revision != request.asset_revision) return error.StaleBackgroundRequest;
             var buffer: [4096]u8 = undefined;
-            const path = try choose(cx, worker, "选择背景图片", &buffer) orelse return true;
+            const path = try chooseBackground(worker, &buffer) orelse return true;
             if (controller.draft_id != request.draft_id or controller.background.asset_revision != request.asset_revision) return error.StaleBackgroundRequest;
             var owned = try controller.requestBackground(path);
+            owned.request.detect_source = true;
             worker.startBackground(&owned) catch |err| {
                 _ = controller.failBackground(owned.request, err);
                 owned.deinit();
@@ -57,6 +58,16 @@ pub fn dispatch(cx: *ui.Cx, worker: *Worker, controller: *Controller, registry: 
         },
         else => return false,
     }
+}
+
+extern "c" fn zw_pick_background_path([*]u8, c_int) c_int;
+fn chooseBackground(worker: *Worker, buffer: []u8) !?[]const u8 {
+    worker.picker_active = true;
+    defer worker.picker_active = false;
+    const length = zw_pick_background_path(buffer.ptr, @intCast(buffer.len));
+    if (length < 0) return error.BackgroundPickerFailed;
+    if (length == 0) return null;
+    return buffer[0..@intCast(length)];
 }
 
 fn choose(cx: *ui.Cx, worker: *Worker, title: []const u8, buffer: []u8) !?[]const u8 {

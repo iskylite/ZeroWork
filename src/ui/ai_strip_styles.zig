@@ -3,7 +3,10 @@ const ui = @import("ui");
 const T = @import("app_theme.zig");
 pub const width: f32 = 120;
 pub const height: f32 = 6;
-pub const State = enum { idle, working, approval, success, failed };
+pub const State = enum { idle, working, approval, success, failed, unknown };
+pub fn project(flags: struct { pending: bool, busy: bool, failed: bool, unknown: bool, has_answer: bool }) State {
+    return if (flags.pending) .approval else if (flags.busy) .working else if (flags.failed) .failed else if (flags.unknown) .unknown else if (flags.has_answer) .success else .idle;
+}
 pub fn trigger() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = width }, .height = .{ .px = height }, .padding = .{}, .background = ui.Color.TRANSPARENT, .align_items = .center, .justify = .center, .gap = 0, .z_index = 199, .corner_radius = 3, .flex_shrink = 0 };
 }
@@ -24,6 +27,7 @@ pub fn color(state: State, index: usize, phase: usize) ui.Color {
         .approval => t.warn,
         .success => t.ok,
         .failed => t.danger,
+        .unknown => t.warn,
     };
     return if ((state == .working or state == .approval) and index != phase % 3) c.withAlpha(95) else c;
 }

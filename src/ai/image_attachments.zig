@@ -4,6 +4,22 @@ const asset = @import("../config/background_asset.zig");
 pub const Owner = @import("tool_scope.zig").Owner;
 pub const max_count = 4;
 pub const max_bytes = 10_000_000;
+/// Shared by all agent workers. Charge physical encoded+decoded storage once
+/// per immutable snapshot; retaining a queue/history reference adds no pixels.
+pub const max_physical_bytes = 512 * 1024 * 1024;
+var physical_mutex: std.atomic.Mutex = .unlocked;
+var physical_bytes: usize = 0;
+fn reservePhysical(bytes: usize) !void {
+    while (!physical_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer physical_mutex.unlock();
+    if (bytes > max_physical_bytes -| physical_bytes) return error.ImageMemoryBudgetExceeded;
+    physical_bytes += bytes;
+}
+fn releasePhysical(bytes: usize) void {
+    while (!physical_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer physical_mutex.unlock();
+    physical_bytes -= bytes;
+}
 pub const Id = u64;
 pub const Limits = struct {
     count: usize = max_count,
@@ -56,6 +72,8 @@ pub const ContentRef = struct {
         try validateFrames(bytes);
         var image = try asset.decode(allocator, bytes, .{ .source_bytes = limits.bytes, .dimension = limits.dimension, .pixels = limits.pixels });
         errdefer image.deinit(allocator);
+        try reservePhysical(bytes.len + image.pixels.len);
+        errdefer releasePhysical(bytes.len + image.pixels.len);
         const owned_path = try allocator.dupe(u8, path);
         errdefer allocator.free(owned_path);
         const owned_bytes = try allocator.dupe(u8, bytes);
@@ -77,6 +95,8 @@ pub const ContentRef = struct {
     pub fn fromHostPng(allocator: std.mem.Allocator, bytes: []const u8, pixels: []u8, width: u32, height: u32, captured_at_ms: i64) !ContentRef {
         if (width == 0 or height == 0 or width > 8192 or height > 8192 or pixels.len > 16 * 1024 * 1024 * 4 or bytes.len > max_bytes or pixels.len != try std.math.mul(usize, try std.math.mul(usize, width, height), 4)) return error.InvalidImage;
         if (try sniff(bytes) != .png or bytes.len < 24 or std.mem.readInt(u32, bytes[16..20], .big) != width or std.mem.readInt(u32, bytes[20..24], .big) != height) return error.InvalidImage;
+        try reservePhysical(bytes.len + pixels.len);
+        errdefer releasePhysical(bytes.len + pixels.len);
         const path = try allocator.dupe(u8, "bmc_ikvm:remote-frame");
         errdefer allocator.free(path);
         const encoded = try allocator.dupe(u8, bytes);
@@ -100,6 +120,7 @@ pub const ContentRef = struct {
         const snapshot = self.snapshot orelse return;
         self.snapshot = null;
         if (snapshot.references.fetchSub(1, .acq_rel) != 1) return;
+        releasePhysical(snapshot.value.bytes.len + snapshot.value.pixels.len);
         const allocator = snapshot.allocator;
         allocator.free(snapshot.value.path);
         allocator.free(snapshot.value.bytes);
@@ -292,4 +313,26 @@ fn validateFrames(bytes: []const u8) !void {
     const source = CGImageSourceCreateWithData(data, null) orelse return error.InvalidImage;
     defer CFRelease(source);
     if (CGImageSourceGetCount(source) > 1) return error.AnimatedImageUnsupported;
+}
+
+test "AI session PATCH image memory cap counts physical blocks across workers" {
+    const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" ++
+        "\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
+        "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d" ++
+        "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+    const before = physical_bytes;
+    var original = try ContentRef.create(std.testing.allocator, "budget.png", png, 1, .{});
+    defer original.release();
+    var shared = original.retain();
+    defer shared.release();
+    try std.testing.expectEqual(before + png.len + 4, physical_bytes);
+    original.release();
+    try std.testing.expectEqual(before + png.len + 4, physical_bytes);
+    shared.release();
+    try std.testing.expectEqual(before, physical_bytes);
+    // Simulate other workers holding the remaining physical memory. Actual
+    // image admission must reject and release its temporary decode storage.
+    try reservePhysical(max_physical_bytes - before);
+    defer releasePhysical(max_physical_bytes - before);
+    try std.testing.expectError(error.ImageMemoryBudgetExceeded, ContentRef.create(std.testing.allocator, "another.png", png, 2, .{}));
 }

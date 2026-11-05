@@ -98,7 +98,70 @@ pub fn isInstalled(family: []const u8) bool {
     return platform.coretext_family_exists(@ptrCast(&buffer)) != 0;
 }
 
-pub const Weight = enum(u16) { light = 300, regular = 400, medium = 500, bold = 700 };
+pub const Weight = @import("font_weight.zig").Weight;
+pub const parseWeight = @import("font_weight.zig").parse;
+pub const WeightRange = struct { min: u16, max: u16, default: u16 };
+
+pub const SupportedWeights = struct {
+    values: [9]Weight = undefined,
+    len: usize = 0,
+    variable: ?WeightRange = null,
+
+    pub fn slice(self: *const SupportedWeights) []const Weight {
+        return self.values[0..self.len];
+    }
+
+    pub fn contains(self: *const SupportedWeights, name: []const u8) bool {
+        const value = parseWeight(name) orelse return false;
+        if (self.variable) |range| return @backingInt(value) >= range.min and @backingInt(value) <= range.max;
+        for (self.slice()) |weight| if (weight == value) return true;
+        return false;
+    }
+};
+
+/// Offer only weights understood by the current config and present in the
+/// native family. Missing families use the same explicit fallback as resolve.
+pub fn supportedWeights(family: []const u8) SupportedWeights {
+    var result: SupportedWeights = .{};
+    if (builtin.os.tag != .macos) return result;
+    const selected = if (isInstalled(family)) family else fallback_family;
+    var name: [family_name_capacity + 1]u8 = undefined;
+    @memcpy(name[0..selected.len], selected);
+    name[selected.len] = 0;
+    var minimum: c_int = 0;
+    var maximum: c_int = 0;
+    var default: c_int = 0;
+    if (platform.coretext_font_weight_range(@ptrCast(&name), &minimum, &maximum, &default) != 0 and minimum >= 1 and maximum <= 1000 and minimum < maximum) {
+        result.variable = .{ .min = @intCast(minimum), .max = @intCast(maximum), .default = @intCast(std.math.clamp(default, minimum, maximum)) };
+        return result;
+    }
+    var available: [16]c_int = undefined;
+    const count = platform.coretext_family_weights(@ptrCast(&name), &available, available.len);
+    if (count <= 0 or count > available.len) return result;
+    for ([_]Weight{ .thin, .extra_light, .light, .regular, .medium, .semibold, .bold, .extra_bold, .black }) |weight| {
+        for (available[0..@intCast(count)]) |value| {
+            if (value != @backingInt(weight)) continue;
+            result.values[result.len] = weight;
+            result.len += 1;
+            break;
+        }
+    }
+    return result;
+}
+
+pub fn problemMessage(problem: anyerror) []const u8 {
+    return switch (problem) {
+        error.UnsupportedWeight => "当前字体不支持所选字重，请选择其他字重。",
+        error.InvalidWeight => "字重无效，请重新选择。",
+        error.InvalidFamily => "字体名称无效，请输入不超过 64 个 UTF-8 字节且不含控制字符的名称。",
+        error.InvalidSize => "字体大小无效，请输入 8–48 的整数。",
+        error.FontUnavailable => "无法加载字体，请选择其他字体后重试。",
+        error.InvalidMetrics => "无法读取有效的字体尺寸，请选择其他字体。",
+        error.OutOfMemory => "内存不足，无法加载字体，请稍后重试。",
+        else => "字体设置验证失败，请重新选择字体或字重。",
+    };
+}
+
 pub const FallbackReason = enum { family_not_installed };
 
 pub const Request = struct {
@@ -167,7 +230,7 @@ pub fn resolve(allocator: std.mem.Allocator, registry: *FontRegistry, request: R
         !std.unicode.utf8ValidateSlice(request.family)) return error.InvalidFamily;
     for (request.family) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidFamily;
     if (!std.math.isFinite(request.size) or request.size < 8 or request.size > 48) return error.InvalidSize;
-    const weight = std.meta.stringToEnum(Weight, request.weight) orelse return error.InvalidWeight;
+    const weight = parseWeight(request.weight) orelse return error.InvalidWeight;
     if (builtin.os.tag != .macos or registry.font_system == null) return error.FontUnavailable;
 
     const requested_z = try allocator.dupeSentinel(u8, request.family, 0);
@@ -178,14 +241,9 @@ pub fn resolve(allocator: std.mem.Allocator, registry: *FontRegistry, request: R
 
     // This is the same native family service used by text.font_catalog. Checking
     // it first prevents CoreText's silent Menlo Light / Monaco Bold downgrade.
-    var available: [16]c_int = undefined;
-    const count = platform.coretext_family_weights(selected.ptr, &available, available.len);
-    if (count <= 0 or count > available.len) return error.FontUnavailable;
-    var supported = false;
-    for (available[0..@intCast(count)]) |value| {
-        if (value == @backingInt(weight)) supported = true;
-    }
-    if (!supported) return error.UnsupportedWeight;
+    const supported = supportedWeights(selected);
+    if (supported.variable == null and supported.len == 0) return error.FontUnavailable;
+    if (!supported.contains(request.weight)) return error.UnsupportedWeight;
 
     const family_id = try registry.intern(selected);
     const font = registry.resolve(family_id, request.size, @backingInt(weight), false) orelse return error.FontUnavailable;
@@ -231,6 +289,12 @@ fn nativeFamily(allocator: std.mem.Allocator, font: *anyopaque) ResolveError![]u
 }
 
 fn nativeWeight(font: *anyopaque) ResolveError!Weight {
+    const variable = platform.coretext_font_weight_value(font);
+    if (std.math.isFinite(variable) and variable >= 0.5 and variable < 1000.5) {
+        // Legacy GX fonts quantize native coordinates. Compare the readback
+        // at the control's integer precision, then verify it against the request.
+        return @fromBackingInt(@as(u16, @intFromFloat(@round(variable))));
+    }
     const traits = platform.CTFontCopyTraits(font) orelse return error.FontUnavailable;
     defer platform.CFRelease(traits);
     const number = platform.CFDictionaryGetValue(traits, platform.kCTFontWeightTrait) orelse return error.FontUnavailable;
@@ -254,13 +318,7 @@ fn nativeWeight(font: *anyopaque) ResolveError!Weight {
             distance = next;
         }
     }
-    return switch (best) {
-        300 => .light,
-        400 => .regular,
-        500 => .medium,
-        700 => .bold,
-        else => error.UnsupportedWeight,
-    };
+    return @fromBackingInt(best);
 }
 
 // Read-only CoreText/CoreFoundation metadata on the FontRegistry-owned native
@@ -289,6 +347,8 @@ const platform = struct {
     extern fn coretext_free_c_string(text: [*:0]u8) void;
     extern fn coretext_family_exists(family: [*:0]const u8) c_int;
     extern fn coretext_family_weights(family: [*:0]const u8, out: [*]c_int, capacity: c_int) c_int;
+    extern fn coretext_font_weight_range(family: [*:0]const u8, minimum: *c_int, maximum: *c_int, default: *c_int) c_int;
+    extern fn coretext_font_weight_value(font: *anyopaque) f64;
     extern "CoreText" fn CTFontCopyFamilyName(font: *const anyopaque) ?*const anyopaque;
     extern "CoreText" fn CTFontCopyTraits(font: *const anyopaque) ?*const anyopaque;
     extern "CoreText" const kCTFontWeightTrait: *const anyopaque;
@@ -311,7 +371,7 @@ test "appearance font rejects invalid requests before resolving a face" {
     for ([_][]const u8{ "", "   ", "Menlo\x00Other", "bad\xff" }) |family| {
         try std.testing.expectError(error.InvalidFamily, resolve(std.testing.allocator, &registry, .{ .family = family, .size = 14 }));
     }
-    try std.testing.expectError(error.InvalidWeight, resolve(std.testing.allocator, &registry, .{ .family = "Menlo", .size = 14, .weight = "semibold" }));
+    try std.testing.expectError(error.InvalidWeight, resolve(std.testing.allocator, &registry, .{ .family = "Menlo", .size = 14, .weight = "invalid" }));
     try std.testing.expectError(error.FontUnavailable, resolve(std.testing.allocator, &registry, .{ .family = "Menlo", .size = 14 }));
 }
 

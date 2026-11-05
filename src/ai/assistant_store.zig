@@ -76,6 +76,7 @@ pub const Message = struct {
 };
 pub const Phase = enum { idle, running, approval, done, failed, stopped };
 pub const State = struct {
+    title: @import("conversation_title.zig").Title = .{},
     phase: Phase = .idle,
     id: u64 = 0,
     conversation_id: ConversationId = .{},
@@ -87,6 +88,7 @@ pub const State = struct {
     /// Ended entries remain in history, but are never automatically reopened
     /// when a terminal becomes independently visible again.
     ended: bool = false,
+    historical_environment: bool = false,
     tool_results: ?@import("tool_results.zig").Store = null,
     owner: scope.Owner,
     history: std.ArrayList(Message) = .empty,
@@ -100,6 +102,20 @@ pub const State = struct {
     draft: ?[]u8 = null,
     model: @import("float_model.zig").Model = .{},
     controls: Controls = .{},
+    /// A nonempty fallback also records that this conversation has already
+    /// attempted its one automatic title request.
+    pub fn beginTitle(self: *State, question: []const u8) bool {
+        if (self.title.text() != null) return false;
+        return self.title.set(question);
+    }
+    pub fn titleText(self: *const State, history: []const Message, last_user: ?[]const u8, scratch: *@import("conversation_title.zig").Title) ?[]const u8 {
+        if (self.title.text()) |value| return value;
+        for (history) |message| {
+            if (message.user and scratch.set(message.text)) return scratch.text();
+        }
+        if (last_user) |value| if (scratch.set(value)) return scratch.text();
+        return null;
+    }
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.current_turn.deinit(allocator);
         for (self.history.items) |*message| message.deinit(allocator);
@@ -117,6 +133,7 @@ pub const State = struct {
 };
 pub const Store = struct {
     allocator: std.mem.Allocator,
+    authority: ?*@import("session_runtime.zig").Service = null,
     states: std.ArrayList(State) = .empty,
     next_id: u64 = 1,
     attachment_ids: std.ArrayList(u64) = .empty,
@@ -162,8 +179,7 @@ pub const Store = struct {
     }
     pub fn select(self: *Store, id: u64) bool {
         const chosen = self.find(id) orelse return false;
-        if (chosen.closed) return false;
-        chosen.ended = false;
+        if (chosen.closed or chosen.ended) return false;
         const owner = chosen.owner;
         for (self.states.items) |*state| {
             if (state.owner.eql(owner)) state.selected = state.id == id;
@@ -200,7 +216,16 @@ pub const Store = struct {
     pub fn endActivity(self: *Store, id: u64, revision: u64) !void {
         const state = self.find(id) orelse return error.ConversationNotFound;
         if (state.closed or state.ended or !state.selected or state.binding_revision != revision) return error.BindingChanged;
-        const next = try @import("../host/identity.zig").advance(revision);
+        var next = try @import("../host/identity.zig").advance(revision);
+        if (self.authority) |service| if (service.store.find(state.conversation_id)) |record| {
+            if (record.binding != null) {
+                const ticket = try service.store.fence(record.id);
+                const operation = if (record.ending) |ending| ending.operation else @import("../host/identity.zig").HostOperationId.generate();
+                try service.endConversation(ticket, operation);
+                if (record.binding != null) return error.ResourceCleanupPending;
+            }
+            next = record.revision;
+        };
         state.binding_revision = next;
         state.selected = false;
         state.ended = true;
@@ -223,6 +248,12 @@ pub const Store = struct {
         if (state.id != plan.runtime_id or state.closed or state.ended or !state.owner.eql(plan.from) or state.binding_revision != plan.revision) return error.BindingChanged;
         if (plan.from != .session or plan.to != .group or plan.to.group == 0 or plan.next_revision != try @import("../host/identity.zig").advance(plan.revision)) return error.InvalidBindingHandoff;
         for (self.states.items) |other| if (!other.closed and other.owner.eql(plan.to)) return error.BindingConflict;
+        if (self.authority) |service| if (service.store.find(plan.id)) |record| {
+            const ticket = try service.store.fence(record.id);
+            if (ticket.binding != plan.revision) return error.BindingChanged;
+            const committed = try service.handoff(ticket, plan.to);
+            if (committed.binding != plan.next_revision) return error.BindingChanged;
+        };
         if (state.initial_owner == null) state.initial_owner = plan.from;
         state.owner = plan.to;
         state.binding_revision = plan.next_revision;
@@ -247,6 +278,10 @@ pub const Store = struct {
         return null;
     }
     pub fn remove(self: *Store, id: u64) void {
+        if (self.authority) |service| if (self.find(id)) |state| if (service.store.find(state.conversation_id)) |record| {
+            if (record.binding != null or record.ending != null) return;
+            service.store.remove(record.id) catch return;
+        };
         var i: usize = self.attachment_ids.items.len;
         while (i > 0) {
             i -= 1;
@@ -314,6 +349,24 @@ pub const Store = struct {
         return draft;
     }
 };
+
+test "conversation title stays fixed after followups and uses the first question as fallback" {
+    var store = Store.init(std.testing.allocator);
+    defer store.deinit();
+    const state = try store.create(.{ .session = 1 });
+    try std.testing.expect(state.beginTitle("帮我排查 nginx 启动失败"));
+    try std.testing.expect(!state.beginTitle("继续"));
+    try std.testing.expectEqualStrings("帮我排查 nginx 启动失败", state.title.text().?);
+    var scratch: @import("conversation_title.zig").Title = .{};
+    const history = [_]Message{
+        .{ .user = false, .text = @constCast("assistant") },
+        .{ .user = true, .text = @constCast("第一条实际问题") },
+        .{ .user = true, .text = @constCast("好的") },
+    };
+    const untitled = try store.create(.{ .session = 1 });
+    try std.testing.expectEqualStrings("第一条实际问题", untitled.titleText(&history, "继续", &scratch).?);
+    try std.testing.expect(untitled.titleText(&.{}, null, &scratch) == null);
+}
 
 test "same numeric session and group IDs retain separate conversations" {
     var store = Store.init(std.testing.allocator);

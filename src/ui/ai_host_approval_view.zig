@@ -147,6 +147,7 @@ pub const View = struct {
         const url_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
         @import("ai_card_scroll.zig").containVertical(url_scroll);
         url_scroll.container.setStyleInline(cx.allocator, summaryViewportStyle(cx.tokens));
+        @import("layer_materials.zig").card(url_scroll.container, .control);
         url_scroll.container.meta.per_frame.hooks.on_theme = commandViewportTheme;
         url_scroll.container.meta.ownership.meta.test_id = "ai.host_approval.summary_viewport";
         url_scroll.content.setStyleInline(cx.allocator, S.commandContent(cx.tokens));

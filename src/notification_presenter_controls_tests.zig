@@ -540,6 +540,59 @@ fn historyNode(root: *ui.Node, id: []const u8) ?*ui.Node {
     return null;
 }
 
+test "notification history repeated reopen retains one compensation background and constant transparency" {
+    const theme = @import("ui/app_theme.zig");
+    const saved = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(saved.transparency, saved.blur);
+    _ = theme.setMaterialParameters(50, 0);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    try cx.setTestFrameStep(16);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+        notice.activity.deinit();
+    }
+    try @import("ui/layer_materials.zig").Policy.mount(cx, scope);
+    const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
+    try cx.root.?.appendChild(a, trigger);
+    const view = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
+    for (0..8) |_| {
+        view.open.set(true);
+        for (0..40) |_| {
+            cx.advanceFrameClock();
+            _ = cx.render();
+        }
+        const rect = view.root.globalRect();
+        var count: usize = 0;
+        var transmission: f32 = 0.5 * (1 - @as(f32, @floatFromInt(view.root.getBackground().a)) / 255);
+        for (view.root.children.items) |child| {
+            const id = child.meta.ownership.meta.test_id orelse continue;
+            if (!std.mem.eql(u8, id, "appearance.material.compensation")) continue;
+            count += 1;
+            for (child.children.items) |patch| {
+                if (patch.style.display == .none) continue;
+                const area = patch.globalRect();
+                if (area.x <= rect.x + 40 and area.x + area.w > rect.x + 40 and area.y <= rect.y + 110 and area.y + area.h > rect.y + 110) {
+                    try std.testing.expect(patch.style.gradient() == null);
+                    transmission *= 1 - @as(f32, @floatFromInt(patch.getBackground().a)) / 255;
+                }
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.1), transmission, 0.003);
+        view.open.set(false);
+        for (0..40) |_| {
+            cx.advanceFrameClock();
+            _ = cx.render();
+        }
+    }
+}
+
 test "notification history background blur follows material changes without replacing content" {
     const theme = @import("ui/app_theme.zig");
     const saved = theme.materialParameters();

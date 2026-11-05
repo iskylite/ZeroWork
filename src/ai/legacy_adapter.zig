@@ -10,6 +10,7 @@ pub const Adapter = struct {
     context: *anyopaque,
     vtable: *const VTable,
     pub const VTable = struct {
+        observe_verification: ?*const fn (*anyopaque, *anyopaque, @import("readonly_verification.zig").Anchor) anyerror!@import("readonly_verification.zig").Observation = null,
         prepare: *const fn (*anyopaque, *anyopaque, identity.SessionHandle) anyerror!void,
         interface: *const fn (*anyopaque) loop.Host,
         preflight: *const fn (*anyopaque, *anyopaque, loop.Invocation) anyerror!void,
@@ -90,11 +91,15 @@ pub const Adapter = struct {
                 cast(raw).deinit();
                 a.destroy(cast(raw));
             }
+            fn observeVerification(raw: *anyopaque, host_app: *anyopaque, anchor: @import("readonly_verification.zig").Anchor) !@import("readonly_verification.zig").Observation {
+                if (@hasDecl(Impl, "observeVerification")) return cast(raw).observeVerification(app(host_app), anchor);
+                return error.VerificationSourceUnavailable;
+            }
             fn label(raw: *anyopaque) []const u8 {
                 const capture = cast(raw).capture orelse return "会话";
                 return if (@hasField(@TypeOf(capture), "target")) capture.target else "本机 · zsh";
             }
-            const vtable: VTable = .{ .prepare = prepare, .preflight = preflight, .interface = interface, .files = files, .delegate = delegate, .tool_ids = ids, .pending = pending, .decide = decide, .pump = pump, .stop = stop, .risk = risk, .impact = impact, .shutdown = shutdown, .clear = clear, .destroy = destroy, .label = label, .assemble_context = Impl.assembleContext };
+            const vtable: VTable = .{ .observe_verification = observeVerification, .prepare = prepare, .preflight = preflight, .interface = interface, .files = files, .delegate = delegate, .tool_ids = ids, .pending = pending, .decide = decide, .pump = pump, .stop = stop, .risk = risk, .impact = impact, .shutdown = shutdown, .clear = clear, .destroy = destroy, .label = label, .assemble_context = Impl.assembleContext };
         };
         const implementation = try allocator.create(Impl);
         implementation.* = Impl.init(allocator);
@@ -130,7 +135,7 @@ pub fn invoke(raw: *anyopaque, invocation: tools.Invocation, allocator: std.mem.
         .cancelled, .timed_out => if (result.remote_effect_unknown) .outcome_unknown else .cancelled_unsent,
         .rejected => .rejected,
         else => .failed,
-    }, .blocks = blocks, .receipt = .{ .owner = invocation.owner, .operation_id = invocation.operation_id, .local_released = result.local_released, .remote_effect_unknown = result.remote_effect_unknown } };
+    }, .blocks = blocks, .verification = outcome.verification, .receipt = .{ .owner = invocation.owner, .operation_id = invocation.operation_id, .local_released = result.local_released, .remote_effect_unknown = result.remote_effect_unknown } };
 }
 fn shellPolicy(arguments: std.json.Value, policy: tools.Policy, grouped: bool) !bool {
     const command = arguments.object.get("command") orelse return error.InvalidToolArguments;

@@ -29,6 +29,8 @@ pub const View = struct {
     command_copy: *ui.Node,
     command_copy_label: *ui.Signal([]const u8) = undefined,
     command: *ui.Node,
+    command_row: *ui.Node = undefined,
+    command_viewport: *ui.Node = undefined,
     feedback: *ui.Node,
     callbacks: Callbacks,
     sequence: ?u64 = null,
@@ -49,6 +51,7 @@ pub const View = struct {
         self.root.meta.ownership.meta.test_id = "ai.approval";
         self.root.setDisplay(.none);
         self.card = try ui.boxStyled(cx, S.panel, .{});
+        self.card.meta.per_frame.hooks.on_theme = panelTheme;
         @import("layer_materials.zig").card(self.card, .action);
         try self.root.appendChild(cx.allocator, self.card);
         const header = try ui.boxStyled(cx, S.header, .{});
@@ -91,12 +94,16 @@ pub const View = struct {
         self.tool_detail.setDisplay(.none);
         try scroll.content.appendChild(cx.allocator, self.tool_detail);
         const command_row = try ui.boxStyled(cx, S.commandRow, .{});
+        self.command_row = command_row;
+        command_row.meta.per_frame.hooks.on_theme = commandRowTheme;
         try scroll.content.appendChild(cx.allocator, command_row);
         const command_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .height = 27 }).mount(scope, cx);
         @import("ai_card_scroll.zig").containVertical(command_scroll);
         command_scroll.container.setStyleInline(cx.allocator, S.commandViewport(cx.tokens));
+        @import("layer_materials.zig").card(command_scroll.container, .control);
         command_scroll.container.meta.per_frame.hooks.on_theme = commandViewportTheme;
         command_scroll.container.meta.ownership.meta.test_id = "ai.approval.command_scroll";
+        self.command_viewport = command_scroll.container;
         command_scroll.content.setStyleInline(cx.allocator, S.commandContent(cx.tokens));
         command_scroll.content.meta.per_frame.hooks.on_theme = commandContentTheme;
         try command_row.appendChild(cx.allocator, command_scroll.container);
@@ -174,7 +181,10 @@ pub const View = struct {
             const header_target = if (!source.group and std.mem.eql(u8, source.target, "bmc_ikvm")) try std.fmt.allocPrint(self.cx.allocator, "会话 #{d}", .{@backingInt(source.owner.session_id)}) else try self.cx.allocator.dupe(u8, if (source.group) "全部目标" else source.target);
             defer self.cx.allocator.free(header_target);
             try self.header_identity.setTextContent(self.cx.allocator, header_target);
-            try self.command.setTextContent(self.cx.allocator, command);
+            const file_change = if (source.tool_id) |name| std.mem.eql(u8, name, "file.write_text") or std.mem.eql(u8, name, "file.edit_text") else false;
+            const display = if (file_change) try @import("../ai/terminal_file_tools.zig").approvalText(self.cx.allocator, source.tool_id.?, source.command) else null;
+            defer if (display) |text| self.cx.allocator.free(text);
+            try self.command.setTextContent(self.cx.allocator, display orelse command);
             try self.feedback.setTextContent(self.cx.allocator, if (source.group) (if (terminal) "影响 · 上述全部目标各执行一次此命令；写入及业务影响尚未核实。" else "影响 · 上述全部目标各执行一次此调用；写入及业务影响尚未核实。") else "影响 · 尚未核实");
             const target_copy = try self.cx.allocator.dupe(u8, target);
             if (self.target_owned) |old| self.cx.allocator.free(old);
@@ -191,7 +201,10 @@ pub const View = struct {
         try self.state_label.setTextContent(self.cx.allocator, "待确认");
         self.body.setDisplay(.flex);
         const tool_height: f32 = if (source.tool_id != null) 20.625 else 0;
-        const desired: f32 = (if (source.group) @as(f32, 207.625) else 167.625) + tool_height;
+        const file_extra: f32 = if (source.tool_id) |name| if (std.mem.startsWith(u8, name, "file.")) 93 else 0 else 0;
+        self.command_row.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 37 + file_extra } });
+        self.command_viewport.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 37 + file_extra } });
+        const desired: f32 = (if (source.group) @as(f32, 207.625) else 167.625) + tool_height + file_extra;
         self.card_height = desired;
         self.target_copy.setDisplay(.flex);
         self.footer.setDisplay(.flex);
@@ -201,7 +214,7 @@ pub const View = struct {
         self.root.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = 14, .right = 14, .top = 9 } });
         self.identity.setDisplay(.flex);
         self.identity.setStyleInline(self.cx.allocator, .{ .height = .{ .fit = .{} } });
-        self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = (if (source.group) @as(f32, 130.625) else 90.625) + tool_height } });
+        self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = (if (source.group) @as(f32, 130.625) else 90.625) + tool_height + file_extra } });
         if (self.card.style.height != .px or self.card.style.height.px != desired) self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired } });
         self.root.setDisplay(.flex);
     }
@@ -252,9 +265,23 @@ fn stateStyle(_: *const ui.ThemeTokens) ui.TextStyle {
 }
 
 fn commandViewportTheme(node: *ui.Node, tokens: *const ui.ThemeTokens, allocator: std.mem.Allocator) void {
-    node.setStyleInline(allocator, S.commandViewport(tokens));
+    var style = S.commandViewport(tokens);
+    style.height = null; // update() owns the ordinary/file-specific viewport height.
+    node.setStyleInline(allocator, style);
 }
 
 fn commandContentTheme(node: *ui.Node, tokens: *const ui.ThemeTokens, allocator: std.mem.Allocator) void {
     node.setStyleInline(allocator, S.commandContent(tokens));
+}
+
+fn commandRowTheme(node: *ui.Node, tokens: *const ui.ThemeTokens, allocator: std.mem.Allocator) void {
+    var style = S.commandRow(tokens);
+    style.height = null;
+    node.setStyleInline(allocator, style);
+}
+
+fn panelTheme(node: *ui.Node, tokens: *const ui.ThemeTokens, allocator: std.mem.Allocator) void {
+    var style = S.panel(tokens);
+    style.height = null; // Approval kind and file detail size belong to update().
+    node.setStyleInline(allocator, style);
 }

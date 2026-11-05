@@ -1,5 +1,6 @@
 //! No-window appearance model, assets and configuration transactions.
 test {
+    _ = @import("ui/startup_transition.zig");
     _ = @import("config/theme_registry.zig");
     _ = @import("config/background_asset.zig");
     _ = @import("config/background_geometry.zig");

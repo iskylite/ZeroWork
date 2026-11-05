@@ -423,7 +423,7 @@ test "file workspace failed refresh preserves rows path and scroll and disables 
     const pane = remote.root.globalRect();
     try std.testing.expect(table.h >= 3 * @import("ui/file_workspace_styles.zig").row_height);
     try std.testing.expectEqual(@import("ui/app_theme.zig").current().warn_ink, remote.stale_notice.getText().?.color);
-    try std.testing.expectEqual(@as(u8, 255), remote.stale_notice.getBackground().a);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").popupInset(), remote.stale_notice.getBackground());
     try std.testing.expectEqual(stale.y + stale.h, table.y);
     try std.testing.expectEqual(table.y + table.h, failure.y);
     try std.testing.expectEqual(pane.y + pane.h - 1, failure.y + failure.h);

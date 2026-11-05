@@ -45,6 +45,7 @@ pub const View = struct {
             self.root.markRenderDirty();
         }
         if (S.activeLip(expanded or self.hovered.get()).background) |paint| if (!ui.Color.eql(self.lip.getBackground(), paint)) self.lip.setBackground(paint);
+        if (self.root.behavior.interaction.a11y) |*attrs| attrs.label = if (state == .unknown) "打开 AI 助手，执行结果仍待核实" else "打开 AI 助手";
         for (self.dots, 0..) |dot, index| {
             const paint = S.color(state, index, phase);
             if (!ui.Color.eql(dot.getBackground(), paint)) dot.setBackground(paint);

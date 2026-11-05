@@ -307,7 +307,11 @@ pub const Host = struct {
             return .{ .failed = result };
         }
         if (entry.closing) return .{ .failed = failure("transfer_backend_closing", self.waitReceipt(entry)) };
-        if (entry.backend.failureReason()) |reason| return .{ .failed = failure(@errorName(reason), convert(entry.backend.closeReceipt())) };
+        if (entry.backend.failureReason()) |reason| {
+            var result = failure(@errorName(reason), convert(entry.backend.closeReceipt()));
+            result.stage = entry.backend.failure_stage orelse result.stage;
+            return .{ .failed = result };
+        }
         return switch (entry.backend.state()) {
             .connecting => .pending,
             .ready => .{ .ready = entry.binding },

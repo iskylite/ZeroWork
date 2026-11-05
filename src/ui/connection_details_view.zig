@@ -375,6 +375,8 @@ pub const View = struct {
     fn card(self: *View, scope: *ui.Scope, parent: *ui.Node, selection: Selection, index: usize, name: []const u8, address: []const u8, online: bool, state: []const u8) !void {
         const context = try self.action(scope, .node);
         context.selection = selection;
+        const surface = try ui.box(self.cx, S.cardSurface(), .{});
+        @import("layer_materials.zig").card(surface, .control);
         const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "查看连接节点详情", .base_style = S.card(), .hover_style = S.hover(), .on_click = self.cx.on(Action, context, Action.click) }).mount(scope, self.cx);
         button.meta.ownership.meta.test_id = try std.fmt.bufPrint(&context.id, "connection.details.node.{d}", .{index});
         const content = try ui.box(self.cx, S.cardContent(), .{});
@@ -391,7 +393,8 @@ pub const View = struct {
         try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.chevron_right, S.theme.current().fg_2, S.icon(14)));
         self.row_status[index] = state_node;
         try button.appendChild(self.cx.allocator, content);
-        try parent.appendChild(self.cx.allocator, button);
+        try surface.appendChild(self.cx.allocator, button);
+        try parent.appendChild(self.cx.allocator, surface);
         self.rows[index] = button;
     }
 

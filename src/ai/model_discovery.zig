@@ -5,6 +5,10 @@ const catalog = @import("model_catalog.zig");
 const transport = @import("provider_transport.zig");
 const http = @import("provider_http.zig");
 pub const list_refresh_seconds = 5 * 60;
+fn initialContextWindow(p: config.AiProvider, advertised: ?u32, require_list: bool) u32 {
+    // Missing metadata stays unknown; never invent an 8K model window.
+    return advertised orelse if (require_list) 0 else p.context_window;
+}
 fn automaticList(p: config.AiProvider) bool {
     return p.model_count == 0 and p.model.len == 0;
 }
@@ -285,7 +289,7 @@ const Job = struct {
                     exists = true;
                     break;
                 };
-                if (!exists) try models.append(a, .{ .id = try a.dupe(u8, entry.id), .context_window = entry.capability.context orelse if (self.require_list) 0 else if (p.context_window != 0) p.context_window else 8192, .efforts = @splat(false) });
+                if (!exists) try models.append(a, .{ .id = try a.dupe(u8, entry.id), .context_window = initialContextWindow(p.*, entry.capability.context, self.require_list), .efforts = @splat(false) });
             };
             var provider_id = if (p.name.len != 0) p.name else @tagName(p.kind);
             if (fallback) |f| for (f.entries) |entry| {
@@ -648,4 +652,26 @@ fn escapeCursor(a: std.mem.Allocator, value: []const u8) ![]u8 {
         }
     }
     return result.toOwnedSlice(a);
+}
+
+test "model discovery missing window stays unknown while explicit and advertised windows remain usable" {
+    const selection = @import("provider_config.zig");
+    for ([_]struct { configured: u32, advertised: ?u32 = null, require_list: bool = false, expected: u32 }{
+        .{ .configured = 0, .expected = 0 },
+        .{ .configured = 8192, .expected = 8192 },
+        .{ .configured = 64000, .expected = 64000 },
+        .{ .configured = 8192, .advertised = 131072, .expected = 131072 },
+        .{ .configured = 8192, .require_list = true, .expected = 0 },
+    }) |case| {
+        var models = [_]config.AiModel{.{ .id = "unknown-fixture", .context_window = initialContextWindow(.{ .context_window = case.configured }, case.advertised, case.require_list) }};
+        var providers = [_]config.AiProvider{.{ .name = "fixture", .enabled = true, .endpoint = "http://127.0.0.1:1/v1", .models = &models, .model_count = 1 }};
+        const ai: config.Ai = .{ .providers = &providers, .provider_count = 1, .default_provider = "fixture" };
+        try std.testing.expectEqual(case.expected, models[0].context_window);
+        if (case.expected == 0) {
+            try std.testing.expectError(error.InvalidContextWindow, selection.fromSettings(ai));
+        } else {
+            const selected = try selection.fromSettings(ai);
+            try std.testing.expectEqual(case.expected, selected.context_window);
+        }
+    }
 }

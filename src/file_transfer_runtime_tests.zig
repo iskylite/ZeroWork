@@ -95,6 +95,7 @@ test "file transfer runtime retains failed connector until actual cleanup releas
         pause();
     }
     try std.testing.expectEqual(error.ControlledConnectFailure, value.failureReason().?);
+    try std.testing.expectEqualStrings("ssh_connect", value.failure_stage.?);
     try std.testing.expectError(error.Busy, value.deinit());
     const engine = value.engine();
     try std.testing.expectError(error.TransferNotReady, engine.open(engine.ctx, .{ .transfer_binding = binding, .direction = .download, .sources = &.{"/etc/os-release"}, .remote_dir = "/etc", .local_dir = "/tmp" }));

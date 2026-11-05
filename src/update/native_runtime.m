@@ -27,7 +27,7 @@ static dispatch_queue_t InstallationQueue(void){static dispatch_queue_t queue;st
 static NSString *Transaction(void){pthread_mutex_lock(&statusLock);NSString *value=transactionPath;pthread_mutex_unlock(&statusLock);return value;}
 static void SetTransaction(NSString *value){pthread_mutex_lock(&statusLock);transactionPath=value;pthread_mutex_unlock(&statusLock);}
 
-static NSString *Version(void){return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ZeroWorkReleaseVersion"]?:@"0.3.0-rc16";}
+static NSString *Version(void){return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ZeroWorkReleaseVersion"]?:@"0.3.0-rc18";}
 static NSString *ArchivePath(void){return [rootPath stringByAppendingPathComponent:@"verified.zip"];}
 static NSString *EnvelopePath(void){return [rootPath stringByAppendingPathComponent:@"envelope.json"];}
 static NSString *CurrentBundle(void){return ZWCanonical(NSBundle.mainBundle.bundlePath);}

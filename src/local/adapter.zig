@@ -658,7 +658,7 @@ pub const LocalAdapter = struct {
         return .{ .handle = handle, .stdout = stdout, .stderr = try allocator.dupe(u8, job.stderr.items), .exit = job.exit, .cancelled = job.cancelled, .timed_out = job.timed_out, .truncated = job.truncated, .cleanup = job.cleanup, .done = job.done };
     }
 
-    const service_vtable: terminal.Service.VTable = .{ .command_history_snapshot = serviceCommandHistorySnapshot, .recording_identity = serviceRecordingIdentity, .content_query = serviceContentQuery, .execution_input = serviceExecutionInput, .execution_secret = serviceExecutionSecret, .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel, .recording_display = serviceRecordingDisplay, .execution_output = serviceExecutionOutput, .execution_snapshot = serviceExecutionSnapshot, .execution_request = serviceExecutionRequest, .execution_renew = serviceExecutionRenew, .execution_revoke = serviceExecutionRevoke };
+    const service_vtable: terminal.Service.VTable = .{ .command_history_snapshot = serviceCommandHistorySnapshot, .recording_identity = serviceRecordingIdentity, .content_query = serviceContentQuery, .execution_input = serviceExecutionInput, .execution_secret = serviceExecutionSecret, .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel, .recording_display = serviceRecordingDisplay, .execution_output = serviceExecutionOutput, .execution_observe = serviceExecutionObserve, .execution_snapshot = serviceExecutionSnapshot, .execution_request = serviceExecutionRequest, .execution_renew = serviceExecutionRenew, .execution_revoke = serviceExecutionRevoke };
     fn serviceCommandHistorySnapshot(raw: *anyopaque, binding: host.ServiceHandle, allocator: std.mem.Allocator) !terminal.CommandHistorySnapshot {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
         const entry = try self.resolve(binding, .terminal, false);
@@ -724,6 +724,16 @@ pub const LocalAdapter = struct {
         defer entry.mutex.unlock();
         const execution = if (entry.execution) |*value| value else return error.IntegrationUnavailable;
         return execution.readOutput(id, allocator, cursor, max_bytes);
+    }
+    fn serviceExecutionObserve(raw: *anyopaque, binding: host.ServiceHandle, id: @import("../host/identity.zig").ExecutionId) !terminal.execution.Snapshot {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        const execution = if (entry.execution) |*value| value else return error.ExecutionNotFound;
+        const value = execution.snapshot;
+        if (value.execution_id == null or !value.execution_id.?.eql(id)) return error.ExecutionNotFound;
+        return value;
     }
     fn serviceExecutionSnapshot(raw: *anyopaque, binding: host.ServiceHandle) !terminal.execution.Snapshot {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));

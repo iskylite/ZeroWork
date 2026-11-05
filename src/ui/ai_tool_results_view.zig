@@ -131,7 +131,14 @@ pub const State = struct {
         self.body_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, self.body, record.expanded);
         try self.root.appendChild(cx.allocator, self.body_disclosure.root);
         const command_row = try ui.boxStyled(cx, S.commandRow, .{});
-        const command_lines = 1 + std.mem.count(u8, std.mem.trimEnd(u8, record.command, "\r\n"), "\n");
+        // File contents remain in the original arguments for approval/copy.
+        // History shows the target instead of laying out an entire JSON file.
+        var decoded_name: [64]u8 = undefined;
+        const logical_name = @import("../ai/plugin_tools.zig").decodeName(&decoded_name, record.name) catch record.name;
+        const file_target = if (std.mem.startsWith(u8, logical_name, "file.")) try @import("ai_tool_header_projection.zig").project(cx.allocator, record.name, record.arguments) else null;
+        defer if (file_target) |value| cx.allocator.free(value);
+        const display_command = file_target orelse record.command;
+        const command_lines = 1 + std.mem.count(u8, std.mem.trimEnd(u8, display_command, "\r\n"), "\n");
         const command_height = @max(@as(f32, 27), @as(f32, @floatFromInt(command_lines)) * 16 + 8);
         command_row.setStyleInline(cx.allocator, .{ .height = .{ .px = command_height } });
         try body.content.appendChild(cx.allocator, command_row);
@@ -141,8 +148,8 @@ pub const State = struct {
         @import("layer_materials.zig").card(command_scroll.container, .control);
         command_scroll.container.setStyleInline(cx.allocator, .{ .height = .{ .px = command_height } });
         command_scroll.content.setStyleInline(cx.allocator, S.outputContent(cx.tokens));
-        const command = try ui.textStyled(cx, S.multilineOutput, record.command);
-        command.setStyleInline(cx.allocator, .{ .width = .{ .px = @import("ai_message_view.zig").textWidth(cx, record.command, 11, 400) }, .flex_shrink = 0 });
+        const command = try ui.textStyled(cx, S.multilineOutput, display_command);
+        command.setStyleInline(cx.allocator, .{ .width = .{ .px = @import("ai_message_view.zig").textWidth(cx, display_command, 11, 400) }, .flex_shrink = 0 });
         command.meta.ownership.meta.test_id = "ai.tool.result.command";
         try command_scroll.content.appendChild(cx.allocator, command);
         try command_row.appendChild(cx.allocator, command_scroll.container);

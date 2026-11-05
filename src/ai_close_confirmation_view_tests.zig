@@ -85,8 +85,8 @@ test "AI close confirmation running and idle labels confirm the captured ticket 
         try std.testing.expect(!f.view.open.peek());
         const ticket = try f.show(4, 1, running, true);
         try std.testing.expectEqualStrings(if (running) "停止并结束当前会话？" else "结束当前会话？", text(f.view.title));
-        try std.testing.expectEqualStrings("历史会保留，下次打开显示欢迎页", text(f.view.detail));
-        try std.testing.expectEqualStrings(if (running) "停止并结束" else "结束会话", text(f.view.confirm));
+        try std.testing.expectEqualStrings("历史和草稿保留，待处理消息暂停。完成后解绑，连接保持打开。", text(f.view.detail));
+        try std.testing.expectEqualStrings(if (running) "停止并结束" else "结束并解绑", text(f.view.confirm));
         f.click(f.view.confirm);
         try std.testing.expectEqual(@as(usize, 1), f.confirms);
         try std.testing.expectEqual(@as(usize, 0), f.cancels);
@@ -175,12 +175,12 @@ test "AI close confirmation compact geometry all themes and theme replay preserv
         f.frame();
         const panel = f.view.panel.globalRect();
         try std.testing.expectEqual(@as(f32, 288), panel.w);
-        try std.testing.expectApproxEqAbs(@as(f32, 106), panel.h, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 124), panel.h, 0.1);
         try std.testing.expect(panel.x >= 8 and panel.x + panel.w <= 312);
         try std.testing.expectApproxEqAbs(panel.x + 12, f.view.title.globalRect().x, 0.1);
         try std.testing.expectApproxEqAbs(panel.y + 12, f.view.title.globalRect().y, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 20), f.view.title.globalRect().h, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 18), f.view.detail.globalRect().h, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 36), f.view.detail.globalRect().h, 0.1);
         for ([_]*ui.Node{ f.view.cancel, f.view.confirm }) |button| {
             const r = button.globalRect();
             try std.testing.expectEqual(@as(f32, 28), r.h);

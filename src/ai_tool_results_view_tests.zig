@@ -1400,3 +1400,106 @@ test "tool action live and result cards share parameter labels while identifiers
     try std.testing.expect(live.globalRect().h > 32);
     try std.testing.expect(result.root.globalRect().h > 32);
 }
+
+test "readonly verification card captures original call target and preserves evidence across retained turns" {
+    const VerificationView = @import("ui/ai_verification_view.zig");
+    const V = facts.Verification;
+    const owner: @import("host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 3 };
+    const scope_value: @import("ai/tool_scope.zig").Scope = .{ .owner = .{ .session = 101 }, .members = .{ .ids = .{101} ++ @as([15]u64, @splat(0)), .len = 1 } };
+    var run = loop.Loop.init(a, scope_value, 77, .{});
+    defer run.deinit();
+    const arguments = "{\"session_ids\":[101],\"command\":\"df -h\"}";
+    const anchor: V.Anchor = .{ .owner = owner, .operation_key = .{ .owner = .{ .session = owner }, .operation_id = 9 }, .service = .{ .resource_owner = .{ .session = owner }, .origin_session = owner, .kind = .exec, .binding_id = 7, .binding_generation = 2 }, .turn_id = 77, .call_hash = V.digest("original"), .arguments_hash = V.digest(arguments) };
+    var outcome = try loop.Outcome.copy(a, &.{.{ .session_id = 101, .status = .unknown, .transport = .ssh, .stdout = "original partial output", .remote_effect_unknown = true, .local_released = false }});
+    outcome.verification = anchor;
+    try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = scope_value.owner, .turn_id = 77, .call_id = "original" }, .name = "run_command", .arguments = arguments, .arguments_hash = V.digest(arguments), .dispatched = true, .outcome = outcome });
+    var store = facts.Store.init(a);
+    defer store.deinit();
+    try std.testing.expect(try store.capture(&run, &.{.{ .owner = owner, .label = "original-server" }}));
+    const record = store.records.items[0];
+    const Probe = struct {
+        count: usize = 0,
+        ticket: ?VerificationView.Ticket = null,
+        fn open(_: *@This()) void {}
+        fn enqueue(raw: *anyopaque, ticket: VerificationView.Ticket) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.count += 1;
+            self.ticket = ticket;
+        }
+    };
+    var probe: Probe = .{};
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(360, 400);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    try VerificationView.mount(cx, scope, cx.root.?, record, .{ .context = &probe, .enqueue = Probe.enqueue });
+    cx.layout();
+    const button = find(cx.root.?, "ai.verification.check").?;
+    const rect = button.globalRect();
+    cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    try std.testing.expectEqual(@as(usize, 1), probe.count);
+    try std.testing.expectEqual(@as(u64, 77), probe.ticket.?.turn_id);
+    try std.testing.expectEqual(@as(?usize, 0), probe.ticket.?.target_index);
+    try std.testing.expectEqualSlices(u8, &V.digest("original"), &probe.ticket.?.call_hash);
+    try std.testing.expect(std.meta.eql(anchor, probe.ticket.?.resolve(record).?));
+    var queued = probe.ticket.?;
+    queued.anchor.?.owner.generation += 1;
+    try std.testing.expect(queued.resolve(record) == null);
+    queued = probe.ticket.?;
+    queued.target_index = 1;
+    try std.testing.expect(queued.resolve(record) == null);
+    queued = probe.ticket.?;
+    queued.anchor = null;
+    try std.testing.expect(queued.resolve(record) == null);
+    record.targets[0].verification.?.service.binding_generation += 1;
+    try std.testing.expect(probe.ticket.?.resolve(record) == null);
+    record.targets[0].verification = anchor;
+    record.targets[0].source.?.generation += 1;
+    try std.testing.expect(probe.ticket.?.resolve(record) == null);
+    record.targets[0].source = owner;
+    // Host observations cannot borrow another conversation's retained anchor.
+    var host_record = record.*;
+    host_record.targets = &.{};
+    host_record.error_status = .unknown;
+    var host_anchor = anchor;
+    host_anchor.service.kind = .terminal;
+    host_anchor.operation_key = null;
+    host_anchor.execution_id = @import("host/identity.zig").ExecutionId.generate();
+    host_anchor.context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = scope_value.owner, .binding_revision = 1, .grant_revision = 1 };
+    host_record.verification = host_anchor;
+    host_record.conversation_id = host_anchor.context.?.conversation_id;
+    var host_ticket = probe.ticket.?;
+    host_ticket.target_index = null;
+    host_ticket.anchor = host_anchor;
+    host_ticket.conversation_id = host_record.conversation_id;
+    try std.testing.expect(host_ticket.resolve(&host_record) != null);
+    host_record.conversation_id = @import("host/identity.zig").ConversationId.generate();
+    host_ticket.conversation_id = host_record.conversation_id;
+    try std.testing.expect(host_ticket.resolve(&host_record) == null);
+    try record.targets[0].checks.append(record.arena.allocator(), .{ .anchor = anchor, .observed_at_ms = 1000, .exit_code = 0, .local_released = true });
+    var copy = try store.cloneTurns(&.{.{ .user = false, .text = @constCast(""), .turn = .{ .id = 77 } }});
+    defer copy.deinit();
+    const kept = copy.records.items[0].targets[0];
+    try std.testing.expect(std.meta.eql(anchor, kept.verification.?));
+    try std.testing.expectEqual(@as(usize, 1), kept.checks.items.items.len);
+    try std.testing.expectEqual(loop.Status.unknown, kept.result.status);
+    try std.testing.expect(kept.result.remote_effect_unknown and !kept.result.local_released);
+    try std.testing.expectEqualStrings("original partial output", kept.result.stdout);
+    try std.testing.expect(copy.records.items[0].hasUnknown());
+    // Retained unknowns still block a new plan when no live Loop is available.
+    try std.testing.expect(copy.hasUnknownFor(scope_value.owner, 77));
+    try std.testing.expect(copy.hasUnknownFor(null, 77));
+    try std.testing.expect(!copy.hasUnknownFor(scope_value.owner, 78));
+    try std.testing.expect(!copy.hasUnknownFor(.{ .group = 101 }, 77));
+    const strip = @import("ui/ai_strip_styles.zig");
+    try std.testing.expectEqual(strip.State.unknown, strip.project(.{ .pending = false, .busy = false, .failed = false, .unknown = copy.records.items[0].hasUnknown(), .has_answer = true }));
+    const indicator = try @import("ui/ai_strip_view.zig").View.mount(cx, scope, cx.on(Probe, &probe, Probe.open));
+    try cx.root.?.appendChild(a, indicator.root);
+    indicator.update(.{ .x = 0, .y = 0, .w = 360, .h = 40 }, true, .unknown, 0, false);
+    try std.testing.expectEqualStrings("打开 AI 助手，执行结果仍待核实", indicator.root.behavior.interaction.a11y.?.label.?);
+    try std.testing.expect(ui.Color.eql(strip.color(.unknown, 0, 0), indicator.dots[0].getBackground()));
+    indicator.update(.{ .x = 0, .y = 0, .w = 360, .h = 40 }, true, .unknown, 9, false);
+    try std.testing.expect(ui.Color.eql(strip.color(.unknown, 0, 0), indicator.dots[0].getBackground()));
+}

@@ -71,6 +71,7 @@ pub const SshExecBridge = struct {
         if (command.len == 0) return error.EmptyCommand;
         if (command.len > std.math.maxInt(u16) - 1 or std.mem.indexOfScalar(u8, command, 0) != null) return error.InvalidCommand;
         if (opts.capture_cap == 0 or opts.capture_cap > max_capture) return error.InvalidCaptureLimit;
+        if (opts.stdin) |bytes| if (bytes.len > 256 * 1024) return error.InvalidInputLimit;
         if (!self.tryLock()) return error.WorkerBusy;
         defer self.unlock();
         if (self.close_requested.load(.acquire)) return error.BridgeClosed;
@@ -90,7 +91,7 @@ pub const SshExecBridge = struct {
         for (self.commands) |pending| if (pending) |item| {
             if (item.call_id == call_id) {
                 if (item.key != null and key != null and !item.key.?.owner.eql(key.?.owner)) continue;
-                if (!std.meta.eql(item.key, key) or !std.mem.eql(u8, item.command, command) or !optionalTextEql(item.cwd, opts.cwd) or item.cap != opts.capture_cap or item.timeout_ms != opts.timeout_ms) return error.ConflictingCallId;
+                if (!std.meta.eql(item.key, key) or !std.mem.eql(u8, item.command, command) or !optionalTextEql(item.cwd, opts.cwd) or !optionalTextEql(item.stdin, opts.stdin) or item.cap != opts.capture_cap or item.timeout_ms != opts.timeout_ms) return error.ConflictingCallId;
                 return .{ .ptr = item };
             }
         };
@@ -288,6 +289,9 @@ pub const SshExecBridge = struct {
         command: [:0]u8,
         wire_command: [:0]u8,
         cwd: ?[]u8,
+        stdin: ?[]u8 = null,
+        stdin_offset: usize = 0,
+        stdin_eof: bool = false,
         channel: ?Channel = null,
         cap: u32,
         timeout_ms: u32,
@@ -313,6 +317,8 @@ pub const SshExecBridge = struct {
 
         fn init(owner: *SshExecBridge, call_id: u64, key: ?operation.OperationKey, binding: ?ServiceHandle, text: []const u8, opts: bridge.ExecOpts, accepted_ms: i64) !Command {
             const allocator = owner.allocator;
+            const input = if (opts.stdin) |bytes| try allocator.dupe(u8, bytes) else null;
+            errdefer if (input) |bytes| allocator.free(bytes);
             const command = try allocator.dupeSentinel(u8, text, 0);
             errdefer allocator.free(command);
             const cwd = if (opts.cwd) |value| blk: {
@@ -330,7 +336,7 @@ pub const SshExecBridge = struct {
             // sent; OOM cannot lose bookkeeping for an already running command.
             try stdout.ensureTotalCapacity(allocator, opts.capture_cap);
             try stderr.ensureTotalCapacity(allocator, opts.capture_cap);
-            return .{ .owner = owner, .call_id = call_id, .key = key, .binding = binding, .command = command, .wire_command = wire, .cwd = cwd, .cap = opts.capture_cap, .timeout_ms = opts.timeout_ms, .started_ms = accepted_ms, .stdout = stdout, .stderr = stderr };
+            return .{ .owner = owner, .call_id = call_id, .key = key, .binding = binding, .command = command, .wire_command = wire, .cwd = cwd, .stdin = input, .cap = opts.capture_cap, .timeout_ms = opts.timeout_ms, .started_ms = accepted_ms, .stdout = stdout, .stderr = stderr };
         }
         fn terminal(self: *const Command) bool {
             return switch (self.status) {
@@ -421,6 +427,7 @@ pub const SshExecBridge = struct {
                 }
             }
             if (self.state == .running or self.state == .closing) {
+                if (self.state == .running) self.sendInput();
                 self.drain() catch {
                     if (!self.terminal()) self.stop(.failed, "ChannelReadFailed");
                 };
@@ -436,6 +443,22 @@ pub const SshExecBridge = struct {
         fn captureExit(self: *Command) void {
             var status: c_int = 0;
             if (c.zw_libssh2_channel_exit_status_received(self.channel.?.handle, &status) == 1) self.exit_code = status;
+        }
+        fn sendInput(self: *Command) void {
+            const bytes = self.stdin orelse return;
+            if (self.stdin_eof) return;
+            if (self.stdin_offset < bytes.len) {
+                const part = bytes[self.stdin_offset..][0..@min(16384, bytes.len - self.stdin_offset)];
+                const n = c.zw_libssh2_channel_write(self.channel.?.handle, part.ptr, part.len);
+                if (n < 0) {
+                    self.stop(.failed, "StdinWriteFailed");
+                    return;
+                }
+                self.stdin_offset += @intCast(n);
+                if (self.stdin_offset < bytes.len) return;
+            }
+            const rc = c.zw_libssh2_channel_send_eof_step(self.channel.?.handle);
+            if (rc < 0) self.stop(.failed, "StdinEofFailed") else if (rc == 0) self.stdin_eof = true;
         }
         fn drain(self: *Command) !void {
             var buffer: [4096]u8 = undefined;
@@ -542,6 +565,7 @@ pub const SshExecBridge = struct {
             if (self.wire_command.ptr != self.command.ptr) allocator.free(self.wire_command);
             allocator.free(self.command);
             if (self.cwd) |cwd| allocator.free(cwd);
+            if (self.stdin) |bytes| allocator.free(bytes);
             self.stdout.deinit(allocator);
             self.stderr.deinit(allocator);
         }

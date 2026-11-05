@@ -10,10 +10,10 @@
 | --- | --- | --- |
 | 通用组件 | [分类目录](components/index.html)，输入、选择、动作、浮层、工具、反馈、集合、异步和通知 | `components/primitives.css/js`供设置与展板共同消费；复杂选择器由`connection/select-preview.js/css`共享。展示页按功能路由复用同一模板/控制器 |
 | 功能组件 | [独立能力目录](features/index.html)，页签、主机导航、终端输入、命令文档、会话菜单、状态、链路、广播、转发、传输、AI、连接向导步骤、设置事务、模型行、KVM控制等 | `features/catalog.js`只登记来源与依赖；画布通过受控component/feature路由挂载模块中的真实renderer/controller，不复制业务界面或另一份任务队列 |
-| 功能模块 | [模块入口](index.html#modules)，终端与文件、连接管理、偏好设置、KVM、笔记 | 组合通用及功能组件；模型持有实体、草稿和操作状态，壳可以重绘，业务归属不跟随active切换 |
+| 功能模块 | [模块入口](index.html#modules)，终端与文件、连接管理、偏好设置、KVM | 组合通用及功能组件；模型持有实体、草稿和操作状态，壳可以重绘，业务归属不跟随active切换 |
 | 整机预览 | [融合入口](app/index.html)，连接会话切换、管理工具浮层、共享主题、通知、传输聚合 | `app/app.js`负责路由/实例生命周期及全局服务投影；`app/bridge.js`是HTML挂载适配，原生须映射Window/Router/WorkspaceModel等，不使用WebView替代 |
 
-同类组件不止共享颜色。页签的HTML由`shared/functional.js`中的`V3.tab`生成，workspace、connection、KVM、notes共同消费；槽位、状态点、关闭命中、hover/focus与尺寸由`shared/functional.css`定义。AI头部与链路测试阶段分别由同一`V3.aiHeader`及`V3.connectionTest`渲染。其业务动作仍分别发回原Session/Connection/Note控制器。设置基础控件和组件展板也消费同一个primitives源。
+同类组件不止共享颜色。页签的HTML由`shared/functional.js`中的`V3.tab`生成，workspace、connection、KVM共同消费；槽位、状态点、关闭命中、hover/focus与尺寸由`shared/functional.css`定义。AI头部与链路测试阶段分别由同一`V3.aiHeader`及`V3.connectionTest`渲染。其业务动作仍分别发回原Session/Connection控制器。设置基础控件和组件展板也消费同一个primitives源。
 
 ## 功能组件合同
 
@@ -36,7 +36,7 @@
 
 ## 范围及未来设计
 
-当前整机连接范围为本地、SSH、SFTP和KVM。VNC/RDP/FTP的研究稿保留在[未来设计](future/index.html)，必须显式future=1进入，默认协议选择、侧栏、模块导航及整机路由都不包含它们。KVM按用户明确要求作为已完整规划的模块参与组合。笔记仍为此前已授权的设计模块，不改变其原型模拟身份。
+当前整机连接范围为本地、SSH、SFTP和KVM。VNC/RDP/FTP的研究稿保留在[未来设计](future/index.html)，必须显式future=1进入，默认协议选择、侧栏、模块导航及整机路由都不包含它们。KVM按用户明确要求作为已完整规划的模块参与组合。
 
 ## 布局/命中不变量
 
@@ -52,7 +52,7 @@
 
 ## 本轮组件展示边界修正
 
-功能区按本地ZSH、SSH、SFTP、AI、顶栏、侧栏、底栏、连接、设置、KVM及笔记组织；相同业务仍消费同一renderer/controller。功能组件是一条可独立验收的状态/事件合同，例如“端口转发浮卡”，而不是整条底栏或整个工作区的裁片。
+功能区按本地ZSH、SSH、SFTP、AI、顶栏、侧栏、底栏、连接、设置、KVM组织；相同业务仍消费同一renderer/controller。功能组件是一条可独立验收的状态/事件合同，例如“端口转发浮卡”，而不是整条底栏或整个工作区的裁片。
 
 - 页签故事只展示页签条及完整页签菜单；其他功能给范围说明或打开来源模块，不在62px高裁片里挂向导。
 - 底栏各故事只显示自身触发器及完整浮层；另有完整底栏组合故事，明确不同层级。
@@ -60,4 +60,4 @@
 - 组件根舞台保留完整可用高度作为浮层边界，展示部件按内容布局；不能把部件高度同时当浮层最大高度。resize后重取活触发器锚点；长浮层内容滚动且头部可达。
 - 只读信息使用hover/focus就近显示；选择、保存、启停等动作仍显式点击。含必须操作的浮卡不能以hover离开即消失。
 - 原型固定860×480最小逻辑尺寸，菜单/弹层可达；通用/功能组件前后导航保留主题与尺寸。关系文档使用Markdown阅读器，不裸露堆叠语法。
-- 整机中央仅承载终端、文件、KVM等连接内容；连接管理、设置、笔记工具以面板/浮窗挂载，关闭返回原连接草稿。
+- 整机中央仅承载终端、文件、KVM等连接内容；连接管理和设置以面板/浮窗挂载，关闭返回原连接草稿。

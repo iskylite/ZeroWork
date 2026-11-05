@@ -53,7 +53,7 @@ pub const View = struct {
         self.title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.title.meta.ownership.meta.test_id = "ai.close.confirmation.title";
         try body.appendChild(cx.allocator, self.title);
-        self.detail = try ui.textStyled(cx, S.detail, "历史会保留，下次打开显示欢迎页");
+        self.detail = try ui.textStyled(cx, S.detail, "历史和草稿保留，待处理消息暂停。完成后解绑，连接保持打开。");
         self.detail.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.detail.meta.ownership.meta.test_id = "ai.close.confirmation.detail";
         try body.appendChild(cx.allocator, self.detail);
@@ -90,7 +90,7 @@ pub const View = struct {
         self.resolved_ticket = null;
         self.disabled.set(!snapshot.enabled);
         try self.title.setTextContent(self.cx.allocator, if (snapshot.running) "停止并结束当前会话？" else "结束当前会话？");
-        self.confirm_label.set(if (snapshot.running) "停止并结束" else "结束会话");
+        self.confirm_label.set(if (snapshot.running) "停止并结束" else "结束并解绑");
         self.open.set(true);
         if (newly_opened or changed) self.focus_pending = true;
         self.cx.requestRedraw();

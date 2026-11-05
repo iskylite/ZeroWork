@@ -53,6 +53,8 @@ pub const Document = struct {
     pixel_offset: f32 = 0,
     height: u16 = 1,
     row_height: f32 = 22,
+    viewport_height: f32 = 0,
+    native_prefix: ?struct { top: u32, version: u64 } = null,
     cell_width: f32 = 8.4,
     follow: bool = true,
     alternate: bool = false,
@@ -91,8 +93,21 @@ pub const Document = struct {
         return layout.y.? - layout.before;
     }
     fn maxPixelOrigin(self: *const Document, doc: *const search.Document) f32 {
-        // Keep the existing bottom alignment, including command-card spacing.
+        if (self.viewport_height > 0 and doc.rows.len > 0) {
+            const last = doc.rows[doc.rows.len - 1].presentation;
+            return @max(0, last.y.? + self.row_height + last.after - self.viewportHeight());
+        }
         return rowOrigin(doc, self.maxTop(doc));
+    }
+    fn viewportHeight(self: *const Document) f32 {
+        const grid = @as(f32, @floatFromInt(self.height)) * self.row_height;
+        // A pending transport resize must not stretch an old grid over a new pane.
+        return if (self.viewport_height >= grid and self.viewport_height < grid + self.row_height) self.viewport_height else grid;
+    }
+    pub fn setViewportHeight(self: *Document, height: f32) bool {
+        if (!std.math.isFinite(height) or height <= 0 or height == self.viewport_height) return false;
+        self.viewport_height = height;
+        return true;
     }
     /// Translate an actual retained VT row into this display document. A
     /// builtin application card may precede that native row, but is never the
@@ -228,6 +243,7 @@ pub const Document = struct {
     }
     pub fn restore(self: *Document, record: terminal.ApplicationRecord) !void {
         for (self.restored.items) |mapped| if (mapped.owner.eql(record.owner) and mapped.external == record.id) {
+            try self.updatePendingCommand(self.owner, mapped.local, record.command);
             return self.finish(self.owner, mapped.local, @fromBackingInt(@intCast(@backingInt(record.state))), record.output);
         };
         try self.restored.ensureUnusedCapacity(self.allocator, 1);
@@ -250,6 +266,26 @@ pub const Document = struct {
         self.raw.releaseAnchor(r.anchor) catch {};
         self.allocator.free(r.command);
         self.allocator.free(r.output);
+    }
+    /// A chooser resolves its file arguments while the command is still pending.
+    pub fn updatePendingCommand(self: *Document, owner: identity.SessionHandle, id: u64, command: []const u8) !void {
+        if (!owner.eql(self.owner)) return error.StaleOwner;
+        if (command.len == 0 or command.len > 16 * 1024 or !std.unicode.utf8ValidateSlice(command)) return error.InvalidCommand;
+        for (self.records.items) |*record| if (record.id == id) {
+            if (std.mem.eql(u8, record.command, command)) return;
+            if (record.state != .pending) return error.CommandAlreadyCompleted;
+            const length = displayLength(command);
+            if (self.bytes - record.command.len + length > 1024 * 1024) return error.CommandRecordCapacity;
+            const owned = try self.displayCopy(command);
+            self.bytes = self.bytes - record.command.len + owned.len;
+            self.allocator.free(record.command);
+            record.command = owned;
+            record.record_dirty = true;
+            self.invalidate();
+            _ = self.flushRecording();
+            return;
+        };
+        return error.CommandRecordExpired;
     }
     pub fn finish(self: *Document, owner: identity.SessionHandle, id: u64, state: State, output: []const u8) !void {
         if (!owner.eql(self.owner)) return error.StaleOwner;
@@ -852,6 +888,7 @@ pub const Document = struct {
         var native = try self.raw.snapshot(allocator);
         errdefer native.deinit(allocator);
         self.height = native.projection.rows;
+        self.native_prefix = null;
         self.alternate = native.projection.modes.alternate_screen;
         if (self.alternate) {
             self.pixel_offset = 0;
@@ -862,13 +899,16 @@ pub const Document = struct {
             self.pixel_scrolling = false;
             self.pixel_offset = 0;
         }
-        if (!self.composed()) return native;
+        if (!self.composed()) {
+            try self.fillNativeViewport(&native.projection, allocator);
+            return native;
+        }
         try self.rebuild(&native);
         const doc = &self.cached.?;
-        const pixel_height = @as(f32, @floatFromInt(self.height)) * self.row_height;
+        const pixel_height = self.viewportHeight();
         const max_top = self.maxTop(doc);
         var origin: f32 = 0;
-        if (self.pixel_scrolling) {
+        if (self.pixel_scrolling or self.viewport_height > 0) {
             const maximum = self.maxPixelOrigin(doc);
             origin = if (self.follow) maximum else @min(rowOrigin(doc, @min(self.top, doc.rows.len -| 1)) + self.pixel_offset, maximum);
             self.locatePixel(doc, origin);
@@ -881,7 +921,8 @@ pub const Document = struct {
         defer cells.deinit(allocator);
         var graphemes: std.ArrayList(u8) = .empty;
         defer graphemes.deinit(allocator);
-        const visible = try allocator.alloc(vt.Row, @as(usize, self.height) + @intFromBool(self.pixel_scrolling and self.pixel_offset > 0 and self.height < std.math.maxInt(u16)));
+        const count = @min(std.math.maxInt(u16), @as(usize, @intFromFloat(@ceil((pixel_height + self.pixel_offset) / self.row_height))));
+        const visible = try allocator.alloc(vt.Row, count);
         errdefer allocator.free(visible);
         var cursor = native.projection.cursor;
         cursor.visible = false;
@@ -971,9 +1012,74 @@ pub const Document = struct {
         projection.graphemes = owned_graphemes;
         projection.cursor = cursor;
         projection.version = self.revision;
-        projection.scrollback = .{ .total_rows = @max(doc.rows.len, self.height), .viewport_offset = self.top, .viewport_rows = self.height };
+        projection.scrollback = .{ .total_rows = @max(doc.rows.len, self.height), .viewport_offset = self.top, .viewport_rows = visible.len };
         self.mapCommandRows(@constCast(projection.commands));
         return native;
+    }
+    /// Keep the VT grid whole, but use its preceding retained row to fill the
+    /// fractional strip above it. This bounded capture never scans full history.
+    fn fillNativeViewport(self: *Document, p: *vt.Projection, allocator: std.mem.Allocator) !void {
+        self.source_retry_at_ns = null;
+        const extra = self.viewportHeight() - @as(f32, @floatFromInt(p.rows)) * self.row_height;
+        if (extra <= 0 or (p.scrollback.viewport_offset == 0 and p.active_cursor.row + 1 < p.rows)) return;
+        for (@constCast(p.visible_rows), 0..) |*row, i| row.presentation.y = extra + @as(f32, @floatFromInt(i)) * self.row_height;
+        if (p.scrollback.viewport_offset == 0 or p.visible_rows.len == std.math.maxInt(u16)) return;
+        const top = std.math.cast(u32, p.scrollback.viewport_offset - 1) orelse return;
+        var capture = self.raw.searchTail(.{ .start_row = top, .version = p.version, .max_rows = p.rows +| 1 }, allocator) catch |err| switch (err) {
+            error.WorkerBusy, error.StaleProjection => {
+                // Historical overscan must never hold back fresh live output.
+                self.source_retry_at_ns = profileNow() + 8 * std.time.ns_per_ms;
+                return;
+            },
+            error.FullSearchRequired, error.SearchUnavailable, error.SearchTooLarge => return,
+            else => return err,
+        };
+        defer capture.deinit(allocator);
+        const doc = &capture.document;
+        if (!capture.owner.eql(self.owner) or doc.source_version != p.version or doc.rows.len < 2 or doc.rows[0].screen_row != top or !std.meta.eql(doc.rows[1].id, p.visible_rows[0].id)) return error.StaleProjection;
+        const rows = try allocator.alloc(vt.Row, p.visible_rows.len + 1);
+        errdefer allocator.free(rows);
+        const cells = try allocator.alloc(vt.Cell, p.cells.len + p.cols);
+        errdefer allocator.free(cells);
+        var graphemes: std.ArrayList(u8) = .empty;
+        defer graphemes.deinit(allocator);
+        try graphemes.appendSlice(allocator, p.graphemes);
+        @memcpy(cells[p.cols..], p.cells);
+        @memset(cells[0..p.cols], .{});
+        for (doc.spans) |span| {
+            if (span.row != 0) break;
+            var byte = span.start;
+            while (byte < span.end) {
+                const source = span.cellAt(byte);
+                byte = source.end;
+                if (source.col >= p.cols) break;
+                var cell: vt.Cell = source.native_cell orelse .{};
+                cell.grapheme_start = @intCast(graphemes.items.len);
+                cell.grapheme_len = source.end - source.start;
+                cell.width = if (source.width == 2) .wide_lead else .single;
+                try graphemes.appendSlice(allocator, doc.text[source.start..source.end]);
+                cells[source.col] = cell;
+                if (source.width == 2 and source.col + 1 < p.cols) cells[source.col + 1].width = .wide_tail;
+            }
+        }
+        const first = doc.rows[0];
+        rows[0] = .{ .id = first.id, .viewport_y = 0, .cell_start = 0, .cell_count = p.cols, .wraps = std.meta.eql(first.logical_id, doc.rows[1].logical_id), .continuation = !std.meta.eql(first.logical_id, first.id), .logical_start_id = first.logical_id, .dirty = true, .semantic_prompt = 0, .received_wallclock_ms = first.timestamp_ms, .presentation = .{ .y = extra - self.row_height } };
+        @memcpy(rows[1..], p.visible_rows);
+        for (rows[1..]) |*row| {
+            row.viewport_y += 1;
+            row.cell_start += p.cols;
+        }
+        const owned_graphemes = try graphemes.toOwnedSlice(allocator);
+        allocator.free(p.visible_rows);
+        allocator.free(p.cells);
+        allocator.free(p.graphemes);
+        p.visible_rows = rows;
+        p.cells = cells;
+        p.graphemes = owned_graphemes;
+        p.cursor.row += 1;
+        p.scrollback.viewport_offset = top;
+        p.scrollback.viewport_rows += 1;
+        self.native_prefix = .{ .top = top, .version = p.version };
     }
     fn find(self: *Document, anchor: terminal.Anchor) !?struct { row: usize, col: u16 } {
         if (!anchor.owner.eql(self.owner)) return error.StaleOwner;
@@ -992,7 +1098,11 @@ pub const Document = struct {
         const self = try checked(raw, binding);
         if (!self.enabled or self.alternate) {
             var native_point = point;
-            if (self.pixel_scrolling and !self.alternate) {
+            if (self.native_prefix) |prefix| {
+                if (point.source_version) |version| if (version != prefix.version) return error.StaleProjection;
+                native_point.row += if (point.space == .viewport) prefix.top else 0;
+                native_point.space = .screen;
+            } else if (self.pixel_scrolling and !self.alternate) {
                 if (point.source_version) |version| if (version != self.revision) return error.StaleProjection;
                 native_point.row += if (point.space == .viewport) @as(u32, @intCast(self.top)) else 0;
                 native_point.space = .screen;
@@ -1481,6 +1591,66 @@ test "terminal records anchor at live prompt while viewport shows history and re
     }
 }
 
+test "terminal surface fractional viewport fills above a whole bottom row without changing the VT grid" {
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 3, 20);
+    defer adapter.destroy();
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    _ = document.setRowHeight(10);
+    _ = document.setViewportHeight(35);
+    _ = try adapter.feed("short");
+    var initial = try document.service().snapshot(a);
+    defer initial.deinit(a);
+    try std.testing.expect(initial.projection.visible_rows[0].presentation.y == null);
+    _ = try adapter.feed("\r\n\x1b[2;9;4:2;58;2;255;0;0mold\x1b[0m\r\none\r\ntwo\r\n$ ");
+    var native = try source.service().snapshot(a);
+    defer native.deinit(a);
+    var filled = try document.service().snapshot(a);
+    defer filled.deinit(a);
+    const p = &filled.projection;
+    try std.testing.expectEqual(@as(u16, 3), p.rows);
+    try std.testing.expectEqual(@as(usize, 4), p.visible_rows.len);
+    try std.testing.expectEqual(native.projection.cursor.row + 1, p.cursor.row);
+    try std.testing.expectEqual(native.projection.active_cursor, p.active_cursor);
+    try std.testing.expectApproxEqAbs(@as(f32, -5), p.visible_rows[0].presentation.y.?, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 35), p.visible_rows[p.cursor.row].presentation.y.? + document.row_height, 0.001);
+    try std.testing.expectEqual(p.scrollback.total_rows, p.scrollback.viewport_offset + p.scrollback.viewport_rows);
+    const first = p.cells[0];
+    try std.testing.expectEqualStrings("o", p.grapheme(first));
+    try std.testing.expect(first.attributes & (1 << 5) != 0);
+    try std.testing.expectEqual(@as(u8, 2), first.underline);
+    try std.testing.expectEqual(@as(u24, 0xff0000), first.underline_color.rgb);
+    const start = try document.service().createAnchor(.{ .row = 0, .col = 0, .source_version = p.version });
+    defer document.service().releaseAnchor(start) catch {};
+    const end = try document.service().createAnchor(.{ .row = 1, .col = 3, .source_version = p.version });
+    defer document.service().releaseAnchor(end) catch {};
+    const selected = try document.service().selectionText(.{ .start = start, .end = end }, a, 100);
+    defer a.free(selected);
+    try std.testing.expectEqualStrings("old\none", selected);
+    try std.testing.expectEqual(@as(u64, 0), document.background_scans + document.synchronous_scans);
+    // Resizing only the fractional strip keeps the last complete row anchored.
+    _ = document.setViewportHeight(39);
+    var resized = try document.service().snapshot(a);
+    defer resized.deinit(a);
+    try std.testing.expectApproxEqAbs(@as(f32, -1), resized.projection.visible_rows[0].presentation.y.?, 0.001);
+    try document.scrollPixels(-0.5);
+    var scrolled = try document.service().snapshot(a);
+    defer scrolled.deinit(a);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.5), scrolled.projection.visible_rows[0].presentation.y.?, 0.001);
+    try document.scrollPixels(100000);
+    var bottom = try document.service().snapshot(a);
+    defer bottom.deinit(a);
+    try std.testing.expectApproxEqAbs(@as(f32, 39), bottom.projection.visible_rows[bottom.projection.cursor.row].presentation.y.? + document.row_height, 0.001);
+    _ = try adapter.feed("\x1b[?1049hALT");
+    var alternate = try document.service().snapshot(a);
+    defer alternate.deinit(a);
+    try std.testing.expectEqual(@as(usize, 3), alternate.projection.visible_rows.len);
+    try std.testing.expect(alternate.projection.visible_rows[0].presentation.y == null);
+    try std.testing.expect(document.native_prefix == null);
+}
+
 test "terminal surface pixel scroll retains historical styles and leaves alternate input native" {
     const a = std.testing.allocator;
     var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 6, 60);
@@ -1677,4 +1847,32 @@ test "terminal command coordinates skip builtin cards without changing native co
     } else return error.CommandPositionMissing;
     try std.testing.expectEqual(@as(u8, 0), row.application_kind);
     try std.testing.expectEqualStrings("$ true", captured_search.document.text[row.start..row.end]);
+}
+
+test "builtin_records upload selection updates the same pending command and replay" {
+    const a = std.testing.allocator;
+    const Adapter = @import("../vt/ghostty_adapter.zig").Adapter;
+    var adapter = try Adapter.init(a, 6, 80);
+    defer adapter.destroy();
+    _ = try adapter.feed("prompt% ");
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(6) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    const id = try document.begin("@up", 10);
+    const command = "@up release.tar.gz \"配置 文件.json\"";
+    try std.testing.expectError(error.StaleOwner, document.updatePendingCommand(.{ .session_id = @fromBackingInt(7) }, id, command));
+    try document.updatePendingCommand(source.owner, id, command);
+    try document.finish(source.owner, id, .success, "已加入上传队列");
+    try std.testing.expectEqual(@as(usize, 1), document.records.items.len);
+    try std.testing.expectEqualStrings(command, document.records.items[0].command);
+    try std.testing.expectError(error.CommandAlreadyCompleted, document.updatePendingCommand(source.owner, id, "@up other.txt"));
+    var replay = Document.init(a, source.service(), source.owner);
+    defer replay.deinit();
+    try replay.restore(.{ .id = 42, .owner = source.owner, .command = "@up", .output = "选择中", .state = .pending, .timestamp_ms = 10 });
+    try replay.restore(.{ .id = 42, .owner = source.owner, .command = command, .output = "已加入上传队列", .state = .success, .timestamp_ms = 10 });
+    try std.testing.expectEqual(@as(usize, 1), replay.records.items.len);
+    try std.testing.expectEqualStrings(command, replay.records.items[0].command);
+    var captured = try document.service().searchSnapshot(a);
+    defer captured.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, captured.document.text, command) != null);
 }

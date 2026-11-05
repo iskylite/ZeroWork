@@ -113,3 +113,10 @@ pub fn materialRow(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn previewBar(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 48 }, .direction = .row, .align_items = .center, .padding = .{ .left = 12, .right = 12 }, .gap = 8, .background = theme.current().overlay, .border = .{ .radius = 14 }, .flex_shrink = 0 };
 }
+
+pub fn backgroundPair(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .flex_wrap = .wrap, .gap = 16, .padding = .{ .top = 8, .bottom = 8 }, .flex_shrink = 0, .min_width = 0 };
+}
+pub fn backgroundField(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .{ .px = 280 }, .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 12 };
+}

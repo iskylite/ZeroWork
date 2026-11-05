@@ -238,6 +238,11 @@ pub const Broker = struct {
         self.stopped = true;
         self.entry = null;
     }
+    pub fn supersede(self: *Broker) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.entry = null;
+    }
     /// Revocation does not stop or invalidate the provider's active round.
     pub fn revoke(self: *Broker) void {
         self.lock();

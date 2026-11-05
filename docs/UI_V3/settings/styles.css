@@ -193,11 +193,12 @@ input[type=checkbox]:focus-visible{box-shadow:none;filter:brightness(.85)}
 /* Settings cards share the window surface; interactive states stay distinguishable. */
 .settings-window{
   --muted:color-mix(in srgb,var(--fg-2) calc(100% - min(100%,200% * var(--material-transparency,0))),var(--fg-1));
-  --settings-selected-base:color-mix(in srgb,var(--overlay-base) 30%,var(--accent-base));
+  --settings-selection-accent:light-dark(var(--action-accent),var(--accent-base));
+  --settings-selected-base:color-mix(in srgb,var(--overlay-base) 30%,var(--settings-selection-accent));
   --settings-hover:light-dark(rgb(0 0 0 / 6.2745%),rgb(255 255 255 / 6.2745%));
   --settings-card-hover:color-mix(in srgb,var(--accent-base) 12.5490%,transparent);
   --settings-selected:color-mix(in srgb,var(--settings-selected-base) var(--tab-on-alpha),transparent);
-  --settings-selected-hover:color-mix(in srgb,color-mix(in srgb,var(--overlay-base) 10%,var(--accent-base)) var(--tab-on-alpha),transparent);
+  --settings-selected-hover:color-mix(in srgb,color-mix(in srgb,var(--overlay-base) 10%,var(--settings-selection-accent)) var(--tab-on-alpha),transparent);
 }
 .settings-window .settings-layout nav button:not(.active):is(:hover,:focus-visible),
 .settings-window .theme-tile:not(.chosen):is(:hover,:focus-visible){background:var(--settings-hover)!important}
@@ -213,3 +214,11 @@ input[type=checkbox]:focus-visible{box-shadow:none;filter:brightness(.85)}
 
 /* Font names need the same 280px width in the trigger and floating list. */
 .field-control:has(#font_family){width:280px}
+
+/* Background choices share two columns; other fields retain their full row. */
+.background-fields-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));column-gap:16px}
+.background-fields-grid>.field-wrap:not(.background-paired-field){grid-column:1/-1}
+.background-paired-field .field-row{gap:12px}
+.background-paired-field .field-label{flex:0 0 76px;min-width:76px}
+.background-paired-field .field-control{width:auto;flex:1;min-width:0}
+.background-paired-field .choice{width:100%;min-width:0}

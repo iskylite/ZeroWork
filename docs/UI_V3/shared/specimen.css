@@ -35,10 +35,6 @@ body[data-functional-kvm="route"] .statusbar>[data-tool="route"]{display:block!i
 body[data-functional-kvm="ai"] #ai-edge{display:block!important}
 body[data-functional-component="ai"] .workspace-body{display:none!important}
 
-body[data-functional-component="note-actions"] #notes-app{position:relative;background:transparent;box-shadow:none}
-body[data-functional-component="note-actions"] .note-toolbar,body[data-functional-component="note-actions"] .note-meta,body[data-functional-component="note-actions"] #editor-grid{display:none!important}
-body[data-functional-component="note-actions"] .note-content{justify-content:center;background:transparent}
-body[data-functional-component="note-actions"] .note-actions{background:var(--panel);border-radius:12px;flex-wrap:wrap;justify-content:center;padding:16px}
 
 body[data-functional-kvm]{height:100vh;min-height:0;margin:0;overflow:hidden}
 body[data-functional-component="ai"] #assistant{left:50%!important;top:50%!important;right:auto!important;bottom:auto!important;transform:translate(-50%,-50%)}

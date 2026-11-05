@@ -6,6 +6,9 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, value: []const u8) !*ui.Node {
     return mountWithWidth(cx, scope, value, 540);
 }
 pub fn mountWithWidth(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32) !*ui.Node {
+    return mountWithImages(cx, scope, value, width, null);
+}
+pub fn mountWithImages(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context) !*ui.Node {
     const root = try ui.box(cx, S.assistantMessage(), .{});
     var lines: std.ArrayList([]const u8) = .empty;
     defer lines.deinit(cx.allocator);
@@ -35,6 +38,20 @@ pub fn mountWithWidth(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f3
             start = @min(end + 1, lines.items.len);
             continue;
         }
+        if (images) |context| if (@import("ai_transcript_images.zig").reference(lines.items[i])) |first| {
+            try appendMarkdown(cx, scope, root, lines.items[start..i]);
+            var remaining = lines.items[i];
+            var ref = first;
+            while (true) {
+                if (ref.start != 0) try appendMarkdown(cx, scope, root, &.{remaining[0..ref.start]});
+                try root.appendChild(cx.allocator, try @import("ai_transcript_images.zig").mount(cx, scope, context, ref, width));
+                remaining = remaining[ref.end..];
+                ref = @import("ai_transcript_images.zig").reference(remaining) orelse break;
+            }
+            if (remaining.len > 0) try appendMarkdown(cx, scope, root, &.{remaining});
+            start = i + 1;
+            continue;
+        };
         if (i + 1 >= lines.items.len or std.mem.indexOfScalar(u8, trimmed, '|') == null or !tableSeparator(lines.items[i + 1])) continue;
         try appendMarkdown(cx, scope, root, lines.items[start..i]);
         var end = i + 2;
@@ -181,9 +198,12 @@ const CodeState = struct {
 };
 fn appendCode(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, code: []const u8, source: []const u8, language: []const u8) !void {
     const block = try ui.box(cx, S.codeBlock(), .{});
+    block.meta.ownership.meta.test_id = "ai.message.code";
+    @import("layer_materials.zig").card(block, .control);
     const toolbar = try ui.box(cx, S.codeToolbar(), .{});
     toolbar.meta.ownership.meta.test_id = "ai.message.code.header";
     const label = try ui.text(cx, languageLabel(language), S.codeLanguage());
+    @import("app_theme.zig").bindInk(label, "fg_2");
     label.meta.ownership.meta.test_id = "ai.message.code.language";
     label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1 });
     try toolbar.appendChild(cx.allocator, label);
@@ -206,6 +226,7 @@ fn appendCode(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, code: []const u8, 
     scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .max_height = S.code_max_height, .flex_shrink = 0 });
     const content_width = textWidth(cx, code, 11, 450);
     const text = try ui.text(cx, code, .{ .font_size = 11, .font_weight = 450, .line_height = 16.0 / 11.0, .wrap = .newline_only, .use_monospace_font = true, .color = S.markdownOptions().code_color });
+    @import("app_theme.zig").bindInk(text, "fg_1");
     text.meta.ownership.meta.test_id = "ai.message.code.text";
     text.setStyleInline(cx.allocator, .{ .width = .{ .px = content_width }, .min_height = 16, .flex_shrink = 0 });
     try scroll.content.appendChild(cx.allocator, text);

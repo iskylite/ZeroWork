@@ -114,6 +114,15 @@ pub const Bridge = struct {
         find: *const fn (*anyopaque, identity.SessionHandle, []const u8) anyerror!@import("../ai/image_attachments.zig").ContentRef,
     } = null,
 
+    pub fn observeVerification(self: *Bridge, app: *Application.ApplicationHost, anchor: @import("../ai/readonly_verification.zig").Anchor) !@import("../ai/readonly_verification.zig").Observation {
+        for (self.children.items) |child| {
+            if (!child.owner.eql(anchor.owner)) continue;
+            const adapter = child.adapter orelse return error.VerificationSourceUnavailable;
+            const read = adapter.vtable.observe_verification orelse return error.VerificationSourceUnavailable;
+            return read(adapter.context, app, anchor);
+        }
+        return error.VerificationSourceUnavailable;
+    }
     pub fn init(allocator: std.mem.Allocator) Bridge {
         return .{ .allocator = allocator, .owned_history = operations.Store.init(allocator), .validation_arena = .init(allocator), .capture_arena = .init(allocator) };
     }
@@ -490,13 +499,14 @@ pub const Bridge = struct {
         return result;
     }
     fn dispatchHost(self: *Bridge, invocation: host_tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !host_tools.Result {
+        if (invocation.dispatch_fence) |fence| try fence.check();
         self.lock();
         const binding = self.host_binding;
         const stopped = self.stopped.load(.acquire);
         self.mutex.unlock();
         const current = binding orelse return error.ToolNotAvailable;
         if (stopped or !current.context.eql(invocation.context)) return error.ScopeChanged;
-        if (self.queries_only and !@import("../ai/host_queries.zig").supports(invocation.tool_id)) return error.ToolNotAvailable;
+        if (self.queries_only and !@import("../ai/host_queries.zig").supports(invocation.tool_id) and !@import("../ai/user_interaction.zig").supports(invocation.tool_id)) return error.ToolNotAvailable;
         if (current.invoke_worker) |worker_fn| return worker_fn(current.handler_context, self, invocation, allocator, cancel);
         return self.exchangeHost(invocation, allocator, cancel);
     }
@@ -795,6 +805,7 @@ pub const Bridge = struct {
         return @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
     }
     fn askApproval(raw: *anyopaque, invocation: tools.DynamicInvocation, ticket: *tools.ApprovalTicket, cancel: ?*provider.CancelToken) !bool {
+        if (invocation.dispatch_fence) |fence| try fence.check();
         const waiting = provider.CancelToken.beginUserWait(cancel);
         defer waiting.end();
         const self: *Bridge = @ptrCast(@alignCast(raw));
@@ -824,6 +835,7 @@ pub const Bridge = struct {
             self.mutex.unlock();
         }
         while (true) {
+            if (invocation.dispatch_fence) |fence| try fence.check();
             self.lock();
             if (exchange.decision == .pending and !(tools.callNeedsApproval(invocation.parsed, self.permissionPolicy(), invocation.table.captured_scope.owner == .group) catch |err| {
                 self.mutex.unlock();

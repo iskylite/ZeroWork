@@ -34,12 +34,14 @@ const Exchange = struct {
     ready: std.atomic.Value(bool) = .init(false),
     cancel: std.atomic.Value(bool) = .init(false),
     approval: ApprovalState = .pending,
+    verification: ?@import("../ai/readonly_verification.zig").Anchor = null,
     operation_key: ?operation.OperationKey = null,
     operation_journal: ?*operation.Journal = null,
     outcome: ?loop.Outcome = null,
     failure: ?anyerror = null,
 };
 const Active = struct {
+    verification: ?@import("../ai/readonly_verification.zig").Anchor = null,
     facade: exec.ExecBridge,
     handle: exec.ExecHandle,
     key: operation.OperationKey,
@@ -70,6 +72,7 @@ const TraceResult = struct {
 
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
+    terminal_files: @import("terminal_file_bridge.zig").Bridge,
     capture: ?Capture = null,
     delegated_owner: ?@import("../ai/tool_scope.zig").Owner = null,
     mutex: std.atomic.Mutex = .unlocked,
@@ -88,10 +91,10 @@ pub const Bridge = struct {
         const tab = app.workspace.sessionTab(id) orelse return error.StaleSession;
         const runtime = tab.runtime orelse return error.ServiceUnavailable;
         const config = tab.host_snapshot orelse return error.ServiceUnavailable;
-        // The assembler consumes at most 1024 recent lines. Bound capture
-        // before taking the VT guard instead of formatting all scrollback.
+        // Bound capture to the content service limits before taking the VT
+        // guard instead of formatting all scrollback.
         const terminal_service = try runtime.terminalService();
-        var lines = try terminal_service.contentQuery(.{ .max_lines = 1024, .max_bytes = @max(1, @min(1024 * 1024, @import("../ai/card.zig").contextBudget(context_window) * 4)) }, allocator);
+        var lines = try terminal_service.contentQuery(.{ .max_lines = 500, .max_bytes = @max(1, @min(65536, @import("../ai/card.zig").contextBudget(context_window) * 4)) }, allocator);
         defer lines.deinit(allocator);
         var captured_text: std.ArrayList(u8) = .empty;
         defer captured_text.deinit(allocator);
@@ -111,7 +114,7 @@ pub const Bridge = struct {
         return assembled;
     }
     pub fn init(allocator: std.mem.Allocator) Bridge {
-        return .{ .allocator = allocator };
+        return .{ .allocator = allocator, .terminal_files = .{ .allocator = allocator } };
     }
     fn lock(self: *Bridge) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -126,6 +129,7 @@ pub const Bridge = struct {
     /// Controller only, after the preceding AI worker has joined. A capture
     /// names the original session generation, services and create operation.
     pub fn prepare(self: *Bridge, app: *Application, owner: identity.SessionHandle) !void {
+        if (self.terminal_files.busy()) return error.ToolCleanupPending;
         self.lock();
         defer self.mutex.unlock();
         if (self.exchange != null or self.active != null or self.file_reader != null) return error.ToolCleanupPending;
@@ -143,7 +147,28 @@ pub const Bridge = struct {
         const cwd = try runtime.workerPtr().copyCwd(self.allocator);
         self.freeCapture();
         self.capture = .{ .owner = owner, .create_key = state.create_operation, .exec_binding = exec_binding, .terminal_binding = terminal_binding, .cwd = cwd, .target = target, .file_dedicated = app.workspace.app_config.transfer.dedicated_connection };
+        self.terminal_files.capture = .{ .owner = owner, .binding = exec_binding, .cwd = cwd };
         self.shutting_down = false;
+    }
+    pub fn observeVerification(self: *Bridge, app: *Application, anchor: @import("../ai/readonly_verification.zig").Anchor) !@import("../ai/readonly_verification.zig").Observation {
+        const capture = self.capture orelse return error.VerificationSourceUnavailable;
+        if (!capture.owner.eql(anchor.owner) or !capture.exec_binding.eql(anchor.service) or anchor.create_key == null or !capture.create_key.eql(anchor.create_key.?)) return error.VerificationIdentityMismatch;
+        if (!app.sessions.bindingIsLive(capture.exec_binding) or !app.sessions.bindingIsLive(capture.terminal_binding)) return error.StaleBinding;
+        const state = app.sessions.queryState(anchor.owner) orelse return error.StaleSession;
+        if (!state.create_operation.eql(capture.create_key)) return error.StaleSession;
+        return self.observeOriginal(anchor);
+    }
+    fn observeOriginal(self: *Bridge, anchor: @import("../ai/readonly_verification.zig").Anchor) !@import("../ai/readonly_verification.zig").Observation {
+        const active = self.active orelse return error.VerificationSourceUnavailable;
+        if (active.verification == null or !std.meta.eql(active.verification.?, anchor)) return error.VerificationIdentityMismatch;
+        if (active.stale or anchor.operation_key == null or !active.key.eql(anchor.operation_key.?)) return error.VerificationIdentityMismatch;
+        var owned = try active.facade.snapshot(active.handle, self.allocator);
+        defer owned.deinit();
+        const value = owned.value;
+        if (value.key == null or !value.key.?.eql(active.key) or value.call_id != active.key.operation_id or value.service_binding == null or !value.service_binding.?.eql(anchor.service)) return error.VerificationIdentityMismatch;
+        var observed: @import("../ai/readonly_verification.zig").Observation = .{ .anchor = anchor, .exit_code = value.exit_code, .running = value.status == .running, .foreground_finished = if (value.exit_code != null) true else null, .local_released = value.cleanup == .released, .remote_effect_unknown = remoteEffectUnknown(value), .truncated = value.truncated };
+        observed.copyOutput(value.stdout, value.stderr);
+        return observed;
     }
     pub fn filesAvailable(self: *Bridge) bool {
         return self.files != null and self.files.?.file_host != null;
@@ -194,13 +219,18 @@ pub const Bridge = struct {
         }
     }
     pub fn clear(self: *Bridge) !void {
+        try self.terminal_files.clear();
         self.lock();
         defer self.mutex.unlock();
         if (self.exchange != null or self.active != null or self.file_reader != null) return error.ToolCleanupPending;
         self.freeCapture();
     }
     pub fn interface(self: *Bridge) loop.Host {
-        return .{ .context = self, .execute = execute };
+        return .{ .context = self, .execute = execute, .execute_file = executeFile };
+    }
+    fn executeFile(raw: *anyopaque, invocation: @import("../ai/plugin_tools.zig").Invocation, allocator: std.mem.Allocator, token: ?*provider.CancelToken) !@import("../ai/plugin_tools.zig").ToolResult {
+        const self: *Bridge = @ptrCast(@alignCast(raw));
+        return self.terminal_files.execute(invocation, allocator, token);
     }
     fn execute(raw: *anyopaque, invocation: loop.Invocation, allocator: std.mem.Allocator, token: ?*provider.CancelToken) !loop.Outcome {
         const self: *Bridge = @ptrCast(@alignCast(raw));
@@ -296,6 +326,7 @@ pub const Bridge = struct {
             current.ready.store(true, .release);
             return;
         };
+        current.outcome.?.verification = current.verification;
         current.ready.store(true, .release);
     }
     fn failure(current: *Exchange, status: loop.Status, err: anyerror) void {
@@ -357,6 +388,7 @@ pub const Bridge = struct {
     /// Controller only. The close hook must hold the original runtime until
     /// stopOwner reports released; a lost binding never redirects an exec.
     pub fn pump(self: *Bridge, app: *Application) void {
+        self.terminal_files.pump(app);
         self.lock();
         defer self.mutex.unlock();
         if (self.file_reader != null) {
@@ -405,12 +437,13 @@ pub const Bridge = struct {
                     current.operation_journal = &app.sessions.journal;
                 }
                 const key = current.operation_key.?;
+                current.verification = .{ .owner = capture.owner, .service = capture.exec_binding, .create_key = capture.create_key, .operation_key = key, .turn_id = current.invocation.key.turn_id, .call_hash = @import("../ai/readonly_verification.zig").digest(current.invocation.key.call_id), .arguments_hash = current.invocation.arguments_hash };
                 const handle = facade.exec(current.invocation.call.command, .{ .key = key, .call_id = key.operation_id, .service_binding = capture.exec_binding, .cwd = capture.cwd, .timeout_ms = current.invocation.timeout_ms, .capture_cap = if (current.invocation.output_context != null) @import("../ai/batch_output.zig").capture_limit else @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) }) catch |err| {
                     if (err == error.WorkerBusy) return;
                     _ = app.sessions.journal.failReleased(key, .{ .domain = .host, .code = @errorName(err), .cleanup = .released, .safe_message = "SSH tool did not start" }) catch {};
                     return failure(current, .failed, err);
                 };
-                self.active = .{ .facade = facade, .handle = handle, .key = key, .journal = &app.sessions.journal };
+                self.active = .{ .verification = current.verification, .facade = facade, .handle = handle, .key = key, .journal = &app.sessions.journal };
                 trace.emit(.{ .event = "exec_started", .sequence = current.sequence, .turn_id = current.invocation.key.turn_id, .call_id = current.invocation.key.call_id, .operation = key, .create_key = capture.create_key, .service_binding = capture.exec_binding, .transport = "ssh", .target = capture.target, .cwd = capture.cwd });
             },
             .list_remote_files, .read_remote_file => {
@@ -444,6 +477,8 @@ pub const Bridge = struct {
     /// Only command execution contributes a write risk. Read tools still
     /// participate in closeImpact's identity/cleanup fingerprint.
     pub fn writeRisk(self: *Bridge, owner: identity.SessionHandle) bool {
+        if (self.capture) |captured| if (!captured.owner.eql(owner)) return false;
+        if (self.terminal_files.busy()) return true;
         self.lock();
         defer self.mutex.unlock();
         const capture = self.capture orelse return false;
@@ -453,15 +488,17 @@ pub const Bridge = struct {
         return !current.ready.load(.acquire) and current.invocation.call.tool == .run_command and current.approval != .rejected;
     }
     pub fn closeImpact(self: *Bridge, owner: identity.SessionHandle) @import("group_close_controller.zig").Impact {
+        const file_operation = self.terminal_files.fingerprint(owner);
         self.lock();
         defer self.mutex.unlock();
         var impact: @import("group_close_controller.zig").Impact = .{};
         const capture = self.capture orelse return impact;
         if (!capture.owner.eql(owner)) return impact;
         const pending = if (self.exchange) |current| !current.ready.load(.acquire) else false;
-        if (!pending and self.active == null and self.file_reader == null) return impact;
+        if (!pending and self.active == null and self.file_reader == null and file_operation == 0) return impact;
         var hash = std.hash.Wyhash.init(0x4149535348);
         std.hash.autoHash(&hash, owner);
+        std.hash.autoHash(&hash, file_operation);
         if (self.exchange) |current| {
             std.hash.autoHash(&hash, current.sequence);
             std.hash.autoHash(&hash, current.invocation.key.turn_id);
@@ -487,6 +524,9 @@ pub const Bridge = struct {
         return impact;
     }
     pub fn stopOwner(self: *Bridge, owner: identity.SessionHandle) sessions.CloseReceipt {
+        if (self.capture) |captured| if (!captured.owner.eql(owner)) return .released;
+        const file_receipt = self.terminal_files.stop();
+        if (file_receipt != .released) return file_receipt;
         self.lock();
         defer self.mutex.unlock();
         const capture = self.capture orelse return .released;
@@ -508,7 +548,8 @@ pub const Bridge = struct {
     /// Exceptional app teardown transfers any still-live child back to its
     /// existing worker. AppHost must outlive this call, and close that worker
     /// only after the waiting AI worker has joined. No released receipt is made.
-    pub fn shutdown(self: *Bridge, _: ?*Application) void {
+    pub fn shutdown(self: *Bridge, app: ?*Application) void {
+        self.terminal_files.shutdown(app);
         self.lock();
         defer self.mutex.unlock();
         self.shutting_down = true;
@@ -522,6 +563,7 @@ pub const Bridge = struct {
         self.active = null;
     }
     pub fn deinit(self: *Bridge) void {
+        self.terminal_files.clear() catch unreachable;
         std.debug.assert(self.exchange == null and self.active == null and self.file_reader == null);
         self.freeCapture();
         self.* = undefined;
@@ -982,4 +1024,39 @@ test "SSH AI tools write risk excludes pending reads but retains unknown command
 /// Registered only by providers using this SSH compatibility engine.
 pub fn createAdapter(allocator: std.mem.Allocator) !@import("../ai/legacy_adapter.zig").Adapter {
     return @import("../ai/legacy_adapter.zig").Adapter.create(Bridge, Application, allocator);
+}
+
+test "readonly verification SSH reads only the original call and never retires or replays it" {
+    const a = std.testing.allocator;
+    const V = @import("../ai/readonly_verification.zig");
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(41), .generation = 2 };
+    var journal = operation.Journal.init(a);
+    defer journal.deinit();
+    const key = try journal.begin(.{ .session = owner }, 1);
+    var bridge: Bridge = .{ .allocator = a, .terminal_files = .{ .allocator = a } };
+    bridge.capture = try testCapture(a, owner, key);
+    defer bridge.freeCapture();
+    const anchor: V.Anchor = .{ .owner = owner, .service = bridge.capture.?.exec_binding, .create_key = key, .operation_key = key, .turn_id = 3, .call_hash = V.digest("original-call"), .arguments_hash = @splat(1) };
+    var peer: TestPeer = .{ .key = key, .binding = anchor.service, .cleanup = .unknown, .stdout = "retained original output", .exit_code = 7 };
+    bridge.active = .{ .verification = anchor, .facade = peer.facade(), .handle = .{ .ptr = &peer }, .key = key, .journal = &journal, .cleanup_unknown = true };
+    const observed = try bridge.observeOriginal(anchor);
+    try std.testing.expectEqual(@as(?i32, 7), observed.exit_code);
+    try std.testing.expectEqual(@as(?bool, false), observed.local_released);
+    try std.testing.expectEqualStrings("retained original output", observed.stdout[0..observed.stdout_len]);
+    var wrong = anchor;
+    wrong.owner.generation += 1;
+    try std.testing.expectError(error.VerificationIdentityMismatch, bridge.observeOriginal(wrong));
+    wrong = anchor;
+    wrong.call_hash = V.digest("another-call");
+    try std.testing.expectError(error.VerificationIdentityMismatch, bridge.observeOriginal(wrong));
+    peer.binding.binding_generation += 1;
+    try std.testing.expectError(error.VerificationIdentityMismatch, bridge.observeOriginal(anchor));
+    peer.binding = anchor.service;
+    peer.snapshot_busy = true;
+    try std.testing.expectError(error.WorkerBusy, bridge.observeOriginal(anchor));
+    try std.testing.expectEqual(@as(usize, 0), peer.cancel_count);
+    try std.testing.expectEqual(@as(usize, 0), peer.close_count);
+    try std.testing.expect(bridge.active.?.cleanup_unknown and !peer.retired);
+    bridge.active = null;
+    try std.testing.expectError(error.VerificationSourceUnavailable, bridge.observeOriginal(anchor));
 }

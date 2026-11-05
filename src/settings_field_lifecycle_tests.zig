@@ -13,7 +13,7 @@ fn nextValue(value: config.Config, entry: @TypeOf(schema.fields[0])) !values.Val
     const old = values.read(value, entry.section, entry.key) orelse return error.UnknownKey;
     switch (old) {
         .boolean => |v| return .{ .boolean = !v },
-        .unsigned => |v| return .{ .unsigned = if (std.mem.eql(u8, entry.section, "ssh") and std.mem.eql(u8, entry.key, "reconnect_max")) v - 1 else v + 1 },
+        .unsigned => |v| return .{ .unsigned = if (std.mem.eql(u8, entry.key, "interval_minutes")) 15 else if (std.mem.eql(u8, entry.section, "ssh") and std.mem.eql(u8, entry.key, "reconnect_max")) v - 1 else v + 1 },
         .decimal => |v| return .{ .decimal = v + 0.25 },
         .text => {},
     }
@@ -32,9 +32,12 @@ fn nextValue(value: config.Config, entry: @TypeOf(schema.fields[0])) !values.Val
         .{ .section = "ai", .key = "execution_mode", .text = "new_pty" },
         .{ .section = "ai", .key = "session_retention", .text = "keep" },
         .{ .section = "ai", .key = "step_display", .text = "expanded" },
+        .{ .section = "ai", .key = "follow_up_mode", .text = "queue" },
         .{ .section = "notify", .key = "quiet_hours", .text = "23:00-07:00" },
         .{ .section = "log", .key = "export_format", .text = "txt" },
         .{ .section = "ui.materials.background", .key = "path", .text = "/fixture/settings-background.png" },
+        .{ .section = "ui.materials.background", .key = "source", .text = "directory" },
+        .{ .section = "ui.materials.background", .key = "order", .text = "random" },
         .{ .section = "ui.materials.background", .key = "fit", .text = "fit" },
         .{ .section = "ui.materials.background", .key = "alignment_x", .text = "left" },
         .{ .section = "ui.materials.background", .key = "alignment_y", .text = "top" },

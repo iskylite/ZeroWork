@@ -100,7 +100,7 @@
   const bySurface=new Map(records.map(record=>[record.surface,record])),writes=[];
   for(const record of records){
    const{surface,style,r,visible,level,blur}=record;
-   const kind=surface.matches(cardSelector)?'card':'floating',base=kind==='floating'?'--overlay-base':surface.matches('.file-panel')?'--surface-1-base':surface.matches('.provider')?'--provider-material-base':surface.matches('.model-row')?'--well-base':surface.matches('.settings-window .settings-scroll > .card')?settingsBase:surface.matches('.host-group,.card,.provider-card,.model-card')?'--surface-2-base':surface.matches('.ap-extra,.ap-live-result,.assistant pre,.copy-path-well,.multiline-preview')?'--well-base':'--state-action-base';
+   const kind=surface.matches(cardSelector)?'card':'floating',base=kind==='floating'?'--overlay-base':surface.matches('.v3-ai-pending-surface')?'--state-control-base':surface.matches('.file-panel')?'--surface-1-base':surface.matches('.provider')?'--provider-material-base':surface.matches('.model-row')?'--well-base':surface.matches('.settings-window .settings-scroll > .card')?settingsBase:surface.matches('.host-group,.card,.provider-card,.model-card')?'--surface-2-base':surface.matches('.ap-extra,.ap-live-result,.assistant pre,.copy-path-well,.multiline-preview')?'--well-base':'--state-action-base';
    const hostedSettings=embedded&&surface.matches('.settings-window'),shown=!r||r.width>0&&r.height>0&&visible.width>0&&visible.height>0&&style.visibility!=='hidden'&&style.display!=='none';
    if(!shown)continue;
    const pad=3*blur,coveredByPeer=r&&effective.transparency>0&&underlays.some(a=>a.level>=level&&a.x<visible.x+visible.width+pad&&a.x+a.w>visible.x-pad&&a.y<visible.y+visible.height+pad&&a.y+a.h>visible.y-pad);
@@ -163,7 +163,7 @@
   document.body.style.setProperty('--bubble-alpha',(100*alpha/255).toFixed(4)+'%');document.body.style.setProperty('--bubble-from',hex(bubbleCache.from));document.body.style.setProperty('--bubble-to',hex(bubbleCache.to));document.body.style.setProperty('--bubble-fg',hex(bubbleCache.foreground));
  }
  const syncScheme=()=>{document.documentElement.style.colorScheme=getComputedStyle(document.body).colorScheme;syncBubbleInk()};syncScheme();
- const root=document.querySelector('#desktop,#app,#notes-app,.settings-window');if(!root)return;root.classList.add('zw-background-root');
+ const root=document.querySelector('#desktop,#app,.settings-window');if(!root)return;root.classList.add('zw-background-root');
  let tint=null,image=null;if(!embedded){const layer=document.createElement('div');layer.className='zw-global-background';layer.ariaHidden='true';image=document.createElement('div');image.className='zw-global-background-image';layer.append(image);tint=document.createElement('div');tint.className='zw-canvas-tint';layer.append(tint);root.prepend(layer);}
  const frames=()=>[...document.querySelectorAll('object[data-document-host],iframe')].map(n=>n.contentWindow||n.contentDocument?.defaultView).filter(Boolean);
  // Canvas colours are one opaque background group before the one global alpha.

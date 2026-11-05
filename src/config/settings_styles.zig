@@ -291,7 +291,10 @@ pub fn cardHover() ui.Color {
 }
 pub fn selectionBackground(hovered: bool) ui.Color {
     const c = theme.current();
-    return ui.Color.lerp(c.overlay.withAlpha(255), c.accent.withAlpha(255), if (hovered) 0.9 else 0.7).withAlpha(c.tab_on.a);
+    // Light palettes may use a pale decorative accent. The existing action
+    // accent retains selection contrast through the translucent material.
+    const accent = if (theme.currentName() == .dark) c.accent else c.action_accent;
+    return ui.Color.lerp(c.overlay.withAlpha(255), accent.withAlpha(255), if (hovered) 0.9 else 0.7).withAlpha(c.tab_on.a);
 }
 pub fn selectionHover(selected: bool) ui.BoxStyle {
     return .{ .background = if (selected) selectionBackground(true) else interactionHover() };

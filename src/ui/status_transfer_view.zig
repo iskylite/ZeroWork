@@ -55,11 +55,11 @@ pub const View = struct {
         name.meta.ownership.meta.test_id = "status.transfer.name";
         try row.appendChild(cx.allocator, name);
         const percent = try ui.text(cx, "", S.text(false));
-        percent.setStyleInline(cx.allocator, S.label(36));
+        percent.setStyleInline(cx.allocator, S.label(28));
         percent.meta.ownership.meta.test_id = "status.transfer.percent";
         try row.appendChild(cx.allocator, percent);
         const speed = try ui.text(cx, "", S.text(false));
-        speed.setStyleInline(cx.allocator, S.label(76));
+        speed.setStyleInline(cx.allocator, S.rateLabel());
         speed.meta.ownership.meta.test_id = "status.transfer.speed";
         try row.appendChild(cx.allocator, speed);
         const badge = try ui.box(cx, S.badge(), .{});
@@ -100,15 +100,18 @@ pub const View = struct {
             if (!std.mem.eql(u8, node.getText().?.content, value)) node.setTextContent(self.cx.allocator, value) catch {};
         }
         self.row.setStyleInline(self.cx.allocator, S.row(idle));
-        self.name.setStyleInline(self.cx.allocator, .{ .width = if (idle) .{ .fit = .{} } else .{ .grow = .{ .min = 0 } }, .min_width = 0, .height = .{ .px = 16 }, .flex_shrink = if (idle) 0 else 1, .overflow_hidden = true });
+        const idle_name_width = if (idle) @ceil(self.cx.text.measureTextWidth(self.name.getText().?.content, 11, 500, false)) + 1 else 0;
+        self.name.setStyleInline(self.cx.allocator, .{ .width = if (idle) .{ .px = idle_name_width } else .{ .grow = .{ .min = 0 } }, .min_width = 0, .height = .{ .px = 16 }, .flex_shrink = if (idle) 0 else 1, .overflow_hidden = true });
         if (self.name.getText()) |old| {
             var text = old;
             text.font_size = if (idle) 11 else 10.5;
             text.font_weight = if (idle) 500 else 400;
             text.line_height = 16 / text.font_size;
             text.color = if (idle) colors.fg_2 else colors.fg_1;
+            text.text_overflow = if (idle) .clip else .ellipsis_smart;
             if (!std.meta.eql(old, text)) self.name.setText(text);
         }
+        self.percent.setStyleInline(self.cx.allocator, S.label(if (summary.phase == .running) 28 else 36));
         self.percent.setTextColor(colors.fg_2);
         self.speed.setTextColor(colors.fg_2);
         self.counts.setTextColor(colors.accent);

@@ -6,7 +6,7 @@ fn find(node: *ui.Node, id: []const u8) ?*ui.Node {
     for (node.children.items) |child| if (find(child, id)) |value| return value;
     return null;
 }
-test "recovery buttons keep captured group and turn and disable IO actions during unknown or cooldown" {
+test "recovery buttons keep captured group and turn and explain unknown plans and cooldown" {
     const Probe = struct {
         count: usize = 0,
         last: ?V.Envelope = null,
@@ -23,13 +23,16 @@ test "recovery buttons keep captured group and turn and disable IO actions durin
     defer scope.dispose();
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     var probe: Probe = .{};
-    const root = try V.mount(cx, scope, .{ .ticket = .{ .owner = .{ .group = 7 }, .turn = 83 }, .reason = "远端写入结果待核实\nToolOutcomeUnknown", .has_tool_calls = true, .retries = 0, .max_retries = 3, .retry_enabled = false, .regenerate_enabled = false, .cooldown_seconds = 2 }, .{ .context = &probe, .enqueue = Probe.enqueue });
+    const root = try V.mount(cx, scope, .{ .ticket = .{ .owner = .{ .group = 7 }, .turn = 83 }, .reason = "部分工具执行结果待核实\nToolOutcomeUnknown", .has_tool_calls = true, .retries = 0, .max_retries = 3, .retry_enabled = false, .regenerate_enabled = false, .regenerate_disabled_reason = "新计划不可用：请先核实结果未知的操作。", .cooldown_seconds = 2 }, .{ .context = &probe, .enqueue = Probe.enqueue });
     try cx.root.?.appendChild(cx.allocator, root);
     cx.layout();
     const details = find(root, "ai.recovery.details").?;
     try std.testing.expectEqual(ui.types.Display.none, details.style.display);
     const summary = find(root, "ai.recovery.reason").?;
-    try std.testing.expectEqualStrings("远端写入结果待核实", summary.getText().?.content);
+    try std.testing.expectEqualStrings("部分工具执行结果待核实", summary.getText().?.content);
+    try std.testing.expectEqualStrings("服务冷却中，2 秒后可重试。", find(root, "ai.recovery.cooldown").?.getText().?.content);
+    try std.testing.expectEqualStrings("新计划不可用：请先核实结果未知的操作。", find(root, "ai.recovery.regenerate.disabled_reason").?.getText().?.content);
+    try std.testing.expectEqualStrings("ToolOutcomeUnknown", details.children.items[0].children.items[0].getText().?.content);
     const toggle = find(root, "ai.recovery.details.toggle").?;
     toggle.behavior.events.on_click.?.invoke();
     cx.layout();
@@ -57,6 +60,26 @@ test "recovery buttons keep captured group and turn and disable IO actions durin
     try std.testing.expectEqual(@as(usize, 1), probe.count);
 }
 
+test "recovery HTTP diagnostics omit the summary and hide empty disclosure" {
+    const Ignore = struct {
+        fn enqueue(_: *anyopaque, _: V.Envelope) void {}
+    };
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    for ([_][]const u8{ "HTTP 400 · 服务端拒绝请求参数\nunsupported_parameter", "HTTP 400 · 服务端拒绝请求参数" }, 0..) |reason, index| {
+        const root = try V.mount(cx, scope, .{ .ticket = .{ .owner = .{ .session = 1 }, .turn = 1 }, .reason = reason, .detail = reason, .retries = 0, .max_retries = 3, .retry_enabled = true, .regenerate_enabled = true, .cooldown_seconds = 0 }, .{ .context = cx, .enqueue = Ignore.enqueue });
+        try cx.root.?.appendChild(cx.allocator, root);
+        try std.testing.expectEqualStrings("服务端拒绝请求参数", find(root, "ai.recovery.reason").?.getText().?.content);
+        if (index == 0) {
+            const details = find(root, "ai.recovery.details").?;
+            try std.testing.expectEqualStrings("unsupported_parameter", details.children.items[0].children.items[0].getText().?.content);
+        } else try std.testing.expect(find(root, "ai.recovery.details.toggle") == null);
+    }
+}
+
 test "enabled answer recovery click enqueues its captured conversation and turn" {
     const Probe = struct {
         last: ?V.Envelope = null,
@@ -72,7 +95,7 @@ test "enabled answer recovery click enqueues its captured conversation and turn"
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     var probe: Probe = .{};
     const ticket: V.Ticket = .{ .owner = .{ .session = 101 }, .turn = 85, .conversation_id = @import("host/identity.zig").ConversationId.generate() };
-    const root = try V.mount(cx, scope, .{ .ticket = ticket, .reason = "连接或答复流中断", .retries = 0, .max_retries = 3, .retry_enabled = true, .regenerate_enabled = true, .cooldown_seconds = 0 }, .{ .context = &probe, .enqueue = Probe.enqueue });
+    const root = try V.mount(cx, scope, .{ .ticket = ticket, .reason = "部分工具执行结果待核实", .has_tool_calls = true, .retries = 0, .max_retries = 3, .retry_enabled = true, .regenerate_enabled = false, .regenerate_disabled_reason = "新计划不可用：请先核实结果未知的操作。", .cooldown_seconds = 0 }, .{ .context = &probe, .enqueue = Probe.enqueue });
     try cx.root.?.appendChild(cx.allocator, root);
     cx.layout();
     const rect = find(root, "ai.recovery.answer").?.globalRect();
@@ -81,6 +104,12 @@ test "enabled answer recovery click enqueues its captured conversation and turn"
     try std.testing.expectEqual(ticket.turn, probe.last.?.ticket.turn);
     try std.testing.expect(ticket.owner.eql(probe.last.?.ticket.owner));
     try std.testing.expect(ticket.conversation_id.?.eql(probe.last.?.ticket.conversation_id.?));
+    try std.testing.expectEqualStrings("仅根据已有结果生成答复，不执行命令。", find(root, "ai.recovery.answer.hint").?.getText().?.content);
+    try std.testing.expectEqualStrings("仅重试答复", find(root, "ai.recovery.answer").?.behavior.interaction.a11y.?.label.?);
+    probe.last = null;
+    const regenerate = find(root, "ai.recovery.regenerate").?.globalRect();
+    cx.handleClick(regenerate.x + regenerate.w / 2, regenerate.y + regenerate.h / 2);
+    try std.testing.expect(probe.last == null);
 }
 
 test "PATCH recovery details keep an idle thumb and contain boundary input inside the conversation" {

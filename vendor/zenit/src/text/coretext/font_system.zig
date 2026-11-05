@@ -96,7 +96,7 @@ pub const FontSystem = struct {
             if (std.mem.eql(u8, descriptor.family, "system")) descriptor.family = fam;
         }
         // Convert FontWeight to numeric weight
-        const weight: c_int = switch (descriptor.weight) {
+        const weight: c_int = descriptor.numeric_weight orelse switch (descriptor.weight) {
             .thin => 100,
             .light => 300,
             .regular => 400,

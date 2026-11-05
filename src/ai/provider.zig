@@ -24,7 +24,9 @@ pub const max_tool_catalog_text_bytes = 96 * 1024;
 pub const max_tool_calls = 16;
 pub const max_tool_call_id_bytes = 256;
 pub const max_tool_name_bytes = 64;
-pub const max_tool_arguments_bytes = 64 * 1024;
+/// Wire ceiling includes JSON escaping for bounded file contents. Dispatch
+/// still enforces each registered tool's lower max_argument_bytes limit.
+pub const max_tool_arguments_bytes = 512 * 1024;
 
 /// Internal admission metadata. This never becomes a model-supplied parameter
 /// and does not by itself authorize dispatch; the captured host table does that.
@@ -110,6 +112,16 @@ pub const CancelToken = struct {
     }
 };
 pub const ReasoningWire = enum { none, thinking_type, openrouter, ollama, anthropic_adaptive };
+/// Internal only: the host rechecks a frozen plan after a human wait. This is
+/// never serialized into a model tool's schema or arguments.
+pub const DispatchFence = struct {
+    context: *anyopaque,
+    revision: u64,
+    current: *const fn (*anyopaque, u64) bool,
+    pub fn check(self: DispatchFence) !void {
+        if (!self.current(self.context, self.revision)) return error.ScopeChanged;
+    }
+};
 pub const ChatRequest = struct {
     thinking: ?bool = null,
     native_effort: bool = false,

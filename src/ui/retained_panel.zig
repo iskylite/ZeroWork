@@ -14,6 +14,7 @@ pub const Panel = struct {
     before: ?*ui.Node,
     hook_installed: bool = false,
     attach_failed: bool = false,
+    theme_version: u32 = 0,
     pending_focus: ?struct { node: *ui.Node, identity: ui.hit.NodeHandle, epoch: u64 } = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, node: *ui.Node) !*Panel {
@@ -30,6 +31,7 @@ pub const Panel = struct {
             .parent = parent,
             .node = node,
             .before = before,
+            .theme_version = cx.theme_version,
             .identity = .{ .id = node.id, .generation = try cx.node_registry.trackGeneration(node) },
             .parent_identity = .{ .id = parent.id, .generation = try cx.node_registry.trackGeneration(parent) },
         };
@@ -44,6 +46,7 @@ pub const Panel = struct {
     }
 
     fn detach(self: *Panel) void {
+        self.theme_version = self.cx.theme_version;
         self.cx.detachChildRetained(self.parent, self.node);
         // Detach invalidates captured/queued input identities for the previous
         // geometry. The window Scope still owns this live branch, so establish
@@ -116,6 +119,10 @@ pub const Panel = struct {
                 return .done;
             };
             self.attach_failed = false;
+            if (self.theme_version != self.cx.theme_version) {
+                self.cx.replaySubtreeTheme(self.node);
+                self.theme_version = self.cx.theme_version;
+            }
             return .needs_layout;
         }
         self.flushFocus();

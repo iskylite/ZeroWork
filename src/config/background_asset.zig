@@ -2,12 +2,18 @@
 //! required; the renderer uploads a prepared RGBA image at its commit boundary.
 const std = @import("std");
 
+pub const Source = enum { file, directory };
+pub const Order = enum { sequential, random };
+pub const Playlist = @import("background_playlist.zig").Playlist;
 pub const Fit = enum { fill, fit, center, tile };
 pub const Horizontal = enum { left, center, right };
 pub const Vertical = enum { top, center, bottom };
 pub const Background = struct {
     enabled: bool = false,
     path: []const u8 = "",
+    source: Source = .file,
+    order: Order = .sequential,
+    interval_minutes: u16 = 5,
     fit: Fit = .fill,
     alignment_x: Horizontal = .center,
     alignment_y: Vertical = .center,
@@ -25,6 +31,10 @@ pub const Materials = struct {
 
     pub fn validate(self: Materials) error{ OutOfRange, InvalidValue }!void {
         if (!std.math.isFinite(self.background.transparency) or self.background.transparency < 0 or self.background.transparency > 100 or self.blur_px > 96) return error.OutOfRange;
+        switch (self.background.interval_minutes) {
+            1, 5, 15, 30, 60 => {},
+            else => return error.OutOfRange,
+        }
         if (std.mem.indexOfScalar(u8, self.background.path, 0) != null or !std.unicode.utf8ValidateSlice(self.background.path)) return error.InvalidValue;
         if (self.background.enabled and self.background.path.len == 0) return error.InvalidValue;
     }
@@ -36,7 +46,7 @@ pub const Limits = struct {
     dimension: usize = 16 * 1024,
 };
 pub const DecodeState = enum { empty, loading, ready, missing, denied, invalid, failed };
-pub const Request = struct { draft_id: u64, asset_revision: u64, path: []const u8 };
+pub const Request = struct { draft_id: u64, asset_revision: u64, path: []const u8, source: Source = .file, order: Order = .sequential, detect_source: bool = false };
 /// The worker owns its path independently of Input and ConfigSnapshot buffers.
 pub const OwnedRequest = struct {
     allocator: std.mem.Allocator,
@@ -61,9 +71,25 @@ pub const Prepared = struct {
     asset_revision: u64,
     path: []u8,
     image: Image,
+    source: Source = .file,
+    playlist: ?Playlist = null,
 
+    pub fn selectedPath(self: *const Prepared) []const u8 {
+        return if (self.playlist) |list| list.paths.items[list.index] else self.path;
+    }
+    pub fn matches(self: *const Prepared, background: Background) bool {
+        return self.source == background.source and std.mem.eql(u8, self.path, background.path);
+    }
+    pub fn clone(self: *const Prepared, allocator: std.mem.Allocator) !Prepared {
+        const path = try allocator.dupe(u8, self.path);
+        errdefer allocator.free(path);
+        const pixels = try allocator.dupe(u8, self.image.pixels);
+        errdefer allocator.free(pixels);
+        return .{ .draft_id = self.draft_id, .asset_revision = self.asset_revision, .source = self.source, .path = path, .image = .{ .pixels = pixels, .width = self.image.width, .height = self.image.height }, .playlist = if (self.playlist) |list| try list.clone(allocator) else null };
+    }
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
+        if (self.playlist) |*list| list.deinit(allocator);
         self.image.deinit(allocator);
         self.* = undefined;
     }
@@ -73,11 +99,69 @@ pub const Prepared = struct {
 /// never changes a draft; stale completions can always be released by callers.
 pub fn prepare(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, request: Request, limits: Limits) !Prepared {
     if (request.path.len == 0 or !std.fs.path.isAbsolute(request.path)) return error.InvalidImagePath;
+    var selected = request;
+    if (selected.detect_source) {
+        const stat = try dir.statFile(io, request.path, .{});
+        selected.source = if (stat.kind == .directory) .directory else .file;
+    }
+    if (selected.source == .directory) return prepareDirectory(io, dir, allocator, selected, limits);
+    return prepareFile(io, dir, allocator, selected, limits);
+}
+
+fn prepareFile(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, request: Request, limits: Limits) !Prepared {
     const bytes = try dir.readFileAlloc(io, request.path, allocator, .limited(limits.source_bytes));
     defer allocator.free(bytes);
     var image = try decode(allocator, bytes, limits);
     errdefer image.deinit(allocator);
     return .{ .draft_id = request.draft_id, .asset_revision = request.asset_revision, .path = try allocator.dupe(u8, request.path), .image = image };
+}
+
+// Enumerate names first, then decode only the selected image. Validating the
+// whole directory here delays the first background by every subsequent image.
+fn prepareDirectory(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, request: Request, limits: Limits) !Prepared {
+    var directory = try dir.openDir(io, request.path, .{ .iterate = true });
+    defer directory.close(io);
+    var list: Playlist = .{};
+    errdefer list.deinit(allocator);
+    var iterator = directory.iterate();
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .file or !@import("background_playlist.zig").imageName(entry.name)) continue;
+        const path = try std.fs.path.join(allocator, &.{ request.path, entry.name });
+        defer allocator.free(path);
+        try list.append(allocator, path);
+    }
+    if (list.paths.items.len == 0) return error.NoUsableImages;
+    list.sort();
+    list.setOrder(request.order == .random, @truncate(@as(u96, @bitCast(std.Io.Clock.real.now(io).nanoseconds))));
+    return prepareSelected(io, dir, allocator, request, limits, &list);
+}
+
+/// Takes the owned list on success. Deleted or damaged files are skipped in a
+/// bounded pass; an all-failed pass leaves the caller's last-good image alive.
+pub fn prepareNext(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, path: []const u8, list: *Playlist) !Prepared {
+    list.advance();
+    return prepareSelected(io, dir, allocator, .{ .draft_id = 0, .asset_revision = 0, .path = path }, .{}, list);
+}
+
+fn prepareSelected(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, request: Request, limits: Limits, list: *Playlist) !Prepared {
+    for (0..list.paths.items.len) |_| {
+        var result = prepareFile(io, dir, allocator, .{ .draft_id = request.draft_id, .asset_revision = request.asset_revision, .path = list.paths.items[list.index] }, limits) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                list.advance();
+                continue;
+            },
+        };
+        errdefer result.deinit(allocator);
+        const source_path = try allocator.dupe(u8, request.path);
+        allocator.free(result.path);
+        result.path = source_path;
+        result.source = .directory;
+        result.playlist = list.*;
+        list.* = .{};
+        return result;
+    }
+    return error.NoUsableImages;
 }
 
 pub fn failureState(err: anyerror) DecodeState {
@@ -134,7 +218,7 @@ pub const Draft = struct {
     pub fn canSave(self: Draft, background: Background) bool {
         if (!background.enabled) return true;
         const good = self.last_good orelse return false;
-        return self.state == .ready and good.asset_revision == self.asset_revision and std.mem.eql(u8, good.path, background.path);
+        return self.state == .ready and good.asset_revision == self.asset_revision and good.matches(background);
     }
 };
 

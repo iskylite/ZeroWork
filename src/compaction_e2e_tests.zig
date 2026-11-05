@@ -62,7 +62,12 @@ test "compaction real HTTP failure cancellation stale owner conversation generat
         var current: c.Identity = id;
         const endpoint = try std.fmt.allocPrint(a, "http://127.0.0.1:18987/{s}", .{scenario});
         defer a.free(endpoint);
-        try service.startReserved(config(endpoint), id, &h, if (std.mem.eql(u8, scenario, "budget")) 32768 else 0);
+        if (std.mem.eql(u8, scenario, "budget")) {
+            try std.testing.expectError(error.ContextFixedOverhead, service.startReserved(config(endpoint), id, &h, 32768));
+            try std.testing.expect(service.job == null);
+            continue;
+        }
+        try service.startReserved(config(endpoint), id, &h, 0);
         try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
         if (std.mem.eql(u8, scenario, "cancel")) service.cancel();
         if (std.mem.eql(u8, scenario, "owner")) current.owner = .{ .session = 202 };

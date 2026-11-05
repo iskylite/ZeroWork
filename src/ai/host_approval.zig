@@ -217,11 +217,19 @@ pub const Broker = struct {
         return self.requestSubject(invocation, .{ .kind = .network_url, .target = exact_url, .detail = exact_url }, network_revision, allocator, cancel);
     }
     pub fn requestSubject(self: *Broker, invocation: host.Invocation, subject: Subject, policy_revision: u64, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !Permit {
+        if (invocation.dispatch_fence) |fence| try fence.check();
         if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
         const permit = try self.beginSubject(invocation, subject, policy_revision, allocator);
         errdefer self.finish(permit);
         try self.waitForDecision(permit, cancel);
+        if (invocation.dispatch_fence) |fence| try fence.check();
         return permit;
+    }
+    pub fn supersede(self: *Broker) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.entry = null;
+        self.execution_route.revoke();
     }
     pub fn waitForDecision(self: *Broker, permit: Permit, cancel: ?*provider.CancelToken) !void {
         const waiting = provider.CancelToken.beginUserWait(cancel);

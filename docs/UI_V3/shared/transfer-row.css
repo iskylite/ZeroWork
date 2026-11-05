@@ -74,3 +74,5 @@ body>.transfer-hover-detail{position:fixed;z-index:10000;display:flex!important;
 /* Compact cards: filename opens details; status occupies the metadata trailing slot. */
 .transfer-job-main>.transfer-name{cursor:pointer}.transfer-job-meta>.transfer-state{flex:1;min-width:0;width:auto;overflow:hidden;text-overflow:ellipsis;text-align:right}.transfer-job-meta>.transfer-job-bytes{width:48%}
 body>.transfer-hover-detail{max-height:calc(100vh - 24px);overflow-y:auto}
+
+.transfer-phase-counts .transfer-manage{display:flex;align-items:center;justify-content:center;width:28px;min-width:28px;height:28px;min-height:28px;padding:0}.transfer-manage[aria-pressed=true]{background:var(--hover);color:var(--accent)}

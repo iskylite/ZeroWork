@@ -36,6 +36,10 @@
 .v3-ai-recovery-detail svg{display:block;width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;transition:transform 160ms ease-out}
 .v3-ai-recovery-detail[aria-expanded=true] svg{transform:rotate(180deg)}
 .v3-ai-recovery .v3-ai-recovery-reason{margin:0;padding:4px 12px 8px;font-size:11px;line-height:18px;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere}
+.v3-ai-recovery-body{padding:4px 12px 8px}
+.v3-ai-recovery-body .v3-ai-recovery-reason{padding:0}
+.v3-ai-recovery-hint{margin:0;font-size:10.5px;line-height:18px;color:var(--muted);overflow-wrap:anywhere}
+.v3-ai-recovery>footer button:disabled{opacity:.6;cursor:not-allowed}
 .v3-ai-recovery-details{padding:4px 12px 8px;max-height:120px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;line-height:18px;color:var(--muted)}
 .v3-ai-recovery-details[hidden]{display:none}
 .ap-card.v3-ai-recovery>footer{display:flex;align-items:center;gap:6px;min-height:34px;height:auto;padding:4px 10px 4px 12px;background:var(--control-bg,var(--well));overflow:visible}

@@ -114,6 +114,12 @@ pub fn failureLabel(failure: backend.Failure) []const u8 {
         .io => "文件读写失败",
     };
 }
+pub fn progressDetail(progress: backend.Progress) []const u8 {
+    if (progress.startup_failure) |problem| return problem.message();
+    if (progress.failure) |failure| return failureLabel(failure);
+    if (progress.binding_wait and progress.state == .queued) return "正在建立传输连接";
+    return "";
+}
 pub fn allows(phase: Phase, action: TaskAction) bool {
     return switch (action) {
         .pause => phase == .running or phase == .queued or phase == .retry_wait,
@@ -797,7 +803,13 @@ pub const Panel = struct {
             state.trigger.setStyleInline(self.cx.allocator, S.scopeTrigger());
             try picker.appendChild(self.cx.allocator, select.wrapper);
         }
-        try self.v3TaskAction(self.tools_row, scope, if (self.batch_visible) "完成" else "管理", "transfer.batch", .{ .panel = self, .kind = .batch }, false);
+        const manage_label = if (self.batch_visible) "完成管理" else "管理任务";
+        const manage = try self.button(self.tools_row, scope, manage_label, "transfer.batch", if (self.batch_visible) "check" else "list-checks", .{ .panel = self, .kind = .batch }, false, 28);
+        if (manage.behavior.interaction.a11y) |*a11y| a11y.pressed = self.batch_visible;
+        if (self.batch_visible) manage.setBackground(S.theme.popupSelection());
+        self.tools_row.removeChild(manage);
+        const manage_hint = try @import("control_hint.zig").mount(self.cx, scope, manage, manage_label, .{ .id = "transfer.batch.tooltip", .layout = S.action(28) });
+        try self.tools_row.appendChild(self.cx.allocator, manage_hint.wrapper);
         _ = try self.button(self.tools_row, scope, "搜索任务", "transfer.search.toggle", "search", .{ .panel = self, .kind = .search }, false, 28);
         _ = try self.button(self.tools_row, scope, "筛选任务状态", "transfer.filter.toggle", "filter", .{ .panel = self, .kind = .filter }, false, 28);
     }
@@ -815,6 +827,14 @@ pub const Panel = struct {
         var row_style = S.task(self.isSelected(task_.target));
         if (!self.isSelected(task_.target) and task_.phase == .running) row_style.background = S.theme.current().accent.withAlpha(18);
         const row = try ui.box(cx, row_style, .{});
+        @import("layer_materials.zig").card(row, .custom);
+        try scope.createEffect(.{ .node = row, .selected = self.isSelected(task_.target), .running = task_.phase == .running, .publication = try cx.themeSignal(scope) }, struct {
+            fn paint(ctx: anytype) void {
+                _ = ctx.publication.get();
+                // Keep state RGB current after material policy changes alpha.
+                ctx.node.setBackground(if (!ctx.selected and ctx.running) S.theme.current().accent.withAlpha(18) else S.task(ctx.selected).background.?);
+            }
+        }.paint);
         row.meta.ownership.meta.test_id = "transfer.task";
         try root.appendChild(cx.allocator, row);
         const compact = self.options.presentation == .session_tray and self.tray_layout_width < 480;
@@ -898,7 +918,12 @@ pub const Panel = struct {
             } else try self.format(progress, "{s} / {s}", .{ done_text, total_text });
         } else try self.format(progress, "{s} / 大小未知", .{done_text});
         progress.setStyleInline(cx.allocator, .{ .width = .{ .px = if (compact) @max(@as(f32, 1), (self.tray_layout_width - 40) * 0.48) else if (self.options.presentation == .session_tray) 160 else 270 }, .min_width = 0, .flex_shrink = 1, .overflow = .hidden, .overflow_hidden = true });
-        const status = try self.label(lower, if (task_.reading_source) "读取源文件" else phaseLabel(task_.phase), 11, 400, true);
+        const fraction: f64 = if (task_.phase == .succeeded) 1 else if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
+        const status = try self.label(lower, "", 11, 400, true);
+        const status_label = if (task_.reading_source) "读取源文件" else phaseLabel(task_.phase);
+        if (task_.phase == .succeeded or (task_.total_bytes != null and task_.total_bytes.? > 0)) {
+            try self.format(status, "{s} {d:.0}%", .{ status_label, fraction * 100 });
+        } else try self.format(status, "{s} —%", .{status_label});
         status.setTextColor(color);
         status.meta.ownership.meta.test_id = "transfer.task.status";
         status.setStyleInline(cx.allocator, S.flexibleLabel());
@@ -912,7 +937,6 @@ pub const Panel = struct {
             const track = try ui.box(cx, S.track(), .{});
             track.meta.ownership.meta.test_id = "transfer.task.progress";
             try row.appendChild(cx.allocator, track);
-            const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
             try track.appendChild(cx.allocator, try ui.box(cx, S.fill(@floatCast(fraction), progressColor(task_.phase)), .{}));
         }
         tip.chrome.setStyleInline(cx.allocator, S.hoverDetail());
@@ -1283,7 +1307,7 @@ pub const Panel = struct {
             const original = manager.sourceName(i) orelse "";
             const name = spec.rename orelse std.fs.path.basename(original);
             const display_name = if (spec.sources.len > 1) try std.fmt.allocPrint(a, "{s} 等{d}个文件", .{ name, spec.sources.len }) else name;
-            row.* = .{ .target = .{ .job = p.job, .attempt = p.attempt, .owner = if (self.callbacks.?.owner) |resolve| resolve(self.callbacks.?.context, p.job) else if (session == 0) null else .{ .session_id = @fromBackingInt(session) } }, .direction = spec.direction, .name = display_name, .owner_label = if (session == 0) "归属未知" else try std.fmt.allocPrint(a, "会话 #{d}", .{session}), .local_path = if (spec.direction == .upload) original else try std.fs.path.join(a, &.{ spec.local_dir, name }), .remote_path = if (spec.direction == .download) original else try std.fs.path.join(a, &.{ spec.remote_dir, name }), .phase = if (p.job_cleanup == .unknown) .cleanup_unknown else if (p.state == .failed and p.failure == .checksum) .checksum_failed else std.meta.stringToEnum(Phase, @tagName(p.state)).?, .done_bytes = p.done_bytes, .total_bytes = if (p.total_bytes == 0 and p.state != .succeeded) null else p.total_bytes, .speed_bps = p.speed_bps, .status_detail = if (p.failure) |failure| failureLabel(failure) else "", .route = if (self.callbacks.?.metadata) |call| call(self.callbacks.?.context, p.job) else "", .options = try std.fmt.allocPrint(a, "断点续传 {s} · MD5 {s}", .{ if (spec.resume_transfer) "开" else "关", if (spec.md5_check) "开" else "关" }) };
+            row.* = .{ .target = .{ .job = p.job, .attempt = p.attempt, .owner = if (self.callbacks.?.owner) |resolve| resolve(self.callbacks.?.context, p.job) else if (session == 0) null else .{ .session_id = @fromBackingInt(session) } }, .direction = spec.direction, .name = display_name, .owner_label = if (session == 0) "归属未知" else try std.fmt.allocPrint(a, "会话 #{d}", .{session}), .local_path = if (spec.direction == .upload) original else try std.fs.path.join(a, &.{ spec.local_dir, name }), .remote_path = if (spec.direction == .download) original else try std.fs.path.join(a, &.{ spec.remote_dir, name }), .phase = if (p.job_cleanup == .unknown) .cleanup_unknown else if (p.state == .failed and p.failure == .checksum) .checksum_failed else std.meta.stringToEnum(Phase, @tagName(p.state)).?, .done_bytes = p.done_bytes, .total_bytes = if (p.total_bytes == 0 and p.state != .succeeded) null else p.total_bytes, .speed_bps = p.speed_bps, .status_detail = progressDetail(p), .route = if (self.callbacks.?.metadata) |call| call(self.callbacks.?.context, p.job) else "", .options = try std.fmt.allocPrint(a, "断点续传 {s} · MD5 {s}", .{ if (spec.resume_transfer) "开" else "关", if (spec.md5_check) "开" else "关" }) };
             if (p.state == .running) if (p.verification) |verification| {
                 row.phase = .verifying;
                 row.speed_bps = 0;
@@ -1569,9 +1593,11 @@ fn eventText(a: std.mem.Allocator, manager: *const backend.Manager, progress: ba
         }
         const state = if (event.attempt == 0 and event.state == .queued) "入队" else phaseLabel(std.meta.stringToEnum(Phase, @tagName(event.state)).?);
         try output.writer.print("{s} · 尝试 {d}", .{ state, event.attempt });
-        if (event.binding_wait) try output.writer.writeAll(" · 等待连接");
+        if (event.binding_wait and event.state == .queued) try output.writer.writeAll(" · 等待连接");
         if (event.conflict_waiting) try output.writer.writeAll(" · 等待处理同名冲突");
-        if (event.failure) |failure| try output.writer.print(" · {s}", .{failureLabel(failure)});
+        if (event.startup_failure) |problem| {
+            try output.writer.print(" · {s}（{s}） · 阶段：{s}", .{ problem.message(), problem.code(), problem.stageLabel() });
+        } else if (event.failure) |failure| try output.writer.print(" · {s}", .{failureLabel(failure)});
         if (event.verification) |verification| try output.writer.print(" · {s}", .{switch (verification) {
             .pending => "等待校验",
             .reading => "正在校验",

@@ -89,15 +89,22 @@ pub fn compactNow(config: pc.ProviderConfig, messages: []const p.Message, reserv
     return result;
 }
 fn budgetCutoff(config: pc.ProviderConfig, messages: []const p.Message, reserve: usize) !usize {
+    const budget = @import("local_text_request.zig");
+    const output = budget.outputTokens(4096, config.context_window);
+    try budget.checkFixedBudget(reserve, output, config.context_window);
     const cut = cutoff(messages) orelse return error.InsufficientContext;
     const request = config.chatRequest(.{ .model = config.model, .system = "", .messages = messages[cut..], .tool_images = config.vision });
     const retained = @import("local_text_request.zig").inputTokens(request) catch return cut;
-    if (reachesThreshold(retained +| reserve, 4096, config.context_window)) {
+    if (reachesThreshold(retained +| reserve, output, config.context_window)) {
         if (pendingImageCut(messages) != null) return error.ContextBudgetExceeded;
         return messages.len;
     }
     return cut;
 }
+pub const Commit = struct {
+    context: *anyopaque,
+    apply: *const fn (*anyopaque, []const p.Message) anyerror!void,
+};
 pub const Service = struct {
     job: ?*Job = null,
     status: Status = .idle,
@@ -142,6 +149,10 @@ pub const Service = struct {
     /// Workers never touch the UI, live history or session store. A changed
     /// owner, session, configuration or transcript invalidates publication.
     pub fn poll(self: *Service, allocator: std.mem.Allocator, identity: ?Identity, history: *History, request_busy: bool) bool {
+        return self.pollWithCommit(allocator, identity, history, request_busy, null);
+    }
+    /// Persist the authoritative checkpoint before publishing the new memory.
+    pub fn pollWithCommit(self: *Service, allocator: std.mem.Allocator, identity: ?Identity, history: *History, request_busy: bool, commit: ?Commit) bool {
         const job = self.job orelse return false;
         if (identity == null or !identity.?.eql(job.identity) or fingerprint(history.messages) != job.source_hash or request_busy) {
             if (self.status == .running) self.cancel();
@@ -160,6 +171,12 @@ pub const Service = struct {
             return true;
         }
         var next = History.copy(allocator, job.result.messages, "") catch |err| {
+            self.status = .failed;
+            self.failure = err;
+            return true;
+        };
+        if (commit) |publisher| publisher.apply(publisher.context, next.messages) catch |err| {
+            next.deinit();
             self.status = .failed;
             self.failure = err;
             return true;
@@ -360,4 +377,32 @@ test "efficiency compaction retains unread image tool batch with its original ca
     try std.testing.expectEqual(@as(usize, 1), cutoff(&messages).?);
     try @import("provider_http.zig").validateToolMessages(.{ .model = "", .system = "", .messages = messages[1..] });
     try std.testing.expect(cutoff(&.{.{ .content = "only image", .images = &.{@as(images.ContentRef, .{})} }}) == null);
+}
+
+test "AiHost integration compaction persistence failure preserves the visible checkpoint" {
+    const a = std.testing.allocator;
+    const messages = [_]p.Message{ .{ .content = "original question" }, .{ .role = .assistant, .content = "original answer" } };
+    var h = try History.copy(a, &messages, "");
+    defer h.deinit();
+    const original = fingerprint(h.messages);
+    const identity_value: Identity = .{ .owner = .{ .session = 1 }, .conversation = 1, .revision = 1 };
+    const job = try Job.create(.{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:1/v1/chat/completions", .model = "fixture", .auth = .none, .context_window = 8192 }, identity_value, &messages, 2);
+    job.result = try History.copy(std.heap.c_allocator, &.{.{ .content = "compacted memory" }}, "");
+    job.thread = try std.Thread.spawn(.{}, struct {
+        fn run() void {}
+    }.run, .{});
+    job.done.store(true, .release);
+    var service: Service = .{ .job = job, .status = .running };
+    defer service.deinit();
+    var called = false;
+    const CommitFailure = struct {
+        fn apply(raw: *anyopaque, _: []const p.Message) !void {
+            @as(*bool, @ptrCast(@alignCast(raw))).* = true;
+            return error.StorageUnavailable;
+        }
+    };
+    try std.testing.expect(service.pollWithCommit(a, identity_value, &h, false, .{ .context = &called, .apply = CommitFailure.apply }));
+    try std.testing.expect(called and service.status == .failed);
+    try std.testing.expectEqual(error.StorageUnavailable, service.failure.?);
+    try std.testing.expectEqual(original, fingerprint(h.messages));
 }

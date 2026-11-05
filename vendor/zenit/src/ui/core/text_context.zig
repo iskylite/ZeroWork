@@ -201,6 +201,7 @@ pub const TextContext = struct {
             .family = opts.font_family,
             .size = opts.font_size,
             .weight = text_shaping.mapFontWeight(opts.font_weight),
+            .numeric_weight = opts.font_weight,
             .style = if (opts.use_italic) .italic else .normal,
         };
         const borrowed = if (opts.font_family_id != 0 or std.mem.eql(u8, opts.font_family, "system"))
@@ -264,6 +265,7 @@ pub const TextContext = struct {
             .family = opts.font_family,
             .size = opts.font_size,
             .weight = text_shaping.mapFontWeight(opts.font_weight),
+            .numeric_weight = opts.font_weight,
             .style = if (opts.use_italic) .italic else .normal,
         };
         const borrowed = if (opts.font_family_id != 0 or std.mem.eql(u8, opts.font_family, "system"))

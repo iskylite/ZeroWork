@@ -53,6 +53,9 @@ pub const keys = [_]ConfigKey{
     .{ .page = "外观与主题", .section = "ui.materials", .key = "blur_px" },
     .{ .page = "外观与主题", .section = "ui.materials.background", .key = "enabled" },
     .{ .page = "外观与主题", .section = "ui.materials.background", .key = "path" },
+    .{ .page = "外观与主题", .section = "ui.materials.background", .key = "source" },
+    .{ .page = "外观与主题", .section = "ui.materials.background", .key = "order" },
+    .{ .page = "外观与主题", .section = "ui.materials.background", .key = "interval_minutes" },
     .{ .page = "外观与主题", .section = "ui.materials.background", .key = "fit" },
     .{ .page = "外观与主题", .section = "ui.materials.background", .key = "alignment_x" },
     .{ .page = "外观与主题", .section = "ui.materials.background", .key = "alignment_y" },
@@ -63,6 +66,7 @@ pub const keys = [_]ConfigKey{
     .{ .page = "外观与主题", .section = "ui", .key = "command_info" },
     .{ .page = "关于与更新", .section = "updates", .key = "auto_check" },
     .{ .page = "AI 辅助", .section = "ai", .key = "step_display" },
+    .{ .page = "AI 辅助", .section = "ai", .key = "follow_up_mode" },
 };
 pub const sections = [_][]const u8{ "ui", "ui.materials", "ui.materials.background", "completion", "transfer", "ssh", "ai", "log", "notify", "updates" };
 
@@ -105,8 +109,9 @@ test "settings page map covers nine documented pages" {
     var buffer: [1024]u8 = undefined;
     const text = try formatPages(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, text, "AI 辅助 [ai]") != null);
-    try std.testing.expectEqual(@as(usize, 60), keys.len);
+    try std.testing.expectEqual(@as(usize, 64), keys.len);
     try std.testing.expect(keyExists("ai", "step_display"));
+    try std.testing.expect(keyExists("ai", "follow_up_mode"));
     try std.testing.expectEqualStrings("line_height", keys[5].key);
     try std.testing.expectEqualStrings("permission_mode", keys[20].key);
     try std.testing.expectEqualStrings("error_hint", keys[22].key);

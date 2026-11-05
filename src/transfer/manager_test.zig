@@ -821,7 +821,7 @@ test "connection wait preserves queued intent and budget until its exact binding
     try std.testing.expectEqual(@as(usize, 2), fake.opens.items.len);
 }
 
-test "failed authentication rebinds only the unstarted original intent without spending an attempt" {
+test "manually paused waiting draft rebinds only the unstarted original intent without spending an attempt" {
     var fake: FakeEngine = .{ .allocator = std.testing.allocator };
     defer fake.deinit();
     var manager = try transfer.Manager.init(std.testing.allocator, fake.interface(), 1, .{});
@@ -854,6 +854,75 @@ test "failed authentication rebinds only the unstarted original intent without s
     try std.testing.expectEqual(@as(u8, 1), manager.progress(id).?.attempt);
     try std.testing.expectEqual(@as(usize, 1), fake.opens.items.len);
     try std.testing.expectError(error.InvalidState, manager.rebindWaitingDraft(id, next));
+}
+
+test "transfer startup failure stays failed with owned diagnostics and retries only on a fresh binding" {
+    var fake: FakeEngine = .{ .allocator = std.testing.allocator };
+    defer fake.deinit();
+    var manager = try transfer.Manager.init(std.testing.allocator, fake.interface(), 1, .{});
+    defer manager.deinit();
+    const owner: @import("../host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(71), .generation = 1 };
+    var request = spec("startup-failure");
+    request.session_id = 71;
+    request.transfer_binding = .{ .resource_owner = .{ .session = owner }, .origin_session = owner, .kind = .transfer, .binding_id = 90, .binding_generation = 1 };
+    const id = try manager.enqueueWaitingBinding(request);
+    var next = request.transfer_binding.?;
+    next.binding_id += 1;
+    next.binding_generation += 1;
+    try std.testing.expectError(error.StaleBinding, manager.failWaitingBinding(id, next, .init("AuthFailed", "ssh_connect")));
+    var code = "AuthFailed".*;
+    try manager.failWaitingBinding(id, request.transfer_binding.?, .init(&code, "ssh_connect"));
+    @memset(&code, 'x');
+    manager.tick(0);
+    const failed = manager.progress(id).?;
+    try std.testing.expectEqual(transfer.State.failed, failed.state);
+    try std.testing.expectEqualStrings("AuthFailed", failed.startup_failure.?.code());
+    try std.testing.expectEqualStrings("SSH 认证失败", failed.startup_failure.?.message());
+    try std.testing.expectEqual(@as(u8, 0), failed.attempt);
+    try std.testing.expectEqual(@as(usize, 0), fake.opens.items.len);
+    try std.testing.expectError(error.BindingNotReady, manager.retry(id));
+    try std.testing.expectError(error.StaleBinding, manager.rebindWaitingDraft(id, request.transfer_binding.?));
+    try manager.rebindWaitingDraft(id, next);
+    try std.testing.expect(manager.progress(id).?.startup_failure == null);
+    try std.testing.expectEqual(transfer.State.queued, manager.progress(id).?.state);
+    try std.testing.expectError(error.StaleBinding, manager.failWaitingBinding(id, request.transfer_binding.?, .init("LateFailure", "ssh_connect")));
+    try manager.releaseBindingWait(id, next);
+    manager.tick(1);
+    try std.testing.expectEqual(transfer.State.running, manager.progress(id).?.state);
+    try std.testing.expectEqual(@as(u8, 1), manager.progress(id).?.attempt);
+    const history = manager.eventHistory(id).?;
+    var found = false;
+    for (history) |event| if (event.startup_failure) |problem| {
+        try std.testing.expectEqualStrings("AuthFailed", problem.code());
+        try std.testing.expectEqualStrings("ssh_connect", problem.stage());
+        found = true;
+    };
+    try std.testing.expect(found);
+
+    // A user's explicit pause is not rewritten by a late connector failure.
+    request.sources = &.{"manual-pause"};
+    const paused = try manager.enqueueWaitingBinding(request);
+    try manager.pause(paused);
+    try std.testing.expectError(error.InvalidState, manager.failWaitingBinding(paused, request.transfer_binding.?, .init("AuthFailed", "ssh_connect")));
+    try std.testing.expectEqual(transfer.State.paused, manager.progress(paused).?.state);
+    try std.testing.expect(manager.progress(paused).?.startup_failure == null);
+}
+
+test "transfer startup failure reports authentication host key timeout and SFTP stages" {
+    const cases = [_]struct { code: []const u8, stage: []const u8, message: []const u8 }{
+        .{ .code = "AuthFailed", .stage = "ssh_connect", .message = "SSH 认证失败" },
+        .{ .code = "AuthenticationInteractionRequired", .stage = "ssh_connect", .message = "独立传输连接需要重新认证" },
+        .{ .code = "HostKeyChanged", .stage = "ssh_connect", .message = "主机密钥校验失败" },
+        .{ .code = "Timeout", .stage = "sftp_init", .message = "SFTP 初始化超时" },
+        .{ .code = "SftpInitFailed", .stage = "sftp_init", .message = "SFTP 初始化失败" },
+        .{ .code = "ConnectionTimedOut", .stage = "ssh_connect", .message = "传输连接超时" },
+        .{ .code = "UnknownStartupError", .stage = "ssh_connect", .message = "传输连接启动失败" },
+    };
+    for (cases) |case| {
+        const problem = transfer.StartupFailure.init(case.code, case.stage);
+        try std.testing.expectEqualStrings(case.message, problem.message());
+        try std.testing.expectEqualStrings(case.code, problem.code());
+    }
 }
 
 test "manager freezes logical window policy and does not deduplicate a different policy" {

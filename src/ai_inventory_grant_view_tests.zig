@@ -137,9 +137,7 @@ test "inventory view stale callback gives safe feedback and disables repeat deci
     // Native Button background transitions take 150ms; inspect the settled paint.
     for (0..3) |_| f.settle();
     try std.testing.expect(ui.Color.eql(theme.popupAction(), f.view.allow_once.getBackground()));
-    const disabled_gradient = f.view.allow_once.style.gradient().?;
-    try std.testing.expect(ui.Color.eql(theme.popupAction(), disabled_gradient.from));
-    try std.testing.expect(ui.Color.eql(theme.popupAction(), disabled_gradient.to));
+    try std.testing.expect(f.view.allow_once.style.gradient() == null);
     try std.testing.expectEqual(@as(f32, 1), f.view.allow_once.getOpacity());
     f.click(f.view.deny);
     try std.testing.expectEqual(@as(usize, 1), f.attempts);

@@ -29,6 +29,13 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             .{ .value = "keep", .label = "保留任务会话" },
         }, null);
     }
+    if (binding.matches(query, "对话 跟进行为 排队 引导 follow_up_mode queue steer")) {
+        const section = try page.section("对话", "AI 工作时如何处理新消息", ui.icons.get("messages-square").?, 29, "settings.ai.conversation", null);
+        try section.select(.{ .section = "ai", .key = "follow_up_mode" }, "跟进行为", "引导：补充到当前任务。排队：当前任务完成后依次处理。仅影响新发送的消息；⌘⇧Enter 使用另一种行为。", &[_]ui.widgets.SelectOption{
+            .{ .value = "steer", .label = "引导", .test_id = "settings.follow_up_mode.steer" },
+            .{ .value = "queue", .label = "排队", .test_id = "settings.follow_up_mode.queue" },
+        }, null);
+    }
     if (binding.matches(query, "上下文 来源 脱敏 隐私 IP 主机 用户 redact_ip")) {
         const section = try page.section("上下文", "连接身份与敏感信息", ui.icons.file_text, 25, "settings.ai.context", null);
         try section.toggle(.{ .section = "ai", .key = "redact_ip" }, "隐藏连接身份", "隐藏 SSH 连接的 IP、主机名和用户名。终端正文与附件仍按原文发送，请检查敏感内容。", null);

@@ -11,6 +11,11 @@ pub const plugin_ui_contract = @import("host/plugin_ui_contract.zig");
 pub const plugin_tools = @import("ai/plugin_tools.zig");
 pub const lifecycle_journal = @import("ai/lifecycle_journal.zig");
 pub const canonical_arguments = @import("ai/canonical_arguments.zig");
+pub const ai_session_lifecycle = @import("ai/session_lifecycle.zig");
+pub const ai_session_input = @import("ai/session_input.zig");
+pub const ai_session_runtime = @import("ai/session_runtime.zig");
+pub const ai_attached_service = @import("ai/attached_service.zig");
+pub const ai_session_journal = @import("ai/session_journal.zig");
 pub const host_queries = @import("ai/host_queries.zig");
 comptime {
     _ = @import("ui/copy_button.zig");
@@ -20,10 +25,15 @@ comptime {
     _ = @import("ui/ai_recording_query_access.zig");
 }
 test {
+    _ = @import("ai_attached_service_tests.zig");
+    _ = @import("ai_conversation_commands_tests.zig");
+    _ = @import("ai_session_patch_tests.zig");
     _ = @import("ui/application_host.zig");
     _ = @import("ai/execution_result_projection.zig");
     _ = @import("ai/image_offload.zig");
     _ = @import("ai/context_compaction.zig");
+    _ = @import("ai/model_discovery.zig");
+    _ = @import("ai/conversation_title.zig");
     _ = @import("bmc_ai_tool_tests.zig");
     _ = canonical_arguments;
     _ = lifecycle_journal;
@@ -33,6 +43,7 @@ test {
     _ = @import("ai/lifecycle_runtime_tests.zig");
     _ = @import("ai/lifecycle_runtime.zig");
     _ = @import("ai/host_approval.zig");
+    _ = @import("ai/user_interaction_tests.zig");
     _ = @import("ai/fetch_url.zig");
     _ = @import("ui/ai_execution_backend.zig");
     _ = @import("ai/host_execution.zig");
@@ -363,6 +374,7 @@ test {
     _ = ai_error_feedback;
     _ = ai_card_stream;
     _ = ai_turn_manager;
+    _ = @import("ai/readonly_verification.zig");
     _ = ai_tool_scope;
     _ = ai_assistant_store;
     _ = ai_provider_sse;
@@ -385,4 +397,8 @@ test {
 
 comptime {
     if (@import("builtin").is_test) _ = @import("bmc_tests.zig");
+}
+
+test {
+    _ = @import("host/terminal_files.zig");
 }

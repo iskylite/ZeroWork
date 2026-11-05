@@ -3,6 +3,18 @@
 const ui = @import("ui");
 pub const font_size: f32 = 12;
 pub const line_height: f32 = 18;
+/// Textarea snapshots its palette at mount; retained drafts must follow theme
+/// publication even while their panel is detached from the render tree.
+pub fn bindTheme(cx: *ui.Cx, scope: *ui.Scope, input: ui.widgets.input.TextareaResult) !void {
+    try scope.createEffect(.{ .cx = cx, .input = input, .publication = try cx.themeSignal(scope) }, struct {
+        fn paint(ctx: anytype) void {
+            _ = ctx.publication.get();
+            ctx.input.state.tokens = ctx.cx.tokens;
+            ctx.input.state.dirty = true;
+            ctx.input.input.markLayoutDirty();
+        }
+    }.paint);
+}
 pub fn configure(input: ui.widgets.input.TextareaResult) void {
     const state = input.state;
     state.font_size = font_size;

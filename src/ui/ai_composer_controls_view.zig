@@ -180,6 +180,10 @@ pub const View = struct {
     root: *ui.Node = undefined,
     /// Append the host's existing send/stop controls here once.
     trailing: *ui.Node = undefined,
+    separate_actions: bool = false,
+    followup_send: ?*ui.Node = null,
+    ordinary_spacer: *ui.Node = undefined,
+    interaction_active: bool = false,
     buttons: [6]*ui.Node = undefined,
     button_styles: [6]*ui.Signal(ui.BoxStyle) = undefined,
     disabled: [6]*ui.Signal(bool) = undefined,
@@ -321,7 +325,8 @@ pub const View = struct {
         // then the original send/stop slot. Keep the existing widgets and sizes.
         cx.detachChild(self.root, self.buttons[4]);
         cx.detachChild(self.root, self.buttons[2]);
-        try self.root.appendChild(cx.allocator, try ui.spacer(cx));
+        self.ordinary_spacer = try ui.spacer(cx);
+        try self.root.appendChild(cx.allocator, self.ordinary_spacer);
         try self.root.appendChild(cx.allocator, self.buttons[4]);
         try self.root.appendChild(cx.allocator, self.buttons[2]);
         self.trailing = try ui.box(cx, S.trailing(), .{});
@@ -746,6 +751,13 @@ pub const View = struct {
     pub fn dismiss(self: *View) void {
         for (0..6) |index| self.close(@fromBackingInt(@intCast(index)), false);
         self.focus_pending = null;
+    }
+    /// Keep the original Stop slot alive while interaction actions replace chips.
+    pub fn setInteraction(self: *View, active: bool) void {
+        if (active and !self.interaction_active) self.dismiss();
+        self.interaction_active = active;
+        for (self.buttons, 0..) |button, index| button.setDisplay(if (active or index == 3) .none else .flex);
+        self.ordinary_spacer.setDisplay(if (active) .none else .flex);
     }
     pub fn isOpen(self: *const View) bool {
         for (self.popups) |popup| if (popup.widget.open.?.peek()) return true;
@@ -1250,22 +1262,30 @@ pub const View = struct {
             return .done;
         };
         self.flush() catch {};
-        // The installed Button recipe forwards frame dimensions but omits
-        // positioning. Send and Stop share this slot; position their native
-        // button nodes explicitly so the hidden sibling cannot shrink Send.
+        // The ordinary composer can reserve independent Stop and Send slots;
+        // approval previews retain their existing single-slot contract.
         var slot_changed = false;
-        for (self.trailing.children.items) |button| if (button.style.position != .absolute) {
-            button.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .{ .px = 28 }, .height = .{ .px = 28 }, .min_width = 28, .min_height = 28, .flex_shrink = 0 });
+        const actions_width: f32 = if (self.separate_actions) 62 else 28;
+        if (self.trailing.style.width != .px or self.trailing.style.width.px != actions_width) {
+            self.trailing.setStyleInline(self.cx.allocator, .{ .width = .{ .px = actions_width } });
             slot_changed = true;
-        };
+        }
+        for (self.trailing.children.items, 0..) |button, index| {
+            const x: f32 = if (self.separate_actions and index != 0) 34 else 0;
+            if (button.style.position != .absolute or button.style.ext == null or button.style.ext.?.inset.left != .px or button.style.ext.?.inset.left.px != x) {
+                button.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = 0 } }, .width = .{ .px = 28 }, .height = .{ .px = 28 }, .min_width = 28, .min_height = 28, .flex_shrink = 0 });
+                slot_changed = true;
+            }
+        }
         if (slot_changed) return .needs_layout;
+        if (self.interaction_active) return .done;
         const row_width = self.root.globalRect().w;
         const mode_label = self.labels[5].?.getText().?.content;
         const natural_execution_width = 48 + self.cx.text.measureTextWidth(mode_label, 10, 400, false);
         const model_width = @ceil(self.cx.text.measureTextWidth(self.labels[2].?.getText().?.content, 10, 400, false));
         const effort_width = if (self.labels[3].?.style.display != .none) @ceil(self.cx.text.measureTextWidth(self.labels[3].?.getText().?.content, 10, 400, false)) else 0;
         const model_chrome = S.compactModelWidth(0, effort_width, self.model_brand.style.display != .none);
-        const fixed_width = self.buttons[0].globalRect().w + self.buttons[1].globalRect().w + self.buttons[4].globalRect().w + 28 + 48;
+        const fixed_width = self.buttons[0].globalRect().w + self.buttons[1].globalRect().w + self.buttons[4].globalRect().w + actions_width + 48;
         const required = fixed_width + natural_execution_width + model_chrome + model_width;
         const compact = row_width > 0 and required > row_width;
         if (compact != self.execution_compact) {
@@ -1295,6 +1315,15 @@ pub const View = struct {
             for (button.children.items) |child| {
                 if (child.getIcon() != null) _ = child.setTint(if (disabled) S.theme.current().fg_2 else S.theme.current().fg_1);
             }
+        }
+        if (self.followup_send) |button| {
+            const disabled = if (button.behavior.interaction.a11y) |attrs| attrs.disabled else false;
+            const hovered = if (self.cx.hovered_node) |node| node == button or node.isDescendantOf(button) else false;
+            button.setBackground(if (hovered) S.theme.states().hover else S.theme.popupAction());
+            button.setOpacityRaw(if (disabled) 0.45 else 1);
+            for (button.children.items) |child| if (child.getIcon() != null) {
+                _ = child.setTint(if (disabled) S.theme.current().fg_2 else S.theme.current().fg_1);
+            };
         }
         if (self.focus_pending) |kind| {
             self.focus_pending = null;

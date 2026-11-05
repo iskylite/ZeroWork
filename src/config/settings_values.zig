@@ -44,6 +44,16 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
     if (std.mem.eql(u8, section, "ui.materials") and std.mem.eql(u8, key, "blur_px")) return setUnsigned(&value.ui.materials.blur_px, next, 0, 96);
     if (std.mem.eql(u8, section, "ui.materials.background")) {
         const background = &value.ui.materials.background;
+        if (std.mem.eql(u8, key, "source")) return setEnum(config.material.Source, &background.source, next);
+        if (std.mem.eql(u8, key, "order")) return setEnum(config.material.Order, &background.order, next);
+        if (std.mem.eql(u8, key, "interval_minutes")) {
+            if (next != .unsigned) return error.InvalidValue;
+            switch (next.unsigned) {
+                1, 5, 15, 30, 60 => {},
+                else => return error.OutOfRange,
+            }
+            return setUnsigned(&background.interval_minutes, next, 1, 60);
+        }
         if (std.mem.eql(u8, key, "enabled")) return setBool(&background.enabled, next);
         if (std.mem.eql(u8, key, "path")) return setText(&background.path, next);
         if (std.mem.eql(u8, key, "fit")) return setEnum(config.material.Fit, &background.fit, next);
@@ -94,6 +104,7 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, key, "default_provider")) return setText(&value.ai.default_provider, next);
         if (std.mem.eql(u8, key, "execution_mode")) return setEnum(config.ExecutionMode, &value.ai.execution_mode, next);
         if (std.mem.eql(u8, key, "session_retention")) return setEnum(config.SessionRetention, &value.ai.session_retention, next);
+        if (std.mem.eql(u8, key, "follow_up_mode")) return setEnum(config.FollowUpMode, &value.ai.follow_up_mode, next);
         if (std.mem.eql(u8, key, "step_display")) return setEnum(config.StepDisplay, &value.ai.step_display, next);
         if (std.mem.eql(u8, key, "permission_mode")) {
             const text = switch (next) {
@@ -174,6 +185,9 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
     if (std.mem.eql(u8, section, "ui.materials") and std.mem.eql(u8, key, "blur_px")) return .{ .unsigned = value.ui.materials.blur_px };
     if (std.mem.eql(u8, section, "ui.materials.background")) {
         const background = value.ui.materials.background;
+        if (std.mem.eql(u8, key, "source")) return .{ .text = @tagName(background.source) };
+        if (std.mem.eql(u8, key, "order")) return .{ .text = @tagName(background.order) };
+        if (std.mem.eql(u8, key, "interval_minutes")) return .{ .unsigned = background.interval_minutes };
         if (std.mem.eql(u8, key, "enabled")) return .{ .boolean = background.enabled };
         if (std.mem.eql(u8, key, "path")) return .{ .text = background.path };
         if (std.mem.eql(u8, key, "fit")) return .{ .text = @tagName(background.fit) };
@@ -226,6 +240,7 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
         if (std.mem.eql(u8, key, "default_provider")) return .{ .text = value.ai.default_provider };
         if (std.mem.eql(u8, key, "execution_mode")) return .{ .text = @tagName(value.ai.execution_mode) };
         if (std.mem.eql(u8, key, "session_retention")) return .{ .text = @tagName(value.ai.session_retention) };
+        if (std.mem.eql(u8, key, "follow_up_mode")) return .{ .text = @tagName(value.ai.follow_up_mode) };
         if (std.mem.eql(u8, key, "step_display")) return .{ .text = @tagName(value.ai.step_display) };
         if (std.mem.eql(u8, key, "permission_mode")) return .{ .text = @tagName(value.ai.permission_mode) };
         if (std.mem.eql(u8, key, "error_hint")) return .{ .boolean = value.ai.error_hint };

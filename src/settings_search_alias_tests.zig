@@ -118,13 +118,18 @@ test "settings search every scalar schema key keeps its own category and mounts 
             if (std.mem.eql(u8, entry.page, page.name)) break index;
         } else unreachable;
         f.controller.model.selectPage(expected_page);
+        // Rotation fields exist only for a directory; source itself is detected
+        // by the existing image/directory picker, rather than a separate control.
+        if (std.mem.eql(u8, entry.section, "ui.materials.background") and
+            (std.mem.eql(u8, entry.key, "order") or std.mem.eql(u8, entry.key, "interval_minutes")))
+            try f.controller.editKey(entry.section, "source", .{ .text = "directory" });
         try f.controller.setSearch(entry.key);
         try std.testing.expectEqual(expected_page, f.controller.model.page_index);
         const mounted = try f.mount();
         var buffer: [96]u8 = undefined;
         const id = if (expected_page == 0) blk: {
             if (std.mem.eql(u8, entry.key, "theme")) break :blk "settings.theme.current";
-            if (std.mem.eql(u8, entry.key, "path")) break :blk "settings.background.filename";
+            if (std.mem.eql(u8, entry.key, "path") or std.mem.eql(u8, entry.key, "source")) break :blk "settings.background.filename";
             if (std.mem.eql(u8, entry.key, "alignment_x") or std.mem.eql(u8, entry.key, "alignment_y")) break :blk "settings.field.alignment";
             const boolean = @import("config/settings_values.zig").read(f.controller.model.value, entry.section, entry.key).? == .boolean;
             break :blk try std.fmt.bufPrint(&buffer, "settings.{s}.{s}", .{ if (boolean) "toggle" else "field", entry.key });

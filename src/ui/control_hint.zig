@@ -14,7 +14,7 @@ pub const Options = struct {
 
 const Visibility = struct {
     cx: *ui.Cx,
-    control: ui.hit.NodeHandle,
+    control_id: u32,
     open: *ui.Signal(bool),
     enabled: ?*ui.Signal(bool),
 
@@ -22,7 +22,11 @@ const Visibility = struct {
         const self: *Visibility = @ptrCast(@alignCast(raw));
         if (!self.open.peek()) return .done;
         if (self.enabled == null or self.enabled.?.peek()) {
-            if (self.cx.node_registry.resolve(self.control, null)) |node| {
+            // Retained portal detach/reopen changes input generations. Node IDs
+            // are never reused, so the current registry entry proves this same
+            // live control without keeping a stale input handle or raw pointer.
+            if (self.cx.node_registry.entries.get(self.control_id)) |entry| {
+                const node = entry.ptr;
                 if (node.isDisplayedInTree() and node.globalRect().w > 0 and node.globalRect().h > 0) return .done;
             }
         }
@@ -56,6 +60,17 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, control: *ui.Node, text: anytype, opt
         }
     }.paint;
     theme.bindInk(tip.content.children.items[0], "fg_1");
+    // Closed tooltip content is detached even when its trigger remains live.
+    // Own this effect with the tooltip, and refresh its paint independently of
+    // window-tree theme replay without changing hover/focus visibility.
+    const tip_scope = tip.wrapper.meta.ownership.scope.scope orelse scope;
+    try tip_scope.createEffect(.{ .publication = try cx.themeSignal(tip_scope), .content = tip.content, .label = tip.content.children.items[0] }, struct {
+        fn paint(ctx: anytype) void {
+            _ = ctx.publication.get();
+            ctx.content.setBackground(theme.current().overlay.withAlpha(255));
+            ctx.label.setTextColor(theme.current().fg_1);
+        }
+    }.paint);
     try tip.trigger.appendChild(cx.allocator, control);
     if (options.enabled) |enabled| {
         const hover = try scope.createState(Hover, .{ .enabled = enabled, .open = tip.open.? });
@@ -70,7 +85,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, control: *ui.Node, text: anytype, opt
             value.open.set(visible and enabled and focused);
         }
     }.update);
-    const visibility = try scope.createState(Visibility, .{ .cx = cx, .control = .{ .id = control.id, .generation = try cx.node_registry.trackGeneration(control) }, .open = tip.open.?, .enabled = options.enabled });
+    const visibility = try scope.createState(Visibility, .{ .cx = cx, .control_id = control.id, .open = tip.open.?, .enabled = options.enabled });
     try cx.addAfterLayoutHook(visibility, Visibility.check);
     errdefer cx.removeAfterLayoutHook(visibility);
     try scope.onCleanup(Visibility, visibility, Visibility.release);

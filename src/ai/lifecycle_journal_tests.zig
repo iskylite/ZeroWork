@@ -212,3 +212,28 @@ test "lifecycle interval receipt owns attribution reasons across publication sna
     try std.testing.expectEqualStrings("ConcurrentOutputOwner", saved.output_attribution_reason.?);
     try std.testing.expect((try recovered.begin(input)).reused);
 }
+
+test "readonly verification anchor survives journal restart without granting a replacement session" {
+    const V = @import("readonly_verification.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var first = try journal.Journal.open(a, io, tmp.dir, "verification.json");
+    const input = request();
+    const handle = try first.begin(input);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 3 };
+    const execution = identity.ExecutionId.generate();
+    const anchor: V.Anchor = .{ .owner = owner, .service = .{ .resource_owner = .{ .session = owner }, .origin_session = owner, .kind = .terminal, .binding_id = 7, .binding_generation = 2 }, .context = input.context, .execution_id = execution, .turn_id = input.turn_id, .call_hash = V.digest(input.call_id), .arguments_hash = @splat(2) };
+    try first.update(handle, 1, .{ .stage = .dispatch_started, .execution = execution, .verification = anchor });
+    try first.update(handle, 2, .{ .stage = .outcome_unknown, .remote_effect_unknown = true, .local_released = false });
+    var replacement = anchor;
+    replacement.owner.generation += 1;
+    try std.testing.expectError(error.ResourceIdentityChanged, first.update(handle, 3, .{ .stage = .outcome_unknown, .verification = replacement }));
+    first.deinit();
+    var reopened = try journal.Journal.open(a, io, tmp.dir, "verification.json");
+    defer reopened.deinit();
+    var record = try reopened.snapshot(a, handle);
+    defer record.deinit(a);
+    try std.testing.expect(std.meta.eql(anchor, record.verification.?));
+    try std.testing.expect(record.remote_effect_unknown and !record.local_released);
+    try std.testing.expectEqual(journal.Stage.outcome_unknown, record.stage);
+}

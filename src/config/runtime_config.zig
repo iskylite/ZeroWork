@@ -26,7 +26,7 @@ pub const Prepared = struct {
     /// No file access or decoding occurs on the configuration commit path.
     pub fn confirmBackground(self: *Prepared, asset: *const config.material.Prepared) !void {
         const candidate = self.owned orelse return error.AlreadyCommitted;
-        if (!std.mem.eql(u8, candidate.value.ui.materials.background.path, asset.path) or asset.image.width == 0 or asset.image.height == 0 or asset.image.pixels.len == 0) return error.BackgroundNotPrepared;
+        if (!asset.matches(candidate.value.ui.materials.background) or asset.image.width == 0 or asset.image.height == 0 or asset.image.pixels.len == 0) return error.BackgroundNotPrepared;
         self.background_ready = true;
     }
 
@@ -134,7 +134,7 @@ pub const RuntimeConfig = struct {
     pub fn commitPrepared(self: *RuntimeConfig, io: std.Io, dir: std.Io.Dir, prepared: *Prepared) !void {
         if (prepared.expected_revision != self.value.config_revision) return error.StaleConfigRevision;
         const next = if (prepared.owned) |*owned| owned else return error.AlreadyCommitted;
-        const same_background = std.mem.eql(u8, next.value.ui.materials.background.path, self.value.ui.materials.background.path);
+        const same_background = next.value.ui.materials.background.source == self.value.ui.materials.background.source and std.mem.eql(u8, next.value.ui.materials.background.path, self.value.ui.materials.background.path);
         if (next.value.ui.materials.background.enabled and !prepared.background_ready and !(self.background_ready and same_background)) return error.BackgroundNotPrepared;
         if (!prepared.theme_ready and !std.mem.eql(u8, next.value.ui.theme, self.value.ui.theme))
             try @import("imported_theme.zig").validateReference(io, dir, self.allocator, next.value.ui.theme);

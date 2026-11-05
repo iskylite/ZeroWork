@@ -298,7 +298,6 @@ const patchWorkspace = (() => {
     root.dataset.executionPatch='true';root.dataset.testid='assistant';
     if(!assistantOpen)return;
     // Saving a review note is a later workspace capability, outside this PATCH.
-    root.querySelector('.ai-save-row')?.remove();
     syncPatchActionInk(root);
     const messages=root.querySelector('#ai-messages');
     messages.classList.toggle('patch-transcript',!!aiData().executionPatch);

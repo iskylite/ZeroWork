@@ -1772,6 +1772,20 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     try mountProgress(state, scroll.container);
     try mountConnectionLog(state);
     try mountDisconnectConfirmation(state);
+    try scope.createEffect(.{ .view = state, .publication = try cx.themeSignal(scope) }, struct {
+        fn paint(ctx: anytype) void {
+            _ = ctx.publication.get();
+            // Closed portal content is retained outside the window tree.
+            const view = ctx.view;
+            if (view.closed) return;
+            for (view.menus, 0..) |maybe, index| if (maybe) |popup| {
+                if (!view.open[index].peek()) view.mount_request.cx.replaySubtreeTheme(popup.chrome);
+            };
+            if (view.log_modal) |modal| if (!view.log_open.?.peek()) view.mount_request.cx.replaySubtreeTheme(modal.dialog);
+            if (view.order_modal) |modal| if (!view.order_open.?.peek()) view.mount_request.cx.replaySubtreeTheme(modal.dialog);
+            if (view.disconnect_confirm_dialog) |dialog| if (!view.disconnect_confirm_open.peek()) view.mount_request.cx.replaySubtreeTheme(dialog);
+        }
+    }.paint);
     try scope.onCleanup(View, state, View.release);
     root.meta.per_frame.hooks.slots.anim_state = state;
     root.addBeforeRender(View.beforeRender);
@@ -1820,18 +1834,21 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     try parent.appendChild(cx.allocator, waiting);
     state.waiting = waiting;
     const surface = try ui.boxStyled(cx, S.progressSurface, .{});
+    // Video progress keeps its own tint; it is still one material boundary.
+    @import("../../ui/layer_materials.zig").card(surface, .custom);
     surface.meta.ownership.meta.test_id = "bmc.progress.surface";
     try waiting.appendChild(cx.allocator, surface);
     const header = try ui.vstackStyled(cx, S.progressHeader, .{});
-    try waiting.appendChild(cx.allocator, header);
+    try surface.appendChild(cx.allocator, header);
     state.waiting_header = header;
     state.waiting_title = try ui.textStyled(cx, S.progressTitle, "正在准备连接");
     state.waiting_title.?.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 26 }, .flex_shrink = 0 });
     state.waiting_title.?.meta.ownership.meta.test_id = "bmc.progress.stage";
     try header.appendChild(cx.allocator, state.waiting_title.?);
     const route = try ui.boxStyled(cx, S.progressRouteBox, .{});
+    @import("../../ui/layer_materials.zig").card(route, .well);
     route.meta.ownership.meta.test_id = "bmc.progress.route";
-    try waiting.appendChild(cx.allocator, route);
+    try surface.appendChild(cx.allocator, route);
     state.progress_route = route;
     const route_heading = try ui.hstack(cx, .{ .width = .fill(), .height = .{ .px = 18 }, .gap = 12, .padding = .{ .right = 20 }, .align_items = .center, .flex_shrink = 0 }, .{});
     try route.appendChild(cx.allocator, route_heading);
@@ -1864,7 +1881,7 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     body.container.behavior.events.on_event_capture = View.progressKey;
     body.container.behavior.events.capture_context = state;
     body.content.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 12, .min_width = 0, .flex_shrink = 0 });
-    try waiting.appendChild(cx.allocator, body.container);
+    try surface.appendChild(cx.allocator, body.container);
     state.waiting_body = body;
     try body.content.appendChild(cx.allocator, state.progress_notice.?);
     const steps = try ui.vstackStyled(cx, S.progressSteps, .{});
@@ -1912,6 +1929,7 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
         const detail = try ui.textStyled(cx, S.progressDiagnostic, "该步骤尚无连接事件。");
         detail.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0, .margin = .{ .left = 24, .top = 4 }, .padding = .{ .top = 8, .bottom = 8, .left = 10, .right = 10 }, .background = S.theme.current().well, .border = .{ .width = 0, .radius = 8 } });
         detail.meta.ownership.meta.test_id = try scopedId(scope, "bmc.progress.diagnostic.", @tagName(group));
+        @import("../../ui/layer_materials.zig").card(detail, .well);
         detail.setDisplay(.none);
         try block.appendChild(cx.allocator, detail);
         state.progress_details[index] = detail;
@@ -1921,7 +1939,7 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     state.waiting_detail.?.meta.ownership.meta.test_id = "bmc.progress.detail";
     try body.content.appendChild(cx.allocator, state.waiting_detail.?);
     const actions = try ui.hstackStyled(cx, S.progressActions, .{});
-    try waiting.appendChild(cx.allocator, actions);
+    try surface.appendChild(cx.allocator, actions);
     state.waiting_actions = actions;
     _ = try progressButton(state, actions, "连接日志", "bmc.connection_log", null, View.showLog);
     const session_action = try ui.box(cx, .{ .width = .{ .px = 76 }, .height = .{ .px = 32 }, .flex_shrink = 0 }, .{});
@@ -1978,6 +1996,7 @@ fn mountConnectionLog(state: *View) !void {
     state.log_route_text = try ui.textStyled(cx, S.progressRoute, "");
     state.log_route_text.?.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0, .padding = ui.Padding.all(10), .margin = .{ .bottom = 12 }, .background = S.theme.current().well, .border = .{ .width = 0, .radius = 8 } });
     state.log_route_text.?.meta.ownership.meta.test_id = "bmc.connection_log.route";
+    @import("../../ui/layer_materials.zig").card(state.log_route_text.?, .well);
     try modal.body.appendChild(cx.allocator, state.log_route_text.?);
     const columns = try ui.box(cx, logColumns(), .{});
     columns.meta.ownership.meta.test_id = "bmc.connection_log.columns";
@@ -1989,6 +2008,7 @@ fn mountConnectionLog(state: *View) !void {
     scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .background = LogS.theme.popupInset(), .border = .{ .width = 0, .radius = 9 }, .flex_shrink = 0 });
     scroll.content.setStyleInline(cx.allocator, LogS.logContent());
     scroll.container.meta.ownership.meta.test_id = "bmc.connection_log.list";
+    @import("../../ui/layer_materials.zig").card(scroll.container, .well);
     scroll.container.behavior.interaction.focusable = true;
     scroll.container.behavior.events.on_event_capture = View.logKey;
     scroll.container.behavior.events.capture_context = state;
@@ -2028,6 +2048,8 @@ fn mountConnectionLog(state: *View) !void {
         row.setDisplay(.none);
     }
     const footer = try ui.box(cx, S.logFooter(cx.viewport.height < 600), .{});
+    footer.meta.ownership.meta.test_id = "bmc.connection_log.footer";
+    @import("../../ui/layer_materials.zig").card(footer, .surface_2);
     try modal.dialog.appendChild(cx.allocator, footer);
     state.log_footer = footer;
     const close = try ui.widgets.Button(.{ .label = "关闭", .variant = .secondary, .base_style = S.logClose(), .on_click = cx.on(View, state, View.closeLog) }).mount(scope, cx);
@@ -2108,7 +2130,7 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
         },
         .power => {
             state.power_mapping_warning = try mappingWarning(state, parent, "bmc.power.mapping_warning");
-            const well = try wellValue(state, parent, "当前电源", "未知");
+            const well = try wellValue(state, parent, "bmc.power.summary", "当前电源", "未知");
             state.power_label = well.value;
             state.power_scope_label = well.label;
             try selectField(state, scope, parent, "操作", "bmc.power.action", state.power_options, state.power_value, state.power_disabled, View.powerChanged);
@@ -2124,7 +2146,7 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
         },
         .boot => {
             state.boot_mapping_warning = try mappingWarning(state, parent, "bmc.boot.mapping_warning");
-            const well = try wellValue(state, parent, "当前启动覆盖", "未知");
+            const well = try wellValue(state, parent, "bmc.boot.summary", "当前启动覆盖", "未知");
             state.boot_label = well.value;
             state.boot_scope_label = well.label;
             state.boot_pending_label = try ui.textStyled(cx, S.hint, "");
@@ -2238,9 +2260,11 @@ fn chordButton(state: *View, scope: *ui.Scope, parent: *ui.Node, label: []const 
     try parent.appendChild(cx.allocator, button);
 }
 const WellValue = struct { label: *ui.Node, value: *ui.Node };
-fn wellValue(state: *View, parent: *ui.Node, label: []const u8, value: []const u8) !WellValue {
+fn wellValue(state: *View, parent: *ui.Node, id: []const u8, label: []const u8, value: []const u8) !WellValue {
     const cx = state.mount_request.cx;
     const row = try ui.hstackStyled(cx, S.well, .{});
+    row.meta.ownership.meta.test_id = id;
+    @import("../../ui/layer_materials.zig").card(row, .well);
     try parent.appendChild(cx.allocator, row);
     const label_node = try ui.textStyled(cx, S.hint, label);
     try row.appendChild(cx.allocator, label_node);

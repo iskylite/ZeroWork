@@ -5,6 +5,30 @@ pub const Entry = command_catalog.Entry;
 pub const catalog = command_catalog.entries;
 pub const find = command_catalog.find;
 
+/// Display-only summary of the files actually selected by the native chooser.
+pub fn uploadDisplayCommand(allocator: std.mem.Allocator, paths: []const []const u8) ![]u8 {
+    var command: std.ArrayList(u8) = .empty;
+    errdefer command.deinit(allocator);
+    try command.appendSlice(allocator, "@up");
+    for (paths) |path| {
+        const name = std.fs.path.basename(path);
+        try command.append(allocator, ' ');
+        if (std.mem.indexOfAny(u8, name, " \t\r\n\"\\") != null) {
+            const quoted = try std.json.Stringify.valueAlloc(allocator, name, .{});
+            defer allocator.free(quoted);
+            try command.appendSlice(allocator, quoted);
+        } else try command.appendSlice(allocator, name);
+    }
+    return command.toOwnedSlice(allocator);
+}
+
+test "builtin_records upload display names reflect selected files including spaces and unicode" {
+    const a = std.testing.allocator;
+    const command = try uploadDisplayCommand(a, &.{ "/tmp/release.tar.gz", "/tmp/配置 文件.json", "/tmp/a\"b.txt" });
+    defer a.free(command);
+    try std.testing.expectEqualStrings("@up release.tar.gz \"配置 文件.json\" \"a\\\"b.txt\"", command);
+}
+
 pub const Download = struct {
     remote_path: []const u8,
     local_directory: ?[]const u8 = null,

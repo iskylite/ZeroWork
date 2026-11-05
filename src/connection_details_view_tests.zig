@@ -406,3 +406,36 @@ test "connection details view explicit sample is deferred and retains the captur
     try std.testing.expectEqual(@as(usize, 2), f.samples);
     try std.testing.expectEqual(@as(usize, 2), f.cancellations);
 }
+
+test "material connection node cards advance below their detail popover" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.cx.setTestFrameStep(16);
+    try @import("ui/layer_materials.zig").Policy.mount(f.cx, f.scope);
+    const publication = try f.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
+    try f.show(try snapshot(1));
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        for ([_]f32{ 0, 25, 75, 100 }) |t| {
+            theme.select(name);
+            _ = theme.setMaterialParameters(t, 24);
+            publication.publish(f.cx, theme.widgetTheme(name));
+            try f.view.retheme();
+            for (0..20) |_| {
+                f.cx.advanceFrameClock();
+                _ = f.cx.render();
+            }
+            const card = findId(f.view.chrome, "connection.details.node.0").?;
+            try std.testing.expectEqual(theme.popupInset().withAlpha(theme.layerAlpha(2)), card.parent.?.getBackground());
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, card.getBackground());
+            try std.testing.expectEqual(@as(f32, 60), card.globalRect().h);
+            try std.testing.expectEqual(theme.layerBackground(1), f.view.chrome.getBackground());
+        }
+    }
+}

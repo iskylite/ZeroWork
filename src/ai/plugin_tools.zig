@@ -21,6 +21,8 @@ pub const ToolDefinition = struct {
     /// Supported JSON Schema subset is checked at registration; unknown keywords
     /// fail closed instead of being silently ignored during host validation.
     schema: []const u8,
+    /// Host-side bound, independent of model schema character counts.
+    max_argument_bytes: usize = 64 * 1024,
     validate: ?*const fn (std.json.Value) anyerror!void = null,
     required_services: []const services.Requirement = &.{},
     effect: Effect = .read_state,
@@ -52,6 +54,7 @@ pub const Status = enum { succeeded, failed, rejected, cancelled_unsent, outcome
 pub const ContentBlock = union(enum) { text: []const u8, structured: []const u8, image_ref: images.ContentRef };
 pub const Receipt = struct { operation_id: u64, owner: identity.SessionHandle, local_released: bool = true, remote_effect_unknown: bool = false };
 pub const ToolResult = struct {
+    verification: ?@import("readonly_verification.zig").Anchor = null,
     status: Status,
     blocks: []const ContentBlock = &.{},
     receipt: Receipt,
@@ -160,7 +163,7 @@ pub fn decodeName(buffer: []u8, name: []const u8) ![]const u8 {
 pub fn validateDefinition(definition: ToolDefinition) !void {
     var name: [64]u8 = undefined;
     _ = try encodeName(&name, definition.id);
-    if (definition.version == 0 or definition.description.len > 4096 or definition.schema.len > 32 * 1024) return error.InvalidToolDefinition;
+    if (definition.version == 0 or definition.description.len > 4096 or definition.schema.len > 32 * 1024 or definition.max_argument_bytes == 0 or definition.max_argument_bytes > 512 * 1024) return error.InvalidToolDefinition;
     const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, definition.schema, .{});
     defer parsed.deinit();
     try validateSchema(parsed.value, 0);
@@ -168,7 +171,7 @@ pub fn validateDefinition(definition: ToolDefinition) !void {
     if (kind != .string or !std.mem.eql(u8, kind.string, "object")) return error.InvalidToolSchema;
 }
 pub fn sameDefinition(a: ToolDefinition, b: ToolDefinition) bool {
-    if (!std.mem.eql(u8, a.id, b.id) or a.version != b.version or !std.mem.eql(u8, a.schema, b.schema) or !std.mem.eql(u8, a.description, b.description) or a.effect != b.effect or a.approval_policy != b.approval_policy or a.evaluate_policy != b.evaluate_policy or a.validate != b.validate or a.required_services.len != b.required_services.len) return false;
+    if (!std.mem.eql(u8, a.id, b.id) or a.version != b.version or a.max_argument_bytes != b.max_argument_bytes or !std.mem.eql(u8, a.schema, b.schema) or !std.mem.eql(u8, a.description, b.description) or a.effect != b.effect or a.approval_policy != b.approval_policy or a.evaluate_policy != b.evaluate_policy or a.validate != b.validate or a.required_services.len != b.required_services.len) return false;
     for (a.required_services, b.required_services) |left, right| if (!left.matches(right)) return false;
     return true;
 }
@@ -315,7 +318,7 @@ pub const RequestTable = struct {
     }
     pub fn parse(self: *const RequestTable, allocator: std.mem.Allocator, name: []const u8, arguments: []const u8) !ParsedCall {
         const entry = self.lookup(name) orelse return error.ToolNotInRequest;
-        if (arguments.len > 64 * 1024) return error.InvalidToolArguments;
+        if (arguments.len > entry.definition.max_argument_bytes) return error.InvalidToolArguments;
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, arguments, .{ .allocate = .alloc_always });
         errdefer parsed.deinit();
         if (parsed.value != .object) return error.InvalidToolArguments;
@@ -668,6 +671,7 @@ pub fn cloneTable(input: *const RequestTable, allocator: std.mem.Allocator) !Req
 }
 
 pub const DynamicInvocation = struct {
+    dispatch_fence: ?@import("provider.zig").DispatchFence = null,
     table: *const RequestTable,
     parsed: ParsedCall,
     turn_id: u64,
@@ -690,6 +694,7 @@ pub const Runtime = struct {
     invoke: ?*const fn (*anyopaque, TargetBinding, Invocation, std.mem.Allocator, ?*@import("provider.zig").CancelToken) anyerror!ToolResult = null,
 
     pub fn execute(self: Runtime, invocation: DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*@import("provider.zig").CancelToken) ![]ToolResult {
+        if (invocation.dispatch_fence) |fence| try fence.check();
         const parsed = invocation.parsed;
         if (parsed.entry.authority != .session_targets) return error.InvalidHostAuthority;
         if (self.operations.count() + parsed.targets.len > @import("../host/operation_store.zig").Store.capacity) return error.OperationHistoryFull;
@@ -732,6 +737,7 @@ pub const Runtime = struct {
                 if (!ticket.?.policy_bypass) ticket.?.approve();
             }
             if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
+            if (invocation.dispatch_fence) |fence| try fence.check();
             authorize(invocation.table, parsed, try self.live_scope(self.context), try self.live_members(self.context), self.current_policy(self.context), if (ticket) |*value| value else null, self.now_ms(self.context)) catch |err| switch (err) {
                 // A concurrent auto -> confirm change must wait for a real user
                 // decision, never turn an automatic bypass into a retained grant.
@@ -754,7 +760,8 @@ pub const Runtime = struct {
         for (parsed.targets.slice(), output) |id, *result| {
             const target = entryTarget(parsed.entry, id).?;
             const cancelled = if (cancel) |token| token.isCancelled() else false;
-            if (cancelled or uncertain) {
+            const superseded = if (invocation.dispatch_fence) |fence| !fence.current(fence.context, fence.revision) else false;
+            if (cancelled or uncertain or superseded) {
                 try self.operations.cancel(target.owner, invocation.operation_id);
                 try self.operations.resourcesReleased(target.owner, invocation.operation_id);
                 result.* = .{ .status = .cancelled_unsent, .receipt = .{ .owner = target.owner, .operation_id = invocation.operation_id } };

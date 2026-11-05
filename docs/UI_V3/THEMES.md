@@ -1,6 +1,59 @@
 # 内置主题与终端配色
 
-内置 26 套主题：12 套产品配色、Dark Pro，以及 Catppuccin Mocha / Latte / Frappé / Macchiato、Dracula、Solarized Dark / Light、Nord、Tokyo Night、Gruvbox Dark / Light、One Dark、Rosé Pine。HTML 基准、原生 registry 和快速连接原型共用语义角色。
+内置 37 套主题：12 套产品配色、Dark Pro，以及 Catppuccin Mocha / Latte / Frappé / Macchiato、Dracula、Solarized Dark / Light、Nord、Tokyo Night、Gruvbox Dark / Light、One Dark、Rosé Pine，以及 Vesper、Flexoki Light / Dark、Everforest Dark Hard / Light Hard、Kanagawa Wave / Dragon / Lotus、Ayu Light / Mirage / Dark。HTML 基准、原生 registry 和快速连接原型共用语义角色。
+
+
+## 中文纯色主题优化（2026-11-04）
+
+本轮调整午夜蓝、松林、深海、暮紫、余烬、石墨、纸白、暖砂、冰川这 9 套既有预设，保留其稳定 ID、名称与排列；其它 28 套配色保持原值。沿用现有布局、组件和材质策略，调整每套独立的表面、文字、填充动作、状态 ink、终端前景、光标、选区与 ANSI 0–15。
+
+| 主题 | 优化后的方向 |
+| --- | --- |
+| 石墨 `graphite` | 中性炭灰与钢蓝灰强调；主文字从近纯白收为灰白，填充动作使用更深的钢蓝，避免大块明亮填充抢内容。 |
+| 纸白 `paper` | 中性暖白、深灰正文、墨蓝灰强调；取代原橄榄绿，与石墨形成中性深浅组合，终端使用接近纸白的底色。 |
+| 午夜蓝 `midnight` | 大面积深蓝收为带少量蓝的炭灰；明亮蓝集中到选中、链接与光标，动作填充单独加深，正文色偏收敛。 |
+| 冰川 `ice` | 冷白与钢蓝，正文改为接近中性的深灰；与午夜蓝呼应，减少大面积蓝色染色。 |
+| 余烬 `ember` | 暖炭灰、铜橙强调，正文保持暖灰；警告金黄、错误砖红，终端蓝紫使用相配的低饱和色。 |
+| 暖砂 `sand` | 奶油砂色与铜棕强调，正文从棕色收向暖深灰；与余烬形成温暖深浅组合，警告与错误各有独立色。 |
+| 松林 `forest` | 炭灰暗绿底与微暖文字；强调偏叶绿，成功色偏青绿，避免强调与成功共享相近绿色。 |
+| 深海 `ocean` | 深蓝灰底与克制的青蓝强调；减少整屏青色，与午夜蓝的蓝色强调拉开区别。 |
+| 暮紫 `plum` | 带少量紫的深灰底、接近中性的灰白文字、灰紫强调；明显紫色集中在局部交互。 |
+
+每套中文主题的终端 ANSI 都单独协调红、黄、蓝、紫、青等色相与明度，不再沿用六套深色主题共用的五个槽位。它们是产品配色，不宣称复刻外部经典主题。浅色 ANSI 使用适合浅背景的深色角色；默认终端前景与选区单独保证可读。
+
+`accent` 保留主题识别色，`action_accent` 提供独立的填充动作色；状态图形与状态小字分别定义。普通文字与辅助文字继续遵守现有对比度合同，不通过降低文字可读性制造层次。实际验收包括无图材质、浮层状态、终端选区、AI 气泡及深浅切换；纯色优化不改变全局透明度或模糊规则。
+
+## 新增主题适配（2026-11-04）
+
+这五个家族共提供 11 个核心版本：Vesper 1 套、Flexoki 2 套、Everforest 2 套、Kanagawa 3 套、Ayu 3 套。Everforest 采用 Hard 的深浅组合；稳定 ID `everforest-dark` 保留，显示名称明确为 Everforest Dark Hard。使用现有原生组件、材质和状态派生规则，26 个 UI 角色与终端配色分别定义。
+
+| ID / 显示名称 | 界面方向与适配 |
+| --- | --- |
+| `vesper` / Vesper | 中性炭黑、蜜桃橙强调、薄荷青成功色。面板保持中性；填充按钮使用较深的暖橙保证白字可读。ANSI 由原版编辑器配色补齐为终端角色，并非上游官方终端移植。 |
+| `flexoki-light` / Flexoki Light | 暖纸白与墨黑文字，青绿强调；与现有 Paper 的橄榄绿强调区分。ANSI、终端默认前景、光标沿用上游 iTerm2；选区改为浅青灰 `#dce8df`，保证默认深色文字可读，状态小字单独加深。 |
+| `flexoki-dark` / Flexoki Dark | 暖墨黑、米灰文字与青绿强调，和 Light 保持色系一致；采用官方深色 ANSI，UI 状态文字独立提亮，选区为深青灰。 |
+| `everforest-dark` / Everforest Dark Hard | 采用 Dark Hard 的灰绿层次与暖米色文字；区别于 Forest 的深绿色外壳。ANSI、终端默认前景与光标保留来源，UI 三层文字与状态小字提亮，避免浮层和选中态对比不足。 |
+| `everforest-light` / Everforest Light Hard | 上游 Hard 暖米白背景与灰绿文字，橄榄绿强调；浅色状态文字加深，ANSI 与默认终端前景保持源配色，浅绿选区保证默认文字可读。 |
+| `kanagawa-wave` / Kanagawa Wave | 靛蓝深色、蓝色强调、暖米白文字；与 Dragon 的暖墨灰／黄铜色区分。ANSI 保留 Wave 源色，UI 辅助文字与状态文字提亮。 |
+| `kanagawa-dragon` / Kanagawa Dragon | 暖墨灰底与黄铜色强调；保留 Dragon 的低饱和绿、灰蓝、灰粉 ANSI，UI 错误文字单独提亮。终端采用来源默认前景与可见的米色光标；蓝灰选区 `#303e48` 保持默认文字可读。 |
+| `kanagawa-lotus` / Kanagawa Lotus | 暖米黄浅色、靛蓝文字与蓝色按钮；保留 Lotus 自有色板与 ANSI，独立加深 UI 的提示、成功与警告文字，选区使用浅蓝灰。 |
+| `ayu-light` / Ayu Light | 中性近白底、蓝灰文字、橙色强调；区别于 Flexoki 的暖纸白和 Everforest 的米白。浅色按钮、光标与 ANSI 按可读性加深，不沿用深色版明亮文字。 |
+| `ayu-mirage` / Ayu Mirage | 冷灰蓝外壳与金橙强调，和 Midnight 的蓝色强调区分。按上游 Mirage 角色适配 UI 与 ANSI，终端默认文字、选区使用本项目可读版本；不宣称逐槽位复刻上游生成器的终端输出。 |
+| `ayu-dark` / Ayu Dark | 采用上游较深的蓝黑底和琥珀强调，明确区别于 Mirage 的较亮冷灰蓝底。UI 与 ANSI 按 Dark 原色角色适配，默认前景、选区分别定义。 |
+
+深浅版本分别定义表面、三层文字、操作按钮、状态 ink、终端前景与选区，不做反色派生。新增 6 套与既有 5 套在主题列表按家族相邻排列。Ayu 的终端 ANSI 是项目按来源角色适配的版本，不宣称复刻上游 YAML 生成器输出。
+
+来源均为 MIT 项目：
+
+- [Vesper / Rauno Freiberg](https://github.com/raunofreiberg/vesper/blob/main/themes/Vesper-dark-color-theme.json)，源文件 SHA-256：`da9e0f65da0199f62246153fb2b521ec549f197d32009532b38d1cf0ead500e4`。
+- [Flexoki / Steph Ango](https://github.com/kepano/flexoki/blob/main/iterm2/flexoki_light.itermcolors)，源文件 SHA-256：`5289cec063dfad553767f1e5573193694b9b2d51dc61b71e1b1fe64936cae7a6`。
+- [Everforest / sainnhe](https://github.com/sainnhe/everforest/blob/master/autoload/everforest.vim)，源文件 SHA-256：`4ddab3c8d96e29310a21441a797e69a2c520ec074db9c20a7eaea866d8b5a8c4`。
+- [Kanagawa / rebelot](https://github.com/rebelot/kanagawa.nvim/blob/master/lua/kanagawa/colors.lua)，源文件 SHA-256：`bad6ccb01c34f16d38083c4df2ead9f03536de81d6ab5d95b1bdf4b0f8129240`。
+- [Ayu / ayu-theme](https://github.com/ayu-theme/ayu-colors/blob/master/themes/mirage.yaml)，源文件 SHA-256：`da1bc0dab910c8d14a93ce52e8900b421a22d4735895524362e414dfb3834937`。
+- [flexoki-dark](https://github.com/kepano/flexoki/blob/main/iterm2/flexoki_dark.itermcolors)，源文件 SHA-256：`69e94108974c728700fbfc8e9df50d9d409ea0e50f6dc4b5afd0206efafe80f2`。
+- [ayu-dark](https://github.com/ayu-theme/ayu-colors/blob/master/themes/dark.yaml)，源文件 SHA-256：`331e54ec29839cfad80039663b56fbe669b67b3c8fbfac530d1c41f5e453b040`。
+- [ayu-light](https://github.com/ayu-theme/ayu-colors/blob/master/themes/light.yaml)，源文件 SHA-256：`e0b99c9254be89ed3ca1f1097278dfa9be90e39a3cf0456ac7a00ed9b737a8af`。
+- [kanagawa-themes](https://github.com/rebelot/kanagawa.nvim/blob/master/lua/kanagawa/themes.lua)，源文件 SHA-256：`da4cbc68ac2b25a1dcea325da3354396068bb007674c51fac5a9184f08a697cf`。
 
 ## 配色约定
 

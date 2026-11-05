@@ -224,6 +224,17 @@ pub const Domain = struct {
     has_file_plugin: bool,
     backgrounds: ?*background.Host = null,
     tasks: ?*@import("../host/application_task_domain.zig").Domain = null,
+    ai: ?*@import("../ai/attached_service.zig").Host = null,
+    group_identity: u32 = 1,
+
+    pub fn aiService(self: *Domain) !*@import("../ai/attached_service.zig").Host {
+        if (self.ai) |host| return host;
+        const host = try self.allocator.create(@import("../ai/attached_service.zig").Host);
+        host.* = @import("../ai/attached_service.zig").Host.init(self.allocator);
+        host.presentations.authority = &host.service;
+        self.ai = host;
+        return host;
+    }
 
     pub fn init(allocator: std.mem.Allocator, has_file_plugin: bool) !*Domain {
         return initWithContributions(allocator, has_file_plugin, &.{}, &.{});
@@ -252,6 +263,14 @@ pub const Domain = struct {
         if (self.attachments.items.len != 0) {
             std.log.warn("Shared application domain still has window attachments; retaining resources", .{});
             return;
+        }
+        if (self.ai) |host| {
+            host.deinit() catch {
+                std.log.warn("Shared AI shutdown is not released; retaining its owner", .{});
+                return;
+            };
+            self.allocator.destroy(host);
+            self.ai = null;
         }
         if (self.local_adapter.shutdownStep() != .released) {
             std.log.warn("Shared local shutdown is not released; retaining its owner", .{});
@@ -1496,6 +1515,7 @@ pub const ApplicationHost = struct {
 
     pub fn requestWindowClose(self: *ApplicationHost) !OperationKey {
         if (self.windowClosePending()) return self.window_close.?.key;
+        if (self.domain.ai) |ai| _ = try ai.closeWindow(self.window_id);
         if (self.window_auxiliary) |tasks| tasks.cancel(tasks.context);
         const revision = @max(self.workspace.model.order_revision, 1);
         const decision = try self.dispatcher.submit(.{ .command_id = try self.dispatcher.issue(), .kind = .request_close_window, .owner = .app, .view_revision = revision, .payload = .{ .number = @backingInt(self.window_id) } }, .{
@@ -1517,6 +1537,7 @@ pub const ApplicationHost = struct {
     pub fn windowCloseReady(self: *const ApplicationHost) bool {
         const close = self.window_close orelse return false;
         if (self.window_auxiliary) |tasks| if (!tasks.released(tasks.context)) return false;
+        if (self.domain.ai) |ai| if (!ai.windowReady(self.window_id)) return false;
         return close.state == .ready and !close.cancel_requested;
     }
 
@@ -1530,6 +1551,7 @@ pub const ApplicationHost = struct {
             close.state = .draining;
             return error.WindowCloseNotReady;
         }
+        if (self.domain.ai) |ai| try ai.releaseWindow(self.window_id);
         _ = try self.sessions.journal.completeReleased(close.key, "window closed");
         try self.windows.completeClose(close.ticket);
         _ = self.workspace.endWindowCloseBatch(close.ticket.request);
@@ -1874,6 +1896,13 @@ pub const ApplicationHost = struct {
     }
 
     pub fn safeTick(self: *ApplicationHost) !bool {
+        if (self.domain.ai) |ai| {
+            ai.pump() catch |err| @import("../platform/applog.zig").warn(.ai, "shared AI receipt: {s}", .{@errorName(err)});
+            if (self.windowClosePending()) _ = ai.closeWindow(self.window_id) catch |err| blk: {
+                @import("../platform/applog.zig").warn(.ai, "AI window close: {s}", .{@errorName(err)});
+                break :blk false;
+            };
+        }
         try self.syncOwnedUserInput(null);
         const lifecycle_pending = try self.tickOwnedSessions();
         const deferred_close_pending = try self.tickDeferredCloses();

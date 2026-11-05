@@ -51,6 +51,53 @@ pub const Failure = enum {
     io,
 };
 
+/// Value-owned startup diagnostics survive connection teardown and retry.
+pub const StartupFailure = struct {
+    code_bytes: [128]u8 = @splat(0),
+    code_len: u8 = 0,
+    stage_bytes: [48]u8 = @splat(0),
+    stage_len: u8 = 0,
+
+    pub fn init(raw_code: []const u8, raw_stage: ?[]const u8) StartupFailure {
+        var result: StartupFailure = .{};
+        result.code_len = @intCast(@min(raw_code.len, result.code_bytes.len));
+        @memcpy(result.code_bytes[0..result.code_len], raw_code[0..result.code_len]);
+        if (raw_stage) |value| {
+            result.stage_len = @intCast(@min(value.len, result.stage_bytes.len));
+            @memcpy(result.stage_bytes[0..result.stage_len], value[0..result.stage_len]);
+        }
+        return result;
+    }
+    pub fn code(self: *const StartupFailure) []const u8 {
+        return self.code_bytes[0..self.code_len];
+    }
+    pub fn stage(self: *const StartupFailure) []const u8 {
+        return self.stage_bytes[0..self.stage_len];
+    }
+    pub fn stageLabel(self: *const StartupFailure) []const u8 {
+        if (std.mem.eql(u8, self.stage(), "ssh_connect")) return "SSH 连接与认证";
+        if (std.mem.eql(u8, self.stage(), "sftp_init")) return "SFTP 初始化";
+        return "传输连接启动";
+    }
+    pub fn message(self: *const StartupFailure) []const u8 {
+        const value = self.code();
+        if (std.mem.indexOf(u8, value, "HostKey") != null) return "主机密钥校验失败";
+        if (std.mem.indexOf(u8, value, "AuthenticationInteraction") != null) return "独立传输连接需要重新认证";
+        if (std.mem.indexOf(u8, value, "Auth") != null or std.mem.indexOf(u8, value, "Credential") != null) return "SSH 认证失败";
+        if (std.mem.indexOf(u8, value, "Timeout") != null or std.mem.indexOf(u8, value, "TimedOut") != null) return if (std.mem.eql(u8, self.stage(), "sftp_init")) "SFTP 初始化超时" else "传输连接超时";
+        if (std.mem.indexOf(u8, value, "Handshake") != null) return "SSH 握手失败";
+        if (std.mem.eql(u8, self.stage(), "sftp_init") or std.mem.indexOf(u8, value, "Sftp") != null) return "SFTP 初始化失败";
+        if (std.mem.indexOf(u8, value, "Connect") != null or std.mem.indexOf(u8, value, "Network") != null or std.mem.indexOf(u8, value, "Socket") != null) return "无法建立传输连接";
+        if (std.mem.indexOf(u8, value, "stale_") != null or std.mem.indexOf(u8, value, "Stale") != null) return "传输连接状态已失效";
+        return "传输连接启动失败";
+    }
+    pub fn category(self: *const StartupFailure) Failure {
+        const value = self.code();
+        if (std.mem.indexOf(u8, value, "Timeout") != null or std.mem.indexOf(u8, value, "TimedOut") != null) return .timeout;
+        return .connection;
+    }
+};
+
 /// Value-only checksum diagnostics from the original engine attempt.
 pub const Verification = struct {
     state: enum { pending, reading, repairing, passed, failed, unavailable },
@@ -116,6 +163,8 @@ pub const Progress = struct {
     attempt: u8,
     retry_at_ms: ?u64,
     failure: ?Failure,
+    startup_failure: ?StartupFailure = null,
+    binding_wait: bool = false,
     job_cleanup: JobCleanup = .awaiting,
     verification: ?Verification = null,
     skipped_files: u32 = 0,
@@ -237,6 +286,7 @@ pub const Event = struct {
     state: State,
     cleanup: JobCleanup,
     failure: ?Failure,
+    startup_failure: ?StartupFailure = null,
     conflict_waiting: bool,
     verification: ?@FieldType(Verification, "state"),
     binding_wait: bool,
@@ -256,6 +306,7 @@ const Job = struct {
     total_bytes: u64 = 0,
     speed_bps: u64 = 0,
     failure: ?Failure = null,
+    startup_failure: ?StartupFailure = null,
     has_progress: bool = false,
     job_cleanup: JobCleanup = .released,
     verification: ?Verification = null,
@@ -284,7 +335,7 @@ const Job = struct {
         var ts: std.c.timespec = undefined;
         const timestamp: ?u64 = if (std.c.clock_gettime(.REALTIME, &ts) == 0 and ts.sec >= 0) @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000 else null;
         self.event_sequence +|= 1;
-        self.events[self.event_count] = .{ .sequence = self.event_sequence, .timestamp_ms = timestamp, .attempt = self.attempt, .state = self.state, .cleanup = self.job_cleanup, .failure = self.failure, .conflict_waiting = self.conflict_waiting, .verification = verification, .binding_wait = self.binding_wait, .done_bytes = self.done_bytes, .total_bytes = self.total_bytes };
+        self.events[self.event_count] = .{ .sequence = self.event_sequence, .timestamp_ms = timestamp, .attempt = self.attempt, .state = self.state, .cleanup = self.job_cleanup, .failure = self.failure, .startup_failure = self.startup_failure, .conflict_waiting = self.conflict_waiting, .verification = verification, .binding_wait = self.binding_wait, .done_bytes = self.done_bytes, .total_bytes = self.total_bytes };
         self.event_count += 1;
     }
 };
@@ -354,13 +405,27 @@ pub const Manager = struct {
         job.binding_wait = false;
     }
 
+    /// A connector failure is a failed, never-started intent, not a user pause.
+    /// Exact binding validation prevents a late failure from changing a retry.
+    pub fn failWaitingBinding(self: *Manager, id: JobId, binding: ServiceHandle, problem: StartupFailure) !void {
+        const job = self.find(id) orelse return error.UnknownJob;
+        if (job.attempt != 0 or job.engine_job != null or job.retained_owner != null or !job.binding_wait or job.spec.transfer_binding == null or !job.spec.transfer_binding.?.eql(binding)) return error.StaleBinding;
+        if (job.state != .queued) return error.InvalidState;
+        job.state = .failed;
+        job.failure = problem.category();
+        job.startup_failure = problem;
+        job.speed_bps = 0;
+        job.record();
+    }
+
     /// An unstarted intent can retry authentication on a new binding of the
     /// same original owner. No paths/options or local endpoint are replaced.
     pub fn rebindWaitingDraft(self: *Manager, id: JobId, binding: ServiceHandle) !void {
         const job = self.find(id) orelse return error.UnknownJob;
         defer job.record();
-        if (job.attempt != 0 or job.engine_job != null or job.retained_owner != null or job.state != .paused or job.job_cleanup != .released) return error.InvalidState;
+        if (job.attempt != 0 or job.engine_job != null or job.retained_owner != null or (job.state != .paused and !(job.state == .failed and job.startup_failure != null)) or job.job_cleanup != .released) return error.InvalidState;
         const previous = job.spec.transfer_binding orelse return error.MissingTransferBinding;
+        if (job.state == .failed and previous.eql(binding)) return error.StaleBinding;
         if (binding.kind != .transfer or binding.binding_id == 0 or binding.binding_generation == 0 or binding.resource_owner != .session or !binding.resource_owner.eql(previous.resource_owner)) return error.TransferOwnerMismatch;
         if (!previous.eql(binding) and binding.binding_generation <= previous.binding_generation) return error.StaleBinding;
         const owner = binding.resource_owner.session;
@@ -380,6 +445,8 @@ pub const Manager = struct {
         job.spec.transfer_binding = binding;
         job.binding_wait = true;
         job.state = .queued;
+        job.failure = null;
+        job.startup_failure = null;
     }
 
     /// Consume all pending engine events, then deterministically schedule FIFO work.
@@ -447,6 +514,7 @@ pub const Manager = struct {
         defer job.record();
         try requireReleased(job);
         if (job.state != .failed) return error.InvalidState;
+        if (job.startup_failure != null and job.binding_wait) return error.BindingNotReady;
         if (job.failure == .checksum) return error.ReviewRequired;
         if (job.attempt == std.math.maxInt(u8)) return error.AttemptExhausted;
         job.state = .queued;
@@ -903,6 +971,8 @@ fn snapshot(job: Job) Progress {
         .attempt = job.attempt,
         .retry_at_ms = if (job.state == .retry_wait) job.retry_at_ms else null,
         .failure = job.failure,
+        .startup_failure = job.startup_failure,
+        .binding_wait = job.binding_wait,
         .job_cleanup = job.job_cleanup,
         .verification = job.verification,
         .skipped_files = job.skipped_files,

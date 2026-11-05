@@ -216,7 +216,7 @@ test "configuration changes global palette without replacing inputs or selected 
             _ = cx.render();
         }
         try std.testing.expect(cx.isFocused(original_input));
-        try std.testing.expectEqual(theme.popupSelection(), original_input.getBackground());
+        try std.testing.expectEqual(theme.states().focus, original_input.getBackground());
         try std.testing.expect(original_input.style.outline() == null or original_input.style.outline().?.width == 0);
         cx.clearFocus();
         for (0..16) |_| {
@@ -229,7 +229,7 @@ test "configuration changes global palette without replacing inputs or selected 
             cx.advanceFrameClock();
             _ = cx.render();
         }
-        try std.testing.expectEqual(theme.popupSelection(), original_input.getBackground());
+        try std.testing.expectEqual(theme.states().focus, original_input.getBackground());
         try std.testing.expect(ui.Color.eql(theme.current().fg_1, v.title.getText().?.color));
         try std.testing.expect(ui.Color.eql(theme.current().ok_ink, v.error_label.getText().?.color));
     }

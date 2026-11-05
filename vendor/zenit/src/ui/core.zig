@@ -2126,6 +2126,13 @@ pub const Cx = struct {
         self.needs_redraw = true;
     }
 
+    /// Replay the current theme on a live retained branch that missed setTheme
+    /// while detached. Does not republish theme signals or rebuild its state.
+    pub fn replaySubtreeTheme(self: *Cx, root: *Node) void {
+        invokeThemeHookRecursive(root, self.tokens, self.allocator);
+        self.requestRedraw();
+    }
+
     fn replayThemeRoots(self: *Cx, t: *const theme.Values) void {
         const refs = @import("overlay_layer_refs.zig");
         // A layer may share the app tree or another layer's ancestor. Replay

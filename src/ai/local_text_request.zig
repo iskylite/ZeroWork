@@ -55,8 +55,31 @@ fn attachmentEnd(content: attachments.Content) []const u8 {
 
 /// The documented bytes/4 estimate, not provider-reported actual usage.
 /// Includes message framing, tool arguments/results/IDs and declared schemas.
+pub fn textTokens(bytes: usize) usize {
+    return (bytes +| 3) / 4;
+}
+pub fn toolTokens(definitions: []const provider.ToolDefinition) !usize {
+    return textTokens(try @import("provider_http.zig").toolCatalogBytes(definitions));
+}
+pub fn fixedTokens(request: provider.ChatRequest) !usize {
+    return std.math.add(usize, textTokens(request.system.len), try toolTokens(request.tools)) catch error.RequestTooLarge;
+}
+pub fn draftTokens(text: []const u8) usize {
+    return if (text.len == 0) 0 else textTokens(text.len +| 32);
+}
+pub fn outputTokens(max_output: u32, window: u32) u32 {
+    return @min(max_output, @max(window / 4, 1));
+}
+/// A summary cannot reduce system/tool definitions or other reserved input.
+pub fn checkFixedBudget(reserve: usize, output: usize, window: u32) !void {
+    if (window == 0) return error.InvalidContextWindow;
+    if (reserve > window or output > window - reserve) return error.ContextFixedOverhead;
+}
+pub fn checkFixedContext(request: provider.ChatRequest, window: u32) !void {
+    try checkFixedBudget(try fixedTokens(request), outputTokens(request.max_output, window), window);
+}
 pub fn inputTokens(request: provider.ChatRequest) !usize {
-    var bytes = request.system.len;
+    var bytes: usize = 0;
     for (request.messages) |message| {
         bytes = std.math.add(usize, bytes, message.content.len) catch return error.RequestTooLarge;
         bytes = std.math.add(usize, bytes, 32) catch return error.RequestTooLarge;
@@ -65,14 +88,14 @@ pub fn inputTokens(request: provider.ChatRequest) !usize {
             bytes = std.math.add(usize, bytes, call.id.len + call.name.len + call.arguments.len + 64) catch return error.RequestTooLarge;
         }
     }
-    bytes = std.math.add(usize, bytes, try provider.catalogTextBytes(request.tools)) catch return error.RequestTooLarge;
     const image_tokens = try @import("image_budget.zig").validate(request);
-    return std.math.add(usize, (bytes +| 3) / 4 + request.tools.len * 256, image_tokens) catch error.RequestTooLarge;
+    const text_tokens = std.math.add(usize, textTokens(bytes), try fixedTokens(request)) catch return error.RequestTooLarge;
+    return std.math.add(usize, text_tokens, image_tokens) catch error.RequestTooLarge;
 }
 pub fn checkContext(request: provider.ChatRequest, window: u32) !void {
-    if (window == 0) return error.InvalidContextWindow;
+    try checkFixedContext(request, window);
     const input = try inputTokens(request);
     // Match the actual serializer's reserved output clamp.
-    const output = @min(request.max_output, @max(window / 4, 1));
+    const output = outputTokens(request.max_output, window);
     if (input > window or output > window - input) return error.ContextBudgetExceeded;
 }

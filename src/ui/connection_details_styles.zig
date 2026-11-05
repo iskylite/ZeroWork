@@ -46,7 +46,13 @@ pub fn info() ui.BoxStyle {
 pub fn card() ButtonStyle {
     // Button keeps its empty default content slot. The explicit cardContent
     // owns the Figma 8 px gaps so that slot adds no extra horizontal gap.
-    return .{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = ui.Padding.all(10), .corner_radius = 8, .border_width = 0, .background = theme.popupInset(), .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = ui.Padding.all(10), .corner_radius = 8, .border_width = 0, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+}
+pub fn cardSurface() ui.BoxStyle {
+    var value = card();
+    value.padding = .{};
+    value.background = theme.popupInset();
+    return value;
 }
 pub fn cardContent() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 8, .min_width = 0 };

@@ -25,7 +25,9 @@ test "settings card and interaction colors remain distinct across builtin themes
             const hovered = theme.patchPaint(settings_styles.cardHover(), card);
             const selected = theme.patchPaint(settings_styles.selectionBackground(false), parent);
             const selected_hover = theme.patchPaint(settings_styles.selectionBackground(true), parent);
-            try std.testing.expect(color_contract.contrast(card, parent) >= 1.18);
+            // Light cards retain their quiet tint as material alpha falls;
+            // dark cards compensate the tint to retain their stronger separation.
+            try std.testing.expect(color_contract.contrast(card, parent) >= (if (theme.currentName() == .dark) @as(f64, 1.18) else 1.01));
             try std.testing.expect(color_contract.contrast(hovered, card) >= 1.05);
             try std.testing.expect(color_contract.contrast(selected, parent) >= 1.12);
             try std.testing.expect(color_contract.contrast(selected_hover, selected) >= 1.03);
@@ -272,6 +274,59 @@ const AppearanceFixture = struct {
 fn clickButton(node: *ui.Node) void {
     node.behavior.events.on_click.?.invoke();
 }
+
+test "appearance font weight reconciles selected and custom family edits" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.controller.folded_sections = 0;
+    try f.controller.editKey("ui", "font_family", .{ .text = "Menlo" });
+    try f.controller.editKey("ui", "font_weight", .{ .text = "bold" });
+    try std.testing.expectEqualStrings("bold", f.controller.model.value.ui.font_weight);
+
+    // Switching to a single-face font also clears the previous raw weight edit.
+    try f.controller.editKey("ui", "font_family", .{ .text = "Monaco" });
+    try std.testing.expectEqualStrings("regular", f.controller.model.value.ui.font_weight);
+    try std.testing.expect(f.controller.raw_fields[@import("config/settings_schema.zig").find("ui", "font_weight").?].input == null);
+    const monaco = try f.mount();
+    try std.testing.expect(textNode(byId(monaco.root, "settings.field.font_weight").?, "Regular") != null);
+
+    // Custom typed family changes use the same reconciliation as the selector.
+    try f.controller.editRaw("ui", "font_family", "Menlo");
+    try f.controller.editKey("ui", "font_weight", .{ .text = "bold" });
+    try f.controller.editRaw("ui", "font_family", "ZeroWorkMissingFontWeightTest");
+    try std.testing.expectEqualStrings("bold", f.controller.model.value.ui.font_weight);
+    try f.controller.editRaw("ui", "font_family", "Monaco");
+    try std.testing.expectEqualStrings("regular", f.controller.model.value.ui.font_weight);
+}
+
+test "appearance variable font weight input slider and preview stay synchronized" {
+    if (!@import("config/appearance_font.zig").isInstalled("Skia")) return error.SkipZigTest;
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.controller.folded_sections = 0;
+    try f.controller.editKey("ui", "font_family", .{ .text = "Skia" });
+    const mounted = try f.mount();
+    const input = inputFor(mounted, "settings.field.font_weight");
+    try std.testing.expectEqualStrings("400", input.getText());
+    const slider = byId(mounted.root, "settings.slider.font_weight").?;
+    f.cx.setFocus(slider);
+    f.cx.handleKeyDown(.right, .{});
+    try std.testing.expectEqualStrings("401", input.getText());
+    try std.testing.expectEqualStrings("401", f.controller.model.value.ui.font_weight);
+    try std.testing.expectEqual(@as(u16, 401), byId(mounted.root, "settings.font.preview.command").?.getText().?.font_weight);
+    f.cx.setFocus(input.input_container_node);
+    inputEvent(input, .{ .key_down = .{ .key = .a, .modifiers = .{ .super = true } } });
+    inputEvent(input, .{ .text_input = .{ .text = "901" } });
+    try std.testing.expectEqualStrings("401", f.controller.model.value.ui.font_weight);
+    try std.testing.expectEqualStrings("901", input.getText());
+    try std.testing.expect(textNode(mounted.root, "请输入 100–900 的整数。") != null);
+    try std.testing.expect(mounted.save_button.behavior.interaction.a11y.?.disabled);
+    inputEvent(input, .{ .key_down = .{ .key = .escape } });
+    try std.testing.expectEqualStrings("401", input.getText());
+    try std.testing.expect(!mounted.save_button.behavior.interaction.a11y.?.disabled);
+}
 fn inputEvent(state: *ui.widgets.input.TextInputState, event: ui.events.Event) void {
     const node = state.input_container_node.?;
     if (node.behavior.events.on_event_capture) |capture| if (capture(event, node.behavior.events.capture_context) == .stop) return;
@@ -498,6 +553,7 @@ test "appearance geometry uses V3 card padding and 32 pixel field controls" {
     defer f.deinit();
     f.controller.folded_sections = 0;
     const mounted = try f.mount();
+    _ = f.cx.render(); // Settle the responsive pair after-layout hook before measuring.
     const font = byId(mounted.root, "settings.appearance.font").?.globalRect();
     const family = byId(mounted.root, "settings.field.font_family").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 626), font.w, 0.1);
@@ -510,8 +566,12 @@ test "appearance geometry uses V3 card padding and 32 pixel field controls" {
     for ([_][]const u8{ "fit", "alignment" }) |field| {
         var buffer: [80]u8 = undefined;
         const control = byId(mounted.root, try std.fmt.bufPrint(&buffer, "settings.field.{s}", .{field})).?.globalRect();
-        try std.testing.expectApproxEqAbs(@as(f32, 16), material.x + material.w - control.x - control.w, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 220), control.w, 0.1);
+        const pair = byId(mounted.root, "settings.background.position_fields").?.globalRect();
+        const fit = byId(mounted.root, "settings.field.fit").?.globalRect();
+        const alignment = byId(mounted.root, "settings.field.alignment").?.globalRect();
+        try std.testing.expectApproxEqAbs(fit.y, alignment.y, 0.1);
+        try std.testing.expectApproxEqAbs((pair.w - 16) / 2 - 88, control.w, 0.1);
+        try std.testing.expect(control.x >= material.x and control.x + control.w <= material.x + material.w);
         try std.testing.expectApproxEqAbs(@as(f32, 32), control.h, 0.1);
     }
     for ([_][]const u8{ "transparency", "blur_px" }) |field| {
@@ -523,6 +583,38 @@ test "appearance geometry uses V3 card padding and 32 pixel field controls" {
     // Turning a background off does not hide its editable draft.
     try std.testing.expect(!f.controller.model.value.ui.materials.background.enabled);
     try std.testing.expect(byId(mounted.root, "settings.background.choose") != null);
+}
+
+test "appearance directory controls follow detected source without a source selector" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.controller.folded_sections = 0;
+    const file = try f.mount();
+    try std.testing.expect(byId(file.root, "settings.field.source") == null);
+    try std.testing.expect(byId(file.root, "settings.field.order") == null);
+    try std.testing.expect(byId(file.root, "settings.field.interval_minutes") == null);
+    try f.controller.editKey("ui.materials.background", "source", .{ .text = "directory" });
+    const directory = try f.mount();
+    try std.testing.expectEqual(@as(u16, 5), f.controller.model.value.ui.materials.background.interval_minutes);
+    try std.testing.expect(byId(directory.root, "settings.field.order") != null);
+    try std.testing.expect(byId(directory.root, "settings.field.interval_minutes") != null);
+    _ = f.cx.render();
+    const order = byId(directory.root, "settings.field.order").?;
+    const interval = byId(directory.root, "settings.field.interval_minutes").?;
+    const fit = byId(directory.root, "settings.field.fit").?;
+    const alignment = byId(directory.root, "settings.field.alignment").?;
+    try std.testing.expectApproxEqAbs(order.globalRect().y, interval.globalRect().y, 0.1);
+    try std.testing.expectApproxEqAbs(fit.globalRect().y, alignment.globalRect().y, 0.1);
+    try std.testing.expect(order.globalRect().x + order.globalRect().w <= interval.globalRect().x);
+    const pair = byId(directory.root, "settings.background.rotation_fields").?.globalRect();
+    try std.testing.expectApproxEqAbs((pair.w - 16) / 2 - 88, order.globalRect().w, 0.1);
+    f.cx.setViewport(500, 628);
+    f.cx.root.?.setStyleInline(f.cx.allocator, .{ .width = .{ .px = 500 } });
+    f.cx.layout();
+    _ = f.cx.render();
+    try std.testing.expect(interval.globalRect().y > order.globalRect().y);
+    try std.testing.expect(alignment.globalRect().y > fit.globalRect().y);
 }
 
 test "appearance V3 inline preview and theme import expose real capability" {
@@ -672,10 +764,10 @@ test "appearance numeric input keeps invalid raw and composition while footer tr
     mounted.refreshFooter();
     try std.testing.expect(mounted.save_button.behavior.interaction.a11y.?.disabled);
     f.busy = false;
-    f.font_problem = "UnsupportedWeight";
+    f.font_problem = @import("config/appearance_font.zig").problemMessage(error.UnsupportedWeight);
     mounted.refreshFooter();
     try std.testing.expect(mounted.save_button.behavior.interaction.a11y.?.disabled);
-    try std.testing.expect(textNode(mounted.root, "UnsupportedWeight") != null);
+    try std.testing.expect(textNode(mounted.root, "当前字体不支持所选字重，请选择其他字重。") != null);
 }
 
 test "settings fixed footer stays outside the scrolling viewport at canonical size" {

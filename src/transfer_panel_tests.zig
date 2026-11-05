@@ -78,6 +78,8 @@ test {
     _ = @import("ai_provider_settings_tests.zig");
     _ = @import("ai_composer_controls_view_tests.zig");
     _ = @import("ai_composer_input_tests.zig");
+    _ = @import("ai_composer_interaction_view_tests.zig");
+    _ = @import("ai_conversation_input_view_tests.zig");
     _ = @import("ai_attachments_view_tests.zig");
     _ = @import("ai_image_attachment_view_tests.zig");
     _ = @import("ai_image_attachment_tests.zig");

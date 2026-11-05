@@ -186,13 +186,12 @@
 | AI模型与权限 | 输入区权限 / 模型 / 用量 | 确认后执行 / 自动执行；组内调用按当前权限模式判断，当前策略见[权限说明](../../DESIGN/V0.1.7_AI_ASSISTANT.md#42-两种权限与分类)；336px模型浮卡、合法低/中/高滑块；200k/1M模型窗口；历史、引用、终端、身份工具、预留输出的预算分解，可清理恢复 |
 | AI上下文 | ＋附件 / `/` | 本地text/image、终端选区、远端文件；远端来源/路径/上级/过滤/列表/读取预览/附加；empty/error/disconnected恢复；处理中→ready、预览/移除/error模拟 |
 | AI工具计划 | 提问→模拟回答 | 只读目标与参数、批准/拒绝/准备到输入区；stdout/stderr/exit、失败、unknown不自动重试及查询目标状态；结果不写入PTY |
-| 笔记闭环 | 终端菜单/AI结果 | 存为笔记片段/复盘笔记→notes；noteCommand保留多行到textarea且不执行；noteContext→当前AI只读笔记附件；提问草稿保持空，不自动发送 |
 
 ### 新场景入口
 
 - [AI浮窗](index.html?mode=ai)、[未配置](index.html?mode=ai-unconfigured)、[请求失败](index.html?mode=ai-error)
 - [独立历史页](index.html?mode=history)、[最小窗口](index.html?mode=ssh&size=compact)
-- 跨模块参数：`noteCommand`、`noteContext`、`ai=1`；`hostName`只改变示例连接名称，实际地址与身份仍以表单/fixture为准。
+- 跨模块参数：`ai=1`；`hostName`只改变示例连接名称，实际地址与身份仍以表单/fixture为准。
 
 ### 原生落地映射（以仓库实际导出为准）
 

@@ -125,7 +125,7 @@ pub const Controller = struct {
 
     pub fn editKey(self: *Controller, section: []const u8, key: []const u8, next: values.Value) !void {
         try self.ensureEditable();
-        const background_path = std.mem.eql(u8, section, "ui.materials.background") and std.mem.eql(u8, key, "path");
+        const background_path = std.mem.eql(u8, section, "ui.materials.background") and (std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "source"));
         if (background_path and self.background.asset_revision == std.math.maxInt(u64)) return error.AssetRevisionExhausted;
         const index = schema.find(section, key) orelse return error.UnknownKey;
         const raw = switch (next) {
@@ -151,7 +151,7 @@ pub const Controller = struct {
     /// keep their last valid value. Navigation never creates a second draft.
     pub fn editRaw(self: *Controller, section: []const u8, key: []const u8, input: []const u8) !void {
         try self.ensureEditable();
-        const background_path = std.mem.eql(u8, section, "ui.materials.background") and std.mem.eql(u8, key, "path");
+        const background_path = std.mem.eql(u8, section, "ui.materials.background") and (std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "source"));
         if (background_path and self.background.asset_revision == std.math.maxInt(u64)) return error.AssetRevisionExhausted;
         const index = schema.find(section, key) orelse return error.UnknownKey;
         const owned = try self.allocator.dupe(u8, input);
@@ -274,7 +274,10 @@ pub const Controller = struct {
         try self.ensureEditable();
         const owned = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned);
-        return .{ .allocator = self.allocator, .request = try self.background.select(owned) };
+        var request = try self.background.select(owned);
+        request.source = self.model.value.ui.materials.background.source;
+        request.order = self.model.value.ui.materials.background.order;
+        return .{ .allocator = self.allocator, .request = request };
     }
 
     pub fn selectTheme(self: *Controller, registry: *const themes.Registry, id: []const u8) !void {
@@ -353,8 +356,17 @@ pub const Controller = struct {
         try self.ensureEditable();
         const path = try self.allocator.dupe(u8, asset.path);
         errdefer self.allocator.free(path);
-        try self.applyEdit("ui.materials.background", "path", .{ .text = path });
+        const source = try self.allocator.dupe(u8, @tagName(asset.source));
+        errdefer self.allocator.free(source);
+        var candidate = self.model.value;
+        candidate.ui.materials.background.path = path;
+        candidate.ui.materials.background.source = asset.source;
+        const owned = try runtime.Snapshot.init(self.allocator, candidate);
+        if (self.draft) |*previous| previous.deinit();
+        self.draft = owned;
+        self.model.value = owned.value;
         self.replaceRaw(schema.find("ui.materials.background", "path").?, path);
+        self.replaceRaw(schema.find("ui.materials.background", "source").?, source);
         _ = self.background.complete(self.allocator, asset);
         self.refreshDirty();
         return true;
@@ -382,10 +394,28 @@ pub const Controller = struct {
     fn applyEdit(self: *Controller, section: []const u8, key: []const u8, next: values.Value) !void {
         var candidate = self.model.value;
         try values.writeConfig(&candidate, section, key, next);
+        var adjusted_weight = false;
+        var weight_buffer: [16]u8 = undefined;
+        if (std.mem.eql(u8, section, "ui") and std.mem.eql(u8, key, "font_family")) {
+            const supported = @import("appearance_font.zig").supportedWeights(candidate.ui.font_family);
+            if ((supported.len != 0 or supported.variable != null) and !supported.contains(candidate.ui.font_weight)) {
+                candidate.ui.font_weight = if (supported.variable) |range| try std.fmt.bufPrint(&weight_buffer, "{d}", .{range.default}) else if (supported.contains("regular")) "regular" else @tagName(supported.values[0]);
+                adjusted_weight = true;
+            }
+        }
+        if (std.mem.eql(u8, section, "ui") and std.mem.eql(u8, key, "font_weight")) {
+            const supported = @import("appearance_font.zig").supportedWeights(candidate.ui.font_family);
+            if (supported.variable != null and !supported.contains(candidate.ui.font_weight)) return error.UnsupportedWeight;
+        }
         const owned = try runtime.Snapshot.init(self.allocator, candidate);
         if (self.draft) |*draft| draft.deinit();
         self.draft = owned;
         self.model.value = owned.value;
+        if (adjusted_weight) {
+            const index = schema.find("ui", "font_weight").?;
+            if (self.raw_fields[index].input) |input| self.allocator.free(input);
+            self.raw_fields[index] = .{};
+        }
     }
 
     /// Replace the complete recorded map as one owned draft transaction.

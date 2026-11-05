@@ -32,6 +32,7 @@ pub const Approval = @import("../ai/legacy_adapter.zig").Approval;
 
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
+    terminal_files: @import("terminal_file_bridge.zig").Bridge,
     capture: ?Capture = null,
     delegated_owner: ?@import("../ai/tool_scope.zig").Owner = null,
     mutex: std.atomic.Mutex = .unlocked,
@@ -47,7 +48,7 @@ pub const Bridge = struct {
         var terminal = tab.terminal orelse return error.ServiceUnavailable;
         const surface = terminal.terminal_surface orelse return error.ServiceUnavailable;
         if (!surface.owner.eql(owner)) return error.StaleSession;
-        var lines = try surface.service.contentQuery(.{ .max_lines = 1024, .max_bytes = 16384 }, allocator);
+        var lines = try surface.service.contentQuery(.{ .max_lines = 500, .max_bytes = 16384 }, allocator);
         defer lines.deinit(allocator);
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(allocator);
@@ -66,13 +67,14 @@ pub const Bridge = struct {
         return assembled;
     }
     pub fn init(allocator: std.mem.Allocator) Bridge {
-        return .{ .allocator = allocator };
+        return .{ .allocator = allocator, .terminal_files = .{ .allocator = allocator } };
     }
     fn lock(self: *Bridge) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
     /// Main-thread only, after the previous Manager worker has joined.
     pub fn prepare(self: *Bridge, app: *Application, owner: identity.SessionHandle) !void {
+        if (self.terminal_files.busy()) return error.ToolCleanupPending;
         self.lock();
         defer self.mutex.unlock();
         if (self.exchange != null or self.active != null) return error.ToolCleanupPending;
@@ -93,9 +95,11 @@ pub const Bridge = struct {
         const cwd = if (directory) |value| if (value.value) |path| try self.allocator.dupe(u8, path) else null else null;
         if (self.capture) |old| if (old.cwd) |path| self.allocator.free(path);
         self.capture = .{ .owner = owner, .exec_binding = exec_binding, .terminal_binding = terminal_binding, .cwd = cwd };
+        self.terminal_files.capture = .{ .owner = owner, .binding = exec_binding, .cwd = cwd };
         self.shutting_down = false;
     }
     pub fn clear(self: *Bridge) !void {
+        try self.terminal_files.clear();
         self.lock();
         defer self.mutex.unlock();
         if (self.exchange != null or self.active != null) return error.ToolCleanupPending;
@@ -103,7 +107,11 @@ pub const Bridge = struct {
         self.capture = null;
     }
     pub fn interface(self: *Bridge) loop.Host {
-        return .{ .context = self, .execute = execute };
+        return .{ .context = self, .execute = execute, .execute_file = executeFile };
+    }
+    fn executeFile(raw: *anyopaque, invocation: @import("../ai/plugin_tools.zig").Invocation, allocator: std.mem.Allocator, token: ?*provider.CancelToken) !@import("../ai/plugin_tools.zig").ToolResult {
+        const self: *Bridge = @ptrCast(@alignCast(raw));
+        return self.terminal_files.execute(invocation, allocator, token);
     }
     fn execute(raw: *anyopaque, invocation: loop.Invocation, allocator: std.mem.Allocator, token: ?*provider.CancelToken) !loop.Outcome {
         const self: *Bridge = @ptrCast(@alignCast(raw));
@@ -190,6 +198,7 @@ pub const Bridge = struct {
     }
     /// UI/controller thread pump. All host and adapter calls stay here.
     pub fn pump(self: *Bridge, app: *Application) void {
+        self.terminal_files.pump(app);
         self.lock();
         defer self.mutex.unlock();
         const exchange = self.exchange;
@@ -271,6 +280,8 @@ pub const Bridge = struct {
     /// Only command execution contributes a write risk. Read tools still
     /// participate in closeImpact's identity/cleanup fingerprint.
     pub fn writeRisk(self: *Bridge, owner: identity.SessionHandle) bool {
+        if (self.capture) |captured| if (!captured.owner.eql(owner)) return false;
+        if (self.terminal_files.busy()) return true;
         self.lock();
         defer self.mutex.unlock();
         const capture = self.capture orelse return false;
@@ -280,15 +291,17 @@ pub const Bridge = struct {
         return !current.ready.load(.acquire) and current.invocation.call.tool == .run_command and current.approval != .rejected;
     }
     pub fn closeImpact(self: *Bridge, owner: identity.SessionHandle) @import("group_close_controller.zig").Impact {
+        const file_operation = self.terminal_files.fingerprint(owner);
         self.lock();
         defer self.mutex.unlock();
         var impact: @import("group_close_controller.zig").Impact = .{};
         const capture = self.capture orelse return impact;
         if (!capture.owner.eql(owner)) return impact;
         const pending = if (self.exchange) |current| !current.ready.load(.acquire) else false;
-        if (!pending and self.active == null) return impact;
+        if (!pending and self.active == null and file_operation == 0) return impact;
         var hash = std.hash.Wyhash.init(0x41494c4f43414c);
         std.hash.autoHash(&hash, owner);
+        std.hash.autoHash(&hash, file_operation);
         if (self.exchange) |current| {
             std.hash.autoHash(&hash, current.sequence);
             std.hash.autoHash(&hash, current.invocation.key.turn_id);
@@ -310,6 +323,9 @@ pub const Bridge = struct {
         return impact;
     }
     pub fn stopOwner(self: *Bridge, owner: identity.SessionHandle) @import("application_host.zig").CloseReceipt {
+        if (self.capture) |captured| if (!captured.owner.eql(owner)) return .released;
+        const file_receipt = self.terminal_files.stop();
+        if (file_receipt != .released) return file_receipt;
         self.lock();
         defer self.mutex.unlock();
         const capture = self.capture orelse return .released;
@@ -323,6 +339,7 @@ pub const Bridge = struct {
     /// Exceptional teardown wakes a waiting worker before the ApplicationHost
     /// is destroyed. Any still-live child remains owned by its Local adapter.
     pub fn shutdown(self: *Bridge, app: ?*Application) void {
+        self.terminal_files.shutdown(app);
         self.lock();
         defer self.mutex.unlock();
         self.shutting_down = true;
@@ -330,6 +347,7 @@ pub const Bridge = struct {
         if (self.exchange) |exchange| if (!exchange.ready.load(.acquire)) finish(exchange, .{ .session_id = exchange.invocation.call.targets.ids[0], .status = if (self.active == null) .cancelled else .unknown, .transport = .local, .local_released = self.active == null, .error_code = "ToolHostShuttingDown" });
     }
     pub fn deinit(self: *Bridge) void {
+        self.terminal_files.clear() catch unreachable;
         // The Manager worker must have joined before destroying this bridge.
         std.debug.assert(self.exchange == null);
         if (self.capture) |capture| if (capture.cwd) |path| self.allocator.free(path);

@@ -205,3 +205,44 @@ test "appearance worker prepares a retained background after reopening disabled 
     try std.testing.expectEqualStrings(path, target.value.ui.materials.background.path);
     try std.testing.expectEqual(.clean, controller.state());
 }
+
+test "background picker selection atomically switches the derived source after worker validation" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" ++
+        "\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
+        "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d" ++
+        "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+    try tmp.dir.writeFile(io, .{ .sub_path = "image.png", .data = png });
+    const file = try tmp.dir.realPathFileAlloc(io, "image.png", a);
+    defer a.free(file);
+    var registry = try themes.Registry.init(a);
+    defer registry.deinit();
+    var controller = try Controller.init(a, .{});
+    defer controller.deinit();
+    var worker = try api.Worker.init(a, io, tmp.dir, "favorites.json");
+    defer worker.deinit();
+    for ([_][]const u8{ std.fs.path.dirname(file).?, file }) |path| {
+        const before = controller.model.value.ui.materials.background.source;
+        var request = try controller.requestBackground(path);
+        request.request.detect_source = true;
+        try worker.startBackground(&request);
+        try std.testing.expectEqual(before, controller.model.value.ui.materials.background.source);
+        const result = try finish(&worker, &controller, &registry);
+        try std.testing.expect(result.changed and result.problem == null);
+        try std.testing.expectEqualStrings(path, controller.model.value.ui.materials.background.path);
+        try std.testing.expectEqual(if (std.mem.eql(u8, path, file)) @import("config/background_asset.zig").Source.file else .directory, controller.model.value.ui.materials.background.source);
+    }
+    try tmp.dir.createDir(io, "empty", .default_dir);
+    const empty = try std.fs.path.join(a, &.{ std.fs.path.dirname(file).?, "empty" });
+    defer a.free(empty);
+    var request = try controller.requestBackground(empty);
+    request.request.detect_source = true;
+    try worker.startBackground(&request);
+    const failed = try finish(&worker, &controller, &registry);
+    try std.testing.expect(failed.problem != null);
+    try std.testing.expectEqualStrings(file, controller.model.value.ui.materials.background.path);
+    try std.testing.expectEqual(@import("config/background_asset.zig").Source.file, controller.model.value.ui.materials.background.source);
+}

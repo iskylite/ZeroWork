@@ -1190,6 +1190,16 @@ pub const SshWorker = struct {
         }
         return snapshot;
     }
+    /// Observation-only exact lookup. An absent historical execution must not
+    /// fall back to whichever execution currently owns the shell.
+    pub fn observeExecution(self: *SshWorker, id: identity.ExecutionId) !Execution.Snapshot {
+        if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
+        defer self.execution_mutex.unlock();
+        if (self.shell_execution) |*bridge| return bridge.snapshotFor(id) orelse error.ExecutionNotFound;
+        const snapshot = if (self.execution) |*bridge| bridge.snapshot else return error.ExecutionNotFound;
+        if (snapshot.execution_id == null or !snapshot.execution_id.?.eql(id)) return error.ExecutionNotFound;
+        return snapshot;
+    }
     /// Retained parent observers survive child commands and layer returns.
     pub fn executionSnapshotFor(self: *SshWorker, id: identity.ExecutionId) !Execution.Snapshot {
         if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
@@ -2756,4 +2766,45 @@ fn executionNow() i64 {
 
 test {
     _ = ShellExecution;
+}
+
+test "readonly verification SSH terminal exact lookup never substitutes the current execution or advances its lease" {
+    const a = std.testing.allocator;
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(7), .generation = 3 };
+    const current = identity.ExecutionId.generate();
+    const original = identity.ExecutionId.generate();
+    // This isolated observation uses only the mutex and the two bridge slots.
+    var worker: SshWorker = undefined;
+    worker.execution_mutex = .unlocked;
+    worker.execution = null;
+    worker.shell_execution = ShellExecution.Bridge.init(a, owner);
+    defer worker.shell_execution.?.deinit();
+    const shell = &worker.shell_execution.?;
+    shell.snapshot.execution_id = current;
+    shell.snapshot.state = .running;
+    shell.snapshot.remote_effect_unknown = true;
+    shell.snapshot.revision = 12;
+    shell.active = true;
+    shell.start_pending = true;
+    shell.lease.expires_at = 0;
+    const before = shell.snapshot;
+    const old_lease = shell.lease;
+    try std.testing.expectError(error.ExecutionNotFound, worker.observeExecution(original));
+    const seen = try worker.observeExecution(current);
+    try std.testing.expect(std.meta.eql(before, seen));
+    try std.testing.expect(std.meta.eql(before, shell.snapshot));
+    try std.testing.expect(std.meta.eql(old_lease, shell.lease));
+    try std.testing.expect(shell.active and shell.start_pending);
+    const retained = try a.create(ShellExecution.Bridge);
+    retained.* = ShellExecution.Bridge.init(a, owner);
+    retained.snapshot.execution_id = original;
+    retained.snapshot.state = .outcome_unknown;
+    retained.snapshot.remote_effect_unknown = true;
+    try shell.contexts.append(a, retained);
+    const historical = try worker.observeExecution(original);
+    try std.testing.expect(historical.execution_id.?.eql(original));
+    try std.testing.expect(historical.state == .outcome_unknown and historical.remote_effect_unknown);
+    try std.testing.expect(worker.execution_mutex.tryLock());
+    defer worker.execution_mutex.unlock();
+    try std.testing.expectError(error.WorkerBusy, worker.observeExecution(original));
 }

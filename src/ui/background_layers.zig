@@ -153,6 +153,7 @@ pub const View = struct {
     /// Its own text and controls render afterward; no image/floor nodes,
     /// layout hooks or target borrows are retained by the global material.
     pub fn isolate(self: *View, scope: *ui.Scope, target: *ui.Node) !void {
+        @import("layer_materials.zig").overlay(target);
         @import("floating_input.zig").protect(self.cx, target);
         try scope.createEffect(.{ .cx = self.cx, .target = target, .publication = try self.cx.themeSignal(scope) }, struct {
             fn paint(ctx: anytype) void {

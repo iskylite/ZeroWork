@@ -63,6 +63,7 @@ pub const TimelineItem = union(enum) {
     }
 };
 pub const Turn = struct {
+    file_source: ?@import("terminal_file_source.zig").Source = null,
     id: u64 = 0,
     task_id: ?identity.TaskId = null,
     sent_at_ms: u64 = 0,
@@ -90,6 +91,7 @@ pub const Turn = struct {
     steps: std.ArrayList(events.Step) = .empty,
     host_notices: std.ArrayList(HostNotice) = .empty,
     pub fn deinit(self: *Turn, a: std.mem.Allocator) void {
+        if (self.file_source) |*source| source.deinit(a);
         self.before.deinit();
         self.after.deinit();
         a.free(self.answer);
@@ -217,6 +219,7 @@ pub const Turn = struct {
     pub fn clone(self: *const Turn, a: std.mem.Allocator) !Turn {
         var result: Turn = .{ .id = self.id, .task_id = self.task_id, .sent_at_ms = self.sent_at_ms, .ended_at_ms = self.ended_at_ms, .started_mono_ms = self.started_mono_ms, .elapsed_ms = self.elapsed_ms, .input_tokens = self.input_tokens, .output_tokens = self.output_tokens, .thinking_started_ms = self.thinking_started_ms, .thinking_ended_ms = self.thinking_ended_ms, .thinking_expanded = self.thinking_expanded };
         errdefer result.deinit(a);
+        result.file_source = if (self.file_source) |source| try source.clone(a) else null;
         result.before = try wire.History.copy(a, self.before.messages, "");
         result.after = try wire.History.copy(a, self.after.messages, "");
         result.answer = try a.dupe(u8, self.answer);

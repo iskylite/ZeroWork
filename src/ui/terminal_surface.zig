@@ -182,7 +182,7 @@ pub const Surface = struct {
         const root = try ui.boxStyled(cx, S.surface, .{});
         errdefer cx.destroyDetached(root);
         root.meta.ownership.meta.test_id = "terminal.surface";
-        const viewport = try ui.box(cx, .{ .position = .absolute, .overflow = .hidden, .hit_behavior = .pass_through }, .{});
+        const viewport = try ui.box(cx, .{ .position = .absolute, .overflow = .hidden, .overflow_hidden = true, .hit_behavior = .pass_through }, .{});
         viewport.meta.ownership.meta.test_id = "terminal.surface.viewport";
         try root.appendChild(cx.allocator, viewport);
         const caret = try leaf(cx, options.cursor);
@@ -377,6 +377,8 @@ pub const Surface = struct {
     pub fn refresh(self: *Surface, expected: identity.SessionHandle, active: bool) !bool {
         if (!self.composite.flushRecording()) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
         if (!self.owner.eql(expected)) return error.StaleOwner;
+        const bounds = self.root.rectFromWorldOrFallback();
+        if (self.composite.setViewportHeight(bounds.h - self.contentPadding().top - self.contentPadding().bottom)) self.force_snapshot = true;
         try self.refreshControl();
         // A retained, exited pane has no worker/clock tick to wake it. Keep
         // polling only until this request appears in an actual owned frame.
@@ -620,7 +622,7 @@ pub const Surface = struct {
         // terminal canvas always exposes the shared application background.
         if (self.root.getBackground().a != 0) self.root.setBackground(ui.Color.TRANSPARENT);
         const bounds = self.root.rectFromWorldOrFallback();
-        try absolute(self.cx, self.viewport, 0, self.contentPadding().top, bounds.w, @min(@max(0, bounds.h - self.contentPadding().top - self.contentPadding().bottom), @as(f32, @floatFromInt(projection.rows)) * self.options.row_height));
+        try absolute(self.cx, self.viewport, 0, self.contentPadding().top, bounds.w, @max(0, bounds.h - self.contentPadding().top - self.contentPadding().bottom));
         const row_width = @max(0, bounds.w - self.contentPadding().left - self.contentPadding().right);
         while (self.rows.items.len < projection.visible_rows.len) {
             try self.rows.ensureUnusedCapacity(self.cx.allocator, 1);
@@ -683,7 +685,7 @@ pub const Surface = struct {
                 }
                 row.article.?.setDisplay(.flex);
                 row.article.?.setBackground(records_style.tint(if (value.application_state == 2) 3 else value.application_kind));
-                try absolute(self.cx, row.article.?, -@import("terminal_record_geometry.zig").padding_inline, value.presentation.article_y - row_y, row_width + 2 * @import("terminal_record_geometry.zig").padding_inline, value.presentation.article_height);
+                try absolute(self.cx, row.article.?, 0, value.presentation.article_y - row_y, row_width, value.presentation.article_height);
             } else if (row.article) |article| article.setDisplay(.none);
             const current = !self.snapshot.?.read_only and projection.cursor.visible and value.viewport_y == projection.cursor.row;
             row.root.setBackground(if (value.application_record_id == 0 and current and self.options.highlight) S.inputHighlight(self.cx.tokens) else ui.Color.TRANSPARENT);

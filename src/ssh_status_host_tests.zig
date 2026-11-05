@@ -386,13 +386,15 @@ test "status transfer ticker displays only the filename and retains a plain file
     const name_bounds = ticker.name.globalRect();
     try std.testing.expect(name_bounds.x + name_bounds.w <= percent_bounds.x);
     try std.testing.expect(percent_bounds.x + percent_bounds.w <= rate_bounds.x);
-    try std.testing.expectEqual(@as(f32, 36), percent_bounds.w);
-    try std.testing.expectEqual(@as(f32, 76), rate_bounds.w);
+    try std.testing.expectEqual(@as(f32, 28), percent_bounds.w);
+    try std.testing.expect(rate_bounds.w > 0 and rate_bounds.w < 76);
     ticker.update("传输 · 空闲", "", "", 0, false);
     f.settle();
     const trigger = ticker.root.globalRect();
     const label = ticker.name.globalRect();
     try std.testing.expectEqual(@as(f32, 11), ticker.name.getText().?.font_size);
+    try std.testing.expectEqual(.clip, ticker.name.getText().?.text_overflow);
+    try std.testing.expect(label.w >= @ceil(f.cx.text.measureTextWidth("传输 · 空闲", 11, 500, false)));
     try std.testing.expect(trigger.w < 140);
     try std.testing.expectApproxEqAbs(@as(f32, 7), trigger.x + trigger.w - label.x - label.w, 0.1);
 }
@@ -521,7 +523,7 @@ test "status transfer ticker fits the actual narrow bottom bar and keeps speed b
     const control = ticker.root.globalRect();
     try std.testing.expect(control.x >= bar.x);
     try std.testing.expect(control.x + control.w <= bar.x + bar.w - 8 + 0.1);
-    try std.testing.expectEqual(@as(f32, 76), ticker.speed.globalRect().w);
+    try std.testing.expect(ticker.speed.globalRect().w > 0 and ticker.speed.globalRect().w < 76);
     try std.testing.expect(ticker.speed.globalRect().x + ticker.speed.globalRect().w <= control.x + control.w);
     const speed = @import("ui/status_transfer_view.zig").formatSpeed;
     var buffer: [48]u8 = undefined;

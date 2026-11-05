@@ -7,6 +7,7 @@ const backend = @import("transfer/manager.zig");
 const V = @import("ui/transfer_manager_view.zig");
 const theme = @import("ui/app_theme.zig");
 var reference_mode = false;
+var startup_failure_mode = false;
 var selected_theme: theme.Name = .dark;
 const Fixture = struct {
     manager: backend.Manager = undefined,
@@ -18,7 +19,17 @@ const Fixture = struct {
     fn poll(_: *anyopaque) ?backend.EngineProgress {
         return null;
     }
-    fn action(_: *anyopaque, _: u64, _: V.Action) void {}
+    fn action(raw: *anyopaque, job: u64, action_: V.Action) void {
+        if (!startup_failure_mode or action_ != .retry) return;
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        var next = self.manager.transferBinding(job) orelse return;
+        next.binding_id += 1;
+        next.binding_generation += 1;
+        self.manager.rebindWaitingDraft(job, next) catch return;
+        self.manager.releaseBindingWait(job, next) catch return;
+        self.manager.tick(1);
+        self.panel.refresh(1, .{ .window_chunks = 16, .chunk_kb = 64 }) catch {};
+    }
     fn cleanup(self: *Fixture) void {
         self.manager.deinit();
     }
@@ -30,7 +41,15 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     const f = try scope.createState(Fixture, .{});
     f.manager = try backend.Manager.init(cx.allocator, .{ .ctx = f, .open = Fixture.open, .cancel = Fixture.cancel, .poll = Fixture.poll }, 1, .{});
     try scope.onCleanup(Fixture, f, Fixture.cleanup);
-    _ = try f.manager.enqueue(.{ .session_id = 101, .direction = .upload, .sources = &.{"/fixtures/release.tar.gz"}, .local_dir = "/fixtures", .remote_dir = "/srv/releases" });
+    if (startup_failure_mode) {
+        const owner = @import("host/identity.zig").SessionHandle{ .session_id = @fromBackingInt(101), .generation = 1 };
+        const binding: backend.ServiceHandle = .{ .resource_owner = .{ .session = owner }, .origin_session = owner, .kind = .transfer, .binding_id = 900, .binding_generation = 1 };
+        const failed = try f.manager.enqueueWaitingBinding(.{ .session_id = 101, .transfer_binding = binding, .direction = .upload, .sources = &.{"/fixtures/connection-failed.zip"}, .local_dir = "/fixtures", .remote_dir = "/srv/releases" });
+        try f.manager.failWaitingBinding(failed, binding, .init("AuthFailed", "ssh_connect"));
+        const paused = try f.manager.enqueueWaitingBinding(.{ .session_id = 101, .transfer_binding = binding, .direction = .upload, .sources = &.{"/fixtures/manually-paused.zip"}, .local_dir = "/fixtures", .remote_dir = "/srv/releases" });
+        try f.manager.pause(paused);
+        _ = try f.manager.enqueueWaitingBinding(.{ .session_id = 101, .transfer_binding = binding, .direction = .upload, .sources = &.{"/fixtures/waiting-for-connection.zip"}, .local_dir = "/fixtures", .remote_dir = "/srv/releases" });
+    } else _ = try f.manager.enqueue(.{ .session_id = 101, .direction = .upload, .sources = &.{"/fixtures/release.tar.gz"}, .local_dir = "/fixtures", .remote_dir = "/srv/releases" });
     f.manager.tick(0);
     f.panel = try V.mountWindow(cx, scope, &f.manager, .{ .context = f, .action = Fixture.action });
     f.panel.options.fill_window = false;
@@ -61,6 +80,8 @@ pub fn main(init: std.process.Init) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--reference")) {
             reference_mode = true;
+        } else if (std.mem.eql(u8, arg, "--startup-failure")) {
+            startup_failure_mode = true;
         } else if (std.mem.eql(u8, arg, "--theme")) {
             selected_theme = std.meta.stringToEnum(theme.Name, args.next() orelse return error.InvalidArgument) orelse return error.InvalidArgument;
         } else return error.InvalidArgument;

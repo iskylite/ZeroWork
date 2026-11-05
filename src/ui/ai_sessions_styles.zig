@@ -4,7 +4,7 @@ pub fn listSurface() ui.BoxStyle {
     return .{
         .width = .fill(),
         .height = .{ .px = 0 },
-        .max_height = 160,
+        .max_height = 240,
         .flex_shrink = 0,
         .display = .flex,
         .background = ui.Color.TRANSPARENT,
@@ -38,7 +38,7 @@ pub fn dialogDetail() ui.TextStyle {
     return result;
 }
 pub fn dialog() ui.BoxStyle {
-    return .{ .width = .{ .px = 320 }, .height = .{ .px = 148 }, .background = T.current().overlay, .border = .{ .radius = 12 } };
+    return .{ .width = .{ .px = 320 }, .height = .{ .fit = .{} }, .background = T.current().overlay, .border = .{ .radius = 12 } };
 }
 pub fn body() ui.BoxStyle {
     return .{ .width = .fill(), .direction = .column, .padding = .{ .top = 16, .bottom = 16, .left = 16, .right = 16 }, .gap = 12 };
@@ -47,7 +47,7 @@ pub fn actions() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .justify = .end, .gap = 8 };
 }
 pub fn control(danger: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = if (danger) 96 else 60 }, .height = .{ .px = 28 }, .padding = .{}, .font_size = 11.5, .font_weight = 500, .background = if (danger) dangerBackground() else T.current().surface_2, .text_color = if (danger) T.actionForeground(T.current().action_danger) else T.current().fg_1, .corner_radius = 8, .border = .{ .width = 0, .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .{ .fit = .{} }, .min_width = if (danger) 96 else 60, .height = .{ .px = 28 }, .padding = .{ .left = 10, .right = 10 }, .font_size = 11.5, .font_weight = 500, .background = if (danger) dangerBackground() else T.current().surface_2, .text_color = if (danger) T.actionForeground(T.current().action_danger) else T.current().fg_1, .corner_radius = 8, .border = .{ .width = 0, .radius = 8 }, .flex_shrink = 0 };
 }
 
 fn dangerBackground() ui.Color {

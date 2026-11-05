@@ -7,7 +7,8 @@ const identity = @import("../host/identity.zig");
 const kvm_feedback = @import("kvm_tool_feedback.zig");
 const fetch_feedback = @import("fetch_url_feedback.zig");
 pub const Source = struct { owner: identity.SessionHandle, label: []const u8 };
-pub const Target = struct { result: loop.TargetResult, source: ?identity.SessionHandle = null, label: []const u8 = "", operation_id: ?u64 = null, feedback: ?kvm_feedback.Feedback = null };
+pub const Verification = @import("readonly_verification.zig");
+pub const Target = struct { verification: ?Verification.Anchor = null, checks: Verification.History = .{}, result: loop.TargetResult, source: ?identity.SessionHandle = null, label: []const u8 = "", operation_id: ?u64 = null, feedback: ?kvm_feedback.Feedback = null };
 pub const execution_projection = @import("execution_result_projection.zig");
 pub const ExecutionProjection = execution_projection.Projection;
 pub const ExecutionActionTarget = execution_projection.ActionTarget;
@@ -34,6 +35,9 @@ pub const ScrollPositions = struct {
     }
 };
 pub const Record = struct {
+    conversation_id: ?identity.ConversationId = null,
+    verification: ?Verification.Anchor = null,
+    checks: Verification.History = .{},
     arena: std.heap.ArenaAllocator,
     owner: scope.Owner,
     turn_id: u64,
@@ -69,6 +73,13 @@ pub const Record = struct {
     }
     pub fn testId(self: *const Record) []const u8 {
         return self.test_id[0..self.test_id_len];
+    }
+    pub fn hasUnknown(self: *const Record) bool {
+        if (self.error_status == .unknown) return true;
+        if (self.host) |fact| if (fact.status == .outcome_unknown or fact.receipt.remote_effect_unknown or !fact.receipt.local_released) return true;
+        if (self.execution) |execution| if (execution.call_status == .outcome_unknown or execution.remote_effect_unknown or execution.state == .outcome_unknown) return true;
+        for (self.targets) |target| if (target.result.status == .unknown or target.result.remote_effect_unknown or !target.result.local_released) return true;
+        return false;
     }
     pub fn summary(self: *const Record, buffer: []u8) []const u8 {
         if (self.host) |fact| if (fact.fetch) |feedback| return feedback.label;
@@ -133,10 +144,10 @@ pub const Store = struct {
         self.retained_bytes = 0;
         self.retained_image_bytes = 0;
         for (self.records.items, 0..) |record, ri| {
-            self.retained_bytes += record.name.len + record.arguments.len * 2 + record.call_id.len + 1024;
+            self.retained_bytes += record.name.len + record.arguments.len * 2 + record.call_id.len + 1024 + record.checks.items.capacity * @sizeOf(Verification.Observation);
             if (record.host) |fact| self.retained_bytes += fact.content.len;
             if (record.execution) |execution| self.retained_bytes += execution.retainedBytes();
-            for (record.targets) |target| self.retained_bytes += target.result.stdout.len + target.result.stderr.len + target.label.len + (if (target.result.cwd) |cwd| cwd.len else 0) + (if (target.result.error_code) |code| code.len else 0);
+            for (record.targets) |target| self.retained_bytes += target.checks.items.capacity * @sizeOf(Verification.Observation) + target.result.stdout.len + target.result.stderr.len + target.label.len + (if (target.result.cwd) |cwd| cwd.len else 0) + (if (target.result.error_code) |code| code.len else 0);
             for (record.images, 0..) |ref, ii| if (ref.content()) |content| {
                 const seen = found: {
                     for (self.records.items[0..ri]) |prior| for (prior.images) |image| if (image.snapshot == ref.snapshot) break :found true;
@@ -190,6 +201,9 @@ pub const Store = struct {
             for (copy.images) |ref| _ = ref.retain();
             copy.error_code = if (record.error_code) |code| try a.dupe(u8, code) else null;
             copy.error_status = record.error_status;
+            copy.conversation_id = record.conversation_id;
+            copy.verification = record.verification;
+            copy.checks = try record.checks.clone(a);
             if (record.host) |fact| copy.host = .{ .status = fact.status, .receipt = fact.receipt, .content = try a.dupe(u8, fact.content), .fetch = try fetch_feedback.project(a, record.name, fact.content) };
             if (record.execution) |execution| copy.execution = try execution.clone(a);
             copy.execution_view_initialized = record.execution_view_initialized;
@@ -201,6 +215,8 @@ pub const Store = struct {
             copy.decision = record.decision;
             for (copy.targets, record.targets) |*target, original| {
                 target.operation_id = original.operation_id;
+                target.verification = original.verification;
+                target.checks = try original.checks.clone(a);
                 if (original.feedback) |info| {
                     target.feedback = info;
                     target.feedback.?.label = try a.dupe(u8, info.label);
@@ -243,6 +259,10 @@ pub const Store = struct {
     }
     fn contains(self: *const Store, owner: scope.Owner, turn_id: u64, call_id: []const u8) bool {
         for (self.records.items) |record| if (record.owner.eql(owner) and record.turn_id == turn_id and std.mem.eql(u8, record.call_id, call_id)) return true;
+        return false;
+    }
+    pub fn hasUnknownFor(self: *const Store, owner: ?scope.Owner, turn_id: ?u64) bool {
+        for (self.records.items) |record| if ((owner == null or record.owner.eql(owner.?)) and (turn_id == null or record.turn_id == turn_id.?) and record.hasUnknown()) return true;
         return false;
     }
     pub fn countForOwner(self: *const Store, owner: scope.Owner) usize {
@@ -339,7 +359,7 @@ pub const Store = struct {
             const copied = try loop.Outcome.copy(a, outcome.targets);
             targets = try a.alloc(Target, copied.targets.len);
             for (copied.targets, targets) |result, *target| {
-                target.* = .{ .result = result };
+                target.* = .{ .result = result, .verification = if (outcome.verification) |anchor| if (anchor.owner.session_id == @as(identity.SessionId, @fromBackingInt(result.session_id))) anchor else null else null };
                 for (sources) |source| if (@backingInt(source.owner.session_id) == result.session_id) {
                     target.source = source.owner;
                     var keep = @min(source.label.len, 4096);
@@ -359,7 +379,7 @@ pub const Store = struct {
                     },
                     .image_ref => |reference| try result_images.append(a, reference),
                 };
-                target.* = .{ .result = .{ .session_id = @backingInt(result.receipt.owner.session_id), .status = switch (result.status) {
+                target.* = .{ .verification = result.verification, .result = .{ .session_id = @backingInt(result.receipt.owner.session_id), .status = switch (result.status) {
                     .succeeded => .succeeded,
                     .failed => .failed,
                     .rejected => .rejected,
@@ -422,6 +442,10 @@ pub const Store = struct {
         const name = try a.dupe(u8, record.name);
         const captured_images = try result_images.toOwnedSlice(a);
         saved.* = .{ .arena = undefined, .images = captured_images, .owner = record.key.owner, .turn_id = record.key.turn_id, .call_id = call_id, .name = name, .arguments = arguments, .command = command, .arguments_hash = record.arguments_hash, .targets = targets, .host = host_fact, .error_code = error_code, .error_status = error_status, .dispatched = record.dispatched };
+        if (record.host_result) |result| saved.verification = result.verification;
+        for (saved.targets) |*target| if (target.verification) |anchor| {
+            if (!anchor.matches(saved.turn_id, saved.call_id, saved.arguments_hash) or @backingInt(anchor.owner.session_id) != target.result.session_id or (target.source != null and !target.source.?.eql(anchor.owner))) target.verification = null;
+        };
         const tag = try std.fmt.bufPrint(&saved.test_id, "ai.tool.result.{d}.{x}", .{ saved.turn_id, std.hash.Wyhash.hash(0, saved.call_id) });
         saved.test_id_len = tag.len;
         if (host_fact) |fact| {

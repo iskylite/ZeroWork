@@ -346,6 +346,8 @@ pub const Binding = struct {
     saving: *ui.Signal(bool),
     status_label: ?*ui.Node = null,
     font_status_label: ?*ui.Node = null,
+    font_preview_texts: [3]?*ui.Node = @splat(null),
+    font_preview_caret: ?*ui.Node = null,
     ime_clients: std.ArrayList(*ui.widgets.input.TextInputState) = .empty,
     popovers: std.ArrayList(struct { open: ui.Source(bool), close: ui.Handler(void) }) = .empty,
     tooltips: std.ArrayList(*ui.Signal(bool)) = .empty,

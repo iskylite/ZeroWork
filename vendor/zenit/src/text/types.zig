@@ -62,6 +62,8 @@ pub const FontDescriptor = struct {
     family: []const u8,
     size: f32,
     weight: FontWeight = .regular,
+    /// Exact numeric weight for variable fonts; null preserves named tiers.
+    numeric_weight: ?u16 = null,
     style: FontStyle = .normal,
 };
 

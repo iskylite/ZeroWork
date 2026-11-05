@@ -35,6 +35,7 @@ pub const View = struct {
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .target = undefined, .detail = undefined, .feedback = undefined, .deny = undefined, .allow_once = undefined, .allow_conversation = undefined, .disabled = try scope.createSignal(bool, true), .primary_style = try scope.createSignal(S.ButtonStyle, S.button(false)), .callbacks = callbacks });
         self.root = try ui.boxStyled(cx, S.root, .{});
+        @import("layer_materials.zig").card(self.root, .action);
         self.root.meta.ownership.meta.test_id = "ai.inventory_grant";
         self.root.setDisplay(.none);
         const header = try ui.boxStyled(cx, S.header, .{});

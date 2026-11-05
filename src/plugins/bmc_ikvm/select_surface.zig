@@ -22,6 +22,7 @@ const Surface = struct {
     select: ui.widgets.SelectResult,
     scroll: ui.widgets.scroll_area.ScrollAreaResult,
     highlighted: ?usize = null,
+    theme_version: u32 = 0,
 
     fn cleanup(self: *Surface) void {
         self.cx.removeAfterLayoutHook(self);
@@ -31,9 +32,24 @@ const Surface = struct {
         const state = ui.widgets.select.stateOf(self.select);
         const rows = state.option_nodes;
         var changed = false;
+        const theme_changed = self.theme_version != self.cx.theme_version;
+        if (theme_changed) {
+            self.theme_version = self.cx.theme_version;
+            // The installed Select snapshots its palette. Update its public
+            // state so later hover/selection paint uses the new theme too.
+            const c = self.cx.tokens.tokens.color;
+            state.tokens = self.cx.tokens;
+            state.colors = .{ .bg = c.bg_secondary, .panel = c.bg_primary, .hover = c.bg_hover, .inset = c.bg_tertiary, .text_primary = c.fg_primary, .text_secondary = c.fg_secondary, .text_tertiary = c.fg_tertiary, .primary = c.accent, .border = c.border, .border_strong = c.border_strong };
+            state.trigger.setBackground(c.bg_secondary);
+            if (state.trigger_label) |label| label.setTextColor(if (state.first_selected == null) c.fg_tertiary else c.fg_primary);
+            _ = state.chevron_down.setTint(c.fg_tertiary);
+            for (state.check_nodes) |check| _ = check.setTint(c.accent);
+        }
         // Options are rebuilt by Select when a fresh device snapshot arrives.
         // Style those live rows rather than retaining their previous pointers.
-        for (rows) |row| {
+        for (rows, 0..) |row, index| {
+            if (row.children.items.len > 0) paintLabels(row.children.items[0], if (state.options[index].disabled) state.colors.text_tertiary else state.colors.text_primary);
+            if (theme_changed) row.setBackground(if (state.highlighted_index == index) state.colors.hover else ui.Color.TRANSPARENT);
             const height = switch (row.style.height) {
                 .px => |value| value,
                 else => -1,
@@ -74,5 +90,9 @@ const Surface = struct {
             }
         }
         return if (changed) .needs_layout else .done;
+    }
+    fn paintLabels(node: *ui.Node, color: ui.Color) void {
+        if (node.getText()) |text| if (!ui.Color.eql(text.color, color)) node.setTextColor(color);
+        for (node.children.items) |child| paintLabels(child, color);
     }
 };

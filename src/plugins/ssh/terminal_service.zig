@@ -311,6 +311,10 @@ pub const Provider = struct {
         if (self.native.worker.execution == null and self.native.worker.shell_execution == null) return .{ .owner = self.source.owner, .failure = "IntegrationUnavailable" };
         return self.native.worker.executionSnapshot();
     }
+    fn executionObserve(raw: *anyopaque, binding: Binding, id: @import("../../host/identity.zig").ExecutionId) !terminal.execution.Snapshot {
+        const self = try get(raw, binding);
+        return self.native.worker.observeExecution(id);
+    }
     fn executionSnapshotFor(raw: *anyopaque, binding: Binding, id: @import("../../host/identity.zig").ExecutionId) !terminal.execution.Snapshot {
         const self = try get(raw, binding);
         return self.native.worker.executionSnapshotFor(id);
@@ -381,7 +385,7 @@ pub const Provider = struct {
         const self = try get(raw, binding);
         return self.native.worker.readExecutionOutput(id, allocator, cursor, max_bytes);
     }
-    const vtable: terminal.Service.VTable = .{ .command_history_snapshot = commandHistorySnapshot, .recording_identity = recordingIdentity, .content_query = contentQuery, .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_snapshot_for = executionSnapshotFor, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .execution_input = executionInput, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .search_async = searchAsync, .search_tail = searchTail, .application_record = applicationRecord };
+    const vtable: terminal.Service.VTable = .{ .command_history_snapshot = commandHistorySnapshot, .recording_identity = recordingIdentity, .content_query = contentQuery, .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_observe = executionObserve, .execution_snapshot_for = executionSnapshotFor, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .execution_input = executionInput, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .search_async = searchAsync, .search_tail = searchTail, .application_record = applicationRecord };
 };
 
 test "SSH terminal provider preserves the registered binding and rejects a different owner" {

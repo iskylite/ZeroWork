@@ -696,6 +696,9 @@ test "AI approval cards follow L2 material opacity without fading text or decisi
             const expected = theme.popupAction().withAlpha(theme.layerAlpha(2));
             try std.testing.expectEqual(expected, tool.card.getBackground());
             try std.testing.expectEqual(expected, host.card.getBackground());
+            const nested = theme.popupInset().withAlpha(theme.layerAlpha(3));
+            try std.testing.expectEqual(nested, tool.command_viewport.getBackground());
+            try std.testing.expectEqual(nested, find(host.root, "ai.host_approval.summary_viewport").?.getBackground());
             try std.testing.expectEqual(@as(u8, 255), tool.title.getText().?.color.a);
             try std.testing.expectEqual(@as(u8, 255), host.title.getText().?.color.a);
             try std.testing.expect(!tool.decision_pending.peek() and !host.decision_pending.peek());
@@ -731,4 +734,26 @@ test "tool action approval shows parameter action with tool identity only in det
     f.settle();
     try std.testing.expectEqualStrings("读取远程画面", f.view.title.getText().?.content);
     try std.testing.expectEqualStrings("工具：bmc_ikvm.screenshot", f.view.tool_detail.getText().?.content);
+}
+
+test "AI approval file viewport retains its expanded height across theme publication" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var approval = Fixture.source(1, "read fixture file");
+    approval.tool_id = "file.read_text";
+    try f.view.update(approval);
+    f.settle();
+    const viewport = f.node("ai.approval.command_scroll");
+    try std.testing.expectEqual(@as(f32, 130), viewport.globalRect().h);
+    const height = f.view.height();
+    f.cx.setTheme(&ui.theme.light);
+    f.settle();
+    try std.testing.expectEqual(@as(f32, 130), viewport.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 130), f.view.command_row.globalRect().h);
+    try std.testing.expectEqual(height, f.view.height());
+    try f.visibleActions();
+    try f.show(2, "printf fixture");
+    try std.testing.expectEqual(@as(f32, 37), viewport.globalRect().h);
+    try f.visibleActions();
 }

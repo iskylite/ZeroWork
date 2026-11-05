@@ -17,6 +17,8 @@ pub const Feedback = struct {
 /// Local admission failures must not be presented as a connection/stream loss.
 pub fn budgetFailureMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.ContextFixedOverhead => "工具定义、系统提示及当前输入等固定开销与回复预留已超过当前模型窗口，压缩对话无法解决；请检查模型窗口设置或更换更大窗口的模型，原始输入和附件已保留",
+        error.InvalidContextWindow => "模型上下文窗口未知或无效，请在 AI 设置中填写服务商支持的窗口大小后重试；原始输入和附件已保留",
         error.ContextCompactionFailed => "上下文压缩失败，原始上下文、输入和附件已保留；已停止自动重试，可手动重试压缩或更换模型",
         error.UnknownImageBudget, error.InvalidImageTokenReservation => "图片预算配置无效，已保留答复和工具结果，请检查模型的图片预算设置",
         error.ToolContextBudget, error.ContextBudgetExceeded => "上下文已超过当前模型窗口（含图片的保守预留，非实际 Token 用量），已保留答复和工具结果，请压缩上下文或新建会话",
@@ -33,7 +35,7 @@ pub fn recoveryReason(err: anyerror, diagnostic: []const u8, http_status: u16) [
     if (budgetFailureMessage(err)) |message| return message;
     if (http_status != 0) return diagnostic;
     return switch (err) {
-        error.ToolOutcomeUnknown => "远端写入结果待核实，请先核查原目标",
+        error.ToolOutcomeUnknown => "部分工具执行结果待核实，已保留收到的内容",
         error.Timeout => "模型长时间未返回新内容，已保留收到的答复和附件",
         error.RequestRejected, error.RateLimited => "服务暂不可用或请求受限，请在冷却结束后重试",
         error.MissingApiKey, error.ProviderFailure => "服务请求失败，请检查 AI 设置",
@@ -48,7 +50,7 @@ test "AI recovery distinguishes retained tool capacity from transport failure an
     try std.testing.expect(std.mem.indexOf(u8, message, "连接") == null);
     try std.testing.expectEqualStrings("请求失败 · StreamCallbackFailed", recoveryReason(error.StreamCallbackFailed, "请求失败 · StreamCallbackFailed", 0));
     try std.testing.expectEqualStrings("HTTP 422 · 服务端拒绝请求参数", recoveryReason(error.ProviderFailure, "HTTP 422 · 服务端拒绝请求参数", 422));
-    try std.testing.expectEqualStrings("远端写入结果待核实，请先核查原目标", recoveryReason(error.ToolOutcomeUnknown, "请求失败 · ToolOutcomeUnknown", 0));
+    try std.testing.expectEqualStrings("部分工具执行结果待核实，已保留收到的内容", recoveryReason(error.ToolOutcomeUnknown, "请求失败 · ToolOutcomeUnknown", 0));
 }
 
 test "local image and context budget failures explain retained facts instead of claiming a stream loss" {
@@ -65,4 +67,13 @@ test "error feedback exposes retry only for retryable errors" {
     try std.testing.expect(f.retry_available);
     f.show(.{ .kind = .provider_missing, .message = "configure provider" });
     try std.testing.expect(!f.retry_available);
+}
+
+test "AI context budget failures distinguish fixed overhead and missing model windows" {
+    const overhead = budgetFailureMessage(error.ContextFixedOverhead).?;
+    try std.testing.expect(std.mem.indexOf(u8, overhead, "压缩对话无法解决") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overhead, "压缩失败") == null);
+    try std.testing.expect(std.mem.indexOf(u8, overhead, "新建会话") == null);
+    try std.testing.expect(!@import("retry.zig").isRetryable(error.ContextFixedOverhead));
+    try std.testing.expect(std.mem.indexOf(u8, budgetFailureMessage(error.InvalidContextWindow).?, "AI 设置") != null);
 }

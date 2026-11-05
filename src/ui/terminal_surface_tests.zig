@@ -347,7 +347,7 @@ test "terminal surface binds real owned VT projection and preserves over sixty r
     const stamp = surface.rows.items[0].time.?;
     try std.testing.expectApproxEqAbs(@as(f32, 20), stamp.globalRect().x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 12), glyph.globalRect().x - stamp.globalRect().x - stamp.globalRect().w, 0.001);
-    try std.testing.expectEqual(@as(f32, 18), glyph.globalRect().y);
+    try std.testing.expectEqual(@as(f32, 4), glyph.globalRect().y);
     try std.testing.expectEqual(@as(u8, 0), glyph.getText().?.color.r);
     try std.testing.expectEqualStrings("界", surface.rows.items[0].glyphs.items[1].node.getText().?.content);
     try std.testing.expectEqualStrings("e\u{301}", surface.rows.items[0].glyphs.items[2].node.getText().?.content);
@@ -356,6 +356,45 @@ test "terminal surface binds real owned VT projection and preserves over sixty r
     try std.testing.expect(view.terminal_surface != null);
     view.unbindTerminalService(owner);
     try std.testing.expect(view.terminal_surface == null);
+}
+
+test "terminal surface fractional viewport keeps clipped history selection and bottom IME coordinates aligned" {
+    var transport: FakeTransport = undefined;
+    try transport.init(3, 20);
+    defer transport.deinit();
+    transport.async_search = true;
+    try transport.controller.feedOutput(owner, 1, "old\r\none\r\ntwo\r\n$ ", 1);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(300, 85); // 3 complete 22px rows plus 11px, and 4px insets.
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    view.setTypography(14, 22.0 / 14.0, 400);
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    _ = cx.render();
+    const surface = view.terminal_surface.?;
+    const viewport = surface.viewport.globalRect();
+    try std.testing.expectEqual(@as(usize, 4), surface.rows.items.len);
+    try std.testing.expectApproxEqAbs(viewport.y - 11, surface.rows.items[0].root.globalRect().y, 0.001);
+    const bottom = surface.rows.items[3].root.globalRect();
+    try std.testing.expectApproxEqAbs(surface.root.globalRect().y + 81, bottom.y + bottom.h, 0.001);
+    const x = surface.rows.items[0].root.globalRect().x + surface.bodyX();
+    // The visible lower half of the historical row still selects its original text.
+    cx.handleMouseDownEx(x, viewport.y + 2, .left, .{});
+    cx.handleMouseMoveEx(x + 3 * surface.options.cell_width, viewport.y + 2, .{});
+    const copied = (try surface.copySelectionText(a)).?;
+    defer a.free(copied);
+    try std.testing.expectEqualStrings("old", copied);
+    const client = view.root.behavior.interaction.text_input_client.?;
+    var caret: ui.types.A11yRect = undefined;
+    try std.testing.expect(client.frame_for_range.?(client.context, surface.caret_byte, surface.caret_byte, &caret));
+    try std.testing.expectApproxEqAbs(bottom.y, caret.y, 0.001);
+    try std.testing.expectApproxEqAbs(viewport.y + viewport.h, caret.y + caret.height, 0.001);
+    try std.testing.expectEqual(@as(u16, 3), transport.controller.geometry.rows);
+    try std.testing.expectEqual(@as(u64, 0), surface.composite.background_scans + surface.composite.synchronous_scans);
 }
 
 test "terminal surface waits for actual theme receipt before adopting effective VT colors" {
@@ -1136,7 +1175,7 @@ test "terminal surface selection remains original VT text and waits for applied 
     try std.testing.expect(!view.hasSelection());
     const surface = view.terminal_surface.?;
     const x = surface.root.globalRect().x + 20 + surface.bodyX();
-    const y = surface.root.globalRect().y + 18 + surface.options.row_height * 0.5;
+    const y = surface.root.globalRect().y + surface.contentPadding().top + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{});
     cx.handleMouseMoveEx(x + 5 * view.cell_width, y, .{});
     cx.handleMouseUpEx(x + 5 * view.cell_width, y, .left, .{});
@@ -1186,7 +1225,7 @@ test "terminal surface public Cx drag release copies and right click always past
         fn publish(_: ?*anyopaque, _: *ui.Cx, _: identity.SessionHandle, _: []const u8) !void {}
     }.publish;
     const x = surface.root.globalRect().x + 20 + surface.bodyX();
-    const y = surface.root.globalRect().y + 18 + surface.options.row_height * 0.5;
+    const y = surface.root.globalRect().y + surface.contentPadding().top + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{});
     try std.testing.expect(!view.hasSelection());
     cx.handleMouseUpEx(x, y, .left, .{});
@@ -1310,7 +1349,7 @@ test "terminal surface selection clears invalid anchors and zero width rectangle
     _ = cx.render();
     const surface = view.terminal_surface.?;
     const x = surface.root.globalRect().x + 20 + surface.bodyX();
-    const y = surface.root.globalRect().y + 18 + surface.options.row_height * 0.5;
+    const y = surface.root.globalRect().y + surface.contentPadding().top + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{ .alt = true });
     cx.handleMouseMoveEx(x, y + surface.options.row_height, .{ .alt = true });
     cx.handleMouseUpEx(x, y + surface.options.row_height, .left, .{ .alt = true });
@@ -1378,7 +1417,7 @@ test "terminal surface offset pane uses window logical points for selection mous
     try std.testing.expectEqual(@as(f32, 238), bounds.x);
     try std.testing.expectEqual(@as(f32, 60), bounds.y);
     const body_x = bounds.x + 20 + surface.bodyX();
-    const body_y = bounds.y + 18;
+    const body_y = bounds.y + surface.contentPadding().top;
     const cell = surface.options.cell_width;
     const row_height = surface.options.row_height;
     const start_x = body_x + 6 * cell;
@@ -1766,7 +1805,7 @@ test "terminal surface visible grouped inactive pane resizes but hidden group do
     _ = cx.render();
     _ = try view.refreshTerminalService(owner, false);
     try std.testing.expectEqual(@as(usize, 1), transport.resize_calls);
-    try std.testing.expectEqual(@as(u16, 13), transport.controller.geometry.rows);
+    try std.testing.expectEqual(@as(u16, 14), transport.controller.geometry.rows);
     view.root.setDisplay(.none);
     cx.setViewport(800, 500);
     _ = cx.render();
@@ -1776,7 +1815,7 @@ test "terminal surface visible grouped inactive pane resizes but hidden group do
     _ = cx.render();
     _ = try view.refreshTerminalService(owner, false);
     try std.testing.expectEqual(@as(usize, 2), transport.resize_calls);
-    try std.testing.expectEqual(@as(u16, 21), transport.controller.geometry.rows);
+    try std.testing.expectEqual(@as(u16, 22), transport.controller.geometry.rows);
 }
 
 test "global backdrop survives OSC default backgrounds while explicit ANSI cells keep their color" {

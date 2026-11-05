@@ -64,6 +64,7 @@ pub const Roster = struct {
     allocator: std.mem.Allocator,
     groups: std.ArrayList(GroupEntry) = .empty,
     next_id: u32 = 1,
+    shared_identity: ?*u32 = null,
     reserved_groups: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Roster {
@@ -84,10 +85,11 @@ pub const Roster = struct {
         }
         const owned = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned);
-        if (self.next_id == 0) return error.GroupIdentityExhausted;
+        const next = if (self.shared_identity) |value| value.* else self.next_id;
+        if (next == 0) return error.GroupIdentityExhausted;
         try self.groups.ensureUnusedCapacity(self.allocator, self.reserved_groups + 1);
-        self.groups.appendAssumeCapacity(.{ .id = self.next_id, .name = owned, .color = color });
-        self.next_id = if (self.next_id == std.math.maxInt(u32)) 0 else self.next_id + 1;
+        self.groups.appendAssumeCapacity(.{ .id = next, .name = owned, .color = color });
+        if (self.shared_identity) |value| value.* = if (next == std.math.maxInt(u32)) 0 else next + 1 else self.next_id = if (next == std.math.maxInt(u32)) 0 else next + 1;
         return &self.groups.items[self.groups.items.len - 1];
     }
     pub const PreparedGroup = struct {
@@ -116,9 +118,10 @@ pub const Roster = struct {
     /// The caller may durably record the reserved ID before exposing it.
     pub fn prepareNew(self: *Roster, name: []const u8, color: u32, initial_pane: ?u64) !PreparedGroup {
         if (name.len == 0) return error.EmptyGroupName;
-        if (self.next_id == 0) return error.GroupIdentityExhausted;
+        const next = if (self.shared_identity) |value| value.* else self.next_id;
+        if (next == 0) return error.GroupIdentityExhausted;
         const owned = try self.allocator.dupe(u8, name);
-        var entry: GroupEntry = .{ .id = self.next_id, .name = owned, .color = color };
+        var entry: GroupEntry = .{ .id = next, .name = owned, .color = color };
         errdefer entry.deinit(self.allocator);
         if (initial_pane) |pane| {
             entry.membership_revision = 2;
@@ -126,7 +129,7 @@ pub const Roster = struct {
         }
         try self.groups.ensureUnusedCapacity(self.allocator, self.reserved_groups + 1);
         self.reserved_groups += 1;
-        self.next_id = if (self.next_id == std.math.maxInt(u32)) 0 else self.next_id + 1;
+        if (self.shared_identity) |value| value.* = if (next == std.math.maxInt(u32)) 0 else next + 1 else self.next_id = if (next == std.math.maxInt(u32)) 0 else next + 1;
         return .{ .roster = self, .id = entry.id, .entry = entry };
     }
 

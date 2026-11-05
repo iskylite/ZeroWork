@@ -142,6 +142,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkFramework("UserNotifications", .{});
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_data_alert.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_transfer_picker.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_background_picker.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/app_icon.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_app_menu.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_menu_bar.m"), .flags = if (test_mode) &.{ "-fobjc-arc", "-DZW_MENU_BAR_TEST=1" } else &.{"-fobjc-arc"} });
@@ -171,12 +172,12 @@ pub fn build(b: *std.Build) void {
     updater.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     updater.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     const update_tests = b.addTest(.{ .filters = &.{ "update ", "settings page map" }, .root_module = b.createModule(.{ .root_source_file = b.path("src/update_tests.zig"), .target = target, .optimize = optimize }) });
-    update_tests.root_module.addImport("ui",zenit_dep.module("ui"));
-    update_tests.root_module.addImport("icon_ir",zenit_dep.module("icon_ir"));
-    update_tests.root_module.addImport("generated_ssh_channel",ssh_channel_translate.createModule());
-    update_tests.root_module.addImport("generated_ssh_session",ssh_session_translate.createModule());
-    update_tests.root_module.addImport("generated_ghostty_vt",ghostty_translate.createModule());
-    b.step("test-update","Run updater state and config contracts").dependOn(&b.addRunArtifact(update_tests).step);
+    update_tests.root_module.addImport("ui", zenit_dep.module("ui"));
+    update_tests.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+    update_tests.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
+    update_tests.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
+    update_tests.root_module.addImport("generated_ghostty_vt", ghostty_translate.createModule());
+    b.step("test-update", "Run updater state and config contracts").dependOn(&b.addRunArtifact(update_tests).step);
     const update_tools = b.step("build-update-tools", "Build isolated updater tools");
     update_tools.dependOn(&b.addInstallArtifact(updater, .{}).step);
     if (test_mode) {
@@ -573,11 +574,11 @@ pub fn build(b: *std.Build) void {
     bmc_live.root_module.addSystemIncludePath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include" });
     bmc_live.root_module.addLibraryPath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib" });
     b.step("bmc-live-readonly", "Build the stdin-only read-only native BMC acceptance runner").dependOn(&b.addInstallArtifact(bmc_live, .{}).step);
-    for ([_][]const u8{ "host-approval", "task-finish", "execution-result", "inventory-grant", "close-confirmation", "ai-empty-recent" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig", "src/inventory_grant_preview_runner.zig", "src/ai_close_confirmation_preview_runner.zig", "src/ai_empty_recent_preview_runner.zig" }) |name, source| {
+    for ([_][]const u8{ "host-approval", "task-finish", "execution-result", "inventory-grant", "close-confirmation", "ai-empty-recent", "ai-recovery", "composer-interaction" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig", "src/inventory_grant_preview_runner.zig", "src/ai_close_confirmation_preview_runner.zig", "src/ai_empty_recent_preview_runner.zig", "src/ai_recovery_preview_runner.zig", "src/composer_interaction_preview_runner.zig" }) |name, source| {
         const preview = b.addExecutable(.{ .name = b.fmt("{s}-preview", .{name}), .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
         zenit.attach(zenit_dep, preview);
         preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
-        if (std.mem.eql(u8, name, "close-confirmation") or std.mem.eql(u8, name, "ai-empty-recent")) {
+        if (std.mem.eql(u8, name, "close-confirmation") or std.mem.eql(u8, name, "ai-empty-recent") or std.mem.eql(u8, name, "ai-recovery") or std.mem.eql(u8, name, "composer-interaction")) {
             // Match the production UI font chain when comparing this HTML baseline.
             preview.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
             preview.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
@@ -754,6 +755,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ssh-connection-wait-runner", .source = "src/ssh_connection_wait_runner.zig" },
         .{ .name = "ssh-hardening-runner", .source = "src/ssh_hardening_runner.zig" },
         .{ .name = "ssh-auth-loopback-runner", .source = "src/ssh_auth_loopback_runner.zig" },
+        .{ .name = "ssh-exec-service-runner", .source = "src/ssh_exec_service_runner.zig" },
     }) |spec| {
         const runner = b.addExecutable(.{ .name = spec.name, .root_module = b.createModule(.{
             .root_source_file = b.path(spec.source),
@@ -776,6 +778,7 @@ pub fn build(b: *std.Build) void {
         runner.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
         runner.root_module.link_libc = true;
         hardening.dependOn(&b.addInstallArtifact(runner, .{}).step);
+        if (std.mem.eql(u8, spec.name, "ssh-exec-service-runner")) b.step("ssh-exec-acceptance", "Build isolated SSH exec stdin and lifecycle acceptance runner").dependOn(&b.addInstallArtifact(runner, .{}).step);
     }
 
     const disconnect_acceptance = b.step("ssh-disconnect-acceptance", "Build headless explicit SSH disconnect lifecycle acceptance runner");

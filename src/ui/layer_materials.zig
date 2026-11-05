@@ -5,13 +5,19 @@ const ui = @import("ui");
 const theme = @import("app_theme.zig");
 const geometry = @import("material_geometry.zig");
 const Rect = ui.ComputedRect;
-pub const CardRole = enum { surface_1, surface_2, well, action, control, settings_card, custom, global_notification };
+pub const CardRole = enum { overlay, surface_1, surface_2, well, action, control, settings_card, custom, global_notification };
 var declaration_revision: u64 = 0;
 pub fn card(node: *ui.Node, comptime role: CardRole) void {
     const name = "MaterialSurface." ++ @tagName(role);
     if (node.meta.ownership.meta.component_name) |old| if (std.mem.eql(u8, old, name)) return;
     node.meta.ownership.meta.component_name = name;
     declaration_revision +%= 1;
+}
+pub fn overlay(node: *ui.Node) void {
+    // Backdrop isolation is also used by inline approval cards. Preserve their
+    // declared tint and layer role instead of turning them into overlay chrome.
+    if (node.meta.ownership.meta.component_name) |name| if (std.mem.startsWith(u8, name, "MaterialSurface.")) return;
+    card(node, .overlay);
 }
 pub const Stats = struct {
     scene_rebuilds: usize = 0,
@@ -71,6 +77,7 @@ pub const Policy = struct {
     }
     fn cardColor(node: *ui.Node) ui.Color {
         const name = node.meta.ownership.meta.component_name orelse return theme.baseColors().overlay;
+        if (std.mem.eql(u8, name, "MaterialSurface.overlay")) return theme.baseColors().overlay;
         inline for (.{ "surface_1", "surface_2", "well" }) |role| if (std.mem.eql(u8, name, "MaterialSurface." ++ role)) return @field(theme.current(), role);
         if (std.mem.eql(u8, name, "MaterialSurface.settings_card")) return theme.settingsCard();
         if (std.mem.eql(u8, name, "MaterialSurface.action")) return theme.popupAction();
@@ -78,10 +85,10 @@ pub const Policy = struct {
         return node.getBackground();
     }
     fn floating(node: *ui.Node) bool {
-        if (node.style.glass_params() == null) return false;
-        const paint = node.getBackground();
-        const base = theme.baseColors().overlay;
-        return paint.r == base.r and paint.g == base.g and paint.b == base.b;
+        const glass = node.style.glass_params() orelse return false;
+        // Surface identity must survive a missed palette publication. Canvas
+        // capture/blur nodes are image processing, not floating UI surfaces.
+        return !glass.capture_current_target and !glass.a11y_exempt;
     }
     fn portal(self: *Policy, node: *ui.Node) bool {
         for (self.cx.overlay_stack.layers) |slot| if (slot) |layer| if (layer.content_node == node) return true;
@@ -174,6 +181,19 @@ pub const Policy = struct {
                 remove = std.mem.indexOfScalar(*ui.Node, node.children.items, paint.root) == null or !self.cx.node_registry.isCurrentIdentity(paint.root_handle, paint.root);
             }
             if (remove) {
+                // Retained popovers invalidate handles when detached, but their
+                // children survive. Remove the old paint from the live tree
+                // before replacing its cache; otherwise every reopen adds a veil.
+                if (self.scene_ids.get(paint.id)) |node| {
+                    if (std.mem.indexOfScalar(*ui.Node, node.children.items, paint.root)) |index| {
+                        const root = node.children.items[index];
+                        if (root.id == paint.root_handle.id) {
+                            self.cx.detachChild(node, root);
+                            self.cx.destroyDetached(root);
+                            self.layout_changed = true;
+                        }
+                    }
+                }
                 _ = self.paint_ids.remove(paint.id);
                 _ = self.paints.swapRemove(i);
                 paint.deinit(self.cx.allocator);
@@ -197,7 +217,7 @@ pub const Policy = struct {
         self.stats.visible_surfaces = 0;
         for (self.entries.items) |entry| {
             const node = entry.node;
-            if (entry.portal_root) {
+            if (entry.portal_root or std.mem.eql(u8, node.meta.ownership.meta.component_name orelse "", "MaterialSurface.overlay")) {
                 const glass = theme.overlayGlass();
                 if (node.style.glass_params() == null or !std.meta.eql(node.style.glass_params().?, glass)) node.setStyleInline(self.cx.allocator, .{ .glass = glass });
                 if (node.style.border.color.a != 0) node.setBorderColor(ui.Color.TRANSPARENT);

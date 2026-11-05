@@ -11,6 +11,7 @@ pub const max_file_bytes = 2 * 1024 * 1024;
 pub const Stage = enum { prepared, dispatch_started, committed, running, succeeded, failed, rejected, cancelled_unsent, outcome_unknown, cleanup_pending };
 pub const Ownership = enum { borrowed_user, created_task, handed_to_user };
 pub const Record = struct {
+    verification: ?@import("readonly_verification.zig").Anchor = null,
     context: host.Context,
     operation_ref: identity.HostOperationId,
     tool_id: []const u8,
@@ -60,6 +61,7 @@ pub const Record = struct {
 pub const Request = struct { context: host.Context, tool_id: []const u8, request_key: []const u8, canonical_hash: Digest, turn_id: u64, call_id: []const u8 };
 pub const Handle = struct { index: usize, operation_ref: identity.HostOperationId, reused: bool = false };
 pub const Update = struct {
+    verification: ?@import("readonly_verification.zig").Anchor = null,
     stage: Stage,
     created_group: ?u64 = null,
     created_session: ?identity.SessionHandle = null,
@@ -185,6 +187,10 @@ pub const Journal = struct {
         if (!transitionAllowed(record.stage, change.stage)) return error.InvalidJournalTransition;
         record.revision = try identity.advance(record.revision);
         record.stage = change.stage;
+        if (change.verification) |anchor| {
+            if (record.verification) |prior| if (!std.meta.eql(prior, anchor)) return error.ResourceIdentityChanged;
+            record.verification = anchor;
+        }
         record.dispatch_started = record.dispatch_started or change.stage == .dispatch_started;
         if (change.created_group) |value| {
             if (record.created_group != null and record.created_group.? != value) return error.ResourceIdentityChanged;
@@ -285,6 +291,14 @@ fn validateRecord(record: Record) !void {
     if (!record.operation_ref.valid() or record.original_turn == 0 or record.revision == 0 or record.ownership_revision == 0 or record.wire_notice_revision > record.notice_revision) return error.InvalidJournal;
     if (record.stage == .succeeded and (!record.local_released or record.remote_effect_unknown)) return error.InvalidJournal;
     if (record.committed_binding != null and (record.committed_binding_revision == null or record.committed_binding_revision.? <= record.context.binding_revision)) return error.InvalidJournal;
+    if (record.verification) |anchor| {
+        if (!anchor.matches(record.original_turn, record.original_call, anchor.arguments_hash) or anchor.context == null or !anchor.context.?.eql(record.context) or anchor.execution_id == null or record.execution == null or !anchor.execution_id.?.eql(record.execution.?)) return error.InvalidJournal;
+        const source = anchor.service.origin_session orelse switch (anchor.service.resource_owner) {
+            .session => |handle| handle,
+            else => return error.InvalidJournal,
+        };
+        if (!source.eql(anchor.owner) or anchor.owner.generation == 0 or anchor.service.binding_generation == 0) return error.InvalidJournal;
+    }
     if (record.execution_receipt) |receipt| {
         const execution_id = record.execution orelse return error.InvalidExecutionReceipt;
         if (!execution_id.eql(receipt.execution_id)) return error.InvalidExecutionReceipt;

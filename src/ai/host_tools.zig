@@ -28,6 +28,7 @@ pub const Contribution = struct {
     authority: provider.ToolAuthority,
 };
 pub const Invocation = struct {
+    dispatch_fence: ?provider.DispatchFence = null,
     context: Context,
     authority: provider.ToolAuthority,
     operation_id: u64,
@@ -55,6 +56,7 @@ pub const Receipt = struct {
 };
 pub const Block = union(enum) { text: []const u8, structured: []const u8 };
 pub const Result = struct {
+    verification: ?@import("readonly_verification.zig").Anchor = null,
     status: @import("plugin_tools.zig").Status,
     blocks: []const Block = &.{},
     receipt: Receipt,

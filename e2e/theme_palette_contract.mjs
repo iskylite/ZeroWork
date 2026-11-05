@@ -12,7 +12,7 @@ const workspaceIds=[...catalog[1].matchAll(/\['([^']+)',/g)].map(m=>m[1]);
 assert.deepEqual(workspaceIds.sort(),Object.keys(design).sort(),'workspace catalogue covers all shared themes');
 const roles={app:'bg-app',surface_1:'surface-1-base',surface_2:'surface-2-base',well:'well-base',well_border:'well-bd',terminal:'bg-term-base',overlay:'overlay-base',hover:'hover-base',tab_on:'tab-on-base',fg_1:'fg-1',fg_2:'fg-2',fg_3:'fg-3',accent:'accent-base',accent_ink:'accent-ink',action_accent:'action-accent',action_accent_2:'action-accent-2',action_danger:'action-danger',ok:'ok',ok_ink:'ok-ink',warn:'warn',warn_ink:'warn-ink',danger:'danger-base',danger_ink:'danger-ink',selection:'sel-bg'};
 const palettes=[...native.matchAll(/if \(std\.mem\.eql\(u8, id, "([^"]+)"\)\) return \.\{(.*?)\n    \};/gs)].map(m=>[m[1],Object.fromEntries([...m[2].matchAll(/\.(\w+) = 0x([\da-f]+)/g)].map(v=>[v[1],v[2]]))]);
-assert.equal(palettes.length,26);assert.equal(Object.keys(design).length,palettes.length);assert.equal(Object.keys(quick).length,palettes.length);
+assert.equal(palettes.length,37);assert.equal(Object.keys(design).length,palettes.length);assert.equal(Object.keys(quick).length,palettes.length);
 let checked=0;
 for(const [id,colors] of palettes){
  assert.equal(Object.keys(colors).length,26,id+' role completeness');
@@ -27,6 +27,19 @@ for(const [id,colors] of palettes){
  }
 }
 console.log(`PASS: ${palettes.length} themes, 26 native roles, ${checked} shared design/native color pairs, workspace catalogue ${workspaceIds.length}`);
+// ANSI content has its own palette; keep all sixteen native slots aligned with
+// the editable terminal preview independently of UI contrast adjustments.
+const ansiSource=native.slice(native.indexOf('pub fn ansi'),native.indexOf('pub fn name'));
+let ansiChecks=0;
+for(const match of ansiSource.matchAll(/if \(std\.mem\.eql\(u8, id, "([^"]+)"\)\) return \.\{([^\n]+)\};/g)){
+ const id=match[1],colors=[...match[2].matchAll(/0x([\da-f]+)/gi)].map(value=>'#'+value[1].slice(0,6).toLowerCase());
+ assert.equal(colors.length,16,id+' native ANSI completeness');
+ assert.deepEqual(colors,catalogData.terminalPalettes[id].ansi.map(value=>value.toLowerCase()),id+' terminal ANSI source parity');
+ assert.equal(catalogData.terminalPalettes[id].background.toLowerCase(),design[id]['--bg-term-base'].toLowerCase(),id+' terminal background parity');
+ ansiChecks++;
+}
+assert.equal(ansiChecks,palettes.length,'all native ANSI palettes checked');
+console.log(`PASS: ${ansiChecks} terminal palettes × 16 ANSI slots match the editable preview`);
 const terminalSource=native.slice(native.indexOf('pub fn terminalDefaults'));
 for(const match of terminalSource.matchAll(/if \(std\.mem\.eql\(u8, id, "([^"]+)"\)\) return \.\{([^\n]+)\};/g)){
  const id=match[1],fields=Object.fromEntries([...match[2].matchAll(/\.(foreground|cursor|selection) = 0x([\da-f]+)/gi)].map(value=>[value[1],value[2].toLowerCase()]));

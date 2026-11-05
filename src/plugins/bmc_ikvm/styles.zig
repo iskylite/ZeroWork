@@ -141,7 +141,7 @@ pub fn progressCard() ui.BoxStyle {
     const appearance = theme.currentName();
     // The blur surface clips to its own bounds. Keep the outer shadow on the
     // layout owner so the renderer can paint it beyond those bounds.
-    return .{ .position = .absolute, .width = .{ .px = progress_width }, .height = .{ .px = progress_height }, .max_width = progress_width, .direction = .column, .align_items = .stretch, .gap = progress_gap, .padding = ui.Padding.all(progress_padding), .min_width = 0, .min_height = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 12 }, .shadow = .{ .offset_y = 16, .blur = 48, .color = ui.Color.BLACK.withAlpha(switch (appearance) {
+    return .{ .position = .absolute, .width = .{ .px = progress_width }, .height = .{ .px = progress_height }, .max_width = progress_width, .direction = .column, .align_items = .stretch, .gap = 0, .padding = ui.Padding.ZERO, .min_width = 0, .min_height = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 12 }, .shadow = .{ .offset_y = 16, .blur = 48, .color = ui.Color.BLACK.withAlpha(switch (appearance) {
         .dark => 71,
         .light => 36,
         .sauber => 41,
@@ -155,7 +155,7 @@ pub fn progressSurface(_: *const ui.ThemeTokens) ui.BoxStyle {
         .light => ui.arb.hex(0xffffff),
         .sauber => ui.arb.hex(0xf3ffef),
     };
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .right = .{ .px = 0 }, .top = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .background = surface.withAlpha(theme.layerAlpha(1)), .glass = .{ .backdrop_blur = @max(24, theme.materialParameters().blur), .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 }, .border = .{ .width = 0, .radius = 12 }, .hit_behavior = .pass_through };
+    return .{ .width = .fill(), .height = .fill(), .direction = .column, .align_items = .stretch, .gap = progress_gap, .padding = ui.Padding.all(progress_padding), .min_width = 0, .min_height = 0, .background = surface.withAlpha(theme.layerAlpha(1)), .glass = .{ .backdrop_blur = @max(24, theme.materialParameters().blur), .capture_current_target = true, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 }, .border = .{ .width = 0, .radius = 12 } };
 }
 pub fn progressSecondary() ui.Color {
     return ui.arb.hex(switch (theme.currentName()) {

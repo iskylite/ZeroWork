@@ -649,6 +649,22 @@ pub fn validateToolMessages(request: provider.ChatRequest) !void {
     if (remaining != 0) return error.InvalidToolMessage;
 }
 
+/// Measure the complete tool declarations, including schemas and JSON framing.
+/// Use one common wire representation for local estimates across adapters.
+pub fn toolCatalogBytes(definitions: []const provider.ToolDefinition) !usize {
+    if (definitions.len == 0) return 0;
+    _ = try provider.catalogTextBytes(definitions);
+    var buffer: [128]u8 = undefined;
+    var counter: BodyCounter = .{ .writer = .{ .buffer = &buffer, .vtable = &.{ .drain = BodyCounter.drain } } };
+    try counter.writer.writeByte('[');
+    for (definitions, 0..) |definition, index| {
+        if (index != 0) try counter.writer.writeByte(',');
+        try writeToolDefinition(&counter.writer, definition, .openai_compat);
+    }
+    try counter.writer.writeByte(']');
+    return counter.count + counter.writer.end;
+}
+
 fn writeToolDefinition(writer: *std.Io.Writer, definition: provider.ToolDefinition, kind: registry.Kind) !void {
     if (definition.dynamic) |dynamic| return writeDynamicToolDefinition(writer, dynamic, kind);
     const canonical = @import("legacy_adapter.zig").builtinDefinition(definition.tool);
@@ -994,8 +1010,8 @@ test "catalog text budget is shared by serialization and initial context admissi
     const definition: provider.ToolDefinition = .{ .session_ids = &.{}, .authority = .conversation_context, .dynamic = .{ .id = "host.context", .name = "host__context", .description = description, .schema = "{\"type\":\"object\"}" } };
     var request: provider.ChatRequest = .{ .model = "m", .system = "", .messages = &.{}, .tools = &.{definition}, .max_output = 1 };
     const input = try @import("local_text_request.zig").inputTokens(request);
-    try std.testing.expect(input >= description.len / 4 + 256);
-    try std.testing.expectError(error.ContextBudgetExceeded, @import("local_text_request.zig").checkContext(request, 1024));
+    try std.testing.expectEqual((try toolCatalogBytes(request.tools) + 3) / 4, input);
+    try std.testing.expectError(error.ContextFixedOverhead, @import("local_text_request.zig").checkContext(request, 1024));
     const catalog: [24]provider.ToolDefinition = @splat(definition);
     request.tools = &catalog;
     try std.testing.expectError(error.ToolCatalogLimit, validateToolMessages(request));

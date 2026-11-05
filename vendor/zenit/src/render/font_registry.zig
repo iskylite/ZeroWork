@@ -135,6 +135,7 @@ pub const FontRegistry = struct {
             .family = name,
             .size = size,
             .weight = mapWeight(weight),
+            .numeric_weight = weight,
             .style = if (italic) .italic else .normal,
         };
         const font = fs.findFont(desc) catch return null;

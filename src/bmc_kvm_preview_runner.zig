@@ -16,6 +16,7 @@ const frames = @import("host/frame_texture_sink.zig");
 const access_api = @import("host/session_service_access.zig");
 const identity = @import("host/identity.zig");
 const theme = @import("ui/app_theme.zig");
+const materials = @import("ui/layer_materials.zig");
 const status_ui = @import("ui/ssh_status_host.zig");
 
 const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(320), .generation = 7 };
@@ -52,6 +53,7 @@ const order = [_][]const u8{
 
 const Fixture = struct {
     cx: *ui.Cx,
+    publication: @import("ui/shell_styles.zig").ThemePublication = .{},
     main_thread: std.Thread.Id,
     root: *ui.Node,
     slot: *ui.Node,
@@ -511,11 +513,36 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     // the shared pane nor tab root may conceal the renderer's own contract.
     pane.setBackground(ui.Color.TRANSPARENT);
     slot.setBackground(ui.Color.TRANSPARENT);
+    // Exercise the same material policy as the main application, including
+    // portal ownership and compensation. Video/HUD paint stays production-owned.
+    try materials.Policy.mount(cx, scope);
     return root;
 }
 
 fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
     const self = active_fixture orelse return null;
+    if (std.mem.eql(u8, path, "/app/bmc-fixture/appearance")) {
+        const parsed = std.json.parseFromSlice(struct { theme: theme.Name, transparency: f32, blur: f32 }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid appearance fixture\"}";
+        defer parsed.deinit();
+        theme.select(parsed.value.theme);
+        _ = theme.setMaterialParameters(parsed.value.transparency, parsed.value.blur);
+        self.publication.publish(self.cx, theme.widgetTheme(parsed.value.theme));
+        return "{\"ok\":true}";
+    }
+    if (std.mem.eql(u8, path, "/app/bmc-fixture/material-node")) {
+        const parsed = std.json.parseFromSlice(struct { id: []const u8 }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid node fixture\"}";
+        defer parsed.deinit();
+        var found = findById(self.root, parsed.value.id);
+        if (found == null) for (self.cx.overlay_stack.layers) |slot| {
+            if (slot) |layer| if (layer.content_node) |node| {
+                found = findById(node, parsed.value.id);
+                if (found != null) break;
+            };
+        };
+        const node = found orelse return "{\"error\":\"node not found\"}";
+        const compensated = findById(node, "appearance.material.compensation") != null;
+        return jsonReply(self.cx.allocator, .{ .id = node.id, .background = node.getBackground(), .compensated = compensated, .blur = if (node.style.glass_params()) |glass| glass.backdrop_blur else 0, .current_target = if (node.style.glass_params()) |glass| glass.capture_current_target else false, .bounds = node.globalRect(), .component = node.meta.ownership.meta.component_name, .ink = firstInk(node), .foreground = theme.current().fg_1, .layer_alpha = .{ theme.layerAlpha(1), theme.layerAlpha(2), theme.layerAlpha(3) } }, out);
+    }
     if (std.mem.eql(u8, path, "/app/bmc-fixture/quit")) {
         if (app_instance) |app| app.quit();
         return "{\"ok\":true}";
@@ -602,7 +629,7 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
                 chromes[i] = popup.chrome.globalRect();
             }
         }
-        return jsonReply(self.cx.allocator, .{ .open = opened, .closed = view.closed, .overlay = self.cx.overlay_stack.topmost() != null, .heights = heights, .bodies = bodies, .chromes = chromes }, out);
+        return jsonReply(self.cx.allocator, .{ .open = opened, .log_open = view.log_open.?.peek(), .order_open = view.order_open.?.peek(), .disconnect_open = view.disconnect_confirm_open.peek(), .closed = view.closed, .overlay = self.cx.overlay_stack.topmost() != null, .heights = heights, .bodies = bodies, .chromes = chromes }, out);
     }
     if (!std.mem.eql(u8, path, "/app/bmc-fixture/stats") and !std.mem.eql(u8, path, "/app/bmc-fixture/input-stats") and !std.mem.eql(u8, path, "/app/bmc-fixture/material-stats")) return null;
     self.pump();
@@ -677,6 +704,11 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
         .pressed_buttons = self.remote.pressed_buttons,
     };
     return jsonReply(self.cx.allocator, stats, out);
+}
+fn firstInk(node: *ui.Node) ?ui.Color {
+    if (node.getText()) |text| return text.color;
+    for (node.children.items) |child| if (firstInk(child)) |color| return color;
+    return null;
 }
 fn findById(node: *ui.Node, id: []const u8) ?*ui.Node {
     if (node.meta.ownership.meta.test_id) |actual| if (std.mem.eql(u8, actual, id)) return node;

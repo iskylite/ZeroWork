@@ -368,6 +368,7 @@ pub const TerminalViewNode = struct {
         const c = app_theme.current();
         const bar = try ui.boxStyled(cx, @import("terminal_styles.zig").historyCard, .{});
         bar.meta.ownership.meta.test_id = "terminal.history.card";
+        @import("layer_materials.zig").card(bar, .surface_1);
         const title = try ui.box(cx, .{ .direction = .row, .gap = 6, .align_items = .center, .flex_shrink = 0 }, .{});
         title.meta.ownership.meta.test_id = "terminal.history.title";
         const title_icon = try ui.iconTint(cx, ui.icons.history, c.accent, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
@@ -1071,7 +1072,10 @@ pub const TerminalViewNode = struct {
     }
 
     fn refreshSearchMarks(self: *TerminalViewNode) !void {
-        for (self.search_marks.items) |mark| mark.setDisplay(.none);
+        for (self.search_marks.items) |mark| {
+            mark.setDisplay(.none);
+            self.cx.setNodeExternalClipRect(mark.id, null);
+        }
         if (!self.search_open or self.search.query.items.len == 0) return;
         if (self.history_reading_top != null) return self.refreshReadingSearchMarks();
         if (self.history.current()) |entry| {
@@ -1300,6 +1304,7 @@ pub const TerminalViewNode = struct {
         const canvas = surface.root.globalRect();
         const origin_x = canvas.x - root.x + surface.contentPadding().left + surface.bodyX();
         const origin_y = canvas.y - root.y + surface.contentPadding().top;
+        const clip: [4]f32 = .{ canvas.x, canvas.y + surface.contentPadding().top, canvas.w, @max(0, canvas.h - surface.contentPadding().top - surface.contentPadding().bottom) };
         var used: usize = 0;
         for (self.search.matches.items, 0..) |hit, index| {
             const first = document.spanAt(hit.start) orelse continue;
@@ -1324,6 +1329,7 @@ pub const TerminalViewNode = struct {
                     break :value node;
                 };
                 (try mark.style.ensureExtFallible(self.cx.allocator)).inset = .{ .left = .{ .px = origin_x + displayed.projection.visible_rows[visible].presentation.shift_x + @as(f32, @floatFromInt(start.col)) * surface.options.cell_width }, .top = .{ .px = origin_y + surface.presentationY(visible) } };
+                self.cx.setNodeExternalClipRect(mark.id, clip);
                 mark.style.width = .{ .px = @as(f32, @floatFromInt(width)) * surface.options.cell_width };
                 mark.style.height = .{ .px = surface.options.row_height };
                 mark.setBackground(if (index == self.search.current) app_theme.states().search_current else app_theme.states().search_match);
@@ -2948,6 +2954,20 @@ pub const TerminalViewNode = struct {
         surface.force_snapshot = true;
         self.cx.requestRedraw();
         return id;
+    }
+    pub fn updateUploadCommandRecord(self: *TerminalViewNode, owner: SessionHandle, id: u64, paths: []const []const u8) bool {
+        const command = @import("builtin_commands.zig").uploadDisplayCommand(self.cx.allocator, paths) catch return false;
+        defer self.cx.allocator.free(command);
+        if (self.legacy_document) |doc| {
+            doc.updatePendingCommand(owner, id, command) catch return false;
+            _ = self.refreshLegacyDocument() catch false;
+            return true;
+        }
+        const surface = self.terminal_surface orelse return false;
+        surface.composite.updatePendingCommand(owner, id, command) catch return false;
+        surface.force_snapshot = true;
+        self.cx.requestRedraw();
+        return true;
     }
     /// Owner and command identity are captured at dispatch, never at completion.
     pub fn finishCommandRecord(self: *TerminalViewNode, owner: SessionHandle, id: u64, state: CommandRecordState, text: []const u8) bool {
@@ -5275,7 +5295,7 @@ pub const TerminalViewNode = struct {
                 }
                 const background = self.record_backgrounds[at].?;
                 background.setBackground(styles.tint(if (row.state == 2) 3 else row.kind));
-                styles.place(self.cx, background, self.historyContentPadding().left - @import("terminal_record_geometry.zig").padding_inline, self.rows_box.style.padding.top + layout.article_y, @max(1, self.root.rectFromWorldOrFallback().w - self.historyContentPadding().left - self.historyContentPadding().right + 2 * @import("terminal_record_geometry.zig").padding_inline), layout.article_height);
+                styles.place(self.cx, background, self.historyContentPadding().left, self.rows_box.style.padding.top + layout.article_y, @max(1, self.root.rectFromWorldOrFallback().w - self.historyContentPadding().left - self.historyContentPadding().right), layout.article_height);
                 background.setDisplay(.flex);
             }
             if (row.kind == 1 and row.id[1] == 0 and row.timestamp != null) {
@@ -6890,7 +6910,7 @@ test "SSH clipboard nested pane maps native window coordinates to its actual VT 
     try std.testing.expectApproxEqAbs(@as(f32, 238), content.x, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 66), content.y, 0.01);
     try std.testing.expectApproxEqAbs(content.x + 20, view.metrics.origin_x, 0.01);
-    try std.testing.expectApproxEqAbs(content.y + 18, view.metrics.origin_y, 0.01);
+    try std.testing.expectApproxEqAbs(content.y + 4, view.metrics.origin_y, 0.01);
     const x = view.metrics.origin_x + view.cell_width * 0.25;
     const y = view.metrics.origin_y + view.cell_height * 0.5;
     const end = x + view.cell_width * 2;

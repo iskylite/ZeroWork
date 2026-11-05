@@ -128,7 +128,7 @@ pub fn prepare(allocator: std.mem.Allocator, registry: *const themes.Registry, c
     const value = candidate.value;
     const record = registry.get(value.ui.theme) orelse return error.UnknownTheme;
     var typography = font orelse if (current) |state| if (state.layout) |layout| layout.font else return error.FontNotPrepared else return error.FontNotPrepared;
-    const expected_weight: u16 = if (std.mem.eql(u8, value.ui.font_weight, "light")) 300 else if (std.mem.eql(u8, value.ui.font_weight, "regular")) 400 else if (std.mem.eql(u8, value.ui.font_weight, "medium")) 500 else if (std.mem.eql(u8, value.ui.font_weight, "bold")) 700 else return error.InvalidWeight;
+    const expected_weight = @backingInt(@import("font_weight.zig").parse(value.ui.font_weight) orelse return error.InvalidWeight);
     if (!std.mem.eql(u8, typography.requested_family, value.ui.font_family) or typography.size != @as(f32, @floatFromInt(value.ui.font_size)) or typography.weight != expected_weight or typography.actual_family.len == 0 or !std.math.isFinite(typography.cell_width) or typography.cell_width <= 0 or !std.math.isFinite(typography.ascent) or typography.ascent <= 0 or !std.math.isFinite(typography.descent) or typography.descent < 0) return error.FontNotPrepared;
     var selected_asset: ?*const material.Prepared = if (asset) |selected| selected else null;
     if (selected_asset == null) if (current) |state| {
@@ -136,7 +136,7 @@ pub fn prepare(allocator: std.mem.Allocator, registry: *const themes.Registry, c
     };
     if (value.ui.materials.background.enabled) {
         const selected = selected_asset orelse return error.BackgroundNotPrepared;
-        if (!std.mem.eql(u8, selected.path, value.ui.materials.background.path)) return error.BackgroundNotPrepared;
+        if (!selected.matches(value.ui.materials.background)) return error.BackgroundNotPrepared;
         if (preflight) |check| try check.check(check.context, selected);
     }
     var owned = try runtime.Snapshot.init(allocator, value);

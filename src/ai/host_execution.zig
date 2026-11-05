@@ -81,7 +81,7 @@ pub fn performTerminal(service: terminal.Service, action: TerminalAction) !Termi
         .output => |value| .{ .output = try service.executionOutput(value.id, value.allocator, value.cursor, value.max_bytes) },
     };
 }
-pub const Target = struct { handle: identity.SessionHandle, service: terminal.Service, ownership_revision: u64 };
+pub const Target = struct { verification_service: ?@import("../host/session_host.zig").ServiceHandle = null, create_key: ?@import("../host/operation.zig").OperationKey = null, handle: identity.SessionHandle, service: terminal.Service, ownership_revision: u64 };
 pub const Backend = struct {
     retained_shell_snapshots: bool = false,
     context: *anyopaque,
@@ -101,6 +101,7 @@ pub const Backend = struct {
 };
 const Entry = struct {
     context: host.Context,
+    verification: ?@import("readonly_verification.zig").Anchor = null,
     invocation_id: u64 = 0,
     id: identity.ExecutionId,
     target: identity.SessionHandle,
@@ -381,12 +382,13 @@ pub const Controller = struct {
             self.allocator.free(index_command);
             return err;
         };
-        self.journal.update(operation, record.revision, .{ .stage = .dispatch_started, .execution = id }) catch |err| {
+        const verification: ?@import("readonly_verification.zig").Anchor = if (target.verification_service) |service| .{ .owner = target.handle, .service = service, .create_key = target.create_key, .execution_id = id, .context = invocation.context, .turn_id = invocation.turn_id, .call_hash = @import("readonly_verification.zig").digest(invocation.call_id), .arguments_hash = invocation.arguments_hash } else null;
+        self.journal.update(operation, record.revision, .{ .stage = .dispatch_started, .execution = id, .verification = verification }) catch |err| {
             self.allocator.free(frozen_command);
             self.allocator.free(index_command);
             return err;
         };
-        self.entries.appendAssumeCapacity(.{ .context = invocation.context, .invocation_id = invocation.operation_id, .id = id, .target = target.handle, .journal = operation, .journal_revision = record.revision + 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = target.handle, .state = .preparing, .completion_source = snapshot.completion_source, .interactive_execution = true, .input_ready = true, .local_released = true, .output_scope = .session_interval }, .next_renew_at = now + execution.renew_ms, .submitted_command = index_command, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = snapshot.input_epoch, .expected_shell_id = snapshot.shell.id, .expected_shell_revision = snapshot.shell.revision, .ownership_revision = target.ownership_revision, .command = frozen_command, .command_hash = hash } });
+        self.entries.appendAssumeCapacity(.{ .verification = verification, .context = invocation.context, .invocation_id = invocation.operation_id, .id = id, .target = target.handle, .journal = operation, .journal_revision = record.revision + 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = target.handle, .state = .preparing, .completion_source = snapshot.completion_source, .interactive_execution = true, .input_ready = true, .local_released = true, .output_scope = .session_interval }, .next_renew_at = now + execution.renew_ms, .submitted_command = index_command, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = snapshot.input_epoch, .expected_shell_id = snapshot.shell.id, .expected_shell_revision = snapshot.shell.revision, .ownership_revision = target.ownership_revision, .command = frozen_command, .command_hash = hash } });
         // Retry only a mailbox's explicit WorkerBusy/zero-admission response.
         // Any accepted, partial or unknown dispatch permanently clears pending.
         self.dispatchPending(self.entries.items.len - 1) catch {};
@@ -655,7 +657,11 @@ pub const Controller = struct {
             const next_cursor = try std.fmt.allocPrint(self.allocator, "{d}", .{if (output) |value| value.start_cursor + keep else output_cursor});
             defer self.allocator.free(next_cursor);
             const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .execution_ref = ref, .path = "interactive", .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .state = entry.snapshot.state, .source_revision = entry.snapshot.revision, .snapshot = entry.snapshot, .stop_requested = entry.stop_intent != .none, .output_available = output != null, .recording_ref = if (entry.snapshot.recording_id) |*value| @as([]const u8, value) else null, .output = safe, .output_cursor = if (output) |value| value.start_cursor else output_cursor, .next_cursor = next_cursor, .gap = if (output) |value| value.gap else false, .truncated = if (output) |value| value.truncated or keep < value.bytes.len else false, .requested_max_bytes = max_bytes, .returned_bytes = keep, .response_limited = if (output) |value| keep < value.bytes.len else false, .timed_out = timed_out, .wait_interrupted = interruption }, .{});
-            if (body.len <= 65536) return ownedResult(self.allocator, context, operation_id, body, entry.snapshot.submit_sent or entry.snapshot.submit_native_bytes != 0, entry.snapshot.remote_effect_unknown or entry.snapshot.state == .outcome_unknown);
+            if (body.len <= 65536) {
+                var response = try ownedResult(self.allocator, context, operation_id, body, entry.snapshot.submit_sent or entry.snapshot.submit_native_bytes != 0, entry.snapshot.remote_effect_unknown or entry.snapshot.state == .outcome_unknown);
+                response.verification = entry.verification;
+                return response;
+            }
             self.allocator.free(body);
             if (keep == 0) return error.ResultLimit;
             keep /= 2;
@@ -665,7 +671,9 @@ pub const Controller = struct {
     fn recoveredResult(self: *Controller, invocation: host.Invocation, record: journal_mod.Record) !host.Result {
         const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .operation_ref = record.operation_ref, .execution_id = record.execution, .state = record.stage, .execution_receipt = record.execution_receipt, .local_released = record.local_released, .remote_effect_unknown = record.remote_effect_unknown, .replayed = false, .recovery_hint = "Inspect the persisted recording; reconnect/replay requires new explicit user intent." }, .{});
         errdefer self.allocator.free(body);
-        return ownedResult(self.allocator, invocation.context, invocation.operation_id, body, record.dispatch_started, record.remote_effect_unknown or record.stage == .outcome_unknown);
+        var response = try ownedResult(self.allocator, invocation.context, invocation.operation_id, body, record.dispatch_started, record.remote_effect_unknown or record.stage == .outcome_unknown);
+        response.verification = record.verification;
+        return response;
     }
 };
 fn inputStage(receipt: execution.InputReceipt) journal_mod.Stage {

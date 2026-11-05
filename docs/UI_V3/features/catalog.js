@@ -4,8 +4,6 @@ window.V3Features=[
  ...[['connection-review','连接核对与测试','身份快照、路径、配置检查与认证边界'],['connection-route','连接路径编辑','直连、多跳排序和独立认证'],['connection-auth','连接认证','凭据挑战、取消、失败与恢复']].map(([id,title,description])=>({id,title,description,group:'connection',module:'主机与连接',base:['inputs','choices','overlays'],url:'../connection/index.html?feature='+id,source:'../connection/app.js'})),
  ...[['settings-navigation','设置导航','搜索、分类、最小窗口的独立滚动'],['settings-transaction','设置事务','草稿、校验、撤销、保存、关闭确认'],['theme-picker','主题选择','主题预览、导入和跨模块语义'],['font-settings','字体与排版','字体选择、fallback和终端预览'],['model-row','模型行','单行信息、能力、测试和编辑']].map(([id,title,description])=>({id,title,description,group:'settings',module:'偏好设置',base:['inputs','choices','feedback'],url:'../settings/index.html?component='+id,source:'../settings/app.js'})),
  ...[['kvm-control','KVM 控制权','只读、申请、释放与输入租约'],['kvm-display','KVM 显示','等比、原始尺寸、滚动与全屏'],['kvm-keys','KVM 按键','组合键与控制权门控'],['kvm-route','KVM 连接链路','连接身份、跳板、目标与检测'],['kvm-power','KVM 电源','已接受、状态核实与未知结果'],['kvm-boot','KVM 启动项','一次性覆盖、读回与恢复'],['kvm-ai','KVM AI','原助手结构与观察、授权和审批']].map(([id,title,description])=>({id,title,description,group:'kvm',module:'BMC iKVM',base:['choices','overlays','async'],url:'../kvm/index.html?protocol=kvm&feature='+id,source:'../kvm/app.js'})),
- {id:'note-editor',title:'笔记编辑与预览',description:'同一笔记模型的编辑、预览与分栏',group:'notes',module:'本地笔记',base:['inputs','actions'],url:'../notes/index.html?component=note-editor',source:'../notes/app.js'},
- {id:'note-actions',title:'笔记联动',description:'命令准备、AI上下文与保留草稿',group:'notes',module:'本地笔记',base:['actions','overlays'],url:'../notes/index.html?component=note-actions',source:'../notes/app.js'}
 ];
 
 // Functional regions are distinct entry points over the same module implementation.
@@ -20,7 +18,6 @@ window.V3Areas=[
  ['connection','连接 · 已冻结','../connection/index.html','保留拆分前已确认的完整模块，仅定点修复'],
  ['settings','设置 · 已冻结','../settings/index.html','保留拆分前已确认的完整模块'],
  ['kvm','BMC iKVM','../kvm/index.html?protocol=kvm','连接画面、控制、按键、电源与启动'],
- ['notes','笔记工具','../notes/index.html','编辑与命令准备，整机以浮窗呈现']
 ];
 V3Features.splice(2,0,{id:'workspace-statusbar',title:'底栏功能入口',description:'底栏仅负责状态及功能触发，浮层复用各自独立组件',base:['toolkit','overlays'],group:'statusbar',module:'底栏',url:'../workspace/index.html?mode=ssh&component=statusbar',source:'../workspace/app.js'});
 for(const item of V3Features){item.area=item.id==='workspace-shell-tabs'?'topbar':item.id==='workspace-host-sidebar'?'sidebar':item.id==='workspace-ai'||item.id==='kvm-ai'?'assistant':item.id==='workspace-transfer'?'sftp':item.id.startsWith('workspace-')&&['connection-status','connection-route','broadcast','port-forward'].some(k=>item.id==='workspace-'+k)?'statusbar':item.group==='workspace'?'ssh':item.group;}

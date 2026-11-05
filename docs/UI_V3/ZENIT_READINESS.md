@@ -19,7 +19,6 @@ HTML可以作为分模块原生实施的交互与几何基准；**不能直接�
 | 页签/分栏/拖动 | Tabs + 项目workspace/pane_manager/float_model；`ui.interaction`路由 | 稳定SessionHandle/TabId，动作冻结目标；拖序投影不复制会话，关闭/新窗口不以active或“最后一个tab”猜目标 |
 | AI浮窗 | `src/ai/float_model.zig`、既有助手视图与composer | 默认600×456，最小520×354(可用边界夹取)，90px输入区；owner只读。收起继续、×停止；拖动/resize不插值命中区；Esc还原手势；历史恢复不复活旧批准 |
 | KVM/VNC/RDP画面 | 未来协议renderer + 原生纹理/输入服务 | HTML BIOS/桌面是夹具；真实视频必须流纹理、等比适配与clip。指针坐标须由viewport→远端帧换算，分辨率/代际变化使旧观察与待发输入失效 |
-| 本地笔记 | Textarea、Markdown、应用分栏/文件与资源服务 | HTML预览为有限子集；原生用现有Markdown组件完整语法，文件导入/相对资源复制/原子保存/失败保稿由文件服务负责 |
 | 全局通知 | 项目NotificationHost/notification_presenter | 通知只消费operation事实和原owner，不在页面底部另造全局横幅；关闭通知不取消任务，点击定位不能改派发目标 |
 
 ## 终端内置命令块：必须单独实现的应用层能力

@@ -27,7 +27,7 @@
 | 最小窗口 | [860×480](workspace/index.html?mode=local&size=compact) | 不缩放字体，保留显式工具入口 |
 | 只读历史 | [历史回放](workspace/index.html?mode=history) | 独立页签、时间轴与返回实时 |
 
-## 连接、未来协议与笔记
+## 连接与未来协议
 
 | 功能页 | 可点击入口 | 重点 |
 | --- | --- | --- |
@@ -37,7 +37,6 @@
 | VNC | [远程桌面](kvm/index.html?protocol=vnc) | 图像、只读与控制、显示、重连 |
 | RDP | [远程桌面](kvm/index.html?protocol=rdp) | 身份/证书/显示、输入与断线 |
 | FTP / FTPS | [文件工作区](kvm/index.html?protocol=ftp) | TLS/主动被动/目录/传输 · [双卡片](kvm/index.html?protocol=ftp) |
-| Markdown 笔记 | [双栏工作区](notes/index.html) | [双栏卡片](notes/index.html)、[上下文预览](notes/index.html)、[最小窗口](notes/index.html) |
 
 连接与未来协议的完整状态图及交互说明见 [连接README](connection/README.md)、[KVM README](kvm/README.md)。历史连接原文件未找回，本次为重新补全的新交互稿，门户不再把恢复登记作为连接弹窗。
 

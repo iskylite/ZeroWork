@@ -221,6 +221,26 @@ pub const Context = struct {
         };
         return error.TargetNotAuthorized;
     }
+    pub fn observeVerification(self: *Context, anchor: @import("../ai/readonly_verification.zig").Anchor, read_context: host.Context) !@import("../ai/readonly_verification.zig").Observation {
+        const original = anchor.context orelse return error.VerificationSourceUnavailable;
+        const id = anchor.execution_id orelse return error.VerificationSourceUnavailable;
+        try authorizeRead(self, read_context, original, anchor.owner, id);
+        if (!self.app.sessions.bindingIsLive(anchor.service)) return error.StaleBinding;
+        for (self.admissions) |item| if (item) |record| {
+            if (!record.authorized or !record.context.eql(original) or !record.boundary.handle.eql(anchor.owner) or record.execution_id == null or !record.execution_id.?.eql(id)) continue;
+            if (record.turn_id != anchor.turn_id or !std.mem.eql(u8, &record.call_hash, &anchor.call_hash) or !std.mem.eql(u8, &record.arguments_hash, &anchor.arguments_hash)) return error.VerificationIdentityMismatch;
+            if (!record.boundary.service.binding.eql(anchor.service)) return error.StaleBinding;
+            const value = try record.boundary.service.observeExecution(id);
+            var observed: @import("../ai/readonly_verification.zig").Observation = .{ .anchor = anchor, .source = .original_terminal, .local_released = value.local_released, .remote_effect_unknown = value.remote_effect_unknown };
+            if (value.process) |process| {
+                observed.foreground_finished = process.foreground_finished;
+                if (process.exit_code) |code| observed.exit_code = code;
+            }
+            observed.running = value.state == .running;
+            return observed;
+        };
+        return error.VerificationSourceUnavailable;
+    }
     fn authorizeRead(raw: *anyopaque, context: host.Context, original: host.Context, handle: identity.SessionHandle, id: identity.ExecutionId) !void {
         const self: *Context = @ptrCast(@alignCast(raw));
         if (!original.conversation_id.eql(context.conversation_id)) return error.TargetNotAuthorized;
@@ -626,7 +646,7 @@ pub const Context = struct {
         try self.validateApproval(invocation, command, hash);
         const service = try self.resolveAdmission(record, true);
         record.authorized = true;
-        return .{ .handle = handle, .service = service, .ownership_revision = record.boundary.ownership_revision };
+        return .{ .verification_service = service.binding, .create_key = (self.app.sessions.queryState(handle) orelse return error.StaleSession).create_operation, .handle = handle, .service = service, .ownership_revision = record.boundary.ownership_revision };
     }
     fn resolve(raw: *anyopaque, authority: host.Context, handle: identity.SessionHandle) !terminal.Service {
         const self: *Context = @ptrCast(@alignCast(raw));

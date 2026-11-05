@@ -151,3 +151,178 @@ test "background asset alpha and disabled missing paths retain valid save semant
         try std.testing.expectError(error.OutOfRange, (asset.Materials{ .background = .{ .transparency = invalid } }).validate());
     }
 }
+
+test "background directory decodes the selected child and skips broken images on demand" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "nested", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "nested/1.png", .data = red_png });
+    for ([_][]const u8{ "10.png", "2.PNG", "01.png" }) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = red_png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.png", .data = "corrupt raster" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = red_png });
+    const file = try tmp.dir.realPathFileAlloc(io, "10.png", a);
+    defer a.free(file);
+    const path = std.fs.path.dirname(file).?;
+    var prepared = try asset.prepare(io, tmp.dir, a, .{ .draft_id = 9, .asset_revision = 4, .path = path, .source = .directory }, .{});
+    defer prepared.deinit(a);
+    try std.testing.expectEqualStrings(path, prepared.path);
+    try std.testing.expectEqual(asset.Source.directory, prepared.source);
+    // Undisplayed files have not been decoded or filtered during startup.
+    try std.testing.expectEqual(@as(usize, 4), prepared.playlist.?.paths.items.len);
+    try std.testing.expectEqualStrings("01.png", std.fs.path.basename(prepared.selectedPath()));
+    var copy = try prepared.clone(a);
+    defer copy.deinit(a);
+    try std.testing.expect(copy.playlist.?.paths.items[0].ptr != prepared.playlist.?.paths.items[0].ptr);
+    var next = try asset.prepareNext(io, tmp.dir, a, path, &copy.playlist.?);
+    defer next.deinit(a);
+    try std.testing.expectEqualStrings("2.PNG", std.fs.path.basename(next.selectedPath()));
+    try tmp.dir.deleteFile(io, "10.png");
+    try tmp.dir.writeFile(io, .{ .sub_path = "01.png", .data = "damaged after scan" });
+    var wrapped = try asset.prepareNext(io, tmp.dir, a, path, &next.playlist.?);
+    defer wrapped.deinit(a);
+    try std.testing.expectEqualStrings("2.PNG", std.fs.path.basename(wrapped.selectedPath()));
+    try tmp.dir.deleteFile(io, "2.PNG");
+    try std.testing.expectError(error.NoUsableImages, asset.prepareNext(io, tmp.dir, a, path, &wrapped.playlist.?));
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, wrapped.image.pixels);
+    try std.testing.expectError(error.NoUsableImages, asset.prepare(io, tmp.dir, a, .{ .draft_id = 9, .asset_revision = 5, .path = path, .source = .directory }, .{}));
+}
+
+test "background directory skips a corrupt first image and honors initial decode limits" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "1.png", .data = invalid_raster_png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "2.png", .data = red_png });
+    const file = try tmp.dir.realPathFileAlloc(io, "2.png", a);
+    defer a.free(file);
+    const request: asset.Request = .{ .draft_id = 19, .asset_revision = 7, .path = std.fs.path.dirname(file).?, .source = .directory };
+    var prepared = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer prepared.deinit(a);
+    try std.testing.expectEqualStrings("2.png", std.fs.path.basename(prepared.selectedPath()));
+    try std.testing.expectEqual(request.draft_id, prepared.draft_id);
+    try std.testing.expectEqual(request.asset_revision, prepared.asset_revision);
+    try std.testing.expectEqual(@as(usize, 2), prepared.playlist.?.paths.items.len);
+    try std.testing.expectError(error.NoUsableImages, asset.prepare(io, tmp.dir, a, request, .{ .pixels = 0 }));
+}
+
+test "background random cycles do not repeat within a cycle or across its boundary" {
+    const a = std.testing.allocator;
+    var list: asset.Playlist = .{};
+    defer list.deinit(a);
+    for ([_][]const u8{ "1.png", "2.png", "3.png", "4.png" }) |path| try list.append(a, path);
+    list.setOrder(true, 12345);
+    var previous: ?[]const u8 = null;
+    for (0..50) |_| {
+        var seen: [4][]const u8 = undefined;
+        for (&seen, 0..) |*entry, i| {
+            entry.* = list.paths.items[list.index];
+            if (previous) |last| try std.testing.expect(!std.mem.eql(u8, last, entry.*));
+            for (seen[0..i]) |earlier| try std.testing.expect(!std.mem.eql(u8, earlier, entry.*));
+            previous = entry.*;
+            list.advance();
+        }
+    }
+    var single: asset.Playlist = .{};
+    defer single.deinit(a);
+    try single.append(a, "only.png");
+    single.setOrder(true, 10);
+    single.advance();
+    try std.testing.expectEqual(@as(usize, 0), single.index);
+}
+
+test "background directory configuration round trips and old file configurations keep defaults" {
+    const config = @import("config/config.zig");
+    const old = try config.Config.parse("[ui.materials.background]\nenabled = true\npath = \"/tmp/old.png\"\n");
+    try std.testing.expectEqual(asset.Source.file, old.ui.materials.background.source);
+    try std.testing.expectEqual(@as(u16, 5), old.ui.materials.background.interval_minutes);
+    var candidate: config.Config = .{};
+    candidate.ui.materials.background = .{ .enabled = true, .source = .directory, .order = .random, .path = "/tmp/images", .interval_minutes = 15 };
+    var buffer: [32768]u8 = undefined;
+    const parsed = try config.Config.parse(try candidate.format(&buffer));
+    try std.testing.expectEqual(asset.Source.directory, parsed.ui.materials.background.source);
+    try std.testing.expectEqual(asset.Order.random, parsed.ui.materials.background.order);
+    try std.testing.expectEqualStrings("/tmp/images", parsed.ui.materials.background.path);
+    try std.testing.expectEqual(@as(u16, 15), parsed.ui.materials.background.interval_minutes);
+    candidate.ui.materials.background.interval_minutes = 0;
+    try std.testing.expectError(error.OutOfRange, candidate.validate());
+}
+
+test "background rotation timer starts at successful display and skips missed intervals" {
+    const Rotation = @import("config/background_rotation.zig").Rotation;
+    var rotation: Rotation = .{};
+    defer rotation.deinit();
+    rotation.sync(7, 1000, 5, false);
+    try std.testing.expect(rotation.deadline_ms == null);
+    rotation.sync(7, 2000, 5, true);
+    try std.testing.expect(!rotation.due(301999));
+    try std.testing.expect(rotation.due(302000));
+    // A long sleep produces a single due result, then a full new interval.
+    try std.testing.expect(rotation.due(9_000_000));
+    rotation.reset(9_000_000, 5);
+    try std.testing.expect(!rotation.due(9_000_001));
+    try std.testing.expectEqual(@as(u64, 9_300_000), rotation.deadline_ms.?);
+    rotation.sync(8, 9_000_010, 1, true);
+    try std.testing.expectEqual(@as(u64, 9_060_010), rotation.deadline_ms.?);
+    rotation.sync(8, 9_000_020, 1, false);
+    try std.testing.expect(rotation.deadline_ms == null);
+}
+
+test "background rotation worker owns its resources and never changes saved configuration" {
+    const Rotation = @import("config/background_rotation.zig").Rotation;
+    const config = @import("config/config.zig");
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "1.png", .data = red_png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "2.png", .data = red_png });
+    const file = try tmp.dir.realPathFileAlloc(io, "1.png", a);
+    defer a.free(file);
+    const path = std.fs.path.dirname(file).?;
+    var current = try asset.prepare(io, tmp.dir, a, .{ .draft_id = 12, .asset_revision = 3, .source = .directory, .path = path }, .{});
+    defer current.deinit(a);
+    var saved: config.Config = .{};
+    saved.ui.materials.background = .{ .enabled = true, .source = .directory, .path = path };
+    var buffer: [32768]u8 = undefined;
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = try saved.format(&buffer) });
+    var rotation: Rotation = .{};
+    defer rotation.deinit();
+    rotation.sync(Rotation.identity(saved.ui.materials.background, 1), 0, 5, true);
+    try rotation.start(a, io, tmp.dir, &current, false);
+    for (0..1_000_000) |_| {
+        if (rotation.ready()) break;
+        std.Thread.yield() catch {};
+    }
+    const job = rotation.take() orelse return error.WorkerTimeout;
+    defer job.destroy();
+    try std.testing.expect(job.problem == null);
+    try std.testing.expectEqualStrings("2.png", std.fs.path.basename(job.result.?.selectedPath()));
+    try std.testing.expectEqual(@as(u64, 3), job.result.?.asset_revision);
+    try std.testing.expectEqualStrings("1.png", std.fs.path.basename(current.selectedPath()));
+    const persisted = try tmp.dir.readFileAlloc(io, "config.toml", a, .limited(32768));
+    defer a.free(persisted);
+    try std.testing.expectEqualStrings(try saved.format(&buffer), persisted);
+    const stale_key = job.key;
+    rotation.sync(Rotation.identity(saved.ui.materials.background, 2), 1, 5, true);
+    try std.testing.expect(stale_key != rotation.key);
+}
+
+test "background selection detects files and directories instead of trusting the previous mode" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "image.png", .data = red_png });
+    const path = try tmp.dir.realPathFileAlloc(io, "image.png", a);
+    defer a.free(path);
+    var file = try asset.prepare(io, tmp.dir, a, .{ .draft_id = 1, .asset_revision = 1, .path = path, .source = .directory, .detect_source = true }, .{});
+    defer file.deinit(a);
+    try std.testing.expectEqual(asset.Source.file, file.source);
+    var directory = try asset.prepare(io, tmp.dir, a, .{ .draft_id = 1, .asset_revision = 2, .path = std.fs.path.dirname(path).?, .source = .file, .detect_source = true }, .{});
+    defer directory.deinit(a);
+    try std.testing.expectEqual(asset.Source.directory, directory.source);
+    try std.testing.expectEqual(@as(usize, 1), directory.playlist.?.paths.items.len);
+}

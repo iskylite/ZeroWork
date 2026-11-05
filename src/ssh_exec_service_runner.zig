@@ -83,10 +83,15 @@ pub fn main(init: std.process.Init) !void {
     defer std.heap.c_allocator.free(command);
     const unknown_mode = std.mem.eql(u8, mode, "close-unknown") or std.mem.eql(u8, mode, "open-unknown") or std.mem.eql(u8, mode, "request-unknown") or std.mem.eql(u8, mode, "result-close-unknown");
     const timed_mode = std.mem.eql(u8, mode, "timeout") or std.mem.eql(u8, mode, "eof-timeout") or (unknown_mode and !std.mem.eql(u8, mode, "close-unknown"));
-    const opts: types.ExecOpts = .{ .key = key, .call_id = 1, .service_binding = binding, .capture_cap = if (std.mem.eql(u8, mode, "capture")) 4096 else 64 * 1024, .timeout_ms = if (timed_mode) 150 else 3000, .cwd = if (std.mem.eql(u8, mode, "cwd")) "/tmp/a'b\n$(not-a-command)" else null };
+    const input_mode = std.mem.eql(u8, mode, "stdin") or std.mem.eql(u8, mode, "stdin-empty");
+    const input = try std.heap.c_allocator.alloc(u8, if (std.mem.eql(u8, mode, "stdin")) 128 * 1024 else 0);
+    defer std.heap.c_allocator.free(input);
+    for (input, 0..) |*byte, index| byte.* = @truncate(index);
+    const opts: types.ExecOpts = .{ .stdin = if (input_mode) input else null, .key = key, .call_id = 1, .service_binding = binding, .capture_cap = if (std.mem.eql(u8, mode, "capture")) 4096 else 64 * 1024, .timeout_ms = if (timed_mode) 150 else 3000, .cwd = if (std.mem.eql(u8, mode, "cwd")) "/tmp/a'b\n$(not-a-command)" else null };
     const handle = try facade.exec(command, opts);
     const duplicate = try facade.exec(command, opts);
     if (handle.ptr != duplicate.ptr) return error.DuplicateCallWasQueued;
+    @memset(input, 0); // The IO owner must send its frozen copy, including NULs.
     if (std.mem.eql(u8, mode, "queued-cancel")) facade.cancel(handle);
     var io: Io = .{ .exec = &service, .session = &session };
     const thread = try std.Thread.spawn(.{}, Io.run, .{&io});
@@ -157,6 +162,8 @@ pub fn main(init: std.process.Init) !void {
             if (result.status != .completed or result.exit_code != 7 or !result.truncated or result.stdout.len + result.stderr.len != 4096 or result.stdout_bytes != 3 * 1024 * 1024 or result.stderr_bytes != 3 * 1024 * 1024) return error.CaptureWasNotDrained;
             for (result.stdout) |byte| if (byte != 'A') return error.StdoutCorrupted;
             for (result.stderr) |byte| if (byte != 'B') return error.StderrCorrupted;
+        } else if (input_mode) {
+            if (result.status != .completed or result.exit_code != 0 or !std.mem.eql(u8, result.stdout, "STDIN-OK\n")) return error.StdinWasNotDelivered;
         } else if (std.mem.eql(u8, mode, "no-exit")) {
             if (result.status != .completed or result.exit_code != null or result.effect != .unknown) return error.MissingExitBecameZero;
         } else if (std.mem.eql(u8, mode, "reject")) {

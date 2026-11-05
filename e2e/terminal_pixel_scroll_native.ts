@@ -33,6 +33,30 @@ async function capture(name: string) {
   const path = join(out, name + '.png');
   assert((await h.screenshot(path)).ok); report.captures.push(path);
 }
+async function bottomAlignment(id: string, label: string) {
+  for (const [width, height] of [[1100, 760], [860, 480], [1200, 797]]) {
+    assert((await h.resizeWindow(width, height)).ok);
+    const geometry = await h.waitFor(async () => {
+      const root = await visible(id);
+      const viewport = flatten(root).find(n => n.test_id === 'terminal.surface.viewport' && shown(n));
+      if (!viewport) return null;
+      const rows = (viewport.children ?? []).filter(n => n.test_id?.startsWith('terminal.surface.row.') && shown(n))
+        .sort((a, b) => a.rect.y - b.rect.y);
+      if (!rows.length) return null;
+      const first = rows[0].rect, last = rows.at(-1).rect;
+      const end = viewport.rect.y + viewport.rect.h;
+      if (Math.abs(last.y + last.h - end) > .05) return null;
+      const remainder = viewport.rect.h % last.h;
+      if (remainder > .05 && !(first.y < viewport.rect.y && first.y + first.h > viewport.rect.y)) return null;
+      if (Math.abs(root.rect.y + root.rect.h - end - 4) > .05) return null;
+      return {width, height, viewport: viewport.rect, first, last, rows: rows.length, remainder};
+    }, 10000);
+    report.checks.push({label: label + '-bottom-alignment', ...geometry});
+    await capture(`${label}-bottom-${width}x${height}`);
+  }
+  assert((await h.resizeWindow(1100, 760)).ok);
+  await h.sleep(200);
+}
 async function scrollCheck(id: string, marker: string, label: string) {
   const root = await visible(id), r = root.rect;
   const position = async () => flatten(await visible(id)).find(n => n.text?.includes(marker) && shown(n))?.rect.y;
@@ -57,6 +81,7 @@ async function scrollCheck(id: string, marker: string, label: string) {
   await h.scrollAt(r.x + r.w * .6, r.y + r.h * .5, 0, -100000);
   await h.waitFor(async () => content(await visible(id)).includes(label === 'local' ? 'LOCAL-ROW-0599' : 'SSH-ROW-0599') || null, 10000);
   await capture(label + '-bottom');
+  await bottomAlignment(id, label);
 }
 try {
   const ready = await h.waitFor(async () => {
@@ -71,7 +96,9 @@ try {
   await click('terminal.surface'); await h.type_("printf 'LOCAL-ROW-%04d\\n' {0..599}"); await h.key('return');
   await scrollCheck('terminal.surface', 'LOCAL-ROW-0580', 'local');
   const host = (await h.query('sidebar.host')).find((n: any) => shown(n) && content(n).includes('Pixel Scroll SSH'));
-  assert(host); assert((await h.clickAt(host.rect.x + 70, host.rect.y + host.rect.h / 2)).ok);
+  assert(host);
+  await h.mouseMove(host.rect.x + host.rect.w - 20, host.rect.y + host.rect.h / 2);
+  await click('sidebar.host.connect');
   await h.waitFor(async () => {
     const modal = (await h.query('plugin.challenge.modal')).find(shown);
     if (modal) {

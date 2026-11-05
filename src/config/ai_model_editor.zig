@@ -484,7 +484,7 @@ pub const Editor = struct {
         }
         var model = self.model;
         model.id = self.id.peek();
-        model.context_window = std.fmt.parseInt(u32, self.context.peek(), 10) catch 8192;
+        model.context_window = std.fmt.parseInt(u32, self.context.peek(), 10) catch 0;
         self.hooks.test_model(self.hooks.context, self.provider, model);
     }
     fn testSignature(self: *Editor) u64 {

@@ -36,6 +36,7 @@ pub const TargetResult = struct {
 };
 pub const Outcome = struct {
     targets: []TargetResult,
+    verification: ?@import("readonly_verification.zig").Anchor = null,
 
     pub fn copy(allocator: std.mem.Allocator, values: []const TargetResult) !Outcome {
         if (values.len > scope_mod.max_targets) return error.TooManyToolTargets;
@@ -80,6 +81,7 @@ pub const Outcome = struct {
     }
 };
 pub const Invocation = struct {
+    dispatch_fence: ?provider.DispatchFence = null,
     key: Key,
     scope: scope_mod.Scope,
     round_index: u16,
@@ -116,6 +118,7 @@ pub const Host = struct {
     /// After dispatch, errors are uncertain: return an explicit actual outcome
     /// (including unknown) and wait for release or transfer cleanup ownership.
     execute: *const fn (*anyopaque, Invocation, std.mem.Allocator, ?*provider.CancelToken) anyerror!Outcome,
+    execute_file: ?*const fn (*anyopaque, dynamic.Invocation, std.mem.Allocator, ?*provider.CancelToken) anyerror!dynamic.ToolResult = null,
     current_permission: ?*const fn (*anyopaque) permission.Engine = null,
     execute_dynamic: ?*const fn (*anyopaque, dynamic.DynamicInvocation, std.mem.Allocator, ?*provider.CancelToken) anyerror![]dynamic.ToolResult = null,
     /// A separate host gateway must revalidate conversation/task, binding and
@@ -138,7 +141,9 @@ pub const Record = struct {
     host_result: ?dynamic.host.Result = null,
     result_body: ?[]const u8 = null,
 };
+pub const DispatchGate = provider.DispatchFence;
 pub const Loop = struct {
+    dispatch_gate: ?DispatchGate = null,
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     scope: scope_mod.Scope,
@@ -148,6 +153,7 @@ pub const Loop = struct {
     messages: std.ArrayList(provider.Message) = .empty,
     records: std.ArrayList(Record) = .empty,
     round_index: u16 = 0,
+    verification_notes: std.ArrayList(u8) = .empty,
     uncertain: bool = false,
     /// A valid unknown host receipt permits observation, never fresh effects.
     /// Invalid receipts and legacy uncertain transports retain their stop gate.
@@ -310,6 +316,76 @@ pub const Loop = struct {
     pub fn checkRequestBudget(self: *Loop) !void {
         try self.checkBudget();
     }
+    /// Reserve and own the entire message before committing its input receipt.
+    /// appendPrepared cannot fail, so an accepted input is never duplicated by
+    /// a retry after a partial history allocation.
+    pub fn prepareMessage(self: *Loop, message: provider.Message) !provider.Message {
+        if (message.tool_calls.len != 0 or message.tool_call_id != null) return error.InvalidToolCall;
+        if (self.messages.items.len >= @import("wire_history.zig").History.max_messages) return error.ToolTranscriptLimit;
+        var bytes: usize = message.content.len + self.request.system.len;
+        for (self.messages.items) |prior| {
+            bytes = std.math.add(usize, bytes, prior.content.len + 32) catch return error.ToolTranscriptLimit;
+            for (prior.tool_calls) |call| bytes = std.math.add(usize, bytes, call.id.len + call.name.len + call.arguments.len) catch return error.ToolTranscriptLimit;
+        }
+        if (bytes > self.limits.max_transcript_bytes) return error.ToolTranscriptLimit;
+        const a = self.arena.allocator();
+        try self.messages.ensureUnusedCapacity(a, 1);
+        var owned = message;
+        owned.content = try a.dupe(u8, message.content);
+        owned.images = try a.dupe(@import("image_attachments.zig").ContentRef, message.images);
+        owned.offloaded_images = try a.dupe(provider.OffloadedImage, message.offloaded_images);
+        var candidate = self.request;
+        candidate.messages = self.preparedTranscript(owned);
+        try @import("local_text_request.zig").checkContext(candidate, self.limits.context_window);
+        return owned;
+    }
+    pub fn appendPrepared(self: *Loop, message: provider.Message) void {
+        for (message.images) |reference| _ = reference.retain();
+        for (message.offloaded_images) |entry| _ = entry.reference.retain();
+        self.messages.appendAssumeCapacity(message);
+        self.request.messages = self.messages.items;
+    }
+    /// Borrow the already reserved append slot for atomic outbox+transcript
+    /// storage. Length and refcounts change only after that commit succeeds.
+    pub fn preparedTranscript(self: *Loop, message: provider.Message) []const provider.Message {
+        self.messages.unusedCapacitySlice()[0] = message;
+        return self.messages.items.ptr[0 .. self.messages.items.len + 1];
+    }
+    pub fn sealInterrupted(self: *Loop) !void {
+        const last = for (self.messages.items, 0..) |message, index| {
+            if (message.tool_calls.len != 0) {
+                // The final assistant batch is the only one a stopped loop
+                // can leave open; earlier batches passed nextRequest checks.
+                var later = false;
+                for (self.messages.items[index + 1 ..]) |other| if (other.tool_calls.len != 0) {
+                    later = true;
+                    break;
+                };
+                if (!later) break index;
+            }
+        } else return;
+        const calls = self.messages.items[last].tool_calls;
+        for (calls) |call| {
+            var present = false;
+            for (self.messages.items[last + 1 ..]) |message| if (message.tool_call_id) |id| if (std.mem.eql(u8, id, call.id)) {
+                present = true;
+                break;
+            };
+            if (present) continue;
+            var dispatched = false;
+            for (self.records.items) |record| if (std.mem.eql(u8, record.key.call_id, call.id)) {
+                dispatched = record.dispatched;
+                break;
+            };
+            const body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (dispatched) "outcome_unknown" else "cancelled_unsent", .error_code = "InterruptedBeforeResult", .operation_may_have_started = dispatched }, .{});
+            try self.messages.append(self.arena.allocator(), .{ .role = .tool, .content = body, .tool_call_id = call.id });
+            self.uncertain = self.uncertain or dispatched;
+        }
+        self.request.messages = self.messages.items;
+    }
+    fn planCurrent(self: *Loop) bool {
+        return if (self.dispatch_gate) |gate| gate.current(gate.context, gate.revision) else true;
+    }
     /// Retains results even when Stop wins or the next request exceeds budget.
     pub fn complete(self: *Loop, text: []const u8, calls: []const provider.ToolCall, host: Host, policy: permission.Engine, policy_revision: u64, cancel: ?*provider.CancelToken) !void {
         if (calls.len == 0 or calls.len > provider.max_tool_calls) return error.InvalidToolCall;
@@ -378,6 +454,10 @@ pub const Loop = struct {
         const a = self.arena.allocator();
         try self.records.append(a, .{ .key = .{ .owner = self.scope.owner, .turn_id = self.turn_id, .call_id = call.id }, .name = call.name, .arguments = call.arguments, .arguments_hash = hash });
         const record = &self.records.items[self.records.items.len - 1];
+        if (!self.planCurrent()) {
+            record.result_body = try self.errorBody("not_dispatched_due_to_new_input", null);
+            return record.result_body.?;
+        }
         if (self.tool_table) |*table| {
             if (table.lookup(call.name) != null) return self.resolveDynamic(record, table, call, host, cancel);
             // A request table is the whole authority; no fallback to a global
@@ -423,10 +503,16 @@ pub const Loop = struct {
             record.result_body = try self.errorBody("ToolResultCapacity", &selected.targets);
             return record.result_body.?;
         }
+        if (!self.planCurrent()) {
+            record.result_body = try self.errorBody("not_dispatched_due_to_new_input", null);
+            return record.result_body.?;
+        }
         record.dispatched = true; // Set before crossing the effect boundary.
-        const outcome = host.execute(host.context, .{ .key = record.key, .scope = self.scope, .round_index = self.round_index, .call_index = index, .arguments = call.arguments, .arguments_hash = hash, .call = selected, .verdict = verdict, .policy_revision = policy_revision }, self.allocator, cancel) catch |err| {
-            self.uncertain = true;
-            record.result_body = try self.unknownBody(@errorName(err), selected.targets);
+        const outcome = host.execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .key = record.key, .scope = self.scope, .round_index = self.round_index, .call_index = index, .arguments = call.arguments, .arguments_hash = hash, .call = selected, .verdict = verdict, .policy_revision = policy_revision }, self.allocator, cancel) catch |err| {
+            const unsent = err == error.ScopeChanged or err == error.CancelledBeforeDispatch;
+            record.dispatched = !unsent;
+            if (!unsent) self.uncertain = true;
+            record.result_body = if (unsent) try self.errorBody(@errorName(err), &selected.targets) else try self.unknownBody(@errorName(err), selected.targets);
             return record.result_body.?;
         };
         // Take ownership before validation; unknown data must remain inspectable.
@@ -461,8 +547,12 @@ pub const Loop = struct {
         }
         const operation_id = next_dynamic_operation.fetchAdd(1, .monotonic);
         if (operation_id == 0 or operation_id == std.math.maxInt(u64)) return error.IdentityExhausted;
+        if (!self.planCurrent()) {
+            record.result_body = try self.errorBody("not_dispatched_due_to_new_input", null);
+            return record.result_body.?;
+        }
         record.dispatched = true;
-        const result = execute(host.context, .{ .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
+        const result = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
             const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ExecutionDeadlineBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
             record.dispatched = !preflight;
             if (!preflight and affecting) self.uncertain = true;
@@ -523,15 +613,19 @@ pub const Loop = struct {
             record.result_body = try self.errorBody("ModelDoesNotSupportToolImages", &parsed.targets);
             return record.result_body.?;
         }
+        if (!self.planCurrent()) {
+            record.result_body = try self.errorBody("not_dispatched_due_to_new_input", null);
+            return record.result_body.?;
+        }
         record.dispatched = true;
         // Monotonic identity belongs to the local operation history; provider
         // call IDs remain correlation strings and never become network handles.
         const operation_id = next_dynamic_operation.fetchAdd(1, .monotonic);
         if (operation_id == 0 or operation_id == std.math.maxInt(u64)) return error.IdentityExhausted;
-        const results = execute(host.context, .{ .table = table, .parsed = parsed, .turn_id = self.turn_id, .call_id = call.id, .arguments = call.arguments, .operation_id = operation_id }, self.allocator, cancel) catch |err| {
+        const results = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .table = table, .parsed = parsed, .turn_id = self.turn_id, .call_id = call.id, .arguments = call.arguments, .operation_id = operation_id }, self.allocator, cancel) catch |err| {
             // Policy and approval rejection happen before any dispatch. Other
             // failures are conservatively unknown and never automatically replay.
-            const preflight = err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded or err == error.OperationHistoryFull or err == error.ModeConflict;
+            const preflight = err == error.ScopeChanged or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded or err == error.OperationHistoryFull or err == error.ModeConflict;
             if (!preflight) self.uncertain = true;
             record.dispatched = !preflight;
             @import("tool_trace.zig").emit(.{ .event = "dynamic_rejected", .call_id = call.id, .tool_id = call.name, .owner = self.scope.owner, .reason = @errorName(err), .dispatched = !preflight });
@@ -576,6 +670,8 @@ pub const Loop = struct {
     var next_dynamic_operation: std.atomic.Value(u64) = .init(1);
     fn checkBudget(self: *Loop) !void {
         self.request.messages = self.messages.items;
+        const budget = @import("local_text_request.zig");
+        try budget.checkFixedContext(self.request, self.limits.context_window);
         if (@import("image_offload.zig").enabled(self.request)) {
             const omitted = try @import("image_offload.zig").apply(self.arena.allocator(), self.messages.items, self.request, self.limits.context_window, if (self.compaction_config) |config| config.kind else .openai_compat);
             if (omitted != 0) @import("tool_trace.zig").emit(.{ .event = "image_offload", .count = omitted, .turn_id = self.turn_id, .owner = self.scope.owner });
@@ -591,16 +687,15 @@ pub const Loop = struct {
         bytes = std.math.add(usize, bytes, try provider.catalogTextBytes(self.request.tools)) catch return error.ToolTranscriptLimit;
         // Share the admission calculation with offload and submission; a
         // different output clamp/overhead must not reject a repaired request.
-        const estimated = try @import("local_text_request.zig").inputTokens(self.request);
-        const output = @min(self.request.max_output, @max(self.limits.context_window / 4, 1));
+        const estimated = try budget.inputTokens(self.request);
+        const output = budget.outputTokens(self.request.max_output, self.limits.context_window);
         if (bytes > self.limits.max_transcript_bytes) return error.ToolTranscriptLimit;
         if (self.compaction_failure != null) return error.ContextCompactionFailed;
         if (self.compaction_config) |config| {
             const compaction = @import("context_compaction.zig");
             if (compaction.reachesThreshold(estimated, output, self.limits.context_window) and compaction.cutoff(self.messages.items) != null) {
-                const history_request = config.chatRequest(.{ .model = config.model, .system = "", .messages = self.messages.items, .tool_images = config.vision });
-                const history_tokens = try @import("local_text_request.zig").inputTokens(history_request);
-                var next = compaction.compactNow(config, self.messages.items, estimated -| history_tokens, self.request.cancel) catch |err| {
+                var next = compaction.compactNow(config, self.messages.items, try budget.fixedTokens(self.request), self.request.cancel) catch |err| {
+                    if (err == error.ContextFixedOverhead) return err;
                     self.compaction_failure = err;
                     return error.ContextCompactionFailed;
                 };

@@ -201,6 +201,7 @@ pub const Service = struct {
         execution_secret: ?*const fn (*anyopaque, session.ServiceHandle, execution.SecretAction) anyerror!execution.InputReceipt = null,
         execution_input: ?*const fn (*anyopaque, session.ServiceHandle, execution.InputRequest) anyerror!execution.InputReceipt = null,
         execution_output: ?*const fn (*anyopaque, session.ServiceHandle, identity.ExecutionId, std.mem.Allocator, u64, usize) anyerror!execution.Output = null,
+        execution_observe: ?*const fn (*anyopaque, session.ServiceHandle, identity.ExecutionId) anyerror!execution.Snapshot = null,
         execution_snapshot_for: ?*const fn (*anyopaque, session.ServiceHandle, identity.ExecutionId) anyerror!execution.Snapshot = null,
         execution_snapshot: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!execution.Snapshot = null,
         execution_request: ?*const fn (*anyopaque, session.ServiceHandle, execution.Request) anyerror!void = null,
@@ -263,6 +264,16 @@ pub const Service = struct {
             else => self.binding.origin_session orelse return error.InvalidOwner,
         } };
         return call(self.context, self.binding);
+    }
+    pub fn observeExecution(self: Service, id: identity.ExecutionId) !execution.Snapshot {
+        if (!id.valid() or self.binding.kind != .terminal or self.binding.binding_id == 0 or self.binding.binding_generation == 0 or self.binding.resource_owner != .session) return error.VerificationIdentityMismatch;
+        const owner = self.binding.resource_owner.session;
+        if (@backingInt(owner.session_id) == 0 or owner.generation == 0) return error.VerificationIdentityMismatch;
+        if (self.binding.origin_session) |origin| if (!origin.eql(owner)) return error.VerificationIdentityMismatch;
+        const read = self.vtable.execution_observe orelse return error.VerificationSourceUnavailable;
+        const value = try read(self.context, self.binding, id);
+        if (!value.owner.eql(owner) or value.execution_id == null or !value.execution_id.?.eql(id)) return error.VerificationIdentityMismatch;
+        return value;
     }
     pub fn executionSnapshotFor(self: Service, id: identity.ExecutionId) !execution.Snapshot {
         if (self.vtable.execution_snapshot_for) |call| return call(self.context, self.binding, id);
