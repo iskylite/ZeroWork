@@ -1,5 +1,6 @@
 //! Local UI feedback: one content-sized surface inside the transcript scroll.
 //! It is not an assistant message and never enters model history.
+const std = @import("std");
 const ui = @import("ui");
 const S = @import("ai_assistant_styles.zig");
 const theme = @import("app_theme.zig");
@@ -42,6 +43,12 @@ pub const View = struct {
     }
 
     pub fn show(self: *View, label: []const u8, kind: Kind) void {
+        // Polling can report the same failure on successive frames. Preserve
+        // the existing notice without keeping the idle scene dirty forever.
+        if (std.mem.eql(u8, self.text.getText().?.content, label) and
+            self.root.style.display == (if (label.len == 0) ui.types.Display.none else .flex) and
+            self.rollback_icon.style.display == (if (kind == .rollback) ui.types.Display.flex else .none) and
+            self.warning_icon.style.display == (if (kind == .warning) ui.types.Display.flex else .none)) return;
         self.text.setTextContent(self.cx.allocator, label) catch return;
         self.rollback_icon.setDisplay(if (kind == .rollback) .flex else .none);
         self.warning_icon.setDisplay(if (kind == .warning) .flex else .none);

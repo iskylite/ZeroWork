@@ -4,6 +4,35 @@ const Feedback = @import("ui/ai_feedback_view.zig");
 const theme = @import("ui/app_theme.zig");
 const a = std.testing.allocator;
 
+test "AI feedback repeated polling errors leave the idle scene clean" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(600, 358);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const feedback = try Feedback.View.mount(cx, scope);
+    try cx.root.?.appendChild(a, feedback.root);
+    feedback.show("InvalidUtf8", .warning);
+    for (0..8) |_| {
+        cx.frame_count += 1;
+        _ = cx.render();
+    }
+    try std.testing.expect(!cx.hasPendingSceneWork());
+    const revision = ui.Node.treeStructureRevision();
+    for (0..100) |_| feedback.show("InvalidUtf8", .warning);
+    try std.testing.expect(!cx.hasPendingSceneWork());
+    try std.testing.expectEqual(revision, ui.Node.treeStructureRevision());
+    try std.testing.expectEqualStrings("InvalidUtf8", feedback.text.getText().?.content);
+    feedback.show("请求失败", .warning);
+    try std.testing.expect(cx.hasPendingSceneWork());
+    feedback.show("请求失败", .rollback);
+    try std.testing.expectEqual(.flex, feedback.dismiss_button.style.display);
+    feedback.dismiss_button.behavior.events.on_click.?.invoke();
+    feedback.show("请求失败", .rollback);
+    try std.testing.expectEqual(.flex, feedback.root.style.display);
+}
+
 test "AI feedback stays in scroll flow and preserves composer bounds with long text" {
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();

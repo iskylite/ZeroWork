@@ -121,9 +121,10 @@ pub const Host = struct {
         try filters.appendChild(cx.allocator, try ui.spacer(cx));
         const clear_disabled = try scope.createSignal(bool, true);
         const actions_disabled = try scope.createSignal(bool, false);
-        const clear = try ui.widgets.Button(.{ .label = "清空列表", .variant = .ghost, .size = .sm, .disabled = clear_disabled, .base_style = actionStyle(), .on_click = cx.on(Host, self, clearRecords) }).mount(scope, cx);
+        const clear = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.get("list-x").?, .icon_size = 16, .a11y_label = "清空历史列表", .variant = .ghost, .size = .sm, .disabled = clear_disabled, .base_style = S.rowAction(), .on_click = cx.on(Host, self, clearRecords) }).mount(scope, cx);
         clear.meta.ownership.meta.test_id = "history.clear";
-        try filters.appendChild(cx.allocator, clear);
+        const clear_hint = try @import("control_hint.zig").mount(cx, scope, clear, "清空历史列表（需确认）", .{ .id = "history.clear.tooltip" });
+        try filters.appendChild(cx.allocator, clear_hint.wrapper);
         const scroll = try ui.widgets.ScrollArea(.{ .height = 200, .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
         scroll.container.meta.ownership.meta.test_id = "history.viewport";
         scroll.container.style.margin.top = 10;
@@ -337,7 +338,8 @@ pub const Host = struct {
             const name = try ui.text(self.cx, if (descriptor.title.len > 0) descriptor.title else entry.host, S.text(13, 500, false));
             name.meta.ownership.meta.test_id = "history.record.title";
             name.setStyleInline(self.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
-            try metadata.appendChild(self.allocator, name);
+            const title_hint = try @import("control_hint.zig").mount(self.cx, rows, name, if (descriptor.title.len > 0) descriptor.title else entry.host, .{ .id = "history.record.title.tooltip", .width = 360, .wrap = .char, .layout = .{ .width = .fill(), .flex = 1, .min_width = 0 } });
+            try metadata.appendChild(self.allocator, title_hint.wrapper);
             var date_buffer: [64]u8 = undefined;
             try metadata.appendChild(self.allocator, try ui.text(self.cx, S.dateLabel(&date_buffer, entry.ended_ms), S.text(11, 400, true)));
             try main.appendChild(self.allocator, metadata);
@@ -347,8 +349,10 @@ pub const Host = struct {
             const detail = try std.fmt.allocPrint(self.allocator, "{s}{s}{s} · {s}", .{ entry.user, if (descriptor.endpoint.len > 0) "@" else "", descriptor.endpoint, S.durationLabel(&duration_buffer, entry.duration_ms) });
             defer self.allocator.free(detail);
             const detail_node = try ui.text(self.cx, detail, S.text(12, 400, true));
+            detail_node.meta.ownership.meta.test_id = "history.record.detail";
             detail_node.setStyleInline(self.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
-            try tail.appendChild(self.allocator, detail_node);
+            const detail_hint = try @import("control_hint.zig").mount(self.cx, rows, detail_node, detail, .{ .id = "history.record.detail.tooltip", .width = 360, .wrap = .char, .layout = .{ .width = .fill(), .flex = 1, .min_width = 0 } });
+            try tail.appendChild(self.allocator, detail_hint.wrapper);
 
             try main.appendChild(self.allocator, tail);
             const actions = try ui.box(self.cx, S.rowActions(), .{});
@@ -377,12 +381,14 @@ pub const Host = struct {
         }
         if (self.model.len() > catalog.page_size) {
             const paging = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .justify = .end, .gap = 8, .flex_shrink = 0 }, .{});
-            const previous = try ui.widgets.Button(.{ .label = "上一批", .variant = .ghost, .size = .sm, .disabled = self.model.page == 0, .on_click = self.cx.on(Host, self, previousPage) }).mount(rows, self.cx);
-            const next = try ui.widgets.Button(.{ .label = "下一批", .variant = .ghost, .size = .sm, .disabled = self.model.pageEnd() == self.model.len(), .on_click = self.cx.on(Host, self, nextPage) }).mount(rows, self.cx);
+            const previous = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.chevron_left, .icon_size = 16, .a11y_label = "上一批历史记录", .base_style = S.rowAction(), .variant = .ghost, .size = .sm, .disabled = self.model.page == 0, .on_click = self.cx.on(Host, self, previousPage) }).mount(rows, self.cx);
+            const next = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.chevron_right, .icon_size = 16, .a11y_label = "下一批历史记录", .base_style = S.rowAction(), .variant = .ghost, .size = .sm, .disabled = self.model.pageEnd() == self.model.len(), .on_click = self.cx.on(Host, self, nextPage) }).mount(rows, self.cx);
             previous.meta.ownership.meta.test_id = "history.previous";
             next.meta.ownership.meta.test_id = "history.next";
-            try paging.appendChild(self.allocator, previous);
-            try paging.appendChild(self.allocator, next);
+            const previous_hint = try @import("control_hint.zig").mount(self.cx, rows, previous, "上一批历史记录", .{ .id = "history.previous.tooltip" });
+            try paging.appendChild(self.allocator, previous_hint.wrapper);
+            const next_hint = try @import("control_hint.zig").mount(self.cx, rows, next, "下一批历史记录", .{ .id = "history.next.tooltip" });
+            try paging.appendChild(self.allocator, next_hint.wrapper);
             try self.list.appendChild(self.allocator, paging);
         }
     }

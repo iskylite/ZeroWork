@@ -20,7 +20,8 @@ extern BOOL ZWValidHTTPS(NSURL *url, BOOL redirects);
 extern NSString *const ZWFeed;
 extern NSString *const ZWReleases;
 typedef struct {
-    int state; // 0 idle,1 checking,2 available,3 download,4 verify,5 ready,6 prepare,7 prepared,8 committed,9 cancelled,10 error,11 aborted
+    int state; // 0 idle,1 checking,2 available,3 download,4 verify,5 ready,6 prepare,7 prepared,8 committed,9 cancelled,10 error,11 aborted,12 no stable release
     uint64_t generation, received, expected;
+    int failure_stage; // 1 check,3 download,4 verify,6 install preparation
     char version[96], message[2048], notes[16385];
 } ZWUpdateStatus;

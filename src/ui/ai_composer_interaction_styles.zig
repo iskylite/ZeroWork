@@ -2,11 +2,15 @@
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
-pub fn panel(question: bool, routing: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = if (question) 180 else if (routing) 164 else 132 }, .min_height = 0, .flex_shrink = 0 };
+pub const max_body_height: f32 = 180;
+pub fn panel(_: bool, _: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{ .max = max_body_height } }, .max_height = max_body_height, .min_height = 0, .flex_shrink = 0 };
 }
 pub fn content() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .padding = .{ .top = 6 }, .flex_shrink = 0 };
+}
+pub fn impactRow() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .start, .gap = 6, .flex_shrink = 0 };
 }
 pub fn heading() ui.BoxStyle {
     return .{ .width = .fill(), .direction = .row, .align_items = .start, .gap = 6, .flex_shrink = 0 };

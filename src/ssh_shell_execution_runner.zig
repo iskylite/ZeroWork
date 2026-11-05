@@ -21,6 +21,7 @@ pub fn main(init: std.process.Init) !void {
     const directory_path = args.next() orelse return error.MissingIsolatedDirectory;
     const mode = args.next() orelse return error.MissingMode;
     if (port < 1024 or !std.mem.startsWith(u8, directory_path, "/tmp/")) return error.NonFixtureTarget;
+    if (std.mem.startsWith(u8, mode, "startup-")) return configuredStartup(init, port, directory_path, mode);
     if (std.mem.eql(u8, mode, "reconnect-startup")) return configuredReconnect(init, port, directory_path);
     if (std.mem.startsWith(u8, mode, "init-retry-")) return initializationRecovery(init, port, directory_path, mode);
     var library = try ssh.Library.init();
@@ -591,6 +592,53 @@ fn release(worker: *Worker, ledger: *ssh.ResourceLedger) !void {
         receipt = worker.releaseConnection();
     }
     if (receipt != .released or !ledger.snapshot().released()) return error.ShellResourcesNotReleased;
+}
+
+fn configuredStartup(init: std.process.Init, port: u16, directory: []const u8, mode: []const u8) !void {
+    const interactive = std.mem.eql(u8, mode, "startup-interactive");
+    const timeout = std.mem.eql(u8, mode, "startup-timeout");
+    const commands: []const []const u8 = if (interactive)
+        &.{ "read -r ZW_REPLY; printf 'ANSWER_%s\\n' \"$ZW_REPLY\"", "printf FORBIDDEN_NEXT" }
+    else if (timeout)
+        &.{"printf FORBIDDEN_STARTUP"}
+    else
+        &.{ "cd /tmp", "export ZW_STARTUP_SEQ=ok", "printf 'STARTUP_%s/%s\\n' \"$PWD\" \"$ZW_STARTUP_SEQ\"" };
+    var library = try ssh.Library.init();
+    defer library.deinit();
+    var ledger = try ssh.ResourceLedger.init(.{ .owner = .{ .session = .{ .session_id = @fromBackingInt(71) } }, .operation_id = 1, .attempt_id = 1 }, 1);
+    const worker = try Worker.init(a, &library, .{ .host = "127.0.0.1", .port = port, .user = "shell-fixture", .auth = .{ .password = "fixture-only" }, .host_key_decision = .trust_once, .operation_key = ledger.key, .resource_ledger = &ledger, .connect_timeout_ms = 5000, .keepalive_sec = 0 }, .{ .auto_reconnect = false, .startup_commands = commands, .initial_input = if (interactive or timeout) "" else "printf 'INITIAL_%s\\n' once\n", .wait_for_attachment = true, .keepalive_sec = 0 });
+    defer worker.deinit();
+    const dir = try std.Io.Dir.cwd().openDir(init.io, directory, .{});
+    defer dir.close(init.io);
+    const recording: publication.Options = .{ .recording_id = worker.recording_id, .archive_key = worker.archive_key, .generations = worker.recording_generations.items, .cast_path = "logs/startup.cast", .started_ms = realtime.milliseconds(undefined), .display = .{ .title = "Startup commands", .host = "127.0.0.1", .user = "shell-fixture" }, .timeline = &worker.timeline };
+    try publication.reserve(a, init.io, dir, recording);
+    try worker.configureExecutionRecording(init.io, dir, recording);
+    worker.markAttached();
+    var stopped = false;
+    var resumed = false;
+    const deadline = now() + 18_000;
+    while (now() < deadline) {
+        try tick(worker);
+        const snapshot = try worker.executionSnapshot();
+        if ((interactive or timeout) and !worker.startup_pending.load(.acquire)) {
+            if (snapshot.failure) |failure| {
+                if (std.mem.eql(u8, failure, "StartupPromptTimedOut")) stopped = true;
+            }
+            if (stopped and !resumed and (interactive or snapshot.shell.prompt_ready == true)) {
+                try worker.pushInputFrom(if (interactive) "answer\n" else "printf 'MANUAL_%s\\n' ready\n", .ordinary);
+                resumed = true;
+            }
+        }
+        const text = try worker.searchText(a);
+        defer a.free(text);
+        if (std.mem.indexOf(u8, text, "FORBIDDEN_") != null) return error.StartupCommandLeaked;
+        const ready = if (interactive) stopped and resumed and std.mem.indexOf(u8, text, "ANSWER_answer") != null else if (timeout) stopped and resumed and std.mem.indexOf(u8, text, "MANUAL_ready") != null else std.mem.indexOf(u8, text, "STARTUP_/tmp/ok") != null and std.mem.indexOf(u8, text, "INITIAL_once") != null;
+        if (ready) {
+            std.debug.print("SHELL_EXECUTION_PASS {s} stopped={any} resumed={any}\n", .{ mode, stopped, resumed });
+            return;
+        }
+    }
+    return error.StartupAcceptanceTimedOut;
 }
 
 fn configuredReconnect(init: std.process.Init, port: u16, directory: []const u8) !void {

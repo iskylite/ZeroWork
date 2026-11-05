@@ -326,3 +326,119 @@ test "background selection detects files and directories instead of trusting the
     try std.testing.expectEqual(asset.Source.directory, directory.source);
     try std.testing.expectEqual(@as(usize, 1), directory.playlist.?.paths.items.len);
 }
+
+test "background progress restores sequential cursor and skips deleted or damaged current images" {
+    const progress = @import("config/background_progress.zig");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "1.png", "2.png", "3.png", "4.png" }) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = red_png });
+    const file = try tmp.dir.realPathFileAlloc(io, "1.png", a);
+    defer a.free(file);
+    const path = std.fs.path.dirname(file).?;
+    const request: asset.Request = .{ .draft_id = 1, .asset_revision = 1, .source = .directory, .path = path, .resume_progress = true };
+    var current = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer current.deinit(a);
+    current.playlist.?.advance();
+    try progress.save(io, tmp.dir, a, path, &current.playlist.?);
+    var restored = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer restored.deinit(a);
+    try std.testing.expectEqualStrings("2.png", std.fs.path.basename(restored.selectedPath()));
+    // Explicit selections and draft previews start independently of saved progress.
+    var preview_request = request;
+    preview_request.resume_progress = false;
+    var preview = try asset.prepare(io, tmp.dir, a, preview_request, .{});
+    defer preview.deinit(a);
+    try std.testing.expectEqualStrings("1.png", std.fs.path.basename(preview.selectedPath()));
+    try tmp.dir.deleteFile(io, "2.png");
+    try tmp.dir.writeFile(io, .{ .sub_path = "3.png", .data = "damaged since exit" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "0.png", .data = red_png });
+    var changed = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer changed.deinit(a);
+    try std.testing.expectEqualStrings("4.png", std.fs.path.basename(changed.selectedPath()));
+    try std.testing.expectEqualStrings("0.png", std.fs.path.basename(changed.playlist.?.paths.items[0]));
+    try std.testing.expectEqual(@as(usize, 4), changed.playlist.?.paths.items.len);
+    const stat = try tmp.dir.statFile(io, progress.filename, .{});
+    try std.testing.expectEqual(@as(u32, 0o600), stat.permissions.toMode() & 0o777);
+}
+
+test "background progress keeps the random round and next images across restart" {
+    const progress = @import("config/background_progress.zig");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "1.png", "2.png", "3.png", "4.png" }) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = red_png });
+    const file = try tmp.dir.realPathFileAlloc(io, "1.png", a);
+    defer a.free(file);
+    const path = std.fs.path.dirname(file).?;
+    const request: asset.Request = .{ .draft_id = 2, .asset_revision = 2, .source = .directory, .order = .random, .path = path, .resume_progress = true };
+    var current = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer current.deinit(a);
+    current.playlist.?.setOrder(true, 12345);
+    current.playlist.?.advance();
+    try progress.save(io, tmp.dir, a, path, &current.playlist.?);
+    var restored = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer restored.deinit(a);
+    try std.testing.expectEqual(current.playlist.?.index, restored.playlist.?.index);
+    for (current.playlist.?.paths.items, restored.playlist.?.paths.items) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+    var last: []const u8 = "";
+    for (1..4) |_| {
+        last = restored.selectedPath();
+        try std.testing.expectEqualStrings(current.selectedPath(), restored.selectedPath());
+        current.playlist.?.advance();
+        restored.playlist.?.advance();
+    }
+    // A new round still avoids repeating the previous round's last image.
+    try std.testing.expect(!std.mem.eql(u8, restored.selectedPath(), last));
+}
+
+test "background progress reconciles random deletions and additions without replaying the prefix" {
+    const progress = @import("config/background_progress.zig");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var saved: asset.Playlist = .{ .random = true, .index = 2 };
+    defer saved.deinit(a);
+    for ([_][]const u8{ "a.png", "b.png", "c.png", "d.png" }) |name| try saved.append(a, name);
+    try progress.save(io, tmp.dir, a, "/images", &saved);
+    var fresh: asset.Playlist = .{ .random = true };
+    defer fresh.deinit(a);
+    for ([_][]const u8{ "e.png", "d.png", "b.png", "a.png" }) |name| try fresh.append(a, name);
+    try progress.restore(io, tmp.dir, a, "/images", &fresh);
+    try std.testing.expectEqual(@as(usize, 2), fresh.index);
+    for ([_][]const u8{ "a.png", "b.png", "d.png", "e.png" }, fresh.paths.items) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "background progress ignores foreign directories changed modes and invalid snapshots" {
+    const progress = @import("config/background_progress.zig");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "1.png", "2.png" }) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = red_png });
+    const file = try tmp.dir.realPathFileAlloc(io, "1.png", a);
+    defer a.free(file);
+    const path = std.fs.path.dirname(file).?;
+    const request: asset.Request = .{ .draft_id = 3, .asset_revision = 3, .source = .directory, .path = path, .resume_progress = true };
+    var saved = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer saved.deinit(a);
+    saved.playlist.?.advance();
+    try progress.save(io, tmp.dir, a, "/another-directory", &saved.playlist.?);
+    var foreign = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer foreign.deinit(a);
+    try std.testing.expectEqualStrings("1.png", std.fs.path.basename(foreign.selectedPath()));
+    saved.playlist.?.random = true;
+    try progress.save(io, tmp.dir, a, path, &saved.playlist.?);
+    var mode = try asset.prepare(io, tmp.dir, a, request, .{});
+    defer mode.deinit(a);
+    try std.testing.expectEqualStrings("1.png", std.fs.path.basename(mode.selectedPath()));
+    for ([_][]const u8{ "{broken", "{\"version\":1,\"directory\":\"/images\",\"random\":false,\"index\":99,\"paths\":[]}" }) |bytes| {
+        try tmp.dir.writeFile(io, .{ .sub_path = progress.filename, .data = bytes });
+        var invalid = try asset.prepare(io, tmp.dir, a, request, .{});
+        defer invalid.deinit(a);
+        try std.testing.expectEqualStrings("1.png", std.fs.path.basename(invalid.selectedPath()));
+    }
+}

@@ -141,7 +141,7 @@ test "retained window panel revokes capture focus and old input handles across r
     try std.testing.expect(cx.node_registry.resolve(cx.node_registry.handleFor(editor.input_container), null) == editor.input_container);
 }
 
-test "retained window panel restores opening focus after its registry is rebuilt" {
+test "retained window panel accepts the first letter after its opening frame" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
     cx.setViewport(600, 400);
@@ -157,12 +157,14 @@ test "retained window panel restores opening focus after its registry is rebuilt
     retained.focusWhenAttached(editor.input_container);
     panel.setDisplay(.flex);
     cx.requestRedraw();
-    for (0..5) |_| {
-        cx.advanceFrameClock();
-        cx.requestRedraw();
-        _ = cx.render();
-    }
+    // Native input resumes after this frame. Waiting additional frames hides
+    // the interval where a visible panel still routes text to the old owner.
+    cx.advanceFrameClock();
+    _ = cx.render();
     try std.testing.expect(cx.focus_manager.getFocused() == editor.input_container);
+    cx.handleKeyDown(.a, .{});
+    cx.handleTextInput("a");
+    try std.testing.expectEqualStrings("a", editor.state.getText());
 }
 
 test "retained window panel does not steal focus after a newer outside focus request" {

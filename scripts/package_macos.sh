@@ -7,6 +7,13 @@ SIGNING_IDENTITY=$(python3 scripts/macos_signing.py identity)
 python3 scripts/update_manifest.py verify-key
 VERSION=$(python3 -c 'import pathlib,re; print(re.search(r"\.version\s*=\s*\"([^\"]+)\"", pathlib.Path("build.zig.zon").read_text()).group(1))')
 OUT="${1:-$ROOT/dist}"
+AUTOMATIC_UPDATE=1
+case "$VERSION" in *-rc*) AUTOMATIC_UPDATE=0 ;; esac
+ZIP="$OUT/ZeroWork-$VERSION-arm64.zip"
+FEED="$OUT/update.json"
+if [ "$AUTOMATIC_UPDATE" -eq 1 ]; then
+  [ ! -e "$ZIP" ] && [ ! -e "$FEED" ] || { echo "Refusing to overwrite automatic update artifacts" >&2; exit 1; }
+fi
 DMG="$OUT/ZeroWork-$VERSION-arm64.dmg"
 [ ! -e "$DMG" ] || { echo "Refusing to overwrite $DMG" >&2; exit 1; }
 STAGING=$(mktemp -d "${TMPDIR:-/tmp}/zerowork-package.XXXXXX")
@@ -48,7 +55,7 @@ if match is None or (match[2] is not None and int(match[2])>255):
     raise SystemExit('Unsupported package version; expected X.Y.Z or X.Y.Z-rc1..rc255')
 short_version=match[1]
 build_version=short_version+('fc'+match[2] if match[2] is not None else '')
-info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'14.0','LSArchitecturePriority':['arm64']}
+info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'13.0','LSArchitecturePriority':['arm64']}
 with (app/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
 binary=(app/'Contents/MacOS/ZeroWork').read_bytes()
 for marker in [b'fixture_probe',b'fixture_uprobe',b'/zerowork/windows']:
@@ -63,10 +70,16 @@ codesign --force --sign "$SIGNING_IDENTITY" --identifier com.zerowork.app "$APP"
 codesign --verify --deep --strict "$APP"
 codesign --verify --strict -R '=identifier "com.zerowork.updater"' "$APP/Contents/Helpers/ZeroWorkUpdater"
 python3 scripts/build_ssh_bootstrap.py --output "$APP/Contents/Resources/ssh-bootstrap/v1" --verify-only
+# Stable releases use this exact final signed app for both DMG and auto-update ZIP.
+if [ "$AUTOMATIC_UPDATE" -eq 1 ]; then
+  ditto -c -k --keepParent --norsrc --noextattr "$APP" "$STAGING/ZeroWork-$VERSION-arm64.zip"
+  python3 scripts/update_manifest.py manifest "$STAGING/ZeroWork-$VERSION-arm64.zip" --version "$VERSION" --output "$STAGING/update.json"
+  python3 scripts/update_manifest.py verify "$STAGING/ZeroWork-$VERSION-arm64.zip" "$STAGING/update.json"
+fi
 SIGNING_NOTICE="应用已使用固定代码签名证书签名；本打包流程未执行 Apple 公证。"
 ln -s /Applications "$STAGING/image/Applications"
 cat > "$STAGING/image/安装说明.txt" <<TXT
-ZeroWork $VERSION · Apple Silicon · macOS 14 或更新版本
+ZeroWork $VERSION · Apple Silicon · macOS 13 或更新版本
 
 将 ZeroWork.app 拖入 Applications，即可安装。
 
@@ -86,4 +99,11 @@ TXT
 hdiutil create -volname "ZeroWork $VERSION" -srcfolder "$STAGING/image" -format UDZO "$DMG"
 hdiutil verify "$DMG"
 (cd "$OUT" && shasum -a 256 "ZeroWork-$VERSION-arm64.dmg" > "ZeroWork-$VERSION-arm64.dmg.sha256")
+if [ "$AUTOMATIC_UPDATE" -eq 1 ]; then
+  mv "$STAGING/ZeroWork-$VERSION-arm64.zip" "$ZIP"
+  mv "$STAGING/update.json" "$FEED"
+  echo "Created $ZIP and $FEED; upload all assets to a draft stable Release before publishing it as Latest."
+else
+  echo "RC package: automatic updates remain on the stable release channel."
+fi
 echo "Created $DMG"

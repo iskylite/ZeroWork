@@ -8,7 +8,7 @@ const schema = @import("settings_schema.zig");
 const pages = @import("settings_pages.zig");
 const design = @import("../ui/design_tokens.zig");
 pub const styles = @import("settings_styles.zig");
-pub const Action = enum { reset_defaults, revert, save, import_theme, export_logs, clear_logs, clear_all, open_config_dir, credential_help, check_updates, open_update_release };
+pub const Action = enum { reset_defaults, revert, save, import_theme, export_logs, clear_logs, clear_all, open_config_dir, credential_help, check_updates, open_update_release, notification_permission };
 pub const ActionState = struct { enabled: bool = true, reason: ?[]const u8 = null };
 pub const Key = struct { section: []const u8, key: []const u8 };
 pub const Hooks = struct {

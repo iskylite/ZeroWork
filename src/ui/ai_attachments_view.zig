@@ -83,6 +83,7 @@ pub const View = struct {
     preview_icon: *ui.Node = undefined,
     preview_identity_box: *ui.Node = undefined,
     preview_identity: *ui.Node = undefined,
+    preview_path_hint: *ui.Node = undefined,
     preview_metadata: *ui.Node = undefined,
     preview_info: *ui.Node = undefined,
     preview_info_text: *ui.Signal([]const u8) = undefined,
@@ -240,7 +241,9 @@ pub const View = struct {
         self.preview_identity = try ui.text(cx, "", .{ .font_size = 11, .line_height = 1.65, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
         self.preview_identity.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 18.1484375 } });
         self.preview_identity.meta.ownership.meta.test_id = "ai.attachment.preview.path";
-        try titles.appendChild(cx.allocator, self.preview_identity);
+        const path_hint = try @import("control_hint.zig").mount(cx, scope, self.preview_identity, "", .{ .id = "ai.attachment.preview.path.tooltip", .width = 360, .wrap = .char, .visible = self.modal_open, .layout = .{ .width = .fill(), .height = .{ .px = 18.1484375 }, .min_width = 0, .flex_shrink = 0 } });
+        self.preview_path_hint = path_hint.content.children.items[0];
+        try titles.appendChild(cx.allocator, path_hint.wrapper);
         const close = try self.previewButton(scope, heading, "ai.attachment.preview.close", "关闭预览", ui.icons.x, closePreview);
         close.setStyleInline(cx.allocator, .{ .width = .{ .px = 30 }, .height = .{ .px = 30 } });
         const body = try ui.box(cx, .{ .width = .fill(), .direction = .column, .padding = .{ .left = 22, .right = 22, .bottom = 20 }, .flex_shrink = 0 }, .{});
@@ -383,6 +386,7 @@ pub const View = struct {
     fn showPreview(self: *View, ticket: attachments.Ticket, reference: attachments.ContentRef, kind: PreviewKind) !void {
         const content = reference.content() orelse return error.EmptyAttachmentResult;
         try self.preview_identity.setTextContent(self.cx.allocator, content.path);
+        try self.preview_path_hint.setTextContent(self.cx.allocator, content.path);
         const metadata = switch (content.source) {
             .local_file => try std.fmt.allocPrint(self.cx.allocator, "本地 · {s} · {d} B · 完整", .{ if (content.bom_preserved) "UTF-8 BOM" else "UTF-8", content.bytes.len }),
             .remote_file => |remote| try std.fmt.allocPrint(self.cx.allocator, "{s} · 会话 #{d} · {d} B · {s}", .{ remote.source_name, @backingInt(remote.owner.session_id), content.bytes.len, if (remote.truncated) "已截断" else "完整" }),

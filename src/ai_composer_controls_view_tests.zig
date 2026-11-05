@@ -99,6 +99,24 @@ fn modelOption(node: *ui.Node, name: []const u8) ?*ui.Node {
     return null;
 }
 
+test "AI composer model tooltip follows long model names and selection changes" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const name = "production-model-with-a-very-long-name-that-exceeds-the-compact-composer-chip";
+    f.models[0].id = name;
+    var source = f.snapshot();
+    source.revision = 2;
+    source.current = .{ .provider_id = "lab", .model_id = name };
+    try f.view.update(source);
+    f.settle();
+    try std.testing.expectEqualStrings(name, f.view.model_hint_label.getText().?.content);
+    source.current = .{ .provider_id = "lab", .model_id = "quiet" };
+    try f.view.update(source);
+    f.settle();
+    try std.testing.expectEqualStrings("quiet", f.view.model_hint_label.getText().?.content);
+}
+
 test "AI composer controls match the V3 compact row and retain the host send slot" {
     var f: Fixture = undefined;
     try f.init();
@@ -145,6 +163,40 @@ test "AI composer controls match the V3 compact row and retain the host send slo
     try std.testing.expectEqualStrings("—", f.view.labels[4].?.getText().?.content);
     try std.testing.expect(f.view.disabled[4].peek());
     try std.testing.expectEqual(@as(usize, 0), f.calls);
+}
+
+test "AI composer collapses the hidden Stop slot and restores it while running" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const stop = try ui.box(f.cx, .{ .width = .{ .px = 28 }, .height = .{ .px = 28 } }, .{});
+    try f.view.trailing.insertChildBefore(a, stop, f.send);
+    f.view.separate_actions = true;
+    stop.setDisplay(.none);
+    stop.setOpacityRaw(0);
+    f.settle();
+
+    const send_x = f.send.globalRect().x;
+    const idle_model = f.view.buttons[2].globalRect();
+    try std.testing.expectEqual(@as(f32, 28), f.view.trailing.globalRect().w);
+    try std.testing.expectApproxEqAbs(idle_model.x + idle_model.w + 8, send_x, 0.1);
+
+    stop.setDisplay(.flex);
+    stop.setOpacityRaw(1);
+    f.settle();
+    const busy_model = f.view.buttons[2].globalRect();
+    try std.testing.expectEqual(@as(f32, 62), f.view.trailing.globalRect().w);
+    try std.testing.expectApproxEqAbs(busy_model.x + busy_model.w + 8, stop.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(stop.globalRect().x + 34, f.send.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(send_x, f.send.globalRect().x, 0.1);
+
+    stop.setDisplay(.none);
+    stop.setOpacityRaw(0);
+    f.settle();
+    const restored_model = f.view.buttons[2].globalRect();
+    try std.testing.expectEqual(@as(f32, 28), f.view.trailing.globalRect().w);
+    try std.testing.expectApproxEqAbs(restored_model.x + restored_model.w + 8, f.send.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(idle_model.x, restored_model.x, 0.1);
 }
 
 test "AI composer grouped model list uses configured capabilities and a captured typed selection awaiting acknowledgement" {
@@ -816,7 +868,7 @@ test "AI composer model metadata columns align across supported and unsupported 
     }
 }
 
-test "AI composer execution mode captures nullable overrides and awaits host acknowledgement" {
+test "AI composer execution mode selects effective default without duplicate inherit choice" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -829,7 +881,8 @@ test "AI composer execution mode captures nullable overrides and awaits host ack
     f.enter(f.view.buttons[5]);
     const menu = find(f.cx.root.?, "ai.execution.menu") orelse return error.MissingExecutionMenu;
     try std.testing.expectEqual(@as(f32, 296), menu.globalRect().w);
-    try std.testing.expect(hasText(menu, "跟随全局 · 批处理"));
+    try std.testing.expect(find(menu, "ai.execution.inherit") == null);
+    try std.testing.expect(find(menu, "ai.execution.isolated_exec").?.behavior.interaction.a11y.?.selected);
     f.enter(find(menu, "ai.execution.new_pty").?);
     try std.testing.expectEqual(config.ExecutionMode.new_pty, f.last.?.action.execution_mode.?);
     try std.testing.expectEqualStrings("批处理", f.view.labels[5].?.getText().?.content);
@@ -839,8 +892,8 @@ test "AI composer execution mode captures nullable overrides and awaits host ack
     f.settle();
     try std.testing.expectEqualStrings("新建 PTY", f.view.labels[5].?.getText().?.content);
     f.enter(f.view.buttons[5]);
-    f.enter(find(menu, "ai.execution.inherit").?);
-    try std.testing.expect(f.last.?.action.execution_mode == null);
+    f.enter(find(menu, "ai.execution.auto").?);
+    try std.testing.expectEqual(config.ExecutionMode.auto, f.last.?.action.execution_mode.?);
 }
 
 test "AI composer retention selection is captured and stale execution menu cannot affect another owner" {
@@ -880,8 +933,9 @@ test "AI composer longest model and execution choices remain reachable at minimu
     const row = f.view.root.globalRect();
     try std.testing.expectEqualStrings(f.models[0].id, f.view.labels[2].?.getText().?.content);
     try std.testing.expect(f.view.labels[2].?.globalRect().w < f.cx.text.measureTextWidth(f.models[0].id, 10, 400, false));
-    try std.testing.expect(f.view.execution_compact);
-    try std.testing.expectEqual(@as(f32, 24), f.view.buttons[5].globalRect().w);
+    try std.testing.expect(!f.view.execution_compact);
+    try std.testing.expect(f.view.labels[5].?.globalRect().w > 0);
+    try std.testing.expectEqualStrings("附加现有 PTY", f.view.labels[5].?.getText().?.content);
     try std.testing.expectApproxEqAbs(row.x + row.w - 28, f.send.globalRect().x, 0.1);
     f.cx.setViewport(860, 480);
     f.panel.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 100 }, .top = .{ .px = 30 } } });
@@ -1087,4 +1141,22 @@ test "AI composer model picker notifies on open and stays open across catalog re
     f.enter(refreshed);
     try std.testing.expectEqual(@as(u64, 2), f.last.?.revision);
     try std.testing.expectEqualStrings("refreshed", f.last.?.action.model.model_id);
+}
+
+test "AI composer context usage marks measured and estimated parts independently" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var snapshot = f.snapshot();
+    snapshot.usage = .{ .used_tokens = 24200, .limit_tokens = 200000, .estimated = true, .parts = &.{
+        .{ .name = "基准输入（实测）", .tokens = 24000, .estimated = false },
+        .{ .name = "新增内容（估算）", .tokens = 200, .estimated = true },
+    } };
+    try f.view.update(snapshot);
+    f.settle();
+    f.click(f.view.buttons[4]);
+    const menu = find(f.cx.root.?, "ai.usage.menu").?;
+    try std.testing.expect(hasText(menu, "24.0K"));
+    try std.testing.expect(hasText(menu, "~200"));
+    try std.testing.expect(!hasText(menu, "~24.0K"));
 }

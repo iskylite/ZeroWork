@@ -66,7 +66,7 @@ pub const Panel = struct {
     }
 
     /// A detached control is not yet in the interaction registry. Preserve an
-    /// opening focus request until attachment/index publication, without taking
+    /// opening focus request until attachment, without taking
     /// focus back after a newer user or modal focus transition.
     pub fn focusWhenAttached(self: *Panel, target: *ui.Node) void {
         const generation = self.cx.node_registry.trackGeneration(target) catch return;
@@ -88,9 +88,17 @@ pub const Panel = struct {
             self.pending_focus = null;
             return;
         }
-        if (self.cx.node_registry.resolve(pending.identity, null)) |target| {
+        // The registry is published after all after-layout hooks. Waiting for
+        // resolve() here leaves the newly visible editor unfocused until the
+        // next frame, allowing the first native key to reach the old owner.
+        // FocusManager accepts a live identity before registry publication;
+        // require attachment to this window before using that path.
+        const root = self.cx.root orelse return;
+        if (self.node.parent != null and self.node.isDescendantOf(root) and
+            pending.node.isDescendantOf(self.node) and pending.node.isDisplayedInTree())
+        {
             self.pending_focus = null;
-            self.cx.setFocus(target);
+            self.cx.setFocus(pending.node);
         } else self.cx.scheduleRedrawAfterNs(std.time.ns_per_ms);
     }
 

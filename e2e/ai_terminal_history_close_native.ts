@@ -94,8 +94,8 @@ try{
  await cap('04-retained-conversation-list');await click('ai.session.jump.3');await absent('ai.sessions.menu');
  assert(text(await h.query('ai.conversation')).includes('SECOND_CONVERSATION_MARKER'));
  await click('ai.sessions');await click('ai.session.jump.4');await absent('ai.sessions.menu');await visible('ai.empty.configured');
- const recent=(await h.query('ai.empty.recent.link')).find((n:any)=>shown(n)&&text(n).includes('READ_HISTORY'));assert(recent,'ended conversation is in welcome recent history');
- assert((await h.clickAt(recent.rect.x+recent.rect.w/2,recent.rect.y+recent.rect.h/2)).ok);
+ const recent=(await h.query('ai.session.row.1')).find((n:any)=>shown(n)&&text(n).includes('READ_HISTORY'));assert(recent,'ended conversation is in welcome recent history');
+ await click('ai.session.restore.1');
  await h.waitFor(async()=>text(await h.query('ai.conversation')).includes('HISTORY_READ_COMPLETE')||null,10000);assert.equal((await h.inputState('ai.prompt')).buffer,'UNSENT_DRAFT');
  report.checks.push('X opens a fresh welcome page with an empty draft; both histories remain in the list and recent history; either entry restores its transcript and saved draft');
  await click('ai.prompt');await h.key('a',{cmd:true});await h.type_('CONTINUE_AFTER_CLOSE');await click('ai.send');

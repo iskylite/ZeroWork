@@ -76,13 +76,10 @@ pub const Host = struct {
             state.listed = true;
             state.phase = .stopped;
             state.wire_history = try @import("wire_history.zig").History.copy(self.allocator, record.history.messages, "");
+            state.wire_history.usage = record.history.usage;
             if (record.draft) |text| state.draft = try self.allocator.dupe(u8, text);
-            for (record.history.messages) |message| if (message.role == .user or message.role == .assistant) {
-                if (message.content.len == 0) continue;
-                const text = try self.allocator.dupe(u8, message.content);
-                errdefer self.allocator.free(text);
-                try state.history.append(self.allocator, .{ .user = message.role == .user, .text = text });
-            };
+            const presentation = @import("conversation_presentation.zig");
+            state.history = try presentation.restoreHistory(self.allocator, record.presentation, record.last_turn, record.history.messages);
         }
         self.journal_io = io;
         self.journal_dir = dir;

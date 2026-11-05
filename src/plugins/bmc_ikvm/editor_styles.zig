@@ -81,8 +81,9 @@ pub fn feedbackArea(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn logAction() ui.BoxStyle {
     var value = action(false);
+    value.width = .{ .px = 26 };
     value.height = .{ .px = 26 };
-    value.padding = .{ .left = 8, .right = 8, .top = 4, .bottom = 4 };
+    value.padding = .{};
     value.background = ui.Color.TRANSPARENT;
     value.font_size = 11;
     value.text_color = theme.current().accent;

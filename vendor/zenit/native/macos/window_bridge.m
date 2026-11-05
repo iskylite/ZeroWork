@@ -2925,6 +2925,7 @@ typedef struct {
 @property (nonatomic, strong) MetalView *metalView;
 @property (nonatomic, strong) ZenitFullscreenHeaderHost *fullscreenHeader;
 @property (nonatomic) BOOL shouldClose;
+@property (nonatomic) BOOL hiddenByApplication;
 // Closing is a two-phase operation. The first user attempt is surfaced to Zig
 // through shouldClose so it can resolve dirty documents. Once Zig commits, the
 // same NSWindow is closed by AppKit and remains owned across the native close
@@ -3832,12 +3833,24 @@ void macos_make_key_window(void* window_ptr) {
     @autoreleasepool {
         WindowWrapper *wrapper = (__bridge WindowWrapper*)window_ptr;
         if (wrapper && wrapper.window) {
+            wrapper.hiddenByApplication = NO;
             g_requested_key_window = [wrapper.window windowNumber];
             if (![NSApp isActive]) {
                 zenitActivateApplication();
             }
             zenitPresentWindow(wrapper.window);
         }
+    }
+}
+
+// Preserve the native window and its Zig owner; only remove it from display.
+void macos_hide_window(void *window_ptr) {
+    @autoreleasepool {
+        if (!window_ptr || !NSThread.isMainThread) return;
+        WindowWrapper *wrapper = (__bridge WindowWrapper *)window_ptr;
+        if (!wrapper.window || wrapper.closeCommitted || wrapper.nativeCloseStarted) return;
+        wrapper.hiddenByApplication = YES;
+        [wrapper.window orderOut:nil];
     }
 }
 
@@ -6585,6 +6598,20 @@ static NSMutableDictionary<NSNumber *, NSMenu *> *zenitMenuById;
     // Zig owns process lifetime and tears down GPU/UI resources only after each
     // NSWindow has completed its AppKit close transaction.
     return NO;
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
+    (void)sender;
+    if (visible) return YES;
+    BOOL restored = NO;
+    for (NSWindow *window in g_window_list) {
+        WindowWrapper *wrapper = [g_window_registry objectForKey:window];
+        if (!wrapper.hiddenByApplication || wrapper.closeCommitted || wrapper.nativeCloseStarted) continue;
+        macos_make_key_window((__bridge void *)wrapper);
+        restored = YES;
+    }
+    if (restored) macos_post_empty_event();
+    return !restored;
 }
 
 // Finder double-click / open with / open -a / drag to Dock

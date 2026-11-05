@@ -839,6 +839,12 @@ test "SFTP AI registration prepares only file tools and rejects terminal or revo
     try bridge.configureHost(.{ .context = .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = .{ .session = @backingInt(accepted.handle.session_id) }, .binding_revision = 1, .grant_revision = 1 }, .handler_context = &adapter, .invoke = Query.invoke, .contributions = &host_contributions });
     try bridge.prepare(f.app, accepted.handle);
     try std.testing.expectEqual(@as(usize, 8), bridge.requestTable().?.entries.len);
+    const prompt = try @import("ai/session_prompt.zig").build(a, .auto, bridge.wire);
+    defer a.free(prompt);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "File paths") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "host.run_in_terminal") == null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "host.attach_shell") == null);
+    try std.testing.expectEqual(bridge.capability_fingerprint, bridge.capabilityFingerprint(f.app));
     try std.testing.expect(bridge.requestTable().?.lookup("host__get_usession") != null);
     for (@import("ai/host_terminal_queries.zig").contributions ++ @import("ai/host_execution.zig").contributions ++ .{@import("ai/batch_output.zig").contribution}) |contribution| {
         var name: [64]u8 = undefined;
@@ -871,6 +877,7 @@ test "SFTP AI registration prepares only file tools and rejects terminal or revo
     try std.testing.expect(f.app.sessions.queryService(accepted.handle, .exec) == .unsupported);
     try std.testing.expect(f.app.sessions.queryService(accepted.handle, .terminal) == .unsupported);
     try std.testing.expect(try f.app.sessions.revokeTypedService(accepted.handle, accepted.operation, .{ .name = "file_read" }));
+    try std.testing.expect(bridge.capability_fingerprint != bridge.capabilityFingerprint(f.app));
     try std.testing.expectError(error.StaleBinding, original.preflight(f.app, call));
 }
 
@@ -1057,4 +1064,48 @@ test "real group active child observes outer request stop while worker is blocke
     }
     try std.testing.expect(!bridge.writeRisk(first));
     try std.testing.expect(!bridge.writeRisk(second));
+}
+
+test "session capabilities Local native catalog excludes shell attachment and keeps PTY execution" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var probe = LocalTools.Bridge.init(a);
+    defer probe.deinit();
+    const owner = try f.prepare(&probe);
+    var bridge = @import("ui/ai_tools.zig").Bridge.init(a);
+    defer bridge.deinit();
+    const host = @import("ai/host_tools.zig");
+    const Query = struct {
+        fn invoke(_: *anyopaque, _: host.Invocation, _: std.mem.Allocator) !host.Result {
+            return error.UnexpectedDispatch;
+        }
+    };
+    const contributions = @import("ai/host_queries.zig").contributions ++ @import("ai/host_terminal_queries.zig").contributions ++ @import("ai/host_execution.zig").contributions ++ .{@import("ai/batch_output.zig").contribution};
+    try bridge.configureHost(.{ .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = @backingInt(owner.session_id) }, .binding_revision = 1, .grant_revision = 1 }, .handler_context = &f, .invoke = Query.invoke, .contributions = &contributions });
+    try bridge.prepare(f.app, owner);
+    const prompt = @import("ai/session_prompt.zig");
+    try std.testing.expect(prompt.has(bridge.wire, "host.run_in_terminal"));
+    try std.testing.expect(prompt.has(bridge.wire, "host.wait_execution"));
+    try std.testing.expect(prompt.has(bridge.wire, "host.read_command_output"));
+    try std.testing.expect(!prompt.has(bridge.wire, "host.attach_shell"));
+    const system = try prompt.build(a, .auto, bridge.wire);
+    defer a.free(system);
+    try std.testing.expect(std.mem.indexOf(u8, system, "Use host.run_in_terminal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, system, "host.attach_shell") == null);
+    // The terminal-read facade can omit native execution. Reading the screen
+    // must not advertise PTY control merely because it has a terminal.
+    const tab = f.workspace.sessionTab(f.app.legacyForHandle(owner).?).?;
+    const surface = tab.terminal.?.terminal_surface.?;
+    const original = surface.composite.raw.vtable;
+    var readonly = original.*;
+    readonly.execution_request = null;
+    surface.composite.raw.vtable = &readonly;
+    defer surface.composite.raw.vtable = original;
+    try std.testing.expect(bridge.capability_fingerprint != bridge.capabilityFingerprint(f.app));
+    try bridge.beginRequest();
+    try bridge.configureHost(.{ .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = @backingInt(owner.session_id) }, .binding_revision = 1, .grant_revision = 1 }, .handler_context = &f, .invoke = Query.invoke, .contributions = &contributions });
+    try bridge.prepare(f.app, owner);
+    try std.testing.expect(prompt.has(bridge.wire, "host.read_terminal"));
+    for (@import("ai/host_execution.zig").contributions) |contribution| try std.testing.expect(!prompt.has(bridge.wire, contribution.definition.id));
 }

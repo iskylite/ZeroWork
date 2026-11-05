@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI 会话 · 两行布局与状态 TAG</title>
+<link rel="stylesheet" href="../theme-tokens.css"><link rel="stylesheet" href="../shared/ai-assistant.css">
+<style>*{box-sizing:border-box}body{margin:0;padding:16px;background:var(--bg-app);color:var(--fg);font:12px/1.4 Inter,-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}main{width:min(440px,100%)}.v3-ai-session-list{position:static;width:100%;max-width:100%;max-height:none;box-shadow:none}button{font-family:inherit}</style>
+<body data-theme="dark"><main></main><script src="../shared/ai-assistant.js"></script><script>
+const action=name=>(item)=>({'data-action':name,'data-id':item.id});
+document.querySelector('main').innerHTML=V3AI.conversationList({items:[
+{id:1,title:'我感觉当前服务器很卡，你查一下',ownerLabel:'历史连接环境',status:'stopped',canRestore:true,canCopy:true},
+{id:2,title:'新会话 #8',ownerLabel:'2 · ScaleX40-AI01',status:'idle',selected:true},
+{id:3,title:'检查服务器状态与最近的错误日志',ownerLabel:'1 · Local Terminal',status:'running',bound:true,canCopy:true,canRemove:false},
+{id:4,title:'服务检查完成',ownerLabel:'历史连接环境',status:'success',canRestore:true,canCopy:true}
+],selectAttrs:action('view'),locateAttrs:action('locate'),restoreAttrs:action('restore'),copyAttrs:action('copy_use'),deleteAttrs:action('delete')});
+document.addEventListener('click',event=>{const button=event.target.closest('button');if(button)document.querySelector('main').dataset.lastAction=button.dataset.action});
+</script></body></html>

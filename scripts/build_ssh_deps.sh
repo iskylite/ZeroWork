@@ -5,7 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 MBED="$ROOT/vendor/mbedtls"
 SSH="$ROOT/vendor/libssh2"
 JOBS=4
-CC=${CC:-"xcrun clang -arch arm64 -mmacosx-version-min=14.0"}
+CC=${CC:-"xcrun clang -arch arm64 -mmacosx-version-min=13.0"}
 AR=${AR:-"xcrun ar"}
 RANLIB=${RANLIB:-"xcrun ranlib"}
 

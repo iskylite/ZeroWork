@@ -9,10 +9,11 @@ const identity = hosts.identity;
 /// membership edit invalidates that menu even if the host revision is unchanged.
 pub const GroupRef = struct { id: identity.AssetGroupId, revision: u64 };
 pub const Kind = enum { clone, pin, move, delete };
+pub const Placement = union(enum) { before: identity.AssetOwner, after: identity.AssetOwner, end };
 pub const Request = union(Kind) {
     clone: struct { owner: identity.AssetOwner, name: []const u8 },
     pin: struct { owner: identity.AssetOwner, pinned: bool },
-    move: struct { owner: identity.AssetOwner, source_group: ?GroupRef, destination: ?GroupRef },
+    move: struct { owner: identity.AssetOwner, source_group: ?GroupRef, destination: ?GroupRef, placement: ?Placement = null },
     delete: struct { owner: identity.AssetOwner },
 };
 pub const CommitReceipt = struct {
@@ -54,7 +55,17 @@ pub fn apply(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []
             if (source.asset_group_id != expected_source) return error.RevisionConflict;
             if (value.source_group) |group| try validateGroup(candidate, group);
             if (value.destination) |group| try validateGroup(candidate, group);
-            break :blk try candidate.move(value.owner, if (value.destination) |group| group.id else null);
+            const destination = if (value.destination) |group| group.id else null;
+            if (value.placement) |placement| switch (placement) {
+                .before, .after => |target| {
+                    const host = try candidate.get(target);
+                    if (target.id == value.owner.id or host.asset_group_id != destination or host.pinned != source.pinned) return error.InvalidPlacement;
+                },
+                .end => {},
+            };
+            const moved = try candidate.move(value.owner, destination);
+            if (value.placement) |placement| try place(candidate, moved, destination, placement);
+            break :blk moved;
         },
         .delete => |value| blk: {
             try candidate.remove(value.owner);
@@ -72,6 +83,45 @@ pub fn apply(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []
         .index = if (owner) |value| live.indexOf(value.id).? else null,
         .commit = .{ .previous_revision = previous_revision, .revision = live.revision, .source_hash = live.source_hash.? },
     };
+}
+
+fn place(registry: *hosts.Registry, owner: identity.AssetOwner, destination: ?identity.AssetGroupId, placement: Placement) !void {
+    if (destination) |id| {
+        const group = &registry.groups[registry.groupIndex(id).?];
+        const order = try registry.arena.allocator().alloc(identity.ConnectionId, group.ordered_connection_ids.len);
+        var count: usize = 0;
+        for (group.ordered_connection_ids) |item| if (item != owner.id) {
+            order[count] = item;
+            count += 1;
+        };
+        var at = count;
+        switch (placement) {
+            .before, .after => |target| for (order[0..count], 0..) |item, index| {
+                if (item == target.id) {
+                    at = index + @as(usize, if (placement == .after) 1 else 0);
+                    break;
+                }
+            },
+            .end => {},
+        }
+        std.mem.copyBackwards(identity.ConnectionId, order[at + 1 .. count + 1], order[at..count]);
+        order[at] = owner.id;
+        if (!std.mem.eql(identity.ConnectionId, order, group.ordered_connection_ids)) group.revision = try identity.advance(group.revision);
+        group.ordered_connection_ids = order;
+    } else {
+        const from = registry.indexOf(owner.id).?;
+        var at = registry.hosts.len - 1;
+        switch (placement) {
+            .before, .after => |target| {
+                const index = registry.indexOf(target.id).?;
+                at = index - @as(usize, if (from < index) 1 else 0) + @as(usize, if (placement == .after) 1 else 0);
+            },
+            .end => {},
+        }
+        const picked = registry.hosts[from];
+        if (from < at) std.mem.copyForwards(hosts.HostConfig, registry.hosts[from..at], registry.hosts[from + 1 .. at + 1]) else if (at < from) std.mem.copyBackwards(hosts.HostConfig, registry.hosts[at + 1 .. from + 1], registry.hosts[at..from]);
+        registry.hosts[at] = picked;
+    }
 }
 
 fn validateGroup(registry: *const hosts.Registry, expected: GroupRef) !void {

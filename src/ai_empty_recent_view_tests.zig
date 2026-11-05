@@ -1,5 +1,4 @@
-//! Production welcome rows: constrained layout, full-title Tooltip and real
-//! Button pointer/keyboard handlers, without provider or conversation storage.
+//! Welcome uses the same phase, binding and icon action contract as history.
 const std = @import("std");
 const ui = @import("ui");
 const V = @import("ui/ai_empty_view.zig");
@@ -16,13 +15,14 @@ const Fixture = struct {
     view: *ui.Node,
     clicks: usize = 0,
     selected: ?u64 = null,
+    last_action: ?@import("ui/ai_session_row.zig").Action = null,
     fn init(self: *Fixture, title: []const u8) !void {
         self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .view = undefined };
         self.cx.setViewport(600, 276);
         self.cx.setTheme(theme.widgetTheme(theme.currentName()));
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .left = 14, .right = 14 } }, .{});
         self.scope = try ui.Scope.init(a, null, self.cx.owner);
-        self.view = try V.mount(self.cx, self.scope, true, .{ .context = self, .summarize = ignore, .logs = ignore, .settings = ignore, .ollama = ignore, .select = select, .recent = &.{ .{ .id = 17, .title = title }, .{ .id = 29, .title = "普通短标题" } } });
+        self.view = try V.mount(self.cx, self.scope, true, .{ .context = self, .summarize = ignore, .logs = ignore, .settings = ignore, .ollama = ignore, .session_hooks = .{ .context = self, .select = select, .request_close = select, .remove = select, .act = act }, .recent = &.{ .{ .id = 17, .title = title, .owner = "1 · Local Terminal", .phase = .running, .bound = true, .can_copy = true, .can_remove = false }, .{ .id = 29, .title = "普通短标题", .owner = "历史连接环境", .phase = .stopped, .can_restore = true, .can_copy = true }, .{ .id = 30, .title = "不应显示第三条", .owner = "" } } });
         try self.cx.root.?.appendChild(a, self.view);
         self.settle();
     }
@@ -35,6 +35,11 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         self.clicks += 1;
         self.selected = id;
+    }
+    fn act(raw: *anyopaque, id: u64, action: @import("ui/ai_session_row.zig").Action) void {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.last_action = action;
+        select(raw, id);
     }
     fn ignore(_: *anyopaque) void {}
     fn settle(self: *Fixture) void {
@@ -55,23 +60,29 @@ const Fixture = struct {
     fn expectBounds(self: *Fixture) !void {
         const view = self.view.globalRect();
         const group = self.node("ai.empty.recent").globalRect();
-        const row = self.node("ai.empty.recent.link").globalRect();
-        const icon = self.node("ai.empty.recent.icon").globalRect();
-        const label = self.node("ai.empty.recent.title");
+        const row = self.node("ai.session.row.17").globalRect();
+        const label = self.node("ai.session.title");
         const title = label.globalRect();
-        const arrow = self.node("ai.empty.recent.arrow").globalRect();
+        const tag = self.node("ai.session.phase_tag").globalRect();
+        const first = self.node("ai.session.first_line").globalRect();
+        const second = self.node("ai.session.second_line").globalRect();
         try std.testing.expect(group.x >= view.x and group.x + group.w <= view.x + view.w + 0.1);
         try std.testing.expectApproxEqAbs(group.w, row.w, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 30), row.h, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 16), icon.w, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 16), arrow.w, 0.1);
-        try std.testing.expectApproxEqAbs(icon.x + icon.w + 8, title.x, 0.1);
-        try std.testing.expectApproxEqAbs(title.x + title.w + 8, arrow.x, 0.1);
-        try std.testing.expectApproxEqAbs(row.x + row.w, arrow.x + arrow.w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 56), row.h, 0.1);
+        try std.testing.expect(title.x + title.w <= tag.x);
+        try std.testing.expectApproxEqAbs(first.x + first.w, tag.x + tag.w, 0.1);
+        try std.testing.expect(first.y + first.h <= second.y);
         try std.testing.expectEqual(ui.types.TextOverflow.ellipsis, label.getText().?.text_overflow);
         try std.testing.expectEqual(ui.TextWrap.none, label.getText().?.wrap);
         try std.testing.expect(label.style.overflow_hidden);
-        try std.testing.expect(title.w > 0 and title.h == 16);
+        try std.testing.expect(title.w > 0 and title.h == 16.5);
+        for ([_][]const u8{ "ai.session.jump.17", "ai.session.locate.17", "ai.session.copy_use.17" }) |id| {
+            const action = self.node(id).globalRect();
+            try std.testing.expectApproxEqAbs(@as(f32, 24), action.w, 0.1);
+            try std.testing.expectApproxEqAbs(@as(f32, 24), action.h, 0.1);
+            try std.testing.expect(action.x + action.w <= second.x + second.w + 0.1);
+            try std.testing.expect(action.y >= second.y and action.y + action.h <= second.y + second.h + 0.1);
+        }
     }
 };
 fn find(node: *ui.Node, id: []const u8) ?*ui.Node {
@@ -101,12 +112,11 @@ test "AI welcome recent long mixed wide and unbroken titles stay bounded after r
                 f.cx.setViewport(width, 276);
                 f.settle();
                 try f.expectBounds();
-                try std.testing.expectEqualStrings(title, text(f.node("ai.empty.recent.title")));
-                try std.testing.expectEqualStrings(title, f.node("ai.empty.recent.link").behavior.interaction.a11y.?.label.?);
-                const wrapper = f.node("ai.empty.recent.link").parent.?.parent.?;
+                try std.testing.expectEqualStrings(title, text(f.node("ai.session.title")));
+                const wrapper = f.node("ai.session.title").parent.?.parent.?;
                 wrapper.behavior.events.on_hover.?.invoke();
                 for (0..8) |_| f.settle();
-                const tooltip = f.node("ai.empty.recent.tooltip");
+                const tooltip = f.node("ai.session.title.tooltip");
                 try std.testing.expect(tooltip.getOpacity() > 0.99);
                 try std.testing.expect(tooltip.globalRect().w <= width - 16);
                 try std.testing.expectEqualStrings(title, text(tooltip));
@@ -116,23 +126,35 @@ test "AI welcome recent long mixed wide and unbroken titles stay bounded after r
         }
     }
 }
-test "AI welcome recent full title tooltip retains complete row pointer and keyboard selection" {
+test "AI welcome recent actions preserve history semantics and phase updates" {
     var f: Fixture = undefined;
     try f.init(titles[0]);
     defer f.deinit();
-    const button = f.node("ai.empty.recent.link");
-    const wrapper = button.parent.?.parent.?;
-    wrapper.behavior.events.on_hover.?.invoke();
-    for (0..8) |_| f.settle();
-    try std.testing.expectEqualStrings(titles[0], text(f.node("ai.empty.recent.tooltip")));
-    const r = button.globalRect();
-    for ([_]f32{ r.x + 2, r.x + r.w / 2, r.x + r.w - 2 }) |x| {
-        f.clickAt(x, r.y + r.h / 2);
+    try std.testing.expect(find(f.view, "ai.session.row.30") == null);
+    try std.testing.expect(find(f.view, "ai.session.restore.17") == null);
+    try std.testing.expectEqual(@as(@TypeOf(f.node("ai.session.delete.17").style.display), .none), f.node("ai.session.delete.17").style.display);
+    const row = f.node("ai.session.row.17").globalRect();
+    f.clickAt(row.x + 10, row.y + 10);
+    try std.testing.expectEqual(@as(usize, 0), f.clicks);
+    inline for (.{ "jump", "locate", "copy_use" }, .{ .view, .locate, .copy_use }) |action, expected| {
+        const button = f.node("ai.session." ++ action ++ ".17");
+        const rect = button.globalRect();
+        f.clickAt(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        try std.testing.expectEqual(expected, f.last_action.?);
         try std.testing.expectEqual(@as(?u64, 17), f.selected);
     }
-    f.cx.setFocus(button);
+    const restore = f.node("ai.session.restore.29");
+    f.cx.setFocus(restore);
     f.cx.handleKeyDown(.@"return", .{});
     f.settle();
-    try std.testing.expectEqual(@as(usize, 4), f.clicks);
-    try std.testing.expectEqual(@as(?u64, 17), f.selected);
+    try std.testing.expectEqual(@import("ui/ai_session_row.zig").Action.restore, f.last_action.?);
+    try std.testing.expectEqual(@as(?u64, 29), f.selected);
+    const remove = f.node("ai.session.delete.29").globalRect();
+    f.clickAt(remove.x + remove.w / 2, remove.y + remove.h / 2);
+    try std.testing.expectEqual(@as(usize, 5), f.clicks);
+    inline for (.{ .idle, .running, .approval, .done, .failed, .stopped }, .{ "未开始", "运行中", "待确认", "已完成", "失败", "已暂停" }) |phase, label| {
+        V.updateRecentPhase(f.cx, f.view, 17, phase);
+        f.settle();
+        try std.testing.expectEqualStrings(label, text(f.node("ai.session.phase_tag")));
+    }
 }

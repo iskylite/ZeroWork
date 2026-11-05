@@ -145,6 +145,20 @@ pub const Button = struct {
     }
 };
 
+test "copy button pending acknowledgement is safe during window teardown" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    cx.root_scope = scope;
+    cx.root = try ui.box(cx, .{}, .{});
+    const button = try Button.mount(cx, scope, .{ .label = "复制" });
+    try cx.root.?.appendChild(a, button.node);
+    button.report(true);
+    try std.testing.expect(button.timer != null);
+    // Cx owns the scope; its cleanup cancels the still-pending timer.
+}
+
 test "copy button acknowledges writes, isolates state, resets and cleans up" {
     const a = std.testing.allocator;
     const cx = try ui.Cx.init(a, std.testing.io);

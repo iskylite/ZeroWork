@@ -99,9 +99,9 @@ const Preview = struct {
         const expanded = self.view.expanded();
         self.controls.setInteraction(expanded);
         self.input.wrapper.setDisplay(if (expanded) .none else .flex);
-        const height: f32 = if (expanded) self.view.bodyHeight() + 44 else 90;
-        const resized = self.composer.style.height != .px or self.composer.style.height.px != height;
-        self.composer.setStyleInline(self.cx.allocator, .{ .height = .{ .px = height } });
+        const height: ui.Sizing = if (expanded) self.view.expandedSizing() else .{ .px = 90 };
+        const resized = !std.meta.eql(self.composer.style.height, height);
+        self.composer.setStyleInline(self.cx.allocator, .{ .height = height });
         var padding = self.transcript.content.style.padding;
         padding.bottom = if (self.view.pendingVisible()) 32 else 0;
         self.transcript.content.setStyleInline(self.cx.allocator, .{ .padding = padding });

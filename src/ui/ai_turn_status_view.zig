@@ -25,10 +25,16 @@ pub fn elapsedMs(turn: *const Turn, now_wall: u64, now_mono: u64) u64 {
     return elapsed -| waiting;
 }
 pub fn usageLabel(buffer: []u8, turn: *const Turn) ![]const u8 {
-    const input = turn.input_tokens orelse return "Token 用量未返回";
-    const output = turn.output_tokens orelse return "Token 用量未返回";
+    const input = turn.input_tokens orelse return "本回合用量未返回";
+    const output = turn.output_tokens orelse return "本回合用量未返回";
     var count_buffer: [32]u8 = undefined;
-    return std.fmt.bufPrint(buffer, "Token {s}", .{try @import("ai_token_count.zig").format(&count_buffer, input +| output)});
+    return std.fmt.bufPrint(buffer, "本回合用量 {s}", .{try @import("ai_token_count.zig").format(&count_buffer, input +| output)});
+}
+pub fn usageDetails(buffer: []u8, turn: *const Turn) ![]const u8 {
+    const input = turn.input_tokens orelse return "服务商未返回完整用量，无法显示输入和输出明细。";
+    const output = turn.output_tokens orelse return "服务商未返回完整用量，无法显示输入和输出明细。";
+    if (turn.request_count) |count| if (count > 0) return std.fmt.bufPrint(buffer, "输入 {d} Token\n输出 {d} Token\n请求次数 {d}\n\n本回合各次请求的累计用量。", .{ input, output, count });
+    return std.fmt.bufPrint(buffer, "输入 {d} Token\n输出 {d} Token\n请求次数未记录\n\n本回合各次请求的累计用量。", .{ input, output });
 }
 pub fn waveOffset(time_ms: f64, index: usize, reduced_motion: bool) f32 {
     if (reduced_motion) return 0;
@@ -130,9 +136,22 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, turn: *const Turn, texture: ?u32) !*u
         try scope.onCleanup(Clock, clock, Clock.release);
     } else {
         try row.appendChild(cx.allocator, try dot(cx));
-        const usage = try ui.text(cx, try usageLabel(&buffer, turn), .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = theme.current().fg_2 });
+        const popup = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top_start, .width = @as(f32, 250), .constrain_width_to_viewport = true }).mount(scope, cx);
+        popup.chrome.setStyleInline(cx.allocator, .{ .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 }, .background = theme.popupAction() });
+        const usage = try ui.widgets.Button(.{
+            .label = try usageLabel(&buffer, turn),
+            .a11y_label = "查看本回合用量明细",
+            .variant = .ghost,
+            .base_style = ui.BoxStyle{ .height = .{ .px = 22 }, .padding = .{ .left = 0, .right = 0 }, .font_size = 10.5, .text_color = theme.current().fg_2 },
+            .on_click = popup.toggle,
+        }).mount(scope, cx);
         usage.meta.ownership.meta.test_id = "ai.turn.tokens";
-        try row.appendChild(cx.allocator, usage);
+        try popup.trigger.appendChild(cx.allocator, usage);
+        var detail_buffer: [320]u8 = undefined;
+        const details = try ui.text(cx, try usageDetails(&detail_buffer, turn), .{ .font_size = 11, .line_height = 1.6, .color = theme.current().fg_2, .wrap = .word });
+        details.meta.ownership.meta.test_id = "ai.turn.usage.details";
+        try popup.content.appendChild(cx.allocator, details);
+        try row.appendChild(cx.allocator, popup.wrapper);
     }
     return row;
 }

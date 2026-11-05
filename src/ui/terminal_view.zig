@@ -1794,7 +1794,12 @@ pub const TerminalViewNode = struct {
     }
 
     pub fn setTimestampGutter(self: *TerminalViewNode, enabled: bool) void {
-        _ = self.local_state.applyTimestamp(enabled);
+        if (self.local_state.applyTimestamp(enabled) == .unchanged) return;
+        if (self.history.selected != null) {
+            // Replay uses retained row nodes rather than the live surface.
+            // Repaint at the same reading position to update both gutter and body.
+            self.renderHistoryReading() catch {};
+        } else self.refreshLegacyTimestamps();
         self.cx.requestRedraw();
     }
 
@@ -6909,8 +6914,8 @@ test "SSH clipboard nested pane maps native window coordinates to its actual VT 
     const content = view.rows_box.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 238), content.x, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 66), content.y, 0.01);
-    try std.testing.expectApproxEqAbs(content.x + 20, view.metrics.origin_x, 0.01);
-    try std.testing.expectApproxEqAbs(content.y + 4, view.metrics.origin_y, 0.01);
+    try std.testing.expectApproxEqAbs(content.x + 12, view.metrics.origin_x, 0.01);
+    try std.testing.expectApproxEqAbs(content.y + 12, view.metrics.origin_y, 0.01);
     const x = view.metrics.origin_x + view.cell_width * 0.25;
     const y = view.metrics.origin_y + view.cell_height * 0.5;
     const end = x + view.cell_width * 2;
@@ -7854,6 +7859,48 @@ test "history replay paints a viewport across blank and structured frame witness
     const label = mark.children.items[0].getText().?;
     try std.testing.expectEqual(view.terminal_font_family_id, label.font_family);
     try std.testing.expectEqual(view.cell_width, label.monospace_char_width);
+}
+
+test "history timestamp preference repaints retained output without changing recorded time or position" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 4, 40);
+    defer adapter.destroy();
+    const Clock = struct {
+        fn now() i64 {
+            return 1793872800000;
+        }
+    };
+    adapter.wall_clock_ms = Clock.now;
+    _ = try adapter.feed("recorded output\r\n");
+    var projection = try adapter.copyProjection(a);
+    defer projection.deinit(a);
+    try view.history.appendProjection(0, &projection);
+    view.history.attachSearch(try adapter.searchSnapshot(a));
+    view.bindArchived();
+    cx.layout();
+    try std.testing.expect(view.openHistory());
+    cx.layout();
+    const position = view.history_reading.?.position;
+    const without_gutter = view.row_nodes[0].?.globalRect().x;
+    try std.testing.expect(view.timestamp_nodes[0] == null);
+    view.setTimestampGutter(true);
+    cx.layout();
+    try std.testing.expect(view.timestamp_nodes[0].?.style.display == .flex);
+    try std.testing.expectEqual(@as(?i64, Clock.now()), view.row_timestamps[0]);
+    try std.testing.expect(view.row_nodes[0].?.globalRect().x > without_gutter);
+    try std.testing.expectEqual(position, view.history_reading.?.position);
+    view.setTimestampGutter(false);
+    cx.layout();
+    try std.testing.expect(view.timestamp_nodes[0].?.style.display == .none);
+    try std.testing.expectEqual(without_gutter, view.row_nodes[0].?.globalRect().x);
+    try std.testing.expectEqual(position, view.history_reading.?.position);
+    try std.testing.expectEqual(@as(?i64, Clock.now()), view.row_timestamps[0]);
 }
 
 test "history log waits for the current snapshot without duplicating its record" {

@@ -40,10 +40,10 @@ const Fixture = struct {
         self.settle();
     }
     fn settle(self: *Fixture) void {
-        self.composer.setStyleInline(a, .{ .height = .{ .px = if (self.view.expanded()) self.view.bodyHeight() + 44 else 90 } });
         self.cx.setTestFrameStep(16) catch unreachable;
         for (0..6) |_| {
             self.cx.advanceFrameClock();
+            self.composer.setStyleInline(a, .{ .height = if (self.view.expanded()) self.view.expandedSizing() else .{ .px = 90 } });
             self.cx.layout();
             _ = self.cx.render();
         }
@@ -118,10 +118,16 @@ test "composer interaction validates empty custom answer and keeps action row ou
     try f.init();
     defer f.deinit();
     try f.show(question());
+    try std.testing.expect(f.view.panel.globalRect().h > 0 and f.view.panel.globalRect().h < 180);
+    try std.testing.expectApproxEqAbs(f.view.panel.globalRect().h + 44, f.composer.globalRect().h, 0.5);
     f.click(f.view.submit_button);
     try std.testing.expectEqual(@as(usize, 0), f.calls);
     try std.testing.expect(f.view.error_label.style.display == .flex);
-    f.cx.setFocus(f.view.custom.input_container);
+    try std.testing.expect(f.view.custom.node.style.display == .none);
+    f.click(f.view.option_rows[6]);
+    try std.testing.expect(f.view.custom.node.style.display == .flex);
+    try std.testing.expect(f.view.custom_label.style.display == .none);
+    try std.testing.expect(f.cx.focus_manager.current_focus == f.view.custom.input_container);
     try std.testing.expectEqualStrings("custom", f.view.selected.peek().?);
     f.click(f.view.submit_button);
     try std.testing.expectEqual(@as(usize, 0), f.calls);
@@ -131,9 +137,9 @@ test "composer interaction validates empty custom answer and keeps action row ou
     @memset(detail, 'x');
     long.detail = detail;
     try f.show(long);
-    try std.testing.expectEqual(@as(f32, 132), f.view.panel.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 180), f.view.panel.globalRect().h);
     const button = f.view.accept.globalRect();
-    try std.testing.expect(button.y >= f.view.panel.globalRect().y + 132);
+    try std.testing.expect(button.y >= f.view.panel.globalRect().y + 180);
     try std.testing.expect(button.y + button.h <= 456);
     f.cx.setViewport(360, 358);
     f.settle();
@@ -141,4 +147,7 @@ test "composer interaction validates empty custom answer and keeps action row ou
         const bounds = node.globalRect();
         try std.testing.expect(bounds.x >= 0 and bounds.x + bounds.w <= 346.1);
     }
+    try f.show(approval(2));
+    try std.testing.expect(f.view.panel.globalRect().h < 180);
+    try std.testing.expectApproxEqAbs(f.view.panel.globalRect().h + 44, f.composer.globalRect().h, 0.5);
 }

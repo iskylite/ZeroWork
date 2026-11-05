@@ -370,7 +370,7 @@ pub const ProviderView = struct {
     }
     fn providerCard(self: *ProviderView, i: usize) !*ui.Node {
         const p = self.controller.model.value.ai.providers[i];
-        const open = self.controller.ai_fields.provider_open.get(i) orelse (i == 0);
+        const open = self.controller.ai_fields.provider_open.get(i) orelse false;
         const result = try self.accordion(.provider, i, 0, displayName(p), open, 64, false);
         @import("../ui/layer_materials.zig").card(result.item, .custom);
         result.item.meta.ownership.meta.test_id = try self.id(i, null, "card");

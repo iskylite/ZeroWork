@@ -15,6 +15,7 @@ comptime {
     _ = @import("plugins/bmc_ikvm/route.zig");
     _ = @import("bmc_controller_tests.zig");
     _ = @import("bmc_native_driver_tests.zig");
+    _ = @import("plugins/bmc_ikvm/native_driver.zig");
     _ = @import("bmc_plugin_probe_tests.zig");
     _ = @import("bmc_plugin_runtime_tests.zig");
     _ = @import("bmc_view_tests.zig");

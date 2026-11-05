@@ -85,8 +85,8 @@ test "tab grouping existing group ends source activity and preserves separate hi
     try std.testing.expectEqualStrings("G history", store.find(g).?.history.items[0].text);
     const welcome_id = (try store.get(.{ .session = 1 })).id;
     try std.testing.expect(welcome_id != a);
-    try std.testing.expect(store.select(a));
-    try std.testing.expectEqual(a, store.active(.{ .session = 1 }).?.id);
+    try std.testing.expect(!store.select(a));
+    try std.testing.expectEqual(welcome_id, store.active(.{ .session = 1 }).?.id);
 }
 
 test "tab grouping new group hands off target identity draft controls and history while stopping source" {

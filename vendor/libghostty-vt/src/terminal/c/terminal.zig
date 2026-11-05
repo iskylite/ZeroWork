@@ -749,6 +749,23 @@ const Effects = struct {
         func(@ptrCast(wrapper), wrapper.effects.userdata, &c_event);
     }
 
+    fn eraseDisplayTrampoline(handler: *Handler, history: bool) void {
+        const wrapper = TerminalWrapper.fromHandler(handler);
+        const t = wrapper.terminal;
+        var it = wrapper.tracked_grid_refs.iterator();
+        while (it.next()) |entry| {
+            const ref = entry.key_ptr.*;
+            if (ref.screen_key != t.screens.active_key or
+                ref.screen_generation != t.screens.generation(ref.screen_key) or
+                ref.pin.garbage) continue;
+            // ED2 may first move prompt content into scrollback. Only pins
+            // still in the erased active area have lost their content.
+            const active = t.screens.active.pages.pointFromPin(.active, ref.pin.*) != null;
+            if (active != history)
+                ref.pin.garbage = true;
+        }
+    }
+
     fn resetTrampoline(handler: *Handler) void {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.reset orelse return;
@@ -823,6 +840,7 @@ fn wrap(
         .progress_report = &Effects.progressReportTrampoline,
         .semantic_prompt = &Effects.semanticPromptTrampoline,
         .reset = &Effects.resetTrampoline,
+        .erase_display = &Effects.eraseDisplayTrampoline,
         .size = &Effects.sizeTrampoline,
         .render_hold = &Effects.renderHoldTrampoline,
 

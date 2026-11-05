@@ -28,10 +28,12 @@ pub const Bridge = struct {
     initialization_expected: u64 = 0,
     initialization_ack: u64 = 0,
     initialization_ack_size: u64 = 0,
+    initialization_ack_offset: u64 = 0,
     initialization_restored: bool = false,
     initialization_echo: @import("shell_integration.zig").EchoFilter = .{},
     prompt_seen: bool = false,
     prompt_clean: bool = false,
+    prompt_offset: u64 = 0,
     debug_start: bool = false,
     active: bool = false,
     start_pending: bool = false,
@@ -401,7 +403,7 @@ pub const Bridge = struct {
     // Swap only shell activity. OSC parsing, initialization and the one PTY
     // input lease remain owned by this root bridge.
     fn swapActivity(self: *Bridge, other: *Bridge) void {
-        inline for (.{ "switch_input", "switch_tracking", "snapshot", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "debug_start", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
+        inline for (.{ "switch_input", "switch_tracking", "snapshot", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "prompt_offset", "debug_start", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
             std.mem.swap(@FieldType(Bridge, name), &@field(self, name), &@field(other, name));
         }
     }
@@ -545,6 +547,7 @@ pub const Bridge = struct {
                 if (parts.next() != null or sequence == 0 or sequence != self.initialization_expected or size > @import("shell_integration.zig").initialization_batch_bytes) return;
                 self.initialization_ack = sequence;
                 self.initialization_ack_size = size;
+                self.initialization_ack_offset = offset;
             },
             'A' => {
                 if (self.active) self.fail("ShellCompletionMissing");
@@ -555,6 +558,7 @@ pub const Bridge = struct {
                 if (!self.prompt_seen or self.active) return;
                 self.prompt_seen = false;
                 self.prompt_clean = true;
+                self.prompt_offset = offset;
                 self.snapshot.interactive_execution = true;
                 if (self.snapshot.execution_id == null) {
                     self.snapshot.failure = null;
@@ -748,6 +752,22 @@ test "SSH initialization ACK checks nonce sequence size and split frames" {
     try std.testing.expect(!bridge.initialization_restored);
     bridge.output("\x1b]133;P;zw_restored=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x07", harness.sink(), 1);
     try std.testing.expect(bridge.initialization_restored);
+}
+
+test "startup prompt offsets distinguish ACK from Readline readiness even in one packet" {
+    var bridge = Bridge.init(std.testing.allocator, .{ .session_id = @fromBackingInt(1) });
+    defer bridge.deinit();
+    var harness = Harness{ .bridge = &bridge };
+    bridge.output("\x1b]133;A\x07\x1b]133;B\x07", harness.sink(), 1);
+    const stale_prompt = bridge.prompt_offset;
+    bridge.initialization_nonce = @splat('a');
+    bridge.initialization_expected = 2;
+    bridge.output("\x1b]133;P;zw_init=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;2;0\x07", harness.sink(), 2);
+    try std.testing.expect(stale_prompt < bridge.initialization_ack_offset);
+    bridge.output("\x1b]133;A\x07\x1b]133;B\x07", harness.sink(), 3);
+    try std.testing.expect(bridge.prompt_offset > bridge.initialization_ack_offset);
+    bridge.output("\x1b]133;P;zw_init=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;2;0\x07\x1b]133;A\x07\x1b]133;B\x07", harness.sink(), 4);
+    try std.testing.expect(bridge.prompt_offset > bridge.initialization_ack_offset);
 }
 
 test "SSH missing start report times out without adding Enter or replay" {

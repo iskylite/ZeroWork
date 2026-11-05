@@ -182,7 +182,9 @@ test "tool header projection keeps terminal status ahead of approval and preserv
         const scope = try ui.Scope.init(a, null, cx.owner);
         defer scope.dispose();
         var expanded = false;
-        cx.root = try Step.mount(cx, scope, .{ .title = "执行命令", .tool_name = "host.run_command", .projection = "{\"command\":\"pwd\"}", .detail = "实际详情", .decision = true, .phase = case.phase, .elapsed_ms = 10, .expanded = &expanded });
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+        const card = try Step.mount(cx, scope, .{ .title = "执行命令", .tool_name = "host.run_command", .projection = "{\"command\":\"pwd\"}", .detail = "实际详情", .decision = true, .phase = case.phase, .elapsed_ms = 10, .expanded = &expanded });
+        try cx.root.?.appendChild(a, card);
         const expected = try std.fmt.allocPrint(a, "{s} · pwd", .{case.status});
         defer a.free(expected);
         try std.testing.expectEqualStrings(expected, find(cx.root.?, "ai.step.projection").?.getText().?.content);
@@ -651,7 +653,9 @@ test "tool step phases keep icon and title on one header line at narrow width" {
             const scope = try ui.Scope.init(a, null, cx.owner);
             defer scope.dispose();
             var expanded = false;
-            cx.root = try Step.mount(cx, scope, .{ .title = "创建会话组", .tool_name = "host.create_group", .projection = "生产环境 · long-target.example.net", .detail = "完整执行详情", .phase = phase, .elapsed_ms = 42, .expanded = &expanded });
+            cx.root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column }, .{});
+            const mounted = try Step.mount(cx, scope, .{ .title = "创建会话组", .tool_name = "host.create_group", .projection = "生产环境 · long-target.example.net", .detail = "完整执行详情", .phase = phase, .elapsed_ms = 42, .expanded = &expanded });
+            try cx.root.?.appendChild(a, mounted);
             cx.root.?.setStyleInline(a, .{ .width = .{ .px = 332 } });
             for (0..4) |_| {
                 cx.layout();
@@ -687,7 +691,9 @@ test "tool step disclosure swaps activity icons on hover and keeps the left arro
         const scope = try ui.Scope.init(a, null, cx.owner);
         defer scope.dispose();
         var expanded = false;
-        cx.root = try Step.mount(cx, scope, .{ .title = "步骤", .tool_name = kind.name, .projection = "执行摘要", .detail = "完整内容", .phase = .succeeded, .elapsed_ms = 42, .expanded = &expanded });
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column }, .{});
+        const mounted = try Step.mount(cx, scope, .{ .title = "步骤", .tool_name = kind.name, .projection = "执行摘要", .detail = "完整内容", .phase = .succeeded, .elapsed_ms = 42, .expanded = &expanded });
+        try cx.root.?.appendChild(a, mounted);
         cx.root.?.setStyleInline(a, .{ .width = .{ .px = 572 } });
         cx.layout();
         _ = cx.render();
@@ -728,7 +734,9 @@ test "tool step waiting approval shows a stable pending label without execution 
     const scope = try ui.Scope.init(a, null, cx.owner);
     defer scope.dispose();
     var expanded = false;
-    cx.root = try Step.mount(cx, scope, .{ .title = "执行命令", .tool_name = "host.run_command", .projection = "{\"command\":\"printf state; false\"}", .detail = "等待你确认", .phase = .approval, .elapsed_ms = 28_400, .expanded = &expanded });
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column }, .{});
+    const mounted = try Step.mount(cx, scope, .{ .title = "执行命令", .tool_name = "host.run_command", .projection = "{\"command\":\"printf state; false\"}", .detail = "等待你确认", .phase = .approval, .elapsed_ms = 28_400, .expanded = &expanded });
+    try cx.root.?.appendChild(a, mounted);
     for (0..4) |_| {
         cx.frame_time_ms += 1000;
         cx.layout();
@@ -1042,9 +1050,14 @@ test "execution result native card preserves real target recording output and re
             inline for (.{ .{ "ai.execution.result.view_terminal", "查看终端" }, .{ "ai.execution.result.stop", "停止执行" }, .{ "ai.execution.result.takeover", "接管输入" } }) |action| {
                 const button = find(root, action[0]).?;
                 const rect = button.globalRect();
-                const label = labelNode(button, action[1]).?.globalRect();
                 try std.testing.expect(rect.x >= footer.x and rect.x + rect.w <= footer.x + footer.w + 0.1);
-                try std.testing.expect(label.x >= rect.x and label.x + label.w <= rect.x + rect.w + 0.1);
+                if (std.mem.eql(u8, action[0], "ai.execution.result.view_terminal")) {
+                    try std.testing.expectEqualStrings(action[1], button.behavior.interaction.a11y.?.label.?);
+                    try std.testing.expectEqual(@as(f32, 24), rect.w);
+                } else {
+                    const label = labelNode(button, action[1]).?.globalRect();
+                    try std.testing.expect(label.x >= rect.x and label.x + label.w <= rect.x + rect.w + 0.1);
+                }
             }
             const output_before = find(root, "ai.execution.result.terminal_output").?.globalRect();
             cx.handleScroll(.{ .x = body.x + body.w / 2, .y = body.y + body.h / 2, .dy = -100000, .dx = 0 });
@@ -1087,7 +1100,9 @@ test "execution result queued controls recheck same execution latest receipt and
     defer cx.deinit();
     const scope = try ui.Scope.init(a, null, cx.owner);
     defer scope.dispose();
-    cx.root = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column }, .{});
+    const mounted = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+    try cx.root.?.appendChild(a, mounted);
     const old_stop = find(cx.root.?, "ai.execution.result.stop").?;
     const old_takeover = find(cx.root.?, "ai.execution.result.takeover").?;
     var latest = record;
@@ -1123,7 +1138,9 @@ test "execution result active stop and takeover callbacks receive original full 
         defer cx.deinit();
         const scope = try ui.Scope.init(a, null, cx.owner);
         defer scope.dispose();
-        cx.root = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column }, .{});
+        const mounted = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+        try cx.root.?.appendChild(a, mounted);
         find(cx.root.?, action[0]).?.behavior.events.on_click.?.invoke();
         try std.testing.expectEqual(@as(usize, 1), recorder.calls);
         try std.testing.expectEqual(action[1], recorder.action.?);
@@ -1152,7 +1169,9 @@ test "execution result preflight refusal shows user readable reason without raw 
     cx.setViewport(332, 358);
     const scope = try ui.Scope.init(a, null, cx.owner);
     defer scope.dispose();
-    cx.root = try Execution.mount(cx, scope, &store, &record, null, null);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column }, .{});
+    const mounted = try Execution.mount(cx, scope, &store, &record, null, null);
+    try cx.root.?.appendChild(a, mounted);
     cx.root.?.setStyleInline(a, .{ .width = .{ .px = 332 } });
     for (0..4) |_| {
         cx.layout();
@@ -1203,8 +1222,9 @@ test "execution interval native result separates saved observation foreground fa
         cx.setViewport(332, 358);
         const scope = try ui.Scope.init(a, null, cx.owner);
         defer scope.dispose();
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column }, .{});
         const root = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
-        cx.root = root;
+        try cx.root.?.appendChild(a, root);
         root.setStyleInline(a, .{ .width = .{ .px = 332 } });
         for (0..4) |_| {
             cx.layout();
@@ -1353,7 +1373,9 @@ test "tool step undispatched request does not invent an execution duration" {
     const scope = try ui.Scope.init(a, null, cx.owner);
     defer scope.dispose();
     var expanded = false;
-    cx.root = try Step.mount(cx, scope, .{ .title = "工具请求", .projection = "已拒绝 · 未执行", .detail = "用户拒绝本次命令。", .phase = .rejected, .elapsed_ms = 0, .show_elapsed = false, .expanded = &expanded });
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column }, .{});
+    const mounted = try Step.mount(cx, scope, .{ .title = "工具请求", .projection = "已拒绝 · 未执行", .detail = "用户拒绝本次命令。", .phase = .rejected, .elapsed_ms = 0, .show_elapsed = false, .expanded = &expanded });
+    try cx.root.?.appendChild(a, mounted);
     cx.layout();
     try std.testing.expect(find(cx.root.?, "ai.step.elapsed").?.style.display == .none);
     try std.testing.expectEqualStrings("工具请求", find(cx.root.?, "ai.step.title").?.getText().?.content);

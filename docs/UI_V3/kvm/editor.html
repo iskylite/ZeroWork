@@ -11,7 +11,9 @@
   <link rel="stylesheet" href="../shared/functional.css?v=2c8d3774bed1">
   <link rel="stylesheet" href="editor.css?v=v033-three-step">
   <link rel="stylesheet" href="../connection/wizard-shell.css?v=three-step">
-</head>
+<style>
+.priority-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;padding:0}.priority-icon svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8}.priority-icon[hidden]{display:none}
+#probe-log.priority-icon{width:26px;height:26px;padding:0}</style></head>
 <body data-theme="dark">
   <header class="review">
     <a href="index.html">← KVM 基准</a><strong>BMC iKVM · 三步连接向导</strong><span>V0.3.2 · 本地夹具</span><div class="grow"></div>
@@ -56,7 +58,7 @@
           </section>
         </div>
       </div>
-      <div class="bmc-feedback" data-testid="bmc.editor.feedback"><div id="form-result" data-testid="bmc.editor.message" role="status">可离线保存；测试仅验证管理连接，打开控制台后才验证视频</div><button type="button" id="probe-log" data-testid="bmc.editor.probe_log" hidden>查看测试日志</button></div>
+      <div class="bmc-feedback" data-testid="bmc.editor.feedback"><div id="form-result" data-testid="bmc.editor.message" role="status">可离线保存；测试仅验证管理连接，打开控制台后才验证视频</div><button type="button" id="probe-log" data-testid="bmc.editor.probe_log" hidden class="priority-icon" aria-label="查看测试日志" title="查看测试日志"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14v18H5zM8 7h8M8 11h8M8 15h6"/></svg></button></div>
       <footer class="modal-foot" data-testid="bmc.editor.footer"><button type="button" class="button" id="cancel-editor" data-testid="bmc.editor.cancel">取消</button><button type="button" class="button" id="step-prev" data-testid="bmc.editor.back" hidden>上一步</button><div class="grow"></div><button type="button" class="button primary" id="step-next" data-testid="bmc.editor.next">下一步</button><button type="button" class="button" id="temporary" data-testid="bmc.editor.temporary">临时连接</button><button type="button" class="button" id="save-only" data-testid="bmc.editor.save">仅保存</button><button type="button" class="button primary" id="save-open" data-testid="bmc.editor.save_and_open">保存并连接</button></footer>
     </section></div></div>
     <div id="probe-log-overlay" class="scrim" hidden><section class="modal bmc-log-modal" role="dialog" aria-modal="true" aria-labelledby="probe-log-title" data-testid="bmc.editor.log_modal"><header class="modal-head"><div><h2 id="probe-log-title">管理测试日志</h2></div><button type="button" id="probe-log-close" data-testid="bmc.editor.log_close" aria-label="关闭测试日志">✕</button></header><div class="bmc-log-body"><p id="probe-log-status" data-testid="bmc.editor.log_status"></p><div id="probe-log-scroll" data-testid="bmc.editor.log_scroll" tabindex="0"><pre id="probe-log-entries" data-testid="bmc.editor.log_entries"></pre></div><p>仅显示最近 32 条脱敏阶段记录，关闭表单后清除。</p><div class="bmc-log-actions"><div class="grow"></div><button type="button" class="button" id="probe-log-cancel" data-testid="bmc.editor.log_cancel_probe">取消测试</button><button type="button" class="button" id="probe-log-done">关闭</button></div></div></section></div>

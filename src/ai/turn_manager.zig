@@ -75,6 +75,7 @@ pub const Manager = struct {
     allocator: std.mem.Allocator,
     input: ?*@import("session_input.zig").Inbox = null,
     compaction_config: ?@import("provider_config.zig").ProviderConfig = null,
+    last_context_usage: ?@import("context_usage.zig").Sample = null,
     observer: ?Observer = null,
     turn: turn_model.Turn,
     cards: card_stream.Stream,
@@ -190,6 +191,7 @@ pub const Manager = struct {
             observer.reset(observer.context);
             try budget.check();
         }
+        self.last_context_usage = null;
         try self.turn.resetForRun();
         self.last_error = null;
         self.saw_done = false;
@@ -238,6 +240,7 @@ pub const Manager = struct {
             try budget.check();
             total.input_tokens +|= stats.input_tokens;
             total.output_tokens +|= stats.output_tokens;
+            total.request_count +|= stats.request_count;
             total.usage_reported = total.usage_reported and stats.usage_reported;
             if (self.pending_tools.items.len == 0 or self.tool_run == null) {
                 if (self.input) |inbox| if (!inbox.tryClose()) {
@@ -414,7 +417,10 @@ pub const Manager = struct {
                     try self.recordFailure(request.model);
                     return if (self.last_error != null) error.StreamCallbackFailed else error.ProviderMissingDone;
                 }
-                return stats;
+                if (stats.usage_reported and stats.input_tokens > 0) self.last_context_usage = @import("context_usage.zig").Sample.capture(attempt_request, stats.input_tokens) catch null;
+                var reported = stats;
+                reported.request_count = @as(u32, attempt) + 1;
+                return reported;
             } else |err| {
                 self.audit_log.truncate(audit_start);
                 if (!retry.isRetryable(err)) {
@@ -1488,7 +1494,7 @@ test "empty text in a tool round produces no observer text or blank answer card 
                 else => return error.UnexpectedProviderRound,
             }
             sink(ctx, .done);
-            return .{};
+            return .{ .input_tokens = @intCast(self.rounds * 1000), .output_tokens = 50 };
         }
         fn models(_: *anyopaque, allocator: std.mem.Allocator) ![]provider.ModelInfo {
             return allocator.alloc(provider.ModelInfo, 0);
@@ -1520,8 +1526,12 @@ test "empty text in a tool round produces no observer text or blank answer card 
     manager.turn_id = 901;
     manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute };
     manager.observer = .{ .context = &fixture, .reset = Fixture.reset, .delta = Fixture.observe };
-    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "two-round-fixture", .system = "", .messages = &.{.{ .content = "read capacity" }}, .tools = &.{.{ .tool = .run_command, .session_ids = &.{101} }} });
+    const usage = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "two-round-fixture", .system = "", .messages = &.{.{ .content = "read capacity" }}, .tools = &.{.{ .tool = .run_command, .session_ids = &.{101} }} });
     try std.testing.expectEqual(@as(usize, 2), fixture.rounds);
+    try std.testing.expectEqual(@as(u32, 2), usage.request_count);
+    try std.testing.expectEqual(@as(u32, 3000), usage.input_tokens);
+    try std.testing.expectEqual(@as(usize, 2000), manager.last_context_usage.?.input_tokens);
+    try std.testing.expect(manager.last_context_usage.?.matches(manager.tool_run.?.messages.items));
     try std.testing.expectEqual(@as(usize, 1), fixture.executions);
     try std.testing.expectEqual(@as(usize, 1), fixture.tool_events);
     try std.testing.expectEqual(@as(usize, 2), fixture.done_events);

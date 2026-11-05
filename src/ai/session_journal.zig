@@ -7,7 +7,7 @@ const provider = @import("provider.zig");
 const images = @import("image_attachments.zig");
 pub const max_bytes = 128 * 1024 * 1024;
 const Image = struct { path: []const u8, encoded: []const u8, captured_at: i64, offloaded: bool = false, owner: ?@import("../host/identity.zig").SessionHandle = null };
-const Message = struct {
+pub const Message = struct {
     role: provider.Role,
     content: []const u8,
     tool_calls: []const provider.ToolCall = &.{},
@@ -29,6 +29,8 @@ const StoredEvent = struct {
     turn: u64 = 0,
     draft: ?[]const u8 = null,
     recoverable: bool = true,
+    presentation: ?[]const u8 = null,
+    context_usage: ?@import("context_usage.zig").Stored = null,
     initial_input: ?input.Receipt = null,
     initial_origin: ?@import("tool_scope.zig").Owner = null,
 };
@@ -103,8 +105,8 @@ pub const Journal = struct {
                 refs.deinit(self.allocator);
             }
             const a = arena.allocator();
-            const messages = try self.decode(a, row.messages, &refs);
-            const transcript = try self.decode(a, row.transcript, &refs);
+            const messages = try decode(self.allocator, a, row.messages, &refs);
+            const transcript = try decode(self.allocator, a, row.transcript, &refs);
             if (row.event) |original| {
                 var event: lifecycle.Event = .{ .kind = original.kind, .conversation = original.conversation, .revision = original.revision, .messages = messages };
                 inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| @field(event, name) = @field(original, name);
@@ -127,7 +129,7 @@ pub const Journal = struct {
         store.input_persist = .{ .context = self, .write = writeInput, .consumed = writeConsumed, .order = writeOrder };
         for (store.records.items) |record| record.inbox.persist = store.input_persist;
     }
-    fn decode(self: *Journal, a: std.mem.Allocator, source: []const Message, refs: *std.ArrayList(images.ContentRef)) ![]provider.Message {
+    pub fn decode(allocator: std.mem.Allocator, a: std.mem.Allocator, source: []const Message, refs: *std.ArrayList(images.ContentRef)) ![]provider.Message {
         const messages = try a.alloc(provider.Message, source.len);
         for (source, messages) |message, *decoded| {
             var normal: std.ArrayList(images.ContentRef) = .empty;
@@ -137,10 +139,17 @@ pub const Journal = struct {
                 if (size > images.max_bytes) return error.ImageTooLarge;
                 const bytes = try a.alloc(u8, size);
                 try std.base64.standard.Decoder.decode(bytes, value.encoded);
-                var ref = try images.ContentRef.create(self.allocator, value.path, bytes, value.captured_at, .{});
-                refs.append(self.allocator, ref) catch |err| {
-                    ref.release();
-                    return err;
+                const ref = cached: {
+                    for (refs.items) |existing| {
+                        const content = existing.content() orelse continue;
+                        if (content.captured_at_ms == value.captured_at and std.mem.eql(u8, content.path, value.path) and std.mem.eql(u8, content.bytes, bytes)) break :cached existing;
+                    }
+                    var created = try images.ContentRef.create(allocator, value.path, bytes, value.captured_at, .{});
+                    refs.append(allocator, created) catch |err| {
+                        created.release();
+                        return err;
+                    };
+                    break :cached created;
                 };
                 if (value.offloaded) try offloaded.append(a, .{ .reference = ref, .owner = value.owner }) else try normal.append(a, ref);
             }
@@ -166,7 +175,7 @@ pub const Journal = struct {
         const self: *Journal = @ptrCast(@alignCast(raw));
         try self.append(.{ .order = .{ .fence = fence, .ids = ids } }, &.{}, &.{});
     }
-    fn encode(a: std.mem.Allocator, source: []const provider.Message) ![]Message {
+    pub fn encode(a: std.mem.Allocator, source: []const provider.Message) ![]Message {
         const messages = try a.alloc(Message, source.len);
         for (source, messages) |message, *out| {
             const image_values = try a.alloc(Image, message.images.len + message.offloaded_images.len);

@@ -86,7 +86,7 @@ body[data-theme=sauber] .kvm-connection-progress{--kvm-progress-fill:#f3ffef;--k
 #content{border:0;border-radius:11px;overflow:hidden;padding:0}
 .kvm-content-surface{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--surface-1);border:0;border-radius:11px;overflow:hidden;padding:0}
 /* One outer card owns clipping; toolbar and video share its bounds. */
-.kvm-video-workspace{flex:1;min-width:0;min-height:0;display:flex;padding:0}
+.kvm-video-workspace{flex:1;min-width:0;min-height:0;display:flex;padding:0 12px 12px}
 .kvm-video-card{flex:1;min-width:0;min-height:0;display:flex;padding:0;background:#000;border:0;border-radius:0;overflow:hidden}
 .kvm-video-card>.video{min-width:0;border:0;border-radius:0;padding:0}
 #video .screen.kvm-reference-video{padding:0;border-radius:0;overflow:hidden}
@@ -141,7 +141,7 @@ body.compact .kvm-tools button{width:58px;min-width:58px;font-size:11px}
 .kvm-progress-overall-state.failed{color:var(--danger-ink,var(--danger))}
 
 /* Shared native header geometry and hostname identity. */
-.kvm-content-surface>.console-head{height:48px;min-height:48px;padding:12px 13px;gap:6px;background:transparent}
+.kvm-content-surface>.console-head{height:48px;min-height:48px;padding:12px;gap:6px;background:transparent}
 .kvm-connection-identity{flex:1;min-width:0;display:flex;align-items:center;gap:8px}
 .kvm-connection-identity>.identity-icon{width:18px;height:18px;flex-shrink:0;stroke-width:2}
 .kvm-connection-identity>.kvm-title,body.compact .kvm-connection-identity>.kvm-title{flex:1;min-width:0;max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

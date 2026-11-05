@@ -161,7 +161,6 @@ pub const SftpAdapter = struct {
         var active = false;
         for (self.entries.items) |entry| {
             if (entry.stage == .closed) continue;
-            active = true;
             const request = entry.request.value;
             if (entry.handles) |handles| if (file_host.connectionJournal(handles.directory)) |journal| {
                 // Preserve diagnostics before teardown releases the file binding.
@@ -200,6 +199,7 @@ pub const SftpAdapter = struct {
             if (entry.failure != null) entry.stage = .draining;
             if (entry.stage == .draining) {
                 try self.drain(entry);
+                active = active or entry.stage != .closed;
                 continue;
             }
             self.advance(entry) catch |err| {
@@ -207,6 +207,10 @@ pub const SftpAdapter = struct {
                 try self.recordFailure(entry, failure(@errorName(err)));
                 entry.stage = .draining;
             };
+            // An attached file workspace is retained state, not a pending
+            // connection operation. File-model requests and active transfers
+            // supply their own polling until their real completion receipts.
+            active = active or (entry.stage != .attached and entry.stage != .closed);
         }
         return active;
     }

@@ -2,7 +2,7 @@
 /* HTML design only: keep the original composer, controls, draft and attachments mounted. */
 window.V3AIComposerInteraction=(()=>{
  const esc=value=>V3AI.escape(value);
- const paths={skip:'M5 4l10 8-10 8zM19 4v16',clock:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 7v5l3 2',copy:'M9 8V3h12v13h-5M3 8h13v13H3z',chevron:'m9 6 6 6-6 6'};
+ const paths={info:'M12 8h.01M12 11v6M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0',skip:'M5 4l10 8-10 8zM19 4v16',clock:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 7v5l3 2',copy:'M9 8V3h12v13h-5M3 8h13v13H3z',chevron:'m9 6 6 6-6 6'};
  const glyph=name=>paths[name]?`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name]}"/></svg>`:V3AI.icon(name);
  const button=(action,label,icon,primary=false)=>`<button type="button" class="ai-control v3-ai-interaction-action${primary?' is-primary':''}" data-ai-interaction="${action}" title="${esc(label)}">${glyph(icon)}<span>${esc(label)}</span></button>`;
 
@@ -28,13 +28,14 @@ window.V3AIComposerInteraction=(()=>{
   panel.setAttribute('aria-label',request.title);
   panel.innerHTML=`<div><div class="v3-ai-interaction-heading">${glyph(request.kind==='question'?'list':'terminal')}<strong>${esc(request.title)}</strong></div><p class="v3-ai-interaction-target">${esc(request.target)}</p></div>`;
   if(request.kind==='approval'){
-   panel.insertAdjacentHTML('beforeend',`<div class="v3-ai-interaction-command"><pre>${esc(request.command)}</pre><button type="button" class="icon-btn v3-ai-interaction-copy" aria-label="复制完整命令" title="复制完整命令">${glyph('copy')}</button></div><p class="v3-ai-interaction-impact">${esc(request.impact)}</p>`);
+   panel.insertAdjacentHTML('beforeend',`<div class="v3-ai-interaction-command"><pre>${esc(request.command)}</pre><button type="button" class="icon-btn v3-ai-interaction-copy" aria-label="复制完整命令" title="复制完整命令">${glyph('copy')}</button></div><p class="v3-ai-interaction-impact">${glyph('info')}<span>${esc(request.impact)}</span></p>`);
    panel.querySelector('.v3-ai-interaction-copy').onclick=async event=>{const control=event.currentTarget;try{await navigator.clipboard.writeText(request.command);if(live())control.setAttribute('title','已复制');}catch{control.setAttribute('title','请选择命令并按 ⌘C 复制');}};
   }else{
    const options=document.createElement('fieldset');options.className='v3-ai-interaction-options';options.setAttribute('aria-label',request.title);
-   options.innerHTML=request.options.map(option=>`<label class="v3-ai-interaction-option"><input type="radio" name="${esc(key)}" value="${esc(option.id)}"${request.selected===option.id?' checked':''}><span class="v3-ai-interaction-option-copy"><strong>${esc(option.label)}${option.recommended?'<em>推荐</em>':''}</strong><small>${esc(option.detail)}</small></span></label>`).join('')+`<label class="v3-ai-interaction-option"><input type="radio" name="${esc(key)}" value="custom"${request.selected==='custom'?' checked':''}><input class="v3-ai-interaction-custom" aria-label="其他处理方式" placeholder="其他方式…" value="${esc(request.custom||'')}"></label>`;
-   options.onchange=event=>{if(event.target.type==='radio'&&live())request.selected=event.target.value;};
-   const custom=options.querySelector('.v3-ai-interaction-custom');
+   options.innerHTML=request.options.map(option=>`<label class="v3-ai-interaction-option"><input type="radio" name="${esc(key)}" value="${esc(option.id)}"${request.selected===option.id?' checked':''}><span class="v3-ai-interaction-option-copy"><strong>${esc(option.label)}${option.recommended?'<em>推荐</em>':''}</strong><small>${esc(option.detail)}</small></span></label>`).join('')+`<label class="v3-ai-interaction-option"><input type="radio" name="${esc(key)}" value="custom"${request.selected==='custom'?' checked':''}><span class="v3-ai-interaction-other"${request.selected==='custom'?' hidden':''}>其他</span><input class="v3-ai-interaction-custom" aria-label="其他处理方式" placeholder="输入你的答案…" value="${esc(request.custom||'')}"${request.selected==='custom'?'':' hidden'}></label>`;
+   const custom=options.querySelector('.v3-ai-interaction-custom'),other=options.querySelector('.v3-ai-interaction-other');
+   const syncCustom=focus=>{const selected=request.selected==='custom';custom.hidden=!selected;other.hidden=selected;if(selected&&focus)custom.focus({preventScroll:true});};
+   options.onchange=event=>{if(event.target.type==='radio'&&live()){request.selected=event.target.value;syncCustom(true);}};
    custom.oninput=()=>{if(!live())return;request.custom=custom.value;request.selected='custom';options.querySelector('[value="custom"]').checked=true;};
    custom.onfocus=()=>{if(live()){request.selected='custom';options.querySelector('[value="custom"]').checked=true;}};
    panel.append(options);
@@ -42,7 +43,7 @@ window.V3AIComposerInteraction=(()=>{
   const error=document.createElement('p');error.className='v3-ai-interaction-error';error.hidden=true;error.setAttribute('role','alert');panel.append(error);
   composer.prepend(panel);
   const actions=document.createElement('div');actions.className='v3-ai-interaction-actions';
-  actions.innerHTML=button('postpone','稍后处理','skip')+'<span class="spacer"></span>'+(request.kind==='approval'?button('reject','拒绝','x'):'')+button('submit',request.kind==='approval'?'批准本次':'提交回答','check',true);
+  actions.innerHTML='<span class="spacer"></span>'+button('postpone','稍后处理','skip')+(request.kind==='approval'?button('reject','拒绝','x'):'')+button('submit',request.kind==='approval'?'允许执行':'提交答案','check');
   row.prepend(actions);
   actions.onclick=event=>{
    const action=event.target.closest('[data-ai-interaction]')?.dataset.aiInteraction;
@@ -54,7 +55,7 @@ window.V3AIComposerInteraction=(()=>{
     return;
    }
    if(action==='submit'&&request.kind==='question'&&(!request.selected||request.selected==='custom'&&!request.custom?.trim())){
-    error.textContent='请选择一个选项，或填写其他处理方式。';error.hidden=false;panel.querySelector('.v3-ai-interaction-custom').focus();return;
+    error.textContent='请选择一个选项，或填写其他处理方式。';error.hidden=false;return;
    }
    request.status='submitting';actions.querySelectorAll('button').forEach(control=>control.disabled=true);
    Promise.resolve().then(()=>{if(callbacks.current()!==request||request.status!=='submitting')return;callbacks.decide(action==='reject'?'rejected':'accepted',request);});

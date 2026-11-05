@@ -475,7 +475,7 @@ pub const Context = struct {
         try authority.validate();
         const frozen = try self.taskGrant(authority);
         const controller = self.lookup_task(self.lookup_context, authority.conversation_id, authority.task_id) orelse return error.TargetNotAuthorized;
-        if (!sameTask(controller.authority, authority) or authority.grant_revision != frozen.initial.grant_revision or controller.authority.grant_revision != frozen.initial.grant_revision or controller.config_revision != frozen.config_revision or controller.execution_policy.execution_mode != frozen.mode or self.app.workspace.app_config.config_revision != frozen.config_revision) return error.ScopeChanged;
+        if (!sameTask(controller.authority, authority) or authority.grant_revision != frozen.initial.grant_revision or controller.authority.grant_revision != frozen.initial.grant_revision or controller.config_revision != frozen.config_revision or controller.execution_policy.execution_mode != frozen.mode or self.app.workspace.app_config.agentPolicyRevision() != frozen.config_revision) return error.ScopeChanged;
         if (!frozen.allow_input or !frozen.allow_write) return error.PermissionDenied;
         const state = self.store.findConversation(authority.conversation_id) orelse return error.ConversationNotFound;
         if (state.closed or !state.owner.eql(controller.authority.binding) or state.binding_revision != controller.authority.binding_revision) return error.BindingConflict;

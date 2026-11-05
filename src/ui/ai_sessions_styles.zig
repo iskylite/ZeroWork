@@ -24,7 +24,7 @@ pub fn actionHover(danger: bool) ui.BoxStyle {
     return .{ .background = if (danger) T.current().danger.withAlpha(20) else T.states().hover, .corner_radius = 5 };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 8, .right = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 56 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 8, .right = 8 }, .flex_shrink = 0 };
 }
 pub fn text(primary: bool) ui.TextStyle {
     return .{ .font_size = if (primary) 11.5 else 10.5, .font_weight = if (primary) 500 else 400, .line_height = if (primary) 16.0 / 11.5 else 14.0 / 10.5, .color = if (primary) T.current().fg_1 else T.current().fg_2, .text_overflow = .ellipsis };
@@ -56,4 +56,34 @@ fn dangerBackground() ui.Color {
 
 pub fn popover() ui.BoxStyle {
     return .{ .width = .{ .px = 440 }, .direction = .column, .padding = .{}, .background = T.current().overlay, .border = .{ .width = 0, .radius = 11 }, .shadow = .{ .color = T.current().shadow, .blur = 24, .offset_y = 12 } };
+}
+
+pub fn rowContent() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .direction = .column, .gap = 4 };
+}
+pub fn firstLine() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
+}
+pub fn secondLine() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 };
+}
+pub fn rowActions() ui.BoxStyle {
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 };
+}
+pub fn rowAction() ui.BoxStyle {
+    return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .flex_shrink = 0, .text_color = T.current().fg_2 };
+}
+pub fn tag(ink: ui.Color) ui.BoxStyle {
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = 6, .right = 6 }, .background = ink.withAlpha(24), .corner_radius = 4, .flex_shrink = 0 };
+}
+pub fn tagText(ink: ui.Color) ui.TextStyle {
+    return .{ .font_size = 10, .font_weight = 500, .line_height = 1.4, .color = ink };
+}
+pub fn bindingTag(ink: ui.Color) ui.BoxStyle {
+    var result = tag(ink);
+    result.font_size = 10;
+    result.font_weight = 500;
+    result.text_color = ink;
+    result.border = .{ .width = 0, .radius = 4 };
+    return result;
 }

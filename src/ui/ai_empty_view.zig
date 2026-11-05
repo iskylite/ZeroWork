@@ -1,10 +1,11 @@
 const ui = @import("ui");
 const S = @import("ai_empty_styles.zig");
-pub const Recent = struct { id: u64, title: []const u8 };
+const RowView = @import("ai_session_row.zig");
+pub const Recent = RowView.Entry;
 pub const Actions = struct {
     logo_texture: ?u32 = null,
     recent: []const Recent = &.{},
-    select: ?*const fn (*anyopaque, u64) void = null,
+    session_hooks: ?RowView.Hooks = null,
     context: *anyopaque,
     summarize: *const fn (*anyopaque) void,
     logs: *const fn (*anyopaque) void,
@@ -64,34 +65,12 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
             try row.appendChild(cx.allocator, hint.wrapper);
         } else try row.appendChild(cx.allocator, button);
     }
-    if (actions.recent.len > 0 and actions.select != null) {
+    if (actions.recent.len > 0 and actions.session_hooks != null) {
         const recent = try ui.boxStyled(cx, S.recentGroup, .{});
         recent.meta.ownership.meta.test_id = "ai.empty.recent";
         try recent.appendChild(cx.allocator, try ui.text(cx, "最近会话", .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = S.muted() }));
         for (actions.recent[0..@min(2, actions.recent.len)]) |entry| {
-            const click = try scope.createState(RecentClick, .{ .context = actions.context, .select = actions.select.?, .id = entry.id });
-            const button = try ui.widgets.Button(.{ .label = entry.title, .variant = .ghost, .block = true, .base_style = S.recent(), .on_click = cx.on(RecentClick, click, RecentClick.run) }).mount(scope, cx);
-            button.meta.ownership.meta.test_id = "ai.empty.recent.link";
-            // Button's recipe only forwards part of base_style. Keep the row's
-            // width and spacing in its inline layer across theme replays.
-            button.setStyleInline(cx.allocator, S.recent());
-            for (button.children.items) |child| child.setDisplay(.none);
-            const icon = try ui.iconTint(cx, ui.icons.get("message-circle").?, S.muted(), S.icon());
-            icon.meta.ownership.meta.test_id = "ai.empty.recent.icon";
-            try button.appendChild(cx.allocator, icon);
-            const text = try ui.textStyled(cx, S.recentTitle, entry.title);
-            text.meta.ownership.meta.test_id = "ai.empty.recent.title";
-            text.setStyleInline(cx.allocator, S.recentTitleBox());
-            try button.appendChild(cx.allocator, text);
-            const arrow = try ui.iconTint(cx, ui.icons.get("arrow-up-right").?, S.muted(), S.icon());
-            arrow.meta.ownership.meta.test_id = "ai.empty.recent.arrow";
-            try button.appendChild(cx.allocator, arrow);
-            const hint = try ui.widgets.Tooltip(.{ .text = entry.title, .width = @as(f32, 320), .wrap = .char }).mount(scope, cx);
-            hint.content.meta.ownership.meta.test_id = "ai.empty.recent.tooltip";
-            hint.wrapper.setStyleInline(cx.allocator, S.recentSlot());
-            hint.trigger.setStyleInline(cx.allocator, S.recentSlot());
-            try hint.trigger.appendChild(cx.allocator, button);
-            try recent.appendChild(cx.allocator, hint.wrapper);
+            try recent.appendChild(cx.allocator, try RowView.mount(cx, scope, entry, actions.session_hooks.?, null, null));
         }
         try root.appendChild(cx.allocator, recent);
     }
@@ -100,14 +79,18 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
     try scope.onCleanup(SetupLayout, layout, SetupLayout.release);
     return root;
 }
-const RecentClick = struct {
-    context: *anyopaque,
-    select: *const fn (*anyopaque, u64) void,
-    id: u64,
-    fn run(self: *RecentClick) void {
-        self.select(self.context, self.id);
+/// Called by the host at a safe frame boundary while the welcome page is mounted.
+pub fn updateRecentPhase(cx: *ui.Cx, root: *ui.Node, id: u64, phase: @import("../ai/assistant_store.zig").Phase) void {
+    if (root.meta.ownership.meta.test_id) |test_id| {
+        var buffer: [64]u8 = undefined;
+        const expected = @import("std").fmt.bufPrint(&buffer, "ai.session.row.{d}", .{id}) catch return;
+        if (@import("std").mem.eql(u8, test_id, expected)) {
+            RowView.updatePhase(cx, root, phase);
+            return;
+        }
     }
-};
+    for (root.children.items) |child| updateRecentPhase(cx, child, id, phase);
+}
 
 const SetupLayout = struct {
     cx: *ui.Cx,

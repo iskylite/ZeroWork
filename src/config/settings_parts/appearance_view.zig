@@ -1491,14 +1491,14 @@ const AppIconSelect = struct {
     }
 };
 fn appIconSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
-    const section = try card(cx, bound, "应用图标", "Dock 图标底色 · 保存后生效", ui.icons.terminal, 3, "settings.appearance.app_icon");
+    const section = try card(cx, bound, "应用图标", "Dock 图标底色 · 保存后生效", ui.icons.terminal, 6, "settings.appearance.app_icon");
     const row = try ui.boxStyled(cx, S.row, .{});
     row.style.padding.top = 12;
     row.style.padding.bottom = 12;
     const labels = try ui.boxStyled(cx, S.labelGroup, .{});
     labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, "图标背景"));
-    try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.icon_background", "保存后切换 Dock，重启后保留。Finder 与启动台使用默认透明图标。", ui.icons.circle_help, S.theme.current().fg_2));
+    try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.icon_background", "保存后更新应用图标，退出后保留。请将应用放在可写目录中。", ui.icons.circle_help, S.theme.current().fg_2));
 
     try row.appendChild(cx.allocator, labels);
     const select = try bound.scope.allocator.create(AppIconSelect);

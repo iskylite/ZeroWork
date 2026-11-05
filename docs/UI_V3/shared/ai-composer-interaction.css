@@ -3,9 +3,8 @@
 #assistant .v3-ai-composer[data-interaction-state="expanded"]>textarea,
 #assistant .v3-ai-composer[data-interaction-state="expanded"]>.ai-draft-attachments,
 #assistant .v3-ai-composer[data-interaction-state="expanded"]>.ap-composer-attachments{display:none}
-#assistant .v3-ai-composer[data-interaction-state="expanded"]>.v3-ai-control-row>:not(.v3-ai-interaction-actions):not(.ai-send){display:none}
-#assistant .v3-ai-interaction-panel{display:flex;flex-direction:column;flex:none;gap:8px;height:132px;min-height:0;overflow:auto;padding-top:6px}
-#assistant .v3-ai-interaction-panel[data-kind="question"]{height:180px}
+#assistant .v3-ai-composer[data-interaction-state="expanded"]>.v3-ai-control-row>:not(.v3-ai-interaction-actions){display:none}
+#assistant .v3-ai-interaction-panel{display:flex;flex-direction:column;flex:none;gap:8px;height:auto;max-height:180px;min-height:0;overflow:auto;padding-top:6px}
 #assistant .v3-ai-interaction-heading{display:flex;align-items:center;gap:6px;min-height:20px;flex:none}
 #assistant .v3-ai-interaction-heading>svg{width:18px;height:18px;color:var(--accent)}
 #assistant .v3-ai-interaction-heading>strong{font-size:13px;font-weight:600;line-height:20px}
@@ -14,7 +13,8 @@
 #assistant .v3-ai-interaction-command pre{flex:1;min-width:0;max-height:64px;overflow:auto;margin:0;padding:8px 10px;background:var(--card);border:0;border-radius:7px;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/17px var(--mono,monospace);color:var(--fg)}
 #assistant .v3-ai-interaction-copy{width:24px;height:24px;border-radius:6px;flex:none}
 #assistant .v3-ai-interaction-copy svg{width:14px;height:14px}
-#assistant .v3-ai-interaction-impact{font-size:11px;line-height:18px;color:var(--warn-ink,var(--muted));margin:0}
+#assistant .v3-ai-interaction-impact{display:flex;align-items:flex-start;gap:6px;font-size:11px;line-height:18px;color:var(--muted);margin:0}
+#assistant .v3-ai-interaction-impact>svg{width:12px;height:12px;flex:none;margin-top:3px;color:var(--muted)}
 #assistant .v3-ai-interaction-options{display:flex;flex-direction:column;gap:4px;margin:0;padding:0;border:0;min-width:0}
 #assistant .v3-ai-interaction-option{display:flex;align-items:center;gap:8px;min-height:36px;padding:4px 8px;border-radius:7px;cursor:pointer}
 #assistant .v3-ai-interaction-option:has(input:checked){background:var(--sel)}

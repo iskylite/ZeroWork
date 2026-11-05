@@ -6,7 +6,7 @@ const S = @import("local_session_styles.zig");
 const theme = @import("app_theme.zig");
 const Control = @import("../vt/reconnect.zig").Control;
 
-pub const State = enum { connected, exited, disconnected, reconnecting, retry_failed };
+pub const State = enum { connected, cancelled, exited, disconnected, reconnecting, retry_failed };
 pub const Snapshot = struct {
     state: State = .connected,
     cleanup: @import("../proto/ssh/session.zig").ReleaseReceipt = .released,
@@ -32,7 +32,7 @@ pub const Snapshot = struct {
     }
     pub fn canRetry(self: Snapshot) bool {
         return self.cleanup == .released and switch (self.state) {
-            .exited, .disconnected, .retry_failed => true,
+            .cancelled, .exited, .disconnected, .retry_failed => true,
             .connected, .reconnecting => false,
         };
     }
@@ -40,6 +40,7 @@ pub const Snapshot = struct {
         if ((self.failure != null and self.failure.? == error.ShellInitializationFailed)) return if (self.initialization_confirmation) "终端自动初始化再次失败" else "终端自动初始化失败，正在自动重连一次…";
         return switch (self.state) {
             .connected => "已连接",
+            .cancelled => "连接已取消",
             .exited => "远程终端已退出",
             .disconnected => "与远程主机的连接已断开",
             .reconnecting => "正在重新连接远程主机…",
@@ -60,6 +61,7 @@ pub const Snapshot = struct {
         };
         const text: []const u8 = switch (self.state) {
             .connected => "",
+            .cancelled => "尚未建立远程会话，可重新连接或关闭此页签",
             .exited => "历史输出仍可查看",
             .disconnected => "历史输出仍可查看，请检查网络后重新连接",
             .reconnecting => if (self.buffer_input) "历史输出仍可查看；已开启输入缓冲，键入内容将在重连后发送" else "历史输出仍可查看，连接恢复后即可继续输入",
@@ -245,6 +247,7 @@ test "Remote session notice native layout and actions preserve output and reject
         .{ .state = .reconnecting },
         .{ .state = .retry_failed, .failure = error.ConnectFailed },
         .{ .state = .disconnected, .cleanup = .unknown },
+        .{ .state = .cancelled },
     };
     for ([_]f32{ 1000, 598, 360 }) |width| {
         cx.setViewport(width, 480);

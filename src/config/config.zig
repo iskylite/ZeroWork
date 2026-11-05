@@ -7,6 +7,8 @@ pub const material = @import("background_asset.zig");
 pub const Config = struct {
     /// Persisted monotonic identity of the committed global configuration.
     config_revision: u64 = 1,
+    /// Runtime-only fence. Default permission/mode edits do not revoke agents.
+    agent_policy_revision: ?u64 = null,
     ui: Ui = .{},
     completion: Completion = .{},
     transfer: Transfer = .{},
@@ -17,6 +19,10 @@ pub const Config = struct {
     updates: Updates = .{},
     keys: keybindings.Map = .{},
     plugin_preferences: []const PluginPreference = &.{},
+
+    pub fn agentPolicyRevision(self: Config) u64 {
+        return self.agent_policy_revision orelse self.config_revision;
+    }
 
     pub fn parse(text: []const u8) ParseError!Config {
         return parseWithAllocator(null, text);

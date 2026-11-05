@@ -132,7 +132,10 @@ pub const Host = struct {
         } else {
             self.bridge.clear();
         }
-        self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
+        // A failure/cancellation is idle only after cleanup settles. Polling a
+        // released result at 30 Hz keeps the failure modal and CPU active.
+        if ((state != .failed and state != .cancelled) or current.cleanup == .not_started or current.cleanup == .releasing)
+            self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
     }
 
     fn showAuthentication(self: *Host, request: auth.Snapshot) !void {
@@ -186,7 +189,10 @@ pub const Host = struct {
             .file_session = true,
             .activity = diagnostic.activity,
         });
-        self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
+        // File connections have the same terminal-result contract as SSH:
+        // preserve cleanup polling, then let the retained diagnostic go idle.
+        if ((fault == null and state.lifecycle != .failed) or state.create_cleanup == .not_started or state.create_cleanup == .releasing)
+            self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
         return true;
     }
 

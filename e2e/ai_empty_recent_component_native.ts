@@ -23,20 +23,20 @@ try{
    await h.waitForServerReady(10000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),child.pid);
    for(const theme of ['dark','light','sauber']){
     for(const width of [600,360,480]){
-     await h.resizeWindow(width,400);await h.mouseMove(1,1);await h.sleep(300);
-     const content=await visible('ai.empty.preview.content'),group=await visible('ai.empty.recent'),row=await visible('ai.empty.recent.link'),icon=await visible('ai.empty.recent.icon'),title=await visible('ai.empty.recent.title'),arrow=await visible('ai.empty.recent.arrow');
-     near(row.rect.w,Math.min(width-28,440));near(row.rect.w,group.rect.w);near(row.rect.h,30);near(icon.rect.w,16);near(arrow.rect.w,16);near(title.rect.x,icon.rect.x+24);near(title.rect.x+title.rect.w+8,arrow.rect.x);near(row.rect.x+row.rect.w,arrow.rect.x+16);assert(row.rect.x>=content.rect.x+13.9&&row.rect.x+row.rect.w<=content.rect.x+content.rect.w-13.9);assert(Buffer.byteLength(text(title))>120);near(title.rect.h,16);
-     report.measurements.push({fixture,theme,width,row:row.rect,icon:icon.rect,title:title.rect,arrow:arrow.rect});
+     await h.resizeWindow(width,460);await h.mouseMove(1,1);await h.sleep(300);
+     const content=await visible('ai.empty.preview.content'),group=await visible('ai.empty.recent'),row=await visible('ai.session.row.17'),title=await visible('ai.session.title'),tag=await visible('ai.session.phase_tag'),action=await visible('ai.session.jump.17');
+     near(row.rect.w,Math.min(width-28,440));near(row.rect.w,group.rect.w);near(row.rect.h,56);near(action.rect.w,24);near(action.rect.h,24);assert(title.rect.x+title.rect.w<=tag.rect.x);near(row.rect.x+row.rect.w-8,tag.rect.x+tag.rect.w);assert(row.rect.x>=content.rect.x+13.9&&row.rect.x+row.rect.w<=content.rect.x+content.rect.w-13.9);assert(Buffer.byteLength(text(title))>120);near(title.rect.h,16.5);
+     report.measurements.push({fixture,theme,width,row:row.rect,title:title.rect,tag:tag.rect,action:action.rect});
      if(theme==='dark'&&width!==480){assert((await h.screenshot(join(out,`${fixture}-${theme}-${width}.png`))).ok);await writeFile(join(out,`${fixture}-${width}-tree.json`),JSON.stringify(await h.query('ai.empty.configured'),null,2));}
      await h.mouseMove(title.rect.x+20,title.rect.y+8);
-     await h.sleep(1000);const tip=await visible('ai.empty.recent.tooltip');assert.equal(text(tip),text(title));assert(tip.rect.x>=0&&tip.rect.x+tip.rect.w<=width+0.2);assert(tip.rect.h>20);
+     await h.sleep(1000);const tip=await visible('ai.session.title.tooltip');assert.equal(text(tip),text(title));assert(tip.rect.x>=0&&tip.rect.x+tip.rect.w<=width+0.2);assert(tip.rect.h>20);
      if(theme==='dark'&&width===360)assert((await h.screenshot(join(out,`${fixture}-tooltip-360.png`))).ok);
-     for(const x of [row.rect.x+2,row.rect.x+row.rect.w/2,row.rect.x+row.rect.w-2]){await h.clickAt(x,row.rect.y+15);assert.equal(text(await visible('ai.empty.preview.result')),'selected 17');}
+     for(const x of [action.rect.x+2,action.rect.x+action.rect.w/2,action.rect.x+action.rect.w-2]){await h.clickAt(x,action.rect.y+12);assert.equal(text(await visible('ai.empty.preview.result')),'selected 17');}
      await h.key('return');assert.equal(text(await visible('ai.empty.preview.result')),'selected 17');
     }
     assert((await h.clickTestId('ai.empty.preview.replay')).ok);
    }
-   report.checks.push(`${fixture}: 360/480/600 native row and icons bounded; dark/light/sauber replay; full original title tooltip; row left/center/right and Enter select conversation 17`);
+   report.checks.push(`${fixture}: 360/480/600 native row and icons bounded; dark/light/sauber replay; full original title tooltip; View icon pointer and Enter open conversation 17`);
   }finally{
    let method='POST /quit';try{await h.request('POST','/quit');await h.waitFor(async()=>child.exitCode!==null||child.signalCode!==null||null,10000)}catch{method='SIGTERM fallback';child.kill('SIGTERM')}
    const status=await ended;report.shutdown.push({fixture,method,...status});await log.close();await save();assert.equal(method,'POST /quit');assert.equal(status.code,0);assert.equal(status.signal,null);

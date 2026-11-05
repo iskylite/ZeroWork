@@ -42,7 +42,11 @@ async function checkThemeCommand(triggerId:string,width:number,height:number){
  report.checks.push(`@theme ${triggerId} ${width}x${height}: matches statusbar click geometry, stays open after pointer leaves, Escape closes`);
 }
 try{
- await waitForServerReady(60000);await resizeWindow(1440,900);const host=await vis('sidebar.host');assert((await clickAt(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2,2)).ok);await waitFor(async()=>content(await vis('workspace.pane')).includes('sshrecords')||null,30000);await sleep(450);
+ await waitForServerReady(60000);await resizeWindow(1440,900);const host=await vis('sidebar.host');await mouseMove(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2);await click('sidebar.host.connect');await waitFor(async()=>{
+  const secret=(await query('plugin.challenge.secret')).find(shown);
+  if(secret){await clickAt(secret.rect.x+secret.rect.w/2,secret.rect.y+secret.rect.h/2);await key('a',{cmd:true});await type_(ready.password);const submit=(await query('plugin.challenge.submit')).find(shown);if(submit)await clickAt(submit.rect.x+submit.rect.w/2,submit.rect.y+submit.rect.h/2);}
+  return content(await vis('workspace.pane')).includes('sshrecords')||null;
+ },30000);await sleep(450);
  await mouseMove(700,300);await sleep(200);
  const cases=[['status.connection.identity','status.connection','status.connection.close'],['status.connection.chain','connection.details','connection.details.close'],['status.connection.forward','socks.info','socks.info.close'],['status.connection.theme','status.theme','status.theme.close']];
  async function checkEntries(cases:string[][]){

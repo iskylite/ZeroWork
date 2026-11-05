@@ -72,6 +72,7 @@ pub const Bridge = struct {
     events: ?*@import("../ai/step_events.zig").Mailbox = null,
     children: std.ArrayList(*Child) = .empty,
     captured_scope: ?scope.Scope = null,
+    capability_fingerprint: u64 = 0,
     table: ?tools.RequestTable = null,
     wire: []provider.ToolDefinition = &.{},
     files: ?*@import("file_application_host.zig").Host = null,
@@ -311,6 +312,10 @@ pub const Bridge = struct {
         var members: std.ArrayList(tools.Member) = .empty;
         defer members.deinit(self.allocator);
         var has_terminal_source = false;
+        var has_batch_source = false;
+        var execution_sources: std.ArrayList(identity.SessionHandle) = .empty;
+        var attachment_sources: std.ArrayList(identity.SessionHandle) = .empty;
+        const capture_allocator = self.capture_arena.allocator();
         for (captured.memberIds()) |id| {
             if (self.queries_only) break;
             const owner = for (app.workspace.tabs.items) |tab| {
@@ -322,6 +327,21 @@ pub const Bridge = struct {
                 has_terminal_source = true;
                 break;
             };
+            for (manifest.tools) |binding| if (std.mem.eql(u8, binding.definition_id, "run_command")) {
+                has_batch_source = true;
+                break;
+            };
+            // Reading terminal output does not imply PTY execution or Shell
+            // attachment. Capture the native service's actual optional API.
+            for (app.workspace.tabs.items) |tab| {
+                if (tab.content_owner != .session or !tab.content_owner.session.eql(owner)) continue;
+                const service = nativeTerminal(tab);
+                if (if (app.sessions.queryService(owner, .terminal) == .available) service else null) |terminal| {
+                    if (supportsPty(terminal)) try execution_sources.append(capture_allocator, owner);
+                    if (tab.runtime) |runtime| if (runtime.vtable.attachShell != null) try attachment_sources.append(capture_allocator, owner);
+                }
+                break;
+            }
             // Metadata authority is independent of terminal service readiness.
             // A failed/opening session remains in the real captured scope but
             // contributes no executable target until its services are ready.
@@ -367,20 +387,57 @@ pub const Bridge = struct {
             try members.append(self.allocator, child.member);
         }
         if (self.host_binding) |*binding| {
-            // Host terminal tools follow the same protocol capability as the
-            // plugin catalog. File-only and video-only sources have no PTY.
-            // Use the declared capability rather than readiness, so supported
-            // terminals retain history/observation while opening or failed.
+            // Retain declared history capabilities while opening/failed, but
+            // advertise execution and attachment only for native API sources.
             const a = self.capture_arena.allocator();
             var contributions: std.ArrayList(host_tools.Contribution) = .empty;
-            for (binding.contributions) |contribution| {
-                if (!has_terminal_source and (@import("../ai/host_terminal_queries.zig").supports(contribution.definition.id) or @import("../ai/host_execution.zig").supports(contribution.definition.id) or @import("../ai/batch_output.zig").supports(contribution.definition.id))) continue;
+            for (binding.contributions) |original| {
+                var contribution = original;
+                const id = contribution.definition.id;
+                if (!has_terminal_source and @import("../ai/host_terminal_queries.zig").supports(id)) continue;
+                if (!has_terminal_source and std.mem.eql(u8, id, @import("../ai/builtin_tools.zig").id)) continue;
+                if (!has_batch_source and @import("../ai/batch_output.zig").supports(id)) continue;
+                if (@import("../ai/host_execution.zig").supports(id)) {
+                    if (std.mem.eql(u8, id, "host.attach_shell")) {
+                        if (attachment_sources.items.len == 0) continue;
+                        contribution.session_targets = attachment_sources.items;
+                    } else {
+                        if (execution_sources.items.len == 0) continue;
+                        if (std.mem.eql(u8, id, "host.run_in_terminal")) contribution.session_targets = execution_sources.items;
+                    }
+                }
                 try contributions.append(a, contribution);
             }
             binding.contributions = try contributions.toOwnedSlice(a);
         }
         self.table = if (self.host_binding) |binding| try tools.RequestTable.initWithHost(self.allocator, captured, definitions.items, members.items, binding.context, binding.contributions) else try tools.RequestTable.init(self.allocator, captured, definitions.items, members.items);
         self.wire = try tools.providerDefinitions(&self.table.?, self.table.?.arena.allocator());
+        self.capability_fingerprint = self.capabilityFingerprint(app);
+    }
+    fn nativeTerminal(tab: *const @import("workspace.zig").SessionTab) ?@import("../host/terminal_service.zig").Service {
+        if (tab.terminal) |view| if (view.terminal_surface) |surface| return surface.composite.raw;
+        return if (tab.runtime) |runtime| runtime.terminalService() catch null else null;
+    }
+    fn supportsPty(service: @import("../host/terminal_service.zig").Service) bool {
+        return service.vtable.execution_request != null and service.vtable.execution_renew != null and service.vtable.execution_revoke != null and service.vtable.execution_output != null and service.vtable.execution_snapshot != null;
+    }
+    /// Includes members without ready services so a later ready/revoked source
+    /// triggers catalog and prompt refresh, even without a membership change.
+    pub fn capabilityFingerprint(self: *const Bridge, app: *Application.ApplicationHost) u64 {
+        var hash = std.hash.Wyhash.init(0);
+        const captured = self.captured_scope orelse return 0;
+        for (captured.memberIds()) |id| {
+            for (app.workspace.tabs.items) |tab| {
+                if (tab.content_owner != .session or @backingInt(tab.content_owner.session.session_id) != id) continue;
+                const owner = tab.content_owner.session;
+                const state = app.sessions.queryState(owner);
+                const service = nativeTerminal(tab);
+                const facts = [_]u64{ id, owner.generation, app.sessions.capabilityRevisionFor(owner) orelse 0, if (state) |value| @backingInt(value.lifecycle) else 0, @intFromBool(if (service) |value| supportsPty(value) else false), @intFromBool(if (tab.runtime) |runtime| runtime.vtable.attachShell != null else false) };
+                hash.update(std.mem.asBytes(&facts));
+                break;
+            }
+        }
+        return hash.final();
     }
     pub fn requestTable(self: *Bridge) ?*const tools.RequestTable {
         return if (self.table) |*table| table else null;
@@ -446,6 +503,7 @@ pub const Bridge = struct {
         self.wire = next.wire;
         next.wire = &.{};
         self.captured_scope = next.captured_scope;
+        self.capability_fingerprint = next.capability_fingerprint;
         next.captured_scope = null;
         self.capture_arena = next.capture_arena;
         next.capture_arena = .init(next.allocator);
@@ -938,7 +996,7 @@ pub const Bridge = struct {
             const current = app.sessions.typedBindingsFor(child.owner);
             child.member.authorized = roster_valid and current != null and app.legacyForHandle(child.owner) != null;
             child.member.capability_revision = app.sessions.capabilityRevisionFor(child.owner) orelse 0;
-            child.member.policy_revision = app.workspace.app_config.config_revision;
+            child.member.policy_revision = app.workspace.app_config.agentPolicyRevision();
             if (child.automation) |grant| {
                 if (self.stopped.load(.acquire) or !child.member.authorized or child.member.policy_revision != self.policy_revision or self.pending_binding != null or !grant.proof.valid()) releaseAutomation(child, true);
             }
@@ -2017,4 +2075,83 @@ test "API2 image offload reader uses live approval and the worker conversation l
     invocation.operation_id = 3;
     try std.testing.expectError(error.ToolExecutionDenied, runtime.execute(invocation, a, null));
     try std.testing.expectEqual(@as(usize, 1), fixture.lookups);
+}
+
+test "session capabilities BMC native catalog keeps image input tools without terminal controls" {
+    const a = std.testing.allocator;
+    const Session = @import("../host/session_host.zig");
+    const plugins = @import("../host/plugin_registry.zig");
+    const bmc = @import("../plugins/bmc_ikvm/tools.zig");
+    const ai_control = @import("../plugins/bmc_ikvm/ai_control.zig");
+    const Driver = struct {
+        fn validate(_: []const u8) !void {}
+        fn create(_: *anyopaque, _: Session.CreateRequest) !void {}
+        fn cancel(_: *anyopaque, _: Session.OperationKey) Session.CloseReceipt {
+            return .released;
+        }
+        fn close(_: *anyopaque, _: identity.SessionHandle, _: Session.OperationKey) !Session.CloseReceipt {
+            return .released;
+        }
+        fn stale(_: *anyopaque, _: identity.SessionHandle, _: Session.OperationKey) void {}
+        fn tool(_: *anyopaque, _: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
+            return error.UnexpectedDispatch;
+        }
+        fn query(_: *anyopaque, _: host_tools.Invocation, _: std.mem.Allocator) !host_tools.Result {
+            return error.UnexpectedDispatch;
+        }
+    };
+    var driver: u8 = 0;
+    const bindings = bmc.bindings(Driver.tool);
+    // Real BMC definitions and AI service; the factory boundary is controlled
+    // so catalog preparation never starts a network worker or sends input.
+    const manifest: plugins.PluginManifest = .{
+        .id = "bmc_ikvm",
+        .display_name = "BMC",
+        .workspace_kind = "kvm",
+        .content_renderer = "kvm",
+        .integration = .{ .ai = true },
+        .quick_create = .{ .validate_payload = Driver.validate },
+        .session_factory = .{ .context = &driver, .vtable = &.{ .create = Driver.create, .cancel = Driver.cancel, .close = Driver.close, .release_stale = Driver.stale } },
+        .services = &@import("../plugins/bmc_ikvm/plugin.zig").declared_services,
+        .required_services = &.{ai_control.definition},
+        .tool_definitions = &bmc.definitions,
+        .tools = bindings[3..],
+        .ai_context = .{ .identity = "BMC" },
+    };
+    var sessions = try Session.SessionHost.initPlugins(a, &.{manifest}, &.{.{ .kind = "kvm", .shared_renderer = true }});
+    defer sessions.deinit();
+    const accepted = try sessions.create(.{ .plugin = .{ .protocol_id = "bmc_ikvm", .name = "BMC", .payload = "{}" } }, .{ .window_id = @fromBackingInt(1), .workspace_id = @fromBackingInt(1) });
+    var budget = @import("../host/frame_budget.zig").Budget.init(1024 * 1024);
+    defer budget.deinit() catch unreachable;
+    var frame = @import("../plugins/bmc_ikvm/framebuffer.zig").Service.init(a, accepted.handle, &budget);
+    defer frame.deinit() catch unreachable;
+    var input = @import("../plugins/bmc_ikvm/remote_input.zig").Service.init(accepted.handle);
+    defer input.close();
+    var control = ai_control.Service.init(accepted.handle, &frame, &input);
+    defer control.close();
+    try std.testing.expect(try sessions.readyPlugin(accepted.handle, accepted.operation, &.{control.binding()}));
+    var domain: Application.Domain = undefined;
+    domain.operation_history = operations.Store.init(a);
+    defer domain.operation_history.deinit();
+    var workspace: @import("workspace.zig").Workspace = undefined;
+    workspace.tabs = .empty;
+    defer workspace.tabs.deinit(a);
+    var tab: @import("workspace.zig").SessionTab = .{ .id = 1, .tab_id = @fromBackingInt(1), .content_owner = .{ .session = accepted.handle }, .host_id = 1, .host_index = 0, .host_snapshot = null, .root = undefined };
+    try workspace.tabs.append(a, &tab);
+    var app: Application.ApplicationHost = undefined;
+    app.workspace = &workspace;
+    app.domain = &domain;
+    app.sessions = &sessions;
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const contributions = @import("../ai/host_queries.zig").contributions ++ @import("../ai/host_terminal_queries.zig").contributions ++ @import("../ai/host_execution.zig").contributions ++ .{@import("../ai/batch_output.zig").contribution};
+    try bridge.configureHost(.{ .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = @backingInt(accepted.handle.session_id) }, .binding_revision = 1, .grant_revision = 1 }, .handler_context = &driver, .invoke = Driver.query, .contributions = &contributions });
+    try bridge.prepare(&app, accepted.handle);
+    const prompt = @import("../ai/session_prompt.zig");
+    for (bindings[3..]) |binding| try std.testing.expect(prompt.has(bridge.wire, binding.definition_id));
+    for (@import("../ai/host_terminal_queries.zig").contributions ++ @import("../ai/host_execution.zig").contributions ++ .{@import("../ai/batch_output.zig").contribution}) |contribution| try std.testing.expect(!prompt.has(bridge.wire, contribution.definition.id));
+    const system = try prompt.build(a, .auto, bridge.wire);
+    defer a.free(system);
+    try std.testing.expect(std.mem.indexOf(u8, system, "KVM pixels") != null);
+    try std.testing.expect(std.mem.indexOf(u8, system, "host.run_in_terminal") == null);
 }

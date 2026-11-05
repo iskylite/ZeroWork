@@ -7,5 +7,5 @@ pub fn metadata(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 1.65, .wrap = .word, .color = theme.current().fg_2 };
 }
 pub fn button(_: *const ui.ThemeTokens) @FieldType(ui.widgets.ControlShellConfig, "style") {
-    return .{ .height = .{ .px = 28 }, .padding = .{ .left = 9, .right = 9, .top = 5, .bottom = 5 }, .font_size = 12.5, .corner_radius = 6 };
+    return .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = .{}, .corner_radius = 6, .flex_shrink = 0 };
 }

@@ -10,13 +10,13 @@ ZeroWork is an Apple Silicon macOS SSH terminal specified in [docs/SPEC/OVERALL_
 
 ## Current baseline
 
-The current version is **0.3.0-rc18 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [editable V3 prototypes](docs/UI_V3/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
+The current version is **0.3.0 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [editable V3 prototypes](docs/UI_V3/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
 
 AI approval, execution-mode and scope decisions wait until the user decides or cancels, pausing the automatic-run time budget. Native secret entry has no user-entry deadline. Network, command execution and post-submission transfer timeouts remain separate.
 
 Dynamic plugin tool history currently retains at most 128 records per application process, counted per target session. At capacity, new operations are rejected before approval or dispatch; quit normally and restart the app to continue. Records are not evicted automatically, preserving unknown outcomes and operations whose resources have not been released.
 
-- Zig 0.17.0 project baseline (managed with local zvm), locked to arm64 macOS 14+
+- Zig 0.17.0 project baseline (managed with local zvm), locked to arm64 macOS 13+
 - P0 configuration model and strict subset TOML loader
 - Atomic configuration replacement with owner-only (0600) permissions
 - Sauber renderer tokens, including overlay/AI state colors
@@ -33,7 +33,7 @@ Before committing, run `./scripts/verify_source_gate.sh`. It verifies the tracke
 
 ## Build
 
-The target platform is **Apple Silicon running macOS 14 or later**, using **Zig 0.17.0**. Install Xcode Command Line Tools and confirm that `xcrun --find clang` and `zig version` work. Run all commands below from the repository root.
+The target platform is **Apple Silicon running macOS 13 or later**, using **Zig 0.17.0**. Install Xcode Command Line Tools and confirm that `xcrun --find clang` and `zig version` work. Run all commands below from the repository root.
 
 ### Local build and direct execution
 

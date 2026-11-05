@@ -17,6 +17,12 @@ pub const Controls = struct {
     effort: ?Effort = null,
     thinking: ?bool = null,
 
+    /// Capture defaults once; later global edits belong to future agents.
+    pub fn ensureDefaults(self: *Controls, ai: @import("../config/config.zig").Ai) void {
+        if (self.permission == null) self.permission = ai.permission_mode;
+        if (self.execution_mode == null) self.execution_mode = ai.execution_mode;
+    }
+
     pub fn ensureEffort(self: *Controls, ai: @import("../config/config.zig").Ai) void {
         if (self.effort != null or self.thinking == false) return;
         self.effort = @import("provider_config.zig").lowestEffort(ai, self.model) catch null;
@@ -195,6 +201,23 @@ pub const Store = struct {
         return self.find(id).?;
     }
     pub fn get(self: *Store, owner: scope.Owner) !*State {
+        // Presentation selection cannot replace a conversation still held by
+        // this attachment. Reconcile a stale welcome against the live authority
+        // before choosing which history to display; only End releases a binding.
+        if (self.authority) |service| for (service.store.agents.items) |agent| {
+            if (agent.closing or !agent.owner.eql(owner)) continue;
+            const id = agent.current orelse continue;
+            const record = service.store.find(id) orelse continue;
+            const binding = record.binding orelse continue;
+            if (record.needs_recovery or !binding.agent.eql(agent.id) or !binding.owner.eql(owner)) continue;
+            const state = self.findConversation(id) orelse continue;
+            if (state.closed) continue;
+            state.owner = owner;
+            state.ended = false;
+            state.binding_revision = record.revision;
+            _ = self.select(state.id);
+            return state;
+        };
         if (self.active(owner)) |state| return state;
         var index = self.states.items.len;
         while (index > 0) {
@@ -349,6 +372,36 @@ pub const Store = struct {
         return draft;
     }
 };
+
+test "conversation selection follows the live binding instead of a stale single-connection welcome" {
+    const a = std.testing.allocator;
+    var service = @import("session_runtime.zig").Service.init(a);
+    defer service.deinit();
+    var store = Store.init(a);
+    defer store.deinit();
+    store.authority = &service;
+    const owner: scope.Owner = .{ .session = 1 };
+    const agent = try service.store.attach(owner);
+    const ticket = try service.store.create(agent.id);
+    const original = try store.create(owner);
+    const original_id = original.id;
+    original.conversation_id = ticket.conversation;
+    // Model a stale presentation flag and a newly selected empty welcome.
+    original.ended = true;
+    const welcome_id = (try store.create(owner)).id;
+    const selected = try store.get(owner);
+    try std.testing.expectEqual(original_id, selected.id);
+    try std.testing.expect(selected.selected and !selected.ended);
+    try std.testing.expect(!store.find(welcome_id).?.selected);
+    try std.testing.expectEqual(ticket.binding, selected.binding_revision);
+    try std.testing.expect((try service.store.fence(ticket.conversation)).eql(ticket));
+    const operation = @import("../host/identity.zig").HostOperationId.generate();
+    _ = try service.store.beginEnd(ticket, operation);
+    try service.store.commitEnd(ticket, operation, .{ .worker_joined = true, .dispatch_closed = true, .local_released = true, .transcript_saved = true });
+    selected.ended = true;
+    selected.selected = false;
+    try std.testing.expectEqual(welcome_id, (try store.get(owner)).id);
+}
 
 test "conversation title stays fixed after followups and uses the first question as fallback" {
     var store = Store.init(std.testing.allocator);

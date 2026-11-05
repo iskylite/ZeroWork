@@ -1148,7 +1148,6 @@ pub const Cx = struct {
         // down. They can now stop without ever touching this soon-to-be-freed Cx.
         const lifetime_token = self.lifetime_token;
         lifetime_token.alive = false;
-        self.timers.deinit(self.allocator);
 
         // Active drag cancel first: callback ctx may be held by scope about to destroy, reversed
         // order = UAF (docs/DRAG_INTERACTION_DESIGN.md sect 11.2).
@@ -1245,6 +1244,9 @@ pub const Cx = struct {
         layout_engine.disableIntrinsicCache();
 
         self.owner.deinit();
+        // Scope/node/state cleanup may cancel component timers. Keep their
+        // storage alive until every owner has released its callbacks.
+        self.timers.deinit(self.allocator);
         // Last: root scope / node tree destroy calls component deinit (e.g. editor), unregister
         // callbacks.
         self.after_layout_hooks.deinit(self.allocator);

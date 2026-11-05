@@ -38,9 +38,14 @@ sock=socket.socket();sock.bind(('127.0.0.1',0));sock.listen(8);sock.settimeout(.
 transports=[]
 def serve(c):
  t=paramiko.Transport(c);transports.append(t);t.add_server_key(key);t.set_subsystem_handler('sftp',paramiko.SFTPServer,Files)
+ channels=[]
  try:
   t.start_server(server=Server())
-  while t.is_active() and not stop.is_set():time.sleep(.1)
+  # Transport keeps weak channel references. Own accepted shell channels for
+  # the whole connection so GC cannot inject an EOF during a tab-group drop.
+  while t.is_active() and not stop.is_set():
+   channel=t.accept(timeout=.1)
+   if channel is not None:channels.append(channel)
  except Exception:pass
  finally:t.close()
 while not stop.is_set():

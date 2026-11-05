@@ -2,14 +2,14 @@ const std = @import("std");
 const zenit = @import("zenit");
 
 pub fn build(b: *std.Build) void {
-    // ZeroWork is intentionally macOS 14+ on Apple Silicon only (SPEC baseline).
+    // ZeroWork is intentionally macOS 13+ on Apple Silicon only (SPEC baseline).
     // Zig 0.17 build graph; the active Xcode SDK is selected by the toolchain.
 
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
         .os_tag = .macos,
         .os_version_min = .{ .semver = .{
-            .major = 14,
+            .major = 13,
             .minor = 0,
             .patch = 0,
         } },
@@ -198,22 +198,22 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     // The local ZSH edit bridge is loaded only by this process's private
     // bootstrap, from beside the executable in both CLI and app bundles.
-    const zsh_bridge = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-bundle", "-undefined", "dynamic_lookup", "-O2" });
+    const zsh_bridge = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos13.0", "-bundle", "-undefined", "dynamic_lookup", "-O2" });
     zsh_bridge.addFileArg(b.path("src/local/shell/zw_ipc.c"));
     zsh_bridge.addArg("-o");
     const zsh_bridge_file = zsh_bridge.addOutputFileArg("zw_ipc.so");
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(zsh_bridge_file, .bin, "zw_ipc.so").step);
-    const execution_bridge = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-bundle", "-undefined", "dynamic_lookup", "-O2", "-DZW_EXECUTION=1" });
+    const execution_bridge = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos13.0", "-bundle", "-undefined", "dynamic_lookup", "-O2", "-DZW_EXECUTION=1" });
     execution_bridge.addFileArg(b.path("src/local/shell/zw_ipc.c"));
     execution_bridge.addArg("-o");
     const execution_bridge_file = execution_bridge.addOutputFileArg("zw_execution.so");
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(execution_bridge_file, .bin, "zw_execution.so").step);
-    const secret_consumer = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-bundle", "-undefined", "dynamic_lookup", "-std=c11", "-O2" });
+    const secret_consumer = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos13.0", "-bundle", "-undefined", "dynamic_lookup", "-std=c11", "-O2" });
     secret_consumer.addFileArg(b.path("src/local/shell/secret_consume.c"));
     secret_consumer.addArg("-o");
     const secret_consumer_file = secret_consumer.addOutputFileArg("zw_secret_consume.so");
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(secret_consumer_file, .bin, "zw_secret_consume.so").step);
-    const execution_guard = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2" });
+    const execution_guard = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos13.0", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2" });
     execution_guard.addFileArg(b.path("src/local/shell/execution_guard.c"));
     execution_guard.addArg("-o");
     const execution_guard_file = execution_guard.addOutputFileArg("zw_execution_guard");
@@ -436,7 +436,7 @@ pub fn build(b: *std.Build) void {
     native_credentials_run.addFileArg(native_credentials_binary);
     root_test_step.dependOn(&native_credentials_run.step);
     b.step("test-credentials-native", "Run credential cache and no-UI regressions with mocked Security APIs").dependOn(&native_credentials_run.step);
-    const secret_transport = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-std=c11", "-Wall", "-Wextra", "-Werror" });
+    const secret_transport = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos13.0", "-std=c11", "-Wall", "-Wextra", "-Werror" });
     secret_transport.addFileArg(b.path("src/local/secret_native.c"));
     secret_transport.addFileArg(b.path("src/local/secret_native_tests.c"));
     secret_transport.addArg("-o");

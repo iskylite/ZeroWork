@@ -16,10 +16,10 @@ cases = [
     ("light-manifest-command", "light"),
     ("sauber-manifest-command", "sauber"),
 ]
-# Terminal foreground comes from ThemeRegistry.builtinTheme, independently
-# of the UI chrome fg_1 token. Sauber deliberately publishes blue VT ink.
+# Terminal colors follow ThemeRegistry.builtinTheme / theme_presets.ansi,
+# independently of the UI chrome inks. Sauber publishes blue default VT ink.
 foreground = {"dark": (244, 244, 245), "light": (24, 24, 27), "sauber": (19, 69, 246)}
-indexed_red = {"dark": (204, 102, 102), "light": (204, 102, 102), "sauber": (220, 76, 63)}
+indexed_red = {"dark": (243, 114, 114), "light": (195, 34, 34), "sauber": (173, 60, 50)}
 literal_rgb = (232, 121, 249)
 report = []
 for name, theme in cases:

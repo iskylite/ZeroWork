@@ -18,12 +18,12 @@ pub fn bindTheme(cx: *ui.Cx, scope: *ui.Scope, input: ui.widgets.input.TextareaR
 pub fn configure(input: ui.widgets.input.TextareaResult) void {
     const state = input.state;
     state.font_size = font_size;
-    state.padding_h = 10;
+    state.padding_h = 0;
     state.padding_v = 8;
     // The public Textarea adds a dark edge fade even to a borderless editor.
     // Clear that decoration and match its list padding to the compact editor.
     if (state.vl_state) |list| {
-        list.container_node.setStyleInline(state.allocator, .{ .padding = .{ .top = 8, .bottom = 8, .left = 10, .right = 10 }, .overflow_fade = .{ .size = 0, .color = ui.Color.TRANSPARENT } });
+        list.container_node.setStyleInline(state.allocator, .{ .padding = .{ .top = 8, .bottom = 8 }, .overflow_fade = .{ .size = 0, .color = ui.Color.TRANSPARENT } });
     }
     state.line_height = line_height;
     state.char_width = state.cx_ref.?.text.measureTextWidth("M", font_size, 400, false);

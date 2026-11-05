@@ -249,6 +249,10 @@ pub const Handler = struct {
         /// command here.
         reset: ?*const fn (*Handler) void,
 
+        /// An unprotected full-display erase has completed (false), or
+        /// scrollback is about to be erased (true).
+        erase_display: ?*const fn (*Handler, bool) void = null,
+
         /// Called when the running program writes to a clipboard.
         clipboard_write: ?*const fn (*Handler, clipboard.Write) void,
 
@@ -623,8 +627,15 @@ pub const Handler = struct {
             .cursor_style => self.terminal.setCursorStyle(value),
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
-            .erase_display_complete => self.terminal.eraseDisplay(.complete, value),
-            .erase_display_scrollback => self.terminal.eraseDisplay(.scrollback, value),
+            .erase_display_complete => {
+                const protected = value or self.terminal.screens.active.protected_mode == .iso;
+                self.terminal.eraseDisplay(.complete, value);
+                if (!protected) if (self.effects.erase_display) |func| func(self, false);
+            },
+            .erase_display_scrollback => {
+                if (self.effects.erase_display) |func| func(self, true);
+                self.terminal.eraseDisplay(.scrollback, value);
+            },
             .erase_display_scroll_complete => self.terminal.eraseDisplay(.scroll_complete, value),
             .erase_line_right => self.terminal.eraseLine(.right, value),
             .erase_line_left => self.terminal.eraseLine(.left, value),

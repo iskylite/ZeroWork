@@ -255,7 +255,7 @@ pub const Host = struct {
         const value = self.driver.settings orelse return "正在查询系统通知授权…";
         return switch (value.authorization) {
             .unavailable => "当前无法查询系统通知授权。",
-            .not_determined => "系统通知尚未授权。开启事件提醒时会请求授权。",
+            .not_determined => "系统通知尚未授权。点击「允许通知」或开启事件提醒时会请求授权。",
             .denied, .restricted => "系统通知已被拒绝，请在 macOS 系统设置中允许 ZeroWork 通知。",
             .authorized => if (value.alert == .disabled and value.notification_center == .disabled) "系统通知已授权，横幅和通知中心当前均关闭。" else "系统通知已获授权。",
             .provisional => "系统通知已获临时授权，将以安静方式呈现。",
@@ -685,7 +685,7 @@ pub const Host = struct {
                     }
                     result.settings_changed = result.settings_changed or value.current_settings;
                     if (value.failure) |failure| self.last_failure = failure;
-                    if (value.explicit_request) self.authorization_feedback = if (value.failure != null) "系统通知授权请求失败" else self.authorizationHelp();
+                    if (value.explicit_request or (value.current_settings and self.permissions.items.len == 0 and self.authorization_feedback != null)) self.authorization_feedback = if (value.failure != null) "系统通知授权请求失败" else self.authorizationHelp();
                     if (value.explicit_request) for (self.permissions.items, 0..) |origin, index| {
                         if (origin.request_id != value.request_id) continue;
                         if (self.windowFor(origin.window)) |window| window.feedback(window.context, if (value.failure != null) "系统通知授权请求失败" else self.authorizationHelp());

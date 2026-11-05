@@ -7,12 +7,13 @@ const attachments = @import("../ai/local_text_attachments.zig");
 const scope_mod = @import("../ai/tool_scope.zig");
 const S = @import("ai_remote_picker_styles.zig");
 /// Own the filename content while retaining native Button focus and events.
-pub fn filenameButton(scope: *ui.Scope, cx: *ui.Cx, name: []const u8, on_click: ?ui.Handler(void)) !struct { button: *ui.Node, label: *ui.Node } {
+pub fn filenameButton(scope: *ui.Scope, cx: *ui.Cx, name: []const u8, on_click: ?ui.Handler(void), visible: ?*ui.Signal(bool)) !struct { button: *ui.Node, label: *ui.Node } {
     const button_node = try ui.widgets.Button(.{ .a11y_label = name, .variant = .ghost, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.option, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, cx, scope, S.hover, .{}), .on_click = on_click }).mount(scope, cx);
     const label = try ui.textStyled(cx, S.filename, name);
     label.setStyleInline(cx.allocator, S.filenameLabel());
     label.meta.ownership.meta.test_id = "ai.remote.filename";
-    try button_node.appendChild(cx.allocator, label);
+    const hint = try @import("control_hint.zig").mount(cx, scope, label, name, .{ .id = "ai.remote.filename.tooltip", .width = 360, .wrap = .char, .visible = visible, .focus_target = button_node, .layout = S.filenameLabel() });
+    try button_node.appendChild(cx.allocator, hint.wrapper);
     return .{ .button = button_node, .label = label };
 }
 pub const Source = struct { session: @import("../host/identity.zig").SessionHandle, name: []const u8, cwd: []const u8, available: bool };
@@ -43,9 +44,9 @@ pub const View = struct {
     root: *ui.Node = undefined,
     surface: *ui.Node = undefined,
     modal_open: *ui.Signal(bool) = undefined,
-    source_label: *ui.Node = undefined,
     source_options: *ui.Signal([]const ui.widgets.SelectOption) = undefined,
     source_value: *ui.Signal(?[]const u8) = undefined,
+    source_hint_label: *ui.Node = undefined,
     source_items: [16]ui.widgets.SelectOption = undefined,
     source_ids: [16][4]u8 = undefined,
     status: *ui.Node = undefined,
@@ -93,27 +94,31 @@ pub const View = struct {
         try heading.appendChild(cx.allocator, title_icon);
         try heading.appendChild(cx.allocator, try ui.textStyled(cx, S.heading, "引用远程文件"));
         try heading.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill() }, .{}));
-        const close_button = try ui.widgets.Button(.{ .label = "关闭", .variant = .ghost, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.closeButton, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, cx, scope, S.hover, .{}), .on_click = cx.on(View, self, close) }).mount(scope, cx);
+        const close_button = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .icon_size = 14, .a11y_label = "关闭远程文件选择器", .variant = .ghost, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.closeButton, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, cx, scope, S.hover, .{}), .on_click = cx.on(View, self, close) }).mount(scope, cx);
         close_button.meta.ownership.meta.test_id = "ai.remote.close";
-        try heading.appendChild(cx.allocator, close_button);
+        const close_hint = try @import("control_hint.zig").mount(cx, scope, close_button, "关闭远程文件选择器", .{ .id = "ai.remote.close.tooltip", .visible = self.modal_open });
+        try heading.appendChild(cx.allocator, close_hint.wrapper);
         try self.surface.appendChild(cx.allocator, heading);
-        const source = try ui.boxStyled(cx, S.row, .{});
-        source.setStyleInline(cx.allocator, .{ .height = .{ .px = 32 } });
-        self.source_label = try ui.textStyled(cx, S.text, "远程来源");
-        self.source_label.setStyleInline(cx.allocator, .{ .width = .{ .px = 56 }, .min_width = 0, .flex_shrink = 0 });
-        try source.appendChild(cx.allocator, self.source_label);
-        self.source_options = try scope.createList(ui.widgets.SelectOption, &.{});
-        self.source_value = try scope.createSignal(?[]const u8, null);
-        const source_picker = try ui.widgets.Select(.{ .options = self.source_options, .value = self.source_value, .width = 656, .size = .md, .on_change = cx.on(View, self, sourceChanged) }).mount(scope, cx);
-        source_picker.trigger.meta.ownership.meta.test_id = "ai.remote.source";
-        source_picker.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
-        source_picker.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
-        try source.appendChild(cx.allocator, source_picker.wrapper);
-        try self.surface.appendChild(cx.allocator, source);
         const path_row = try ui.boxStyled(cx, S.row, .{});
         path_row.setStyleInline(cx.allocator, .{ .height = .{ .px = 32 } });
-        try path_row.appendChild(cx.allocator, try self.button("主目录", "ai.remote.home", home));
-        try path_row.appendChild(cx.allocator, try self.button("上级", "ai.remote.parent", parent));
+        self.source_options = try scope.createList(ui.widgets.SelectOption, &.{});
+        self.source_value = try scope.createSignal(?[]const u8, null);
+        const source_picker = try ui.widgets.Select(.{ .options = self.source_options, .value = self.source_value, .width = 180, .dropdown_width = 320, .size = .md, .on_change = cx.on(View, self, sourceChanged) }).mount(scope, cx);
+        source_picker.trigger.meta.ownership.meta.test_id = "ai.remote.source";
+        source_picker.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        source_picker.wrapper.setStyleInline(cx.allocator, .{ .width = .{ .px = 180 }, .min_width = 0, .flex_shrink = 0 });
+        const source_hint = try @import("control_hint.zig").mount(cx, scope, source_picker.wrapper, "远程来源", .{ .id = "ai.remote.source.tooltip", .visible = self.modal_open, .focus_target = source_picker.trigger.parent.?, .width = 320 });
+        self.source_hint_label = source_hint.content.children.items[0];
+        var source_hint_text = self.source_hint_label.getText().?;
+        source_hint_text.wrap = .char;
+        self.source_hint_label.setText(source_hint_text);
+        try path_row.appendChild(cx.allocator, source_hint.wrapper);
+        const home_button = try self.button("主目录", "ai.remote.home", ui.icons.get("house").?, home);
+        const home_hint = try @import("control_hint.zig").mount(cx, scope, home_button, "返回主目录", .{ .id = "ai.remote.home.tooltip", .visible = self.modal_open });
+        try path_row.appendChild(cx.allocator, home_hint.wrapper);
+        const parent_button = try self.button("上级目录", "ai.remote.parent", ui.icons.get("arrow-up").?, parent);
+        const parent_hint = try @import("control_hint.zig").mount(cx, scope, parent_button, "返回上级目录", .{ .id = "ai.remote.parent.tooltip", .visible = self.modal_open });
+        try path_row.appendChild(cx.allocator, parent_hint.wrapper);
         var input = try ui.widgets.Input(.{ .value = self.path, .placeholder = "输入远程目录，例如 /var/log", .on_change = cx.on(View, self, pathChanged), .on_submit = cx.on(View, self, pathSubmitted) }).mountResult(scope, cx);
         @import("app_theme.zig").styleInput(input);
         input.input_container.setStyleInline(cx.allocator, S.input());
@@ -121,7 +126,7 @@ pub const View = struct {
         input.node.meta.ownership.meta.test_id = "ai.remote.path";
         self.input_state = input.state;
         try path_row.appendChild(cx.allocator, input.node);
-        const go_button = try self.button("打开", "ai.remote.go", go);
+        const go_button = try self.button("打开目录", "ai.remote.go", ui.icons.get("arrow-right").?, go);
         const go_hint = try @import("control_hint.zig").mount(cx, scope, go_button, "打开目录（Enter）", .{ .id = "ai.remote.go.tooltip", .visible = self.modal_open });
         try path_row.appendChild(cx.allocator, go_hint.wrapper);
         try self.surface.appendChild(cx.allocator, path_row);
@@ -157,10 +162,13 @@ pub const View = struct {
         footer.setStyleInline(cx.allocator, .{ .height = .{ .px = 32 } });
         self.read_disabled = try scope.createSignal(bool, true);
         self.attach_disabled = try scope.createSignal(bool, true);
-        self.status = try ui.textStyled(cx, S.text, "未选择文件");
+        const info_button = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.get("info").?, .icon_size = 16, .a11y_label = "文件信息", .variant = .ghost, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.navigationButton, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, cx, scope, S.hover, .{}) }).mount(scope, cx);
+        info_button.meta.ownership.meta.test_id = "ai.remote.info";
+        const info_hint = try @import("control_hint.zig").mount(cx, scope, info_button, "未选择文件\n附加文件内容，每文件最多 4 KiB。", .{ .id = "ai.remote.info.tooltip", .visible = self.modal_open, .width = 280 });
+        self.status = info_hint.content.children.items[0];
         self.status.meta.ownership.meta.test_id = "ai.remote.status";
-        self.status.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
-        try footer.appendChild(cx.allocator, self.status);
+        try footer.appendChild(cx.allocator, info_hint.wrapper);
+        try footer.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill(), .min_width = 0 }, .{}));
         const preview = try ui.widgets.Button(.{ .label = "预览文件", .variant = .secondary, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.button, .{}), .disabled = self.read_disabled, .on_click = cx.on(View, self, readSelected) }).mount(scope, cx);
         preview.meta.ownership.meta.test_id = "ai.remote.read";
         try footer.appendChild(cx.allocator, preview);
@@ -169,14 +177,13 @@ pub const View = struct {
         attach.meta.ownership.meta.test_id = "ai.remote.attach";
         try footer.appendChild(cx.allocator, attach);
         try self.surface.appendChild(cx.allocator, footer);
-        try self.surface.appendChild(cx.allocator, try ui.textStyled(cx, S.text, "附加文件内容；每个文件最多读取 4 KiB。"));
         return self;
     }
     fn modalChanged(self: *View, value: bool) void {
         if (!value and self.open_state) self.close();
     }
-    fn button(self: *View, label: []const u8, id: []const u8, comptime handler: *const fn (*View) void) !*ui.Node {
-        const button_node = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, self.cx, self.scope, S.button, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, self.cx, self.scope, S.hover, .{}), .on_click = self.cx.on(View, self, handler) }).mount(self.scope, self.cx);
+    fn button(self: *View, label: []const u8, id: []const u8, asset: ui.SvgAsset, comptime handler: *const fn (*View) void) !*ui.Node {
+        const button_node = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = asset, .icon_size = 16, .a11y_label = label, .variant = .secondary, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, self.cx, self.scope, S.navigationButton, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, self.cx, self.scope, S.hover, .{}), .on_click = self.cx.on(View, self, handler) }).mount(self.scope, self.cx);
         button_node.meta.ownership.meta.test_id = id;
         return button_node;
     }
@@ -202,6 +209,7 @@ pub const View = struct {
             break;
         };
         self.source_value.set(if (self.source_count > 0) self.source_items[self.source_index].value else null);
+        try self.source_hint_label.setTextContent(self.cx.allocator, "远程来源");
         self.open_state = true;
         self.modal_open.set(true);
         if (self.source_count == 0) return self.message("当前范围没有可读远程来源");
@@ -241,6 +249,7 @@ pub const View = struct {
         self.invalidate();
         self.bindings = null;
         const source = self.sources[self.source_index];
+        try self.source_hint_label.setTextContent(self.cx.allocator, source.name);
         const initial_path = if (source.cwd.len != 0) source.cwd else ".";
         self.path.set(initial_path);
         _ = self.input_state.setText(initial_path);
@@ -451,7 +460,7 @@ pub const View = struct {
         try container.appendChild(cx.allocator, checkbox);
         const icon = if (entry.attributes.kind == .directory) try S.theme.icon(cx, ui.icons.folder, "fg_2", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }) else try ui.iconTint(cx, @import("file_workspace_icons.zig").asset(entry.display_name), @import("file_workspace_icons.zig").color(entry.display_name), .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } });
         try container.appendChild(cx.allocator, icon);
-        const filename = try filenameButton(scope, cx, entry.display_name, cx.on(Row, row, Row.choose));
+        const filename = try filenameButton(scope, cx, entry.display_name, cx.on(Row, row, Row.choose), self.modal_open);
         const button_node = filename.button;
         button_node.meta.ownership.meta.test_id = "ai.remote.preview";
         const name_cell = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .direction = .row, .align_items = .center }, .{});
@@ -519,7 +528,9 @@ pub const View = struct {
         self.attach_disabled.set(busy or self.selections.items.len == 0 or self.callbacks.attach == null);
     }
     fn message(self: *View, value: []const u8) !void {
-        try self.status.setTextContent(self.cx.allocator, value);
+        const help = try std.fmt.allocPrint(self.cx.allocator, "{s}\n附加文件内容，每文件最多 4 KiB。", .{value});
+        defer self.cx.allocator.free(help);
+        try self.status.setTextContent(self.cx.allocator, help);
         const no_entries = self.filtered_count == 0;
         self.list_node.setDisplay(if (no_entries) .none else .flex);
         self.empty.parent.?.setDisplay(if (no_entries) .flex else .none);

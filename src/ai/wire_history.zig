@@ -13,6 +13,8 @@ pub const History = struct {
     arena: ?std.heap.ArenaAllocator = null,
     messages: []const provider.Message = &.{},
     failure: ?anyerror = null,
+    /// Copies/edits/compaction deliberately start without an old measurement.
+    usage: ?@import("context_usage.zig").Baseline = null,
     pub const max_messages = 512;
     pub const max_text_bytes = 512 * 1024;
     // Aggregate retained image memory is finite across the conversation, in

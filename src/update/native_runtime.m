@@ -15,19 +15,24 @@ static BOOL automatic=YES;
 static double lastCheck=0;
 static BOOL decisionSent=NO;
 static _Atomic(double) prepareStarted=0;
+static void SetState(int state) {
+    if(state==10 && status.state!=10)status.failure_stage=(status.state>=5 && status.state<=8)?6:status.state;
+    else if(state!=10)status.failure_stage=0;
+    status.state=state;
+}
 static void Publish(int state,NSString *message) {
-    pthread_mutex_lock(&statusLock);status.state=state;
+    pthread_mutex_lock(&statusLock);SetState(state);
     if(message)strlcpy(status.message,message.UTF8String,sizeof(status.message));
     pthread_mutex_unlock(&statusLock);
 }
 static uint64_t Generation(void){pthread_mutex_lock(&statusLock);uint64_t g=status.generation;pthread_mutex_unlock(&statusLock);return g;}
 static BOOL Current(uint64_t g){return Generation()==g;}
-static void PublishGeneration(uint64_t generation,int state,NSString *message){pthread_mutex_lock(&statusLock);if(status.generation==generation){status.state=state;if(message)strlcpy(status.message,message.UTF8String,sizeof(status.message));}pthread_mutex_unlock(&statusLock);}
+static void PublishGeneration(uint64_t generation,int state,NSString *message){pthread_mutex_lock(&statusLock);if(status.generation==generation){SetState(state);if(message)strlcpy(status.message,message.UTF8String,sizeof(status.message));}pthread_mutex_unlock(&statusLock);}
 static dispatch_queue_t InstallationQueue(void){static dispatch_queue_t queue;static dispatch_once_t once;dispatch_once(&once,^{queue=dispatch_queue_create("com.zerowork.update.install",DISPATCH_QUEUE_SERIAL);});return queue;}
 static NSString *Transaction(void){pthread_mutex_lock(&statusLock);NSString *value=transactionPath;pthread_mutex_unlock(&statusLock);return value;}
 static void SetTransaction(NSString *value){pthread_mutex_lock(&statusLock);transactionPath=value;pthread_mutex_unlock(&statusLock);}
 
-static NSString *Version(void){return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ZeroWorkReleaseVersion"]?:@"0.3.0-rc18";}
+static NSString *Version(void){return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ZeroWorkReleaseVersion"]?:@"0.3.0";}
 static NSString *ArchivePath(void){return [rootPath stringByAppendingPathComponent:@"verified.zip"];}
 static NSString *EnvelopePath(void){return [rootPath stringByAppendingPathComponent:@"envelope.json"];}
 static NSString *CurrentBundle(void){return ZWCanonical(NSBundle.mainBundle.bundlePath);}
@@ -83,6 +88,8 @@ void zw_update_healthy(void){
 @interface ZWUpdateFetch : NSObject <NSURLSessionDataDelegate>
 @property(nonatomic) uint64_t generation;
 @property(nonatomic) BOOL package;
+@property(nonatomic) int probe; // 0 signed feed/package,1 latest release,2 public repository
+@property(nonatomic) NSInteger httpStatus;
 @property(nonatomic) NSMutableData *metadata;
 @property(nonatomic) NSURLSession *session;
 @property(nonatomic) NSURLSessionDataTask *task;
@@ -94,23 +101,57 @@ void zw_update_healthy(void){
 @property(nonatomic) NSString *failure;
 @end
 static ZWUpdateFetch *fetch;
+#if ZW_UPDATE_TESTING
+static Class fetchProtocol;
+#endif
+static void StartFetch(ZWUpdateFetch *f,NSString *url);
+static void ProbeRelease(uint64_t generation,int probe){
+    ZWUpdateFetch *f=[ZWUpdateFetch new];f.generation=generation;f.fd=-1;f.probe=probe;f.metadata=[NSMutableData data];
+    StartFetch(f,probe==1?@"https://api.github.com/repos/iskylite/ZeroWork/releases/latest":@"https://api.github.com/repos/iskylite/ZeroWork");
+}
+static BOOL ValidFetchURL(ZWUpdateFetch *f,NSURL *url){
+    if(!f.probe)return ZWValidHTTPS(url,YES);
+    NSString *expected=f.probe==1?@"https://api.github.com/repos/iskylite/ZeroWork/releases/latest":@"https://api.github.com/repos/iskylite/ZeroWork";
+    return [url.absoluteString isEqual:expected];
+}
+static NSString *NetworkFailure(NSError *error){
+    NSString *detail=@"网络连接失败，请检查系统代理或稍后重试";
+    if([error.domain isEqual:NSURLErrorDomain]){
+        switch(error.code){
+            case NSURLErrorTimedOut:detail=@"连接 GitHub 超时，请检查系统代理或稍后重试";break;
+            case NSURLErrorCannotFindHost:case NSURLErrorDNSLookupFailed:detail=@"无法解析 GitHub 地址，请检查网络与 DNS";break;
+            case NSURLErrorCannotConnectToHost:detail=@"无法连接 GitHub 或系统代理，请检查网络设置";break;
+            case NSURLErrorNotConnectedToInternet:detail=@"网络未连接，请连接网络后重试";break;
+            case NSURLErrorSecureConnectionFailed:case NSURLErrorServerCertificateUntrusted:case NSURLErrorServerCertificateHasBadDate:detail=@"GitHub 的安全连接或证书验证失败，请检查系统时间与代理";break;
+        }
+    }
+    return [NSString stringWithFormat:@"%@（%@ %ld）",detail,error.domain,(long)error.code];
+}
 @implementation ZWUpdateFetch
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest *))completionHandler {
-    BOOL allow=ZWValidHTTPS(request.URL,YES) && task.countOfBytesReceived==0;
+    BOOL allow=!self.probe && ZWValidHTTPS(request.URL,YES) && task.countOfBytesReceived==0;
     if(!allow)self.failure=@"更新请求重定向到未授权地址";
     completionHandler(allow?request:nil);
 }
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
-    NSHTTPURLResponse *http=(NSHTTPURLResponse *)response;uint64_t cap=self.package?[self.releaseInfo[@"bytes"] unsignedLongLongValue]:65536;
-    if(!Current(self.generation) || ![http isKindOfClass:NSHTTPURLResponse.class] || http.statusCode!=200 || response.expectedContentLength>(int64_t)cap || !ZWValidHTTPS(response.URL,YES)){
-        self.failure=@"更新服务响应无效或超过大小限制";completionHandler(NSURLSessionResponseCancel);return;
+    uint64_t cap=self.package?[self.releaseInfo[@"bytes"] unsignedLongLongValue]:(self.probe?262144:65536);
+    if(!Current(self.generation)){completionHandler(NSURLSessionResponseCancel);return;}
+    if(![response isKindOfClass:NSHTTPURLResponse.class])self.failure=@"更新服务未返回有效的 HTTP 响应";
+    else if(!ValidFetchURL(self,response.URL))self.failure=@"更新响应来自未授权地址";
+    else {
+        self.httpStatus=[(NSHTTPURLResponse *)response statusCode];
+        if(self.httpStatus!=200 && !(self.httpStatus==404 && !self.package)){
+            NSString *prefix=self.probe?@"更新源返回 HTTP 404，发布状态查询失败":(self.package?@"更新包下载失败":@"更新服务请求失败");
+            self.failure=[NSString stringWithFormat:@"%@（HTTP %ld）",prefix,(long)self.httpStatus];
+        }else if(response.expectedContentLength>(int64_t)cap)self.failure=self.package?@"更新包超过签名描述的大小限制":@"更新服务响应超过大小限制";
     }
+    if(self.failure){completionHandler(NSURLSessionResponseCancel);return;}
     completionHandler(NSURLSessionResponseAllow);
 }
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
     if(!Current(self.generation)){[task cancel];return;}
-    self.received+=data.length;uint64_t cap=self.package?[self.releaseInfo[@"bytes"] unsignedLongLongValue]:65536;
-    if(self.received>cap){self.failure=@"下载超过签名描述的大小限制";[task cancel];return;}
+    self.received+=data.length;uint64_t cap=self.package?[self.releaseInfo[@"bytes"] unsignedLongLongValue]:(self.probe?262144:65536);
+    if(self.received>cap){self.failure=self.package?@"更新包超过签名描述的大小限制":@"更新服务响应超过大小限制";[task cancel];return;}
     if(self.package){size_t left=data.length;const char *p=data.bytes;while(left){ssize_t n=write(self.fd,p,left);if(n<=0){self.failure=@"更新包写入失败";[task cancel];return;}p+=n;left-=n;}}
     else [self.metadata appendData:data];
     pthread_mutex_lock(&statusLock);if(status.generation==self.generation){status.received=self.received;status.expected=cap;}pthread_mutex_unlock(&statusLock);
@@ -119,11 +160,28 @@ static ZWUpdateFetch *fetch;
     if(self.fd>=0){if(fsync(self.fd))self.failure=@"下载文件保存失败";close(self.fd);self.fd=-1;}
     @try{
         if(!Current(self.generation))return;
-        if(error || self.failure)ZWFail(self.failure?:@"无法连接 GitHub，请稍后重试");
+        if(error || self.failure)ZWFail(self.failure?:(self.probe?[@"更新源返回 HTTP 404，无法确认发布状态：" stringByAppendingString:NetworkFailure(error)]:NetworkFailure(error)));
+        if(self.httpStatus==404 && !self.package){
+            if(self.probe==2)ZWFail(@"更新源仓库不可访问（HTTP 404）");
+            ProbeRelease(self.generation,self.probe==1?2:1);return;
+        }
+        if(self.probe){
+            id object=[NSJSONSerialization JSONObjectWithData:self.metadata options:0 error:nil];
+            if(![object isKindOfClass:NSDictionary.class])ZWFail(@"更新源返回 HTTP 404，发布状态响应格式无效");
+            if(self.probe==2){
+                if(![object[@"full_name"] isEqual:@"iskylite/ZeroWork"] || ![object[@"private"] isEqual:@NO])ZWFail(@"无法确认公开更新源的发布状态");
+                PublishGeneration(self.generation,12,@"正式版通道尚未发布可用版本，当前未开始下载或安装。");
+            }else{
+                if(![object[@"tag_name"] isKindOfClass:NSString.class] || ![object[@"draft"] isEqual:@NO] || ![object[@"prerelease"] isEqual:@NO] || ![object[@"assets"] isKindOfClass:NSArray.class])ZWFail(@"更新源返回 HTTP 404，正式版发布状态无效");
+                BOOL hasFeed=NO;for(id asset in object[@"assets"])if([asset isKindOfClass:NSDictionary.class] && [asset[@"name"] isEqual:@"update.json"])hasFeed=YES;
+                ZWFail(hasFeed?@"正式版更新清单暂不可用（HTTP 404），请稍后重试或查看官方发布页":@"正式版缺少自动更新清单 update.json，请从官方发布页手动下载");
+            }
+            return;
+        }
         if(!self.package){
             NSDictionary *release=ZWManifest(self.metadata);
             dispatch_sync(dispatch_get_main_queue(),^{if(Current(self.generation)){manifest=release;manifestEnvelope=self.metadata;}});
-            pthread_mutex_lock(&statusLock);strlcpy(status.version,[release[@"version"] UTF8String],sizeof(status.version));strlcpy(status.notes,[release[@"notes"] UTF8String],sizeof(status.notes));pthread_mutex_unlock(&statusLock);
+            pthread_mutex_lock(&statusLock);if(status.generation==self.generation){strlcpy(status.version,[release[@"version"] UTF8String],sizeof(status.version));strlcpy(status.notes,[release[@"notes"] UTF8String],sizeof(status.notes));}pthread_mutex_unlock(&statusLock);
             PublishGeneration(self.generation,zw_update_newer([release[@"version"] UTF8String],Version().UTF8String)?2:0,zw_update_newer([release[@"version"] UTF8String],Version().UTF8String)?@"发现新版本":@"当前已是最新版本");
         }else{
             if(self.received != [self.releaseInfo[@"bytes"] unsignedLongLongValue])ZWFail(@"下载大小与签名描述不一致");
@@ -142,24 +200,39 @@ static ZWUpdateFetch *fetch;
     @finally{if(self.temporary)unlink(self.temporary.fileSystemRepresentation);[session finishTasksAndInvalidate];}
 }
 @end
+static void StartFetch(ZWUpdateFetch *f,NSString *url){
+    NSURLSessionConfiguration *config=NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    config.timeoutIntervalForRequest=30;config.timeoutIntervalForResource=f.package?1800:60;
+    config.HTTPCookieStorage=nil;config.URLCredentialStorage=nil;config.URLCache=nil;
+    // Leave proxy configuration unset so NSURLSession uses macOS system settings.
+#if ZW_UPDATE_TESTING
+    if(fetchProtocol)config.protocolClasses=@[fetchProtocol];
+#endif
+    NSOperationQueue *queue=[NSOperationQueue new];queue.maxConcurrentOperationCount=1;
+    f.session=[NSURLSession sessionWithConfiguration:config delegate:f delegateQueue:queue];
+    NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+    [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
+    [request setValue:@"ZeroWork-Updater" forHTTPHeaderField:@"User-Agent"];
+    f.task=[f.session dataTaskWithRequest:request];
+    if(NSThread.isMainThread){fetch=f;}else dispatch_sync(dispatch_get_main_queue(),^{if(Current(f.generation))fetch=f;});
+    if(Current(f.generation))[f.task resume];else [f.session invalidateAndCancel];
+}
 static void Fetch(BOOL package){
     @try{
         if(!rootPath)ZWFail(@"更新服务尚未就绪");
         [fetch.task cancel];pthread_mutex_lock(&statusLock);status.generation++;status.received=0;status.expected=0;pthread_mutex_unlock(&statusLock);
         ZWUpdateFetch *f=[ZWUpdateFetch new];f.generation=Generation();f.package=package;f.fd=-1;f.metadata=[NSMutableData data];f.releaseInfo=manifest;f.envelope=manifestEnvelope;
         if(package){if(!manifest)ZWFail(@"请先检查新版本");f.temporary=[rootPath stringByAppendingFormat:@"/download-%llu.part",f.generation];f.fd=open(f.temporary.fileSystemRepresentation,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(f.fd<0)ZWFail(@"无法创建下载文件");}
-        NSURLSessionConfiguration *config=NSURLSessionConfiguration.ephemeralSessionConfiguration;config.timeoutIntervalForRequest=30;config.timeoutIntervalForResource=1800;config.HTTPCookieStorage=nil;config.URLCredentialStorage=nil;config.URLCache=nil;
-        NSOperationQueue *queue=[NSOperationQueue new];queue.maxConcurrentOperationCount=1;
-        f.session=[NSURLSession sessionWithConfiguration:config delegate:f delegateQueue:queue];
-        NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:[NSURL URLWithString:package?manifest[@"url"]:ZWFeed]];[request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
-        f.task=[f.session dataTaskWithRequest:request];fetch=f;Publish(package?3:1,package?@"正在下载已签名的更新包…":@"正在检查 GitHub Release…");[f.task resume];
+        if(!package){manifest=nil;manifestEnvelope=nil;pthread_mutex_lock(&statusLock);status.version[0]=0;status.notes[0]=0;pthread_mutex_unlock(&statusLock);}
+        Publish(package?3:1,package?@"正在下载已签名的更新包…":@"正在检查 GitHub Release…");
+        StartFetch(f,package?f.releaseInfo[@"url"]:ZWFeed);
         if(!package){lastCheck=NSDate.date.timeIntervalSince1970;ZWWrite([rootPath stringByAppendingPathComponent:@"check.json"],@{@"time":@(lastCheck)});}
     }@catch(NSException *e){Publish(10,e.reason);}
 }
 void zw_update_start(int autoCheck){automatic=autoCheck!=0;lastCheck=[ZWRead([rootPath stringByAppendingPathComponent:@"check.json"])[@"time"] doubleValue];}
 void zw_update_status(ZWUpdateStatus *out){pthread_mutex_lock(&statusLock);*out=status;pthread_mutex_unlock(&statusLock);}
 int zw_update_take_present(void){BOOL value=presented;presented=NO;return value;}
-void zw_update_open(void){presented=YES;if(status.state==0 || status.state==10)Fetch(NO);}
+void zw_update_open(void){presented=YES;if(status.state==0 || status.state==10 || status.state==12)Fetch(NO);}
 void zw_update_set_automatic(int enabled){automatic=enabled!=0;}
 void zw_update_command(int command){
     @try{
@@ -191,7 +264,8 @@ void zw_update_tick(void){
         // If a decision request was sent and ACK is lost, retain the gate and
         // query this transaction. Never assume cancellation or create a second one.
     }
-    if(automatic && status.state==0 && NSDate.date.timeIntervalSince1970-lastCheck>=86400)Fetch(NO);
+    pthread_mutex_lock(&statusLock);BOOL checkable=status.state==0 || status.state==12 || (status.state==10 && status.failure_stage==1);pthread_mutex_unlock(&statusLock);
+    if(automatic && checkable && NSDate.date.timeIntervalSince1970-lastCheck>=86400)Fetch(NO);
 }
 int zw_update_can_install(char *reason,size_t length){
     NSString *failure=nil;
@@ -257,3 +331,7 @@ void zw_update_test_ready(void){Publish(5,@"更新包已验证，可以准备安
 const char *zw_update_current_version(void){return Version().UTF8String;}
 const char *zw_update_summary(void){static char text[2048];pthread_mutex_lock(&statusLock);strlcpy(text,status.message,sizeof(text));pthread_mutex_unlock(&statusLock);return text[0]?text:"从官方 GitHub Release 检查新版本";}
 const char *zw_update_last_check(void){if(lastCheck<=0)return "尚未检查";NSDateFormatter *formatter=[NSDateFormatter new];formatter.dateFormat=@"yyyy-MM-dd HH:mm";return [[@"上次检查：" stringByAppendingString:[formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:lastCheck]]] UTF8String];}
+
+#if ZW_UPDATE_TESTING
+#import "native_fetch_tests.m"
+#endif

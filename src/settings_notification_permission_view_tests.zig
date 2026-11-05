@@ -8,6 +8,8 @@ const Probe = struct {
     controller: *Controller,
     user_edits: usize = 0,
     help_reads: usize = 0,
+    permission_actions: usize = 0,
+    help_text: []const u8 = "系统通知已被拒绝，请在 macOS 系统设置中允许 ZeroWork 通知。",
     feedback_text: ?[]const u8 = null,
     feedback_on_edit: ?[]const u8 = null,
     status_label: ?*ui.Node = null,
@@ -17,7 +19,10 @@ const Probe = struct {
     }
     fn changed(_: *anyopaque) void {}
     fn request(_: *anyopaque, _: view.Key, _: *ui.Node) void {}
-    fn action(_: *anyopaque, _: view.Action) void {}
+    fn action(raw: *anyopaque, value: view.Action) void {
+        const self: *Probe = @ptrCast(@alignCast(raw));
+        if (value == .notification_permission) self.permission_actions += 1;
+    }
     fn edit(raw: *anyopaque, key: view.Key, value: values.Value) void {
         const self: *Probe = @ptrCast(@alignCast(raw));
         self.user_edits += 1;
@@ -30,7 +35,7 @@ const Probe = struct {
     fn help(raw: *anyopaque) []const u8 {
         const self: *Probe = @ptrCast(@alignCast(raw));
         self.help_reads += 1;
-        return "系统通知已被拒绝，请在 macOS 系统设置中允许 ZeroWork 通知。";
+        return self.help_text;
     }
 };
 fn byId(node: *ui.Node, id: []const u8) ?*ui.Node {
@@ -127,4 +132,47 @@ test "notification actual switch preserves waiting and failed authorization feed
     controller.model.selectPage(7);
     mounted.refreshFooter();
     try std.testing.expect(!std.mem.eql(u8, "系统通知授权请求失败", mounted.status_label.getText().?.content));
+}
+
+test "notification permission action follows system status and does not edit settings" {
+    const cases = [_]struct { help: []const u8, feedback: ?[]const u8 = null, label: ?[]const u8 }{
+        .{ .help = "系统通知尚未授权。", .label = "允许通知" },
+        .{ .help = "系统通知已被拒绝，请在 macOS 系统设置中允许 ZeroWork 通知。", .label = "打开系统设置" },
+        .{ .help = "系统通知已获授权。", .label = "打开系统设置" },
+        .{ .help = "系统通知已授权，横幅和通知中心当前均关闭。", .label = "打开系统设置" },
+        .{ .help = "系统通知已获临时授权，将以安静方式呈现。", .label = "打开系统设置" },
+        .{ .help = "系统通知尚未授权。", .feedback = "正在等待系统通知授权结果…", .label = null },
+        .{ .help = "正在查询系统通知授权…", .label = null },
+        .{ .help = "系统通知不可用，请从 ZeroWork.app 启动。", .label = null },
+    };
+    for (cases) |case| {
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        var controller = try Controller.init(a, .{});
+        defer controller.deinit();
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        cx.setViewport(636, 700);
+        cx.root = try ui.box(cx, .{ .width = .{ .px = 636 }, .height = .{ .px = 700 } }, .{});
+        controller.model.selectPage(6);
+        controller.folded_sections = std.math.maxInt(u64);
+        var probe: Probe = .{ .controller = &controller, .help_text = case.help, .feedback_text = case.feedback };
+        const mounted = try view.mountPage(cx, scope, &controller, .{ .context = &probe, .changed = Probe.changed, .request_edit = Probe.request, .action = Probe.action, .authorization_help = Probe.help, .authorization_feedback = Probe.feedback });
+        try cx.root.?.appendChild(a, mounted.root);
+        cx.layout();
+        try expandEvents(cx, mounted.root);
+        const button = byId(mounted.root, "settings.notifications.permission.open");
+        try std.testing.expectEqual(@as(usize, 0), probe.permission_actions);
+        if (case.label) |label| {
+            try std.testing.expect(button != null);
+            try std.testing.expectEqualStrings(label, button.?.behavior.interaction.a11y.?.label.?);
+            const row = byId(mounted.root, "settings.notifications.permission").?.globalRect();
+            const rect = button.?.globalRect();
+            try std.testing.expect(rect.x >= row.x and rect.x + rect.w <= row.x + row.w + 0.5);
+            try clickControl(cx, button.?);
+            try std.testing.expectEqual(@as(usize, 1), probe.permission_actions);
+        } else try std.testing.expect(button == null);
+        try std.testing.expectEqual(@as(usize, 0), probe.user_edits);
+        try std.testing.expect(!controller.model.dirty);
+    }
 }

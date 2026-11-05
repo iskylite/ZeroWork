@@ -22,6 +22,7 @@ pub fn title(name: []const u8) ?[]const u8 {
         .{ "host.fetch_url", "读取网页内容" },
         .{ "host.get_current_context", "读取对话状态" },
         .{ "host.request_user_input", "询问用户" },
+        .{ "host.run_builtin", "显示内置指令" },
         .{ "host.list_sessions", "列出会话" },
         .{ "host.list_hosts", "列出已保存主机" },
         .{ "host.get_host", "读取主机配置" },

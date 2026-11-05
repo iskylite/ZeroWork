@@ -128,7 +128,7 @@ pub const Host = struct {
     acknowledge_notice: ?*const fn (*anyopaque, u64, ?*provider.CancelToken) anyerror!void = null,
     accepted_host_result: ?*const fn (*anyopaque, dynamic.host.Context, []const u8, *const dynamic.host.Result, ?*provider.CancelToken) anyerror!void = null,
 };
-pub const AuthorityRefresh = struct { table: dynamic.RequestTable, notice: []const u8 = "", notice_revision: u64 = 0 };
+pub const AuthorityRefresh = struct { table: dynamic.RequestTable, notice: []const u8 = "", notice_revision: u64 = 0, system: ?[]const u8 = null };
 
 pub const Record = struct {
     key: Key,
@@ -269,6 +269,7 @@ pub const Loop = struct {
         var accepted = false;
         defer if (!accepted) next.table.deinit();
         defer self.allocator.free(next.notice);
+        defer if (next.system) |system| self.allocator.free(system);
         if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
         const old_context = previous.host_context orelse return error.InvalidHostAuthority;
         const context = next.table.host_context orelse return error.InvalidHostAuthority;
@@ -284,6 +285,7 @@ pub const Loop = struct {
         var candidate = self.request;
         candidate.tools = definitions;
         candidate.tool_table = &next.table;
+        if (next.system) |system| candidate.system = try a.dupe(u8, system);
         const notice = if (next.notice.len != 0) try a.dupe(u8, next.notice) else null;
         if (notice) |text| {
             try self.messages.ensureUnusedCapacity(a, 1);
@@ -299,6 +301,7 @@ pub const Loop = struct {
         self.scope = next_scope;
         self.request.tools = definitions;
         self.request.tool_table = &self.tool_table.?;
+        self.request.system = candidate.system;
         if (notice) |text| {
             self.messages.appendAssumeCapacity(.{ .role = .user, .content = text });
             self.notice_revision = next.notice_revision;

@@ -32,7 +32,7 @@ const states = stateNames;
 $('#scenario').innerHTML = Object.entries(states).map(([value,label]) => `<option value="${value}">${label}</option>`).join('');
 let fixtureBusy=q.get('busy')!=='false';
 const model = new UpdateDesignModel(q.get('state')||'confirm',fixtureBusy);
-let state=model.state, draft=true, saved=true;
+let state=model.state, draft=true, saved=true, incomplete=false;
 const timers = new Map();
 $('#busy').checked=fixtureBusy;
 const taskRows = mode => model.tasks.filter(t=>mode!=='confirm'||t.status!=='released').map(t=>{
@@ -44,9 +44,13 @@ const locked=()=>['installing','startup_blocked','recovery_pending','cancel_pend
 const closeButton=()=>`<button class="icon-button" data-action="dismiss" aria-label="关闭更新窗口" ${locked()?'disabled':''}>${icon('close')}</button>`;
 const header=(title,name='download',tone='')=>`<header class="dialog-head ${tone}"><span class="heading-icon ${['closing','handoff','installing','verifying','saving','cancel_pending','commit_pending'].includes(state)?'spinning':''}">${icon(name)}</span><h2 id="dialog-title">${title}</h2>${closeButton()}</header>`;
 const footer=(secondary,primary,action,tone='primary',status='',secondaryAction='dismiss')=>`<footer class="dialog-footer">${status?`<span class="status" role="status">${status}</span>`:''}${secondary?`<button data-action="${secondaryAction}">${secondary}</button>`:''}${primary?`<button class="${tone}" data-action="${action}">${primary}</button>`:''}</footer>`;
+const checkFooter=()=>footer('关闭','重新检查','recheck').replace('<footer class="dialog-footer">','<footer class="dialog-footer"><button data-action="release">发布页</button>');
 const backup=`<div class="summary recovery-path"><h3>备份位置</h3><p>/Applications/.ZeroWork-update-TX/ZeroWork.app</p><p>事务记录与备份会保留，不会随下载缓存清理。</p></div>`;
 function content(){
   switch(state){
+    case 'no_stable':return header('暂无可用的正式版更新','refresh')+`<div class="dialog-body"><p id="dialog-description">正式版通道尚未发布可用版本，当前未开始下载或安装。</p></div>`+checkFooter();
+    case 'check_failed':return header('检查更新失败','alert','warning')+`<div class="dialog-body"><p id="dialog-description">正式版缺少自动更新清单 update.json，请从官方发布页手动下载</p><p>尚未开始下载或安装。可重新检查，或查看官方发布页。</p></div>`+checkFooter();
+    case 'download_failed':return header('更新下载失败','alert','warning')+`<div class="dialog-body"><p id="dialog-description">更新包下载失败（HTTP 503）</p><p>尚未开始安装。可重新检查，或从官方发布页下载安装包。</p></div>`+checkFooter();
     case 'available':return header('ZeroWork 0.3.0 已发布')+`<div class="dialog-body"><p id="dialog-description">当前 0.3.0-rc1 → 新版 0.3.0 · 42.8 MB</p><div class="summary"><h3>本次更新</h3><p>改进连接与文件传输的稳定性</p><p>修复已知问题</p></div><a href="https://github.com/iskylite/ZeroWork/releases" target="_blank" rel="noopener">完整更新说明 ↗</a></div>`+footer('稍后','下载更新','download');
     case 'downloading':return header('正在下载更新')+`<div class="dialog-body"><p id="dialog-description">ZeroWork 0.3.0 · Apple Silicon</p><div class="download-value"><span>已下载 18.4 MB / 42.8 MB</span><span>43%</span></div><div class="progress-track"><div class="progress-fill"></div></div><p>下载在后台继续，不影响当前工作。</p><p>取消下载会删除未完成的更新包。</p></div>`+footer('取消下载','后台下载','dismiss','primary','','cancel-download');
     case 'verifying':return header('正在检查更新包','shield')+`<div class="dialog-body"><p id="dialog-description">ZeroWork 0.3.0</p><div class="summary"><div class="task-row"><span>完整性与发布签名</span><span class="task-state done">已通过</span></div><div class="task-row"><span>应用身份与系统兼容性</span><span class="task-state active">检查中</span></div></div><p>后台检查可继续；取消会清除未验证的包。</p></div>`+footer('取消校验','后台检查','dismiss','primary','','cancel-verify');
@@ -82,7 +86,17 @@ function paint({focus=true}={}){
   $('#current-version').textContent=`${model.installed?'0.3.0':'0.3.0-rc1'} · main@1a2b3c4d5e6f* · 2026-11-04 18:00:00 +0800`;
   $('#version-badge').textContent=model.installed?'已是最新':'有新版本';$('#available-title').textContent=model.installed?'你正在使用最新版本':'0.3.0 正式版可用';
   $('#open-update').textContent=model.installed?'已是最新':model.operation==='downloading'?'查看下载':model.operation==='verifying'?'查看校验':'查看更新';$('#open-update').disabled=model.installed;
-  $('#check').disabled=model.operation==='downloading'||model.operation==='verifying'||model.intent;
+  if(state!=='settings')incomplete=['invalid','snapshot_failed','handoff_failed','parent_exit_timeout','failed','restore_failed','launch_failed','incompatible_data'].includes(state);
+  if(model.installed)incomplete=false;
+  $('#version-badge').dataset.tone=incomplete||state==='draining'?'warning':model.installed||model.operation==='ready'?'success':'accent';
+  if(incomplete){$('#version-badge').textContent='更新未完成';$('#available-title').textContent='本次更新未完成';$('#open-update').textContent='检查更新';}
+  if(['no_stable','check_failed','download_failed'].includes(state)){
+    $('#version-badge').textContent=state==='no_stable'?'暂无正式版':state==='check_failed'?'检查失败':'下载失败';
+    $('#version-badge').dataset.tone=state==='no_stable'?'accent':'warning';
+    $('#available-title').textContent=state==='no_stable'?'暂无可用的正式版更新':state==='check_failed'?'检查更新失败':'更新下载失败';
+    $('#open-update').textContent='检查更新';
+  }
+  if(state==='draining')$('#version-badge').textContent='正在收尾';
   $('#app').dataset.state=state;$('#app').dataset.surface=model.helperSurface?'helper':'application';$('#app').dataset.operation=model.operation;
   $('#app').dataset.gate=String(model.gate);$('#app').dataset.pendingCloses=String(model.tasks.filter(t=>t.status==='closing'||t.status==='unknown').length);
   $('#app').dataset.transaction=model.transactionStage;$('#scenario').value=state;
@@ -119,7 +133,7 @@ function action(name){
   if(name==='restore-old')model.restoreOld();
   if(name==='reopen-recovery')model.state=model.recoveryState||'restore_failed';
   if(name==='return-app'){model.state='settings';model.gate=false;model.message='已返回原版本；已结束的工作不会自动恢复。';}
-  if(name==='recheck'){model.state='available';model.operation='idle';}
+  if(name==='recheck'){model.checkState=null;model.state='available';model.operation='idle';}
   if(name==='finish'){model.state='settings';model.operation='idle';}
   if(name==='show-backup')$('#review-status').textContent='备份与事务记录位置已在窗口中显示；本地原型不会访问文件。';
   if(name==='release')window.open('https://github.com/iskylite/ZeroWork/releases','_blank','noopener');
@@ -133,8 +147,7 @@ document.addEventListener('keydown',e=>{
 });
 $('#open-update').onclick=()=>{model.open();paint();};
 $('#cleanup-details').onclick=()=>{model.state='draining';paint();};
-$('#check').onclick=()=>{if(model.installed){$('#check-note').textContent='你正在使用最新版本';return;}model.state='available';paint();};
-$('#scenario').onchange=e=>{for(const timer of timers.values())clearTimeout(timer);timers.clear();model.loadFixture(e.target.value,fixtureBusy);paint();};
+$('#scenario').onchange=e=>{for(const timer of timers.values())clearTimeout(timer);timers.clear();incomplete=false;model.loadFixture(e.target.value,fixtureBusy);paint();};
 $('#busy').onchange=e=>{fixtureBusy=e.target.checked;for(const timer of timers.values())clearTimeout(timer);timers.clear();model.loadFixture(model.state,fixtureBusy);paint({focus:false});};
 $('#step').onclick=step;
 $('#automatic').onclick=()=>{draft=!draft;$('#automatic').setAttribute('aria-checked',String(draft));$('#save-state').textContent=draft===saved?'偏好设置在保存后生效':'有未保存的偏好设置';};

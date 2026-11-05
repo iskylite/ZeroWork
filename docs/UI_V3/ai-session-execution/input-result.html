@@ -22,6 +22,8 @@ strong{width:84px;flex:none;font-size:12px;line-height:18px;font-weight:500;whit
 .actions{display:flex;align-items:center;min-height:34px;padding:3px 8px;gap:6px}
 button{border:0;outline:none;border-radius:7px;background:transparent;color:var(--accent-ink);height:28px;padding:4px 8px;font:500 12px/18px inherit}
 .input-unknown .icon-slot{color:var(--warn-ink)}[hidden]{display:none!important}
+
+.priority-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;padding:0}.priority-icon svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8}.priority-icon[hidden]{display:none}
 </style>
 <body data-theme="dark">
 <main>
@@ -44,7 +46,7 @@ Output boundary retained.</pre>
       <span class="identity">执行 · x1:0123456789abcdef0123456789abcdef</span>
       <span class="identity">记录 · 72caa8de1cc0436ea818599430082006</span>
     </div>
-    <div class="actions"><button type="button">查看终端</button><button type="button" id="details-toggle" aria-expanded="false" aria-controls="collection-details">详情</button></div>
+    <div class="actions"><button type="button" class="priority-icon" aria-label="查看原执行终端" title="查看原执行终端"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 5 6 7-6 7m9 0h7"/></svg></button><button type="button" id="details-toggle" aria-expanded="false" aria-controls="collection-details" class="priority-icon" aria-label="展开详情" title="展开详情"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
   </details>
   <details class="result" id="input" open>
     <summary><span class="icon-slot"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><strong>提交终端输入</strong><span class="summary" id="input-summary">输入结果 · 输入已消费</span><span class="elapsed">—</span></summary>
@@ -59,7 +61,7 @@ Output boundary retained.</pre>
 <script>
 const params=new URLSearchParams(location.search);document.body.dataset.theme=params.get('theme')||'dark';
 const toggle=document.querySelector('#details-toggle'),collection=document.querySelector('#collection-details');
-toggle.addEventListener('click',()=>{collection.hidden=!collection.hidden;toggle.textContent=collection.hidden?'详情':'收起详情';toggle.setAttribute('aria-expanded',String(!collection.hidden));});
+toggle.addEventListener('click',()=>{collection.hidden=!collection.hidden;toggle.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';toggle.querySelector('svg').style.transform=collection.hidden?'':'rotate(180deg)';toggle.title=collection.hidden?'展开详情':'收起详情';toggle.setAttribute('aria-label',toggle.title);toggle.setAttribute('aria-expanded',String(!collection.hidden));});
 if(['interval_concurrent','interval_unverified','recording_failed'].includes(params.get('state'))){
   const warning=document.createElement('span');warning.className='metadata';warning.style.color='var(--warn-ink)';
   warning.textContent=params.get('state')==='interval_concurrent'?'检测到其他程序可能写入终端，输出可能包含其他程序的内容。':params.get('state')==='recording_failed'?'终端记录保存失败，可查看原终端。':'未能确认输出来源，请结合原终端核实结果。';

@@ -27,6 +27,7 @@ pub const View = struct {
     full: *ui.Node,
     empty: *ui.Node,
     list: *ui.Node,
+    viewport: *ui.Node,
     list_visible: bool = false,
     title: *ui.Node,
     search_box: *ui.Node,
@@ -91,7 +92,7 @@ pub const View = struct {
         list.setStyleInline(cx.allocator, S.list());
         try viewport.content.appendChild(cx.allocator, list);
         try full.appendChild(cx.allocator, viewport.container);
-        const self = try scope.createState(View, .{ .cx = cx, .root = root, .full = full, .empty = undefined, .list = list, .title = title, .header = header, .search_box = search_box, .search = search, .search_button = undefined, .search_clear = undefined, .search_spacer = search_spacer, .search_value = search_value, .footer = undefined, .new_menu = new_menu, .colors = T.current(), .actions = actions, .tint = tint, .hover = hover, .host_disabled = host_disabled, .group_disabled = group_disabled, .footer_style = footer_style, .empty_footer_style = empty_footer_style });
+        const self = try scope.createState(View, .{ .cx = cx, .root = root, .full = full, .empty = undefined, .list = list, .viewport = viewport.container, .title = title, .header = header, .search_box = search_box, .search = search, .search_button = undefined, .search_clear = undefined, .search_spacer = search_spacer, .search_value = search_value, .footer = undefined, .new_menu = new_menu, .colors = T.current(), .actions = actions, .tint = tint, .hover = hover, .host_disabled = host_disabled, .group_disabled = group_disabled, .footer_style = footer_style, .empty_footer_style = empty_footer_style });
         try search_box.appendChild(cx.allocator, search.node);
         const clear = try iconButton(cx, scope, "x", "清空搜索", "sidebar.search.clear", S.headerAction(), tint, hover, cx.on(View, self, View.clearSearch), null);
         clear.setDisplay(.none);

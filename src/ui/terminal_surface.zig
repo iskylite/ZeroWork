@@ -8,6 +8,7 @@ const identity = @import("../host/identity.zig");
 const vt = @import("../vt/snapshot.zig");
 const TextSlot = @import("../vt/text_slot.zig").TextSlot;
 const S = @import("terminal_styles.zig");
+const cell_graphics = @import("terminal_cell_graphics.zig");
 const records_style = @import("builtin_records_styles.zig");
 const input = @import("terminal_surface_input.zig");
 const annotations = @import("command_annotations.zig");
@@ -31,7 +32,13 @@ pub const Options = struct {
     highlight: bool,
     cursor_style: enum { block, bar, underline },
 };
-const Glyph = struct { node: *ui.Node, background: ?*ui.Node = null, overline: ?*ui.Node = null, double_underline: ?*ui.Node = null };
+const Glyph = struct {
+    node: *ui.Node,
+    background: ?*ui.Node = null,
+    overline: ?*ui.Node = null,
+    double_underline: ?*ui.Node = null,
+    drawing: ?*cell_graphics.Drawing = null,
+};
 const Row = struct {
     root: *ui.Node,
     donation_qr: @import("donation_qr_view.zig").View = .{},
@@ -255,7 +262,7 @@ pub const Surface = struct {
         self.cx.allocator.free(self.preedit);
         self.recovered_input.deinit(self.cx.allocator);
         self.document.deinit(self.cx.allocator);
-        for (self.rows.items) |*row| row.glyphs.deinit(self.cx.allocator);
+        for (self.rows.items) |*row| self.releaseGlyphs(row);
         if (self.snapshot) |*value| value.deinit(snapshot_allocator);
         self.cx.allocator.free(self.options.family_name);
         if (self.root.parent) |parent| self.cx.detachChild(parent, self.root);
@@ -640,7 +647,7 @@ pub const Surface = struct {
         }
         while (self.rows.items.len > projection.visible_rows.len) {
             var row = self.rows.pop().?;
-            row.glyphs.deinit(self.cx.allocator);
+            self.releaseGlyphs(&row);
             self.cx.detachChild(self.viewport, row.root);
             self.cx.destroyDetached(row.root);
             self.cx.allocator.free(row.test_id);
@@ -919,6 +926,10 @@ pub const Surface = struct {
         if (self.snapshot) |snap| if (index < snap.projection.visible_rows.len) return @import("terminal_record_geometry.zig").rowY(snap.projection.visible_rows[index].presentation, index, self.options.row_height);
         return @as(f32, @floatFromInt(index)) * self.options.row_height;
     }
+    fn releaseGlyphs(self: *Surface, row: *Row) void {
+        for (row.glyphs.items) |glyph| if (glyph.drawing) |drawing| self.cx.allocator.destroy(drawing);
+        row.glyphs.deinit(self.cx.allocator);
+    }
     fn renderGlyphs(self: *Surface, row: *Row, cells: []const vt.Cell, projection: *const vt.Projection) !bool {
         var used = row.pending_glyphs;
         var col = row.pending_col;
@@ -993,6 +1004,19 @@ pub const Surface = struct {
             }, .underline_thickness = 1 };
             props.spans = spans;
             props.spans_owned = spans.len > 0;
+            const graphic = cell_graphics.codepoint(text);
+            if (graphic != null and glyph.drawing == null) {
+                const drawing = try self.cx.allocator.create(cell_graphics.Drawing);
+                drawing.* = .{};
+                glyph.drawing = drawing;
+                glyph.node.setCustomDraw(cell_graphics.Drawing.draw, drawing);
+            }
+            if (glyph.drawing) |drawing| {
+                drawing.* = .{ .cp = graphic orelse 0, .color = fg, .font_size = self.options.font_size, .scale = self.cx.window_scale };
+                // Keep the source grapheme and cell bounds; only replace its ink.
+                if (graphic != null) props.color = ui.Color.TRANSPARENT;
+                glyph.node.markRenderDirty();
+            }
             glyph.node.setTextFixedBounds(props);
             published = true;
             const has_background = cell.background != .default or cell.attributes & (1 << 4) != 0 or projection.modes.reverse_colors;

@@ -18,8 +18,27 @@ pub const Adapter = struct {
     openai_tool_call_deltas: usize = 0,
     openai_tool_plan_deltas: usize = 0,
     anthropic_stop: bool = false,
+    anthropic_input: u32 = 0,
+    anthropic_cache_read: u32 = 0,
+    anthropic_cache_write: u32 = 0,
     anthropic_tools: [provider.max_tool_calls]AnthropicTool = @splat(.{}),
     anthropic_tool_count: usize = 0,
+    const AnthropicUsage = struct {
+        input_tokens: ?u32 = null,
+        output_tokens: ?u32 = null,
+        cache_read_input_tokens: ?u32 = null,
+        cache_creation_input_tokens: ?u32 = null,
+    };
+    fn receiveAnthropicUsage(self: *Adapter, value: AnthropicUsage) void {
+        const stats = self.stats orelse return;
+        self.usage_seen = true;
+        if (value.input_tokens) |n| self.anthropic_input = n;
+        if (value.cache_read_input_tokens) |n| self.anthropic_cache_read = n;
+        if (value.cache_creation_input_tokens) |n| self.anthropic_cache_write = n;
+        // Anthropic splits total prompt input into three disjoint components.
+        stats.input_tokens = self.anthropic_input +| self.anthropic_cache_read +| self.anthropic_cache_write;
+        if (value.output_tokens) |n| stats.output_tokens = n;
+    }
     const AnthropicTool = struct { block_index: u32 = 0, active: bool = false, arguments_seen: bool = false };
 
     fn complete(self: *Adapter) void {
@@ -110,22 +129,14 @@ pub const Adapter = struct {
             content_block: ?struct { type: ?[]const u8 = null, id: ?[]const u8 = null, name: ?[]const u8 = null, input: ?std.json.Value = null, text: ?[]const u8 = null } = null,
             delta: ?struct { type: ?[]const u8 = null, text: ?[]const u8 = null, thinking: ?[]const u8 = null, partial_json: ?[]const u8 = null, stop_reason: ?[]const u8 = null } = null,
             @"error": ?struct { message: ?[]const u8 = null } = null,
-            usage: ?struct { input_tokens: ?u32 = null, output_tokens: ?u32 = null } = null,
-            message: ?struct { usage: ?struct { input_tokens: ?u32 = null, output_tokens: ?u32 = null } = null } = null,
+            usage: ?AnthropicUsage = null,
+            message: ?struct { usage: ?AnthropicUsage = null } = null,
         };
         var parsed = try std.json.parseFromSlice(Payload, self.allocator, data, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         const value = parsed.value;
-        if (value.message) |message| if (message.usage) |u| if (self.stats) |stats| {
-            self.usage_seen = true;
-            if (u.input_tokens) |v| stats.input_tokens = v;
-            if (u.output_tokens) |v| stats.output_tokens = v;
-        };
-        if (value.usage) |u| if (self.stats) |stats| {
-            self.usage_seen = true;
-            if (u.input_tokens) |v| stats.input_tokens = v;
-            if (u.output_tokens) |v| stats.output_tokens = v;
-        };
+        if (value.message) |message| if (message.usage) |value_usage| self.receiveAnthropicUsage(value_usage);
+        if (value.usage) |value_usage| self.receiveAnthropicUsage(value_usage);
         if (value.@"error") |failure| return self.fail(failure.message orelse "provider error");
         const event = value.type orelse return error.MissingEventType;
         if (std.mem.eql(u8, event, "content_block_start")) {
@@ -644,4 +655,18 @@ test "json delta adapter response metadata counts text and original tool deltas"
     try std.testing.expectEqual(@as(usize, 1), adapter.openai_tool_call_deltas);
     try std.testing.expectEqual(@as(usize, 1), adapter.openai_tool_plan_deltas);
     try std.testing.expect(adapter.terminal);
+}
+
+test "context usage Anthropic cached input is normalized once across partial and repeated frames" {
+    const Sink = struct {
+        fn receive(_: *anyopaque, _: provider.Delta) void {}
+    };
+    var stream = Stream.initWithKind(std.testing.allocator, .anthropic, Sink.receive, undefined);
+    defer stream.deinit();
+    const start = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":10000,\"cache_creation_input_tokens\":2000,\"output_tokens\":0}}}\n\n";
+    try stream.feed(start);
+    try stream.feed(start);
+    try stream.feed("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n");
+    try std.testing.expectEqual(@as(u32, 12002), stream.stats.input_tokens);
+    try std.testing.expectEqual(@as(u32, 3), stream.stats.output_tokens);
 }

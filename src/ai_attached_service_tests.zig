@@ -449,3 +449,133 @@ test "AiHost integration accepted input survives controller capture failure and 
     try shared.service.endConversation(ticket, identity.HostOperationId.generate());
     try std.testing.expect(shared.service.store.find(ticket.conversation).?.binding == null);
 }
+
+test "conversation presentation persists across restart fork source deletion and rebind without starting tools" {
+    const presentation = @import("ai/conversation_presentation.zig");
+    const Turn = @import("ai/conversation_turn.zig").Turn;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    var turn: Turn = .{ .id = 9, .sent_at_ms = 100, .ended_at_ms = 200, .elapsed_ms = 100, .input_tokens = 40, .output_tokens = 20 };
+    defer turn.deinit(a);
+    try turn.applyEvent(a, .{ .call_id = "query", .name = "host.read_terminal", .detail = "已读取", .phase = .succeeded, .at_ms = 150 });
+    const bytes = try presentation.capture(a, &.{}, .{ .user = true, .text = @constCast("持久问话 ✅"), .turn = turn }, &.{.{ .text = "持久答复" }});
+    defer a.free(bytes);
+    var first = attached.Host.init(a);
+    try first.ensurePersistence(path);
+    const agent = try first.service.store.attach(.{ .session = 7 });
+    const ticket = try first.service.store.create(agent.id);
+    try first.service.store.checkpoint(ticket, 9, &.{ .{ .content = "持久问话 ✅" }, .{ .role = .assistant, .content = "持久答复" } }, true);
+    try first.service.store.savePresentation(ticket.conversation, bytes);
+    var pin = try first.service.store.pinFork(ticket.conversation);
+    defer pin.deinit();
+    const copy = try first.service.store.publishFork(&pin, null);
+    try first.deinit();
+    var recovered = attached.Host.init(a);
+    defer recovered.deinit() catch unreachable;
+    try recovered.ensurePersistence(path);
+    const source = recovered.service.store.find(ticket.conversation).?;
+    try std.testing.expectEqualStrings(bytes, source.presentation.?);
+    try recovered.service.store.remove(source.id);
+    const target = try recovered.service.store.attach(.{ .session = 8 });
+    const record = recovered.service.store.find(copy).?;
+    _ = try recovered.service.store.resumeConversation(copy, target.id, record.revision);
+    const state = recovered.presentations.findConversation(copy).?;
+    try std.testing.expectEqual(@as(usize, 2), state.history.items.len);
+    try std.testing.expectEqualStrings("持久问话 ✅", state.history.items[0].text);
+    try std.testing.expectEqual(@as(u64, 100), state.history.items[0].turn.?.elapsed_ms);
+    try std.testing.expectEqual(@as(?u64, 40), state.history.items[0].turn.?.input_tokens);
+    try std.testing.expectEqualStrings("已读取", state.history.items[0].turn.?.steps.items[0].detail);
+    try std.testing.expectEqual(@as(usize, 0), recovered.service.runners.items.len);
+}
+
+test "durable context usage restores real journal baseline and persists model invalidation with unchanged display" {
+    const usage = @import("ai/context_usage.zig");
+    const Cache = @import("ai/composer_usage_cache.zig").Cache;
+    const Config = @import("ai/provider_config.zig").ProviderConfig;
+    const presentation = @import("ai/conversation_presentation.zig");
+    const config: Config = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:9", .model = "fixture", .auth = .none };
+    const request: provider.ChatRequest = .{ .model = "fixture", .system = "system", .messages = &.{.{ .content = "question" }} };
+    const baseline: usage.Baseline = .{ .sample = try usage.Sample.capture(request, 24000), .model_key = usage.modelKey(config) };
+    const bytes = try presentation.capture(a, &.{.{ .user = true, .text = @constCast("question") }}, null, &.{});
+    defer a.free(bytes);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    var conversation: identity.ConversationId = undefined;
+    {
+        var first = attached.Host.init(a);
+        defer first.deinit() catch unreachable;
+        try first.ensurePersistence(path);
+        const agent = try first.service.store.attach(.{ .session = 7 });
+        const ticket = try first.service.store.create(agent.id);
+        conversation = ticket.conversation;
+        try first.service.store.checkpoint(ticket, 1, &.{ request.messages[0], .{ .role = .assistant, .content = "answer" } }, true);
+        try first.service.store.savePresentation(ticket.conversation, bytes);
+        // The display bytes already exist: a newly measured baseline must still save.
+        try first.service.store.savePresentationWithUsage(conversation, bytes, baseline);
+    }
+    {
+        var recovered = attached.Host.init(a);
+        defer recovered.deinit() catch unreachable;
+        try recovered.ensurePersistence(path);
+        const record = recovered.service.store.find(conversation).?;
+        const state = recovered.presentations.findConversation(conversation).?;
+        try std.testing.expectEqual(@as(usize, 24000), record.history.usage.?.sample.input_tokens);
+        try std.testing.expectEqual(@as(usize, 24000), state.wire_history.usage.?.sample.input_tokens);
+        var cache: Cache = .{};
+        const summary = cache.readWithFixed(&state.wire_history, config, baseline.sample.fixed);
+        try std.testing.expectEqual(@as(?usize, 24000), summary.measured_tokens);
+        try std.testing.expect(summary.tokens > 24000);
+        var changed = config;
+        changed.model = "other-model";
+        try std.testing.expect(cache.readWithFixed(&state.wire_history, changed, baseline.sample.fixed).measured_tokens == null);
+        try recovered.service.store.savePresentationWithUsage(conversation, record.presentation.?, state.wire_history.usage);
+        try std.testing.expect(record.history.usage == null);
+        try std.testing.expectEqual(@as(usize, 0), recovered.service.runners.items.len);
+    }
+    {
+        var again = attached.Host.init(a);
+        defer again.deinit() catch unreachable;
+        try again.ensurePersistence(path);
+        const state = again.presentations.findConversation(conversation).?;
+        try std.testing.expect(state.wire_history.usage == null);
+        var cache: Cache = .{};
+        try std.testing.expect(cache.readWithFixed(&state.wire_history, config, baseline.sample.fixed).measured_tokens == null);
+    }
+}
+
+test "durable context usage rejects stale full history metadata during journal replay" {
+    const usage = @import("ai/context_usage.zig");
+    const config: @import("ai/provider_config.zig").ProviderConfig = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:9", .model = "fixture", .auth = .none };
+    const request: provider.ChatRequest = .{ .model = "fixture", .system = "system", .messages = &.{.{ .content = "question" }} };
+    const original = [_]provider.Message{ request.messages[0], .{ .role = .assistant, .content = "answer" } };
+    const baseline: usage.Baseline = .{ .sample = try usage.Sample.capture(request, 24000), .model_key = usage.modelKey(config) };
+    const stored = usage.Stored.capture(&original, baseline).?;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    var conversation: identity.ConversationId = undefined;
+    {
+        var first = attached.Host.init(a);
+        defer first.deinit() catch unreachable;
+        try first.ensurePersistence(path);
+        const agent = try first.service.store.attach(.{ .session = 7 });
+        const ticket = try first.service.store.create(agent.id);
+        conversation = ticket.conversation;
+        // Only the unmeasured answer changed, so a prefix-only check would pass.
+        try first.service.store.checkpoint(ticket, 1, &.{ request.messages[0], .{ .role = .assistant, .content = "edited" } }, true);
+        const persist = first.service.store.persist.?;
+        try persist.write(persist.context, .{ .kind = .presentation, .conversation = conversation, .revision = ticket.binding, .presentation = "{\"schema\":1,\"messages\":[]}", .context_usage = stored });
+    }
+    var recovered = attached.Host.init(a);
+    defer recovered.deinit() catch unreachable;
+    try recovered.ensurePersistence(path);
+    const state = recovered.presentations.findConversation(conversation).?;
+    try std.testing.expect(state.wire_history.usage == null);
+    try std.testing.expectEqualStrings("edited", state.wire_history.messages[1].content);
+    try std.testing.expectEqual(@as(usize, 0), recovered.service.runners.items.len);
+}

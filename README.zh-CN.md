@@ -10,13 +10,13 @@ ZeroWork 是面向 Apple Silicon Mac 的 SSH 终端，架构定义见 [总体架
 
 ## 当前基线
 
-当前版本为 **0.3.0-rc18（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
+当前版本为 **0.3.0（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
 
 AI 助手等待用户确认、选择运行方式或授权范围时持续等待，直到用户决定或取消；等待期间暂停自动执行时间预算。原生敏感输入不设用户填写期限。网络、命令执行及提交后的传输超时保持独立。
 
 当前动态插件工具的操作历史在每个应用进程内最多保留 128 条记录，按目标会话计数。达到上限后，新操作会在审批和派发前被拒绝；需正常退出并重新启动应用后继续。历史不会自动驱逐，以保留未知结果及尚未释放资源的操作事实。
 
-- 项目使用 Zig 0.17.0（本地通过 zvm 管理），目标固定为 arm64、macOS 14 或更新版本。
+- 项目使用 Zig 0.17.0（本地通过 zvm 管理），目标固定为 arm64、macOS 13 或更新版本。
 - P0 配置模型及严格子集 TOML 加载器。
 - 配置采用原子替换，权限限制为仅所有者可读写（0600）。
 - Sauber 渲染器设计令牌，包含浮层和 AI 状态颜色。
@@ -33,7 +33,7 @@ ZeroWork 链接 GPL Zenit 核心，因此按 GPL-3.0-only 分发；参见 [LICEN
 
 ## 构建
 
-目标平台为 **Apple Silicon、macOS 14 或更新版本**，使用 **Zig 0.17.0**。先安装 Xcode Command Line Tools，并确认 `xcrun --find clang`、`zig version` 可用。以下命令均在仓库根目录执行。
+目标平台为 **Apple Silicon、macOS 13 或更新版本**，使用 **Zig 0.17.0**。先安装 Xcode Command Line Tools，并确认 `xcrun --find clang`、`zig version` 可用。以下命令均在仓库根目录执行。
 
 ### 本地构建与直接运行
 

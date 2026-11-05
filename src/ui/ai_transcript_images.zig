@@ -275,14 +275,16 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, context: Context, ref: Reference, wid
     }
     const actions = try ui.hstack(cx, .{ .gap = 8, .flex_shrink = 0 }, .{});
     if (item.phase == .ready) {
-        const open = try ui.widgets.Button(.{ .label = "查看图片", .variant = .ghost, .on_click = cx.on(View, view, View.open), .base_style = S.button(cx.tokens) }).mount(scope, cx);
+        const open = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.get("maximize-2").?, .icon_size = 16, .a11y_label = "查看图片", .variant = .ghost, .on_click = cx.on(View, view, View.open), .base_style = S.button(cx.tokens) }).mount(scope, cx);
         open.meta.ownership.meta.test_id = "ai.transcript.image.open";
-        try actions.appendChild(cx.allocator, open);
+        const open_hint = try @import("control_hint.zig").mount(cx, scope, open, "查看图片", .{ .id = "ai.transcript.image.open.tooltip" });
+        try actions.appendChild(cx.allocator, open_hint.wrapper);
     }
     if (item.job == null and (item.phase == .ready or item.phase == .failed)) {
-        const reload = try ui.widgets.Button(.{ .label = if (item.phase == .failed) "重试" else "重新加载", .variant = .ghost, .on_click = cx.on(View, view, View.reload), .base_style = S.button(cx.tokens) }).mount(scope, cx);
+        const reload = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.get("rotate-cw").?, .icon_size = 16, .a11y_label = if (item.phase == .failed) "重试加载图片" else "重新加载图片", .variant = .ghost, .on_click = cx.on(View, view, View.reload), .base_style = S.button(cx.tokens) }).mount(scope, cx);
         reload.meta.ownership.meta.test_id = "ai.transcript.image.reload";
-        try actions.appendChild(cx.allocator, reload);
+        const reload_hint = try @import("control_hint.zig").mount(cx, scope, reload, if (item.phase == .failed) @as([]const u8, "重试加载图片") else "重新加载图片", .{ .id = "ai.transcript.image.reload.tooltip" });
+        try actions.appendChild(cx.allocator, reload_hint.wrapper);
     }
     try root.appendChild(cx.allocator, actions);
     return root;

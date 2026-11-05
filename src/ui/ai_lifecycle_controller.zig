@@ -65,7 +65,7 @@ pub const Controller = struct {
     pub fn init(options: Init) !Controller {
         try options.authority.validate();
         if ((options.callbacks.on_handoff != null or options.callbacks.on_membership_changed != null) and options.callbacks.context == null) return error.InvalidCallbacks;
-        var self: Controller = .{ .allocator = options.allocator, .app = options.app, .roster = options.roster, .store = options.store, .bridge = options.bridge, .authority = options.authority, .execution_policy = options.execution_policy, .config_revision = options.app.workspace.app_config.config_revision, .notice_revision = options.notice_revision, .callbacks = options.callbacks };
+        var self: Controller = .{ .allocator = options.allocator, .app = options.app, .roster = options.roster, .store = options.store, .bridge = options.bridge, .authority = options.authority, .execution_policy = options.execution_policy, .config_revision = options.app.workspace.app_config.agentPolicyRevision(), .notice_revision = options.notice_revision, .callbacks = options.callbacks };
         try self.validateAuthority(options.authority);
         return self;
     }
@@ -94,7 +94,7 @@ pub const Controller = struct {
         try authority.validate();
         if (!authority.conversation_id.eql(self.authority.conversation_id) or !authority.task_id.eql(self.authority.task_id)) return error.ScopeChanged;
         const state = self.store.findConversation(authority.conversation_id) orelse return error.ConversationNotFound;
-        if (state.closed or state.ended or !state.owner.eql(authority.binding) or state.binding_revision != authority.binding_revision or self.bridge.policy_revision != self.config_revision or authority.grant_revision != self.authority.grant_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
+        if (state.closed or state.ended or !state.owner.eql(authority.binding) or state.binding_revision != authority.binding_revision or self.bridge.policy_revision != self.config_revision or authority.grant_revision != self.authority.grant_revision or self.app.workspace.app_config.agentPolicyRevision() != self.config_revision) return error.ScopeChanged;
         self.authority = authority;
     }
     /// Called on the controller thread only after its worker joined. This is
@@ -107,7 +107,7 @@ pub const Controller = struct {
         self.* = undefined;
     }
     fn validateAuthority(self: *Controller, context: host.Context) !void {
-        if (!self.authority.eql(context) or self.bridge.policy_revision != self.config_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
+        if (!self.authority.eql(context) or self.bridge.policy_revision != self.config_revision or self.app.workspace.app_config.agentPolicyRevision() != self.config_revision) return error.ScopeChanged;
         const state = self.store.findConversation(context.conversation_id) orelse return error.ConversationNotFound;
         if (state.closed or state.ended or !state.owner.eql(context.binding) or state.binding_revision != context.binding_revision) return error.BindingConflict;
         if (self.app.workspace.shutting_down or self.app.windowClosePending()) return error.WorkspaceClosed;

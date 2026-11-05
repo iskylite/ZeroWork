@@ -114,6 +114,28 @@ fn id(node: *ui.Node, text: []const u8) ?*ui.Node {
     return null;
 }
 
+test "SSH status hover pin survives a refreshed projection click action" {
+    const Preview = @import("ui/status_hover_preview.zig");
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var source = try snapshot(key, "DB-A");
+    try f.update(source, false);
+    var group: Preview.Group = .{};
+    try Preview.Preview.mount(f.cx, f.scope, &group, f.bar.controls.identity_button, f.host.info.chrome, f.host.info.open, f.cx.on(@import("ui/status_connection_view.zig").View, f.host.info, @import("ui/status_connection_view.zig").View.dismiss));
+    source.revision += 1;
+    try f.update(source, false);
+    const trigger = f.bar.controls.identity_button.globalRect();
+    f.cx.handleMouseMove(trigger.x + trigger.w / 2, trigger.y + trigger.h / 2);
+    f.settle();
+    try std.testing.expect(f.host.info.open.peek());
+    f.click(f.bar.controls.identity_button);
+    try std.testing.expect(group.pinned != null);
+    f.cx.handleMouseMove(700, 300);
+    f.settle();
+    try std.testing.expect(f.host.info.open.peek());
+}
+
 test "SSH status host mounts exact live bar geometry and publishes only authoritative metrics" {
     var f: Fixture = undefined;
     try f.init();

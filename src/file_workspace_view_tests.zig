@@ -190,14 +190,25 @@ test "file workspace V3 independent cards and fixed header footer use measured g
     var f: Fixture = undefined;
     try f.init(1194, 794);
     defer f.deinit();
+    const root = f.view.root.globalRect();
+    const local = f.view.columns[0].globalRect();
+    const remote = f.view.columns[1].globalRect();
+    try std.testing.expectEqual(@as(f32, 12), local.x - root.x);
+    try std.testing.expectEqual(@as(f32, 12), local.y - root.y);
+    try std.testing.expectEqual(@as(f32, 12), root.x + root.w - remote.x - remote.w);
+    try std.testing.expectEqual(@as(f32, 12), root.y + root.h - local.y - local.h);
     for (f.view.panes) |pane| {
-        try std.testing.expectEqual(@as(f32, 594), pane.root.globalRect().w);
-        try std.testing.expectEqual(@as(f32, 794), pane.root.globalRect().h);
-        try std.testing.expectEqual(@as(f32, 592), pane.table.globalRect().w);
-        try std.testing.expectEqual(@as(f32, 621), pane.table.globalRect().h);
+        const toolbar = pane.toolbar.globalRect();
+        const first_line = pane.toolbar.children.items[0].globalRect();
+        try std.testing.expectEqual(@as(f32, 12), first_line.x - toolbar.x);
+        try std.testing.expectEqual(@as(f32, 12), toolbar.x + toolbar.w - first_line.x - first_line.w);
+        try std.testing.expectEqual(@as(f32, 582), pane.root.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 770), pane.root.globalRect().h);
+        try std.testing.expectEqual(@as(f32, 580), pane.table.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 597), pane.table.globalRect().h);
         try std.testing.expectEqual(@as(f32, 34), pane.header.globalRect().h);
-        try std.testing.expectEqual(@as(f32, 757), pane.footer.globalRect().y);
-        try std.testing.expectEqual(@as(f32, 757), pane.actions.globalRect().y);
+        try std.testing.expectEqual(@as(f32, 745), pane.footer.globalRect().y);
+        try std.testing.expectEqual(@as(f32, 745), pane.actions.globalRect().y);
         try std.testing.expect(pane.name_width > 0 and pane.size_width > 0 and pane.date_width > 0);
         try std.testing.expectApproxEqAbs(pane.column_width - 34, pane.name_width + pane.size_width + pane.date_width, 0.01);
     }
@@ -235,11 +246,17 @@ test "file workspace narrow columns fit with independent vertical scrolling and 
     f.settle();
     const left = f.view.panes[0];
     const right = f.view.panes[1];
-    try std.testing.expectEqual(@as(f32, 392), left.root.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 209), left.table.globalRect().h);
+    for (f.view.panes) |pane| {
+        const toolbar = pane.toolbar.globalRect();
+        const first_line = pane.toolbar.children.items[0].globalRect();
+        try std.testing.expectEqual(@as(f32, 12), first_line.x - toolbar.x);
+        try std.testing.expectEqual(@as(f32, 12), toolbar.x + toolbar.w - first_line.x - first_line.w);
+    }
+    try std.testing.expectEqual(@as(f32, 380), left.root.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 185), left.table.globalRect().h);
     try std.testing.expectApproxEqAbs(left.column_width - 34, left.name_width + left.size_width, 0.01);
-    try std.testing.expectEqual(@as(f32, 390), left.column_width);
-    try std.testing.expectEqual(@as(f32, 175), left.list.state.viewport_height);
+    try std.testing.expectEqual(@as(f32, 378), left.column_width);
+    try std.testing.expectEqual(@as(f32, 151), left.list.state.viewport_height);
     const footer = left.footer.globalRect();
     const path = left.path.node.globalRect();
     const header = left.header.globalRect();

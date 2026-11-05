@@ -353,6 +353,36 @@ test "connection host cancellation during retry delay prevents another TCP conne
     try std.testing.expectEqual(@as(u64, 1), job.operation_key.?.attempt_id.?);
 }
 
+test "connection host released failure leaves the idle scene clean" {
+    const socket = try Socket.init(false);
+    defer socket.deinit();
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    _ = try f.application.create(.{ .name = "Idle refused peer", .host = "127.0.0.1", .port = socket.port, .user = "fixture", .auth_mode = .password, .password = "fixture-password" }, 1, 0, "");
+    const deadline = clock.monotonicNs() + 20 * std.time.ns_per_s;
+    while (clock.monotonicNs() < deadline) {
+        try f.tick();
+        if (f.host.progress.source) |source| if (source.value.state == .failed and source.value.cleanup == .released) break;
+    }
+    try std.testing.expectEqual(@import("ui/connection_progress_view.zig").State.failed, f.host.progress.source.?.value.state);
+    try std.testing.expectEqual(@import("host/operation.zig").Cleanup.released, f.host.progress.source.?.value.cleanup);
+    const settle = clock.monotonicNs() + std.time.ns_per_s / 2;
+    while (clock.monotonicNs() < settle) {
+        _ = f.cx.processScheduledRedraw();
+        try f.tick();
+    }
+    const revision = ui.Node.treeStructureRevision();
+    for (0..8) |_| {
+        _ = f.cx.processScheduledRedraw();
+        try f.tick();
+        try std.testing.expect(!f.cx.hasPendingSceneWork());
+        try std.testing.expect(!f.cx.needs_redraw);
+        try std.testing.expect(f.cx.next_redraw_scheduled_at == null);
+        try std.testing.expectEqual(revision, ui.Node.treeStructureRevision());
+    }
+}
+
 test "connection host mounts and disposes the actual Workspace ApplicationHost and native modal scopes" {
     var f: Fixture = undefined;
     try f.init();

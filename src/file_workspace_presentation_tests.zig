@@ -370,6 +370,19 @@ test "file workspace presentation context and history use real menus and reject 
     const rename = find(menu.content, "files.context.rename").?;
     try std.testing.expect(!rename.behavior.interaction.focusable);
     try std.testing.expectEqualStrings(entry, menu.frozen.?.envelope.action.context.keys[0]);
+    // Reuse the same popup across repeated context/history requests. A fill
+    // assignment on aliased content/chrome must never expand either menu.
+    for ([_]bool{ false, true, true, false }) |history| {
+        const current = model.projection().?;
+        var repeated = envelope;
+        repeated.stamp = current.panes[0].stamp;
+        repeated.projection_revision = current.revision;
+        repeated.selection_revision = current.panes[0].selection_revision;
+        if (history) repeated.action = .history;
+        try model.handle(repeated);
+        for (0..12) |_| try f.frame();
+        try std.testing.expectApproxEqAbs(@as(f32, if (history) 340 else 224), menu.chrome.globalRect().w, 1);
+    }
 }
 
 test "file workspace presentation history removal leaves directory and other card unchanged" {

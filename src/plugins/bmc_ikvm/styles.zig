@@ -38,7 +38,7 @@ pub fn workspaceRoot(tokens: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn toolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
     // Share the workspace material with the area outside the video's top corners.
-    return .{ .width = .fill(), .height = .{ .px = toolbar_height }, .direction = .row, .align_items = .center, .justify = .end, .gap = 6, .padding = .{ .top = 12, .bottom = 12, .left = 13, .right = 13 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .px = toolbar_height }, .direction = .row, .align_items = .center, .justify = .end, .gap = 6, .padding = .{ .top = 12, .bottom = 12, .left = 12, .right = 12 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn connectionIdentity(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .min_width = 0, .direction = .row, .align_items = .center, .gap = 8 };
@@ -60,7 +60,8 @@ pub fn toolHover() ui.BoxStyle {
     return .{ .background = theme.states().hover };
 }
 pub fn videoWorkspace(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = ui.Padding.ZERO, .gap = 0 };
+    // The toolbar already owns the 12px gap below its controls.
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = .{ .left = 12, .right = 12, .bottom = 12 }, .gap = 0 };
 }
 pub fn videoCard(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = ui.Padding.ZERO, .gap = 0, .background = ui.Color.BLACK, .border = .{ .width = 0, .radius = video_card_radius }, .overflow_hidden = true, .clip_shape = .{ .rounded_rect = video_card_radius } };

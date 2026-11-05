@@ -58,7 +58,7 @@ const capture=async(name:string)=>{
  for(const id of ids){const n=(await h.query(id)).find(shown);if(n)geometry[id]=relative(n.rect);}
  report.geometry[name]=geometry;
  await writeFile(join(out,name+'.tree.json'),JSON.stringify(nodes,null,2));
- assert.equal(parent.rect.h,name.startsWith('question')?224:name.startsWith('approval')?176:90,'composer height matches reference');
+ if(name.startsWith('question')||name.startsWith('approval')){const body=geometry['ai.interaction.panel'];assert(body.h>0&&body.h<=180,'interaction content is capped at 180px');assert(parent.rect.h<224,'short content does not reserve the full maximum');assert(Math.abs(parent.rect.h-body.h-44)<.6,'composer hugs its content and fixed action row');assert(parent.rect.y+parent.rect.h<=root.rect.y+root.rect.h+.6,'composer remains inside the assistant panel');}else assert.equal(parent.rect.h,90);
  if(geometry['ai.interaction.pending']){
   const badge=geometry['ai.interaction.pending'];assert.equal(badge.h,26);assert(Math.abs(geometry.composer.y-badge.y-badge.h-8)<.6,'floating capsule gap is 8px');
  }
@@ -69,21 +69,22 @@ const capture=async(name:string)=>{
    assert(button.rect.y>=parent.rect.y&&button.rect.y+button.rect.h<=parent.rect.y+parent.rect.h+.5,'action stays outside scrolling content');
   }
  }
+ if(name.startsWith('question')||name.startsWith('approval')){assert(!geometry['ai.stop']);const later=await visible('ai.interaction.postpone');const primary=await visible(name.startsWith('question')?'ai.interaction.submit':'ai.interaction.approve');assert.equal(later.rect.h,primary.rect.h);assert(Math.abs(primary.rect.y-later.rect.y)<.5);const previous=name.startsWith('question')?later:await visible('ai.interaction.reject');assert(Math.abs(primary.rect.x-previous.rect.x-previous.rect.w-8)<.6);}
  await h.screenshot(join(out,name+'.png'));
 };
 try{
  await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.prompt');await h.type_('验证 composer 交互');await click('ai.send');
  await visible('ai.interaction.option.0');assert((await visible('ai.interaction.title')).text.includes('如何处理'));
  assert(!(await h.query('ai.host_approval')).some(shown));assert(!(await h.query('ai.prompt')).some(shown));
- const stop=await visible('ai.stop');const panel=await visible('ai.interaction.panel');assert(!flat(await h.query('ai.conversation')).some((n:any)=>n.test_id==='ai.interaction.panel'));
+ assert(!(await h.query('ai.stop')).some(shown));assert(!(await h.query('ai.send')).some(shown));const panel=await visible('ai.interaction.panel');assert(!flat(await h.query('ai.conversation')).some((n:any)=>n.test_id==='ai.interaction.panel'));
  await capture('question');await h.resizeWindow(860,480);await capture('question-compact');await h.resizeWindow(1200,900);await h.sleep(100);const beforeEmpty=requests.length;await click('ai.interaction.submit');await visible('ai.interaction.error');assert.equal(requests.length,beforeEmpty);report.checks.push('empty answer is rejected without leaving the question');report.checks.push('real question tool replaces composer input; transcript has no approval card');
- const questionRequests=requests.length;await click('ai.interaction.option.1');await click('ai.interaction.answer');await h.type_('保留自定义答案');assert.equal((await h.inputState('ai.interaction.answer')).buffer,'保留自定义答案');await click('ai.interaction.postpone');await visible('ai.interaction.pending');await click('ai.prompt');await h.type_('保留这条草稿');const draft=(await h.inputState('ai.prompt')).buffer;assert.equal(draft,'保留这条草稿');
+ const questionRequests=requests.length;assert(!(await h.query('ai.interaction.answer')).some(shown));await visible('ai.interaction.other');await click('ai.interaction.option.1');await click('ai.interaction.option.6');await visible('ai.interaction.answer');assert(!(await h.query('ai.interaction.other')).some(shown));await h.type_('保留自定义答案');assert.equal((await h.inputState('ai.interaction.answer')).buffer,'保留自定义答案');await capture('question-custom');await click('ai.interaction.option.1');assert(!(await h.query('ai.interaction.answer')).some(shown));await click('ai.interaction.option.6');assert.equal((await h.inputState('ai.interaction.answer')).buffer,'保留自定义答案');await click('ai.interaction.postpone');await visible('ai.interaction.pending');await click('ai.prompt');await h.type_('保留这条草稿');const draft=(await h.inputState('ai.prompt')).buffer;assert.equal(draft,'保留这条草稿');
  await h.sleep(200);assert.equal(requests.length,questionRequests,'postpone must not answer');
  await capture('pending-question');await click('ai.interaction.pending');await visible('ai.interaction.option.1');assert.equal((await h.inputState('ai.interaction.answer')).buffer,'保留自定义答案');
  report.checks.push('postpone leaves provider waiting and restores ordinary input');
  await click('ai.interaction.option.0');await click('ai.interaction.submit');
  await visible('ai.interaction.approve');assert.equal(await readFile(marker,'utf8').catch(()=>null),null,'zero execution before approval');
- const approvalStop=await visible('ai.stop');assert.equal(approvalStop.rect.x,stop.rect.x);assert.equal(approvalStop.rect.y,stop.rect.y);assert.equal(approvalStop.rect.w,28);assert.equal(approvalStop.rect.h,28);
+ assert(!(await h.query('ai.stop')).some(shown));assert(!(await h.query('ai.send')).some(shown));
  await capture('approval');
  const content=await visible('ai.interaction.panel');const beforeScroll=await visible('ai.interaction.approve');await h.scrollAt(content.rect.x+content.rect.w/2,content.rect.y+content.rect.h/2,0,600);await h.sleep(120);const afterScroll=await visible('ai.interaction.approve');assert.deepEqual(afterScroll.rect,beforeScroll.rect,'decision row stays fixed while request scrolls');
  await h.resizeWindow(860,480);await capture('approval-compact');await h.resizeWindow(1200,900);await h.sleep(100);report.checks.push('compact window retains every action; request scrolling leaves decisions fixed');await click('ai.interaction.postpone');await visible('ai.prompt');assert.equal((await h.inputState('ai.prompt')).buffer,draft);

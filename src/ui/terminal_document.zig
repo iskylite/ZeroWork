@@ -509,6 +509,7 @@ pub const Document = struct {
         var positions: [256]?u32 = @splat(null);
         for (self.records.items, 0..) |*r, i| {
             const p = try self.raw.resolveAnchor(r.anchor);
+            if (p == null) r.row_id = null;
             if (p) |point| if (!point.alternate_screen) {
                 if (point.source_version == doc.source_version) {
                     positions[i] = point.row;
@@ -735,6 +736,11 @@ pub const Document = struct {
     fn patchTail(self: *Document, native: *const terminal.TerminalSnapshot) !bool {
         const cache = self.tail_cache orelse return false;
         if (self.source_version == 0 or tailFingerprint(&native.projection) != cache.fingerprint) return false;
+        // A clear followed by the same prompt can leave identical VT cells
+        // and row IDs while invalidating application insertion anchors.
+        for (self.records.items) |record| {
+            if (record.row_id != null and try self.raw.resolveAnchor(record.anchor) == null) return false;
+        }
         const doc = if (self.cached) |*value| value else return false;
         if (cache.row >= doc.rows.len) return false;
         const old = doc.rows[cache.row];
@@ -1465,6 +1471,59 @@ test "builtin_records native clear preserves only valid tracked positions and ra
     defer captured.deinit(a);
     try std.testing.expect(std.mem.indexOf(u8, captured.document.text, "new%") != null);
     try std.testing.expect(std.mem.indexOf(u8, captured.document.text, "supported commands") == null);
+}
+
+test "builtin_records repeated clear removes log card anchored at the first prompt" {
+    const a = std.testing.allocator;
+    const Adapter = @import("../vt/ghostty_adapter.zig").Adapter;
+    for ([_][]const u8{ "\x1b[2J\x1b[H", "\x1b[H\x1b[2J\x1b[3J" }) |clear| {
+        var adapter = try Adapter.init(a, 4, 32);
+        defer adapter.destroy();
+        _ = try adapter.feed("prompt% ");
+        var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+        var document = Document.init(a, source.service(), source.owner);
+        defer document.deinit();
+        const id = try document.begin("@log", 5);
+        try document.finish(source.owner, id, .success, "已打开会话历史");
+        var initial = try document.service().snapshot(a);
+        initial.deinit(a);
+        for (0..3) |_| {
+            _ = try adapter.feed(clear);
+            _ = try adapter.feed("prompt% ");
+            var snap = try document.service().snapshot(a);
+            defer snap.deinit(a);
+            var captured = try document.service().searchSnapshot(a);
+            defer captured.deinit(a);
+            try std.testing.expect(std.mem.indexOf(u8, captured.document.text, "prompt%") != null);
+            try std.testing.expect(std.mem.indexOf(u8, captured.document.text, "@log") == null);
+        }
+        _ = try adapter.feed("\r\nafter-clear\r\nprompt% ");
+        var later = try document.service().searchSnapshot(a);
+        defer later.deinit(a);
+        try std.testing.expect(std.mem.indexOf(u8, later.document.text, "@log") == null);
+    }
+}
+
+test "builtin_records clear retains log card already in scrollback" {
+    const a = std.testing.allocator;
+    const Adapter = @import("../vt/ghostty_adapter.zig").Adapter;
+    var adapter = try Adapter.init(a, 4, 32);
+    defer adapter.destroy();
+    _ = try adapter.feed("prompt% ");
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    const id = try document.begin("@log", 5);
+    try document.finish(source.owner, id, .success, "已打开会话历史");
+    _ = try adapter.feed("\r\n1\r\n2\r\n3\r\n4\r\nprompt% ");
+    _ = try adapter.feed("\x1b[H\x1b[2Jprompt% ");
+    var history = try document.service().searchSnapshot(a);
+    defer history.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, history.document.text, "@log") != null);
+    _ = try adapter.feed("\x1b[3J");
+    var cleared = try document.service().searchSnapshot(a);
+    defer cleared.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, cleared.document.text, "@log") == null);
 }
 
 test "builtin_records wrapped commands copy original text and terminal results are immutable" {

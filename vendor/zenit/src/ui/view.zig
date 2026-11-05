@@ -1576,6 +1576,12 @@ pub fn Canvas(comptime Props: type, comptime P: type) type {
             }
 
             fn tick(node: *Node) void {
+                // Retained loading indicators keep their hook after hiding.
+                // A zero-sized hidden canvas is not classified off-screen by
+                // the tick traversal, so check ancestors before dirtying it;
+                // otherwise completed/failed operations keep repainting forever.
+                // Leave the hook installed so showing it resumes animation.
+                if (!node.isDisplayedInTree()) return;
                 const d = node.meta.per_frame.custom_hooks.draw orelse return;
                 if (d.callback != &drawThunk) return;
                 const st: *State = @ptrCast(@alignCast(d.context orelse return));

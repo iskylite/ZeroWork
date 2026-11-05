@@ -23,7 +23,7 @@ const parent: svc.OperationKey = .{ .owner = .app, .operation_id = 180 };
 const old_reference = "zw1_0000000000000000000000000000000000000000000000000000000000000000";
 
 const fixture =
-    \\import base64,gzip,json,os,pathlib,socket,ssl,subprocess,sys,tempfile
+    \\import base64,gzip,json,os,pathlib,socket,ssl,subprocess,sys,tempfile,time
     \\with tempfile.TemporaryDirectory(prefix='zerowork-bmc-bootstrap-') as directory:
     \\ d=pathlib.Path(directory);mode=sys.argv[2]
     \\ (d/'cert.cnf').write_text('[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=127.0.0.1\n[ext]\nsubjectAltName=IP:127.0.0.1\n')
@@ -68,14 +68,23 @@ const fixture =
     \\     if mode.startswith('asset-'): public['RedfishVersion']='1.17.2.0.3.8.0.21'
     \\     response(200,root)
     \\    elif path=='/js/app.0bc71eb0.js' and method=='GET':
-    \\     assert mode.startswith('asset-') and headers.get('accept-encoding')=='identity' and 'x-auth-token' not in headers
+    \\     assert mode.startswith('asset-') and headers.get('accept-encoding')=='gzip' and 'x-auth-token' not in headers
     \\     asset=b'/* ephemeral loopback asset */'*3000
     \\     if mode=='asset-large-gzip': asset=b''.join(os.urandom(1024)+b'/* ephemeral loopback only */'*144 for _ in range(2300))
     \\     if mode=='asset-bomb': asset=b'x'*(16*1024*1024+1)
     \\     encoded=gzip.compress(asset,mtime=0)
     \\     if mode=='asset-truncated': encoded=encoded[:-3]
     \\     if mode=='asset-trailing': encoded+=b'extra'
-    \\     if mode=='asset-plain': response(200,asset,{},True)
+    \\     if mode in ('asset-slow-plain','asset-slow-gzip'):
+    \\      b=asset if mode=='asset-slow-plain' else encoded
+    \\      h=('HTTP/1.1 200 OK\r\nContent-Length: '+str(len(b))+'\r\n').encode()
+    \\      if mode=='asset-slow-gzip': h+=b'Content-Encoding: gzip\r\n'
+    \\      s.sendall(h+b'\r\n')
+    \\      parts=[b[:len(b)//3],b[len(b)//3:2*len(b)//3],b[2*len(b)//3:]]
+    \\      for i,part in enumerate(parts):
+    \\       if i: time.sleep(8)
+    \\       s.sendall(part)
+    \\     elif mode=='asset-plain': response(200,asset,{},True)
     \\     else: response(200,encoded,{'Content-Encoding':'gzip'},True)
     \\    elif path=='/redfish/v1/SessionService' and method=='GET':
     \\     assert not zero
@@ -237,6 +246,7 @@ fn autoProbe(mode: []const u8, expected_error: ?anyerror, default_override: bool
     try factory.begin(factory.context, request(context, bytes));
     const result = (try drain(factory)).result;
     const elapsed_ms = console.progress.nowMs() -| started_ms;
+    if (std.mem.startsWith(u8, mode, "asset-slow-")) try std.testing.expect(elapsed_ms >= 16000);
     try std.testing.expectEqual(if (expected_error == null) probes.Outcome.succeeded else probes.Outcome.failed, result.outcome);
     if (expected_error) |err| try expectReadableFailure(mode, err, result.safe_message, elapsed_ms);
     try std.testing.expectEqual(@as(usize, if (untrusted) 0 else 1), replies.prompts);
@@ -281,6 +291,10 @@ test "BMC bootstrap large streamed gzip public asset completes framing and diges
     // Match the live-shaped multi-megabyte encoded / eleven-megabyte decoded
     // body without retaining device JavaScript or weakening the digest gate.
     try autoProbe("asset-large-gzip", error.UnsupportedProfilePublicEvidence, true);
+}
+test "BMC bootstrap slow public assets keep downloading beyond fifteen seconds without consuming credentials" {
+    try autoProbe("asset-slow-plain", error.UnsupportedProfilePublicEvidence, true);
+    try autoProbe("asset-slow-gzip", error.UnsupportedProfilePublicEvidence, true);
 }
 test "BMC bootstrap operation default secret overrides an existing saved reference without prompting" {
     try autoProbe("success", null, true);

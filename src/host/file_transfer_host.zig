@@ -68,6 +68,7 @@ pub const Host = struct {
     /// Manager events remain in Mux; only Manager may poll them.
     pub fn safeTick(self: *Host) !bool {
         var at: usize = 0;
+        var pending = false;
         while (at < self.entries.items.len) {
             const entry = self.entries.items[at];
             if (entry.backend.transportFailure()) |reason| {
@@ -110,9 +111,13 @@ pub const Host = struct {
                 self.allocator.destroy(entry);
                 continue;
             }
+            // A registered ready connection is retained for reuse, not work
+            // requiring another UI frame. Manager owns active-job polling;
+            // the runtime publishes a wakeup if this idle transport fails.
+            pending = pending or !entry.registered or entry.closing or entry.faulted;
             at += 1;
         }
-        return self.entries.items.len != 0;
+        return pending;
     }
 
     /// Nonblocking. Actual draining, Mux detach, and done-thread deinit happen

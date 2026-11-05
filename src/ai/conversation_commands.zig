@@ -49,9 +49,12 @@ pub const Command = struct {
         const source = store.find(pin.source) orelse return error.ConversationNotFound;
         if (source.content_revision != pin.revision) return error.CheckpointChanged;
         if (turn == 0 or turn > source.last_turn) return error.NoStableCheckpoint;
-        const snapshot = try @import("wire_history.zig").History.copy(store.allocator, messages, "");
+        var snapshot = try @import("wire_history.zig").History.copy(store.allocator, messages, "");
+        errdefer snapshot.deinit();
+        const presentation = if (pin.presentation) |bytes| try snapshot.arena.?.allocator().dupe(u8, bytes) else null;
         pin.history.deinit();
         pin.history = snapshot;
+        pin.presentation = presentation;
         pin.turn = turn;
     }
     pub fn deinit(self: *Command) void {

@@ -507,11 +507,16 @@ pub fn Host(comptime Process: type) type {
                         p.cancel = "稍后安装";
                     },
                     10 => {
-                        p.title = "更新未完成";
+                        p.title = self.status.failureTitle();
                         p.description = self.status.messageText();
-                        p.message = "应用尚未退出。可重试，或从官方发布页下载安装包。";
+                        p.message = self.status.failureHint();
                         p.primary = "重新检查";
                         p.warning = true;
+                    },
+                    12 => {
+                        p.title = "暂无可用的正式版更新";
+                        p.description = self.status.messageText();
+                        p.primary = "重新检查";
                     },
                     else => {
                         p.description = self.status.messageText();

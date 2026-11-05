@@ -104,7 +104,7 @@ test "round authority handoff preserves old tool pairs and refreshes only the ne
             const self: *@This() = @ptrCast(@alignCast(raw));
             if (self.refreshed) return null;
             self.refreshed = true;
-            return .{ .table = try tools.cloneTable(self.successor, allocator), .notice = try allocator.dupe(u8, "ZeroWork context notice: original conversation now belongs to group 7; binding revision 2."), .notice_revision = 1 };
+            return .{ .table = try tools.cloneTable(self.successor, allocator), .notice = try allocator.dupe(u8, "ZeroWork context notice: original conversation now belongs to group 7; binding revision 2."), .notice_revision = 1, .system = try @import("session_prompt.zig").build(allocator, .auto, try tools.providerDefinitions(self.successor, self.successor.arena.allocator())) };
         }
         fn ack(raw: *anyopaque, revision: u64, _: ?*provider.CancelToken) !void {
             try std.testing.expectEqual(@as(u64, 1), revision);
@@ -122,6 +122,9 @@ test "round authority handoff preserves old tool pairs and refreshes only the ne
     try std.testing.expect(run.scope.owner.eql(next_context.binding));
     try std.testing.expect(run.records.items[0].key.owner.eql(context.binding));
     const request = try run.nextRequest();
+    try std.testing.expect(std.mem.indexOf(u8, request.system, "connection assistant") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.system, "stable rules") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request.system, "Current host execution mode") == null);
     try http.validateToolMessages(request);
     try std.testing.expectEqualStrings("create-original", request.messages[1].tool_call_id.?);
     try std.testing.expectEqual(provider.Role.user, request.messages[2].role);
@@ -161,8 +164,10 @@ test "tool deadline cancelled authority refresh releases the candidate and keeps
             var next = try tools.cloneTable(previous, allocator);
             errdefer next.deinit();
             const notice = try allocator.dupe(u8, "cancelled candidate");
+            errdefer allocator.free(notice);
+            const system = try allocator.dupe(u8, "cancelled system");
             cancel.?.cancel();
-            return .{ .table = next, .notice = notice, .notice_revision = 1 };
+            return .{ .table = next, .notice = notice, .notice_revision = 1, .system = system };
         }
     };
     var fixture: Fixture = .{};
@@ -174,6 +179,7 @@ test "tool deadline cancelled authority refresh releases the candidate and keeps
     const callbacks: loop_mod.Host = .{ .context = &fixture, .execute = Fixture.execute, .refresh_authority = Fixture.refresh };
     try std.testing.expectError(error.Cancelled, run.refreshAuthority(callbacks, &cancel));
     try std.testing.expectEqual(@as(u64, 0), run.notice_revision);
+    try std.testing.expectEqualStrings("", run.request.system);
     try std.testing.expectEqual(@as(usize, 0), run.messages.items.len);
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
     try std.testing.expectError(error.Cancelled, run.refreshAuthority(callbacks, &cancel));

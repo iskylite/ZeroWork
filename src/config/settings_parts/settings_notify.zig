@@ -26,6 +26,19 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 8 });
         try labels.appendChild(cx.allocator, status_row);
         try row.appendChild(cx.allocator, labels);
+        if (!std.mem.eql(u8, status, "不可用") and !std.mem.eql(u8, status, "查询中…")) {
+            const waiting = if (bound.hooks.authorization_feedback) |read| blk: {
+                const feedback = read(bound.hooks.context) orelse break :blk false;
+                break :blk std.mem.eql(u8, feedback, "正在等待系统通知授权结果…");
+            } else false;
+            if (waiting) {
+                try row.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.note, "等待授权…"));
+            } else {
+                const label = if (std.mem.eql(u8, status, "未授权")) "允许通知" else "打开系统设置";
+                const action = try bound.actionButton(cx, .notification_permission, ui.icons.external_link, label, "settings.notifications.permission.open", false);
+                try row.appendChild(cx.allocator, action.wrapper);
+            }
+        }
         try permission_panel.appendChild(cx.allocator, row);
         try section.body.appendChild(cx.allocator, permission_panel);
     }

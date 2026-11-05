@@ -4,6 +4,7 @@
 extern int zw_update_startup_gate(const char *);
 extern void zw_update_healthy(void);
 #if ZW_UPDATE_TESTING
+extern void zw_update_test_fetch_contracts(void);
 extern int zw_update_test_seed_verified(const char *,const char *);
 extern void zw_update_start(int);
 extern void zw_update_prepare(const char *,const float *);
@@ -41,6 +42,7 @@ void zw_update_fixture_main(void){@autoreleasepool{
     NSArray *args=NSProcessInfo.processInfo.arguments;
     @try{
 #if ZW_UPDATE_TESTING
+        if(args.count>1 && [args[1] isEqual:@"--fetch-contracts"]){zw_update_test_fetch_contracts();return;}
         if(args.count>1 && [args[1] isEqual:@"--runtime"]){Runtime(args);return;}
 #endif
         if(args.count>2 && [args[1] isEqual:@"--birth"]){printf("%llu\n",ZWBirth([args[2] intValue]));return;}

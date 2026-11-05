@@ -72,6 +72,7 @@ pub const Turn = struct {
     elapsed_ms: u64 = 0,
     input_tokens: ?u64 = null,
     output_tokens: ?u64 = null,
+    request_count: ?u64 = null,
     before: wire.History = .{},
     after: wire.History = .{},
     answer: []u8 = &.{},
@@ -217,7 +218,7 @@ pub const Turn = struct {
         self.timeline.appendAssumeCapacity(.{ .notice = self.host_notices.items.len - 1 });
     }
     pub fn clone(self: *const Turn, a: std.mem.Allocator) !Turn {
-        var result: Turn = .{ .id = self.id, .task_id = self.task_id, .sent_at_ms = self.sent_at_ms, .ended_at_ms = self.ended_at_ms, .started_mono_ms = self.started_mono_ms, .elapsed_ms = self.elapsed_ms, .input_tokens = self.input_tokens, .output_tokens = self.output_tokens, .thinking_started_ms = self.thinking_started_ms, .thinking_ended_ms = self.thinking_ended_ms, .thinking_expanded = self.thinking_expanded };
+        var result: Turn = .{ .id = self.id, .task_id = self.task_id, .sent_at_ms = self.sent_at_ms, .ended_at_ms = self.ended_at_ms, .started_mono_ms = self.started_mono_ms, .elapsed_ms = self.elapsed_ms, .input_tokens = self.input_tokens, .output_tokens = self.output_tokens, .request_count = self.request_count, .thinking_started_ms = self.thinking_started_ms, .thinking_ended_ms = self.thinking_ended_ms, .thinking_expanded = self.thinking_expanded };
         errdefer result.deinit(a);
         result.file_source = if (self.file_source) |source| try source.clone(a) else null;
         result.before = try wire.History.copy(a, self.before.messages, "");

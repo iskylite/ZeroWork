@@ -17,6 +17,9 @@ const Fixture = struct {
         return self.initWithCount(configured, if (configured) 1 else 0);
     }
     fn initWithCount(self: *Fixture, configured: bool, count: usize) !void {
+        return self.initWithExpansion(configured, count, true);
+    }
+    fn initWithExpansion(self: *Fixture, configured: bool, count: usize, open_first: bool) !void {
         self.cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
         try self.cx.setTestFrameStep(100);
         self.cx.setViewport(600, 700);
@@ -36,6 +39,8 @@ const Fixture = struct {
         value.ai.providers = &providers;
         value.ai.provider_count = count;
         self.controller = try Controller.init(std.testing.allocator, value);
+        // Editing/layout fixtures explicitly open the form they exercise.
+        if (open_first and count > 0) try self.controller.ai_fields.provider_open.put(std.testing.allocator, 0, true);
         self.saving = try self.scope.createSignal(bool, false);
         self.changes = 0;
         self.view_scope = try self.scope.childScope();
@@ -108,6 +113,25 @@ fn hasText(node: *ui.Node, value: []const u8) bool {
 }
 fn inputEvent(state: *ui.widgets.input.TextInputState, event: ui.events.Event) void {
     _ = ui.widgets.input.inputEventHandler(event, state);
+}
+
+test "native provider cards default collapsed and preserve manual expansion within settings" {
+    var f: Fixture = undefined;
+    try f.initWithExpansion(true, 2, false);
+    defer f.deinit();
+    for (0..2) |i| {
+        var buffer: [64]u8 = undefined;
+        const id = try std.fmt.bufPrint(&buffer, "settings.ai.provider.{d}.header", .{i});
+        try std.testing.expect(!byId(f.mounted.root, id).?.behavior.interaction.a11y.?.expanded.?);
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 64), byId(f.mounted.root, "settings.ai.provider.0.card").?.globalRect().h, 0.1);
+    f.clickId("settings.ai.provider.0.header");
+    try std.testing.expect(byId(f.mounted.root, "settings.ai.provider.0.header").?.behavior.interaction.a11y.?.expanded.?);
+    try f.remount();
+    try std.testing.expect(byId(f.mounted.root, "settings.ai.provider.0.header").?.behavior.interaction.a11y.?.expanded.?);
+    try std.testing.expect(!byId(f.mounted.root, "settings.ai.provider.1.header").?.behavior.interaction.a11y.?.expanded.?);
+    try std.testing.expect(!f.controller.model.dirty);
+    try std.testing.expectEqual(@as(usize, 0), f.changes);
 }
 
 test "provider enabled status stays readable in every builtin at maximum transparency" {

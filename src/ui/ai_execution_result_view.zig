@@ -283,9 +283,10 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
         try collection.content.appendChild(cx.allocator, row);
     }
     if (projection.actionTarget() != null) {
-        const view = try ui.widgets.Button(.{ .variant = .ghost, .label = "查看终端", .base_style = S.action(), .disabled = callbacks == null, .on_click = cx.on(State, state, State.viewTerminal) }).mount(scope, cx);
+        const view = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get("terminal").?, .icon_size = 14, .a11y_label = "查看终端", .base_style = S.iconButton(), .disabled = callbacks == null, .on_click = cx.on(State, state, State.viewTerminal) }).mount(scope, cx);
         view.meta.ownership.meta.test_id = "ai.execution.result.view_terminal";
-        try footer.appendChild(cx.allocator, view);
+        const view_hint = try @import("control_hint.zig").mount(cx, scope, view, "查看原执行终端", .{ .id = "ai.execution.result.view_terminal.tooltip" });
+        try footer.appendChild(cx.allocator, view_hint.wrapper);
         if (projection.canStop()) {
             const stop = try ui.widgets.Button(.{ .variant = .ghost, .label = "停止执行", .base_style = S.action(), .disabled = state.controls_disabled, .on_click = cx.on(State, state, State.stop) }).mount(scope, cx);
             stop.meta.ownership.meta.test_id = "ai.execution.result.stop";
@@ -304,9 +305,14 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
         try footer.appendChild(cx.allocator, copy);
     }
     if (!projection.input_result) {
-        const details = try ui.widgets.Button(.{ .variant = .ghost, .label = state.details_label, .base_style = S.action(), .on_click = cx.on(State, state, State.toggleDetails) }).mount(scope, cx);
+        const details = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.map(state.details_label, struct {
+            fn asset(label: []const u8) ?ui.SvgAsset {
+                return if (std.mem.eql(u8, label, "收起详情")) ui.icons.chevron_up else ui.icons.chevron_down;
+            }
+        }.asset), .icon_size = 14, .a11y_label = state.details_label, .base_style = S.iconButton(), .on_click = cx.on(State, state, State.toggleDetails) }).mount(scope, cx);
         details.meta.ownership.meta.test_id = "ai.execution.result.details_toggle";
-        try footer.appendChild(cx.allocator, details);
+        const details_hint = try @import("control_hint.zig").mount(cx, scope, details, state.details_label, .{ .id = "ai.execution.result.details_toggle.tooltip" });
+        try footer.appendChild(cx.allocator, details_hint.wrapper);
     } else if (projection.actionTarget() == null and projection.terminal_output.len == 0) footer.setDisplay(.none);
     try @import("ai_text_selection.zig").attach(cx, scope, scroll.content);
     try @import("ai_text_selection.zig").attach(cx, scope, collection.content);

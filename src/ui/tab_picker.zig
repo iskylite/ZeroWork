@@ -153,7 +153,10 @@ pub const View = struct {
             try labels.appendChild(self.cx.allocator, try ui.text(self.cx, tab.details, .{ .font_size = 10, .color = theme.current().fg_2, .text_overflow = .ellipsis }));
             try row.appendChild(self.cx.allocator, labels);
             try row.appendChild(self.cx.allocator, try ui.text(self.cx, self.hooks.status(self.hooks.context, id), .{ .font_size = 10, .color = if (self.model.active == id) theme.current().accent_ink else theme.current().fg_2 }));
-            try self.rows.appendChild(self.cx.allocator, row);
+            const full_identity = try std.fmt.allocPrint(self.cx.allocator, "{s}\n{s}", .{ tab.name(), tab.details });
+            defer self.cx.allocator.free(full_identity);
+            const hint = try @import("control_hint.zig").mount(self.cx, scope, row, try scope.createText(full_identity, .{}), .{ .id = "tabs.picker.row.tooltip", .width = 360, .wrap = .char, .visible = self.open, .layout = .{ .width = .fill(), .flex_shrink = 0 } });
+            try self.rows.appendChild(self.cx.allocator, hint.wrapper);
         }
         if (self.picker.highlighted) |id| {
             for (self.picker.results.items, 0..) |candidate, index| if (candidate == id) {
@@ -235,7 +238,8 @@ test "picker uses prototype panel and rows; no-match Enter preserves active tab"
     defer model.deinit();
     const first: identity.TabId = @fromBackingInt(1);
     const second: identity.TabId = @fromBackingInt(2);
-    try model.append(first, .{ .session = .{ .session_id = @fromBackingInt(91) } }, "same");
+    const long_title = "production-session-very-long-title-with-012345678901234567890";
+    try model.append(first, .{ .session = .{ .session_id = @fromBackingInt(91) } }, long_title);
     try model.setDetails(first, "test@one.example · SSH");
     try model.append(second, .{ .session = .{ .session_id = @fromBackingInt(92) } }, "same");
     try model.setDetails(second, "test@two.example · SSH");

@@ -26,6 +26,10 @@ pub const Context = struct {
 pub const Contribution = struct {
     definition: @import("plugin_tools.zig").ToolDefinition,
     authority: provider.ToolAuthority,
+    /// Exact capable sources captured by the controller, independently for
+    /// terminal reads, PTY execution and shell attachment. Null uses the legacy
+    /// terminal-read projection; an explicit empty set advertises no sources.
+    session_targets: ?[]const identity.SessionHandle = null,
 };
 pub const Invocation = struct {
     dispatch_fence: ?provider.DispatchFence = null,

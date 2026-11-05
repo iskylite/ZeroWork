@@ -25,6 +25,9 @@ const Preview = struct {
         self.cx.requestRedraw();
     }
     fn ignore(_: *anyopaque) void {}
+    fn action(raw: *anyopaque, id: u64, _: @import("ui/ai_session_row.zig").Action) void {
+        select(raw, id);
+    }
     fn replay(self: *Preview) void {
         const ids = @import("config/theme_presets.zig").ids;
         for (ids, 0..) |id, index| if (std.mem.eql(u8, id, selected_theme)) {
@@ -40,13 +43,13 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(selected_theme));
     cx.setTheme(theme.widgetTheme(theme.currentName()));
     const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .top = 40 }, .background = theme.baseColors().app }, .{});
-    const content = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 276 }, .direction = .column, .padding = .{ .left = 14, .right = 14 }, .flex_shrink = 0 }, .{});
+    const content = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 340 }, .direction = .column, .padding = .{ .left = 14, .right = 14 }, .flex_shrink = 0 }, .{});
     content.meta.ownership.meta.test_id = "ai.empty.preview.content";
     try root.appendChild(cx.allocator, content);
     const result = try ui.text(cx, "selected none", .{ .font_size = 11, .color = theme.current().fg_2 });
     result.meta.ownership.meta.test_id = "ai.empty.preview.result";
     const state = try scope.createState(Preview, .{ .cx = cx, .result = result });
-    const welcome = try V.mount(cx, scope, true, .{ .context = state, .logo_texture = logo_texture, .summarize = Preview.ignore, .logs = Preview.ignore, .settings = Preview.ignore, .ollama = Preview.ignore, .select = Preview.select, .recent = &.{ .{ .id = 17, .title = titles[@backingInt(fixture)] }, .{ .id = 29, .title = "普通短标题" } } });
+    const welcome = try V.mount(cx, scope, true, .{ .context = state, .logo_texture = logo_texture, .summarize = Preview.ignore, .logs = Preview.ignore, .settings = Preview.ignore, .ollama = Preview.ignore, .session_hooks = .{ .context = state, .select = Preview.select, .request_close = Preview.select, .remove = Preview.select, .act = Preview.action }, .recent = &.{ .{ .id = 17, .title = titles[@backingInt(fixture)], .owner = "1 · Local Terminal", .bound = true, .phase = .running, .can_copy = true, .can_remove = false }, .{ .id = 29, .title = "普通短标题", .owner = "历史连接环境", .phase = .stopped, .can_restore = true, .can_copy = true } } });
     try content.appendChild(cx.allocator, welcome);
     try root.appendChild(cx.allocator, result);
     const replay = try ui.widgets.Button(.{ .label = "Replay theme", .on_click = cx.on(Preview, state, Preview.replay) }).mount(scope, cx);
@@ -61,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = try parseTheme(arg[8..]) else if (std.mem.startsWith(u8, arg, "--fixture=")) fixture = std.meta.stringToEnum(Fixture, arg[10..]) orelse return error.InvalidFixture else return error.InvalidOption;
     }
     try @import("platform/ui_fonts.zig").register();
-    const app = try App.init(std.heap.c_allocator, .{ .io = init.io, .font = .{ .fallback_families = @import("platform/ui_fonts.zig").families }, .window = .{ .width = 600, .height = 400, .title = "ZeroWork Recent Conversation Preview", .titlebar = .custom_inset, .titlebar_height = 40 } });
+    const app = try App.init(std.heap.c_allocator, .{ .io = init.io, .font = .{ .fallback_families = @import("platform/ui_fonts.zig").families }, .window = .{ .width = 600, .height = 460, .title = "ZeroWork Recent Conversation Preview", .titlebar = .custom_inset, .titlebar_height = 40 } });
     defer app.deinit();
     var image = try @import("config/background_asset.zig").decode(std.heap.c_allocator, @import("app_icon_assets").ai_assistant, .{});
     defer image.deinit(std.heap.c_allocator);

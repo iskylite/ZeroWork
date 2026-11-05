@@ -46,6 +46,45 @@ fn member(fake: *Fake, id: u64, bindings: []const tools.ToolBinding) tools.Membe
 }
 const binding: tools.ToolBinding = .{ .plugin_id = "example", .definition_id = "example.power_write", .handler = Fake.handler };
 
+test "session capabilities narrow each host execution source independently in a mixed group" {
+    const a = std.testing.allocator;
+    var fake: Fake = .{};
+    const read_binding: tools.ToolBinding = .{ .plugin_id = "example", .definition_id = "read_terminal", .handler = Fake.handler };
+    const members = [_]tools.Member{ member(&fake, 101, &.{read_binding}), member(&fake, 102, &.{read_binding}) };
+    const context: tools.host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = captured.owner, .binding_revision = 1, .grant_revision = 1 };
+    var contributions = @import("host_terminal_queries.zig").contributions ++ @import("host_execution.zig").contributions;
+    for (&contributions) |*contribution| {
+        if (std.mem.eql(u8, contribution.definition.id, "host.run_in_terminal")) contribution.session_targets = &.{members[0].owner};
+        if (std.mem.eql(u8, contribution.definition.id, "host.attach_shell")) contribution.session_targets = &.{members[1].owner};
+    }
+    var table = try tools.RequestTable.initWithHost(a, captured, &.{@import("legacy_adapter.zig").builtin_definitions[1]}, &members, context, &contributions);
+    defer table.deinit();
+    const Case = struct { id: []const u8, targets: []const identity.SessionHandle };
+    for ([_]Case{
+        .{ .id = "host.read_terminal", .targets = &.{ members[0].owner, members[1].owner } },
+        .{ .id = "host.run_in_terminal", .targets = &.{members[0].owner} },
+        .{ .id = "host.attach_shell", .targets = &.{members[1].owner} },
+    }) |case| {
+        var name: [64]u8 = undefined;
+        const entry = table.lookup(try tools.encodeName(&name, case.id)).?;
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, entry.definition.schema, .{});
+        defer parsed.deinit();
+        const references = parsed.value.object.get("properties").?.object.get("session_ref").?.object.get("enum").?.array.items;
+        try std.testing.expectEqual(case.targets.len, references.len);
+        for (case.targets, references) |target, reference| {
+            const expected = try @import("host_queries.zig").sessionRef(a, context, target);
+            defer a.free(expected);
+            try std.testing.expectEqualStrings(expected, reference.string);
+        }
+    }
+    const wrong_ref = try @import("host_queries.zig").sessionRef(a, context, members[1].owner);
+    defer a.free(wrong_ref);
+    const arguments = try std.json.Stringify.valueAlloc(a, .{ .session_ref = wrong_ref, .command = "pwd", .request_key = "wrong-capability" }, .{});
+    defer a.free(arguments);
+    var name: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidToolArguments, table.parse(a, try tools.encodeName(&name, "host.run_in_terminal"), arguments));
+}
+
 test "dynamic terminal read advertises only its captured capable targets without widening dispatch" {
     const a = std.testing.allocator;
     var fake: Fake = .{};

@@ -662,6 +662,34 @@ test "transfer projection resumes only the original native paused task when its 
     try std.testing.expectEqual(@as(usize, 1), manager.count());
 }
 
+test "transfer ended-state polling stops only after native IO cleanup" {
+    const Poll = struct {
+        event: ?backend.EngineProgress = null,
+        fn poll(raw: *anyopaque) ?backend.EngineProgress {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const event = self.event;
+            self.event = null;
+            return event;
+        }
+    };
+    for ([_]backend.EngineState{ .succeeded, .failed, .cancelled, .paused }) |state| {
+        var engine: Poll = .{};
+        var manager = try backend.Manager.init(std.testing.allocator, .{ .ctx = &engine, .open = Engine.open, .cancel = Engine.cancel, .poll = Poll.poll }, 1, .{ .max_attempts = 1 });
+        defer manager.deinit();
+        try std.testing.expect(!manager.needsPolling());
+        _ = try manager.enqueue(.{ .session_id = 101, .direction = .upload, .sources = &.{"/tmp/idle.txt"}, .local_dir = "/tmp", .remote_dir = "/srv" });
+        try std.testing.expect(manager.needsPolling());
+        manager.tick(0);
+        engine.event = .{ .job = 9, .done_bytes = 10, .total_bytes = 10, .state = state, .job_cleanup = .awaiting };
+        manager.tick(1);
+        try std.testing.expect(manager.needsPolling());
+        engine.event = .{ .job = 9, .done_bytes = 10, .total_bytes = 10, .state = state, .job_cleanup = .released };
+        manager.tick(2);
+        try std.testing.expect(!manager.needsPolling());
+        try std.testing.expectEqual(@as(usize, 1), manager.count());
+    }
+}
+
 test "transfer projection unchanged Manager refresh keeps task nodes focus and user state" {
     const h = try H.init(1440, 900);
     defer h.deinit();

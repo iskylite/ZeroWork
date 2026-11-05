@@ -20,6 +20,7 @@ pub const MacOSWindow = struct {
     extern fn macos_create_window(width: c_int, height: c_int, title: [*:0]const u8) ?*anyopaque;
     extern fn macos_create_window_borderless(width: c_int, height: c_int, title: [*:0]const u8) ?*anyopaque;
     extern fn macos_make_key_window(window_ptr: *anyopaque) void;
+    extern fn macos_hide_window(window_ptr: *anyopaque) void;
     extern fn macos_minimize_window(window_ptr: *anyopaque) c_int;
     extern fn macos_zoom_window(window_ptr: *anyopaque) c_int;
 
@@ -633,6 +634,12 @@ pub const MacOSWindow = struct {
     /// responder. This is the public programmatic counterpart of a user click.
     pub fn activate(self: *MacOSWindow) void {
         macos_make_key_window(self.window_ptr);
+    }
+
+    /// Hide without closing the window or releasing its state. Dock reopen
+    /// restores windows hidden this way when no application window is visible.
+    pub fn hide(self: *MacOSWindow) void {
+        macos_hide_window(self.window_ptr);
     }
 
     extern fn macos_add_child_window(parent_ptr: *anyopaque, child_ptr: *anyopaque) void;

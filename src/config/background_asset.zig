@@ -46,7 +46,7 @@ pub const Limits = struct {
     dimension: usize = 16 * 1024,
 };
 pub const DecodeState = enum { empty, loading, ready, missing, denied, invalid, failed };
-pub const Request = struct { draft_id: u64, asset_revision: u64, path: []const u8, source: Source = .file, order: Order = .sequential, detect_source: bool = false };
+pub const Request = struct { draft_id: u64, asset_revision: u64, path: []const u8, source: Source = .file, order: Order = .sequential, detect_source: bool = false, resume_progress: bool = false };
 /// The worker owns its path independently of Input and ConfigSnapshot buffers.
 pub const OwnedRequest = struct {
     allocator: std.mem.Allocator,
@@ -133,6 +133,10 @@ fn prepareDirectory(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, r
     if (list.paths.items.len == 0) return error.NoUsableImages;
     list.sort();
     list.setOrder(request.order == .random, @truncate(@as(u96, @bitCast(std.Io.Clock.real.now(io).nanoseconds))));
+    if (request.resume_progress) @import("background_progress.zig").restore(io, dir, allocator, request.path, &list) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {}, // Missing, damaged or inaccessible progress never blocks startup.
+    };
     return prepareSelected(io, dir, allocator, request, limits, &list);
 }
 

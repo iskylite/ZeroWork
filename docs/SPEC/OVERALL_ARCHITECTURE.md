@@ -29,7 +29,7 @@
 
 > **版本**：v3.1-Production Draft
 > **编写时间**：2026-10-08
-> **技术栈基准**：Zenit 原生 macOS UI（Metal Retained Node） | Headless VT (libghostty-vt / libvterm) | **Zig 0.17.0（由本地 zvm 固定，构建说明见 docs/GUIDES/DEVELOPMENT.md）** | libssh2 1.11+ / mbedtls 3.x | macOS 14.0+ (Apple Silicon)
+> **技术栈基准**：Zenit 原生 macOS UI（Metal Retained Node） | Headless VT (libghostty-vt / libvterm) | **Zig 0.17.0（由本地 zvm 固定，构建说明见 docs/GUIDES/DEVELOPMENT.md）** | libssh2 1.11+ / mbedtls 3.x | macOS 13.0+ (Apple Silicon)
 
 > **UI 实现边界**：应用界面统一直接使用 Zenit。Zenit 自身负责 macOS 原生窗口、输入与 Metal 平台集成；ZeroWork 不另写 Objective-C/Swift UI 桥接层，也不维护平行的 AppKit/SwiftUI 视图树。
 > **文档体系（当前执行入口）**：

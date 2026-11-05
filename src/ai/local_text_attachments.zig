@@ -101,6 +101,11 @@ pub const ContentRef = struct {
             .truncated = value.body.text.truncated,
         } });
     }
+    /// Rehydrate already captured bytes; never reread a local/remote source.
+    pub fn restore(allocator: std.mem.Allocator, value: Content) !ContentRef {
+        if (!std.unicode.utf8ValidateSlice(value.bytes)) return error.InvalidLocalTextEncoding;
+        return createSnapshot(allocator, value.path, value.bytes, value.captured_at_ms, value.source);
+    }
     fn createSnapshot(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8, captured_at_ms: i64, source: Source) !ContentRef {
         if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAttachmentPath;
         var owned_source = source;

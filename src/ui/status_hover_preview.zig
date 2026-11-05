@@ -44,6 +44,15 @@ pub const Preview = struct {
     }
     fn tick(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Preview = @ptrCast(@alignCast(raw));
+        // Status projection updates can replace the underlying click action
+        // (terminal/file/BMC). Retain hover-to-pin routing around that action.
+        const handler = self.cx.on(Preview, self, click);
+        if (self.trigger.behavior.events.on_click) |current| {
+            if (current.callback != handler.callback or current.context != handler.context) {
+                self.action = current;
+                self.trigger.behavior.events.on_click = handler;
+            }
+        }
         const inside = self.contains(self.trigger);
         const shown = self.open.peek();
         if (self.preview and !shown) {

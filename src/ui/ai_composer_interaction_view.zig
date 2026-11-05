@@ -1,5 +1,6 @@
-//! A stable native composer slot; ordinary editor/attachments and Stop stay
-//! mounted. Caller feeds exact broker identities and owns authorization.
+//! A stable native composer slot; ordinary editor, attachments and actions stay
+//! mounted and are hidden while a request is expanded. The caller owns
+//! authorization and supplies exact broker identities.
 const std = @import("std");
 const ui = @import("ui");
 const question = @import("../ai/user_interaction.zig");
@@ -71,11 +72,13 @@ pub const View = struct {
     target: *ui.Node = undefined,
     command_row: *ui.Node = undefined,
     command: *ui.Node = undefined,
+    impact_row: *ui.Node = undefined,
     impact: *ui.Node = undefined,
     option_group: *ui.Node = undefined,
     option_rows: [7]*ui.Node = undefined,
     option_labels: [6]*ui.Node = undefined,
     option_descriptions: [6]*ui.Node = undefined,
+    custom_label: *ui.Node = undefined,
     custom: ui.widgets.input.InputResult = undefined,
     selected: *ui.Signal(?[]const u8),
     custom_text: *ui.Signal([]const u8),
@@ -120,7 +123,13 @@ pub const View = struct {
         const copy = try self.button(self.command_row, "", "复制命令或详情", "copy", "ai.interaction.copy", false, copyDetail);
         copy.setStyleInline(cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{} });
         try self.content.appendChild(cx.allocator, self.command_row);
-        self.impact = try self.label(self.content, "", S.text(11, 18, 400, true));
+        self.impact_row = try ui.box(cx, S.impactRow(), .{});
+        self.impact_row.meta.ownership.meta.test_id = "ai.interaction.impact.note";
+        const impact_icon = try ui.iconTint(cx, ui.icons.get("info").?, S.theme.current().fg_3, S.icon(12));
+        impact_icon.setStyleInline(cx.allocator, .{ .margin = .{ .top = 3 } });
+        try self.impact_row.appendChild(cx.allocator, impact_icon);
+        self.impact = try self.label(self.impact_row, "", S.text(11, 18, 400, true));
+        try self.content.appendChild(cx.allocator, self.impact_row);
         self.impact.meta.ownership.meta.test_id = "ai.interaction.impact";
         self.route_row = try ui.box(cx, .{ .width = .fill(), .direction = .row, .gap = 6, .flex_shrink = 0 }, .{});
         inline for (.{ .{ "批处理", chooseBatch }, .{ "当前终端", chooseCurrent }, .{ "新工作终端", chooseNew } }, 0..) |item, index| self.route_buttons[index] = try self.button(self.route_row, item[0], item[0], "terminal", std.fmt.comptimePrint("ai.interaction.route.{d}", .{index}), false, item[1]);
@@ -143,8 +152,8 @@ pub const View = struct {
                 self.option_descriptions[index] = try self.label(option_copy, "", S.text(11, 16, 400, true));
                 try row.appendChild(cx.allocator, option_copy);
             } else {
-                const custom_label = try self.label(row, "其他", S.text(12, 16, 500, false));
-                custom_label.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .flex = 0 });
+                self.custom_label = try self.label(row, "其他", S.text(12, 16, 500, false));
+                self.custom_label.meta.ownership.meta.test_id = "ai.interaction.other";
                 self.custom = try ui.widgets.Input(.{ .value = self.custom_text, .placeholder = "输入你的答案…", .embedded = true, .growable = true, .disabled = self.disabled, .on_change = cx.on(View, self, customChanged) }).mountResult(scope, cx);
                 self.custom.node.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 28 }, .background = S.theme.current().surface_2, .border = .{ .radius = 7 } });
                 self.custom.input_container.setStyleInline(cx.allocator, .{ .height = .{ .px = 28 } });
@@ -160,11 +169,11 @@ pub const View = struct {
         self.error_label.meta.ownership.meta.test_id = "ai.interaction.error";
         self.actions = try ui.box(cx, S.actions(), .{});
         self.actions.meta.ownership.meta.test_id = "ai.interaction.actions";
-        _ = try self.button(self.actions, "稍后处理", "稍后处理", "corner-down-left", "ai.interaction.postpone", false, postpone);
         try self.actions.appendChild(cx.allocator, try ui.spacer(cx));
+        _ = try self.button(self.actions, "稍后处理", "稍后处理", "corner-down-left", "ai.interaction.postpone", false, postpone);
         self.reject = try self.button(self.actions, "拒绝", "拒绝执行", "x", "ai.interaction.reject", false, deny);
-        self.accept = try self.button(self.actions, "允许执行", "允许执行", "check", "ai.interaction.approve", true, approve);
-        self.submit_button = try self.button(self.actions, "提交答案", "提交答案", "check", "ai.interaction.submit", true, submit);
+        self.accept = try self.button(self.actions, "允许执行", "允许执行", "check", "ai.interaction.approve", false, approve);
+        self.submit_button = try self.button(self.actions, "提交答案", "提交答案", "check", "ai.interaction.submit", false, submit);
         self.pending = try ui.widgets.Button(.{ .variant = .secondary, .a11y_label = "继续处理待办请求", .base_style = S.pending(), .on_click = cx.on(View, self, reopen) }).mount(scope, cx);
         for (self.pending.children.items) |child| child.setDisplay(.none);
         self.pending.meta.ownership.meta.test_id = "ai.interaction.pending";
@@ -221,7 +230,7 @@ pub const View = struct {
                 try self.command.setTextContent(self.cx.allocator, value.detail);
                 self.command_row.setDisplay(if (is_question or value.detail.len == 0) .none else .flex);
                 try self.impact.setTextContent(self.cx.allocator, value.impact);
-                self.impact.setDisplay(if (value.impact.len == 0) .none else .flex);
+                self.impact_row.setDisplay(if (value.impact.len == 0) .none else .flex);
                 self.option_group.setDisplay(if (is_question) .flex else .none);
                 for (0..6) |index| {
                     self.option_rows[index].setDisplay(if (is_question and index < value.options.len) .flex else .none);
@@ -265,8 +274,10 @@ pub const View = struct {
     pub fn pendingVisible(self: *const View) bool {
         return self.visible and self.source != null and self.postponed;
     }
-    pub fn bodyHeight(self: *const View) f32 {
-        return if (self.source) |source| if (source.value.ticket == .question) 180 else if (source.value.route_selectable) 164 else 132 else 0;
+    pub fn expandedSizing(self: *const View) ui.Sizing {
+        // Use the wrapped content measured by layout, capped independently of
+        // the composer. An explicit result lets its parent re-anchor the dock.
+        return .{ .px = @min(S.max_body_height, self.content.globalRect().h) + 44 };
     }
     fn show(self: *View) void {
         self.panel.setDisplay(if (self.expanded()) .flex else .none);
@@ -277,6 +288,9 @@ pub const View = struct {
         self.reject.setDisplay(if (is_question) .none else .flex);
         self.submit_button.setDisplay(if (is_question) .flex else .none);
         const selected = self.selected.peek();
+        const custom_selected = selected != null and std.mem.eql(u8, selected.?, "custom");
+        self.custom_label.setDisplay(if (custom_selected) .none else .flex);
+        self.custom.node.setDisplay(if (custom_selected) .flex else .none);
         for (self.option_rows, 0..) |row, index| {
             row.setBackground(if (selected != null and std.mem.eql(u8, selected.?, radio_values[index])) S.theme.popupSelection() else ui.Color.TRANSPARENT);
             if (row.behavior.interaction.a11y) |*attrs| attrs.label = if (index == 6) "其他方式" else self.option_labels[index].getText().?.content;
@@ -285,6 +299,8 @@ pub const View = struct {
     fn selectionChanged(self: *View, _: []const u8) void {
         self.error_label.setDisplay(.none);
         self.show();
+        const selected = self.selected.peek() orelse return;
+        if (std.mem.eql(u8, selected, "custom") and self.cx.focus_manager.current_focus != self.custom.input_container) self.cx.setFocus(self.custom.input_container);
     }
     fn customFocused(self: *View) void {
         if (self.input_focus) |handler| handler.invoke();
@@ -382,7 +398,7 @@ pub const View = struct {
         }
         self.colors = colors;
         self.command.setBackground(colors.surface_2);
-        self.impact.setTextColor(colors.warn_ink);
+        self.impact.setTextColor(colors.fg_2);
         self.error_label.setTextColor(colors.danger_ink);
         self.pending.setBackground(colors.surface_2);
         self.custom.node.setBackground(colors.surface_2);

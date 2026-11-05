@@ -20,7 +20,7 @@ pub const ModelKey = struct {
         return std.mem.eql(u8, self.provider_id, other.provider_id) and std.mem.eql(u8, self.model_id, other.model_id);
     }
 };
-pub const UsagePart = struct { name: []const u8, tokens: u64 };
+pub const UsagePart = struct { name: []const u8, tokens: u64, estimated: ?bool = null };
 pub const Usage = struct {
     used_tokens: u64,
     limit_tokens: u64,
@@ -217,10 +217,9 @@ pub const View = struct {
     permission_styles: [2]*ui.Signal(ui.BoxStyle) = undefined,
     permission_checks: [2]*ui.Node = undefined,
     execution_scroll: ui.widgets.ScrollAreaResult = undefined,
-    execution_rows: [6]*ui.Node = undefined,
-    execution_styles: [6]*ui.Signal(ui.BoxStyle) = undefined,
-    execution_checks: [6]*ui.Node = undefined,
-    execution_inherit_label: *ui.Node = undefined,
+    execution_rows: [5]*ui.Node = undefined,
+    execution_styles: [5]*ui.Signal(ui.BoxStyle) = undefined,
+    execution_checks: [5]*ui.Node = undefined,
     retention_select: ui.widgets.SelectResult = undefined,
     retention_value: *ui.Signal(?[]const u8),
     retention_global_label: *ui.Node = undefined,
@@ -241,6 +240,7 @@ pub const View = struct {
     usage_scope: ?*ui.Scope = null,
     ring: *ui.Node = undefined,
     model_brand: *ui.Node = undefined,
+    model_hint_label: *ui.Node = undefined,
     model_brand_hash: ?u64 = null,
     focus_pending: ?S.Kind = null,
     colors: S.theme.Colors,
@@ -328,7 +328,9 @@ pub const View = struct {
         self.ordinary_spacer = try ui.spacer(cx);
         try self.root.appendChild(cx.allocator, self.ordinary_spacer);
         try self.root.appendChild(cx.allocator, self.buttons[4]);
-        try self.root.appendChild(cx.allocator, self.buttons[2]);
+        const model_hint = try @import("control_hint.zig").mount(cx, scope, self.buttons[2], "未配置模型", .{ .id = "ai.composer.model.tooltip", .width = 320, .wrap = .char });
+        self.model_hint_label = model_hint.content.children.items[0];
+        try self.root.appendChild(cx.allocator, model_hint.wrapper);
         self.trailing = try ui.box(cx, S.trailing(), .{});
         self.trailing.meta.ownership.meta.test_id = "ai.composer.trailing";
         try self.root.appendChild(cx.allocator, self.trailing);
@@ -415,7 +417,7 @@ pub const View = struct {
             };
             try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, assets[index], S.theme.current().fg_2, S.icon(16)));
             _ = try self.label(button, names[index], S.text(11.5, 400, 18, false), S.flexibleLabel(18));
-            _ = try self.label(button, if (index == 2) "/" else if (index == 3) "⌘V" else "", S.text(10.5, 400, 16, true), S.label(38, 16));
+            _ = try self.label(button, if (index == 3) "⌘V" else "", S.text(10.5, 400, 16, true), S.label(38, 16));
             try parent.appendChild(self.cx.allocator, button);
         }
     }
@@ -450,25 +452,24 @@ pub const View = struct {
         scroll.container.meta.ownership.meta.test_id = "ai.execution.viewport";
         scroll.content.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 2 });
         try popup.body.appendChild(self.cx.allocator, scroll.container);
-        for (0..6) |index| {
-            const mode: ?ExecutionMode = if (index == 0) null else @fromBackingInt(@intCast(index - 1));
-            const name = if (mode) |value| config.executionModeLabel(value) else "跟随全局";
+        for (0..5) |index| {
+            const mode: ExecutionMode = @fromBackingInt(@intCast(index));
+            const name = config.executionModeLabel(mode);
             self.execution_styles[index] = try self.scope.createSignal(ui.BoxStyle, S.executionOption(false));
             const choice = try self.scope.createState(Choice, .{ .view = self, .kind = .execution, .action = .{ .execution_mode = mode } });
             const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = name, .disabled = self.disabled[5], .base_style = self.execution_styles[index], .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
             prepareCustomButton(button, .start, self.cx.allocator);
-            button.meta.ownership.meta.test_id = if (mode) |value| switch (value) {
+            button.meta.ownership.meta.test_id = switch (mode) {
                 .auto => "ai.execution.auto",
                 .ask => "ai.execution.ask",
                 .isolated_exec => "ai.execution.isolated_exec",
                 .attached_pty => "ai.execution.attached_pty",
                 .new_pty => "ai.execution.new_pty",
-            } else "ai.execution.inherit";
+            };
             self.execution_rows[index] = button;
             self.execution_checks[index] = try ui.iconTint(self.cx, ui.icons.circle, S.theme.current().accent, S.icon(14));
             try button.appendChild(self.cx.allocator, self.execution_checks[index]);
-            const label_node = try self.label(button, name, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
-            if (index == 0) self.execution_inherit_label = label_node;
+            _ = try self.label(button, name, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
             if (mode == .attached_pty or mode == .new_pty) _ = try self.label(button, "交互式", S.text(10.5, 400, 16, true), S.label(34, 16));
             try scroll.content.appendChild(self.cx.allocator, button);
         }
@@ -501,12 +502,11 @@ pub const View = struct {
         const selected = if (source) |value| value.execution_mode_override else null;
         const global = if (source) |value| value.global_execution_mode else .auto;
         var buffer: [128]u8 = undefined;
-        try self.execution_inherit_label.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "跟随全局 · {s}", .{config.executionModeLabel(global)}));
         try self.labels[5].?.setTextContent(self.cx.allocator, config.executionModeLabel(selected orelse global));
         if (self.buttons[5].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[5].?.getText().?.content;
         self.button_styles[5].set(if (self.execution_compact) S.iconButton(8) else S.executionChip());
-        for (0..6) |index| {
-            const active = if (selected) |value| index == @as(usize, @intCast(@backingInt(value))) + 1 else index == 0;
+        for (0..5) |index| {
+            const active = index == @as(usize, @intCast(@backingInt(selected orelse global)));
             self.execution_styles[index].set(S.executionOption(active));
             setAsset(self.execution_checks[index], if (active) "check" else "circle", 14, colors.accent);
             if (self.execution_rows[index].behavior.interaction.a11y) |*attrs| attrs.selected = active;
@@ -752,10 +752,11 @@ pub const View = struct {
         for (0..6) |index| self.close(@fromBackingInt(@intCast(index)), false);
         self.focus_pending = null;
     }
-    /// Keep the original Stop slot alive while interaction actions replace chips.
+    /// Interaction decisions replace all ordinary composer controls.
     pub fn setInteraction(self: *View, active: bool) void {
         if (active and !self.interaction_active) self.dismiss();
         self.interaction_active = active;
+        self.trailing.setDisplay(if (active) .none else .flex);
         for (self.buttons, 0..) |button, index| button.setDisplay(if (active or index == 3) .none else .flex);
         self.ordinary_spacer.setDisplay(if (active) .none else .flex);
     }
@@ -1123,6 +1124,7 @@ pub const View = struct {
         const full_model_name = if (current) |item| item.key.model_id else if (source) |value| if (value.current) |key| key.model_id else "未配置模型" else "未配置模型";
         try self.refreshModelBrand(if (current) |item| item.key.model_id else null);
         try self.labels[2].?.setTextContent(self.cx.allocator, full_model_name);
+        try self.model_hint_label.setTextContent(self.cx.allocator, full_model_name);
         var model_text = self.labels[2].?.getText().?;
         model_text.text_overflow = .ellipsis;
         self.labels[2].?.setText(model_text);
@@ -1241,7 +1243,7 @@ pub const View = struct {
             const row = try ui.box(self.cx, S.usageRow(), .{});
             try row.appendChild(self.cx.allocator, try ui.box(self.cx, S.usageSwatch(index), .{}));
             _ = try self.label(row, part.name, S.text(11, 400, 18, true), S.flexibleLabel(18));
-            const value = try self.label(row, try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (usage.estimated) "~" else "", try tokenText(&used_buffer, part.tokens) }), S.text(11, 400, 18, false), S.label(64, 18));
+            const value = try self.label(row, try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (part.estimated orelse usage.estimated) "~" else "", try tokenText(&used_buffer, part.tokens) }), S.text(11, 400, 18, false), S.label(64, 18));
             value.meta.ownership.meta.test_id = "ai.usage.part.value";
             try self.usage_body.appendChild(self.cx.allocator, row);
         }
@@ -1262,16 +1264,18 @@ pub const View = struct {
             return .done;
         };
         self.flush() catch {};
-        // The ordinary composer can reserve independent Stop and Send slots;
-        // approval previews retain their existing single-slot contract.
+        // Reserve the independent Stop slot only while its button is visible.
+        // Idle composers keep the model chip next to Send without an empty slot.
         var slot_changed = false;
-        const actions_width: f32 = if (self.separate_actions) 62 else 28;
+        const show_stop = self.separate_actions and self.trailing.children.items.len > 0 and
+            self.trailing.children.items[0].style.display != .none;
+        const actions_width: f32 = if (show_stop) 62 else 28;
         if (self.trailing.style.width != .px or self.trailing.style.width.px != actions_width) {
             self.trailing.setStyleInline(self.cx.allocator, .{ .width = .{ .px = actions_width } });
             slot_changed = true;
         }
         for (self.trailing.children.items, 0..) |button, index| {
-            const x: f32 = if (self.separate_actions and index != 0) 34 else 0;
+            const x: f32 = if (show_stop and index != 0) 34 else 0;
             if (button.style.position != .absolute or button.style.ext == null or button.style.ext.?.inset.left != .px or button.style.ext.?.inset.left.px != x) {
                 button.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = 0 } }, .width = .{ .px = 28 }, .height = .{ .px = 28 }, .min_width = 28, .min_height = 28, .flex_shrink = 0 });
                 slot_changed = true;
@@ -1286,8 +1290,8 @@ pub const View = struct {
         const effort_width = if (self.labels[3].?.style.display != .none) @ceil(self.cx.text.measureTextWidth(self.labels[3].?.getText().?.content, 10, 400, false)) else 0;
         const model_chrome = S.compactModelWidth(0, effort_width, self.model_brand.style.display != .none);
         const fixed_width = self.buttons[0].globalRect().w + self.buttons[1].globalRect().w + self.buttons[4].globalRect().w + actions_width + 48;
-        const required = fixed_width + natural_execution_width + model_chrome + model_width;
-        const compact = row_width > 0 and required > row_width;
+        // Always show the effective execution mode; truncate the model first.
+        const compact = false;
         if (compact != self.execution_compact) {
             self.execution_compact = compact;
             self.labels[5].?.setDisplay(if (compact) .none else .flex);
@@ -1333,7 +1337,7 @@ pub const View = struct {
                 .effort => self.slider.wrapper,
                 .attachment => self.attachment_rows[firstEnabled(self.attachment_disabled) orelse 0],
                 .usage => self.buttons[4],
-                .execution => self.execution_rows[if (self.source) |source| if (source.value.execution_mode_override) |mode| @as(usize, @intCast(@backingInt(mode))) + 1 else 0 else 0],
+                .execution => self.execution_rows[if (self.source) |source| @as(usize, @intCast(@backingInt(source.value.execution_mode_override orelse source.value.global_execution_mode))) else 0],
             };
             self.cx.setFocus(node);
         }
@@ -1347,7 +1351,7 @@ pub const View = struct {
             const panel_height = S.panel(.execution, self.cx.viewport).height.?.px;
             const chrome_height = self.popups[@backingInt(S.Kind.execution)].widget.chrome.globalRect().h;
             if (@abs(chrome_height - panel_height) <= 0.5 and viewport.h <= panel_height and viewport.h > 0 and self.execution_scroll.state.viewport_height > 0 and @abs(self.execution_scroll.state.viewport_height - viewport.h) <= 0.5) {
-                const selected: usize = if (self.source) |source| if (source.value.execution_mode_override) |mode| @as(usize, @intCast(@backingInt(mode))) + 1 else 0 else 0;
+                const selected: usize = if (self.source) |source| @as(usize, @intCast(@backingInt(source.value.execution_mode_override orelse source.value.global_execution_mode))) else 0;
                 const node = self.execution_rows[selected];
                 const target = node.globalRect();
                 const content = self.execution_scroll.content.globalRect();
@@ -1428,7 +1432,7 @@ fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;
     const two = second orelse return false;
     if (one.compaction_before != two.compaction_before or one.compaction_after != two.compaction_after or one.compaction != two.compaction or one.can_compact != two.can_compact or one.used_tokens != two.used_tokens or one.limit_tokens != two.limit_tokens or one.estimated != two.estimated or one.request_tokens != two.request_tokens or one.redacted != two.redacted or one.parts.len != two.parts.len) return false;
-    for (one.parts, two.parts) |left, right| if (left.tokens != right.tokens or !std.mem.eql(u8, left.name, right.name)) return false;
+    for (one.parts, two.parts) |left, right| if (left.tokens != right.tokens or left.estimated != right.estimated or !std.mem.eql(u8, left.name, right.name)) return false;
     return true;
 }
 fn prepareCustomButton(button: *ui.Node, justify: ui.JustifyContent, allocator: std.mem.Allocator) void {

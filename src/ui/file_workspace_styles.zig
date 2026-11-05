@@ -8,7 +8,7 @@ pub const columns_fixed: f32 = 282;
 pub const path_font: f32 = 11.5;
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = 6, .min_width = 0, .min_height = 0, .background = theme.current().app };
+    return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = 6, .padding = ui.Padding.all(12), .min_width = 0, .min_height = 0, .background = theme.current().app };
 }
 /// Each side owns a file card plus an optional sibling transfer card.
 /// Hidden transfer roots do not contribute a gap or reserve any height.
@@ -19,7 +19,7 @@ pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 0, .padding = ui.Padding.all(1), .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 11, .width = 0, .color = theme.current().border }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn toolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .gap = 10, .padding = .{ .top = 14, .right = 13, .bottom = 11, .left = 13 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .gap = 10, .padding = .{ .top = 14, .right = 12, .bottom = 11, .left = 12 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
 }
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     var value = line(36);

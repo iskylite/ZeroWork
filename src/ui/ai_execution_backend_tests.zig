@@ -850,6 +850,15 @@ test "execution backend keeps config policy revision distinct from exact metadat
     const permit = try approve(&ctx, &broker, &prepared);
     defer broker.finish(permit);
     _ = try authorize(&ctx, prepared);
+    // Saving defaults for future agents must leave this admitted task valid.
+    fixture.config_.agent_policy_revision = fixture.config_.config_revision;
+    fixture.config_.config_revision += 1;
+    fixture.config_.ai.permission_mode = .auto;
+    fixture.config_.ai.execution_mode = .new_pty;
+    _ = try authorize(&ctx, prepared);
+    fixture.config_.agent_policy_revision = fixture.config_.config_revision;
+    try std.testing.expectError(error.ScopeChanged, authorize(&ctx, prepared));
+    fixture.config_.agent_policy_revision = controller.config_revision;
     bridge.policy_revision += 1;
     try std.testing.expectError(error.ScopeChanged, authorize(&ctx, prepared));
     bridge.policy_revision -= 1;

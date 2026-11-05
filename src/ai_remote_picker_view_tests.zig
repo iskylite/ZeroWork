@@ -60,7 +60,7 @@ test "AI remote filename button stays inside its bounded table cell" {
     try cx.root.?.appendChild(allocator, cell);
     var probe: Probe = .{};
     const name = "very-long-remote-filename-that-must-not-paint-over-the-size-or-modified-time-column.txt";
-    const filename = try V.filenameButton(scope, cx, name, cx.on(Probe, &probe, Probe.click));
+    const filename = try V.filenameButton(scope, cx, name, cx.on(Probe, &probe, Probe.click), null);
     const button_node = filename.button;
     try cell.appendChild(allocator, button_node);
     cx.layout();
@@ -147,6 +147,52 @@ test "AI remote picker leaves a reused earlier authentication modal accessible" 
     try std.testing.expect(!close_action.state.disabled);
 }
 
-test {
-    _ = @import("ui/ai_remote_reference.zig");
+test "AI remote source tooltip follows selected name and clears stale names on empty reopen" {
+    const std = @import("std");
+    const files = @import("host/file_binding_host.zig");
+    const attachments = @import("ai/local_text_attachments.zig");
+    const owner_scope = @import("ai/tool_scope.zig");
+    const Callbacks = struct {
+        fn ensure(_: *anyopaque, _: V.Source) !files.Bindings {
+            return error.NoFixtureIO;
+        }
+        fn live(_: *anyopaque, _: owner_scope.Owner) ?owner_scope.Scope {
+            return null;
+        }
+        fn stage(_: *anyopaque, _: owner_scope.Owner, _: *attachments.ContentRef) !void {}
+        fn find(node: *ui.Node) ?*ui.Node {
+            if (node.meta.ownership.meta.test_id) |id| if (std.mem.eql(u8, id, "ai.remote.source")) return node;
+            for (node.children.items) |child| if (find(child)) |found| return found;
+            return null;
+        }
+    };
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    var host: files.FileBindingHost = undefined;
+    var context: u8 = 0;
+    const picker = try V.View.mount(cx, scope, &host, .{ .context = &context, .ensure = Callbacks.ensure, .live = Callbacks.live, .stage = Callbacks.stage });
+    defer picker.release() catch unreachable;
+    const long_name = "very-long-remote-source-name.production.example.internal";
+    try cx.root.?.appendChild(a, picker.root);
+    const sources = [_]V.Source{
+        .{ .session = .{ .session_id = @fromBackingInt(1), .generation = 1 }, .name = long_name, .cwd = "/fixture", .available = true },
+        .{ .session = .{ .session_id = @fromBackingInt(2), .generation = 1 }, .name = "第二个远程来源", .cwd = "/fixture", .available = true },
+    };
+    try std.testing.expectError(error.NoFixtureIO, picker.open(.{ .group = 1 }, &sources));
+    cx.layout();
+    _ = cx.render();
+    try std.testing.expectEqualStrings(long_name, picker.source_hint_label.getText().?.content);
+    const trigger = Callbacks.find(cx.root.?).?.parent.?;
+    // Exercise the Select's real keyboard selection callback, including the
+    // failed connection path: the name still follows the user's selection.
+    _ = trigger.behavior.events.on_key_down.?(.end, .{}, trigger.behavior.events.key_context);
+    _ = trigger.behavior.events.on_key_down.?(.@"return", .{}, trigger.behavior.events.key_context);
+    try std.testing.expectEqualStrings(sources[1].name, picker.source_hint_label.getText().?.content);
+    try picker.open(.{ .group = 1 }, &.{});
+    try std.testing.expectEqualStrings("远程来源", picker.source_hint_label.getText().?.content);
 }

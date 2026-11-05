@@ -17,7 +17,8 @@ for(const theme of ['dark','light','sauber']){
  const isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-global-history-'))),data=join(isolated,'data'),rpc=join(isolated,'rpc');
  for(const path of [rpc,join(data,'logs/history')])await mkdir(path,{recursive:true});
  const materialT=theme==='dark'?0:theme==='light'?75:100;
- await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="${theme}"\nfont_family="Menlo"\nfont_size=14\n[ui.materials]\nblur_px=0\n[ui.materials.background]\ntransparency=${materialT}\n`);
+ const timestamps=theme==='dark';
+ await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="${theme}"\nfont_family="Menlo"\nfont_size=14\ntimestamp_gutter=${timestamps}\n[ui.materials]\nblur_px=0\n[ui.materials.background]\ntransparency=${materialT}\n`);
  await writeFile(join(data,'hosts.toml'),'[registry]\nschema_version=2\nrevision=1\nnext_connection_id=1\nnext_group_id=1\n');
  const started=Date.now()-60000;
  const extraCount=12,recordCount=5+extraCount;
@@ -31,7 +32,7 @@ for(const theme of ['dark','light','sauber']){
  const localCast=JSON.stringify({version:2,width:80,height:24})+'\n'+JSON.stringify([0,'o','LOCAL_ARCHIVE_DEFAULT\r\n\u001b[31mANSI_RED \u001b[38;5;1mINDEX_RED \u001b[38;2;232;121;249mTRUECOLOR_MARK\u001b[0m\r\nprompt% '])+'\n'+JSON.stringify([1,'a',JSON.stringify({id:1,owner:{session_id:2,generation:1},timestamp_ms:started,anchor_row:1,command:'@ts',output:'RECORDED_COMMAND 中文',state:'success'})])+'\n';
  await writeFile(join(data,'logs/history/local.cast'),localCast);
  const palette=Array.from({length:16},(_,i)=>i===2?0x22aa66ff:0x888888ff);
- const localManifest={schema_version:1,archive_key:'1234567890abcdef1234567890abcdef',recording_id:'abcdef1234567890abcdef1234567890',manifest_revision:1,source_kind:'local',started_ms:started-60000,ended_ms:started-30000,exit_code:0,state:'closed',display:{title:'Original local title',host:'Local Terminal',user:'fixture',endpoint:'local zsh',cwd:'/archive/original',final_cols:80,final_rows:24,timestamps:true,layout_version:1,font_family:'Menlo',font_size_px:16,line_height:1.5,theme_reference:'dark',colors:{foreground:0xe0e0e0ff,background:0x101018ff,cursor:0xe0e0e0ff,selection:0x6366f14d,ansi:palette}},recording:{generations:[{recording_generation:1,session_id:2,session_generation:1,initial_cols:80,initial_rows:24,receive_time_origin:started-60000,baselines:[{event_sequence:0,raw_offset:0,kind:'initial_empty'}]}]},files:[{path:'logs/history/local.cast',kind:'cast',committed_length:Buffer.byteLength(localCast),checksum:createHash('sha256').update(localCast).digest('hex')}],coverage:'complete',replayability:'verified',commit:{state:'indexed',committed_length:Buffer.byteLength(localCast)}};
+ const localManifest={schema_version:1,archive_key:'1234567890abcdef1234567890abcdef',recording_id:'abcdef1234567890abcdef1234567890',manifest_revision:1,source_kind:'local',started_ms:started-60000,ended_ms:started-30000,exit_code:0,state:'closed',display:{title:'Original local title',host:'Local Terminal',user:'fixture',endpoint:'local zsh',cwd:'/archive/original',final_cols:80,final_rows:24,timestamps:!timestamps,layout_version:1,font_family:'Menlo',font_size_px:16,line_height:1.5,theme_reference:'dark',colors:{foreground:0xe0e0e0ff,background:0x101018ff,cursor:0xe0e0e0ff,selection:0x6366f14d,ansi:palette}},recording:{generations:[{recording_generation:1,session_id:2,session_generation:1,initial_cols:80,initial_rows:24,receive_time_origin:started-60000,baselines:[{event_sequence:0,raw_offset:0,kind:'initial_empty'}]}]},files:[{path:'logs/history/local.cast',kind:'cast',committed_length:Buffer.byteLength(localCast),checksum:createHash('sha256').update(localCast).digest('hex')}],coverage:'complete',replayability:'verified',commit:{state:'indexed',committed_length:Buffer.byteLength(localCast)}};
  await writeFile(join(data,'logs/history/local.session.json'),JSON.stringify(localManifest));
  const fragment={...structuredClone(localManifest),archive_key:'33333333333333333333333333333333',recording_id:'44444444444444444444444444444444',source_kind:'ssh',started_ms:started-130000,ended_ms:started-100000,display:{...localManifest.display,title:'Retained fragment',host:'retained',endpoint:'10.0.1.24:22'},coverage:'retained',replayability:'baseline_unavailable',files:[{path:'logs/history/fragment.cast',kind:'cast',committed_length:Buffer.byteLength(cast),checksum:createHash('sha256').update(cast).digest('hex')}]};
  await writeFile(join(data,'logs/history/fragment.cast'),cast);
@@ -44,7 +45,7 @@ for(const theme of ['dark','light','sauber']){
  const log=await open(join(out,`${theme}.log`),'w');
  const child=spawn(binary,[],{env:{...process.env,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1',ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0'},stdio:['ignore',log.fd,log.fd]});
  const exited=new Promise(r=>child.once('close',r));
- const cap=async(name:string)=>{await mouseMove(20,20);const captured:any={};for(const id of ['history.panel','history.search','history.footer','history.confirmation','history.empty','history.empty.detail','history.message','history.viewport','history.record','terminal.history.card','terminal.history.title','terminal.history.position','terminal.history.notice','terminal.row','terminal.command.record','terminal.command.output','terminal.command.article','tabs.strip'])captured[id]=await query(id);await writeFile(join(out,`${theme}-${name}.tree.json`),JSON.stringify(captured,null,2));assert((await screenshot(join(out,`${theme}-${name}.png`))).ok);report.captures.push(`${theme}-${name}`);};
+ const cap=async(name:string)=>{await mouseMove(20,20);const captured:any={};for(const id of ['history.panel','history.search','history.footer','history.confirmation','history.empty','history.empty.detail','history.message','history.viewport','history.record','terminal.history.card','terminal.history.title','terminal.history.position','terminal.history.notice','terminal.timestamp','terminal.row','terminal.command.record','terminal.command.output','terminal.command.article','tabs.strip'])captured[id]=await query(id);await writeFile(join(out,`${theme}-${name}.tree.json`),JSON.stringify(captured,null,2));assert((await screenshot(join(out,`${theme}-${name}.png`))).ok);report.captures.push(`${theme}-${name}`);};
  try{
   await waitForServerReady();await resizeWindow(1440,900);
   await visible('workspace.empty');assert((await clickTestId('toolbar.history')).ok);
@@ -67,6 +68,10 @@ for(const theme of ['dark','light','sauber']){
   await clickTestId('history.record.title');
   assert((await query('history.panel')).some(shown),'clicking record content must keep the list open');
   assert(!(await query('terminal.history.card')).some(shown),'record content must not open history');
+  for(const [id,tip] of [['history.record.title','history.record.title.tooltip'],['history.record.detail','history.record.detail.tooltip']]){
+   const value=await visible(id);await mouseMove(value.rect.x+value.rect.w/2,value.rect.y+value.rect.h/2);
+   assert.equal(text(await visible(tip)),text(value));await new Promise(r=>setTimeout(r,220));assert((await screenshot(join(out,theme+'-'+tip+'.png'))).ok);await mouseMove(20,20);
+  }
   await cap('list');
   await key('up');assert.equal((await focused()).test_id,'history.record.view');
   const viewport=await visible('history.viewport'),lastRow=(await query('history.record')).filter(shown).at(-1)!;
@@ -124,8 +129,30 @@ for(const theme of ['dark','light','sauber']){
   await waitFor(async()=>(await query('terminal.row')).filter(shown).some(n=>text(n).includes('TRUECOLOR_MARK'))||null);
   const manifestRow=(await query('terminal.row')).filter(shown).find(n=>text(n).includes('LOCAL_ARCHIVE_DEFAULT'))!;
   assert.equal(manifestRow.rect.h,24,'recorded 16px font and 1.5 line height remain intact');
+  await waitFor(async()=>((await query('terminal.timestamp')).filter(shown).length>0)===timestamps||null);
+  const recordedTimes=(await query('terminal.timestamp')).filter(shown).map(text);
+  const manifestBefore=await readFile(join(data,'logs/history/local.session.json'),'utf8');
   await cap('manifest-command');
+  report.checks.push(`${theme}: archive timestamp visibility follows global ${timestamps} over recorded ${!timestamps}`);
   if(theme==='dark'){
+   const position=text(await visible('terminal.history.position'));
+   for(const enabled of [false,true]){
+    await clickTestId('toolbar.settings');await clickTestId('settings.nav.appearance');
+    if(!(await query('settings.toggle.timestamp_gutter')).some(shown))await clickTestId('settings.appearance.aids.header');
+    await visible('settings.toggle.timestamp_gutter');assert((await clickTestId('settings.toggle.timestamp_gutter')).ok);
+    assert((await clickTestId('settings.save')).ok);
+    await waitFor(async()=>new RegExp(`timestamp_gutter\\s*=\\s*${enabled}`).test(await readFile(join(data,'config.toml'),'utf8'))||null,10000);
+    await clickTestId('settings.close');
+    await waitFor(async()=>((await query('terminal.timestamp')).filter(shown).length>0)===enabled||null);
+    assert.equal(text(await visible('terminal.history.position')),position,'timestamp toggle retains reading position');
+    const row=(await query('terminal.row')).filter(shown).find(n=>text(n).includes('LOCAL_ARCHIVE_DEFAULT'))!;
+    assert.equal(row.rect.h,24,'timestamp toggle preserves recorded font and line height');
+    if(enabled){assert.equal(row.rect.x,manifestRow.rect.x);assert.deepEqual((await query('terminal.timestamp')).filter(shown).map(text),recordedTimes,'timestamps keep their recorded values');}
+    else assert(row.rect.x<manifestRow.rect.x,'hiding timestamps reclaims the gutter');
+    await cap('archive-timestamps-'+enabled);
+   }
+   assert.equal(await readFile(join(data,'logs/history/local.session.json'),'utf8'),manifestBefore,'display changes do not rewrite the recording');
+   report.checks.push('Global timestamp Save updates an open archive immediately in both directions without moving the reading position or changing recorded times/typography');
    const recordedPosition=text(await visible('terminal.history.position'));
    for(const nextTheme of ['light','sauber','dark']){
     const tab=await visible('tabs.tab.2'),x=tab.rect.x+tab.rect.w/2,y=tab.rect.y+tab.rect.h/2;
@@ -137,7 +164,7 @@ for(const theme of ['dark','light','sauber']){
     assert.equal(text(await visible('terminal.history.position')),recordedPosition,'theme switch retains the original reading position');
     const retained=(await query('terminal.row')).filter(shown).find(n=>text(n).includes('LOCAL_ARCHIVE_DEFAULT'))!;
     assert.equal(retained.rect.h,24,'theme switch does not change recorded typography');
-    assert.equal(retained.rect.x,manifestRow.rect.x,'theme switch preserves the recorded timestamp gutter and layout');
+    assert.equal(retained.rect.x,manifestRow.rect.x,'theme switch preserves the current timestamp gutter and recorded layout');
     await cap('manifest-theme-'+nextTheme);
    }
   }

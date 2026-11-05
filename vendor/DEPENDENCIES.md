@@ -5,17 +5,21 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-11-04-ime-source-transition` (upstream revision and license unchanged)
+- Local patch revision: `2026-11-05-window-hide-reopen-idle-canvas` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3507` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `554a507fe839c7b6b402a1a707ce47665367467cbf4d0c17c6bc838c40585a11`
+- Canonical tracked-tree SHA-256: `b204e22654e9da802e10d6ca746e7023d5b9b26af055baa1913fde28c81118de`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
 
-The latest local patch preserves an active IME composition when AppKit publishes the changed input-source identifier after its first marked-text callback. A native input-pump regression covers retaining the first letter and input context across the next key. Upstream revision, license and toolchain are unchanged.
+The idle-canvas adaptation skips animated canvas repaint hooks while the node or an ancestor is `display:none`. Retained loading indicators resume when shown; completed or failed operations no longer keep hidden spinners repainting. This local guard changes neither the public API nor the upstream license/build contract.
+
+The latest local patch adds an explicit macOS window hide API and restores those retained windows on Dock reopen when no window is visible. Hiding preserves the native window and application state; committed close and application quit keep their existing teardown. Upstream revision, license and toolchain are unchanged.
+
+The preceding local patch preserves an active IME composition when AppKit publishes the changed input-source identifier after its first marked-text callback. A native input-pump regression covers retaining the first letter and input context across the next key. Upstream revision, license and toolchain are unchanged.
 
 The preceding local patch adds an explicit `SelectProps.virtualize` option, allowing the font picker to use a scrollable virtual viewport below the automatic 200-option threshold. Upstream revision, license and toolchain are unchanged.
 
@@ -43,7 +47,7 @@ The preceding local patch synchronizes single-line input caret, selection and hi
 
 The previous local patch keeps placeholders visually neutral for required-but-empty inputs; existing mouse-move hit-count accounting before drag callbacks is retained. No API, toolchain or license changes.
 
-Local adaptations are included in the canonical hash: optional independent Select dropdown width and positioning (existing defaults preserved), bounded/wrapping Tooltip content through public optional properties (defaults preserve the existing API and behavior), native close confirmation/commit/completion and IME handling, scoped theme replay for detached retained panels, rendering and hit-test fixes, idle interaction-geometry drainage, material subtree cache ranges, safe focus cleanup, legacy hidden-control window configuration, fixed ASCII grid positioning for explicitly configured terminal faces, and the compile-time automation boundary that removes all process environment overrides from formal macOS App builds. The upstream repository metadata is not required for building this snapshot. Run `python3 scripts/verify_vendor_zenit.py` to verify the exact vendored tree.
+Local adaptations are included in the canonical hash: optional independent Select dropdown width and positioning (existing defaults preserved), bounded/wrapping Tooltip content through public optional properties (defaults preserve the existing API and behavior), native close confirmation/commit/completion and IME handling, scoped theme replay for detached retained panels, rendering and hit-test fixes, idle interaction-geometry drainage, material subtree cache ranges, safe focus cleanup, legacy hidden-control window configuration, fixed ASCII grid positioning for explicitly configured terminal faces, and the compile-time automation boundary that removes all process environment overrides from formal macOS App builds. The upstream repository metadata is not required for building this snapshot. The local timer cleanup adaptation retains timer storage until scope, node, and state owners have released their callbacks. Run `python3 scripts/verify_vendor_zenit.py` to verify the exact vendored tree.
 
 Terminal acceptance additionally extends only the compile-time test Harness: mouse requests can specify left/middle/right buttons and key names resolve the existing KeyCode enum, allowing F1–F12 and editing keys through the production dispatcher. No VT injection or screen-state override is added; formal builds retain their existing automation boundary. No toolchain or license changes.
 
@@ -68,6 +72,14 @@ The resource-scheduling patch combines frame-local z-order/cache-boundary prepar
   its `build.zig.zon` and the `-Demit-lib-vt` build mode. Full Ghostty App and
   font-renderer builds require restoring the omitted upstream resources.
   Dependency hash checks must remain enabled when resolving its packages.
+
+Local patch `2026-11-05-erase-display-refs` invalidates C tracked grid
+references left in the active area after an unprotected ED2, and history
+references before ED3 removes scrollback. References
+moved into scrollback by prompt-aware clearing remain valid. This prevents
+builtin command cards from reappearing over a cleared terminal, including
+cards anchored at the first prompt. Rebuild the pinned static archive with
+`zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast`.
 
 ## Planned SSH dependencies
 

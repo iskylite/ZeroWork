@@ -12,27 +12,31 @@ const shown=(n:any)=>n&&n.hidden!==true&&n.visible!==false&&(n.effective_opacity
 const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,15000);
 const click=async(id:string)=>{report.lastAction=id;await visible(id);assert((await h.clickTestId(id)).ok,id)};
 const capture=async(name:string)=>{await h.sleep(160);await h.screenshot(join(out,name+'.png'));await writeFile(join(out,name+'.json'),JSON.stringify(await h.query('ai.panel'),null,2))};
+const checkOwnerHint=async()=>{const owner=await visible('ai.session.owner');await h.mouseMove(owner.rect.x+owner.rect.w/2,owner.rect.y+owner.rect.h/2);const ownerTip=await visible('ai.session.owner.tooltip');const tipText=(n:any):string=>(n.text??'')+(n.children??[]).map(tipText).join('');assert.equal(tipText(ownerTip),owner.text);await h.sleep(220);await h.screenshot(join(out,'owner-tooltip.png'));await h.mouseMove(20,20);};
 const report:any={status:'running',checks:[],isolatedData:iso};
 try{
  await h.waitForServerReady(60000);await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');
  const strip=await visible('ai.strip');await h.mouseMove(strip.rect.x+strip.rect.w/2,strip.rect.y+strip.rect.h/2);await visible('ai.panel');
  await h.sleep(300);const before=(await visible('ai.conversation.viewport')).rect;
  await click('ai.sessions');await visible('ai.sessions.menu');await h.sleep(220);
- await visible('ai.session.row.1');assert(!(await h.query('ai.sessions.empty')).some(shown),'current preview conversation must appear in the list');
+ await visible('ai.session.row.1');await checkOwnerHint();assert(!(await h.query('ai.sessions.empty')).some(shown),'current preview conversation must appear in the list');
  assert.deepEqual((await visible('ai.conversation.viewport')).rect,before,'session popover must not resize transcript');
- const menu=await visible('ai.sessions.menu');assert.equal(menu.rect.w,440);await capture('01-session-popover');
+ const menu=await visible('ai.sessions.menu');assert.equal(menu.rect.w,440);
+ for(const id of ['ai.session.row.1','ai.session.first_line','ai.session.phase_tag','ai.session.unbound']){await click(id);await visible('ai.sessions.menu');assert(!(await h.query('ai.history')).some(shown),'row content must not open history');}
+ report.checks.push('Clicking row content and tags keeps the list open; only icon buttons trigger actions');await capture('01-session-popover');
  await h.key('escape');await h.waitFor(async()=>!(await h.query('ai.sessions.menu')).some(shown)||null,5000);
  await click('ai.sessions');await visible('ai.sessions.menu');await click('ai.prompt');await h.waitFor(async()=>!(await h.query('ai.sessions.menu')).some(shown)||null,5000);
  report.checks.push('Session list floats without moving transcript; Escape and outside click dismiss it');
- await h.type_('UNSENT_WELCOME_DRAFT');await click('ai.close');await h.waitFor(async()=>!(await h.query('ai.panel')).some(shown)||null,5000);
+ await h.type_('UNSENT_WELCOME_DRAFT');await click('ai.close');await h.waitFor(async()=>{assert(!(await h.query('ai.close.confirmation')).some(shown),'an unsent welcome draft must not require End confirmation');return !(await h.query('ai.panel')).some(shown)||null},5000);await capture('01b-welcome-closed');
  assert(!(await h.query('ai.close.confirmation')).some(shown),'empty welcome closes without confirmation');
  await click('toolbar.ai');await visible('ai.empty.unconfigured');assert.equal((await h.inputState('ai.prompt')).buffer,'UNSENT_WELCOME_DRAFT');
- await click('ai.sessions');await visible('ai.session.row.1');assert(!(await h.query('ai.session.row.2')).some(shown),'closing welcome must not create another conversation');await click('ai.sessions.close');
+ await click('ai.sessions');await visible('ai.session.row.1');await checkOwnerHint();assert(!(await h.query('ai.session.row.2')).some(shown),'closing welcome must not create another conversation');await click('ai.sessions.close');
  await click('ai.prompt');await h.key('a',{cmd:true});await h.key('backspace');
  report.checks.push('Current hover-preview conversation is listed; welcome X closes immediately, preserves its draft and reopens the same conversation');
- await click('ai.session.new');await click('ai.sessions');await visible('ai.sessions.menu');await click('ai.session.jump.1');await h.waitFor(async()=>!(await h.query('ai.sessions.menu')).some(shown)||null,5000);
- if(!(await h.query('ai.panel')).some(shown))await click('ai.strip');await click('ai.sessions');await visible('ai.sessions.menu');await click('ai.session.delete.1');await h.sleep(300);await h.waitFor(async()=>!(await h.query('ai.session.row.1')).some(shown)||null,5000);if(!(await h.query('ai.panel')).some(shown))await click('ai.strip');if((await h.query('ai.sessions.menu')).some(shown))await click('ai.sessions.close');
- report.checks.push('Switching sessions dismisses the popover; idle session deletion removes the selected row');
+ await click('ai.session.new');await click('ai.session.close.accept');await h.waitFor(async()=>!(await h.query('ai.session.close.confirmation')).some(shown)||null,5000);await click('ai.sessions');await visible('ai.sessions.menu');await click('ai.session.jump.1');await h.waitFor(async()=>!(await h.query('ai.sessions.menu')).some(shown)||null,5000);
+ await visible('ai.history');await click('ai.history.close');await h.waitFor(async()=>!(await h.query('ai.history')).some(shown)||null,5000);
+ if(!(await h.query('ai.panel')).some(shown))await click('ai.strip');await click('ai.sessions');await visible('ai.sessions.menu');await click('ai.session.delete.1');await click('ai.session.close.accept');await h.waitFor(async()=>!(await h.query('ai.session.row.1')).some(shown)||null,5000);if(!(await h.query('ai.panel')).some(shown))await click('ai.strip');if((await h.query('ai.sessions.menu')).some(shown))await click('ai.sessions.close');
+ report.checks.push('Confirmed New ends and unbinds the previous conversation; View opens read-only history; confirmed Delete removes the unbound row');
  await h.resizeWindow(860,480);await h.sleep(300);const compact=(await visible('ai.conversation.viewport')).rect;await click('ai.sessions');await visible('ai.sessions.menu');await h.sleep(220);const small=await visible('ai.sessions.menu');assert.deepEqual((await visible('ai.conversation.viewport')).rect,compact);assert(small.rect.x>=8&&small.rect.y>=8&&small.rect.x+small.rect.w<=852&&small.rect.y+small.rect.h<=472);await capture('02-session-popover-compact');report.checks.push('Compact window keeps popover within viewport and transcript unchanged');report.status='passed';
 
 }catch(e){report.status='failed';report.error=String(e);await capture('failure').catch(()=>{});process.exitCode=1;}

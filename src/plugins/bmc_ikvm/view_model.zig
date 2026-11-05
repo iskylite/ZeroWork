@@ -530,6 +530,9 @@ fn writeProgressMessage(writer: *std.Io.Writer, event: console.progress.Event, t
         }
         if (context.phase != .none) try writer.print(" · {s}", .{console.progress.phaseLabel(context.phase)});
         if (context.received_bytes) |bytes| try writer.print(" · 已收 {d} B", .{bytes});
+        if (context.content_encoding) |encoding| try writer.print(" · 编码 {s}", .{@tagName(encoding)});
+        if (context.content_length) |bytes| try writer.print(" · 正文长度 {d} B", .{bytes});
+        if (context.body_idle_ms) |ms| try writer.print(" · 正文无进展 {d}.{d}s", .{ ms / 1000, (ms % 1000) / 100 });
         if (include_duration) if (context.duration_ms) |ms| try writer.print(" · 请求 {d}.{d}s", .{ ms / 1000, (ms % 1000) / 100 });
     }
     if (event.code != .none) try writer.print(" · {s}", .{console.progress.codeLabel(event.code)});

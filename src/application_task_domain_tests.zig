@@ -65,4 +65,9 @@ test "shared task domain retains original window owner while sibling continues i
     try std.testing.expectEqual(@import("transfer/manager.zig").State.queued, second_view.progress(second_job).?.state);
     try domain.manager.cancel(second_job);
     try std.testing.expectEqual(sessions.CloseReceipt.released, domain.shutdownStep());
+    // Both jobs remain as history. Neither a normal tick nor another window
+    // polling the same timestamp may turn those released records into work.
+    try std.testing.expectEqual(@as(usize, 2), domain.manager.count());
+    try std.testing.expect(!try domain.tick(100, 1));
+    try std.testing.expect(!try domain.tick(100, 1));
 }

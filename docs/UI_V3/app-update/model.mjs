@@ -1,6 +1,6 @@
 // Design simulation only: no filesystem, process, network or native updater access.
 export const stateNames = {
-  settings:'设置入口',available:'发现新版本',downloading:'正在下载',verifying:'正在校验',ready:'准备安装',
+  settings:'设置入口',no_stable:'暂无正式版',check_failed:'检查更新失败',download_failed:'下载失败',available:'发现新版本',downloading:'正在下载',verifying:'正在校验',ready:'准备安装',
   drafts:'未保存内容',saving:'保存工作区快照',snapshot_failed:'快照保存失败',confirm:'结束任务确认',
   closing:'正在结束任务',draining:'取消后的收尾进度',blocked:'结束任务超时',handoff:'等待安装准备',commit_pending:'等待提交回执',
   cancel_pending:'等待取消回执',handoff_failed:'安装交接失败',parent_exit_timeout:'应用退出超时',
@@ -9,13 +9,14 @@ export const stateNames = {
   restore_failed:'旧版本恢复失败',launch_failed:'新版启动失败',incompatible_data:'数据已变更不可回退',recovery_saved:'恢复信息已保留'
 };
 const definitions = [['terminal','终端连接','terminal',3],['transfer','文件传输','transfer',1],['ai','AI 任务','spark',1],['other','KVM 与转发','network',2]];
-const verifiedStates = new Set(Object.keys(stateNames).filter(x=>!['settings','available','downloading','verifying','invalid'].includes(x)));
+const verifiedStates = new Set(Object.keys(stateNames).filter(x=>!['settings','no_stable','check_failed','download_failed','available','downloading','verifying','invalid'].includes(x)));
 export class UpdateDesignModel {
   constructor(state='confirm',busy=true){this.loadFixture(state,busy);}
   loadFixture(state,busy=true){
     this.epoch=(this.epoch||0)+1;this.batchId=`close-${this.epoch}`;this.planId=`plan-${this.epoch}`;
     this.state=stateNames[state]?state:'confirm';this.tasks=busy?definitions.map(([id,label,icon,count])=>({id,label,icon,count,status:'active',requests:0})):[];
     this.operation=['downloading','verifying'].includes(this.state)?this.state:verifiedStates.has(this.state)?'ready':'idle';
+    this.checkState=['no_stable','check_failed','download_failed'].includes(this.state)?this.state:null;
     this.operationGeneration=1;this.attempt=0;this.installed=this.state==='done';this.intent=false;this.gate=false;
     this.helper='none';this.commitSent=false;this.decision=null;this.message='';this.unsaved=this.state==='drafts';
     this.snapshot=null;this.dataChanged=this.state==='incompatible_data';this.backupValid=true;this.backupPreserved=false;
@@ -60,7 +61,7 @@ export class UpdateDesignModel {
   }
   open(){
     if(this.intent)this.state=this.remaining.length?'closing':'handoff';
-    else this.state=this.operation==='ready'?'ready':['downloading','verifying'].includes(this.operation)?this.operation:'available';
+    else this.state=this.checkState|| (this.operation==='ready'?'ready':['downloading','verifying'].includes(this.operation)?this.operation:'available');
   }
   download(){this.operationGeneration++;this.operation='downloading';this.state='downloading';}
   downloadComplete(generation=this.operationGeneration){if(generation!==this.operationGeneration||this.operation!=='downloading')return false;this.operation='verifying';if(this.state!=='settings')this.state='verifying';return true;}

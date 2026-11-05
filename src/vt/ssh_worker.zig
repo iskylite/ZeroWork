@@ -59,6 +59,28 @@ pub const RuntimeOptions = struct {
 pub const current_directory_command = " printf '\\033]7;\\007\\033]7;file://localhost%s\\007' \"$(printf '%s' \"$PWD\" | sed 's/%/%25/g;s/ /%20/g')\"\n";
 
 const startup_input_limit: usize = 64 * 1024;
+const startup_prompt_timeout_ms = 5000;
+
+// End offsets preserve configuration-item boundaries, including multiline text.
+fn startupCommandEnds(allocator: std.mem.Allocator, commands: []const []const u8) ![]usize {
+    var ends: std.ArrayList(usize) = .empty;
+    errdefer ends.deinit(allocator);
+    var end: usize = 0;
+    for (commands) |command| {
+        if (command.len == 0) continue;
+        end += command.len + 1; // encodeStartupInput has already checked the limit.
+        try ends.append(allocator, end);
+    }
+    return ends.toOwnedSlice(allocator);
+}
+
+const StartupCursor = struct {
+    next: usize = 0,
+    offset: usize = 0,
+    prompt_after: ?u64 = null,
+    deadline_ms: ?i64 = null,
+    shell: ?struct { id: ?[32]u8, revision: u64 } = null,
+};
 
 /// Encode the declarative startup command list for the PTY input queue.
 /// Commands remain shell text (quoting, pipes, etc. are intentional); the
@@ -158,6 +180,8 @@ pub const SshWorker = struct {
     buffer_input: bool,
     startup_input: []u8,
     startup_commands_input_len: usize = 0,
+    startup_command_ends: []usize = &.{},
+    startup_cursor: StartupCursor = .{},
     shell_initializer_chunks: []const []u8 = &.{},
     shell_initializer_index: usize = 0,
     shell_initializer_expected: ?u64 = null,
@@ -341,6 +365,8 @@ pub const SshWorker = struct {
         errdefer timeline.deinit();
         const startup_input = try encodeStartupInput(allocator, runtime.startup_commands, runtime.initial_input);
         errdefer allocator.free(startup_input);
+        const startup_command_ends = try startupCommandEnds(allocator, runtime.startup_commands);
+        errdefer allocator.free(startup_command_ends);
         const initializer_nonce = std.fmt.bytesToHex(identity.ExecutionId.generate().bytes, .lower);
         const initializer_chunks: []const []u8 = if (runtime.bootstrap == null and runtime.auto_shell_integration) try ShellIntegration.initializerChunks(allocator, &initializer_nonce) else &.{};
         errdefer {
@@ -434,6 +460,8 @@ pub const SshWorker = struct {
         worker.vt.setCommandObserver(.{ .context = worker, .changed = commandObserved });
         worker.startup_input = startup_input;
         worker.startup_commands_input_len = startup_input.len - runtime.initial_input.len;
+        worker.startup_command_ends = startup_command_ends;
+        worker.startup_cursor = .{};
         worker.shell_initializer_chunks = initializer_chunks;
         worker.startup_pending = .init(runtime.wait_for_attachment or startup_input.len != 0 or initializer_chunks.len != 0);
         worker.presentation_attached = .init(!runtime.wait_for_attachment);
@@ -538,6 +566,7 @@ pub const SshWorker = struct {
         self.allocator.free(self.read_buffer);
         self.allocator.free(self.write_buffer);
         self.allocator.free(self.startup_input);
+        self.allocator.free(self.startup_command_ends);
         for (self.shell_initializer_chunks) |chunk| self.allocator.free(chunk);
         if (self.shell_initializer_chunks.len != 0) self.allocator.free(self.shell_initializer_chunks);
         self.recording_generations.deinit(self.allocator);
@@ -1928,6 +1957,14 @@ pub const SshWorker = struct {
         }
         if (self.shell_initializer_chunks.len == 0 and !startupReadyAt(now_ns, last_output_ns)) return;
         const startup_input = self.startup_input[0..if (self.initial_input_allowed) self.startup_input.len else self.startup_commands_input_len];
+        if (startup_input.len != 0) if (self.shell_execution) |*bridge| {
+            // An initializer ACK is emitted before Readline/ZLE resumes. Only
+            // a subsequent prompt in this shell is safe for automatic input.
+            if (self.shell_initializer_chunks.len != 0 or bridge.snapshot.interactive_execution) {
+                try self.enqueueStartupAtPrompt(bridge, startup_input, now);
+                return;
+            }
+        };
         if (startup_input.len != 0) if (self.shell_execution) |*bridge| try bridge.ordinaryInput();
         try self.replay.startup(&self.input, startup_input);
         self.startup_end_index = self.input.write_index.load(.acquire);
@@ -1938,18 +1975,99 @@ pub const SshWorker = struct {
         };
     }
 
+    fn stopStartupCommands(self: *SshWorker, bridge: *ShellExecution.Bridge, reason: []const u8) void {
+        // Never deliver pre-startup typeahead into an unknown foreground (for
+        // example a password prompt). Fresh human input remains available.
+        self.replay.discardBuffered();
+        bridge.snapshot.failure = reason;
+        bridge.snapshot.revision +|= 1;
+        @import("../platform/applog.zig").warn(.ssh, "startup commands stopped: {s}; remaining commands and buffered input were not sent", .{reason});
+        self.startup_pending.store(false, .release);
+        _ = self.replay.attached(&self.input, self.options.operation_key, replay_mod.InputMode.from(self.vt.snapshot().modes)) catch false;
+    }
+
+    fn enqueueStartupAtPrompt(self: *SshWorker, bridge: *ShellExecution.Bridge, bytes: []const u8, now: i64) !void {
+        const cursor = &self.startup_cursor;
+        if (cursor.deadline_ms == null) cursor.deadline_ms = now + startup_prompt_timeout_ms;
+        if (cursor.shell) |shell| {
+            if (!std.meta.eql(shell.id, bridge.snapshot.shell.id) or shell.revision != bridge.snapshot.shell.revision) {
+                self.stopStartupCommands(bridge, "StartupShellContextChanged");
+                return;
+            }
+        }
+        const modes = self.vt.snapshot().modes;
+        if (modes.alternate_screen or modes.application_cursor or modes.mouse_tracking != .none) {
+            self.stopStartupCommands(bridge, "StartupInteractiveProgram");
+            return;
+        }
+        const after = cursor.prompt_after orelse bridge.initialization_ack_offset;
+        if (bridge.attach_failure != null or now >= cursor.deadline_ms.?) {
+            self.stopStartupCommands(bridge, bridge.attach_failure orelse "StartupPromptTimedOut");
+            return;
+        }
+        if (bridge.pending_context != null or !bridge.prompt_clean or bridge.active or bridge.prompt_offset <= after) return;
+        if (self.input.pending() != 0 or self.io.write_len != 0 or self.io.repliesPending()) return;
+        if (cursor.next < self.startup_command_ends.len) {
+            const end = self.startup_command_ends[cursor.next];
+            const command = bytes[cursor.offset..end];
+            if (bridge.lease.holder != null or bridge.lease.draining) return;
+            if (bridge.lease.input_epoch == std.math.maxInt(u64)) {
+                self.stopStartupCommands(bridge, "InputSequenceExhausted");
+                return;
+            }
+            self.replay.startup(&self.input, command) catch |err| switch (err) {
+                error.Full, error.InputEventsFull => return,
+                else => return err,
+            };
+            try bridge.ordinaryInput();
+            cursor.shell = .{ .id = bridge.snapshot.shell.id, .revision = bridge.snapshot.shell.revision };
+            cursor.prompt_after = bridge.prompt_offset;
+            cursor.offset = end;
+            cursor.next += 1;
+            cursor.deadline_ms = now + startup_prompt_timeout_ms;
+            self.startup_end_index = self.input.write_index.load(.acquire);
+            return;
+        }
+        // One-time launch input is handed off only after configured commands
+        // have returned to their shell; reconnect never replays this suffix.
+        if (bytes.len > cursor.offset) {
+            if (bridge.lease.holder != null or bridge.lease.draining) return;
+            if (bridge.lease.input_epoch == std.math.maxInt(u64)) {
+                self.stopStartupCommands(bridge, "InputSequenceExhausted");
+                return;
+            }
+        }
+        self.replay.startup(&self.input, bytes[cursor.offset..]) catch |err| switch (err) {
+            error.Full, error.InputEventsFull => return,
+            else => return err,
+        };
+        if (bytes.len > cursor.offset) try bridge.ordinaryInput();
+        self.startup_end_index = self.input.write_index.load(.acquire);
+        self.startup_pending.store(false, .release);
+        _ = self.replay.attached(&self.input, self.options.operation_key, replay_mod.InputMode.from(modes)) catch |err| switch (err) {
+            error.Full => false,
+            else => return err,
+        };
+    }
+
     fn resumeInputAfterReconnect(self: *SshWorker) !void {
         // Start from the declarative command list, never an old queue suffix.
         // One-time mirroring/launch input still belongs to the original shell.
         self.initial_input_allowed = false;
+        self.startup_cursor = .{};
         self.startup_end_index = null;
         self.startup_pending.store(true, .release);
     }
 
     fn configureStartup(self: *SshWorker, configuration: @import("reconnect.zig").Configuration) !void {
         const input = try encodeStartupCommands(self.allocator, configuration.startup_commands);
+        errdefer self.allocator.free(input);
+        const ends = try startupCommandEnds(self.allocator, configuration.startup_commands);
         self.allocator.free(self.startup_input);
+        self.allocator.free(self.startup_command_ends);
         self.startup_input = input;
+        self.startup_command_ends = ends;
+        self.startup_cursor = .{};
         self.startup_commands_input_len = input.len;
         self.auto_shell_integration = configuration.auto_shell_integration;
     }
@@ -2130,6 +2248,8 @@ fn inputTestWorker(worker: *SshWorker) !void {
     worker.shell_attach_evidence = null;
     worker.initial_input_allowed = true;
     worker.startup_commands_input_len = 0;
+    worker.startup_command_ends = &.{};
+    worker.startup_cursor = .{};
     worker.auto_shell_integration = true;
     worker.ai_registered_execution = null;
     worker.cwd_capture = .{};
@@ -2143,9 +2263,117 @@ fn inputTestWorker(worker: *SshWorker) !void {
     worker.startup_end_index = null;
 }
 fn deinitInputTestWorker(worker: *SshWorker) void {
+    std.testing.allocator.free(worker.startup_command_ends);
     worker.input.deinit(std.testing.allocator);
     worker.replay.deinit();
     worker.vt.destroy();
+}
+
+fn startupPromptTestWorker(worker: *SshWorker, commands: []const []const u8, initial: []const u8) !void {
+    try inputTestWorker(worker);
+    worker.allocator = std.testing.allocator;
+    worker.startup_input = try encodeStartupInput(worker.allocator, commands, initial);
+    worker.startup_commands_input_len = worker.startup_input.len - initial.len;
+    worker.startup_command_ends = try startupCommandEnds(worker.allocator, commands);
+    worker.io.write_len = 0;
+    worker.io.reply_len = 0;
+    worker.io.reply_offset = 0;
+}
+
+test "startup prompt gate rejects stale prompt and admits each configuration item once" {
+    const a = std.testing.allocator;
+    var worker: SshWorker = undefined;
+    const commands = &.{ "cd /tmp", "export READY=1" };
+    try startupPromptTestWorker(&worker, commands, "launch\n");
+    defer deinitInputTestWorker(&worker);
+    defer a.free(worker.startup_input);
+    var bridge = ShellExecution.Bridge.init(a, worker.options.operation_key.?.owner.session);
+    defer bridge.deinit();
+    bridge.prompt_clean = true;
+    bridge.prompt_offset = 100;
+    bridge.initialization_ack_offset = 200;
+    try worker.replay.submit(&worker.input, "human\n", .ordinary, replay_mod.InputMode.from(worker.vt.snapshot().modes));
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 1000);
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+    bridge.prompt_offset = 300;
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 1100);
+    var buffer: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("cd /tmp\n", worker.input.drain(&buffer));
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 1200);
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+    bridge.prompt_clean = true;
+    bridge.prompt_offset = 400;
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 1300);
+    try std.testing.expectEqualStrings("export READY=1\n", worker.input.drain(&buffer));
+    try std.testing.expect(worker.startup_pending.load(.acquire));
+    bridge.prompt_clean = true;
+    bridge.prompt_offset = 500;
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 1400);
+    try std.testing.expectEqualStrings("launch\nhuman\n", worker.input.drain(&buffer));
+    try std.testing.expect(!bridge.prompt_clean);
+    try std.testing.expect(!worker.startup_pending.load(.acquire));
+}
+
+test "startup prompt timeout never sends commands or stale typeahead and releases fresh human input" {
+    const a = std.testing.allocator;
+    var worker: SshWorker = undefined;
+    try startupPromptTestWorker(&worker, &.{"never-send"}, "never-launch\n");
+    defer deinitInputTestWorker(&worker);
+    defer a.free(worker.startup_input);
+    var bridge = ShellExecution.Bridge.init(a, worker.options.operation_key.?.owner.session);
+    defer bridge.deinit();
+    try worker.replay.submit(&worker.input, "old typeahead\n", .ordinary, .{});
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 10);
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 10 + startup_prompt_timeout_ms);
+    try std.testing.expectEqualStrings("StartupPromptTimedOut", bridge.snapshot.failure.?);
+    try std.testing.expect(!worker.startup_pending.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+    try worker.replay.submit(&worker.input, "fresh", .ordinary, .{});
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("fresh", worker.input.drain(&buffer));
+}
+
+test "startup prompt queue backpressure retries only unadmitted commands" {
+    const a = std.testing.allocator;
+    var worker: SshWorker = undefined;
+    try startupPromptTestWorker(&worker, &.{"once"}, "");
+    defer deinitInputTestWorker(&worker);
+    defer a.free(worker.startup_input);
+    var bridge = ShellExecution.Bridge.init(a, worker.options.operation_key.?.owner.session);
+    defer bridge.deinit();
+    bridge.prompt_clean = true;
+    bridge.prompt_offset = 1;
+    const full: [256]u8 = @splat('x');
+    try worker.input.push(&full);
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 10);
+    try std.testing.expectEqual(@as(usize, 0), worker.startup_cursor.next);
+    try worker.input.consume(full.len);
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 20);
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("once\n", worker.input.drain(&buffer));
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 30);
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+}
+
+test "startup prompt context change abandons later commands and preserves multiline item boundaries" {
+    const a = std.testing.allocator;
+    var worker: SshWorker = undefined;
+    try startupPromptTestWorker(&worker, &.{ "printf first\nprintf second", "never-next" }, "");
+    defer deinitInputTestWorker(&worker);
+    defer a.free(worker.startup_input);
+    var bridge = ShellExecution.Bridge.init(a, worker.options.operation_key.?.owner.session);
+    defer bridge.deinit();
+    bridge.prompt_clean = true;
+    bridge.prompt_offset = 1;
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 10);
+    var buffer: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("printf first\nprintf second\n", worker.input.drain(&buffer));
+    bridge.snapshot.shell.revision += 1;
+    bridge.prompt_clean = true;
+    bridge.prompt_offset = 2;
+    try worker.enqueueStartupAtPrompt(&bridge, worker.startup_input, 20);
+    try std.testing.expectEqualStrings("StartupShellContextChanged", bridge.snapshot.failure.?);
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
 }
 
 test "notification SSH read receipt requires successful current publication and actual viewport tail" {

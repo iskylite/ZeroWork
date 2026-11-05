@@ -88,3 +88,11 @@ test('background verification completes without installing, explicit cancellatio
   const m=new UpdateDesignModel('verifying');m.dismiss();assert.equal(m.operation,'verifying');m.verificationComplete();assert.equal(m.operation,'ready');assert.equal(m.intent,false);
   const n=new UpdateDesignModel('verifying'),old=n.operationGeneration;n.cancelOperation();assert.equal(n.verificationComplete(old),false);assert.equal(n.operation,'idle');
 });
+
+test('empty stable channel and fetch errors never imply a verified package',()=>{
+  for(const state of ['no_stable','check_failed','download_failed']){
+    const m=new UpdateDesignModel(state);
+    assert.equal(m.operation,'idle');assert.equal(m.requestInstall(),false);
+    m.dismiss();m.open();assert.equal(m.state,state);
+  }
+});

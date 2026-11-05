@@ -155,6 +155,20 @@ test "BMC connection progress preserves safe request failure context without log
     try std.testing.expectEqualStrings("TlsClosed", snapshot.events[0].error_code.?);
 }
 
+test "BMC connection progress retains public script encoding length idle duration and timeout cause" {
+    const vm = @import("plugins/bmc_ikvm/view_model.zig");
+    var tracker = progress.Tracker.initAt(1, 0);
+    tracker.setStageAt(.public_script, 1);
+    tracker.setContext(.{ .method = .get, .path = .public_script, .phase = .response_body, .http_status = 200, .received_bytes = 933888, .content_encoding = .gzip, .content_length = 2500000, .body_idle_ms = 15000, .duration_ms = 45000 });
+    tracker.failAt(error.HttpBodyIdleTimeout, 45001);
+    tracker.setStageAt(.cleanup, 45002);
+    for (0..progress.capacity) |index| tracker.noteAt(.{ .code = .local_cleanup_unknown, .context = .{} }, 45003 + index);
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try vm.writeConnectionLog(&writer.writer, tracker.snapshotAt(45100));
+    for ([_][]const u8{ "HttpBodyIdleTimeout", "已收 933888 B", "编码 gzip", "正文长度 2500000 B", "正文无进展 15.0s", "请求 45.0s" }) |expected| try std.testing.expect(std.mem.indexOf(u8, writer.written(), expected) != null);
+}
+
 test "BMC SSH route diagnostics preserve the original jump failure and format only its proven target" {
     const vm = @import("plugins/bmc_ikvm/view_model.zig");
     var tracker = progress.Tracker.initAt(1, 0);

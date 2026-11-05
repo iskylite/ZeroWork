@@ -7,6 +7,8 @@ pub fn activityIcon(tool_name: ?[]const u8) ui.SvgAsset {
     const name = tool_name orelse return ui.icons.get("brain").?;
     var decoded: [128]u8 = undefined;
     const logical = @import("../ai/plugin_tools.zig").decodeName(&decoded, name) catch name;
+    if (std.mem.eql(u8, logical, "host.run_builtin")) return ui.icons.terminal;
+    if (std.mem.eql(u8, logical, "host.request_user_input")) return ui.icons.get("message-circle").?;
     if (std.mem.startsWith(u8, logical, "bmc_ikvm.")) return ui.icons.get("monitor").?;
     if (std.mem.indexOf(u8, logical, "search") != null) return ui.icons.search;
     if (std.mem.endsWith(u8, logical, "run_command")) return ui.icons.get("code").?;

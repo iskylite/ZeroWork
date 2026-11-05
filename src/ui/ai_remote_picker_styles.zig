@@ -20,6 +20,12 @@ pub fn input() ui.BoxStyle {
 pub fn button() ButtonStyle {
     return .{ .height = .{ .px = 32 }, .padding = .{ .left = 12, .right = 12 }, .corner_radius = 6, .background = theme.popupInset(), .flex_shrink = 0 };
 }
+pub fn navigationButton() ButtonStyle {
+    var style = button();
+    style.width = .{ .px = 32 };
+    style.padding = .{};
+    return style;
+}
 pub fn option() ButtonStyle {
     return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 32 }, .padding = .{ .left = 0, .right = 6 }, .corner_radius = 0, .background = ui.Color.TRANSPARENT, .justify = .start, .overflow = .hidden };
 }
@@ -46,7 +52,7 @@ pub fn empty(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 
 pub fn closeButton() ButtonStyle {
-    return .{ .height = .{ .px = 24 }, .padding = .{ .left = 6, .right = 6 }, .corner_radius = 6, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .corner_radius = 6, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 
 pub fn filename(_: *const ui.ThemeTokens) ui.TextStyle {

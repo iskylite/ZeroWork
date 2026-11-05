@@ -345,9 +345,9 @@ test "terminal surface binds real owned VT projection and preserves over sixty r
     try std.testing.expectEqual(@as(usize, 70), surface.rows.items.len);
     const glyph = surface.rows.items[0].glyphs.items[0].node;
     const stamp = surface.rows.items[0].time.?;
-    try std.testing.expectApproxEqAbs(@as(f32, 20), stamp.globalRect().x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 12), stamp.globalRect().x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 12), glyph.globalRect().x - stamp.globalRect().x - stamp.globalRect().w, 0.001);
-    try std.testing.expectEqual(@as(f32, 4), glyph.globalRect().y);
+    try std.testing.expectEqual(@as(f32, 12), glyph.globalRect().y);
     try std.testing.expectEqual(@as(u8, 0), glyph.getText().?.color.r);
     try std.testing.expectEqualStrings("界", surface.rows.items[0].glyphs.items[1].node.getText().?.content);
     try std.testing.expectEqualStrings("e\u{301}", surface.rows.items[0].glyphs.items[2].node.getText().?.content);
@@ -366,7 +366,7 @@ test "terminal surface fractional viewport keeps clipped history selection and b
     try transport.controller.feedOutput(owner, 1, "old\r\none\r\ntwo\r\n$ ", 1);
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
-    cx.setViewport(300, 85); // 3 complete 22px rows plus 11px, and 4px insets.
+    cx.setViewport(300, 101); // 3 complete 22px rows plus 11px, and 12px insets.
     var view = try View.mount(cx);
     cx.root = view.root;
     defer view.releaseBuffers(cx);
@@ -380,7 +380,7 @@ test "terminal surface fractional viewport keeps clipped history selection and b
     try std.testing.expectEqual(@as(usize, 4), surface.rows.items.len);
     try std.testing.expectApproxEqAbs(viewport.y - 11, surface.rows.items[0].root.globalRect().y, 0.001);
     const bottom = surface.rows.items[3].root.globalRect();
-    try std.testing.expectApproxEqAbs(surface.root.globalRect().y + 81, bottom.y + bottom.h, 0.001);
+    try std.testing.expectApproxEqAbs(surface.root.globalRect().y + 89, bottom.y + bottom.h, 0.001);
     const x = surface.rows.items[0].root.globalRect().x + surface.bodyX();
     // The visible lower half of the historical row still selects its original text.
     cx.handleMouseDownEx(x, viewport.y + 2, .left, .{});
@@ -489,10 +489,12 @@ test "terminal surface public Cx wheel moves document viewport once without scro
     try transport.controller.feedOutput(owner, 1, output.items, 1);
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
-    cx.setViewport(400, 100);
+    // Four complete 22px rows and 12px insets keep this wheel test on row boundaries.
+    cx.setViewport(400, 112);
     var view = try View.mount(cx);
     cx.root = view.root;
     defer view.releaseBuffers(cx);
+    view.setTypography(14, 22.0 / 14.0, 400);
     try view.bindTerminalService(transport.service());
     _ = cx.render();
     _ = try view.refreshTerminalService(owner, false);
@@ -754,7 +756,7 @@ test "terminal surface native input queues once across busy service and exposes 
     const client = view.root.behavior.interaction.text_input_client.?;
     var frame: ui.types.A11yRect = undefined;
     try std.testing.expect(client.frame_for_range.?(client.context, surface.caret_byte, surface.caret_byte, &frame));
-    try std.testing.expectEqual(surface.root.globalRect().x + 20 + view.cell_width, frame.x);
+    try std.testing.expectEqual(surface.root.globalRect().x + surface.contentPadding().left + view.cell_width, frame.x);
     _ = view.root.behavior.events.on_event.?(.{ .ime_commit = .{ .text = "候选" } }, view.root.behavior.events.event_context);
     try std.testing.expectEqualStrings("中文\x1b[Z\x03候选", transport.written.items);
     try view.pasteTerminalText(owner, "a\nb");
@@ -1174,7 +1176,7 @@ test "terminal surface selection remains original VT text and waits for applied 
     _ = cx.render();
     try std.testing.expect(!view.hasSelection());
     const surface = view.terminal_surface.?;
-    const x = surface.root.globalRect().x + 20 + surface.bodyX();
+    const x = surface.root.globalRect().x + surface.contentPadding().left + surface.bodyX();
     const y = surface.root.globalRect().y + surface.contentPadding().top + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{});
     cx.handleMouseMoveEx(x + 5 * view.cell_width, y, .{});
@@ -1224,7 +1226,7 @@ test "terminal surface public Cx drag release copies and right click always past
     surface.feedback.publish = struct {
         fn publish(_: ?*anyopaque, _: *ui.Cx, _: identity.SessionHandle, _: []const u8) !void {}
     }.publish;
-    const x = surface.root.globalRect().x + 20 + surface.bodyX();
+    const x = surface.root.globalRect().x + surface.contentPadding().left + surface.bodyX();
     const y = surface.root.globalRect().y + surface.contentPadding().top + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{});
     try std.testing.expect(!view.hasSelection());
@@ -1348,7 +1350,7 @@ test "terminal surface selection clears invalid anchors and zero width rectangle
     _ = try view.refreshTerminalService(owner, false);
     _ = cx.render();
     const surface = view.terminal_surface.?;
-    const x = surface.root.globalRect().x + 20 + surface.bodyX();
+    const x = surface.root.globalRect().x + surface.contentPadding().left + surface.bodyX();
     const y = surface.root.globalRect().y + surface.contentPadding().top + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{ .alt = true });
     cx.handleMouseMoveEx(x, y + surface.options.row_height, .{ .alt = true });
@@ -1416,7 +1418,7 @@ test "terminal surface offset pane uses window logical points for selection mous
     const bounds = surface.root.globalRect();
     try std.testing.expectEqual(@as(f32, 238), bounds.x);
     try std.testing.expectEqual(@as(f32, 60), bounds.y);
-    const body_x = bounds.x + 20 + surface.bodyX();
+    const body_x = bounds.x + surface.contentPadding().left + surface.bodyX();
     const body_y = bounds.y + surface.contentPadding().top;
     const cell = surface.options.cell_width;
     const row_height = surface.options.row_height;
@@ -1805,7 +1807,7 @@ test "terminal surface visible grouped inactive pane resizes but hidden group do
     _ = cx.render();
     _ = try view.refreshTerminalService(owner, false);
     try std.testing.expectEqual(@as(usize, 1), transport.resize_calls);
-    try std.testing.expectEqual(@as(u16, 14), transport.controller.geometry.rows);
+    try std.testing.expectEqual(@as(u16, 13), transport.controller.geometry.rows);
     view.root.setDisplay(.none);
     cx.setViewport(800, 500);
     _ = cx.render();
@@ -1815,7 +1817,7 @@ test "terminal surface visible grouped inactive pane resizes but hidden group do
     _ = cx.render();
     _ = try view.refreshTerminalService(owner, false);
     try std.testing.expectEqual(@as(usize, 2), transport.resize_calls);
-    try std.testing.expectEqual(@as(u16, 22), transport.controller.geometry.rows);
+    try std.testing.expectEqual(@as(u16, 21), transport.controller.geometry.rows);
 }
 
 test "global backdrop survives OSC default backgrounds while explicit ANSI cells keep their color" {
@@ -2673,4 +2675,67 @@ test "terminal surface AI readonly rejects busy keyboard and paste without repla
     try std.testing.expectEqualStrings("", transport.written.items);
     try surface.queueText("HUMAN_AFTER_TAKEOVER");
     try std.testing.expectEqualStrings("HUMAN_AFTER_TAKEOVER", transport.written.items);
+}
+
+test "terminal cell graphics preserve VT text styles selection and pooled text reuse" {
+    const saved_preferences = ui.a11y.preferences.current();
+    defer ui.a11y.preferences.set(saved_preferences);
+    ui.a11y.preferences.set(.{});
+    var transport: FakeTransport = undefined;
+    try transport.init(4, 40);
+    defer transport.deinit();
+    try transport.controller.feedOutput(owner, 1, "\x1b[38;2;255;190;40m▌│█\x1b[7m▐\x1b[27;2m┃\x1b[22;8m║\x1b[28;5m│\x1b[0m", 1);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setWindowMetrics(800, 300, 2);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    view.setTypography(14, 1.5, 400);
+    view.setTimestampGutter(false);
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, true);
+    _ = cx.render();
+    const surface = view.terminal_surface.?;
+    const glyphs = surface.rows.items[0].glyphs.items;
+    const first = glyphs[0].node;
+    try std.testing.expectEqualStrings("▌", first.getText().?.content);
+    try std.testing.expectEqual(@as(f32, 21), first.globalRect().h);
+    try std.testing.expectEqual(ui.Color.rgb(255, 190, 40), glyphs[0].drawing.?.color);
+    try std.testing.expectEqual(ui.Color.rgb(255, 190, 40), glyphs[3].background.?.getBackground());
+    try std.testing.expectEqual(@as(u8, 127), glyphs[4].drawing.?.color.a);
+    try std.testing.expectEqual(@as(u8, 0), glyphs[5].drawing.?.color.a);
+    // A visual substitution must never change copied terminal text.
+    surface.selection = .{
+        .start = try surface.service.createAnchor(.{ .row = 0, .col = 0 }),
+        .end = try surface.service.createAnchor(.{ .row = 0, .col = 3 }),
+    };
+    const copied = (try view.copySelectionText(a)).?;
+    defer a.free(copied);
+    try std.testing.expectEqualStrings("▌│█", copied);
+    cx.setFocus(view.root);
+    _ = try view.refreshTerminalService(owner, true);
+    _ = try view.refreshTerminalService(owner, true);
+    surface.blink = true;
+    surface.last_blink = 100;
+    cx.frame_time_ms = 650;
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expectEqual(@as(u8, 0), surface.rows.items[0].glyphs.items[6].drawing.?.color.a);
+    // The same pooled node must return to normal text without stale graphics.
+    try transport.controller.feedOutput(owner, 2, "\x1b[H\x1b[2KEND", 2);
+    surface.force_snapshot = true;
+    _ = try view.refreshTerminalService(owner, true);
+    _ = cx.render();
+    const reused = surface.rows.items[0].glyphs.items[0];
+    try std.testing.expectEqual(first, reused.node);
+    try std.testing.expectEqualStrings("END", reused.node.getText().?.content);
+    try std.testing.expect(reused.node.getText().?.color.a != 0);
+    try std.testing.expectEqual(@as(u21, 0), reused.drawing.?.cp);
+    // Exercise row-pool retirement while the testing allocator checks ownership.
+    view.setTypography(13, 1.35, 400);
+    cx.setWindowMetrics(800, 160, 2);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, true);
+    _ = cx.render();
 }

@@ -410,3 +410,69 @@ test "conversation UI long queue preserves single-line bounds and scrolls keyboa
         }
     }
 }
+
+test "conversation UI session list keeps phase and binding tags with icon actions on the second line" {
+    defer T.select(.dark);
+    for ([_]@TypeOf(T.currentName()){ .dark, .light, .sauber }) |name| {
+        T.select(name);
+        for ([_]f32{ 360, 600 }) |width| {
+            var f: Fixture = undefined;
+            try f.init(width, 456);
+            defer f.deinit();
+            var callbacks: SessionFixture = .{};
+            const view = try Sessions.View.mount(f.cx, f.scope, f.composer, .{ .context = &callbacks, .select = SessionFixture.ignore, .request_close = SessionFixture.ignore, .remove = SessionFixture.ignore, .act = SessionFixture.act });
+            try f.cx.root.?.appendChild(a, view.root);
+            try view.show(&.{
+                .{ .id = 1, .title = "很长的会话标题，用于检查图标操作与状态标签不会挤压或重叠", .owner = "来源连接与环境信息", .bound = true, .phase = .running, .can_copy = true, .can_remove = false },
+                .{ .id = 2, .title = "历史会话", .owner = "历史连接环境", .phase = .stopped, .can_restore = true, .can_copy = true },
+            });
+            f.settle();
+            for ([_]u64{ 1, 2 }) |id| {
+                var buf: [64]u8 = undefined;
+                const row = find(view.content, try std.fmt.bufPrint(&buf, "ai.session.row.{d}", .{id})).?;
+                const first = find(row, "ai.session.first_line").?.globalRect();
+                const second = find(row, "ai.session.second_line").?.globalRect();
+                const tag = find(row, "ai.session.phase_tag").?.globalRect();
+                try std.testing.expect(first.y + first.h <= second.y);
+                try std.testing.expectApproxEqAbs(first.x + first.w, tag.x + tag.w, 0.1);
+                try std.testing.expect(tag.x >= first.x + first.w / 2);
+                const binding = find(row, if (id == 1) "ai.session.bound" else "ai.session.unbound").?;
+                try std.testing.expectApproxEqAbs(second.x, binding.globalRect().x, 0.1);
+                inline for (.{ "jump", "copy_use", "locate", "restore", "delete" }) |action| {
+                    if (find(row, try std.fmt.bufPrint(&buf, "ai.session.{s}.{d}", .{ action, id }))) |button| {
+                        if (button.style.display != .none) {
+                            const rect = button.globalRect();
+                            try std.testing.expectEqual(@as(f32, 24), rect.w);
+                            try std.testing.expectEqual(@as(f32, 24), rect.h);
+                            try std.testing.expect(rect.y >= second.y and rect.y + rect.h <= second.y + second.h + 0.1);
+                            try std.testing.expect(rect.x >= second.x and rect.x + rect.w <= second.x + second.w + 0.1);
+                            try std.testing.expect(button.behavior.interaction.a11y.?.label != null);
+                            for (button.children.items) |child| try std.testing.expect(child.getText() == null);
+                        }
+                    }
+                }
+            }
+            f.click("ai.session.row.1");
+            f.click("ai.session.first_line");
+            f.click("ai.session.phase_tag");
+            f.click("ai.session.bound");
+            try std.testing.expectEqual(@as(usize, 0), callbacks.actions);
+            try std.testing.expect(view.open.peek());
+            f.click("ai.session.copy_use.2");
+            try std.testing.expectEqual(@as(usize, 1), callbacks.actions);
+            try std.testing.expectEqual(Sessions.Action.copy_use, callbacks.last.?);
+            f.click("ai.session.restore.2");
+            try std.testing.expectEqual(@as(usize, 2), callbacks.actions);
+            try std.testing.expectEqual(Sessions.Action.restore, callbacks.last.?);
+            f.click("ai.session.locate.1");
+            try std.testing.expectEqual(@as(usize, 3), callbacks.actions);
+            try std.testing.expectEqual(Sessions.Action.locate, callbacks.last.?);
+            const row = find(view.content, "ai.session.row.1").?;
+            inline for (.{ .idle, .running, .approval, .done, .failed, .stopped }, .{ "未开始", "运行中", "待确认", "已完成", "失败", "已暂停" }) |phase, label| {
+                view.updatePhase(1, phase);
+                f.settle();
+                try std.testing.expect(findText(find(row, "ai.session.phase_tag").?, label) != null);
+            }
+        }
+    }
+}

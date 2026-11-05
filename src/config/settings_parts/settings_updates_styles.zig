@@ -1,6 +1,7 @@
 //! Geometry from app-update/styles.css and its exported 900 × 640 DOM snapshot.
 //! Paint always comes from the active global application theme.
 const ui = @import("ui");
+const std = @import("std");
 const shared = @import("../settings_styles.zig");
 pub const theme = shared.theme;
 
@@ -27,7 +28,14 @@ pub fn appMark(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = 42 }, .height = .{ .px = 42 }, .align_items = .center, .justify = .center, .background = colors.action_accent, .gradient = .{ .from = colors.action_accent, .to = colors.action_accent_2, .direction = .diagonal }, .border = .{ .width = 0, .radius = 11 }, .flex_shrink = 0 };
 }
 pub fn badge(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .height = .{ .px = 26 }, .padding = .{ .left = 9, .right = 9 }, .justify = .center, .align_items = .center, .background = theme.popupSelection(), .border = .{ .width = 0, .radius = 6 }, .flex_shrink = 0 };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 26 }, .padding = .{ .left = 9, .right = 9 }, .justify = .center, .align_items = .center, .background = theme.current().fg_2.withAlpha(26), .border = .{ .width = 0, .radius = 6 }, .flex_shrink = 0 };
+}
+pub fn badgeInk(state: []const u8, label: []const u8) ui.Color {
+    const colors = theme.current();
+    if (std.mem.eql(u8, state, "failed") or std.mem.eql(u8, state, "draining")) return colors.warn_ink;
+    if (std.mem.eql(u8, state, "ready") or std.mem.eql(u8, label, "无需更新")) return colors.ok_ink;
+    if (state.len == 0 or std.mem.eql(u8, state, "idle")) return colors.fg_2;
+    return colors.accent_ink;
 }
 pub fn divider(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 1 }, .background = theme.current().border, .flex_shrink = 0 };
@@ -35,12 +43,6 @@ pub fn divider(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn detail(t: *const ui.ThemeTokens) ui.BoxStyle {
     var style = row(t);
     style.padding = .{ .top = 15 };
-    return style;
-}
-pub fn versionFooter(t: *const ui.ThemeTokens) ui.BoxStyle {
-    var style = row(t);
-    style.margin = .{ .top = 13 };
-    style.min_height = 24;
     return style;
 }
 pub fn preferenceHeader(_: *const ui.ThemeTokens) ui.BoxStyle {

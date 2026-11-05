@@ -1,6 +1,9 @@
 //! Figma Local Bridge: 274:913661, 499:657547, 300:593434.
 const std = @import("std");
 const ui = @import("ui");
+pub fn dropMarker() ui.BoxStyle {
+    return .{ .position = .absolute, .height = .{ .px = 2 }, .background = theme.current().accent, .hit_behavior = .pass_through };
+}
 pub const theme = @import("app_theme.zig");
 pub const expanded_width: f32 = @import("sidebar_model.zig").default_width;
 pub const collapsed_width: f32 = 48;

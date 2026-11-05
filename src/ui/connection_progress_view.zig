@@ -30,6 +30,26 @@ pub const Snapshot = struct {
     logs: []const LogRecord = &.{},
     dropped: usize = 0,
 };
+
+fn sameResult(a: *const Snapshot, b: *const Snapshot) bool {
+    if (!a.key.eql(b.key) or a.state != b.state or a.cleanup != b.cleanup or
+        a.attached != b.attached or a.inline_authentication != b.inline_authentication or
+        a.local_ready != b.local_ready or a.file_session != b.file_session or
+        a.dropped != b.dropped or !std.mem.eql(u8, a.activity, b.activity) or
+        !std.meta.eql(a.resources, b.resources) or a.logs.len != b.logs.len or
+        a.journal.attempt != b.journal.attempt or a.journal.count != b.journal.count or
+        a.journal.dropped != b.journal.dropped or a.journal.completed != b.journal.completed or
+        !std.meta.eql(a.journal.failure, b.journal.failure)) return false;
+    // Compare only initialized records, without copying the large journal to
+    // the UI stack. Hop identity was already validated by show().
+    for (a.journal.entries[0..a.journal.count], b.journal.entries[0..b.journal.count]) |left, right| if (!std.meta.eql(left, right)) return false;
+    for (a.logs, b.logs) |left, right| if (!std.meta.eql(left, right)) return false;
+    if (a.failure) |left| {
+        const right = b.failure orelse return false;
+        return left.hop == right.hop and left.phase == right.phase and std.mem.eql(u8, left.reason, right.reason);
+    }
+    return b.failure == null;
+}
 pub const Callbacks = struct {
     context: *anyopaque,
     cancel: *const fn (*anyopaque, OperationKey) void,
@@ -431,6 +451,11 @@ pub const View = struct {
                 for (current.value.hops, snapshot.hops) |before, after| {
                     if (before.port != after.port or !std.mem.eql(u8, before.name, after.name) or !std.mem.eql(u8, before.host, after.host) or !std.mem.eql(u8, before.user, after.user)) return error.FrozenConnectionChanged;
                 }
+                // A retained failure/cancellation is a result, not an active
+                // animation. Repeated host polls must leave it clean.
+                if (self.visible and self.open.peek() and
+                    (snapshot.state == .failed or snapshot.state == .cancelled) and
+                    sameResult(current.value, &snapshot)) return;
             }
         }
         var copy = try Owned.init(self.cx.allocator, &snapshot);

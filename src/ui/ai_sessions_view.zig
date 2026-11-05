@@ -2,9 +2,10 @@
 const ui = @import("ui");
 const S = @import("ai_sessions_styles.zig");
 const T = @import("app_theme.zig");
-pub const Action = enum { view, locate, restore, copy, copy_use, end, new, more };
-pub const Entry = struct { id: u64, title: []const u8, owner: []const u8, detail: []const u8 = "", active: bool = false, phase: @import("../ai/assistant_store.zig").Phase = .idle, bound: bool = false, ending: bool = false, can_restore: bool = false, can_copy: bool = false, can_remove: bool = true, first_use: bool = false };
-pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, u64) void, request_close: *const fn (*anyopaque, u64) void, remove: *const fn (*anyopaque, u64) void, act: ?*const fn (*anyopaque, u64, Action) void = null, confirmed: ?*const fn (*anyopaque, u64, bool) void = null };
+const RowView = @import("ai_session_row.zig");
+pub const Action = RowView.Action;
+pub const Entry = RowView.Entry;
+pub const Hooks = RowView.Hooks;
 pub const View = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -88,9 +89,10 @@ pub const View = struct {
         self.history_title = try ui.textStyled(cx, titleStyle, "AI 会话");
         self.history_title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try history_heading.appendChild(cx.allocator, self.history_title);
-        const history_close = try ui.widgets.Button(.{ .variant = .ghost, .label = "关闭", .base_style = @import("ai_pending_styles.zig").action(), .on_click = cx.on(View, self, closeHistory) }).mount(scope, cx);
+        const history_close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = 14, .a11y_label = "关闭会话历史", .base_style = S.rowAction(), .on_click = cx.on(View, self, closeHistory) }).mount(scope, cx);
         history_close.meta.ownership.meta.test_id = "ai.history.close";
-        try history_heading.appendChild(cx.allocator, history_close);
+        const history_close_hint = try @import("control_hint.zig").mount(cx, scope, history_close, "关闭会话历史", .{ .id = "ai.history.close.tooltip", .visible = self.history_open });
+        try history_heading.appendChild(cx.allocator, history_close_hint.wrapper);
         try history_modal.body.appendChild(cx.allocator, history_heading);
         self.history_status = try ui.textStyled(cx, detailStyle, "只读查看");
         self.history_status.meta.ownership.meta.test_id = "ai.history.status";
@@ -173,6 +175,7 @@ pub const View = struct {
         if (T.remapUiSurface(color, previous)) |next| return next;
         if (ui.Color.eql(color, previous.accent.withAlpha(24))) return T.current().accent.withAlpha(24);
         inline for (@typeInfo(T.Colors).@"struct".field_names) |field| {
+            if (ui.Color.eql(color, @field(previous, field).withAlpha(24))) return @field(T.current(), field).withAlpha(24);
             if (ui.Color.eql(color, @field(previous, field))) return @field(T.current(), field);
         }
         return color;
@@ -294,37 +297,6 @@ pub const View = struct {
         button.meta.ownership.meta.test_id = test_id;
         try self.history_actions.appendChild(self.cx.allocator, button);
     }
-    const Row = struct {
-        view: *View,
-        id: u64,
-        select_id: [64]u8 = undefined,
-        delete_id: [64]u8 = undefined,
-        row_id: [64]u8 = undefined,
-        actions_start: ?*ui.Node = null,
-        status_icon: ?*ui.Node = null,
-        status_label: ?*ui.Signal([]const u8) = null,
-        action: Action = .view,
-        fn event(event_value: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
-            const self: *Row = @ptrCast(@alignCast(raw orelse return .ignored));
-            if (event_value != .mouse_down or event_value.mouse_down.button != .left) return .ignored;
-            // Action buttons handle their own mouse-up click; do not hide
-            // their row while the pointer is still pressed.
-            if (self.actions_start) |action| if (event_value.mouse_down.x >= action.globalRect().x) return .ignored;
-            self.view.highlighted.set(self.id);
-            self.select();
-            return .handled;
-        }
-        fn select(self: *Row) void {
-            self.view.open.set(false);
-            if (self.view.hooks.act) |callback| callback(self.view.hooks.context, self.id, .view) else self.view.hooks.select(self.view.hooks.context, self.id);
-        }
-        fn act(self: *Row) void {
-            if (self.view.hooks.act) |callback| callback(self.view.hooks.context, self.id, self.action);
-        }
-        fn remove(self: *Row) void {
-            self.view.hooks.request_close(self.view.hooks.context, self.id);
-        }
-    };
     pub fn show(self: *View, entries: []const Entry) !void {
         self.open.set(false);
         if (self.rows) |old| old.dispose();
@@ -335,13 +307,6 @@ pub const View = struct {
         }
         const scope = try self.scope.childScope();
         self.rows = scope;
-        const arena = try scope.createState(@import("std").heap.ArenaAllocator, .init(self.cx.allocator));
-        try scope.onCleanup(@import("std").heap.ArenaAllocator, arena, struct {
-            fn cleanup(value: *@import("std").heap.ArenaAllocator) void {
-                value.deinit();
-            }
-        }.cleanup);
-        const data = arena.allocator();
         self.content.setStyleInline(self.cx.allocator, S.menu());
 
         const heading = try ui.box(self.cx, S.heading(), .{});
@@ -371,66 +336,7 @@ pub const View = struct {
             break;
         };
         for (entries) |entry| {
-            const state = try scope.createState(Row, .{ .view = self, .id = entry.id });
-            const row = try ui.box(self.cx, S.row(), .{});
-            if (self.hooks.act != null) row.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 48 } });
-            row.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&state.row_id, "ai.session.row.{d}", .{entry.id});
-            row.behavior.events.on_event = Row.event;
-            row.behavior.events.event_context = state;
-            const hovered = try ui.hooks.useHover(scope, row);
-            try scope.createEffect(.{ .cx = self.cx, .row = row, .hovered = hovered, .highlighted = self.highlighted, .id = entry.id, .publication = try self.cx.themeSignal(scope) }, struct {
-                fn run(ctx: anytype) void {
-                    _ = ctx.publication.get();
-                    ctx.row.setStyleInline(ctx.cx.allocator, S.rowBackground(ctx.highlighted.get() == ctx.id, ctx.hovered.get()));
-                    ctx.cx.requestRedraw();
-                }
-            }.run);
-            state.status_label = try scope.createText(phaseLabel(entry.phase), .{});
-            const hint = try ui.widgets.Tooltip(.{ .text = state.status_label.? }).mount(scope, self.cx);
-            state.status_icon = try ui.iconTint(self.cx, ui.icons.get(phaseIcon(entry.phase)).?, phaseColor(entry.phase), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
-            state.status_icon.?.meta.ownership.meta.test_id = phaseTestId(entry.phase);
-            try hint.trigger.appendChild(self.cx.allocator, state.status_icon.?);
-            hint.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .flex_shrink = 0, .align_items = .center, .justify = .center });
-            try row.appendChild(self.cx.allocator, hint.wrapper);
-            const copy = try ui.box(self.cx, .{ .width = .fill(), .min_width = 0, .direction = if (self.hooks.act != null) .column else .row, .align_items = .center, .gap = 6 }, .{});
-            try row.appendChild(self.cx.allocator, copy);
-            const title = try ui.text(self.cx, entry.title, S.text(true));
-            title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16.5 }, .min_width = 0 });
-            try copy.appendChild(self.cx.allocator, title);
-            const summary = if (self.hooks.act != null) try @import("std").fmt.allocPrint(self.cx.allocator, "{s} · {s}{s}", .{ if (entry.bound) "已绑定" else "未绑定", entry.owner, if (entry.ending) " · 正在停止任务" else "" }) else try self.cx.allocator.dupe(u8, entry.owner);
-            defer self.cx.allocator.free(summary);
-            const owner = try ui.text(self.cx, "", S.text(false));
-            try owner.setTextContent(self.cx.allocator, summary);
-            owner.setStyleInline(self.cx.allocator, .{ .width = if (self.hooks.act != null) .fill() else .{ .px = 130 }, .min_width = 0, .height = .{ .px = 15 }, .flex_shrink = 1 });
-            try copy.appendChild(self.cx.allocator, owner);
-            const select = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get("arrow-up-right").?, .icon_size = 14, .a11y_label = "查看此 AI 会话", .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .font_weight = 400, .text_color = T.current().accent_ink }), .hover_style = S.actionHover(false), .on_click = self.cx.on(Row, state, Row.select) }).mount(scope, self.cx);
-            select.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .text_color = T.current().accent_ink });
-            state.actions_start = select;
-            select.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&state.select_id, "ai.session.jump.{d}", .{entry.id});
-            try row.appendChild(self.cx.allocator, select);
-            if (self.hooks.act != null) {
-                inline for (.{ .{ Action.locate, "↗", "locate" }, .{ Action.restore, "恢复", "restore" }, .{ Action.copy_use, "复制", "copy_use" } }) |spec| {
-                    const enabled = switch (spec[0]) {
-                        .locate => entry.bound,
-                        .restore => entry.can_restore,
-                        .copy_use => entry.can_copy,
-                        else => false,
-                    };
-                    if (enabled) {
-                        const action_state = try scope.createState(Row, .{ .view = self, .id = entry.id, .action = spec[0] });
-                        const action_button = try ui.widgets.Button(.{ .label = if (spec[0] == .restore and entry.first_use) "使用" else if (spec[0] == .copy_use) "复制并使用" else spec[1], .variant = .ghost, .a11y_label = if (spec[0] == .locate) "定位原持有者" else if (spec[0] == .copy_use) "复制并使用到当前 Agent" else if (entry.first_use) "使用到当前 Agent" else "恢复到当前 Agent", .base_style = @import("ai_pending_styles.zig").action(), .on_click = self.cx.on(Row, action_state, Row.act) }).mount(scope, self.cx);
-                        action_button.meta.ownership.meta.test_id = try @import("std").fmt.allocPrint(data, "ai.session.{s}.{d}", .{ spec[2], entry.id });
-                        try row.appendChild(self.cx.allocator, action_button);
-                    }
-                }
-            }
-            const remove = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "删除 AI 会话", .hover_style = S.actionHover(true), .on_click = self.cx.on(Row, state, Row.remove) }).mount(scope, self.cx);
-            if (!entry.can_remove) remove.setDisplay(.none);
-            remove.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{} });
-            remove.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&state.delete_id, "ai.session.delete.{d}", .{entry.id});
-            try remove.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("trash-2").?, T.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
-            try row.appendChild(self.cx.allocator, remove);
-            try self.content.appendChild(self.cx.allocator, row);
+            try self.content.appendChild(self.cx.allocator, try RowView.mount(self.cx, scope, entry, self.hooks, self.highlighted, self.open));
         }
         if (self.hooks.act != null and entries.len >= 50) {
             const more = try scope.createState(HistoryAction, .{ .view = self, .id = 0, .action = .more });
@@ -438,7 +344,7 @@ pub const View = struct {
             button.meta.ownership.meta.test_id = "ai.sessions.more";
             try self.content.appendChild(self.cx.allocator, button);
         }
-        self.desired_height = @min(if (self.hooks.act != null) @as(f32, 240) else 160, 38 + if (entries.len == 0) @as(f32, 33) else @as(f32, @floatFromInt(entries.len)) * (if (self.hooks.act != null) @as(f32, 48) else 30) + @as(f32, @floatFromInt(entries.len - 1)) * 2);
+        self.desired_height = @min(if (self.hooks.act != null) @as(f32, 240) else 160, 38 + if (entries.len == 0) @as(f32, 33) else @as(f32, @floatFromInt(entries.len)) * 56 + @as(f32, @floatFromInt(entries.len - 1)) * 2);
         self.surface.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.desired_height }, .display = .flex });
         ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
         self.open.set(true);
@@ -450,59 +356,13 @@ pub const View = struct {
         for (self.content.children.items) |row| {
             const test_id = row.meta.ownership.meta.test_id orelse continue;
             if (@import("std").mem.eql(u8, test_id, expected) and row.children.items.len > 0) {
-                const state: *Row = @ptrCast(@alignCast(row.behavior.events.event_context orelse continue));
-                state.status_label.?.set(phaseLabel(phase));
-                state.status_icon.?.meta.ownership.meta.test_id = phaseTestId(phase);
-                if (state.status_icon.?.getIcon()) |old| {
-                    var icon = old;
-                    const asset = ui.icons.get(phaseIcon(phase)).?;
-                    icon.icon_id = asset.icon_id.?;
-                    icon.rep = asset.pickRep(14).?;
-                    icon.tint = phaseColor(phase);
-                    state.status_icon.?.setIcon(icon);
-                    state.status_icon.?.markRenderDirty();
-                }
+                RowView.updatePhase(self.cx, row, phase);
                 break;
             }
         }
     }
-    fn phaseTestId(phase: @import("../ai/assistant_store.zig").Phase) []const u8 {
-        return switch (phase) {
-            .idle => "ai.session.status.idle",
-            .running => "ai.session.status.running",
-            .approval => "ai.session.status.approval",
-            .done => "ai.session.status.done",
-            .failed => "ai.session.status.failed",
-            .stopped => "ai.session.status.stopped",
-        };
-    }
-    fn phaseIcon(phase: @import("../ai/assistant_store.zig").Phase) []const u8 {
-        return switch (phase) {
-            .idle => "circle-dashed",
-            .running => "loader-circle",
-            .approval => "circle-help",
-            .done => "circle-check",
-            .failed => "circle-alert",
-            .stopped => "circle-stop",
-        };
-    }
-    fn phaseColor(phase: @import("../ai/assistant_store.zig").Phase) ui.Color {
-        return switch (phase) {
-            .idle, .stopped => T.current().fg_2,
-            .running => T.current().accent_ink,
-            .approval => T.current().warn_ink,
-            .done => T.current().ok_ink,
-            .failed => T.current().danger_ink,
-        };
-    }
-    fn phaseLabel(phase: @import("../ai/assistant_store.zig").Phase) []const u8 {
-        return switch (phase) {
-            .idle => "待开始",
-            .running => "运行中",
-            .approval => "待确认",
-            .done => "已完成",
-            .failed => "失败",
-            .stopped => "已停止",
-        };
-    }
+    const phaseTestId = RowView.phaseTestId;
+    const phaseIcon = RowView.phaseIcon;
+    const phaseColor = RowView.phaseColor;
+    const phaseLabel = RowView.phaseLabel;
 };

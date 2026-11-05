@@ -890,7 +890,7 @@ pub const Pane = struct {
         const size_width = remaining * preferred_size / preferred_total;
         const date_width = if (compact) 0 else remaining * preferred_date / preferred_total;
         const name_width = remaining - size_width - date_width;
-        self.toolbar.setStyleInline(cx.allocator, .{ .padding = if (compact) .{ .top = 8, .right = 8, .bottom = 9, .left = 8 } else .{ .top = 14, .right = 13, .bottom = 11, .left = 13 } });
+        self.toolbar.setStyleInline(cx.allocator, .{ .padding = .{ .top = if (compact) 8 else 14, .right = 12, .bottom = if (compact) 9 else 11, .left = 12 } });
         self.heading_buttons[2].setDisplay(if (compact) .none else .flex);
         var changed = false;
         if (@abs(width - self.column_width) > 0.01 or @abs(size_width - self.size_width) > 0.01 or @abs(date_width - self.date_width) > 0.01 or @abs(name_width - self.name_width) > 0.01) {

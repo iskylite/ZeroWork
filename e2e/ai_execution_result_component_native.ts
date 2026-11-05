@@ -55,7 +55,7 @@ for(const theme of report.matrix.themes)for(const width of report.matrix.width)f
    if(state==='recording_failed')assert.equal(text(await visible('ai.execution.result.effect')),'终端记录保存失败，可查看原终端。');
    if(savedInterval||state==='recording_failed'||state==='sealed'||state==='failed')assert.equal(text(await visible('ai.execution.result.process')),state==='interval_signal'?'结束信号 15':state==='interval_no_exit'?'命令已结束 · 未提供退出码':`退出码 ${state==='interval_failed'||state==='failed'?7:0}`);
    else assert(!(await h.query('ai.execution.result.process')).some(shown));
-   assert.equal(text(await visible('ai.execution.result.output_label')),'终端输出');
+   assert.equal(text(await visible('ai.execution.result.output_label')),state==='cancelled'?'暂未取得终端输出':'终端输出');
    await h.resizeWindow(width,600);
    await click('ai.execution.result.details_toggle');
    const collection=await visible('ai.execution.result.collection_details');

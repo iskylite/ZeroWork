@@ -10,7 +10,9 @@
 - `icons.zig`：将三种 PNG 编入应用，无需运行时访问源码目录。
 - `preview.html`：三种底色的实际素材预览。
 
-设置 → 外观与主题 → 应用图标提供透明背景、白底、黑底。配置为 `[ui] icon_background = "transparent" | "light" | "dark"`，默认 `transparent`。选择经现有设置事务保存后更新 Dock；取消不更新，重启恢复。Finder 与启动台使用应用包的默认透明图标，不修改已签名应用包。
+设置 → 外观与主题 → 应用图标提供透明背景、白底、黑底。配置为 `[ui] icon_background = "transparent" | "light" | "dark"`，默认 `transparent`。选择经现有设置事务保存后，同时更新运行中的 Dock 图标和应用文件的自定义图标；取消不更新，退出后保留，启动时重新应用。使用 `NSWorkspace.setIcon` 保存自定义图标，不替换签名 `Contents` 内的资源；Finder 等系统位置也使用所选图标。应用必须位于当前用户可写的目录中，从只读磁盘映像启动时无法持久保存。直接运行未打包的可执行文件时只更新运行中的 Dock 图标。
+
+签名验证：Finder 自定义图标会在应用文件上增加 `com.apple.FinderInfo` 等元数据，`codesign --verify --strict` 会将其报告为不允许的附加数据；常规 `codesign --verify --deep` 及更新器使用的 `SecStaticCodeCheckValidity(kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)` 仍应通过。打包时先对无自定义文件图标的新应用完成严格签名校验，再由安装后的应用设置自定义图标。
 
 重建默认安装图标：
 

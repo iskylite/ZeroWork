@@ -5,12 +5,13 @@ const identity = @import("../host/identity.zig");
 const scope = @import("tool_scope.zig");
 const wire = @import("wire_history.zig");
 const provider = @import("provider.zig");
+const context_usage = @import("context_usage.zig");
 pub const input = @import("session_input.zig");
 pub const Binding = struct { agent: identity.AgentId, owner: scope.Owner };
 pub const End = struct { operation: identity.HostOperationId, fence: input.Fence, failed: bool = false };
 pub const Released = struct { worker_joined: bool, dispatch_closed: bool, local_released: bool, transcript_saved: bool };
 pub const Event = struct {
-    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, draft, remove, migrate_bound, migrate_closed },
+    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed },
     conversation: identity.ConversationId,
     agent: ?identity.AgentId = null,
     owner: ?scope.Owner = null,
@@ -21,6 +22,8 @@ pub const Event = struct {
     source_revision: ?u64 = null,
     turn: u64 = 0,
     messages: []const provider.Message = &.{},
+    presentation: ?[]const u8 = null,
+    context_usage: ?context_usage.Stored = null,
     draft: ?[]const u8 = null,
     recoverable: bool = true,
     initial_input: ?input.Receipt = null,
@@ -39,6 +42,7 @@ pub const Record = struct {
     content_revision: u64 = 1,
     draft_revision: u64 = 1,
     history: wire.History = .{},
+    presentation: ?[]u8 = null,
     recovery_history: wire.History = .{},
     recovery_turn: u64 = 0,
     draft: ?[]u8 = null,
@@ -54,6 +58,7 @@ pub const Record = struct {
     inbox: input.Inbox,
     fn deinit(self: *Record, a: std.mem.Allocator) void {
         self.history.deinit();
+        if (self.presentation) |bytes| a.free(bytes);
         self.recovery_history.deinit();
         if (self.draft) |text| a.free(text);
         self.inbox.deinit();
@@ -290,12 +295,31 @@ pub const Store = struct {
         record.last_turn = turn;
         record.recoverable = recoverable;
     }
+    /// Display history is independent of compacted model context and grants no authority.
+    pub fn savePresentation(self: *Store, id: identity.ConversationId, bytes: []const u8) !void {
+        const record = self.find(id) orelse return error.ConversationNotFound;
+        try self.savePresentationWithUsage(id, bytes, record.history.usage);
+    }
+    /// Persist display data and its counter together, including explicit clears.
+    pub fn savePresentationWithUsage(self: *Store, id: identity.ConversationId, bytes: []const u8, baseline: ?context_usage.Baseline) !void {
+        const record = self.find(id) orelse return error.ConversationNotFound;
+        const stored = context_usage.Stored.capture(record.history.messages, baseline);
+        const valid = if (stored) |value| value.baseline else null;
+        if (record.presentation) |prior| if (std.mem.eql(u8, prior, bytes) and std.meta.eql(record.history.usage, valid)) return;
+        const owned = try self.allocator.dupe(u8, bytes);
+        errdefer self.allocator.free(owned);
+        try self.save(.{ .kind = .presentation, .conversation = id, .revision = record.revision, .presentation = bytes, .context_usage = stored });
+        if (record.presentation) |prior| self.allocator.free(prior);
+        record.presentation = owned;
+        record.history.usage = valid;
+    }
     pub const ForkSnapshot = struct {
         source: identity.ConversationId,
         revision: u64,
         turn: u64,
         origin: ?scope.Owner,
         history: wire.History,
+        presentation: ?[]const u8 = null,
         pub fn deinit(self: *ForkSnapshot) void {
             self.history.deinit();
         }
@@ -305,7 +329,10 @@ pub const Store = struct {
     pub fn pinFork(self: *Store, source: identity.ConversationId) !ForkSnapshot {
         const record = self.find(source) orelse return error.ConversationNotFound;
         if (record.last_turn == 0 or !record.recoverable or record.history.failure != null) return error.NoStableCheckpoint;
-        return .{ .source = source, .revision = record.content_revision, .turn = record.last_turn, .origin = record.initial_origin, .history = try wire.History.copy(self.allocator, record.history.messages, "") };
+        var history = try wire.History.copy(self.allocator, record.history.messages, "");
+        errdefer history.deinit();
+        const presentation = if (record.presentation) |bytes| try history.arena.?.allocator().dupe(u8, bytes) else null;
+        return .{ .source = source, .revision = record.content_revision, .turn = record.last_turn, .origin = record.initial_origin, .history = history, .presentation = presentation };
     }
     pub fn publishFork(self: *Store, pinned: *const ForkSnapshot, agent_id: ?identity.AgentId) !identity.ConversationId {
         const target = if (agent_id) |id| self.agent(id) orelse return error.AgentNotFound else null;
@@ -316,7 +343,8 @@ pub const Store = struct {
         const record = try self.allocateRecord();
         errdefer record.deinit(self.allocator);
         if (target != null) record.revision = try identity.advance(record.revision);
-        try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = pinned.source, .source_revision = pinned.revision, .turn = pinned.turn, .messages = snapshot.messages, .agent = if (target) |agent_value| agent_value.id else null, .owner = if (target) |agent_value| agent_value.owner else null, .environment = if (target) |agent_value| agent_value.environment else 1, .initial_origin = pinned.origin });
+        if (pinned.presentation) |bytes| record.presentation = try self.allocator.dupe(u8, bytes);
+        try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = pinned.source, .source_revision = pinned.revision, .turn = pinned.turn, .messages = snapshot.messages, .presentation = record.presentation, .agent = if (target) |agent_value| agent_value.id else null, .owner = if (target) |agent_value| agent_value.owner else null, .environment = if (target) |agent_value| agent_value.environment else 1, .initial_origin = pinned.origin });
         record.history = snapshot;
         record.initial_origin = pinned.origin;
         record.parent = pinned.source;
@@ -360,7 +388,8 @@ pub const Store = struct {
         const record = try self.allocateRecord();
         errdefer record.deinit(self.allocator);
         if (target != null) record.revision = try identity.advance(record.revision);
-        try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = parent.id, .source_revision = parent.content_revision, .turn = selected_checkpoint.turn, .messages = snapshot.messages, .agent = if (target) |value| value.id else null, .owner = if (target) |value| value.owner else null, .environment = if (target) |value| value.environment else 1, .initial_origin = parent.initial_origin });
+        if (parent.presentation) |bytes| record.presentation = try self.allocator.dupe(u8, bytes);
+        try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = parent.id, .source_revision = parent.content_revision, .turn = selected_checkpoint.turn, .messages = snapshot.messages, .presentation = record.presentation, .agent = if (target) |value| value.id else null, .owner = if (target) |value| value.owner else null, .environment = if (target) |value| value.environment else 1, .initial_origin = parent.initial_origin });
         record.history = snapshot;
         record.initial_origin = parent.initial_origin;
         record.parent = parent.id;
@@ -446,6 +475,7 @@ pub const Store = struct {
             fresh.fork_turn = if (event.parent != null) event.turn else null;
             fresh.last_turn = event.turn;
             if (event.draft) |text| fresh.draft = try self.allocator.dupe(u8, text);
+            if (event.presentation) |bytes| fresh.presentation = try self.allocator.dupe(u8, bytes);
             fresh.history = try wire.History.copy(self.allocator, if (event.initial_input != null) &.{} else event.messages, "");
             self.records.appendAssumeCapacity(fresh);
             record = fresh;
@@ -512,6 +542,12 @@ pub const Store = struct {
                 value.last_turn = event.turn;
                 value.recoverable = event.recoverable;
                 value.content_revision = try identity.advance(value.content_revision);
+            },
+            .presentation => {
+                const bytes = try self.allocator.dupe(u8, event.presentation orelse return error.InvalidSessionJournal);
+                if (value.presentation) |prior| self.allocator.free(prior);
+                value.presentation = bytes;
+                value.history.usage = if (event.context_usage) |stored| stored.restore(value.history.messages) else null;
             },
             .draft => {
                 const text = try self.allocator.dupe(u8, event.draft orelse "");

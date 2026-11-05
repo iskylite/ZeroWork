@@ -303,8 +303,13 @@ pub const RequestTable = struct {
             for (entries[0..index]) |entry| if (std.mem.eql(u8, entry.provider_name, name)) return error.ToolDefinitionConflict;
             var owned_definition = try copyDefinition(a, definition);
             const terminal_source = @import("host_terminal_queries.zig").supports(definition.id) or
-                std.mem.eql(u8, definition.id, "host.run_in_terminal") or std.mem.eql(u8, definition.id, "host.attach_shell");
-            if (terminal_source and terminal_targets.len != 0) owned_definition.schema = try terminalSourceSchema(a, definition.schema, terminal_targets, context);
+                std.mem.eql(u8, definition.id, "host.run_in_terminal") or std.mem.eql(u8, definition.id, "host.attach_shell") or std.mem.eql(u8, definition.id, @import("builtin_tools.zig").id);
+            if (terminal_source) {
+                if (contribution.session_targets) |owners| {
+                    for (owners) |owner| _ = try captured_scope.validate(&.{@backingInt(owner.session_id)});
+                    owned_definition.schema = try sessionSourceSchema(a, definition.schema, owners, context);
+                } else if (terminal_targets.len != 0) owned_definition.schema = try terminalSourceSchema(a, definition.schema, terminal_targets, context);
+            }
             entries[index] = .{ .definition = owned_definition, .provider_name = try a.dupe(u8, name), .targets = &.{}, .authority = contribution.authority };
         }
         table.entries = entries;
@@ -636,6 +641,13 @@ pub fn narrowSessionSchema(allocator: std.mem.Allocator, input: []const u8, ids:
 }
 
 fn terminalSourceSchema(allocator: std.mem.Allocator, input: []const u8, targets: []const TargetBinding, context: host.Context) ![]const u8 {
+    const owners = try allocator.alloc(identity.SessionHandle, targets.len);
+    defer allocator.free(owners);
+    for (targets, owners) |target, *owner| owner.* = target.owner;
+    return sessionSourceSchema(allocator, input, owners, context);
+}
+
+fn sessionSourceSchema(allocator: std.mem.Allocator, input: []const u8, owners: []const identity.SessionHandle, context: host.Context) ![]const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
     defer parsed.deinit();
     var schema = parsed.value;
@@ -643,7 +655,7 @@ fn terminalSourceSchema(allocator: std.mem.Allocator, input: []const u8, targets
     const source = properties.object.getPtr("session_ref") orelse return error.InvalidToolSchema;
     const a = parsed.arena.allocator();
     var references: std.array_list.Managed(std.json.Value) = .init(a);
-    for (targets) |target| try references.append(.{ .string = try @import("host_queries.zig").sessionRef(a, context, target.owner) });
+    for (owners) |owner| try references.append(.{ .string = try @import("host_queries.zig").sessionRef(a, context, owner) });
     try source.object.put(a, "enum", .{ .array = references });
     return std.json.Stringify.valueAlloc(allocator, schema, .{});
 }

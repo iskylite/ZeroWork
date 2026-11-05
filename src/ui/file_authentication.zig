@@ -33,6 +33,8 @@ const Context = struct {
     auth_bridge: auth.InteractiveBridge = .{},
     delegate: files.readonly.Connector,
     started: std.atomic.Value(bool) = .init(false),
+    connect_finished: std.atomic.Value(bool) = .init(false),
+    close_started: std.atomic.Value(bool) = .init(false),
     cancelled: std.atomic.Value(bool) = .init(false),
     native_receipt: std.atomic.Value(u8) = .init(@backingInt(Receipt.awaiting)),
     closed: std.atomic.Value(bool) = .init(false),
@@ -45,11 +47,16 @@ const Context = struct {
     fn connect(raw: *anyopaque, cancelled: *const std.atomic.Value(bool)) !ssh.Session {
         const self: *Context = @ptrCast(@alignCast(raw));
         if (self.started.swap(true, .acq_rel)) return error.ConnectorAlreadyStarted;
+        // The authentication context outlives connect(): it also owns the
+        // connector's eventual close. Its mere presence must not keep frames
+        // running after authentication has finished.
+        defer self.connect_finished.store(true, .release);
         if (self.cancelled.load(.acquire)) return error.Cancelled;
         return self.delegate.connect_fn(self.delegate.ctx, cancelled);
     }
     fn close(raw: *anyopaque, session: ?*ssh.Session) Receipt {
         const self: *Context = @ptrCast(@alignCast(raw));
+        self.close_started.store(true, .release);
         const receipt = self.delegate.close_fn(self.delegate.ctx, session);
         self.native_receipt.store(@backingInt(receipt), .release);
         return receipt;
@@ -91,6 +98,7 @@ pub const FileAuthentication = struct {
     /// Source/bridges outlive the delegate's actual close and deinit callback.
     pub fn collect(self: *FileAuthentication) !bool {
         var index: usize = 0;
+        var work_pending = false;
         while (index < self.contexts.items.len) {
             const context = self.contexts.items[index];
             if (context.closed.load(.acquire)) {
@@ -100,9 +108,12 @@ pub const FileAuthentication = struct {
                 continue;
             }
             if (!self.current(context)) context.cancel();
+            // Live authenticated connectors are retained ownership. Poll only
+            // outstanding connect/close/cancel work until actual destruction.
+            work_pending = work_pending or !context.connect_finished.load(.acquire) or context.close_started.load(.acquire) or context.cancelled.load(.acquire);
             index += 1;
         }
-        return self.contexts.items.len != 0;
+        return work_pending;
     }
     pub fn shutdownStep(self: *FileAuthentication) Receipt {
         self.shutting_down = true;

@@ -382,6 +382,10 @@ pub const Workspace = struct {
     host_rows: std.ArrayList(HostRow) = .empty,
     group_headers: std.ArrayList(*ui.Node) = .empty,
     group_rows: std.ArrayList(*sidebar_view.GroupRow) = .empty,
+    sidebar_drag_owner: ?identity.AssetOwner = null,
+    sidebar_drop: ?@import("../config/asset_actions.zig").Request = null,
+    pending_sidebar_drop: ?@import("../config/asset_actions.zig").Request = null,
+    sidebar_drop_marker: ?*ui.Node = null,
     search_query: [128]u8 = undefined,
     search_len: usize = 0,
     selected_host: ?usize = null,
@@ -887,7 +891,10 @@ pub const Workspace = struct {
         switch (result.kind) {
             .clone => self.identities.appendHosts(self.allocator, self.registry.hosts.len) catch unreachable,
             .delete => _ = self.identities.removeHost(result.previous_index) catch unreachable,
-            .pin, .move => {},
+            .move => if (result.index) |index| {
+                if (index != result.previous_index) self.identities.moveHost(result.previous_index, index) catch unreachable;
+            },
+            .pin => {},
         }
         self.refreshAssetPositions(selected);
         self.rebuildSidebar() catch |err| {
@@ -1016,6 +1023,9 @@ pub const Workspace = struct {
     }
 
     pub fn rebuildSidebar(self: *Workspace) !void {
+        self.sidebar_drag_owner = null;
+        self.sidebar_drop = null;
+        self.sidebar_drop_marker = null;
         // Preserve an interrupted group's visible height across the registry's
         // safe-boundary row rebuild; persistence still owns the final state.
         const FoldFrame = struct { reference: sidebar_view.GroupRef, collapsed: bool, height: f32, animating: bool };
@@ -1066,7 +1076,7 @@ pub const Workspace = struct {
                 count += 1;
                 if (self.sidebarMatches(index, query)) try matches.append(self.allocator, index);
             };
-            if (group == null and count == 0) continue;
+            if (group == null and count == 0 and (self.registry.hosts.len == 0 or query.len > 0)) continue;
             if (query.len > 0 and matches.items.len == 0 and !matchesFold(if (group) |value| value.name else "默认分组", query)) continue;
             const section = try sidebar_view.GroupRow.mount(self.cx, scope, .{
                 .reference = if (group) |value| .{ .id = value.group_id, .revision = value.revision } else null,
@@ -1076,6 +1086,7 @@ pub const Workspace = struct {
                 .color = if (group) |value| sidebarGroupColor(value.color) else null,
             }, self.sidebar_bridge);
             if (group == null) self.default_group_row = section;
+            if (group == null and count == 0) section.root.setDisplay(.none);
             try self.sidebar_list.appendChild(self.allocator, section.root);
             try self.group_headers.append(self.allocator, section.root);
             try self.group_rows.append(self.allocator, section);
@@ -1108,7 +1119,12 @@ pub const Workspace = struct {
                     .forward = self.backgroundForwardBadge(host.owner()),
                 }, .{ .context = context, .select = onSidebarSelect, .connect = onSidebarConnect, .menu = onSidebarMenu, .action = onSidebarAction });
                 context.node = row.node;
-                try section.members.appendChild(self.allocator, row.node);
+                // Buttons already own their capture handler (status/actions).
+                // A parent drag binding preserves those handlers and normal clicks.
+                const holder = try ui.box(self.cx, .{ .width = .fill(), .min_width = 0, .direction = .column, .flex_shrink = 0 }, .{});
+                try holder.appendChild(self.allocator, row.node);
+                if (context.asset_owner != null) context.drag_binding = try ui.interaction.drag.Binding.attach(scope, self.cx, holder, .{ .axis = .both, .activation_distance = 5 }, onSidebarDrag, context);
+                try section.members.appendChild(self.allocator, holder);
                 try self.host_rows.append(self.allocator, .{ .node = row.node, .name_node = row.name, .host_index = index, .click_ctx = context, .view = row });
             }
         }
@@ -1117,6 +1133,79 @@ pub const Workspace = struct {
             _ = try sidebar_view.text(self.cx, empty, "未找到匹配的主机或分组", 11, 400, true);
             try self.sidebar_list.appendChild(self.allocator, empty);
         }
+        const marker = try ui.box(self.cx, sidebar_view.styles.dropMarker(), .{});
+        marker.meta.ownership.meta.test_id = "sidebar.drop_hint";
+        (try marker.style.ensureExtFallible(self.allocator)).z_index = 20;
+        marker.setDisplay(.none);
+        try self.sidebar_list.appendChild(self.allocator, marker);
+        self.sidebar_drop_marker = marker;
+        self.cx.requestRedraw();
+    }
+
+    fn sidebarGroupRef(self: *const Workspace, id: ?identity.AssetGroupId) ?sidebar_view.GroupRef {
+        const index = self.registry.groupIndex(id orelse return null) orelse return null;
+        const group = self.registry.groups[index];
+        return .{ .id = group.group_id, .revision = group.revision };
+    }
+
+    fn updateSidebarDrop(self: *Workspace, point: ui.interaction.drag.Point) void {
+        self.sidebar_drop = null;
+        const marker = self.sidebar_drop_marker orelse return;
+        marker.setDisplay(.none);
+        const clip = if (self.sidebar_chrome) |view| view.viewport.globalRect() else self.sidebar_list.globalRect();
+        if (point.x < clip.x or point.x > clip.x + clip.w or point.y < clip.y or point.y > clip.y + clip.h) return;
+        const owner = self.sidebar_drag_owner orelse return;
+        const source = self.registry.get(owner) catch return;
+        var target: ?ui.ComputedRect = null;
+        var destination: ?sidebar_view.GroupRef = null;
+        var placement: @import("../config/asset_actions.zig").Placement = .end;
+        for (self.host_rows.items) |row| {
+            const rect = row.node.globalRect();
+            if (!row.node.isDisplayedInTree() or point.x < rect.x or point.x > rect.x + rect.w or point.y < rect.y or point.y > rect.y + rect.h) continue;
+            const host = self.registry.hosts[row.host_index];
+            if (host.connection_id == owner.id or @backingInt(host.connection_id) == 0 or host.pinned != source.pinned) return;
+            const after = point.y >= rect.y + rect.h / 2;
+            target = .{ .x = rect.x, .y = rect.y + if (after) rect.h else 0, .w = rect.w, .h = 2 };
+            destination = self.sidebarGroupRef(host.asset_group_id);
+            placement = if (after) .{ .after = host.owner() } else .{ .before = host.owner() };
+            break;
+        }
+        if (target == null) for (self.group_rows.items) |group| {
+            const rect = group.header.globalRect();
+            if (!group.root.isDisplayedInTree() or point.x < rect.x or point.x > rect.x + rect.w or point.y < rect.y or point.y > rect.y + rect.h) continue;
+            target = .{ .x = rect.x, .y = rect.y + rect.h - 2, .w = rect.w, .h = 2 };
+            destination = group.reference;
+            break;
+        };
+        const rect = target orelse return;
+        self.sidebar_drop = .{ .move = .{ .owner = owner, .source_group = self.sidebarGroupRef(source.asset_group_id), .destination = destination, .placement = placement } };
+        const bounds = self.sidebar_list.globalRect();
+        marker.setStyleInline(self.allocator, .{ .inset = .{ .left = .{ .px = rect.x - bounds.x }, .top = .{ .px = rect.y - bounds.y } }, .width = .{ .px = rect.w }, .display = .flex });
+    }
+
+    fn onSidebarDrag(event: ui.interaction.drag.Event, raw: *anyopaque) void {
+        const context: *ClickCtx = @ptrCast(@alignCast(raw));
+        const self = context.workspace;
+        switch (event.phase) {
+            .start => {
+                self.sidebar_drag_owner = context.asset_owner;
+                if (self.default_group_row) |group| if (group.count == 0) group.root.setDisplay(.flex);
+            },
+            .move => {},
+            .end, .cancel => {
+                if (event.phase == .end) {
+                    self.updateSidebarDrop(event.position_window);
+                    self.pending_sidebar_drop = self.sidebar_drop;
+                }
+                self.sidebar_drag_owner = null;
+                self.sidebar_drop = null;
+                if (self.sidebar_drop_marker) |marker| marker.setDisplay(.none);
+                if (self.default_group_row) |group| if (group.count == 0) group.root.setDisplay(.none);
+                self.cx.requestRedraw();
+                return;
+            },
+        }
+        self.updateSidebarDrop(event.position_window);
         self.cx.requestRedraw();
     }
 
@@ -1608,7 +1697,7 @@ pub const Workspace = struct {
         if (tab.remote_notice) |notice| if (notice.snapshot) |snapshot| switch (snapshot.state) {
             .reconnecting => return .connecting,
             .disconnected, .retry_failed => return .failed,
-            .exited => return .normal,
+            .cancelled, .exited => return .normal,
             .connected => {},
         };
         if (tab.failed) return .failed;
@@ -2275,6 +2364,7 @@ pub const Workspace = struct {
                 const cell = try scope.createState(GroupResize, .{ .workspace = self, .group = view.id, .split_id = id, .first = first, .second = second });
                 const vertical = split.axis == .stacked;
                 const divider = try ui.box(self.cx, group_styles.separator(vertical), .{});
+                divider.setPointerDownFocus(.preserve);
                 divider.meta.ownership.meta.test_id = try std.fmt.bufPrint(&cell.test_id, "groups.separator.{d}", .{id});
                 divider.behavior.interaction.a11y = .{ .role = .separator, .label = if (vertical) "拖动调整上下会话高度" else "拖动调整左右会话宽度" };
                 _ = try ui.interaction.drag.Binding.attach(scope, self.cx, divider, .{ .axis = if (vertical) .vertical else .horizontal, .activation_distance = 1, .active_cursor = if (vertical) .ns_resize else .ew_resize }, GroupResize.drag, cell);
@@ -2685,6 +2775,11 @@ pub const Workspace = struct {
                 },
             }
         }
+        fn focusContent(self: *@This()) void {
+            const index = self.workspace.tabIndex(self.session) orelse return;
+            const tab = self.workspace.tabs.items[index];
+            self.workspace.cx.setFocus(if (tab.terminal) |terminal| terminal.root else tab.root);
+        }
         fn event(event_value: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
             const self: *@This() = @ptrCast(@alignCast(raw orelse return .ignored));
             switch (event_value) {
@@ -2730,6 +2825,17 @@ pub const Workspace = struct {
         self.loadGroupLayout(view);
         const roster = self.group_roster orelse return;
         const group = roster.findById(view.id) orelse return;
+        // A live group's status/layout refresh must not take input from an
+        // outside editor. An explicit tab activation still hands input to the
+        // member: its prior group root is hidden, or focus is on the tab strip.
+        const preserve_outside_focus = if (self.cx.focus_manager.getFocused()) |focused|
+            if (view.root) |old_root|
+                old_root.isDisplayedInTree() and !focused.isDescendantOf(old_root) and
+                    !focused.isDescendantOf(self.tab_bar)
+            else
+                false
+        else
+            false;
         self.restoreGroupRoots();
         view.resizing = false;
         view.drop_marker = null;
@@ -2782,6 +2888,12 @@ pub const Workspace = struct {
             header_style.gap = 8;
             header_style.background = app_theme.current().surface_1;
             const header = try ui.box(self.cx, header_style, .{});
+            // A header selects its member but is not an editor. Let the
+            // pointer's default focus transfer settle on that member's content
+            // instead of clearing focus after the capture callback returns.
+            header.behavior.interaction.focusable = true;
+            header.behavior.interaction.tab_index = -1;
+            header.behavior.events.on_focus = self.cx.on(GroupCell, cell, GroupCell.focusContent);
             try app_theme.bindMaterial(self.cx, scope, header, "surface_1");
             header.meta.ownership.meta.test_id = "groups.pane.header";
             var grip_style = group_styles.control();
@@ -2919,7 +3031,9 @@ pub const Workspace = struct {
         for (self.tabs.items) |tab| if (tab.plugin_renderer) |renderer| renderer.vtable.focus_changed(renderer.context, view.focused == tab.id);
         if (view.focused) |id| if (self.tabIndex(id)) |index| {
             self.active_tab = index;
-            if (self.confirming_id == null and (view.dialog_open == null or !view.dialog_open.?.peek())) {
+            if (!(preserve_outside_focus and self.cx.focus_manager.getFocused() != null) and
+                self.confirming_id == null and (view.dialog_open == null or !view.dialog_open.?.peek()))
+            {
                 self.cx.setFocus(if (self.tabs.items[index].terminal) |terminal| terminal.root else self.tabs.items[index].root);
             }
         };
@@ -2950,6 +3064,14 @@ pub const Workspace = struct {
     }
 
     fn pollGroupWorkspace(self: *Workspace) bool {
+        if (self.pending_sidebar_drop) |request| {
+            self.pending_sidebar_drop = null;
+            _ = self.applyAssetAction(request) catch |err| {
+                self.statusFailure(@errorName(err));
+                return false;
+            };
+            return true;
+        }
         if (self.pending_tab_drop) |drop| {
             self.pending_tab_drop = null;
             self.dropTabIntoGroup(drop.source, drop.target) catch |err| self.statusFailure(@errorName(err));
@@ -4893,7 +5015,6 @@ pub const Workspace = struct {
         }
         const display = descriptor.display;
         terminal.setGrouped(display.grouped);
-        terminal.setTimestampGutter(display.timestamps);
         var fallback = display.font_family == null or display.font_size_px == null or display.line_height == null;
         if (display.font_family) |family| {
             const family_id = if (self.font_family_resolver) |resolve| resolve(family) else 0;
@@ -5120,7 +5241,7 @@ pub const Workspace = struct {
         tab.failed = false;
         tab.remote_retrying = tab.runtime != null;
         tab.remote_retry_deadline = null;
-        if (tab.runtime != null) if (tab.remote_notice) |notice| notice.update(.{ .state = .reconnecting });
+        if (tab.remote_notice) |notice| notice.update(.{ .state = if (tab.runtime != null) .reconnecting else .connected });
         tab.terminal.?.clearPendingPaste();
         tab.terminal.?.paste_confirmation_pending = false;
         if (tab.runtime) |runtime| {
@@ -5355,7 +5476,8 @@ pub const Workspace = struct {
                 if (!self.shutting_down and job.cancelled.load(.acquire)) {
                     if (self.findTicket(job.ticket)) |cancelled_tab| {
                         if (cancelled_tab.runtime == null) {
-                            if (cancelled_tab.terminal) |*terminal| terminal.setOutput(self.cx, "连接已取消") catch {};
+                            if (cancelled_tab.terminal) |*terminal| terminal.setOutput(self.cx, "") catch {};
+                            if (cancelled_tab.remote_notice) |notice| notice.update(.{ .state = .cancelled });
                             if (self.active_tab == self.tabIndex(cancelled_tab.id)) self.status("连接已取消");
                         }
                     }
@@ -5463,7 +5585,7 @@ pub const Workspace = struct {
                 // Keep input and contextual actions in step with the same facts,
                 // including a failed successor after the first transport loss.
                 if (tab.terminal) |*terminal| switch (state.state) {
-                    .exited, .disconnected, .retry_failed => {
+                    .cancelled, .exited, .disconnected, .retry_failed => {
                         if (terminal.tombstone.state != .ended) {
                             terminal.tombstone.end(state.title());
                             terminal.refreshTombstone();
@@ -6266,13 +6388,20 @@ test "cancelled initial connection retires placeholder after cleanup without rep
     const allocator = std.testing.allocator;
     const cx = try ui.Cx.init(allocator, std.testing.io);
     defer cx.deinit();
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    const Hooks = struct {
+        fn ignore(_: *anyopaque, _: u64) void {}
+    };
+    cx.root = try ui.box(cx, local_styles.pane(), .{});
     const terminal = try TerminalViewNode.mount(cx);
-    cx.root = terminal.root;
     var tab: SessionTab = undefined;
     tab.id = 7;
     tab.generation = 1;
     tab.runtime = null;
     tab.terminal = terminal;
+    tab.remote_notice = try RemoteNotice.View.mount(cx, scope, cx.root.?, .{ .context = &tab, .session_id = tab.id, .reconnect = Hooks.ignore, .close = Hooks.ignore });
+    try cx.root.?.appendChild(allocator, terminal.root);
     defer tab.terminal.?.releaseBuffers(cx);
     var job: Workspace.ConnectJob = undefined;
     job.bootstrap = null;
@@ -6309,7 +6438,9 @@ test "cancelled initial connection retires placeholder after cleanup without rep
     job.ready.store(true, .release);
     workspace.drainResults();
     try std.testing.expect(job.drained);
-    try std.testing.expectEqualStrings("连接已取消", tab.terminal.?.row_texts[0]);
+    try std.testing.expectEqualStrings("", tab.terminal.?.row_texts[0]);
+    try std.testing.expectEqual(RemoteNotice.State.cancelled, tab.remote_notice.?.snapshot.?.state);
+    try std.testing.expectEqualStrings("连接已取消", tab.remote_notice.?.title_node.getText().?.content);
     // A completed older generation must not change the replacement tab.
     try tab.terminal.?.setOutput(cx, "new attempt");
     tab.generation += 1;
@@ -7741,6 +7872,28 @@ test "mixed session group mounts terminal file KVM and future content and retain
     cx.layout();
     try std.testing.expectEqual(@as(usize, 5), view.panes.items.len);
     for (tabs, view.panes.items) |tab, pane| try std.testing.expect(tab.root.parent == pane.node);
+    // Selecting a member through its header must hand keyboard input to the
+    // same member; the visual active-member marker alone is insufficient.
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        _ = cx.render();
+    }
+    const member_title = view.panes.items[1].node.children.items[0].children.items[1].globalRect();
+    cx.handleMouseDown(member_title.x + member_title.w / 2, member_title.y + member_title.h / 2, .{});
+    cx.handleMouseUp(member_title.x + member_title.w / 2, member_title.y + member_title.h / 2);
+    try std.testing.expectEqual(tabs[1].id, view.focused.?);
+    try std.testing.expect(cx.focus_manager.getFocused() == tabs[1].terminal.?.root);
+    const outside_editor = try ui.widgets.Input(.{ .placeholder = "assistant or other outside editor" }).mountResult(scope, cx);
+    outside_editor.node.setStyleInline(a, .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .{ .px = 120 }, .height = .{ .px = 24 } });
+    try root.appendChild(a, outside_editor.node);
+    cx.setFocus(outside_editor.input_container);
+    // Group status/membership updates rebuild the presentation while an AI
+    // composer or another outside editor can still own keyboard input.
+    try workspace.presentGroup(view);
+    cx.advanceFrameClock();
+    _ = cx.render();
+    try std.testing.expect(cx.focus_manager.getFocused() == outside_editor.input_container);
+    cx.setFocus(tabs[1].terminal.?.root);
     try roster.leave("Mixed", tabs[4].id);
     try workspace.dockGroupMember(group.id, tabs[0].id, tabs[1].id, .top);
     try workspace.dockGroupMember(group.id, tabs[2].id, tabs[3].id, .top);
@@ -7765,10 +7918,14 @@ test "mixed session group mounts terminal file KVM and future content and retain
     const divider = tree_root.children.items[1].globalRect();
     cx.handleMouseMove(divider.x + 2, divider.y + 90);
     try std.testing.expectEqual(ui.CursorShape.ew_resize, cx.current_cursor);
+    const resize_focus = cx.focus_manager.getFocused();
+    try std.testing.expect(resize_focus != null);
     cx.handleMouseDown(divider.x + 2, divider.y + 90, .{});
+    try std.testing.expect(cx.focus_manager.getFocused() == resize_focus);
     cx.handleMouseMove(divider.x + 62, divider.y + 90);
     try std.testing.expectEqual(ui.CursorShape.ew_resize, cx.current_cursor);
     cx.handleMouseUp(divider.x + 62, divider.y + 90);
+    try std.testing.expect(cx.focus_manager.getFocused() == resize_focus);
     cx.layout();
     try std.testing.expect(view.panes.items[0].node.globalRect().w > first.w + 40);
     try std.testing.expectApproxEqAbs(third.h, view.panes.items[2].node.globalRect().h, 0.1);
@@ -7788,6 +7945,7 @@ test "mixed session group mounts terminal file KVM and future content and retain
     cx.handleMouseDown(next_divider.x + 100, next_divider.y + 2, .{});
     cx.handleMouseMove(next_divider.x + 100, next_divider.y + 20);
     cx.cancelPointerInteractions(.window_blur);
+    try std.testing.expect(cx.focus_manager.getFocused() == resize_focus);
     try std.testing.expectApproxEqAbs(before_cancel, view.tree.nodes.items[left_id].split.ratio, 0.001);
     cx.layout();
     try std.testing.expectEqual(.online, Workspace.groupConnectionState(&tabs[3]));

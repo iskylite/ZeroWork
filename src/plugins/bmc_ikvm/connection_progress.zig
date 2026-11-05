@@ -74,6 +74,7 @@ pub fn resourcePath(target: []const u8) ?ResourcePath {
     return ResourcePath.init(path);
 }
 pub const Phase = enum { none, connect, ssh_tunnel, ssh_handshake, ssh_host_key, ssh_authentication, tls_handshake, request_send, response_headers, response_body, response_validate };
+pub const ContentEncoding = enum { identity, gzip, unsupported };
 pub const Context = struct {
     channel: Channel = .management,
     /// One-based SSH jump position, copied from the native SSH observer.
@@ -91,6 +92,10 @@ pub const Context = struct {
     http_status: ?u16 = null,
     /// HTTP entity bytes received, before any optional content decompression.
     received_bytes: ?u64 = null,
+    /// Public asset response metadata, restricted to enums and numeric values.
+    content_encoding: ?ContentEncoding = null,
+    content_length: ?u64 = null,
+    body_idle_ms: ?u64 = null,
     duration_ms: ?u64 = null,
 };
 pub const Code = enum {

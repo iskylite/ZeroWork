@@ -33,6 +33,7 @@ const Live = struct {
     bound: *binding.Binding,
     version: ?*ui.Node = null,
     badge: ?*ui.Node = null,
+    badge_container: ?*ui.Node = null,
     title: ?*ui.Node = null,
     last_check: ?*ui.Node = null,
     channel: ?*ui.Node = null,
@@ -61,6 +62,11 @@ const Live = struct {
         changed = self.text(self.last_check, read(self.bound, "last_check", "尚未检查")) or changed;
         changed = self.text(self.channel, read(self.bound, "release_channel", "正式版")) or changed;
         const state = read(self.bound, "state", "");
+        if (self.badge) |badge| {
+            const color = S.badgeInk(state, read(self.bound, "version_badge", "待检查"));
+            if (badge.getText()) |text_value| if (!ui.Color.eql(text_value.color, color)) badge.setTextColor(color);
+            if (self.badge_container) |container| if (!ui.Color.eql(container.getBackground(), color.withAlpha(26))) container.setBackground(color.withAlpha(26));
+        }
         const checking = std.mem.eql(u8, state, "checking");
         const label: []const u8 = if (std.mem.eql(u8, state, "draining")) "查看收尾进度" else if (checking) "正在检查…" else if (read(self.bound, "available_version", "").len != 0) "查看更新" else "检查更新";
         if (!std.mem.eql(u8, self.action_label.peek(), label)) {
@@ -114,10 +120,12 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         live.version = try ink(cx, title, "", 11, 18, 400, "fg_2");
         live.version.?.meta.ownership.meta.test_id = "settings.updates.version_text";
         const badge = try ui.boxStyled(cx, S.badge, .{});
+        live.badge_container = badge;
         badge.meta.ownership.meta.test_id = "settings.updates.badge";
         try identity.appendChild(cx.allocator, badge);
-        live.badge = try ink(cx, badge, "待检查", 11, 18, 600, "accent_ink");
-        live.badge.?.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} } });
+        live.badge = try ui.text(cx, "待检查", .{ .font_size = 11, .line_height = 18.0 / 11.0, .font_weight = 600, .color = theme.current().fg_2, .wrap = .none });
+        live.badge.?.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        try badge.appendChild(cx.allocator, live.badge.?);
         try card.appendChild(cx.allocator, try ui.boxStyled(cx, S.divider, .{}));
         const detail = try ui.boxStyled(cx, S.detail, .{});
         try card.appendChild(cx.allocator, detail);
@@ -125,20 +133,12 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         labels.setStyleInline(cx.allocator, .{ .gap = 4, .flex = 1 });
         try detail.appendChild(cx.allocator, labels);
         live.title = try ink(cx, labels, "检查是否有可用的新版本", 13, 20, 650, "fg_1");
-        _ = try ink(cx, labels, "Apple Silicon · macOS 14 或更新版本", 11, 18, 400, "fg_2");
+        _ = try ink(cx, labels, "Apple Silicon · macOS 13 或更新版本", 11, 18, 400, "fg_2");
         const primary_style = try theme.paintSignal(controls.S.ButtonStyle, cx, bound.scope, S.primaryButton, .{});
         const button = try ui.widgets.Button(.{ .label = live.action_label, .variant = .primary, .disabled = live.disabled, .on_click = cx.on(Click, click, Click.run), .base_style = primary_style }).mount(bound.scope, cx);
         button.meta.ownership.meta.test_id = "settings.updates.open";
         try theme.stylePrimary(cx, bound.scope, button, live.disabled);
         try detail.appendChild(cx.allocator, button);
-        const footer = try ui.boxStyled(cx, S.versionFooter, .{});
-        try card.appendChild(cx.allocator, footer);
-        const note = try ink(cx, footer, "下载与安装由你确认", 11, 18, 400, "fg_2");
-        note.setStyleInline(cx.allocator, .{ .flex = 1 });
-        const text_style = try theme.paintSignal(controls.S.ButtonStyle, cx, bound.scope, S.textButton, .{});
-        const check = try ui.widgets.Button(.{ .label = "检查更新", .variant = .link, .disabled = live.disabled, .on_click = cx.on(Click, click, Click.run), .base_style = text_style }).mount(bound.scope, cx);
-        check.meta.ownership.meta.test_id = "settings.updates.check";
-        try footer.appendChild(cx.allocator, check);
     }
     if (binding.matches(bound.controller.search_query, "自动 检查 更新 偏好 通道 正式版 auto_check channel")) {
         const section = try page.section("更新偏好", "", ui.icons.refresh_cw, 59, "settings.updates.preferences", null);
@@ -149,7 +149,8 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         section.header.setCursor(.default);
         if (section.header.behavior.interaction.a11y) |*a11y| {
             a11y.role = .heading;
-            a11y.expanded = null;
+            // The shared settings layout hooks still read the open state.
+            a11y.expanded = true;
             a11y.expansion = null;
         }
         section.header.children.items[1].children.items[0].behavior.events.on_event = null;

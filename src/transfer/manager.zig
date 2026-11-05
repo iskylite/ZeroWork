@@ -716,6 +716,19 @@ pub const Manager = struct {
         return self.jobs.items.len;
     }
 
+    /// Retained history does not need a frame clock. Keep polling runnable
+    /// jobs and native IO until its actual cleanup receipt has arrived.
+    pub fn needsPolling(self: *const Manager) bool {
+        for (self.jobs.items) |job| {
+            if (job.engine_job != null and job.job_cleanup != .released) return true;
+            switch (job.state) {
+                .queued, .running, .retry_wait, .pausing, .cancelling => return true,
+                .paused, .succeeded, .failed, .cancelled => {},
+            }
+        }
+        return false;
+    }
+
     fn activeCount(self: *const Manager) u16 {
         var count_: u16 = 0;
         for (self.jobs.items) |job| if (job.engine_job != null and job.job_cleanup != .released) {

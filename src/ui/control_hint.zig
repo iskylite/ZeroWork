@@ -6,6 +6,7 @@ pub const Options = struct {
     id: []const u8,
     layout: ui.BoxStyle = .{ .flex_shrink = 0 },
     width: ?f32 = null,
+    wrap: ui.TextWrap = .word,
     visible: ?*ui.Signal(bool) = null,
     enabled: ?*ui.Signal(bool) = null,
     /// Preserve keyboard help when the hover target wraps an actual input.
@@ -50,7 +51,7 @@ const Hover = struct {
 };
 
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, control: *ui.Node, text: anytype, options: Options) !ui.widgets.TooltipResult {
-    const tip = try ui.widgets.Tooltip(.{ .text = text, .open_delay_ms = 450, .position = .bottom_end, .width = options.width, .wrap = .word, .font_size = 11, .background = theme.current().overlay.withAlpha(255), .text_color = theme.current().fg_1 }).mount(scope, cx);
+    const tip = try ui.widgets.Tooltip(.{ .text = text, .open_delay_ms = 450, .position = .bottom_end, .width = options.width, .wrap = options.wrap, .font_size = 11, .background = theme.current().overlay.withAlpha(255), .text_color = theme.current().fg_1 }).mount(scope, cx);
     tip.wrapper.setStyleInline(cx.allocator, options.layout);
     tip.trigger.setStyleInline(cx.allocator, options.layout);
     tip.content.meta.ownership.meta.test_id = options.id;

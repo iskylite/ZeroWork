@@ -18,13 +18,16 @@ const report={status:'running',checks:[],data};
 try{
  await h.waitForServerReady();await h.resizeWindow(1440,1000);await click('workspace.empty.local');await click('ai.strip');await visible('ai.empty.unconfigured');
  await click('ai.empty.settings');await visible('settings.ai.provider.0.card');
+ assert.equal((await visible('settings.ai.provider.0.card')).rect.h,64);await capture('00-default-collapsed');
+ await click('settings.ai.provider.0.enabled');
+ await click('settings.ai.provider.0.header');
  const logo=await visible('settings.ai.provider.0.logo');assert.equal(text(logo).trim(),'M');
  const row=await visible('settings.ai.provider.0.model.0.card');assert.equal(row.rect.h,60);
  const name=await visible('settings.ai.provider.0.model.0.name.text'),meta=await visible('settings.ai.provider.0.model.0.metadata');assert(meta.rect.y>=name.rect.y+name.rect.h);assert(text(meta).includes('256K 上下文'));assert(text(meta).includes('推理'));assert(text(meta).includes('识图'));
  const brand=await visible('settings.ai.provider.0.model.0.logo');assert(flat(brand).some(n=>n.tag==='image'),JSON.stringify(brand));
  await capture('01-settings');report.checks.push('Custom provider M; bundled Grok logo; model name above readable context/reasoning/vision');
- await click('settings.ai.provider.0.enabled');await click('settings.save');await h.waitFor(async()=>(await readFile(join(data,'config.toml'),'utf8')).includes('enabled = true')||null,20000);await click('settings.close');await visible('ai.empty.configured');assert(!(await h.query('ai.empty.unconfigured')).some(shown));await capture('02-refreshed');report.checks.push('Saving enabled provider refreshes the already-open assistant welcome');
+ await click('settings.save');await h.waitFor(async()=>(await readFile(join(data,'config.toml'),'utf8')).includes('enabled = true')||null,20000);await click('settings.close');await visible('ai.empty.configured');assert(!(await h.query('ai.empty.unconfigured')).some(shown));await capture('02-refreshed');report.checks.push('Saving enabled provider refreshes the already-open assistant welcome');
  await click('ai.composer.model');await visible('ai.model.logo');await capture('03-model-menu');report.checks.push('Assistant model chooser displays bundled brand marks');await h.key('Escape');
- await click('toolbar.settings');await click('settings.nav.ai');await h.resizeWindow(860,600);const vp=(await visible('settings.viewport')).rect;await h.scrollAt(vp.x+vp.w-4,vp.y+vp.h/2,0,-290);await h.sleep(200);await capture('04-compact');
+ await click('toolbar.settings');await click('settings.nav.ai');assert.equal((await visible('settings.ai.provider.0.card')).rect.h,64);report.checks.push('Provider starts collapsed on initial settings open and after closing/reopening');await click('settings.ai.provider.0.header');await h.resizeWindow(860,600);const vp=(await visible('settings.viewport')).rect;await h.scrollAt(vp.x+vp.w-4,vp.y+vp.h/2,0,-290);await h.sleep(200);await capture('04-compact');
  const compactName=await visible('settings.ai.provider.0.model.0.name.text'),compactMeta=await visible('settings.ai.provider.0.model.0.metadata');assert(compactMeta.rect.y>=compactName.rect.y+compactName.rect.h);await click('settings.close');report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await capture('failure').catch(()=>{});process.exitCode=1}finally{app.kill('SIGTERM');await new Promise(r=>app.exitCode!==null||app.signalCode!==null?r():app.once('close',r));await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report))}

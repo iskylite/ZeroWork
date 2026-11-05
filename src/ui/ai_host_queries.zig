@@ -125,7 +125,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
             try groups.append(a, .{ .id = entry.id, .name = if (app.workspace.app_config.ai.redact_ip) "<redacted>" else entry.name, .membership_revision = entry.membership_revision, .members = members.items });
         }
     }
-    const revision_source = try std.json.Stringify.valueAlloc(a, .{ sessions.items, groups.items, context, options.execution_policy, options.permission_mode, lifecycle_management, execution_control, app.workspace.app_config.config_revision }, .{});
+    const revision_source = try std.json.Stringify.valueAlloc(a, .{ sessions.items, groups.items, context, options.execution_policy, options.permission_mode, lifecycle_management, execution_control, app.workspace.app_config.agentPolicyRevision() }, .{});
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(revision_source, &digest, .{});
     const revision = std.mem.readInt(u64, digest[0..8], .little);

@@ -61,6 +61,7 @@ pub const View = struct {
     footer: *ui.Node = undefined,
     feedback: *ui.Node = undefined,
     bottom_button: *ui.Node = undefined,
+    bottom_hint: *ui.Node = undefined,
     copy_button: *ui.Node = undefined,
     copy_feedback: *@import("copy_button.zig").Button = undefined,
     close_button: *ui.Node = undefined,
@@ -230,15 +231,18 @@ pub const View = struct {
         self.feedback = try label(self.cx, self.footer, "", S.meta(), S.feedbackBox());
         self.feedback.meta.ownership.meta.test_id = "connection.logs.feedback";
         const bottom_context = try self.action(scope, .bottom);
-        self.bottom_button = try ui.widgets.Button(.{ .label = "回到底部", .variant = .ghost, .base_style = S.button(112, 28, false), .hover_style = S.hover(), .on_click = self.cx.on(Action, bottom_context, Action.click) }).mount(scope, self.cx);
+        self.bottom_button = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.get("arrow-down-to-line").?, .icon_size = 16, .a11y_label = "回到底部", .variant = .ghost, .base_style = S.button(28, 28, false), .hover_style = S.hover(), .on_click = self.cx.on(Action, bottom_context, Action.click) }).mount(scope, self.cx);
         self.bottom_button.meta.ownership.meta.test_id = "connection.logs.bottom";
-        try self.footer.appendChild(self.cx.allocator, self.bottom_button);
+        const bottom_hint = try @import("control_hint.zig").mount(self.cx, scope, self.bottom_button, "回到日志底部", .{ .id = "connection.logs.bottom.tooltip", .visible = self.open });
+        self.bottom_hint = bottom_hint.wrapper;
+        try self.footer.appendChild(self.cx.allocator, self.bottom_hint);
         const copy_context = try self.action(scope, .copy);
-        self.copy_button = try ui.widgets.Button(.{ .label = "复制日志", .variant = .primary, .disabled = self.copy_disabled, .base_style = S.button(112, 34, true), .on_click = self.cx.on(Action, copy_context, Action.click) }).mount(scope, self.cx);
+        self.copy_button = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = 16, .a11y_label = "复制日志", .variant = .primary, .disabled = self.copy_disabled, .base_style = S.button(34, 34, true), .on_click = self.cx.on(Action, copy_context, Action.click) }).mount(scope, self.cx);
         try @import("app_theme.zig").stylePrimary(self.cx, scope, self.copy_button, self.copy_disabled);
         self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, self.copy_button);
         self.copy_button.meta.ownership.meta.test_id = "connection.logs.copy";
-        try self.footer.appendChild(self.cx.allocator, self.copy_button);
+        const copy_hint = try @import("control_hint.zig").mount(self.cx, scope, self.copy_button, "复制全部连接日志", .{ .id = "connection.logs.copy.tooltip", .visible = self.open });
+        try self.footer.appendChild(self.cx.allocator, copy_hint.wrapper);
         const done_context = try self.action(scope, .close);
         self.close_button = try ui.widgets.Button(.{ .label = "关闭", .variant = .secondary, .base_style = S.button(88, 34, false), .hover_style = S.hover(), .on_click = self.cx.on(Action, done_context, Action.click) }).mount(scope, self.cx);
         self.close_button.meta.ownership.meta.test_id = "connection.logs.close";
@@ -325,6 +329,7 @@ pub const View = struct {
     }
     fn refreshScrollFeedback(self: *View) !void {
         self.bottom_button.setDisplay(if (self.following) .none else .flex);
+        self.bottom_hint.setDisplay(if (self.following) .none else .flex);
         if (self.new_records != 0) {
             var buffer: [96]u8 = undefined;
             try self.feedback.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{d} 条新日志", .{self.new_records}));

@@ -154,6 +154,40 @@ const Transaction = struct {
     received_bytes: u64 = 0,
     context: progress.Context,
     sequence: u64 = 0,
+    public_material: bool = false,
+    body_progress_ns: ?u64 = null,
+
+    fn usePublicMaterialTimeout(self: *Transaction) void {
+        self.public_material = true;
+        self.deadline_ns = self.started_ns + public_material_timeout_ns;
+    }
+    fn checkTimeout(self: *const Transaction, now_ns: u64) !void {
+        if (!self.public_material) {
+            if (now_ns >= self.deadline_ns) return error.HttpTimeout;
+            return;
+        }
+        if (now_ns >= self.deadline_ns) return error.HttpTotalTimeout;
+        if (self.body_progress_ns) |last| {
+            if (now_ns -| last >= stage_timeout_ns) return error.HttpBodyIdleTimeout;
+        } else if (now_ns -| self.started_ns >= stage_timeout_ns) return error.HttpHeadersTimeout;
+    }
+    fn observeResponse(self: *Transaction, body_bytes: usize, now_ns: u64) void {
+        self.received_bytes += body_bytes;
+        if (!self.public_material) return;
+        if (self.body_progress_ns == null and self.response.state != .headers) {
+            // Start the body idle clock once final headers arrive. Header and
+            // chunk-framing trickles must never renew a stalled body's clock.
+            self.body_progress_ns = now_ns;
+            self.context.content_encoding = if (self.response.headerCount("Content-Encoding") > 1)
+                .unsupported
+            else if (self.response.header("Content-Encoding")) |encoding|
+                if (std.ascii.eqlIgnoreCase(encoding, "gzip")) .gzip else if (std.ascii.eqlIgnoreCase(encoding, "identity")) .identity else .unsupported
+            else
+                .identity;
+            self.context.content_length = if (self.response.header("Content-Length")) |length| std.fmt.parseInt(u64, length, 10) catch null else null;
+        }
+        if (body_bytes != 0) self.body_progress_ns = now_ns;
+    }
     fn deinit(self: *Transaction) void {
         self.request.deinit();
         self.response.deinit();
@@ -533,7 +567,8 @@ pub const NativeDriver = struct {
         // HTTP decoder owns at most one TLS read of script body at a time;
         // parsed bytes are wiped immediately, never executed or persisted.
         const limit = 16 * 1024 * 1024;
-        var transaction = self.newTransaction(try self.build("GET", profile.sugon_public_material_path, &.{.{ .name = "Accept-Encoding", .value = "identity" }}, ""), 0);
+        var transaction = self.newTransaction(try self.build("GET", profile.sugon_public_material_path, &.{.{ .name = "Accept-Encoding", .value = "gzip" }}, ""), 0);
+        transaction.usePublicMaterialTimeout();
         defer transaction.deinit();
         errdefer if (transaction.offset != 0 and !transaction.response.isDone()) {
             self.management_failed = true;
@@ -1043,7 +1078,7 @@ pub const NativeDriver = struct {
         transaction.context.channel = if (self.video_channel != null and channel == &self.video_channel.?) .video else .management;
         self.progressTransaction(transaction);
         if (!closing) try self.check();
-        if (timestamp() >= transaction.deadline_ns) return error.HttpTimeout;
+        try transaction.checkTimeout(timestamp());
         if (transaction.offset != transaction.request.bytes.len) {
             switch (try channel.client.write(transaction.request.bytes[transaction.offset..])) {
                 .bytes => |n| {
@@ -1082,7 +1117,7 @@ pub const NativeDriver = struct {
         }
         const body_before = transaction.response.body().len;
         channel.start += try transaction.response.feed(channel.pending[channel.start..channel.end]);
-        transaction.received_bytes += transaction.response.body().len - body_before;
+        transaction.observeResponse(transaction.response.body().len - body_before, timestamp());
         self.progressTransaction(transaction);
         if (channel.start == channel.end) {
             channel.start = 0;
@@ -1101,7 +1136,9 @@ pub const NativeDriver = struct {
             .response_body;
         transaction.context.received_bytes = transaction.received_bytes;
         transaction.context.http_status = if (transaction.response.status != 0) transaction.response.status else null;
-        transaction.context.duration_ms = (timestamp() -| transaction.started_ns) / std.time.ns_per_ms;
+        const current = timestamp();
+        transaction.context.duration_ms = (current -| transaction.started_ns) / std.time.ns_per_ms;
+        if (transaction.body_progress_ns) |last| transaction.context.body_idle_ms = (current -| last) / std.time.ns_per_ms;
         self.progressContext(transaction.context);
     }
     fn read(context: *anyopaque, out: []u8) !usize {
@@ -1464,6 +1501,7 @@ pub const NativeDriver = struct {
     }
 };
 const stage_timeout_ns: u64 = 15 * std.time.ns_per_s;
+const public_material_timeout_ns: u64 = 300 * std.time.ns_per_s;
 /// Only scalar route metadata crosses from the SSH worker. The borrowed host,
 /// authentication and device text never enter the BMC progress tracker.
 fn recordSshProgress(raw: *anyopaque, event: ssh_progress.Event) void {
@@ -1875,4 +1913,76 @@ fn timestamp() u64 {
 }
 fn testIdentity() profile.Identity {
     return .{ .trusted_channel = true, .manufacturer = "Sugon", .product = "SuperPod", .processor_vendor = "Hygon", .bmc_chip = "AST2600-A3", .firmware = "1.80", .oem_namespace = "Public", .kvm_login_resource = profile.kvm_login_path, .oem_rfb = true };
+}
+
+fn timeoutTestTransaction() Transaction {
+    return .{ .request = undefined, .response = http.ResponseParser.init(std.testing.allocator, .{}), .deadline_ns = stage_timeout_ns, .started_ns = 0, .context = .{} };
+}
+fn timeoutTestFeed(transaction: *Transaction, bytes: []const u8, now_ns: u64) !void {
+    const before = transaction.response.body().len;
+    try std.testing.expectEqual(bytes.len, try transaction.response.feed(bytes));
+    transaction.observeResponse(transaction.response.body().len - before, now_ns);
+}
+
+test "BMC public script timeout preserves ordinary request and cleanup deadlines" {
+    var transaction = timeoutTestTransaction();
+    defer transaction.response.deinit();
+    try timeoutTestFeed(&transaction, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx", 14 * std.time.ns_per_s);
+    try transaction.checkTimeout(stage_timeout_ns - 1);
+    try std.testing.expectError(error.HttpTimeout, transaction.checkTimeout(stage_timeout_ns));
+    transaction.deadline_ns = std.time.ns_per_s;
+    try std.testing.expectError(error.HttpTimeout, transaction.checkTimeout(std.time.ns_per_s));
+    try std.testing.expect(transaction.body_progress_ns == null);
+    try std.testing.expect(transaction.context.content_encoding == null);
+}
+
+test "BMC public script header trickles do not extend the fifteen second header deadline" {
+    var transaction = timeoutTestTransaction();
+    defer transaction.response.deinit();
+    transaction.usePublicMaterialTimeout();
+    try timeoutTestFeed(&transaction, "HTTP/1.1 200 OK\r\nContent-Length: ", 1 * std.time.ns_per_s);
+    try timeoutTestFeed(&transaction, "100\r\n", 14 * std.time.ns_per_s);
+    try transaction.checkTimeout(stage_timeout_ns - 1);
+    try std.testing.expectError(error.HttpHeadersTimeout, transaction.checkTimeout(stage_timeout_ns));
+}
+
+test "BMC public script body idle timeout starts at headers and only entity bytes renew it" {
+    var transaction = timeoutTestTransaction();
+    defer transaction.response.deinit();
+    transaction.usePublicMaterialTimeout();
+    try timeoutTestFeed(&transaction, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 14 * std.time.ns_per_s);
+    try transaction.checkTimeout(29 * std.time.ns_per_s - 1);
+    try std.testing.expectError(error.HttpBodyIdleTimeout, transaction.checkTimeout(29 * std.time.ns_per_s));
+    try timeoutTestFeed(&transaction, "1\r\nx\r\n", 28 * std.time.ns_per_s);
+    try transaction.checkTimeout(42 * std.time.ns_per_s);
+    try timeoutTestFeed(&transaction, "1", 42 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(u64, 1), transaction.received_bytes);
+    try std.testing.expectError(error.HttpBodyIdleTimeout, transaction.checkTimeout(43 * std.time.ns_per_s));
+}
+
+test "BMC public script active downloads cross fifteen seconds but cannot extend the total cap" {
+    var transaction = timeoutTestTransaction();
+    defer transaction.response.deinit();
+    transaction.usePublicMaterialTimeout();
+    try timeoutTestFeed(&transaction, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\n\r\n", 1 * std.time.ns_per_s);
+    for (1..30) |index| {
+        const now_ns = index * 10 * std.time.ns_per_s;
+        try transaction.checkTimeout(now_ns);
+        try timeoutTestFeed(&transaction, "1\r\nx\r\n", now_ns);
+    }
+    try timeoutTestFeed(&transaction, "1\r\nx\r\n", 299 * std.time.ns_per_s);
+    try transaction.checkTimeout(public_material_timeout_ns - 1);
+    try std.testing.expectError(error.HttpTotalTimeout, transaction.checkTimeout(public_material_timeout_ns));
+    try std.testing.expectEqual(progress.ContentEncoding.gzip, transaction.context.content_encoding.?);
+    try std.testing.expect(transaction.context.content_length == null);
+}
+
+test "BMC public script diagnostics copy only numeric length and classified response encoding" {
+    var transaction = timeoutTestTransaction();
+    defer transaction.response.deinit();
+    transaction.usePublicMaterialTimeout();
+    try timeoutTestFeed(&transaction, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Encoding: unknown-private-header-value\r\n\r\nx", std.time.ns_per_s);
+    try std.testing.expectEqual(@as(?u64, 100), transaction.context.content_length);
+    try std.testing.expectEqual(progress.ContentEncoding.unsupported, transaction.context.content_encoding.?);
+    try std.testing.expectEqual(@as(u64, 1), transaction.received_bytes);
 }

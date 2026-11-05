@@ -132,7 +132,7 @@ class Fixture:
             try:
                 time.sleep(0.01)
                 args = [self.shell, "--noprofile", "--norc", "-i"] if Path(self.shell).name == "bash" else [self.shell, "-d", "-f", "-i"]
-                if self.mode in {"existing", "disabled-existing"}:
+                if self.mode in {"existing", "disabled-existing"} or self.mode.startswith("startup-"):
                     args = [self.shell, "--noprofile", "--rcfile", str(Path(self.home) / ".bashrc"), "-i"] if Path(self.shell).name == "bash" else [self.shell, "-d", "-i"]
                 env = {"HOME": self.home, "ZDOTDIR": self.home, "HISTFILE": "", "PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "LC_ALL": "C.UTF-8", "SHELL": self.shell, "PS1": "fixture> "}
                 child, master = pty.fork()

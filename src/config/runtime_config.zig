@@ -121,12 +121,24 @@ pub const RuntimeConfig = struct {
         try self.commitPrepared(io, dir, &prepared);
     }
 
+    /// Startup restores the saved image without a configuration commit. Call
+    /// only after decoding and renderer preparation have both succeeded.
+    pub fn confirmLoadedBackground(self: *RuntimeConfig, asset: *const config.material.Prepared) !void {
+        if (!asset.matches(self.value.ui.materials.background) or asset.image.width == 0 or asset.image.height == 0 or asset.image.pixels.len == 0) return error.BackgroundNotPrepared;
+        self.background_ready = true;
+    }
+
     pub fn prepare(self: *RuntimeConfig, candidate: config.Config) !Prepared {
         if (self.value.config_revision == std.math.maxInt(u64)) return error.RevisionExhausted;
         var next = candidate;
         next.config_revision = self.value.config_revision + 1;
+        const changed = schema.changed(self.value, next);
+        var policy_changes = changed;
+        policy_changes.unset(schema.find("ai", "permission_mode").?);
+        policy_changes.unset(schema.find("ai", "execution_mode").?);
+        next.agent_policy_revision = if (policy_changes.count() == 0) self.value.agentPolicyRevision() else next.config_revision;
         try next.validate();
-        return .{ .expected_revision = self.value.config_revision, .changed_fields = schema.changed(self.value, next), .owned = try Snapshot.init(self.allocator, next) };
+        return .{ .expected_revision = self.value.config_revision, .changed_fields = changed, .owned = try Snapshot.init(self.allocator, next) };
     }
 
     /// Main-thread commit boundary. A stale prepared request never overwrites a
@@ -199,6 +211,82 @@ test "runtime config defaults when file is absent" {
     var runtime = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
     defer runtime.deinit();
     try std.testing.expectEqual(@as(u16, 64), runtime.value.log.ring_mb);
+}
+
+test "AI defaults persist across restart while existing agents keep their choices and policy fence" {
+    const Controls = @import("../ai/assistant_store.zig").Controls;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var runtime = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer runtime.deinit();
+    var existing: Controls = .{};
+    existing.ensureDefaults(runtime.value.ai);
+    const fence = runtime.value.agentPolicyRevision();
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "permission_mode", .{ .text = "auto" });
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "execution_mode", .{ .text = "new_pty" });
+    existing.ensureDefaults(runtime.value.ai);
+    try std.testing.expectEqual(config.PermissionMode.confirm, existing.permission.?);
+    try std.testing.expectEqual(config.ExecutionMode.auto, existing.execution_mode.?);
+    try std.testing.expectEqual(fence, runtime.value.agentPolicyRevision());
+    try std.testing.expect(runtime.value.config_revision > fence);
+    var restarted = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer restarted.deinit();
+    var next: Controls = .{};
+    next.ensureDefaults(restarted.value.ai);
+    try std.testing.expectEqual(config.PermissionMode.auto, next.permission.?);
+    try std.testing.expectEqual(config.ExecutionMode.new_pty, next.execution_mode.?);
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "session_retention", .{ .text = "keep" });
+    try std.testing.expectEqual(runtime.value.config_revision, runtime.value.agentPolicyRevision());
+}
+
+test "loaded background permits AI defaults while unprepared replacements remain blocked" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var initial: config.Config = .{};
+    initial.ui.materials.background = .{ .enabled = true, .source = .directory, .path = "/fixture/backgrounds" };
+    try store.save(std.testing.io, tmp.dir, "config.toml", initial);
+    var runtime = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer runtime.deinit();
+    const revision = runtime.value.config_revision;
+    try std.testing.expectError(error.BackgroundNotPrepared, runtime.updateSetting(std.testing.io, tmp.dir, "ai", "permission_mode", .{ .text = "auto" }));
+    var pixels = [_]u8{ 255, 255, 255, 255 };
+    var path = "/fixture/backgrounds".*;
+    var asset: config.material.Prepared = .{ .draft_id = 1, .asset_revision = 1, .path = &path, .source = .file, .image = .{ .pixels = &pixels, .width = 1, .height = 1 } };
+    try std.testing.expectError(error.BackgroundNotPrepared, runtime.confirmLoadedBackground(&asset));
+    asset.source = .directory;
+    asset.image.width = 0;
+    try std.testing.expectError(error.BackgroundNotPrepared, runtime.confirmLoadedBackground(&asset));
+    try std.testing.expect(!runtime.background_ready);
+    asset.image.width = 1;
+    try runtime.confirmLoadedBackground(&asset);
+    try std.testing.expectEqual(revision, runtime.value.config_revision);
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "permission_mode", .{ .text = "auto" });
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "execution_mode", .{ .text = "new_pty" });
+    try std.testing.expectEqual(config.PermissionMode.auto, runtime.value.ai.permission_mode);
+    try std.testing.expectEqual(config.ExecutionMode.new_pty, runtime.value.ai.execution_mode);
+    var candidate = runtime.value;
+    candidate.ui.materials.background.path = "/fixture/other-backgrounds";
+    try std.testing.expectError(error.BackgroundNotPrepared, runtime.save(std.testing.io, tmp.dir, candidate));
+    candidate = runtime.value;
+    candidate.ui.materials.background.source = .file;
+    try std.testing.expectError(error.BackgroundNotPrepared, runtime.save(std.testing.io, tmp.dir, candidate));
+    var restarted = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer restarted.deinit();
+    try std.testing.expectEqual(config.PermissionMode.auto, restarted.value.ai.permission_mode);
+    try std.testing.expectEqual(config.ExecutionMode.new_pty, restarted.value.ai.execution_mode);
+    try std.testing.expect(!restarted.background_ready);
+}
+
+test "failed AI default persistence preserves defaults and agent policy fence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var runtime = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "blocked/config.toml");
+    defer runtime.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "not a directory" });
+    try std.testing.expectError(error.NotDir, runtime.updateSetting(std.testing.io, tmp.dir, "ai", "permission_mode", .{ .text = "auto" }));
+    try std.testing.expectEqual(config.PermissionMode.confirm, runtime.value.ai.permission_mode);
+    try std.testing.expectEqual(@as(u64, 1), runtime.value.config_revision);
+    try std.testing.expectEqual(@as(u64, 1), runtime.value.agentPolicyRevision());
 }
 
 test "runtime snapshot owns edited strings after the caller buffer changes" {
@@ -283,7 +371,11 @@ test "extended settings persist together and reload from the same path" {
     try runtime.save(std.testing.io, tmp.dir, candidate);
     var restarted = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "settings.toml");
     defer restarted.deinit();
-    try std.testing.expectEqualDeep(runtime.value, restarted.value);
+    // The agent policy fence is runtime-only; persisted fields still round-trip.
+    var persisted = runtime.value;
+    persisted.agent_policy_revision = null;
+    try std.testing.expectEqualDeep(persisted, restarted.value);
+    try std.testing.expectEqual(runtime.value.agentPolicyRevision(), restarted.value.agentPolicyRevision());
     try std.testing.expectEqual(@as(u16, 45), restarted.value.ssh.connect_timeout_sec);
     try std.testing.expect(!restarted.value.transfer.@"resume");
     try std.testing.expect(!restarted.value.completion.enabled);

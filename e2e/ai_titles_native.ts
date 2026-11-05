@@ -55,7 +55,7 @@ try{
  await click('ai.sessions.close');await send('继续');assert.equal(titleCount(),2);
  await click('ai.sessions');await row(2,titles.second);await click('ai.session.jump.1');await send('好的');assert.equal(titleCount(),2);
  await click('ai.sessions');await row(1,titles.first);await click('ai.sessions.close');await click('ai.session.new');
- const recent=await h.query('ai.empty.recent.title');assert(recent.some((n:any)=>n.text===titles.first));assert(recent.some((n:any)=>n.text===titles.second));
+ const recent=await h.query('ai.session.title');assert(recent.some((n:any)=>n.text===titles.first));assert(recent.some((n:any)=>n.text===titles.second));
  assert((await h.screenshot(join(out,'02-welcome-titles.png'))).ok);
  report.checks.push('Followups trigger no extra title requests; titles survive switching and match the welcome recent-conversation links');
  await send(questions.failed);await h.waitFor(async()=>titleCount()===3||null,5000);await h.sleep(300);await send('继续');assert.equal(titleCount(),3);

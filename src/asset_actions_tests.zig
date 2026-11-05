@@ -244,3 +244,50 @@ test "asset action delete rejects old owner revisions and cannot delete a replac
     try std.testing.expect(disk.indexOf(source.id) == null);
     try std.testing.expectEqual(replacement, disk.hosts[1].owner());
 }
+
+test "asset drag placement persists named and default group order with stable identities" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var live = try fixture(tmp.dir);
+    defer live.deinit();
+    const jump = live.hosts[0].owner();
+    const target = live.hosts[1].owner();
+    const key = live.hosts[2].owner();
+    const moved = try actions.apply(a, io, tmp.dir, path, &live, .{ .move = .{ .owner = target, .source_group = groupRef(&live, 0), .destination = groupRef(&live, 0), .placement = .{ .before = jump } } });
+    try std.testing.expectEqualSlices(hosts.identity.ConnectionId, &.{ target.id, jump.id }, live.groups[0].ordered_connection_ids);
+    const empty = try actions.apply(a, io, tmp.dir, path, &live, .{ .move = .{ .owner = moved.owner.?, .source_group = groupRef(&live, 0), .destination = groupRef(&live, 1), .placement = .end } });
+    try std.testing.expectEqualSlices(hosts.identity.ConnectionId, &.{target.id}, live.groups[1].ordered_connection_ids);
+    const ungrouped = try actions.apply(a, io, tmp.dir, path, &live, .{ .move = .{ .owner = empty.owner.?, .source_group = groupRef(&live, 1), .destination = null, .placement = .{ .before = key } } });
+    const ids = try live.orderedIds(a, null);
+    defer a.free(ids);
+    try std.testing.expectEqualSlices(hosts.identity.ConnectionId, &.{ target.id, key.id }, ids);
+    try std.testing.expectEqual(@as(usize, 1), ungrouped.index.?);
+    try std.testing.expectEqualStrings("password-secret", (try live.get(ungrouped.owner.?)).password.?);
+    var disk = try store.loadHosts(io, tmp.dir, a, path);
+    defer disk.deinit();
+    const restored = try disk.orderedIds(a, null);
+    defer a.free(restored);
+    try std.testing.expectEqualSlices(hosts.identity.ConnectionId, ids, restored);
+    try std.testing.expectEqual(@as(usize, 0), disk.groups[1].ordered_connection_ids.len);
+    const after = try actions.apply(a, io, tmp.dir, path, &live, .{ .move = .{ .owner = ungrouped.owner.?, .source_group = null, .destination = null, .placement = .{ .after = key } } });
+    try std.testing.expectEqual(live.hosts.len - 1, after.index.?);
+}
+
+test "asset drag placement rejects stale targets and preserves disk on failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var live = try fixture(tmp.dir);
+    defer live.deinit();
+    const source = live.hosts[1].owner();
+    var target = live.hosts[0].owner();
+    target.revision += 1;
+    const original = try read(tmp.dir);
+    defer a.free(original);
+    try std.testing.expectError(error.RevisionConflict, actions.apply(a, io, tmp.dir, path, &live, .{ .move = .{ .owner = source, .source_group = groupRef(&live, 0), .destination = groupRef(&live, 0), .placement = .{ .before = target } } }));
+    const current = try read(tmp.dir);
+    defer a.free(current);
+    try std.testing.expectEqualStrings(original, current);
+    try std.testing.expectEqual(source, live.hosts[1].owner());
+    const pinned = try actions.apply(a, io, tmp.dir, path, &live, .{ .pin = .{ .owner = live.hosts[0].owner(), .pinned = true } });
+    try std.testing.expectError(error.InvalidPlacement, actions.apply(a, io, tmp.dir, path, &live, .{ .move = .{ .owner = source, .source_group = groupRef(&live, 0), .destination = groupRef(&live, 0), .placement = .{ .before = pinned.owner.? } } }));
+}

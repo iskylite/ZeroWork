@@ -580,6 +580,8 @@ test "notification permission feedback retains waiting and native failure indepe
     var window: WindowProbe = .{};
     const id = try host.registerWindow(window.callbacks());
     try std.testing.expect(host.authorization_feedback == null);
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = .{ .authorization = 1 } });
+    _ = try host.poll();
     try host.requestAuthorization(id);
     try std.testing.expectEqualStrings("正在等待系统通知授权结果…", host.authorization_feedback.?);
     var failed: platform.RawEvent = .{ .kind = 2, .result = 3, .request_id = fake.last_permission, .settings = .{ .authorization = 1 }, .error_code = 1 };
@@ -592,6 +594,16 @@ test "notification permission feedback retains waiting and native failure indepe
     try std.testing.expectEqualStrings("系统通知授权请求失败", host.authorization_feedback.?);
     try std.testing.expectEqual(.not_determined, host.driver.settings.?.authorization);
     try std.testing.expectEqual(@as(i64, 1), host.last_failure.?.code);
+    // Returning from System Settings replaces stale denial/failure feedback
+    // with the actual OS authorization without another prompt or config edit.
+    host.authorization_feedback = "系统通知已被拒绝，请在 macOS 系统设置中允许 ZeroWork 通知。";
+    try host.refreshAuthorization();
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
+    const refreshed = try host.poll();
+    try std.testing.expect(refreshed.settings_changed);
+    try std.testing.expectEqualStrings("系统通知已获授权。", host.authorization_feedback.?);
+    try std.testing.expectEqual(@as(usize, 1), fake.requests);
+    try std.testing.expectEqual(@as(usize, 0), fake.sends);
 }
 
 test "ordinary feedback and typed failures stay outside global history" {

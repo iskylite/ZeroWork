@@ -339,6 +339,10 @@ pub const Runtime = struct {
                 self.failure = error.TransferTransportClosed;
                 self.phase.store(.failed, .release);
                 self.transport_fault.store(true, .release);
+                // Ready idle bindings no longer force 30 Hz UI polling. Wake
+                // the controller on this actual state change; it will revoke
+                // the original binding and drain IO through the normal path.
+                @import("../platform/presentation_wakeup.zig").notify();
                 break;
             }
             pause();

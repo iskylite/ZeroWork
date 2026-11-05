@@ -111,7 +111,7 @@ test "status connection view follows V3 labeled facts geometry and copies source
     const footer = f.view.footer.globalRect();
     try std.testing.expect(footer.y >= f.view.scroll.container.globalRect().y + f.view.scroll.container.globalRect().h);
     try std.testing.expect(footer.y + footer.h <= r.y + r.h - 14.5);
-    try std.testing.expectEqual(@as(f32, 90), f.view.copy_button.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 28), f.view.copy_button.globalRect().w);
     try std.testing.expectEqual(@as(f32, 88), f.view.reconnect_button.globalRect().w);
     try std.testing.expectEqualStrings("ubuntu@10.0.1.11:22", f.view.address.getText().?.content);
     try std.testing.expectEqualStrings("会话 101", f.view.session.getText().?.content);
@@ -284,6 +284,7 @@ test "status connection view icon tooltips appear on keyboard focus and hover wi
     f.settle();
     try std.testing.expectEqualStrings("复制信息", f.view.copy_button.behavior.interaction.a11y.?.label.?);
     try std.testing.expectEqual(before, f.view.copy_button.globalRect());
+    try std.testing.expect(visibleHint(f.cx.root.?, "复制信息"));
     f.cx.clearFocus();
     const logs_rect = f.view.logs_button.globalRect();
     f.cx.handleMouseMove(logs_rect.x + logs_rect.w / 2, logs_rect.y + logs_rect.h / 2);

@@ -150,7 +150,8 @@ pub const Domain = struct {
     /// Each window may request a tick. The Manager remains the sole progress
     /// consumer, and a process timestamp prevents duplicate scheduling passes.
     pub fn tick(self: *Domain, now_ms: u64, concurrency: u16) !bool {
-        if (self.last_tick_ms != null and self.last_tick_ms.? == now_ms) return self.manager.count() != 0;
+        // Duplicate window polls must not turn retained history into work.
+        if (self.last_tick_ms != null and self.last_tick_ms.? == now_ms) return self.manager.needsPolling();
         self.last_tick_ms = now_ms;
         var active = try self.transfers.safeTick();
         active = try self.authentication.collect() or active;

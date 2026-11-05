@@ -1321,6 +1321,19 @@ test "native settings expanded headers hide repeated summaries while fields rema
     }
 }
 
+test "native settings appearance icon and workspace folds remain independent after remount" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const mounted = try f.mount();
+    const icon = byId(mounted.root, "settings.appearance.app_icon.header").?;
+    _ = icon.behavior.events.on_event.?(.{ .key_down = .{ .key = .space } }, icon.behavior.events.event_context);
+    const remounted = try f.mount();
+    try std.testing.expect(byId(remounted.root, "settings.appearance.app_icon.header").?.behavior.interaction.a11y.?.expanded.?);
+    try std.testing.expect(!byId(remounted.root, "settings.appearance.aids.header").?.behavior.interaction.a11y.?.expanded.?);
+    try std.testing.expect(!f.controller.model.dirty);
+}
+
 test "native settings section headers retain readable collapsed summaries across all pages" {
     for (0..8) |index| {
         var f: AppearanceFixture = undefined;

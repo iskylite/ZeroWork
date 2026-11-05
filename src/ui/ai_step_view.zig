@@ -153,10 +153,11 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     text.meta.ownership.meta.test_id = "ai.step.detail";
     if (props.copy_detail and props.detail.len > 0) {
         const copy = try scope.createState(Copy, .{ .cx = cx, .text = try scope.createText(props.detail, .{}) });
-        copy.button = try @import("copy_button.zig").Button.mount(cx, scope, .{ .label = "复制", .variant = .ghost, .on_click = cx.on(Copy, copy, Copy.run) });
+        copy.button = try @import("copy_button.zig").Button.mount(cx, scope, .{ .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = 14, .a11y_label = "复制步骤详情", .variant = .ghost, .base_style = S.button(24), .on_click = cx.on(Copy, copy, Copy.run) });
         const copy_button = copy.button.node;
         copy_button.meta.ownership.meta.test_id = "ai.step.copy";
-        try scroll.content.appendChild(cx.allocator, copy_button);
+        const copy_hint = try @import("control_hint.zig").mount(cx, scope, copy_button, "复制步骤详情", .{ .id = "ai.step.copy.tooltip" });
+        try scroll.content.appendChild(cx.allocator, copy_hint.wrapper);
     }
     try @import("ai_text_selection.zig").attach(cx, scope, scroll.content);
     const disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, scroll.container, props.expanded.*);
