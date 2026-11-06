@@ -14,3 +14,6 @@ body[data-freeze=true] .modal,body[data-freeze=true] .spinning svg{animation:non
 .version-identity>div{flex:1;min-width:0}.version-identity p{overflow-wrap:anywhere}
 
 .badge{flex-shrink:0;color:var(--badge-ink,var(--accent-ink));background:color-mix(in srgb,var(--badge-ink,var(--accent-ink)) 10%,transparent)}.badge[data-tone=warning]{--badge-ink:var(--warn-ink)}.badge[data-tone=success]{--badge-ink:var(--ok-ink)}
+
+/* Update progress and optional explanation share the native dialog's compact layout. */
+.download-progress{display:flex;align-items:center;gap:8px;height:18px;margin-top:8px;font-size:12px;color:var(--fg-2)}.download-progress .progress-track{flex:1;margin:0}.update-help{position:relative;display:flex;flex-shrink:0}.update-help>.icon-button{width:24px;height:24px;margin:0}.update-help svg{width:16px;height:16px}.update-help-tooltip{display:none;position:absolute;z-index:40;right:0;top:calc(100% + 8px);width:300px;padding:8px 10px;border-radius:8px;box-shadow:var(--shadow-float);background:var(--overlay-base);color:var(--fg-1);font-size:11px;line-height:17px}.update-help:hover .update-help-tooltip,.update-help:focus-within .update-help-tooltip{display:block}

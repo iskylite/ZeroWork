@@ -2,9 +2,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-// UI-thread-only. Keep the running Dock tile and the file icon in sync: the
-// latter is what Dock uses once the process exits. NSWorkspace stores a custom
-// file icon without replacing resources inside the signed Contents directory.
+// UI-thread-only. Update the running Dock tile without mutating the signed app.
+// NSWorkspace.setIcon adds Icon\r / FinderInfo / ResourceFork to the bundle,
+// which fails strict codesign verification after startup. The installed file
+// icon is supplied by the packaged CFBundleIconFile resource.
 bool zw_app_icon_apply(const unsigned char *bytes, size_t length) {
     @autoreleasepool {
         if (![NSThread isMainThread] || !NSApp || !bytes || !length) return false;
@@ -13,14 +14,6 @@ bool zw_app_icon_apply(const unsigned char *bytes, size_t length) {
         if (!image || !image.valid) return false;
         image.size = NSMakeSize(512, 512);
         NSApp.applicationIconImage = image;
-        NSBundle *bundle = NSBundle.mainBundle;
-        if ([bundle.bundlePath.pathExtension isEqualToString:@"app"] &&
-            [bundle.infoDictionary[@"CFBundlePackageType"] isEqualToString:@"APPL"]) {
-            return [NSWorkspace.sharedWorkspace setIcon:image
-                                               forFile:bundle.bundlePath
-                                               options:0];
-        }
-        // Command-line and harness launches have no application file to update.
         return true;
     }
 }

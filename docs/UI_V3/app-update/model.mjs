@@ -18,7 +18,7 @@ export class UpdateDesignModel {
     this.operation=['downloading','verifying'].includes(this.state)?this.state:verifiedStates.has(this.state)?'ready':'idle';
     this.checkState=['no_stable','check_failed','download_failed'].includes(this.state)?this.state:null;
     this.operationGeneration=1;this.attempt=0;this.installed=this.state==='done';this.intent=false;this.gate=false;
-    this.helper='none';this.commitSent=false;this.decision=null;this.message='';this.unsaved=this.state==='drafts';
+    this.helper='none';this.commitSent=false;this.decision=null;this.message='';this.unsaved=this.state==='drafts';this.allowUnsaved=false;
     this.snapshot=null;this.dataChanged=this.state==='incompatible_data';this.backupValid=true;this.backupPreserved=false;
     this.dataCompatibility=['launch_failed','recovery_pending'].includes(this.state)?'unchanged':this.dataChanged?'incompatible':'unknown';
     this.newProcessReleased=['launch_failed','recovery_pending','failed'].includes(this.state);
@@ -70,12 +70,12 @@ export class UpdateDesignModel {
   requestInstall(){
     if(this.operation!=='ready'||this.gate)return false;
     if(this.decision==='committed'&&!['old_restored_verified','aborted_before_replace'].includes(this.transactionStage))return false;
-    if(this.unsaved){this.state='drafts';return true;}
+    if(this.unsaved&&!this.allowUnsaved){this.state='drafts';return true;}
     this.attempt++;this.planId=`plan-${this.epoch}-${this.attempt}`;
     this.helper='none';this.decision=null;this.commitSent=false;
     this.state=this.remaining.length?'confirm':'saving';if(this.state==='saving'){this.intent=true;this.gate=true;}return true;
   }
-  discardDrafts(){if(this.state!=='drafts')return;this.unsaved=false;this.requestInstall();}
+  discardDrafts(){if(this.state!=='drafts')return;this.allowUnsaved=true;this.requestInstall();this.state='confirm';this.intent=false;this.gate=false;}
   confirmClose(){if(this.state!=='confirm')return;this.intent=true;this.gate=true;this.state='saving';}
   snapshotReceipt(ok=true){
     if(this.state!=='saving'||!this.intent)return false;
@@ -135,7 +135,7 @@ export class UpdateDesignModel {
     if(['restore_failed','launch_failed','incompatible_data'].includes(this.state)){this.recoveryState=this.state;this.state='recovery_saved';return true;}
     if(['installing','startup_blocked','recovery_pending','recovery_saved','cancel_pending'].includes(this.state))return false;
     if(['closing','blocked','handoff','saving','commit_pending'].includes(this.state))return this.cancelInstall();
-    if(this.state==='confirm'){this.state='ready';return true;}
+    if(this.state==='confirm'){this.allowUnsaved=false;this.state='ready';return true;}
     if(['drafts','snapshot_failed'].includes(this.state)){this.intent=false;this.gate=false;this.state='ready';return true;}
     // Hiding details is independent of the background download or verification.
     this.state='settings';return true;

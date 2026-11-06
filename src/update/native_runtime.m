@@ -326,6 +326,10 @@ int zw_update_test_seed_verified(const char *envelopeFile,const char *archiveFil
 }
 // Main-app host E2E only: inject a verified-state presentation without enabling
 // an installer or accepting an unsigned package. Production erases this symbol.
+void zw_update_test_downloading(uint64_t received,uint64_t expected){
+    Publish(3,@"正在下载更新");
+    pthread_mutex_lock(&statusLock);status.received=received;status.expected=expected;pthread_mutex_unlock(&statusLock);presented=YES;
+}
 void zw_update_test_ready(void){Publish(5,@"更新包已验证，可以准备安装");presented=YES;}
 #endif
 const char *zw_update_current_version(void){return Version().UTF8String;}

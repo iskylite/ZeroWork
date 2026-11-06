@@ -18,6 +18,7 @@ const ProcessWindows = struct {
     runtime_config: ?*RuntimeConfig = null,
     font_system: ?@FieldType(App, "font_manager") = null,
     pending: std.ArrayList(PendingWindow) = .empty,
+    update_test_legacy_preflight: bool = false,
     const PendingWindow = struct {
         source: @import("host/session_host.zig").AttachmentTarget,
         connection: application_host_mod.WindowConnection,
@@ -91,7 +92,7 @@ const ProcessWindows = struct {
         applog.info(.workspace, "workspace ready window={d} workspace={d} shared_sessions={d}", .{ @backingInt(host.window_id), @backingInt(host.workspace_id), self.domain.sessions.sessions.items.len });
     }
 
-    pub fn updateDraftReason(self: *ProcessWindows) ?[]const u8 {
+    pub fn updateDraftReason(self: *ProcessWindows, allow_unsaved: bool) ?[]const u8 {
         if (self.data_cleanup_owner != null) return "正在清除应用数据，请先完成该操作";
         if (self.pending.items.len != 0) return "有窗口正在创建，请稍后重试";
         for (self.runtime.windows.items) |managed| {
@@ -99,16 +100,73 @@ const ProcessWindows = struct {
             if (nav.native_close_pending) return "有窗口正在关闭，请等待收尾";
             if (nav.settings) |settings| {
                 if (settings.busy()) return "请先完成设置资源操作";
-                if (settings.controller.state() != .clean) return "有未保存的设置，请返回工作区保存或放弃后再更新";
+                if (!allow_unsaved and settings.controller.state() != .clean) return "有未保存的设置，请返回工作区保存或放弃后再更新";
             }
+            if (allow_unsaved) continue;
             if (nav.wizard) |wizard| if (wizard.open) |editor_open| if (editor_open.get()) return "连接编辑器尚未关闭，请先保存或放弃编辑";
             if (nav.quick_host) |quick| if (quick.view.isOpen()) return "请先关闭快捷连接输入，避免丢失未提交内容";
             if (nav.ai) |ai| {
-                if (ai.controller.input.len != 0 or ai.controller.model.prompt.len != 0) return "有未发送的 AI 输入，请返回工作区发送或清空后再更新";
-                if (ai.assistant_states) |store| for (store.states.items) |state| if (state.draft) |draft| if (std.mem.trim(u8, draft, " \t\r\n").len != 0) return "其他 AI 会话有未发送的输入，请先保存或清空后再更新";
+                if (application_test_mode and self.update_test_legacy_preflight) {
+                    if (legacyUpdateAiReason(ai)) |reason| return reason;
+                }
+                // Inspect the live composer, not retained controller/model copies.
+                if (ai.assistant_states) |store| {
+                    if (ai.display_conversation) |id| if (store.find(id)) |current| {
+                        if (!current.closed and !current.ended and std.mem.trim(u8, ai.prompt.peek(), " \t\r\n").len != 0) return "当前 AI 会话有未发送的输入";
+                    };
+                    for (store.states.items) |state| {
+                        if (@import("update/draft_guard.zig").blocks(state, ai.display_conversation)) return "其他 AI 会话有未发送的输入";
+                    }
+                }
             }
         }
         return null;
+    }
+    // Test-only observation/replay of the pre-fix AI guard. Never changes draft data.
+    fn legacyUpdateAiReason(ai: *AiHost) ?[]const u8 {
+        if (ai.controller.input.len != 0 or ai.controller.model.prompt.len != 0) return "有未发送的 AI 输入，请返回工作区发送或清空后再更新";
+        if (ai.assistant_states) |store| for (store.states.items) |state| if (state.draft) |draft| if (std.mem.trim(u8, draft, " \t\r\n").len != 0) return "其他 AI 会话有未发送的输入，请先保存或清空后再更新";
+        return null;
+    }
+    pub fn updateTestLegacyPreflight(self: *ProcessWindows, enabled: bool) void {
+        if (application_test_mode) self.update_test_legacy_preflight = enabled;
+    }
+    pub fn updateTestDrafts(self: *ProcessWindows, buffer: []u8) ?[]const u8 {
+        if (!application_test_mode) return null;
+        var output = std.Io.Writer.fixed(buffer);
+        output.writeAll("{\"windows\":[") catch return null;
+        var first = true;
+        for (self.runtime.windows.items) |managed| {
+            const nav = navFor(managed.app) orelse continue;
+            const ai = nav.ai orelse continue;
+            const Entry = struct {
+                id: u64,
+                closed: bool,
+                ended: bool,
+                listed: bool,
+                selected: bool,
+                draft_len: usize,
+                draft_hash: u64,
+                model_prompt_len: usize,
+                journal_present: bool,
+                journal_draft_len: usize,
+                journal_draft_hash: u64,
+                bound: bool,
+            };
+            var states: std.ArrayList(Entry) = .empty;
+            defer states.deinit(std.heap.c_allocator);
+            if (ai.assistant_states) |store| for (store.states.items) |state| {
+                const record = if (ai.shared_service) |host| host.service.store.find(state.conversation_id) else null;
+                const draft = state.draft orelse "";
+                const persisted = if (record) |r| r.draft orelse "" else "";
+                states.append(std.heap.c_allocator, .{ .id = state.id, .closed = state.closed, .ended = state.ended, .listed = state.listed, .selected = state.selected, .draft_len = draft.len, .draft_hash = std.hash.Wyhash.hash(0, draft), .model_prompt_len = state.model.prompt.len, .journal_present = record != null, .journal_draft_len = persisted.len, .journal_draft_hash = std.hash.Wyhash.hash(0, persisted), .bound = if (record) |r| r.binding != null else false }) catch return null;
+            };
+            if (!first) output.writeAll(",") catch return null;
+            first = false;
+            std.json.Stringify.value(.{ .window = @backingInt(nav.application_host.?.window_id), .display = ai.display_conversation, .prompt_len = ai.prompt.peek().len, .prompt_hash = std.hash.Wyhash.hash(0, ai.prompt.peek()), .controller_input_len = ai.controller.input.len, .controller_model_prompt_len = ai.controller.model.prompt.len, .legacy_reason = legacyUpdateAiReason(ai), .states = states.items }, .{}, &output) catch return null;
+        }
+        output.writeAll("]}") catch return null;
+        return output.buffered();
     }
     pub fn updateTestTheme(self: *ProcessWindows, id: []const u8) !void {
         const app = self.primary orelse return error.NoWindow;
@@ -8120,7 +8178,7 @@ const SettingsHost = struct {
     }
 
     fn applyRuntimeSettings(self: *SettingsHost) void {
-        if (!@import("platform/app_icon.zig").apply(self.runtime.value.ui.icon_background)) self.refresh("无法更新或保存应用图标，请确认应用位于可写目录后重试");
+        if (!@import("platform/app_icon.zig").apply(self.runtime.value.ui.icon_background)) self.refresh("无法更新 Dock 图标，请稍后重试");
         if (process_notifications) |notifications| notifications.updatePolicy(self.runtime.value.notify) catch |err| self.refresh(@errorName(err));
         if (self.workspace) |workspace| {
             const setting = self.runtime.value.ui;

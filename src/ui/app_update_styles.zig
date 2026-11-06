@@ -26,3 +26,10 @@ pub fn summary(height: f32) ui.BoxStyle {
     const m = metrics(height);
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .margin = .{ .top = m.summary_gap, .bottom = m.summary_gap }, .padding = .all(m.summary_padding), .background = theme.current().surface_2, .border = .{ .width = 0, .radius = 10 }, .flex_shrink = 0 };
 }
+
+pub fn helpButton() ui.BoxStyle {
+    return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .ZERO, .flex_shrink = 0 };
+}
+pub fn progress() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 18 }, .margin = .{ .top = 8 }, .flex_shrink = 0 };
+}

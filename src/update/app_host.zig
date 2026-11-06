@@ -29,6 +29,9 @@ pub fn Host(comptime Process: type) type {
         previous: client.Status = .{},
         message: [2048]u8 = @splat(0),
         dirty: bool = true,
+        install_blocked: bool = false,
+        allow_unsaved: bool = false,
+        can_force: bool = false,
         pub fn deinit(self: *Self) void {
             self.coordinator.deinit(allocator);
             self.sources.deinit(allocator);
@@ -90,6 +93,14 @@ pub fn Host(comptime Process: type) type {
             }
         }
         fn activate(self: *Self) !void {
+            if (self.phase == .idle and self.install_blocked and self.can_force) self.allow_unsaved = true;
+            // A preflight failure belongs to that attempt, not to the package.
+            // Reusing it after the user deletes a conversation reports a ghost draft.
+            if (self.phase == .idle or self.phase == .confirm) {
+                self.install_blocked = false;
+                self.can_force = false;
+                self.note("");
+            }
             switch (self.phase) {
                 .confirm => {
                     try self.begin();
@@ -116,10 +127,13 @@ pub fn Host(comptime Process: type) type {
                     char: {
                         var reason: [512]u8 = @splat(0);
                         if (client.zw_update_can_install(&reason, reason.len) == 0) {
+                            self.install_blocked = true;
                             self.note(std.mem.sliceTo(&reason, 0));
                             break :char;
                         }
-                        if (self.process.updateDraftReason()) |reasonText| {
+                        if (self.process.updateDraftReason(self.allow_unsaved)) |reasonText| {
+                            self.install_blocked = true;
+                            self.can_force = self.process.updateDraftReason(true) == null;
                             self.note(reasonText);
                             return;
                         }
@@ -133,7 +147,9 @@ pub fn Host(comptime Process: type) type {
             }
         }
         fn begin(self: *Self) !void {
-            if (self.process.updateDraftReason()) |reason| {
+            if (self.process.updateDraftReason(self.allow_unsaved)) |reason| {
+                self.install_blocked = true;
+                self.can_force = self.process.updateDraftReason(true) == null;
                 self.note(reason);
                 self.phase = .idle;
                 return;
@@ -216,11 +232,14 @@ pub fn Host(comptime Process: type) type {
                 return;
             }
             if (self.status.state == 3 or self.status.state == 4) client.zw_update_command(3);
-            const closing = self.coordinator.intent;
             self.coordinator.cancel();
             admission.set(false);
             self.phase = .idle;
-            if (closing) self.note("");
+            self.allow_unsaved = false;
+            self.can_force = false;
+            self.install_blocked = false;
+            // Dismissal finishes the attempt even when no close was dispatched.
+            self.note("");
             if (self.view) |v| v.hide();
         }
         fn issue(self: *Self, sourceValue: Source) !u64 {
@@ -256,10 +275,28 @@ pub fn Host(comptime Process: type) type {
             };
         }
         pub fn testRoute(self: *Self, body: []const u8, buffer: []u8) ?[]const u8 {
-            const Input = struct { action: []const u8 = "snapshot", theme_name: []const u8 = "sauber" };
+            const Input = struct { action: []const u8 = "snapshot", theme_name: []const u8 = "sauber", received: u64 = 7500000, expected: u64 = 20200000, legacy: bool = false, envelope: []const u8 = "", archive: []const u8 = "" };
             var parsed = std.json.parseFromSlice(Input, allocator, body, .{}) catch return "{\"ok\":false}";
             defer parsed.deinit();
             const command = parsed.value;
+            if (std.mem.eql(u8, command.action, "fixture_feed")) {
+                const Native = struct {
+                    extern fn zw_update_test_package_feed([*:0]const u8, [*:0]const u8) void;
+                };
+                const envelope = allocator.dupeSentinel(u8, command.envelope, 0) catch return "{\"ok\":false}";
+                defer allocator.free(envelope);
+                const archive = allocator.dupeSentinel(u8, command.archive, 0) catch return "{\"ok\":false}";
+                defer allocator.free(archive);
+                Native.zw_update_test_package_feed(envelope, archive);
+            }
+            if (std.mem.eql(u8, command.action, "drafts")) return self.process.updateTestDrafts(buffer);
+            if (std.mem.eql(u8, command.action, "legacy_preflight")) self.process.updateTestLegacyPreflight(command.legacy);
+            if (std.mem.eql(u8, command.action, "downloading")) {
+                const Native = struct {
+                    extern fn zw_update_test_downloading(u64, u64) void;
+                };
+                Native.zw_update_test_downloading(command.received, command.expected);
+            }
             if (std.mem.eql(u8, command.action, "ready")) {
                 const Native = struct {
                     extern fn zw_update_test_ready() void;
@@ -270,8 +307,11 @@ pub fn Host(comptime Process: type) type {
             if (std.mem.eql(u8, command.action, "theme")) {
                 self.process.updateTestTheme(command.theme_name) catch return "{\"ok\":false}";
             }
+            const Native = struct {
+                extern fn zw_update_current_version() [*:0]const u8;
+            };
             var writer = std.Io.Writer.fixed(buffer);
-            std.json.Stringify.value(.{ .button = if (self.view) |v| .{ .base = v.primary_base.peek().background, .actual = v.primary.getBackground(), .gradient = v.primary.style.gradient(), .variant = v.primary_variant.peek(), .danger = v.danger, .token = theme.current().action_danger } else null, .phase = @tagName(self.phase), .gate = admission.blocked(), .intent = self.coordinator.intent, .batch = self.coordinator.batch, .generation = self.coordinator.generation, .draining = self.coordinator.draining(), .released = self.coordinator.released(), .work = self.coordinator.work.items, .message = std.mem.sliceTo(&self.message, 0) }, .{}, &writer) catch return "{\"ok\":false}";
+            std.json.Stringify.value(.{ .pid = std.c.getpid(), .app_version = std.mem.span(Native.zw_update_current_version()), .update_state = self.status.state, .received = self.status.received, .expected = self.status.expected, .button = if (self.view) |v| .{ .base = v.primary_base.peek().background, .actual = v.primary.getBackground(), .gradient = v.primary.style.gradient(), .variant = v.primary_variant.peek(), .danger = v.danger, .token = theme.current().action_danger } else null, .phase = @tagName(self.phase), .draft_reason = self.process.updateDraftReason(false), .allow_unsaved = self.allow_unsaved, .can_force = self.can_force, .gate = admission.blocked(), .intent = self.coordinator.intent, .batch = self.coordinator.batch, .generation = self.coordinator.generation, .draining = self.coordinator.draining(), .released = self.coordinator.released(), .work = self.coordinator.work.items, .message = std.mem.sliceTo(&self.message, 0) }, .{}, &writer) catch return "{\"ok\":false}";
             return writer.buffered();
         }
         pub fn failed(self: *Self, err: anyerror) void {
@@ -429,7 +469,12 @@ pub fn Host(comptime Process: type) type {
                     p.title = "结束当前工作并安装更新？";
                     p.description = "保存工作区快照后，由 ZeroWork 统一结束以下工作。";
                     p.message = "未完成的传输和 AI 任务将被取消，历史记录会保留。\n已结束的工作不会恢复；断开连接不保证远端命令停止。";
-                    p.primary = "结束任务并安装";
+                    if (self.allow_unsaved) {
+                        p.title = "仍然安装更新？";
+                        p.description = "未保存的设置、编辑内容和未发送输入可能丢失。";
+                        p.message = "确认后保存工作区快照并结束当前工作，随后安装更新并重启。";
+                    }
+                    p.primary = if (self.allow_unsaved) "仍然安装并重启" else "结束任务并安装";
                     p.cancel = "取消";
                     p.danger = true;
                     p.show_release = false;
@@ -487,22 +532,22 @@ pub fn Host(comptime Process: type) type {
                     3 => {
                         p.title = "正在下载更新";
                         p.description = try std.fmt.bufPrint(&details, "已下载 {d:.1} MB / {d:.1} MB", .{ @as(f64, @floatFromInt(self.status.received)) / 1_000_000, @as(f64, @floatFromInt(self.status.expected)) / 1_000_000 });
-                        p.summary = "下载完成后将校验完整性、发布签名与应用身份。";
-                        p.message = "取消会清除未完成的更新包。";
+                        p.progress = self.status.downloadPercent();
+                        p.help = "下载完成后会验证更新包。取消下载会删除未完成的更新包。";
                         p.primary = "";
                         p.cancel = "取消下载";
                     },
                     4 => {
                         p.title = "正在检查更新包";
                         p.description = "正在检查完整性、发布签名与应用身份。";
-                        p.message = "取消会清除未验证的更新包。";
+                        p.help = "取消校验会删除未验证的更新包。";
                         p.primary = "";
                         p.cancel = "取消校验";
                     },
                     5, 9, 11 => {
                         p.title = "更新已准备好安装";
                         p.description = try std.fmt.bufPrint(&details, "ZeroWork {s} · 更新包校验通过", .{self.status.versionText()});
-                        p.summary = "安装需要退出并重新打开 ZeroWork。\n结束工作前，会先处理草稿并保存工作区快照。";
+                        p.help = "安装前会检查未保存的内容并保存工作区快照，随后退出并重新打开 ZeroWork。";
                         p.primary = "安装并重启";
                         p.cancel = "稍后安装";
                     },
@@ -534,6 +579,17 @@ pub fn Host(comptime Process: type) type {
                 p.show_release = false;
             }
             if (custom.len != 0) p.message = custom;
+            if (self.phase == .idle and self.install_blocked) {
+                p.title = "暂时无法安装更新";
+                p.description = custom;
+                p.summary = "";
+                p.help = "尚未结束任何工作。更新包会保留，处理完成后可重新检查并继续安装。";
+                p.primary = if (self.can_force) "仍然安装…" else "重新检查";
+                p.cancel = "返回处理";
+                p.message = if (self.can_force) "可返回处理，也可选择仍然安装。未保存的内容可能丢失。" else "";
+                p.danger = self.can_force;
+                p.warning = true;
+            }
             try v.update(p);
         }
         fn now() u64 {

@@ -79,3 +79,31 @@ void zw_update_test_fetch_contracts(void){
         [NSFileManager.defaultManager removeItemAtPath:temporary error:nil];
     }
 }
+
+// Full main-app update E2E: only substitute HTTP response bytes. The normal
+// download, signed manifest, archive, code identity and installer paths still run.
+static NSString *packageFixtureEnvelope,*packageFixtureArchive;
+@interface ZWUpdatePackageFixtureProtocol : NSURLProtocol
+@property(atomic) BOOL cancelled;
+@end
+@implementation ZWUpdatePackageFixtureProtocol
++ (BOOL)canInitWithRequest:(NSURLRequest *)request{return YES;}
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request{return request;}
+- (void)startLoading{
+    NSString *file=[self.request.URL.absoluteString isEqual:ZWFeed]?packageFixtureEnvelope:([self.request.URL.path hasSuffix:@"-arm64.zip"]?packageFixtureArchive:nil);
+    NSData *data=file?[NSData dataWithContentsOfFile:file options:NSDataReadingMappedIfSafe error:nil]:nil;
+    if(!data){[self.client URLProtocol:self didFailWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorFileDoesNotExist userInfo:nil]];return;}
+    NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:200 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Length":[NSString stringWithFormat:@"%lu",(unsigned long)data.length]}];
+    [self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    for(NSUInteger offset=0;offset<data.length && !self.cancelled;){
+        NSUInteger count=MIN((NSUInteger)131072,data.length-offset);
+        [self.client URLProtocol:self didLoadData:[data subdataWithRange:NSMakeRange(offset,count)]];
+        offset+=count;if(data.length>65536)usleep(4000);
+    }
+    if(!self.cancelled)[self.client URLProtocolDidFinishLoading:self];
+}
+- (void)stopLoading{self.cancelled=YES;}
+@end
+void zw_update_test_package_feed(const char *envelope,const char *archive){
+    packageFixtureEnvelope=[NSString stringWithUTF8String:envelope];packageFixtureArchive=[NSString stringWithUTF8String:archive];fetchProtocol=ZWUpdatePackageFixtureProtocol.class;
+}

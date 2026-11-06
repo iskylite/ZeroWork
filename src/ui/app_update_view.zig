@@ -10,6 +10,8 @@ pub const Presentation = struct {
     title: []const u8,
     description: []const u8,
     summary: []const u8 = "",
+    help: []const u8 = "",
+    progress: ?f32 = null,
     message: []const u8 = "",
     primary: []const u8 = "",
     cancel: []const u8 = "关闭",
@@ -37,6 +39,11 @@ pub const View = struct {
     heading: *ui.Node,
     heading_icon: *ui.Node,
     description: *ui.Node,
+    help: *ui.Node,
+    help_icon: *ui.Node,
+    help_text: *ui.Signal([]const u8),
+    progress: *ui.Node,
+    progress_value: *ui.Signal(f32),
     summary: *ui.Node,
     summary_text: *ui.Node,
     message: *ui.Node,
@@ -88,6 +95,13 @@ pub const View = struct {
         try header.appendChild(cx.allocator, heading_icon);
         const heading = try text(cx, header, "应用更新", 16, 22, 700);
         heading.meta.ownership.meta.test_id = "update.title";
+        const help_text = try scope.createText("", .{});
+        const help_button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "更新说明", .base_style = S.helpButton() }).mount(scope, cx);
+        help_button.meta.ownership.meta.test_id = "update.help";
+        const help_icon = try ui.iconTint(cx, ui.icons.circle_alert, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } });
+        try help_button.appendChild(cx.allocator, help_icon);
+        const help = try @import("control_hint.zig").mount(cx, scope, help_button, help_text, .{ .id = "update.help.tooltip", .width = 300, .visible = open, .layout = .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0 } });
+        try header.appendChild(cx.allocator, help.wrapper);
         const close_button = try ui.widgets.Button(.{ .variant = .ghost, .disabled = cancel_disabled, .a11y_label = "关闭更新窗口", .on_click = cx.on(View, self, cancelClicked), .base_style = ui.BoxStyle{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .margin = .{ .top = -4, .right = -4, .bottom = -4 }, .padding = .ZERO, .flex_shrink = 0 } }).mount(scope, cx);
         close_button.meta.ownership.meta.test_id = "update.close";
         const close_icon = try ui.iconTint(cx, ui.icons.x, S.theme.current().fg_2, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } });
@@ -100,6 +114,11 @@ pub const View = struct {
         try scroll.content.appendChild(cx.allocator, content);
         const description = try text(cx, content, "", 12, 18, 400);
         description.meta.ownership.meta.test_id = "update.detail";
+        const progress_value = try scope.createSignal(f32, 0);
+        const progress = try ui.widgets.Progress(.{ .value = progress_value, .height = 5, .show_text = true }).mount(scope, cx);
+        progress.meta.ownership.meta.test_id = "update.download.progress";
+        progress.setStyleInline(cx.allocator, S.progress());
+        try content.appendChild(cx.allocator, progress);
         const summary = try ui.box(cx, S.summary(cx.viewport.height), .{});
         summary.meta.ownership.meta.test_id = "update.summary";
         try content.appendChild(cx.allocator, summary);
@@ -147,7 +166,7 @@ pub const View = struct {
         primary.meta.ownership.meta.test_id = "update.primary";
         const primary_label = firstText(primary).?;
         try actions.appendChild(cx.allocator, primary);
-        self.* = .{ .cx = cx, .hooks = hooks, .open = open, .disabled = disabled, .cancel_disabled = cancel_disabled, .dialog = modal.dialog, .overlay = modal.overlay, .body = modal.body, .scroll = scroll.container, .actions = actions, .content = content, .heading = heading, .heading_icon = heading_icon, .description = description, .summary = summary, .summary_text = summary_text, .message = message, .footer = footer, .row_nodes = row_nodes, .row_labels = row_labels, .row_values = row_values, .row_icons = row_icons, .primary_interaction = primary_interaction, .primary_base = primary_base, .cancel_base = cancel_base, .release_base = release_base, .primary_variant = primary_variant, .primary_text = primary_text, .cancel_text = cancel_text, .primary = primary, .primary_label = primary_label, .cancel = cancel, .cancel_label = cancel_label, .release = release, .release_label = release_label, .close = close_button, .close_icon = close_icon, .colors = S.theme.current() };
+        self.* = .{ .cx = cx, .hooks = hooks, .open = open, .disabled = disabled, .cancel_disabled = cancel_disabled, .dialog = modal.dialog, .overlay = modal.overlay, .body = modal.body, .scroll = scroll.container, .actions = actions, .content = content, .heading = heading, .heading_icon = heading_icon, .description = description, .help = help.wrapper, .help_icon = help_icon, .help_text = help_text, .progress = progress, .progress_value = progress_value, .summary = summary, .summary_text = summary_text, .message = message, .footer = footer, .row_nodes = row_nodes, .row_labels = row_labels, .row_values = row_values, .row_icons = row_icons, .primary_interaction = primary_interaction, .primary_base = primary_base, .cancel_base = cancel_base, .release_base = release_base, .primary_variant = primary_variant, .primary_text = primary_text, .cancel_text = cancel_text, .primary = primary, .primary_label = primary_label, .cancel = cancel, .cancel_label = cancel_label, .release = release, .release_label = release_label, .close = close_button, .close_icon = close_icon, .colors = S.theme.current() };
         try scope.onCleanup(View, self, cleanup);
         try cx.addAfterLayoutHook(self, frame);
         self.retheme();
@@ -166,6 +185,10 @@ pub const View = struct {
         try self.heading.setTextContent(self.cx.allocator, p.title);
         try self.description.setTextContent(self.cx.allocator, p.description);
         try self.summary_text.setTextContent(self.cx.allocator, p.summary);
+        self.help_text.set(p.help);
+        self.help.setDisplay(if (p.help.len == 0) .none else .flex);
+        self.progress_value.set(p.progress orelse 0);
+        self.progress.setDisplay(if (p.progress == null) .none else .flex);
         try self.setMessage(p.message);
         try self.footer.setTextContent(self.cx.allocator, p.footer);
         self.primary_text.set(if (p.primary.len == 0) "检查更新" else p.primary);
@@ -265,6 +288,7 @@ pub const View = struct {
         const asset = if (self.warning or self.danger) ui.icons.triangle_alert else ui.icons.refresh_cw;
         if (asset.icon_id) |id| if (asset.pickRep(18)) |rep| self.heading_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = if (self.warning or self.danger) c.warn_ink else c.accent_ink });
         _ = self.close_icon.setTint(c.fg_2);
+        _ = self.help_icon.setTint(c.fg_2);
         for (0..4) |i| {
             self.row_nodes[i].setStyleInline(self.cx.allocator, .{ .height = .{ .px = m.row_height } });
             self.row_labels[i].setTextColor(c.fg_1);

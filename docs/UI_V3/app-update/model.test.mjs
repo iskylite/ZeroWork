@@ -96,3 +96,9 @@ test('empty stable channel and fetch errors never imply a verified package',()=>
     m.dismiss();m.open();assert.equal(m.state,state);
   }
 });
+
+test('force install requires final confirmation even without running tasks',()=>{
+  const m=new UpdateDesignModel('drafts',false);m.discardDrafts();
+  assert.equal(m.state,'confirm');assert.equal(m.allowUnsaved,true);assert.equal(m.gate,false);
+  m.dismiss();assert.equal(m.allowUnsaved,false);assert.equal(m.unsaved,true);m.requestInstall();assert.equal(m.state,'drafts');
+});

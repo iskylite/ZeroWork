@@ -11,6 +11,10 @@ pub const Status = extern struct {
     version: [96]u8 = @splat(0),
     message: [2048]u8 = @splat(0),
     notes: [16385]u8 = @splat(0),
+    pub fn downloadPercent(self: *const Status) ?f32 {
+        if (self.expected == 0) return null;
+        return @min(100, @as(f32, @floatFromInt(self.received)) / @as(f32, @floatFromInt(self.expected)) * 100);
+    }
     pub fn failureTitle(self: *const Status) []const u8 {
         return switch (self.failure_stage) {
             1 => "检查更新失败",

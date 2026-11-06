@@ -36,3 +36,23 @@ test "update failures describe the phase before installation" {
     const prepare: Status = .{ .state = 10, .failure_stage = 6 };
     try std.testing.expectEqualStrings("安装准备失败", prepare.failureTitle());
 }
+
+test "update ignores deleted ended and displayed draft snapshots but catches live background drafts" {
+    const State = struct { id: u64 = 1, closed: bool = false, ended: bool = false, draft: ?[]const u8 = "未发送" };
+    const blocks = @import("update/draft_guard.zig").blocks;
+    try std.testing.expect(blocks(State{}, null));
+    try std.testing.expect(!blocks(State{ .closed = true }, null));
+    try std.testing.expect(!blocks(State{ .ended = true }, null));
+    try std.testing.expect(!blocks(State{}, 1));
+    try std.testing.expect(!blocks(State{ .draft = " \n" }, null));
+    try std.testing.expect(!blocks(State{ .draft = null }, null));
+}
+
+test "update download progress handles partial complete overflow and unknown totals" {
+    const Status = @import("update/client.zig").Status;
+    try std.testing.expectApproxEqAbs(@as(f32, 37.12871), (Status{ .received = 7500000, .expected = 20200000 }).downloadPercent().?, 0.001);
+    try std.testing.expectEqual(@as(?f32, 100), (Status{ .received = 100, .expected = 100 }).downloadPercent());
+    try std.testing.expectEqual(@as(?f32, 100), (Status{ .received = 101, .expected = 100 }).downloadPercent());
+    try std.testing.expectEqual(@as(?f32, 0), (Status{ .received = 0, .expected = 100 }).downloadPercent());
+    try std.testing.expectEqual(@as(?f32, null), (Status{ .received = 100, .expected = 0 }).downloadPercent());
+}
