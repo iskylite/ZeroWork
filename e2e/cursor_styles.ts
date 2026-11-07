@@ -207,7 +207,7 @@ try {
   await type_("exit");
   await key("enter");
   await waitFor(async () => !descendants().some((process) => process.pid === shell.pid) || null);
-  await visible("local.ended.new");
+  await visible("local.ended.reconnect");
   await click("tabs.close.1");
   await visible("workspace.empty.local");
   assert.equal(descendants().filter((process) => /(^|\/)(zsh|sleep)$/.test(process.command)).length, 0);

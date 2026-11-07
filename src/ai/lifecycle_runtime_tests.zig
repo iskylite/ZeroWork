@@ -16,6 +16,8 @@ const Fixture = struct {
     owner: *backend.ProcessJournal,
     ctx: host.Context,
     prepare_count: usize = 0,
+    settlement_polls: usize = 0,
+    cancelled_preparations: usize = 0,
     publish_count: usize = 0,
     released_count: usize = 0,
     open_count: usize = 0,
@@ -45,6 +47,10 @@ const Fixture = struct {
             },
             .prepare_group => |request| {
                 self.prepare_count += 1;
+                if (self.settlement_polls != 0) {
+                    self.settlement_polls -= 1;
+                    return error.ChildSettlementRequired;
+                }
                 self.last_operation = request.operation;
                 if (self.fail_before_dispatch) try self.owner.dir.?.writeFile(io, .{ .sub_path = self.owner.path, .data = "disk changed before dispatch" });
                 call.result = .{ .group_plan = .{ .id = 77, .token = self, .binding_revision = 2, .notice_revision = 2 } };
@@ -56,6 +62,7 @@ const Fixture = struct {
                 if (self.fail_after_publish) try self.owner.dir.?.writeFile(io, .{ .sub_path = self.owner.path, .data = "disk changed during publication" });
             },
             .release_group => self.released_count += 1,
+            .cancel_group_prepare => self.cancelled_preparations += 1,
             .queue_open => |request| {
                 self.open_count += 1;
                 self.snapshot = .{ .operation_ref = request.operation_ref, .context = request.context, .group = request.group, .source = request.source, .saved_source = request.saved_source, .session = .{ .session_id = @fromBackingInt(102), .generation = 3 }, .state = .prepared, .retention = request.retention, .revision = 2 };
@@ -495,4 +502,24 @@ test "lifecycle bootstrap product second approval gates dispatch and rejection c
     if (std.c.getenv("ZW_TEST_BOOTSTRAP_PRODUCT_BUNDLED") == null) return error.SkipZigTest;
     try bootstrapApprovalCase(true);
     try bootstrapApprovalCase(false);
+}
+
+test "v0.4 handoff model create waits outside controller and publishes once after child settlement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const owner = try backend.ProcessJournal.acquire(.{ .data_root = "/test/group-child-settlement", .dir = tmp.dir, .io = io });
+    defer owner.release();
+    var fixture: Fixture = .{ .owner = owner, .ctx = context(), .settlement_polls = 2 };
+    const args = try createArgs(fixture.ctx, "settled group");
+    defer a.free(args);
+    var result = try execute(&fixture, "host.create_group", args);
+    defer result.deinit(a);
+    try std.testing.expectEqual(@import("plugin_tools.zig").Status.succeeded, result.status);
+    try std.testing.expectEqual(@as(usize, 3), fixture.prepare_count);
+    try std.testing.expectEqual(@as(usize, 1), fixture.publish_count);
+    try std.testing.expectEqual(@as(usize, 1), fixture.released_count);
+    try std.testing.expectEqual(@as(usize, 1), fixture.cancelled_preparations);
+    var repeated = try execute(&fixture, "host.create_group", args);
+    defer repeated.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), fixture.publish_count);
 }

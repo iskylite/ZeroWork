@@ -33,7 +33,7 @@ pub const View = struct {
         const open = try scope.createSignal(bool, false);
         self.* = .{ .cx = cx, .scope = scope, .controller = .{ .allocator = cx.allocator }, .hooks = hooks, .open = open };
         try scope.onCleanup(View, self, cleanup);
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .max_width = 380, .offset = .{ .static = 6 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .max_width = 380, .offset = .{ .static = 6 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -84,7 +84,7 @@ pub const View = struct {
 
     pub fn show(self: *View, kind: model.Kind, trigger: *ui.Node, status_top: f32, narrow: bool) !void {
         const rect = trigger.globalRect();
-        if (try self.controller.toggle(kind, .{ .x = rect.x, .y = status_top, .width = rect.w, .height = rect.h }, trigger.id, narrow)) |focus| {
+        if (try self.controller.toggle(kind, .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .width = rect.w, .height = rect.h }, trigger.id, narrow)) |focus| {
             self.open.set(false);
             self.restoreFocus(focus);
             return;
@@ -107,7 +107,7 @@ pub const View = struct {
             return;
         }
         const rect = trigger.globalRect();
-        const next: @import("overlay_anchor.zig").Rect = .{ .x = rect.x, .y = status_top, .width = rect.w, .height = rect.h };
+        const next: @import("overlay_anchor.zig").Rect = .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .width = rect.w, .height = rect.h };
         if (std.meta.eql(current.anchor, next)) return;
         self.controller.updateAnchor(current.owner, next) catch return;
         self.dirty = true;
@@ -119,6 +119,16 @@ pub const View = struct {
         if (!std.meta.eql(self.viewport, self.cx.viewport)) {
             self.viewport = self.cx.viewport;
             self.dirty = true;
+        }
+        // Popover restores fit sizing when its open signal commits. Reapply the
+        // captured controller size at the next safe layout point, including
+        // when no source data changed while the opening effect ran.
+        if (self.controller.popover != null) {
+            const expected = try self.controller.placement(.{ .width = self.cx.viewport.width, .height = self.cx.viewport.height });
+            if (self.chrome.style.width != .px or self.chrome.style.height != .px or self.chrome.style.width.px != expected.width or self.chrome.style.height.px != expected.height) {
+                self.chrome.setStyleInline(self.cx.allocator, .{ .width = .{ .px = expected.width }, .height = .{ .px = expected.height } });
+                self.dirty = true;
+            }
         }
         if (!self.dirty or self.controller.popover == null) return;
         self.dirty = false;
@@ -193,6 +203,9 @@ pub const View = struct {
                 try self.fact("协议", "本地 · 交互式 Shell");
                 try self.fact("Shell", "/bin/zsh");
                 try self.fact("目录", source.cwd orelse "目录未知");
+                try self.fact("编码", if (source.encoding == .utf8) "UTF-8" else "未知");
+                var geometry_buffer: [48]u8 = undefined;
+                try self.fact("网格", if (source.grid) |grid| try std.fmt.bufPrint(&geometry_buffer, "{d} × {d}", .{ grid.cols, grid.rows }) else "未知");
                 var buffer: [96]u8 = undefined;
                 const session = switch (source.owner) {
                     .session => |owner| @backingInt(owner.session_id),
@@ -324,7 +337,7 @@ pub const View = struct {
     fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));
         const open = self.controller.popover orelse return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-        return .{ .x = open.anchor.x, .y = open.anchor.y, .w = open.anchor.width, .h = 0 };
+        return .{ .x = open.anchor.x, .y = open.anchor.y, .w = open.anchor.width, .h = if (open.anchor.y < 72) open.anchor.height else 0 };
     }
     fn cleanup(self: *View) void {
         self.controller.deinit();

@@ -147,6 +147,8 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
             // A focus click does not select text. Only create versioned anchors
             // once the pointer actually drags, avoiding stale-frame errors on clicks.
             self.drag_origin = .{ .x = mouse.x, .y = mouse.y };
+            self.drag_position = self.drag_origin;
+            self.drag_scroll_ms = null;
             self.dragging = true;
             self.cx.setPointerCapture(self.host);
             return .stop;
@@ -157,6 +159,7 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
                 return .stop;
             }
             if (self.dragging) {
+                self.drag_position = .{ .x = mouse.x, .y = mouse.y };
                 if (self.selection == null) {
                     if (@abs(mouse.x - self.drag_origin.x) < 3 and @abs(mouse.y - self.drag_origin.y) < 3) return .stop;
                     beginSelection(self, self.drag_origin.x, self.drag_origin.y) catch |err| {
@@ -167,7 +170,7 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
                         return .stop;
                     };
                 }
-                updateSelection(self, mouse.x, mouse.y) catch |err| self.showError(err);
+                refreshDragSelection(self);
                 return .stop;
             }
         },
@@ -230,6 +233,49 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
 }
 fn reportsMouse(self: *Surface) bool {
     return self.control_grant == null and self.snapshot != null and !self.snapshot.?.read_only and self.snapshot.?.projection.modes.mouse_tracking != .none;
+}
+// Keep scrolling while a captured selection pointer rests at either edge,
+// including outside the pane. Use the presentation document, never PTY input.
+pub fn prepareDragScroll(self: *Surface, active: bool) void {
+    const snapshot = self.snapshot orelse return;
+    const focused = self.cx.focus_manager.getFocused();
+    if (!active or !self.cx.window_active or focused != self.host or !self.host.isDisplayedInTree() or
+        !self.dragging or self.selection == null or self.mouse_reporting or snapshot.projection.modes.alternate_screen)
+    {
+        self.drag_scroll_ms = null;
+        return;
+    }
+    const bounds = self.root.globalRect();
+    const padding = self.contentPadding();
+    const top = bounds.y + padding.top;
+    const bottom = bounds.y + bounds.h - padding.bottom;
+    const edge = @min(self.options.row_height, (bottom - top) * 0.25);
+    if (edge <= 0) return;
+    const y = self.drag_position.y;
+    const distance = if (y < top + edge) y - (top + edge) else if (y > bottom - edge) y - (bottom - edge) else 0;
+    if (distance == 0) {
+        self.drag_scroll_ms = null;
+        return;
+    }
+    const now = self.cx.frame_time_ms;
+    const elapsed: f32 = @floatCast(std.math.clamp(now - (self.drag_scroll_ms orelse now), 0, 50));
+    self.drag_scroll_ms = now;
+    // Do not accumulate distance while the document is busy loading history.
+    if (self.pending_scroll == 0) {
+        const rows_per_second = @min(40, 3 + @abs(distance) / edge * 9);
+        self.pending_scroll = std.math.sign(distance) * rows_per_second * self.options.row_height * elapsed / 1000;
+    }
+    self.scrollbar_until = now + 900;
+    self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+}
+pub fn refreshDragSelection(self: *Surface) void {
+    updateSelection(self, self.drag_position.x, self.drag_position.y) catch |err| {
+        if (err == error.WorkerBusy or err == error.SnapshotUnavailable or err == error.StaleProjection) {
+            self.force_snapshot = true;
+            self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+        } else self.showError(err);
+    };
+    self.cx.requestRedraw();
 }
 fn mouseReport(self: *Surface, action: @FieldType(terminal.MouseEvent, "action"), button: @FieldType(terminal.MouseEvent, "button"), x: f32, y: f32, modifiers: ui.events.Modifiers) !void {
     if (self.control_grant != null) return error.TerminalControlled;

@@ -66,7 +66,7 @@ const ProcessWindows = struct {
         // attachment/factory validation fails. Close it through its owner at
         // the next runtime boundary instead of leaving an orphan empty view.
         errdefer _ = self.runtime.closeWindow(app.windowId());
-        app.win.setTrafficLightsLayout(shell_styles.outer + 20, shell_styles.outer + shell_styles.title_height / 2, 12);
+        app.win.setTrafficLightsLayout(shell_styles.outer + 28, shell_styles.outer + shell_styles.title_height / 2, 12);
         installMonospaceFonts(app);
         app.setFontRegistry(registry);
         if (application_test_mode) try verifyUiFontPaths(app);
@@ -583,6 +583,7 @@ const AiHost = struct {
     input_node: ?*ui.Node = null,
     input_placeholder: ?*ui.Node = null,
     request_config: ?@import("config/runtime_config.zig").Snapshot = null,
+    extension_session: ?@import("ai/extension_gateway.zig").Session = null,
     request_context: ?@import("ai/assembler.zig").Assembled = null,
     request_execution_policy: @import("config/config.zig").ExecutionPolicy = .{ .execution_mode = .auto, .session_retention = .auto_idle },
     request_permission_mode: @import("config/config.zig").PermissionMode = .confirm,
@@ -626,6 +627,13 @@ const AiHost = struct {
     resource_stamp: ?u64 = null,
     attached_scope: ?@import("ai/tool_scope.zig").Scope = null,
     attached_inputs: std.ArrayList(AttachedInput) = .empty,
+    child_identity: ?@import("host/identity.zig").AgentId = null,
+    child_parent: ?*AiHost = null,
+    children_view: ?*@import("ui/ai_children_view.zig").View = null,
+    child_open_requested: ?struct { agent: @import("host/identity.zig").AgentId, revision: u64, parent: ?@import("host/identity.zig").ConversationId } = null,
+    child_list_parent: ?@import("host/identity.zig").ConversationId = null,
+    child_dialog: ?*ChildDialog = null,
+
     history: std.ArrayList(HistoryMessage) = .empty,
     const TaskFinishView = struct { task: @import("host/identity.zig").TaskId, view: *@import("ui/ai_task_finish.zig").View };
     const PendingHostNotice = struct {
@@ -641,24 +649,220 @@ const AiHost = struct {
     const ExecutionAction = struct { action: @import("ui/ai_execution_result_view.zig").Action, target: @import("ai/tool_results.zig").ExecutionActionTarget };
     const HistoryMessage = @import("ai/assistant_store.zig").Message;
 
+    fn childRecord(self: *AiHost) ?*@import("ai/session_lifecycle.zig").Record {
+        const shared_host = self.shared_service orelse return null;
+        const agent = self.child_identity orelse if (self.attached_runner) |runner| if (runner.agent.role == .child) runner.agent.id else return null else return null;
+        for (shared_host.service.store.records.items) |record| if (record.child) |owned| if (owned.info.agent.eql(agent)) return record;
+        return null;
+    }
+    fn parentPermission(self: *AiHost) @import("config/config.zig").PermissionMode {
+        const record = self.childRecord() orelse return .confirm;
+        const shared_host = self.shared_service orelse return .confirm;
+        const parent = shared_host.presentations.findConversation(record.child.?.info.owning_parent_conversation) orelse return .confirm;
+        if (parent.controls.permission) |permission| return permission;
+        const runtime = self.runtime_config orelse (self.attachedView().runtime_config orelse return .confirm);
+        return runtime.value.ai.permission_mode;
+    }
+    fn childCanWrite(self: *AiHost) bool {
+        const record = self.childRecord() orelse return false;
+        const parent = self.shared_service.?.service.store.find(record.child.?.info.owning_parent_conversation) orelse return false;
+        if (parent.binding == null or parent.ending != null or parent.transition != null or parent.needs_recovery or record.ending != null or record.needs_recovery) return false;
+        return self.attachmentOwnerExists(parent.binding.?.owner);
+    }
+    fn syncChildView(self: *AiHost) !void {
+        const record = self.childRecord() orelse return error.ChildNotFound;
+        const state = self.assistant_states.?.find(self.display_conversation orelse return error.ConversationNotFound) orelse return error.ConversationNotFound;
+        if (self.currentBinding()) |owner| {
+            self.display_owner = owner;
+            state.owner = owner;
+        }
+        if (self.child_parent.?.child_dialog) |dialog| {
+            const writable = self.childCanWrite();
+            if (self.composer_node) |composer| composer.setDisplay(if (writable) .flex else .none);
+            dialog.apply_disabled.set(!writable);
+            dialog.restore_parent.setDisplay(if (writable) .none else .flex);
+            if (dialog.last_writable == null or dialog.last_writable.? != writable) {
+                var label: [192]u8 = undefined;
+                try dialog.parent_label.setTextContent(self.allocator, if (!writable) "父对话未绑定或正在收尾，恢复父对话后可继续" else try std.fmt.bufPrint(&label, "父对话 {s} · {s}上下文", .{ std.fmt.bytesToHex(record.child.?.info.owning_parent_conversation.bytes, .lower)[0..8], if (record.child.?.info.context_mode == .inherit) "继承" else "独立" }));
+                dialog.last_writable = writable;
+            }
+            const projected = @import("ai/child_projection.zig").entry(&self.shared_service.?.service, record);
+            if (dialog.last_status == null or !std.mem.eql(u8, dialog.last_status.?, projected.status)) {
+                try self.status.setTextContent(self.allocator, projected.status);
+                dialog.last_status = projected.status;
+            }
+        }
+    }
+    fn bindUserChild(self: *AiHost, owner: ai_attachments.Owner) !*AiHost {
+        if (!self.childCanWrite()) return error.ParentBindingChanged;
+        const record = self.childRecord() orelse return error.ChildNotFound;
+        const shared_host = self.shared_service.?;
+        const agent = record.child.?.info.agent;
+        var backend: *AiHost = undefined;
+        if (shared_host.bridgeFor(agent)) |bridge| backend = @ptrCast(@alignCast(bridge.context)) else {
+            if (shared_host.closing) return error.ApplicationClosing;
+            try shared_host.bridges.ensureUnusedCapacity(shared_host.allocator, 1);
+            const a = std.heap.c_allocator;
+            backend = try a.create(AiHost);
+            errdefer a.destroy(backend);
+            backend.* = self.attachedSlot(a, shared_host);
+            const parent = try shared_host.service.store.fence(record.child.?.info.owning_parent_conversation);
+            const allowed = try self.child_parent.?.captureOwnerScope(owner);
+            defer if (allowed.inventory) |ids| self.child_parent.?.allocator.free(ids);
+            const prefs = @import("ai/session_lifecycle.zig").Store.childPreferences(record);
+            const runner = try shared_host.service.useChild(parent, agent, record.revision, allowed, prefs.targets, .{ .context = backend, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .supersede = supersedeAttached, .stop = stopAttached, .release_worker = releaseAttachedWorker }, null);
+            backend.attached_runner = runner;
+            try shared_host.register(.{ .agent = agent, .window = self.application_host.?.window_id, .context = backend, .pump = pumpAttached, .released = disposeReadyAttached, .destroy = destroyAttached, .flush = flushAttached });
+        }
+        backend.backend_owner = self;
+        self.execution_host = backend;
+        const runner = backend.attached_runner.?;
+        if (runner.thread != null) {
+            runner.end_when_idle = true;
+            return backend;
+        }
+        if (record.binding == null) {
+            const parent = try shared_host.service.store.fence(record.child.?.info.owning_parent_conversation);
+            const allowed = try self.child_parent.?.captureOwnerScope(owner);
+            defer if (allowed.inventory) |ids| self.child_parent.?.allocator.free(ids);
+            const prefs = @import("ai/session_lifecycle.zig").Store.childPreferences(record);
+            for (prefs.targets) |target| {
+                const tab = self.tabForSession(@backingInt(target.session_id)) orelse return error.TargetNotAuthorized;
+                if (tab.content_owner != .session or !tab.content_owner.session.eql(target)) return error.TargetNotAuthorized;
+            }
+            _ = try shared_host.service.useChild(parent, agent, record.revision, allowed, prefs.targets, runner.backend, null);
+        }
+        // Explicit user continuation is allowed even when reusable=false. A
+        // prior unknown attempt still restricts this new task to observation.
+        var verification = false;
+        for (shared_host.service.store.task_facts.items) |prior| if (prior.fact.agent.eql(agent)) @import("ai/child_gateway.zig").checkReuse(prior.fact, runner.agent.targets, false) catch {
+            verification = true;
+        };
+        for (shared_host.service.task_roots.items) |root| {
+            root.lock();
+            defer root.mutex.unlock();
+            for (root.facts[0..root.count]) |prior| if (prior.agent.eql(agent)) @import("ai/child_gateway.zig").checkReuse(prior, runner.agent.targets, false) catch {
+                verification = true;
+            };
+        }
+        runner.observation_only = verification;
+        runner.end_when_idle = true;
+        // Binding provenance changes on every explicit user continuation.
+        // Publish that exact generation to the presentation before capture;
+        // the execution backend validates it before admitting any tool.
+        const state = self.assistant_states.?.find(self.display_conversation.?) orelse return error.ConversationNotFound;
+        state.binding_revision = record.revision;
+        state.owner = record.binding.?.owner;
+        state.ended = false;
+        state.closed = false;
+        if (verification) self.setFeedback("原操作结果未知，本次续行为只读核验");
+        return backend;
+    }
+    fn saveChildPreferences(self: *AiHost) !void {
+        const life = @import("ai/session_lifecycle.zig");
+        const record = self.childRecord() orelse return error.ChildNotFound;
+        const shared_host = self.shared_service.?;
+        const parent = try shared_host.service.store.fence(record.child.?.info.owning_parent_conversation);
+        const allowed = try self.child_parent.?.captureOwnerScope((try shared_host.service.store.validate(parent)).binding.?.owner);
+        defer if (allowed.inventory) |ids| self.child_parent.?.allocator.free(ids);
+        var prefs = life.Store.childPreferences(record);
+        const controls = try self.selectedControls();
+        prefs.model = controls.model;
+        prefs.effort = controls.effort;
+        prefs.thinking = controls.thinking;
+        prefs.session_retention = controls.session_retention;
+        prefs.permission = controls.permission orelse .confirm;
+        prefs.execution_mode = controls.execution_mode orelse .auto;
+        try shared_host.service.store.updateChildSettings(parent, record.child.?.info.agent, record.child_settings_revision, prefs, allowed);
+    }
+    fn childSelected(raw: *anyopaque, agent: @import("host/identity.zig").AgentId, revision: u64) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        self.child_open_requested = .{ .agent = agent, .revision = revision, .parent = self.child_list_parent orelse if (self.assistant_states.?.find(self.display_conversation orelse return)) |state| state.conversation_id else null };
+        self.cx.requestRedraw();
+    }
+    fn processChildren(self: *AiHost) !void {
+        if (self.child_identity != null) return;
+        if (self.child_dialog) |dialog| if (!dialog.open.peek()) {
+            try dialog.releaseView();
+            self.child_dialog = null;
+            dialog.scope.dispose();
+        };
+        if (self.child_open_requested) |request| {
+            self.child_open_requested = null;
+            const shared_host = try self.shared();
+            const parent_state = (self.assistant_states orelse return).find(self.display_conversation orelse return) orelse return;
+            const parent_record = shared_host.service.store.find(request.parent orelse parent_state.conversation_id) orelse return;
+            var chosen: ?*@import("ai/session_lifecycle.zig").Record = null;
+            for (shared_host.service.store.records.items) |record| if (record.child) |owned| if (owned.info.agent.eql(request.agent) and owned.info.owning_parent_conversation.eql(parent_record.id)) {
+                chosen = record;
+                break;
+            };
+            const record = chosen orelse return error.ChildNotFound;
+            if (record.child_settings_revision != request.revision) return error.StaleChildSettings;
+            if (self.child_dialog) |dialog| {
+                if (dialog.host.child_identity.?.eql(request.agent)) {
+                    dialog.open.set(true);
+                    return;
+                }
+                try dialog.releaseView();
+                self.child_dialog = null;
+                dialog.scope.dispose();
+            }
+            // A single view owns the editable presentation; another window
+            // locates that existing dialog rather than moving or copying it.
+            if (shared_host.bridgeFor(request.agent)) |bridge| {
+                const backend: *AiHost = @ptrCast(@alignCast(bridge.context));
+                if (backend.backend_owner) |view| if (view.child_identity != null) {
+                    if (process_windows) |process| for (process.runtime.windows.items) |managed| {
+                        const nav = ProcessWindows.navFor(managed.app) orelse continue;
+                        if (nav.application_host == view.application_host) {
+                            _ = process.runtime.activateWindow(managed.app.windowId());
+                            return;
+                        }
+                    };
+                };
+            }
+            self.child_dialog = try ChildDialog.mount(self, record);
+        }
+        if (self.children_view) |view| {
+            const shared_host = self.shared_service orelse return;
+            const state = (self.assistant_states orelse return).find(self.display_conversation orelse return) orelse return;
+            const rows = try @import("ai/child_projection.zig").query(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id);
+            defer self.allocator.free(rows);
+            var running_count: ?usize = null;
+            if (self.child_list_parent != null) {
+                running_count = 0;
+                for (shared_host.service.store.records.items) |candidate| if (candidate.child) |child| if (child.info.owning_parent_conversation.eql(state.conversation_id)) {
+                    running_count.? += @intFromBool(@import("ai/child_projection.zig").entry(&shared_host.service, candidate).running);
+                };
+            }
+            try view.updateWithCount(rows, running_count);
+            if (!view.open.peek()) self.child_list_parent = null;
+        }
+    }
+
     fn execution(self: *const AiHost) *AiHost {
         return self.execution_host orelse @constCast(self);
     }
     fn managerRef(self: *const AiHost) *AiManager {
         const current = self.execution();
-        return if (current.attached_runner) |runner| &runner.manager else &current.manager;
+        if (current.attached_runner) |runner| if (runner.worker) |worker| return &worker.manager;
+        return &current.manager;
     }
     fn cancelRef(self: *AiHost) *ai_provider.CancelToken {
         const current = self.execution();
-        return if (current.attached_runner) |runner| &runner.cancel else &current.request_cancel;
+        if (current.attached_runner) |runner| if (runner.worker) |worker| return &worker.cancel;
+        return &current.request_cancel;
     }
     fn approvalsRef(self: *AiHost) *@import("ai/host_approval.zig").Broker {
         const current = self.execution();
-        return if (current.attached_runner) |runner| &runner.approvals else &current.host_approval;
+        if (current.attached_runner) |runner| if (runner.worker) |worker| return &worker.approvals;
+        return &current.host_approval;
     }
     fn questionsRef(self: *AiHost) *@import("ai/user_interaction.zig").Broker {
         const current = self.execution();
-        return if (current.attached_runner) |runner| &runner.questions else &current.user_interaction;
+        if (current.attached_runner) |runner| if (runner.worker) |worker| return &worker.questions;
+        return &current.user_interaction;
     }
     fn uiOwner(self: *AiHost) *AiHost {
         return self.backend_owner orelse self;
@@ -674,6 +878,7 @@ const AiHost = struct {
     }
 
     fn currentBinding(self: *AiHost) ?ai_attachments.Owner {
+        if (self.child_identity != null) return if (self.childRecord()) |record| if (self.shared_service.?.service.store.find(record.child.?.info.owning_parent_conversation)) |parent| if (parent.binding) |binding| binding.owner else self.display_owner else self.display_owner else self.display_owner;
         const workspace = self.workspace orelse return null;
         if (workspace.active_group_view) |id| {
             const roster = self.roster orelse return null;
@@ -706,6 +911,24 @@ const AiHost = struct {
                 if (member.active and tab.id == member.pane_id and self.supportsAssistant(tab)) try ids.append(self.allocator, @backingInt(tab.content_owner.session.session_id));
             };
         }
+        const child_targets: ?[]const @import("host/identity.zig").SessionHandle = if (self.attached_runner) |runner| (if (runner.agent.role == .child) runner.agent.targets else null) else if (self.child_identity != null) child: {
+            const record = self.childRecord() orelse return error.ChildNotFound;
+            if (record.binding != null) break :child self.shared_service.?.service.store.agent(self.child_identity.?).?.targets;
+            break :child @import("ai/session_lifecycle.zig").Store.childPreferences(record).targets;
+        } else null;
+        if (child_targets) |assigned| {
+            var kept: usize = 0;
+            for (ids.items) |session_id| {
+                const tab = self.tabForSession(session_id) orelse continue;
+                const handle = tab.content_owner.session;
+                for (assigned) |target| if (target.eql(handle)) {
+                    ids.items[kept] = session_id;
+                    kept += 1;
+                    break;
+                };
+            }
+            ids.shrinkRetainingCapacity(kept);
+        }
         result.members.len = @min(ids.items.len, @import("ai/tool_scope.zig").max_targets);
         @memcpy(result.members.ids[0..result.members.len], ids.items[0..result.members.len]);
         result.inventory = try ids.toOwnedSlice(self.allocator);
@@ -713,6 +936,17 @@ const AiHost = struct {
     }
 
     fn currentScope(self: *AiHost) ?@import("ai/tool_scope.zig").Scope {
+        if (self.child_identity != null) {
+            const owner = self.currentBinding() orelse return null;
+            var result: @import("ai/tool_scope.zig").Scope = .{ .owner = owner, .members = .{} };
+            const record = self.childRecord() orelse return null;
+            const targets = if (record.binding != null) self.shared_service.?.service.store.agent(self.child_identity.?).?.targets else @import("ai/session_lifecycle.zig").Store.childPreferences(record).targets;
+            for (targets) |target| if (self.tabForSession(@backingInt(target.session_id))) |tab| if (tab.content_owner == .session and tab.content_owner.session.eql(target) and result.members.len < result.members.ids.len) {
+                result.members.ids[result.members.len] = @backingInt(target.session_id);
+                result.members.len += 1;
+            };
+            return result;
+        }
         const workspace = self.workspace orelse return null;
         if (workspace.active_group_view) |id| {
             const roster = self.roster orelse return null;
@@ -771,6 +1005,7 @@ const AiHost = struct {
     }
 
     fn syncOwner(self: *AiHost) !void {
+        if (self.child_identity != null) return self.syncChildView();
         const current_owner = self.currentBinding() orelse {
             if (self.gestures) |gestures| gestures.cancel();
             self.controller.model.visible = false;
@@ -788,6 +1023,7 @@ const AiHost = struct {
         const selected_state = try self.assistant_states.?.get(current_owner);
         selected_state.controls.ensureDefaults(self.effectiveAi());
         const selected_id = selected_state.id;
+        const owner_changed = self.display_owner == null or !self.display_owner.?.eql(current_owner);
         if (self.display_owner == null or !self.display_owner.?.eql(current_owner) or self.display_conversation != selected_id) try self.preservePendingEdit();
         try self.persistDisplayedDraft();
         try self.saveDisplayedPresentation();
@@ -818,9 +1054,13 @@ const AiHost = struct {
             const historical_environment = saved.historical_environment;
             const controls = saved.controls;
             const title = saved.title;
+            var presentation = self.controller.model;
+            // A hover preview is temporary; only an explicitly opened panel
+            // should be restored when returning to this session/group.
+            if (owner_changed) presentation.visible = presentation.visible and self.dock.mode == .pinned;
             saved.controls = .{};
             saved.deinit(self.allocator);
-            saved.* = .{ .title = title, .id = saved_id, .conversation_id = saved_conversation_id, .initial_owner = initial_owner, .binding_revision = binding_revision, .selected = selected, .listed = listed, .phase = phase, .closed = closed, .ended = ended, .historical_environment = historical_environment, .tool_results = self.tool_results, .controls = controls, .owner = saved_owner, .current_turn = self.current_turn, .history = self.history, .wire_history = self.wire_history, .stream = self.controller.stream, .last_user_text = self.last_user_text, .last_user_wire = self.last_user_wire, .last_user_attachments = self.last_user_attachments, .last_user_images = self.last_user_images, .draft = draft, .model = self.controller.model };
+            saved.* = .{ .title = title, .id = saved_id, .conversation_id = saved_conversation_id, .initial_owner = initial_owner, .binding_revision = binding_revision, .selected = selected, .listed = listed, .phase = phase, .closed = closed, .ended = ended, .historical_environment = historical_environment, .tool_results = self.tool_results, .controls = controls, .owner = saved_owner, .current_turn = self.current_turn, .history = self.history, .wire_history = self.wire_history, .stream = self.controller.stream, .last_user_text = self.last_user_text, .last_user_wire = self.last_user_wire, .last_user_attachments = self.last_user_attachments, .last_user_images = self.last_user_images, .draft = draft, .model = presentation };
             self.tool_results = @import("ai/tool_results.zig").Store.init(self.allocator);
             self.current_turn = .{};
             self.history = .empty;
@@ -849,8 +1089,14 @@ const AiHost = struct {
         self.last_user_images = saved.last_user_images;
         if (self.images_view) |view| view.dismiss();
         self.controller.model = saved.model;
-        self.controller.model.visible = was_visible;
-        if (was_visible) self.controller.model.expanded = true;
+        if (owner_changed) {
+            if (self.controller.model.visible) self.dock.pin() else self.dock.hide();
+        } else {
+            // Changing AI conversations within one attachment keeps the panel
+            // open; changing tabs restores that attachment's own presentation.
+            self.controller.model.visible = was_visible;
+            if (was_visible) self.controller.model.expanded = true;
+        }
         self.prompt.set(saved.draft orelse "");
         if (saved.draft) |draft| self.allocator.free(draft);
         const controls = saved.controls;
@@ -888,6 +1134,10 @@ const AiHost = struct {
 
     fn remoteScope(raw: *anyopaque, owner: ai_attachments.Owner) ?@import("ai/tool_scope.zig").Scope {
         const self: *AiHost = @ptrCast(@alignCast(raw));
+        if (self.child_identity != null) {
+            const selected = self.currentScope() orelse return null;
+            return if (selected.owner.eql(owner)) selected else null;
+        }
         const workspace = self.workspace orelse return null;
         var scope: @import("ai/tool_scope.zig").Scope = .{ .owner = owner, .members = .{} };
         switch (owner) {
@@ -1011,7 +1261,7 @@ const AiHost = struct {
 
     fn imageDraft(self: *AiHost, owner: ai_images.Owner) !*ai_images.Draft {
         if (self.assistant_states == null) self.assistant_states = &(try self.shared()).presentations;
-        return self.assistant_states.?.imageDraft(owner);
+        return if (self.child_identity != null) self.assistant_states.?.imageDraftForState(self.display_conversation orelse return error.ConversationNotFound) else self.assistant_states.?.imageDraft(owner);
     }
 
     fn attachmentConversation(self: *AiHost, id: ?@import("host/identity.zig").ConversationId) ?*@import("ai/assistant_store.zig").State {
@@ -1221,7 +1471,7 @@ const AiHost = struct {
 
     fn attachmentDraft(self: *AiHost, owner: ai_attachments.Owner) !*ai_attachments.Draft {
         if (self.assistant_states == null) self.assistant_states = &(try self.shared()).presentations;
-        return self.assistant_states.?.attachmentDraft(owner);
+        return if (self.child_identity != null) self.assistant_states.?.attachmentDraftForState(self.display_conversation orelse return error.ConversationNotFound) else self.assistant_states.?.attachmentDraft(owner);
     }
 
     fn validateAttachmentScope(self: *AiHost, allowed: @import("ai/tool_scope.zig").Scope, bundle: *const ai_attachments.Bundle) !void {
@@ -1552,7 +1802,7 @@ const AiHost = struct {
     fn selectedControls(self: *AiHost) !*@import("ai/assistant_store.zig").Controls {
         const owner = self.display_owner orelse return error.MissingAssistantOwner;
         const store = if (self.assistant_states) |value| value else return error.MissingAssistantOwner;
-        const controls = &(try store.get(owner)).controls;
+        const controls = if (self.child_identity != null) &(store.find(self.display_conversation orelse return error.ConversationNotFound) orelse return error.ConversationNotFound).controls else &(try store.get(owner)).controls;
         controls.ensureDefaults(self.effectiveAi());
         controls.ensureEffort(self.effectiveAi());
         return controls;
@@ -1597,6 +1847,11 @@ const AiHost = struct {
         if (!owner.eql(envelope.owner) or envelope.revision != self.controlsRevision()) return error.StaleAssistantControls;
         try self.syncOwner();
         const controls = try self.selectedControls();
+        if (self.child_identity != null and !self.childCanWrite()) return error.ParentBindingChanged;
+        if (self.child_identity != null) switch (envelope.action) {
+            .permission => |value| if (value == .auto and self.parentPermission() != .auto) return error.ParentPermissionCeiling,
+            else => {},
+        };
         switch (envelope.action) {
             .compact_context => {
                 if (self.execution().thread_state.load(.acquire) != 0) return error.AssistantBusy;
@@ -1632,7 +1887,7 @@ const AiHost = struct {
                 self.execution().host_notice_revision = try @import("host/identity.zig").advance(@max(1, self.execution().host_notice_revision));
             },
             .permission => |value| {
-                if (runtime.value.ai.permission_mode != value) try runtime.updateSetting(self.cx.io, std.Io.Dir.cwd(), "ai", "permission_mode", .{ .text = @tagName(value) });
+                if (self.child_identity == null and runtime.value.ai.permission_mode != value) try runtime.updateSetting(self.cx.io, std.Io.Dir.cwd(), "ai", "permission_mode", .{ .text = @tagName(value) });
                 controls.permission = value;
                 if (self.requestDisplayed()) {
                     const mode: @import("ai/permission.zig").Mode = if (value == .auto) .auto else .confirm;
@@ -1644,7 +1899,7 @@ const AiHost = struct {
             },
             .execution_mode => |value| {
                 const mode = value orelse runtime.value.ai.execution_mode;
-                if (runtime.value.ai.execution_mode != mode) try runtime.updateSetting(self.cx.io, std.Io.Dir.cwd(), "ai", "execution_mode", .{ .text = @tagName(mode) });
+                if (self.child_identity == null and runtime.value.ai.execution_mode != mode) try runtime.updateSetting(self.cx.io, std.Io.Dir.cwd(), "ai", "execution_mode", .{ .text = @tagName(mode) });
                 controls.execution_mode = mode;
             },
             .session_retention => |value| controls.session_retention = value,
@@ -1676,6 +1931,10 @@ const AiHost = struct {
                 .local_text => try self.chooseLocalText(envelope.owner, null),
                 .remote_file => try self.chooseRemoteFile(envelope.owner),
             },
+        }
+        if (self.child_identity != null) {
+            try self.saveChildPreferences();
+            if (self.child_parent.?.child_dialog) |dialog| dialog.revision = self.childRecord().?.child_settings_revision;
         }
         self.composer_hash = null;
         self.cx.requestRedraw();
@@ -1817,7 +2076,7 @@ const AiHost = struct {
         if (self.composer_hash == fingerprint) return;
         const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = estimated, .parts = parts, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
         const key: ?@import("ui/ai_composer_controls_view.zig").ModelKey = if (controls.model) |value| .{ .provider_id = value.provider_id, .model_id = value.model_id } else if (selected) |value| .{ .provider_id = config.ai.default_provider, .model_id = value.model } else null;
-        try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .usage = usage, .permission = controls.permission orelse config.ai.permission_mode, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .thinking = controls.thinking, .attachments = .{ .image = true, .paste_image = true, .local_text = true, .remote_file = remote_files_available }, .editable = true });
+        try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .thinking = controls.thinking, .attachments = .{ .image = true, .paste_image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite() });
         if (catalog_changed) view.preserveModelPopup();
         self.composer_hash = fingerprint;
         self.promptChanged(self.prompt.peek());
@@ -1905,6 +2164,9 @@ const AiHost = struct {
             std.mem.eql(u8, label, "AI Float · 请求中") or
             std.mem.eql(u8, label, "AI · 当前助手") or
             std.mem.eql(u8, label, "AI response")) "" else label);
+        if (self.child_identity != null) if (self.childRecord()) |record| {
+            owner_label = @import("ai/child_projection.zig").entry(&self.shared_service.?.service, record).status;
+        };
         writer.print("{s}", .{owner_label}) catch return;
         self.status.setTextContent(self.allocator, writer.buffered()) catch return;
         self.status.markRenderDirty();
@@ -2587,7 +2849,7 @@ const AiHost = struct {
                 while (recent_index > 0) {
                     recent_index -= 1;
                     const state = &store.states.items[recent_index];
-                    if (state.closed or !state.listed or self.display_conversation == state.id) continue;
+                    if (state.child_agent != null or state.closed or !state.listed or self.display_conversation == state.id) continue;
                     var title_scratch: @import("ai/conversation_title.zig").Title = .{};
                     const fallback = state.titleText(state.history.items, state.last_user_text, &title_scratch) orelse continue;
                     if (state.title.text() == null) _ = state.title.set(fallback);
@@ -2668,6 +2930,7 @@ const AiHost = struct {
     }
 
     fn updatePresentation(self: *AiHost) void {
+        if (self.child_identity != null) return;
         const visible = self.controller.model.visible;
         const frame = self.reveal.update(visible, @import("platform/realtime.zig").milliseconds(self), self.cx.reduced_motion);
         if (visible and self.panel.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
@@ -2974,6 +3237,10 @@ const AiHost = struct {
         entry.active = self.display_conversation == id;
         const shared_host = self.shared_service orelse return entry;
         const record = shared_host.service.store.find(state.conversation_id) orelse return entry;
+        for (shared_host.service.store.records.items) |candidate| if (candidate.child) |child| if (child.info.owning_parent_conversation.eql(record.id)) {
+            entry.has_children = true;
+            break;
+        };
         entry.bound = record.binding != null;
         entry.ending = record.ending != null;
         entry.first_use = record.parent != null and record.closed_revision == null;
@@ -3080,6 +3347,12 @@ const AiHost = struct {
             if (action.action == .more) {
                 self.list_limit += 50;
                 self.list_requested = true;
+                return;
+            }
+            if (action.action == .children) {
+                const state = (self.assistant_states orelse return error.ConversationNotFound).find(action.id) orelse return error.ConversationNotFound;
+                self.child_list_parent = state.conversation_id;
+                if (self.children_view) |view| view.open.set(true);
                 return;
             }
             if (action.action == .view) {
@@ -3414,7 +3687,7 @@ const AiHost = struct {
                 entries.deinit(self.allocator);
             }
             for (store.states.items) |state| {
-                if (state.closed or !state.listed) continue;
+                if (state.child_agent != null or state.closed or !state.listed) continue;
                 if (entries.items.len == self.list_limit) break;
                 var label_buffer: [256]u8 = undefined;
                 const bound_now = if (self.shared_service.?.service.store.find(state.conversation_id)) |record| record.binding != null else false;
@@ -3427,7 +3700,7 @@ const AiHost = struct {
                     return;
                 };
                 const facts = self.conversationEntry(state.id, owned_title, owned_owner);
-                entries.append(self.allocator, .{ .bound = facts.bound, .ending = facts.ending, .can_restore = facts.can_restore, .can_copy = facts.can_copy, .can_remove = facts.can_remove, .first_use = facts.first_use, .id = state.id, .title = owned_title, .owner = owned_owner, .detail = if (self.display_conversation == state.id) self.prompt.peek() else state.draft orelse "空对话", .active = self.display_conversation == state.id, .phase = state.phase }) catch {
+                entries.append(self.allocator, .{ .bound = facts.bound, .ending = facts.ending, .can_restore = facts.can_restore, .has_children = facts.has_children, .can_copy = facts.can_copy, .can_remove = facts.can_remove, .first_use = facts.first_use, .id = state.id, .title = owned_title, .owner = owned_owner, .detail = if (self.display_conversation == state.id) self.prompt.peek() else state.draft orelse "空对话", .active = self.display_conversation == state.id, .phase = state.phase }) catch {
                     self.allocator.free(owned_title);
                     self.allocator.free(owned_owner);
                     return;
@@ -3722,7 +3995,7 @@ const AiHost = struct {
             }
         }
         const ending = if (self.shared_service) |host| if (self.assistant_states.?.find(self.display_conversation orelse 0)) |state| if (host.service.store.find(state.conversation_id)) |record| record.ending != null else false else false else false;
-        if (self.send_disabled) |disabled| disabled.set(ending or !self.hasSelectedModel() or (std.mem.trim(u8, text, " \t\r\n").len == 0 and ready == 0) or processing or image_problem != null);
+        if (self.send_disabled) |disabled| disabled.set((self.child_identity != null and !self.childCanWrite()) or ending or !self.hasSelectedModel() or (std.mem.trim(u8, text, " \t\r\n").len == 0 and ready == 0) or processing or image_problem != null);
         const gate_changed = self.image_gate != image_problem;
         self.image_gate = image_problem;
         // Keep the reason visible through unrelated refreshes while sending is
@@ -3811,6 +4084,7 @@ const AiHost = struct {
         return error.SubmissionNotFound;
     }
     fn bindAttached(self: *AiHost, owner: @import("ai/tool_scope.zig").Owner) !*AiHost {
+        if (self.child_identity != null) return self.bindUserChild(owner);
         const shared_host = try self.shared();
         const agent = try shared_host.service.store.attach(owner);
         if (shared_host.bridgeFor(agent.id)) |bridge| {
@@ -3823,7 +4097,15 @@ const AiHost = struct {
         const a = std.heap.c_allocator;
         const execution_host = try a.create(AiHost);
         errdefer a.destroy(execution_host);
-        execution_host.* = .{
+        execution_host.* = self.attachedSlot(a, shared_host);
+        const runner = try shared_host.service.attach(owner, .{ .context = execution_host, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .supersede = supersedeAttached, .stop = stopAttached, .release_worker = releaseAttachedWorker });
+        execution_host.attached_runner = runner;
+        try shared_host.register(.{ .agent = agent.id, .window = self.application_host.?.window_id, .context = execution_host, .pump = pumpAttached, .released = disposeReadyAttached, .destroy = destroyAttached, .flush = flushAttached });
+        self.execution_host = execution_host;
+        return execution_host;
+    }
+    fn attachedSlot(self: *AiHost, a: std.mem.Allocator, shared_host: *@import("ai/attached_service.zig").Host) AiHost {
+        return .{
             .allocator = a,
             .cx = undefined,
             .panel = undefined,
@@ -3854,11 +4136,6 @@ const AiHost = struct {
             .recording_archive = self.recording_archive,
             .notification_window = self.notification_window,
         };
-        const runner = try shared_host.service.attach(owner, .{ .context = execution_host, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .supersede = supersedeAttached, .stop = stopAttached });
-        execution_host.attached_runner = runner;
-        try shared_host.register(.{ .agent = agent.id, .window = self.application_host.?.window_id, .context = execution_host, .pump = pumpAttached, .released = disposeReadyAttached, .destroy = destroyAttached, .flush = flushAttached });
-        self.execution_host = execution_host;
-        return execution_host;
     }
     fn attachedView(self: *AiHost) *AiHost {
         return self.backend_owner orelse self;
@@ -3885,6 +4162,9 @@ const AiHost = struct {
             frozen_ai.follow_up_mode = live_config.ai.follow_up_mode;
             frozen_ai.permission_mode = live_config.ai.permission_mode;
             frozen_ai.execution_mode = live_config.ai.execution_mode;
+            frozen_ai.extensions = live_config.ai.extensions;
+            frozen_ai.child_context_mode = live_config.ai.child_context_mode;
+            frozen_ai.child_reuse_policy = live_config.ai.child_reuse_policy;
             if (!@import("config/settings_schema.zig").same(frozen_ai, live_config.ai)) return error.StaleConfiguration;
         }
         const view = self.attachedView();
@@ -3900,9 +4180,20 @@ const AiHost = struct {
         generation_config.config_revision = live_config.config_revision;
         generation_config.agent_policy_revision = live_config.agent_policy_revision;
         self.request_config = try @import("config/runtime_config.zig").Snapshot.init(self.allocator, generation_config);
+        if (self.extension_session) |*old| old.deinit();
+        self.extension_session = null;
+        var extensions = self.request_config.?.value.ai.extensions;
+        if (self.attached_runner.?.record.?.child) |owned_child| {
+            const child_info = owned_child.info;
+            extensions = try @import("ai/extension_gateway.zig").select(self.request_config.?.arena.allocator(), extensions, (if (self.childRecord()) |record| @import("ai/session_lifecycle.zig").Store.childPreferences(record).skill_ids else child_info.skill_ids), (if (self.childRecord()) |record| @import("ai/session_lifecycle.zig").Store.childPreferences(record).mcp_ids else child_info.mcp_ids));
+        }
+        self.extension_session = try @import("ai/extension_gateway.zig").Session.init(self.allocator, extensions, self.data_root);
         const controls = input.controls;
         const selected_config = try ai_provider_config.fromSettingsSelection(self.request_config.?.value.ai, controls.model);
-        if (self.native_context == null) self.native_context = try self.allocator.create(NativeContext);
+        if (self.native_context == null) {
+            self.native_context = try self.allocator.create(NativeContext);
+            self.native_context.?.* = .{ .io = undefined };
+        }
         if (self.native_client == null) self.native_client = try self.allocator.create(AiClient);
         if (self.native_binding == null) self.native_binding = try self.allocator.create(AiClient.Binding);
         self.native_binding.?.config = selected_config;
@@ -3918,6 +4209,7 @@ const AiHost = struct {
         self.request_policy_revision = self.request_config.?.value.agentPolicyRevision();
         self.request_execution_policy = @import("config/config.zig").resolveExecutionPolicy(self.request_config.?.value.ai, controls.execution_mode, controls.session_retention);
         self.request_permission_mode = controls.permission orelse self.request_config.?.value.ai.permission_mode;
+        if (context.child_origin != null and self.parentPermission() != .auto) self.request_permission_mode = .confirm;
         self.managerRef().permission_engine.mode = if (self.request_permission_mode == .auto) .auto else .confirm;
         self.managerRef().live_permission.reset();
         const allowed = try self.captureOwnerScope(context.owner);
@@ -3937,7 +4229,7 @@ const AiHost = struct {
         const tab = if (context.owner == .session) self.tabForSession(context.owner.session) else if (allowed.memberIds().len != 0) self.tabForSession(allowed.memberIds()[0]) else null;
         self.request_session = if (tab) |value| value.id else null;
         if (self.application_host) |app| if (self.assistantToolsAvailable(context.owner)) {
-            const authority: @import("ai/host_tools.zig").Context = .{ .conversation_id = context.fence.conversation, .task_id = context.task, .binding = context.owner, .binding_revision = context.fence.binding, .grant_revision = self.request_policy_revision };
+            const authority: @import("ai/host_tools.zig").Context = .{ .conversation_id = context.fence.conversation, .task_id = context.task, .binding = context.owner, .binding_revision = context.fence.binding, .grant_revision = self.request_policy_revision, .child_origin = context.child_origin };
             self.request_host_context = authority;
             try self.approvalsRef().configure(authority, self.request_policy_revision);
             self.questionsRef().configure(authority);
@@ -3952,10 +4244,10 @@ const AiHost = struct {
             self.authority_notice_revision = self.host_notice_revision;
             self.prepareHostCatalog();
             try self.tool_bridge.configureHost(.{ .context = authority, .handler_context = self, .invoke = queryHost, .invoke_worker = dispatchHostWorker, .contributions = self.host_catalog[0..self.host_catalog_len], .refresh = refreshHostAuthority, .acknowledge_notice = acknowledgeHostNotice, .accepted_result = acceptedHostResult });
-            if (context.owner == .group) try self.tool_bridge.prepareGroup(app, self.roster orelse return error.ContextUnavailable, allowed) else try self.tool_bridge.prepare(app, (tab orelse return error.StaleSession).content_owner.session);
+            if (context.owner == .group) try self.tool_bridge.prepareGroup(app, self.roster orelse return error.ContextUnavailable, allowed) else if (context.child_origin != null) try self.tool_bridge.prepareScope(app, allowed) else try self.tool_bridge.prepare(app, (tab orelse return error.StaleSession).content_owner.session);
             self.request_tools_len = try self.tool_bridge.fill(&self.request_tools);
             self.request_tool_tokens = try @import("ai/local_text_request.zig").toolTokens(self.request_tools[0..self.request_tools_len]);
-            const scoped_rules = try @import("ai/session_prompt.zig").build(self.allocator, self.request_execution_policy.execution_mode, self.request_tools[0..self.request_tools_len]);
+            const scoped_rules = try @import("ai/session_prompt.zig").buildConfigured(self.allocator, self.request_execution_policy.execution_mode, self.request_tools[0..self.request_tools_len], .{ .context_mode = self.request_config.?.value.ai.child_context_mode, .reuse_policy = self.request_config.?.value.ai.child_reuse_policy });
             self.allocator.free(self.request_context.?.text);
             self.request_context.?.text = scoped_rules;
 
@@ -4022,7 +4314,7 @@ const AiHost = struct {
         self.thread_state.store(1, .release);
         self.tool_bridge.events = &self.step_mailbox;
         self.tool_bridge.image_lookup = .{ .context = self, .find = findRetainedImage };
-        self.tool_bridge.beginAutomationRun(&self.attached_runner.?.cancel.cancelled);
+        self.tool_bridge.beginAutomationRun(&self.attached_runner.?.worker.?.cancel.cancelled);
     }
     fn prepareAttached(raw: *anyopaque, _: std.mem.Allocator, io: std.Io, _: @import("ai/session_runtime.zig").Context) !@import("ai/session_runtime.zig").Prepared {
         const self: *AiHost = @ptrCast(@alignCast(raw));
@@ -4042,6 +4334,7 @@ const AiHost = struct {
     fn finishPreparedAttached(raw: *anyopaque) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         self.tool_bridge.endAutomationRun();
+        if (self.extension_session) |*session| session.finish();
         if (self.recording_access) |*access| access.deinit();
         self.recording_access = null;
     }
@@ -4051,7 +4344,7 @@ const AiHost = struct {
         self.request_stats = runner.stats;
         self.request_failure = runner.failure;
         if (runner.failure) |err| self.failure_label = if (self.native_context) |native| native.diagnostic.format(&self.failure_detail, err) else @errorName(err);
-        const state: u8 = if (runner.cancel.isCancelled()) 4 else if (runner.failure != null) 3 else 2;
+        const state: u8 = if (runner.worker.?.cancel.isCancelled()) 4 else if (runner.failure != null) 3 else 2;
         self.thread_state.store(state, .release);
         const view = self.attachedView();
         const previous = self.withAttachedView();
@@ -4193,6 +4486,11 @@ const AiHost = struct {
     fn persistDisplayedDraft(self: *AiHost) !void {
         const shared_host = self.shared_service orelse return;
         const state = (self.assistant_states orelse return).find(self.display_conversation orelse return) orelse return;
+        if (self.child_identity != null) {
+            const record = self.childRecord() orelse return;
+            if (!std.mem.eql(u8, record.draft orelse "", self.prompt.peek())) _ = try shared_host.service.store.setChildDraft(record.id, record.draft_revision, self.prompt.peek());
+            return;
+        }
         if (state.ended or state.closed or !state.selected) return;
         if (shared_host.service.store.find(state.conversation_id)) |record| if (record.ending != null) try self.preservePendingEdit();
         const text = self.prompt.peek();
@@ -4213,6 +4511,15 @@ const AiHost = struct {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         const app = self.application_host orelse return;
         try flushAttached(raw);
+        if (self.attached_runner.?.agent.role == .child and self.parentPermission() != .auto and self.request_permission_mode == .auto) {
+            self.request_permission_mode = .confirm;
+            self.managerRef().setPermissionMode(.confirm);
+            self.tool_bridge.setPermissionMode(.confirm);
+        }
+        if (self.extension_session) |*session| {
+            const active = session.active_server.load(.acquire);
+            if (active != 0 and !self.extensionAllowed(session.frozen.servers[active - 1].id, true)) session.revoked.store(true, .release);
+        }
         if (self.attached_runner.?.agent.current) |id| {
             const record = self.shared_service.?.service.store.find(id).?;
             if (record.ending == null) {
@@ -4260,11 +4567,34 @@ const AiHost = struct {
         }
         return self.executionShutdownReady();
     }
-    fn destroyAttached(raw: *anyopaque) void {
+    fn releaseAttachedWorker(raw: *anyopaque) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
-        if (self.backend_owner) |view| if (view.execution_host == self) {
-            view.execution_host = null;
-        };
+        const view = self.attachedView();
+        const previous = self.withAttachedView();
+        defer view.execution_host = previous;
+        if (view.tickTaskFinish()) return error.ResourceCleanupPending;
+        view.publishSettledAiCompletions();
+        for (self.pending_ai_completions) |pending| if (pending != null) return error.ResourceCleanupPending;
+        if (!self.executionShutdownReady()) return error.ResourceCleanupPending;
+        // Final UI data lives in the conversation store, never in this factory.
+        if (self.request_conversation) |id| try view.saveConversationPresentation(id);
+        self.request_tools_len = 0;
+        const runner = self.attached_runner;
+        const a = self.allocator;
+        const shared_host = self.shared_service.?;
+        // Accepted follow-up inputs belong to the conversation, including
+        // their frozen settings and attachments. Worker teardown must not
+        // discard the next queued submission before its capture starts.
+        const inputs = self.attached_inputs;
+        self.attached_inputs = .empty;
+        self.destroyAttachedResources();
+        self.* = view.attachedSlot(a, shared_host);
+        self.attached_runner = runner;
+        self.attached_inputs = inputs;
+    }
+    fn destroyAttachedResources(self: *AiHost) void {
+        if (self.extension_session) |*session| session.deinit();
+        self.extension_session = null;
         if (self.recording_access) |*value| value.deinit();
         for (self.lifecycle_controllers.items) |controller| {
             controller.deinitAfterWorker();
@@ -4290,8 +4620,19 @@ const AiHost = struct {
         for (self.attached_inputs.items) |*input| input.deinit(self.allocator);
         self.attached_inputs.deinit(self.allocator);
         if (self.attached_scope) |value| if (value.inventory) |ids| self.allocator.free(ids);
+        if (self.request_attachments) |*value| value.deinit();
+        if (self.request_images) |*value| value.deinit();
+        self.request_image_refs.deinit(self.allocator);
+    }
+    fn destroyAttached(raw: *anyopaque) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        if (self.backend_owner) |view| if (view.execution_host == self) {
+            view.execution_host = null;
+        };
+        self.destroyAttachedResources();
         self.allocator.destroy(self);
     }
+
     fn submit(self: *AiHost, text: []const u8) void {
         self.submitAttached(text, null) catch |err| self.refresh(@errorName(err));
     }
@@ -4820,6 +5161,18 @@ const AiHost = struct {
             self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
             self.execution().host_catalog_len += 1;
         }
+        if (self.execution().request_host_context) |authority| if (authority.child_origin == null) {
+            self.execution().host_catalog[self.execution().host_catalog_len] = @import("ai/child_gateway.zig").contribution;
+            self.execution().host_catalog_len += 1;
+        };
+        if (self.execution().extension_session) |session| {
+            for (@import("ai/extension_gateway.zig").contributions, 0..) |contribution, i| {
+                if (i == 0 and session.frozen.skills.len == 0) continue;
+                if (i != 0 and (session.frozen.servers.len == 0 or self.execution().tool_bridge.queries_only)) continue;
+                self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
+                self.execution().host_catalog_len += 1;
+            }
+        }
         if (self.execution().tool_bridge.queries_only) return;
         self.execution().host_catalog[self.execution().host_catalog_len] = @import("ai/builtin_tools.zig").contribution;
         self.execution().host_catalog_len += 1;
@@ -4933,7 +5286,7 @@ const AiHost = struct {
                 binding.context = next_context;
                 binding.contributions = self.execution().host_catalog[0..self.execution().host_catalog_len];
                 try next.configureHost(binding);
-                if (state.owner == .group) try next.prepareGroup(app, self.roster.?, captured) else {
+                if (state.owner == .group) try next.prepareGroup(app, self.roster.?, captured) else if (next_context.child_origin != null) try next.prepareScope(app, captured) else {
                     const tab = self.tabForSession(state.owner.session) orelse return error.StaleSession;
                     try next.prepare(app, tab.content_owner.session);
                 }
@@ -4941,7 +5294,7 @@ const AiHost = struct {
                 var table = try @import("ai/plugin_tools.zig").cloneTable(value.bridge.requestTable().?, value.allocator);
                 errdefer table.deinit();
                 const wire = try @import("ai/plugin_tools.zig").providerDefinitions(&table, table.arena.allocator());
-                const system = try @import("ai/session_prompt.zig").build(value.allocator, self.execution().request_execution_policy.execution_mode, wire);
+                const system = try @import("ai/session_prompt.zig").buildConfigured(value.allocator, self.execution().request_execution_policy.execution_mode, wire, .{ .context_mode = self.execution().request_config.?.value.ai.child_context_mode, .reuse_policy = self.execution().request_config.?.value.ai.child_reuse_policy });
                 errdefer value.allocator.free(system);
                 var handoff_buffer: [128]PendingHostNotice = undefined;
                 const pending_handoffs = self.pendingInputNotices(next_context.conversation_id, &handoff_buffer);
@@ -5044,6 +5397,7 @@ const AiHost = struct {
         if (result.status != .succeeded) return;
         var decoded: [64]u8 = undefined;
         const logical = @import("ai/plugin_tools.zig").decodeName(&decoded, name) catch return;
+        if (std.mem.eql(u8, logical, @import("ai/child_gateway.zig").tool_id)) try @import("ai/child_gateway.zig").acknowledge(self.attached_runner.?.task_root.?, result, self.allocator);
         if (std.mem.eql(u8, logical, "host.run_in_terminal") or std.mem.eql(u8, logical, "host.wait_execution") or std.mem.eql(u8, logical, "host.get_execution")) {
             const CaptureRecording = struct {
                 host: *AiHost,
@@ -5079,6 +5433,10 @@ const AiHost = struct {
         if (!binding.context.eql(context) or app.workspace.app_config.agentPolicyRevision() != self.execution().request_policy_revision) return error.ScopeChanged;
         const store = if (self.assistant_states) |value| value else return error.ContextUnavailable;
         const state = store.findConversation(context.conversation_id) orelse return error.ScopeChanged;
+        if (self.shared_service) |service| if (service.service.store.find(context.conversation_id)) |record| if (record.transition != null) return error.TransitionPending;
+        if (context.child_origin != null or state.child_agent != null) {
+            _ = try (self.shared_service orelse return error.ScopeChanged).service.validateAuthority(context);
+        }
         if (state.closed or state.ended or !state.owner.eql(context.binding) or state.binding_revision != context.binding_revision or !self.attachmentOwnerExists(state.owner)) return error.ScopeChanged;
     }
     fn committedHandoffPending(self: *AiHost, context: @import("ai/host_tools.zig").Context) bool {
@@ -5096,8 +5454,242 @@ const AiHost = struct {
         const state = store.findConversation(context.conversation_id) orelse return false;
         return !state.closed and state.owner == .group and state.owner.eql(pending) and state.binding_revision == context.binding_revision +| 1 and state.initial_owner != null and state.initial_owner.?.eql(context.binding);
     }
+    fn installChildExecution(raw: *anyopaque, record: *@import("ai/session_lifecycle.zig").Record, root: *@import("ai/task_budget.zig").Root, fact: @import("ai/task_budget.zig").Fact, submission: @import("host/identity.zig").SubmissionId, text: []const u8) !*@import("ai/session_runtime.zig").Runner {
+        const parent: *AiHost = @ptrCast(@alignCast(raw));
+        const shared_host = parent.shared_service.?;
+        const agent_id = record.child.?.info.agent;
+        const a = std.heap.c_allocator;
+        if (shared_host.closing) return error.ApplicationClosing;
+        const existing_bridge = shared_host.bridgeFor(agent_id);
+        if (existing_bridge == null) try shared_host.bridges.ensureUnusedCapacity(shared_host.allocator, 1);
+        const backend: *AiHost = if (existing_bridge) |bridge| @ptrCast(@alignCast(bridge.context)) else try a.create(AiHost);
+        if (existing_bridge == null) backend.* = parent.attachedView().attachedSlot(a, shared_host);
+        var adopted = false;
+        errdefer if (existing_bridge == null and !adopted) {
+            backend.destroyAttachedResources();
+            a.destroy(backend);
+        };
+        const state = try shared_host.presentations.createChildPresentation(record, record.binding.?.owner);
+        state.binding_revision = record.revision;
+        state.ended = false;
+        state.closed = false;
+        var controls = state.controls;
+        // Frozen child config wins; the remaining defaults come from this
+        // parent's captured generation, never from a later composer edit.
+        const source = try parent.attachedInput(parent.attached_runner.?.context.?.submission);
+        const life = @import("ai/session_lifecycle.zig");
+        if (record.child_settings == null) {
+            var initial = life.child.Settings.fromInfo(record.child.?.info);
+            initial.thinking = source.controls.thinking;
+            initial.session_retention = source.controls.session_retention;
+            initial.permission = source.controls.permission orelse .confirm;
+            initial.execution_mode = source.controls.execution_mode orelse .auto;
+            initial.targets = shared_host.service.store.agent(record.child.?.info.agent).?.targets;
+            const allowed = try parent.attachedView().captureOwnerScope(record.binding.?.owner);
+            defer if (allowed.inventory) |ids| parent.attachedView().allocator.free(ids);
+            try shared_host.service.store.updateChildSettings(try shared_host.service.store.fence(record.child.?.info.owning_parent_conversation), record.child.?.info.agent, record.child_settings_revision, initial, allowed);
+        }
+        const prefs = life.Store.childPreferences(record);
+        controls = source.controls;
+        controls.model = prefs.model;
+        controls.effort = prefs.effort;
+        controls.permission = prefs.permission;
+        controls.thinking = prefs.thinking;
+        controls.session_retention = prefs.session_retention;
+        controls.execution_mode = prefs.execution_mode;
+        if (state.controls.model == null) try state.controls.setModel(shared_host.presentations.allocator, prefs.model);
+        state.controls.effort = prefs.effort;
+        state.controls.permission = prefs.permission;
+        state.controls.thinking = prefs.thinking;
+        state.controls.session_retention = prefs.session_retention;
+        state.controls.execution_mode = prefs.execution_mode;
+        var empty_text: ai_attachments.Bundle = .{ .allocator = a, .owner = record.binding.?.owner, .draft_epoch = 1, .items = &.{} };
+        var empty_images: ai_images.Bundle = .{ .allocator = a, .owner = record.binding.?.owner, .draft_epoch = 1, .items = &.{} };
+        var frozen = try backend.captureAttachedInput(submission, text, &empty_text, &empty_images, parent.request_config.?.value, &controls);
+        errdefer frozen.deinit(a);
+        // Validate saved selection on every reuse; never silently replace it.
+        _ = try ai_provider_config.fromSettingsSelection(frozen.config.?.value.ai, frozen.controls.model);
+        if (frozen.controls.effort) |effort| try ai_provider_config.validateEffort(frozen.config.?.value.ai, frozen.controls.model, effort);
+        try backend.attached_inputs.ensureUnusedCapacity(a, 1);
+        const runner = try shared_host.service.adoptChild(record, .{ .context = backend, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .supersede = supersedeAttached, .stop = stopAttached, .release_worker = releaseAttachedWorker }, root, fact);
+        backend.attached_runner = runner;
+        adopted = true;
+        if (existing_bridge == null) try shared_host.register(.{ .agent = agent_id, .window = parent.application_host.?.window_id, .context = backend, .pump = pumpAttached, .released = disposeReadyAttached, .destroy = destroyAttached, .flush = flushAttached });
+        backend.attached_inputs.appendAssumeCapacity(frozen);
+        return runner;
+    }
+    fn dispatchChildGateway(self: *AiHost, bridge: *@import("ui/ai_tools.zig").Bridge, invocation: @import("ai/host_tools.zig").Invocation, allocator: std.mem.Allocator, cancel: ?*ai_provider.CancelToken) !@import("ai/host_tools.zig").Result {
+        const gateway = @import("ai/child_gateway.zig");
+        const parsed = try gateway.parse(allocator, invocation.arguments);
+        defer parsed.deinit();
+        const request = parsed.value;
+        var history: @import("ai/wire_history.zig").History = .{};
+        defer history.deinit();
+        var inherited: ?@import("ai/session_lifecycle.zig").Store.Inherited = null;
+        if (request.action == .create and @import("ai/child_agent.zig").resolve(.{ .context_mode = self.request_config.?.value.ai.child_context_mode, .reuse_policy = self.request_config.?.value.ai.child_reuse_policy }, request.context_mode, request.reusable).context_mode == .inherit) {
+            const loop = self.managerRef().tool_run orelse return error.NoStableCheckpoint;
+            var targets: [32]@import("host/identity.zig").SessionHandle = undefined;
+            var ids: [32]u64 = undefined;
+            for (request.session_refs.?, 0..) |reference, i| {
+                const handle = for (bridge.children.items) |child| {
+                    const current = try @import("ai/host_queries.zig").sessionRef(allocator, invocation.context, child.owner);
+                    defer allocator.free(current);
+                    if (std.mem.eql(u8, reference, current)) break child.owner;
+                } else return error.TargetNotAuthorized;
+                targets[i] = handle;
+                ids[i] = @backingInt(handle.session_id);
+            }
+            var child_scope = loop.scope;
+            child_scope.inventory = ids[0..request.session_refs.?.len];
+            history = try loop.snapshotForChild(allocator, invocation.call_id, child_scope, targets[0..request.session_refs.?.len]);
+            inherited = .{ .source = .{ .conversation = invocation.context.conversation_id, .content_revision = self.attached_runner.?.record.?.content_revision, .turn = invocation.turn_id, .message_count = history.messages.len }, .messages = history.messages };
+        }
+        const Call = struct {
+            host: *AiHost,
+            invocation: @import("ai/host_tools.zig").Invocation,
+            request: gateway.Request,
+            inherited: ?@import("ai/session_lifecycle.zig").Store.Inherited,
+            allocator: std.mem.Allocator,
+            result: ?@import("ai/host_tools.zig").Result = null,
+            has_events: bool = false,
+            fn run(raw: *anyopaque) !void {
+                const self_call: *@This() = @ptrCast(@alignCast(raw));
+                const value = self_call.host;
+                try value.validateHostContext(self_call.invocation.context);
+                const allowed = try value.captureOwnerScope(self_call.invocation.context.binding);
+                defer value.allocator.free(allowed.inventory.?);
+                var handles: [@import("ai/tool_scope.zig").max_targets]@import("host/identity.zig").SessionHandle = undefined;
+                if (allowed.memberIds().len > handles.len) return error.TooManyToolTargets;
+                for (allowed.memberIds(), 0..) |session_id, i| handles[i] = (value.tabForSession(session_id) orelse return error.StaleSession).content_owner.session;
+                const root = value.attached_runner.?.task_root.?;
+                root.lock();
+                self_call.has_events = for (root.facts[0..root.count]) |fact| {
+                    if (fact.parent != null and fact.event_sequence > self_call.request.after_sequence) break true;
+                } else false;
+                root.mutex.unlock();
+                const source = try value.attachedInput(value.attached_runner.?.context.?.submission);
+                if (self_call.request.action == .create) {
+                    const selection = self_call.request.model orelse source.controls.model;
+                    _ = try ai_provider_config.fromSettingsSelection(value.request_config.?.value.ai, selection);
+                    if (self_call.request.effort orelse source.controls.effort) |effort| try ai_provider_config.validateEffort(value.request_config.?.value.ai, selection, effort);
+                }
+                var skill_ids: [32][]const u8 = undefined;
+                var skill_count: usize = 0;
+                var mcp_ids: [16][]const u8 = undefined;
+                var mcp_count: usize = 0;
+                if (value.extension_session) |session| {
+                    for (session.frozen.skills) |skill| if (skill.enabled and value.extensionAllowed(skill.id, false)) {
+                        skill_ids[skill_count] = skill.id;
+                        skill_count += 1;
+                    };
+                    for (session.frozen.servers) |server| if (server.enabled and value.extensionAllowed(server.id, true)) {
+                        mcp_ids[mcp_count] = server.id;
+                        mcp_count += 1;
+                    };
+                }
+                self_call.result = try gateway.execute(.{ .service = &value.shared_service.?.service, .authority = self_call.invocation.context, .live = allowed, .handles = handles[0..allowed.memberIds().len], .inherited = self_call.inherited, .factory = .{ .context = value, .defaults = .{ .context_mode = value.request_config.?.value.ai.child_context_mode, .reuse_policy = value.request_config.?.value.ai.child_reuse_policy }, .model = source.controls.model orelse .{ .provider_id = value.request_config.?.value.ai.default_provider, .model_id = value.model }, .effort = source.controls.effort, .skill_ids = skill_ids[0..skill_count], .mcp_ids = mcp_ids[0..mcp_count], .install = installChildExecution } }, self_call.invocation, self_call.request, self_call.allocator);
+            }
+        };
+        var call: Call = .{ .host = self, .invocation = invocation, .request = request, .inherited = inherited, .allocator = allocator };
+        const started = (@import("ai/retry.zig").Clock{}).now();
+        const root = self.attached_runner.?.task_root.?;
+        const task = self.attached_runner.?.context.?.task;
+        // Waiting releases model slots and pauses only this branch's local
+        // budget; the root clock continues while any sibling is doing work.
+        const human_wait = if (request.action == .wait_events) ai_provider.CancelToken.beginUserWait(cancel) else ai_provider.CancelToken.UserWait{ .token = null };
+        defer human_wait.end();
+        if (request.action == .wait_events) try root.state(task, .waiting_children, "");
+        defer if (request.action == .wait_events) root.state(task, .running, "") catch {};
+        while (true) {
+            try bridge.callController(&call, Call.run, cancel);
+            if (request.action != .wait_events or call.has_events or (@import("ai/retry.zig").Clock{}).now() - started >= @as(i128, request.wait_ms) * std.time.ns_per_ms) return call.result.?;
+            call.result.?.deinit(allocator);
+            call.result = null;
+            if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
+            (@import("ai/retry.zig").Clock{}).sleep(10 * std.time.ns_per_ms);
+        }
+    }
+    fn extensionAllowed(self: *AiHost, key: []const u8, mcp: bool) bool {
+        const live = (self.backend_owner orelse self).runtime_config orelse return false;
+        const frozen = self.extension_session orelse return false;
+        if (mcp) {
+            for (frozen.frozen.servers) |selected| if (selected.enabled and std.mem.eql(u8, key, selected.id)) {
+                for (live.value.ai.extensions.servers) |current| if (current.enabled and std.mem.eql(u8, current.id, key)) return @import("config/settings_schema.zig").same(selected, current);
+            };
+        } else {
+            for (frozen.frozen.skills) |selected| if (selected.enabled and std.mem.eql(u8, key, selected.id)) {
+                for (live.value.ai.extensions.skills) |current| if (current.enabled and std.mem.eql(u8, current.id, key)) return true;
+            };
+        }
+        return false;
+    }
+    fn dispatchExtensionGateway(self: *AiHost, bridge: *@import("ui/ai_tools.zig").Bridge, invocation: @import("ai/host_tools.zig").Invocation, a: std.mem.Allocator, cancel: ?*ai_provider.CancelToken) !@import("ai/host_tools.zig").Result {
+        const session = if (self.extension_session) |*value| value else return error.ToolNotAvailable;
+        const Context = struct {
+            host: *AiHost,
+            bridge: *@import("ui/ai_tools.zig").Bridge,
+            invocation: @import("ai/host_tools.zig").Invocation,
+            allocator: std.mem.Allocator,
+            key: []const u8 = "",
+            mcp: bool = false,
+            fn validate(raw: *anyopaque) !void {
+                const ctx: *@This() = @ptrCast(@alignCast(raw));
+                try ctx.host.validateHostContext(ctx.invocation.context);
+                if (ctx.key.len != 0 and !ctx.host.extensionAllowed(ctx.key, ctx.mcp)) return error.ExtensionRevoked;
+            }
+            fn check(raw: *anyopaque, key: []const u8, mcp: bool, token: ?*ai_provider.CancelToken) !void {
+                const ctx: *@This() = @ptrCast(@alignCast(raw));
+                ctx.key = key;
+                ctx.mcp = mcp;
+                try ctx.bridge.callController(ctx, validate, token);
+                if (token) |t| if (t.isCancelled()) return error.CancelledBeforeDispatch;
+            }
+            fn approve(raw: *anyopaque, call: @import("ai/host_tools.zig").Invocation, server: @import("config/ai_extensions.zig").Server, remote_tool: ?[]const u8, token: ?*ai_provider.CancelToken) !void {
+                const ctx: *@This() = @ptrCast(@alignCast(raw));
+                const detail = try std.json.Stringify.valueAlloc(ctx.allocator, .{
+                    .server = server.name,
+                    .transport = server.transport,
+                    .program = if (server.transport == .stdio) server.program else "",
+                    .args = server.args,
+                    .cwd = server.cwd,
+                    .endpoint = if (server.transport == .http) server.endpoint else "",
+                    .remote_tool = remote_tool,
+                    .request = call.arguments,
+                }, .{ .whitespace = .indent_2 });
+                defer ctx.allocator.free(detail);
+                const permit = try ctx.host.approvalsRef().beginSubject(call, .{ .kind = .mcp, .target = server.name, .detail = detail, .impact = "启动已配置的 MCP 服务或发送本次明确提供的文本；远端结果作为外部材料。" }, ctx.host.request_policy_revision, ctx.allocator);
+                defer ctx.host.approvalsRef().finish(permit);
+                try ctx.host.approvalsRef().waitForDecision(permit, token);
+            }
+        };
+        const Cancellation = struct {
+            parent: ?*ai_provider.CancelToken,
+            session: *@import("ai/extension_gateway.zig").Session,
+            fn poll(raw: *const anyopaque) bool {
+                const ctx: *const @This() = @ptrCast(@alignCast(raw));
+                return ctx.session.revoked.load(.acquire) or (if (ctx.parent) |token| token.isCancelled() else false);
+            }
+            fn wait(raw: *const anyopaque, active: bool) void {
+                const ctx: *const @This() = @ptrCast(@alignCast(raw));
+                if (ctx.parent) |token| if (token.source) |source| if (source.user_wait) |notify| notify(source.context, active);
+            }
+        };
+        var ctx: Context = .{ .host = self, .bridge = bridge, .invocation = invocation, .allocator = a };
+        const cancellation: Cancellation = .{ .parent = cancel, .session = session };
+        var token: ai_provider.CancelToken = .{ .source = .{ .context = &cancellation, .poll = Cancellation.poll, .user_wait = Cancellation.wait } };
+        return session.invoke(self.native_context.?.io, .{ .context = &ctx, .check = Context.check, .approve = Context.approve }, self.lifecycle_runtime.?.journal_owner, invocation, &token, a) catch |err| rejectedHostInvocation(invocation, a, err);
+    }
     fn dispatchHostWorker(raw: *anyopaque, bridge: *@import("ui/ai_tools.zig").Bridge, invocation: @import("ai/host_tools.zig").Invocation, allocator: std.mem.Allocator, cancel: ?*ai_provider.CancelToken) !@import("ai/host_tools.zig").Result {
         const self: *AiHost = @ptrCast(@alignCast(raw));
+        if (self.attached_runner) |runner| if (runner.observation_only) {
+            const table = self.tool_bridge.requestTable() orelse return error.ToolNotAvailable;
+            const entry = for (table.entries) |item| {
+                if (std.mem.eql(u8, item.definition.id, invocation.tool_id)) break item;
+            } else return error.ToolNotAvailable;
+            if (entry.definition.effect != .read_state and entry.definition.effect != .observe_image) return rejectedHostInvocation(invocation, allocator, error.ObservationOnlyTask);
+        };
+        if (@import("ai/extension_gateway.zig").supports(invocation.tool_id)) return self.dispatchExtensionGateway(bridge, invocation, allocator, cancel);
+        if (std.mem.eql(u8, invocation.tool_id, @import("ai/child_gateway.zig").tool_id)) return self.dispatchChildGateway(bridge, invocation, allocator, cancel);
         if (@import("ai/user_interaction.zig").supports(invocation.tool_id)) {
             const Validate = struct {
                 host: *AiHost,
@@ -5469,6 +6061,7 @@ const AiHost = struct {
                 .ticket = .{ .host = .{ .sequence = pending.sequence, .hash = pending.arguments_hash } },
                 .title = switch (pending.kind) {
                     .network_url => "确认访问网址",
+                    .mcp => "确认 MCP 操作",
                     .lifecycle => "确认会话操作",
                     .terminal_command => "确认执行命令",
                 },
@@ -6176,6 +6769,7 @@ const AiHost = struct {
                 if (host.pending_view) |view| view.fail(@errorName(err));
             };
             host.updatePending() catch |err| host.setFeedback(@errorName(err));
+            host.processChildren() catch |err| host.setFeedback(@errorName(err));
             host.processConversationActions();
             host.updateCloseConfirmation() catch |err| host.setFeedback(@errorName(err));
             host.processMessageAction() catch |err| host.setFeedback(@errorName(err));
@@ -6202,8 +6796,10 @@ const AiHost = struct {
                 }
                 host.execution().execution_bridge.pump(application);
             }
-            if (host.execution().request_host_context) |context| host.validateHostContext(context) catch {
-                if (!host.committedHandoffPending(context)) {
+            if (host.execution().request_host_context) |context| host.validateHostContext(context) catch |err| {
+                // A pending handoff closes new dispatch. Its already approved
+                // lifecycle call must retain its permit while children drain.
+                if (err != error.TransitionPending and !host.committedHandoffPending(context)) {
                     host.approvalsRef().stop();
                     host.questionsRef().stop();
                     host.execution().inventory_approval.stop();
@@ -6302,6 +6898,10 @@ const AiHost = struct {
             if (!rebuild and !live_updated and !composer_resized and !bubbles_resized) if (host.tail_follow) |*follow| {
                 if ((host.attachments_view == null or !host.attachments_view.?.isPreviewOpen()) and (host.images_view == null or !host.images_view.?.isPreviewOpen())) follow.update();
             };
+            if (host.child_identity != null) if (host.child_parent.?.child_dialog) |dialog| {
+                dialog.reflow();
+                dialog.prefix();
+            };
             if (state == 1) {
                 host.cx.scheduleRedrawAfterNs(33 * 1_000_000);
                 return if (rebuild or live_updated or composer_resized or bubbles_resized) .needs_layout else .done;
@@ -6354,7 +6954,7 @@ const AiHost = struct {
         if (self.lifecycle_command) |*command| command.deinit();
         self.lifecycle_command = null;
 
-        if (self.shared_service) |shared_host| if (self.application_host) |app| {
+        if (self.child_identity == null) if (self.shared_service) |shared_host| if (self.application_host) |app| {
             shared_host.releaseWindow(app.window_id) catch {
                 applog.warn(.app, "AI owners are still draining; retaining their view adapter", .{});
                 return;
@@ -6466,6 +7066,493 @@ const AiHost = struct {
     }
 };
 
+/// A presentation subscription, never an execution owner or a second Worker.
+const ChildDialog = struct {
+    parent: *AiHost,
+    host: *AiHost,
+    scope: *ui.Scope,
+    open: *ui.Signal(bool),
+    dialog: *ui.Node,
+    parent_label: *ui.Node,
+    restore_parent: *ui.Node = undefined,
+    last_writable: ?bool = null,
+    title: *ui.Node = undefined,
+    task_summary: *ui.Node = undefined,
+    history_label: *ui.Node = undefined,
+    history_arrow: *ui.Node = undefined,
+    history_toggle: *ui.Node = undefined,
+    history_expanded: bool = false,
+    props: *ui.Node,
+    props_open: *ui.Signal(bool),
+    apply_disabled: *ui.Signal(bool),
+    props_scroll: *ui.Node = undefined,
+    props_chrome: *ui.Node = undefined,
+    status_dot: *ui.Node = undefined,
+    painted_colors: app_theme.Colors = undefined,
+    layout_width: f32 = 0,
+    layout_height: f32 = 0,
+    maximized: bool = false,
+    name: *ui.Signal([]const u8),
+    reusable: *ui.Signal(bool),
+    skill_bits: u32 = 0,
+    mcp_bits: u32 = 0,
+    target_bits: u32 = 0,
+    target_handles: [32]@import("host/identity.zig").SessionHandle = undefined,
+    target_count: usize = 0,
+    revision: u64,
+    released: bool = false,
+    last_status: ?[]const u8 = null,
+    fn mount(parent: *AiHost, record: *@import("ai/session_lifecycle.zig").Record) !*ChildDialog {
+        const cx = parent.cx;
+        const scope = try parent.scope.?.childScope();
+        errdefer scope.dispose();
+        const open = try scope.createSignal(bool, true);
+        const modal = try ui.widgets.Modal(.{ .open = open, .width = 600, .max_height = @min(456, cx.viewport.height - 32), .background = app_theme.current().overlay }).mount(scope, cx);
+        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        modal.dialog.setStyleInline(cx.allocator, @import("ui/ai_assistant_styles.zig").panel(cx.tokens));
+        modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = @min(600, cx.viewport.width - 32) }, .height = .{ .px = @min(456, cx.viewport.height - 32) }, .max_height = @min(456, cx.viewport.height - 32) });
+        modal.dialog.meta.ownership.meta.test_id = "ai.child.dialog";
+        modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .direction = .column, .padding = .{}, .gap = 0 });
+        const service = parent.shared_service.?;
+        const state = try service.presentations.createChildPresentation(record, record.initial_origin orelse parent.display_owner.?);
+        const prefs = @import("ai/session_lifecycle.zig").Store.childPreferences(record);
+        const prompt = try scope.createText(record.draft orelse state.draft orelse "", .{});
+        const host = try cx.allocator.create(AiHost);
+        host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = parent.provider, .native_context = null, .native_client = null, .native_binding = null, .endpoint = "", .model = "", .panel = modal.body, .status = undefined, .card_node = undefined, .prompt = prompt, .runtime_config = parent.runtime_config, .assistant_states = &service.presentations, .shared_service = service, .workspace = parent.workspace, .application_host = parent.application_host, .roster = parent.roster, .file_application = parent.file_application, .data_root = parent.data_root, .recording_archive = parent.recording_archive, .notification_window = parent.notification_window, .child_identity = record.child.?.info.agent, .child_parent = parent, .display_conversation = state.id, .display_owner = state.owner, .settings_host = parent.settings_host };
+        try scope.onCleanup(AiHost, host, AiHost.cleanup);
+        const self = try scope.createState(ChildDialog, .{ .parent = parent, .host = host, .scope = scope, .open = open, .dialog = modal.dialog, .parent_label = undefined, .props = undefined, .props_open = try scope.createSignal(bool, false), .apply_disabled = try scope.createSignal(bool, !host.childCanWrite()), .painted_colors = app_theme.current(), .name = try scope.createText(prefs.name, .{}), .reusable = try scope.createSignal(bool, prefs.reusable), .revision = record.child_settings_revision });
+        const shell = try @import("ui/ai_assistant_header.zig").mount(cx, modal.body, prefs.name);
+        const heading = shell.bar;
+        self.title = shell.owner;
+        self.title.meta.ownership.meta.test_id = "ai.child.name";
+        self.status_dot = try ui.box(cx, .{ .width = .{ .px = 5 }, .height = .{ .px = 5 }, .border = .{ .radius = 3 }, .background = app_theme.current().fg_3, .flex_shrink = 0 }, .{});
+        self.status_dot.setDisplay(.none);
+        try shell.owner_pill.insertChildBefore(cx.allocator, self.status_dot, shell.owner);
+        host.status = try ui.textStyled(cx, @import("ui/ai_assistant_styles.zig").ownerText, "");
+        host.status.meta.ownership.meta.test_id = "ai.child.status";
+        host.status.setDisplay(.none);
+        try shell.owner_pill.appendChild(cx.allocator, host.status);
+        const properties = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.settings_2, .icon_size = 14, .a11y_label = "子智能体设置", .base_style = @import("ui/ai_assistant_styles.zig").windowControl(), .variant = .ghost, .on_click = cx.on(ChildDialog, self, toggleProps) }).mount(scope, cx);
+        properties.meta.ownership.meta.test_id = "ai.child.properties";
+        const properties_hint = try @import("ui/control_hint.zig").mount(cx, scope, properties, "子智能体设置", .{ .id = "ai.child.properties.hint", .layout = .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 } });
+        try heading.appendChild(cx.allocator, properties_hint.wrapper);
+        const collapse = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.minus, .icon_size = 14, .a11y_label = "收起子对话", .base_style = @import("ui/ai_assistant_styles.zig").windowControl(), .on_click = cx.on(ChildDialog, self, close) }).mount(scope, cx);
+        collapse.meta.ownership.meta.test_id = "ai.child.collapse";
+        try heading.appendChild(cx.allocator, collapse);
+        const maximize = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get("maximize-2").?, .icon_size = 14, .a11y_label = "放大或还原子对话", .base_style = @import("ui/ai_assistant_styles.zig").windowControl(), .on_click = cx.on(ChildDialog, self, toggleMaximize) }).mount(scope, cx);
+        maximize.meta.ownership.meta.test_id = "ai.child.maximize";
+        try heading.appendChild(cx.allocator, maximize);
+        const close_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = 14, .a11y_label = "关闭子智能体", .base_style = @import("ui/ai_assistant_styles.zig").windowControl(), .on_click = cx.on(ChildDialog, self, close) }).mount(scope, cx);
+        close_button.meta.ownership.meta.test_id = "ai.child.close";
+        try heading.appendChild(cx.allocator, close_button);
+        var parent_text: [192]u8 = undefined;
+        self.parent_label = try ui.textStyled(cx, @import("ui/ai_children_styles.zig").secondary, try std.fmt.bufPrint(&parent_text, "父对话 {s} · {s}上下文", .{ std.fmt.bytesToHex(record.child.?.info.owning_parent_conversation.bytes, .lower)[0..8], if (record.child.?.info.context_mode == .inherit) "继承" else "独立" }));
+        self.parent_label.setStyleInline(cx.allocator, .{ .width = .fill(), .padding = .{}, .flex_shrink = 0 });
+        self.parent_label.meta.ownership.meta.test_id = "ai.child.parent";
+        self.restore_parent = try ui.widgets.Button(.{ .label = "恢复父对话…", .variant = .secondary, .on_click = cx.on(ChildDialog, self, restoreParent) }).mount(scope, cx);
+        self.restore_parent.meta.ownership.meta.test_id = "ai.child.restore_parent";
+        self.restore_parent.setDisplay(.none);
+        const popup = try ui.widgets.Popover(.{ .open = self.props_open, .trigger = .manual, .anchor = .{ .node = properties }, .position = .bottom_end, .offset = .{ .static = 8 }, .width = 320, .max_height = @max(120, @min(420, cx.viewport.height - 32)), .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 16 }).mount(scope, cx);
+        popup.wrapper.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } });
+        self.props = popup.content;
+        self.props_chrome = popup.chrome;
+        self.props_chrome.meta.ownership.meta.test_id = "ai.child.settings";
+        self.props.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 0 });
+        self.props_chrome.setStyleInline(cx.allocator, @import("ui/ai_children_styles.zig").settings(cx.tokens));
+        try heading.appendChild(cx.allocator, popup.wrapper);
+        const props_heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 36 }, .direction = .row, .align_items = .center, .padding = .{ .left = 12, .right = 8 }, .gap = 8, .flex_shrink = 0 }, .{});
+        const props_title = try ui.textStyled(cx, @import("ui/ai_children_styles.zig").name, "子智能体设置");
+        props_title.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1 });
+        try props_heading.appendChild(cx.allocator, props_title);
+        const props_close = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .icon_size = 12, .a11y_label = "关闭子智能体设置", .variant = .ghost, .base_style = @import("ui/ai_assistant_styles.zig").windowControl(), .on_click = cx.on(ChildDialog, self, toggleProps) }).mount(scope, cx);
+        props_close.meta.ownership.meta.test_id = "ai.child.settings.close";
+        try props_heading.appendChild(cx.allocator, props_close);
+        try self.props.appendChild(cx.allocator, props_heading);
+        const props_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+        self.props_scroll = props_scroll.container;
+        props_scroll.container.setStyleInline(cx.allocator, @import("ui/ai_children_styles.zig").settingsBody(cx.viewport.height));
+        props_scroll.container.meta.ownership.meta.test_id = "ai.child.settings.viewport";
+        props_scroll.content.setStyleInline(cx.allocator, @import("ui/ai_children_styles.zig").settingsContent(cx.tokens));
+        try self.props.appendChild(cx.allocator, props_scroll.container);
+        const name_field = try ui.boxStyled(cx, @import("ui/ai_children_styles.zig").settingsRow, .{});
+        const name_label = try ui.textStyled(cx, @import("ui/ai_children_styles.zig").settingLabel, "名称");
+        name_label.meta.ownership.meta.test_id = "ai.child.property.name.label";
+        name_label.setStyleInline(cx.allocator, .{ .width = .{ .px = 48 }, .flex_shrink = 0 });
+        try name_field.appendChild(cx.allocator, name_label);
+        const name = try ui.widgets.Input(.{ .value = self.name, .placeholder = "子智能体名称", .on_change = cx.on(ChildDialog, self, nameChanged) }).mount(scope, cx);
+        name.meta.ownership.meta.test_id = "ai.child.property.name";
+        name.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        try name_field.appendChild(cx.allocator, name);
+        try props_scroll.content.appendChild(cx.allocator, name_field);
+        const reuse_row = try ui.boxStyled(cx, @import("ui/ai_children_styles.zig").settingsRow, .{});
+        const reuse = try ui.widgets.Switch(.{ .checked = self.reusable, .on_change = cx.on(ChildDialog, self, reusableChanged) }).mount(scope, cx);
+        reuse.meta.ownership.meta.test_id = "ai.child.property.reusable";
+        const reuse_label = try ui.textStyled(cx, @import("ui/ai_children_styles.zig").settingLabel, "允许模型自动复用");
+        reuse_label.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        try reuse_row.appendChild(cx.allocator, reuse_label);
+        try reuse_row.appendChild(cx.allocator, reuse);
+        try props_scroll.content.appendChild(cx.allocator, reuse_row);
+        const options_section = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 4, .flex_shrink = 0 }, .{});
+        const options_divider = try ui.boxStyled(cx, @import("ui/ai_children_styles.zig").divider, .{});
+        try props_scroll.content.appendChild(cx.allocator, options_divider);
+        try options_section.appendChild(cx.allocator, try ui.textStyled(cx, @import("ui/ai_children_styles.zig").settingLabel, "授权范围"));
+        try props_scroll.content.appendChild(cx.allocator, options_section);
+        const info = record.child.?.info;
+        inline for (.{ "skill_ids", "mcp_ids" }, 0..) |field, kind| for (@field(info, field), 0..) |key, i| {
+            const chosen = for (@field(prefs, field)) |selected| {
+                if (std.mem.eql(u8, key, selected)) break true;
+            } else false;
+            if (chosen) {
+                if (kind == 0) self.skill_bits |= @as(u32, 1) << @intCast(i) else self.mcp_bits |= @as(u32, 1) << @intCast(i);
+            }
+            try self.option(options_section, if (kind == 0) "技能" else "MCP", key, @intCast(kind), i, chosen);
+        };
+        if (host.currentBinding()) |owner| {
+            const allowed = try parent.captureOwnerScope(owner);
+            defer if (allowed.inventory) |ids| parent.allocator.free(ids);
+            for (allowed.memberIds()) |session_id| {
+                if (self.target_count == 32) break;
+                const tab = host.tabForSession(session_id) orelse continue;
+                const handle = tab.content_owner.session;
+                const i = self.target_count;
+                self.target_handles[i] = handle;
+                self.target_count += 1;
+                const chosen = for (prefs.targets) |target| {
+                    if (target.eql(handle)) break true;
+                } else false;
+                if (chosen) self.target_bits |= @as(u32, 1) << @intCast(i);
+                try self.option(options_section, "目标", tab.titleSlice(), 2, i, chosen);
+            }
+        }
+        if (info.skill_ids.len == 0 and info.mcp_ids.len == 0 and self.target_count == 0) {
+            options_section.setDisplay(.none);
+            options_divider.setDisplay(.none);
+        }
+        try props_scroll.content.appendChild(cx.allocator, self.parent_label);
+        self.history_toggle = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "任务记录", .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 28 }, .padding = .{}, .direction = .row, .justify = .start, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .on_click = cx.on(ChildDialog, self, toggleHistory) }).mount(scope, cx);
+        for (self.history_toggle.children.items) |slot| slot.setDisplay(.none);
+        self.history_toggle.setStyleInline(cx.allocator, .{ .justify = .start });
+        self.history_toggle.meta.ownership.meta.test_id = "ai.child.tasks.toggle";
+        if (self.history_toggle.behavior.interaction.a11y) |*a11y| a11y.expanded = false;
+        self.history_arrow = try ui.iconTint(cx, ui.icons.chevron_right, app_theme.current().fg_2, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 });
+        self.history_label = try ui.textStyled(cx, @import("ui/ai_children_styles.zig").settingLabel, "任务记录");
+        self.history_label.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        self.history_label.meta.ownership.meta.test_id = "ai.child.tasks.label";
+        try self.history_toggle.appendChild(cx.allocator, self.history_arrow);
+        try self.history_toggle.appendChild(cx.allocator, self.history_label);
+        try props_scroll.content.appendChild(cx.allocator, self.history_toggle);
+        self.task_summary = try ui.textStyled(cx, @import("ui/ai_children_styles.zig").detail, "");
+        self.task_summary.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
+        self.task_summary.meta.ownership.meta.test_id = "ai.child.tasks";
+        self.task_summary.setDisplay(.none);
+        try props_scroll.content.appendChild(cx.allocator, self.task_summary);
+        const props_footer = try ui.boxStyled(cx, @import("ui/ai_children_styles.zig").settingsFooter, .{});
+        const apply = try ui.widgets.Button(.{ .label = "保存", .variant = .primary, .base_style = ui.BoxStyle{ .height = .{ .px = 28 }, .padding = .{ .left = 12, .right = 12 } }, .disabled = self.apply_disabled, .on_click = cx.on(ChildDialog, self, applyProperties) }).mount(scope, cx);
+        apply.meta.ownership.meta.test_id = "ai.child.property.save";
+        try props_footer.appendChild(cx.allocator, apply);
+        try self.props.appendChild(cx.allocator, props_footer);
+        const conversation = try ui.boxStyled(cx, @import("ui/ai_assistant_styles.zig").conversation, .{});
+        host.card_node = try ui.textStyled(cx, @import("ui/ai_assistant_styles.zig").secondary, "");
+        try conversation.appendChild(cx.allocator, host.card_node);
+        const scroll = try ui.widgets.ScrollArea(.{ .height = 276, .direction = .vertical }).mount(scope, cx);
+        @import("ui/ai_card_scroll.zig").showOverflowScrollbar(scroll);
+        scroll.content.setStyleInline(cx.allocator, .{ .will_change_transform = false });
+        scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .margin = .{ .bottom = 6 }, .overflow_hidden = true, .composited_group = true });
+        scroll.container.meta.ownership.meta.test_id = "ai.child.conversation.viewport";
+        try scroll.content.appendChild(cx.allocator, conversation);
+        try modal.body.appendChild(cx.allocator, scroll.container);
+        self.restore_parent.setStyleInline(cx.allocator, .{ .margin = .{ .left = 14, .right = 14, .bottom = 8 }, .flex_shrink = 0 });
+        try modal.body.appendChild(cx.allocator, self.restore_parent);
+        host.conversation = conversation;
+        host.conversation_viewport = scroll.container;
+        host.card_box = modal.dialog;
+        host.tail_follow = .{ .scroll = scroll };
+        try mountAssistantConversation(host, scope, modal.body, scroll, conversation, prompt);
+        if (host.images_view) |view| {
+            if (parent.images_view) |source| view.app = source.app;
+        }
+        try self.takePresentation(state, record);
+        if (service.bridgeFor(info.agent)) |bridge| {
+            const backend: *AiHost = @ptrCast(@alignCast(bridge.context));
+            backend.backend_owner = host;
+            host.execution_host = backend;
+        }
+        const hook = try cx.allocator.create(AiHost.PollHook);
+        hook.* = .{ .host = host };
+        try cx.addAfterLayoutHook(hook, AiHost.PollHook.run);
+        try scope.onCleanup(AiHost.PollHook, hook, AiHost.PollHook.cleanup);
+        try scope.onCleanup(ChildDialog, self, cleanup);
+        host.controller.model.visible = true;
+        host.controller.model.expanded = true;
+        host.dock.pin();
+        host.conversation_dirty = true;
+        host.refresh("AI 助手");
+        self.prefix();
+        return self;
+    }
+    fn toggleMaximize(self: *ChildDialog) void {
+        self.maximized = !self.maximized;
+        self.layout_width = 0;
+        self.host.cx.requestRedraw();
+    }
+    fn restoreParent(self: *ChildDialog) void {
+        const record = self.host.childRecord() orelse return;
+        const parent = self.host.assistant_states.?.findConversation(record.child.?.info.owning_parent_conversation) orelse return;
+        self.close();
+        AiHost.conversationAction(self.parent, parent.id, .restore);
+    }
+    fn nameChanged(self: *ChildDialog, value: []const u8) void {
+        self.name.set(value);
+    }
+    fn reusableChanged(self: *ChildDialog, value: bool) void {
+        self.reusable.set(value);
+    }
+    fn toggleProps(self: *ChildDialog) void {
+        self.props_open.set(!self.props_open.peek());
+        if (self.props_open.peek()) self.updateTaskSummary() catch |err| self.host.setFeedback(@errorName(err));
+    }
+    fn toggleHistory(self: *ChildDialog) void {
+        self.history_expanded = !self.history_expanded;
+        self.task_summary.setDisplay(if (self.history_expanded) .flex else .none);
+        self.history_arrow.setStyleInline(self.host.allocator, .{ .rotate = if (self.history_expanded) std.math.pi / 2.0 else 0 });
+        if (self.history_toggle.behavior.interaction.a11y) |*a11y| a11y.expanded = self.history_expanded;
+        self.host.cx.requestRedraw();
+    }
+    fn updateTaskSummary(self: *ChildDialog) !void {
+        const shared = self.host.shared_service.?;
+        const record = self.host.childRecord() orelse return error.ChildNotFound;
+        const agent = record.child.?.info.agent;
+        var facts: [32]@import("ai/task_budget.zig").Fact = undefined;
+        var count: usize = 0;
+        for (shared.service.store.task_facts.items) |saved| if (saved.fact.agent.eql(agent) and count < facts.len) {
+            facts[count] = saved.fact;
+            count += 1;
+        };
+        for (shared.service.task_roots.items) |root| {
+            root.lock();
+            defer root.mutex.unlock();
+            for (root.facts[0..root.count]) |fact| if (fact.agent.eql(agent)) {
+                const index: ?usize = for (facts[0..count], 0..) |old, i| {
+                    if (old.task.eql(fact.task)) break i;
+                } else null;
+                if (index) |i| facts[i] = fact else {
+                    if (count == facts.len) {
+                        std.mem.copyForwards(@import("ai/task_budget.zig").Fact, facts[0..31], facts[1..32]);
+                        count -= 1;
+                    }
+                    facts[count] = fact;
+                    count += 1;
+                }
+            };
+        }
+        var buffer: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        if (record.child.?.info.context_source) |source| try writer.print("继承快照：第 {d} 回合，{d} 条消息\n", .{ source.turn, source.message_count });
+        var label: [64]u8 = undefined;
+        try self.history_label.setTextContent(self.host.allocator, try std.fmt.bufPrint(&label, "任务记录 · {d}", .{count}));
+        if (count == 0) try writer.writeAll("暂无任务记录");
+        for (facts[0..count], 1..) |fact, number| try writer.print("第 {d} 次 · {s} · 请求 {d} / 工具 {d}\n", .{ number, switch (fact.status) {
+            .running => "运行中",
+            .waiting_model => "等待模型",
+            .waiting_children => "等待子任务",
+            .human_wait => "等待用户",
+            .settling => "收尾中",
+            .succeeded => "已完成",
+            .failed => "失败",
+            .cancelled => "已停止",
+            .outcome_unknown => "结果未知",
+            .interrupted => "已中断",
+        }, fact.counters.requests, fact.counters.calls });
+        try self.task_summary.setTextContent(self.host.allocator, writer.buffered());
+    }
+    fn close(self: *ChildDialog) void {
+        self.props_open.set(false);
+        self.open.set(false);
+        self.parent.cx.requestRedraw();
+    }
+    fn option(self: *ChildDialog, body: *ui.Node, prefix_label: []const u8, label: []const u8, kind: u8, index: usize, checked: bool) !void {
+        const toggle = try self.scope.createState(Toggle, .{ .dialog = self, .kind = kind, .index = @intCast(index) });
+        const signal = try self.scope.createSignal(bool, checked);
+        const row = try ui.boxStyled(self.host.cx, @import("ui/ai_children_styles.zig").settingsRow, .{});
+        const control = try ui.widgets.Switch(.{ .checked = signal, .on_change = self.host.cx.on(Toggle, toggle, Toggle.change) }).mount(self.scope, self.host.cx);
+        control.meta.ownership.meta.test_id = try std.fmt.bufPrint(&toggle.test_id, "ai.child.property.{d}.{d}", .{ kind, index });
+        var text: [512]u8 = undefined;
+        const text_node = try ui.textStyled(self.host.cx, @import("ui/ai_children_styles.zig").settingLabel, try std.fmt.bufPrint(&text, "{s}：{s}", .{ prefix_label, label }));
+        text_node.setStyleInline(self.host.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        try row.appendChild(self.host.allocator, text_node);
+        try row.appendChild(self.host.allocator, control);
+        try body.appendChild(self.host.allocator, row);
+    }
+    const Toggle = struct {
+        dialog: *ChildDialog,
+        kind: u8,
+        index: u5,
+        test_id: [64]u8 = undefined,
+        fn change(self: *Toggle, enabled: bool) void {
+            const bits = switch (self.kind) {
+                0 => &self.dialog.skill_bits,
+                1 => &self.dialog.mcp_bits,
+                else => &self.dialog.target_bits,
+            };
+            const mask = @as(u32, 1) << self.index;
+            if (enabled) bits.* |= mask else bits.* &= ~mask;
+        }
+    };
+    fn applyProperties(self: *ChildDialog) void {
+        self.saveProperties() catch |err| self.host.setFeedback(@errorName(err));
+    }
+    fn saveProperties(self: *ChildDialog) !void {
+        if (!self.host.childCanWrite()) return error.ParentBindingChanged;
+        const record = self.host.childRecord() orelse return error.ChildNotFound;
+        const life = @import("ai/session_lifecycle.zig");
+        var prefs = life.Store.childPreferences(record);
+        var skills: [32][]const u8 = undefined;
+        var skill_count: usize = 0;
+        var mcps: [32][]const u8 = undefined;
+        var mcp_count: usize = 0;
+        var targets: [32]@import("host/identity.zig").SessionHandle = undefined;
+        var target_count: usize = 0;
+        for (record.child.?.info.skill_ids, 0..) |key, i| if (self.skill_bits & (@as(u32, 1) << @intCast(i)) != 0) {
+            skills[skill_count] = key;
+            skill_count += 1;
+        };
+        for (record.child.?.info.mcp_ids, 0..) |key, i| if (self.mcp_bits & (@as(u32, 1) << @intCast(i)) != 0) {
+            mcps[mcp_count] = key;
+            mcp_count += 1;
+        };
+        for (self.target_handles[0..self.target_count], 0..) |handle, i| if (self.target_bits & (@as(u32, 1) << @intCast(i)) != 0) {
+            targets[target_count] = handle;
+            target_count += 1;
+        };
+        const current_targets = if (record.binding != null) self.host.shared_service.?.service.store.agent(record.child.?.info.agent).?.targets else prefs.targets;
+        if (!@import("config/settings_schema.zig").same(current_targets, targets[0..target_count]) and record.binding != null) {
+            const runner = self.host.shared_service.?.service.runnerFor(record.child.?.info.agent) orelse return error.AgentNotFound;
+            if (runner.thread != null or record.task_pending) return error.ChildScopeBusy;
+            const fence = try self.host.shared_service.?.service.store.fence(record.id);
+            const operation = if (record.ending) |ending| ending.operation else @import("host/identity.zig").HostOperationId.generate();
+            try self.host.shared_service.?.service.endConversation(fence, operation);
+            if (record.binding != null) return error.ResourceCleanupPending;
+        }
+        prefs.name = self.name.peek();
+        prefs.reusable = self.reusable.peek();
+        prefs.skill_ids = skills[0..skill_count];
+        prefs.mcp_ids = mcps[0..mcp_count];
+        prefs.targets = targets[0..target_count];
+        const shared = self.host.shared_service.?;
+        const parent = try shared.service.store.fence(record.child.?.info.owning_parent_conversation);
+        const owner = (try shared.service.store.validate(parent)).binding.?.owner;
+        const allowed = try self.parent.captureOwnerScope(owner);
+        defer if (allowed.inventory) |ids| self.parent.allocator.free(ids);
+        try shared.service.store.updateChildSettings(parent, record.child.?.info.agent, self.revision, prefs, allowed);
+        self.revision = record.child_settings_revision;
+        self.props_open.set(false);
+        try self.title.setTextContent(self.host.allocator, prefs.name);
+        self.host.setFeedback("子配置已保存，作用于后续任务");
+    }
+    fn takePresentation(self: *ChildDialog, state: *@import("ai/assistant_store.zig").State, record: *@import("ai/session_lifecycle.zig").Record) !void {
+        const host = self.host;
+        host.tool_results.deinit();
+        host.tool_results = state.tool_results orelse @import("ai/tool_results.zig").Store.init(host.allocator);
+        state.tool_results = null;
+        host.history = state.history;
+        state.history = .empty;
+        host.wire_history = state.wire_history;
+        state.wire_history = .{};
+        host.current_turn = state.current_turn;
+        state.current_turn = .{};
+        host.controller.stream.deinit();
+        host.controller.stream = state.stream;
+        state.stream = @import("ai/card_stream.zig").Stream.init(host.allocator);
+        host.last_user_text = state.last_user_text;
+        state.last_user_text = null;
+        host.last_user_wire = state.last_user_wire;
+        state.last_user_wire = null;
+        host.last_user_attachments = state.last_user_attachments;
+        state.last_user_attachments = null;
+        host.last_user_images = state.last_user_images;
+        state.last_user_images = null;
+        if (host.wire_history.messages.len == 0 and record.history.messages.len != 0) host.wire_history = try @import("ai/wire_history.zig").History.copy(host.allocator, record.history.messages, "");
+        if (host.history.items.len == 0 and host.last_user_text == null) host.history = try @import("ai/conversation_presentation.zig").restoreHistory(host.allocator, record.presentation, record.last_turn, record.history.messages);
+        if (state.controls.model == null) try state.controls.setModel(host.allocator, @import("ai/session_lifecycle.zig").Store.childPreferences(record).model);
+        const prefs = @import("ai/session_lifecycle.zig").Store.childPreferences(record);
+        state.controls.effort = prefs.effort;
+        state.controls.permission = prefs.permission;
+        state.controls.thinking = prefs.thinking;
+        state.controls.session_retention = prefs.session_retention;
+        state.controls.execution_mode = prefs.execution_mode;
+    }
+    fn releaseView(self: *ChildDialog) !void {
+        if (self.released) return;
+        const host = self.host;
+        try host.persistDisplayedDraft();
+        try host.saveDisplayedPresentation();
+        const state = host.assistant_states.?.find(host.display_conversation.?) orelse return error.ConversationNotFound;
+        if (state.draft) |old| host.allocator.free(old);
+        state.draft = try host.allocator.dupe(u8, host.prompt.peek());
+        state.history = host.history;
+        host.history = .empty;
+        state.wire_history = host.wire_history;
+        host.wire_history = .{};
+        state.current_turn = host.current_turn;
+        host.current_turn = .{};
+        state.stream.deinit();
+        state.stream = host.controller.stream;
+        host.controller.stream = @import("ai/card_stream.zig").Stream.init(host.allocator);
+        if (state.tool_results) |*old| old.deinit();
+        state.tool_results = host.tool_results;
+        host.tool_results = @import("ai/tool_results.zig").Store.init(host.allocator);
+        state.last_user_text = host.last_user_text;
+        host.last_user_text = null;
+        state.last_user_wire = host.last_user_wire;
+        host.last_user_wire = null;
+        state.last_user_attachments = host.last_user_attachments;
+        host.last_user_attachments = null;
+        state.last_user_images = host.last_user_images;
+        host.last_user_images = null;
+        if (host.execution_host) |backend| {
+            if (backend.backend_owner == host) backend.backend_owner = self.parent;
+        }
+        host.execution_host = null;
+        self.released = true;
+    }
+    fn cleanup(self: *ChildDialog) void {
+        self.releaseView() catch |err| self.parent.setFeedback(@errorName(err));
+        if (self.parent.child_dialog == self) self.parent.child_dialog = null;
+    }
+    fn reflow(self: *ChildDialog) void {
+        if (!std.meta.eql(self.painted_colors, app_theme.current())) {
+            self.painted_colors = app_theme.current();
+            self.props_chrome.setStyleInline(self.host.cx.allocator, @import("ui/ai_children_styles.zig").settings(self.host.cx.tokens));
+            self.dialog.setBackground(app_theme.current().overlay);
+            _ = self.history_arrow.setTint(app_theme.current().fg_2);
+        }
+        if (self.layout_width != self.host.cx.viewport.width or self.layout_height != self.host.cx.viewport.height) {
+            self.layout_width = self.host.cx.viewport.width;
+            self.layout_height = self.host.cx.viewport.height;
+            self.props_scroll.setStyleInline(self.host.cx.allocator, @import("ui/ai_children_styles.zig").settingsBody(self.layout_height));
+            self.dialog.setStyleInline(self.host.cx.allocator, .{ .width = .{ .px = @max(0, if (self.maximized) self.layout_width - 32 else @min(600, self.layout_width - 32)) }, .height = .{ .px = @max(0, if (self.maximized) self.layout_height - 32 else @min(456, self.layout_height - 32)) }, .max_height = @max(0, if (self.maximized) self.layout_height - 32 else @min(456, self.layout_height - 32)) });
+        }
+        const record = self.host.childRecord() orelse return;
+        const entry = @import("ai/child_projection.zig").entry(&self.host.shared_service.?.service, record);
+        self.status_dot.setBackground(if (entry.group == .attention) app_theme.current().warn else if (entry.running) app_theme.current().accent else app_theme.current().ok);
+    }
+    fn prefix(self: *ChildDialog) void {
+        prefixNode(self.host.cx, self.scope, self.dialog) catch {};
+        if (self.host.composer_controls) |controls| for (controls.popups[0..controls.popup_count]) |popup| prefixNode(self.host.cx, self.scope, popup.widget.chrome) catch {};
+    }
+    fn prefixNode(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node) !void {
+        if (node.meta.ownership.meta.test_id) |key| {
+            if (std.mem.startsWith(u8, key, "ai.") and !std.mem.startsWith(u8, key, "ai.child.")) {
+                const owned = try std.fmt.allocPrint(cx.allocator, "ai.child.{s}", .{key[3..]});
+                if (node.frame_state.state_bits.flags.test_id_owned) cx.allocator.free(key);
+                node.meta.ownership.meta.test_id = owned;
+                node.frame_state.state_bits.flags.test_id_owned = true;
+            }
+        }
+        for (node.children.items) |child| try prefixNode(cx, scope, child);
+    }
+};
+
 const RenameTabCtx = struct {
     menu: *MenuHost,
     tab_index: usize,
@@ -6542,6 +7629,7 @@ const MenuHost = struct {
             self.smartRightClick();
             return;
         }
+        if (self.workspace) |workspace| workspace.setTabMenuOpen(true);
         const kind = @import("ui/context_menu_state.zig").kindFor(trigger);
         self.context_host = if (kind == .host_asset) host_index else null;
         self.captured_host = if (self.context_host) |index| if (self.workspace) |workspace| workspace.hostId(index) else null else null;
@@ -6570,6 +7658,7 @@ const MenuHost = struct {
             .background_active = if (self.background_socks) |background| if (self.captured_asset) |asset| background.hasAsset(asset) else false else false,
         });
         self.render() catch |err| {
+            if (self.workspace) |workspace| workspace.setTabMenuOpen(false);
             applog.warn(.ui, "menu render failed: {s}", .{@errorName(err)});
             return;
         };
@@ -6609,13 +7698,17 @@ const MenuHost = struct {
     }
 
     fn hide(self: *MenuHost) void {
+        if (self.workspace) |workspace| workspace.setTabMenuOpen(false);
         if (self.popover_open) |open| open.set(false);
         self.state.dismiss();
         self.cx.requestRedraw();
     }
 
     fn popoverChanged(self: *MenuHost, open: bool) void {
-        if (!open) self.state.dismiss();
+        if (!open) {
+            if (self.workspace) |workspace| workspace.setTabMenuOpen(false);
+            self.state.dismiss();
+        }
     }
 
     fn popoverAnchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
@@ -7467,6 +8560,7 @@ const SettingsHost = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
     controller: SettingsController,
+    extensions_view: ?*@import("config/ai_extensions_settings.zig").View = null,
     runtime: *RuntimeConfig,
     io: std.Io,
     panel: *ui.Node,
@@ -7476,8 +8570,6 @@ const SettingsHost = struct {
     navigation: ?*ui.Node = null,
     header_title: ?*ui.Node = null,
     header_icon: ?*ui.Node = null,
-    identity_label: ?*ui.Node = null,
-    identity_icon: ?*ui.Node = null,
     layout: ?*ui.Node = null,
     /// Right content column (rebuilt on page switch / save / discard).
     content: *ui.Node = undefined,
@@ -7912,6 +9004,10 @@ const SettingsHost = struct {
 
     fn toggle(self: *SettingsHost) void {
         if (self.busy()) return;
+        if (self.open) if (self.extensions_view) |view| if (view.busy() or view.hasEditor()) {
+            self.refresh("请先完成扩展操作，并应用或取消 MCP 编辑。");
+            return;
+        };
         if (self.open) if (self.providers) |providers| if (providers.hasModelEditor()) {
             _ = providers.consumeEscape();
             return;
@@ -7979,6 +9075,7 @@ const SettingsHost = struct {
     }
 
     fn searchChanged(self: *SettingsHost, query: []const u8) void {
+        if (self.extensions_view) |view| if (view.busy() or view.hasEditor()) return;
         self.controller.setSearch(query) catch |err| {
             self.refresh(@errorName(err));
             return;
@@ -8002,6 +9099,10 @@ const SettingsHost = struct {
 
     fn selectPage(self: *SettingsHost, index: usize) void {
         if (self.busy()) return;
+        if (self.extensions_view) |view| if (view.busy() or view.hasEditor()) {
+            self.refresh("请先完成扩展操作，并应用或取消 MCP 编辑。");
+            return;
+        };
         self.rememberScroll();
         self.controller.setSearch("") catch |err| {
             self.refresh(@errorName(err));
@@ -8022,6 +9123,10 @@ const SettingsHost = struct {
 
     fn saveWithClose(self: *SettingsHost, close_after_save: bool) void {
         if (self.busy()) return;
+        if (self.extensions_view) |view| if (view.busy() or view.hasEditor()) {
+            self.refresh("请先完成扩展操作，并应用或取消 MCP 编辑。");
+            return;
+        };
         if (self.mounted_page) |page| if (page.isComposing()) return;
         if (self.providers) |providers| if (providers.isComposing() or providers.hasModelEditor()) return;
         if (!self.controller.model.dirty) {
@@ -8470,6 +9575,7 @@ const SettingsHost = struct {
         self.mounted_page = null;
         self.dismissPicker();
         self.providers = null;
+        self.extensions_view = null;
         if (self.content_scope) |old| old.dispose();
         self.content_scope = null;
         // Scope callbacks are released while their nodes remain valid. Detach
@@ -8500,6 +9606,7 @@ const SettingsHost = struct {
             .action = contentAction,
             .action_state = contentActionState,
             .mount_providers = mountProviders,
+            .mount_extensions = mountExtensions,
             .mount_provider_action = mountProviderAction,
             .read = readContentValue,
             .edit = editContentValue,
@@ -9124,6 +10231,12 @@ const SettingsHost = struct {
         return .{};
     }
 
+    fn mountExtensions(raw: *anyopaque, cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
+        const self: *SettingsHost = @ptrCast(@alignCast(raw));
+        const view = try @import("config/ai_extensions_settings.zig").View.mount(cx, scope, &self.controller, self.dataDirectory(), .{ .context = raw, .changed = providersChanged });
+        self.extensions_view = view;
+        return view.root;
+    }
     fn mountProviders(raw: *anyopaque, cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
         const providers = try @import("config/ai_provider_settings.zig").ProviderView.mountWithHooks(cx, scope, &self.controller, .{ .context = raw, .changed = providersChanged });
@@ -9374,7 +10487,10 @@ fn onSettingsToggleClick(raw: *anyopaque) void {
 }
 
 /// Root-level keyboard shortcuts (⌘B sidebar, ⌘K quick connect).
+const MistChrome = @import("ui/workspace_chrome.zig");
 const AppNavHost = struct {
+    mist: ?*MistChrome.View = null,
+    mist_transfer: ?*@import("ui/transfer_toolbar_view.zig").View = null,
     startup_view: ?*@import("ui/startup_view.zig").View = null,
     file_application: ?*file_application_mod.Host = null,
     allocator: std.mem.Allocator,
@@ -9384,6 +10500,8 @@ const AppNavHost = struct {
     quick_host: ?*QuickConnectHost = null,
     sidebar_panel: *ui.Node = undefined,
     sidebar_grip: ?*ui.Node = null,
+    sidebar_resizing: bool = false,
+    sidebar_saved_width: f32 = @import("ui/sidebar_model.zig").default_width,
     sidebar_drag_width: f32 = @import("ui/sidebar_model.zig").default_width,
     sidebar_alignment_pending_before_drag: bool = true,
     sidebar_full: ?*ui.Node = null,
@@ -9616,7 +10734,9 @@ const AppNavHost = struct {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
         switch (event.phase) {
             .start => {
-                self.sidebar_drag_width = self.quick.sidebar.expanded_width;
+                self.sidebar_saved_width = self.quick.sidebar.expanded_width;
+                self.sidebar_resizing = true;
+                self.sidebar_drag_width = self.sidebar_panel.globalRect().w;
                 self.sidebar_alignment_pending_before_drag = self.quick.sidebar.initial_width_pending;
                 self.quick.sidebar.initial_width_pending = false;
             },
@@ -9632,10 +10752,11 @@ const AppNavHost = struct {
                 };
             },
             .cancel => {
-                self.quick.sidebar.expanded_width = self.sidebar_drag_width;
+                self.quick.sidebar.expanded_width = self.sidebar_saved_width;
                 self.quick.sidebar.initial_width_pending = self.sidebar_alignment_pending_before_drag;
             },
         }
+        if (event.phase == .end or event.phase == .cancel) self.sidebar_resizing = false;
         self.applySidebar();
         self.cx.requestRedraw();
     }
@@ -9800,7 +10921,7 @@ const AppNavHost = struct {
         // AppKit reports only controls occupying the client header. In native
         // fullscreen its hidden header has none; zoom/maximize keeps them.
         const title_chrome_changed = if (self.app_runtime) |app|
-            if (self.title_bar) |bar| shell_styles.syncTitleChrome(self.allocator, bar, app.chromeState()) else false
+            if (self.title_bar) |bar| shell_styles.syncWorkspaceChrome(self.allocator, bar, app.chromeState(), self.quick.sidebar.collapsed) else false
         else
             false;
         if (self.application_host) |host| {
@@ -9880,14 +11001,13 @@ const AppNavHost = struct {
         self.syncHomeConnect();
         self.syncHostArtwork();
         var sidebar_width_changed = false;
-        if (self.quick.sidebar.initial_width_pending) if (self.workspace) |workspace| if (workspace.visibleLocalTerminalTabRect()) |rect| {
-            const left = if (self.sidebar_panel.parent) |row| row.globalRect().x else shell_styles.outer;
-            sidebar_width_changed = self.quick.sidebar.alignInitialWidth(rect.x + rect.w, left, width);
-            if (sidebar_width_changed) self.applySidebar();
-        };
-        const sidebar_width: ui.Sizing = .{ .px = self.quick.sidebar.expanded_width };
+        // Content-fit tabs no longer determine the width of the independent sidebar.
+        self.quick.sidebar.initial_width_pending = false;
+        const compact_sidebar = if (self.settings) |settings| settings.runtime.value.ui.sidebar_width == null and width < 1000 and !self.sidebar_resizing else width < 1000 and !self.sidebar_resizing;
+        const effective_sidebar_width: f32 = if (compact_sidebar) 220 else self.quick.sidebar.expanded_width;
+        const sidebar_width: ui.Sizing = .{ .px = effective_sidebar_width };
         if (!std.meta.eql(self.sidebar_panel.style.width, sidebar_width)) {
-            self.applySidebar();
+            self.sidebar_panel.setStyle(self.allocator, .width, sidebar_width);
             sidebar_width_changed = true;
         }
         const before = self.quick.sidebar.collapsed;
@@ -9930,7 +11050,7 @@ const AppNavHost = struct {
             if (self.ai) |ai| if (ai.toolbar_trigger) |trigger| trigger.setDisplay(if (has_session) .flex else .none);
             if (self.chrome.transfer_badge) |badge| {
                 const count = if (self.transfer_host) |transfer| transfer.unreadTransferCount() else 0;
-                badge.setDisplay(if (count == 0) .none else .flex);
+                badge.setDisplay(.none);
                 if (count != 0 and badge.children.items.len != 0) {
                     var count_buffer: [24]u8 = undefined;
                     const label = std.fmt.bufPrint(&count_buffer, "{d}", .{count}) catch "";
@@ -9976,8 +11096,8 @@ const AppNavHost = struct {
             const plugin_status = if (workspace.active_tab) |index| index < workspace.tabs.items.len and workspace.tabs.items[index].plugin_renderer != null else false;
             const forward_status = if (status_capabilities) |snapshot| @import("host/actions.zig").project(.toggle_socks, snapshot).visible else false;
             if (self.session_details) |details| details.setDisplay(if (has_session and (plugin_status or route_status or (terminal_active and !local_active))) .flex else .none);
-            if (self.socks_chip) |chip| chip.setDisplay(if (forward_status or (terminal_active and !local_active)) .flex else .none);
-            if (self.status_bar) |bar| bar.setDisplay(if (local_active or (has_session and !terminal_active and !route_status and !transfer_status and !plugin_status)) .none else .flex);
+            if (self.socks_chip) |chip| chip.setDisplay(if (self.mist != null or forward_status or (terminal_active and !local_active)) .flex else .none);
+            if (self.status_bar) |bar| bar.setDisplay(if (self.mist != null or local_active or (has_session and !terminal_active and !route_status and !transfer_status and !plugin_status)) .none else .flex);
             if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
                 controls.sidebar_width = self.quick.sidebar.width();
                 self.refreshBroadcastStatus(controls);
@@ -9985,25 +11105,25 @@ const AppNavHost = struct {
                 // Group status follows the focused member, including Local.
                 // Keep the same broadcast control on the visible status bar.
                 const local_status = if (local_active) self.local_status_view else null;
-                const destination = if (local_status) |view| view.root else controls.bar;
-                const anchor = if (local_status) |view| view.theme_button else controls.chain_button;
+                const destination = if (self.mist) |chrome| chrome.groups[0] else if (local_status) |view| view.root else controls.bar;
+                const anchor = if (self.mist != null) controls.chain_button else if (local_status) |view| view.theme_button else controls.chain_button;
                 if (controls.broadcast_button.parent != destination) {
                     if (controls.broadcast_button.parent) |parent| parent.removeChild(controls.broadcast_button);
                     destination.insertChildBefore(self.allocator, controls.broadcast_button, anchor) catch {};
                 }
             };
             if (self.local_status_view) |view| {
-                view.root.setDisplay(if (local_active) .flex else .none);
+                view.root.setDisplay(if (self.mist == null and local_active) .flex else .none);
                 view.setSidebarCollapsed(self.quick.sidebar.collapsed);
                 view.layoutForWidth(@max(0, self.cx.viewport.width - 2 * shell_styles.outer));
             }
-            if (self.collapsed_sidebar) |restore| {
+            if (self.mist == null) if (self.collapsed_sidebar) |restore| {
                 const destination = if (local_active and self.local_status_view != null) self.local_status_view.?.root else self.status_bar;
                 if (destination) |bar| if (restore.root.parent != bar) {
                     if (restore.root.parent) |parent| parent.removeChild(restore.root);
                     bar.insertChildBefore(self.allocator, restore.root, if (bar.children.items.len != 0) bar.children.items[0] else null) catch {};
                 };
-            }
+            };
             self.refreshLocalStatus(local_active) catch |err| applog.warn(.ui, "local status: {s}", .{@errorName(err)});
             if (self.status_detail_view) |view| {
                 if (self.local_status_view) |status_view| view.reanchor(status_view.root.globalRect().y);
@@ -10450,7 +11570,7 @@ const AppNavHost = struct {
             if (self.workspace) |workspace| workspace.statusFailure(@errorName(err));
             return;
         };
-        const top = if (self.local_status_view) |status_view| if (status_view.root.style.display != .none) status_view.root.globalRect().y else if (self.status_bar) |bar| bar.globalRect().y else trigger.globalRect().y else trigger.globalRect().y;
+        const top = trigger.globalRect().y;
         view.show(trigger, top) catch |err| {
             if (self.workspace) |workspace| workspace.statusFailure(@errorName(err));
         };
@@ -10460,6 +11580,7 @@ const AppNavHost = struct {
         // Commands and menus use the visible statusbar entry, including its
         // click-to-pin behavior. The Local bar is hidden during SSH sessions.
         const trigger = trigger: {
+            if (self.mist != null) if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| break :trigger controls.theme_button;
             if (self.local_status_view) |status_view| if (status_view.root.isDisplayedInTree()) {
                 break :trigger if (status_view.theme_button.style.display != .none) status_view.theme_button else status_view.more_button;
             };
@@ -10554,10 +11675,6 @@ const AppNavHost = struct {
         if (self.settings) |settings| if (settings.header_icon) |icon| {
             _ = icon.setTint(c.accent);
         };
-        if (self.settings) |settings| if (settings.identity_label) |label| label.setTextColor(c.fg_2);
-        if (self.settings) |settings| if (settings.identity_icon) |icon| {
-            _ = icon.setTint(c.fg_2);
-        };
         if (self.settings) |settings| if (settings.search_input) |input| settings_content_view.styles.paintSearch(self.cx, &input);
         if (self.chrome.toolbar_tint) |tint| tint.set(c.fg_2);
         if (self.chrome.transfer_badge) |badge| badge.setBackground(c.ok);
@@ -10598,7 +11715,7 @@ const AppNavHost = struct {
         const workspace = self.workspace orelse return;
         const index = workspace.active_tab orelse return;
         if (index >= workspace.tabs.items.len or !workspace.tabs.items[index].content_owner.eql(.{ .session = owner })) return;
-        detail.show(kind, trigger, view.root.globalRect().y, view.encoding_button.style.display == .none or view.grid_button.style.display == .none) catch |err| workspace.statusFailure(@errorName(err));
+        detail.show(kind, trigger, trigger.globalRect().y, view.encoding_button.style.display == .none or view.grid_button.style.display == .none) catch |err| workspace.statusFailure(@errorName(err));
     }
 
     fn refreshLocalStatus(self: *AppNavHost, active: bool) !void {
@@ -11246,7 +12363,21 @@ const AppNavHost = struct {
         workspace.group_roster = &self.roster;
         workspace.group_action_context = self;
         workspace.group_action = groupWorkspaceAction;
-        workspace.ai_grouping_bridge = .{ .context = self, .prepare = prepareTabGrouping, .commit = commitTabGrouping };
+        workspace.ai_grouping_bridge = .{ .context = self, .prepare = prepareTabGrouping, .commit = commitTabGrouping, .capture = captureTabGrouping, .settle = settleTabGrouping, .release = releaseTabGrouping };
+    }
+    fn captureTabGrouping(raw: *anyopaque, source: @import("host/identity.zig").SessionHandle, target: ?@import("host/identity.zig").SessionHandle) !@import("ai/tab_grouping.zig").Settlement {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        if (self.ai) |ai| if (ai.assistant_states) |store| return @import("ai/tab_grouping.zig").capture(store, source, target);
+        return .{ .operation = @import("host/identity.zig").HostOperationId.generate() };
+    }
+    fn settleTabGrouping(raw: *anyopaque, intent: @import("ai/tab_grouping.zig").Settlement) !bool {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        if (self.ai) |ai| if (ai.assistant_states) |store| return @import("ai/tab_grouping.zig").settle(store, intent);
+        return true;
+    }
+    fn releaseTabGrouping(raw: *anyopaque, intent: @import("ai/tab_grouping.zig").Settlement) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        if (self.ai) |ai| if (ai.assistant_states) |store| @import("ai/tab_grouping.zig").release(store, intent);
     }
     fn prepareTabGrouping(raw: *anyopaque, drop: @import("ai/tab_grouping.zig").Drop) !@import("ai/tab_grouping.zig").Plan {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
@@ -11789,47 +12920,62 @@ fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *Setti
     const bar = try ui.boxStyled(cx, shell_styles.title, .{});
     bar.meta.ownership.meta.test_id = "workspace.titlebar";
     nav_host.title_bar = bar;
+    if (nav_host.collapsed_sidebar) |restore| try bar.appendChild(cx.allocator, restore.root);
     const icon_tint = try scope.createSignal(?ui.Color, p.fg_secondary);
     nav_host.chrome.toolbar_tint = icon_tint;
     const controls = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 6 }, .{});
     nav_host.title_controls = controls;
     controls.setDisplay(.flex);
     try bar.appendChild(cx.allocator, controls);
-    // Live tab strip: Workspace appends/removes/selects tab nodes here.
-    try controls.appendChild(cx.allocator, workspace.tab_bar);
-    const tab_add = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.plus, .icon_tint = icon_tint, .a11y_label = "新建会话", .on_click = cx.on(AppNavHost, nav_host, AppNavHost.showSessionMenu) }).mount(scope, cx);
+    const tabs = try ui.boxStyled(cx, shell_styles.tabCapsule, .{});
+    tabs.meta.ownership.meta.test_id = "workspace.tabs.capsule";
+    tabs.setStyleInline(cx.allocator, .{ .gap = 4, .padding = ui.Padding.all(4) });
+    try controls.appendChild(cx.allocator, tabs);
+    try tabs.appendChild(cx.allocator, workspace.tab_bar);
+    const tab_add = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.plus, .icon_size = @as(f32, 16), .icon_tint = icon_tint, .a11y_label = "新建会话", .on_click = cx.on(AppNavHost, nav_host, AppNavHost.showSessionMenu) }).mount(scope, cx);
     shell_styles.titleToolbarButton(cx.allocator, tab_add);
     tab_add.meta.ownership.meta.test_id = "toolbar.new_session";
     nav_host.session_menu_anchor = tab_add;
-    try controls.appendChild(cx.allocator, tab_add);
+    try tabs.appendChild(cx.allocator, tab_add);
     try controls.appendChild(cx.allocator, try ui.spacer(cx));
-    const actions = try ui.hstack(cx, .{ .gap = 5, .align_items = .center, .flex_shrink = 0 }, .{});
+    const actions = try ui.hstack(cx, .{ .gap = 8, .height = .{ .px = 36 }, .align_items = .center, .flex_shrink = 0 }, .{});
     try controls.appendChild(cx.allocator, actions);
-    const history_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.history, .icon_tint = icon_tint, .a11y_label = "回看日志", .on_click = cx.on(HistoryHost, history_host, openGlobalHistory) }).mount(scope, cx);
+    var groups: [3]*ui.Node = undefined;
+    for (&groups, 0..) |*group, index| {
+        group.* = try ui.boxStyled(cx, shell_styles.titleFloating, .{});
+        group.*.meta.ownership.meta.test_id = switch (index) {
+            0 => "toolbar.group.connection",
+            1 => "toolbar.group.history",
+            else => "toolbar.group.application",
+        };
+        try actions.appendChild(cx.allocator, group.*);
+    }
+    const history_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.history, .icon_size = @as(f32, 16), .icon_tint = icon_tint, .a11y_label = "回看日志", .on_click = cx.on(HistoryHost, history_host, openGlobalHistory) }).mount(scope, cx);
     shell_styles.titleToolbarButton(cx.allocator, history_button);
     history_button.meta.ownership.meta.test_id = "toolbar.history";
     history_host.trigger = history_button;
-    try actions.appendChild(cx.allocator, history_button);
+    try groups[1].appendChild(cx.allocator, history_button);
     const xfer_click = try cx.allocator.create(NavClick);
     xfer_click.* = .{ .host = nav_host, .kind = .transfer };
     const transfer_anchor = try transferIcon(cx, scope, icon_tint, nav_host, onNavClick, @ptrCast(xfer_click));
     nav_host.transfer_anchor = transfer_anchor;
-    try actions.appendChild(cx.allocator, transfer_anchor);
+    try groups[0].appendChild(cx.allocator, transfer_anchor);
     const ai_click = try cx.allocator.create(AiClick);
     ai_click.* = .{ .host = ai_host };
     const ai_trigger = try titleIcon(cx, scope, "✨", icon_tint, false, onAiToggleClickLegacy, @ptrCast(ai_click));
     ai_host.toolbar_trigger = ai_trigger;
-    try actions.appendChild(cx.allocator, ai_trigger);
+    try groups[2].appendChild(cx.allocator, ai_trigger);
     const notification_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.bell, .icon_size = @as(f32, 16), .icon_tint = icon_tint, .a11y_label = "通知" }).mount(scope, cx);
     shell_styles.titleToolbarButton(cx.allocator, notification_button);
     notification_button.meta.ownership.meta.test_id = "toolbar.notifications";
     nav_host.notification_anchor = notification_button;
-    try actions.appendChild(cx.allocator, notification_button);
+    try groups[1].appendChild(cx.allocator, notification_button);
     const settings_click = try cx.allocator.create(SettingsNavClick);
     settings_click.* = .{ .host = settings_host, .page_index = 0 };
     const settings_trigger = try titleIcon(cx, scope, "⚙️", icon_tint, true, onSettingsTitleClick, @ptrCast(settings_click));
     settings_host.focus_return = settings_trigger;
-    try actions.appendChild(cx.allocator, settings_trigger);
+    try groups[2].appendChild(cx.allocator, settings_trigger);
+    nav_host.mist = try MistChrome.View.mount(cx, scope, workspace, controls, tabs, actions, groups);
     return bar;
 }
 
@@ -11845,9 +12991,11 @@ fn titleIcon(cx: *ui.Cx, scope: *ui.Scope, icon: []const u8, color: *ui.Signal(?
 
 /// ⇅ 传输图标（含右上角计数徽标）。
 fn transferIcon(cx: *ui.Cx, scope: *ui.Scope, tint: *ui.Signal(?ui.Color), nav_host: *AppNavHost, on_click: anytype, ctx: *anyopaque) !*ui.Node {
-    const icn = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.arrow_down_up, .icon_size = @as(f32, 16), .icon_tint = tint, .a11y_label = "全局传输管理器", .on_click = ui.Handler(void){ .callback = on_click, .context = ctx } }).mount(scope, cx);
+    _ = tint;
+    const icn = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "全局传输管理器", .on_click = ui.Handler(void){ .callback = on_click, .context = ctx } }).mount(scope, cx);
     shell_styles.titleToolbarButton(cx.allocator, icn);
     icn.meta.ownership.meta.test_id = "toolbar.transfers";
+    nav_host.mist_transfer = try @import("ui/transfer_toolbar_view.zig").View.mount(cx, scope, icn);
     const badge = try ui.box(cx, .{
         .position = .absolute,
         .inset = .{ .top = .{ .px = 1 }, .right = .{ .px = 0 } },
@@ -11924,197 +13072,10 @@ const PresentationWindow = struct {
     }
 };
 
-fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
-    const presentation_window = try scope.allocator.create(PresentationWindow);
-    presentation_window.* = .{ .context = @intFromPtr(cx), .target = @import("platform/presentation_wakeup.zig").registerWindow(@intFromPtr(cx)) };
-    try scope.adoptResource(presentation_window, struct {
-        fn destroy(raw: *anyopaque, allocator: std.mem.Allocator) void {
-            const value: *PresentationWindow = @ptrCast(@alignCast(raw));
-            value.cleanup(allocator);
-        }
-    }.destroy);
-    const data_paths = try cx.allocator.create(DataPaths);
-    data_paths.* = try DataPaths.forApplication(cx.allocator);
-    try scope.onCleanup(DataPaths, data_paths, cleanupDataPaths);
-    const config_path = data_paths.config;
-    const hosts_path = data_paths.hosts;
-    const app_config = if (process_windows) |process| blk: {
-        if (process.runtime_config) |existing| break :blk existing;
-        const runtime = try std.heap.c_allocator.create(RuntimeConfig);
-        errdefer std.heap.c_allocator.destroy(runtime);
-        runtime.* = try RuntimeConfig.loadOrDefault(cx.io, std.Io.Dir.cwd(), std.heap.c_allocator, config_path);
-        process.runtime_config = runtime;
-        break :blk runtime;
-    } else blk: {
-        const runtime = try cx.allocator.create(RuntimeConfig);
-        runtime.* = try RuntimeConfig.loadOrDefault(cx.io, std.Io.Dir.cwd(), cx.allocator, config_path);
-        try scope.onCleanup(RuntimeConfig, runtime, cleanupRuntimeConfig);
-        break :blk runtime;
-    };
-    if (!@import("platform/app_icon.zig").apply(app_config.value.ui.icon_background)) std.log.warn("Dock icon could not be applied", .{});
-    @import("platform/app_menu.zig").apply();
-    if (process_notifications) |notifications| try notifications.updatePolicy(app_config.value.notify);
-    app_theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(app_config.value.ui.theme));
-    cx.setTheme(app_theme.widgetTheme(app_theme.currentName()));
-    const p = Palette.fromTheme();
-
-    // ── Overlay panels (hidden by default) ──────────────────────────
-    // AI Float（mockup-ai-float .af）：锚 pane 顶中央（top14 居中），600 宽
-    // 浮窗。外层为全宽定位容器（display 切换目标），内层 .af 卡片承载视觉。
-    const ai_panel = try ui.box(cx, .{
-        .position = .absolute,
-        .inset = .{ .top = .{ .px = 14 }, .left = .{ .px = 0 }, .right = .{ .px = 0 } },
-        .z_index = 200,
-        .width = .fill(),
-        .direction = .row,
-        .justify = .center,
-        .align_items = .start,
-    }, .{});
-    ai_panel.setDisplay(.none);
+/// Shared writable conversation surface used by the main assistant and child dialog.
+fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *ui.Node, ai_scroll: ui.widgets.ScrollAreaResult, ai_conversation: *ui.Node, ai_prompt: *ui.Signal([]const u8)) !void {
+    const cx = ai_host.cx;
     const ai_styles = @import("ui/ai_assistant_styles.zig");
-    const ai_host = try cx.allocator.create(AiHost);
-    const ai_card_box = try ui.boxStyled(cx, ai_styles.panel, .{});
-    ai_card_box.meta.ownership.meta.test_id = "ai.panel";
-    const grip_row = try ui.boxStyled(cx, ai_styles.gripRow, .{});
-    try grip_row.appendChild(cx.allocator, try ui.boxStyled(cx, ai_styles.grip, .{}));
-    try ai_card_box.appendChild(cx.allocator, grip_row);
-    const ai_window_base = try scope.createSignal(ai_styles.ButtonStyle, ai_styles.windowControl());
-    const ai_window_hovers = [_]*ui.Signal(?ai_styles.ButtonStyle){
-        try scope.createSignal(?ai_styles.ButtonStyle, ai_styles.controlHover(.collapse)),
-        try scope.createSignal(?ai_styles.ButtonStyle, ai_styles.controlHover(.maximize)),
-        try scope.createSignal(?ai_styles.ButtonStyle, ai_styles.controlHover(.close)),
-    };
-    const ai_header = try ui.boxStyled(cx, ai_styles.header, .{});
-    try ai_header.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.sparkles, app_theme.current().accent, ai_styles.regionIcon()));
-    try ai_header.appendChild(cx.allocator, try ui.textStyled(cx, ai_styles.title, "AI 助手"));
-    const ai_status = try ui.textStyled(cx, ai_styles.ownerText, "");
-    ai_status.setStyleInline(cx.allocator, .{ .max_width = 144, .min_width = 0 });
-    const ai_owner_pill = try ui.boxStyled(cx, ai_styles.ownerPill, .{});
-    ai_owner_pill.meta.ownership.meta.test_id = "ai.owner";
-    try ai_owner_pill.appendChild(cx.allocator, ai_status);
-    try ai_header.appendChild(cx.allocator, ai_owner_pill);
-    try ai_header.appendChild(cx.allocator, try ui.spacer(cx));
-    const ai_new = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "新建 AI 会话", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.newConversation) }).mount(scope, cx);
-    ai_new.meta.ownership.meta.test_id = "ai.session.new";
-    const ai_new_icon = try ui.iconTint(cx, ui.icons.plus, app_theme.current().fg_2, ai_styles.icon());
-    try ai_new.appendChild(cx.allocator, ai_new_icon);
-    try ai_header.appendChild(cx.allocator, ai_new);
-    const ai_sessions = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "AI 会话列表", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.showConversations) }).mount(scope, cx);
-    ai_sessions.meta.ownership.meta.test_id = "ai.sessions";
-    const ai_sessions_icon = try ui.iconTint(cx, ui.icons.get("messages-square").?, app_theme.current().fg_2, ai_styles.icon());
-    try ai_sessions.appendChild(cx.allocator, ai_sessions_icon);
-    try ai_header.appendChild(cx.allocator, ai_sessions);
-    const ai_collapse = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "收起 AI 助手", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.collapse) }).mount(scope, cx);
-    ai_collapse.meta.ownership.meta.test_id = "ai.collapse";
-    const ai_collapse_icon = try ui.iconTint(cx, ui.icons.get("minus").?, app_theme.current().fg_2, ai_styles.windowIcon());
-    try ai_collapse.appendChild(cx.allocator, ai_collapse_icon);
-    try ai_header.appendChild(cx.allocator, ai_collapse);
-    const ai_maximize = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "放大 AI 助手", .base_style = ai_window_base, .hover_style = ai_window_hovers[1], .on_click = cx.on(AiHost, ai_host, AiHost.maximize) }).mount(scope, cx);
-    ai_maximize.meta.ownership.meta.test_id = "ai.maximize";
-    const ai_maximize_icon = try ui.iconTint(cx, ui.icons.get("maximize-2").?, app_theme.current().fg_2, ai_styles.windowIcon());
-    try ai_maximize.appendChild(cx.allocator, ai_maximize_icon);
-    try ai_header.appendChild(cx.allocator, ai_maximize);
-    const ai_close = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "结束当前 AI 会话", .base_style = ai_window_base, .hover_style = ai_window_hovers[2], .on_click = cx.on(AiHost, ai_host, AiHost.closeAssistant) }).mount(scope, cx);
-    ai_close.meta.ownership.meta.test_id = "ai.close";
-    const ai_close_icon = try ui.iconTint(cx, ui.icons.x, app_theme.current().fg_2, ai_styles.windowIcon());
-    try ai_close.appendChild(cx.allocator, ai_close_icon);
-    try ai_header.appendChild(cx.allocator, ai_close);
-    try ai_card_box.appendChild(cx.allocator, ai_header);
-    const ai_card = try ui.textStyled(cx, ai_styles.secondary, "");
-    const ai_conversation = try ui.boxStyled(cx, ai_styles.conversation, .{});
-    ai_conversation.meta.ownership.meta.test_id = "ai.conversation";
-    try ai_conversation.appendChild(cx.allocator, ai_card);
-    const ai_scroll = try ui.widgets.ScrollArea(.{ .height = 276, .direction = .vertical }).mount(scope, cx);
-    @import("ui/ai_card_scroll.zig").showOverflowScrollbar(ai_scroll);
-    ai_scroll.container.meta.ownership.meta.test_id = "ai.conversation.viewport";
-    ai_scroll.content.setStyleInline(cx.allocator, .{ .will_change_transform = false });
-    ai_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .margin = .{ .bottom = 6 }, .overflow_hidden = true, .composited_group = true });
-    try ai_scroll.content.appendChild(cx.allocator, ai_conversation);
-    try ai_card_box.appendChild(cx.allocator, ai_scroll.container);
-    const ai_prompt = try scope.createText("", .{});
-    var native_context: ?*NativeContext = null;
-    var native_client: ?*AiClient = null;
-    var native_binding: ?*AiClient.Binding = null;
-    var ai_native_io: ?*std.Io.Threaded = null;
-    var ai_provider_instance: ai_provider.Provider = undefined;
-    // Bootstrap the transport from saved settings. Sending validates the exact
-    // current selection and credentials before any network request.
-    const provider_config = ai_provider_config.fromSettings(app_config.value.ai) catch ai_provider_config.defaults(.openai_compat);
-    {
-        // Dedicated io instance for the AI worker thread: std.Io is not
-        // thread-safe and the UI thread owns cx.io. The worker runs the
-        // synchronous HTTP call on this private instance exclusively.
-        const ai_io = try cx.allocator.create(std.Io.Threaded);
-        ai_io.* = .init(std.heap.c_allocator, .{});
-        ai_native_io = ai_io;
-        const context = try cx.allocator.create(NativeContext);
-        context.* = .{ .io = ai_io.io() };
-        native_context = context;
-        // The provider chain captures POINTERS: Binding.asProvider stores
-        // ctx = *Binding and Binding holds client: *AiClient. These MUST
-        // outlive mountUI's stack frame — as locals the worker thread
-        // dereferenced dead stack memory after mountUI returned (SIGSEGV
-        // in transport.request, and the pre-async "AI request failed"
-        // ghost). Heap-allocate both; AiHost.cleanup frees them.
-        const client_ptr = try cx.allocator.create(AiClient);
-        client_ptr.* = AiClient.native(cx.allocator, context, switch (provider_config.kind) {
-            .anthropic => .anthropic,
-            else => .openai_compat,
-        });
-        native_client = client_ptr;
-        const binding_ptr = try cx.allocator.create(AiClient.Binding);
-        binding_ptr.* = .{ .client = client_ptr, .config = provider_config };
-        native_binding = binding_ptr;
-        ai_provider_instance = binding_ptr.asProvider();
-    }
-    const endpoint = provider_config.endpoint;
-    const model = provider_config.model;
-    ai_host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = ai_provider_instance, .native_context = native_context, .native_client = native_client, .native_binding = native_binding, .endpoint = endpoint, .model = model, .panel = ai_panel, .status = ai_status, .card_node = ai_card, .prompt = ai_prompt, .conversation = ai_conversation };
-    ai_host.data_root = data_paths.directory;
-    ai_host.manager.observer = .{ .context = ai_host, .reset = AiHost.streamReset, .delta = AiHost.streamDelta, .tool_rejected = AiHost.streamToolRejected, .round_start = AiHost.streamRoundStart };
-    ai_host.window_base = ai_window_base;
-    for (ai_window_hovers, 0..) |hover, index| ai_host.window_hovers[index] = hover;
-    ai_host.window_icons = .{ ai_collapse_icon, ai_maximize_icon, ai_close_icon };
-    ai_host.session_icons = .{ ai_new_icon, ai_sessions_icon };
-    for ([_]*ui.Node{ ai_collapse, ai_maximize, ai_close }, ai_host.window_icons, 0..) |button, icon_node, index| {
-        const hovered = try ui.hooks.useHover(scope, button);
-        try scope.createEffect(.{ .hovered = hovered, .icon = icon_node.?, .index = index, .theme = try cx.themeSignal(scope) }, struct {
-            fn run(ctx: anytype) void {
-                _ = ctx.theme.get();
-                const colors = app_theme.current();
-                _ = ctx.icon.setTint(if (!ctx.hovered.get()) colors.fg_2 else switch (ctx.index) {
-                    0 => colors.warn,
-                    1 => colors.ok,
-                    else => colors.danger,
-                });
-            }
-        }.run);
-    }
-
-    ai_host.sessions_view = try @import("ui/ai_sessions_view.zig").View.mount(cx, scope, ai_sessions, .{ .context = ai_host, .select = AiHost.selectConversation, .request_close = AiHost.requestConversationClose, .remove = AiHost.deleteConversation, .act = AiHost.conversationAction, .confirmed = AiHost.lifecycleConfirmed });
-    try ai_header.appendChild(cx.allocator, ai_host.sessions_view.?.root);
-    ai_host.close_confirmation_view = try @import("ui/ai_close_confirmation_view.zig").View.mount(cx, scope, ai_close, .{ .context = ai_host, .on_confirm = AiHost.confirmCloseWindow, .on_cancel = AiHost.cancelCloseWindow });
-    try ai_header.appendChild(cx.allocator, ai_host.close_confirmation_view.?.root);
-    ai_host.panel_hover = try ui.hooks.useHover(scope, ai_card_box);
-    ai_card_box.behavior.events.on_event_capture = AiHost.panelCapture;
-    ai_card_box.behavior.events.capture_context = ai_host;
-    ai_host.runtime_config = app_config;
-    ai_host.card_box = ai_card_box;
-    ai_host.conversation_viewport = ai_scroll.container;
-    ai_host.tail_follow = .{ .scroll = ai_scroll };
-    try scope.onCleanup(AiHost, ai_host, AiHost.cleanup);
-    ai_host.gestures = try @import("ui/ai_float_gestures.zig").View.mount(cx, scope, ai_card_box, grip_row, &ai_host.controller.model);
-    // Own the AI-threaded io AFTER the full struct literal above (the
-    // literal resets every unlisted field, so assigning earlier leaked).
-    if (ai_native_io) |io| ai_host.ai_io = io;
-    // Result poller: consumes worker-thread completions on the UI thread
-    // (self-scheduling only while a request is in flight). Registered
-    // AFTER the AiHost cleanup entry: scope teardown is reverse-order, so
-    // the poll hook is gone before the worker may be joined.
-    const ai_poll = try cx.allocator.create(AiHost.PollHook);
-    ai_poll.* = .{ .host = ai_host };
-    try cx.addAfterLayoutHook(ai_poll, AiHost.PollHook.run);
-    try scope.onCleanup(AiHost.PollHook, ai_poll, AiHost.PollHook.cleanup);
     ai_host.approval_view = try @import("ui/ai_tool_approval_view.zig").View.mount(cx, scope, .{ .context = ai_host, .decide = AiHost.decideTool });
     try ai_scroll.content.appendChild(cx.allocator, ai_host.approval_view.?.root);
     ai_host.host_approval_view = try @import("ui/ai_host_approval_view.zig").View.mount(cx, scope, .{ .context = ai_host, .on_decision = AiHost.decideHostApproval, .on_route = AiHost.chooseHostRoute });
@@ -12203,6 +13164,196 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try ai_input_row.appendChild(cx.allocator, interaction.pending);
     try ai_input_row.appendChild(cx.allocator, composer_controls.root);
     try ai_card_box.appendChild(cx.allocator, ai_input_row);
+}
+
+fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
+    const presentation_window = try scope.allocator.create(PresentationWindow);
+    presentation_window.* = .{ .context = @intFromPtr(cx), .target = @import("platform/presentation_wakeup.zig").registerWindow(@intFromPtr(cx)) };
+    try scope.adoptResource(presentation_window, struct {
+        fn destroy(raw: *anyopaque, allocator: std.mem.Allocator) void {
+            const value: *PresentationWindow = @ptrCast(@alignCast(raw));
+            value.cleanup(allocator);
+        }
+    }.destroy);
+    const data_paths = try cx.allocator.create(DataPaths);
+    data_paths.* = try DataPaths.forApplication(cx.allocator);
+    try scope.onCleanup(DataPaths, data_paths, cleanupDataPaths);
+    const config_path = data_paths.config;
+    const hosts_path = data_paths.hosts;
+    const app_config = if (process_windows) |process| blk: {
+        if (process.runtime_config) |existing| break :blk existing;
+        const runtime = try std.heap.c_allocator.create(RuntimeConfig);
+        errdefer std.heap.c_allocator.destroy(runtime);
+        runtime.* = try RuntimeConfig.loadOrDefault(cx.io, std.Io.Dir.cwd(), std.heap.c_allocator, config_path);
+        process.runtime_config = runtime;
+        break :blk runtime;
+    } else blk: {
+        const runtime = try cx.allocator.create(RuntimeConfig);
+        runtime.* = try RuntimeConfig.loadOrDefault(cx.io, std.Io.Dir.cwd(), cx.allocator, config_path);
+        try scope.onCleanup(RuntimeConfig, runtime, cleanupRuntimeConfig);
+        break :blk runtime;
+    };
+    if (!@import("platform/app_icon.zig").apply(app_config.value.ui.icon_background)) std.log.warn("Dock icon could not be applied", .{});
+    @import("platform/app_menu.zig").apply();
+    if (process_notifications) |notifications| try notifications.updatePolicy(app_config.value.notify);
+    app_theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(app_config.value.ui.theme));
+    cx.setTheme(app_theme.widgetTheme(app_theme.currentName()));
+    const p = Palette.fromTheme();
+
+    // ── Overlay panels (hidden by default) ──────────────────────────
+    // AI Float（mockup-ai-float .af）：锚 pane 顶中央（top14 居中），600 宽
+    // 浮窗。外层为全宽定位容器（display 切换目标），内层 .af 卡片承载视觉。
+    const ai_panel = try ui.box(cx, .{
+        .position = .absolute,
+        .inset = .{ .top = .{ .px = 14 }, .left = .{ .px = 0 }, .right = .{ .px = 0 } },
+        .z_index = 200,
+        .width = .fill(),
+        .direction = .row,
+        .justify = .center,
+        .align_items = .start,
+    }, .{});
+    ai_panel.setDisplay(.none);
+    const ai_styles = @import("ui/ai_assistant_styles.zig");
+    const ai_host = try cx.allocator.create(AiHost);
+    const ai_card_box = try ui.boxStyled(cx, ai_styles.panel, .{});
+    ai_card_box.meta.ownership.meta.test_id = "ai.panel";
+    const ai_window_base = try scope.createSignal(ai_styles.ButtonStyle, ai_styles.windowControl());
+    const ai_window_hovers = [_]*ui.Signal(?ai_styles.ButtonStyle){
+        try scope.createSignal(?ai_styles.ButtonStyle, ai_styles.controlHover(.collapse)),
+        try scope.createSignal(?ai_styles.ButtonStyle, ai_styles.controlHover(.maximize)),
+        try scope.createSignal(?ai_styles.ButtonStyle, ai_styles.controlHover(.close)),
+    };
+    const ai_header_view = try @import("ui/ai_assistant_header.zig").mount(cx, ai_card_box, "");
+    const ai_header = ai_header_view.bar;
+    const ai_status = ai_header_view.owner;
+    const ai_children = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "子智能体，0 个运行中", .base_style = ai_window_base, .hover_style = ai_window_hovers[0] }).mount(scope, cx);
+    ai_children.meta.ownership.meta.test_id = "ai.children";
+    ai_children.setStyleInline(cx.allocator, .{ .position = .relative });
+    try ai_children.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("bot").?, app_theme.current().fg_2, ai_styles.icon()));
+    try ai_header.appendChild(cx.allocator, ai_children);
+    const ai_new = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "新建 AI 会话", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.newConversation) }).mount(scope, cx);
+    ai_new.meta.ownership.meta.test_id = "ai.session.new";
+    const ai_new_icon = try ui.iconTint(cx, ui.icons.plus, app_theme.current().fg_2, ai_styles.icon());
+    try ai_new.appendChild(cx.allocator, ai_new_icon);
+    try ai_header.appendChild(cx.allocator, ai_new);
+    const ai_sessions = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "AI 会话列表", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.showConversations) }).mount(scope, cx);
+    ai_sessions.meta.ownership.meta.test_id = "ai.sessions";
+    const ai_sessions_icon = try ui.iconTint(cx, ui.icons.get("messages-square").?, app_theme.current().fg_2, ai_styles.icon());
+    try ai_sessions.appendChild(cx.allocator, ai_sessions_icon);
+    try ai_header.appendChild(cx.allocator, ai_sessions);
+    const ai_collapse = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "收起 AI 助手", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.collapse) }).mount(scope, cx);
+    ai_collapse.meta.ownership.meta.test_id = "ai.collapse";
+    const ai_collapse_icon = try ui.iconTint(cx, ui.icons.get("minus").?, app_theme.current().fg_2, ai_styles.windowIcon());
+    try ai_collapse.appendChild(cx.allocator, ai_collapse_icon);
+    try ai_header.appendChild(cx.allocator, ai_collapse);
+    const ai_maximize = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "放大 AI 助手", .base_style = ai_window_base, .hover_style = ai_window_hovers[1], .on_click = cx.on(AiHost, ai_host, AiHost.maximize) }).mount(scope, cx);
+    ai_maximize.meta.ownership.meta.test_id = "ai.maximize";
+    const ai_maximize_icon = try ui.iconTint(cx, ui.icons.get("maximize-2").?, app_theme.current().fg_2, ai_styles.windowIcon());
+    try ai_maximize.appendChild(cx.allocator, ai_maximize_icon);
+    try ai_header.appendChild(cx.allocator, ai_maximize);
+    const ai_close = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "结束当前 AI 会话", .base_style = ai_window_base, .hover_style = ai_window_hovers[2], .on_click = cx.on(AiHost, ai_host, AiHost.closeAssistant) }).mount(scope, cx);
+    ai_close.meta.ownership.meta.test_id = "ai.close";
+    const ai_close_icon = try ui.iconTint(cx, ui.icons.x, app_theme.current().fg_2, ai_styles.windowIcon());
+    try ai_close.appendChild(cx.allocator, ai_close_icon);
+    try ai_header.appendChild(cx.allocator, ai_close);
+    const ai_card = try ui.textStyled(cx, ai_styles.secondary, "");
+    const ai_conversation = try ui.boxStyled(cx, ai_styles.conversation, .{});
+    ai_conversation.meta.ownership.meta.test_id = "ai.conversation";
+    try ai_conversation.appendChild(cx.allocator, ai_card);
+    const ai_scroll = try ui.widgets.ScrollArea(.{ .height = 276, .direction = .vertical }).mount(scope, cx);
+    @import("ui/ai_card_scroll.zig").showOverflowScrollbar(ai_scroll);
+    ai_scroll.container.meta.ownership.meta.test_id = "ai.conversation.viewport";
+    ai_scroll.content.setStyleInline(cx.allocator, .{ .will_change_transform = false });
+    ai_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .margin = .{ .bottom = 6 }, .overflow_hidden = true, .composited_group = true });
+    try ai_scroll.content.appendChild(cx.allocator, ai_conversation);
+    try ai_card_box.appendChild(cx.allocator, ai_scroll.container);
+    const ai_prompt = try scope.createText("", .{});
+    var native_context: ?*NativeContext = null;
+    var native_client: ?*AiClient = null;
+    var native_binding: ?*AiClient.Binding = null;
+    var ai_native_io: ?*std.Io.Threaded = null;
+    var ai_provider_instance: ai_provider.Provider = undefined;
+    // Bootstrap the transport from saved settings. Sending validates the exact
+    // current selection and credentials before any network request.
+    const provider_config = ai_provider_config.fromSettings(app_config.value.ai) catch ai_provider_config.defaults(.openai_compat);
+    {
+        // Dedicated io instance for the AI worker thread: std.Io is not
+        // thread-safe and the UI thread owns cx.io. The worker runs the
+        // synchronous HTTP call on this private instance exclusively.
+        const ai_io = try cx.allocator.create(std.Io.Threaded);
+        ai_io.* = .init(std.heap.c_allocator, .{});
+        ai_native_io = ai_io;
+        const context = try cx.allocator.create(NativeContext);
+        context.* = .{ .io = ai_io.io() };
+        native_context = context;
+        // The provider chain captures POINTERS: Binding.asProvider stores
+        // ctx = *Binding and Binding holds client: *AiClient. These MUST
+        // outlive mountUI's stack frame — as locals the worker thread
+        // dereferenced dead stack memory after mountUI returned (SIGSEGV
+        // in transport.request, and the pre-async "AI request failed"
+        // ghost). Heap-allocate both; AiHost.cleanup frees them.
+        const client_ptr = try cx.allocator.create(AiClient);
+        client_ptr.* = AiClient.native(cx.allocator, context, switch (provider_config.kind) {
+            .anthropic => .anthropic,
+            else => .openai_compat,
+        });
+        native_client = client_ptr;
+        const binding_ptr = try cx.allocator.create(AiClient.Binding);
+        binding_ptr.* = .{ .client = client_ptr, .config = provider_config };
+        native_binding = binding_ptr;
+        ai_provider_instance = binding_ptr.asProvider();
+    }
+    const endpoint = provider_config.endpoint;
+    const model = provider_config.model;
+    ai_host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = ai_provider_instance, .native_context = native_context, .native_client = native_client, .native_binding = native_binding, .endpoint = endpoint, .model = model, .panel = ai_panel, .status = ai_status, .card_node = ai_card, .prompt = ai_prompt, .conversation = ai_conversation };
+    ai_host.data_root = data_paths.directory;
+    ai_host.manager.observer = .{ .context = ai_host, .reset = AiHost.streamReset, .delta = AiHost.streamDelta, .tool_rejected = AiHost.streamToolRejected, .round_start = AiHost.streamRoundStart };
+    ai_host.window_base = ai_window_base;
+    for (ai_window_hovers, 0..) |hover, index| ai_host.window_hovers[index] = hover;
+    ai_host.window_icons = .{ ai_collapse_icon, ai_maximize_icon, ai_close_icon };
+    ai_host.session_icons = .{ ai_new_icon, ai_sessions_icon };
+    for ([_]*ui.Node{ ai_collapse, ai_maximize, ai_close }, ai_host.window_icons, 0..) |button, icon_node, index| {
+        const hovered = try ui.hooks.useHover(scope, button);
+        try scope.createEffect(.{ .hovered = hovered, .icon = icon_node.?, .index = index, .theme = try cx.themeSignal(scope) }, struct {
+            fn run(ctx: anytype) void {
+                _ = ctx.theme.get();
+                const colors = app_theme.current();
+                _ = ctx.icon.setTint(if (!ctx.hovered.get()) colors.fg_2 else switch (ctx.index) {
+                    0 => colors.warn,
+                    1 => colors.ok,
+                    else => colors.danger,
+                });
+            }
+        }.run);
+    }
+
+    ai_host.children_view = try @import("ui/ai_children_view.zig").View.mount(cx, scope, ai_children, .{ .context = ai_host, .select = AiHost.childSelected });
+    try ai_header.appendChild(cx.allocator, ai_host.children_view.?.root);
+    ai_host.sessions_view = try @import("ui/ai_sessions_view.zig").View.mount(cx, scope, ai_sessions, .{ .context = ai_host, .select = AiHost.selectConversation, .request_close = AiHost.requestConversationClose, .remove = AiHost.deleteConversation, .act = AiHost.conversationAction, .confirmed = AiHost.lifecycleConfirmed });
+    try ai_header.appendChild(cx.allocator, ai_host.sessions_view.?.root);
+    ai_host.close_confirmation_view = try @import("ui/ai_close_confirmation_view.zig").View.mount(cx, scope, ai_close, .{ .context = ai_host, .on_confirm = AiHost.confirmCloseWindow, .on_cancel = AiHost.cancelCloseWindow });
+    try ai_header.appendChild(cx.allocator, ai_host.close_confirmation_view.?.root);
+    ai_host.panel_hover = try ui.hooks.useHover(scope, ai_card_box);
+    ai_card_box.behavior.events.on_event_capture = AiHost.panelCapture;
+    ai_card_box.behavior.events.capture_context = ai_host;
+    ai_host.runtime_config = app_config;
+    ai_host.card_box = ai_card_box;
+    ai_host.conversation_viewport = ai_scroll.container;
+    ai_host.tail_follow = .{ .scroll = ai_scroll };
+    try scope.onCleanup(AiHost, ai_host, AiHost.cleanup);
+    ai_host.gestures = try @import("ui/ai_float_gestures.zig").View.mount(cx, scope, ai_card_box, ai_header_view.grip, &ai_host.controller.model);
+    // Own the AI-threaded io AFTER the full struct literal above (the
+    // literal resets every unlisted field, so assigning earlier leaked).
+    if (ai_native_io) |io| ai_host.ai_io = io;
+    // Result poller: consumes worker-thread completions on the UI thread
+    // (self-scheduling only while a request is in flight). Registered
+    // AFTER the AiHost cleanup entry: scope teardown is reverse-order, so
+    // the poll hook is gone before the worker may be joined.
+    const ai_poll = try cx.allocator.create(AiHost.PollHook);
+    ai_poll.* = .{ .host = ai_host };
+    try cx.addAfterLayoutHook(ai_poll, AiHost.PollHook.run);
+    try scope.onCleanup(AiHost.PollHook, ai_poll, AiHost.PollHook.cleanup);
+    try mountAssistantConversation(ai_host, scope, ai_card_box, ai_scroll, ai_conversation, ai_prompt);
     try ai_panel.appendChild(cx.allocator, ai_card_box);
 
     // Frozen V3 settings: centered shell, independently scrolling navigation and content.
@@ -12235,14 +13386,6 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const settings_nav_list = settings_nav_scroll.content;
     settings_nav_list.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 5 });
     try settings_nav.appendChild(cx.allocator, settings_nav_scroll.container);
-    const settings_identity = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6 }, .{});
-    const settings_identity_icon = try ui.iconTint(cx, ui.icons.lock, app_theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
-    settings_identity_icon.meta.ownership.meta.test_id = "settings.identity.icon";
-    try settings_identity.appendChild(cx.allocator, settings_identity_icon);
-    const settings_identity_label = try ui.text(cx, "本地设置", .{ .font_size = 11, .color = app_theme.current().fg_2 });
-    settings_identity_label.meta.ownership.meta.test_id = "settings.identity.label";
-    try settings_identity.appendChild(cx.allocator, settings_identity_label);
-    try settings_nav.appendChild(cx.allocator, settings_identity);
     const settings_right = try ui.boxStyled(cx, shell_styles.settingsContent, .{});
     settings_right.setStyle(cx.allocator, .padding, ui.Padding{ .right = 4 });
     const settings_content = try ui.boxStyled(cx, shell_styles.settingsContent, .{});
@@ -12255,8 +13398,6 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_host.navigation = settings_nav;
     settings_host.header_title = settings_header_title;
     settings_host.header_icon = settings_header_icon;
-    settings_host.identity_label = settings_identity_label;
-    settings_host.identity_icon = settings_identity_icon;
     settings_host.layout = settings_body;
     settings_host.content = settings_content;
     settings_host.card = settings_card;
@@ -12516,7 +13657,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     nav_host.sidebar_panel = sidebar;
     try main_row.appendChild(cx.allocator, sidebar);
     // Keep the 8pt hit target while cancelling the extra flex gap it introduces.
-    const sidebar_grip = try ui.box(cx, .{ .width = .{ .px = 8 }, .height = .fill(), .margin = .{ .left = -8, .right = -shell_styles.gap }, .flex_shrink = 0, .cursor = .ew_resize, .hit_behavior = .@"opaque" }, .{});
+    const sidebar_grip = try ui.box(cx, .{ .width = .{ .px = 8 }, .height = .fill(), .margin = .{ .left = -shell_styles.gap, .right = -8 }, .flex_shrink = 0, .cursor = .ew_resize, .hit_behavior = .@"opaque" }, .{});
     sidebar_grip.meta.ownership.meta.test_id = "sidebar.resize";
     _ = try ui.interaction.drag.Binding.attach(scope, cx, sidebar_grip, .{ .axis = .horizontal, .activation_distance = 1, .active_cursor = .ew_resize }, AppNavHost.resizeSidebar, nav_host);
     nav_host.sidebar_grip = sidebar_grip;
@@ -12549,10 +13690,10 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try root.appendChild(cx.allocator, main_row);
 
     const title_bar = try mountTitleBar(cx, scope, p, settings_host, workspace, ai_host, nav_host, history_host);
-    try root.insertChildBefore(cx.allocator, title_bar, main_row);
+    try content_stack.insertChildBefore(cx.allocator, title_bar, history_card_host);
     try root.insertChildBefore(cx.allocator, settings_panel, main_row);
     ai_host.strip = try @import("ui/ai_strip_view.zig").View.mount(cx, scope, cx.on(AiHost, ai_host, AiHost.openFromStrip));
-    try background_view.bindAiEntry(ai_host.strip.?.lip);
+
     ai_host.dock_titlebar = title_bar;
     try root.appendChild(cx.allocator, ai_host.strip.?.root);
     try root.appendChild(cx.allocator, ai_panel);
@@ -12567,7 +13708,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     nav_host.session_details = status_bar.details;
     nav_host.socks_chip = status_bar.socks_chip;
     nav_host.status_bar = status_bar.bar;
-    try status_bar.bar.insertChildBefore(cx.allocator, collapsed_sidebar.root, if (status_bar.bar.children.items.len != 0) status_bar.bar.children.items[0] else null);
+    if (nav_host.mist == null) try status_bar.bar.insertChildBefore(cx.allocator, collapsed_sidebar.root, if (status_bar.bar.children.items.len != 0) status_bar.bar.children.items[0] else null);
+    MistChrome.retainLegacy(cx, status_bar.bar);
     try root.appendChild(cx.allocator, status_bar.bar);
     const theme_picker = try @import("ui/status_theme_view.zig").View.mount(cx, scope, &settings_host.registry, .{ .context = nav_host, .select = AppNavHost.selectGlobalTheme, .manage = AppNavHost.manageGlobalThemes, .busy = AppNavHost.globalThemeBusy });
     nav_host.status_theme_view = theme_picker;
@@ -12577,10 +13719,12 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     menu_host.global_theme = AppNavHost.showThemeFromMenu;
     const local_status = try @import("ui/local_status_view.zig").View.mount(cx, scope, .{ .context = nav_host, .detail = AppNavHost.showLocalStatusDetail, .theme = AppNavHost.showGlobalTheme });
     local_status.root.setDisplay(.none);
+    MistChrome.retainLegacy(cx, local_status.root);
     nav_host.local_status_view = local_status;
     try background_view.bindLocalStatus(local_status.root);
     try root.appendChild(cx.allocator, local_status.root);
     const command_history = try @import("ui/command_history_view.zig").View.mount(cx, scope, workspace, status_bar.bar, local_status.root);
+    command_history.workspace_chrome = true;
     nav_host.command_history = command_history;
     menu_host.command_history = command_history;
     const status_detail = try @import("ui/status_detail_view.zig").View.mount(cx, scope, .{ .context = nav_host, .theme = AppNavHost.showThemeFromMenu });
@@ -12611,6 +13755,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     transfer_host.progress_slot = status_bar.progress_slot;
     const ticker = try @import("ui/status_transfer_view.zig").View.mount(cx, scope, cx.on(TransferHost, transfer_host, TransferHost.toggleManager));
     transfer_host.status_transfer = ticker;
+    transfer_host.toolbar_progress = nav_host.mist_transfer;
     try status_bar.progress_slot.appendChild(cx.allocator, ticker.root);
     nav_host.transfer_host = transfer_host;
     menu_host.transfer_host = transfer_host;
@@ -12709,6 +13854,42 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     details_host.bindStatus(status_bar.controls, nav_host, AppNavHost.showGlobalTheme);
     nav_host.connection_details_host = details_host;
     menu_host.connection_details_host = details_host;
+    if (nav_host.mist) |chrome| {
+        const c = status_bar.controls;
+        c.workspace_chrome = true;
+        local_status.workspace_chrome = true;
+        try chrome.identitiesAtTabs(c.identity_button, local_status.identity_button);
+        for ([_]*ui.Node{ c.identity_label, c.state_dot, c.rtt_label, c.file_icon, c.icons[0], c.icons[1], local_status.identity_label, local_status.state_dot, local_status.identity_icon, local_status.identity_chevron }) |node| node.setDisplay(.none);
+        MistChrome.iconOnly(cx, c.chain_button, status_bar.chain_icon, c.chain_label);
+        MistChrome.iconOnly(cx, c.socks_button, c.icons[6], c.forward_label);
+        MistChrome.iconOnly(cx, c.theme_button, c.icons[7], c.theme_label);
+        MistChrome.iconOnly(cx, c.broadcast_button, c.broadcast_icon, c.broadcast_label);
+        shell_styles.titleToolbarButton(cx.allocator, command_history.buttons[0]);
+        try MistChrome.move(cx, chrome.groups[0], c.chain_button);
+        chrome.groups[0].removeChild(c.chain_button);
+        try chrome.groups[0].insertChildBefore(cx.allocator, c.chain_button, nav_host.transfer_anchor);
+        try MistChrome.move(cx, chrome.groups[0], c.socks_button);
+        chrome.groups[0].removeChild(c.socks_button);
+        try chrome.groups[0].insertChildBefore(cx.allocator, c.socks_button, nav_host.transfer_anchor);
+        try MistChrome.move(cx, chrome.groups[1], command_history.buttons[0]);
+        chrome.groups[1].removeChild(command_history.buttons[0]);
+        try chrome.groups[1].insertChildBefore(cx.allocator, command_history.buttons[0], history_host.trigger);
+        try MistChrome.move(cx, chrome.groups[2], c.theme_button);
+        chrome.groups[2].removeChild(c.theme_button);
+        try chrome.groups[2].insertChildBefore(cx.allocator, c.theme_button, ai_host.toolbar_trigger);
+        try MistChrome.move(cx, chrome.groups[0], c.broadcast_button);
+        try MistChrome.move(cx, chrome.groups[0], background_socks.view.remote_entry);
+        chrome.ownPanel(settings_panel);
+        chrome.ownPanel(history_host.panel);
+        chrome.ownPanel(download_list.root);
+        chrome.ownPanel(command_history.root);
+        chrome.own(theme_picker.open);
+        chrome.own(details_host.view.open);
+        chrome.own(details_host.ssh_status.info.open);
+        chrome.own(status_detail.open);
+        chrome.own(socks_info.open);
+        chrome.own(background_socks.view.popover.open.?);
+    }
     try details_host.view.setMaterial(background_view);
     try background_view.isolate(details_host.logs.scope, details_host.logs.dialog);
     try background_view.isolate(details_host.ssh_status.info.scope, details_host.ssh_status.info.chrome);
@@ -12716,15 +13897,16 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const StatusPreview = @import("ui/status_hover_preview.zig").Preview;
     const status_previews = try scope.createState(@import("ui/status_hover_preview.zig").Group, .{});
     try StatusPreview.mount(cx, scope, status_previews, status_bar.controls.identity_button, details_host.ssh_status.info.chrome, details_host.ssh_status.info.open, cx.on(@import("ui/status_connection_view.zig").View, details_host.ssh_status.info, @import("ui/status_connection_view.zig").View.dismiss));
-    try StatusPreview.mount(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.dismiss));
-    try StatusPreview.mount(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
+    try StatusPreview.mountClick(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.dismiss));
+    try StatusPreview.mountClick(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
     for ([_]*ui.Node{ status_bar.controls.theme_button, local_status.theme_button }) |trigger| {
-        try StatusPreview.mount(cx, scope, status_previews, trigger, theme_picker.chrome, theme_picker.open, cx.on(@import("ui/status_theme_view.zig").View, theme_picker, @import("ui/status_theme_view.zig").View.dismiss));
+        try StatusPreview.mountClick(cx, scope, status_previews, trigger, theme_picker.chrome, theme_picker.open, cx.on(@import("ui/status_theme_view.zig").View, theme_picker, @import("ui/status_theme_view.zig").View.dismiss));
     }
     try StatusPreview.mount(cx, scope, status_previews, local_status.identity_button, status_detail.chrome, status_detail.open, cx.on(@import("ui/status_detail_view.zig").View, status_detail, @import("ui/status_detail_view.zig").View.dismiss));
     for ([_]*ui.Node{ background_socks.view.remote_entry, background_socks.view.local_entry }) |trigger| {
-        try StatusPreview.mount(cx, scope, status_previews, trigger, background_socks.view.popover.chrome, background_socks.view.popover.open.?, background_socks.view.popover.close);
+        try StatusPreview.mountClick(cx, scope, status_previews, trigger, background_socks.view.popover.chrome, background_socks.view.popover.open.?, background_socks.view.popover.close);
     }
+    if (nav_host.mist) |chrome| try chrome.installFeedback(scope);
     nav_host.asset_group_host = try @import("ui/asset_group_host.zig").Host.mount(cx, scope, workspace, .{ .context = wiz_host, .open = WizardHost.openInAssetGroup });
     try background_view.isolate(scope, nav_host.asset_group_host.?.view.dialog);
     try cx.addAfterLayoutHook(nav_host, AppNavHost.hookRun);
@@ -13085,7 +14267,10 @@ const NotificationWindowHook = struct {
             cx.allocator.destroy(self);
             return err;
         };
-        if (nav.notification_anchor) |trigger| _ = try @import("ui/notification_history.zig").View.mount(cx, scope, host, trigger);
+        if (nav.notification_anchor) |trigger| {
+            const notifications_view = try @import("ui/notification_history.zig").View.mount(cx, scope, host, trigger);
+            if (nav.mist) |chrome| chrome.own(notifications_view.open);
+        }
         workspace.status_feedback = .{ .context = self, .publish = publishStatus };
         if (nav.application_host) |application| application.file_failure = .{ .context = self, .publish = publishFileFailure };
         try cx.addAfterLayoutHook(self, run);
@@ -13327,6 +14512,7 @@ const TransferHost = struct {
     manager_panel: ?*transfer_manager_view.Panel = null,
     seen_transfers: std.AutoHashMapUnmanaged(transfer_mod.JobId, void) = .empty,
     status_transfer: ?*@import("ui/status_transfer_view.zig").View = null,
+    toolbar_progress: ?*@import("ui/transfer_toolbar_view.zig").View = null,
     ticker_scope: ?transfer_manager_view.Scope = null,
     ticker_scope_arena: ?std.heap.ArenaAllocator = null,
     ticker_last_refresh_ms: u64 = 0,
@@ -14954,7 +16140,46 @@ const TransferHost = struct {
             }
         }
     }
+    fn refreshGlobalToolbar(self: *TransferHost) void {
+        const view = self.toolbar_progress orelse return;
+        var done: u128 = 0;
+        var total: u128 = 0;
+        var active: usize = 0;
+        var paused: usize = 0;
+        var waiting: usize = 0;
+        var unknown = false;
+        var failed = false;
+        var completed = false;
+        for (0..self.manager.count()) |index| {
+            const value = self.manager.progressAt(index) orelse continue;
+            switch (value.state) {
+                .cancelled => continue,
+                .failed => {
+                    failed = true;
+                    continue;
+                },
+                .succeeded => {
+                    completed = true;
+                    continue;
+                },
+                .paused, .pausing => paused += 1,
+                .queued, .retry_wait => waiting += 1,
+                else => {},
+            }
+            active += 1;
+            const bytes = if (value.source_read) |read| read.done_bytes else value.done_bytes;
+            const size = if (value.source_read) |read| read.total_bytes else value.total_bytes;
+            done += @min(bytes, size);
+            total += size;
+            if (size == 0) unknown = true;
+        }
+        if (active != 0) {
+            const fraction: ?f32 = if (unknown or total == 0) null else @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(total));
+            view.update(if (paused == active) .paused else if (waiting + paused == active) .waiting else .running, fraction);
+        } else view.update(if (self.unreadTransferCount() == 0) .idle else if (failed) .failed else if (completed) .completed else .idle, null);
+    }
     fn refreshProgressRow(self: *TransferHost) void {
+        self.refreshGlobalToolbar();
         const view = self.status_transfer orelse return;
         const now = wallClockMsTransfer();
         var next_arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -15170,7 +16395,7 @@ pub fn main() !void {
         .window = .{ .width = 1440, .height = 900, .min_width = 860, .min_height = 480, .title = "ZeroWork", .titlebar = .custom_inset, .titlebar_height = shell_styles.outer + shell_styles.title_height, .titlebar_drag_right_inset = 150 },
     });
     process.primary = app;
-    app.win.setTrafficLightsLayout(shell_styles.outer + 20, shell_styles.outer + shell_styles.title_height / 2, 12);
+    app.win.setTrafficLightsLayout(shell_styles.outer + 28, shell_styles.outer + shell_styles.title_height / 2, 12);
     installMonospaceFonts(app);
     registry.setFontSystem(&process.font_system.?);
     app.setFontRegistry(&registry);

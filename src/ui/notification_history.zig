@@ -100,7 +100,7 @@ pub const View = struct {
         self.count.meta.ownership.meta.test_id = "notifications.history.count";
         try heading.appendChild(cx.allocator, self.count);
         try heading.appendChild(cx.allocator, try ui.spacer(cx));
-        self.clear_button = try ui.widgets.Button(.{ .label = "清除已结束", .variant = .ghost, .size = .xs, .on_click = cx.on(View, self, clear) }).mount(self.scope, cx);
+        self.clear_button = try ui.widgets.Button(.{ .label = "清除已结束", .variant = .secondary, .size = .xs, .base_style = try theme.paintSignal(ui.BoxStyle, cx, self.scope, S.footerAction, .{}), .on_click = cx.on(View, self, clear) }).mount(self.scope, cx);
         self.clear_button.meta.ownership.meta.test_id = "notifications.history.clear";
         self.clear_button.setDisplay(.none);
 
@@ -286,7 +286,7 @@ pub const View = struct {
     }
     fn mountAction(self: *View, scope: *ui.Scope, parent: *ui.Node, record: host.notifications.NotificationRecord, index: usize) !void {
         const handler = try scope.createState(Action, .{ .view = self, .fact_id = record.fact_id, .index = index });
-        const button = try ui.widgets.Button(.{ .label = record.event.actions[index].label, .variant = .ghost, .size = .xs, .disabled = record.owner_ended, .base_style = S.action(), .hover_style = .{ .background = theme.states().hover }, .on_click = self.cx.on(Action, handler, Action.invoke) }).mount(scope, self.cx);
+        const button = try ui.widgets.Button(.{ .label = record.event.actions[index].label, .variant = .secondary, .size = .xs, .disabled = record.owner_ended, .base_style = S.action(), .on_click = self.cx.on(Action, handler, Action.invoke) }).mount(scope, self.cx);
         button.setStyle(self.cx.allocator, .max_width, @max(1, @min(112, self.root.globalRect().w - 120)));
         button.meta.ownership.meta.test_id = "notifications.history.action";
         try parent.appendChild(self.cx.allocator, button);

@@ -130,7 +130,7 @@ pub const View = struct {
         return self;
     }
     fn button(self: *View, scope: *ui.Scope, label: []const u8, id: []const u8, comptime primary: bool, comptime callback: fn (*View) void) !*ui.Node {
-        const node = try ui.widgets.Button(.{ .label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .ghost), .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(View, self, callback) }).mount(scope, self.cx);
+        const node = try ui.widgets.Button(.{ .label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(View, self, callback) }).mount(scope, self.cx);
         if (primary) try theme.stylePrimary(self.cx, scope, node, null);
         node.setStyleInline(self.cx.allocator, S.action());
         node.meta.ownership.meta.test_id = id;

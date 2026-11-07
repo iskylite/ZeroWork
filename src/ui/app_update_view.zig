@@ -154,7 +154,7 @@ pub const View = struct {
         const primary_variant = try scope.createSignal(ui.widgets.ButtonVariant, .primary);
         const primary_text = try scope.createText("检查更新", .{});
         const cancel_text = try scope.createText("关闭", .{});
-        const release = try ui.widgets.Button(.{ .label = "发布页", .variant = .ghost, .on_click = cx.on(View, self, releaseClicked), .a11y_label = "打开官方发布页", .base_style = release_base }).mount(scope, cx);
+        const release = try ui.widgets.Button(.{ .label = "发布页", .variant = .secondary, .on_click = cx.on(View, self, releaseClicked), .a11y_label = "打开官方发布页", .base_style = release_base }).mount(scope, cx);
         release.meta.ownership.meta.test_id = "update.release";
         const release_label = firstText(release).?;
         try actions.appendChild(cx.allocator, release);

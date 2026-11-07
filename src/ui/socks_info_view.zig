@@ -42,7 +42,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     try scope.onCleanup(View, self, View.cleanup);
     const focus_guard = try scope.childScope();
     self.open = try scope.createSignal(bool, false);
-    const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = false, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
+    const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
     self.scope = popup.scope;
     self.wrapper = popup.wrapper;
     self.portaled = popup.portaled;
@@ -143,7 +143,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.message.setDisplay(.none);
     try self.body.content.appendChild(cx.allocator, self.message);
     self.logs_open = try scope.createSignal(bool, false);
-    const logs_popup = try ui.widgets.Popover(.{ .open = self.logs_open, .trigger = .manual, .position = .top, .width = S.logs_width, .max_width = S.logs_width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = false, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.logsOpenChanged) }).mount(scope, cx);
+    const logs_popup = try ui.widgets.Popover(.{ .open = self.logs_open, .trigger = .manual, .position = .top, .width = S.logs_width, .max_width = S.logs_width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.logsOpenChanged) }).mount(scope, cx);
     self.logs_wrapper = logs_popup.wrapper;
     self.logs_portaled = logs_popup.portaled;
     self.logs_root = logs_popup.chrome;
@@ -405,7 +405,7 @@ pub const View = struct {
     /// Public for layout tests and host resize integration.
     pub fn updateGeometry(self: *View) bool {
         if (self.logs_visible) {
-            const upper = anchorRect(self).y;
+            const upper = availableHeight(self);
             const height = @max(@as(f32, 1), @min(S.logs_height, @min(self.cx.viewport.height - 16, upper - 14)));
             const width = @max(@as(f32, 1), @min(S.logs_width, self.cx.viewport.width - 16));
             const changed = self.logs_root.style.width != .px or self.logs_root.style.height != .px or @abs(self.logs_root.style.width.px - width) > 0.5 or @abs(self.logs_root.style.height.px - height) > 0.5;
@@ -417,7 +417,7 @@ pub const View = struct {
             self.hide();
             return false;
         };
-        const upper = anchorRect(self).y;
+        const upper = availableHeight(self);
         const available = @max(@as(f32, 1), @min(self.cx.viewport.height - 16, upper - 14));
         const width = @max(@as(f32, 1), @min(S.width, self.cx.viewport.width - 16));
         // Hug the measured content; only a viewport-constrained body scrolls.
@@ -443,6 +443,10 @@ pub const View = struct {
             self.cx.requestRedraw();
         }
         return changed;
+    }
+    fn availableHeight(self: *View) f32 {
+        const rect = anchorRect(self);
+        return if (rect.y < self.cx.viewport.height / 2) self.cx.viewport.height - rect.y - rect.h else rect.y;
     }
     fn anchorRect(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));

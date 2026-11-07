@@ -126,6 +126,30 @@ test "AI welcome recent long mixed wide and unbroken titles stay bounded after r
         }
     }
 }
+test "AI welcome recent title tooltip only opens for truncated text and closes when it fits" {
+    var f: Fixture = undefined;
+    try f.init("检查当前服务器状态并分析最近的应用错误日志");
+    defer f.deinit();
+    const title = f.node("ai.session.title");
+    const wrapper = title.parent.?.parent.?;
+    wrapper.behavior.events.on_hover.?.invoke();
+    for (0..8) |_| f.settle();
+    try std.testing.expect(find(f.cx.root.?, "ai.session.title.tooltip") == null);
+
+    f.cx.setViewport(240, 276);
+    f.settle();
+    wrapper.behavior.events.on_hover.?.invoke();
+    for (0..8) |_| f.settle();
+    try std.testing.expect(f.node("ai.session.title.tooltip").getOpacity() > 0.99);
+
+    f.cx.setViewport(600, 276);
+    for (0..8) |_| f.settle();
+    try std.testing.expect(find(f.cx.root.?, "ai.session.title.tooltip") == null);
+    wrapper.behavior.events.on_leave.?.invoke();
+    wrapper.behavior.events.on_hover.?.invoke();
+    for (0..8) |_| f.settle();
+    try std.testing.expect(find(f.cx.root.?, "ai.session.title.tooltip") == null);
+}
 test "AI welcome recent actions preserve history semantics and phase updates" {
     var f: Fixture = undefined;
     try f.init(titles[0]);

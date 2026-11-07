@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, open, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { waitForServerReady, waitFor, query, resizeWindow, screenshot, scrollAt, sleep } from "../zig-out/share/zenit/harness/client.ts";
+import { waitForServerReady, waitFor, query, resizeWindow, screenshot, scrollAt, sleep } from "../vendor/zenit/e2e/client.ts";
 
 const options: Record<string, string> = {}, args = process.argv.slice(2);
 for (let i = 0; i < args.length; i += 2) {
@@ -79,18 +79,21 @@ try {
     assert((await resizeWindow(1194, 794)).ok);
     const normal = await capture("00-normal-wide");
     const left = normal["files.local"].find(shown), right = normal["files.remote"].find(shown);
-    assert.equal(left.rect.w, 594); assert.equal(right.rect.w, 594);
-    assert.equal(left.rect.h, 794); assert.equal(right.rect.x - left.rect.x - left.rect.w, 6);
+    assert.equal(left.rect.x, 12); assert.equal(left.rect.y, 12);
+    assert.equal(left.rect.w, 582); assert.equal(right.rect.w, 582);
+    assert.equal(left.rect.h, 770); assert.equal(right.rect.y, left.rect.y);
+    assert.equal(right.rect.x - left.rect.x - left.rect.w, 6);
     assert(flatten(left).filter(n => n.test_id === "files.row" && shown(n)).length > 0, "Actual native file rows");
-    report.checks.push("Native wide cards are 594×794 with 6 point gap; production file rows render");
+    report.checks.push("Native wide cards are 582×770 inside the 12 point workspace inset, with 6 point gap; production file rows render");
     assert((await resizeWindow(790, 374)).ok);
     const compact = await capture("01-normal-compact");
     const compactLeft = compact["files.local"].find(shown);
-    assert.equal(compactLeft.rect.w, 392); assert.equal(compactLeft.rect.h, 374);
+    assert.equal(compactLeft.rect.x, 12); assert.equal(compactLeft.rect.y, 12);
+    assert.equal(compactLeft.rect.w, 380); assert.equal(compactLeft.rect.h, 350);
     const bodies = compact["files.rows"].filter(shown), columns = compact["files.columns"].filter(shown);
     const clips = compact["files.data_clip"].filter(shown);
-    assert.equal(columns[0].rect.w, 390); assert.equal(columns[1].rect.w, 390);
-    assert.equal(clips[0].rect.h, 175); assert.equal(clips[1].rect.h, 175);
+    assert.equal(columns[0].rect.w, 378); assert.equal(columns[1].rect.w, 378);
+    assert.equal(clips[0].rect.h, 151); assert.equal(clips[1].rect.h, 151);
     assert.equal(clips[0].rect.y + clips[0].rect.h, bodies[0].rect.y + bodies[0].rect.h);
     const x = bodies[0].rect.x + 60, y = bodies[0].rect.y + 45;
     assert((await scrollAt(x, y, -1000, -200)).ok);
@@ -99,7 +102,7 @@ try {
     assert.equal(moved[0].rect.x, columns[0].rect.x, "Compact columns fit without horizontal drift");
     assert.equal(moved[1].rect.x, columns[1].rect.x, "Right card scroll remains independent");
     assert.equal(scrolled["files.breadcrumb"].filter(shown)[0].rect.y, compact["files.breadcrumb"].filter(shown)[0].rect.y);
-    report.checks.push("Native 392×374 cards fit 390 point compact columns, hide the date column and retain fixed headers and paths while rows scroll");
+    report.checks.push("Native 380×350 cards fit 378 point compact columns inside the 12 point workspace inset, hide the date column and retain fixed headers and paths while rows scroll");
   });
   await run("empty", async () => {
     const nodes = await capture("03-empty-remote");

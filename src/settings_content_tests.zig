@@ -212,7 +212,7 @@ test "AI settings filtered fields retain body and footer without a missing Provi
         try std.testing.expect(byId(mounted.root, "settings.footer") != null);
         try std.testing.expect(byId(mounted.root, "settings.save") == mounted.save_button);
         try std.testing.expect(byId(mounted.root, "settings.reset") == mounted.reset_button);
-        try std.testing.expectEqualStrings("已保存", mounted.status_label.getText().?.content);
+        try std.testing.expectEqualStrings("", mounted.status_label.getText().?.content);
         try std.testing.expectEqual(case.providers, context.mounted);
         try std.testing.expectEqual(@as(usize, 0), context.action_count);
         try std.testing.expect(byId(mounted.root, "test.providers.add") == null);
@@ -692,7 +692,7 @@ test "appearance footer reports failed replacement even with clean configuration
         .ui = .{ .materials = .{ .background = .{ .enabled = true, .path = "/saved.png" } } },
     });
     const mounted = try f.mount();
-    try std.testing.expectEqualStrings("已保存", mounted.status_label.getText().?.content);
+    try std.testing.expectEqualStrings("", mounted.status_label.getText().?.content);
     var bad = try f.controller.requestBackground("/broken.png");
     defer bad.deinit();
     try std.testing.expect(f.controller.failBackground(bad.request, error.InvalidImage));
@@ -806,7 +806,7 @@ test "settings fixed footer stays outside the scrolling viewport at canonical si
     }
 }
 
-test "enabled settings save icon stays visible within its button in every theme" {
+test "enabled settings save label stays visible within its button in every theme" {
     const theme = @import("ui/app_theme.zig");
     const previous = theme.currentName();
     defer theme.select(previous);
@@ -828,17 +828,16 @@ test "enabled settings save icon stays visible within its button in every theme"
         try cx.root.?.appendChild(cx.allocator, page.root);
         cx.layout();
         try std.testing.expect(!page.save_button.behavior.interaction.a11y.?.disabled);
-        const icon = firstImage(page.save_button).?;
-        const icon_rect = icon.globalRect();
+        const label = textNode(page.save_button, "保存更改").?;
+        const label_rect = label.globalRect();
         const button_rect = page.save_button.globalRect();
-        try std.testing.expectApproxEqAbs(@as(f32, 14), icon_rect.w, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 14), icon_rect.h, 0.1);
-        try std.testing.expect(icon_rect.x >= button_rect.x and icon_rect.x + icon_rect.w <= button_rect.x + button_rect.w);
-        try std.testing.expect(icon_rect.y >= button_rect.y and icon_rect.y + icon_rect.h <= button_rect.y + button_rect.h);
-        const ink = relativeLuminance(if (icon.getIcon()) |props| props.tint else icon.getImage().?.tint);
+        try std.testing.expect(label_rect.w > 0 and label_rect.h > 0);
+        try std.testing.expect(label_rect.x >= button_rect.x and label_rect.x + label_rect.w <= button_rect.x + button_rect.w);
+        try std.testing.expect(label_rect.y >= button_rect.y and label_rect.y + label_rect.h <= button_rect.y + button_rect.h);
+        const ink = relativeLuminance(label.getText().?.color);
         const background = relativeLuminance(page.save_button.getBackground());
         const contrast = (@max(ink, background) + 0.05) / (@min(ink, background) + 0.05);
-        try std.testing.expect(contrast >= 3);
+        try std.testing.expect(contrast >= 4.5);
     }
 }
 

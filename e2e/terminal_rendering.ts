@@ -269,7 +269,7 @@ try {
   assert(restored.some((row) => row.text.includes("PRIMARY_BEFORE_ALT")), "Leaving alternate screen must restore primary contents");
   assert(restored.some((row) => row.text.includes("AFTER_ALT_TAIL")), "Post-alternate output must survive final process exit");
   assert(!restored.some((row) => row.text.includes("ALT_ACTIVE")), "Alternate contents must not leak into the restored primary screen");
-  await visible("local.ended.new");
+  await visible("local.ended.reconnect");
   await waitFor(async () => !descendants().some((value) => value.command.endsWith("/zsh")) || null);
   await capture("alternate-exited-tail", "Primary contents, AFTER_ALT_TAIL and FINAL_EOF_TAIL remain readable after the real shell exits. Inspect the final row and tombstone for truncation, clearing or stale alternate pixels.");
   checks.push("Actual DEC1049 alternate-screen entry/exit restores primary contents and retains post-alternate/final output after the owned zsh exits");

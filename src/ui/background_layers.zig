@@ -116,7 +116,7 @@ pub const View = struct {
             const source = maybe orelse continue;
             const fill = paint_maybe.?;
             const rect = source.globalRect();
-            var visible = rect.w > 0 and rect.h > 0 and !(index == 2 and group != null);
+            var visible = rect.w > 0 and rect.h > 0 and index != 0 and index != 2;
             var ancestor: ?*ui.Node = source;
             while (ancestor) |node| : (ancestor = node.parent) {
                 if (node.style.display == .none) visible = false;
@@ -129,6 +129,7 @@ pub const View = struct {
             // terminal is active) keep their last source rect, but their
             // hidden fill is not laid out. Comparing those forever would
             // request a new layout and frame even in a completely idle window.
+            if (index == 0 or index == 2) clearShellFill(source);
             if (!visible) continue;
             const old = fill.globalRect();
             if (@abs(old.x - rect.x) > 0.01 or @abs(old.y - rect.y) > 0.01 or @abs(old.w - rect.w) > 0.01 or @abs(old.h - rect.h) > 0.01) {
@@ -348,9 +349,11 @@ test "global material composites opaque shell fills before applying canvas trans
             try std.testing.expectEqual(@as(f32, 0), entry.style.backdrop_blur());
             try std.testing.expectEqual(@as(u8, 255), view.shell_paints[5].?.getBackground().a);
             try std.testing.expect(view.shell_paints[5].?.parent == view.veil);
-            for (sources, view.shell_paints[0..4]) |source, paint| {
+            for (sources, view.shell_paints[0..4], 0..) |source, paint, index| {
                 try std.testing.expectEqual(@as(u8, 0), source.getBackground().a);
-                try std.testing.expectEqual(@as(u8, 255), paint.?.getBackground().a);
+                if (index == 0 or index == 2) {
+                    try std.testing.expectEqual(.none, paint.?.style.display);
+                } else try std.testing.expectEqual(@as(u8, 255), paint.?.getBackground().a);
             }
             try std.testing.expectEqual(@as(f32, @floatFromInt(materials.blur_px)), view.blur.style.backdrop_blur());
             try std.testing.expect((view.blur.style.display == .none) == (materials.blur_px == 0));
@@ -432,6 +435,6 @@ test "group canvas paints each member and leaves gutters on base canvas" {
         cx.layout();
         _ = View.syncShell(view, 0, false);
     }
-    try std.testing.expectEqual(.flex, view.shell_paints[2].?.style.display);
+    try std.testing.expectEqual(.none, view.shell_paints[2].?.style.display);
     for (view.group_paints.items) |paint| try std.testing.expectEqual(.none, paint.style.display);
 }

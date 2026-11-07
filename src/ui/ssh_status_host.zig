@@ -37,6 +37,8 @@ pub const Active = struct {
 
     fn connectionInfo(self: Active) Info.Snapshot {
         var value = infoSnapshot(self.details, self.can_reconnect);
+        value.utf8 = self.utf8;
+        if (self.grid) |grid| value.grid = .{ .cols = grid.cols, .rows = grid.rows };
         if (self.ended) value.state = .disconnected;
         return value;
     }
@@ -72,6 +74,7 @@ pub const Hooks = struct {
     hide_chain: *const fn (*anyopaque) void,
 };
 pub const Controls = struct {
+    workspace_chrome: bool = false,
     bar: *ui.Node,
     identity_button: *ui.Node,
     identity_label: *ui.Node,
@@ -385,6 +388,10 @@ pub const Host = struct {
                 .unknown => "SFTP · 状态未知",
             };
         }
+        if (controls.workspace_chrome) {
+            controls.chain_button.setDisplay(.flex);
+            controls.socks_button.setDisplay(.flex);
+        }
         try self.finishUpdate();
         self.projection_kind = .file;
         self.layout_metrics = metrics;
@@ -404,13 +411,14 @@ pub const Host = struct {
             else => "连接异常",
         });
         _ = controls.state_dot.setTint(if (next.state == .online) S.theme.current().ok else S.theme.current().fg_3);
-        controls.identity_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = S.identity_width } });
-        controls.rtt_label.setDisplay(.flex);
+        controls.identity_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (controls.workspace_chrome) 28 else S.identity_width } });
+        controls.rtt_label.setDisplay(if (controls.workspace_chrome) .none else .flex);
         for ([_]*ui.Node{ controls.encoding_button, controls.grid_button, controls.more_button, controls.socks_button, controls.progress_slot }) |node| node.setDisplay(.none);
         if (controls.chain_button.behavior.interaction.a11y) |*props| props.description = "KVM 连接链路与连接日志";
         for (controls.chain_button.children.items) |child| if (child.getIcon() != null) {
             _ = child.setTint(if (next.state == .online) S.theme.current().ok else S.theme.current().fg_3);
         };
+        if (controls.workspace_chrome) controls.socks_button.setDisplay(.flex);
         self.graphical = next;
         self.projection_kind = .graphical;
         self.layout_metrics = metrics;
@@ -471,19 +479,19 @@ pub const Host = struct {
             _ = child.setTint(chain_ink);
         };
         const identity_width: f32 = if (self.active != null) S.identity_width else 96;
-        controls.identity_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = identity_width } });
-        controls.identity_label.setDisplay(.flex);
+        controls.identity_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (controls.workspace_chrome) 28 else identity_width } });
+        controls.identity_label.setDisplay(if (controls.workspace_chrome) .none else .flex);
         controls.icons[1].setDisplay(.none);
         const full_width: f32 = identity_width + 232 + S.action_width * 2 + controls.theme_button.globalRect().w + 20 + controls.progress_slot.globalRect().w;
         const narrow = controls.bar.globalRect().w < full_width;
         controls.theme_button.setDisplay(.flex);
         controls.narrow = narrow;
         controls.rtt_button.setDisplay(.none);
-        controls.rtt_label.setDisplay(if (self.active == null) .none else .flex);
-        controls.chain_label.setDisplay(.flex);
-        controls.forward_label.setDisplay(.flex);
-        controls.chain_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = S.action_width } });
-        controls.socks_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = S.action_width } });
+        controls.rtt_label.setDisplay(if (controls.workspace_chrome or self.active == null) .none else .flex);
+        controls.chain_label.setDisplay(if (controls.workspace_chrome) .none else .flex);
+        controls.forward_label.setDisplay(if (controls.workspace_chrome) .none else .flex);
+        controls.chain_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (controls.workspace_chrome) 28 else S.action_width } });
+        controls.socks_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (controls.workspace_chrome) 28 else S.action_width } });
         for ([_]*ui.Node{ controls.encoding_button, controls.grid_button }) |node| node.setDisplay(if (narrow or self.file_active != null) .none else .flex);
         self.detail.reanchor(controls.bar.globalRect().y);
         try self.detail.flush();
@@ -493,6 +501,10 @@ pub const Host = struct {
     pub fn refreshFrozen(self: *Host, snapshot: Details.Snapshot, can_reconnect: bool) void {
         if (self.info.source) |source| if (source.key.eql(snapshot.key)) {
             var value = infoSnapshot(snapshot, can_reconnect);
+            if (self.active) |active| if (active.details.key.eql(snapshot.key)) {
+                value.utf8 = active.utf8;
+                if (active.grid) |grid| value.grid = .{ .cols = grid.cols, .rows = grid.rows };
+            };
             if (self.active) |active| if (active.details.key.eql(snapshot.key) and active.ended) {
                 value.state = .disconnected;
             };

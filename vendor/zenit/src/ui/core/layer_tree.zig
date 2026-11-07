@@ -983,7 +983,6 @@ pub const LayerTree = struct {
                 // inherits.
                 var apply_clip_id = runtime.clip_id;
                 if (apply_clip_id != INVALID_ID and apply_clip_id < clips.len and
-                    effect.kind != .backdrop_blur and
                     clips[apply_clip_id].owner_wraps_children and
                     clips[apply_clip_id].node_id == runtime.node_id)
                 {

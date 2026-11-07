@@ -107,7 +107,7 @@ pub const View = struct {
         // Scope children dispose in creation order. Release this view's focus
         // while all Button/Tooltip signals still exist.
         const focus_guard = try scope.childScope();
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -144,8 +144,8 @@ pub const View = struct {
         } else try self.update(snapshot);
         const rect = trigger.globalRect();
         self.anchor_id = trigger.id;
-        self.status_top = status_top;
-        self.anchor_rect = .{ .x = rect.x, .y = status_top, .w = rect.w, .h = 0 };
+        self.status_top = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top;
+        self.anchor_rect = .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
         self.visible = true;
         self.open.set(true);
         self.dirty = true;
@@ -232,8 +232,8 @@ pub const View = struct {
             return;
         }
         const rect = trigger.globalRect();
-        const next: ui.widgets.popover.AnchorRect = .{ .x = rect.x, .y = status_top, .w = rect.w, .h = 0 };
-        self.status_top = status_top;
+        const next: ui.widgets.popover.AnchorRect = .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
+        self.status_top = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top;
         if (!std.meta.eql(next, self.anchor_rect)) {
             self.anchor_rect = next;
             self.chrome.markLayoutDirty();
@@ -284,7 +284,7 @@ pub const View = struct {
     }
     fn panelHeight(self: *const View) f32 {
         const natural = S.height(if (self.source) |source| source.hop_count else 1);
-        return @min(natural, @max(96, @min(self.cx.viewport.height - S.margin * 2, self.status_top - S.anchor_gap - S.margin)));
+        return @min(natural, @max(96, @min(self.cx.viewport.height - S.margin * 2, (if (self.status_top < self.cx.viewport.height / 2) self.cx.viewport.height - self.status_top - self.anchor_rect.h else self.status_top) - S.anchor_gap - S.margin)));
     }
     fn positionPointer(self: *View) void {
         const pointer = self.pointer orelse return;
@@ -298,7 +298,7 @@ pub const View = struct {
         const self: *View = @ptrCast(@alignCast(raw));
         if (self.visible) if (self.cx.root) |root| if (self.anchor_id) |id| if (find(root, id)) |trigger| {
             const rect = trigger.globalRect();
-            if (trigger.isDisplayedInTree() and rect.w > 0) return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = 0 };
+            if (trigger.isDisplayedInTree() and rect.w > 0) return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
         };
         return self.anchor_rect;
     }
@@ -353,7 +353,7 @@ pub const View = struct {
         try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.spacer(14), .{}));
         const footer = try ui.box(self.cx, S.chainFooter(), .{});
         footer.meta.ownership.meta.test_id = "connection.details.footer";
-        try footer.appendChild(self.cx.allocator, try self.textAction(scope, .edit, "编辑连接路径", "connection.details.edit", self.callbacks.edit == null or target.endpoint.asset_owner == null, target.endpoint.asset_owner, 96, false));
+        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .edit, ui.icons.pencil, "编辑连接路径", "connection.details.edit", self.callbacks.edit == null or target.endpoint.asset_owner == null, target.endpoint.asset_owner, 28, true));
         try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .copy, ui.icons.copy, "复制链路", "connection.details.copy", self.callbacks.copy == null, null, 28, true));
         try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .logs, ui.icons.get("file-text").?, "连接日志", "connection.details.logs", self.callbacks.logs == null, null, 28, true));
         try footer.appendChild(self.cx.allocator, try ui.spacer(self.cx));

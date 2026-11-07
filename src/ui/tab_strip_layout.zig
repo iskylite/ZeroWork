@@ -16,6 +16,11 @@ pub const maximum: f32 = 200;
 pub const gap: f32 = 4;
 
 pub fn calculate(header_width: f32, title_advances: []const f32, widths: []f32, requested_offset: f32) !Result {
+    return calculateBudget(@max(0, header_width - 272), title_advances, widths, requested_offset);
+}
+
+pub fn calculateBudget(available: f32, title_advances: []const f32, widths: []f32, requested_offset: f32) !Result {
+    const header_width = available + 272;
     if (!std.math.isFinite(header_width) or header_width < 0 or !std.math.isFinite(requested_offset)) return error.InvalidGeometry;
     if (widths.len != title_advances.len) return error.InvalidOutput;
     var natural: f32 = 0;

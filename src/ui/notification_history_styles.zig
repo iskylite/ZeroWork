@@ -18,7 +18,7 @@ pub fn line() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 18 }, .min_width = 0, .flex = 1 };
 }
 pub fn action() ui.BoxStyle {
-    return .{ .height = .{ .px = 22 }, .padding = .{ .left = 6, .right = 6 }, .font_size = 11, .font_weight = 400, .text_color = theme.current().accent_ink, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 22 }, .padding = .{ .left = 6, .right = 6 }, .font_size = 11, .font_weight = 400, .border = .{ .radius = 5 }, .flex_shrink = 0 };
 }
 pub fn expand() ui.BoxStyle {
     return .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .padding = .ZERO, .border = .{ .radius = 5 }, .flex_shrink = 0 };
@@ -32,4 +32,8 @@ pub fn footer() ui.BoxStyle {
 
 pub fn empty() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 152 }, .direction = .column, .align_items = .center, .justify = .center, .gap = 8, .flex_shrink = 0 };
+}
+
+pub fn footerAction() ui.BoxStyle {
+    return .{ .background = theme.popupInset(), .text_color = theme.current().fg_1, .border_width = 0 };
 }

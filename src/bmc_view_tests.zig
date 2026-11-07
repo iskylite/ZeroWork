@@ -706,7 +706,7 @@ test "BMC view progress compact card scrolls independently and log close never c
     const card = view.waiting.?.globalRect();
     const body = view.waiting_body.?;
     const actions = view.waiting_actions.?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 390) - @import("plugins/bmc_ikvm/styles.zig").toolbar_height - 12, video.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 390) - @import("plugins/bmc_ikvm/styles.zig").toolbar_height - 16 - 16, video.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 520), card.w, 0.01);
     try std.testing.expect(card.h <= video.h - 23.9);
     try std.testing.expect(card.y >= video.y + 11.9 and card.y + card.h <= video.y + video.h - 11.9);
@@ -1155,7 +1155,7 @@ const InputWire = struct {
     }
 };
 
-test "BMC view workspace owns outer corners and aligns host identity across resize" {
+test "BMC view workspace aligns floating toolbar and video surface and aligns host identity across resize" {
     var service = remote.Service.init(owner);
     try service.setConnected(true, 1);
     try service.setControl(true, 2);
@@ -1169,25 +1169,26 @@ test "BMC view workspace owns outer corners and aligns host identity across resi
         const card = card_node.globalRect();
         const viewport = view.viewport.?.globalRect();
         const image = view.image_node.?.globalRect();
-        try std.testing.expectApproxEqAbs(@as(f32, 12), card.x, 0.01);
-        try std.testing.expectApproxEqAbs(@as(f32, 48), card.y, 0.01);
-        try std.testing.expectEqual(card, viewport);
-        try std.testing.expectApproxEqAbs(size[0] - 24, viewport.w, 0.01);
-        try std.testing.expectApproxEqAbs(size[1] - 60, viewport.h, 0.01);
-        try std.testing.expectEqual(ui.Padding.ZERO, card_node.style.padding);
-        try std.testing.expectEqual(ui.Padding{ .left = 12, .right = 12, .bottom = 12 }, findById(view.root.?, "bmc.video_workspace").?.style.padding);
-        try std.testing.expectEqual(@as(f32, 11), view.root.?.style.border.radius);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), card.x, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 60), card.y, 0.01);
+        try std.testing.expectApproxEqAbs(card.x + 8, viewport.x, 0.01);
+        try std.testing.expectApproxEqAbs(card.y + 8, viewport.y, 0.01);
+        try std.testing.expectApproxEqAbs(size[0] - 16, viewport.w, 0.01);
+        try std.testing.expectApproxEqAbs(size[1] - 76, viewport.h, 0.01);
+        try std.testing.expectEqual(ui.Padding.all(8), card_node.style.padding);
+        try std.testing.expectEqual(ui.Padding.ZERO, findById(view.root.?, "bmc.video_workspace").?.style.padding);
+        try std.testing.expectEqual(@as(f32, 0), view.root.?.style.border.radius);
         try std.testing.expectEqual(@as(f32, 0), view.viewport.?.style.border.radius);
         try std.testing.expectEqual(@as(f32, 0), view.image_node.?.style.border.radius);
         const icon = findById(view.root.?, "bmc.title.icon").?.globalRect();
-        try std.testing.expectApproxEqAbs(card.x, icon.x, 0.01);
+        try std.testing.expectApproxEqAbs(card.x + 16, icon.x, 0.01);
         const last_tool = view.tool_nodes[4].?.globalRect();
-        try std.testing.expectApproxEqAbs(@as(f32, 12), last_tool.y, 0.01);
-        try std.testing.expectApproxEqAbs(@as(f32, 12), card.y - last_tool.y - last_tool.h, 0.01);
-        try std.testing.expectApproxEqAbs(card.x + card.w, last_tool.x + last_tool.w, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 6), last_tool.y, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 22), card.y - last_tool.y - last_tool.h, 0.01);
+        try std.testing.expectApproxEqAbs(card.x + card.w - 6, last_tool.x + last_tool.w, 0.01);
         try std.testing.expectApproxEqAbs(@as(f32, 18), icon.w, 0.01);
-        try std.testing.expectApproxEqAbs(@as(f32, 24), icon.y + icon.h / 2, 0.01);
-        try std.testing.expectEqual(@import("ui/app_theme.zig").current().surface_1, view.root.?.getBackground());
+        try std.testing.expectApproxEqAbs(@as(f32, 22), icon.y + icon.h / 2, 0.01);
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, view.root.?.getBackground());
         try std.testing.expectApproxEqAbs(@as(f32, 1.6), image.w / image.h, 0.0001);
         try std.testing.expect(image.x >= card.x and image.y >= card.y);
         try std.testing.expect(image.x + image.w <= card.x + card.w + 0.01);
@@ -1235,7 +1236,7 @@ test "BMC view final coalesced mouse move schedules its own deadline and flushes
     view.last_pointer_ms = ui.frame.estimateTimeMs();
     harness.cx.next_redraw_scheduled_at = null;
     harness.cx.next_redraw_delay_ns = null;
-    _ = view.viewport.?.behavior.events.on_event_capture.?(.{ .mouse_move = .{ .x = image.x + image.w * 0.75, .y = image.y + image.h * 0.75 } }, view);
+    _ = view.viewport.?.behavior.events.on_event_capture.?(.{ .mouse_move = .{ .x = image.x + image.w * (1440.25 / 1920.0), .y = image.y + image.h * (900.25 / 1200.0) } }, view);
     try std.testing.expect(view.pending_pointer != null);
     const deadline = harness.cx.next_redraw_delay_ns orelse return error.PointerDeadlineMissing;
     try std.testing.expect(deadline > 0 and deadline <= 16_666_667);

@@ -41,6 +41,14 @@ pub fn saveWithCredentialRefs(io: std.Io, dir: std.Io.Dir, sub_path: []const u8,
 
 pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: config.Config, allocator: std.mem.Allocator, options: CredentialOptions) !SavedConfig {
     try value.validate();
+    if (value.ai.extensions.skills.len != 0) {
+        var skill_root = try dir.openDir(io, std.fs.path.dirname(sub_path) orelse ".", .{});
+        defer skill_root.close(io);
+        for (value.ai.extensions.skills) |skill| {
+            const content = try @import("../ai/local_skills.zig").read(std.heap.page_allocator, io, skill_root, skill, "SKILL.md");
+            std.heap.page_allocator.free(content);
+        }
+    }
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -65,6 +73,11 @@ pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: 
         }
         provider.api_key_ref = try tx.stage(io, allocator, if (provider.api_key.len != 0) provider.api_key else null, old);
     }
+    disk.ai.extensions = try value.ai.extensions.clone(allocator);
+    for (disk.ai.extensions.servers) |*server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |*entry| if (entry.secret) {
+        const secret = if (entry.value.len != 0) entry.value else if (entry.secret_ref) |ref| try credentials.get(a, ref) else "";
+        entry.secret_ref = try tx.stage(io, allocator, if (secret.len != 0) secret else null, entry.secret_ref);
+    };
     var previous = plugin_credential_references.References.init(a);
     defer previous.deinit();
     if (baseline) |old| try addConfigReferences(&previous, old);
@@ -114,6 +127,10 @@ pub fn loadWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator
             provider.api_key = try credentials.get(arena.allocator(), reference);
         } else if (provider.api_key.len != 0) migrate = true;
     }
+    for (value.ai.extensions.servers) |*server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |*entry| if (entry.secret_ref) |reference| {
+        if (entry.value.len != 0) return error.AmbiguousCredential;
+        entry.value = try credentials.get(arena.allocator(), reference);
+    };
     if (migrate) {
         observeCleanup(try saveWithOptions(io, dir, sub_path, value, options));
         const migrated = try loadWithOptions(io, dir, allocator, sub_path, options);
@@ -130,6 +147,9 @@ pub const LoadedConfig = struct {
     value: config.Config,
 
     pub fn deinit(self: *LoadedConfig, allocator: std.mem.Allocator) void {
+        for (self.value.ai.extensions.servers) |server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |entry| if (entry.secret) {
+            std.crypto.secureZero(u8, @constCast(entry.value));
+        };
         self.arena.deinit();
         allocator.free(self.source);
         self.* = undefined;
@@ -383,6 +403,7 @@ fn siblingPath(allocator: std.mem.Allocator, path: []const u8, sibling: []const 
 
 fn addConfigReferences(references: *plugin_credential_references.References, value: config.Config) !void {
     for (value.ai.providers[0..value.ai.provider_count]) |provider| if (provider.api_key_ref) |reference| try references.add(reference);
+    for (value.ai.extensions.servers) |server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |entry| if (entry.secret_ref) |reference| try references.add(reference);
 }
 
 fn addHostFileReferences(io: std.Io, dir: std.Io.Dir, path: []const u8, references: *plugin_credential_references.References, provider: ?plugin_credential_references.Provider) !void {

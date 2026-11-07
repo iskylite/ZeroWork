@@ -104,15 +104,14 @@ test "status connection view follows V3 labeled facts geometry and copies source
     try std.testing.expectApproxEqAbs(f.trigger.globalRect().y - 6 - S.height, r.y, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 380), r.w, 0.1);
     try std.testing.expectApproxEqAbs(S.height, r.h, 0.1);
-    try std.testing.expectApproxEqAbs(r.x + 16, f.view.name.parent.?.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(r.y + 56, f.view.name.parent.?.globalRect().y, 0.1);
+    try std.testing.expectApproxEqAbs(r.x + 16, f.view.name.parent.?.parent.?.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(r.y + 56, f.view.name.parent.?.parent.?.globalRect().y, 0.1);
     try std.testing.expect(f.view.address.globalRect().y >= f.view.name.globalRect().y + f.view.name.globalRect().h);
-    try std.testing.expect(f.view.address.globalRect().y + f.view.address.globalRect().h <= f.view.name.parent.?.globalRect().y + f.view.name.parent.?.globalRect().h);
-    const footer = f.view.footer.globalRect();
-    try std.testing.expect(footer.y >= f.view.scroll.container.globalRect().y + f.view.scroll.container.globalRect().h);
-    try std.testing.expect(footer.y + footer.h <= r.y + r.h - 14.5);
+    try std.testing.expect(f.view.address.globalRect().y + f.view.address.globalRect().h <= f.view.name.parent.?.parent.?.globalRect().y + f.view.name.parent.?.parent.?.globalRect().h);
+    try std.testing.expectApproxEqAbs(f.view.address.globalRect().y - 4, f.view.copy_button.globalRect().y, 0.1);
+    try std.testing.expect(f.view.copy_button.globalRect().x >= f.view.address.globalRect().x + f.view.address.globalRect().w);
+    try std.testing.expect(f.view.logs_button.globalRect().x > f.view.copy_button.globalRect().x);
     try std.testing.expectEqual(@as(f32, 28), f.view.copy_button.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 88), f.view.reconnect_button.globalRect().w);
     try std.testing.expectEqualStrings("ubuntu@10.0.1.11:22", f.view.address.getText().?.content);
     try std.testing.expectEqualStrings("会话 101", f.view.session.getText().?.content);
     try std.testing.expectEqualStrings("42 分钟", f.view.duration.getText().?.content);
@@ -176,7 +175,7 @@ test "status connection view rejects other generations old revisions and endpoin
     try std.testing.expect(f.last_key.?.eql(key));
 }
 
-test "status connection view logs and reconnect are explicit callbacks and close or escape has no session action" {
+test "status connection view logs callback and close or escape has no session action" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -190,17 +189,6 @@ test "status connection view logs and reconnect are explicit callbacks and close
     try f.show(source);
     f.click(f.view.logs_button);
     try std.testing.expectEqual(@as(usize, 1), f.log_calls);
-    try std.testing.expect(f.last_key.?.eql(key));
-    try std.testing.expect(!f.view.isVisible());
-    try f.show(source);
-    f.fail = true;
-    f.click(f.view.reconnect_button);
-    try std.testing.expectEqual(@as(usize, 0), f.reconnects);
-    try std.testing.expect(f.view.isVisible());
-    try std.testing.expectEqualStrings("暂时无法重新连接", f.view.feedback_label.getText().?.content);
-    f.fail = false;
-    f.click(f.view.reconnect_button);
-    try std.testing.expectEqual(@as(usize, 1), f.reconnects);
     try std.testing.expect(f.last_key.?.eql(key));
     try std.testing.expect(!f.view.isVisible());
 }
@@ -220,8 +208,6 @@ test "status connection view expired capture keeps copy and logs but cannot adve
     f.settle();
     try std.testing.expectEqualStrings("已过期", f.view.state.getText().?.content);
     try std.testing.expectEqualStrings("未知", f.view.duration.getText().?.content);
-    try std.testing.expect(f.view.reconnect_disabled.peek());
-    f.click(f.view.reconnect_button);
     try std.testing.expectEqual(@as(usize, 0), f.reconnects);
     f.click(f.view.copy_button);
     try std.testing.expectEqual(@as(usize, 1), f.copies);
@@ -317,4 +303,80 @@ test "status connection view hands keyboard focus to the actual log modal after 
     const focused = f.cx.focus_manager.current_focus orelse return error.MissingModalFocus;
     try std.testing.expect(focused.isDescendantOf(modal.dialog));
     try std.testing.expect(f.last_key.?.eql(key));
+}
+
+test "status connection view top toolbar opens below full trigger and keeps bounded size across reopen" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.trigger.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 420 }, .top = .{ .px = 12 } } });
+    f.cx.layout();
+    const source = try snapshot();
+    for (0..2) |_| {
+        try f.view.show(source, f.trigger, 860);
+        f.settle();
+        try f.view.flush();
+        f.settle();
+        const r = f.view.chrome.globalRect();
+        const trigger = f.trigger.globalRect();
+        try std.testing.expectApproxEqAbs(trigger.y + trigger.h + S.anchor_gap, r.y, 0.1);
+        try std.testing.expectApproxEqAbs(S.width, r.w, 0.1);
+        try std.testing.expectApproxEqAbs(S.height, r.h, 0.1);
+        try std.testing.expectApproxEqAbs(trigger.x, r.x, 0.1);
+        f.view.dismiss();
+        f.settle();
+    }
+    f.cx.setViewport(480, 240);
+    f.trigger.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 440 }, .top = .{ .px = 12 } } });
+    f.cx.layout();
+    try f.view.show(source, f.trigger, 190);
+    f.settle();
+    try f.view.flush();
+    f.settle();
+    const r = f.view.chrome.globalRect();
+    try std.testing.expectApproxEqAbs(f.trigger.globalRect().y + f.trigger.globalRect().h + S.anchor_gap, r.y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 472), r.x + r.w, 0.1);
+    try std.testing.expect(r.x >= 8 and r.x + r.w <= 472.1 and r.y + r.h <= 232.1);
+    try std.testing.expect(f.view.scroll.content.globalRect().h > f.view.scroll.container.globalRect().h);
+}
+
+test "status connection view aligns the floating identity to its tab and changes health states" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const tab = try ui.box(f.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 400 }, .top = .{ .px = 12 } }, .width = .{ .px = 180 }, .height = .{ .px = 28 } }, .{});
+    tab.meta.ownership.meta.test_id = "tabs.tab.101";
+    try f.cx.root.?.appendChild(a, tab);
+    f.trigger.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 412 }, .top = .{ .px = 12 } }, .width = .{ .px = 28 }, .height = .{ .px = 28 } });
+    f.cx.layout();
+    var source = try snapshot();
+    source.latency_ms = 20;
+    try f.show(source);
+    try std.testing.expectApproxEqAbs(tab.globalRect().x, f.view.chrome.globalRect().x, 0.1);
+    try std.testing.expectEqualStrings("20 ms", f.view.latency.getText().?.content);
+    try std.testing.expect(f.view.heartbeat[0].isDisplayedInTree());
+    try std.testing.expect(!f.view.heartbeat[1].isDisplayedInTree());
+    try std.testing.expect(f.view.latency.globalRect().x > f.view.name.globalRect().x + f.view.name.globalRect().w);
+    source.revision += 1;
+    source.state = .disconnected;
+    try f.view.update(source);
+    try f.view.flush();
+    f.settle();
+    try std.testing.expect(f.view.heartbeat[1].isDisplayedInTree());
+    try std.testing.expectEqualStrings("—", f.view.latency.getText().?.content);
+    source.revision += 1;
+    source.state = .unknown;
+    try f.view.update(source);
+    try f.view.flush();
+    f.settle();
+    try std.testing.expect(f.view.heartbeat[2].isDisplayedInTree());
+    // Right fallback uses the card edge, not the floating icon edge.
+    tab.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 1220 }, .top = .{ .px = 12 } } });
+    f.trigger.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 1232 }, .top = .{ .px = 12 } } });
+    f.cx.layout();
+    f.view.reanchor(860);
+    try f.view.flush();
+    f.settle();
+    const r = f.view.chrome.globalRect();
+    try std.testing.expectApproxEqAbs(tab.globalRect().x + tab.globalRect().w, r.x + r.w, 0.1);
 }

@@ -1,11 +1,67 @@
 //! Semantic UI and terminal palettes shared with docs/UI_V3/theme-presets.json.
 //! Source terminal palettes are independent of UI contrast and material adjustments.
 const std = @import("std");
-pub const product_ids = [_][]const u8{ "dark", "light", "sauber", "midnight", "forest", "ocean", "plum", "ember", "graphite", "paper", "sand", "ice" };
+pub const product_ids = [_][]const u8{ "dark", "light", "sauber", "reference-light", "mist", "midnight", "forest", "ocean", "plum", "ember", "graphite", "paper", "sand", "ice" };
 pub const legacy_ids = [_][]const u8{ "catppuccin-mocha", "dracula", "dark-pro", "solarized-dark", "nord" };
 pub const classic_ids = [_][]const u8{ "catppuccin-latte", "catppuccin-frappe", "catppuccin-macchiato", "tokyo-night", "gruvbox-dark", "gruvbox-light", "one-dark", "solarized-light", "rose-pine", "vesper", "flexoki-light", "flexoki-dark", "everforest-dark", "everforest-light", "kanagawa-wave", "kanagawa-dragon", "kanagawa-lotus", "ayu-light", "ayu-mirage", "ayu-dark" };
 pub const ids = product_ids ++ legacy_ids ++ classic_ids;
 pub fn tokens(comptime T: type, id: []const u8) ?T {
+    if (std.mem.eql(u8, id, "reference-light")) return .{
+        .app = 0xffffffff,
+        .surface_1 = 0xf6f6f7ff,
+        .surface_2 = 0xe7e7e8ff,
+        .well = 0xefefefff,
+        .well_border = 0xd4d4d8ff,
+        .terminal = 0xffffffff,
+        .overlay = 0xffffffff,
+        .hover = 0xefeff2ff,
+        .tab_on = 0xeaedfdff,
+        .fg_1 = 0x18181bff,
+        .fg_2 = 0x5b5b65ff,
+        .fg_3 = 0x676771ff,
+        .accent = 0x4f5ed9ff,
+        .accent_ink = 0x4352c7ff,
+        .action_accent = 0x4f5ed9ff,
+        .action_accent_2 = 0x4352c7ff,
+        .action_danger = 0xaf3f53ff,
+        .ok = 0x15b8a6ff,
+        .ok_ink = 0x146d58ff,
+        .warn = 0xd98a00ff,
+        .warn_ink = 0x8a5a12ff,
+        .danger = 0xe5484dff,
+        .danger_ink = 0x9e3548ff,
+        .selection = 0xeaedfdff,
+        .border = 0xd4d4d8ff,
+        .shadow = 0x18181b18,
+    };
+    if (std.mem.eql(u8, id, "mist")) return .{
+        .app = 0xfcfcfeff,
+        .surface_1 = 0xf4f3f8ff,
+        .surface_2 = 0xeeeaf4ff,
+        .well = 0xebe9f1ff,
+        .well_border = 0xdad4e4ff,
+        .terminal = 0xfcfcfeff,
+        .overlay = 0xffffffff,
+        .hover = 0xeae6f2ff,
+        .tab_on = 0xf0ecfcff,
+        .fg_1 = 0x302d3dff,
+        .fg_2 = 0x5f596dff,
+        .fg_3 = 0x6b6578ff,
+        .accent = 0x6c5bd5ff,
+        .accent_ink = 0x6554c2ff,
+        .action_accent = 0x6554c2ff,
+        .action_accent_2 = 0x7964c9ff,
+        .action_danger = 0xaf3f53ff,
+        .ok = 0x239a78ff,
+        .ok_ink = 0x146d58ff,
+        .warn = 0xb68024ff,
+        .warn_ink = 0x8a5a12ff,
+        .danger = 0xc25062ff,
+        .danger_ink = 0x9e3548ff,
+        .selection = 0xe8e3faff,
+        .border = 0xdad4e4ff,
+        .shadow = 0x30243d18,
+    };
     if (std.mem.eql(u8, id, "dark")) return .{
         .app = 0x060608ff,
         .surface_1 = 0x131316ff,
@@ -1046,6 +1102,8 @@ pub fn tokens(comptime T: type, id: []const u8) ?T {
 }
 /// Opaque ANSI 0–15; indexed 16–255 and truecolor remain owned by the VT engine.
 pub fn ansi(comptime T: type, id: []const u8) ?[16]u32 {
+    if (std.mem.eql(u8, id, "reference-light")) return .{ 0x18181bff, 0xb44558ff, 0x146d58ff, 0x896013ff, 0x4f5ed9ff, 0x8756a0ff, 0x26758aff, 0x6c6c76ff, 0x797980ff, 0xbb4c62ff, 0x24846cff, 0x90691aff, 0x526fb5ff, 0x925da9ff, 0x2f7c91ff, 0x5b5b65ff };
+    if (std.mem.eql(u8, id, "mist")) return .{ 0x302d3dff, 0xb44558ff, 0x187e65ff, 0x896013ff, 0x4568aaff, 0x8756a0ff, 0x26758aff, 0x706a7dff, 0x797184ff, 0xbb4c62ff, 0x24846cff, 0x90691aff, 0x526fb5ff, 0x925da9ff, 0x2f7c91ff, 0x5e586cff };
     _ = T;
     if (std.mem.eql(u8, id, "dark")) return .{ 0x0a0a0dff, 0xf37272ff, 0x22c55eff, 0xf59e0bff, 0x85aaf2ff, 0xbd96deff, 0x72c7d0ff, 0xa4a4adff, 0x5d5d66ff, 0xf38888ff, 0x46cd78ff, 0xf5ad33ff, 0x98b7f3ff, 0xc6a6e2ff, 0x88cfd6ff, 0xf4f4f5ff };
     if (std.mem.eql(u8, id, "light")) return .{ 0xfbfbfcff, 0xc32222ff, 0x107435ff, 0x985304ff, 0x315f9dff, 0x814c9fff, 0x21747bff, 0x52525bff, 0x919199ff, 0xa62021ff, 0x116431ff, 0x824908ff, 0x2d5387ff, 0x6f4389ff, 0x1f646bff, 0x18181bff };
@@ -1087,6 +1145,8 @@ pub fn ansi(comptime T: type, id: []const u8) ?[16]u32 {
     return null;
 }
 pub fn name(id: []const u8) []const u8 {
+    if (std.mem.eql(u8, id, "reference-light")) return "晴霜";
+    if (std.mem.eql(u8, id, "mist")) return "雾紫 · Mist";
     if (std.mem.eql(u8, id, "midnight")) return "午夜蓝";
     if (std.mem.eql(u8, id, "forest")) return "松林";
     if (std.mem.eql(u8, id, "ocean")) return "深海";
@@ -1120,6 +1180,8 @@ pub fn name(id: []const u8) []const u8 {
 }
 pub const TerminalDefaults = struct { foreground: u32, cursor: u32, selection: u32 };
 pub fn terminalDefaults(id: []const u8) ?TerminalDefaults {
+    if (std.mem.eql(u8, id, "reference-light")) return .{ .foreground = 0x5b5b65ff, .cursor = 0x4f5ed9ff, .selection = 0xeaedfdff };
+    if (std.mem.eql(u8, id, "mist")) return .{ .foreground = 0x625c70ff, .cursor = 0x6c5bd5ff, .selection = 0xe8e3faff };
     if (std.mem.eql(u8, id, "dark")) return .{ .foreground = 0xf4f4f5ff, .cursor = 0x9597f5ff, .selection = 0x6366f124 };
     if (std.mem.eql(u8, id, "light")) return .{ .foreground = 0x18181bff, .cursor = 0x4f46e5ff, .selection = 0x4f46e517 };
     if (std.mem.eql(u8, id, "sauber")) return .{ .foreground = 0x1345f6ff, .cursor = 0x000000ff, .selection = 0xbeddffff };

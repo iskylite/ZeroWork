@@ -34,7 +34,6 @@ pub const View = struct {
     scope_tag: *ui.Node = undefined,
     manage_button: *ui.Node = undefined,
     manage_icon: *ui.Node = undefined,
-    manage_label: *ui.Node = undefined,
     feedback_row: *ui.Node = undefined,
     feedback_label: *ui.Node = undefined,
     feedback_icon: *ui.Node = undefined,
@@ -71,7 +70,7 @@ pub const View = struct {
         self.* = .{ .cx = cx, .scope = scope, .registry = registry, .hooks = hooks, .open = open, .disabled = disabled };
         try scope.onCleanup(View, self, cleanup);
         adopted = true;
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = 6 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .size_policy = .fit_content, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = 6 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = false, .size_policy = .fit_content, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -90,6 +89,13 @@ pub const View = struct {
         self.title.setStyleInline(cx.allocator, .{ .width = .{ .px = 72 }, .height = .{ .px = 20 }, .flex_shrink = 0 });
         try self.header.appendChild(cx.allocator, self.title);
         try self.header.appendChild(cx.allocator, try ui.spacer(cx));
+        self.manage_button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "管理主题", .base_style = S.close(), .hover_style = S.hover(), .disabled = disabled, .on_click = cx.on(View, self, manage) }).mount(popup.scope, cx);
+        self.manage_button.setStyleInline(cx.allocator, S.close());
+        self.manage_button.meta.ownership.meta.test_id = "status.theme.manage";
+        self.manage_icon = try ui.iconTint(cx, ui.icons.get("settings-2").?, S.theme.current().fg_2, S.icon(14));
+        try self.manage_button.appendChild(cx.allocator, self.manage_icon);
+        const manage_hint = try @import("control_hint.zig").mount(cx, popup.scope, self.manage_button, "管理主题", .{ .id = "status.theme.manage.tooltip", .layout = .{ .width = .{ .px = 26 }, .height = .{ .px = 26 }, .flex_shrink = 0 } });
+        try self.header.appendChild(cx.allocator, manage_hint.wrapper);
         const close = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "关闭全局主题", .base_style = S.close(), .hover_style = S.hover(), .on_click = cx.on(View, self, hide) }).mount(popup.scope, cx);
         close.setStyleInline(cx.allocator, S.close());
         self.close_icon = try ui.iconTint(cx, ui.icons.x, S.theme.current().fg_2, S.icon(14));
@@ -114,13 +120,6 @@ pub const View = struct {
         self.scroll.container.meta.ownership.meta.test_id = "status.theme.list";
         self.scroll.content.setStyleInline(cx.allocator, S.body());
         try self.body.appendChild(cx.allocator, self.scroll.container);
-        self.manage_button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "管理主题…", .base_style = S.row(), .hover_style = S.hover(), .disabled = disabled, .on_click = cx.on(View, self, manage) }).mount(popup.scope, cx);
-        self.manage_button.setStyleInline(cx.allocator, S.row());
-        self.manage_button.meta.ownership.meta.test_id = "status.theme.manage";
-        const manage_content = try self.rowContent(self.manage_button, ui.icons.get("settings-2").?, "管理主题…");
-        self.manage_icon = manage_content.icon;
-        self.manage_label = manage_content.label;
-        try self.body.appendChild(cx.allocator, self.manage_button);
         self.feedback_row = try ui.box(cx, S.passiveRow(), .{});
         self.feedback_icon = try ui.iconTint(cx, ui.icons.get("circle-check").?, S.theme.current().ok_ink, S.icon(14));
         try self.feedback_row.appendChild(cx.allocator, self.feedback_icon);
@@ -171,9 +170,9 @@ pub const View = struct {
         }
         const rect = trigger.globalRect();
         self.anchor_id = trigger.id;
-        self.status_top = status_top;
-        self.anchor_inset = rect.y - status_top;
-        self.anchor_rect = .{ .x = rect.x, .y = status_top, .w = rect.w, .h = 0 };
+        self.status_top = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top;
+        self.anchor_inset = if (rect.y < self.cx.viewport.height / 2) 0 else rect.y - status_top;
+        self.anchor_rect = .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
         self.focus_current = true;
         self.open.set(true);
         try self.flush();
@@ -201,7 +200,7 @@ pub const View = struct {
             }
             const rect = trigger.globalRect();
             self.status_top = rect.y - self.anchor_inset;
-            self.anchor_rect = .{ .x = rect.x, .y = self.status_top, .w = rect.w, .h = 0 };
+            self.anchor_rect = .{ .x = rect.x, .y = self.status_top, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
         } else {
             self.hide();
             return;
@@ -239,9 +238,8 @@ pub const View = struct {
             self.scope_label.setTextColor(S.theme.current().fg_1);
             self.scope_tag.setTextColor(S.theme.current().accent_ink);
             _ = self.scope_icon.setTint(S.theme.current().fg_2);
-            self.manage_button.setStyleInline(self.cx.allocator, S.row());
+            self.manage_button.setStyleInline(self.cx.allocator, S.close());
             _ = self.manage_icon.setTint(S.theme.current().fg_2);
-            self.manage_label.setTextColor(S.theme.current().fg_1);
             _ = self.scroll_hint.setTint(S.theme.current().fg_3);
             self.rendered_registry_revision = self.registry.revision;
             self.paint_revision = self.cx.theme_version;
@@ -249,7 +247,7 @@ pub const View = struct {
         }
         const count = @min(S.visible_rows, self.rows.items.len);
         const desired = if (count == 0) 0 else @as(f32, @floatFromInt(count)) * S.row_height + @as(f32, @floatFromInt(count - 1)) * S.row_gap;
-        const available = @max(0, @min(self.status_top, self.cx.viewport.height - 8) - 6 - 8 - S.fixed_height);
+        const available = @max(0, (if (self.status_top < self.cx.viewport.height / 2) self.cx.viewport.height - self.status_top - self.anchor_rect.h else @min(self.status_top, self.cx.viewport.height - 8)) - 6 - 8 - S.fixed_height);
         const list_height = @min(340, @min(desired, available));
         if (self.list_height != list_height) {
             self.list_height = list_height;
@@ -495,7 +493,9 @@ test "global theme popover renders the real registry in a bounded scroll area" {
     try std.testing.expect(view.scope_row.style.display == .none);
     try std.testing.expect(view.feedback_row.style.display == .none);
     try std.testing.expect(view.scroll.container.globalRect().h <= 340);
-    try std.testing.expect(view.manage_button.globalRect().y >= view.scroll.container.globalRect().y + view.scroll.container.globalRect().h);
+    const manage = view.manage_button.globalRect();
+    try std.testing.expect(manage.y >= head.y and manage.y + manage.h <= head.y + head.h);
+    try std.testing.expect(manage.y + manage.h <= view.scroll.container.globalRect().y);
     for (view.rows.items) |row| try std.testing.expect(registry.get(row.id) != null);
     // A late selection keeps registry order and is focused/visible on every open.
     const last_id = registry.records.items[registry.records.items.len - 1].id;

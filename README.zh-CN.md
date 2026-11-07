@@ -10,7 +10,7 @@ ZeroWork 是面向 Apple Silicon Mac 的 SSH 终端，架构定义见 [总体架
 
 ## 当前基线
 
-当前版本为 **0.3.1（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
+当前版本为 **0.4.0-rc3（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
 
 AI 助手等待用户确认、选择运行方式或授权范围时持续等待，直到用户决定或取消；等待期间暂停自动执行时间预算。原生敏感输入不设用户填写期限。网络、命令执行及提交后的传输超时保持独立。
 
@@ -106,6 +106,10 @@ sh scripts/package_macos.sh /absolute/path/to/output
 候选版本在 DMG 文件名及 `ZeroWorkReleaseVersion` 中保留完整版本。例如 `0.3.0-rc1` 对应 `CFBundleShortVersionString=0.3.0`、`CFBundleVersion=0.3.0fc1`，遵循 [Apple 的包版本格式](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html#//apple_ref/doc/uid/TP40009249-SW1)。
 
 签名私钥保存在当前用户的钥匙串中；`~/Library/Application Support/com.zerowork.signing/` 仅保存公开证书和指纹。重复执行 setup 会复用原身份；身份缺失时应恢复原身份，不应重新生成替代。首次配置或签名时 macOS 可能要求授权。打包仅使用已保存的固定身份，不会回退到 ad-hoc 签名。应用凭据继续使用现有钥匙串存储；固定签名身份不保证旧凭据永远无需再次授权。
+
+安装包和 `sh scripts/build_ui_check.sh` 生成的测试 App 使用独立签名的 `ZeroWorkCredentials` 辅助程序访问钥匙串，避免本地自签名主程序每次构建后因 `cdhash` 变化而重复授权。双方验证应用标识和签名证书，通过私有进程通道通信。读取已有凭据前，主程序调用系统身份验证，支持 Touch ID 及系统提供的其他验证方式，每次运行解锁一次；验证取消或失败时不继续读取。这是应用层校验，凭据仍受原有钥匙串 ACL 保护。旧凭据首次切换、辅助程序或工具链变化、签名身份变化、钥匙串锁定时仍可能要求密码；首次切换可在系统窗口选择“始终允许”保存辅助程序授权。直接运行 `zig-out/bin/zerowork` 保留原开发访问方式，验证重复安装和授权行为请使用上述签名 App。
+
+针对性验证：`zig build test-credentials-native` 检查验证失败、取消、缓存及存储回滚；`python3 scripts/verify_keychain_update.py --out /tmp/zerowork-keychain-check` 用随机隔离凭据验证重新构建、安装路径变化和调用方限制。后者默认只模拟指纹结果；加 `--real-auth` 可验证真实系统认证，需要手动完成系统验证。
 
 验证安装链路时，打开 DMG，将 `ZeroWork.app` 拖入「应用程序」，弹出安装盘，再从「应用程序」启动并检查。**直接运行构建产物、打包成功、安装后运行验证是三个不同的验证步骤。** 自签名不等于 Developer ID 签名或 Apple 公证；正式分发的签名、公证与干净机器安装检查仍需单独完成。
 

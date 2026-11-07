@@ -231,26 +231,30 @@ pub const View = struct {
             const tool_detail = try @import("ai_tool_titles.zig").detail(self.cx.allocator, pending.tool.text());
             defer self.cx.allocator.free(tool_detail);
             try self.tool_detail.setTextContent(self.cx.allocator, tool_detail);
-            self.network_icon.setDisplay(if (pending.kind == .network_url) .flex else .none);
+            self.network_icon.setDisplay(if ((pending.kind == .network_url or pending.kind == .mcp)) .flex else .none);
             self.lifecycle_icon.setDisplay(if (pending.kind == .lifecycle) .flex else .none);
             self.terminal_icon.setDisplay(if (pending.kind == .terminal_command) .flex else .none);
             self.accept_label.set(switch (pending.kind) {
+                .mcp => "批准这次 MCP 调用",
                 .network_url => "批准这次本机网络读取",
                 .lifecycle => if (saving_host) "批准保存这台主机" else "批准这次会话管理操作",
                 .terminal_command => if (interaction) "批准这次受控输入" else "批准这次终端命令",
             });
             self.reject_label.set(switch (pending.kind) {
+                .mcp => "拒绝这次 MCP 调用",
                 .network_url => "拒绝这次本机网络读取",
                 .lifecycle => if (saving_host) "拒绝保存这台主机" else "拒绝这次会话管理操作",
                 .terminal_command => if (interaction) "拒绝这次受控输入" else "拒绝这次终端命令",
             });
             self.copy_label.set(if (pending.kind == .network_url) "复制完整请求 URL" else "复制完整操作详情");
             try self.source.setTextContent(self.cx.allocator, switch (pending.kind) {
+                .mcp => "来源 · 当前任务 · 外部 MCP 服务",
                 .network_url => "来源 · 本机网络 · HTTP/HTTPS GET",
                 .lifecycle => "来源 · 当前对话 · 会话管理",
                 .terminal_command => if (interaction) "来源 · 已授权执行 · 受控交互输入" else "来源 · 当前对话 · 交互式终端命令",
             });
             try self.feedback.setTextContent(self.cx.allocator, if (pending.impact.len != 0) pending.impact.text() else switch (pending.kind) {
+                .mcp => "仅向此服务发送本次明确提供的材料。",
                 .network_url => impact_copy,
                 .lifecycle => "仅批准本调用列明的对象与操作。",
                 .terminal_command => "仅批准本调用列明的终端与命令。",
@@ -265,6 +269,7 @@ pub const View = struct {
         }
         self.accept_text.set("批准此调用");
         self.accept_label.set(switch (pending.kind) {
+            .mcp => "批准这次 MCP 调用",
             .network_url => "批准这次本机网络读取",
             .lifecycle => if (std.mem.eql(u8, pending.tool.text(), "host.create_host")) "批准保存这台主机" else "批准这次会话管理操作",
             .terminal_command => if (std.mem.eql(u8, pending.tool.text(), "host.send_execution_input")) "批准这次受控输入" else "批准这次终端命令",

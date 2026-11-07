@@ -159,6 +159,8 @@ pub const Surface = struct {
     released_anchors: std.ArrayList(terminal.Anchor) = .empty,
     dragging: bool = false,
     drag_origin: ui.Point = .{ .x = 0, .y = 0 },
+    drag_position: ui.Point = .{ .x = 0, .y = 0 },
+    drag_scroll_ms: ?f64 = null,
     rectangle: bool = false,
     mouse_reporting: bool = false,
     reported_button: @FieldType(terminal.MouseEvent, "button") = .none,
@@ -393,6 +395,7 @@ pub const Surface = struct {
             if (self.snapshot == null or self.snapshot.?.applied_theme_revision != theme.revision)
                 self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
         };
+        input.prepareDragScroll(self, active);
         if (self.pending_scroll != 0) {
             var accepted = true;
             self.composite.scrollPixels(self.pending_scroll) catch |err| {
@@ -578,6 +581,7 @@ pub const Surface = struct {
             }
         }
         if (changed or was_focused != self.focused or self.glyphs_pending) try self.render(now);
+        if (changed and self.dragging) input.refreshDragSelection(self);
         self.updateCommandHover();
         if (blink_running) {
             const remaining = @max(1, blink_half_period_ms - (self.cx.frame_time_ms - self.last_blink));
@@ -702,7 +706,14 @@ pub const Surface = struct {
             } else false;
             const stamp = value.submitted_wallclock_ms orelse value.received_wallclock_ms;
             const header = value.application_kind == 1 and value.id[1] == 0;
-            try self.renderTime(row, if (has_text and (value.application_record_id == 0 or header)) stamp else null);
+            // The active logical line has no command time until Return. Match
+            // its logical start too, so a wrapped input stays unstamped.
+            const cursor_line = if (projection.cursor.visible and projection.cursor.row < projection.visible_rows.len) projection.visible_rows[projection.cursor.row] else null;
+            const pending_input = !self.snapshot.?.read_only and value.application_record_id == 0 and value.submitted_wallclock_ms == null and if (cursor_line) |line|
+                std.meta.eql(value.logical_start_id orelse value.id, line.logical_start_id orelse line.id)
+            else
+                false;
+            try self.renderTime(row, if (has_text and !pending_input and (value.application_record_id == 0 or header)) stamp else null);
             if (header and stamp != null) {
                 const time = try self.rowText(row, "record_time", records_style.recordTime, "", "terminal.command.time");
                 time.setDisplay(.flex);

@@ -14,6 +14,10 @@ static CFStringRef expected_service = CFSTR("com.zerowork.tests.mock-only");
 static int other_item_exists;
 static OSStatus fail_read, fail_write, fail_delete, fail_authorize;
 static int authorization_reads;
+static int confirmations;
+static OSStatus fail_confirmation;
+static OSStatus confirm_vault(void) { confirmations++; return fail_confirmation; }
+#define ZW_CREDENTIALS_TESTING 1
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static void check_query(CFDictionaryRef q) {
@@ -25,6 +29,8 @@ static void check_query(CFDictionaryRef q) {
 #pragma clang diagnostic pop
 static OSStatus fake_copy(CFDictionaryRef q, CFTypeRef *result) {
     check_query(q);
+    if (!CFDictionaryGetValue(q, kSecReturnData) && !CFDictionaryGetValue(q, kSecReturnRef))
+        return fake_item ? errSecSuccess : errSecItemNotFound;
     if (CFDictionaryGetValue(q, kSecReturnRef)) {
         ref_reads++;
         assert(!CFDictionaryGetValue(q, kSecReturnData));
@@ -81,6 +87,8 @@ static OSStatus fake_set_interaction(Boolean value) { fake_interaction = value; 
 #include "macos_credentials.m"
 
 static void reset_cache(void) {
+    if (confirmed_service) CFRelease(confirmed_service);
+    confirmed_service = NULL;
     if (cached_service) CFRelease(cached_service);
     if (cached_vault) CFRelease(cached_vault);
     cached_service = NULL; cached_vault = NULL; vault_exists = 0;
@@ -109,6 +117,7 @@ int main(void) {
     assert(zw_credentials_add(scope, b, (const unsigned char *)"owned-second", 12) == errSecSuccess);
     expect_secret(a, "owned-first"); expect_secret(b, "owned-second");
     assert(reads == 1 && additions == 1 && updates == 1 && fake_interaction);
+    assert(confirmations == 0); // Nothing saved before this process: no biometric prompt.
     assert(zw_credentials_add(scope, a, (const unsigned char *)"overwrite", 9) == errSecDuplicateItem);
     fail_write = errSecAuthFailed;
     assert(zw_credentials_add(scope, c, (const unsigned char *)"owned-rejected", 14) == errSecAuthFailed);
@@ -169,6 +178,20 @@ int main(void) {
     expect_secret(a, "preserved-secret");
     assert(authorization_reads == 2); // Cached use never prompts again.
     fake_interaction = true;
+    reset_cache();
+    int reads_before_confirmation = reads;
+    int confirmations_before = confirmations;
+    fail_confirmation = -43001;
+    assert(zw_credentials_get(scope, a, &missing, &length) == -43001);
+    assert(!cached_service && !cached_vault && !confirmed_service && reads == reads_before_confirmation);
+    fail_confirmation = -43002;
+    assert(zw_credentials_authorize(scope) == -43002);
+    assert(!cached_service && !cached_vault && reads == reads_before_confirmation);
+    fail_confirmation = errSecSuccess; fail_read = errSecSuccess;
+    expect_secret(a, "preserved-secret"); expect_secret(a, "preserved-secret");
+    assert(confirmations == confirmations_before + 3 && reads == reads_before_confirmation + 1);
+    assert(zw_credentials_get("com.zerowork.tests.other-scope", a, &missing, &length) == errSecParam);
+    assert(confirmations == confirmations_before + 3);
     puts("native vault mock regression passed: one item, cached reads, immutable refs, rollback, size limit, restart, metadata-only erase, cache isolation, legacy deletion fallback, no UI");
     return 0;
 }

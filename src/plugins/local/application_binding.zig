@@ -19,7 +19,7 @@ pub fn Binding(comptime Host: type) type {
             try self.local_adapter.configureRecording(.{ .io = self.workspace.io, .log = self.workspace.app_config.log });
             var mapping: ?*@typeInfo(@TypeOf(self.mappings.items)).pointer.child = null;
             // SessionHost.retry changes generation before invoking this callback.
-            // Only the old, failed/released attempt can reach this reuse path.
+            // Only the old failed or ended, released attempt can reach this path.
             for (self.mappings.items) |*candidate| if (candidate.process != null and candidate.handle.session_id == request.handle.session_id) {
                 const previous = candidate.handle;
                 self.workspace.unbindLocalTerminal(candidate.legacy_id, previous);

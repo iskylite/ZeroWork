@@ -1,8 +1,8 @@
-//! Compatibility name for the status bar's single connection-library restore
-//! control. V3 hides the library completely; no collapsed host rail is mounted.
+//! Top-left connection-library restore control, visible while the sidebar is hidden.
 const ui = @import("ui");
 const Sidebar = @import("sidebar_view.zig");
 const theme = @import("app_theme.zig");
+const S = @import("shell_styles.zig");
 const Workspace = @import("workspace.zig").Workspace;
 const identity = @import("../host/identity.zig");
 pub const HostAction = enum { edit, connect };
@@ -19,12 +19,17 @@ pub const View = struct {
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *Workspace, actions: Actions) !*View {
         const tint = try scope.createSignal(?ui.Color, theme.current().fg_2);
         const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = theme.states().hover });
-        const button = try Sidebar.iconButton(cx, scope, "panel-left-open", "显示连接列表 ⌘B", "sidebar.restore", Sidebar.styles.railAction(26), tint, hover, ui.Cx.simpleHandler(actions.expand, actions.context), null);
-        const root = try Sidebar.hint(cx, scope, button, "显示连接列表 ⌘B", .top);
+        const button = try Sidebar.iconButton(cx, scope, "panel-left", "显示连接列表 ⌘B", "sidebar.restore", Sidebar.styles.railAction(28), tint, hover, ui.Cx.simpleHandler(actions.expand, actions.context), null);
+        const root = try Sidebar.hint(cx, scope, button, "显示连接列表 ⌘B", .bottom);
         root.meta.ownership.meta.test_id = "workspace.sidebar.restore";
-        root.setStyleInline(cx.allocator, .{ .width = .{ .px = 26 }, .height = .{ .px = 26 }, .flex_shrink = 0 });
-        root.setDisplay(.none);
-        return scope.createState(View, .{ .cx = cx, .root = root });
+        const capsule = try ui.boxStyled(cx, S.titleFloating, .{});
+        capsule.setStyleInline(cx.allocator, .{ .width = .{ .px = 36 }, .justify = .center });
+        try capsule.appendChild(cx.allocator, root);
+        capsule.meta.ownership.meta.test_id = "workspace.sidebar.restore.capsule";
+        capsule.setStyleInline(cx.allocator, .{ .margin = .{ .right = 16 } });
+        root.setStyleInline(cx.allocator, .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .flex_shrink = 0 });
+        capsule.setDisplay(.none);
+        return scope.createState(View, .{ .cx = cx, .root = capsule });
     }
     pub fn setCollapsed(self: *View, hidden: bool) void {
         self.root.setDisplay(if (hidden) .flex else .none);

@@ -23,6 +23,7 @@ pub const Hooks = struct {
 };
 
 pub const View = struct {
+    workspace_chrome: bool = false,
     cx: *ui.Cx,
     hooks: Hooks,
     hover_style: *ui.Signal(?S.ButtonStyle),
@@ -204,7 +205,7 @@ pub const View = struct {
         try replaceText(self, self.cwd_label, value.cwd orelse "目录未知");
         self.owner = value.owner;
         self.source_revision = value.source_revision;
-        self.root.setDisplay(.flex);
+        self.root.setDisplay(if (self.workspace_chrome) .none else .flex);
     }
 
     pub fn setSidebarCollapsed(self: *View, collapsed: bool) void {
@@ -226,8 +227,8 @@ pub const View = struct {
         const show_metrics = width >= self.minimumWidth(identity_width, true, show_theme);
         if (width < self.minimumWidth(identity_width, show_metrics, show_theme)) show_theme = false;
         const remaining = @min(S.cwd_width, @max(0, width - self.minimumWidth(identity_width, show_metrics, show_theme) - S.gap));
-        self.identity_button.setStyleInline(self.cx.allocator, S.buttonLayout(S.chip(identity_width)));
-        self.identity_label.setDisplay(.flex);
+        if (!self.workspace_chrome) self.identity_button.setStyleInline(self.cx.allocator, S.buttonLayout(S.chip(identity_width)));
+        self.identity_label.setDisplay(if (self.workspace_chrome) .none else .flex);
         self.identity_chevron.setDisplay(.none);
         visible(self.encoding_button, show_metrics);
         visible(self.grid_button, show_metrics);

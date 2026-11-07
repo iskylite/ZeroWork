@@ -5,15 +5,19 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-11-05-window-hide-reopen-idle-canvas` (upstream revision and license unchanged)
+- Local patch revision: `2026-11-06-ime-source-context-preservation+floating-shadow-clip` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3507` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `b204e22654e9da802e10d6ca746e7023d5b9b26af055baa1913fde28c81118de`
+- Canonical tracked-tree SHA-256: `7e1b424a3c544a3c981066e7cc22eacf22628aede7d43025cf5b3cec5679ee10`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
+
+The floating-shadow patch keeps glass surfaces’ outer shadows outside their own overflow clip, while clipping descendants at the rounded panel boundary. It covers plain and composited glass panels, including retained rendering. The public API, upstream revision, license and toolchain are unchanged.
+
+The latest IME patch retains the native input context and first responder when the keyboard input source changes, including before the first composing key. Native input-pump regressions cover early and delayed source publication. Upstream revision, license and toolchain are unchanged.
 
 The idle-canvas adaptation skips animated canvas repaint hooks while the node or an ancestor is `display:none`. Retained loading indicators resume when shown; completed or failed operations no longer keep hidden spinners repainting. This local guard changes neither the public API nor the upstream license/build contract.
 

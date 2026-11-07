@@ -73,7 +73,7 @@ test "AI session PATCH real workers overlap and stopping one leaves another runn
     try std.testing.expect(a.agent.busy and b.agent.busy);
     try service.stop(ta);
     try waitIdle(&service, a);
-    try std.testing.expect(b.agent.busy and !b.cancel.isCancelled());
+    try std.testing.expect(b.agent.busy and !b.worker.?.cancel.isCancelled());
     second.release.store(true, .release);
     try waitIdle(&service, b);
     try std.testing.expect(service.store.find(ta.conversation).?.binding != null);
@@ -518,16 +518,16 @@ test "AI session PATCH steering supersedes exact approval and question tickets w
     defer args.deinit();
     var call: host.Invocation = .{ .context = runner.context.?.authority(), .authority = .conversation_context, .operation_id = 9, .turn_id = runner.context.?.turn, .call_id = "waiting", .tool_id = Q.contribution.definition.id, .arguments = args.value, .arguments_json = json, .arguments_hash = @splat(1), .canonical_arguments_hash = try @import("ai/canonical_arguments.zig").digest(std.testing.allocator, args.value) };
     std.crypto.hash.sha2.Sha256.hash(json, &call.arguments_hash, .{});
-    const question = try runner.questions.begin(call, std.testing.allocator);
+    const question = try runner.worker.?.questions.begin(call, std.testing.allocator);
     call.authority = .execution_control;
     call.tool_id = "host.send_execution_input";
-    const permit = try runner.approvals.beginSubject(call, .{ .kind = .terminal_command, .target = "execution", .detail = "input" }, ticket.environment, std.testing.allocator);
+    const permit = try runner.worker.?.approvals.beginSubject(call, .{ .kind = .terminal_command, .target = "execution", .detail = "input" }, ticket.environment, std.testing.allocator);
     _ = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "new plan" }, .steer);
-    try std.testing.expect(runner.questions.snapshot() == null and runner.approvals.snapshot() == null);
-    try std.testing.expectError(error.ScopeChanged, runner.approvals.waitForDecision(permit, null));
-    try std.testing.expectError(error.StaleApproval, runner.approvals.decide(permit.sequence, permit.arguments_hash, true));
-    try std.testing.expectError(error.CancelledBeforeDispatch, runner.questions.poll(question));
-    try std.testing.expectError(error.StaleUserQuestion, runner.questions.answer(question, null, "late answer"));
+    try std.testing.expect(runner.worker.?.questions.snapshot() == null and runner.worker.?.approvals.snapshot() == null);
+    try std.testing.expectError(error.ScopeChanged, runner.worker.?.approvals.waitForDecision(permit, null));
+    try std.testing.expectError(error.StaleApproval, runner.worker.?.approvals.decide(permit.sequence, permit.arguments_hash, true));
+    try std.testing.expectError(error.CancelledBeforeDispatch, runner.worker.?.questions.poll(question));
+    try std.testing.expectError(error.StaleUserQuestion, runner.worker.?.questions.answer(question, null, "late answer"));
     try service.stop(ticket);
     try waitIdle(&service, runner);
 }
@@ -585,7 +585,7 @@ test "AI session PATCH destroyed attachment gets fresh agent and idle send-now s
     try std.testing.expectEqual(input.Delivery.consumed, inbox.receipt(second.id).?.delivery);
     try std.testing.expectEqual(input.Delivery.queued, inbox.receipt(first.id).?.delivery);
     try std.testing.expectError(error.ConversationUnbound, service.endConversation(initial, identity.HostOperationId.generate()));
-    try std.testing.expect(!fresh.cancel.isCancelled());
+    try std.testing.expect(!fresh.worker.?.cancel.isCancelled());
     try service.stop(ticket);
     try waitIdle(&service, fresh);
     try std.testing.expectEqualStrings("selected", service.store.find(ticket.conversation).?.history.messages[0].content);

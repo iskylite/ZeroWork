@@ -154,7 +154,7 @@ pub const SessionTab = struct {
     local_cancel: ?*ui.Node = null,
     local_close: ?*ui.Node = null,
     local_retry: ?*ui.Node = null,
-    local_new: ?*ui.Node = null,
+    local_reconnect: ?*ui.Node = null,
 
     pub fn ticket(self: *const SessionTab) lifecycle.Ticket {
         return .{ .session_id = self.id, .generation = self.generation };
@@ -213,6 +213,7 @@ const TabNode = struct {
     holder: *ui.Node,
     icon: *ui.Node,
     type_icon: *ui.Node,
+    connection_dot: ?*ui.Node = null,
     icon_asset: ui.SvgAsset,
     label: *ui.Node,
     close: *ui.Node,
@@ -251,6 +252,8 @@ const ClickCtx = struct {
     session_id: ?SessionId = null,
     tab_id: ?identity.TabId = null,
     hovered: bool = false,
+    tooltip_open: ?*ui.Signal(bool) = null,
+    tooltip_suppressed: bool = false,
     drag_binding: ?*ui.interaction.drag.Binding = null,
     test_id: [48]u8 = undefined,
 };
@@ -401,6 +404,7 @@ pub const Workspace = struct {
     strip_offset: f32 = 0,
     strip_geometry: tab_layout.Result = .{ .mode = .normal, .viewport = 0, .content = 0, .offset = 0, .can_scroll_left = false, .can_scroll_right = false },
     header_width: f32 = 0,
+    tab_budget: ?f32 = null,
     reveal_active: bool = false,
     command_held: bool = false,
     drag_tab: ?identity.TabId = null,
@@ -432,7 +436,17 @@ pub const Workspace = struct {
     tab_rebuild_pending: bool = false,
     tab_drop_target: ?identity.TabId = null,
     tab_reorder_target: ?identity.TabId = null,
-    pending_tab_drop: ?struct { source: identity.TabId, target: identity.TabId } = null,
+    pending_tab_drop: ?struct {
+        source: identity.TabId,
+        target: identity.TabId,
+        captured: bool = false,
+        source_handle: ?identity.SessionHandle = null,
+        target_handle: ?identity.SessionHandle = null,
+        group: ?u32 = null,
+        membership_revision: u64 = 0,
+        settlement: ?ai_tab_grouping.Settlement = null,
+    } = null,
+    tab_menu_open: bool = false,
     group_tab_menu: ?*GroupTabMenu = null,
     active_tab: ?usize = null,
     /// Set only by a rendered group workspace. Membership alone never makes
@@ -722,6 +736,10 @@ pub const Workspace = struct {
         const self = cell.workspace;
         if (self.isStaleTabCell(cell)) return .ignored;
         const tab_id = cell.tab_id orelse return .ignored;
+        if (event == .mouse_down) {
+            cell.tooltip_suppressed = true;
+            if (cell.tooltip_open) |open| open.set(false);
+        }
         if (self.groupIdByTab(tab_id)) |group| {
             if (event == .mouse_down and event.mouse_down.button == .right) {
                 self.showGroupTabMenu(group, cell.node orelse return .ignored) catch {};
@@ -1445,7 +1463,7 @@ pub const Workspace = struct {
             advance.* = @ceil(line.width);
         }
         self.header_width = @max(0, self.cx.viewport.width - 2 * @import("shell_styles.zig").outer);
-        self.strip_geometry = try tab_layout.calculate(self.header_width, self.strip_advances.items, self.strip_widths.items, self.strip_offset);
+        self.strip_geometry = try tab_layout.calculateBudget(self.tab_budget orelse @max(0, self.header_width - 272), self.strip_advances.items, self.strip_widths.items, self.strip_offset);
         if (self.reveal_active) {
             if (self.model.active) |id| {
                 if (self.model.visibleIndexOf(id)) |index| self.strip_geometry.offset = try tab_layout.reveal(self.strip_geometry, self.strip_widths.items, index);
@@ -1533,6 +1551,9 @@ pub const Workspace = struct {
             const full_name = try std.fmt.allocPrint(self.allocator, "{s}\n{s}\n{s}", .{ self.model.tabs.items[index].name(), self.model.tabs.items[index].details, self.tabStatus(model_tab.id) });
             defer self.allocator.free(full_name);
             const tooltip = try ui.widgets.Tooltip(.{ .text = full_name, .position = .bottom_start, .open_delay_ms = 450, .background = app_theme.current().overlay, .text_color = app_theme.current().fg_1, .font_size = 11 }).mount(scope, self.cx);
+            select_ctx.tooltip_open = tooltip.open;
+            tooltip.wrapper.behavior.events.on_hover = self.cx.on(ClickCtx, select_ctx, tabHintHover);
+            tooltip.wrapper.behavior.events.on_leave = self.cx.on(ClickCtx, select_ctx, tabHintLeave);
             tooltip.content.meta.ownership.meta.test_id = "tabs.tooltip";
             tooltip.content.setStyleInline(self.allocator, tab_styles.tooltip());
             try app_theme.bindMaterial(self.cx, scope, tooltip.content, "overlay");
@@ -1568,6 +1589,9 @@ pub const Workspace = struct {
             const connection_color = session_icon.tabTint(self.tabIconState(model_tab.id), tab_icon_asset);
             const type_icon = try ui.iconTint(self.cx, tab_icon_asset, connection_color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
             try icon_slot.appendChild(self.cx.allocator, type_icon);
+            const connection_dot = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 10 }, .top = .{ .px = -2 } }, .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = self.tabConnectionColor(model_tab.id), .border = .{ .width = 1, .color = app_theme.baseColors().overlay, .radius = 3 }, .hit_behavior = .pass_through }, .{});
+            connection_dot.meta.ownership.meta.test_id = "tabs.connection.state";
+            try icon_slot.appendChild(self.cx.allocator, connection_dot);
             const number = try ui.text(self.cx, "", .{ .font_size = 10, .font_weight = 500, .color = app_theme.current().fg_2, .selectable = false });
             number.meta.ownership.meta.test_id = "tabs.ordinal";
             type_icon.meta.ownership.meta.test_id = "tabs.type_icon";
@@ -1579,7 +1603,7 @@ pub const Workspace = struct {
             label_style.color = if (active) app_theme.current().fg_1 else app_theme.current().fg_2;
             const title = try ui.text(self.cx, self.model.tabs.items[index].name(), label_style);
             title.meta.ownership.meta.test_id = "tabs.title";
-            title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 30 }, .top = .{ .px = (tab_styles.height - 18) / 2 } }, .width = .{ .px = width - 62 }, .height = .{ .px = 18 }, .overflow_hidden = true });
+            title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 43 }, .top = .{ .px = (tab_styles.height - 18) / 2 } }, .width = .{ .px = width - 75 }, .height = .{ .px = 18 }, .overflow_hidden = true });
             try tab_box.appendChild(self.cx.allocator, title);
             const close_ctx = try self.newTabClickCtx(index);
             const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 12), .icon_tint = self.palette.fg_muted, .a11y_label = if (group_id != null) "关闭组内全部会话" else "关闭页签", .base_style = tab_styles.close(width), .on_click = ui.Cx.simpleHandler(onCloseTabTrampoline, close_ctx) }).mount(scope, self.cx);
@@ -1588,13 +1612,15 @@ pub const Workspace = struct {
             close.meta.ownership.meta.test_id = if (group_id != null) "groups.close" else try std.fmt.bufPrint(&close_ctx.test_id, "tabs.close.{d}", .{@backingInt(model_tab.id)});
             close.behavior.events.capture_context = close_ctx;
             close.behavior.events.on_event_capture = onCloseControlEvent;
-            close.setOpacity(if (active) 1 else 0);
-            close.setHitTestVisible(active);
-            close.setFocusable(active);
+            try @import("icon_button_feedback.zig").Binding.attach(self.cx, scope, close);
+            close.setOpacity(1);
+            close.setHitTestVisible(true);
+            close.setFocusable(true);
             try tab_box.appendChild(self.cx.allocator, close);
             if (active) {
                 const underline = try ui.box(self.cx, tab_styles.underline(width), .{});
                 underline.setBackground(identity_color);
+                underline.setDisplay(.none);
                 underline.meta.ownership.meta.test_id = "tabs.active_underline";
                 try tab_box.appendChild(self.cx.allocator, underline);
             }
@@ -1603,7 +1629,7 @@ pub const Workspace = struct {
             try content.appendChild(self.cx.allocator, holder);
             const drag = try ui.interaction.drag.Binding.attach(scope, self.cx, holder, .{ .axis = .both, .activation_distance = 5 }, onTabDrag, select_ctx);
             select_ctx.drag_binding = drag;
-            try self.tab_nodes.append(self.allocator, .{ .node = tab_box, .holder = holder, .icon = number, .type_icon = type_icon, .icon_asset = tab_icon_asset, .label = title, .close = close, .tab_id = model_tab.id, .tab_index = index, .select_ctx = select_ctx, .close_ctx = close_ctx });
+            try self.tab_nodes.append(self.allocator, .{ .node = tab_box, .holder = holder, .icon = number, .type_icon = type_icon, .connection_dot = connection_dot, .icon_asset = tab_icon_asset, .label = title, .close = close, .tab_id = model_tab.id, .tab_index = index, .select_ctx = select_ctx, .close_ctx = close_ctx });
         }
         if (overflow) {
             _ = try self.stripControl(scope, row, ui.icons.chevron_right, "向右滚动页签", "tabs.scroll_right", 24, !self.strip_geometry.can_scroll_right, scrollRight);
@@ -1713,8 +1739,42 @@ pub const Workspace = struct {
         return if (tab.file_ready or tab.content_ready) .normal else .connecting;
     }
 
+    fn tabConnectionColor(self: *Workspace, id: identity.TabId) ui.Color {
+        const c = app_theme.current();
+        const index = self.tabIndexById(id) orelse return c.fg_3;
+        const tab = self.tabs.items[index];
+        if (tab.archived or tab.closing) return c.fg_3;
+        if (tab.local) return switch (tab.local_state) {
+            .running => c.ok,
+            .starting, .closing => c.warn,
+            .failed, .cleanup_unknown => c.danger,
+            else => c.fg_3,
+        };
+        if (tab.plugin_renderer != null) return switch (pluginConnectionState(tab)) {
+            .online => c.ok,
+            .connecting => c.warn,
+            .degraded => c.danger,
+            .ended => c.fg_3,
+        };
+        if (tab.remote_notice) |notice| if (notice.snapshot) |snapshot| return switch (snapshot.state) {
+            .connected => c.ok,
+            .reconnecting => c.warn,
+            .disconnected, .retry_failed => c.danger,
+            .cancelled, .exited => c.fg_3,
+        };
+        if (tab.terminal) |surface| if (surface.tombstone.state != .active) return c.fg_3;
+        return switch (self.tabIconState(id)) {
+            .failed => c.danger,
+            .connecting => c.warn,
+            .normal => if (tab.file_ready or tab.runtime != null) c.ok else c.fg_3,
+        };
+    }
     fn refreshTabIconTints(self: *Workspace) void {
         for (self.tab_nodes.items) |node| {
+            if (node.connection_dot) |indicator| {
+                const color = self.tabConnectionColor(node.tab_id);
+                if (!ui.Color.eql(indicator.getBackground(), color)) indicator.setBackground(color);
+            }
             if (node.type_icon.getIcon()) |icon| {
                 const tint = session_icon.tabTint(self.tabIconState(node.tab_id), node.icon_asset);
                 if (!ui.Color.eql(icon.tint, tint)) _ = node.type_icon.setTint(tint);
@@ -1881,16 +1941,36 @@ pub const Workspace = struct {
     pub fn finishRecentTabSwitch(self: *Workspace) void {
         self.model.finishRecentSwitch();
     }
-    fn closeVisible(self: *Workspace, cell: *ClickCtx, visible: bool) void {
+    fn closeVisible(self: *Workspace, cell: *ClickCtx, _: bool) void {
         for (self.tab_nodes.items) |*node| if (node.tab_id == cell.tab_id) {
-            const focused = if (self.cx.focused_node) |focus| focus == node.node or focus.isDescendantOf(node.node) else false;
-            const show = visible or focused or self.model.active == node.tab_id;
+            const show = true;
             node.close.setOpacity(if (show) 1 else 0);
             node.close.setHitTestVisible(show);
             node.close.setFocusable(show);
-            node.node.setBackground(if (self.model.active == node.tab_id) app_theme.current().tab_on else if (cell.hovered) app_theme.states().hover else ui.Color.TRANSPARENT);
+            node.node.setBackground(if (self.model.active == node.tab_id) app_theme.current().selection else if (cell.hovered) app_theme.states().hover else ui.Color.TRANSPARENT);
             return;
         };
+    }
+    /// Context menus own the pointer until dismissed; a stationary pointer
+    /// must leave and re-enter its tab before showing another hover hint.
+    pub fn setTabMenuOpen(self: *Workspace, open: bool) void {
+        self.tab_menu_open = open;
+        if (open) for (self.click_ctxs.items) |cell| {
+            if (cell.tooltip_open) |hint| {
+                hint.set(false);
+                if (cell.hovered) cell.tooltip_suppressed = true;
+            }
+        };
+    }
+    fn tabHintHover(cell: *ClickCtx) void {
+        const workspace = cell.workspace;
+        if (workspace.tab_menu_open or cell.tooltip_suppressed) return;
+        if (workspace.group_tab_menu) |menu| if (menu.open.peek()) return;
+        if (cell.tooltip_open) |open| open.set(true);
+    }
+    fn tabHintLeave(cell: *ClickCtx) void {
+        cell.tooltip_suppressed = false;
+        if (cell.tooltip_open) |open| open.set(false);
     }
     fn tabHover(context: *anyopaque) void {
         const cell: *ClickCtx = @ptrCast(@alignCast(context));
@@ -1938,7 +2018,7 @@ pub const Workspace = struct {
                             const r = node.node.globalRect();
                             const p = event.position_window;
                             if (p.x >= r.x + r.w * 0.25 and p.x <= r.x + r.w * 0.75 and p.y >= r.y and p.y <= r.y + r.h) {
-                                self.pending_tab_drop = .{ .source = id, .target = target };
+                                if (self.pending_tab_drop == null) self.pending_tab_drop = .{ .source = id, .target = target };
                             }
                             break;
                         };
@@ -2024,6 +2104,38 @@ pub const Workspace = struct {
     fn prepareTabGrouping(self: *Workspace, drop: ai_tab_grouping.Drop) !?ai_tab_grouping.Plan {
         const prepare = self.ai_grouping_bridge.prepare orelse return null;
         return try prepare(self.ai_grouping_bridge.context orelse return error.ContextUnavailable, drop);
+    }
+    /// Keep the original identities and group revision throughout child cleanup.
+    /// Repeated frames never allocate/publish a fresh group while waiting.
+    fn settleTabDrop(self: *Workspace) !bool {
+        const drop = &self.pending_tab_drop.?;
+        const source = self.tabs.items[self.tabIndexById(drop.source) orelse return error.StaleSession];
+        if (source.archived or source.closing or source.owned_pending or source.content_owner != .session) return error.StaleSession;
+        const group_id = self.groupIdByTab(drop.target);
+        var target: ?identity.SessionHandle = null;
+        var revision: u64 = 0;
+        if (group_id) |id| {
+            if (self.groupClosing(id)) return error.GroupClosing;
+            revision = (self.group_roster.?.findById(id) orelse return error.UnknownGroup).membership_revision;
+        } else {
+            const tab = self.tabs.items[self.tabIndexById(drop.target) orelse return error.StaleSession];
+            if (tab.archived or tab.closing or tab.owned_pending or tab.content_owner != .session) return error.StaleSession;
+            target = tab.content_owner.session;
+        }
+        if (!drop.captured) {
+            drop.source_handle = source.content_owner.session;
+            drop.target_handle = target;
+            drop.group = group_id;
+            drop.membership_revision = revision;
+            if (self.ai_grouping_bridge.capture) |capture| drop.settlement = try capture(self.ai_grouping_bridge.context.?, source.content_owner.session, target);
+            drop.captured = true;
+        } else if (!drop.source_handle.?.eql(source.content_owner.session) or !std.meta.eql(drop.target_handle, target) or drop.group != group_id or drop.membership_revision != revision) return error.SourceChanged;
+        if (drop.settlement) |intent| if (self.ai_grouping_bridge.settle) |settle| return settle(self.ai_grouping_bridge.context.?, intent);
+        return true;
+    }
+    fn releaseTabDrop(self: *Workspace) void {
+        if (self.pending_tab_drop) |drop| if (drop.settlement) |intent| if (self.ai_grouping_bridge.release) |release| release(self.ai_grouping_bridge.context.?, intent);
+        self.pending_tab_drop = null;
     }
     fn commitTabGrouping(self: *Workspace, plan: ?ai_tab_grouping.Plan) void {
         if (plan) |value| if (self.ai_grouping_bridge.commit) |commit| commit(self.ai_grouping_bridge.context.?, value);
@@ -2426,6 +2538,8 @@ pub const Workspace = struct {
         const r = anchor.globalRect();
         menu.group = group;
         menu.anchor = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+        self.setTabMenuOpen(false);
+        for (self.click_ctxs.items) |cell| if (cell.tooltip_open) |hint| hint.set(false);
         menu.open.set(true);
         self.cx.requestRedraw();
     }
@@ -3073,7 +3187,13 @@ pub const Workspace = struct {
             return true;
         }
         if (self.pending_tab_drop) |drop| {
-            self.pending_tab_drop = null;
+            const ready = self.settleTabDrop() catch |err| {
+                self.releaseTabDrop();
+                self.statusFailure(@errorName(err));
+                return false;
+            };
+            if (!ready) return false;
+            defer self.releaseTabDrop();
             self.dropTabIntoGroup(drop.source, drop.target) catch |err| self.statusFailure(@errorName(err));
         }
 
@@ -4503,9 +4623,10 @@ pub const Workspace = struct {
     pub fn retryLocalSession(self: *Workspace, id: SessionId) !void {
         if (self.shutting_down or self.model.window_close != null) return error.WorkspaceClosed;
         const tab = self.sessionTab(id) orelse return error.InvalidTab;
-        if (!tab.local or tab.closing or tab.local_state != .failed) return error.LifecycleDoesNotAllowRetry;
+        if (!tab.local or tab.closing or (tab.local_state != .failed and tab.local_state != .exited)) return error.LifecycleDoesNotAllowRetry;
         const retry = self.session_bridge.retry_local orelse return error.LocalAdapterUnavailable;
         try retry(self.session_bridge.context, id);
+        if (self.active_tab) |index| if (self.tabs.items[index] == tab) tab.terminal.?.focus();
     }
 
     /// Presentation only; SessionHost has already assigned this exact owner.
@@ -4745,13 +4866,13 @@ pub const Workspace = struct {
             }
         }.release);
         adopted = true;
-        const cancel = try ui.widgets.Button(.{ .label = "取消启动", .variant = .ghost, .size = .sm, .on_click = self.cx.on(ClickCtx, cell, cancelLocalStart) }).mount(tab.local_scope.?, self.cx);
+        const cancel = try ui.widgets.Button(.{ .label = "取消启动", .variant = .secondary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(ClickCtx, cell, cancelLocalStart) }).mount(tab.local_scope.?, self.cx);
         cancel.setStyleInline(self.allocator, local_styles.cancel());
         cancel.meta.ownership.meta.test_id = "local.start.cancel";
         tab.local_cancel = cancel;
         try banner.appendChild(self.allocator, cancel);
-        const close = try ui.widgets.Button(.{ .label = "关闭页签", .variant = .ghost, .size = .sm, .on_click = self.cx.on(ClickCtx, cell, cancelLocalStart) }).mount(tab.local_scope.?, self.cx);
-        close.setStyleInline(self.allocator, local_styles.cancel());
+        const close = try ui.widgets.Button(.{ .label = "关闭页签", .variant = .secondary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(ClickCtx, cell, cancelLocalStart) }).mount(tab.local_scope.?, self.cx);
+        close.setStyleInline(self.allocator, local_styles.action());
         close.meta.ownership.meta.test_id = "local.ended.close";
         tab.local_close = close;
         try banner.appendChild(self.allocator, close);
@@ -4761,12 +4882,12 @@ pub const Workspace = struct {
         retry.meta.ownership.meta.test_id = "local.start.retry";
         tab.local_retry = retry;
         try banner.appendChild(self.allocator, retry);
-        const new = try ui.widgets.Button(.{ .label = "新建终端", .variant = .primary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(ClickCtx, cell, newLocalFromEnded) }).mount(tab.local_scope.?, self.cx);
-        try @import("app_theme.zig").stylePrimary(self.cx, tab.local_scope.?, new, null);
-        new.setStyleInline(self.allocator, local_styles.action());
-        new.meta.ownership.meta.test_id = "local.ended.new";
-        tab.local_new = new;
-        try banner.appendChild(self.allocator, new);
+        const reconnect = try ui.widgets.Button(.{ .label = "重新连接", .variant = .primary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(ClickCtx, cell, retryLocalStart) }).mount(tab.local_scope.?, self.cx);
+        try @import("app_theme.zig").stylePrimary(self.cx, tab.local_scope.?, reconnect, null);
+        reconnect.setStyleInline(self.allocator, local_styles.action());
+        reconnect.meta.ownership.meta.test_id = "local.ended.reconnect";
+        tab.local_reconnect = reconnect;
+        try banner.appendChild(self.allocator, reconnect);
     }
 
     fn cancelLocalStart(cell: *ClickCtx) void {
@@ -4782,9 +4903,6 @@ pub const Workspace = struct {
     }
     fn retryLocalStart(cell: *ClickCtx) void {
         cell.workspace.retryLocalSession(cell.session_id orelse return) catch |err| cell.workspace.statusFailure(@errorName(err));
-    }
-    fn newLocalFromEnded(cell: *ClickCtx) void {
-        cell.workspace.newLocalSession(null) catch |err| cell.workspace.statusFailure(@errorName(err));
     }
 
     pub fn userInputRevision(self: *Workspace, handle: identity.SessionHandle) ?u64 {
@@ -4870,7 +4988,7 @@ pub const Workspace = struct {
         if (tab.local_ended_icon) |node| node.setDisplay(if (state == .exited) .flex else .none);
         if (tab.local_failure_icon) |node| node.setDisplay(if (state == .failed or state == .cleanup_unknown) .flex else .none);
         if (tab.local_retry) |node| node.setDisplay(if (state == .failed) .flex else .none);
-        if (tab.local_new) |node| node.setDisplay(if (state == .exited) .flex else .none);
+        if (tab.local_reconnect) |node| node.setDisplay(if (state == .exited) .flex else .none);
         if (changed) {
             const title = if (state == .failed) "Local Terminal · 启动失败" else if (state == .exited) "Local Terminal · 已退出" else "Local Terminal";
             const index = self.model.indexOf(tab.tab_id) orelse return;
@@ -5846,6 +5964,22 @@ test "tab grouping native drop preserves target conversation and refreshes exist
         store: @import("../ai/assistant_store.zig").Store,
         preparations: usize = 0,
         stops: usize = 0,
+        captures: usize = 0,
+        releases: usize = 0,
+        ready: bool = false,
+        fn capture(raw: *anyopaque, _: identity.SessionHandle, _: ?identity.SessionHandle) !ai_tab_grouping.Settlement {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.captures += 1;
+            return .{ .operation = identity.HostOperationId.generate() };
+        }
+        fn settle(raw: *anyopaque, _: ai_tab_grouping.Settlement) !bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.ready;
+        }
+        fn release(raw: *anyopaque, _: ai_tab_grouping.Settlement) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.releases += 1;
+        }
         fn prepare(raw: *anyopaque, drop: ai_tab_grouping.Drop) !ai_tab_grouping.Plan {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.preparations += 1;
@@ -5862,7 +5996,7 @@ test "tab grouping native drop preserves target conversation and refreshes exist
     };
     var probe: Probe = .{ .store = @import("../ai/assistant_store.zig").Store.init(allocator) };
     defer probe.store.deinit();
-    workspace.ai_grouping_bridge = .{ .context = &probe, .prepare = Probe.prepare, .commit = Probe.commit };
+    workspace.ai_grouping_bridge = .{ .context = &probe, .prepare = Probe.prepare, .commit = Probe.commit, .capture = Probe.capture, .settle = Probe.settle, .release = Probe.release };
     cx.setViewport(860, 480);
     var tabs: [3]SessionTab = undefined;
     var conversations: [3]u64 = undefined;
@@ -5888,13 +6022,32 @@ test "tab grouping native drop preserves target conversation and refreshes exist
     try std.testing.expect(workspace.pending_tab_drop == null);
     try std.testing.expectEqual(@as(usize, 0), probe.preparations);
     try std.testing.expectEqual(@as(usize, 0), probe.stops);
-    try workspace.dropTabIntoGroup(tabs[0].tab_id, tabs[1].tab_id);
+    workspace.pending_tab_drop = .{ .source = tabs[0].tab_id, .target = tabs[1].tab_id };
+    _ = workspace.pollGroupWorkspace();
+    _ = workspace.pollGroupWorkspace();
+    try std.testing.expectEqual(@as(usize, 1), probe.captures);
+    try std.testing.expectEqual(@as(usize, 0), probe.preparations);
+    try std.testing.expectEqual(@as(usize, 0), roster.groups.items.len);
+    try std.testing.expect(workspace.pending_tab_drop != null);
+    probe.ready = true;
+    _ = workspace.pollGroupWorkspace();
+    try std.testing.expect(workspace.pending_tab_drop == null);
+    try std.testing.expectEqual(@as(usize, 1), probe.releases);
     const group = roster.groups.items[0].id;
     const parent = workspace.groupTabId(group).?;
     try std.testing.expect(probe.store.find(conversations[0]).?.ended);
     try std.testing.expect(probe.store.active(.{ .group = group }).?.conversation_id.eql(b_identity));
     try std.testing.expectEqual(@as(usize, 1), probe.stops);
     const revision = roster.findById(group).?.membership_revision;
+    probe.ready = false;
+    workspace.pending_tab_drop = .{ .source = tabs[2].tab_id, .target = parent };
+    try std.testing.expect(!try workspace.settleTabDrop());
+    roster.findById(group).?.membership_revision += 1;
+    try std.testing.expectError(error.SourceChanged, workspace.settleTabDrop());
+    workspace.releaseTabDrop();
+    try std.testing.expect(!probe.store.find(conversations[2]).?.ended);
+    try std.testing.expectEqual(@as(usize, 2), roster.findById(group).?.members.items.len);
+    roster.findById(group).?.membership_revision = revision;
     try workspace.dropTabIntoGroup(tabs[2].tab_id, parent);
     try std.testing.expectEqual(revision + 1, roster.findById(group).?.membership_revision);
     try std.testing.expectEqual(@as(usize, 3), roster.findById(group).?.members.items.len);
@@ -6147,22 +6300,33 @@ test "Local presentation has independent owners and keeps ended output beneath i
     try std.testing.expectEqualStrings("我的终端", workspace.model.tabs.items[1].name());
     try std.testing.expectEqualStrings("本地终端已退出", tab.local_message.?.getText().?.content);
     try std.testing.expectEqualStrings("历史输出仍可查看 · 退出码 0", tab.local_detail.?.getText().?.content);
-    try std.testing.expect(tab.local_new.?.style.display != .none);
+    try std.testing.expect(tab.local_reconnect.?.style.display != .none);
     try std.testing.expect(tab.local_close.?.style.display != .none);
     try std.testing.expect(tab.local_retry.?.style.display == .none);
-    const NewSink = struct {
-        fn create(raw: ?*anyopaque, _: ?[]const u8) !void {
-            const calls: *usize = @ptrCast(@alignCast(raw.?));
-            calls.* += 1;
+    const RetrySink = struct {
+        calls: usize = 0,
+        id: ?SessionId = null,
+        fn retry(raw: ?*anyopaque, id: SessionId) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            self.id = id;
         }
     };
-    var new_calls: usize = 0;
-    workspace.session_bridge = .{ .context = &new_calls, .create_local = NewSink.create };
+    var retry_sink: RetrySink = .{};
+    workspace.session_bridge = .{ .context = &retry_sink, .retry_local = RetrySink.retry };
     // Rebuilding tabs must not free the still visible pane's callback context.
     try workspace.renderTabBar();
     try workspace.renderTabBar();
-    tab.local_new.?.behavior.events.on_click.?.invoke();
-    try std.testing.expectEqual(@as(usize, 1), new_calls);
+    tab.local_reconnect.?.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 1), retry_sink.calls);
+    try std.testing.expectEqual(second, retry_sink.id.?);
+    try std.testing.expectEqual(@as(usize, 2), workspace.tabs.items.len);
+    workspace.updateLocalState(second, .starting, "");
+    try std.testing.expect(tab.local_reconnect.?.style.display == .none);
+    try std.testing.expectError(error.LifecycleDoesNotAllowRetry, workspace.retryLocalSession(second));
+    workspace.updateLocalState(second, .failed, "retry failed");
+    tab.local_retry.?.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 2), retry_sink.calls);
     workspace.removeClosedTab(1);
     try std.testing.expectEqual(@as(usize, 1), workspace.tabs.items.len);
     try std.testing.expectEqual(first, workspace.tabs.items[0].id);
@@ -7505,7 +7669,7 @@ test "mixed tab group identity unifies drag cursor rollback ordinals picker and 
     try std.testing.expectEqual(ui.Color.TRANSPARENT, workspace.tab_nodes.items[1].node.getBackground());
     Workspace.tabLeave(workspace.tab_nodes.items[1].select_ctx);
     try std.testing.expectEqual(ui.Color.TRANSPARENT, workspace.tab_nodes.items[1].node.getBackground());
-    try std.testing.expectEqual(app_theme.current().tab_on, workspace.tab_nodes.items[2].node.getBackground());
+    try std.testing.expectEqual(app_theme.current().selection, workspace.tab_nodes.items[2].node.getBackground());
     workspace.activateTabId(group_tab);
     try workspace.renderTabBar();
     cx.layout();

@@ -88,6 +88,17 @@ pub const Controller = struct {
 
     /// All UI edits enter here instead of assigning borrowed Input slices
     /// directly to model.value. Validate and copy before releasing the old draft.
+    pub fn setExtensions(self: *Controller, extensions: config.ai_extensions.Extensions) !void {
+        if (self.model.locked) return error.SettingsLocked;
+        try extensions.validate();
+        var candidate = self.model.value;
+        candidate.ai.extensions = extensions;
+        const owned = try runtime.Snapshot.init(self.allocator, candidate);
+        if (self.draft) |*previous| previous.deinit();
+        self.draft = owned;
+        self.model.value = owned.value;
+        self.refreshDirty();
+    }
     pub fn setPluginPreference(self: *Controller, plugin_id: []const u8, key: []const u8, value: []const u8) !void {
         try self.ensureEditable();
         const manifest = self.plugin_page.registry_source.find(plugin_id) orelse return error.UnknownPlugin;
@@ -591,6 +602,12 @@ pub const Controller = struct {
             _ = self.failSave(request, err);
             return err;
         };
+        var secret_count: usize = 0;
+        for (baseline.value.ai.extensions.servers) |server| secret_count += server.environment.len + server.headers.len;
+        const extension_refs = baseline.arena.allocator().alloc([68]u8, secret_count) catch |err| {
+            _ = self.failSave(request, err);
+            return err;
+        };
         target.commitPrepared(io, dir, &request.prepared) catch |err| {
             _ = self.failSave(request, err);
             return err;
@@ -601,6 +618,14 @@ pub const Controller = struct {
                 break :blk slot;
             } else null;
         }
+        var ref_index: usize = 0;
+        for (baseline.value.ai.extensions.servers, target.value.ai.extensions.servers) |*server, saved| inline for (.{ "environment", "headers" }) |key| for (@field(server, key), @field(saved, key)) |*entry, stored| {
+            entry.secret_ref = if (stored.secret_ref) |reference| blk: {
+                @memcpy(&extension_refs[ref_index], reference);
+                break :blk &extension_refs[ref_index];
+            } else null;
+            ref_index += 1;
+        };
         if (self.draft) |*draft| draft.deinit();
         self.draft = null;
         self.original.deinit();

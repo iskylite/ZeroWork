@@ -50,6 +50,46 @@ const Fixture = struct {
         self.worker.vt.destroy();
     }
 };
+test "terminal timestamp records admitted SSH Return and explicit submission without stamping typing or rejected input" {
+    const Clock = struct {
+        var now: i64 = 1000;
+        fn read() i64 {
+            return now;
+        }
+    };
+    var f: Fixture = .{};
+    try f.init();
+    defer f.deinit();
+    f.worker.vt.wall_clock_ms = Clock.read;
+    const service = f.provider.service();
+    _ = try f.worker.vt.feed("$ ");
+    var projection = try f.worker.vt.copyProjection(a);
+    try std.testing.expectEqual(@as(?i64, null), projection.visible_rows[0].submitted_wallclock_ms);
+    projection.deinit(a);
+    const mode = f.worker.vt.snapshot().mode_revision;
+    _ = try service.write(.{ .input_sequence = 1, .mode_revision = mode, .bytes = "true" });
+    projection = try f.worker.vt.copyProjection(a);
+    try std.testing.expectEqual(@as(?i64, null), projection.visible_rows[0].submitted_wallclock_ms);
+    projection.deinit(a);
+    Clock.now = 5000;
+    try std.testing.expectError(error.StaleInput, service.writeKey(.{ .input_sequence = 1, .mode_revision = mode, .event = .{ .key = .enter } }));
+    projection = try f.worker.vt.copyProjection(a);
+    try std.testing.expectEqual(@as(?i64, null), projection.visible_rows[0].submitted_wallclock_ms);
+    projection.deinit(a);
+    _ = try service.writeKey(.{ .input_sequence = 2, .mode_revision = mode, .event = .{ .key = .enter } });
+    projection = try f.worker.vt.copyProjection(a);
+    try std.testing.expectEqual(@as(?i64, 1000), projection.visible_rows[0].received_wallclock_ms);
+    try std.testing.expectEqual(@as(?i64, 5000), projection.visible_rows[0].submitted_wallclock_ms);
+    projection.deinit(a);
+    Clock.now = 9000;
+    _ = try f.worker.vt.feed("true\r\n$ ");
+    _ = try service.write(.{ .input_sequence = 3, .mode_revision = mode, .bytes = "\r", .submission = true });
+    projection = try f.worker.vt.copyProjection(a);
+    defer projection.deinit(a);
+    try std.testing.expectEqual(@as(?i64, 5000), projection.visible_rows[0].submitted_wallclock_ms);
+    try std.testing.expectEqual(@as(?i64, 9000), projection.visible_rows[1].submitted_wallclock_ms);
+}
+
 test "SSH terminal async search reconnect keeps owner storage stable across generations and drains close" {
     const work = @import("vt/search_task.zig");
     const pool = @import("vt/search_executor.zig");

@@ -184,15 +184,19 @@ static void verifyCompositionCommandOwnership(WindowWrapper *w) {
 }
 @end
 
-static void verifySourceTransitionPreservesFirstLetter(WindowWrapper *w) {
+static void verifySourceTransitionPreservesFirstLetter(WindowWrapper *w, BOOL publishBeforeKey) {
     NSTextInputContext *previous = w.metalView.zenitInputContext;
     SourceTransitionInputContext *context = [[SourceTransitionInputContext alloc] initWithClient:w.metalView];
     context.reportedSource = @"com.apple.keylayout.ABC";
     w.metalView.zenitInputContext = context;
     w.lastKeyboardInputSource = context.selectedKeyboardInputSource;
+    // Both event orders occur: the source may change before the first key,
+    // or only become observable after that key's setMarkedText callback.
+    if (publishBeforeKey) context.reportedSource = @"com.apple.inputmethod.SCIM.ITABC";
     macos_set_text_input_enabled((__bridge void *)w, 1);
     enqueue(@[key(w, @"n", 45)]);
-    for (int i = 0; i < 16 && context.calls == 0; i++) pumpAppEventsWithTimeout(0);
+    for (int i = 0; i < 16 && w.keyEventQueue.count == 0; i++) pumpAppEventsWithTimeout(0);
+    assert(w.metalView.zenitInputContext == context);
     assert(context.calls == 1 && [w.metalView.markedTextStorage.string isEqualToString:@"n"]);
     dispatchToClient(w);
     enqueue(@[key(w, @"i", 34)]);
@@ -205,7 +209,8 @@ static void verifySourceTransitionPreservesFirstLetter(WindowWrapper *w) {
     dispatchToClient(w);
     w.metalView.zenitInputContext = previous;
     w.lastKeyboardInputSource = previous.selectedKeyboardInputSource;
-    fprintf(stderr, "PASS: delayed input-source publication preserves first composing letter and context\n");
+    fprintf(stderr, "PASS: %s input-source publication preserves first composing letter and context\n",
+            publishBeforeKey ? "early" : "delayed");
 }
 
 // Observe the native ordering boundary with two logical client documents.
@@ -884,7 +889,8 @@ int main(int argc, const char **argv) {
         w.lastKeyboardInputSource = probe.selectedKeyboardInputSource;
         verifyKeyboardIsolation(w, probe);
         verifyCompositionCommandOwnership(w);
-        verifySourceTransitionPreservesFirstLetter(w);
+        verifySourceTransitionPreservesFirstLetter(w, YES);
+        verifySourceTransitionPreservesFirstLetter(w, NO);
         verifyQueuedTextBeforeFocusClick(w, probe);
 
         // First click and first key queued together: the old pump consumed

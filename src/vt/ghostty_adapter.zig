@@ -588,6 +588,10 @@ pub const Adapter = struct {
     pub fn recordSubmission(self: *Adapter) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+        self.recordSubmissionLocked();
+    }
+    /// Caller holds mutex across input admission and timestamp capture.
+    pub fn recordSubmissionLocked(self: *Adapter) void {
         self.row_metadata.submitted(self.terminal, self.rows, self.wall_clock_ms());
         self.refreshVersions();
     }

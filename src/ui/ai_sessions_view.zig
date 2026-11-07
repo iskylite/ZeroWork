@@ -278,6 +278,7 @@ pub const View = struct {
             try self.historyButton(scope, entry.id, .locate, "定位", "ai.history.locate");
             if (entry.active and !entry.ending) try self.historyButton(scope, entry.id, .end, "结束并解绑", "ai.history.end");
         } else if (entry.can_restore) try self.historyButton(scope, entry.id, .restore, if (entry.first_use) "使用到当前 Agent" else "恢复到当前 Agent", "ai.history.restore");
+        if (entry.has_children) try self.historyButton(scope, entry.id, .children, "查看子智能体", "ai.history.children");
         self.reflow();
         self.history_open.set(true);
         self.cx.requestRedraw();
@@ -287,13 +288,13 @@ pub const View = struct {
         id: u64,
         action: Action,
         fn run(self: *HistoryAction) void {
-            if (self.action == .end) self.view.history_open.set(false);
+            if (self.action == .end or self.action == .children) self.view.history_open.set(false);
             if (self.view.hooks.act) |act| act(self.view.hooks.context, self.id, self.action);
         }
     };
     fn historyButton(self: *View, scope: *ui.Scope, id: u64, action: Action, label: []const u8, test_id: []const u8) !void {
         const state = try scope.createState(HistoryAction, .{ .view = self, .id = id, .action = action });
-        const button = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .base_style = @import("ai_close_confirmation_styles.zig").button(false), .on_click = self.cx.on(HistoryAction, state, HistoryAction.run) }).mount(scope, self.cx);
+        const button = try ui.widgets.Button(.{ .label = if (action == .children) "" else label, .a11y_label = label, .icon_only = action == .children, .icon_asset = if (action == .children) ui.icons.bot else null, .variant = .secondary, .base_style = @import("ai_close_confirmation_styles.zig").button(false), .on_click = self.cx.on(HistoryAction, state, HistoryAction.run) }).mount(scope, self.cx);
         button.meta.ownership.meta.test_id = test_id;
         try self.history_actions.appendChild(self.cx.allocator, button);
     }

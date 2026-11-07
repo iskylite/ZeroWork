@@ -1592,7 +1592,6 @@ fn shouldUseRoundedClipBridge(node: *Node, clip_shape_kind: display_list_mod.Cli
     if (clip_shape_kind != .rounded_rect) return false;
     if (radius <= 0.5) return false;
     if (node.frame_state.state_bits.flags.manual_opacity_animation_active or node.frame_state.state_bits.flags.manual_transform_animation_active) return false;
-    if (use_blur) return true;
     // rounded_clip effect (and the Stage 3 fold into the opacity layer rounded mask) is
     // **node-level**: the owner's own shadow / background / border and descendants are clipped
     // by the same mask, so the shadow keeps only the border-box part (Popover rectangle gray
@@ -1600,6 +1599,7 @@ fn shouldUseRoundedClipBridge(node: *Node, clip_shape_kind: display_list_mod.Cli
     // When the owner has such content, switch to a children-enclosing node-local push_clip
     // (shader SDF radius, emitScrollClipBegin) that clips descendants only.
     if (clip_mod.ownerPaintsOutsideChildClip(node)) return false;
+    if (use_blur) return true;
     if (use_opacity_layer) return true;
     // Conservative: z>0 creates a rounded_clip effect only during animation/will_change (keeps
     // the shouldPromoteLayer surface promote vehicle). Static z>0 rounded containers use
@@ -2473,7 +2473,7 @@ fn scrollClipWanted(node: *Node, exec_state: *const NodeExecutionState) bool {
     // after the token falls outside the blur/opacity layer (tests.zig "same-frame two
     // blur+rounded_clip islands": content ranks after end_blur).
     //
-    // But if an opacity / composited_group owner has self-content painted outside the children
+    // But if an opacity / composited_group / blur owner has self-content painted outside the children
     // clip (shadow / stroke, clip_mod.ownerPaintsOutsideChildClip), do **not** exclude: the
     // compositor's apply_clip right after begin_layer push covers the entire surface content and
     // would clip the owner's own shadow to a rectangle and press edge content against the stroke
@@ -2483,7 +2483,8 @@ fn scrollClipWanted(node: *Node, exec_state: *const NodeExecutionState) bool {
     // it doesn't cut the effect group; the promoted cache also writes this pair into the cache
     // (CachedRenderSlice.descendant_clip_open_count).
     if (!exec_state.needs_clip or !(exec_state.clip_rect.w > 0 and exec_state.clip_rect.h > 0)) return false;
-    if (exec_state.use_rounded_clip or effectiveBackdropBlurRadius(node) > 0) return false;
+    if (exec_state.use_rounded_clip) return false;
+    if (effectiveBackdropBlurRadius(node) > 0 and !clip_mod.ownerPaintsOutsideChildClip(node)) return false;
     if (exec_state.use_opacity_layer and !clip_mod.ownerPaintsOutsideChildClip(node)) return false;
     return !@import("zenit_environment").has("ZENIT_DISABLE_SCROLL_CLIP");
 }

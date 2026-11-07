@@ -11,6 +11,8 @@ const clock = @import("../platform/realtime.zig");
 
 pub const Mode = enum { closed, preview, pinned };
 pub const View = struct {
+    workspace_chrome: bool = false,
+    unavailable: *ui.Signal(bool),
     cx: *ui.Cx,
     scope: *ui.Scope,
     workspace: *Workspace,
@@ -76,7 +78,7 @@ pub const View = struct {
         empty.meta.ownership.meta.test_id = "terminal.command-history.empty";
         empty.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 70 }, .padding = .{ .top = 18 } });
         try root.appendChild(cx.allocator, empty);
-        self.* = .{ .cx = cx, .scope = scope, .workspace = workspace, .root = root, .title = title, .count = count, .scroll = scroll, .empty = empty, .virtual = list.state, .buttons = undefined, .colors = S.theme.current() };
+        self.* = .{ .cx = cx, .scope = scope, .workspace = workspace, .root = root, .title = title, .count = count, .scroll = scroll, .empty = empty, .virtual = list.state, .buttons = undefined, .colors = S.theme.current(), .unavailable = try scope.createSignal(bool, true) };
         try scope.onCleanup(View, self, cleanup);
         self.buttons = .{ try self.button(ssh_bar, "status.command-history"), try self.button(local_bar, "local.status.command-history") };
         try cx.root.?.appendChild(cx.allocator, root);
@@ -84,10 +86,10 @@ pub const View = struct {
         return self;
     }
     fn button(self: *View, bar: *ui.Node, id: []const u8) !*ui.Node {
-        const trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "命令历史 · ⇧⌘B", .base_style = @import("status_connection_styles.zig").metricTrigger(28), .hover_style = .{ .background = S.theme.states().hover }, .on_click = self.cx.on(View, self, toggle) }).mount(self.scope, self.cx);
+        const trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "命令历史 · ⇧⌘B", .disabled = self.unavailable, .base_style = @import("status_connection_styles.zig").metricTrigger(28), .hover_style = .{ .background = S.theme.states().hover }, .on_click = self.cx.on(View, self, toggle) }).mount(self.scope, self.cx);
         trigger.setStyleInline(self.cx.allocator, .{ .align_items = .center, .justify = .center, .padding = .{}, .gap = 0 });
         trigger.meta.ownership.meta.test_id = id;
-        try trigger.appendChild(self.cx.allocator, try S.theme.icon(self.cx, ui.icons.list_restart, "fg_2", .{ .width = .{ .px = 15 }, .height = .{ .px = 15 } }));
+        try trigger.appendChild(self.cx.allocator, try S.theme.icon(self.cx, ui.icons.list_restart, "fg_2", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
         try bar.appendChild(self.cx.allocator, trigger);
         return trigger;
     }
@@ -125,11 +127,12 @@ pub const View = struct {
     }
     fn update(self: *View) !void {
         const active = self.terminal();
-        for (self.buttons) |button_node| button_node.setDisplay(if (active != null) .flex else .none);
+        if (self.unavailable.peek() != (active == null)) self.unavailable.set(active == null);
+        for (self.buttons, 0..) |button_node, index| button_node.setDisplay(if (active != null or (self.workspace_chrome and index == 0)) .flex else .none);
         if (active == null) self.mode = .closed;
         const inside = self.contains(self.buttons[0]) or self.contains(self.buttons[1]);
         if (!inside) self.suppressed = false;
-        if (inside and self.mode == .closed and !self.suppressed) self.mode = .preview;
+        if (active != null and inside and self.mode == .closed and !self.suppressed) self.mode = .preview;
         if (self.mode == .preview) {
             if (inside or self.contains(self.root)) self.leave_ns = null else {
                 const now = clock.monotonicNs();
@@ -169,7 +172,10 @@ pub const View = struct {
         const w = @min(if (self.cx.viewport.width < 1000) @as(f32, 320) else S.width, @max(0, pane.w - 24));
         const content_height: f32 = if (self.visible_count == 0) 70 else self.virtual.totalContentHeight();
         const h = @min(@min(@as(f32, 475), @max(120, pane.h - 24)), 86 + content_height);
-        self.root.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = pane.x + pane.w - w - 12 }, .top = .{ .px = pane.y + pane.h - h - 12 } }, .width = .{ .px = w }, .height = .{ .px = h } });
+        const trigger = self.buttons[0].globalRect();
+        const left = if (self.workspace_chrome) std.math.clamp(trigger.x + trigger.w / 2 - w / 2, 8, @max(8, self.cx.viewport.width - w - 8)) else pane.x + pane.w - w - 12;
+        const top = if (self.workspace_chrome) trigger.y + trigger.h + 6 else pane.y + pane.h - h - 12;
+        self.root.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = left }, .top = .{ .px = top } }, .width = .{ .px = w }, .height = .{ .px = h } });
     }
     fn clearRecords(self: *View) void {
         for (self.records.items) |command| if (command.command) |text| self.cx.allocator.free(text);

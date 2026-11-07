@@ -2,6 +2,7 @@ const std = @import("std");
 pub const keybindings = @import("keybindings.zig");
 pub const hosts = @import("hosts.zig");
 pub const store = @import("store.zig");
+pub const ai_extensions = @import("ai_extensions.zig");
 pub const material = @import("background_asset.zig");
 
 pub const Config = struct {
@@ -123,7 +124,7 @@ pub const Config = struct {
         return result;
     }
 
-    pub fn format(self: Config, buffer: []u8) std.Io.Writer.Error![]const u8 {
+    pub fn format(self: Config, buffer: []u8) ![]const u8 {
         var writer = std.Io.Writer.fixed(buffer);
         try writer.print("[meta]\nconfig_revision = {d}\n\n", .{self.config_revision});
         try writer.print("[ui]\nicon_background = \"{s}\"\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\ncommand_info = {}\nscrollback_limit = {d}\n\n", .{ @tagName(self.ui.icon_background), self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter, self.ui.command_info, self.ui.scrollback_limit });
@@ -138,6 +139,15 @@ pub const Config = struct {
         try writer.print("[transfer]\ndedicated_connection = {}\nwindow_chunks = {d}\nchunk_kb = {d}\ndownload_dir = \"{s}\"\nverify_md5 = {}\nshared_pacing_kbps = {d}\nresume = {}\nmax_tasks = {d}\nconflict_policy = \"{s}\"\n\n", .{ self.transfer.dedicated_connection, self.transfer.window_chunks, self.transfer.chunk_kb, self.transfer.download_dir, self.transfer.verify_md5, self.transfer.shared_pacing_kbps, self.transfer.@"resume", self.transfer.max_tasks, self.transfer.conflict_policy });
         try writer.print("[ssh]\nkeepalive_sec = {d}\nreconnect_max = {d}\nreconnect_backoff = [{d},{d},{d},{d},{d}]\nconnect_timeout_sec = {d}\nterm = \"{s}\"\ncompression = {}\nauto_shell_integration = {}\nauto_reconnect = {}\nbuffer_input = {}\nsocks_port = {d}\nsocks_bind = \"{s}\"\notp_modal = {}\ntotp_autofill = {}\n\n", .{ self.ssh.keepalive_sec, self.ssh.reconnect_max, self.ssh.reconnect_backoff[0], self.ssh.reconnect_backoff[1], self.ssh.reconnect_backoff[2], self.ssh.reconnect_backoff[3], self.ssh.reconnect_backoff[4], self.ssh.connect_timeout_sec, self.ssh.term, self.ssh.compression, self.ssh.auto_shell_integration, self.ssh.auto_reconnect, self.ssh.buffer_input, self.ssh.socks_port, self.ssh.socks_bind, self.ssh.otp_modal, self.ssh.totp_autofill });
         try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nfollow_up_mode = \"{s}\"\nstep_display = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), @tagName(self.ai.follow_up_mode), @tagName(self.ai.step_display), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
+        try writer.print("child_context_mode = \"{s}\"\nchild_reuse_policy = \"{s}\"\n", .{ @tagName(self.ai.child_context_mode), @tagName(self.ai.child_reuse_policy) });
+        if (self.ai.extensions.skills.len != 0 or self.ai.extensions.servers.len != 0) {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), try self.ai.extensions.disk(arena.allocator()), .{});
+            try writer.writeAll("extensions = ");
+            try std.json.Stringify.value(encoded, .{}, &writer);
+            try writer.writeAll("\n");
+        }
         var has_provider = false;
         for (self.ai.providers) |p| if (p.endpoint.len > 0 or p.api_key.len > 0 or p.api_key_ref != null or p.name.len > 0 or p.model_count > 0 or p.enabled) {
             has_provider = true;
@@ -230,7 +240,11 @@ pub const Config = struct {
                 if (eq(key, "keepalive_sec")) self.ssh.keepalive_sec = try parseInt(u16, value) else if (eq(key, "reconnect_max")) self.ssh.reconnect_max = try parseInt(u8, value) else if (eq(key, "reconnect_backoff")) self.ssh.reconnect_backoff = try parseBackoff(value) else if (eq(key, "connect_timeout_sec")) self.ssh.connect_timeout_sec = try parseInt(u16, value) else if (eq(key, "term")) self.ssh.term = try parseString(value) else if (eq(key, "compression")) self.ssh.compression = try parseBool(value) else if (eq(key, "auto_shell_integration")) self.ssh.auto_shell_integration = try parseBool(value) else if (eq(key, "auto_reconnect")) self.ssh.auto_reconnect = try parseBool(value) else if (eq(key, "buffer_input")) self.ssh.buffer_input = try parseBool(value) else if (eq(key, "socks_port")) self.ssh.socks_port = try parseInt(u16, value) else if (eq(key, "socks_bind")) self.ssh.socks_bind = try parseString(value) else if (eq(key, "otp_modal")) self.ssh.otp_modal = try parseBool(value) else if (eq(key, "totp_autofill")) self.ssh.totp_autofill = try parseBool(value) else return error.UnknownKey;
             },
             .ai => {
-                if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
+                if (eq(key, "extensions")) {
+                    const a = allocator orelse return error.RequiresAllocator;
+                    const encoded = try parseOwnedString(allocator, value);
+                    self.ai.extensions = std.json.parseFromSliceLeaky(ai_extensions.Extensions, a, encoded, .{ .allocate = .alloc_always }) catch return error.InvalidValue;
+                } else if (eq(key, "child_context_mode")) self.ai.child_context_mode = std.meta.stringToEnum(ChildContextMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "child_reuse_policy")) self.ai.child_reuse_policy = std.meta.stringToEnum(ChildReusePolicy, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
             },
             .log => {
                 if (eq(key, "ring_mb")) self.log.ring_mb = try parseInt(u16, value) else if (eq(key, "checkpoint_sec")) self.log.checkpoint_sec = try parseInt(u16, value) else if (eq(key, "retention_days")) self.log.retention_days = try parseInt(u16, value) else if (eq(key, "export_format")) self.log.export_format = try parseString(value) else return error.UnknownKey;
@@ -316,6 +330,7 @@ pub const Config = struct {
             for (self.plugin_preferences[0..i]) |previous| if (eq(preference.plugin_id, previous.plugin_id) and eq(preference.key, previous.key)) return error.InvalidValue;
         }
         if (self.config_revision == 0) return error.OutOfRange;
+        self.ai.extensions.validate() catch return error.InvalidValue;
         if (self.ai.provider_count > self.ai.providers.len) return error.OutOfRange;
         for (self.ai.providers[0..self.ai.provider_count]) |p| {
             for ([_][]const u8{ p.name, p.endpoint, p.api_key, p.model }) |text| {
@@ -433,7 +448,12 @@ pub const default_providers = [_]AiProvider{ .{ .kind = .anthropic }, .{ .kind =
 pub const StepDisplay = enum { collapsed, expanded };
 pub const FollowUpMode = enum { queue, steer };
 
+pub const ChildContextMode = enum { independent, inherit };
+pub const ChildReusePolicy = enum { new, prefer_reuse, model };
 pub const Ai = struct {
+    child_context_mode: ChildContextMode = .independent,
+    child_reuse_policy: ChildReusePolicy = .new,
+    extensions: ai_extensions.Extensions = .{},
     follow_up_mode: FollowUpMode = .steer,
     default_provider: []const u8 = "anthropic",
     permission_mode: PermissionMode = .confirm,

@@ -4707,10 +4707,9 @@ static BOOL zenitTextInputIsActive(WindowWrapper *target) {
     return target && target.metalView && target.textInputEnabled;
 }
 
-// An input-source change while the app stays active does not reliably
-// reactivate an existing custom NSTextInputContext. Cross the same responder
-// boundary that AppKit uses on an application deactivate/reactivate, but keep
-// zenit's logical widget focus intact.
+// AppKit owns input-source transitions within the existing input context.
+// Observe the source for diagnostics/caret invalidation without replacing its
+// context or cycling firstResponder at the first key of the new input method.
 static NSTextInputContext *synchronizeTextInputSource(WindowWrapper *target,
                                                        NSString *reason) {
     if (!target || !target.metalView) return nil;
@@ -4725,28 +4724,10 @@ static NSTextInputContext *synchronizeTextInputSource(WindowWrapper *target,
         return context;
     }
 
-    // The source identifier can lag behind its first setMarkedText callback.
-    // An existing composition proves this context is already serving the IME;
-    // rebinding here would discard its first letter before the next key.
-    if (target.metalView.hasMarkedText) {
-        target.lastKeyboardInputSource = selected;
-        return context;
-    }
-
-    macos_ime_discard((__bridge void *)target);
+    target.lastKeyboardInputSource = selected;
     [context invalidateCharacterCoordinates];
-    const BOOL wasFirstResponder = target.window.firstResponder == target.metalView;
-    if (wasFirstResponder) {
-        [target.window makeFirstResponder:nil];
-    }
-    NSTextInputContext *replacement = [[NSTextInputContext alloc] initWithClient:target.metalView];
-    replacement.selectedKeyboardInputSource = selected;
-    target.metalView.zenitInputContext = replacement;
-    if (wasFirstResponder) [target.window makeFirstResponder:target.metalView];
-    context = [target.metalView inputContext];
-    target.lastKeyboardInputSource = context.selectedKeyboardInputSource ?: selected;
     if (input_debug_enabled()) {
-        NSLog(@"[ime-debug] rebound input context reason=%@ source=%@ -> %@ current=%d",
+        NSLog(@"[ime-debug] observed input source reason=%@ source=%@ -> %@ current=%d",
               reason,
               previous ?: @"<nil>",
               target.lastKeyboardInputSource ?: @"<nil>",

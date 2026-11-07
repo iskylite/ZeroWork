@@ -22,10 +22,14 @@ int zw_data_startup_alert(const char *code, int reset_pending, const unsigned ch
         BOOL credential_access = !reset_pending && code &&
             (strcmp(code, "CredentialDenied") == 0 || strcmp(code, "CredentialLocked") == 0);
         BOOL authorization_failed = code && strcmp(code, "CredentialAuthorizationFailed") == 0;
-        alert.messageText = credential_access ? @"需要授权访问已保存的凭据" : already_running ? @"此应用数据已在使用中" : reset_pending ? @"应用数据清除尚未完成" : @"无法安全打开应用数据";
+        BOOL authentication_failed = code &&
+            (strcmp(code, "CredentialAuthenticationCanceled") == 0 || strcmp(code, "CredentialAuthenticationFailed") == 0);
+        alert.messageText = authentication_failed ? @"已保存的凭据尚未解锁" : credential_access ? @"需要授权访问已保存的凭据" : already_running ? @"此应用数据已在使用中" : reset_pending ? @"应用数据清除尚未完成" : @"无法安全打开应用数据";
         NSString *reason = code ? [NSString stringWithUTF8String:code] : @"UnknownError";
-        alert.informativeText = credential_access
-            ? @"此版本尚未获准访问已保存的钥匙串凭据，或钥匙串处于锁定状态。点击“授权钥匙串并重试”，在 macOS 系统窗口中完成授权或解锁。原有配置和凭据会保留；取消授权将停止启动。"
+        alert.informativeText = authentication_failed
+            ? @"身份验证已取消或未通过，应用已停止启动。原有配置和凭据会保留，重新打开应用可再次使用 Touch ID 或系统提供的验证方式解锁。"
+            : credential_access
+            ? @"首次使用凭据辅助程序、辅助程序更新或钥匙串锁定时，macOS 可能要求输入钥匙串密码。点击“授权钥匙串并重试”，在系统窗口中完成授权；如提供“始终允许”，选择后可保存对辅助程序的授权。日常主程序更新继续复用该授权。原有配置和凭据会保留；取消授权将停止启动。"
             : authorization_failed
             ? @"钥匙串授权或凭据加载未完成，应用已停止启动。原有配置和凭据会保留。可重新打开应用并重试；如果仍被拒绝，请在“钥匙串访问”中检查本应用凭据的访问权限。"
             : already_running

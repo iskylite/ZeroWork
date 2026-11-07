@@ -33,6 +33,24 @@ const StoredEvent = struct {
     context_usage: ?@import("context_usage.zig").Stored = null,
     initial_input: ?input.Receipt = null,
     initial_origin: ?@import("tool_scope.zig").Owner = null,
+    child_info: ?@import("child_agent.zig").Info = null,
+    child_settings: ?@import("child_agent.zig").Settings = null,
+    parent_binding: ?input.Fence = null,
+    targets: ?[]const @import("../host/identity.zig").SessionHandle = null,
+    children: ?[]const @import("../host/identity.zig").ConversationId = null,
+    task_fact: ?@import("task_budget.zig").Fact = null,
+    initial_text: ?[]const u8 = null,
+    pub fn jsonStringify(self: StoredEvent, writer: *std.json.Stringify) !void {
+        try writer.beginObject();
+        inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
+            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text")) @field(self, name) != null else true;
+            if (emit) {
+                try writer.objectField(name);
+                try writer.write(@field(self, name));
+            }
+        }
+        try writer.endObject();
+    }
 };
 const QueueOrder = struct { fence: input.Fence, ids: []const @import("../host/identity.zig").SubmissionId };
 const Line = struct { schema: u8 = 1, event: ?StoredEvent = null, receipt: ?input.Receipt = null, order: ?QueueOrder = null, messages: []const Message = &.{}, transcript: []const Message = &.{} };
@@ -85,7 +103,9 @@ pub const Journal = struct {
             const parsed = try std.json.parseFromSlice(Line, self.allocator, line, .{});
             defer parsed.deinit();
             const row = parsed.value;
-            if (row.schema != 1 or @as(u8, @intFromBool(row.event != null)) + @intFromBool(row.receipt != null) + @intFromBool(row.order != null) != 1) return error.InvalidSessionJournal;
+            if ((row.schema != 1 and row.schema != 2 and row.schema != 3) or @as(u8, @intFromBool(row.event != null)) + @intFromBool(row.receipt != null) + @intFromBool(row.order != null) != 1) return error.InvalidSessionJournal;
+            if (row.schema < 3) if (row.event) |event| if (event.kind == .task_fact or event.kind == .child_launch or event.task_fact != null or event.initial_text != null) return error.InvalidSessionJournal;
+            if (row.schema == 1) if (row.event) |event| if (event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.child_info != null or event.parent_binding != null or event.targets != null or event.children != null or event.task_fact != null or event.kind == .task_fact or event.kind == .child_launch or event.initial_text != null) return error.InvalidSessionJournal;
             if (row.order) |order| {
                 const record = store.find(order.fence.conversation) orelse return error.InvalidSessionJournal;
                 if (order.ids.len != record.inbox.entries.items.len or order.ids.len > @import("wire_history.zig").History.max_messages) return error.InvalidSessionJournal;
@@ -161,7 +181,8 @@ pub const Journal = struct {
         const self: *Journal = @ptrCast(@alignCast(raw));
         var event: StoredEvent = undefined;
         inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| @field(event, name) = @field(original, name);
-        try self.append(.{ .event = event }, original.messages, &.{});
+        const extended = event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.kind == .task_fact or event.kind == .child_launch;
+        try self.append(.{ .schema = if (event.kind == .task_fact or event.kind == .child_launch) 3 else if (extended) 2 else 1, .event = event }, original.messages, &.{});
     }
     fn writeInput(raw: *anyopaque, receipt: input.Receipt, messages: []const provider.Message) !void {
         const self: *Journal = @ptrCast(@alignCast(raw));

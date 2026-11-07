@@ -152,11 +152,12 @@ pub const Controller = struct {
             .identity => 272, // Shared connection header, summary and labeled facts.
             .theme => 260,
         };
-        const height = @min(desired, @max(0, open.anchor.y - 6 - 8));
+        const below = open.anchor.y < 72;
+        const height = @min(desired, @max(0, if (below) window.height - open.anchor.y - open.anchor.height - 6 - 8 else open.anchor.y - 6 - 8));
         const width = @min(@as(f32, if (open.kind == .identity) 380 else 360), @max(0, window.width - 16));
         return .{
             .x = @min(@max(8, open.anchor.x + (open.anchor.width - width) / 2), @max(8, window.width - width - 8)),
-            .y = @max(8, open.anchor.y - 6 - height),
+            .y = if (below) open.anchor.y + open.anchor.height + 6 else @max(8, open.anchor.y - 6 - height),
             .width = width,
             .height = height,
         };
@@ -239,4 +240,17 @@ test "status rejects local RTT and writable history and invalidates old focus" {
     _ = try controller.select(value);
     try std.testing.expect(controller.available(.readonly));
     try std.testing.expect(!controller.available(.rtt));
+}
+
+test "status identity below a top tab remains bounded in a compact window" {
+    var controller: Controller = .{ .allocator = std.testing.allocator };
+    defer controller.deinit();
+    _ = try controller.select(localProjection(1, 1));
+    _ = try controller.toggle(.identity, .{ .x = 730, .y = 20, .width = 28, .height = 28 }, 42, false);
+    const placed = try controller.placement(.{ .width = 860, .height = 480 });
+    try std.testing.expectEqual(@as(f32, 54), placed.y);
+    try std.testing.expectEqual(@as(f32, 380), placed.width);
+    try std.testing.expectEqual(@as(f32, 272), placed.height);
+    try std.testing.expect(placed.x + placed.width <= 852);
+    try std.testing.expect(placed.y + placed.height <= 472);
 }

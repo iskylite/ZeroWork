@@ -25,6 +25,10 @@ const Fixture = struct {
     shared: ?*attached.Host = null,
     final_draft: ?[]const u8 = null,
     fail_projection_once: bool = false,
+    worker_releases: usize = 0,
+    late_release_checks: usize = 0,
+    fail_worker_release: bool = false,
+    pending_worker_release: bool = false,
     calls: std.atomic.Value(usize) = .init(0),
     release: std.atomic.Value(bool) = .init(false),
     fn init() Fixture {
@@ -35,7 +39,7 @@ const Fixture = struct {
         self.bridge.deinit();
     }
     fn backend(self: *Fixture) runtime.Backend {
-        return .{ .context = self, .capture = capture, .prepare = prepare, .completed = complete, .local_released = localReleased };
+        return .{ .context = self, .capture = capture, .prepare = prepare, .completed = complete, .local_released = localReleased, .release_worker = releaseWorker };
     }
     fn capture(raw: *anyopaque, context: runtime.Context) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -103,8 +107,23 @@ const Fixture = struct {
         }
         self.completed += 1;
     }
+    fn releaseWorker(raw: *anyopaque) !void {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        const runner = self.runner.?;
+        try std.testing.expectEqual(self.controller_thread, std.Thread.getCurrentId());
+        try std.testing.expect(runner.thread == null and !runner.agent.busy and runner.saved and !runner.pending_commit and !runner.pending_notify);
+        if (self.pending_worker_release) return error.ResourceCleanupPending;
+        if (self.fail_worker_release) return error.BackendSaveFailed;
+        if (self.table) |*table| table.deinit();
+        self.table = null;
+        self.definitions = &.{};
+        try self.bridge.clear();
+        self.worker_releases += 1;
+    }
     fn localReleased(raw: *anyopaque, _: runtime.Context) bool {
-        return @as(*Fixture, @ptrCast(@alignCast(raw))).released;
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        if (self.runner.?.worker_released) self.late_release_checks += 1;
+        return self.released;
     }
     fn pump(raw: *anyopaque) !void {
         @as(*Fixture, @ptrCast(@alignCast(raw))).bridge.pump(undefined);
@@ -185,7 +204,7 @@ test "AiHost integration real workers share one writer and closing one window le
     _ = try shared.closeWindow(w1);
     try awaitIdle(&shared, one);
     try shared.releaseWindow(w1);
-    try std.testing.expect(first.disposed and !second.disposed and !two.cancel.isCancelled() and two.agent.busy);
+    try std.testing.expect(first.disposed and !second.disposed and !two.worker.?.cancel.isCancelled() and two.agent.busy);
     second.release.store(true, .release);
     try awaitIdle(&shared, two);
     try std.testing.expectEqual(@as(usize, 1), second.completed);
@@ -326,7 +345,7 @@ test "AiHost integration one failed End persistence still cancels every owner in
     var failing: Failing = .{ .id = ticket.conversation };
     shared.service.store.persist = .{ .context = &failing, .write = Failing.write };
     try std.testing.expectError(error.StorageUnavailable, shared.closeWindow(window));
-    try std.testing.expect(one.cancel.isCancelled() and two.cancel.isCancelled());
+    try std.testing.expect((one.worker == null or one.worker.?.cancel.isCancelled()) and (two.worker == null or two.worker.?.cancel.isCancelled()));
     shared.service.store.persist = null;
     const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
     while (!(try shared.closeWindow(window))) {
@@ -404,7 +423,7 @@ test "AiHost integration final draft is flushed before an idle window can unbind
     try std.testing.expectEqualStrings("typed just before close", record.draft.?);
     try shared.service.store.remove(ticket.conversation);
     try shared.pump();
-    try std.testing.expect(runner.record == null and runner.context == null and runner.manager.input == null);
+    try std.testing.expect(runner.record == null and runner.context == null and runner.worker == null);
 }
 
 test "AiHost integration pinned earlier fork excludes later history and queued authority" {
@@ -578,4 +597,104 @@ test "durable context usage rejects stale full history metadata during journal r
     try std.testing.expect(state.wire_history.usage == null);
     try std.testing.expectEqualStrings("edited", state.wire_history.messages[1].content);
     try std.testing.expectEqual(@as(usize, 0), recovered.service.runners.items.len);
+}
+
+test "v0.4 Worker releases on End and only explicit input rebuilds the stable slot" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    fixture.release.store(true, .release);
+    var shared = attached.Host.init(a);
+    defer shared.deinit() catch unreachable;
+    const runner = try fixture.attach(&shared, .{ .session = 1 }, @fromBackingInt(@intCast(1)));
+    try std.testing.expect(runner.worker == null and runner.worker_generation == 0);
+    const ticket = try shared.service.store.create(runner.agent.id);
+    try shared.pump();
+    try std.testing.expect(runner.worker == null and fixture.calls.load(.acquire) == 0);
+    _ = try shared.service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "saved task" }, null);
+    try awaitIdle(&shared, runner);
+    const generation = runner.worker_generation;
+    try std.testing.expect(runner.worker != null and generation == 1);
+    const operation = identity.HostOperationId.generate();
+    try shared.service.endConversation(ticket, operation);
+    try std.testing.expect(runner.worker == null and runner.context == null and runner.record == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.worker_releases);
+    const record = shared.service.store.find(ticket.conversation).?;
+    try std.testing.expectEqualStrings("completed", record.history.messages[1].content);
+    const restored = try shared.service.resumeConversation(record.id, runner.agent.id, record.revision);
+    try shared.pump();
+    try std.testing.expect(runner.worker == null and fixture.calls.load(.acquire) == 1);
+    _ = try shared.service.submit(restored, identity.SubmissionId.generate(), .{ .content = "new task" }, null);
+    try awaitIdle(&shared, runner);
+    try std.testing.expect(runner.worker != null and runner.worker_generation == generation + 1);
+    // A completed old End is idempotent, and cannot cancel the new generation.
+    try shared.service.endConversation(ticket, operation);
+    try std.testing.expect(!runner.worker.?.cancel.isCancelled() and runner.agent.current.?.eql(restored.conversation));
+    try std.testing.expectError(error.BindingChanged, shared.service.stop(ticket));
+    try std.testing.expectError(error.BindingChanged, shared.service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "late input" }, null));
+    try std.testing.expectEqual(@as(usize, 2), fixture.calls.load(.acquire));
+}
+
+test "v0.4 Worker stays released when durable unbind fails and retries the original fence" {
+    const Failing = struct {
+        fn write(_: *anyopaque, event: @import("ai/session_lifecycle.zig").Event) !void {
+            if (event.kind == .unbind) return error.StorageUnavailable;
+        }
+    };
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    fixture.release.store(true, .release);
+    var shared = attached.Host.init(a);
+    defer shared.deinit() catch unreachable;
+    const runner = try fixture.attach(&shared, .{ .session = 1 }, @fromBackingInt(@intCast(1)));
+    const ticket = try shared.service.store.create(runner.agent.id);
+    _ = try shared.service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "persist before unbind" }, null);
+    try awaitIdle(&shared, runner);
+    const operation = identity.HostOperationId.generate();
+    var sentinel: u8 = 0;
+    shared.service.store.persist = .{ .context = &sentinel, .write = Failing.write };
+    try std.testing.expectError(error.StorageUnavailable, shared.service.endConversation(ticket, operation));
+    const record = shared.service.store.find(ticket.conversation).?;
+    try std.testing.expect(record.binding != null and record.ending != null and runner.worker == null);
+    try std.testing.expect(runner.context.?.approvals == null and runner.context.?.questions == null);
+    try std.testing.expectError(error.ConversationEnding, shared.service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "cannot restart" }, null));
+    try std.testing.expectError(error.StorageUnavailable, shared.pump());
+    try std.testing.expectEqual(@as(usize, 1), fixture.worker_releases);
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixture.late_release_checks);
+    shared.service.store.persist = null;
+    try shared.service.endConversation(ticket, operation);
+    try std.testing.expect(record.binding == null and runner.worker == null and runner.context == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.worker_releases);
+}
+
+test "v0.4 Worker waits for backend save and real release without discarding recovery state" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    fixture.query = true;
+    fixture.release.store(true, .release);
+    var shared = attached.Host.init(a);
+    defer shared.deinit() catch unreachable;
+    const runner = try fixture.attach(&shared, .{ .session = 1 }, @fromBackingInt(@intCast(1)));
+    const ticket = try shared.service.store.create(runner.agent.id);
+    _ = try shared.service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "tool evidence" }, null);
+    try awaitIdle(&shared, runner);
+    fixture.released = false;
+    const operation = identity.HostOperationId.generate();
+    try shared.service.endConversation(ticket, operation);
+    try std.testing.expect(runner.worker != null and runner.agent.current != null and fixture.worker_releases == 0);
+    fixture.released = true;
+    fixture.pending_worker_release = true;
+    try shared.pump();
+    try std.testing.expect(runner.worker != null and runner.record.?.binding != null);
+    fixture.pending_worker_release = false;
+    fixture.fail_worker_release = true;
+    try std.testing.expectError(error.BackendSaveFailed, shared.pump());
+    try std.testing.expect(runner.worker != null and runner.worker.?.manager.tool_run != null and runner.record.?.binding != null);
+    fixture.fail_worker_release = false;
+    try shared.pump();
+    try std.testing.expect(runner.worker == null and runner.agent.current == null and fixture.table == null and fixture.definitions.len == 0);
+    try std.testing.expectEqual(@as(usize, 1), fixture.worker_releases);
+    try std.testing.expectEqual(@as(usize, 1), fixture.controller_calls);
+    try shared.pump();
+    try std.testing.expectEqual(@as(usize, 1), fixture.controller_calls);
 }

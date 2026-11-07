@@ -116,6 +116,7 @@ playwright-report/
 /docs/DEVELOPMENT/
 /docs/DESIGN/*_VALIDATION.md
 /docs/DESIGN/*_ACCEPTANCE_MATRIX.md
+/docs/UI_V3/**/*VERIFICATION*.md
 /docs/UI_V3/**/*VALIDATION*.md
 /docs/UI_V3/**/native-validation*.md
 /docs/UI_V3/**/review-[0-9]*.html

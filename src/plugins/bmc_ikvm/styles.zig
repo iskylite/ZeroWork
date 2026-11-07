@@ -1,11 +1,12 @@
-//! Native projection of docs/UI_V3/kvm's measured content region. Product
-//! palette/materials come from the existing three-theme publication.
+//! Native KVM content aligned to the approved Mist workspace geometry.
+//! Product palette and materials follow the existing theme registry.
 const ui = @import("ui");
 pub const theme = @import("../../ui/app_theme.zig");
 const shell = @import("../../ui/shell_styles.zig");
-pub const toolbar_height: f32 = 48;
-// The workspace root owns the rounded outer edge, including the video bottom.
-pub const video_card_radius: f32 = 0;
+pub const toolbar_height: f32 = 44;
+// Round the outer video surface only. Its 8-point black inset preserves every
+// source pixel and all edge input targets in both fit and original modes.
+pub const video_card_radius: f32 = 16;
 pub const popup_width: f32 = 296;
 pub const boot_width: f32 = 312;
 pub const select_width: f32 = 180;
@@ -21,24 +22,15 @@ pub const log_width: f32 = 760;
 pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 0, .min_width = 0, .min_height = 0, .overflow_hidden = true };
 }
-pub fn workspaceRoot(tokens: *const ui.ThemeTokens) ui.BoxStyle {
-    // The host clears nonterminal tab backgrounds. Keep the shared pane's
-    // single material on this inner node; its host already owns the shadow.
-    var style = shell.pane(tokens);
-    style.shadow = null;
-    style.inset_shadow = null;
-    style.padding = ui.Padding.ZERO;
-    style.gap = 0;
-    style.overflow_hidden = true;
-    style.clip_shape = .{ .rounded_rect = shell.card_radius };
-    style.corner_radius = shell.card_radius;
-    // Composite the outer mask after the ScrollArea's rectangular clip.
-    style.composited_group = true;
-    return style;
+pub fn workspaceRoot(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column, .gap = 16, .padding = .{}, .background = ui.Color.TRANSPARENT };
 }
-pub fn toolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
-    // Share the workspace material with the area outside the video's top corners.
-    return .{ .width = .fill(), .height = .{ .px = toolbar_height }, .direction = .row, .align_items = .center, .justify = .end, .gap = 6, .padding = .{ .top = 12, .bottom = 12, .left = 12, .right = 12 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0, .min_width = 0 };
+pub fn toolbar(t: *const ui.ThemeTokens) ui.BoxStyle {
+    var style = shell.floating(t);
+    style.width = .fill();
+    style.padding = .{ .left = 16, .right = 6, .top = 6, .bottom = 6 };
+    style.min_width = 0;
+    return style;
 }
 pub fn connectionIdentity(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .min_width = 0, .direction = .row, .align_items = .center, .gap = 8 };
@@ -54,23 +46,23 @@ pub fn disconnect() ui.BoxStyle {
     return style;
 }
 pub fn tool() ui.BoxStyle {
-    return .{ .width = .{ .px = 82 }, .height = .{ .px = 24 }, .min_height = 24, .padding = .{ .left = 8, .right = 8 }, .gap = 4, .border = .{ .width = 0, .radius = 12 }, .font_size = 12, .font_weight = 500, .text_color = theme.current().fg_1, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 82 }, .height = .{ .px = 32 }, .min_height = 32, .padding = .{ .left = 8, .right = 8 }, .gap = 4, .border = .{ .width = 0, .radius = 8 }, .font_size = 12, .font_weight = 500, .text_color = theme.current().fg_1, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 pub fn toolHover() ui.BoxStyle {
     return .{ .background = theme.states().hover };
 }
 pub fn videoWorkspace(_: *const ui.ThemeTokens) ui.BoxStyle {
-    // The toolbar already owns the 12px gap below its controls.
-    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = .{ .left = 12, .right = 12, .bottom = 12 }, .gap = 0 };
+    // workspaceRoot owns the 16-point gap below the floating toolbar.
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = .{}, .gap = 0 };
 }
 pub fn videoCard(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = ui.Padding.ZERO, .gap = 0, .background = ui.Color.BLACK, .border = .{ .width = 0, .radius = video_card_radius }, .overflow_hidden = true, .clip_shape = .{ .rounded_rect = video_card_radius } };
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = ui.Padding.all(8), .gap = 0, .background = ui.Color.BLACK, .border = .{ .width = 0, .radius = video_card_radius }, .overflow_hidden = true, .clip_shape = .{ .rounded_rect = video_card_radius } };
 }
 pub fn video() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .background = ui.Color.BLACK, .padding = ui.Padding.ZERO, .gap = 0, .border = .{ .width = 0, .radius = video_card_radius }, .overflow_hidden = true, .clip_shape = .{ .rounded_rect = video_card_radius }, .hit_behavior = .@"opaque" };
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .background = ui.Color.BLACK, .padding = ui.Padding.ZERO, .gap = 0, .border = .{ .width = 0, .radius = 0 }, .overflow_hidden = true, .clip_shape = .{ .rounded_rect = 0 }, .hit_behavior = .@"opaque" };
 }
 pub fn image() ui.Style {
-    return .{ .position = .absolute, .width = .{ .px = 1 }, .height = .{ .px = 1 }, .flex_shrink = 0, .border = .{ .width = 0, .radius = video_card_radius } };
+    return .{ .position = .absolute, .width = .{ .px = 1 }, .height = .{ .px = 1 }, .flex_shrink = 0, .border = .{ .width = 0, .radius = 0 } };
 }
 pub fn popup() ui.BoxStyle {
     return .{ .direction = .column, .gap = 0, .padding = ui.Padding.ZERO, .min_width = 0, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 12 }, .shadow = .{ .offset_y = 20, .blur = 50, .color = theme.current().shadow }, .hit_behavior = .@"opaque" };

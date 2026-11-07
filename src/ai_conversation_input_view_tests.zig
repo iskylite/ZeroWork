@@ -140,10 +140,11 @@ test "conversation UI history separates view locate restore and copy without a s
     try std.testing.expect(find(view.content, "ai.session.restore.1") == null);
     try std.testing.expect(find(view.content, "ai.session.locate.1") != null);
     try std.testing.expect(find(view.content, "ai.session.restore.2") != null);
-    try view.showHistory(.{ .id = 2, .title = "已结束的历史", .owner = "历史环境", .can_restore = true, .can_copy = true }, "只读历史正文");
+    try view.showHistory(.{ .id = 2, .title = "已结束的历史", .owner = "历史环境", .can_restore = true, .can_copy = true, .has_children = true }, "只读历史正文");
     f.settle();
     try std.testing.expect(find(view.history_dialog, "ai.send") == null);
     try std.testing.expect(find(view.history_dialog, "ai.history.restore") != null);
+    try std.testing.expect(find(view.history_dialog, "ai.history.children") != null);
     try std.testing.expect(find(view.history_dialog, "ai.history.copy") != null);
     try std.testing.expectEqualStrings("只读历史正文", view.history_body.getText().?.content);
 }

@@ -59,7 +59,12 @@ if data_dir:
 with (Path(app) / 'Contents/Info.plist').open('wb') as f:
     plistlib.dump(plist, f)
 PY
-codesign --force --deep --sign "$SIGNING_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+python3 scripts/build_credential_agent.py "$APP" --identifier "$BUNDLE_ID" --identity "$SIGNING_IDENTITY"
+# Sign nested code first; --deep would overwrite the agent's distinct identity.
+for binary in "$APP"/Contents/MacOS/zw_*; do
+  codesign --force --sign "$SIGNING_IDENTITY" "$binary"
+done
+codesign --force --sign "$SIGNING_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --deep --strict "$APP"
 python3 - "$APP" "$BUNDLE_ID" "$DATA_DIR" <<'PY'
 import hashlib, json, subprocess, sys

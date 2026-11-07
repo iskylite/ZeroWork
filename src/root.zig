@@ -25,6 +25,9 @@ comptime {
     _ = @import("ui/ai_recording_query_access.zig");
 }
 test {
+    _ = @import("ai_child_agent_tests.zig");
+    _ = @import("ai_task_gateway_tests.zig");
+    _ = @import("ai_extensions_tests.zig");
     _ = @import("ai_attached_service_tests.zig");
     _ = @import("ai_conversation_commands_tests.zig");
     _ = @import("ai_session_patch_tests.zig");

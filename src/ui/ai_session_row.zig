@@ -3,9 +3,37 @@ const ui = @import("ui");
 const S = @import("ai_sessions_styles.zig");
 const T = @import("app_theme.zig");
 const Phase = @import("../ai/assistant_store.zig").Phase;
-pub const Action = enum { view, locate, restore, copy, copy_use, end, new, more };
-pub const Entry = struct { id: u64, title: []const u8, owner: []const u8, detail: []const u8 = "", active: bool = false, phase: @import("../ai/assistant_store.zig").Phase = .idle, bound: bool = false, ending: bool = false, can_restore: bool = false, can_copy: bool = false, can_remove: bool = true, first_use: bool = false };
+pub const Action = enum { view, locate, restore, copy, copy_use, end, new, more, children };
+pub const Entry = struct { id: u64, title: []const u8, owner: []const u8, detail: []const u8 = "", active: bool = false, phase: @import("../ai/assistant_store.zig").Phase = .idle, bound: bool = false, ending: bool = false, can_restore: bool = false, has_children: bool = false, can_copy: bool = false, can_remove: bool = true, first_use: bool = false };
 pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, u64) void, request_close: *const fn (*anyopaque, u64) void, remove: *const fn (*anyopaque, u64) void, act: ?*const fn (*anyopaque, u64, Action) void = null, confirmed: ?*const fn (*anyopaque, u64, bool) void = null };
+const TitleHint = struct {
+    cx: *ui.Cx,
+    title: *ui.Node,
+    open: *ui.Signal(bool),
+    on_hover: ui.HandlerRef,
+
+    fn truncated(self: *TitleHint) bool {
+        const text = self.title.getText() orelse return false;
+        const width = self.title.globalRect().w;
+        return width > 0 and self.cx.text.measureTextWidth(text.content, text.font_size, text.font_weight, text.use_italic_font) > width;
+    }
+
+    fn show(self: *TitleHint) void {
+        if (self.truncated()) self.on_hover.invoke();
+    }
+
+    fn check(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *TitleHint = @ptrCast(@alignCast(raw));
+        if (!self.open.peek() or self.truncated()) return .done;
+        self.open.set(false);
+        self.cx.requestRedraw();
+        return .needs_layout;
+    }
+
+    fn release(self: *TitleHint) void {
+        self.cx.removeAfterLayoutHook(self);
+    }
+};
 const Row = struct {
     hooks: Hooks,
     menu_open: ?*ui.Signal(bool),
@@ -58,6 +86,11 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, entry: Entry, hooks: Hooks, highlight
     title_hint.content.meta.ownership.meta.test_id = "ai.session.title.tooltip";
     title_hint.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 16.5 } });
     title_hint.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 16.5 } });
+    const hint = try scope.createState(TitleHint, .{ .cx = cx, .title = title, .open = title_hint.open.?, .on_hover = title_hint.wrapper.behavior.events.on_hover.? });
+    title_hint.wrapper.behavior.events.on_hover = cx.on(TitleHint, hint, TitleHint.show);
+    try cx.addAfterLayoutHook(hint, TitleHint.check);
+    errdefer cx.removeAfterLayoutHook(hint);
+    try scope.onCleanup(TitleHint, hint, TitleHint.release);
     try title_hint.trigger.appendChild(cx.allocator, title);
     try first_line.appendChild(cx.allocator, title_hint.wrapper);
     const tag = try ui.box(cx, S.tag(phaseColor(entry.phase)), .{});

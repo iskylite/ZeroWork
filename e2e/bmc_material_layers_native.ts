@@ -101,7 +101,7 @@ try{
   }
   const stats=await h.request('GET','/app/bmc-fixture/stats');assert.equal(stats.power_writes,0);assert.equal(stats.boot_writes,0);
   await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));
-  execFileSync('python3',[resolve('e2e/bmc_material_pixels.py'),out],{stdio:'inherit'});
+  execFileSync(process.env.ZW_TEST_PYTHON??'python3',[resolve('e2e/bmc_material_pixels.py'),out],{stdio:'inherit'});
   assert.equal(report.violations.length,0,JSON.stringify(report.violations));report.status='passed';
 }catch(error){report.status='failed';report.error=String(error);process.exitCode=1;report.menus=await h.request('GET','/app/bmc-fixture/menus').catch(()=>null);await h.screenshot(join(out,'failure.png')).catch(()=>{});await writeFile(join(out,'failure-tree.json'),JSON.stringify(await h.tree(),null,2)).catch(()=>{});}
 finally{

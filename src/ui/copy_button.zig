@@ -17,6 +17,8 @@ pub const Button = struct {
         const label = findLabel(node);
         try scope.createEffect(.{
             .status = self.status,
+            .publication = try cx.themeSignal(scope),
+            .original_palette = theme.current(),
             .cx = cx,
             .node = node,
             .icon = icon,
@@ -27,10 +29,17 @@ pub const Button = struct {
             .original_name = try scope.createText(if (node.behavior.interaction.a11y) |attrs| attrs.label orelse "" else "", .{}),
         }, struct {
             fn update(ctx: anytype) void {
+                _ = ctx.publication.get();
                 const status = ctx.status.get();
                 const color = if (status == .copied) theme.current().ok_ink else theme.current().danger_ink;
                 if (ctx.icon) |n| {
-                    if (status == .idle) n.setIcon(ctx.original_icon) else {
+                    if (status == .idle) {
+                        if (ctx.original_icon) |original| {
+                            var restored_icon = original;
+                            restored_icon.tint = theme.remapUiInk(original.tint, ctx.original_palette);
+                            n.setIcon(restored_icon);
+                        }
+                    } else {
                         const asset = if (status == .copied) ui.icons.check else ui.icons.get("circle-alert").?;
                         if (asset.icon_id) |id| if (asset.pickRep(16)) |rep| n.setIcon(.{ .icon_id = id, .rep = rep, .tint = color });
                     }
@@ -41,7 +50,7 @@ pub const Button = struct {
                         .copied => "已复制",
                         .failed => "复制失败",
                     }) catch {};
-                    n.setTextColor(if (status == .idle) ctx.original_color else color);
+                    n.setTextColor(if (status == .idle) theme.remapUiInk(ctx.original_color, ctx.original_palette) else color);
                 }
                 if (ctx.node.behavior.interaction.a11y) |*attrs| attrs.label = switch (status) {
                     .idle => ctx.original_name.peek(),
@@ -81,10 +90,11 @@ pub const Button = struct {
                 };
             }
         }.get);
-        props.icon_tint = try scope.derive(?ui.Color, .{ .status = self.status, .original = props.icon_tint }, struct {
+        props.icon_tint = try scope.derive(?ui.Color, .{ .status = self.status, .original = props.icon_tint, .original_palette = theme.current(), .publication = try cx.themeSignal(scope) }, struct {
             fn get(ctx: anytype) ?ui.Color {
+                _ = ctx.publication.get();
                 return switch (ctx.status.get()) {
-                    .idle => ctx.original.get(),
+                    .idle => if (ctx.original.get()) |color| theme.remapUiInk(color, ctx.original_palette) else null,
                     .copied => theme.current().ok_ink,
                     .failed => theme.current().danger_ink,
                 };
@@ -157,6 +167,53 @@ test "copy button pending acknowledgement is safe during window teardown" {
     button.report(true);
     try std.testing.expect(button.timer != null);
     // Cx owns the scope; its cleanup cancels the still-pending timer.
+}
+
+test "button policy clipboard feedback and idle ink follow every builtin palette" {
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.dark);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(cx.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.setViewport(400, 200);
+    const publication = try cx.bindState(@import("shell_styles.zig").ThemePublication, .{});
+    publication.publish(cx, theme.widgetTheme(theme.currentName()));
+    const mounted = try Button.mount(cx, scope, .{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_tint = theme.current().fg_2 });
+    try cx.root.?.appendChild(cx.allocator, mounted.node);
+    const custom = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "复制日志" }).mount(scope, cx);
+    try cx.root.?.appendChild(cx.allocator, custom);
+    const custom_icon = try ui.iconTint(cx, ui.icons.copy, theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } });
+    const custom_label = try ui.text(cx, "复制日志", .{ .font_size = 12, .color = theme.current().fg_2 });
+    try custom.appendChild(cx.allocator, custom_icon);
+    try custom.appendChild(cx.allocator, custom_label);
+    const attached = try Button.attach(cx, scope, custom);
+    var registry = try @import("../config/theme_registry.zig").Registry.init(cx.allocator);
+    defer registry.deinit();
+    for (registry.records.items) |record| {
+        errdefer std.debug.print("\nclipboard palette: {s}\n", .{record.theme.name});
+        mounted.report(true);
+        attached.report(true);
+        theme.selectTokens(record.ui_tokens);
+        publication.publish(cx, theme.widgetTheme(theme.currentName()));
+        cx.layout();
+        _ = cx.render();
+        try std.testing.expectEqual(theme.current().ok_ink, Button.findIcon(mounted.node).?.getIcon().?.tint);
+        try std.testing.expectEqual(theme.current().ok_ink, custom_icon.getIcon().?.tint);
+        try std.testing.expectEqual(theme.current().ok_ink, custom_label.getText().?.color);
+        mounted.report(false);
+        attached.report(false);
+        try std.testing.expectEqual(theme.current().danger_ink, Button.findIcon(mounted.node).?.getIcon().?.tint);
+        try std.testing.expectEqual(theme.current().danger_ink, custom_label.getText().?.color);
+        mounted.status.set(.idle);
+        attached.status.set(.idle);
+        try std.testing.expectEqual(theme.current().fg_2, Button.findIcon(mounted.node).?.getIcon().?.tint);
+        try std.testing.expectEqual(theme.current().fg_2, custom_icon.getIcon().?.tint);
+        try std.testing.expectEqual(theme.current().fg_2, custom_label.getText().?.color);
+        try std.testing.expectEqualStrings("复制日志", custom_label.getText().?.content);
+    }
 }
 
 test "copy button acknowledges writes, isolates state, resets and cleans up" {

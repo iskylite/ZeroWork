@@ -11,10 +11,10 @@ pub fn trigger() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = width }, .height = .{ .px = height }, .padding = .{}, .background = ui.Color.TRANSPARENT, .align_items = .center, .justify = .center, .gap = 0, .z_index = 199, .corner_radius = 3, .flex_shrink = 0 };
 }
 pub fn lip(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = height }, .padding = .{}, .direction = .row, .justify = .center, .align_items = .center, .gap = 4, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 3 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = width }, .height = .{ .px = height }, .padding = .{}, .direction = .row, .justify = .center, .align_items = .center, .gap = 4, .background = T.baseColors().overlay.withAlpha(120), .shadow = .{ .blur = 3, .offset_y = 1, .color = T.baseColors().shadow.withAlpha(16) }, .border = .{ .width = 0, .radius = 3 }, .flex_shrink = 0 };
 }
 pub fn activeLip(_: bool) ui.BoxStyle {
-    return .{ .background = ui.Color.TRANSPARENT };
+    return .{ .background = T.baseColors().overlay.withAlpha(120) };
 }
 pub fn dot(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = 3 }, .height = .{ .px = 3 }, .background = T.current().accent_ink, .border = .{ .radius = 2 }, .flex_shrink = 0 };

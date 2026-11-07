@@ -217,6 +217,20 @@ pub const Policy = struct {
         self.stats.visible_surfaces = 0;
         for (self.entries.items) |entry| {
             const node = entry.node;
+            // Portal chrome includes Tooltip (which clears its default shadow),
+            // Popover and Modal (which otherwise retain different shadow lists).
+            // Non-portaled floating panels already declare elevation. Keep
+            // shadowless inline material cards/bodies flat inside their owner.
+            const existing = node.style.shadowSlice();
+            const elevated = for (existing) |shadow| {
+                if (shadow.color.a != 0) break true;
+            } else false;
+            if (entry.portal_root or (floating(node) and (entry.owner == null or elevated)) or fixedLevel(node) != null) {
+                const shadow = theme.floatingShadow();
+                if (existing.len != 1 or !std.meta.eql(existing[0], shadow)) {
+                    node.setStyleInline(self.cx.allocator, .{ .shadows = ui.ShadowList.of(&.{shadow}) });
+                }
+            }
             if (entry.portal_root or std.mem.eql(u8, node.meta.ownership.meta.component_name orelse "", "MaterialSurface.overlay")) {
                 const glass = theme.overlayGlass();
                 if (node.style.glass_params() == null or !std.meta.eql(node.style.glass_params().?, glass)) node.setStyleInline(self.cx.allocator, .{ .glass = glass });

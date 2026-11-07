@@ -705,7 +705,7 @@ pub const ApplicationHost = struct {
         if (self.workspace.shutting_down or self.workspace.model.window_close != null) return error.WorkspaceClosed;
         const mapping = self.localMapping(id) orelse return error.UnknownSession;
         const state = self.sessions.queryState(mapping.handle) orelse return error.StaleSession;
-        if (state.lifecycle != .failed) return error.LifecycleDoesNotAllowRetry;
+        if (state.lifecycle != .failed and state.lifecycle != .ended) return error.LifecycleDoesNotAllowRetry;
         if (state.create_cleanup != .released) return error.CleanupNotReleased;
         const tab = self.workspace.sessionTab(id) orelse return error.StaleSession;
         const index = self.workspace.model.indexOf(tab.tab_id) orelse return error.StaleSession;

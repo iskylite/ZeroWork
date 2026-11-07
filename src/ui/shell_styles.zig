@@ -2,31 +2,36 @@ const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 
-// Final shell geometry in macOS points: outer/gap 5, title 36, status 26.
-pub const outer: f32 = 5;
-pub const gap: f32 = outer;
-pub const title_height: f32 = @import("v3_geometry.zig").title_height;
+// Approved Mist SVG geometry in macOS points; the legacy status host has no layout slot.
+pub const outer: f32 = 12;
+pub const gap: f32 = 24;
+pub const title_height: f32 = 36;
 pub const status_height: f32 = @import("v3_geometry.zig").status_height;
 pub const sidebar_width: f32 = @import("sidebar_model.zig").default_width;
 pub const sidebar_collapsed: f32 = 0;
-pub const card_radius: f32 = 11;
-// The windowed inset clears the native traffic lights; a header without
-// native controls uses the same inset at both ends.
+pub const card_radius: f32 = 16;
+// Native traffic lights are hosted above the sidebar, outside the tool row.
 pub const title_controls_inset: f32 = 79;
 pub const title_content_inset: f32 = 10;
 
 pub fn titlePaddingForChrome(chrome: anytype) ui.Padding {
-    const controls_visible = if (chrome.controls_geometry_known)
-        chrome.native_controls_count != 0
-    else
-        !chrome.fullscreen;
-    return .{ .left = if (controls_visible) title_controls_inset else title_content_inset, .right = title_content_inset };
+    _ = chrome;
+    return .{};
 }
 
 /// Apply after theme publication: boxStyled replays its windowed default.
 /// Compare the retained node itself so a theme replay cannot mask the change.
 pub fn syncTitleChrome(allocator: std.mem.Allocator, node: *ui.Node, chrome: anytype) bool {
     const padding = titlePaddingForChrome(chrome);
+    if (std.meta.eql(node.style.padding, padding)) return false;
+    node.setStyleInline(allocator, .{ .padding = padding });
+    return true;
+}
+
+/// With the sidebar hidden, reserve only the native traffic-light footprint.
+pub fn syncWorkspaceChrome(allocator: std.mem.Allocator, node: *ui.Node, chrome: anytype, collapsed: bool) bool {
+    const controls_visible = if (chrome.controls_geometry_known) chrome.native_controls_count != 0 else !chrome.fullscreen;
+    const padding: ui.Padding = .{ .left = if (collapsed and controls_visible) 96 else 0 };
     if (std.meta.eql(node.style.padding, padding)) return false;
     node.setStyleInline(allocator, .{ .padding = padding });
     return true;
@@ -52,21 +57,31 @@ pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = ui.Padding.all(outer), .gap = 0, .background = theme.current().app };
 }
 pub fn title(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = title_height }, .margin = .{ .bottom = 12 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .background = ui.Color.TRANSPARENT };
+}
+pub fn floating(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .height = .{ .px = 44 }, .direction = .row, .align_items = .center, .padding = ui.Padding.all(6), .gap = 8, .flex_shrink = 0, .background = theme.current().overlay, .border = .{ .radius = 14 }, .shadow = .{ .blur = 14, .offset_y = 3, .color = theme.baseColors().shadow.withAlpha(18) } };
+}
+/// Compact top-level chrome; content-page toolbars retain floating().
+pub fn titleFloating(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .fill(), .height = .{ .px = title_height }, .margin = .{ .bottom = gap }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = title_controls_inset, .right = title_content_inset }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .height = .{ .px = title_height }, .direction = .row, .align_items = .center, .padding = ui.Padding.all(4), .gap = 4, .flex_shrink = 0, .background = c.overlay, .border = .{ .radius = 18 }, .shadow = .{ .blur = 8, .offset_y = 3, .color = theme.baseColors().shadow.withAlpha(20) } };
+}
+pub fn tabCapsule(t: *const ui.ThemeTokens) ui.BoxStyle {
+    var style = titleFloating(t);
+    style.gap = 4;
+    style.padding = ui.Padding.all(4);
+    return style;
 }
 pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .direction = .row, .gap = gap, .margin = .{ .bottom = gap } };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .direction = .row, .gap = gap };
 }
 pub fn sidebar(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
     return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .{ .px = sidebar_width }, .height = .fill(), .flex_shrink = 0, .direction = .column, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
 }
 pub fn pane(_: *const ui.ThemeTokens) ui.BoxStyle {
-    const c = theme.current();
-    // All four workspace cards share the sidebar surface and treatment.
-    const background = c.surface_1;
-    return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column, .background = background, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column, .background = ui.Color.TRANSPARENT, .overflow = .hidden };
 }
 pub fn status(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
@@ -138,13 +153,13 @@ pub fn settingsContent(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn toolbarButton(allocator: std.mem.Allocator, node: *ui.Node) void {
     const c = theme.current();
-    node.setStyleInline(allocator, .{ .width = .{ .px = @import("v3_geometry.zig").icon_action }, .height = .{ .px = @import("v3_geometry.zig").icon_action }, .padding = ui.Padding.ZERO, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
+    node.setStyleInline(allocator, .{ .width = .{ .px = @import("v3_geometry.zig").icon_action }, .height = .{ .px = @import("v3_geometry.zig").icon_action }, .corner_radius = 12, .padding = ui.Padding.ZERO, .flex_shrink = 0, .border = .{ .width = 0, .color = c.border, .radius = 12 } });
 }
 
-// Actual workspace HTML .title-actions .icon-btn is 30 × 30.
+// Compact native workspace tool hit target.
 pub fn titleToolbarButton(allocator: std.mem.Allocator, node: *ui.Node) void {
     toolbarButton(allocator, node);
-    node.setStyleInline(allocator, .{ .width = .{ .px = 30 }, .height = .{ .px = 30 } });
+    node.setStyleInline(allocator, .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .corner_radius = 14, .border = .{ .width = 0, .radius = 14 } });
 }
 
 pub fn emptyGuide(_: *const ui.ThemeTokens) ui.BoxStyle {
@@ -197,13 +212,13 @@ test "shell publishes reused registry tokens and repaints retained chrome" {
         previous_publication = cx.tokens;
         const c = theme.current();
         try std.testing.expectEqual(c.app, shell.getBackground());
-        try std.testing.expectEqual(c.surface_1, titlebar.getBackground());
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, titlebar.getBackground());
         try std.testing.expectEqual(c.surface_1, side.getBackground());
-        try std.testing.expectEqual(c.surface_1, content.getBackground());
-        try std.testing.expect(content.getBackground().a > 0);
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, content.getBackground());
+        try std.testing.expectEqual(@as(u8, 0), content.getBackground().a);
         try std.testing.expectEqual(content_id, content.id);
-        try std.testing.expectEqual(card_radius, content.style.border.radius);
-        try std.testing.expectEqual(c.shadow, titlebar.style.shadow().?.color);
+        try std.testing.expectEqual(@as(f32, 0), content.style.border.radius);
+        try std.testing.expect(titlebar.style.shadow() == null);
         try std.testing.expectEqual(c.shadow, side.style.shadow().?.color);
         try std.testing.expectEqual(c.fg_1, cx.tokens.tokens.color.fg_primary);
         try std.testing.expectEqual(title_id, titlebar.id);
@@ -257,7 +272,7 @@ test "global material publication repaints retained shell after an image becomes
     try std.testing.expectEqual(@import("v3_geometry.zig").settings_sidebar, nodes[4].style.width.px);
     _ = theme.setMaterialVisible(false);
     publication.publish(cx, theme.widgetTheme(.dark));
-    for (nodes, 0..) |node, index| try std.testing.expectEqual(if (index == 4) @as(u8, 0) else if (index == 3) theme.current().overlay.a else theme.current().surface_1.a, node.getBackground().a);
+    for (nodes, 0..) |node, index| try std.testing.expectEqual(if (index == 0 or index == 4) @as(u8, 0) else if (index == 3) theme.current().overlay.a else theme.current().surface_1.a, node.getBackground().a);
     try std.testing.expectEqual(@as(u8, 0), shell.getBackground().a);
 }
 

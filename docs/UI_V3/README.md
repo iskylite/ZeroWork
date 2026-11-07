@@ -1,4 +1,6 @@
 
+
+SVG 主界面设计已独立移至 [UI_V4](../UI_V4/README.md)。
 > [冻结的连接与设置完整模块](FROZEN.md)
 
 # ZeroWork · V3 可交互设计原型

@@ -7,11 +7,13 @@ const wire = @import("wire_history.zig");
 const provider = @import("provider.zig");
 const context_usage = @import("context_usage.zig");
 pub const input = @import("session_input.zig");
+pub const child = @import("child_agent.zig");
+pub const Role = enum { attached, child };
 pub const Binding = struct { agent: identity.AgentId, owner: scope.Owner };
 pub const End = struct { operation: identity.HostOperationId, fence: input.Fence, failed: bool = false };
 pub const Released = struct { worker_joined: bool, dispatch_closed: bool, local_released: bool, transcript_saved: bool };
 pub const Event = struct {
-    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed },
+    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config },
     conversation: identity.ConversationId,
     agent: ?identity.AgentId = null,
     owner: ?scope.Owner = null,
@@ -28,6 +30,13 @@ pub const Event = struct {
     recoverable: bool = true,
     initial_input: ?input.Receipt = null,
     initial_origin: ?scope.Owner = null,
+    child_info: ?child.Info = null,
+    child_settings: ?child.Settings = null,
+    parent_binding: ?input.Fence = null,
+    targets: ?[]const identity.SessionHandle = null,
+    children: ?[]const identity.ConversationId = null,
+    task_fact: ?@import("task_budget.zig").Fact = null,
+    initial_text: ?[]const u8 = null,
 };
 pub const Persistence = struct {
     context: *anyopaque,
@@ -55,8 +64,18 @@ pub const Record = struct {
     fork_turn: ?u64 = null,
     historical_messages: usize = 0,
     needs_recovery: bool = false,
+    /// Controller-only gate until the final task fact is durably committed.
+    task_pending: bool = false,
+    /// Main-thread intent closes dispatch while children release their workers.
+    /// Never replay an unfinished UI transition after a restart.
+    transition: ?struct { fence: input.Fence, operation: identity.HostOperationId } = null,
+    child: ?child.Owned = null,
+    child_settings: ?child.SettingsOwned = null,
+    child_settings_revision: u64 = 1,
     inbox: input.Inbox,
     fn deinit(self: *Record, a: std.mem.Allocator) void {
+        if (self.child_settings) |*settings| settings.deinit();
+        if (self.child) |*owned| owned.deinit();
         self.history.deinit();
         if (self.presentation) |bytes| a.free(bytes);
         self.recovery_history.deinit();
@@ -68,6 +87,9 @@ pub const Record = struct {
 pub const Agent = struct {
     id: identity.AgentId,
     owner: scope.Owner,
+    role: Role = .attached,
+    parent_binding: ?input.Fence = null,
+    targets: []const identity.SessionHandle = &.{},
     current: ?identity.ConversationId = null,
     environment: u64 = 1,
     busy: bool = false,
@@ -80,15 +102,47 @@ pub const Store = struct {
     persist: ?Persistence = null,
     input_persist: ?input.Persist = null,
     budget: input.Budget = .{},
+    task_facts: std.ArrayList(@import("task_budget.zig").Owned) = .empty,
 
     pub fn init(a: std.mem.Allocator) Store {
         return .{ .allocator = a };
     }
     pub fn deinit(self: *Store) void {
+        for (self.task_facts.items) |*fact| fact.deinit();
+        self.task_facts.deinit(self.allocator);
         for (self.records.items) |record| record.deinit(self.allocator);
-        for (self.agents.items) |value| self.allocator.destroy(value);
+        for (self.agents.items) |value| {
+            self.allocator.free(value.targets);
+            self.allocator.destroy(value);
+        }
         self.records.deinit(self.allocator);
         self.agents.deinit(self.allocator);
+    }
+    pub fn recoverTasks(self: *Store) !void {
+        for (0..self.task_facts.items.len) |i| {
+            var fact = self.task_facts.items[i].fact;
+            if (@import("task_budget.zig").terminal(fact.status)) continue;
+            var latest = fact;
+            for (self.task_facts.items) |other| if (other.fact.root.eql(fact.root) and other.fact.sequence > latest.sequence) {
+                latest = other.fact;
+            };
+            fact.sequence = try identity.advance(latest.sequence);
+            fact.counters = latest.counters;
+            if (fact.counters.pending_requests != 0) fact.counters.usage_complete = false;
+            fact.status = .interrupted;
+            fact.event_sequence = fact.sequence;
+            fact.user_waits = 0;
+            fact.summary = "Process ended; execution was not restored. Pending effects require their original evidence.";
+            try persistTask(self, fact);
+            var owned = try @import("task_budget.zig").Owned.init(self.allocator, fact);
+            errdefer owned.deinit();
+            self.task_facts.items[i].deinit();
+            self.task_facts.items[i] = owned;
+        }
+    }
+    pub fn persistTask(raw: *anyopaque, fact: @import("task_budget.zig").Fact) !void {
+        const self: *Store = @ptrCast(@alignCast(raw));
+        try self.save(.{ .kind = .task_fact, .conversation = fact.conversation, .revision = fact.sequence, .task_fact = fact });
     }
     fn save(self: *Store, event: Event) !void {
         if (self.persist) |p| try p.write(p.context, event);
@@ -106,7 +160,7 @@ pub const Store = struct {
             .session => |id| if (id == 0) return error.InvalidOwner,
             .group => |id| if (id == 0) return error.InvalidOwner,
         }
-        for (self.agents.items) |value| if (value.owner.eql(owner)) {
+        for (self.agents.items) |value| if (value.role == .attached and value.owner.eql(owner)) {
             if (value.current) |id| if (self.find(id).?.needs_recovery) return error.RecoveryRequired;
             if (!value.closing) return value;
         };
@@ -148,6 +202,7 @@ pub const Store = struct {
     }
     pub fn create(self: *Store, agent_id: identity.AgentId) !input.Fence {
         const target = self.agent(agent_id) orelse return error.AgentNotFound;
+        if (target.role != .attached) return error.ChildRequiresParent;
         if (target.current != null or target.busy or target.closing) return error.BindingConflict;
         const record = try self.allocateRecord();
         errdefer record.deinit(self.allocator);
@@ -200,6 +255,7 @@ pub const Store = struct {
     /// prepared privately, then published by one durable lifecycle event.
     pub fn createWithInput(self: *Store, agent_id: identity.AgentId, id: identity.SubmissionId, message: provider.Message, mode: input.Mode) !input.Fence {
         const target = self.agent(agent_id) orelse return error.AgentNotFound;
+        if (target.role != .attached) return error.ChildRequiresParent;
         if (target.current != null or target.busy or target.closing) return error.BindingConflict;
         const record = try self.allocateRecord();
         errdefer record.deinit(self.allocator);
@@ -240,6 +296,7 @@ pub const Store = struct {
         if (!pending.operation.eql(operation) or !pending.fence.eql(expected) or pending.failed) return error.StaleLifecycleOperation;
         const target = self.agent(expected.agent).?;
         if (target.busy or !released.worker_joined or !released.dispatch_closed or !released.local_released or !released.transcript_saved) return error.ResourceCleanupPending;
+        if (self.hasBoundChildren(record.id)) return error.ChildSettlementRequired;
         const revision = try identity.advance(record.revision);
         try self.save(.{ .kind = .unbind, .conversation = record.id, .revision = revision, .operation = operation, .turn = record.last_turn, .messages = record.history.messages, .draft = record.draft });
         record.revision = revision;
@@ -247,13 +304,18 @@ pub const Store = struct {
         record.binding = null;
         record.last_end = pending;
         record.ending = null;
+        record.transition = null;
         target.current = null;
+        self.allocator.free(target.targets);
+        target.targets = &.{};
+        target.parent_binding = null;
         record.inbox.archive();
     }
     pub fn resumeConversation(self: *Store, id: identity.ConversationId, agent_id: identity.AgentId, expected_revision: u64) !input.Fence {
         const record = self.find(id) orelse return error.ConversationNotFound;
         const target = self.agent(agent_id) orelse return error.AgentNotFound;
-        if (record.binding != null or target.current != null or target.busy or target.closing) return error.BindingConflict;
+        if (record.child != null or target.role != .attached) return error.ChildRequiresParent;
+        if (record.task_pending or record.binding != null or target.current != null or target.busy or target.closing) return error.BindingConflict;
         if (record.revision != expected_revision or record.ending != null) return error.BindingChanged;
         if (!record.recoverable or record.history.failure != null) return error.ConversationNotRecoverable;
         // A fresh never-used fork is also eligible for first binding.
@@ -267,6 +329,18 @@ pub const Store = struct {
         const ticket = try self.fence(id);
         record.inbox.changeFence(ticket);
         return ticket;
+    }
+    pub fn setChildDraft(self: *Store, conversation: identity.ConversationId, revision: u64, text: []const u8) !u64 {
+        const record = self.find(conversation) orelse return error.ConversationNotFound;
+        if (record.child == null or record.draft_revision != revision or text.len > wire.History.max_text_bytes or !std.unicode.utf8ValidateSlice(text)) return error.StaleDraft;
+        const next = try identity.advance(revision);
+        const owned = try self.allocator.dupe(u8, text);
+        errdefer self.allocator.free(owned);
+        try self.save(.{ .kind = .draft, .conversation = record.id, .revision = record.revision, .draft = text });
+        if (record.draft) |old| self.allocator.free(old);
+        record.draft = owned;
+        record.draft_revision = next;
+        return next;
     }
     pub fn setDraft(self: *Store, expected: input.Fence, revision: u64, text: []const u8) !u64 {
         const record = try self.validate(expected);
@@ -328,6 +402,7 @@ pub const Store = struct {
     /// cannot change the content awaiting an explicit UI confirmation.
     pub fn pinFork(self: *Store, source: identity.ConversationId) !ForkSnapshot {
         const record = self.find(source) orelse return error.ConversationNotFound;
+        if (record.child != null) return error.ChildRequiresParent;
         if (record.last_turn == 0 or !record.recoverable or record.history.failure != null) return error.NoStableCheckpoint;
         var history = try wire.History.copy(self.allocator, record.history.messages, "");
         errdefer history.deinit();
@@ -336,6 +411,8 @@ pub const Store = struct {
     }
     pub fn publishFork(self: *Store, pinned: *const ForkSnapshot, agent_id: ?identity.AgentId) !identity.ConversationId {
         const target = if (agent_id) |id| self.agent(id) orelse return error.AgentNotFound else null;
+        if (target) |agent_value| if (agent_value.role != .attached) return error.ChildRequiresParent;
+        if (self.find(pinned.source)) |source| if (source.child != null) return error.ChildRequiresParent;
         if (target) |agent_value| if (agent_value.current != null or agent_value.busy or agent_value.closing) return error.BindingConflict;
         if (!pinned.source.valid() or pinned.revision == 0 or pinned.turn == 0 or pinned.history.failure != null) return error.NoStableCheckpoint;
         var snapshot = try wire.History.copy(self.allocator, pinned.history.messages, "");
@@ -365,6 +442,7 @@ pub const Store = struct {
     }
     pub fn forkAndUse(self: *Store, source: identity.ConversationId, expected_content: u64, agent_id: identity.AgentId) !input.Fence {
         const target = self.agent(agent_id) orelse return error.AgentNotFound;
+        if (target.role != .attached) return error.ChildRequiresParent;
         if (target.current != null or target.busy or target.closing) return error.BindingConflict;
         const id = try self.forkImpl(source, expected_content, target, null);
         return self.fence(id);
@@ -374,11 +452,13 @@ pub const Store = struct {
     /// tool cannot supply arbitrary transcripts through this internal API.
     pub fn forkCheckpointAndUse(self: *Store, source: identity.ConversationId, expected_content: u64, turn: u64, messages: []const provider.Message, agent_id: identity.AgentId) !input.Fence {
         const target = self.agent(agent_id) orelse return error.AgentNotFound;
+        if (target.role != .attached) return error.ChildRequiresParent;
         if (target.current != null or target.busy or target.closing) return error.BindingConflict;
         return self.fence(try self.forkImpl(source, expected_content, target, .{ .turn = turn, .messages = messages }));
     }
     fn forkImpl(self: *Store, source: identity.ConversationId, expected_content: u64, target: ?*Agent, checkpoint_value: ?Checkpoint) !identity.ConversationId {
         const parent = self.find(source) orelse return error.ConversationNotFound;
+        if (parent.child != null) return error.ChildRequiresParent;
         if (parent.content_revision != expected_content) return error.CheckpointChanged;
         if (parent.last_turn == 0 or !parent.recoverable or parent.history.failure != null) return error.NoStableCheckpoint;
         const selected_checkpoint = checkpoint_value orelse Checkpoint{ .turn = parent.last_turn, .messages = parent.history.messages };
@@ -427,7 +507,8 @@ pub const Store = struct {
     pub fn handoff(self: *Store, expected: input.Fence, owner: scope.Owner) !input.Fence {
         const record = try self.validate(expected);
         if (record.ending != null) return error.LifecycleBusy;
-        for (self.agents.items) |other| if (!other.id.eql(expected.agent) and other.owner.eql(owner) and !other.closing) return error.BindingConflict;
+        if (record.child != null or self.hasBoundChildren(record.id)) return error.ChildSettlementRequired;
+        for (self.agents.items) |other| if (other.role == .attached and !other.id.eql(expected.agent) and other.owner.eql(owner) and !other.closing) return error.BindingConflict;
         if (record.binding.?.owner != .session or owner != .group or owner.group == 0) return error.InvalidBindingHandoff;
         const revision = try identity.advance(record.revision);
         const target = self.agent(expected.agent).?;
@@ -442,9 +523,349 @@ pub const Store = struct {
         record.inbox.changeFence(ticket);
         return ticket;
     }
+    pub const Inherited = struct { source: child.Source, messages: []const provider.Message };
+    /// Data-only registration. The execution-side caller freezes a legal prefix
+    /// from the current Loop; this API never silently substitutes a checkpoint.
+    pub fn registerChild(self: *Store, parent: input.Fence, draft: child.Draft, inherited: ?Inherited) !*Record {
+        const parent_record = try self.validate(parent);
+        if (parent_record.child != null) return error.ChildCannotDelegate;
+        if (parent_record.ending != null) return error.ConversationEnding;
+        if (parent_record.transition != null) return error.TransitionPending;
+        const context_hash = try childContextHash(self.allocator, if (inherited) |snapshot| snapshot.messages else &.{});
+        for (self.records.items) |existing| if (existing.child) |owned| {
+            if (owned.info.owning_parent_conversation.eql(parent.conversation) and std.mem.eql(u8, owned.info.request_key, draft.request_key)) {
+                const info = owned.info;
+                if (!std.mem.eql(u8, &info.initial_context_hash, &context_hash) or !std.mem.eql(u8, info.name, draft.name) or info.context_mode != draft.context_mode or info.reusable != draft.reusable or info.effort != draft.effort or !@import("../config/settings_schema.zig").same(info.skill_ids, draft.skill_ids) or !@import("../config/settings_schema.zig").same(info.mcp_ids, draft.mcp_ids) or !sameModel(info.model, draft.model) or !std.meta.eql(info.context_source, if (inherited) |snapshot| @as(?child.Source, snapshot.source) else null)) return error.ChildRequestConflict;
+                return existing;
+            }
+        };
+        if ((draft.context_mode == .inherit) != (inherited != null)) return error.MissingInheritanceSnapshot;
+        if (inherited) |snapshot| if (!snapshot.source.conversation.eql(parent.conversation) or snapshot.source.message_count != snapshot.messages.len) return error.InvalidInheritanceSnapshot;
+        try self.agents.ensureUnusedCapacity(self.allocator, 1);
+        const record = try self.allocateRecord();
+        errdefer record.deinit(self.allocator);
+        const agent_value = try self.allocator.create(Agent);
+        errdefer self.allocator.destroy(agent_value);
+        const info: child.Info = .{ .agent = identity.AgentId.generate(), .owning_parent_conversation = parent.conversation, .created_by_agent = parent.agent, .request_key = draft.request_key, .name = draft.name, .context_mode = draft.context_mode, .reusable = draft.reusable, .model = draft.model, .effort = draft.effort, .context_source = if (inherited) |snapshot| snapshot.source else null, .initial_context_hash = context_hash, .skill_ids = draft.skill_ids, .mcp_ids = draft.mcp_ids };
+        record.child = try child.Owned.init(self.allocator, info);
+        if (inherited) |snapshot| record.history = try wire.History.copy(self.allocator, snapshot.messages, "");
+        record.initial_origin = parent_record.initial_origin;
+        record.historical_messages = record.history.messages.len;
+        agent_value.* = .{ .id = info.agent, .owner = parent_record.binding.?.owner, .role = .child };
+        try self.save(.{ .kind = .child_create, .conversation = record.id, .revision = record.revision, .child_info = record.child.?.info, .parent_binding = parent, .messages = record.history.messages, .initial_origin = record.initial_origin });
+        self.agents.appendAssumeCapacity(agent_value);
+        self.records.appendAssumeCapacity(record);
+        return record;
+    }
+    /// Stage identity/binding/input under the serialized controller and publish
+    /// exactly one durable row. No Worker can observe a partially created task.
+    pub fn launchChild(self: *Store, parent: input.Fence, draft: ?child.Draft, reuse: ?identity.AgentId, inherited: ?Inherited, live: scope.Scope, targets: []const identity.SessionHandle, submission: identity.SubmissionId, text: []const u8, fact: *@import("task_budget.zig").Fact) !*Record {
+        if (fact.targets) |captured| if (!@import("../config/settings_schema.zig").same(captured, targets)) return error.InvalidTaskFact;
+        const capture = struct {
+            fn write(_: *anyopaque, _: Event) !void {}
+        };
+        const original_persist = self.persist;
+        const original_input = self.input_persist;
+        var sentinel: u8 = 0;
+        self.persist = .{ .context = &sentinel, .write = capture.write };
+        self.input_persist = null;
+        defer {
+            self.persist = original_persist;
+            self.input_persist = original_input;
+        }
+        const records_before = self.records.items.len;
+        const agents_before = self.agents.items.len;
+        const record = if (draft) |config| try self.registerChild(parent, config, inherited) else try self.childFor(parent, reuse orelse return error.ChildNotFound);
+        const created = self.records.items.len != records_before;
+        if (draft != null and !created) return error.ChildRequestAlreadyUsed;
+        errdefer if (created) {
+            const removed = self.records.pop().?;
+            removed.deinit(self.allocator);
+            const removed_agent = self.agents.pop().?;
+            self.allocator.free(removed_agent.targets);
+            self.allocator.destroy(removed_agent);
+            std.debug.assert(self.records.items.len == records_before and self.agents.items.len == agents_before);
+        };
+        const agent_value = self.agent(record.child.?.info.agent).?;
+        const revision = record.revision;
+        const environment = agent_value.environment;
+        const old_fence = record.inbox.fence;
+        const old_closed = record.closed_revision;
+        const inbox_revision = record.inbox.revision;
+        const inbox_admission = record.inbox.admission;
+        const old_owner = agent_value.owner;
+        const old_closing = agent_value.closing;
+        // Queued old inputs require an explicit disposition before model reuse.
+        for (record.inbox.entries.items) |entry| if (!input.terminal(entry.receipt.delivery)) return error.SubmissionUnconfirmed;
+        const ticket = try self.bindChild(parent, agent_value.id, revision, live, targets);
+        errdefer {
+            record.binding = null;
+            record.revision = revision;
+            record.closed_revision = old_closed;
+            record.inbox.fence = old_fence;
+            record.inbox.revision = inbox_revision;
+            record.inbox.admission = inbox_admission;
+            agent_value.owner = old_owner;
+            agent_value.closing = old_closing;
+            agent_value.current = null;
+            agent_value.parent_binding = null;
+            agent_value.environment = environment;
+            self.allocator.free(agent_value.targets);
+            agent_value.targets = &.{};
+        }
+        var staged = input.Inbox.init(self.allocator, ticket);
+        staged.budget = &self.budget;
+        staged.next_sequence = record.inbox.next_sequence;
+        staged.revision = record.inbox.revision;
+        staged.queue_revision = record.inbox.queue_revision;
+        defer staged.deinit();
+        const receipt = try staged.admit(ticket, submission, .{ .content = text }, .queue);
+        try record.inbox.entries.ensureUnusedCapacity(self.allocator, 1);
+        fact.conversation = record.id;
+        fact.agent = agent_value.id;
+        try fact.validate();
+        if (original_persist) |persist| try persist.write(persist.context, .{ .kind = .child_launch, .conversation = record.id, .agent = agent_value.id, .owner = live.owner, .revision = record.revision, .environment = agent_value.environment, .child_info = if (created) record.child.?.info else null, .parent_binding = parent, .targets = agent_value.targets, .messages = if (created) record.history.messages else &.{}, .initial_origin = record.initial_origin, .initial_input = receipt, .initial_text = text, .task_fact = fact.* });
+        record.inbox.entries.appendAssumeCapacity(staged.entries.items[0]);
+        record.inbox.revision = staged.revision;
+        record.inbox.next_sequence = staged.next_sequence;
+        record.inbox.queue_revision = staged.queue_revision;
+        staged.entries.clearRetainingCapacity();
+        record.inbox.persist = original_input;
+        record.task_pending = true;
+        return record;
+    }
+    fn childContextHash(allocator: std.mem.Allocator, messages: []const provider.Message) ![32]u8 {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const encoded = try @import("session_journal.zig").Journal.encode(a, messages);
+        const text = try std.json.Stringify.valueAlloc(a, encoded, .{});
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(text, &hash, .{});
+        return hash;
+    }
+    fn sameModel(a: ?@import("provider_config.zig").ModelSelection, b: ?@import("provider_config.zig").ModelSelection) bool {
+        if (a == null or b == null) return a == null and b == null;
+        return std.mem.eql(u8, a.?.provider_id, b.?.provider_id) and std.mem.eql(u8, a.?.model_id, b.?.model_id);
+    }
+    pub fn childCount(self: *Store, parent: identity.ConversationId) usize {
+        var count: usize = 0;
+        for (self.records.items) |record| if (record.child) |owned| {
+            if (owned.info.owning_parent_conversation.eql(parent)) count += 1;
+        };
+        return count;
+    }
+    pub fn hasBoundChildren(self: *Store, parent: identity.ConversationId) bool {
+        for (self.records.items) |record| if (record.child) |owned| {
+            if (owned.info.owning_parent_conversation.eql(parent) and (record.binding != null or record.ending != null or record.task_pending)) return true;
+        };
+        return false;
+    }
+    pub fn beginTransition(self: *Store, expected: input.Fence, operation: identity.HostOperationId) !void {
+        if (!operation.valid()) return error.InvalidOperation;
+        const record = try self.validate(expected);
+        if (record.child != null or record.ending != null) return error.ConversationEnding;
+        if (record.transition) |pending| {
+            if (!pending.fence.eql(expected) or !pending.operation.eql(operation)) return error.TransitionPending;
+        } else record.transition = .{ .fence = expected, .operation = operation };
+    }
+    pub fn releaseTransition(self: *Store, expected: input.Fence, operation: identity.HostOperationId) void {
+        const record = self.find(expected.conversation) orelse return;
+        if (record.transition) |pending| if (pending.fence.eql(expected) and pending.operation.eql(operation)) {
+            record.transition = null;
+        };
+    }
+    pub fn updateChildSettings(self: *Store, parent: input.Fence, agent_id: identity.AgentId, revision: u64, value: child.Settings, live: scope.Scope) !void {
+        const record = try self.childFor(parent, agent_id);
+        if (record.child_settings_revision != revision) return error.StaleChildSettings;
+        if (self.find(parent.conversation).?.transition != null) return error.TransitionPending;
+        if (!live.owner.eql(self.find(parent.conversation).?.binding.?.owner)) return error.BindingChanged;
+        if (value.targets.len != 0) try validateTargets(live, value.targets);
+        var owned = try child.SettingsOwned.init(self.allocator, value, record.child.?.info);
+        errdefer owned.deinit();
+        const next = try identity.advance(revision);
+        try self.save(.{ .kind = .child_config, .conversation = record.id, .agent = agent_id, .revision = next, .child_settings = value });
+        if (record.child_settings) |*old| old.deinit();
+        record.child_settings = owned;
+        record.child_settings_revision = next;
+    }
+    pub fn childPreferences(record: *const Record) child.Settings {
+        return if (record.child_settings) |settings| settings.value else child.Settings.fromInfo(record.child.?.info);
+    }
+    pub fn childFor(self: *Store, parent: input.Fence, agent_id: identity.AgentId) !*Record {
+        const current = try self.validate(parent);
+        if (current.child != null or current.ending != null) return error.ChildNotFound;
+        for (self.records.items) |record| if (record.child) |owned| {
+            if (owned.info.agent.eql(agent_id) and owned.info.owning_parent_conversation.eql(parent.conversation)) return record;
+        };
+        return error.ChildNotFound;
+    }
+    /// Bind saved child data to the parent's CURRENT fence, never its creation
+    /// AgentId. Exact handles are supplied/validated by the live host adapter.
+    pub fn bindChild(self: *Store, parent: input.Fence, agent_id: identity.AgentId, revision: u64, live: scope.Scope, targets: []const identity.SessionHandle) !input.Fence {
+        const record = try self.childFor(parent, agent_id);
+        if (self.find(parent.conversation).?.transition != null) return error.TransitionPending;
+        if (record.revision != revision) return error.BindingChanged;
+        if (record.task_pending or record.binding != null or record.ending != null or !record.recoverable or record.history.failure != null) return error.BindingConflict;
+        record.inbox.lock();
+        const unconfirmed = for (record.inbox.entries.items) |entry| {
+            if (entry.receipt.delivery == .outcome_unknown or entry.receipt.delivery == .submitting or entry.receipt.delivery == .accepted) break true;
+        } else false;
+        record.inbox.unlock();
+        if (unconfirmed) return error.SubmissionUnconfirmed;
+        try validateTargets(live, targets);
+        const parent_record = self.find(parent.conversation).?;
+        if (!live.owner.eql(parent_record.binding.?.owner)) return error.BindingChanged;
+        const agent_value = self.agent(agent_id) orelse return error.AgentNotFound;
+        if (agent_value.role != .child or agent_value.current != null or agent_value.busy) return error.BindingConflict;
+        const owned = try self.allocator.dupe(identity.SessionHandle, targets);
+        errdefer self.allocator.free(owned);
+        const next = try identity.advance(record.revision);
+        const environment = try identity.advance(agent_value.environment);
+        try self.save(.{ .kind = .child_bind, .conversation = record.id, .agent = agent_id, .owner = live.owner, .revision = next, .environment = environment, .parent_binding = parent, .targets = owned });
+        self.allocator.free(agent_value.targets);
+        agent_value.targets = owned;
+        agent_value.parent_binding = parent;
+        agent_value.environment = environment;
+        agent_value.owner = live.owner;
+        agent_value.closing = false;
+        agent_value.current = record.id;
+        record.binding = .{ .agent = agent_id, .owner = live.owner };
+        record.revision = next;
+        record.historical_messages = record.history.messages.len;
+        const ticket = try self.fence(record.id);
+        record.inbox.changeFence(ticket);
+        return ticket;
+    }
+    fn validateTargets(live: scope.Scope, targets: []const identity.SessionHandle) !void {
+        if (targets.len > wire.History.max_messages) return error.InvalidTargetCount;
+        for (targets, 0..) |handle, i| {
+            if (@backingInt(handle.session_id) == 0 or handle.generation == 0) return error.TargetOutsideAssistant;
+            try live.validateDirectory(&.{@backingInt(handle.session_id)});
+            for (targets[0..i]) |prior| if (prior.session_id == handle.session_id) return error.DuplicateTarget;
+        }
+    }
+    /// Dispatch-only gate. Cleanup/checkpoint may still append old facts after
+    /// parent invalidation, but new input/reads/leases must pass this gate.
+    pub fn validateExecution(self: *Store, expected: input.Fence) !*Record {
+        const record = try self.validate(expected);
+        if (record.ending != null) return error.ConversationEnding;
+        if (record.transition != null) return error.TransitionPending;
+        if (record.child != null) {
+            const agent_value = self.agent(expected.agent).?;
+            const parent = agent_value.parent_binding orelse return error.ParentBindingChanged;
+            const parent_record = self.validate(parent) catch return error.ParentBindingChanged;
+            if (parent_record.transition != null) return error.TransitionPending;
+            if (parent_record.ending != null or parent_record.child != null or !record.child.?.info.owning_parent_conversation.eql(parent.conversation) or !parent_record.binding.?.owner.eql(agent_value.owner)) return error.ParentBindingChanged;
+        }
+        return record;
+    }
+    pub fn validateExecutionTarget(self: *Store, expected: input.Fence, handle: identity.SessionHandle, live: scope.Scope, live_handles: []const identity.SessionHandle) !void {
+        const record = try self.validateExecution(expected);
+        if (!record.binding.?.owner.eql(live.owner)) return error.TargetOutsideAssistant;
+        try live.validateDirectory(&.{@backingInt(handle.session_id)});
+        const present = for (live_handles) |current| {
+            if (current.eql(handle)) break true;
+        } else false;
+        if (!present) return error.TargetOutsideAssistant;
+        if (record.child != null) {
+            for (self.agent(expected.agent).?.targets) |target| if (target.eql(handle)) return;
+            return error.TargetOutsideAssistant;
+        }
+    }
+    fn removable(record: *Record) !void {
+        if (record.task_pending or record.binding != null or record.ending != null or record.needs_recovery) return error.BindingConflict;
+        record.inbox.lock();
+        defer record.inbox.unlock();
+        for (record.inbox.entries.items) |entry| if (entry.receipt.delivery == .outcome_unknown) return error.SubmissionUnconfirmed;
+    }
+    /// One durable delete plan, including every child. No partial family is
+    /// removed if persistence or any bound/unknown child blocks publication.
+    pub fn removeFamily(self: *Store, id: identity.ConversationId, expected_revision: u64, expected_children: usize) !void {
+        const parent = self.find(id) orelse return error.ConversationNotFound;
+        if (parent.child != null) return error.ChildRequiresParent;
+        if (parent.revision != expected_revision or self.childCount(id) != expected_children) return error.BindingChanged;
+        try removable(parent);
+        var children: std.ArrayList(identity.ConversationId) = .empty;
+        defer children.deinit(self.allocator);
+        for (self.records.items) |record| if (record.child) |owned| {
+            if (!owned.info.owning_parent_conversation.eql(id)) continue;
+            try removable(record);
+            try children.append(self.allocator, record.id);
+        };
+        try self.save(.{ .kind = .remove_family, .conversation = id, .revision = parent.revision, .children = children.items });
+        for (children.items) |child_id| self.eraseRecord(child_id);
+        self.eraseRecord(id);
+    }
+    fn eraseRecord(self: *Store, id: identity.ConversationId) void {
+        for (self.records.items, 0..) |record, index| if (record.id.eql(id)) {
+            if (record.child) |owned| if (self.agent(owned.info.agent)) |child_agent_value| {
+                child_agent_value.closing = true;
+            };
+            record.deinit(self.allocator);
+            _ = self.records.orderedRemove(index);
+            return;
+        };
+    }
+    fn replayChild(self: *Store, event: Event) !void {
+        if (event.kind == .child_create) {
+            const info = event.child_info orelse return error.InvalidSessionJournal;
+            info.validate() catch return error.InvalidSessionJournal;
+            if (event.agent != null or event.owner != null or event.presentation != null or event.draft != null or event.source_revision != null or event.turn != 0 or event.environment != 1 or !event.recoverable) return error.InvalidSessionJournal;
+            const hash = try childContextHash(self.allocator, event.messages);
+            if (!std.mem.eql(u8, &hash, &info.initial_context_hash)) return error.InvalidSessionJournal;
+            const parent = event.parent_binding orelse return error.InvalidSessionJournal;
+            const parent_record = self.find(parent.conversation) orelse return error.InvalidSessionJournal;
+            if (parent_record.child != null or parent_record.ending != null or !info.owning_parent_conversation.eql(parent.conversation) or !info.created_by_agent.eql(parent.agent) or !(try self.fence(parent.conversation)).eql(parent) or self.agent(info.agent) != null or self.find(event.conversation) != null or event.revision != 1 or event.targets != null or event.children != null or event.parent != null or event.initial_input != null) return error.InvalidSessionJournal;
+            if (info.context_source) |source| {
+                if (source.message_count != event.messages.len) return error.InvalidSessionJournal;
+            } else if (event.messages.len != 0) return error.InvalidSessionJournal;
+            try self.agents.ensureUnusedCapacity(self.allocator, 1);
+            const fresh = try self.allocateRecord();
+            errdefer fresh.deinit(self.allocator);
+            const agent_value = try self.allocator.create(Agent);
+            errdefer self.allocator.destroy(agent_value);
+            fresh.id = event.conversation;
+            fresh.inbox.fence.conversation = fresh.id;
+            fresh.initial_origin = event.initial_origin;
+            fresh.child = try child.Owned.init(self.allocator, info);
+            fresh.history = try wire.History.copy(self.allocator, event.messages, "");
+            fresh.historical_messages = fresh.history.messages.len;
+            agent_value.* = .{ .id = info.agent, .role = .child, .owner = parent_record.binding.?.owner, .closing = true };
+            self.agents.appendAssumeCapacity(agent_value);
+            self.records.appendAssumeCapacity(fresh);
+            return;
+        }
+        if (event.child_info != null or event.children != null or event.messages.len != 0 or event.parent != null or event.source_revision != null or event.initial_input != null or event.presentation != null or event.draft != null or event.turn != 0) return error.InvalidSessionJournal;
+        const record = self.find(event.conversation) orelse return error.InvalidSessionJournal;
+        const info = (record.child orelse return error.InvalidSessionJournal).info;
+        const parent = event.parent_binding orelse return error.InvalidSessionJournal;
+        const parent_record = self.find(parent.conversation) orelse return error.InvalidSessionJournal;
+        const agent_value = self.agent(info.agent) orelse return error.InvalidSessionJournal;
+        const owner = event.owner orelse return error.InvalidSessionJournal;
+        const targets = event.targets orelse return error.InvalidSessionJournal;
+        const agent_id = event.agent orelse return error.InvalidSessionJournal;
+        if (!agent_id.eql(info.agent) or record.binding != null or record.ending != null or !info.owning_parent_conversation.eql(parent.conversation) or parent_record.child != null or parent_record.ending != null or !(try self.fence(parent.conversation)).eql(parent) or !owner.eql(parent_record.binding.?.owner) or event.revision != try identity.advance(record.revision) or event.environment != try identity.advance(agent_value.environment)) return error.InvalidSessionJournal;
+        if (targets.len > wire.History.max_messages) return error.InvalidSessionJournal;
+        var ids: [wire.History.max_messages]u64 = undefined;
+        for (targets, 0..) |handle, i| ids[i] = @backingInt(handle.session_id);
+        try validateTargets(.{ .owner = owner, .members = .{}, .inventory = ids[0..targets.len] }, targets);
+        const owned_targets = try self.allocator.dupe(identity.SessionHandle, targets);
+        self.allocator.free(agent_value.targets);
+        agent_value.targets = owned_targets;
+        agent_value.current = record.id;
+        agent_value.parent_binding = parent;
+        agent_value.owner = owner;
+        agent_value.environment = event.environment;
+        record.binding = .{ .agent = agent_id, .owner = owner };
+        record.revision = event.revision;
+        record.needs_recovery = true;
+    }
     pub fn remove(self: *Store, id: identity.ConversationId) !void {
         for (self.records.items, 0..) |record, index| if (record.id.eql(id)) {
-            if (record.binding != null or record.ending != null) return error.BindingConflict;
+            if (record.child != null) return error.ChildRequiresParent;
+            if (self.childCount(id) != 0) return error.ChildRecordsPresent;
+            if (record.task_pending or record.binding != null or record.ending != null) return error.BindingConflict;
             record.inbox.lock();
             for (record.inbox.entries.items) |entry| if (entry.receipt.delivery == .outcome_unknown) {
                 record.inbox.unlock();
@@ -461,7 +882,67 @@ pub const Store = struct {
     /// Replay under the journal's exclusive writer lock, before attaching any
     /// worker. A saved binding is metadata, never recovered execution power.
     pub fn replay(self: *Store, event: Event) !void {
+        if (event.kind == .child_config) {
+            const record = self.find(event.conversation) orelse return error.InvalidSessionJournal;
+            const info = (record.child orelse return error.InvalidSessionJournal).info;
+            if (!info.agent.eql(event.agent orelse return error.InvalidSessionJournal) or event.revision != try identity.advance(record.child_settings_revision)) return error.InvalidSessionJournal;
+            const value = event.child_settings orelse return error.InvalidSessionJournal;
+            var owned = child.SettingsOwned.init(self.allocator, value, info) catch return error.InvalidSessionJournal;
+            errdefer owned.deinit();
+            if (record.child_settings) |*old| old.deinit();
+            record.child_settings = owned;
+            record.child_settings_revision = event.revision;
+            return;
+        }
+        if (event.child_settings != null) return error.InvalidSessionJournal;
+        if (event.kind == .child_launch) {
+            const fact = event.task_fact orelse return error.InvalidSessionJournal;
+            if (fact.targets) |captured| if (!@import("../config/settings_schema.zig").same(captured, event.targets orelse return error.InvalidSessionJournal)) return error.InvalidSessionJournal;
+            const receipt = event.initial_input orelse return error.InvalidSessionJournal;
+            const text = event.initial_text orelse return error.InvalidSessionJournal;
+            if (!fact.conversation.eql(event.conversation) or !fact.agent.eql(event.agent orelse return error.InvalidSessionJournal) or fact.parent == null or fact.generation == 0 or receipt.delivery != .queued or !receipt.fence.conversation.eql(event.conversation) or receipt.fence.binding != event.revision) return error.InvalidSessionJournal;
+            if (event.child_info != null) try self.replayChild(.{ .kind = .child_create, .conversation = event.conversation, .revision = 1, .child_info = event.child_info, .parent_binding = event.parent_binding, .messages = event.messages, .initial_origin = event.initial_origin });
+            try self.replayChild(.{ .kind = .child_bind, .conversation = event.conversation, .revision = event.revision, .agent = event.agent, .owner = event.owner, .environment = event.environment, .parent_binding = event.parent_binding, .targets = event.targets });
+            try self.replayInput(receipt, &.{.{ .content = text }});
+            try self.replay(.{ .kind = .task_fact, .conversation = fact.conversation, .revision = fact.sequence, .task_fact = fact });
+            return;
+        }
+        if (event.initial_text != null) return error.InvalidSessionJournal;
+        if (event.kind == .task_fact) {
+            const fact = event.task_fact orelse return error.InvalidSessionJournal;
+            fact.validate() catch return error.InvalidSessionJournal;
+            if (!fact.conversation.eql(event.conversation) or fact.sequence != event.revision) return error.InvalidSessionJournal;
+            var existing: ?usize = null;
+            for (self.task_facts.items, 0..) |prior, i| {
+                if (prior.fact.root.eql(fact.root)) {
+                    if (prior.fact.sequence >= fact.sequence or prior.fact.counters.requests > fact.counters.requests or prior.fact.counters.calls > fact.counters.calls or prior.fact.counters.elapsed_ns > fact.counters.elapsed_ns) return error.InvalidSessionJournal;
+                }
+                if (prior.fact.task.eql(fact.task)) {
+                    if (!prior.fact.root.eql(fact.root) or !prior.fact.agent.eql(fact.agent) or !prior.fact.conversation.eql(fact.conversation) or prior.fact.generation != fact.generation or !std.meta.eql(prior.fact.parent, fact.parent) or !std.mem.eql(u8, prior.fact.request_key, fact.request_key) or !std.mem.eql(u8, &prior.fact.input_hash, &fact.input_hash) or prior.fact.read_only != fact.read_only or !@import("../config/settings_schema.zig").same(prior.fact.targets, fact.targets)) return error.InvalidSessionJournal;
+                    if (@import("task_budget.zig").terminal(prior.fact.status) and !@import("task_budget.zig").terminal(fact.status) and !(fact.status == .running and (prior.fact.status == .failed or prior.fact.status == .outcome_unknown) and fact.attempt == prior.fact.attempt + 1)) return error.InvalidSessionJournal;
+                    existing = i;
+                }
+            }
+            if (fact.parent) |parent_task| {
+                const parent_fact = for (self.task_facts.items) |prior| {
+                    if (prior.fact.task.eql(parent_task)) break prior.fact;
+                } else return error.InvalidSessionJournal;
+                const record = self.find(fact.conversation) orelse return error.InvalidSessionJournal;
+                const info = (record.child orelse return error.InvalidSessionJournal).info;
+                if (!parent_fact.root.eql(fact.root) or !info.owning_parent_conversation.eql(parent_fact.conversation)) return error.InvalidSessionJournal;
+            }
+            var owned = try @import("task_budget.zig").Owned.init(self.allocator, fact);
+            errdefer owned.deinit();
+            if (existing) |i| {
+                self.task_facts.items[i].deinit();
+                self.task_facts.items[i] = owned;
+            } else try self.task_facts.append(self.allocator, owned);
+            return;
+        }
+        if (event.task_fact != null) return error.InvalidSessionJournal;
         if (!event.conversation.valid() or event.revision == 0) return error.InvalidSessionJournal;
+        if (event.kind == .child_create or event.kind == .child_bind) return self.replayChild(event);
+        if (event.child_info != null or event.parent_binding != null or event.targets != null or (event.kind != .remove_family and event.children != null)) return error.InvalidSessionJournal;
         var record = self.find(event.conversation);
         if (event.kind == .create or event.kind == .fork or event.kind == .fork_bound or event.kind == .migrate_bound or event.kind == .migrate_closed) {
             if (record != null) return error.InvalidSessionJournal;
@@ -487,7 +968,7 @@ pub const Store = struct {
                 const owner = event.owner orelse return error.InvalidSessionJournal;
                 var target = self.agent(aid);
                 if (target == null) {
-                    for (self.agents.items) |other| if (other.owner.eql(owner) and !other.id.eql(aid) and other.current != null) return error.InvalidSessionJournal;
+                    for (self.agents.items) |other| if (other.role == .attached and other.owner.eql(owner) and !other.id.eql(aid) and other.current != null) return error.InvalidSessionJournal;
                     try self.agents.ensureUnusedCapacity(self.allocator, 1);
                     const created = try self.allocator.create(Agent);
                     // Process-local business objects are not proven alive by
@@ -496,6 +977,7 @@ pub const Store = struct {
                     self.agents.appendAssumeCapacity(created);
                     target = created;
                 }
+                if (value.child != null or target.?.role != .attached) return error.InvalidSessionJournal;
                 if (target.?.current) |prior| if (!prior.eql(value.id)) return error.InvalidSessionJournal;
                 if (value.binding) |prior| if (!prior.agent.eql(aid)) return error.InvalidSessionJournal;
                 target.?.current = value.id;
@@ -520,8 +1002,13 @@ pub const Store = struct {
                 value.ending = .{ .operation = event.operation orelse return error.InvalidSessionJournal, .fence = .{ .agent = bound.agent, .conversation = value.id, .binding = event.revision, .environment = event.environment } };
             },
             .unbind => {
+                if (self.hasBoundChildren(value.id)) return error.InvalidSessionJournal;
                 const bound = value.binding orelse return error.InvalidSessionJournal;
-                self.agent(bound.agent).?.current = null;
+                const old_agent = self.agent(bound.agent).?;
+                old_agent.current = null;
+                self.allocator.free(old_agent.targets);
+                old_agent.targets = &.{};
+                old_agent.parent_binding = null;
                 value.closed_revision = value.revision;
                 value.revision = event.revision;
                 value.last_end = value.ending;
@@ -555,7 +1042,24 @@ pub const Store = struct {
                 value.draft = text;
                 value.draft_revision = try identity.advance(value.draft_revision);
             },
+            .child_create, .child_bind => unreachable,
+            .remove_family => {
+                if (value.child != null or value.binding != null) return error.InvalidSessionJournal;
+                const children = event.children orelse return error.InvalidSessionJournal;
+                if (children.len != self.childCount(value.id)) return error.InvalidSessionJournal;
+                for (children, 0..) |id, i| {
+                    const dependent = self.find(id) orelse return error.InvalidSessionJournal;
+                    const info = (dependent.child orelse return error.InvalidSessionJournal).info;
+                    if (!info.owning_parent_conversation.eql(value.id) or dependent.binding != null) return error.InvalidSessionJournal;
+                    for (children[0..i]) |prior| if (prior.eql(id)) return error.InvalidSessionJournal;
+                }
+                for (children) |id| self.eraseRecord(id);
+                self.eraseRecord(value.id);
+                return;
+            },
+            .task_fact, .child_launch, .child_config => unreachable,
             .remove => {
+                if (value.child != null or self.childCount(value.id) != 0) return error.InvalidSessionJournal;
                 if (value.binding != null) return error.InvalidSessionJournal;
                 for (self.records.items, 0..) |entry, i| if (entry == value) {
                     value.deinit(self.allocator);

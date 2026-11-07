@@ -215,3 +215,33 @@ test "socks diagnostics keep recent measured steps and disclose truncation" {
     try std.testing.expect(std.mem.indexOf(u8, logs, "AddressInUse") != null);
     try std.testing.expect(std.mem.indexOf(u8, logs, "已省略 3 条") != null);
 }
+
+test "socks card top toolbar retains forwarding body and anchors below button" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1440, 900);
+    try cx.setTestFrameStep(100);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    var sink: Sink = .{};
+    const view = try view_mod.mount(cx, scope, .{ .context = &sink, .action = action });
+    try cx.root.?.appendChild(cx.allocator, view.wrapper);
+    try view.update(.{ .configured = true, .host = "DB-A", .port = 1081, .route = "via jump", .connections = 2, .uploaded = 1024 });
+    for ([_]ui.Size{ .{ .width = 1440, .height = 900 }, .{ .width = 860, .height = 480 } }) |size| {
+        cx.setViewport(size.width, size.height);
+        view.show(.{ .x = size.width - 240, .y = 16, .w = 28, .h = 28 });
+        settle(cx);
+        const r = view.root.globalRect();
+        const body = view.body.container.globalRect();
+        const address = view.address.globalRect();
+        try std.testing.expectApproxEqAbs(@as(f32, 50), r.y, 0.5);
+        try std.testing.expect(r.x >= 8 and r.x + r.w <= size.width - 7.9 and r.y + r.h <= size.height - 7.9);
+        try std.testing.expect(body.h > 100);
+        try std.testing.expect(address.y >= body.y and address.y + address.h <= body.y + body.h + 0.1);
+        try std.testing.expect(view.footer.globalRect().y >= body.y + body.h);
+        try std.testing.expectEqualStrings("127.0.0.1:1081", view.address.getText().?.content);
+        view.hide();
+        settle(cx);
+    }
+}

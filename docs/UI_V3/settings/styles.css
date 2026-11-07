@@ -222,3 +222,6 @@ input[type=checkbox]:focus-visible{box-shadow:none;filter:brightness(.85)}
 .background-paired-field .field-label{flex:0 0 76px;min-width:76px}
 .background-paired-field .field-control{width:auto;flex:1;min-width:0}
 .background-paired-field .choice{width:100%;min-width:0}
+
+/* Keep the settings transaction actions in one button family. */
+.settings-footer>.button{min-width:92px;font-size:12px;border-radius:7px;flex-shrink:0}

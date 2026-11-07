@@ -99,12 +99,9 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
         const click = try scope.createState(Click, .{ .actions = actions, .envelope = .{ .ticket = state.ticket, .action = action } });
         var cooldown: [64]u8 = undefined;
         const action_label = if (action == .answer and state.cooldown_seconds != 0) try std.fmt.bufPrint(&cooldown, "仅重试答复 · {d}s", .{state.cooldown_seconds}) else label;
-        var button_style = S.action(action == .answer, action == .edit, enabled);
-        if (action == .answer and state.cooldown_seconds != 0) {
-            button_style.width = .{ .fit = .{} };
-            button_style.min_width = 53;
-        }
-        const button = try ui.widgets.Button(.{ .label = if (action == .answer) action_label else if (action == .regenerate) "新计划" else label, .icon_only = false, .icon_asset = null, .icon_size = @as(f32, 12), .a11y_label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .answer) .primary else .secondary), .hover_style = .{ .background = @import("app_theme.zig").states().hover }, .disabled = !enabled, .base_style = button_style, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        const button_style = try @import("app_theme.zig").paintSignal(ui.BoxStyle, cx, scope, S.action, .{ action == .answer, action == .edit, enabled });
+        const button = try ui.widgets.Button(.{ .label = if (action == .answer) action_label else if (action == .regenerate) "新计划" else label, .icon_only = false, .icon_asset = null, .icon_size = @as(f32, 12), .a11y_label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .answer) .primary else .secondary), .disabled = !enabled, .base_style = button_style, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        if (action == .answer and state.cooldown_seconds != 0) button.setStyle(cx.allocator, .min_width, @as(f32, 53));
         if (action == .answer) try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
         button.meta.ownership.meta.test_id = id;
         try action_row.appendChild(cx.allocator, button);

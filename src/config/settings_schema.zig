@@ -8,7 +8,8 @@ pub const fields = pages.keys;
 pub const keys_index = fields.len;
 pub const providers_index = fields.len + 1;
 pub const plugin_preferences_index = fields.len + 2;
-pub const field_count = fields.len + 3;
+pub const extensions_index = fields.len + 3;
+pub const field_count = fields.len + 4;
 pub const FieldSet = std.StaticBitSet(field_count);
 
 pub fn find(section: []const u8, key: []const u8) ?usize {
@@ -43,6 +44,7 @@ pub fn same(a: anytype, b: @TypeOf(a)) bool {
 }
 
 pub fn fieldEqual(a: config.Config, b: config.Config, index: usize) bool {
+    if (index == extensions_index) return same(a.ai.extensions, b.ai.extensions);
     if (index == plugin_preferences_index) return same(a.plugin_preferences, b.plugin_preferences);
     if (index == keys_index) return same(a.keys, b.keys);
     if (index == providers_index) return a.ai.provider_count == b.ai.provider_count and same(a.ai.providers, b.ai.providers);
@@ -94,6 +96,7 @@ pub fn merge(latest: config.Config, draft: config.Config, dirty: FieldSet) confi
             }
         }
     }
+    if (dirty.isSet(extensions_index)) result.ai.extensions = draft.ai.extensions;
     if (dirty.isSet(plugin_preferences_index)) result.plugin_preferences = draft.plugin_preferences;
     if (dirty.isSet(keys_index)) result.keys = draft.keys;
     if (dirty.isSet(providers_index)) {

@@ -41,6 +41,12 @@ pub fn badge(width: f32, _: ui.Color) ui.BoxStyle {
 pub fn task(selected: bool) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .column, .gap = 7, .padding = .{ .top = 9, .left = 10, .right = 10, .bottom = 9 }, .background = if (selected) theme.popupSelection() else theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
+pub fn taskBackground(selected: bool, running: bool) ui.Color {
+    if (selected) return theme.popupSelection();
+    // The material compositor changes opacity; keep the state RGB a pale tint,
+    // rather than turning a low-alpha accent into an opaque purple surface.
+    return if (running) ui.Color.lerp(theme.baseColors().overlay, theme.baseColors().accent, 0.05).withAlpha(theme.popupInset().a) else theme.popupInset();
+}
 pub fn detail() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 120 }, .direction = .column, .gap = 4, .padding = .{ .top = 8, .left = 10, .right = 10, .bottom = 8 }, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0, .overflow = .hidden };
 }
@@ -162,7 +168,7 @@ pub fn v3Card() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = v3_card_height }, .direction = .column, .padding = .{ .left = 10, .right = 10, .top = 7, .bottom = 9 }, .background = theme.popupInset(), .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn v3TextAction() ui.BoxStyle {
-    return .{ .height = .{ .px = 24 }, .padding = .{ .left = 6, .right = 6, .top = 2, .bottom = 2 }, .font_size = 11, .font_weight = 400, .text_color = theme.current().accent_ink, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 4 }, .shadow = .{}, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 24 }, .padding = .{ .left = 6, .right = 6, .top = 2, .bottom = 2 }, .font_size = 11, .font_weight = 400, .border = .{ .radius = 4 }, .shadow = .{}, .flex_shrink = 0 };
 }
 
 pub fn v3Footer() ui.BoxStyle {
@@ -176,7 +182,7 @@ pub fn v3FooterButton(primary: bool) ui.BoxStyle {
 
 /// Embedded SFTP tray shares exactly the same task renderer as both popovers.
 pub fn sessionTray() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 127 }, .min_width = 0, .flex_shrink = 0, .direction = .column, .padding = .{ .top = 9, .right = 12, .bottom = 8, .left = 12 }, .background = theme.current().surface_1, .border = .{ .radius = 11 }, .overflow = .hidden };
+    return .{ .width = .fill(), .height = .{ .px = 127 }, .min_width = 0, .flex_shrink = 0, .direction = .column, .padding = .{ .top = 9, .right = 12, .bottom = 8, .left = 12 }, .background = theme.current().overlay, .border = .{ .radius = 16 }, .overflow = .hidden };
 }
 
 pub fn hoverDetail() ui.BoxStyle {

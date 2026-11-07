@@ -318,12 +318,12 @@ test "global material component roles preserve readable bubble paints and materi
             try std.testing.expectEqual(theme.layerAlpha(2), paint.from.a);
             try std.testing.expectEqual(theme.layerAlpha(2), paint.to.a);
             try std.testing.expectEqual(ui.Color.TRANSPARENT, recent.recent().background);
-            // The AI entry has no separate foreground fill or local glass;
-            // its opaque L0 shape is owned by the shared canvas group.
-            try std.testing.expectEqual(ui.Color.TRANSPARENT, strip.lip(theme.widgetTheme(theme.currentName())).background);
+            // The compact AI strip keeps the palette overlay at fixed alpha,
+            // without a second local glass layer or transparency multiplier.
+            try std.testing.expectEqual(theme.baseColors().overlay.withAlpha(120), strip.lip(theme.widgetTheme(theme.currentName())).background);
             try std.testing.expect(strip.lip(theme.widgetTheme(theme.currentName())).glass == null);
             for ([_]bool{ false, true }) |active| {
-                try std.testing.expectEqual(ui.Color.TRANSPARENT, strip.activeLip(active).background);
+                try std.testing.expectEqual(theme.baseColors().overlay.withAlpha(120), strip.activeLip(active).background);
                 try std.testing.expect(strip.activeLip(active).gradient == null);
             }
             // Destructive actions retain a separate theme warning hue, at full fill.

@@ -52,7 +52,7 @@ const report: Record<string, unknown> = {
   functional_checks: [], sessions: {}, shell_receipts: [], captures: [], pixel_review: "pending", real_ime: "not_tested",
   unverified: [
     { requirement: "Duplicate a Local session in its current directory", status: "requires_cua", reason: "The actual entry is the tab right-click menu (context.menu.clone_session). The current public Harness mouse endpoint only dispatches left presses; Local Surface does not intercept the legacy @dup palette. No copy is simulated." },
-    { requirement: "Failed-start retry increments the same SessionId generation", status: "not_exercised", reason: "local.start.retry is only visible for a real failed startup with released cleanup. No artificial failure is injected. Normal exit exposes local.ended.new and creates a distinct SessionId; exact generation is not exposed by the public UI." },
+    { requirement: "Failed-start retry increments the same SessionId generation", status: "not_exercised", reason: "local.start.retry is only visible for a real failed startup with released cleanup. No artificial failure is injected. Normal exit exposes local.ended.reconnect; failed startup is not injected by this runner." },
     { requirement: "Native keyboard, clipboard and real IME", status: "not_tested", reason: "All input uses public Harness type_/key/click APIs." },
   ],
 };
@@ -180,7 +180,7 @@ async function capture(name: string): Promise<void> {
   assert((await screenshot(join(output, `${name}.png`))).ok);
   const value = await surface();
   const queries: Record<string, Node[]> = {};
-  for (const id of ["tabs.strip", "local.statusbar", "local.ended.new", "local.ended.close", "local.start.retry"]) queries[id] = await nodes(id);
+  for (const id of ["tabs.strip", "local.statusbar", "local.ended.reconnect", "local.ended.close", "local.start.retry"]) queries[id] = await nodes(id);
   await writeFile(join(output, `${name}.json`), JSON.stringify({ focused: await focused(), surface: value, queries }, null, 2));
   (report.captures as unknown[]).push({ name, screenshot: join(output, `${name}.png`), evidence: join(output, `${name}.json`), pixel_review: "pending" });
 }
@@ -236,7 +236,7 @@ try {
   const finalA = await shell("A-final", { exit: true });
   assert.equal(finalA.pid, a.shell_pid);
   await waitFor(async () => !descendants().some((value) => value.pid === a.shell_pid) || null);
-  await visible("local.ended.new");
+  await visible("local.ended.reconnect");
   await visible("local.ended.close");
   await waitFor(async () => text(await visible("local.status.identity")).includes("已退出") || null);
   assert.equal((await nodes("local.start.retry")).filter(shown).length, 0, "Normal exit must not expose failed-start retry");
@@ -253,27 +253,21 @@ try {
   await capture("a-exited-readonly");
   checks.push("A exits normally with code 0 through its actual shell; its process disappears while its tab/final output and visible ended actions remain, typing cannot execute or alter the read-only grid, and B stays alive");
 
-  await clickVisible("local.ended.new");
-  const cTab = await newTab([a.tab, b.tab]);
+  await clickVisible("local.ended.reconnect");
   await surface();
-  const cFocus = await focusId(), initialC = await shell("C-new", { clear: true });
+  const cFocus = await focusId(), initialC = await shell("A-reconnected", { clear: true });
   assert(![a.shell_pid, b.shell_pid].includes(initialC.pid));
-  assert(![a.focus_id, b.focus_id].includes(cFocus));
-  assert.equal(initialC.scope, "unset", "The new session must not inherit either other shell's private variable");
+  assert.equal(initialC.scope, "unset", "Reconnecting starts a fresh shell without inheriting private variables");
   assert(descendants().some((value) => value.pid === initialC.pid && value.command.endsWith("/zsh")));
-  const c: Session = { tab: cTab, session_id: await sessionId(), focus_id: cFocus, shell_pid: initialC.pid, cwd: initialC.cwd, marker: initialC.marker };
-  assert(![a.session_id, b.session_id].includes(c.session_id), "Ended-session New must allocate a distinct SessionId, not retry the old generation");
-  (report.sessions as Record<string, Session>).c = c;
-  await select(c);
-  await capture("new-session-from-ended");
-  await select(a);
-  await waitText(finalA.marker);
-  await visible("local.ended.new");
+  const c: Session = { tab: a.tab, session_id: await sessionId(), focus_id: cFocus, shell_pid: initialC.pid, cwd: initialC.cwd, marker: initialC.marker };
+  assert.equal(c.session_id, a.session_id, "Reconnect preserves the logical SessionId");
+  assert.deepEqual(await tabs(), [a.tab, b.tab], "Reconnect preserves the existing TabId and count");
+  (report.sessions as Record<string, Session>).reconnected_a = c;
+  await capture("reconnected-session-from-ended");
   await select(b);
   const afterExitB = await shell("B-after-A-exit");
   assert.deepEqual([afterExitB.pid, afterExitB.cwd, afterExitB.scope], [b.shell_pid, b.cwd, "beta"]);
-  assert.deepEqual(await tabs(), [a.tab, b.tab, c.tab]);
-  checks.push("The real ended banner's New action creates a fresh TabId/SessionId/shell PID with its own private state, leaves A's tombstone intact, and B remains usable with its original owner and cwd");
+  checks.push("The ended banner reconnects A in its original TabId/SessionId with a new shell PID and fresh private state; B retains its original owner, cwd and shell");
   report.status = "covered_functional_checks_passed_native_menu_and_retry_pending";
 } catch (error) {
   failure = launchError ?? error;

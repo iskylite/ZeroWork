@@ -4,24 +4,24 @@ const styles = @import("ui/shell_styles.zig");
 const theme = @import("ui/app_theme.zig");
 const Chrome = @FieldType(@FieldType(@import("zenit_app").App, "chrome"), "initial");
 
-test "fullscreen titlebar follows visible native controls through enter exit and maximize" {
+test "fullscreen titlebar leaves native controls outside the expanded workspace" {
     const Case = struct { chrome: Chrome, left: f32 };
     for ([_]Case{
-        .{ .chrome = .{ .native_controls_count = 3 }, .left = 79 },
-        .{ .chrome = .{ .maximized = true, .native_controls_count = 3 }, .left = 79 },
-        .{ .chrome = .{ .fullscreen_transitioning = true, .native_controls_count = 3 }, .left = 79 },
-        .{ .chrome = .{ .fullscreen = true, .fullscreen_transitioning = true }, .left = 10 },
-        .{ .chrome = .{ .fullscreen = true }, .left = 10 },
-        .{ .chrome = .{ .fullscreen_transitioning = true }, .left = 10 },
-        .{ .chrome = .{ .native_controls_count = 3 }, .left = 79 },
-        // Unknown geometry stays conservative in windowed mode. Fullscreen
-        // is observed state, never a requested action or the maximized flag.
-        .{ .chrome = .{ .controls_geometry_known = false }, .left = 79 },
-        .{ .chrome = .{ .controls_geometry_known = false, .fullscreen = true }, .left = 10 },
+        .{ .chrome = .{ .native_controls_count = 3 }, .left = 0 },
+        .{ .chrome = .{ .maximized = true, .native_controls_count = 3 }, .left = 0 },
+        .{ .chrome = .{ .fullscreen_transitioning = true, .native_controls_count = 3 }, .left = 0 },
+        .{ .chrome = .{ .fullscreen = true, .fullscreen_transitioning = true }, .left = 0 },
+        .{ .chrome = .{ .fullscreen = true }, .left = 0 },
+        .{ .chrome = .{ .fullscreen_transitioning = true }, .left = 0 },
+        .{ .chrome = .{ .native_controls_count = 3 }, .left = 0 },
+        // Expanded workspace keeps traffic lights over the separate sidebar,
+        // including unknown geometry and fullscreen transitions.
+        .{ .chrome = .{ .controls_geometry_known = false }, .left = 0 },
+        .{ .chrome = .{ .controls_geometry_known = false, .fullscreen = true }, .left = 0 },
     }) |case| {
         const padding = styles.titlePaddingForChrome(case.chrome);
         try std.testing.expectEqual(case.left, padding.left);
-        try std.testing.expectEqual(@as(f32, 10), padding.right);
+        try std.testing.expectEqual(@as(f32, 0), padding.right);
     }
 }
 
@@ -31,7 +31,7 @@ const Hook = struct {
     chrome: Chrome = .{ .native_controls_count = 3 },
     fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *@This() = @ptrCast(@alignCast(raw));
-        return if (styles.syncTitleChrome(self.cx.allocator, self.bar, self.chrome)) .needs_layout else .done;
+        return if (styles.syncWorkspaceChrome(self.cx.allocator, self.bar, self.chrome, true)) .needs_layout else .done;
     }
     fn frame(self: *@This()) void {
         self.cx.frame_count += 1;
@@ -40,7 +40,7 @@ const Hook = struct {
     }
 };
 
-test "fullscreen titlebar retains children focus and window isolation across theme publication and resize" {
+test "collapsed workspace retains children focus and window isolation across fullscreen theme publication and resize" {
     const saved = theme.currentName();
     defer theme.select(saved);
     const allocator = std.testing.allocator;
@@ -72,30 +72,30 @@ test "fullscreen titlebar retains children focus and window isolation across the
     hook.frame();
     other.frame();
     cx.setFocus(tab);
-    try std.testing.expectApproxEqAbs(styles.outer + 79, tab.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(styles.outer + 96, tab.globalRect().x, 0.01);
     const bar_id = bar.id;
     const tab_id = tab.id;
     hook.chrome = .{ .fullscreen = true };
     cx.requestRedraw();
     hook.frame();
-    try std.testing.expectApproxEqAbs(styles.outer + 10, tab.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(styles.outer, tab.globalRect().x, 0.01);
     // Theme publication replays boxStyled defaults. The same safe hook must
     // restore native-state padding before the frame is presented.
     theme.select(.light);
     publication.publish(cx, theme.widgetTheme(.light));
     cx.setViewport(1728, 1117);
     hook.frame();
-    try std.testing.expectEqual(@as(f32, 10), bar.style.padding.left);
-    try std.testing.expectApproxEqAbs(styles.outer + 10, tab.globalRect().x, 0.01);
+    try std.testing.expectEqual(@as(f32, 0), bar.style.padding.left);
+    try std.testing.expectApproxEqAbs(styles.outer, tab.globalRect().x, 0.01);
     try std.testing.expectEqual(bar_id, bar.id);
     try std.testing.expectEqual(tab_id, controls.children.items[0].id);
     try std.testing.expectEqual(tab, cx.focused_node.?);
-    try std.testing.expectEqual(@as(f32, 79), other_bar.style.padding.left);
-    try std.testing.expect(!styles.syncTitleChrome(allocator, bar, hook.chrome));
+    try std.testing.expectEqual(@as(f32, 96), other_bar.style.padding.left);
+    try std.testing.expect(!styles.syncWorkspaceChrome(allocator, bar, hook.chrome, true));
     hook.chrome = .{ .native_controls_count = 3 };
     cx.setViewport(1440, 900);
     hook.frame();
-    try std.testing.expectApproxEqAbs(styles.outer + 79, tab.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(styles.outer + 96, tab.globalRect().x, 0.01);
     try std.testing.expectEqual(tab, cx.focused_node.?);
     try std.testing.expectEqual(tab_id, controls.children.items[0].id);
     // The second window deliberately has no tabs; its own fullscreen state
@@ -103,6 +103,6 @@ test "fullscreen titlebar retains children focus and window isolation across the
     other.chrome = .{ .fullscreen = true };
     other_cx.requestRedraw();
     other.frame();
-    try std.testing.expectEqual(@as(f32, 10), other_bar.style.padding.left);
-    try std.testing.expectEqual(@as(f32, 79), bar.style.padding.left);
+    try std.testing.expectEqual(@as(f32, 0), other_bar.style.padding.left);
+    try std.testing.expectEqual(@as(f32, 96), bar.style.padding.left);
 }

@@ -92,7 +92,7 @@ pub const Editor = struct {
         catalog_note.meta.ownership.meta.test_id = "settings.ai.model.catalog_status";
         self.catalog_status = catalog_note;
         try catalog_bar.appendChild(cx.allocator, catalog_note);
-        const fetch = try ui.widgets.Button(.{ .variant = .ghost, .label = "获取模型清单", .base_style = S.ButtonStyle{ .width = .{ .px = 78 }, .height = .{ .px = 25 }, .padding = .{ .left = 6, .right = 6 }, .background = ui.Color.TRANSPARENT, .text_color = S.theme.current().accent_ink, .font_size = 11, .font_weight = 400 }, .on_click = cx.on(Editor, self, fetchModels) }).mount(scope, cx);
+        const fetch = try ui.widgets.Button(.{ .variant = .secondary, .label = "获取模型清单", .base_style = S.ButtonStyle{ .width = .{ .px = 78 }, .height = .{ .px = 25 }, .padding = .{ .left = 6, .right = 6 }, .border_width = 0, .font_size = 11, .font_weight = 400 }, .on_click = cx.on(Editor, self, fetchModels) }).mount(scope, cx);
         fetch.meta.ownership.meta.test_id = "settings.ai.model.fetch_models";
         self.catalog_fetch = fetch;
         try catalog_bar.appendChild(cx.allocator, fetch);

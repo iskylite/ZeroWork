@@ -92,6 +92,17 @@ pub const ProcessJournal = struct {
         defer self.mutex.unlock();
         return (try self.openLocked()).begin(request);
     }
+    pub fn beginMcp(self: *ProcessJournal, request: journal.Request) !journal.Handle {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        const store = try self.openLocked();
+        const family = if (request.context.child_origin) |origin| origin.parent.conversation else request.context.conversation_id;
+        for (store.records.items) |record| {
+            const other = if (record.context.child_origin) |origin| origin.parent.conversation else record.context.conversation_id;
+            if (family.eql(other) and std.mem.eql(u8, record.tool_id, "host.mcp_call") and std.mem.eql(u8, &record.canonical_hash, &request.canonical_hash) and record.dispatch_started and record.stage != .succeeded and record.stage != .failed and record.stage != .rejected and record.stage != .cancelled_unsent) return error.McpPreviousOutcomeUnknown;
+        }
+        return store.begin(request);
+    }
     pub fn snapshot(self: *ProcessJournal, a: std.mem.Allocator, handle: journal.Handle) !journal.Record {
         lock(&self.mutex);
         defer self.mutex.unlock();
@@ -169,6 +180,7 @@ pub const Action = union(enum) {
     prepare_group: struct { operation: identity.HostOperationId, request: tools.Request, authorized: Authorized },
     commit_group: GroupPlan,
     release_group: GroupPlan,
+    cancel_group_prepare: identity.HostOperationId,
     queue_open: lifecycle.OpenRequest,
     query_open: identity.HostOperationId,
     resolve_owned: identity.SessionHandle,
@@ -320,7 +332,21 @@ pub const Runtime = struct {
         }
     }
     fn createGroup(self: *Runtime, scheduler: Scheduler, invocation: host.Invocation, request: tools.Request, authorized: Authorized, handle: journal.Handle, a: std.mem.Allocator, cancel: ?*provider.CancelToken, permit: ?approvals.Permit) !host.Result {
-        const prepared = try self.controllerCall(scheduler, invocation.context, .{ .prepare_group = .{ .operation = handle.operation_ref, .request = request, .authorized = authorized } }, cancel);
+        defer _ = self.controllerCall(scheduler, invocation.context, .{ .cancel_group_prepare = handle.operation_ref }, null) catch {};
+        const prepared = blk: {
+            var waiting: ?provider.CancelToken.UserWait = null;
+            defer if (waiting) |guard| guard.end();
+            while (true) {
+                try cancelled(cancel);
+                const call = self.controllerCall(scheduler, invocation.context, .{ .prepare_group = .{ .operation = handle.operation_ref, .request = request, .authorized = authorized } }, cancel) catch |err| {
+                    if (err != error.ChildSettlementRequired) return err;
+                    if (waiting == null) waiting = provider.CancelToken.beginResourceWait(cancel);
+                    try @import("retry.zig").wait(10, cancel);
+                    continue;
+                };
+                break :blk call;
+            }
+        };
         if (prepared.result != .group_plan) return error.InvalidControllerReceipt;
         const plan = prepared.result.group_plan;
         // Release prepared allocations even when cancellation or journal IO fails.

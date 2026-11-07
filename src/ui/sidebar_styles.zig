@@ -8,7 +8,7 @@ pub const theme = @import("app_theme.zig");
 pub const expanded_width: f32 = @import("sidebar_model.zig").default_width;
 pub const collapsed_width: f32 = 48;
 pub const host_height: f32 = 36;
-pub const group_height: f32 = 26;
+pub const group_height: f32 = 28;
 pub const tail_width: f32 = 36;
 pub const action_size: f32 = 24;
 pub const host_icon_size: f32 = 14;
@@ -19,13 +19,13 @@ pub fn kvmIconInk() ui.Color {
 }
 
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = expanded_width }, .height = .fill(), .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 11 }, .overflow = .hidden };
+    return .{ .width = .{ .px = expanded_width }, .height = .fill(), .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 16 }, .overflow = .hidden };
 }
 pub fn full() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .column, .min_height = 0, .padding = .{ .top = 12, .left = 10, .right = 10, .bottom = 10 }, .gap = 14 };
+    return .{ .width = .fill(), .height = .fill(), .direction = .column, .min_height = 0, .padding = .{ .top = 66, .left = 10, .right = 10, .bottom = 10 }, .gap = 24 };
 }
 pub fn header() ui.BoxStyle {
-    return .{ .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 3, .right = 3 }, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{}, .flex_shrink = 0 };
 }
 pub fn search() ui.BoxStyle {
     return .{ .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .padding = .{ .left = 9, .right = 9 }, .gap = 7, .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 };
@@ -39,13 +39,13 @@ pub fn list() ui.BoxStyle {
 
 /// Main workspace Sidebar 233:335283: each asset group is one inset surface.
 pub fn groupCard() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .padding = ui.Padding.all(3), .background = theme.current().surface_2, .border = .{ .radius = 9 }, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .padding = .{}, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 0 }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn members() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 1, .min_width = 0 };
 }
 pub fn footer() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 10, .right = 10 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .background = theme.current().surface_2, .border = .{ .radius = 8 }, .font_size = 12, .font_weight = 400, .text_color = theme.current().fg_1, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 10, .right = 10 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .font_size = 12, .font_weight = 500, .text_color = theme.current().fg_2, .flex_shrink = 0 };
 }
 pub fn footerSlot(empty: bool) ui.BoxStyle {
     // Current Figma: workspace 233:334511 ends 8px above the panel;
@@ -57,8 +57,7 @@ pub fn footerFrame() ui.Style {
 }
 pub fn emptyFooter() ui.BoxStyle {
     var value = footer();
-    value.background = theme.current().well;
-    value.border = .{ .radius = 9 };
+    value.border.?.radius = 9;
     return value;
 }
 pub fn headerAction() ui.BoxStyle {
@@ -78,7 +77,7 @@ pub fn host(selected: bool, hot: bool) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = host_height }, .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .background = if (selected) (if (hot) theme.states().selected_hover else theme.states().selected) else if (hot) theme.states().hover else ui.Color.TRANSPARENT, .border = .{ .radius = 9 }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn content() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .min_width = 0 };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 5 }, .min_width = 0 };
 }
 pub fn titleViewport() ui.BoxStyle {
     return .{ .height = .{ .px = 18 }, .width = .{ .grow = .{ .min = 0 } }, .flex = 1, .flex_shrink = 1, .min_width = 0, .overflow = .hidden, .align_items = .center };
@@ -103,12 +102,12 @@ pub fn group() ui.BoxStyle {
 }
 pub fn groupContent() ui.BoxStyle {
     var value = content();
-    value.padding = .{ .left = 8, .right = 8 };
+    value.padding = .{ .left = 8, .right = 5 };
     value.gap = 6;
     return value;
 }
 pub fn badge() ui.BoxStyle {
-    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .direction = .row, .align_items = .center, .justify = .center, .background = theme.current().well, .padding = .{ .left = 7, .right = 7 }, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .direction = .row, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .padding = .{}, .border = .{ .radius = 0 }, .flex_shrink = 0 };
 }
 pub fn badgeText() ui.TextStyle {
     return .{ .font_size = 10, .font_weight = 400, .line_height = 1.4, .color = theme.current().fg_2, .selectable = false, .text_overflow = .clip };

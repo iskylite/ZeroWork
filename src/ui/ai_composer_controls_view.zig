@@ -41,6 +41,7 @@ pub const Snapshot = struct {
     providers: []const config.AiProvider = &.{},
     current: ?ModelKey = null,
     permission: PermissionMode = .confirm,
+    allow_auto_permission: bool = true,
     global_execution_mode: ExecutionMode = .auto,
     global_session_retention: SessionRetention = .auto_idle,
     execution_mode_override: ?ExecutionMode = null,
@@ -85,7 +86,7 @@ pub fn effortLabel(value: Effort) []const u8 {
     };
 }
 const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
-const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
+const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
     value: Projection,
@@ -115,7 +116,7 @@ const Owned = struct {
             value.parts = parts;
         }
         const current = if (snapshot.current) |key| try cloneKey(a, key) else null;
-        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .permission = snapshot.permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
+        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
     }
     fn appendModel(a: std.mem.Allocator, models: *std.ArrayList(Model), hash: *std.hash.Wyhash, id: []const u8, kind: config.ProviderKind, endpoint: []const u8, enabled: bool, value: config.AiModel) !void {
         const key: ModelKey = .{ .provider_id = id, .model_id = value.id };
@@ -211,6 +212,7 @@ pub const View = struct {
     model_settings: *ui.Node = undefined,
     model_list: *ui.Node = undefined,
     permission_disabled: *ui.Signal(bool),
+    permission_auto_disabled: *ui.Signal(bool),
     inventory_revoke_disabled: *ui.Signal(bool),
     inventory_revoke: *ui.Node = undefined,
     permission_rows: [2]*ui.Node = undefined,
@@ -253,7 +255,7 @@ pub const View = struct {
     viewport: ui.Size = .ZERO,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks, .hover_style = try scope.createSignal(?ui.BoxStyle, S.hover()), .model_count = try scope.createSignal(usize, 0), .model_version = try scope.createSignal(u64, 0), .slider_value = try scope.createSignal(f32, 0), .retention_value = try scope.createSignal(?[]const u8, "inherit"), .permission_disabled = try scope.createSignal(bool, true), .inventory_revoke_disabled = try scope.createSignal(bool, true), .colors = S.theme.current() });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks, .hover_style = try scope.createSignal(?ui.BoxStyle, S.hover()), .model_count = try scope.createSignal(usize, 0), .model_version = try scope.createSignal(u64, 0), .slider_value = try scope.createSignal(f32, 0), .retention_value = try scope.createSignal(?[]const u8, "inherit"), .permission_disabled = try scope.createSignal(bool, true), .permission_auto_disabled = try scope.createSignal(bool, true), .inventory_revoke_disabled = try scope.createSignal(bool, true), .colors = S.theme.current() });
         try scope.onCleanup(View, self, release);
         self.root = try ui.box(cx, S.row(), .{});
         self.root.meta.ownership.meta.test_id = "ai.composer.controls";
@@ -427,7 +429,7 @@ pub const View = struct {
             const mode: PermissionMode = @fromBackingInt(@intCast(index));
             self.permission_styles[index] = try self.scope.createSignal(ui.BoxStyle, S.option(32, false));
             const choice = try self.scope.createState(Choice, .{ .view = self, .kind = .permission, .action = .{ .permission = mode } });
-            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = permissionLabel(mode), .disabled = self.permission_disabled, .base_style = self.permission_styles[index], .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
+            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = permissionLabel(mode), .disabled = if (mode == .auto) self.permission_auto_disabled else self.permission_disabled, .base_style = self.permission_styles[index], .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
             prepareCustomButton(button, .start, self.cx.allocator);
             button.meta.ownership.meta.test_id = if (mode == .confirm) "ai.permission.confirm" else "ai.permission.auto";
             self.permission_rows[index] = button;
@@ -922,6 +924,7 @@ pub const View = struct {
         const captured = self.capture(kind) orelse return;
         const source = &self.source.?.value;
         if (!source.editable and action != .revoke_inventory) return;
+        if (action == .permission and action.permission == .auto and !source.allow_auto_permission) return;
         switch (action) {
             .revoke_inventory => |conversation_id| {
                 if (!source.inventory_authorized or source.inventory_conversation_id == null or !source.inventory_conversation_id.?.eql(conversation_id)) return;
@@ -1074,6 +1077,7 @@ pub const View = struct {
         const inventory_authorized = if (source) |value| value.inventory_authorized and value.inventory_conversation_id != null else false;
         self.disabled[1].set(!editable and !inventory_authorized);
         self.permission_disabled.set(!editable);
+        self.permission_auto_disabled.set(!editable or !self.source.?.value.allow_auto_permission);
         self.inventory_revoke_disabled.set(!inventory_authorized);
         self.inventory_revoke.setDisplay(if (inventory_authorized) .flex else .none);
         self.disabled[5].set(!editable);
@@ -1426,7 +1430,7 @@ fn optionalKeyEql(first: ?ModelKey, second: ?ModelKey) bool {
     return second == null;
 }
 fn projectionEql(first: Projection, second: Projection) bool {
-    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.permission == second.permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
+    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
 }
 fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;

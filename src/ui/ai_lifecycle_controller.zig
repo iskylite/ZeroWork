@@ -61,6 +61,7 @@ pub const Controller = struct {
     close_targets: std.ArrayList(CloseTarget) = .empty,
     open_authorizations: std.ArrayList(OpenAuthorization) = .empty,
     last_authorization: ?struct { kind: tools.Kind, value: runtime.Authorized } = null,
+    pending_transition: ?struct { fence: @import("../ai/session_input.zig").Fence, operation: identity.HostOperationId } = null,
 
     pub fn init(options: Init) !Controller {
         try options.authority.validate();
@@ -70,6 +71,7 @@ pub const Controller = struct {
         return self;
     }
     pub fn available(self: *Controller, tool_id: []const u8) bool {
+        if (self.authority.child_origin != null) return false;
         const kind = tools.kind(tool_id) orelse return false;
         return switch (kind) {
             .create_group => self.authority.binding == .session,
@@ -100,6 +102,7 @@ pub const Controller = struct {
     /// Called on the controller thread only after its worker joined. This is
     /// also the Stop fallback if Bridge refused a cancelled release callback.
     pub fn deinitAfterWorker(self: *Controller) void {
+        self.releaseTransition(null);
         for (self.prepared.items) |plan| self.destroyPlan(plan);
         self.prepared.deinit(self.allocator);
         self.close_targets.deinit(self.allocator);
@@ -132,6 +135,15 @@ pub const Controller = struct {
         return owner.group;
     }
     pub fn inBinding(self: *Controller, handle_: identity.SessionHandle) bool {
+        if (self.authority.child_origin) |origin| {
+            const service = &(self.app.domain.ai orelse return false).service;
+            _ = service.validateAuthority(self.authority) catch return false;
+            const child = service.store.agent(origin.agent) orelse return false;
+            const assigned = for (child.targets) |target| {
+                if (target.eql(handle_)) break true;
+            } else false;
+            if (!assigned) return false;
+        }
         return switch (self.authority.binding) {
             .session => |id| id == @backingInt(handle_.session_id),
             .group => |id| blk: {
@@ -182,6 +194,7 @@ pub const Controller = struct {
     /// Model-facing preflight also runs before idempotent receipt reuse, so
     /// a former member cannot be revived by a historical request key.
     pub fn validateRequestScope(self: *Controller, context: host.Context, request: tools.Request) !void {
+        if (context.child_origin != null) return error.TargetNotAuthorized;
         try self.validateAuthority(context);
         if (request.group) |group| if (context.binding != .group or context.binding.group != @backingInt(group.id)) return error.TargetNotAuthorized;
         if (request.session) |target| if (!self.inBinding(target) and !((request.kind == .close_session or request.kind == .wait_session_ready) and self.permitsHistoricalOwner(target))) return error.TargetNotAuthorized;
@@ -309,6 +322,13 @@ pub const Controller = struct {
         if (!std.meta.eql(authorized, input.authorized)) return error.ScopeChanged;
         const source = input.request.session orelse return error.InvalidArguments;
         const legacy = try self.validateIdentity(source, true);
+        if (self.store.authority) |service| {
+            const fence = try service.store.fence(context.conversation_id);
+            if (self.pending_transition) |pending| {
+                if (!pending.fence.eql(fence) or !pending.operation.eql(input.operation)) return error.TransitionPending;
+            } else self.pending_transition = .{ .fence = fence, .operation = input.operation };
+            if (!try service.quiesceChildren(fence, input.operation)) return error.ChildSettlementRequired;
+        }
         const plan = try self.allocator.create(Prepared);
         errdefer self.allocator.destroy(plan);
         try self.prepared.ensureUnusedCapacity(self.allocator, 1);
@@ -370,9 +390,16 @@ pub const Controller = struct {
         broker.execution_route.created(context, routeCreate(entry.request), snapshot.session.?) catch {};
     }
     fn destroyPlan(self: *Controller, plan: *Prepared) void {
+        self.releaseTransition(plan.operation);
         plan.view.deinit();
         plan.group.deinit();
         self.allocator.destroy(plan);
+    }
+    fn releaseTransition(self: *Controller, operation: ?identity.HostOperationId) void {
+        const pending = self.pending_transition orelse return;
+        if (operation) |expected| if (!expected.eql(pending.operation)) return;
+        if (self.store.authority) |service| service.store.releaseTransition(pending.fence, pending.operation);
+        self.pending_transition = null;
     }
     fn releaseGroup(self: *Controller, receipt: runtime.GroupPlan) !void {
         const plan = try self.findPlan(receipt.token);
@@ -469,6 +496,7 @@ pub const Controller = struct {
         // Exact cleanup tokens remain valid after a successful handoff changed
         // the conversation binding, or after a policy cancellation.
         switch (call.action) {
+            .cancel_group_prepare => |operation| return self.releaseTransition(operation),
             .release_group => |receipt| return self.releaseGroup(receipt),
             .cancel_open => |operation| {
                 call.result = .{ .session = try self.app.cancelOwnedSession(operation, call.context) };
@@ -553,7 +581,7 @@ pub const Controller = struct {
                 call.result = .{ .session = try self.app.setOwnedSessionRetention(request.session, call.context.task_id, request.retention) };
             },
             .mutate => |request| call.result = .{ .mutation = try self.mutate(call.context, request) },
-            .release_group, .cancel_open => unreachable,
+            .release_group, .cancel_group_prepare, .cancel_open => unreachable,
         }
     }
 };

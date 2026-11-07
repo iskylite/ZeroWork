@@ -265,7 +265,9 @@ pub const RequestTable = struct {
                 entry.targets = targets;
             }
         }
-        return .{ .arena = arena, .captured_scope = try captured_scope.clone(a), .entries = try entries.toOwnedSlice(a) };
+        const owned_scope = try captured_scope.clone(a);
+        const owned_entries = try entries.toOwnedSlice(a);
+        return .{ .arena = arena, .captured_scope = owned_scope, .entries = owned_entries };
     }
     pub fn deinit(self: *RequestTable) void {
         self.arena.deinit();
@@ -294,7 +296,9 @@ pub const RequestTable = struct {
             entries[kept] = entry;
             kept += 1;
         }
-        for (contributions, plugin_count..) |contribution, index| {
+        for (contributions) |contribution| {
+            if (context.child_origin != null and (contribution.authority == .lifecycle or std.mem.eql(u8, contribution.definition.id, "host.agent_tasks"))) continue;
+            const index = kept;
             const definition = contribution.definition;
             if (contribution.authority == .session_targets or !std.mem.startsWith(u8, definition.id, "host.") or definition.required_services.len != 0) return error.InvalidHostAuthority;
             try validateDefinition(definition);
@@ -305,14 +309,17 @@ pub const RequestTable = struct {
             const terminal_source = @import("host_terminal_queries.zig").supports(definition.id) or
                 std.mem.eql(u8, definition.id, "host.run_in_terminal") or std.mem.eql(u8, definition.id, "host.attach_shell") or std.mem.eql(u8, definition.id, @import("builtin_tools.zig").id);
             if (terminal_source) {
+                if (context.child_origin != null and contribution.session_targets == null) return error.ChildCapabilityTargetsRequired;
+                if (context.child_origin != null and contribution.session_targets.?.len == 0) continue;
                 if (contribution.session_targets) |owners| {
                     for (owners) |owner| _ = try captured_scope.validate(&.{@backingInt(owner.session_id)});
                     owned_definition.schema = try sessionSourceSchema(a, definition.schema, owners, context);
                 } else if (terminal_targets.len != 0) owned_definition.schema = try terminalSourceSchema(a, definition.schema, terminal_targets, context);
             }
             entries[index] = .{ .definition = owned_definition, .provider_name = try a.dupe(u8, name), .targets = &.{}, .authority = contribution.authority };
+            kept += 1;
         }
-        table.entries = entries;
+        table.entries = entries[0..kept];
         table.host_context = context;
         _ = try @import("provider.zig").catalogTextBytes(try providerDefinitions(&table, a));
         return table;
@@ -555,6 +562,9 @@ fn jsonEqual(a: std.json.Value, b: std.json.Value) bool {
         else => false,
     };
 }
+pub fn validateArguments(schema: std.json.Value, value: std.json.Value) !void {
+    try validateValue(schema, value, 0);
+}
 fn validateValue(schema: std.json.Value, value: std.json.Value, depth: usize) anyerror!void {
     if (depth > 12) return error.InvalidToolArguments;
     const kind = schema.object.get("type").?.string;
@@ -679,7 +689,8 @@ pub fn cloneTable(input: *const RequestTable, allocator: std.mem.Allocator) !Req
         }
         entry.targets = targets;
     }
-    return .{ .arena = arena, .captured_scope = try input.captured_scope.clone(a), .entries = entries, .host_context = input.host_context };
+    const owned_scope = try input.captured_scope.clone(a);
+    return .{ .arena = arena, .captured_scope = owned_scope, .entries = entries, .host_context = input.host_context };
 }
 
 pub const DynamicInvocation = struct {

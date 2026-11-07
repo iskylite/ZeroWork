@@ -39,7 +39,7 @@ pub const View = struct {
         self.error_label.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} } });
         try modal.body.appendChild(cx.allocator, self.error_label);
         const actions = try ui.hstack(cx, .{ .width = .fill(), .gap = 8 }, .{});
-        const leave_button = try ui.widgets.Button(.{ .label = "移出所有组", .variant = .ghost, .size = .sm, .on_click = cx.on(View, self, leave) }).mount(scope, cx);
+        const leave_button = try ui.widgets.Button(.{ .label = "移出所有组", .variant = .secondary, .size = .sm, .on_click = cx.on(View, self, leave) }).mount(scope, cx);
         leave_button.meta.ownership.meta.test_id = "groups.join.leave";
         try actions.appendChild(cx.allocator, leave_button);
         try actions.appendChild(cx.allocator, try ui.spacer(cx));

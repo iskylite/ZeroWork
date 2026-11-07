@@ -198,7 +198,7 @@ pub fn appendRetainedMetadata(
             .polygon = render_state.clip_polygon,
             .bounds_fallback = render_state.clip_bounds_fallback,
             .owner_content_exempt = !hasExternalClip(cx, node),
-            .owner_wraps_children = !render_state.use_blur and clip_mod.ownerPaintsOutsideChildClip(node),
+            .owner_wraps_children = clip_mod.ownerPaintsOutsideChildClip(node),
         }) catch parent_clip_id;
     }
 

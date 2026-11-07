@@ -411,6 +411,12 @@ test "AI approval long target stays readable in body with fixed header and decis
 
 fn hostSnapshot(kind: @import("ai/host_approval.zig").SubjectKind, detail: []const u8) @import("ai/host_approval.zig").Snapshot {
     var source: @import("ai/host_approval.zig").Snapshot = .{ .kind = kind, .target = .{}, .detail = .{}, .impact = .{}, .context = undefined, .authority = .local_network_read, .sequence = 1, .operation_id = 2, .turn_id = 1, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0), .tool = .{}, .call = .{}, .requested_url = .{}, .canonical_url = .{}, .network_policy_revision = 1, .created_at_ms = 0, .expires_at_ms = 1 };
+    if (kind == .mcp) {
+        const tool = "host.mcp_call";
+        @memcpy(source.tool.bytes[0..tool.len], tool);
+        source.tool.len = tool.len;
+        source.authority = .conversation_context;
+    }
     source.kind = kind;
     source.sequence = 1;
     source.operation_id = 2;
@@ -442,7 +448,7 @@ test "host approval all subjects keep icons titles and fixed decisions aligned a
     inline for (.{ .dark, .light, .sauber }) |name| {
         theme.select(name);
         for ([_]f32{ 600, 360 }) |width| {
-            inline for (.{ .network_url, .lifecycle, .terminal_command }) |kind| {
+            inline for (.{ .network_url, .lifecycle, .terminal_command, .mcp }) |kind| {
                 const cx = try ui.Cx.init(a, std.testing.io);
                 defer cx.deinit();
                 cx.setTheme(theme.widgetTheme(name));
@@ -469,17 +475,20 @@ test "host approval all subjects keep icons titles and fixed decisions aligned a
                     .network_url => "批准这次本机网络读取",
                     .lifecycle => "批准这次会话管理操作",
                     .terminal_command => "批准这次终端命令",
+                    .mcp => "批准这次 MCP 调用",
                 }, view.accept.behavior.interaction.a11y.?.label.?);
                 try std.testing.expectEqualStrings(switch (@as(@import("ai/host_approval.zig").SubjectKind, kind)) {
                     .network_url => "拒绝这次本机网络读取",
                     .lifecycle => "拒绝这次会话管理操作",
                     .terminal_command => "拒绝这次终端命令",
+                    .mcp => "拒绝这次 MCP 调用",
                 }, view.reject.behavior.interaction.a11y.?.label.?);
                 const title = view.title.globalRect();
                 const icon = (switch (@as(@import("ai/host_approval.zig").SubjectKind, kind)) {
                     .network_url => view.network_icon,
                     .lifecycle => view.lifecycle_icon,
                     .terminal_command => view.terminal_icon,
+                    .mcp => view.network_icon,
                 }).globalRect();
                 try std.testing.expect(title.w > 0 and title.h >= 20);
                 try std.testing.expect(icon.x + icon.w <= title.x);

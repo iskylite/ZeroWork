@@ -7,7 +7,7 @@ extern fn zw_credentials_collect(service: [*:0]const u8, keep: [*]const [*:0]con
 extern fn zw_credentials_erase(service: [*:0]const u8) c_int;
 extern fn zw_credentials_free(value: ?[*]u8, length: usize) void;
 
-pub const Error = error{ CredentialMissing, CredentialDenied, CredentialLocked, CredentialUnavailable, CredentialAlreadyExists, CredentialStorageFailure, OutOfMemory };
+pub const Error = error{ CredentialMissing, CredentialDenied, CredentialLocked, CredentialUnavailable, CredentialAlreadyExists, CredentialStorageFailure, CredentialAuthenticationCanceled, CredentialAuthenticationFailed, OutOfMemory };
 fn check(status: c_int) Error!void {
     switch (status) {
         0 => {},
@@ -16,6 +16,8 @@ fn check(status: c_int) Error!void {
         -25293, -128 => return error.CredentialDenied,
         -25308 => return error.CredentialLocked,
         -25291 => return error.CredentialUnavailable,
+        -43001 => return error.CredentialAuthenticationCanceled,
+        -43002 => return error.CredentialAuthenticationFailed,
         else => return error.CredentialStorageFailure,
     }
 }

@@ -13,6 +13,8 @@ pub const Snapshot = struct {
     state: State = .unknown,
     connected_duration_ms: ?u64 = null,
     latency_ms: ?u64 = null,
+    utf8: ?bool = null,
+    grid: ?struct { cols: u16, rows: u16 } = null,
     cipher_c2s: details.Text(64) = .{},
     cipher_s2c: details.Text(64) = .{},
     route: [details.max_hops]details.Endpoint = @splat(.{}),
@@ -29,7 +31,7 @@ pub const Callbacks = struct {
 const Action = struct {
     view: *View,
     key: OperationKey,
-    kind: enum { close, copy, logs, reconnect },
+    kind: enum { close, copy, logs },
     fn click(self: *Action) void {
         const view = self.view;
         if (!view.visible or view.source == null or !view.source.?.key.eql(self.key)) return;
@@ -43,14 +45,6 @@ const Action = struct {
                     return;
                 };
                 view.hideWithoutFocus();
-            },
-            .reconnect => {
-                if (view.expired or !view.source.?.can_reconnect or view.callbacks.reconnect == null) return;
-                view.callbacks.reconnect.?(view.callbacks.context, self.key) catch {
-                    view.feedback("暂时无法重新连接", false);
-                    return;
-                };
-                view.hide();
             },
         }
     }
@@ -66,7 +60,6 @@ pub const View = struct {
     chrome: *ui.Node = undefined,
     content: *ui.Node = undefined,
     open: *ui.Signal(bool),
-    reconnect_disabled: *ui.Signal(bool),
     logs_disabled: *ui.Signal(bool),
     source: ?Snapshot = null,
     expired: bool = false,
@@ -81,6 +74,7 @@ pub const View = struct {
     pointer: *ui.Node = undefined,
     name: *ui.Node = undefined,
     state: *ui.Node = undefined,
+    state_text: *ui.Signal([]const u8),
     address: *ui.Node = undefined,
     session: *ui.Node = undefined,
     duration: *ui.Node = undefined,
@@ -90,22 +84,23 @@ pub const View = struct {
     logs_button: *ui.Node = undefined,
     copy_button: *ui.Node = undefined,
     copy_feedback: *@import("copy_button.zig").Button = undefined,
-    reconnect_button: *ui.Node = undefined,
     close_button: *ui.Node = undefined,
     scroll: ui.widgets.ScrollAreaResult = undefined,
     latency: *ui.Node = undefined,
     cipher: *ui.Node = undefined,
-    footer: *ui.Node = undefined,
+    encoding: *ui.Node = undefined,
+    grid: *ui.Node = undefined,
+    heartbeat: [3]*ui.Node = undefined,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
         const self = try cx.allocator.create(View);
         var registered = false;
         errdefer if (!registered) cx.allocator.destroy(self);
-        self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .open = try scope.createSignal(bool, false), .reconnect_disabled = try scope.createSignal(bool, true), .logs_disabled = try scope.createSignal(bool, true) };
+        self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .open = try scope.createSignal(bool, false), .state_text = try scope.createSignal([]const u8, "未知"), .logs_disabled = try scope.createSignal(bool, true) };
         try scope.onCleanup(View, self, cleanup);
         registered = true;
         const focus_guard = try scope.childScope();
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top_start, .width = S.width, .max_width = S.width, .max_height = S.height, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -129,10 +124,10 @@ pub const View = struct {
             self.expired = false;
             self.rebuild = true;
         } else if (!self.expired) try self.update(source);
-        const rect = trigger.globalRect();
+        const rect = self.triggerRect(trigger);
         self.anchor_id = trigger.id;
-        self.status_top = status_top;
-        self.anchor_rect = .{ .x = rect.x, .y = status_top, .w = rect.w, .h = 0 };
+        self.status_top = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top;
+        self.anchor_rect = .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
         self.visible = true;
         self.open.set(true);
         self.dirty = true;
@@ -165,10 +160,10 @@ pub const View = struct {
             self.hideWithoutFocus();
             return;
         }
-        const rect = trigger.globalRect();
-        const next: ui.widgets.popover.AnchorRect = .{ .x = rect.x, .y = status_top, .w = rect.w, .h = 0 };
+        const rect = self.triggerRect(trigger);
+        const next: ui.widgets.popover.AnchorRect = .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
         if (std.meta.eql(next, self.anchor_rect)) return;
-        self.status_top = status_top;
+        self.status_top = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top;
         self.anchor_rect = next;
         self.dirty = true;
         self.chrome.markLayoutDirty();
@@ -185,12 +180,17 @@ pub const View = struct {
             self.rebuild = false;
             self.dirty = true;
         }
+        const h = @min(S.height, @max(0, (if (self.status_top < self.cx.viewport.height / 2) self.cx.viewport.height - self.status_top - self.anchor_rect.h else self.status_top) - S.anchor_gap - S.margin));
+        const w = @min(S.width, @max(0, self.cx.viewport.width - S.margin * 2));
+        // The opening effect restores fit sizing. Retain the bounded card
+        // even when no new SSH sample arrives after that effect.
+        if (self.chrome.style.height != .px or self.chrome.style.height.px != h or self.chrome.style.width != .px or self.chrome.style.width.px != w) {
+            self.chrome.setStyleInline(self.cx.allocator, S.panel(h, self.cx.viewport.width));
+            self.dirty = true;
+        }
         if (!self.dirty) return;
         self.dirty = false;
-        const h = @min(S.height, @max(0, self.status_top - S.anchor_gap - S.margin));
-        const w = @min(S.width, @max(0, self.cx.viewport.width - S.margin * 2));
-        self.chrome.setStyleInline(self.cx.allocator, S.panel(h, self.cx.viewport.width));
-        const x = @min(@max(S.margin, self.anchor_rect.x + (self.anchor_rect.w - w) / 2), @max(S.margin, self.cx.viewport.width - w - S.margin));
+        const x = @min(@max(S.margin, self.alignedAnchor(self.anchor_rect).x), @max(S.margin, self.cx.viewport.width - w - S.margin));
         self.pointer.setStyleInline(self.cx.allocator, S.pointer(@min(@max(14, self.anchor_rect.x + self.anchor_rect.w / 2 - x - 6), @max(14, w - 26))));
         try self.refresh();
         self.cx.requestRedraw();
@@ -240,8 +240,6 @@ pub const View = struct {
         try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.terminal, S.theme.current().accent, S.icon(16)));
         _ = try label(self.cx, header, "会话连接", S.title(), S.titleBox());
         try header.appendChild(self.cx.allocator, try ui.spacer(self.cx));
-        self.state = try label(self.cx, header, "", S.infoText(true), .{ .height = .{ .px = 18 }, .min_width = 40, .flex_shrink = 0 });
-        self.state.meta.ownership.meta.test_id = "status.connection.state";
         self.close_button = try self.button(scope, header, .close, "关闭会话连接", "status.connection.close", ui.icons.x, 28, false, null);
         try self.content.appendChild(self.cx.allocator, header);
         try self.content.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .height = .{ .px = 12 }, .flex_shrink = 0 }, .{}));
@@ -250,15 +248,38 @@ pub const View = struct {
         self.scroll.container.meta.ownership.meta.test_id = "status.connection.viewport";
         self.scroll.content.setStyleInline(self.cx.allocator, S.body());
         try self.content.appendChild(self.cx.allocator, self.scroll.container);
-        const summary = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(12), .direction = .column, .gap = 4, .margin = .{ .bottom = 10 }, .background = S.theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
-        self.name = try label(self.cx, summary, "", @import("connection_details_styles.zig").text(15, 600, 24, false), .{ .width = .fill(), .height = .{ .px = 24 }, .min_width = 0 });
+        const summary = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(10), .direction = .column, .gap = 4, .margin = .{ .bottom = 4 }, .background = S.theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+        const name_row = try ui.box(self.cx, S.row(24), .{});
+        try summary.appendChild(self.cx.allocator, name_row);
+        self.name = try label(self.cx, name_row, "", @import("connection_details_styles.zig").text(15, 600, 24, false), .{ .width = .fill(), .height = .{ .px = 24 }, .min_width = 0, .flex = 1, .overflow_hidden = true });
         self.name.meta.ownership.meta.test_id = "status.connection.name";
-        self.address = try label(self.cx, summary, "", S.address(), .{ .width = .fill(), .height = .{ .px = 20 }, .min_width = 0 });
+        const health = try ui.box(self.cx, .{ .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
+        const tip = try ui.widgets.Tooltip(.{ .text = self.state_text, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1 }).mount(scope, self.cx);
+        try tip.trigger.appendChild(self.cx.allocator, health);
+        tip.wrapper.setStyleInline(self.cx.allocator, .{ .flex_shrink = 0 });
+        try name_row.appendChild(self.cx.allocator, tip.wrapper);
+        // Keep the tooltip's text node so state refreshes without remounting.
+        self.state = tip.content.children.items[0];
+        self.state.meta.ownership.meta.test_id = "status.connection.state";
+        for ([_]ui.SvgAsset{ ui.icons.activity, ui.icons.get("unplug").?, ui.icons.get("circle-help").? }, 0..) |asset, i| {
+            self.heartbeat[i] = try ui.iconTint(self.cx, asset, S.theme.current().fg_3, S.icon(14));
+            try health.appendChild(self.cx.allocator, self.heartbeat[i]);
+        }
+        health.meta.ownership.meta.test_id = "status.connection.health";
+        self.latency = try label(self.cx, health, "", S.infoText(false), .{ .height = .{ .px = 18 }, .flex_shrink = 0 });
+        self.latency.meta.ownership.meta.test_id = "status.connection.latency";
+        const address_row = try ui.box(self.cx, S.row(28), .{});
+        try summary.appendChild(self.cx.allocator, address_row);
+        self.address = try label(self.cx, address_row, "", S.address(), .{ .width = .fill(), .height = .{ .px = 20 }, .min_width = 0, .flex = 1, .overflow_hidden = true });
         self.address.meta.ownership.meta.test_id = "status.connection.address";
+        self.copy_button = try self.button(scope, address_row, .copy, "复制信息", "status.connection.copy", ui.icons.copy, 28, false, null);
+        self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, self.copy_button);
+        self.logs_button = try self.button(scope, address_row, .logs, "连接日志", "status.connection.logs", ui.icons.get("file-text").?, 28, false, self.logs_disabled);
         try self.scroll.content.appendChild(self.cx.allocator, summary);
         _ = try self.factValue("协议", "SSH · 交互式 Shell", "status.connection.protocol");
-        self.latency = try self.fact("延迟", "status.connection.latency");
         self.cipher = try self.fact("加密", "status.connection.cipher");
+        self.encoding = try self.fact("编码", "status.connection.encoding.detail");
+        self.grid = try self.fact("网格", "status.connection.grid.detail");
         self.session = try self.fact("会话", "status.connection.session");
         self.duration = try label(self.cx, self.session.parent.?, "", S.infoText(true), .{ .width = .{ .px = 66 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
         self.duration.meta.ownership.meta.test_id = "status.connection.duration";
@@ -266,16 +287,8 @@ pub const View = struct {
         // Retain the captured hop summary for existing host/test consumers.
         self.hops = try label(self.cx, self.scroll.content, "", S.infoText(true), S.factValue());
         self.hops.setDisplay(.none);
-        try self.content.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .height = .{ .px = 14 }, .flex_shrink = 0 }, .{}));
-        const actions = try ui.box(self.cx, S.footer(), .{});
-        self.footer = actions;
-        actions.meta.ownership.meta.test_id = "status.connection.footer";
-        self.copy_button = try self.button(scope, actions, .copy, "复制信息", "status.connection.copy", ui.icons.copy, 28, true, null);
-        self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, scope, self.copy_button);
-        self.logs_button = try self.button(scope, actions, .logs, "连接日志", "status.connection.logs", ui.icons.get("file-text").?, 28, true, self.logs_disabled);
-        self.feedback_label = try label(self.cx, actions, "", S.infoText(true), S.feedbackBox());
-        self.reconnect_button = try self.textButton(scope, actions, .reconnect, "重新连接", "status.connection.reconnect", 88, true, self.reconnect_disabled);
-        try self.content.appendChild(self.cx.allocator, actions);
+        self.feedback_label = try label(self.cx, self.scroll.content, "", S.infoText(true), S.feedbackBox());
+        self.feedback_label.setDisplay(.none);
         self.pointer = try ui.iconTint(self.cx, ui.icons.chevron_down, S.theme.current().fg_3, S.icon(12));
         self.pointer.setDisplay(.none);
         try self.chrome.appendChild(self.cx.allocator, self.pointer);
@@ -289,13 +302,6 @@ pub const View = struct {
         const node = try label(self.cx, row, value, S.infoText(true), S.factValue());
         node.meta.ownership.meta.test_id = test_id;
         try self.scroll.content.appendChild(self.cx.allocator, row);
-        return node;
-    }
-    fn textButton(self: *View, scope: *ui.Scope, parent: *ui.Node, kind: @FieldType(Action, "kind"), name: []const u8, test_id: []const u8, width: f32, surface: bool, disabled: ?*ui.Signal(bool)) !*ui.Node {
-        const action = try scope.createState(Action, .{ .view = self, .key = self.source.?.key, .kind = kind });
-        const node = try ui.widgets.Button(.{ .label = name, .variant = .ghost, .base_style = S.textAction(width, surface), .hover_style = S.hover(), .disabled = disabled orelse try scope.createSignal(bool, false), .on_click = self.cx.on(Action, action, Action.click) }).mount(scope, self.cx);
-        node.meta.ownership.meta.test_id = test_id;
-        try parent.appendChild(self.cx.allocator, node);
         return node;
     }
     fn button(self: *View, scope: *ui.Scope, parent: *ui.Node, kind: @FieldType(Action, "kind"), name: []const u8, test_id: []const u8, asset: ui.SvgAsset, size: f32, surface: bool, disabled: ?*ui.Signal(bool)) !*ui.Node {
@@ -313,16 +319,26 @@ pub const View = struct {
     fn refresh(self: *View) !void {
         const source = &self.source.?;
         try self.name.setTextContent(self.cx.allocator, if (source.endpoint.name.len != 0) source.endpoint.name.slice() else unknown(source.endpoint.host.slice()));
-        try self.state.setTextContent(self.cx.allocator, if (self.expired) "已过期" else switch (source.state) {
+        self.state_text.set(if (self.expired) "已过期" else switch (source.state) {
             .unknown => "未知",
             .online => "在线",
             .disconnected => "已断开",
         });
         const online = !self.expired and source.state == .online;
-        self.state.setTextColor(if (online) @import("socks_info_styles.zig").text(.success) else S.theme.current().fg_2);
+        const color = if (online) @import("socks_info_styles.zig").text(.success) else if (self.expired or source.state == .disconnected) S.theme.current().danger_ink else S.theme.current().fg_3;
+        const active: usize = if (online) 0 else if (self.expired or source.state == .disconnected) 1 else 2;
+        for (self.heartbeat, 0..) |node, i| {
+            node.setDisplay(if (i == active) .flex else .none);
+            _ = node.setTint(color);
+        }
+        self.latency.setTextColor(color);
 
         var buffer: [4096]u8 = undefined;
-        try self.latency.setTextContent(self.cx.allocator, if (online and source.latency_ms != null) try std.fmt.bufPrint(&buffer, "{d} ms", .{source.latency_ms.?}) else "未知");
+        try self.latency.setTextContent(self.cx.allocator, if (online and source.latency_ms != null) try std.fmt.bufPrint(&buffer, "{d} ms", .{source.latency_ms.?}) else "—");
+        const latency_width = @ceil(self.cx.text.measureTextWidth(self.latency.getText().?.content, 12, 400, false)) + 1;
+        self.latency.setStyle(self.cx.allocator, .width, .{ .px = latency_width });
+        try self.encoding.setTextContent(self.cx.allocator, if (source.utf8 orelse false) "UTF-8" else "未知");
+        try self.grid.setTextContent(self.cx.allocator, if (source.grid) |grid| try std.fmt.bufPrint(&buffer, "{d} × {d}", .{ grid.cols, grid.rows }) else "未知");
         const outgoing = source.cipher_c2s.slice();
         const incoming = source.cipher_s2c.slice();
         try self.cipher.setTextContent(self.cx.allocator, if (outgoing.len == 0 and incoming.len == 0) "未知" else if (std.mem.eql(u8, outgoing, incoming)) outgoing else try std.fmt.bufPrint(&buffer, "↑ {s} · ↓ {s}", .{ unknown(outgoing), unknown(incoming) }));
@@ -343,7 +359,6 @@ pub const View = struct {
         try self.route.setTextContent(self.cx.allocator, route_text.writer.buffered());
         try self.hops.setTextContent(self.cx.allocator, if (source.hop_count == 1) "直连" else try std.fmt.bufPrint(&buffer, "{d} 跳", .{source.hop_count - 1}));
         self.logs_disabled.set(!source.logs_available or self.callbacks.logs == null);
-        self.reconnect_disabled.set(self.expired or !source.can_reconnect or self.callbacks.reconnect == null);
     }
     pub fn copyAddress(self: *View) void {
         if (!self.visible or self.source == null) return;
@@ -353,7 +368,7 @@ pub const View = struct {
             self.feedback("复制失败，请重试", false);
             return;
         };
-        const report = std.fmt.allocPrint(self.cx.allocator, "连接：{s}\n身份：{s}\n协议：SSH · 交互式 Shell\n状态：{s}\n延迟：{s}\n加密：{s}\n会话：{s}\n时长：{s}\n路径：{s}", .{ self.name.getText().?.content, endpoint, self.state.getText().?.content, self.latency.getText().?.content, self.cipher.getText().?.content, self.session.getText().?.content, self.duration.getText().?.content, self.route.getText().?.content }) catch {
+        const report = std.fmt.allocPrint(self.cx.allocator, "连接：{s}\n身份：{s}\n协议：SSH · 交互式 Shell\n状态：{s}\n延迟：{s}\n加密：{s}\n会话：{s}\n时长：{s}\n路径：{s}", .{ self.name.getText().?.content, endpoint, self.state_text.peek(), self.latency.getText().?.content, self.cipher.getText().?.content, self.session.getText().?.content, self.duration.getText().?.content, self.route.getText().?.content }) catch {
             self.feedback("复制失败，请重试", false);
             return;
         };
@@ -367,16 +382,31 @@ pub const View = struct {
     fn feedback(self: *View, text: []const u8, success: bool) void {
         self.copy_feedback.report(success);
         self.feedback_label.setTextContent(self.cx.allocator, text) catch {};
+        self.feedback_label.setDisplay(if (success) .none else .flex);
         self.feedback_label.setTextColor(if (success) @import("socks_info_styles.zig").text(.success) else S.theme.current().danger_ink);
         self.cx.requestRedraw();
     }
     fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));
         if (self.visible) if (self.cx.root) |root| if (self.anchor_id) |id| if (find(root, id)) |trigger| {
-            const rect = trigger.globalRect();
-            if (trigger.isDisplayedInTree() and rect.w > 0) return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = 0 };
+            const rect = self.triggerRect(trigger);
+            if (trigger.isDisplayedInTree() and rect.w > 0) return self.alignedAnchor(rect);
         };
-        return self.anchor_rect;
+        return self.alignedAnchor(self.anchor_rect);
+    }
+    fn triggerRect(self: *View, trigger: *ui.Node) ui.widgets.popover.AnchorRect {
+        var r = trigger.globalRect();
+        // Workspace identity buttons float over their tab rather than being
+        // children of it. Resolve that card by its actual displayed bounds.
+        if (self.cx.root) |root| {
+            if (tabAt(root, r)) |tab| r = tab.globalRect();
+        }
+        return .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+    }
+    fn alignedAnchor(self: *View, rect: ui.widgets.popover.AnchorRect) ui.widgets.popover.AnchorRect {
+        const w = @min(S.width, @max(0, self.cx.viewport.width - S.margin * 2));
+        const x = if (rect.x + w <= self.cx.viewport.width - S.margin) rect.x else rect.x + rect.w - w;
+        return .{ .x = @max(S.margin, @min(x, self.cx.viewport.width - w - S.margin)), .y = rect.y, .w = 0, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
     }
     fn cleanup(self: *View) void {
         self.cx.allocator.destroy(self);
@@ -424,5 +454,16 @@ fn clear(cx: *ui.Cx, parent: *ui.Node) void {
 fn find(node: *ui.Node, id: u32) ?*ui.Node {
     if (node.id == id) return node;
     for (node.children.items) |child| if (find(child, id)) |found| return found;
+    return null;
+}
+
+fn tabAt(node: *ui.Node, trigger: ui.ComputedRect) ?*ui.Node {
+    if (node.meta.ownership.meta.test_id) |id| if (std.mem.startsWith(u8, id, "tabs.tab.") and node.isDisplayedInTree()) {
+        const r = node.globalRect();
+        const x = trigger.x + trigger.w / 2;
+        const y = trigger.y + trigger.h / 2;
+        if (x >= r.x and x <= r.x + r.w and y >= r.y and y <= r.y + r.h) return node;
+    };
+    for (node.children.items) |child| if (tabAt(child, trigger)) |tab| return tab;
     return null;
 }

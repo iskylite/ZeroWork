@@ -1,4 +1,4 @@
-//! V3 workspace identity popover: 344px, labeled facts and fixed actions.
+//! Compact session identity: inline health and address actions.
 //! Status triggers: 358:1407192; retained fixed hit areas and icon positions.
 const ui = @import("ui");
 pub const identity_width: f32 = 118;
@@ -7,8 +7,8 @@ const shared = @import("connection_details_styles.zig");
 pub const theme = shared.theme;
 pub const ButtonStyle = shared.ButtonStyle;
 pub const width: f32 = 380;
-// Duration shares the session row; the existing route summary adds one 27px row.
-pub const height: f32 = 348;
+// Header + identity summary + six compact fact rows.
+pub const height: f32 = 300;
 pub const margin: f32 = 8;
 pub const anchor_gap: f32 = 6;
 
@@ -33,7 +33,7 @@ pub fn header() ui.BoxStyle {
 }
 pub fn body() ui.BoxStyle {
     var result = shared.stack();
-    result.gap = 9;
+    result.gap = 6;
     return result;
 }
 pub fn info() ui.BoxStyle {

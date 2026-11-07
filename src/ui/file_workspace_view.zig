@@ -464,14 +464,14 @@ pub const Pane = struct {
         const scope = view.scope;
         const self = try scope.createState(Pane, .{ .view = view, .side = side, .root = undefined, .title = undefined, .subtitle = undefined, .endpoint_tip = try scope.createText("", .{}), .badge = undefined, .path = undefined, .path_value = try scope.createText("", .{}), .nav_disabled = try scope.createSignal(bool, true), .back_disabled = try scope.createSignal(bool, true), .parent_disabled = try scope.createSignal(bool, true), .write_disabled = try scope.createSignal(bool, true), .mkdir_disabled = try scope.createSignal(bool, true), .table = undefined, .header = undefined, .headings = undefined, .heading_buttons = undefined, .all_checked = try scope.createSignal(bool, false), .mixed = try scope.createSignal(bool, false), .list = undefined, .virtual = undefined, .empty = undefined, .empty_text = undefined, .footer = undefined, .summary = undefined, .mode = undefined, .actions = undefined, .status = undefined, .error_box = undefined, .error_text = undefined, .error_detail = undefined, .recovery_detail = undefined, .paint = try scope.createSignal(u64, 0) });
         self.root = try ui.boxStyled(cx, S.card, .{});
-        @import("layer_materials.zig").card(self.root, .surface_1);
+        @import("layer_materials.zig").card(self.root, .overlay);
         self.root.meta.ownership.meta.test_id = if (side == .local) "files.local" else "files.remote";
         self.toolbar = try ui.boxStyled(cx, S.toolbar, .{});
         self.toolbar.meta.ownership.meta.test_id = "files.toolbar";
         try self.root.appendChild(cx.allocator, self.toolbar);
-        const top = try ui.box(cx, S.line(30), .{});
+        const top = try ui.box(cx, S.line(32), .{});
         try self.toolbar.appendChild(cx.allocator, top);
-        const title_icon = try ui.iconTint(cx, if (side == .local) @import("file_workspace_title_icons.zig").home else @import("file_workspace_title_icons.zig").server, S.theme.current().accent, S.icon(19));
+        const title_icon = try ui.iconTint(cx, if (side == .local) @import("file_workspace_title_icons.zig").home else @import("file_workspace_title_icons.zig").server, S.theme.current().accent, S.icon(18));
         title_icon.meta.ownership.meta.test_id = "files.title.icon";
         try top.appendChild(cx.allocator, title_icon);
         const endpoint = try ui.widgets.Tooltip(.{ .text = self.endpoint_tip, .open_delay_ms = 450 }).mount(scope, cx);
@@ -491,13 +491,13 @@ pub const Pane = struct {
         }
         try top.appendChild(cx.allocator, badge);
         try top.appendChild(cx.allocator, try ui.spacer(cx));
-        _ = try self.button(top, "refresh-cw", "刷新当前目录", .refresh, null, 24);
+        _ = try self.button(top, "refresh-cw", "刷新当前目录", .refresh, null, 32);
         self.subtitle = try label(cx, self.root, S.subtitle, "");
         self.subtitle.setStyleInline(cx.allocator, .{ .height = .{ .px = 18 }, .flex_shrink = 0, .width = .fill(), .overflow = .hidden });
-        const path_row = try ui.box(cx, S.line(30), .{});
+        const path_row = try ui.box(cx, S.line(32), .{});
         try self.toolbar.appendChild(cx.allocator, path_row);
-        _ = try self.button(path_row, "arrow-left", "返回上一个目录", .back, self.back_disabled, 24);
-        _ = try self.button(path_row, "arrow-up", "上级目录", .parent, self.parent_disabled, 24);
+        _ = try self.button(path_row, "arrow-left", "返回上一个目录", .back, self.back_disabled, 32);
+        _ = try self.button(path_row, "arrow-up", "上级目录", .parent, self.parent_disabled, 32);
         const field = try ui.boxStyled(cx, S.pathField, .{});
         try path_row.appendChild(cx.allocator, field);
         field.setStyleInline(cx.allocator, .{ .padding = .{ .left = 7, .right = 7 }, .gap = 2 });
@@ -507,10 +507,10 @@ pub const Pane = struct {
         field.behavior.interaction.a11y = .{ .role = .button, .label = "编辑当前目录路径" };
         const path_scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
         self.breadcrumb_frame = path_scroll.container;
-        self.breadcrumb_frame.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .height = .{ .px = 30 }, .min_width = 0 });
+        self.breadcrumb_frame.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .height = .{ .px = 32 }, .min_width = 0 });
         self.breadcrumb_frame.meta.ownership.meta.test_id = "files.breadcrumb";
         self.breadcrumb = path_scroll.content;
-        self.breadcrumb.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 2, .flex_shrink = 0 });
+        self.breadcrumb.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 2, .flex_shrink = 0 });
         try field.appendChild(cx.allocator, self.breadcrumb_frame);
         self.path = try ui.widgets.Input(.{ .value = self.path_value, .growable = true, .embedded = true, .disabled = self.nav_disabled, .on_submit = cx.on(Pane, self, inputSubmitted) }).mountResult(scope, cx);
         self.path.node.setStyleInline(cx.allocator, S.pathInput());
@@ -530,8 +530,8 @@ pub const Pane = struct {
         self.path.input_container.behavior.events.capture_context = self;
         self.path.node.setDisplay(.none);
         try field.appendChild(cx.allocator, self.path.node);
-        self.history_button = try self.button(field, "chevron-down", "目录历史", .history, self.nav_disabled, 14);
-        const filter_row = try ui.box(cx, S.line(30), .{});
+        self.history_button = try self.button(field, "chevron-down", "目录历史", .history, self.nav_disabled, 24);
+        const filter_row = try ui.box(cx, S.line(32), .{});
         filter_row.meta.ownership.meta.test_id = "files.filter_row";
         try self.toolbar.appendChild(cx.allocator, filter_row);
         const filter_field = try ui.boxStyled(cx, S.pathField, .{});
@@ -543,8 +543,8 @@ pub const Pane = struct {
         self.filter.input_container.setStyleInline(cx.allocator, S.pathInput());
         self.filter.input_container.meta.ownership.meta.test_id = "files.filter";
         try filter_field.appendChild(cx.allocator, self.filter.node);
-        _ = try self.button(filter_row, "plus", "新建文件夹", .new_folder, self.mkdir_disabled, 24);
-        self.context_button = try self.button(filter_row, "ellipsis", "当前文件操作", .context, null, 24);
+        _ = try self.button(filter_row, "plus", "新建文件夹", .new_folder, self.mkdir_disabled, 32);
+        self.context_button = try self.button(filter_row, "ellipsis", "当前文件操作", .context, null, 32);
         self.stale_notice = try label(cx, self.root, S.staleText, "上次列表 · 已过期");
         self.stale_notice.meta.ownership.meta.test_id = "files.stale.notice";
         self.stale_notice.setStyleInline(cx.allocator, S.staleNotice());
@@ -608,17 +608,17 @@ pub const Pane = struct {
         self.actions = self.footer;
         self.status = try label(cx, self.actions, S.secondary, "");
         self.status.setStyleInline(cx.allocator, .{ .max_width = 180, .min_width = 0, .overflow = .hidden });
-        _ = try self.button(self.actions, if (side == .local) "upload" else "download", if (side == .local) "上传所选" else "下载所选", .transfer, self.write_disabled, 28);
+        _ = try self.button(self.actions, if (side == .local) "upload" else "download", if (side == .local) "上传所选" else "下载所选", .transfer, self.write_disabled, 32);
         self.error_box = try ui.boxStyled(cx, S.errorBox, .{});
         self.error_box.meta.ownership.meta.test_id = "files.error";
         self.error_text = try label(cx, self.error_box, S.errorText, "");
         self.error_detail = try label(cx, self.error_box, S.secondary, "上次列表 · 已过期");
         self.recovery_detail = try label(cx, self.error_box, S.secondary, "");
         self.recovery_detail.setDisplay(.none);
-        const recovery = try ui.box(cx, S.line(30), .{});
+        const recovery = try ui.box(cx, S.line(32), .{});
         try recovery.appendChild(cx.allocator, try ui.spacer(cx));
         _ = try self.button(recovery, "plug", "恢复原文件连接", .recover, null, 24);
-        _ = try self.button(recovery, "refresh-cw", "重新读取当前目录", .refresh, null, 24);
+        _ = try self.button(recovery, "refresh-cw", "重新读取当前目录", .refresh, null, 32);
         try self.error_box.appendChild(cx.allocator, recovery);
         self.drag_preview = try ui.boxStyled(cx, S.dragPreview, .{});
         self.drag_preview.meta.ownership.meta.test_id = "files.drag.preview";
@@ -724,6 +724,7 @@ pub const Pane = struct {
         const scope = self.view.scope;
         const control = try scope.createState(Control, .{ .pane = self, .kind = kind });
         const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon).?, .icon_size = @min(@as(f32, 16), size), .a11y_label = help, .base_style = S.iconButton(size), .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false }, .on_click = cx.on(Control, control, Control.run) }).mount(scope, cx);
+        try @import("icon_button_feedback.zig").Binding.attach(cx, scope, node);
         control.node = node;
         node.meta.ownership.meta.test_id = switch (kind) {
             .new_folder => "files.new_folder",
@@ -886,11 +887,11 @@ pub const Pane = struct {
         const preferred_size = self.preferred_columns[1];
         const preferred_date = self.preferred_columns[2];
         const preferred_total = preferred_name + preferred_size + (if (compact) @as(f32, 0) else preferred_date);
-        const remaining = @max(0, width - 34);
+        const remaining = @max(0, width - 36);
         const size_width = remaining * preferred_size / preferred_total;
         const date_width = if (compact) 0 else remaining * preferred_date / preferred_total;
         const name_width = remaining - size_width - date_width;
-        self.toolbar.setStyleInline(cx.allocator, .{ .padding = .{ .top = if (compact) 8 else 14, .right = 12, .bottom = if (compact) 9 else 11, .left = 12 } });
+        self.toolbar.setStyleInline(cx.allocator, .{ .padding = .{ .top = 6, .right = 16, .bottom = 12, .left = 16 } });
         self.heading_buttons[2].setDisplay(if (compact) .none else .flex);
         var changed = false;
         if (@abs(width - self.column_width) > 0.01 or @abs(size_width - self.size_width) > 0.01 or @abs(date_width - self.date_width) > 0.01 or @abs(name_width - self.name_width) > 0.01) {

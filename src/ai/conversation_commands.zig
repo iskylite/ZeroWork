@@ -21,10 +21,12 @@ pub const Command = struct {
     end_started: bool = false,
     pub fn prepare(service: *runtime.Service, kind: Kind, source: ?identity.ConversationId, target: identity.AgentId) !Command {
         const runner = service.runnerFor(target) orelse return error.AgentNotFound;
+        if (runner.agent.role != .attached) return error.ChildRequiresParent;
         if (runner.agent.closing) return error.AgentClosed;
         var command: Command = .{ .kind = kind, .operation = identity.HostOperationId.generate(), .source = source, .target = target, .owner = runner.agent.owner, .environment = runner.agent.environment, .previous = if (runner.agent.current) |id| try service.store.fence(id) else null };
         if (kind == .restore or kind == .copy or kind == .copy_use) {
             const record = service.store.find(source orelse return error.ConversationNotFound) orelse return error.ConversationNotFound;
+            if (record.child != null) return error.ChildRequiresParent;
             command.source_revision = record.revision;
             command.source_content_revision = record.content_revision;
             if (kind == .restore) {
@@ -94,7 +96,7 @@ pub const Command = struct {
                 const id = try service.store.publishFork(&self.pinned.?, self.target);
                 runner.record = service.store.find(id);
                 runner.context = null;
-                runner.manager.input = null;
+                if (runner.worker) |worker| worker.manager.input = null;
                 runner.has_tools = false;
                 break :blk .{ .conversation = id, .used = true };
             },

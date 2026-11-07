@@ -53,6 +53,7 @@ pub const Snapshot = struct {
         copy.ui.cursor_style = try owned.dupe(u8, value.ui.cursor_style);
         copy.ui.materials.background.path = try owned.dupe(u8, value.ui.materials.background.path);
         copy.transfer.download_dir = try owned.dupe(u8, value.transfer.download_dir);
+        copy.ai.extensions = try value.ai.extensions.clone(owned);
         copy.ai.default_provider = try owned.dupe(u8, value.ai.default_provider);
         copy.ai.providers = try owned.dupe(config.AiProvider, value.ai.providers);
         for (copy.ai.providers, value.ai.providers) |*dst, src| {
@@ -80,6 +81,9 @@ pub const Snapshot = struct {
     }
 
     pub fn deinit(self: *Snapshot) void {
+        for (self.value.ai.extensions.servers) |server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |entry| if (entry.secret) {
+            std.crypto.secureZero(u8, @constCast(entry.value));
+        };
         self.arena.deinit();
         self.* = undefined;
     }
@@ -134,6 +138,9 @@ pub const RuntimeConfig = struct {
         next.config_revision = self.value.config_revision + 1;
         const changed = schema.changed(self.value, next);
         var policy_changes = changed;
+        policy_changes.unset(schema.extensions_index);
+        policy_changes.unset(schema.find("ai", "child_context_mode").?);
+        policy_changes.unset(schema.find("ai", "child_reuse_policy").?);
         policy_changes.unset(schema.find("ai", "permission_mode").?);
         policy_changes.unset(schema.find("ai", "execution_mode").?);
         next.agent_policy_revision = if (policy_changes.count() == 0) self.value.agentPolicyRevision() else next.config_revision;

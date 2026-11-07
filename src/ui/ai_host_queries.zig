@@ -56,8 +56,19 @@ pub fn needsWorkspaceApproval(_: *Application, _: ?*@import("group_model.zig").R
     return false;
 }
 
+fn assigned(child_agent: ?*const @import("../ai/session_lifecycle.zig").Agent, handle: identity.SessionHandle) bool {
+    const child = child_agent orelse return true;
+    for (child.targets) |target| if (target.eql(handle)) return true;
+    return false;
+}
 fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roster, initial: @import("../ai/tool_scope.zig").Owner, options: Options, cursor_key: [32]u8, context: host.Context, now: i64, a: std.mem.Allocator) !queries.Snapshot {
     try context.validate();
+    var child_agent: ?*const @import("../ai/session_lifecycle.zig").Agent = null;
+    if (context.child_origin) |origin| {
+        const service = &(app.domain.ai orelse return error.ScopeChanged).service;
+        _ = try service.validateAuthority(context);
+        child_agent = service.store.agent(origin.agent) orelse return error.ScopeChanged;
+    }
     var sessions: std.ArrayList(queries.Session) = .empty;
     const binding = context.binding;
     const group = if (binding == .group) (roster orelse return error.ContextUnavailable).findById(std.math.cast(u32, binding.group) orelse return error.ContextUnavailable) orelse return error.ContextUnavailable else null;
@@ -73,7 +84,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
             for (value.members.items) |member| if (member.active and member.pane_id == tab.id) break :blk true;
             break :blk false;
         } else @backingInt(handle.session_id) == binding.session;
-        if (!in_binding) continue;
+        if (!in_binding or !assigned(child_agent, handle)) continue;
         const basic = basicMetadata(app, tab, a);
         const state = app.sessions.queryState(handle) orelse {
             try sessions.append(a, basic);
@@ -102,6 +113,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
     // historical metadata across Tasks, regardless of task-owned status.
     // A removed live member never enters this directory.
     for (app.deferred_closes.items) |*close| {
+        if (!assigned(child_agent, close.handle)) continue;
         if (!queries.sameHistoricalBinding(close.context, context) or close.snapshot.state != .closed) continue;
         const state = app.sessions.queryState(close.handle) orelse continue;
         if (state.lifecycle != .closed) continue;
@@ -116,7 +128,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
             for (entry.members.items) |member| {
                 if (!member.active) continue;
                 for (app.workspace.tabs.items) |tab| {
-                    if (tab.id == member.pane_id and tab.content_owner == .session) {
+                    if (tab.id == member.pane_id and tab.content_owner == .session and assigned(child_agent, tab.content_owner.session)) {
                         try members.append(a, tab.content_owner.session);
                         break;
                     }
@@ -453,4 +465,84 @@ test "current-tab projection ignores old inventory grants and external changes" 
     roster.groups.items[0].membership_revision += 1;
     const second = try captureSnapshot(&app, &roster, context.binding, options, @splat(3), context, 100, arena.allocator());
     try std.testing.expectEqual(first.source_revision, second.source_revision);
+}
+
+test "v0.4 child metadata projects only assigned handles and never leaks a sibling group member" {
+    const a = std.testing.allocator;
+    const Runtime = @import("../ai/session_runtime.zig");
+    const P = @import("../ai/provider.zig");
+    const Fake = struct {
+        fn prepare(raw: *anyopaque, _: std.mem.Allocator, _: std.Io, context: Runtime.Context) !Runtime.Prepared {
+            return .{ .provider = .{ .ctx = raw, .chat = chat, .models = models }, .request = .{ .model = "mock", .system = "", .messages = &.{} }, .scope = .{ .owner = context.owner, .members = .{} } };
+        }
+        fn chat(_: *anyopaque, _: P.ChatRequest, sink: *const fn (*anyopaque, P.Delta) void, raw: *anyopaque) !P.ChatStats {
+            sink(raw, .done);
+            return .{};
+        }
+        fn models(_: *anyopaque, alloc: std.mem.Allocator) ![]P.ModelInfo {
+            return alloc.alloc(P.ModelInfo, 0);
+        }
+    };
+    var settings: config.Config = .{};
+    var workspace: @import("workspace.zig").Workspace = undefined;
+    workspace.app_config = &settings;
+    workspace.tabs = .empty;
+    defer workspace.tabs.deinit(a);
+    const first_handle: identity.SessionHandle = .{ .session_id = @fromBackingInt(4), .generation = 2 };
+    const sibling_handle: identity.SessionHandle = .{ .session_id = @fromBackingInt(8), .generation = 3 };
+    var first: SessionTab = .{ .id = 11, .tab_id = @fromBackingInt(11), .content_owner = .{ .session = first_handle }, .host_id = 0, .host_index = 0, .host_snapshot = null, .root = undefined, .local = true };
+    first.setTitle("assigned visible");
+    var sibling: SessionTab = .{ .id = 12, .tab_id = @fromBackingInt(12), .content_owner = .{ .session = sibling_handle }, .host_id = 0, .host_index = 0, .host_snapshot = null, .root = undefined, .local = true };
+    sibling.setTitle("secret sibling");
+    try workspace.tabs.append(a, &first);
+    try workspace.tabs.append(a, &sibling);
+    var sessions = try @import("../host/session_host.zig").SessionHost.init(a, &.{});
+    defer sessions.deinit();
+    var shared = @import("../ai/attached_service.zig").Host.init(a);
+    // Standalone service, with no UI Bridge/transport or active Worker at teardown.
+    defer {
+        shared.service.deinit();
+        shared.presentations.deinit();
+    }
+    var domain: @import("application_host.zig").Domain = undefined;
+    domain.ai = &shared;
+    var app: Application = undefined;
+    app.domain = &domain;
+    app.workspace = &workspace;
+    app.sessions = &sessions;
+    app.deferred_closes = .empty;
+    var roster = @import("group_model.zig").Roster.init(a);
+    defer roster.deinit();
+    const group_id = (try roster.join("current", first.id, 0)).id;
+    _ = try roster.join("current", sibling.id, 0);
+    const owner: @import("../ai/tool_scope.zig").Owner = .{ .group = group_id };
+    const parent = try shared.service.store.attach(owner);
+    const parent_fence = try shared.service.store.create(parent.id);
+    const child = try shared.service.store.registerChild(parent_fence, .{ .name = "reader", .request_key = "reader" }, null);
+    var backend_context: u8 = 0;
+    const runner = try shared.service.useChild(parent_fence, child.child.?.info.agent, child.revision, .{ .owner = owner, .members = .{}, .inventory = &.{ 4, 8 } }, &.{first_handle}, .{ .context = &backend_context, .prepare = Fake.prepare }, null);
+    const ticket = try shared.service.store.fence(child.id);
+    _ = try shared.service.submit(ticket, .generate(), .{ .content = "read only assigned target" }, null);
+    const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    while (runner.thread != null or runner.agent.busy) {
+        try shared.service.poll();
+        if (started.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() > 3000) return error.WorkerTimeout;
+        std.Thread.yield() catch {};
+    }
+    const context = runner.context.?.authority();
+    const options: Options = .{ .execution_policy = .{ .execution_mode = .auto, .session_retention = .ask }, .permission_mode = .confirm, .host_contributions = &queries.contributions };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const snapshot = try captureSnapshot(&app, &roster, owner, options, @splat(3), context, 100, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), snapshot.sessions.len);
+    try std.testing.expect(snapshot.sessions[0].handle.eql(first_handle));
+    try std.testing.expectEqual(@as(usize, 1), snapshot.groups.len);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.groups[0].members.len);
+    try std.testing.expect(!queries.permitsSessionId(snapshot, 8));
+    sibling.setTitle("sibling changed");
+    const changed = try captureSnapshot(&app, &roster, owner, options, @splat(3), context, 100, arena.allocator());
+    try std.testing.expectEqual(snapshot.source_revision, changed.source_revision);
+    _ = try shared.service.store.environmentChanged(parent.id);
+    try std.testing.expectError(error.ScopeChanged, captureSnapshot(&app, &roster, owner, options, @splat(3), context, 100, arena.allocator()));
+    try shared.service.endConversation(ticket, .generate());
 }

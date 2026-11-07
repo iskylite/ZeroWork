@@ -24,7 +24,7 @@ const operation: services.OperationKey = .{ .owner = .{ .session = owner }, .ope
 const State = enum { controlled, read_only, no_signal, disconnected, partial, unknown, progress_log, management };
 const ProgressFixture = struct { revision: u64 = 1, stage: console.progress.Stage = .public_script, elapsed_ms: u64 = 9900, stage_elapsed_ms: u64 = 9900, long_route: bool = false, event_count: ?u8 = null, completed_stage_ms: [@typeInfo(console.progress.Stage).@"enum".field_names.len]?u64 = @splat(null), failure: bool = false, log_generation: u64 = 1 };
 var selected_state: State = .controlled;
-var selected_theme: theme.Name = .dark;
+var selected_theme: []const u8 = "dark";
 var app_instance: ?*App = null;
 var active_fixture: ?*Fixture = null;
 const evidence: services.Evidence = .{ .source_uri = "/local-fixture/system", .collected_ms = 1, .validity = .valid, .corroborated = true };
@@ -57,6 +57,7 @@ const Fixture = struct {
     main_thread: std.Thread.Id,
     root: *ui.Node,
     slot: *ui.Node,
+    sidebar: *ui.Node,
     budget: frames.Budget = frames.Budget.init(128 * 1024 * 1024),
     sink: frames.Sink = undefined,
     fb: framebuffer.Service = undefined,
@@ -398,6 +399,12 @@ const Fixture = struct {
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self = from(raw);
+        const sidebar_width: f32 = if (self.cx.viewport.width < 1000) 220 else 238;
+        if (self.sidebar.style.width != .px or self.sidebar.style.width.px != sidebar_width) {
+            self.sidebar.setStyle(self.cx.allocator, .width, .{ .px = sidebar_width });
+            return .needs_layout;
+        }
+
         if (!self.closed) {
             _ = self.sink.drain() catch false;
             self.pump();
@@ -469,35 +476,43 @@ fn syntheticFrame(self: *Fixture) !void {
     _ = try self.sink.drain();
 }
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-    theme.select(selected_theme);
-    cx.setTheme(theme.widgetTheme(selected_theme));
+    theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(selected_theme));
+    cx.setTheme(theme.widgetTheme(theme.currentName()));
     const shell = @import("ui/shell_styles.zig");
     const root = try ui.boxStyled(cx, shell.root, .{});
     root.meta.ownership.meta.test_id = "fixture.window";
-    const top = try ui.boxStyled(cx, shell.title, .{});
-    top.meta.ownership.meta.test_id = "fixture.shell.header";
-    try root.appendChild(cx.allocator, top);
-    try top.appendChild(cx.allocator, try ui.text(cx, "ZeroWork · BMC renderer · LOCAL SYNTHETIC FIXTURE", .{ .font_size = 12, .color = theme.current().fg_2 }));
     const body = try ui.boxStyled(cx, shell.body, .{});
     body.meta.ownership.meta.test_id = "fixture.shell.body";
     try root.appendChild(cx.allocator, body);
     const sidebar = try ui.boxStyled(cx, shell.sidebar, .{});
     sidebar.meta.ownership.meta.test_id = "fixture.shell.sidebar";
+    sidebar.setStyleInline(cx.allocator, .{ .padding = .{ .top = 66, .left = 14, .right = 10 } });
     try body.appendChild(cx.allocator, sidebar);
-    try sidebar.appendChild(cx.allocator, try ui.text(cx, "主机与连接 · SYNTHETIC", .{ .font_size = 13, .color = theme.current().fg_2 }));
+    try sidebar.appendChild(cx.allocator, try ui.text(cx, "主机与连接", .{ .font_size = 13, .color = theme.current().fg_2 }));
+    const content = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column }, .{});
+    try body.appendChild(cx.allocator, content);
+    const top = try ui.boxStyled(cx, shell.title, .{});
+    top.meta.ownership.meta.test_id = "fixture.shell.header";
+    try content.appendChild(cx.allocator, top);
+    const tab = try ui.boxStyled(cx, shell.tabCapsule, .{});
+    tab.setStyleInline(cx.allocator, .{ .padding = .{ .left = 16, .right = 16, .top = 6, .bottom = 6 } });
+    try tab.appendChild(cx.allocator, try ui.text(cx, "KVM 控制台", .{ .font_size = 12.5, .font_weight = 500, .color = theme.current().fg_1 }));
+    try top.appendChild(cx.allocator, tab);
     const pane = try ui.boxStyled(cx, shell.pane, .{});
     pane.meta.ownership.meta.test_id = "fixture.shared_pane";
-    try body.appendChild(cx.allocator, pane);
+    try content.appendChild(cx.allocator, pane);
     const slot = try ui.box(cx, @import("ui/local_session_styles.zig").pane(), .{});
     slot.meta.ownership.meta.test_id = "fixture.content_slot";
     try pane.appendChild(cx.allocator, slot);
     const status = try status_ui.mountStatusBar(cx, scope, try ui.text(cx, "连接中", .{}));
+    @import("ui/workspace_chrome.zig").retainLegacy(cx, status.bar);
+    status.bar.setDisplay(.none);
     try root.appendChild(cx.allocator, status.bar);
-    const self = try scope.createState(Fixture, .{ .cx = cx, .main_thread = std.Thread.getCurrentId(), .root = root, .slot = slot });
+    const self = try scope.createState(Fixture, .{ .cx = cx, .main_thread = std.Thread.getCurrentId(), .root = root, .slot = slot, .sidebar = sidebar });
     self.status_host = try status_ui.Host.mount(cx, scope, .{ .context = self, .capture = Fixture.captureDetails, .copy = Fixture.copyStatus, .logs = Fixture.statusAction, .reconnect = Fixture.statusAction, .hide_chain = Fixture.hideStatus });
     self.status_host.?.bind(status.controls, self, Fixture.showTheme);
     status.chain_trigger.behavior.events.on_click = .{ .context = self, .callback = Fixture.showDetails };
-    try status.controls.setThemeName(cx, @tagName(selected_theme));
+    try status.controls.setThemeName(cx, selected_theme);
     self.fb = framebuffer.Service.init(cx.allocator, owner, &self.budget);
     self.sink = frames.Sink.initWithBudget(owner, frames.backendFor((app_instance orelse return error.AppUnavailable).sharedImageStore() orelse return error.ImageStoreUnavailable), &self.budget, .kvm);
     try scope.onCleanup(Fixture, self, Fixture.cleanup);
@@ -522,11 +537,11 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
 fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
     const self = active_fixture orelse return null;
     if (std.mem.eql(u8, path, "/app/bmc-fixture/appearance")) {
-        const parsed = std.json.parseFromSlice(struct { theme: theme.Name, transparency: f32, blur: f32 }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid appearance fixture\"}";
+        const parsed = std.json.parseFromSlice(struct { theme: []const u8, transparency: f32, blur: f32 }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid appearance fixture\"}";
         defer parsed.deinit();
-        theme.select(parsed.value.theme);
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(parsed.value.theme));
         _ = theme.setMaterialParameters(parsed.value.transparency, parsed.value.blur);
-        self.publication.publish(self.cx, theme.widgetTheme(parsed.value.theme));
+        self.publication.publish(self.cx, theme.widgetTheme(theme.currentName()));
         return "{\"ok\":true}";
     }
     if (std.mem.eql(u8, path, "/app/bmc-fixture/material-node")) {
@@ -728,7 +743,7 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = std.meta.stringToEnum(theme.Name, arg[8..]) orelse return error.InvalidTheme else if (std.mem.startsWith(u8, arg, "--state=")) selected_state = std.meta.stringToEnum(State, arg[8..]) orelse return error.InvalidFixtureState else return error.InvalidFixtureArgument;
+        if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = @import("config/imported_theme.zig").builtinId(arg[8..]) orelse return error.InvalidTheme else if (std.mem.startsWith(u8, arg, "--state=")) selected_state = std.meta.stringToEnum(State, arg[8..]) orelse return error.InvalidFixtureState else return error.InvalidFixtureArgument;
     }
     try @import("platform/ui_fonts.zig").register();
     var application = zenit.MultiWindowApp.init(std.heap.c_allocator, .{ .shared_gpu = true });

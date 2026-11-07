@@ -78,10 +78,12 @@ pub const EchoFilter = struct {
         var index: usize = 0;
         var after_cr = false;
         while (index < bytes.len) {
-            if (source == header.len) return if (echoTerminator(bytes[index..])) index else null;
+            if (source == header.len and echoTerminator(bytes[index..])) return index;
             const byte = bytes[index];
             if (byte == ' ' and index + 2 < bytes.len and bytes[index + 1] == '\r' and bytes[index + 2] != '\n') {
-                index += 1;
+                // Readline's padding space is followed by CR, with no
+                // source character redrawn at the start of the next row.
+                index += 2;
                 continue;
             }
             if (byte == '\r') {
@@ -93,6 +95,14 @@ pub const EchoFilter = struct {
                 // source characters, including adjacent equal chars such as ||.
                 if (next + 2 < bytes.len and bytes[next + 1] == '\r' and bytes[next] == bytes[next + 2]) {
                     index = next + 2;
+                    continue;
+                }
+                // Bash Readline can print the first wrap character, CR,
+                // then print it again. Consume that redraw before matching
+                // the next source character: it may be identical (||, ((,
+                // or repeated nonce digits), so mismatch recovery is too late.
+                if (source != 0 and index != 0 and bytes[index - 1] == header[source - 1] and next < bytes.len and bytes[next] == header[source - 1]) {
+                    index = next + 1;
                     continue;
                 }
                 after_cr = true;
@@ -112,6 +122,7 @@ pub const EchoFilter = struct {
                 index = end + 1;
                 continue;
             }
+            if (source == header.len) return null;
             if (byte != header[source]) {
                 if (!after_cr or source == 0 or byte != header[source - 1]) return null;
                 after_cr = false;
@@ -403,4 +414,41 @@ test "initializer echo filter timeout and capacity release original bytes" {
     try std.testing.expectEqualStrings("banner\r\n", ready.bytes);
     try std.testing.expectEqualSlices(u8, &large, ready.remainder);
     try std.testing.expect(!filter.active);
+}
+
+test "initializer echo filter handles Bash redraw at every source boundary" {
+    const a = std.testing.allocator;
+    const nonce = "00112233445566778899aabbccddeeff";
+    const chunks = try initializerChunks(a, nonce);
+    defer {
+        for (chunks) |chunk| a.free(chunk);
+        a.free(chunks);
+    }
+    const header = std.mem.trimEnd(u8, chunks[0], "\n");
+    const ack = "\x1b]133;P;zw_init=" ++ nonce ++ ";1;128\x07";
+    // Real Readline wraps can duplicate any character, including the first
+    // of adjacent equal source characters. Older versions use space + CR.
+    for (1..header.len + 1) |boundary| {
+        for ([_]bool{ false, true }) |padding| {
+            const echo = try std.fmt.allocPrint(a, "banner\r\nprompt> {s}{s}\r{s}{s}\r\n{s}after\r\n", .{
+                header[0..boundary],
+                if (padding) " " else "",
+                if (padding) "" else header[boundary - 1 .. boundary],
+                header[boundary..],
+                ack,
+            });
+            defer a.free(echo);
+            var filter: EchoFilter = .{};
+            filter.arm(chunks[0], nonce);
+            // Split a native read inside the wrap sequence as well.
+            const split = "banner\r\nprompt> ".len + boundary + 1;
+            try std.testing.expect(filter.feed(echo[0..split]) == null);
+            // Whitespace after the complete command belongs to its terminator.
+            const expected = if (padding and boundary == header.len)
+                "banner\r\nprompt>  \r\r\n" ++ ack ++ "after\r\n"
+            else
+                "banner\r\nprompt> \r\n" ++ ack ++ "after\r\n";
+            try std.testing.expectEqualStrings(expected, filter.feed(echo[split..]).?.bytes);
+        }
+    }
 }

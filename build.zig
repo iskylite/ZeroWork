@@ -49,11 +49,13 @@ pub fn build(b: *std.Build) void {
     core.addLibraryPath(b.path("vendor/libghostty-vt"));
     core.addIncludePath(b.path("vendor/libghostty-vt/include"));
     core.linkSystemLibrary("ghostty-vt", .{});
+    core.linkSystemLibrary("curl", .{});
 
     const ghostty_translate = b.addTranslateC(.{ .root_source_file = b.path("vendor/libghostty-vt/include/ghostty/vt.h"), .target = target, .optimize = optimize });
     ghostty_translate.addIncludePath(b.path("vendor/libghostty-vt/include"));
     core.addImport("generated_ghostty_vt", ghostty_translate.createModule());
     // The static Local plugin owns the native PTY/process boundary.
+    core.addCSourceFile(.{ .file = b.path("src/ai/mcp_native.c"), .flags = &.{"-std=c11"} });
     core.addCSourceFile(.{ .file = b.path("src/local/darwin_process.c"), .flags = &.{"-std=c11"} });
     core.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = &.{} });
     core.addCSourceFile(.{ .file = b.path("src/platform/data_scope_lock.c"), .flags = &.{"-std=c11"} });
@@ -160,6 +162,7 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_runtime.m" }, .flags = if (test_mode) &.{ "-fobjc-arc", "-Wno-deprecated-declarations", "-DZW_UPDATE_TESTING=1" } else &.{ "-fobjc-arc", "-Wno-deprecated-declarations" } });
     exe.root_module.linkFramework("Security", .{});
+    exe.root_module.linkFramework("LocalAuthentication", .{});
     exe.root_module.linkSystemLibrary("archive", .{});
     const updater = b.addExecutable(.{ .name = "ZeroWorkUpdater", .root_module = b.createModule(.{ .root_source_file = b.path("src/update/helper_main.zig"), .target = target, .optimize = optimize }) });
     updater.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_installer.m" }, .flags = if (test_mode) &.{ "-fobjc-arc", "-Wno-deprecated-declarations", "-DZW_UPDATE_TESTING=1" } else &.{ "-fobjc-arc", "-Wno-deprecated-declarations" } });
@@ -370,10 +373,11 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
     tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     tests.root_module.linkSystemLibrary("ghostty-vt", .{});
+    tests.root_module.linkSystemLibrary("curl", .{});
     tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     tests.root_module.addIncludePath(b.path("src/proto/ssh"));
-    tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
+    tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/ai/mcp_native.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     tests.root_module.addCSourceFile(.{ .file = b.path("src/platform/data_scope_lock.c"), .flags = &.{"-std=c11"} });
     tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
@@ -404,13 +408,14 @@ pub fn build(b: *std.Build) void {
     bmc_tests.root_module.addCSourceFiles(.{ .files = &.{
         "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c",
         "src/platform/macos_credentials.m",     "src/platform/data_scope_lock.c",
-        "src/local/darwin_process.c",           "src/local/trusted_edit_native.c",
-        "src/local/secret_native.c",
+        "src/local/darwin_process.c",           "src/ai/mcp_native.c",
+        "src/local/trusted_edit_native.c",      "src/local/secret_native.c",
     }, .flags = &.{} });
     bmc_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     bmc_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     bmc_tests.root_module.linkSystemLibrary("ssh2", .{});
     bmc_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
+    bmc_tests.root_module.linkSystemLibrary("curl", .{});
     addCoreTextBridgeForTest(zenit_dep, bmc_tests);
     addBmcNative(b, bmc_tests.root_module);
     bmc_tests.step.dependOn(&verify_ssh.step);
@@ -574,7 +579,7 @@ pub fn build(b: *std.Build) void {
     bmc_live.root_module.addSystemIncludePath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include" });
     bmc_live.root_module.addLibraryPath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib" });
     b.step("bmc-live-readonly", "Build the stdin-only read-only native BMC acceptance runner").dependOn(&b.addInstallArtifact(bmc_live, .{}).step);
-    for ([_][]const u8{ "host-approval", "task-finish", "execution-result", "inventory-grant", "close-confirmation", "ai-empty-recent", "ai-recovery", "composer-interaction" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig", "src/inventory_grant_preview_runner.zig", "src/ai_close_confirmation_preview_runner.zig", "src/ai_empty_recent_preview_runner.zig", "src/ai_recovery_preview_runner.zig", "src/composer_interaction_preview_runner.zig" }) |name, source| {
+    for ([_][]const u8{ "host-approval", "task-finish", "execution-result", "inventory-grant", "close-confirmation", "ai-empty-recent", "ai-recovery", "composer-interaction", "button-policy" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig", "src/inventory_grant_preview_runner.zig", "src/ai_close_confirmation_preview_runner.zig", "src/ai_empty_recent_preview_runner.zig", "src/ai_recovery_preview_runner.zig", "src/composer_interaction_preview_runner.zig", "src/button_policy_preview_runner.zig" }) |name, source| {
         const preview = b.addExecutable(.{ .name = b.fmt("{s}-preview", .{name}), .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
         zenit.attach(zenit_dep, preview);
         preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
@@ -616,10 +621,11 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
     appearance_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     appearance_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
+    appearance_tests.root_module.linkSystemLibrary("curl", .{});
     appearance_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     appearance_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     appearance_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
-    appearance_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
+    appearance_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/ai/mcp_native.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     appearance_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     appearance_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     appearance_tests.root_module.linkSystemLibrary("ssh2", .{});
@@ -670,10 +676,11 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
     ui_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     ui_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
+    ui_tests.root_module.linkSystemLibrary("curl", .{});
     ui_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     ui_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     ui_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
-    ui_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
+    ui_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/ai/mcp_native.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     ui_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     ui_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     ui_tests.root_module.linkSystemLibrary("ssh2", .{});
@@ -712,10 +719,11 @@ pub fn build(b: *std.Build) void {
     plugin_tests.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
     plugin_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     plugin_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
+    plugin_tests.root_module.linkSystemLibrary("curl", .{});
     plugin_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     plugin_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     plugin_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
-    plugin_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
+    plugin_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/ai/mcp_native.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     plugin_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     plugin_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     plugin_tests.root_module.linkSystemLibrary("ssh2", .{});
@@ -825,7 +833,8 @@ pub fn build(b: *std.Build) void {
         addCoreTextBridgeForTest(zenit_dep, fixed_forward_runner);
         addBmcNative(b, fixed_forward_runner.root_module);
         if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner") or std.mem.eql(u8, runner.name, "ssh-bootstrap-runner") or std.mem.eql(u8, runner.name, "ssh-shell-execution-runner") or std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner") or std.mem.eql(u8, runner.name, "socks-worker-host-runner") or std.mem.eql(u8, runner.name, "forward-load-runner")) {
-            fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
+            fixed_forward_runner.root_module.linkSystemLibrary("curl", .{});
+            fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/local/darwin_process.c", "src/ai/mcp_native.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
             fixed_forward_runner.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = &.{} });
             fixed_forward_runner.root_module.linkFramework("Security", .{});
         }
@@ -931,6 +940,6 @@ fn addBmcNative(b: *std.Build, module: *std.Build.Module) void {
     }, .flags = &.{"-std=c11"} });
     module.addLibraryPath(b.path("vendor/mbedtls/library"));
     for ([_][]const u8{ "mbedtls", "mbedx509", "mbedcrypto", "z" }) |library| module.linkSystemLibrary(library, .{});
-    for ([_][]const u8{ "Security", "CoreFoundation", "CoreGraphics", "ImageIO" }) |framework| module.linkFramework(framework, .{});
+    for ([_][]const u8{ "Security", "CoreFoundation", "CoreGraphics", "ImageIO", "LocalAuthentication", "Foundation" }) |framework| module.linkFramework(framework, .{});
     module.link_libc = true;
 }

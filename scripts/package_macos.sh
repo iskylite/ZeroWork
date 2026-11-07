@@ -62,6 +62,7 @@ for marker in [b'fixture_probe',b'fixture_uprobe',b'/zerowork/windows']:
     if marker in binary: raise SystemExit('Refusing to package a fixture or Harness build')
 PY
 # Always resolve a persistent identity before the build; never fall back to ad-hoc.
+python3 scripts/build_credential_agent.py "$APP" --identifier com.zerowork.app --identity "$SIGNING_IDENTITY"
 codesign --force --sign "$SIGNING_IDENTITY" --identifier com.zerowork.updater "$APP/Contents/Helpers/ZeroWorkUpdater"
 for binary in "$APP"/Contents/MacOS/zw_*; do
   codesign --force --sign "$SIGNING_IDENTITY" "$binary"

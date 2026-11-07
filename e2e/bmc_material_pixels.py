@@ -19,7 +19,9 @@ for capture in report['captures']:
             x, y = r['x'] + 100, r['y'] + 100
             expected = spec['rgb']
         else:
-            x, y = r['x'] + (10 if spec['kind'] == 'progress' else 3), r['y'] + r['h'] / 2
+            # Progress glass has real blur: keep the sample in its empty bottom
+            # padding, away from video letterbox edges and text.
+            x, y = (r['x'] + r['w'] / 2, r['y'] + r['h'] - 12) if spec['kind'] == 'progress' else (r['x'] + 3, r['y'] + r['h'] / 2)
             bg = node['background']
             alpha = bg['a'] / 255
             if spec['kind'] == 'progress':

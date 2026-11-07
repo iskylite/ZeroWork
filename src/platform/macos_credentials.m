@@ -2,11 +2,45 @@
 #include <Security/Security.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING)
+#include "credential_agent_client.h"
+#endif
+#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING) && !defined(ZW_CREDENTIALS_CONFIRM_EXTERNAL)
+#import <LocalAuthentication/LocalAuthentication.h>
+#include <stdatomic.h>
+// This is an application-level gate. Legacy Keychain ACLs remain enforced by
+// macOS in the agent; this does not claim biometric protection of the item.
+static OSStatus confirm_vault(void) {
+    @autoreleasepool {
+        LAContext *context = [[LAContext alloc] init];
+        NSError *error = nil;
+        if (![context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&error]) {
+            [context release]; return errSecNotAvailable;
+        }
+        __block atomic_int outcome;
+        atomic_init(&outcome, 0);
+        [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+            localizedReason:@"解锁已保存的连接凭据和 API Key"
+            reply:^(BOOL success, NSError *failure) {
+                int value = success ? 1 :
+                    (failure.code == LAErrorUserCancel || failure.code == LAErrorAppCancel || failure.code == LAErrorSystemCancel) ? 2 : 3;
+                atomic_store(&outcome, value);
+            }];
+        while (atomic_load(&outcome) == 0) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+        int result = atomic_load(&outcome);
+        [context invalidate]; [context release];
+        return result == 1 ? errSecSuccess : result == 2 ? -43001 : -43002;
+    }
+}
+#endif
 
 // One item per app scope. The signed app reads it once, then updates that same
-// item from its process cache. Never relax the item's default macOS ACL.
+// item from its process cache. The agent keeps its own default macOS ACL.
 static CFStringRef cached_service;
 static CFMutableDictionaryRef cached_vault;
+#if !defined(ZW_CREDENTIALS_LOCAL)
+static CFStringRef confirmed_service;
+#endif
 static int vault_exists;
 static const CFStringRef vault_account = CFSTR("vault-v1");
 
@@ -16,6 +50,11 @@ static const CFStringRef vault_account = CFSTR("vault-v1");
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static OSStatus no_ui_call(int operation, CFDictionaryRef query, CFDictionaryRef updates, CFTypeRef *result) {
+#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING)
+    // Keep the existing standalone Zig/dev runners working. Packaged apps fail
+    // closed if their signed helper is missing, invalid or refuses the caller.
+    if (credential_agent_is_bundled()) return credential_agent_call(operation, query, updates, result, 0);
+#endif
     Boolean previous = false;
     OSStatus status = SecKeychainGetUserInteractionAllowed(&previous);
     if (status) return status;
@@ -46,6 +85,10 @@ static CFMutableDictionaryRef vault_query(const char *service) {
 // Resolve only this exact service/account to an item reference, never its data.
 static OSStatus delete_vault(CFDictionaryRef query) {
     OSStatus status = no_ui_call(3, query, NULL, NULL);
+#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING)
+    // Legacy deletion fallback is performed inside the agent as the owner.
+    if (credential_agent_is_bundled()) return status;
+#endif
     if (status != errSecInvalidOwnerEdit) return status;
     CFMutableDictionaryRef ref_query = CFDictionaryCreateMutableCopy(NULL, 0, query);
     if (!ref_query) return errSecAllocate;
@@ -90,6 +133,20 @@ static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
     }
     CFMutableDictionaryRef q = vault_query(service);
     if (!q) { CFRelease(name); return errSecAllocate; }
+#if !defined(ZW_CREDENTIALS_LOCAL)
+    // Probe metadata before reading any saved secret. New/empty installations
+    // do not ask for authentication. Cache is published only after all checks.
+    OSStatus presence = no_ui_call(0, q, NULL, NULL);
+    if (presence != errSecSuccess && presence != errSecItemNotFound) {
+        CFRelease(q); CFRelease(name); return presence;
+    }
+    if (presence == errSecSuccess && (!confirmed_service || !CFEqual(confirmed_service, name))) {
+        OSStatus confirmation = confirm_vault();
+        if (confirmation) { CFRelease(q); CFRelease(name); return confirmation; }
+        if (confirmed_service) CFRelease(confirmed_service);
+        confirmed_service = CFRetain(name);
+    }
+#endif
     CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
     CFTypeRef data = NULL;
@@ -97,6 +154,11 @@ static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
     if (allow_ui) {
         // Only the explicit startup recovery action may request system UI.
         // This reads the same vault and preserves its existing access control.
+#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING)
+        if (credential_agent_is_bundled()) status = credential_agent_call(0, q, NULL, &data, 1);
+        else
+#endif
+        {
         CFDictionarySetValue(q, kSecUseAuthenticationUI, kSecUseAuthenticationUIAllow);
         Boolean previous = false;
         status = SecKeychainGetUserInteractionAllowed(&previous);
@@ -104,6 +166,7 @@ static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
             status = SecKeychainSetUserInteractionAllowed(true);
             if (!status) status = SecItemCopyMatching(q, &data);
             (void)SecKeychainSetUserInteractionAllowed(previous);
+        }
         }
     } else status = no_ui_call(0, q, NULL, &data);
     CFRelease(q);

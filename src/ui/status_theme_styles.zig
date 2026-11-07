@@ -7,7 +7,7 @@ pub const width: f32 = 344;
 pub const row_height: f32 = 36;
 pub const row_gap: f32 = 0;
 pub const visible_rows: usize = 10;
-pub const fixed_height: f32 = 114; // chrome, header, scope, manage and feedback
+pub const fixed_height: f32 = 78; // chrome, header and feedback
 
 pub fn panel() ui.BoxStyle {
     const c = theme.current();

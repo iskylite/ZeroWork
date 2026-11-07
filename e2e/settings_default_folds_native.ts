@@ -59,7 +59,7 @@ const pages: Record<string, [string, string][]> = {
   keys: sections(['settings.keys.tabs', 'settings.keys.terminal']),
   ssh: sections(['settings.ssh.connection', 'settings.ssh.reconnect', 'settings.ssh.socks', 'settings.ssh.authentication']),
   transfer: sections(['settings.transfer.connection', 'settings.transfer.engine', 'settings.transfer.defaults']),
-  ai: [...sections(['settings.ai.provider.0.card', 'settings.ai.provider.1.card']).map(([id]) => [id, id.replace('.card', '.header')] as [string, string]), ...sections(['settings.ai.permissions', 'settings.ai.execution', 'settings.ai.conversation', 'settings.ai.context', 'settings.ai.attachments', 'settings.ai.behavior'])],
+  ai: [...sections(['settings.ai.provider.0.card', 'settings.ai.provider.1.card']).map(([id]) => [id, id.replace('.card', '.header')] as [string, string]), ...sections(['settings.ai.permissions', 'settings.ai.execution', 'settings.ai.conversation', 'settings.ai.context', 'settings.ai.attachments', 'settings.ai.behavior', 'settings.ai.skills', 'settings.ai.mcp'])],
   plugins: [['settings.plugins.builtin', '已内置'], ['settings.plugins.bundled', '随应用提供']],
   notifications: sections(['settings.notifications.events', 'settings.notifications.attention']),
   data: sections(['settings.data.location', 'settings.data.history', 'settings.data.actions']),

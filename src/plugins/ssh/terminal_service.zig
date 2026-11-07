@@ -152,7 +152,9 @@ pub const Provider = struct {
         try self.lock();
         defer self.native.worker.vt.mutex.unlock();
         try self.gate(request.input_sequence, request.mode_revision);
-        return self.submit(request.input_sequence, request.bytes);
+        const result = try self.submit(request.input_sequence, request.bytes);
+        if (request.submission and result.queued_bytes > 0 and self.writable()) self.native.worker.vt.recordSubmissionLocked();
+        return result;
     }
     fn key(raw: *anyopaque, binding: Binding, request: terminal.KeyRequest) !terminal.Submission {
         const self = try get(raw, binding);
@@ -161,7 +163,9 @@ pub const Provider = struct {
         try self.gate(request.input_sequence, request.mode_revision);
         const bytes = try self.native.worker.vt.encodeKeyLocked(request.event, self.native.allocator);
         defer self.native.allocator.free(bytes);
-        return self.submit(request.input_sequence, bytes);
+        const result = try self.submit(request.input_sequence, bytes);
+        if (request.event.key == .enter and request.event.action != .release and result.queued_bytes > 0 and self.writable()) self.native.worker.vt.recordSubmissionLocked();
+        return result;
     }
     fn mouse(raw: *anyopaque, binding: Binding, request: terminal.MouseRequest) !terminal.Submission {
         const self = try get(raw, binding);

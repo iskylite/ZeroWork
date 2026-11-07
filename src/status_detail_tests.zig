@@ -167,7 +167,7 @@ test "status popover local identity matches the real cwd and original session wi
     const r = f.view.chrome.globalRect();
     try std.testing.expectEqual(@as(f32, 380), r.w);
     try std.testing.expectEqual(@as(f32, 272), r.h);
-    try std.testing.expectEqual(@as(usize, 5), f.view.rows.children.items.len);
+    try std.testing.expectEqual(@as(usize, 7), f.view.rows.children.items.len);
     try std.testing.expect(statusText(f.view.rows, "/tmp/own"));
     try std.testing.expect(statusText(f.view.rows, "会话 #401"));
     try std.testing.expect(statusText(f.view.rows, "本地 · 交互式 Shell"));

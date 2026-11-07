@@ -21,6 +21,7 @@ pub const Hooks = struct {
     edit: ?*const fn (*anyopaque, Key, values.Value) void = null,
     keybindings: ?*const @import("keybindings.zig").Map = null,
     shortcut_text: ?*const fn (*anyopaque, []const u8, []u8) anyerror![]const u8 = null,
+    mount_extensions: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope) anyerror!*ui.Node = null,
     mount_providers: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope) anyerror!*ui.Node = null,
     mount_provider_action: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope) anyerror!*ui.Node = null,
     appearance: ?*@import("appearance_ui_context.zig").Context = null,
@@ -82,6 +83,8 @@ pub const rows = [_]Row{
     .{ .label = "重命名冲突", .section = "transfer", .key = "conflict_policy" },
     .{ .label = "完成后系统通知", .section = "notify", .key = "transfer_done" },
     .{ .label = "默认权限模式", .section = "ai", .key = "permission_mode" },
+    .{ .label = "默认上下文", .section = "ai", .key = "child_context_mode" },
+    .{ .label = "默认复用策略", .section = "ai", .key = "child_reuse_policy" },
     .{ .label = "步骤默认显示", .section = "ai", .key = "step_display" },
     .{ .label = "默认运行方式", .section = "ai", .key = "execution_mode" },
     .{ .label = "任务会话处理", .section = "ai", .key = "session_retention" },
@@ -217,12 +220,11 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     const reset = try binding.actionButton(cx, .reset_defaults, ui.icons.rotate_ccw, "恢复默认…", "settings.reset", false);
     try footer.appendChild(cx.allocator, reset.wrapper);
     const state_text = footerStateText(controller);
-    try footer.appendChild(cx.allocator, try ui.iconTint(cx, if (controller.model.dirty or backgroundNeedsAttention(controller)) ui.icons.circle else ui.icons.check, styles.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
     const state_label = try ui.textStyled(cx, styles.note, state_text);
+    state_label.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
     binding.status_label = state_label;
     state_label.meta.ownership.meta.test_id = "settings.footer.state";
     try footer.appendChild(cx.allocator, state_label);
-    try footer.appendChild(cx.allocator, try ui.spacer(cx));
     const revert = try binding.actionButton(cx, .revert, ui.icons.rotate_ccw, "撤销更改", "settings.revert", false);
     const save = try binding.actionButton(cx, .save, ui.icons.save, "保存更改", "settings.save", true);
     try footer.appendChild(cx.allocator, revert.wrapper);
@@ -240,7 +242,7 @@ fn footerStateText(controller: *const Controller) []const u8 {
     return switch (controller.state()) {
         // A failed replacement retains the committed typed path, so Config can
         // remain clean while the selected resource still needs attention.
-        .clean => if (backgroundNeedsAttention(controller)) "背景图片准备失败，草稿已保留" else "已保存",
+        .clean => if (backgroundNeedsAttention(controller)) "背景图片准备失败，草稿已保留" else "",
         .dirty_valid => "未保存",
         .dirty_invalid => "请修正设置中的错误",
         .saving => "正在保存…",
@@ -361,13 +363,7 @@ pub const Binding = struct {
         return self;
     }
     fn saveButtonStyle(available: bool) styles.ButtonStyle {
-        var result = styles.textButton();
-        result.height = .{ .px = 32 };
-        result.padding = .{ .left = 12, .right = 12 };
-        result.width = .{ .px = 92 };
-        result.font_size = 12;
-        result.font_weight = 500;
-        result.gap = 6;
+        var result = styles.footerButton();
         result.background = styles.theme.current().action_accent;
         result.gradient = .{ .from = styles.theme.current().action_accent, .to = styles.theme.current().action_accent_2, .direction = .diagonal };
         result.text_color = styles.theme.actionForeground(styles.theme.current().action_accent);
@@ -565,7 +561,8 @@ pub const Binding = struct {
         style.padding = .{ .left = 8, .right = 8 };
         style.background = if (primary) styles.theme.current().action_accent else ui.Color.TRANSPARENT;
         style.text_color = if (primary) styles.theme.actionForeground(styles.theme.current().action_accent) else styles.theme.current().fg_2;
-        const node = try ui.widgets.Button(.{ .label = label, .icon_asset = if (action == .reset_defaults) null else icon, .icon_size = @as(f32, 14), .icon_tint = if (primary) self.save_tint else try self.scope.createSignal(?ui.Color, styles.theme.current().fg_2), .a11y_label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .disabled = if (primary) self.save_disabled else if (action == .revert) self.revert_disabled else self.saving, .loading = if (primary) self.saving else try self.scope.createSignal(bool, false), .on_click = cx.on(ActionClick, click, ActionClick.activate), .base_style = @as(ui.Source(styles.ButtonStyle), if (primary) .{ .signal = self.save_style } else .{ .value = style }), .hover_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else styles.buttonHover()), .pressed_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else null) }).mount(self.scope, cx);
+        if (action == .reset_defaults or action == .revert or action == .save) style = styles.footerButton();
+        const node = try ui.widgets.Button(.{ .label = label, .icon_asset = if (action == .reset_defaults or action == .revert or action == .save) null else icon, .icon_size = @as(f32, 14), .icon_tint = if (primary) self.save_tint else try self.scope.createSignal(?ui.Color, styles.theme.current().fg_2), .a11y_label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .disabled = if (primary) self.save_disabled else if (action == .revert) self.revert_disabled else self.saving, .loading = if (primary) self.saving else try self.scope.createSignal(bool, false), .on_click = cx.on(ActionClick, click, ActionClick.activate), .base_style = @as(ui.Source(styles.ButtonStyle), if (primary) .{ .signal = self.save_style } else .{ .value = style }), .hover_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else styles.buttonHover()), .pressed_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else null) }).mount(self.scope, cx);
         node.meta.ownership.meta.test_id = id;
         if (primary) try self.scope.createEffect(.{ .bound = self, .node = node, .hovered = try ui.hooks.useHover(self.scope, node), .pressed = try ui.hooks.usePressed(self.scope, cx, node), .publication = try cx.themeSignal(self.scope) }, struct {
             fn run(args: anytype) void {

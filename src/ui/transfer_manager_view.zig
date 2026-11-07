@@ -825,14 +825,14 @@ pub const Panel = struct {
         const root = try ui.box(cx, S.stack(), .{});
         root.setStyleInline(cx.allocator, .{ .gap = 4 });
         var row_style = S.task(self.isSelected(task_.target));
-        if (!self.isSelected(task_.target) and task_.phase == .running) row_style.background = S.theme.current().accent.withAlpha(18);
+        row_style.background = S.taskBackground(self.isSelected(task_.target), task_.phase == .running);
         const row = try ui.box(cx, row_style, .{});
         @import("layer_materials.zig").card(row, .custom);
         try scope.createEffect(.{ .node = row, .selected = self.isSelected(task_.target), .running = task_.phase == .running, .publication = try cx.themeSignal(scope) }, struct {
             fn paint(ctx: anytype) void {
                 _ = ctx.publication.get();
                 // Keep state RGB current after material policy changes alpha.
-                ctx.node.setBackground(if (!ctx.selected and ctx.running) S.theme.current().accent.withAlpha(18) else S.task(ctx.selected).background.?);
+                ctx.node.setBackground(S.taskBackground(ctx.selected, ctx.running));
             }
         }.paint);
         row.meta.ownership.meta.test_id = "transfer.task";
@@ -1022,7 +1022,7 @@ pub const Panel = struct {
     fn v3TaskAction(self: *Panel, parent: *ui.Node, scope: *ui.Scope, label_: []const u8, test_id: []const u8, control: Control, disabled: bool) !void {
         const state = try scope.createState(Control, control);
         const owned = try scope.createText(label_, .{});
-        const button_ = try ui.widgets.Button(.{ .label = owned, .a11y_label = owned, .variant = .ghost, .base_style = S.v3TextAction(), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
+        const button_ = try ui.widgets.Button(.{ .label = owned, .a11y_label = owned, .variant = .secondary, .base_style = S.v3TextAction(), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
         button_.meta.ownership.meta.test_id = test_id;
         const label_node = firstTextNode(button_) orelse return error.MissingActionLabel;
         label_node.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 18 } });

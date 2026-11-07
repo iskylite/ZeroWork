@@ -241,13 +241,14 @@ test "SSH status host reuses a single actual log modal and keeps its captured ke
     try std.testing.expect(f.captured.?.key.eql(key));
 }
 
-test "SSH status host retains disabled offline actions and the global theme entry" {
+test "SSH status host keeps captured info read only and the global theme entry" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
     try f.update(try snapshot(key, "DB-A"), false);
     f.enter(f.bar.controls.identity_button);
-    try std.testing.expect(f.host.info.reconnect_disabled.peek());
+    try std.testing.expect(!f.host.info.logs_disabled.peek());
+    try std.testing.expect(id(f.host.info.root, "status.connection.reconnect") == null);
     var source = try snapshot(key, "DB-A");
     source.revision = 2;
     for (source.hops[0..2]) |*hop| hop.status = .released;
@@ -255,10 +256,8 @@ test "SSH status host retains disabled offline actions and the global theme entr
     f.host.refreshFrozen(source, true);
     try f.host.info.flush();
     f.settle();
-    try std.testing.expect(!f.host.info.reconnect_disabled.peek());
-    f.enter(f.host.info.reconnect_button);
-    try std.testing.expectEqual(@as(usize, 1), f.reconnects);
-    try std.testing.expect(f.last_key.?.eql(key));
+    try std.testing.expect(!f.host.info.logs_disabled.peek());
+    try std.testing.expectEqual(@as(usize, 0), f.reconnects);
     try f.host.updateActive(null);
     f.settle();
     try std.testing.expect(f.bar.controls.theme_button.style.display == .flex);
@@ -551,4 +550,28 @@ test "status transfer ticker fits the actual narrow bottom bar and keeps speed b
     var buffer: [48]u8 = undefined;
     try std.testing.expectEqualStrings("64 B/s", speed(&buffer, 64));
     try std.testing.expectEqualStrings("8.0 KiB/s", speed(&buffer, 8192));
+}
+
+test "SSH status click only panel ignores hover toggles and survives refreshed actions" {
+    const Preview = @import("ui/status_hover_preview.zig");
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var source = try snapshot(key, "DB-A");
+    try f.update(source, false);
+    var group: Preview.Group = .{};
+    try Preview.Preview.mountClick(f.cx, f.scope, &group, f.bar.controls.identity_button, f.host.info.chrome, f.host.info.open, f.cx.on(@import("ui/status_connection_view.zig").View, f.host.info, @import("ui/status_connection_view.zig").View.dismiss));
+    source.revision += 1;
+    try f.update(source, false);
+    const trigger = f.bar.controls.identity_button.globalRect();
+    f.cx.handleMouseMove(trigger.x + trigger.w / 2, trigger.y + trigger.h / 2);
+    f.settle();
+    try std.testing.expect(!f.host.info.open.peek());
+    f.click(f.bar.controls.identity_button);
+    try std.testing.expect(f.host.info.open.peek());
+    f.cx.handleMouseMove(700, 300);
+    f.settle();
+    try std.testing.expect(f.host.info.open.peek());
+    f.click(f.bar.controls.identity_button);
+    try std.testing.expect(!f.host.info.open.peek());
 }

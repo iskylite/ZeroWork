@@ -12,6 +12,10 @@ zig build -Dtest-mode=true -De2e-port=19818 -j2
 node e2e/workspace.ts --out /absolute/path/to/evidence
 ```
 
+文字操作按钮与主题专项：`./scripts/test_isolated.sh test-ui -Dui-test-filter='button policy' -j2` 遍历当前全部内置主题，检查保留节点的次按钮底色／文字、悬停／按下／无描边焦点、禁用门禁及复制反馈恢复颜色。`zig build button-policy-preview -Dtest-mode=true -j2 --prefix /tmp/zw-button-policy` 后运行 `node e2e/button_policy_native.ts /tmp/zw-button-policy /tmp/zw-button-policy-evidence`，在独立原生窗口复用生产远程提示条、AI 恢复卡片、复制反馈和执行／传输／通知的真实样式；遍历主题，并保存代表主题的常规／最小窗口和交互状态。回执为合成数据，不访问钥匙串、真实服务器或模型，不作为主程序启动或真实会话操作的端到端证据。
+
+本地终端原页签重连：`node e2e/local_reconnect_native.ts /absolute/build-prefix /tmp/zerowork-local-reconnect-evidence`。使用隔离数据和真实 zsh PTY，验证 Ctrl+D／非零退出后的“重新连接”、原页签复用、自动回焦、连续重连、860×480 布局及关闭后的进程释放；保存原生截图和报告，最后正常退出应用。
+
 普通 `zig build` 的 `test-mode` 默认为 `false`，发行构建保留该默认值。
 `e2e-port` 仅定义默认文件 RPC 目录后缀。Runner 每次创建独立 RPC、应用数据目录和进程，使用它刚启动的 PID，不复用正在运行的用户窗口。
 
@@ -97,4 +101,24 @@ KVM 视频及 HUD 分层：`zig build bmc-kvm-preview -Dtest-mode=true -j2 --pre
 
 开机命令回显回归：先运行 `zig build ssh-shell-execution-acceptance -j2 -Doptimize=ReleaseFast`，再用已安装 Paramiko 的 Python 执行 `e2e/ssh_startup_commands.py --runner zig-out/bin/ssh-shell-execution-runner --output /tmp/zerowork-startup-check`。测试使用隔离的本地 SSH 和真实 Bash/Zsh PTY，检查延迟提示符下逐条执行与单次回显、提示符超时，以及交互式命令后的人工输入恢复；不连接已保存主机。
 
+v0.4 首个基础增量（Worker 回收）：先执行 `zig build -Dtest-mode=true -j2 --prefix /tmp/zw-v04-build`，再运行 `ZW_AI_TEST_PREFIX=/tmp/zw-v04-build node e2e/ai_worker_release_native.ts /tmp/zw-v04-worker-native`。Runner 启动隔离的生产 App、真实 Local PTY 和 loopback Provider，核对宿主查询的真实工具结果、结束并解绑后历史／草稿保留、恢复不请求模型、明确再次发送后重建执行、流式响应中取消并解绑、860×480 和应用级正常 Quit。报告记录二进制 SHA-256、请求、journal 及 Metal 截图，截图需实际查看。仅 Provider 输出由 fixture 控制；不连接已保存主机或真实模型，不代表子 Agent／技能／MCP 已验收。对应服务回归为 `./scripts/test_isolated.sh test -Dtest-filter='v0.4 Worker' -j2`，包括清理等待、最终保存失败、释放后解绑提交失败及旧 fence 不影响新 Worker；现有 `AiHost integration` 用例继续覆盖回答恢复与跨窗口归属。
+
 应用更新完整回归：`zig build -Dtest-mode=true -Doptimize=Debug -j2 --prefix /tmp/zw-update-e2e` 后执行 `node e2e/app_update_full_native.ts /tmp/zw-update-e2e /tmp/zw-update-normal`，以及 `node e2e/app_update_full_native.ts /tmp/zw-update-e2e /tmp/zw-update-force force`。仅 HTTP 响应由本地签名包提供；运行真实主程序、下载与签名校验、独立安装程序、替换和自动重启，核对旧进程退出、启动／healthy 回执、新版窗口、版本页、严格代码签名及数据保留。所有应用与数据均隔离，不替换已安装应用。`app_update_deleted_drafts_native.ts` 另外覆盖先报错、关闭、删除全部会话后重新安装的旧错误缓存回归。
+
+
+v0.4 子记录与恢复基础：`./scripts/test_isolated.sh test -Dtest-filter='v0.4 child' -j2` 覆盖独立身份与主 owner 索引、当前父 fence／精确 generation、独立／继承上下文、创建键冲突与内容哈希、混合 schema 回放、显式家庭删除、分配失败回滚、独立 Worker、Task 范围停止及父级 End、子成员读取投影与空工具目录。构建 test-mode 到 `/tmp/zw-v04-child-build` 后，运行 `ZW_AI_TEST_PREFIX=/tmp/zw-v04-child-build node e2e/ai_child_recovery_native.ts /tmp/zw-v04-child-recovery-native`：隔离日志保存旧父子绑定，真实 App 先回收孩子再回收父级，子记录不进入主列表，显式恢复父对话不调用模型，再次发送沿新 AgentId 使用原 ConversationId；保留原 child identity／创建来源且不自动绑定子 Worker。报告含二进制 SHA-256、原 journal、标准／860×480 Metal 截图和应用级 Quit 结果。该专项不创建模型子任务，不作为任务协作／预算／技能／MCP／子弹窗已完成的证据。
+
+
+v0.4 子任务协作增量：`./scripts/test_isolated.sh test -Dtest-filter='v0.4' -j2` 覆盖共享请求／工具预算、人工与模型排队时间、全局 4／根 2 模型槽及根间轮转、4 个未收尾孩子、原子首任务提交与分配失败、任务日志 schema 3 和降级拒绝、重启不复活、回执幂等、事件确认无自唤醒、复用 generation、当前 handoff fence、压缩请求统一计费及最终事实提交重试。宿主桥定向回归为 `./scripts/test_isolated.sh test-ui -Dui-test-filter='host' -j2`。
+
+原生协作验收：`zig build -Dtest-mode=true -j2 --prefix /tmp/zw-v04-task-build` 后运行 `ZW_AI_TEST_PREFIX=/tmp/zw-v04-task-build node e2e/ai_task_gateway_native.ts /tmp/zw-v04-task-gateway`；另以新的输出目录追加 `steer` 参数，验证父级等待孩子时用户引导仍进入原 Task／Turn。脚本使用隔离数据、真实 Local PTY 和 loopback Provider，经真实模型工具目录创建仅材料子任务，检查子级不获得委派能力、父级提前回答后保留原 Task 等待并收集真实报告、孩子释放早于父级完成、原根任务收尾后才消费 queue，以及累计请求／工具计数和正常应用 Quit。报告含请求、journal、二进制哈希和原生截图，需实际查看。无远端命令、付费模型或已保存主机操作；不作为子弹窗、人工审批交互入口、异步交接、技能或 MCP 已完成的证据。
+
+
+本地技能与 MCP 专项：`zig build -Dtest-mode=true --prefix /tmp/zw-v04-extensions-build -j2` 后运行 `ZW_AI_TEST_PREFIX=/tmp/zw-v04-extensions-build node e2e/ai_extensions_native.ts /tmp/zw-v04-extensions-native`。使用隔离数据目录、Local PTY、受控 Provider 和真实本地 stdio / HTTP MCP 服务，验证原生导入／查看、两种配置表单、只发现能力的显式连接测试、秘密引用保存、撤销、紧凑窗口、确认模式审批及技能读取到 MCP 材料调用的真实工具链；不执行终端业务命令，正常应用退出。系统文件选择器、真实拖入和第三方远端认证不在自动化覆盖范围。
+
+v0.4 默认策略与活动子任务交接：构建 `zig build -Dtest-mode=true -j2 --prefix /tmp/zw-v04-completion` 后运行 `ZW_AI_TEST_PREFIX=/tmp/zw-v04-completion node e2e/ai_child_defaults_handoff_native.ts /tmp/zw-v04-child-handoff-native`。使用隔离配置、Local PTY 和 loopback Provider；实际搜索并选择子 Agent 默认上下文／复用策略，验证全局保存、撤销和 860×480 窗口；省略 reusable 使用捕获的 prefer_reuse，显式 independent 覆盖继承默认。让子 Provider 真正运行后由父级调用 create_group，核对子请求取消与解绑先于 handoff，父级保留原 Task／root、收取报告后完成，并正常应用级 Quit。产物包含二进制哈希、请求、journal、设置几何和原生截图。该专项只证明设置与交接；子 Agent 列表、可写弹窗和独立审批另见下述子对话专项。
+
+对应定向检查：`./scripts/test_isolated.sh test -Dtest-filter='v0.4' -j2`，`./scripts/test_isolated.sh test -Dtest-filter='settings' -j2`，`./scripts/test_isolated.sh test-ui -Dui-test-filter='lifecycle controller' -j2` 和 `./scripts/test_isolated.sh test-ui -Dui-test-filter='tab grouping native drop' -j2`。异常复用覆盖当前账本与恢复事实、只读新任务不改写旧 unknown、伪造动态写调用被宿主拦截、目标不相交与 reconnect generation 不能绕过重叠约束；拖放检查等待期间不建半成品组、原目标成员版本变化时不发布。
+
+
+v0.4 子智能体对话与设置气泡：`zig build -Dtest-mode=true --prefix /tmp/zw-child-ui-build -j2` 后运行 `ZW_AI_TEST_PREFIX=/tmp/zw-child-ui-build node e2e/ai_child_dialog_native.ts /tmp/zw-child-dialog-new-run`。使用隔离数据、真实 Local PTY 与 loopback Provider，验证子提问／审批只消费原子票据、命令仅执行一次、父子草稿和真实拖入图片隔离、非复用子对话的显式用户续行、子模型独立与父权限上限、后台 queue／steer、主标题栏打开列表及标题／LOGO／状态列对齐、主子共用 600×456 默认尺寸、设置气泡宽 320 且自然撑高、名称同行与任务记录折叠／展开／数量不截断、时间线几何不变、最大化恢复、收起重开保留草稿、860×480、历史子详情只读与显式恢复父对话不发模型请求，最后正常 Quit。报告记录二进制 SHA-256、请求、journal 和 Metal 截图，必须实际查看。核心与 UI 定向使用 `v0.4`、`AI composer`、`v0.4 child list`、`conversation UI` 过滤器。HTML 基准见 `docs/UI_V3/workspace/child-agents/index.html`；受控回答不替代真实模型／外部 MCP／远端业务验收。

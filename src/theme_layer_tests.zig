@@ -9,6 +9,46 @@ const publication = @import("ui/shell_styles.zig").ThemePublication;
 const Close = @import("ui/local_close_view.zig");
 const Transfer = @import("ui/transfer_panel.zig");
 
+test "floating shadows unify tooltip popover modal and retained panels" {
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    const w = try Window.init();
+    defer w.deinit();
+    const materials = @import("ui/layer_materials.zig");
+    try materials.Policy.mount(w.cx, w.scope);
+    const panel = try ui.boxStyled(w.cx, @import("ui/ai_assistant_styles.zig").panel, .{});
+    try w.cx.root.?.appendChild(w.cx.allocator, panel);
+    const open = try w.scope.createSignal(bool, true);
+    const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .enter_transition = .none, .exit_transition = .none, .width = 240 }).mount(w.scope, w.cx);
+    try panel.appendChild(w.cx.allocator, popup.wrapper);
+    const hint = try ui.widgets.Tooltip(.{ .text = "Floating shadow", .open = open }).mount(w.scope, w.cx);
+    try popup.content.appendChild(w.cx.allocator, hint.wrapper);
+    const modal = try ui.widgets.Modal(.{ .open = open, .width = @as(f32, 300), .enter_transition = .none, .exit_transition = .none }).mount(w.scope, w.cx);
+    if (!modal.portaled) try w.cx.root.?.appendChild(w.cx.allocator, modal.overlay);
+    // A material body fills the dialog but must not cast a second shadow.
+    materials.overlay(modal.body);
+    const card = try ui.box(w.cx, .{ .width = .{ .px = 80 }, .height = .{ .px = 30 }, .background = theme.popupAction() }, .{});
+    materials.card(card, .action);
+    try panel.appendChild(w.cx.allocator, card);
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        w.publish.publish(w.cx, theme.widgetTheme(name));
+        for (0..2) |_| {
+            open.set(false);
+            w.frame();
+            open.set(true);
+            w.frame();
+            for ([_]*ui.Node{ panel, popup.chrome, hint.content, modal.dialog }) |node| {
+                const shadows = node.style.shadowSlice();
+                try std.testing.expectEqual(@as(usize, 1), shadows.len);
+                try std.testing.expectEqual(theme.floatingShadow(), shadows[0]);
+            }
+            try std.testing.expectEqual(@as(usize, 0), card.style.shadowSlice().len);
+            try std.testing.expectEqual(@as(usize, 0), modal.body.style.shadowSlice().len);
+        }
+    }
+}
+
 test "material snapshot ignores content clipped by a collapsed accordion" {
     const w = try Window.init();
     defer w.deinit();

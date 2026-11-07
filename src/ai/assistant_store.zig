@@ -90,6 +90,7 @@ pub const State = struct {
     binding_revision: u64 = 1,
     selected: bool = true,
     listed: bool = true,
+    child_agent: ?@import("../host/identity.zig").AgentId = null,
     closed: bool = false,
     /// Ended entries remain in history, but are never automatically reopened
     /// when a terminal becomes independently visible again.
@@ -185,10 +186,10 @@ pub const Store = struct {
     }
     pub fn select(self: *Store, id: u64) bool {
         const chosen = self.find(id) orelse return false;
-        if (chosen.closed or chosen.ended) return false;
+        if (chosen.closed or chosen.ended or chosen.child_agent != null) return false;
         const owner = chosen.owner;
         for (self.states.items) |*state| {
-            if (state.owner.eql(owner)) state.selected = state.id == id;
+            if (state.child_agent == null and state.owner.eql(owner)) state.selected = state.id == id;
         }
         return true;
     }
@@ -200,12 +201,21 @@ pub const Store = struct {
         _ = self.select(id);
         return self.find(id).?;
     }
+    pub fn createChildPresentation(self: *Store, record: *const @import("session_lifecycle.zig").Record, owner: scope.Owner) !*State {
+        const info = (record.child orelse return error.ChildNotFound).info;
+        if (self.findConversation(record.id)) |state| return state;
+        const id = self.next_id;
+        if (id == 0) return error.ConversationIdentityExhausted;
+        try self.states.append(self.allocator, .{ .id = id, .conversation_id = record.id, .initial_owner = record.initial_origin, .owner = owner, .child_agent = info.agent, .selected = false, .listed = false, .ended = record.binding == null, .binding_revision = record.revision, .stream = cards.Stream.init(self.allocator) });
+        self.next_id = if (id == std.math.maxInt(u64)) 0 else id + 1;
+        return self.find(id).?;
+    }
     pub fn get(self: *Store, owner: scope.Owner) !*State {
         // Presentation selection cannot replace a conversation still held by
         // this attachment. Reconcile a stale welcome against the live authority
         // before choosing which history to display; only End releases a binding.
         if (self.authority) |service| for (service.store.agents.items) |agent| {
-            if (agent.closing or !agent.owner.eql(owner)) continue;
+            if (agent.role != .attached or agent.closing or !agent.owner.eql(owner)) continue;
             const id = agent.current orelse continue;
             const record = service.store.find(id) orelse continue;
             const binding = record.binding orelse continue;
@@ -223,7 +233,7 @@ pub const Store = struct {
         while (index > 0) {
             index -= 1;
             const state = &self.states.items[index];
-            if (state.owner.eql(owner) and !state.closed and !state.ended) {
+            if (state.child_agent == null and state.owner.eql(owner) and !state.closed and !state.ended) {
                 _ = self.select(state.id);
                 return &self.states.items[index];
             }
@@ -233,7 +243,7 @@ pub const Store = struct {
         return state;
     }
     pub fn active(self: *Store, owner: scope.Owner) ?*State {
-        for (self.states.items) |*state| if (state.owner.eql(owner) and state.selected and !state.closed and !state.ended) return state;
+        for (self.states.items) |*state| if (state.child_agent == null and state.owner.eql(owner) and state.selected and !state.closed and !state.ended) return state;
         return null;
     }
     pub fn endActivity(self: *Store, id: u64, revision: u64) !void {
@@ -261,16 +271,17 @@ pub const Store = struct {
     /// no borrowed State pointer and commits without allocation or cloning data.
     pub fn prepareHandoff(self: *Store, id: ConversationId, from: scope.Owner, revision: u64, group_id: u64) !Handoff {
         const state = self.findConversation(id) orelse return error.ConversationNotFound;
-        if (state.closed or state.ended or !state.owner.eql(from) or state.binding_revision != revision) return error.BindingChanged;
+        if (state.child_agent != null or state.closed or state.ended or !state.owner.eql(from) or state.binding_revision != revision) return error.BindingChanged;
         if (from != .session or group_id == 0) return error.InvalidBindingHandoff;
-        for (self.states.items) |other| if (!other.closed and other.owner.eql(.{ .group = group_id })) return error.BindingConflict;
+        if (self.authority) |service| if (service.store.hasBoundChildren(id)) return error.ChildSettlementRequired;
+        for (self.states.items) |other| if (other.child_agent == null and !other.closed and other.owner.eql(.{ .group = group_id })) return error.BindingConflict;
         return .{ .id = id, .runtime_id = state.id, .from = from, .to = .{ .group = group_id }, .revision = revision, .next_revision = try @import("../host/identity.zig").advance(revision) };
     }
     pub fn commitHandoff(self: *Store, plan: Handoff) !void {
         const state = self.findConversation(plan.id) orelse return error.ConversationNotFound;
-        if (state.id != plan.runtime_id or state.closed or state.ended or !state.owner.eql(plan.from) or state.binding_revision != plan.revision) return error.BindingChanged;
+        if (state.child_agent != null or state.id != plan.runtime_id or state.closed or state.ended or !state.owner.eql(plan.from) or state.binding_revision != plan.revision) return error.BindingChanged;
         if (plan.from != .session or plan.to != .group or plan.to.group == 0 or plan.next_revision != try @import("../host/identity.zig").advance(plan.revision)) return error.InvalidBindingHandoff;
-        for (self.states.items) |other| if (!other.closed and other.owner.eql(plan.to)) return error.BindingConflict;
+        for (self.states.items) |other| if (other.child_agent == null and !other.closed and other.owner.eql(plan.to)) return error.BindingConflict;
         if (self.authority) |service| if (service.store.find(plan.id)) |record| {
             const ticket = try service.store.fence(record.id);
             if (ticket.binding != plan.revision) return error.BindingChanged;
@@ -342,7 +353,10 @@ pub const Store = struct {
         return null;
     }
     pub fn imageDraft(self: *Store, owner: scope.Owner) !*@import("image_attachments.zig").Draft {
-        const id = (try self.get(owner)).id;
+        return self.imageDraftForState((try self.get(owner)).id);
+    }
+    pub fn imageDraftForState(self: *Store, id: u64) !*@import("image_attachments.zig").Draft {
+        const owner = (self.find(id) orelse return error.ConversationNotFound).owner;
         for (self.image_drafts.items, self.image_ids.items) |draft, conversation| if (conversation == id) return draft;
         try self.image_ids.ensureUnusedCapacity(self.allocator, 1);
         const Draft = @import("image_attachments.zig").Draft;
@@ -357,7 +371,10 @@ pub const Store = struct {
         return draft;
     }
     pub fn attachmentDraft(self: *Store, owner: scope.Owner) !*@import("local_text_attachments.zig").Draft {
-        const id = (try self.get(owner)).id;
+        return self.attachmentDraftForState((try self.get(owner)).id);
+    }
+    pub fn attachmentDraftForState(self: *Store, id: u64) !*@import("local_text_attachments.zig").Draft {
+        const owner = (self.find(id) orelse return error.ConversationNotFound).owner;
         for (self.attachment_drafts.items, self.attachment_ids.items) |draft, conversation| if (conversation == id) return draft;
         try self.attachment_ids.ensureUnusedCapacity(self.allocator, 1);
         const Draft = @import("local_text_attachments.zig").Draft;

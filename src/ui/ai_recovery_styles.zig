@@ -24,7 +24,7 @@ pub fn warning(_: *const ui.ThemeTokens) ui.TextStyle {
 pub fn action(primary: bool, edit: bool, enabled: bool) ui.BoxStyle {
     _ = edit;
     const c = theme.current();
-    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 26.5 }, .padding = .{ .left = 8, .right = 8 }, .gap = 0, .flex_shrink = 0, .corner_radius = 8, .font_size = 10.5, .font_weight = 500, .opacity = if (enabled) 1 else 0.6, .background = if (primary) c.action_accent else theme.popupAction(), .gradient = if (primary) .{ .from = c.action_accent, .to = c.action_accent_2, .direction = .diagonal } else null, .text_color = if (primary) theme.actionForeground(c.action_accent) else c.fg_1 };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 26.5 }, .padding = .{ .left = 8, .right = 8 }, .gap = 0, .flex_shrink = 0, .corner_radius = 8, .font_size = 10.5, .font_weight = 500, .opacity = if (enabled) 1 else 0.6, .background = if (primary) null else theme.popupInset(), .text_color = if (primary) null else c.fg_1 };
 }
 pub fn statusRow(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 10, .right = 10 }, .flex_shrink = 0 };

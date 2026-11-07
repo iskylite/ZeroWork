@@ -4,22 +4,43 @@ const identity = @import("../host/identity.zig");
 const scope = @import("tool_scope.zig");
 const provider = @import("provider.zig");
 
+pub const ChildOrigin = struct {
+    agent: identity.AgentId,
+    parent: @import("session_input.zig").Fence,
+    worker_generation: u64,
+    scope_revision: u64,
+};
 pub const Context = struct {
     conversation_id: identity.ConversationId,
     task_id: identity.TaskId,
     binding: scope.Owner,
     binding_revision: u64,
     grant_revision: u64,
+    child_origin: ?ChildOrigin = null,
 
+    pub fn jsonStringify(self: Context, writer: *std.json.Stringify) !void {
+        try writer.beginObject();
+        inline for (@typeInfo(Context).@"struct".field_names) |name| {
+            const emit = if (comptime std.mem.eql(u8, name, "child_origin")) self.child_origin != null else true;
+            if (emit) {
+                try writer.objectField(name);
+                try writer.write(@field(self, name));
+            }
+        }
+        try writer.endObject();
+    }
     pub fn validate(self: Context) !void {
         if (!self.conversation_id.valid() or !self.task_id.valid() or self.binding_revision == 0 or self.grant_revision == 0) return error.InvalidHostAuthority;
+        if (self.child_origin) |origin| {
+            if (!origin.agent.valid() or !origin.parent.agent.valid() or !origin.parent.conversation.valid() or origin.parent.binding == 0 or origin.parent.environment == 0 or origin.worker_generation == 0 or origin.scope_revision == 0 or origin.parent.conversation.eql(self.conversation_id)) return error.InvalidHostAuthority;
+        }
         switch (self.binding) {
             .session => |id| if (id == 0) return error.InvalidHostAuthority,
             .group => |id| if (id == 0) return error.InvalidHostAuthority,
         }
     }
     pub fn eql(self: Context, other: Context) bool {
-        return self.conversation_id.eql(other.conversation_id) and self.task_id.eql(other.task_id) and self.binding.eql(other.binding) and self.binding_revision == other.binding_revision and self.grant_revision == other.grant_revision;
+        return self.conversation_id.eql(other.conversation_id) and self.task_id.eql(other.task_id) and self.binding.eql(other.binding) and self.binding_revision == other.binding_revision and self.grant_revision == other.grant_revision and std.meta.eql(self.child_origin, other.child_origin);
     }
 };
 /// Contributed by the trusted host, never by a provider manifest.

@@ -14,7 +14,7 @@ pub const RouteSelection = struct {
     selectable: bool = false,
     reason: []const u8 = "按本次任务选择运行方式；只覆盖此命令。",
 };
-pub const SubjectKind = enum { network_url, lifecycle, terminal_command };
+pub const SubjectKind = enum { network_url, lifecycle, terminal_command, mcp };
 /// Display data comes from a trusted preflight, never an authorization decision.
 /// The owner still checks lifecycle grants, execution modes and live targets.
 pub const Subject = struct {
@@ -118,7 +118,7 @@ pub const Broker = struct {
         const saved = &entry.snapshot;
         const route_decided = if (saved.route) |route| !route.selectable and route.choice.route == route.proposed else true;
         const automatic = policy.mode == .auto and route_decided and !saved.requires_user_input and switch (saved.kind) {
-            .network_url, .lifecycle => true,
+            .network_url, .lifecycle, .mcp => true,
             .terminal_command => blk: {
                 const tool = saved.tool.text();
                 if (!std.mem.eql(u8, tool, "host.run_in_terminal") and !std.mem.eql(u8, tool, "run_command") and !std.mem.eql(u8, tool, "host.send_execution_input") and !std.mem.eql(u8, tool, "host.attach_shell")) break :blk false;
@@ -156,6 +156,7 @@ pub const Broker = struct {
         if (subject.target.len == 0 or subject.detail.len == 0 or invocation.tool_id.len == 0 or invocation.call_id.len == 0) return error.InvalidHostApproval;
         switch (subject.kind) {
             .network_url => if (invocation.authority != .local_network_read or !fetch.supports(invocation.tool_id)) return error.InvalidHostApproval,
+            .mcp => if (invocation.authority != .conversation_context or (!std.mem.eql(u8, invocation.tool_id, "host.mcp_catalog") and !std.mem.eql(u8, invocation.tool_id, "host.mcp_call"))) return error.InvalidHostApproval,
             .lifecycle => if (invocation.authority != .lifecycle) return error.InvalidHostApproval,
             .terminal_command => if (invocation.authority != .execution_control) return error.InvalidHostApproval,
         }

@@ -177,10 +177,11 @@ pub const Wizard = struct {
         self.footer = try ui.box(cx, S.footer(), .{});
         self.footer.?.meta.ownership.meta.test_id = "wizard.footer";
         try self.footer.?.appendChild(self.alloc, try ui.spacer(cx));
-        const save = try ui.widgets.Button(.{ .label = "保存主机", .variant = .ghost, .disabled = self.locked.?, .on_click = cx.on(Wizard, self, saveOnly) }).mount(scope, cx);
+        const save = try ui.widgets.Button(.{ .label = "保存主机", .variant = .secondary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500, .border_width = 0 }, .disabled = self.locked.?, .on_click = cx.on(Wizard, self, saveOnly) }).mount(scope, cx);
         save.meta.ownership.meta.test_id = "wizard.save_only";
         try self.footer.?.appendChild(self.alloc, save);
-        const submit = try ui.widgets.Button(.{ .label = "保存并打开", .disabled = self.locked.?, .on_click = cx.on(Wizard, self, saveAndOpen) }).mount(scope, cx);
+        const submit = try ui.widgets.Button(.{ .label = "保存并打开", .variant = .primary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500, .border_width = 0 }, .disabled = self.locked.?, .on_click = cx.on(Wizard, self, saveAndOpen) }).mount(scope, cx);
+        try S.theme.stylePrimary(cx, scope, submit, self.locked.?);
         submit.meta.ownership.meta.test_id = "wizard.save";
         try self.footer.?.appendChild(self.alloc, submit);
         try modal.body.appendChild(self.alloc, self.footer.?);

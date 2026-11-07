@@ -496,7 +496,7 @@ test "local adapter exec is independent, uses the same journal and cancels on cl
     try std.testing.expectEqual(host.CloseReceipt.released, result.cleanup);
 }
 
-test "local adapter cancellation waits for cleanup and normal exit cannot retry" {
+test "local adapter cancellation waits for cleanup and normal exit reconnects the same session" {
     var sandbox = try Sandbox.init();
     defer sandbox.deinit();
     var rig = try Rig.init();
@@ -512,6 +512,7 @@ test "local adapter cancellation waits for cleanup and normal exit cannot retry"
     }
     const accepted = try rig.sessions.create(.{ .local = .{ .initial_cwd = sandbox.path } }, target);
     const service = try rig.ready(accepted);
+    try std.testing.expect(try rig.sessions.attached(accepted.handle, .{ .target = target, .tab_id = @fromBackingInt(1) }));
     _ = try write(service, .{ .input_sequence = 1, .bytes = "printf '%s_%s\\n' 'FINAL' 'TAIL'; exit 3\n" });
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
@@ -529,13 +530,19 @@ test "local adapter cancellation waits for cleanup and normal exit cannot retry"
     try std.testing.expect(process.eof_seen);
     try std.testing.expectError(error.SessionStillPresented, rig.adapter.retire(accepted.handle));
     try std.testing.expect(!(try status(service)).writable);
-    try std.testing.expectError(error.SessionNotWritable, write(service, .{ .input_sequence = 2, .bytes = "ignored\n" }));
-    try std.testing.expectError(error.LifecycleDoesNotAllowRetry, rig.sessions.retry(accepted.handle));
-    const opened = try rig.sessions.create(.{ .local = .{ .initial_cwd = sandbox.path } }, target);
-    try std.testing.expect(opened.handle.session_id != accepted.handle.session_id);
-    _ = try rig.ready(opened);
-    try rig.close(accepted.handle);
-    try rig.close(opened.handle);
+    try std.testing.expectError(error.ServiceUnavailable, write(service, .{ .input_sequence = 2, .bytes = "ignored\n" }));
+    try std.testing.expectEqual(host.Lifecycle.ended, rig.sessions.queryState(accepted.handle).?.lifecycle);
+    const reopened = try rig.sessions.retry(accepted.handle);
+    try std.testing.expectEqual(accepted.handle.session_id, reopened.handle.session_id);
+    try std.testing.expectEqual(accepted.handle.generation + 1, reopened.handle.generation);
+    try std.testing.expectError(error.LifecycleDoesNotAllowRetry, rig.sessions.retry(reopened.handle));
+    const replacement = try rig.ready(reopened);
+    var resumed_output: std.ArrayList(u8) = .empty;
+    defer resumed_output.deinit(allocator);
+    _ = try write(replacement, .{ .input_sequence = 1, .bytes = "printf '%s_%s\\n' RECONNECTED OK\n" });
+    try waitText(&rig, replacement, &resumed_output, "RECONNECTED_OK");
+    try std.testing.expectError(error.ServiceUnavailable, write(service, .{ .input_sequence = 3, .bytes = "ignored\n" }));
+    try rig.close(reopened.handle);
 }
 
 test "local raw owner drain releases a cancelled attempt without a ready binding" {

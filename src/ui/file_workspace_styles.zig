@@ -1,41 +1,41 @@
-//! V3 workspace HTML: independent dual cards, 40 point rows and fixed 36 point footer.
+//! Mist workspace: aligned dual surfaces, 40-point rows and 44-point footer.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub const row_height: f32 = 40;
 pub const header_height: f32 = 34;
 pub const min_columns: f32 = 490;
-pub const columns_fixed: f32 = 282;
+pub const columns_fixed: f32 = 284;
 pub const path_font: f32 = 11.5;
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = 6, .padding = ui.Padding.all(12), .min_width = 0, .min_height = 0, .background = theme.current().app };
+    return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = 12, .padding = .{}, .min_width = 0, .min_height = 0, .background = ui.Color.TRANSPARENT };
 }
 /// Each side owns a file card plus an optional sibling transfer card.
 /// Hidden transfer roots do not contribute a gap or reserve any height.
 pub fn columnStack(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 6 };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 12 };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 0, .padding = ui.Padding.all(1), .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 11, .width = 0, .color = theme.current().border }, .overflow = .hidden, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 0, .padding = .{}, .background = theme.current().overlay, .shadow = @import("shell_styles.zig").floating(theme.widgetTheme(theme.currentName())).shadow, .border = .{ .radius = 16, .width = 0, .color = theme.current().border }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn toolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .gap = 10, .padding = .{ .top = 14, .right = 12, .bottom = 11, .left = 12 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .gap = 8, .padding = .{ .top = 6, .right = 16, .bottom = 12, .left = 16 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
 }
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
-    var value = line(36);
-    value.padding = .{ .left = 13, .right = 13 };
+    var value = line(44);
+    value.padding = .{ .left = 16, .right = 16 };
     value.gap = 8;
     value.border = .{ .width = 0, .color = ui.Color.TRANSPARENT };
     return value;
 }
 pub fn line(height: f32) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = height }, .flex_shrink = 0, .direction = .row, .gap = 6, .align_items = .center, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .px = height }, .flex_shrink = 0, .direction = .row, .gap = 8, .align_items = .center, .min_width = 0 };
 }
 pub fn flexible() ui.BoxStyle {
     return .{ .width = .fill(), .flex = 1, .min_width = 0, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 13, .font_weight = 700, .line_height = 18.5 / 13.0, .color = theme.current().fg_1, .wrap = .none, .text_overflow = .ellipsis };
+    return .{ .font_size = 13, .font_weight = 600, .line_height = 18.5 / 13.0, .color = theme.current().fg_1, .wrap = .none, .text_overflow = .ellipsis };
 }
 pub fn secondary(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .wrap = .none };
@@ -75,10 +75,10 @@ pub fn iconButton(size: f32) ButtonStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 7, .background = ui.Color.TRANSPARENT };
 }
 pub fn pathField(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 8 }, .gap = 6, .background = theme.popupInset(), .border = .{ .width = 0, .radius = 8 }, .overflow = .hidden, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 8 }, .gap = 6, .background = theme.popupInset(), .border = .{ .width = 0, .radius = 8 }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn pathInput() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .flex = 1, .min_width = 0, .padding = .{}, .border = .{ .width = 0 }, .background = ui.Color.TRANSPARENT };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .flex = 1, .min_width = 0, .padding = .{}, .border = .{ .width = 0 }, .background = ui.Color.TRANSPARENT };
 }
 pub fn table(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .min_width = 0, .direction = .column, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 0 }, .overflow = .hidden, .overflow_hidden = true };
@@ -87,7 +87,7 @@ pub fn headerClip(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = header_height }, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn columns(width: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 14, .right = 0 }, .gap = 0 };
+    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 16, .right = 0 }, .gap = 0 };
 }
 pub fn column(width: f32) ui.BoxStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .flex_shrink = 0, .min_width = 0, .direction = .row, .align_items = .center, .gap = 6, .overflow = .hidden, .overflow_hidden = true };

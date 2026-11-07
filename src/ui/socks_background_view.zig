@@ -45,7 +45,7 @@ pub const View = struct {
         const title = try ui.text(cx, "后台转发", S.text(13, 700, 20, S.theme.current().fg_1));
         title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try header.appendChild(cx.allocator, title);
-        const close = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 14), .icon_tint = tint, .variant = .ghost, .a11y_label = "关闭后台转发列表", .base_style = S.action(22), .hover_style = hover, .on_click = self.popover.close }).mount(self.popover.scope, cx);
+        const close = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 18), .icon_tint = tint, .variant = .ghost, .a11y_label = "关闭后台转发列表", .base_style = S.action(22), .hover_style = hover, .on_click = self.popover.close }).mount(self.popover.scope, cx);
         close.meta.ownership.meta.test_id = "socks.background.close";
         try header.appendChild(cx.allocator, close);
         try self.popover.content.appendChild(cx.allocator, header);
@@ -72,7 +72,8 @@ pub const View = struct {
     }
     fn entry(self: *View, scope: *ui.Scope, id: []const u8) !*ui.Node {
         const trigger = try scope.createState(EntryTrigger, .{ .view = self, .node = undefined });
-        const node = try ui.widgets.Button(.{ .label = self.count_text, .icon_asset = ui.icons.get("plug-zap"), .icon_size = @as(f32, 14), .icon_tint = self.tint, .variant = .ghost, .a11y_label = "后台转发列表", .base_style = self.count_style, .hover_style = self.hover, .on_click = self.cx.on(EntryTrigger, trigger, EntryTrigger.open) }).mount(scope, self.cx);
+        const node = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.get("plug-zap"), .icon_size = @as(f32, 16), .icon_tint = self.tint, .variant = .ghost, .a11y_label = "后台转发列表", .base_style = self.count_style, .hover_style = self.hover, .on_click = self.cx.on(EntryTrigger, trigger, EntryTrigger.open) }).mount(scope, self.cx);
+        @import("shell_styles.zig").titleToolbarButton(self.cx.allocator, node);
         trigger.node = node;
         node.meta.ownership.meta.test_id = id;
         node.setDisplay(.none);
@@ -166,7 +167,7 @@ pub const View = struct {
                 .stop => row.phase != .closing,
             };
             const capture = try scope.createState(RowAction, .{ .view = self, .owner = row.owner, .revision = self.revision, .action = action });
-            const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = @as(f32, 14), .icon_tint = self.tint, .a11y_label = label, .base_style = S.action(24), .hover_style = self.hover, .disabled = !enabled, .on_click = self.cx.on(RowAction, capture, RowAction.run) }).mount(scope, self.cx);
+            const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = @as(f32, 18), .icon_tint = self.tint, .a11y_label = label, .base_style = S.action(24), .hover_style = self.hover, .disabled = !enabled, .on_click = self.cx.on(RowAction, capture, RowAction.run) }).mount(scope, self.cx);
             button.meta.ownership.meta.test_id = switch (action) {
                 .open_terminal => "socks.background.open_terminal",
                 .reconnect => "socks.background.reconnect",

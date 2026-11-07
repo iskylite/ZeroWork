@@ -328,7 +328,7 @@ test "terminal surface binds real owned VT projection and preserves over sixty r
     var transport: FakeTransport = undefined;
     try transport.init(70, 16);
     defer transport.deinit();
-    try transport.controller.feedOutput(owner, 1, "\x1b[38;2;0;0;0mA界e\u{301}👩‍💻\x1b[48;2;255;255;255m   ", 1);
+    try transport.controller.feedOutput(owner, 1, "\x1b[38;2;0;0;0mA界e\u{301}👩‍💻\x1b[48;2;255;255;255m   \r\n", 1);
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     cx.setViewport(800, 1700);
@@ -345,9 +345,9 @@ test "terminal surface binds real owned VT projection and preserves over sixty r
     try std.testing.expectEqual(@as(usize, 70), surface.rows.items.len);
     const glyph = surface.rows.items[0].glyphs.items[0].node;
     const stamp = surface.rows.items[0].time.?;
-    try std.testing.expectApproxEqAbs(@as(f32, 12), stamp.globalRect().x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 16), stamp.globalRect().x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 12), glyph.globalRect().x - stamp.globalRect().x - stamp.globalRect().w, 0.001);
-    try std.testing.expectEqual(@as(f32, 12), glyph.globalRect().y);
+    try std.testing.expectEqual(@as(f32, 16), glyph.globalRect().y);
     try std.testing.expectEqual(@as(u8, 0), glyph.getText().?.color.r);
     try std.testing.expectEqualStrings("界", surface.rows.items[0].glyphs.items[1].node.getText().?.content);
     try std.testing.expectEqualStrings("e\u{301}", surface.rows.items[0].glyphs.items[2].node.getText().?.content);
@@ -366,7 +366,7 @@ test "terminal surface fractional viewport keeps clipped history selection and b
     try transport.controller.feedOutput(owner, 1, "old\r\none\r\ntwo\r\n$ ", 1);
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
-    cx.setViewport(300, 101); // 3 complete 22px rows plus 11px, and 12px insets.
+    cx.setViewport(300, 109); // 3 complete 22px rows plus 11px, and 16px insets.
     var view = try View.mount(cx);
     cx.root = view.root;
     defer view.releaseBuffers(cx);
@@ -380,7 +380,7 @@ test "terminal surface fractional viewport keeps clipped history selection and b
     try std.testing.expectEqual(@as(usize, 4), surface.rows.items.len);
     try std.testing.expectApproxEqAbs(viewport.y - 11, surface.rows.items[0].root.globalRect().y, 0.001);
     const bottom = surface.rows.items[3].root.globalRect();
-    try std.testing.expectApproxEqAbs(surface.root.globalRect().y + 89, bottom.y + bottom.h, 0.001);
+    try std.testing.expectApproxEqAbs(surface.root.globalRect().y + 93, bottom.y + bottom.h, 0.001);
     const x = surface.rows.items[0].root.globalRect().x + surface.bodyX();
     // The visible lower half of the historical row still selects its original text.
     cx.handleMouseDownEx(x, viewport.y + 2, .left, .{});
@@ -489,8 +489,8 @@ test "terminal surface public Cx wheel moves document viewport once without scro
     try transport.controller.feedOutput(owner, 1, output.items, 1);
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
-    // Four complete 22px rows and 12px insets keep this wheel test on row boundaries.
-    cx.setViewport(400, 112);
+    // Four complete 22px rows and 16px insets keep this wheel test on row boundaries.
+    cx.setViewport(400, 120);
     var view = try View.mount(cx);
     cx.root = view.root;
     defer view.releaseBuffers(cx);
@@ -517,6 +517,88 @@ test "terminal surface public Cx wheel moves document viewport once without scro
     try std.testing.expect(view.terminal_surface == null);
     cx.handleScroll(.{ .x = bounds.x + bounds.w * 0.6, .y = bounds.y + bounds.h * 0.5, .dx = 0, .dy = 32 });
     try std.testing.expectEqual(@as(usize, 0), transport.scroll_calls);
+}
+
+test "terminal surface edge drag scrolls stationary selection and copies offscreen rows" {
+    var transport: FakeTransport = undefined;
+    try transport.init(4, 32);
+    defer transport.deinit();
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(a);
+    for (0..40) |index| {
+        var line: [32]u8 = undefined;
+        try output.appendSlice(a, try std.fmt.bufPrint(&line, "ROW_{d:0>3}\r\n", .{index}));
+    }
+    try transport.controller.feedOutput(owner, 1, output.items, 1);
+    var clipboard: TestClipboard = .{};
+    var sdk = TestSdk.init(a, &clipboard, &TestClipboard.vtable, .{ .clipboard = true });
+    defer sdk.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setSystemSdk(&sdk);
+    cx.setViewport(600, 112);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    view.setTimestampGutter(false);
+    view.setTypography(14, 22.0 / 14.0, 400);
+    try view.bindTerminalService(transport.service());
+    for (0..3) |_| {
+        _ = cx.render();
+        _ = try view.refreshTerminalService(owner, true);
+    }
+    _ = cx.render();
+    const surface = view.terminal_surface.?;
+    surface.feedback.publish = struct {
+        fn publish(_: ?*anyopaque, _: *ui.Cx, _: identity.SessionHandle, _: []const u8) !void {}
+    }.publish;
+    const bounds = surface.root.globalRect();
+    const x = bounds.x + surface.contentPadding().left + surface.bodyX();
+    const middle = bounds.y + bounds.h * 0.5;
+    cx.handleMouseDownEx(x, middle, .left, .{});
+    cx.handleMouseMoveEx(x + 7 * surface.options.cell_width, bounds.y - 20, .{});
+    _ = try view.refreshTerminalService(owner, true);
+    const start = surface.selection.?.start;
+    const before = surface.snapshot.?.projection.scrollback.viewport_offset;
+    const first_end = (try surface.service.resolveAnchor(surface.selection.?.end)).?.row;
+    // No additional pointer events: a timed refresh must extend the selection.
+    for (0..6) |_| {
+        cx.frame_time_ms += 40;
+        _ = try view.refreshTerminalService(owner, true);
+    }
+    try std.testing.expect(surface.snapshot.?.projection.scrollback.viewport_offset < before);
+    try std.testing.expectEqual(start, surface.selection.?.start);
+    try std.testing.expect((try surface.service.resolveAnchor(surface.selection.?.end)).?.row < first_end);
+    const copied = (try view.copySelectionText(a)).?;
+    defer a.free(copied);
+    try std.testing.expect(std.mem.count(u8, copied, "ROW_") > 4);
+    try std.testing.expectEqual(@as(usize, 0), clipboard.writes);
+    try std.testing.expectEqual(@as(usize, 0), transport.scroll_calls);
+
+    // Returning to the middle stops scrolling; moving below reverses direction.
+    cx.handleMouseMoveEx(x + 7 * surface.options.cell_width, middle, .{});
+    _ = try view.refreshTerminalService(owner, true);
+    const stopped = surface.composite.top;
+    const stopped_pixel = surface.composite.pixel_offset;
+    cx.frame_time_ms += 100;
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expectEqual(stopped, surface.composite.top);
+    try std.testing.expectEqual(stopped_pixel, surface.composite.pixel_offset);
+    cx.handleMouseMoveEx(x + 7 * surface.options.cell_width, bounds.y + bounds.h + 20, .{});
+    _ = try view.refreshTerminalService(owner, true);
+    for (0..2) |_| {
+        cx.frame_time_ms += 40;
+        _ = try view.refreshTerminalService(owner, true);
+    }
+    try std.testing.expect(surface.composite.top > stopped);
+    cx.handleMouseUpEx(x + 7 * surface.options.cell_width, bounds.y + bounds.h + 20, .left, .{});
+    try std.testing.expect(!surface.dragging and !cx.dispatcher.hasPointerCapture());
+    try std.testing.expectEqual(@as(usize, 1), clipboard.writes);
+    const released = surface.composite.top;
+    cx.frame_time_ms += 100;
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expectEqual(released, surface.composite.top);
+    try std.testing.expect(surface.drag_scroll_ms == null);
 }
 
 test "terminal surface scrolling retains glyph nodes for overlapping document rows" {
@@ -670,7 +752,7 @@ test "terminal surface prepared registry face keeps glyph IME metrics and grid s
     var transport: FakeTransport = undefined;
     try transport.init(3, 16);
     defer transport.deinit();
-    try transport.controller.feedOutput(owner, 1, "MMMM", 1);
+    try transport.controller.feedOutput(owner, 1, "MMMM\r\n", 1);
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     cx.text.setFontSystem(&system);
@@ -1872,6 +1954,73 @@ test "global backdrop survives OSC default backgrounds while explicit ANSI cells
     try std.testing.expect(surface.preedit_node.getBackground().a <= 64);
     surface.showError(error.WorkerBusy);
     try std.testing.expect(surface.message_root.getBackground().a <= 64);
+}
+
+test "terminal timestamp hides pending wrapped input and freezes Return time with and without builtin records" {
+    const Clock = struct {
+        var now: i64 = 1000;
+        fn read() i64 {
+            return now;
+        }
+    };
+    for ([_]bool{ false, true }) |composed| {
+        var transport: FakeTransport = undefined;
+        try transport.init(12, 16);
+        defer transport.deinit();
+        Clock.now = 1000;
+        transport.vt.wall_clock_ms = Clock.read;
+        try transport.controller.feedOutput(owner, 1, "$ ", Clock.now);
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        cx.setViewport(500, 400);
+        var view = try View.mount(cx);
+        cx.root = view.root;
+        defer view.releaseBuffers(cx);
+        view.setTimestampGutter(true);
+        try view.bindTerminalService(transport.service());
+        _ = cx.render();
+        _ = try view.refreshTerminalService(owner, false);
+        const surface = view.terminal_surface.?;
+        if (composed) {
+            const id = try surface.composite.begin("@help", 500);
+            try surface.composite.finish(owner, id, .success, "help");
+        }
+        // The prompt and its wrapped input must both remain unstamped.
+        for ([_][]const u8{ "\x1b[0m", "abcdefghijklmnopqrstuvwx" }, 2..) |bytes, sequence| {
+            Clock.now = 3000;
+            try transport.controller.feedOutput(owner, sequence, bytes, Clock.now);
+            surface.force_snapshot = true;
+            _ = try view.refreshTerminalService(owner, false);
+            for (surface.rows.items, surface.snapshot.?.projection.visible_rows) |row, item| {
+                if (item.application_record_id == 0) try std.testing.expect(row.time == null or row.time.?.style.display == .none);
+            }
+        }
+        Clock.now = 5000;
+        try transport.controller.recordSubmission(owner);
+        surface.force_snapshot = true;
+        _ = try view.refreshTerminalService(owner, false);
+        var stamp: [8]u8 = undefined;
+        const expected = try @import("terminal_surface_input.zig").localTimestamp(&stamp, Clock.now);
+        var submitted_count: usize = 0;
+        for (surface.rows.items, surface.snapshot.?.projection.visible_rows) |row, item| {
+            if (item.application_record_id == 0 and item.submitted_wallclock_ms != null) {
+                try std.testing.expectEqual(@as(?i64, 5000), item.submitted_wallclock_ms);
+                try std.testing.expectEqual(.flex, row.time.?.style.display);
+                try std.testing.expectEqualStrings(expected, row.time.?.getText().?.content);
+                submitted_count += 1;
+            }
+        }
+        try std.testing.expect(submitted_count >= 2);
+        Clock.now = 9000;
+        try transport.controller.feedOutput(owner, 4, "\r\nresult\r\n$ ", Clock.now);
+        _ = try view.refreshTerminalService(owner, false);
+        const projection = surface.snapshot.?.projection;
+        const prompt = surface.rows.items[projection.cursor.row];
+        try std.testing.expect(prompt.time == null or prompt.time.?.style.display == .none);
+        for (surface.rows.items, projection.visible_rows) |row, item| {
+            if (item.submitted_wallclock_ms != null) try std.testing.expectEqualStrings(expected, row.time.?.getText().?.content);
+        }
+    }
 }
 
 test "terminal timestamp skips blank rows and builtin headers preserve distinct execution times" {

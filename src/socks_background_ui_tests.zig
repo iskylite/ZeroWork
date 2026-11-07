@@ -301,7 +301,7 @@ test "background SOCKS attached list uses real count owner callbacks and theme r
     try view.update(&rows);
     frames(cx);
     try std.testing.expectEqualStrings("后台转发 ×1", view.count_text.get());
-    try std.testing.expectEqual(@as(f32, 26), view.remote_entry.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 28), view.remote_entry.globalRect().h);
     click(cx, view.remote_entry);
     try view.update(&rows);
     frames(cx);

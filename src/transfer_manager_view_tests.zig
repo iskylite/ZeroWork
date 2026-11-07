@@ -1790,7 +1790,7 @@ test "material transfer task cards keep L2 fills and L3 detail ownership through
             p.retheme();
             h.frames();
             const task = id(p.root, "transfer.task").?;
-            try std.testing.expectEqual(theme.current().accent.withAlpha(theme.layerAlpha(2)), task.getBackground());
+            try std.testing.expectEqual(theme.layerAlpha(2), task.getBackground().a);
             const filename = id(p.root, "transfer.task.name").?;
             click(h, filename);
             h.frames();

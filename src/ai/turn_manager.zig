@@ -27,6 +27,15 @@ fn RequestBudget(comptime Timing: type) type {
         }
         fn userWait(raw: *const anyopaque, entering: bool) void {
             const self: *const @This() = @ptrCast(@alignCast(raw));
+            if (self.stop) |stop| if (stop.source) |source| if (source.user_wait) |notify| notify(source.context, entering);
+            self.changeWait(entering);
+        }
+        fn resourceWait(raw: *const anyopaque, entering: bool) void {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            if (self.stop) |stop| if (stop.source) |source| if (source.resource_wait) |notify| notify(source.context, entering);
+            self.changeWait(entering);
+        }
+        fn changeWait(self: *const @This(), entering: bool) void {
             const mutable = self.lock();
             defer mutable.mutex.unlock();
             const now = self.timing.now();
@@ -57,7 +66,7 @@ fn RequestBudget(comptime Timing: type) type {
             return self.reason() != null;
         }
         fn childToken(self: *const @This()) provider.CancelToken {
-            return .{ .source = .{ .context = self, .poll = cancelled, .user_wait = userWait } };
+            return .{ .source = .{ .context = self, .poll = cancelled, .user_wait = userWait, .resource_wait = resourceWait } };
         }
     };
 }
@@ -73,7 +82,9 @@ pub const Manager = struct {
         tool_rejected: ?*const fn (*anyopaque, provider.ToolCall, []const u8) anyerror!void = null,
     };
     allocator: std.mem.Allocator,
+    read_only: bool = false,
     input: ?*@import("session_input.zig").Inbox = null,
+    shared_task: ?struct { root: *@import("task_budget.zig").Root, task: @import("../host/identity.zig").TaskId } = null,
     compaction_config: ?@import("provider_config.zig").ProviderConfig = null,
     last_context_usage: ?@import("context_usage.zig").Sample = null,
     observer: ?Observer = null,
@@ -168,6 +179,10 @@ pub const Manager = struct {
     }
 
     fn runWithinBudget(self: *Manager, p: provider.Provider, request: provider.ChatRequest, budget: anytype, cancel: *provider.CancelToken) !provider.ChatStats {
+        defer if (self.tool_run) |loop| {
+            loop.compaction_provider = null;
+            loop.request.cancel = request.cancel;
+        };
         try budget.check();
         if (self.tool_run) |previous| {
             // Only a retry of the same turn inherits its dispatch ledger.
@@ -209,8 +224,12 @@ pub const Manager = struct {
             const scope = self.scope orelse return error.ToolScopeUnavailable;
             const loop = try self.allocator.create(tool_loop.Loop);
             loop.* = tool_loop.Loop.init(self.allocator, scope, self.turn_id, self.tool_limits);
+            loop.read_only = self.read_only;
             loop.compaction_config = self.compaction_config;
-            loop.start(request) catch |err| {
+            loop.compaction_provider = p;
+            var initial_request = request;
+            initial_request.cancel = cancel;
+            loop.start(initial_request) catch |err| {
                 if (loop.compaction_failure != null) {
                     self.tool_run = loop;
                     return err;
@@ -243,6 +262,21 @@ pub const Manager = struct {
             total.request_count +|= stats.request_count;
             total.usage_reported = total.usage_reported and stats.usage_reported;
             if (self.pending_tools.items.len == 0 or self.tool_run == null) {
+                if (self.shared_task) |shared| if (self.tool_run) |loop| if (shared.root.needsChildren(shared.task)) {
+                    if (self.round_text.items.len != 0) loop.appendPrepared(try loop.prepareMessage(.{ .role = .assistant, .content = self.round_text.items }));
+                    const dependency_wait = provider.CancelToken.beginUserWait(cancel);
+                    defer dependency_wait.end();
+                    try shared.root.state(shared.task, .waiting_children, "");
+                    while (shared.root.childrenRunning(shared.task)) {
+                        if (shared.root.unreportedHuman(shared.task) or self.hasSteeringInput()) break;
+                        try budget.check();
+                        try shared.root.check();
+                        (@import("retry.zig").Clock{}).sleep(5 * std.time.ns_per_ms);
+                    }
+                    try shared.root.state(shared.task, .running, "");
+                    continue;
+                };
+
                 if (self.input) |inbox| if (!inbox.tryClose()) {
                     const loop = self.tool_run.?;
                     if (self.round_text.items.len != 0) loop.appendPrepared(try loop.prepareMessage(.{ .role = .assistant, .content = self.round_text.items }));
@@ -252,6 +286,7 @@ pub const Manager = struct {
                 try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = self.command, .verdict = "stream_done", .target = request.model });
                 return total;
             }
+            if (self.shared_task) |shared| try shared.root.take(shared.task, 0, @intCast(self.pending_tools.items.len));
             try self.completeTools(current.cancel, self.permissionEngine(), frozen_policy_revision);
             try budget.check();
             if (self.tool_run.?.uncertain and !self.tool_run.?.host_observation_only) return error.ToolOutcomeUnknown;
@@ -263,6 +298,9 @@ pub const Manager = struct {
     fn inputPlanCurrent(raw: *anyopaque, revision: u64) bool {
         const inbox: *@import("session_input.zig").Inbox = @ptrCast(@alignCast(raw));
         return inbox.planCurrent(revision);
+    }
+    fn hasSteeringInput(self: *Manager) bool {
+        return if (self.input) |inbox| inbox.hasPending() else false;
     }
     fn consumeInputs(self: *Manager) !u64 {
         const inbox = self.input.?;
@@ -300,6 +338,11 @@ pub const Manager = struct {
     }
 
     fn resumeAnswerWithinBudget(self: *Manager, p: provider.Provider, loop: *tool_loop.Loop, budget: anytype, cancel: *provider.CancelToken) !provider.ChatStats {
+        loop.compaction_provider = p;
+        defer loop.compaction_provider = null;
+        const original_cancel = loop.request.cancel;
+        loop.request.cancel = cancel;
+        defer loop.request.cancel = original_cancel;
         try budget.check();
         if (self.cooldownRemainingMs() != 0) return error.ProviderCoolingDown;
         if (self.turn_id != loop.turn_id or self.scope == null or !tool_scope.Owner.eql(self.scope.?.owner, loop.scope.owner)) return error.ToolOwnerChanged;
@@ -388,7 +431,7 @@ pub const Manager = struct {
             const audit_start = self.audit_log.len();
             var retry_after_ms: ?u32 = null;
             var attempt_request = request;
-            const remaining_ns = deadline_ns - timing.now();
+            const remaining_ns: i128 = if (self.shared_task) |shared| try shared.root.remainingNs() else deadline_ns - timing.now();
             if (remaining_ns <= 0) {
                 self.turn.abort();
                 try self.recordFailure(request.model);
@@ -404,7 +447,11 @@ pub const Manager = struct {
             // Stop wins on both success and failure. Providers and their
             // epilogues must also stay within the original retry budget.
             const cancelled = if (request.cancel) |token| token.isCancelled() else false;
-            if (cancelled or timing.now() >= deadline_ns) {
+            const timed_out = if (self.shared_task) |shared| expired: {
+                shared.root.check() catch break :expired true;
+                break :expired false;
+            } else timing.now() >= deadline_ns;
+            if (cancelled or timed_out) {
                 self.audit_log.truncate(audit_start);
                 self.turn.abort();
                 try self.recordFailure(request.model);
@@ -432,12 +479,13 @@ pub const Manager = struct {
                     const actual_delay = @max(delay_ms, retry_after_ms orelse 0);
                     // Do not retry ahead of Retry-After or wait indefinitely
                     // when the server asks for a delay beyond this turn's budget.
-                    if (@as(i128, actual_delay) * std.time.ns_per_ms >= deadline_ns - timing.now()) {
+                    const retry_deadline = if (self.shared_task) |shared| timing.now() + @as(i128, try shared.root.remainingNs()) else deadline_ns;
+                    if (@as(i128, actual_delay) * std.time.ns_per_ms >= retry_deadline - timing.now()) {
                         self.turn.abort();
                         try self.recordFailure(request.model);
                         return error.Timeout;
                     }
-                    retry.waitWithTiming(actual_delay, request.cancel, deadline_ns, timing) catch |wait_err| {
+                    retry.waitWithTiming(actual_delay, request.cancel, retry_deadline, timing) catch |wait_err| {
                         self.turn.abort();
                         try self.recordFailure(request.model);
                         return wait_err;

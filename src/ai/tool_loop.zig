@@ -143,6 +143,7 @@ pub const Record = struct {
 };
 pub const DispatchGate = provider.DispatchFence;
 pub const Loop = struct {
+    read_only: bool = false,
     dispatch_gate: ?DispatchGate = null,
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -163,6 +164,8 @@ pub const Loop = struct {
     compaction_config: ?@import("provider_config.zig").ProviderConfig = null,
     compacted: @import("wire_history.zig").History = .{},
     compaction_failure: ?anyerror = null,
+    /// Borrowed only for the current Manager call, cleared before it returns.
+    compaction_provider: ?provider.Provider = null,
     notice_revision: u64 = 0,
     wire_notice_revision: u64 = 0,
 
@@ -245,12 +248,16 @@ pub const Loop = struct {
     pub fn nextRequest(self: *Loop) !provider.ChatRequest {
         if (self.round_index >= self.limits.max_rounds) return error.ToolRoundLimit;
         if (self.uncertain and !self.host_observation_only) return error.ToolOutcomeUnknown;
-        if (self.host_observation_only) {
+        if (self.host_observation_only or self.read_only) {
             var visible: std.ArrayList(provider.ToolDefinition) = .empty;
             for (self.request.tools) |definition| {
+                if (self.tool_table == null) {
+                    if (definition.dynamic == null and definition.tool != .run_command) try visible.append(self.arena.allocator(), definition);
+                    continue;
+                }
                 const entry = if (self.tool_table) |*table| table.lookup(definition.name()) orelse continue else continue;
                 const read = entry.definition.effect == .read_state or entry.definition.effect == .observe_image;
-                if (read or std.mem.eql(u8, entry.definition.id, "host.stop_execution")) try visible.append(self.arena.allocator(), definition);
+                if (read or (!self.read_only and std.mem.eql(u8, entry.definition.id, "host.stop_execution"))) try visible.append(self.arena.allocator(), definition);
             }
             self.request.tools = try visible.toOwnedSlice(self.arena.allocator());
         }
@@ -315,6 +322,42 @@ pub const Loop = struct {
         if (host.acknowledge_notice) |acknowledge| try acknowledge(host.context, self.notice_revision, cancel);
         if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
         self.wire_notice_revision = self.notice_revision;
+    }
+    /// Called by the execution-side child gateway while its own call is still
+    /// open. Excludes that ENTIRE assistant batch, including results of earlier
+    /// siblings, so the child sees consumed input and only closed tool pairs.
+    pub fn snapshotForChild(self: *const Loop, allocator: std.mem.Allocator, call_id: []const u8, child_scope: scope_mod.Scope, targets: []const @import("../host/identity.zig").SessionHandle) !@import("wire_history.zig").History {
+        if (!self.scope.owner.eql(child_scope.owner) or self.scope.memberIds().len != child_scope.memberIds().len) return error.InheritanceScopeProjectionRequired;
+        for (self.scope.memberIds()) |id| child_scope.validateDirectory(&.{id}) catch return error.InheritanceScopeProjectionRequired;
+        var offset = self.messages.items.len;
+        while (offset > 0) {
+            offset -= 1;
+            const message = self.messages.items[offset];
+            if (message.role != .assistant or message.tool_calls.len == 0) continue;
+            const owns_call = for (message.tool_calls) |call| {
+                if (std.mem.eql(u8, call.id, call_id)) break true;
+            } else false;
+            if (!owns_call) return error.InvalidInheritanceSnapshot;
+            for (self.messages.items[offset + 1 ..]) |result| if (result.tool_call_id) |id| {
+                if (std.mem.eql(u8, id, call_id)) return error.InvalidInheritanceSnapshot;
+            };
+            for (self.messages.items[0..offset]) |prior| {
+                if (prior.image_owner) |owner| {
+                    const permitted = for (targets) |target| {
+                        if (target.eql(owner)) break true;
+                    } else false;
+                    if (!permitted) return error.InheritanceScopeProjectionRequired;
+                }
+                for (prior.offloaded_images) |image| if (image.owner) |owner| {
+                    const permitted = for (targets) |target| {
+                        if (target.eql(owner)) break true;
+                    } else false;
+                    if (!permitted) return error.InheritanceScopeProjectionRequired;
+                };
+            }
+            return @import("wire_history.zig").History.copy(allocator, self.messages.items[0..offset], "");
+        }
+        return error.InvalidInheritanceSnapshot;
     }
     pub fn checkRequestBudget(self: *Loop) !void {
         try self.checkBudget();
@@ -474,6 +517,10 @@ pub const Loop = struct {
         };
         defer parsed.deinit();
         const selected = parsed.call;
+        if (self.read_only and selected.tool == .run_command) {
+            record.result_body = try self.errorBody("ObservationOnlyTask", &selected.targets);
+            return record.result_body.?;
+        }
         var declared = false;
         for (self.request.tools) |definition| if (definition.tool == selected.tool) {
             declared = true;
@@ -603,6 +650,10 @@ pub const Loop = struct {
             record.result_body = try self.errorBody("CancelledBeforeDispatch", &parsed.targets);
             return record.result_body.?;
         };
+        if (self.read_only and parsed.entry.definition.effect != .read_state and parsed.entry.definition.effect != .observe_image) {
+            record.result_body = try self.errorBody("ObservationOnlyTask", &parsed.targets);
+            return record.result_body.?;
+        }
         if (parsed.entry.authority != .session_targets) return self.resolveHost(record, table, parsed, call, host, cancel);
         if (self.uncertain and (!self.host_observation_only or (parsed.entry.definition.effect != .read_state and parsed.entry.definition.effect != .observe_image))) {
             record.result_body = try self.errorBody("EarlierToolOutcomeUnknown", &parsed.targets);
@@ -697,7 +748,7 @@ pub const Loop = struct {
         if (self.compaction_config) |config| {
             const compaction = @import("context_compaction.zig");
             if (compaction.reachesThreshold(estimated, output, self.limits.context_window) and compaction.cutoff(self.messages.items) != null) {
-                var next = compaction.compactNow(config, self.messages.items, try budget.fixedTokens(self.request), self.request.cancel) catch |err| {
+                var next = compaction.compactNowWithProvider(config, self.messages.items, try budget.fixedTokens(self.request), self.request.cancel, self.compaction_provider) catch |err| {
                     if (err == error.ContextFixedOverhead) return err;
                     self.compaction_failure = err;
                     return error.ContextCompactionFailed;

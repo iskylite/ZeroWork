@@ -969,6 +969,7 @@ pub const Document = struct {
                     row.wraps = nr.wraps;
                     row.continuation = nr.continuation;
                     row.semantic_prompt = nr.semantic_prompt;
+                    row.submitted_wallclock_ms = nr.submitted_wallclock_ms;
                     for (native.projection.cells[nr.cell_start..][0..nr.cell_count], 0..) |cell, col| {
                         var copy = cell;
                         copy.grapheme_start = @intCast(graphemes.items.len);

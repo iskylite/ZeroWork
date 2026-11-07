@@ -20440,6 +20440,28 @@ test "render: overflow clip spares owner shadow and stops at border inner edge (
     try expectOwnClipContract(cx, child_color);
 }
 
+test "render: glass overflow clip preserves floating shadow and clips children" {
+    for ([_]bool{ false, true }) |composited| {
+        var cx = try Cx.init(std.testing.allocator, std.testing.io);
+        defer cx.deinit();
+        cx.setViewport(320, 240);
+        const child_color = Color.rgba(79, 70, 229, 255);
+        cx.root = try buildShadowedClipPanel(cx, composited, child_color);
+        const panel = cx.root.?.children.items[0];
+        panel.setStyleInline(cx.allocator, .{ .glass = .{ .backdrop_blur = 12 } });
+        cx.layout();
+        for (0..2) |frame| {
+            cx.frame_time_ms = @as(f64, @floatFromInt(frame)) * 16;
+            _ = cx.render();
+            const probe = try ownClipProbe(cx, 104, 300, child_color);
+            try std.testing.expectEqual(@as(?usize, 0), probe.shadow_depth);
+            try std.testing.expect(probe.child_found);
+            // Glass uses the border box for the filtered backdrop and child clip.
+            try std.testing.expectEqual(@as(?ui.ComputedRect, ui.ComputedRect.init(40, 40, 120, 80)), probe.child_scissor);
+        }
+    }
+}
+
 test "render: composited owner overflow clip spares owner shadow and stops at border inner edge, fresh and cached" {
     var cx = try Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();

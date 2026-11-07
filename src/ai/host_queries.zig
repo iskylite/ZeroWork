@@ -162,6 +162,10 @@ fn visibleGroup(snapshot: Snapshot, id: u64) bool {
 /// This check uses only the current binding's allowlist. It must precede any
 /// lookup of a requested object's state, metadata or generation.
 pub fn permitsSessionId(snapshot: Snapshot, id: u64) bool {
+    if (snapshot.context.child_origin != null) {
+        for (snapshot.sessions) |item| if (@backingInt(item.handle.session_id) == id and visibleSession(snapshot, item)) return true;
+        return false;
+    }
     for (snapshot.sessions) |item| if (@backingInt(item.handle.session_id) == id and retainedSession(snapshot, item)) return true;
     return switch (snapshot.context.binding) {
         .session => |bound| id == bound,

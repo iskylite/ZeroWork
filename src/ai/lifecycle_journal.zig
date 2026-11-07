@@ -109,11 +109,12 @@ pub const Journal = struct {
         journal.disk_hash = hash(source);
         const parsed = try std.json.parseFromSlice(Disk, a, source, .{});
         defer parsed.deinit();
-        if (parsed.value.schema_version != 1) return error.UnsupportedJournalSchema;
+        if (parsed.value.schema_version != 1 and parsed.value.schema_version != 2) return error.UnsupportedJournalSchema;
         if (parsed.value.records.len > max_records) return error.JournalLimit;
         try journal.records.ensureTotalCapacity(a, parsed.value.records.len);
         var recovered = false;
         for (parsed.value.records) |value| {
+            if (parsed.value.schema_version == 1 and value.context.child_origin != null) return error.UnsupportedJournalSchema;
             try validateRecord(value);
             for (journal.records.items) |prior| if (prior.operation_ref.eql(value.operation_ref) or sameKey(prior, value.context, value.tool_id, value.request_key)) return error.InvalidJournal;
             var owned = try value.clone(a);
@@ -262,7 +263,10 @@ pub const Journal = struct {
         defer if (current) |value| self.allocator.free(value);
         const current_hash = if (current) |value| @as(?Digest, hash(value)) else null;
         if (!std.meta.eql(current_hash, self.disk_hash)) return error.JournalConflict;
-        const encoded = try std.json.Stringify.valueAlloc(self.allocator, Disk{ .schema_version = 1, .records = records }, .{});
+        const extended = for (records) |record| {
+            if (record.context.child_origin != null) break true;
+        } else false;
+        const encoded = try std.json.Stringify.valueAlloc(self.allocator, Disk{ .schema_version = if (extended) 2 else 1, .records = records }, .{});
         defer self.allocator.free(encoded);
         if (encoded.len > max_file_bytes) return error.JournalLimit;
         var atomic = try self.dir.createFileAtomic(self.io, self.path, .{ .permissions = @fromBackingInt(0o600), .make_path = true, .replace = true });

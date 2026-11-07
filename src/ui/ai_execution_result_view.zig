@@ -288,12 +288,12 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
         const view_hint = try @import("control_hint.zig").mount(cx, scope, view, "查看原执行终端", .{ .id = "ai.execution.result.view_terminal.tooltip" });
         try footer.appendChild(cx.allocator, view_hint.wrapper);
         if (projection.canStop()) {
-            const stop = try ui.widgets.Button(.{ .variant = .ghost, .label = "停止执行", .base_style = S.action(), .disabled = state.controls_disabled, .on_click = cx.on(State, state, State.stop) }).mount(scope, cx);
+            const stop = try ui.widgets.Button(.{ .variant = .secondary, .label = "停止执行", .base_style = try @import("app_theme.zig").paintSignal(S.ButtonStyle, cx, scope, S.action, .{}), .disabled = state.controls_disabled, .on_click = cx.on(State, state, State.stop) }).mount(scope, cx);
             stop.meta.ownership.meta.test_id = "ai.execution.result.stop";
             try footer.appendChild(cx.allocator, stop);
         }
         if (projection.canTakeover()) {
-            const takeover = try ui.widgets.Button(.{ .variant = .ghost, .label = "接管输入", .base_style = S.action(), .disabled = state.controls_disabled, .on_click = cx.on(State, state, State.takeover) }).mount(scope, cx);
+            const takeover = try ui.widgets.Button(.{ .variant = .secondary, .label = "接管输入", .base_style = try @import("app_theme.zig").paintSignal(S.ButtonStyle, cx, scope, S.action, .{}), .disabled = state.controls_disabled, .on_click = cx.on(State, state, State.takeover) }).mount(scope, cx);
             takeover.meta.ownership.meta.test_id = "ai.execution.result.takeover";
             try footer.appendChild(cx.allocator, takeover);
         }

@@ -92,17 +92,27 @@ pub const CancelToken = struct {
         poll: *const fn (*const anyopaque) bool,
         /// Human decisions suspend the active-run budget, not Stop or scope checks.
         user_wait: ?*const fn (*const anyopaque, bool) void = null,
+        /// Capacity waits pause this branch without reporting a human decision.
+        resource_wait: ?*const fn (*const anyopaque, bool) void = null,
     } = null,
     pub const UserWait = struct {
         token: ?*const CancelToken,
+        resource: bool = false,
         pub fn end(self: UserWait) void {
-            if (self.token) |token| if (token.source) |source| if (source.user_wait) |notify| notify(source.context, false);
+            if (self.token) |token| if (token.source) |source| {
+                const callback = if (self.resource) source.resource_wait else source.user_wait;
+                if (callback) |notify| notify(source.context, false);
+            };
         }
     };
     /// Worker-owned guard. Always end it, including rejection and cancellation.
     pub fn beginUserWait(self: ?*const CancelToken) UserWait {
         if (self) |token| if (token.source) |source| if (source.user_wait) |notify| notify(source.context, true);
         return .{ .token = self };
+    }
+    pub fn beginResourceWait(self: ?*const CancelToken) UserWait {
+        if (self) |token| if (token.source) |source| if (source.resource_wait) |notify| notify(source.context, true);
+        return .{ .token = self, .resource = true };
     }
     pub fn cancel(self: *CancelToken) void {
         self.cancelled.store(true, .release);

@@ -36,6 +36,18 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             .{ .value = "queue", .label = "排队", .test_id = "settings.follow_up_mode.queue" },
         }, null);
     }
+    if (binding.matches(query, "子 Agent 默认上下文 独立 继承 复用策略 每次新建 优先复用 模型决定 child_context_mode child_reuse_policy")) {
+        const section = try page.section("子 Agent", "只用于之后创建的子配置；已有子配置保持原选择", ui.icons.get("messages-square").?, 30, "settings.ai.children", null);
+        try section.select(.{ .section = "ai", .key = "child_context_mode" }, "默认上下文", "独立上下文从任务材料开始；继承上下文复制创建时已消费的合法历史。显式创建参数优先。", &[_]ui.widgets.SelectOption{
+            .{ .value = "independent", .label = "独立上下文", .test_id = "settings.child_context.independent" },
+            .{ .value = "inherit", .label = "继承当前上下文", .test_id = "settings.child_context.inherit" },
+        }, null);
+        try section.select(.{ .section = "ai", .key = "child_reuse_policy" }, "默认复用策略", "每次新建默认不可自动复用；优先复用会提示模型先列出并选择明确候选；模型决定默认保守，仍需显式设置可复用。宿主不会按名称悄悄替换。", &[_]ui.widgets.SelectOption{
+            .{ .value = "new", .label = "每次新建", .test_id = "settings.child_reuse.new" },
+            .{ .value = "prefer_reuse", .label = "优先复用", .test_id = "settings.child_reuse.prefer_reuse" },
+            .{ .value = "model", .label = "模型决定", .test_id = "settings.child_reuse.model" },
+        }, null);
+    }
     if (binding.matches(query, "上下文 来源 脱敏 隐私 IP 主机 用户 redact_ip")) {
         const section = try page.section("上下文", "连接身份与敏感信息", ui.icons.file_text, 25, "settings.ai.context", null);
         try section.toggle(.{ .section = "ai", .key = "redact_ip" }, "隐藏连接身份", "隐藏 SSH 连接的 IP、主机名和用户名。终端正文与附件仍按原文发送，请检查敏感内容。", null);
@@ -60,5 +72,6 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.select(.{ .section = "ai", .key = "step_display" }, "步骤默认显示", "只决定新步骤组的初始状态；已有组和手动收展状态保持不变。", &[_]ui.widgets.SelectOption{ .{ .value = "collapsed", .label = "折叠", .test_id = "settings.step_display.collapsed" }, .{ .value = "expanded", .label = "展开", .test_id = "settings.step_display.expanded" } }, null);
         try section.toggle(.{ .section = "ai", .key = "error_hint" }, "错误轻提示", "命令失败时显示助手入口。", null);
     }
+    if (binding.matches(query, "本地技能 技能 SKILL MCP 服务 工具 导入 stdio HTTP 环境变量 请求头")) if (bound.hooks.mount_extensions) |mount| try page.root.appendChild(cx.allocator, try mount(bound.hooks.context, cx, bound.scope));
     return page.finish();
 }

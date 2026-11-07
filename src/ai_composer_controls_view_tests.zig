@@ -257,6 +257,24 @@ test "AI composer brand follows selected model and clears without a model" {
     try std.testing.expectEqual(@as(usize, 0), f.view.model_brand.children.items.len);
 }
 
+test "AI composer child permission ceiling disables auto without blocking confirm" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var snapshot = f.snapshot();
+    snapshot.allow_auto_permission = false;
+    try f.view.update(snapshot);
+    f.settle();
+    f.enter(f.view.buttons[1]);
+    const auto = find(f.cx.root.?, "ai.permission.auto").?;
+    const confirm = find(f.cx.root.?, "ai.permission.confirm").?;
+    f.enter(auto);
+    try std.testing.expectEqual(@as(usize, 0), f.calls);
+    f.enter(confirm);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expectEqual(.confirm, f.last.?.action.permission);
+}
+
 test "AI composer permission labels preserve real confirm and auto modes and only update on host acknowledgement" {
     var f: Fixture = undefined;
     try f.init();

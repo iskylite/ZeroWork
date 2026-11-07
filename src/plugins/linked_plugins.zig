@@ -119,7 +119,7 @@ pub fn registerAll(host: *plugins.PluginHost, adapters: []const sessions.Adapter
             },
             .ai_context = .{ .identity = descriptor.display_name },
             .integration = switch (descriptor.plugin_id) {
-                .local => .{ .ai = true },
+                .local => .{ .ai = true, .retry_after_end = true },
                 .ssh => .{ .retry_after_end = true, .transport_loss = true, .auxiliary_readonly = true, .auxiliary_transfer = true, .ai = true },
                 .sftp => .{ .directory_recovery = true, .ai = true },
                 .external => unreachable,

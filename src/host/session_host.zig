@@ -862,8 +862,8 @@ pub const SessionHost = struct {
         self.startAdapter(entry) catch |err| try self.failCreate(entry, @errorName(err));
     }
 
-    /// A failed startup keeps identity and advances generation/attempt only
-    /// after cleanup. Reopening an exited Local uses create, not failed/retry.
+    /// Failed startup or a retryable ended shell keeps its identity and advances
+    /// generation/attempt only after the previous resources have been released.
     pub fn retry(self: *SessionHost, handle: SessionHandle) !Accepted {
         const entry = self.find(handle) orelse return error.StaleSession;
         if (entry.presentation_policy == .probe) return error.ContentPresentationForbidden;

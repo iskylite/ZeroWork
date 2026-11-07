@@ -1,9 +1,9 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 
-pub const height = @import("v3_geometry.zig").tab_height;
+pub const height: f32 = 28;
 pub const gap: f32 = 4;
-pub const title_font: f32 = 12;
+pub const title_font: f32 = 12.5;
 pub const title_weight: u16 = 500;
 pub const attention_border_width: f32 = 0;
 pub const attention_duration_ms: f64 = 480;
@@ -26,7 +26,7 @@ pub fn strip() ui.BoxStyle {
 }
 pub fn tab(width: f32, active: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .cursor = .grab, .shadow = if (active) .{ .blur = if (theme.currentName() == .dark) 8 else 6, .offset_y = if (theme.currentName() == .dark) 2 else 1, .color = c.shadow.withAlpha(if (theme.currentName() == .dark) 89 else 18) } else .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.tab_on else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 9 }, .flex_shrink = 0 };
+    return .{ .cursor = .grab, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.selection else ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn underline(width: f32) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .top = .{ .px = height - 5 } }, .width = .{ .px = width - 24 }, .height = .{ .px = 2 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };
@@ -35,10 +35,10 @@ pub fn title() ui.TextStyle {
     return .{ .font_size = title_font, .font_weight = title_weight, .color = theme.current().fg_1, .line_height = 1.5, .text_overflow = .ellipsis, .selectable = false };
 }
 pub fn iconSlot() ui.BoxStyle {
-    return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .position = .absolute, .inset = .{ .left = .{ .px = 10 }, .top = .{ .px = (height - 14) / 2 } }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .position = .absolute, .inset = .{ .left = .{ .px = 19 }, .top = .{ .px = (height - 14) / 2 } }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
 }
 pub fn close(width: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .position = .absolute, .inset = .{ .left = .{ .px = width - 26 }, .top = .{ .px = (height - 20) / 2 } }, .padding = ui.Padding.ZERO, .align_items = .center, .justify = .center, .gap = 0, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .position = .absolute, .inset = .{ .left = .{ .px = width - 26 }, .top = .{ .px = (height - 20) / 2 } }, .corner_radius = 10, .padding = ui.Padding.ZERO, .align_items = .center, .justify = .center, .gap = 0, .border = .{ .radius = 10 }, .flex_shrink = 0 };
 }
 pub fn control(width: f32) ui.BoxStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = 28 }, .padding = .{}, .border = .{ .radius = 6 }, .flex_shrink = 0 };
@@ -134,7 +134,7 @@ pub fn groupTint(color: ui.Color) ui.Color {
     return color.withAlpha(20);
 }
 pub fn groupMarker(color: ui.Color) ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = (height - 18) / 2 } }, .width = .{ .px = 2.5 }, .height = .{ .px = 18 }, .background = color, .border = .{ .radius = 1 }, .flex_shrink = 0 };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = (height - 18) / 2 } }, .width = .{ .px = 2.5 }, .height = .{ .px = 18 }, .background = color, .border = .{ .radius = 1 }, .flex_shrink = 0 };
 }
 
 // V3 #tooltip: independent floating content, max-width300, inset7/10, radius7.

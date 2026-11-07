@@ -52,7 +52,7 @@ pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 34, .direction = .row, .align_items = .center, .flex_wrap = .wrap, .gap = 6, .padding = .{ .left = 8, .right = 8, .top = 3, .bottom = 3 }, .flex_shrink = 0 };
 }
 pub fn action() ButtonStyle {
-    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 28 }, .padding = .{ .left = 8, .right = 8, .top = 4, .bottom = 4 }, .font_size = 12, .font_weight = 500, .background = ui.Color.TRANSPARENT, .text_color = theme.patchInk(theme.current().accent_ink, &.{theme.popupAction()}), .corner_radius = 7, .flex_shrink = 0 };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 28 }, .padding = .{ .left = 8, .right = 8, .top = 4, .bottom = 4 }, .font_size = 12, .font_weight = 500, .background = theme.popupInset(), .text_color = theme.current().fg_1, .border_width = 0, .corner_radius = 7, .flex_shrink = 0 };
 }
 pub fn iconButton() ButtonStyle {
     return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .background = ui.Color.TRANSPARENT, .corner_radius = 7, .flex_shrink = 0 };

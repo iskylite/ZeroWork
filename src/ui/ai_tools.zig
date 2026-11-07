@@ -300,7 +300,7 @@ pub const Bridge = struct {
         self.roster_revision = group.membership_revision;
         try self.prepareScope(app, captured);
     }
-    fn prepareScope(self: *Bridge, app: *Application.ApplicationHost, input: scope.Scope) !void {
+    pub fn prepareScope(self: *Bridge, app: *Application.ApplicationHost, input: scope.Scope) !void {
         if (self.captured_scope != null or self.pending != null or self.controller != null) return error.ToolCleanupPending;
         const captured = try input.clone(self.capture_arena.allocator());
         self.shared_history = &app.domain.operation_history;
@@ -313,6 +313,7 @@ pub const Bridge = struct {
         defer members.deinit(self.allocator);
         var has_terminal_source = false;
         var has_batch_source = false;
+        var terminal_sources: std.ArrayList(identity.SessionHandle) = .empty;
         var execution_sources: std.ArrayList(identity.SessionHandle) = .empty;
         var attachment_sources: std.ArrayList(identity.SessionHandle) = .empty;
         const capture_allocator = self.capture_arena.allocator();
@@ -325,6 +326,7 @@ pub const Bridge = struct {
             if (!manifest.integration.ai) continue;
             for (manifest.tools) |binding| if (std.mem.eql(u8, binding.definition_id, "read_terminal")) {
                 has_terminal_source = true;
+                try terminal_sources.append(self.capture_arena.allocator(), owner);
                 break;
             };
             for (manifest.tools) |binding| if (std.mem.eql(u8, binding.definition_id, "run_command")) {
@@ -397,6 +399,7 @@ pub const Bridge = struct {
                 if (!has_terminal_source and @import("../ai/host_terminal_queries.zig").supports(id)) continue;
                 if (!has_terminal_source and std.mem.eql(u8, id, @import("../ai/builtin_tools.zig").id)) continue;
                 if (!has_batch_source and @import("../ai/batch_output.zig").supports(id)) continue;
+                if (@import("../ai/host_terminal_queries.zig").supports(id) or std.mem.eql(u8, id, @import("../ai/builtin_tools.zig").id)) contribution.session_targets = terminal_sources.items;
                 if (@import("../ai/host_execution.zig").supports(id)) {
                     if (std.mem.eql(u8, id, "host.attach_shell")) {
                         if (attachment_sources.items.len == 0) continue;

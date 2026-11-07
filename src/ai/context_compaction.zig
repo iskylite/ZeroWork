@@ -73,16 +73,31 @@ pub fn reachesThreshold(input: usize, output: usize, window: u32) bool {
 }
 /// Worker-only synchronous path, used between complete tool batches.
 pub fn compactNow(config: pc.ProviderConfig, messages: []const p.Message, reserve: usize, cancel: ?*p.CancelToken) !History {
+    return compactNowWithProvider(config, messages, reserve, cancel, null);
+}
+pub fn compactNowWithProvider(config: pc.ProviderConfig, messages: []const p.Message, reserve: usize, cancel: ?*p.CancelToken, transport: ?p.Provider) !History {
     const cut = try budgetCutoff(config, messages, reserve);
     const job = try Job.create(config, .{ .owner = .{ .session = 0 }, .conversation = 0, .revision = 0 }, messages, cut);
     defer job.destroy();
     job.reserve_tokens = reserve;
-    if (cancel) |token| job.cancel.source = .{ .context = token, .poll = struct {
-        fn poll(raw: *const anyopaque) bool {
-            const t: *const p.CancelToken = @ptrCast(@alignCast(raw));
-            return t.isCancelled();
-        }
-    }.poll };
+    job.provider_override = transport;
+    if (cancel) |token| {
+        const Link = struct {
+            fn poll(raw: *const anyopaque) bool {
+                const t: *const p.CancelToken = @ptrCast(@alignCast(raw));
+                return t.isCancelled();
+            }
+            fn human(raw: *const anyopaque, entering: bool) void {
+                const t: *const p.CancelToken = @ptrCast(@alignCast(raw));
+                if (t.source) |source| if (source.user_wait) |notify| notify(source.context, entering);
+            }
+            fn resource(raw: *const anyopaque, entering: bool) void {
+                const t: *const p.CancelToken = @ptrCast(@alignCast(raw));
+                if (t.source) |source| if (source.resource_wait) |notify| notify(source.context, entering);
+            }
+        };
+        job.cancel.source = .{ .context = token, .poll = Link.poll, .user_wait = Link.human, .resource_wait = Link.resource };
+    }
     try job.generate();
     const result = job.result;
     job.result = .{};
@@ -218,6 +233,7 @@ const Job = struct {
     failure: ?anyerror = null,
     saw_done: bool = false,
     summary_requests: usize = 0,
+    provider_override: ?p.Provider = null,
     fn create(config: pc.ProviderConfig, identity: Identity, source: []const p.Message, cut: usize) !*Job {
         const self = try std.heap.c_allocator.create(Job);
         self.* = .{ .arena = .init(std.heap.c_allocator), .config = config, .identity = identity, .source_hash = fingerprint(source), .cut = cut };
@@ -314,7 +330,7 @@ const Job = struct {
         self.output = .empty;
         self.saw_done = false;
         self.summary_requests += 1;
-        _ = try client.chatWithStats(self.config, request, sink, self);
+        _ = if (self.provider_override) |transport| try transport.chat(transport.ctx, request, sink, self) else try client.chatWithStats(self.config, request, sink, self);
         if (self.cancel.isCancelled()) return error.Cancelled;
         if (self.failure) |err| return err;
         const summary = std.mem.trim(u8, self.output.items, " \t\r\n");

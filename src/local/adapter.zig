@@ -486,6 +486,9 @@ pub const LocalAdapter = struct {
             const cleanup = entry.receipt();
             const close_key = entry.close_key;
             entry.mutex.unlock();
+            if (done and ready and failure == null and !entry.close_requested.load(.acquire) and cleanup != .awaiting) {
+                _ = try session_host.shellEnded(entry.handle, entry.key, if (cleanup == .released) .released else .unknown);
+            }
             if (cleanup != .awaiting and !entry.cleanup_published) {
                 _ = try session_host.createCleanupReceipt(entry.handle, entry.key, cleanup);
                 entry.cleanup_published = true;

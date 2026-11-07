@@ -63,17 +63,19 @@ pub const Host = struct {
             self.presentations.authority = &self.service;
         }
         try self.journal.?.bind(&self.service.store);
-        for (self.service.store.records.items) |record| if (record.needs_recovery) {
-            try self.service.store.recoverOrphan(record.id, .{ .worker_joined = true, .dispatch_closed = true, .local_released = true, .transcript_saved = true });
+        for ([_]bool{ true, false }) |is_child| for (self.service.store.records.items) |record| {
+            if (record.needs_recovery and (record.child != null) == is_child) try self.service.store.recoverOrphan(record.id, .{ .worker_joined = true, .dispatch_closed = true, .local_released = true, .transcript_saved = true });
         };
+        try self.service.store.recoverTasks();
         for (self.service.store.records.items) |record| {
-            const state = try self.presentations.create(record.initial_origin orelse return error.MissingConversationOrigin);
+            const origin = record.initial_origin orelse return error.MissingConversationOrigin;
+            const state = if (record.child != null) try self.presentations.createChildPresentation(record, origin) else try self.presentations.create(origin);
             state.conversation_id = record.id;
             state.binding_revision = record.revision;
             state.selected = false;
             state.ended = true;
             state.historical_environment = true;
-            state.listed = true;
+            state.listed = record.child == null;
             state.phase = .stopped;
             state.wire_history = try @import("wire_history.zig").History.copy(self.allocator, record.history.messages, "");
             state.wire_history.usage = record.history.usage;
@@ -108,9 +110,13 @@ pub const Host = struct {
         self.pumping = true;
         defer self.pumping = false;
         var failure: ?anyerror = null;
-        for (self.bridges.items) |bridge| if (!bridge.disposed) bridge.pump(bridge.context) catch |err| {
-            if (failure == null) failure = err;
-        };
+        var bridge_index: usize = 0;
+        while (bridge_index < self.bridges.items.len) : (bridge_index += 1) {
+            const bridge = self.bridges.items[bridge_index];
+            if (!bridge.disposed) bridge.pump(bridge.context) catch |err| {
+                if (failure == null) failure = err;
+            };
+        }
         self.service.poll() catch |err| {
             if (failure == null) failure = err;
         };

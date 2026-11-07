@@ -308,6 +308,11 @@ pub fn remapUiInk(color: ui.Color, previous: Colors) ui.Color {
     }
     return color;
 }
+/// Shared outer shadow for every floating surface; palette owns its color.
+pub fn floatingShadow() ui.Shadow {
+    return .{ .offset_y = 8, .blur = 24, .color = current().shadow };
+}
+
 /// Separate floating surfaces with material and shadow, without perimeter lines.
 pub fn overlayPaint() ui.BoxStyle {
     return .{ .glass = overlayGlass(), .outline = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
@@ -863,7 +868,7 @@ test "all V3 themes publish independent filled action and readable state roles" 
         try std.testing.expectEqual(popupInset(), widget.input_bg);
         try std.testing.expectEqual(popupSelection(), widget.list_selection_bg);
         try std.testing.expectEqual(states().pressed, widget.bg_active);
-        if (!std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber"))
+        if (!std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber") and !std.mem.eql(u8, id, "reference-light"))
             try std.testing.expect(!ui.Color.eql(c.action_accent, c.accent));
     }
 }

@@ -174,9 +174,12 @@ fn iconButton(cx: *ui.Cx, scope: *ui.Scope, bound: *binding.Binding, kind: Click
     try tip.trigger.appendChild(cx.allocator, button);
     return tip.wrapper;
 }
+fn textActionStyle(danger: bool, is_disabled: bool) ui.BoxStyle {
+    return .{ .height = .{ .px = 28 }, .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .font_size = 11, .font_weight = 400, .text_color = if (is_disabled) S.theme.current().fg_3 else if (danger) S.theme.current().danger_ink else S.theme.current().fg_1, .border = .{ .width = 0, .radius = 7 }, .opacity = 1 };
+}
 fn textAction(cx: *ui.Cx, bound: *binding.Binding, kind: Click.Kind, stable_id: []const u8, label: []const u8, tooltip: []const u8, test_id: []const u8, danger: bool, is_disabled: bool) !*ui.Node {
     const action = try Click.create(bound.scope, bound, kind, stable_id);
-    const button = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = is_disabled, .on_click = cx.on(Click, action, Click.activate), .base_style = .{ .height = .{ .px = 28 }, .padding = .{ .top = 5, .bottom = 5 }, .font_size = 11, .font_weight = 400, .text_color = if (is_disabled) S.theme.current().fg_3 else if (danger) S.theme.current().danger_ink else S.theme.current().accent_ink, .opacity = 1 }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
+    const button = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .disabled = is_disabled, .on_click = cx.on(Click, action, Click.activate), .base_style = try S.theme.paintSignal(ui.BoxStyle, cx, bound.scope, textActionStyle, .{ danger, is_disabled }) }).mount(bound.scope, cx);
     button.meta.ownership.meta.test_id = test_id;
     button.addBeforeRender(explanationOpacity);
     if (tooltip.len == 0 or std.mem.eql(u8, label, tooltip)) return button;

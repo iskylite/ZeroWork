@@ -139,7 +139,7 @@ pub const Host = struct {
         message.setStyleInline(cx.allocator, .{ .width = .fill(), .margin = .{ .top = 8 }, .flex_shrink = 0 });
         message.setDisplay(.none);
         try card.appendChild(cx.allocator, message);
-        const retry_button = try ui.widgets.Button(.{ .label = "重新读取", .variant = .ghost, .size = .sm, .on_click = cx.on(Host, self, retry) }).mount(scope, cx);
+        const retry_button = try ui.widgets.Button(.{ .label = "重新读取", .variant = .secondary, .size = .sm, .on_click = cx.on(Host, self, retry) }).mount(scope, cx);
         retry_button.meta.ownership.meta.test_id = "history.retry";
         retry_button.setDisplay(.none);
         try card.appendChild(cx.allocator, retry_button);

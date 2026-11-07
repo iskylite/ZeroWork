@@ -275,6 +275,19 @@ pub fn button(size: f32, primary: bool) ButtonStyle {
 pub fn textButton() ButtonStyle {
     return .{ .height = .{ .px = geometry.section_header }, .padding = .{ .left = 8, .right = 8 }, .background = theme.current().surface_2, .text_color = theme.current().fg_2, .corner_radius = 7, .border_width = 0, .font_size = 11.5, .font_weight = 400 };
 }
+pub fn footerButton() ButtonStyle {
+    var style = textButton();
+    style.height = .{ .px = 32 };
+    style.min_width = 92;
+    style.padding = .{ .left = 12, .right = 12 };
+    style.font_size = 12;
+    style.font_weight = 500;
+    style.gap = 6;
+    style.background = theme.states().control;
+    style.text_color = theme.current().fg_1;
+    return style;
+}
+
 pub fn buttonHover() ButtonStyle {
     return .{ .background = theme.states().hover };
 }

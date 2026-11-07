@@ -28,6 +28,9 @@ try{
      near(row.rect.w,Math.min(width-28,440));near(row.rect.w,group.rect.w);near(row.rect.h,56);near(action.rect.w,24);near(action.rect.h,24);assert(title.rect.x+title.rect.w<=tag.rect.x);near(row.rect.x+row.rect.w-8,tag.rect.x+tag.rect.w);assert(row.rect.x>=content.rect.x+13.9&&row.rect.x+row.rect.w<=content.rect.x+content.rect.w-13.9);assert(Buffer.byteLength(text(title))>120);near(title.rect.h,16.5);
      report.measurements.push({fixture,theme,width,row:row.rect,title:title.rect,tag:tag.rect,action:action.rect});
      if(theme==='dark'&&width!==480){assert((await h.screenshot(join(out,`${fixture}-${theme}-${width}.png`))).ok);await writeFile(join(out,`${fixture}-${width}-tree.json`),JSON.stringify(await h.query('ai.empty.configured'),null,2));}
+     const shortRow=await visible('ai.session.row.29'),shortTitle=(await h.query('ai.session.title')).find(n=>shown(n)&&n.rect.y>=shortRow.rect.y&&n.rect.y<shortRow.rect.y+shortRow.rect.h)!;
+     await h.mouseMove(shortTitle.rect.x+20,shortTitle.rect.y+8);await h.sleep(1000);assert(!(await h.query('ai.session.title.tooltip')).some(shown),'complete short title must not show a duplicate tooltip');
+     if(theme==='dark'&&width===360)assert((await h.screenshot(join(out,`${fixture}-short-no-tooltip-360.png`))).ok);
      await h.mouseMove(title.rect.x+20,title.rect.y+8);
      await h.sleep(1000);const tip=await visible('ai.session.title.tooltip');assert.equal(text(tip),text(title));assert(tip.rect.x>=0&&tip.rect.x+tip.rect.w<=width+0.2);assert(tip.rect.h>20);
      if(theme==='dark'&&width===360)assert((await h.screenshot(join(out,`${fixture}-tooltip-360.png`))).ok);
@@ -36,7 +39,7 @@ try{
     }
     assert((await h.clickTestId('ai.empty.preview.replay')).ok);
    }
-   report.checks.push(`${fixture}: 360/480/600 native row and icons bounded; dark/light/sauber replay; full original title tooltip; View icon pointer and Enter open conversation 17`);
+   report.checks.push(`${fixture}: 360/480/600 native row and icons bounded; dark/light/sauber replay; short title has no tooltip; truncated title shows full original text; View icon pointer and Enter open conversation 17`);
   }finally{
    let method='POST /quit';try{await h.request('POST','/quit');await h.waitFor(async()=>child.exitCode!==null||child.signalCode!==null||null,10000)}catch{method='SIGTERM fallback';child.kill('SIGTERM')}
    const status=await ended;report.shutdown.push({fixture,method,...status});await log.close();await save();assert.equal(method,'POST /quit');assert.equal(status.code,0);assert.equal(status.signal,null);
