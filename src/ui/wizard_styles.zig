@@ -69,6 +69,29 @@ pub fn field(w: ?f32) ui.BoxStyle {
 pub fn input() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 11, .right = 11, .top = 6, .bottom = 6 }, .background = theme.popupInset(), .border = .{ .radius = 8, .width = 0, .color = ui.Color.TRANSPARENT }, .font_size = 11 };
 }
+pub fn groupControl() ui.BoxStyle {
+    var style = input();
+    style.padding = .{};
+    style.direction = .row;
+    style.gap = 0;
+    style.min_width = 0;
+    return style;
+}
+pub fn groupInput() ui.BoxStyle {
+    var style = input();
+    style.background = ui.Color.TRANSPARENT;
+    style.border.?.radius = 0;
+    return style;
+}
+pub fn groupPicker() ui.BoxStyle {
+    var style = groupInput();
+    style.width = .{ .px = 32 };
+    style.padding = .{};
+    style.align_items = .center;
+    style.justify = .center;
+    style.flex_shrink = 0;
+    return style;
+}
 pub fn button(w: f32, h: f32, primary: bool) ui.BoxStyle {
     return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .background = if (primary) theme.current().action_accent else theme.popupInset(), .gradient = if (primary) .{ .from = theme.current().action_accent, .to = theme.current().action_accent_2, .direction = .diagonal } else null, .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }

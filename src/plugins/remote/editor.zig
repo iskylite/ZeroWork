@@ -2926,11 +2926,12 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     _ = try field(w, name_row, "连接名称", w.sig_name.?, "", "wizard.name", null, false);
     const group_field = try ui.box(cx, S.field(null), .{});
     try group_field.appendChild(w.alloc, try fieldLabel(cx, "资产分组"));
-    const group_control = try ui.hstack(cx, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 34 }, .gap = 0 }, .{});
-    const group_input = try ui.widgets.Input(.{ .value = w.sig_group.?, .placeholder = "未分组，可输入新分组", .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onGroupInput) }).mountResult(w.scope, cx);
+    const group_control = try ui.box(cx, S.groupControl(), .{});
+    group_control.meta.ownership.meta.test_id = "wizard.group.control";
+    const group_input = try ui.widgets.Input(.{ .value = w.sig_group.?, .placeholder = "未分组，可输入新分组", .embedded = true, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onGroupInput) }).mountResult(w.scope, cx);
     @import("../../ui/app_theme.zig").styleInput(group_input);
     group_input.node.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 34 } });
-    group_input.input_container.setStyleInline(w.alloc, S.input());
+    group_input.input_container.setStyleInline(w.alloc, S.groupInput());
     group_input.input_container.meta.ownership.meta.test_id = "wizard.group";
     group_input.state.font_size = 11;
     group_input.state.line_height = 16;
@@ -2942,11 +2943,15 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     try group_control.appendChild(w.alloc, group_input.node);
     const group_select = try ui.widgets.Select(.{ .options = w.group_options.?, .value = w.sig_group_selection.?, .width = 32, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onGroupChanged) }).mount(w.scope, cx);
     skinSelect(w, group_select, 34, 12);
+    group_select.trigger.setStyleInline(w.alloc, S.groupPicker());
+    group_select.trigger.addBeforeRender(clearGroupInnerChrome);
     group_select.content_slot.setStyleInline(w.alloc, .{ .display = .none });
     group_select.trigger.meta.ownership.meta.test_id = "wizard.group.pick";
     group_select.chrome.meta.ownership.meta.test_id = "wizard.group.menu";
     group_select.chrome.setStyleInline(w.alloc, .{ .min_width = (S.width - 48 - 16) / 2 });
     try group_control.appendChild(w.alloc, group_select.wrapper);
+    group_control.behavior.events.event_context = try w.scope.createState(GroupControlChrome, .{ .input = group_input, .select = group_select });
+    group_control.addBeforeRender(GroupControlChrome.paint);
     try group_field.appendChild(w.alloc, group_control);
     try name_row.appendChild(w.alloc, group_field);
     try details.appendChild(w.alloc, name_row);
@@ -3548,6 +3553,33 @@ fn paintCheckboxLabels(node: *ui.Node) void {
         node.setText(props);
     }
     for (node.children.items) |child| paintCheckboxLabels(child);
+}
+
+// Input and Select retain their native event handlers; only the outer field
+// paints the compound control, including focus on the arrow or its open menu.
+const GroupControlChrome = struct {
+    input: ui.widgets.input.InputResult,
+    select: ui.widgets.SelectResult,
+
+    fn paint(node: *ui.Node) void {
+        const self: *GroupControlChrome = @ptrCast(@alignCast(node.behavior.events.event_context.?));
+        var focused = self.input.state.focused or self.select.open.?.peek();
+        if (self.input.state.cx_ref) |cx| {
+            var ancestor = cx.focused_node;
+            while (ancestor) |current| : (ancestor = current.parent) {
+                if (current == node) {
+                    focused = true;
+                    break;
+                }
+            }
+        }
+        node.setBackground(if (self.input.state.disabled) S.theme.states().disabled else if (focused) S.theme.states().focus else S.theme.popupInset());
+    }
+};
+
+fn clearGroupInnerChrome(node: *ui.Node) void {
+    node.setBackground(ui.Color.TRANSPARENT);
+    node.setBorderWidth(0);
 }
 
 fn skinSelect(w: *RemoteEditor, result: ui.widgets.SelectResult, height: f32, size: f32) void {

@@ -359,7 +359,7 @@ fn paintInputChrome(node: *ui.Node) void {
         state.selection_fg_override = selection_fg;
         state.dirty = true;
     }
-    const background = if (state.disabled) states().disabled else if (state.has_error) (if (state.focused) states().error_focus else states().tag_danger) else if (state.focused) states().focus else popupInset();
+    const background = if (state.embedded_chrome) ui.Color.TRANSPARENT else if (state.disabled) states().disabled else if (state.has_error) (if (state.focused) states().error_focus else states().tag_danger) else if (state.focused) states().focus else popupInset();
     if (!ui.Color.eql(node.getBackground(), background)) node.setBackground(background);
     node.setBorderColor(ui.Color.TRANSPARENT);
     const outline = node.style.outline();

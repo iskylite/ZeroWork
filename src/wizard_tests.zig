@@ -1272,9 +1272,19 @@ test "wizard V3 group select retains registry empty groups and replaced snapshot
     f.wizard.show();
     feedbackFrames(&f);
     const group = findId(f.wizard.root.?, "wizard.group.pick").?;
+    const control = findId(f.wizard.root.?, "wizard.group.control").?;
+    const input = findId(f.wizard.root.?, "wizard.group").?;
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, input.getBackground());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, group.getBackground());
+    try std.testing.expectApproxEqAbs(control.globalRect().y, input.globalRect().y, 0.01);
+    try std.testing.expectApproxEqAbs(control.globalRect().h, input.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(input.globalRect().x + input.globalRect().w, group.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), group.globalRect().w, 0.01);
     f.cx.setFocus(group);
     f.cx.handleKeyDown(.down, .{});
     feedbackFrames(&f);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").states().focus, control.getBackground());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, group.getBackground());
     f.cx.handleKeyDown(.end, .{});
     f.cx.handleKeyDown(.@"return", .{});
     feedbackFrames(&f);
@@ -1298,6 +1308,17 @@ test "wizard V3 group select retains registry empty groups and replaced snapshot
     try std.testing.expect(f.wizard.currentDraft().group == null);
     try f.wizard.setAssets(&grouped);
     try std.testing.expect(f.wizard.currentDraft().group == null);
+    f.cx.setFocus(input);
+    f.cx.handleTextInput("New group");
+    feedbackFrames(&f);
+    try std.testing.expectEqualStrings("New group", f.wizard.currentDraft().group.?);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").states().focus, control.getBackground());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, input.getBackground());
+    f.wizard.setTestResult(.pending);
+    feedbackFrames(&f);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").states().disabled, control.getBackground());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, input.getBackground());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, group.getBackground());
 }
 
 test "wizard V3 multiline startup preserves order rejects overflow and remains hidden for SFTP" {
