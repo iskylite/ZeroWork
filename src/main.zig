@@ -66,7 +66,7 @@ const ProcessWindows = struct {
         // attachment/factory validation fails. Close it through its owner at
         // the next runtime boundary instead of leaving an orphan empty view.
         errdefer _ = self.runtime.closeWindow(app.windowId());
-        app.win.setTrafficLightsLayout(shell_styles.outer + 28, shell_styles.outer + shell_styles.title_height / 2, 12);
+        app.win.setTrafficLightsLayout(shell_styles.outer + 18, shell_styles.outer + shell_styles.title_height / 2, 12);
         installMonospaceFonts(app);
         app.setFontRegistry(registry);
         if (application_test_mode) try verifyUiFontPaths(app);
@@ -5166,9 +5166,10 @@ const AiHost = struct {
             self.execution().host_catalog_len += 1;
         };
         if (self.execution().extension_session) |session| {
-            for (@import("ai/extension_gateway.zig").contributions, 0..) |contribution, i| {
-                if (i == 0 and session.frozen.skills.len == 0) continue;
-                if (i != 0 and (session.frozen.servers.len == 0 or self.execution().tool_bridge.queries_only)) continue;
+            for (@import("ai/extension_gateway.zig").contributions) |contribution| {
+                const skill_tool = std.mem.eql(u8, contribution.definition.id, "host.skills");
+                if (skill_tool and session.frozen.skills.len == 0) continue;
+                if (!skill_tool and (session.frozen.servers.len == 0 or self.execution().tool_bridge.queries_only)) continue;
                 self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
                 self.execution().host_catalog_len += 1;
             }
@@ -5632,6 +5633,7 @@ const AiHost = struct {
             allocator: std.mem.Allocator,
             key: []const u8 = "",
             mcp: bool = false,
+            server: @import("config/ai_extensions.zig").Server = undefined,
             fn validate(raw: *anyopaque) !void {
                 const ctx: *@This() = @ptrCast(@alignCast(raw));
                 try ctx.host.validateHostContext(ctx.invocation.context);
@@ -5643,6 +5645,63 @@ const AiHost = struct {
                 ctx.mcp = mcp;
                 try ctx.bridge.callController(ctx, validate, token);
                 if (token) |t| if (t.isCancelled()) return error.CancelledBeforeDispatch;
+            }
+            fn question(raw: *anyopaque, allocator: std.mem.Allocator, text: []const u8, options: []const @import("ai/mcp_interaction.zig").Option, custom: bool, token: ?*ai_provider.CancelToken) !@import("ai/user_interaction.zig").Answer {
+                const ctx: *@This() = @ptrCast(@alignCast(raw));
+                try check(raw, ctx.server.id, true, token);
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
+                const call = try @import("ai/mcp_interaction.zig").invocation(arena.allocator(), ctx.invocation, "host.request_user_input", .{ .question = text, .options = options, .allow_custom = custom });
+                const ticket = try ctx.host.questionsRef().begin(call, allocator);
+                const answer = try ctx.host.questionsRef().wait(ticket, token);
+                try check(raw, ctx.server.id, true, token);
+                return answer;
+            }
+            fn review(raw: *anyopaque, allocator: std.mem.Allocator, method: []const u8, params: std.json.Value, token: ?*ai_provider.CancelToken) !void {
+                const ctx: *@This() = @ptrCast(@alignCast(raw));
+                try check(raw, ctx.server.id, true, token);
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
+                const call = try @import("ai/mcp_interaction.zig").invocation(arena.allocator(), ctx.invocation, ctx.invocation.tool_id, .{ .server_id = ctx.server.id, .method = method, .params = params });
+                const detail = try std.json.Stringify.valueAlloc(arena.allocator(), call.arguments, .{ .whitespace = .indent_2 });
+                const permit = try ctx.host.approvalsRef().beginSubject(call, .{ .human_review = true, .kind = .mcp, .target = ctx.server.name, .detail = detail, .impact = method }, ctx.host.request_policy_revision, allocator);
+                defer ctx.host.approvalsRef().finish(permit);
+                try ctx.host.approvalsRef().waitForDecision(permit, token);
+                try check(raw, ctx.server.id, true, token);
+            }
+            fn sample(raw: *anyopaque, allocator: std.mem.Allocator, params: std.json.Value, token: ?*ai_provider.CancelToken) ![]u8 {
+                const ctx: *@This() = @ptrCast(@alignCast(raw));
+                const binding = ctx.host.native_binding orelse return error.ProviderUnavailable;
+                return @import("ai/mcp_sampling.zig").generate(allocator, ctx.host.provider, binding.config.model, 4096, params, token);
+            }
+            fn open(raw: *anyopaque, url: []const u8, token: ?*ai_provider.CancelToken) !void {
+                const ctx: *@This() = @ptrCast(@alignCast(raw));
+                try @import("config/ai_extensions.zig").text(url, 8192, false);
+                const uri = std.Uri.parse(url) catch return error.InvalidMcpEndpoint;
+                if (uri.host == null or uri.user != null or uri.password != null or (!std.mem.eql(u8, uri.scheme, "https") and !(std.mem.eql(u8, uri.scheme, "http") and (std.mem.eql(u8, uri.host.?.percent_encoded, "localhost") or std.mem.eql(u8, uri.host.?.percent_encoded, "127.0.0.1") or std.mem.eql(u8, uri.host.?.percent_encoded, "[::1]"))))) return error.InvalidMcpEndpoint;
+                const Open = struct {
+                    url: [:0]const u8,
+                    extern fn macos_open_url([*:0]const u8) c_int;
+                    fn run(value: *anyopaque) !void {
+                        const opened: *@This() = @ptrCast(@alignCast(value));
+                        if (macos_open_url(opened.url) != 1) return error.BrowserOpenFailed;
+                    }
+                };
+                const z = try ctx.allocator.dupeSentinel(u8, url, 0);
+                defer ctx.allocator.free(z);
+                var browser_open: Open = .{ .url = z };
+                try ctx.bridge.callController(&browser_open, Open.run, token);
+            }
+            fn request(raw: *anyopaque, server: @import("config/ai_extensions.zig").Server, allocator: std.mem.Allocator, method: []const u8, params: std.json.Value, token: ?*ai_provider.CancelToken) ![]u8 {
+                const ctx: *@This() = @ptrCast(@alignCast(raw));
+                ctx.server = server;
+                if (std.mem.eql(u8, method, "host/mcp_continue") or std.mem.eql(u8, method, "host/mcp_continue_url")) {
+                    try check(raw, server.id, true, token);
+                    if (ctx.invocation.dispatch_fence) |fence| try fence.check();
+                    if (std.mem.eql(u8, method, "host/mcp_continue_url")) try review(raw, allocator, "网页操作完成后继续 MCP 请求", params, token);
+                    return allocator.dupe(u8, "{}");
+                }
+                return @import("ai/mcp_interaction.zig").handle(.{ .context = raw, .question = question, .review = review, .sample = sample, .open = open }, allocator, server, method, params, token);
             }
             fn approve(raw: *anyopaque, call: @import("ai/host_tools.zig").Invocation, server: @import("config/ai_extensions.zig").Server, remote_tool: ?[]const u8, token: ?*ai_provider.CancelToken) !void {
                 const ctx: *@This() = @ptrCast(@alignCast(raw));
@@ -5657,7 +5716,7 @@ const AiHost = struct {
                     .request = call.arguments,
                 }, .{ .whitespace = .indent_2 });
                 defer ctx.allocator.free(detail);
-                const permit = try ctx.host.approvalsRef().beginSubject(call, .{ .kind = .mcp, .target = server.name, .detail = detail, .impact = "启动已配置的 MCP 服务或发送本次明确提供的文本；远端结果作为外部材料。" }, ctx.host.request_policy_revision, ctx.allocator);
+                const permit = try ctx.host.approvalsRef().beginSubject(call, .{ .kind = .mcp, .target = server.name, .detail = detail, .impact = "启动已配置的 MCP 服务，或按上方参数执行所选工具；结果来自外部服务。" }, ctx.host.request_policy_revision, ctx.allocator);
                 defer ctx.host.approvalsRef().finish(permit);
                 try ctx.host.approvalsRef().waitForDecision(permit, token);
             }
@@ -5677,7 +5736,7 @@ const AiHost = struct {
         var ctx: Context = .{ .host = self, .bridge = bridge, .invocation = invocation, .allocator = a };
         const cancellation: Cancellation = .{ .parent = cancel, .session = session };
         var token: ai_provider.CancelToken = .{ .source = .{ .context = &cancellation, .poll = Cancellation.poll, .user_wait = Cancellation.wait } };
-        return session.invoke(self.native_context.?.io, .{ .context = &ctx, .check = Context.check, .approve = Context.approve }, self.lifecycle_runtime.?.journal_owner, invocation, &token, a) catch |err| rejectedHostInvocation(invocation, a, err);
+        return session.invoke(self.native_context.?.io, .{ .context = &ctx, .check = Context.check, .approve = Context.approve, .request = Context.request }, self.lifecycle_runtime.?.journal_owner, invocation, &token, a) catch |err| rejectedHostInvocation(invocation, a, err);
     }
     fn dispatchHostWorker(raw: *anyopaque, bridge: *@import("ui/ai_tools.zig").Bridge, invocation: @import("ai/host_tools.zig").Invocation, allocator: std.mem.Allocator, cancel: ?*ai_provider.CancelToken) !@import("ai/host_tools.zig").Result {
         const self: *AiHost = @ptrCast(@alignCast(raw));
@@ -5997,7 +6056,9 @@ const AiHost = struct {
     fn rejectedHostInvocation(invocation: @import("ai/host_tools.zig").Invocation, allocator: std.mem.Allocator, failure: anyerror) !@import("ai/host_tools.zig").Result {
         const host = @import("ai/host_tools.zig");
         const recover_shell = failure == error.ShellPromptNotObserved or failure == error.IntegrationUnavailable or failure == error.ShellContextChanged;
-        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = @errorName(failure), .message = @import("ai/step_failure.zig").explanation(@errorName(failure)), .next_tool = if (recover_shell) @as(?[]const u8, "host.read_terminal/host.get_session/host.attach_shell") else null, .side_effect_started = false, .local_released = true, .remote_effect_unknown = false }, .{});
+        const next_tool = if (recover_shell) try @import("ai/plugin_tools.zig").toolHints(allocator, &.{ "host.read_terminal", "host.get_session", "host.attach_shell" }) else null;
+        defer if (next_tool) |hint| allocator.free(hint);
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = @errorName(failure), .message = @import("ai/step_failure.zig").explanation(@errorName(failure)), .next_tool = next_tool, .side_effect_started = false, .local_released = true, .remote_effect_unknown = false }, .{});
         errdefer allocator.free(body);
         const blocks = try allocator.alloc(host.Block, 1);
         blocks[0] = .{ .structured = body };
@@ -6810,6 +6871,11 @@ const AiHost = struct {
                 if (store.find(id)) |state| state.phase = if (host.execution().tool_bridge.pendingApproval() != null or host.approvalsRef().snapshot() != null or host.execution().inventory_approval.snapshot() != null or host.questionsRef().snapshot() != null) .approval else .running;
             };
             if (host.sessions_view) |view| if (host.assistant_states) |store| {
+                var bound_count: usize = 0;
+                if (host.shared_service) |shared_host| for (shared_host.service.store.records.items) |record| {
+                    if (record.child == null and record.binding != null) bound_count += 1;
+                };
+                view.updateBoundCount(bound_count) catch {};
                 for (store.states.items) |state| {
                     view.updatePhase(state.id, state.phase);
                     if (host.last_user_text == null and host.history.items.len == 0) if (host.conversation) |conversation| @import("ui/ai_empty_view.zig").updateRecentPhase(host.cx, conversation, state.id, state.phase);
@@ -10832,7 +10898,7 @@ const AppNavHost = struct {
             const pixels = if (state == .normal) assets.display_pixels[index] else blk: {
                 for (0..72 * 72) |i| {
                     @memset(mask[i * 4 ..][0..3], 255);
-                    mask[i * 4 + 3] = assets.pixels[index][i * 4 + 3];
+                    mask[i * 4 + 3] = assets.status_pixels[index][i * 4 + 3];
                 }
                 break :blk &mask;
             };
@@ -13235,12 +13301,12 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     ai_new.meta.ownership.meta.test_id = "ai.session.new";
     const ai_new_icon = try ui.iconTint(cx, ui.icons.plus, app_theme.current().fg_2, ai_styles.icon());
     try ai_new.appendChild(cx.allocator, ai_new_icon);
-    try ai_header.appendChild(cx.allocator, ai_new);
     const ai_sessions = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "AI 会话列表", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.showConversations) }).mount(scope, cx);
     ai_sessions.meta.ownership.meta.test_id = "ai.sessions";
     const ai_sessions_icon = try ui.iconTint(cx, ui.icons.get("messages-square").?, app_theme.current().fg_2, ai_styles.icon());
     try ai_sessions.appendChild(cx.allocator, ai_sessions_icon);
     try ai_header.appendChild(cx.allocator, ai_sessions);
+    try ai_header.appendChild(cx.allocator, ai_new);
     const ai_collapse = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "收起 AI 助手", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.collapse) }).mount(scope, cx);
     ai_collapse.meta.ownership.meta.test_id = "ai.collapse";
     const ai_collapse_icon = try ui.iconTint(cx, ui.icons.get("minus").?, app_theme.current().fg_2, ai_styles.windowIcon());
@@ -16395,7 +16461,7 @@ pub fn main() !void {
         .window = .{ .width = 1440, .height = 900, .min_width = 860, .min_height = 480, .title = "ZeroWork", .titlebar = .custom_inset, .titlebar_height = shell_styles.outer + shell_styles.title_height, .titlebar_drag_right_inset = 150 },
     });
     process.primary = app;
-    app.win.setTrafficLightsLayout(shell_styles.outer + 28, shell_styles.outer + shell_styles.title_height / 2, 12);
+    app.win.setTrafficLightsLayout(shell_styles.outer + 18, shell_styles.outer + shell_styles.title_height / 2, 12);
     installMonospaceFonts(app);
     registry.setFontSystem(&process.font_system.?);
     app.setFontRegistry(&registry);

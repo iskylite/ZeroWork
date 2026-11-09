@@ -5,6 +5,8 @@ const ui = @import("ui");
 pub const styles = @import("sidebar_styles.zig");
 const S = styles;
 const T = S.theme;
+const header_icon_size: f32 = 17;
+const new_menu_width: f32 = 144;
 pub const GroupRef = @import("../config/asset_actions.zig").GroupRef;
 pub const GroupAction = enum { new_host, rename, color, toggle_collapsed, delete_empty };
 pub const Bridge = struct {
@@ -34,7 +36,7 @@ pub const View = struct {
     search: ui.widgets.input.InputResult,
     search_button: *ui.Node,
     search_clear: *ui.Node,
-    search_spacer: *ui.Node,
+    header_leading: *ui.Node,
     header: *ui.Node,
     search_open: bool = false,
     search_available: bool = true,
@@ -61,15 +63,19 @@ pub const View = struct {
         header.meta.ownership.meta.test_id = "sidebar.header";
         header.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try full.appendChild(cx.allocator, header);
-        try header.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("server").?, T.current().accent, S.icon(17)));
-        const title = try text(cx, header, "主机与连接", 13, 700, false);
+        const header_leading = try ui.box(cx, .{ .width = .{ .grow = .{ .min = header_icon_size } }, .min_width = header_icon_size, .direction = .row, .align_items = .center, .gap = header.style.gap }, .{});
+        try header.appendChild(cx.allocator, header_leading);
+        try header_leading.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("server").?, T.current().accent, S.icon(header_icon_size)));
+        const title = try text(cx, header_leading, "主机与连接", 13, 700, false);
         title.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .min_width = 0 });
         const tint = try scope.createSignal(?ui.Color, T.current().fg_2);
         const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = T.states().hover });
         const host_disabled = try scope.createSignal(bool, actions.bridge.new_host == null);
         const group_disabled = try scope.createSignal(bool, actions.bridge.new_group == null);
-        const new_menu = try ui.widgets.Popover(.{ .trigger = .click, .position = .bottom_start, .close_on_escape = true, .close_on_outside_click = true, .width = @as(f32, 258), .max_width = @as(f32, 258), .max_height = @as(f32, 106) }).mount(scope, cx);
-        new_menu.content.setStyleInline(cx.allocator, S.menu(106));
+        const new_menu = try ui.widgets.Popover(.{ .trigger = .click, .position = .bottom_start, .close_on_escape = true, .close_on_outside_click = true, .width = new_menu_width, .max_width = new_menu_width, .max_height = @as(f32, 106) }).mount(scope, cx);
+        var new_menu_style = S.menu(106);
+        new_menu_style.width = .{ .px = new_menu_width };
+        new_menu.content.setStyleInline(cx.allocator, new_menu_style);
         new_menu.content.meta.ownership.meta.test_id = "sidebar.new.menu";
         const plus = try iconButton(cx, scope, "plus", "新建", "sidebar.new", S.headerAction(), tint, hover, null, null);
         try new_menu.trigger.appendChild(cx.allocator, plus);
@@ -78,9 +84,6 @@ pub const View = struct {
         search.node.setDisplay(.none);
         const search_box = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .border = .{ .radius = 8 }, .min_width = 0, .overflow = .hidden, .flex_shrink = 0 }, .{});
         search_box.meta.ownership.meta.test_id = "sidebar.search.well";
-        const search_spacer = try ui.spacer(cx);
-        search_spacer.setDisplay(.none);
-        try header.appendChild(cx.allocator, search_spacer);
         const viewport = try ui.widgets.ScrollArea(.{}).mount(scope, cx);
         viewport.container.meta.ownership.meta.test_id = "sidebar.viewport";
         viewport.container.setStyleInline(cx.allocator, S.viewport());
@@ -88,7 +91,7 @@ pub const View = struct {
         list.setStyleInline(cx.allocator, S.list());
         try viewport.content.appendChild(cx.allocator, list);
         try full.appendChild(cx.allocator, viewport.container);
-        const self = try scope.createState(View, .{ .cx = cx, .root = root, .full = full, .empty = undefined, .list = list, .viewport = viewport.container, .title = title, .header = header, .search_box = search_box, .search = search, .search_button = undefined, .search_clear = undefined, .search_spacer = search_spacer, .search_value = search_value, .footer = undefined, .new_menu = new_menu, .colors = T.current(), .actions = actions, .tint = tint, .hover = hover, .host_disabled = host_disabled, .group_disabled = group_disabled });
+        const self = try scope.createState(View, .{ .cx = cx, .root = root, .full = full, .empty = undefined, .list = list, .viewport = viewport.container, .title = title, .header = header, .search_box = search_box, .search = search, .search_button = undefined, .search_clear = undefined, .header_leading = header_leading, .search_value = search_value, .footer = undefined, .new_menu = new_menu, .colors = T.current(), .actions = actions, .tint = tint, .hover = hover, .host_disabled = host_disabled, .group_disabled = group_disabled });
         try search_box.appendChild(cx.allocator, search.node);
         const clear = try iconButton(cx, scope, "x", "清空搜索", "sidebar.search.clear", S.headerAction(), tint, hover, cx.on(View, self, View.clearSearch), null);
         clear.setDisplay(.none);
@@ -107,7 +110,7 @@ pub const View = struct {
         try self.newItem(new_menu.scope, "新建主机", "server", false);
         try self.newItem(new_menu.scope, "新建分组", "folder-plus", true);
         try MenuKeyboard.install(cx, new_menu);
-        const bottom = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 8, .flex_shrink = 0 }, .{});
+        const bottom = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 8, .margin = .{ .top = 12 }, .flex_shrink = 0 }, .{});
         bottom.meta.ownership.meta.test_id = "sidebar.bottom";
         const footer = try self.footerButton(scope, "sidebar.footer.new", false);
         try bottom.appendChild(cx.allocator, footer);
@@ -162,7 +165,7 @@ pub const View = struct {
             self.search_width = 24;
             self.search.node.setDisplay(.none);
             self.search_clear.setDisplay(.none);
-            self.search_spacer.setDisplay(.none);
+            self.header_leading.setStyle(self.cx.allocator, .width, .{ .grow = .{ .min = header_icon_size } });
             self.title.setDisplay(.flex);
             self.search_box.setStyle(self.cx.allocator, .width, .{ .px = 24 });
             self.search_box.setStyle(self.cx.allocator, .height, .{ .px = 24 });
@@ -181,13 +184,15 @@ pub const View = struct {
         }
     }
     fn toggleSearch(self: *View) void {
+        self.search_width = self.search_box.globalRect().w;
+        self.search_box.setStyle(self.cx.allocator, .width, .{ .px = self.search_width });
+        self.header_leading.setStyle(self.cx.allocator, .width, .{ .grow = .{ .min = header_icon_size } });
         self.search_open = !self.search_open;
         self.search_start_width = self.search_width;
         self.search_start_ms = self.cx.frame_time_ms;
         self.search_animating = true;
         if (self.search_open) {
             self.title.setDisplay(.none);
-            self.search_spacer.setDisplay(.flex);
             self.search.node.setDisplay(.flex);
             self.search_box.setStyle(self.cx.allocator, .height, .{ .px = 30 });
             self.search_box.setStyle(self.cx.allocator, .padding, .{ .left = 8 });
@@ -214,7 +219,7 @@ pub const View = struct {
     }
     fn animateSearch(self: *View) bool {
         if (!self.search_animating) return false;
-        const target: f32 = if (self.search_open) @max(24, self.header.globalRect().w - 95) else 24;
+        const target: f32 = if (self.search_open) @max(24, self.header.globalRect().w - header_icon_size - self.new_menu.wrapper.globalRect().w - 2 * self.header.style.gap) else 24;
         const elapsed = @max(0, self.cx.frame_time_ms - self.search_start_ms);
         const progress: f32 = @floatCast(@min(1, elapsed / 200.0));
         const eased = 1 - (1 - progress) * (1 - progress);
@@ -226,14 +231,18 @@ pub const View = struct {
         }
         if (progress >= 1) {
             self.search_animating = false;
-            if (!self.search_open) {
+            if (self.search_open) {
+                self.header_leading.setStyle(self.cx.allocator, .width, .{ .px = header_icon_size });
+                self.search_box.setStyle(self.cx.allocator, .width, .{ .grow = .{ .min = 0 } });
+            } else {
                 self.search_box.setStyle(self.cx.allocator, .height, .{ .px = 24 });
                 self.search_box.setStyle(self.cx.allocator, .padding, .{});
                 self.search_box.setBackground(ui.Color.TRANSPARENT);
-                self.search_spacer.setDisplay(.none);
                 self.title.setDisplay(.flex);
             }
-        } else self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            return true;
+        }
+        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
         return changed;
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
@@ -266,6 +275,7 @@ pub const View = struct {
         item.font_size = 11.5;
         item.font_weight = 400;
         const button = try ui.widgets.Button(.{ .label = label, .icon_asset = ui.icons.get(icon_name), .icon_size = @as(f32, 14), .icon_tint = self.tint, .variant = .ghost, .a11y_label = label, .disabled = if (group) self.group_disabled else self.host_disabled, .base_style = item, .hover_style = self.hover, .on_click = if (group) self.cx.on(View, self, View.newGroup) else self.cx.on(View, self, View.newHost) }).mount(scope, self.cx);
+        button.setStyleInline(self.cx.allocator, .{ .justify = .start });
         button.meta.ownership.meta.test_id = if (group) "sidebar.new.group" else "sidebar.new.host";
         if (button.behavior.interaction.a11y) |*a11y| a11y.role = .menuitem;
         try self.new_menu.content.appendChild(self.cx.allocator, button);
@@ -345,6 +355,7 @@ pub const HostRow = struct {
     tail: *ui.Node,
     supports_route: bool,
     route: *ui.Node,
+    route_label: ?*ui.Node = null,
     actions: *ui.Node,
     dot: *ui.Node,
     online: bool,
@@ -382,9 +393,10 @@ pub const HostRow = struct {
         self.dot.meta.ownership.meta.test_id = "sidebar.host.icon";
         try content.appendChild(cx.allocator, self.dot);
         const metadata = try ui.box(cx, .{ .width = .{ .grow = .{ .min = 0 } }, .flex_shrink = 1, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0 }, .{});
-        const name = try ui.text(cx, data.name, S.text(12, 500, false));
+        const initial_weight: u16 = if (data.selected) 600 else 500;
+        const name = try ui.text(cx, data.name, S.text(12, initial_weight, false));
         name.meta.ownership.meta.test_id = "sidebar.host.name";
-        name.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .max_width = cx.text.measureTextWidth(data.name, 12, 500, false), .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
+        name.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
         self.name = name;
         try metadata.appendChild(cx.allocator, name);
         const identity = try std.fmt.allocPrint(cx.allocator, "{s}\n{s}\n{s}", .{ data.name, data.detail, data.route });
@@ -406,26 +418,27 @@ pub const HostRow = struct {
         const route = try ui.box(cx, S.route(), .{});
         route.meta.ownership.meta.test_id = "sidebar.host.route";
         if (data.supports_route) {
-            try route.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("route").?, T.current().fg_2, S.icon(S.host_icon_size)));
+            const icon = try ui.iconTintStyled(cx, ui.icons.get("route").?, T.current().fg_2, S.routeIcon());
+            icon.meta.ownership.meta.test_id = "sidebar.host.route-icon";
+            try route.appendChild(cx.allocator, icon);
+            const badge = try ui.box(cx, S.routeBadge(), .{});
+            badge.meta.ownership.meta.test_id = "sidebar.host.route-badge";
             var count: [24]u8 = undefined;
-            const hops = try text(cx, route, try std.fmt.bufPrint(&count, "{d}", .{data.hops}), 10.5, 400, true);
+            const hops = try ui.text(cx, try std.fmt.bufPrint(&count, "{d}", .{data.hops}), S.routeBadgeText());
             hops.meta.ownership.meta.test_id = "sidebar.host.hops";
-            hops.setStyleInline(cx.allocator, .{ .width = .{ .px = 12 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
-            if (hops.getText()) |old| {
-                var next = old;
-                next.use_monospace_font = true;
-                next.text_align = .end;
-                hops.setText(next);
-            }
+            hops.setStyleInline(cx.allocator, .{ .width = .{ .px = 12 }, .height = .{ .px = 10 }, .flex_shrink = 0 });
+            try badge.appendChild(cx.allocator, hops);
+            try route.appendChild(cx.allocator, badge);
+            self.route_label = hops;
         }
         self.route = route;
-        try tail.appendChild(cx.allocator, route);
         self.forward = try ui.box(cx, .{ .width = .{ .px = S.tail_width }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .flex_shrink = 0, .display = .none }, .{});
         self.forward.meta.ownership.meta.test_id = "sidebar.host.background";
         self.forward_label = try ui.text(cx, "", S.text(9, 500, true));
         self.forward_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try self.forward.appendChild(cx.allocator, self.forward_label);
         try tail.appendChild(cx.allocator, self.forward);
+        try tail.appendChild(cx.allocator, route);
         const actions = try ui.box(cx, .{ .width = .{ .px = S.action_size }, .height = .{ .px = S.action_size }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
         self.actions = actions;
         const connect_button = try iconButtonWithSize(cx, scope, "play", "新标签连接", "sidebar.host.connect", S.action(S.action_size), S.host_icon_size, tint, hover, cx.on(HostRow, self, HostRow.connect), swallowDoubleClick);
@@ -447,6 +460,7 @@ pub const HostRow = struct {
                     ctx.identity_open.set(identity_focus);
                 }
                 S.repaint(ctx.self.node, ctx.self.colors);
+                if (ctx.self.route_label) |label| label.setTextColor(T.current().fg_2);
                 @import("session_icon.zig").refreshHostTint(ctx.self.dot);
                 ctx.self.colors = T.current();
                 ctx.self.tint.set(T.current().fg_2);
@@ -459,7 +473,7 @@ pub const HostRow = struct {
                 if (ctx.self.forward_badge) |badge| ctx.self.forward_label.setTextColor(@import("socks_background_styles.zig").ink(badge.phase));
                 if (ctx.self.name.getText()) |current| {
                     var next = current;
-                    next.font_weight = 500;
+                    next.font_weight = if (picked) 600 else 500;
                     next.color = T.current().fg_1;
                     ctx.self.name.setText(next);
                 }
@@ -467,6 +481,7 @@ pub const HostRow = struct {
             }
         }.run);
         self.setForwardBadge(data.forward);
+        self.updateTrailing();
         return self;
     }
     pub fn setForwardBadge(self: *HostRow, badge: ?ForwardBadge) void {
@@ -480,7 +495,7 @@ pub const HostRow = struct {
         if (self.node.behavior.interaction.a11y) |*props| props.description = if (badge) |value| @import("socks_background_model.zig").phaseLabel(value.phase) else null;
     }
     fn updateTrailing(self: *HostRow) void {
-        const show_route = self.supports_route and (self.hot or self.forward_badge == null);
+        const show_route = self.supports_route;
         const show_forward = !self.hot and self.forward_badge != null;
         self.trailing.setDisplay(if (show_route or show_forward or self.hot) .flex else .none);
         self.tail.setStyle(self.cx.allocator, .width, .{ .px = if (show_forward) S.action_size * 3 else S.tail_width });
@@ -574,7 +589,8 @@ pub const GroupRow = struct {
 
         root.meta.ownership.meta.test_id = "sidebar.group.card";
         const self = try scope.createState(GroupRow, .{ .cx = cx, .root = root, .header = undefined, .members = undefined, .actions = undefined, .reference = data.reference, .bridge = bridge, .collapsed = data.collapsed, .chevron = undefined, .menu = undefined, .count = data.count });
-        const header = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(data.name, .{}), .base_style = S.group(), .hover_style = ui.BoxStyle{ .background = T.states().hover }, .on_click = cx.on(GroupRow, self, GroupRow.toggle), .on_event = groupEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx);
+        const header_hover = try scope.createSignal(?ui.BoxStyle, .{ .background = T.current().overlay });
+        const header = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(data.name, .{}), .base_style = S.group(), .hover_style = header_hover, .on_click = cx.on(GroupRow, self, GroupRow.toggle), .on_event = groupEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx);
         header.meta.ownership.meta.test_id = "sidebar.group";
         setFocusRing(header);
         self.header = header;
@@ -598,11 +614,7 @@ pub const GroupRow = struct {
         const count_label = try ui.text(cx, "", S.badgeText());
         const count_text = try std.fmt.bufPrint(&count, "{d}", .{data.count});
         try count_label.setTextContent(cx.allocator, count_text);
-        const count_width = @ceil(cx.text.measureTextWidth(count_text, 10, 400, false));
-        badge.setStyleInline(cx.allocator, .{ .width = .{ .px = count_width } });
-        var count_style = S.badgeLabel();
-        count_style.width = .{ .px = count_width };
-        count_label.setStyleInline(cx.allocator, count_style);
+        count_label.setStyleInline(cx.allocator, S.badgeLabel());
         count_label.meta.ownership.meta.test_id = "sidebar.group.count";
         try badge.appendChild(cx.allocator, count_label);
         var group_tail = S.tail();
@@ -641,20 +653,26 @@ pub const GroupRow = struct {
         try MenuKeyboard.install(cx, menu);
         const members = try ui.box(cx, S.members(), .{});
         self.members = members;
+        const guide = try ui.box(cx, S.groupGuide(), .{});
+        guide.meta.ownership.meta.test_id = "sidebar.group.guide";
+        try members.appendChild(cx.allocator, guide);
         self.disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, members, !data.collapsed);
         try root.appendChild(cx.allocator, self.disclosure.root);
         const hovered = try ui.hooks.useHover(scope, header);
         const focused = try ui.hooks.useFocusState(scope, cx, header);
         const plus_focus = try ui.hooks.useFocusState(scope, cx, plus);
         const more_focus = try ui.hooks.useFocusState(scope, cx, more);
-        try scope.createEffect(.{ .self = self, .hovered = hovered, .focused = focused.focused, .plus_focus = plus_focus.focused, .more_focus = more_focus.focused, .actions = actions, .badge = badge, .open = menu.open.?, .tint = tint, .hover = hover, .theme = try cx.themeSignal(scope) }, struct {
+        try scope.createEffect(.{ .self = self, .hovered = hovered, .focused = focused.focused, .plus_focus = plus_focus.focused, .more_focus = more_focus.focused, .actions = actions, .badge = badge, .count_label = count_label, .open = menu.open.?, .tint = tint, .hover = hover, .header_hover = header_hover, .guide = guide, .theme = try cx.themeSignal(scope) }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.theme.get();
                 const hot = ctx.hovered.get() or ctx.focused.get() or ctx.plus_focus.get() or ctx.more_focus.get() or ctx.open.get();
                 ctx.actions.setDisplay(if (hot) .flex else .none);
                 ctx.badge.setDisplay(if (hot) .none else .flex);
+                ctx.count_label.setTextColor(T.current().fg_3);
                 ctx.tint.set(T.current().fg_2);
                 ctx.hover.set(.{ .background = T.current().well });
+                ctx.header_hover.set(.{ .background = T.current().overlay });
+                ctx.guide.setBackground(S.groupGuideColor());
             }
         }.run);
         return self;

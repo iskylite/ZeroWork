@@ -423,7 +423,7 @@ test "notification countdown pauses and application risk expires while retaining
     cx.mouse_y = card.y + 10;
     cx.hovered_node = view.slots[0].close;
     try view.update(7300, true, owner, placement);
-    try std.testing.expectEqualStrings("6 秒后关闭", view.slots[0].countdown.getText().?.content);
+    try std.testing.expectEqual(ui.types.Display.none, view.slots[0].countdown_view.root.style.display);
     // The framework can retain the old hover node after the pointer leaves.
     cx.mouse_x = 0;
     cx.mouse_y = 0;
@@ -431,7 +431,8 @@ test "notification countdown pauses and application risk expires while retaining
     try std.testing.expect(!notice_host.coordinator.recordFor(view.slots[0].fact_id.?).?.paused);
     const risk = try notice_host.coordinator.publishNotification(.{ .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 2, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failed" }, .{ .monotonic_ms = 7300, .local_minute = 0 });
     try view.update(7300, true, owner, placement);
-    try std.testing.expect(view.slots[0].countdown.style.display == .none);
+    try std.testing.expect(view.slots[0].countdown.style.display == .flex);
+    try std.testing.expectEqualStrings("4 秒后关闭", view.slots[0].countdown.getText().?.content);
     cx.hovered_node = null;
     try view.update(7300, true, owner, placement);
     try view.update(11_299, true, owner, placement);
@@ -706,4 +707,73 @@ test "notification visible migration preserves expanded content and paused prese
     try std.testing.expectEqual(ui.types.Display.flex, view.slots[0].detail.style.display);
     try std.testing.expectEqual(remaining, notice.coordinator.recordFor(id).?.remaining_ms);
     try std.testing.expect(notice.coordinator.recordFor(id).?.paused);
+}
+
+test "notification countdown covers risk banners and hides during interaction beside the action" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    for ([_]bool{ false, true }) |has_action| {
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        cx.setViewport(860, 480);
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+        defer {
+            scope.dispose();
+            notice.coordinator.deinit();
+            notice.activity.deinit();
+        }
+        const view = try Presenter.mount(cx, scope, &notice, @fromBackingInt(1));
+        const published = try notice.coordinator.publishNotification(.{
+            .definition_id = "host.feedback",
+            .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } },
+            .operation_id = 1,
+            .event_revision = 1,
+            .phase = .failed,
+            .title = "需要处理",
+            .owner_name = "prod-web-01",
+            .detail = "保留完整详情",
+            .attention = .{ .kind = if (has_action) .task_blocked else .application_risk, .requires_action = true, .time_sensitive = true },
+            .actions = if (has_action) &.{.{ .kind = .locate_owner, .label = "查看来源" }} else &.{},
+        }, .{ .monotonic_ms = 1000, .local_minute = 0 });
+        const placement: @import("ui/notification_presenter.zig").Placement = .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } };
+        for (0..4) |_| {
+            try view.update(1000, true, null, placement);
+            cx.layout();
+        }
+        const slot = &view.slots[0];
+        try std.testing.expectEqualStrings(if (has_action) "8 秒后关闭" else "4 秒后关闭", slot.countdown.getText().?.content);
+        try std.testing.expectEqual(ui.types.Display.flex, slot.countdown.style.display);
+        try view.update(2001, true, null, placement);
+        try std.testing.expectEqualStrings(if (has_action) "7 秒后关闭" else "3 秒后关闭", slot.countdown.getText().?.content);
+        if (has_action) {
+            const timer = slot.countdown_view.root.globalRect();
+            const button = slot.actions[0].root.globalRect();
+            try std.testing.expect(timer.x + timer.w <= button.x);
+            try std.testing.expectApproxEqAbs(timer.y + timer.h / 2, button.y + button.h / 2, 0.5);
+        }
+        const rect = slot.root.globalRect();
+        cx.mouse_x = rect.x + 10;
+        cx.mouse_y = rect.y + 10;
+        cx.hovered_node = slot.root;
+        try view.update(3000, true, null, placement);
+        try view.update(15000, true, null, placement);
+        try std.testing.expectEqual(ui.types.Display.none, slot.countdown_view.root.style.display);
+        try std.testing.expectEqual(host.notifications.Presentation.visible, notice.coordinator.recordFor(published.fact_id).?.presentation);
+        cx.hovered_node = null;
+        for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+            theme.select(name);
+            try view.update(15000, true, null, placement);
+            cx.layout();
+            try std.testing.expectEqualStrings(if (has_action) "8 秒后关闭" else "4 秒后关闭", slot.countdown.getText().?.content);
+            try std.testing.expectEqual(theme.current().fg_2, slot.countdown.getText().?.color);
+            if (has_action) try std.testing.expectEqual(theme.actionForeground(theme.current().action_accent), slot.actions[0].label.getText().?.color);
+        }
+        try view.update(23001, true, null, placement);
+        try std.testing.expectEqual(ui.types.Display.none, slot.root.style.display);
+        // Closing the banner never resolves the source or removes its record.
+        try std.testing.expect(notice.coordinator.recordFor(published.fact_id).?.pending());
+    }
 }

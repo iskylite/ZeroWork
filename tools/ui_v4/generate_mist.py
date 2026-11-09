@@ -9,6 +9,12 @@ BASE = REPO / "docs/UI_V4"
 DEFS = (BASE/'mist-workspace.svg').read_text().split('<defs>',1)[1].split('</defs>',1)[0]
 DEFS = re.sub(r'<clipPath.*?</clipPath>', '', DEFS, flags=re.S)
 DEFS = re.sub(r'<filter id="(?:raised|sidebar-shadow|mist-raised|mist-sidebar-shadow)".*?</filter>', '', DEFS, flags=re.S)
+DEFS = re.sub(r'<symbol id="sidebar-(?:server|route|monitor|plus|search|down|chevron)".*?</symbol>', '', DEFS, flags=re.S)
+def sidebar_icon(filename, ident, common=False):
+ raw=(REPO/'vendor/zenit/src/ui'/('icons_common' if common else 'icons_oss')/(filename+'.svg')).read_text()
+ body=re.search(r'<svg\b[^>]*>(.*?)</svg>',raw,flags=re.S).group(1)
+ return f'<symbol id="sidebar-{ident}" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</g></symbol>'
+DEFS += ''.join(sidebar_icon(filename,ident,common) for filename,ident,common in [('server','server',False),('route','route',False),('screen-share','monitor',False),('plus','plus',True),('search','search',False),('chevron_down','down',True),('chevron_right','chevron',True)])
 DEFS += '''<filter id="mist-raised" x="-50%" y="-60%" width="200%" height="240%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#18181B" flood-opacity=".07"/></filter><filter id="mist-sidebar-shadow" x="-12%" y="-3%" width="130%" height="108%"><feDropShadow dx="1" dy="2" stdDeviation="5" flood-color="#18181B" flood-opacity=".055"/></filter>'''
 P = {'app': '#FFFFFF', 'sidebar': '#F6F6F7', 'surface': '#FFFFFF', 'well': '#EFEFEF', 'selected': '#EAEDFD', 'fg': '#18181B', 'fg2': '#5B5B65', 'fg3': '#676771', 'accent': '#4F5ED9', 'accent_ink': '#4352C7', 'ok': '#15B8A6', 'ok_ink': '#146D58', 'warn': '#D98A00'}
 
@@ -26,7 +32,7 @@ class Screen:
   self.parts=[]
   self.add(f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" fill="none"><title>ZeroWork 工作区</title><desc>主机分组、活动终端、会话工具与三点 AI 状态浮条。</desc>')
   self.source_contract()
-  self.add(f'<defs>{DEFS}<clipPath id="window.clip"><rect width="{w}" height="{h}" rx="18"/></clipPath><clipPath id="sidebar.list.clip"><rect x="22" y="118" width="{self.sidebar_width-20}" height="{h-186}"/></clipPath><clipPath id="terminal.text.clip"><rect x="{self.text_x}" y="{self.text_y}" width="{self.text_right-self.text_x}" height="{self.text_bottom-self.text_y}"/></clipPath></defs><g clip-path="url(#window.clip)">')
+  self.add(f'<defs>{DEFS}<clipPath id="window.clip"><rect width="{w}" height="{h}" rx="18"/></clipPath><clipPath id="sidebar.list.clip"><rect x="22" y="114" width="{self.sidebar_width-20}" height="{h-194}"/></clipPath><clipPath id="terminal.text.clip"><rect x="{self.text_x}" y="{self.text_y}" width="{self.text_right-self.text_x}" height="{self.text_bottom-self.text_y}"/></clipPath></defs><g clip-path="url(#window.clip)">')
   self.rect(0,0,w,h,P['app'],id='window.background')
  def add(self,s):self.parts.append(s)
  def note(self,s):
@@ -53,7 +59,9 @@ class Screen:
     'flow':'absolute_overlay_no_reserved_row','material':'existing_transparent_glass',
     'behavior':'preserve_existing_hover_preview_click_and_state_controller'},
    'sidebar':{'protocol_text_tags':False,'header_actions_right_inset':10,
+    'header_to_list_gap':12,'group_gap':15,'member_indent':12,'member_top_gap':6,
     'host_row_height':36,'host_row_pitch':37,'footer_height':34,
+    'route_badge':'always_visible_count_in_icon_corner',
     'operations':'preserve_existing_search_creation_grouping_and_connection_actions'},
    'fonts':{'interface':'system-ui / PingFang SC','terminal':'embedded JetBrains Mono Regular'},
   }
@@ -99,45 +107,50 @@ class Screen:
   self.group('window.native-controls')
   for x,col in [(40,'#FF5F57'),(60,'#FEBC2E'),(80,'#28C840')]:self.dot(x,30,6,col)
   self.end()
-  self.group('sidebar.collapse');self.title('隐藏侧栏 ⌘B');self.hit('sidebar.collapse.hit',sw-22,18,24,24);self.icon('sidebar',sw-19.5,20.5,19);self.end()
+  self.group('sidebar.collapse');self.title('隐藏侧栏 ⌘B');self.hit('sidebar.collapse.hit',sw-22,18,24,24);self.icon('sidebar',sw-19.5,20.5,19,P['fg2']);self.end()
   self.group('sidebar.header')
-  self.icon('server',26,81,17,P['accent_ink']);self.text(49,95,'主机与连接',13,P['fg'],700)
-  for asset,x,label,id in [('search',sw-50,'搜索主机','sidebar.search.toggle'),('plus',sw-22,'新建主机或分组','sidebar.new')]:
-   self.group(id);self.title(label);self.hit(id+'.hit',x,78,24,24);self.icon(asset,x+4,82,16);self.end()
+  self.icon('sidebar-server',22,81.5,17,P['accent'],id='sidebar.header.icon');self.text(45,95,'主机与连接',13,P['fg'],700)
+  for asset,x,label,id in [('sidebar-search',sw-52,'搜索主机','sidebar.search.toggle'),('sidebar-plus',sw-22,'新建主机或分组','sidebar.new')]:
+   self.group(id);self.title(label);self.hit(id+'.hit',x,78,24,24);self.icon(asset,x+4,82,16,P['fg2']);self.end()
   self.end()
   self.group('sidebar.hosts',extra='clip-path="url(#sidebar.list.clip)"')
   def group_heading(top,name,count,col,collapsed=False):
    self.group('host-group.'+name)
    self.hit('host-group.'+name+'.hit',22,top,sw-20,28)
-   self.icon('chevron' if collapsed else 'down',30,top+7,12)
-   self.dot(51,top+13,2.5,col)
-   self.text(62,top+17,name,11.5,P['fg2'],600)
-   self.text(sw-3,top+17,str(count),10,P['fg3'],id='host-group.'+name+'.count',extra='text-anchor="end"')
+   self.icon('sidebar-chevron' if collapsed else 'sidebar-down',22,top+8,12,P['fg2'],id='host-group.'+name+'.chevron')
+   self.dot(42.5,top+14,2.5,col)
+   self.text(51,top+18,name,11.5,P['fg2'],600)
+   self.text(sw-3,top+18,str(count),10,P['fg2'],id='host-group.'+name+'.count',extra='text-anchor="end"')
+   if not collapsed and count:
+    self.add(f'<path id="host-group.{escape(name)}.guide" d="M28 {top+37} V{top+52+(count-1)*37}" stroke="#D9D9DD" stroke-width="1" stroke-linecap="round"/>')
    self.end()
   def host(top,name,proto='SSH',hops='0',os='ubuntu',selected=False,online=False):
    ident='host.'+name;self.group(ident)
-   self.rect(22,top,sw-20,36,P['selected'] if selected else 'transparent',8,id=ident+'.hit',extra='data-role="hit-area"')
-   self.icon('os-'+os if proto=='SSH' else ('folder' if proto=='SFTP' else 'monitor'),31,top+9,18)
-   if online:self.dot(49,top+9,3,P['ok'],extra='stroke="#F6F6F7" stroke-width="1.2"')
-   self.text(58,top+23,name,12,P['fg'],500,id=ident+'.name')
-   if proto!='KVM':
-    self.icon('route',sw-36,top+11,14);self.text(sw-3,top+22,hops,10,P['fg3'],id=ident+'.hops',extra='text-anchor="end"')
+   self.rect(34,top,sw-32,36,P['selected'] if selected else 'transparent',8,id=ident+'.hit',extra='data-role="hit-area"')
+   self.icon('os-'+os if proto=='SSH' else ('folder' if proto=='SFTP' else 'sidebar-monitor'),43,top+9,18)
+   if online:self.dot(61,top+9,3,P['ok'],extra='stroke="#F6F6F7" stroke-width="1.2"')
+   self.text(70,top+23,name,12,P['fg'],600 if selected else 500,id=ident+'.name')
+   self.icon('sidebar-route',sw-27,top+10,16,P['fg2'],id=ident+'.route-icon')
+   self.text(sw-9,top+15,hops,8.5,P['fg2'],600,id=ident+'.hops',extra='text-anchor="middle" style="font-family:Menlo,monospace"')
    self.end()
-  group_heading(126,'生产环境',4,'#8C7CC5')
-  host(162,'prod-web-01',selected=True,online=True);host(199,'prod-web-02');host(236,'prod-db-01',hops='1',os='debian');host(273,'prod-bastion',os='debian')
-  group_heading(329,'开发环境',3,'#75A99A')
-  host(365,'dev-api-01',os='fedora',online=True);host(402,'项目文件','SFTP');host(439,'dev-cache-01',os='debian')
-  group_heading(495,'硬件管理',2,'#BEA06B',True)
+  group_heading(114,'生产环境',4,'#8C7CC5')
+  host(148,'prod-web-01',selected=True,online=True);host(185,'prod-web-02');host(222,'prod-db-01',hops='1',os='debian');host(259,'prod-bastion',os='debian')
+  group_heading(310,'开发环境',3,'#75A99A')
+  host(344,'dev-api-01',os='fedora',online=True);host(381,'项目文件','SFTP');host(418,'dev-cache-01',os='debian')
+  group_heading(469,'硬件管理',2,'#BEA06B',True)
   self.end()
   if self.compact:self.rect(sw,151,2,102,'#C4C4CC',1)
   self.group('sidebar.footer.new');fy=self.h-56;mid=12+sw/2
-  self.rect(22.75,fy+.75,sw-21.5,32.5,'transparent',7.25,id='sidebar.footer.surface',extra='stroke="#D4D4D8" stroke-width="1.5" stroke-dasharray="4.5 4.5"')
-  self.group('sidebar.footer.content',extra='transform="translate(-1.5,.5)"')
-  self.icon('plus',mid-34,fy+10,14);self.text(mid-14,fy+21,'新建连接',12,P['fg2'],500)
+  self.rect(22,fy,sw-20,34,'transparent',8,id='sidebar.footer.surface',extra='data-role="hit-area"')
+  self.group('sidebar.footer.content')
+  self.icon('sidebar-plus',mid-34,fy+10,14,P['fg2']);self.text(mid-14,fy+21,'新建连接',12,P['fg2'],500)
   self.end();self.end();self.end()
- def tab(self,x,w,name,asset,active,color):
+ def tab(self,x,w,name,asset,active,color,first=False):
   self.group('tab.'+name)
-  self.rect(x,16,w,28,P['selected'] if active else 'transparent',7,id='tab.'+name+'.hit',extra='data-role="hit-area"')
+  fill=P['selected'] if active else 'transparent'
+  if first:
+   self.add(f'<path id="tab.{name}.hit" d="M {x+14} 16 H {x+w-7} A 7 7 0 0 1 {x+w} 23 V 37 A 7 7 0 0 1 {x+w-7} 44 H {x+14} A 14 14 0 0 1 {x} 30 A 14 14 0 0 1 {x+14} 16 Z" fill="{fill}" data-role="hit-area"/>')
+  else:self.rect(x,16,w,28,fill,7,id='tab.'+name+'.hit',extra='data-role="hit-area"')
   self.rect(x+8,23,2.5,14,color,1.25)
   self.icon(asset,x+19,22,16,P['accent_ink'] if active else P['fg3'])
   if active:self.dot(x+33,22,3.7,P['ok'],extra='stroke="#FFFFFF" stroke-width="1.2"')
@@ -168,7 +181,7 @@ class Screen:
    if self.tools_expanded:
     tw=204
     self.capsule('toolbar.tabs',self.work_x,tw)
-    self.tab(self.work_x+4,164,'prod-web-01','terminal',True,P['accent'])
+    self.tab(self.work_x+4,164,'prod-web-01','terminal',True,P['accent'],first=True)
     self.button('tabs.new',self.work_x+tw-32,'plus','新建会话')
     self.end()
     pref=toggle-8-100;hist=pref-8-100;conn=hist-8-100
@@ -179,7 +192,7 @@ class Screen:
    else:
     tw=204
     self.capsule('toolbar.tabs',self.work_x,tw)
-    self.tab(self.work_x+4,164,'prod-web-01','terminal',True,P['accent'])
+    self.tab(self.work_x+4,164,'prod-web-01','terminal',True,P['accent'],first=True)
     self.button('tabs.new',self.work_x+tw-32,'plus','新建会话')
     self.end()
    self.capsule('toolbar.compact-toggle',toggle,36)
@@ -191,7 +204,7 @@ class Screen:
    self.capsule('toolbar.tabs',self.work_x,tw)
    cur=self.work_x+4
    for i,(width,name,asset,col) in enumerate([(164,'prod-web-01','terminal',P['accent']),(100,'本地','terminal','#98909F'),(128,'项目文件','folder','#5D9F8E'),(144,'BMC 控制台','monitor','#B0925D'),(140,'部署会话组','layers','#A586B6')]):
-    self.tab(cur,width,name,asset,i==0,col);cur+=width+4
+    self.tab(cur,width,name,asset,i==0,col,first=i==0);cur+=width+4
    self.button('tabs.new',self.work_x+tw-32,'plus','新建会话')
    self.end()
    self.full_tool_groups(conn,hist,pref)

@@ -1,8 +1,9 @@
 """Check filled action and translucent bubble ink against native gradient pixels."""
 import collections,json,pathlib,sys
 from PIL import Image
+from native_theme_data import load as load_native_theme_data
 BASE=pathlib.Path(sys.argv[1]);OUT=pathlib.Path(sys.argv[2])if len(sys.argv)>2 else BASE/'action-pixel-report.json'
-D=json.loads((pathlib.Path(__file__).resolve().parents[1]/'docs/UI_V3/theme-presets.json').read_text())['themes']
+D=load_native_theme_data()['themes']
 def lum(c):return sum((v/255/12.92 if v/255<=.04045 else ((v/255+.055)/1.055)**2.4)*w for v,w in zip(c,(.2126,.7152,.0722)))
 def cr(a,b):x,y=sorted((lum(a),lum(b)));return(y+.05)/(x+.05)
 def walk(n):

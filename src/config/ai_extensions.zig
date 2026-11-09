@@ -2,7 +2,11 @@
 const std = @import("std");
 pub const Skill = struct { id: []const u8, revision: []const u8, name: []const u8, description: []const u8, enabled: bool = true };
 pub const Value = struct { name: []const u8, value: []const u8 = "", secret: bool = false, secret_ref: ?[]const u8 = null };
-pub const Binding = struct { name: []const u8, adapter: enum { material_text } = .material_text };
+pub const Binding = struct {
+    name: []const u8,
+    // Retain the legacy tag when reading existing saved configurations.
+    adapter: enum { material_text, tool } = .tool,
+};
 pub const Server = struct {
     id: []const u8,
     name: []const u8,
@@ -17,12 +21,15 @@ pub const Server = struct {
     headers: []Value = &.{},
     timeout_ms: u32 = 30000,
     bindings: []const Binding = &.{},
+    roots: []const []const u8 = &.{},
+    oauth_client_id: []const u8 = "",
+    oauth_scope: []const u8 = "",
 };
 pub const Extensions = struct {
     skills: []const Skill = &.{},
     servers: []Server = &.{},
     pub fn validate(self: Extensions) !void {
-        if (self.skills.len > 32 or self.servers.len > 16) return error.ExtensionLimit;
+        if (self.servers.len > 16) return error.ExtensionLimit;
         for (self.skills, 0..) |skill, i| {
             if (!hex(skill.id, 32) or !hex(skill.revision, 64)) return error.InvalidSkillReference;
             try text(skill.name, 128, false);
@@ -47,6 +54,13 @@ pub const Extensions = struct {
                 if (!std.mem.eql(u8, uri.scheme, "https") and !(std.mem.eql(u8, uri.scheme, "http") and (std.mem.eql(u8, hostname, "127.0.0.1") or std.mem.eql(u8, hostname, "localhost") or std.mem.eql(u8, hostname, "[::1]")))) return error.InvalidMcpEndpoint;
                 if (server.program.len != 0 or server.args.len != 0 or server.environment.len != 0) return error.InvalidMcpConfig;
             }
+            try text(server.oauth_client_id, 4096, true);
+            try text(server.oauth_scope, 4096, true);
+            for (server.roots) |root| {
+                try text(root, 4096, false);
+                const uri = std.Uri.parse(root) catch return error.InvalidMcpRoot;
+                if (!std.mem.eql(u8, uri.scheme, "file") or uri.query != null or uri.fragment != null or !std.mem.startsWith(u8, root, "file:///")) return error.InvalidMcpRoot;
+            }
             for (server.args) |arg| try text(arg, 4096, true);
             for ([_][]Value{ server.environment, server.headers }, 0..) |values, kind| for (values, 0..) |value, n| {
                 try identifier(value.name);
@@ -54,7 +68,8 @@ pub const Extensions = struct {
                 if (std.mem.indexOfAny(u8, value.value, "\r\n") != null) return error.InvalidMcpValue;
                 if (value.secret_ref != null and !value.secret) return error.InvalidMcpSecret;
                 if (value.secret_ref) |reference| if (reference.len != 68 or !std.mem.startsWith(u8, reference, "zw1_") or !hex(reference[4..], 64)) return error.InvalidMcpSecret;
-                if (kind == 1) for ([_][]const u8{ "host", "content-length", "accept", "content-type", "mcp-session-id", "mcp-protocol-version" }) |reserved| {
+                if (kind == 1 and value.name.len >= 10 and std.ascii.eqlIgnoreCase(value.name[0..10], "mcp-param-")) return error.ReservedMcpHeader;
+                if (kind == 1) for ([_][]const u8{ "mcp-method", "mcp-name", "host", "content-length", "accept", "content-type", "mcp-session-id", "mcp-protocol-version" }) |reserved| {
                     if (std.ascii.eqlIgnoreCase(value.name, reserved)) return error.ReservedMcpHeader;
                 };
                 for (values[0..n]) |prior| if (std.ascii.eqlIgnoreCase(prior.name, value.name)) return error.DuplicateMcpValue;
@@ -72,10 +87,13 @@ pub const Extensions = struct {
         }
         const servers = try a.dupe(Server, self.servers);
         for (servers) |*server| {
-            inline for (.{ "id", "name", "program", "cwd", "endpoint" }) |key| @field(server, key) = try a.dupe(u8, @field(server, key));
+            inline for (.{ "id", "name", "program", "cwd", "endpoint", "oauth_client_id", "oauth_scope" }) |key| @field(server, key) = try a.dupe(u8, @field(server, key));
             const args = try a.alloc([]const u8, server.args.len);
             for (args, server.args) |*dst, arg| dst.* = try a.dupe(u8, arg);
             server.args = args;
+            const roots = try a.alloc([]const u8, server.roots.len);
+            for (roots, server.roots) |*dst, root| dst.* = try a.dupe(u8, root);
+            server.roots = roots;
             inline for (.{ "environment", "headers" }) |key| {
                 @field(server, key) = try a.dupe(Value, @field(server, key));
                 for (@field(server, key)) |*v| {

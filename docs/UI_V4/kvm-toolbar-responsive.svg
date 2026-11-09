@@ -1,0 +1,278 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1208" height="404" viewBox="0 0 1208 404" fill="none">
+  <title>KVM 会话</title>
+  <desc>KVM 会话工具栏及电源、启动菜单。</desc>
+  <metadata>Session widths: 520 / 336 / 240 logical px. Toolbar height 44; video gap 16. At 480 and above show text actions. Below 480 show all five 32px icon actions and a 32px connection status action. Below the complete icon row minimum of 264, move power and boot into the downward overflow menu. Outer padding 22 + monitor/status 58 + five icons 160 + six gaps 24 = 264. Native mapping: src/plugins/bmc_ikvm/views.zig and styles.zig. Minimum checked session width 228. Hostname belongs to the session header.</metadata>
+  <!-- Icons: lucide-static v1.31.0, ISC; reused from vendor/zenit/src/ui/icons_oss. -->
+  <defs>
+    <symbol id="icon-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="20" height="14" x="2" y="3" rx="2" />
+      <line x1="8" x2="16" y1="21" y2="21" />
+      <line x1="12" x2="12" y1="17" y2="21" />
+    </symbol>
+    <symbol id="icon-mouse-pointer-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z" />
+    </symbol>
+    <symbol id="icon-keyboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M10 8h.01" />
+      <path d="M12 12h.01" />
+      <path d="M14 8h.01" />
+      <path d="M16 12h.01" />
+      <path d="M18 8h.01" />
+      <path d="M6 8h.01" />
+      <path d="M7 16h10" />
+      <path d="M8 12h.01" />
+      <rect width="20" height="16" x="2" y="4" rx="2" />
+    </symbol>
+    <symbol id="icon-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2v10" />
+      <path d="M18.4 6.6a9 9 0 1 1-12.77.04" />
+    </symbol>
+    <symbol id="icon-arrow-up-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7 7h10v10" />
+      <path d="M7 17 17 7" />
+    </symbol>
+    <symbol id="icon-ellipsis" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="1" />
+      <circle cx="19" cy="12" r="1" />
+      <circle cx="5" cy="12" r="1" />
+    </symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 17v5" />
+      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+    </symbol>
+    <symbol id="icon-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m9 18 6-6-6-6" />
+    </symbol>
+    <filter id="shadow" x="-30%" y="-50%" width="160%" height="220%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#18181B" flood-opacity=".07" />
+    </filter>
+    <filter id="menu-shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#18181B" flood-opacity=".15" />
+    </filter>
+    <clipPath id="wide-video-clip">
+      <rect x="8" y="100" width="504" height="248" rx="9" />
+    </clipPath>
+    <clipPath id="compact-video-clip">
+      <rect x="8" y="100" width="320" height="248" rx="9" />
+    </clipPath>
+    <clipPath id="compact-title-clip">
+      <rect x="24" y="0" width="170" height="32" />
+    </clipPath>
+    <symbol id="icon-circle-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <path d="m9 12 2 2 4-4" />
+    </symbol>
+    <clipPath id="overflow-title-clip">
+      <rect x="24" y="0" width="74" height="32" rx="0" />
+    </clipPath>
+    <clipPath id="overflow-video-clip">
+      <rect x="8" y="100" width="224" height="248" rx="9" />
+    </clipPath>
+  </defs>
+  <g font-family="-apple-system, BlinkMacSystemFont, PingFang SC, sans-serif">
+    <rect width="1208" height="404" fill="#F6F6F7" />
+    <g id="kvm-wide" transform="translate(24 24)">
+      <rect width="520" height="356" rx="12" fill="#EEEFF2" />
+      <g id="wide-session-header">
+        <circle cx="12" cy="12" r=".8" fill="#8A8A93" />
+        <circle cx="12" cy="16" r=".8" fill="#8A8A93" />
+        <circle cx="12" cy="20" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="12" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="16" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="20" r=".8" fill="#8A8A93" />
+        <text x="25" y="20" font-size="11" fill="#5B5B65" font-weight="500">BMC · iKVM · P3C9-KVM · #5</text>
+        <circle cx="399" cy="16" r="3" fill="#12B8A6" />
+        <text x="409" y="20" font-size="11" fill="#5B5B65" font-weight="500">视频在线</text>
+        <use href="#icon-pin" x="466" y="8" width="15" height="15" color="#5B5B65" />
+        <use href="#icon-ellipsis" x="494" y="8" width="16" height="16" color="#5B5B65" />
+      </g>
+      <g id="wide-toolbar" transform="translate(0 32)">
+        <rect width="520" height="44" rx="18" fill="#FFF" filter="url(#shadow)" />
+        <use href="#icon-monitor" x="16" y="13" width="18" height="18" color="#5B5B65" />
+        <text x="42" y="26" font-size="12" fill="#18181B" font-weight="700">P3C…</text>
+        <use href="#icon-circle-check" x="106" y="15" width="14" height="14" color="#12B8A6" />
+        <text x="124" y="26" font-size="12" fill="#3E3E47" font-weight="500">已连接</text>
+        <g id="wide-mouse-pointer-2">
+          <use href="#icon-mouse-pointer-2" x="188" y="14" width="16" height="16" color="#3E3E47" />
+          <text x="208" y="26" font-size="12" fill="#3E3E47" font-weight="500">控制</text>
+        </g>
+        <g id="wide-keyboard">
+          <use href="#icon-keyboard" x="256" y="14" width="16" height="16" color="#3E3E47" />
+          <text x="276" y="26" font-size="12" fill="#3E3E47" font-weight="500">按键</text>
+        </g>
+        <g id="wide-monitor">
+          <use href="#icon-monitor" x="324" y="14" width="16" height="16" color="#3E3E47" />
+          <text x="344" y="26" font-size="12" fill="#3E3E47" font-weight="500">显示</text>
+        </g>
+        <g id="wide-power">
+          <use href="#icon-power" x="392" y="14" width="16" height="16" color="#3E3E47" />
+          <text x="412" y="26" font-size="12" fill="#3E3E47" font-weight="500">电源</text>
+        </g>
+        <g id="wide-arrow-up-right">
+          <use href="#icon-arrow-up-right" x="460" y="14" width="16" height="16" color="#3E3E47" />
+          <text x="480" y="26" font-size="12" fill="#3E3E47" font-weight="500">启动</text>
+        </g>
+      </g>
+      <g id="wide-video">
+        <rect y="92" width="520" height="264" rx="16" fill="#000" />
+        <g clip-path="url(#wide-video-clip)" font-family="Menlo, monospace">
+          <text x="12" y="113.0" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.000000] Linux version 5.14.0-503.el9.x86_64</text>
+          <text x="12" y="123.7" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.000000] Command line: BOOT_IMAGE=/vmlinuz root=/dev/mapper/rl-root</text>
+          <text x="12" y="134.4" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.032481] ACPI: Core revision 20230628</text>
+          <text x="12" y="145.1" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.127003] smp: Bringing up secondary CPUs ...</text>
+          <text x="12" y="155.8" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.184721] smp: Brought up 2 nodes, 32 CPUs</text>
+          <text x="12" y="166.5" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.238416] Memory: 131526256K/134217728K available</text>
+          <text x="12" y="177.2" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.341290] PCI: Using configuration type 1 for base access</text>
+          <text x="12" y="187.89999999999998" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.483902] usbcore: registered new interface driver usbfs</text>
+          <text x="12" y="198.6" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.587231] SCSI subsystem initialized</text>
+          <text x="12" y="209.3" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.682047] clocksource: Switched to clocksource tsc</text>
+          <text x="12" y="220.0" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.793154] systemd[1]: systemd 252 running in system mode</text>
+          <text x="12" y="230.7" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Started Journal Service.</text>
+          <text x="12" y="241.39999999999998" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Mounted /boot.</text>
+          <text x="12" y="252.1" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Reached target Local File Systems.</text>
+          <text x="12" y="262.79999999999995" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Started OpenSSH server daemon.</text>
+          <text x="12" y="273.5" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Reached target Multi-User System.</text>
+          <text x="12" y="284.2" font-size="7.7" fill="#D9DDE0" font-weight="400" />
+          <text x="12" y="294.9" font-size="7.7" fill="#D9DDE0" font-weight="400">Rocky Linux 9.5 (Blue Onyx)</text>
+          <text x="12" y="305.6" font-size="7.7" fill="#D9DDE0" font-weight="400">Kernel 5.14.0-503.el9.x86_64 on an x86_64</text>
+          <text x="12" y="316.29999999999995" font-size="7.7" fill="#D9DDE0" font-weight="400" />
+          <text x="12" y="327.0" font-size="7.7" fill="#D9DDE0" font-weight="400">localhost login: _</text>
+        </g>
+        <g transform="translate(420 104)">
+          <rect width="88" height="42" rx="7" fill="#14171C" fill-opacity=".9" />
+          <text x="9" y="16" font-size="9.5" fill="#ECEEF1" font-weight="500">显示 5.0 FPS</text>
+          <text x="9" y="31" font-size="9.5" fill="#C0C4CB" font-weight="500">解码 6.0 FPS</text>
+        </g>
+      </g>
+    </g>
+    <g id="kvm-compact" transform="translate(576 24)">
+      <rect width="336" height="356" rx="12" fill="#EEEFF2" />
+      <g id="compact-session-header">
+        <circle cx="12" cy="12" r=".8" fill="#8A8A93" />
+        <circle cx="12" cy="16" r=".8" fill="#8A8A93" />
+        <circle cx="12" cy="20" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="12" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="16" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="20" r=".8" fill="#8A8A93" />
+        <text x="25" y="20" font-size="11" fill="#5B5B65" font-weight="500" clip-path="url(#compact-title-clip)">BMC · iKVM · P3C9-KVM · #5</text>
+        <circle cx="215" cy="16" r="3" fill="#12B8A6" />
+        <text x="225" y="20" font-size="11" fill="#5B5B65" font-weight="500">视频在线</text>
+        <use href="#icon-pin" x="282" y="8" width="15" height="15" color="#5B5B65" />
+        <use href="#icon-ellipsis" x="310" y="8" width="16" height="16" color="#5B5B65" />
+      </g>
+      <g id="compact-toolbar" transform="translate(0 32)">
+        <rect width="336" height="44" rx="18" fill="#FFF" filter="url(#shadow)" />
+        <use href="#icon-monitor" x="16" y="13" width="18" height="18" color="#5B5B65" />
+        <text x="42" y="26" font-size="12" fill="#18181B" font-weight="700">P3C9-KVM</text>
+        <use href="#icon-circle-check" x="127" y="15" width="14" height="14" color="#12B8A6" />
+        <use href="#icon-mouse-pointer-2" x="162" y="14" width="16" height="16" color="#3E3E47" />
+        <use href="#icon-keyboard" x="198" y="14" width="16" height="16" color="#3E3E47" />
+        <use href="#icon-monitor" x="234" y="14" width="16" height="16" color="#3E3E47" />
+        <use href="#icon-power" x="270" y="14" width="16" height="16" color="#3E3E47" />
+        <use href="#icon-arrow-up-right" x="306" y="14" width="16" height="16" color="#3E3E47" />
+      </g>
+      <g id="compact-video">
+        <rect y="92" width="336" height="264" rx="16" fill="#000" />
+        <g clip-path="url(#compact-video-clip)" font-family="Menlo, monospace">
+          <g transform="translate(2.92 81.78) scale(.6349206)">
+            <text x="12" y="113.0" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.000000] Linux version 5.14.0-503.el9.x86_64</text>
+            <text x="12" y="123.7" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.000000] Command line: BOOT_IMAGE=/vmlinuz root=/dev/mapper/rl-root</text>
+            <text x="12" y="134.4" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.032481] ACPI: Core revision 20230628</text>
+            <text x="12" y="145.1" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.127003] smp: Bringing up secondary CPUs ...</text>
+            <text x="12" y="155.8" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.184721] smp: Brought up 2 nodes, 32 CPUs</text>
+            <text x="12" y="166.5" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.238416] Memory: 131526256K/134217728K available</text>
+            <text x="12" y="177.2" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.341290] PCI: Using configuration type 1 for base access</text>
+            <text x="12" y="187.89999999999998" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.483902] usbcore: registered new interface driver usbfs</text>
+            <text x="12" y="198.6" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.587231] SCSI subsystem initialized</text>
+            <text x="12" y="209.3" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.682047] clocksource: Switched to clocksource tsc</text>
+            <text x="12" y="220.0" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.793154] systemd[1]: systemd 252 running in system mode</text>
+            <text x="12" y="230.7" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Started Journal Service.</text>
+            <text x="12" y="241.39999999999998" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Mounted /boot.</text>
+            <text x="12" y="252.1" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Reached target Local File Systems.</text>
+            <text x="12" y="262.79999999999995" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Started OpenSSH server daemon.</text>
+            <text x="12" y="273.5" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Reached target Multi-User System.</text>
+            <text x="12" y="284.2" font-size="7.7" fill="#D9DDE0" font-weight="400" />
+            <text x="12" y="294.9" font-size="7.7" fill="#D9DDE0" font-weight="400">Rocky Linux 9.5 (Blue Onyx)</text>
+            <text x="12" y="305.6" font-size="7.7" fill="#D9DDE0" font-weight="400">Kernel 5.14.0-503.el9.x86_64 on an x86_64</text>
+            <text x="12" y="316.29999999999995" font-size="7.7" fill="#D9DDE0" font-weight="400" />
+            <text x="12" y="327.0" font-size="7.7" fill="#D9DDE0" font-weight="400">localhost login: _</text>
+          </g>
+        </g>
+        <g transform="translate(236 104)">
+          <rect width="88" height="42" rx="7" fill="#14171C" fill-opacity=".9" />
+          <text x="9" y="16" font-size="9.5" fill="#ECEEF1" font-weight="500">显示 5.0 FPS</text>
+          <text x="9" y="31" font-size="9.5" fill="#C0C4CB" font-weight="500">解码 6.0 FPS</text>
+        </g>
+      </g>
+    </g>
+    <g id="kvm-overflow" transform="translate(944 24)">
+      <rect width="240" height="356" rx="12" fill="#EEEFF2" />
+      <g id="overflow-session-header">
+        <circle cx="12" cy="12" r=".8" fill="#8A8A93" />
+        <circle cx="12" cy="16" r=".8" fill="#8A8A93" />
+        <circle cx="12" cy="20" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="12" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="16" r=".8" fill="#8A8A93" />
+        <circle cx="16" cy="20" r=".8" fill="#8A8A93" />
+        <text x="25" y="20" font-size="11" fill="#5B5B65" font-weight="500" clip-path="url(#overflow-title-clip)">BMC · iKVM · P3C9-KVM · #5</text>
+        <circle cx="119.0" cy="16" r="3" fill="#12B8A6" />
+        <text x="129.0" y="20" font-size="11" fill="#5B5B65" font-weight="500">视频在线</text>
+        <use href="#icon-pin" x="186.0" y="8" width="15" height="15" color="#5B5B65" />
+        <use href="#icon-ellipsis" x="214.0" y="8" width="16" height="16" color="#5B5B65" />
+      </g>
+      <g id="overflow-toolbar" transform="translate(0 32)">
+        <rect width="240" height="44" rx="18" fill="#FFF" filter="url(#shadow)" />
+        <use href="#icon-monitor" x="16" y="13" width="18" height="18" color="#5B5B65" />
+        <text x="42" y="26" font-size="12" fill="#18181B" font-weight="700">…</text>
+        <use href="#icon-circle-check" x="67" y="15" width="14" height="14" color="#12B8A6" />
+        <use href="#icon-mouse-pointer-2" x="102" y="14" width="16" height="16" color="#3E3E47" />
+        <use href="#icon-keyboard" x="138" y="14" width="16" height="16" color="#3E3E47" />
+        <use href="#icon-monitor" x="174" y="14" width="16" height="16" color="#3E3E47" />
+        <circle cx="218" cy="22" r="16" fill="#EAEDFD" />
+        <use href="#icon-ellipsis" x="210" y="14" width="16" height="16" color="#4F5ED9" />
+      </g>
+      <g id="overflow-video">
+        <rect y="92" width="240" height="264" rx="16" fill="#000" />
+        <g clip-path="url(#overflow-video-clip)" font-family="Menlo, monospace">
+          <g transform="translate(4.44 124.44) scale(.4444444)">
+            <text x="12" y="113.0" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.000000] Linux version 5.14.0-503.el9.x86_64</text>
+            <text x="12" y="123.7" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.000000] Command line: BOOT_IMAGE=/vmlinuz root=/dev/mapper/rl-root</text>
+            <text x="12" y="134.4" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.032481] ACPI: Core revision 20230628</text>
+            <text x="12" y="145.1" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.127003] smp: Bringing up secondary CPUs ...</text>
+            <text x="12" y="155.8" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.184721] smp: Brought up 2 nodes, 32 CPUs</text>
+            <text x="12" y="166.5" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.238416] Memory: 131526256K/134217728K available</text>
+            <text x="12" y="177.2" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.341290] PCI: Using configuration type 1 for base access</text>
+            <text x="12" y="187.89999999999998" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.483902] usbcore: registered new interface driver usbfs</text>
+            <text x="12" y="198.6" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.587231] SCSI subsystem initialized</text>
+            <text x="12" y="209.3" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.682047] clocksource: Switched to clocksource tsc</text>
+            <text x="12" y="220.0" font-size="7.7" fill="#D9DDE0" font-weight="400">[    0.793154] systemd[1]: systemd 252 running in system mode</text>
+            <text x="12" y="230.7" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Started Journal Service.</text>
+            <text x="12" y="241.39999999999998" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Mounted /boot.</text>
+            <text x="12" y="252.1" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Reached target Local File Systems.</text>
+            <text x="12" y="262.79999999999995" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Started OpenSSH server daemon.</text>
+            <text x="12" y="273.5" font-size="7.7" fill="#D9DDE0" font-weight="400">[  OK  ] Reached target Multi-User System.</text>
+            <text x="12" y="284.2" font-size="7.7" fill="#D9DDE0" font-weight="400" />
+            <text x="12" y="294.9" font-size="7.7" fill="#D9DDE0" font-weight="400">Rocky Linux 9.5 (Blue Onyx)</text>
+            <text x="12" y="305.6" font-size="7.7" fill="#D9DDE0" font-weight="400">Kernel 5.14.0-503.el9.x86_64 on an x86_64</text>
+            <text x="12" y="316.29999999999995" font-size="7.7" fill="#D9DDE0" font-weight="400" />
+            <text x="12" y="327.0" font-size="7.7" fill="#D9DDE0" font-weight="400">localhost login: _</text>
+          </g>
+        </g>
+        <g transform="translate(140 104)">
+          <rect width="88" height="42" rx="7" fill="#14171C" fill-opacity=".9" />
+          <text x="9" y="16" font-size="9.5" fill="#ECEEF1" font-weight="500">显示 5.0 FPS</text>
+          <text x="9" y="31" font-size="9.5" fill="#C0C4CB" font-weight="500">解码 6.0 FPS</text>
+        </g>
+      </g>
+      <g id="overflow-more-menu" transform="translate(82 84)">
+        <rect width="152" height="88" rx="12" fill="#FFF" filter="url(#menu-shadow)" />
+        <use href="#icon-power" x="14" y="16" width="16" height="16" color="#5B5B65" />
+        <text x="42" y="28" font-size="12" fill="#18181B" font-weight="500">电源</text>
+        <use href="#icon-chevron-right" x="124" y="17" width="14" height="14" color="#85858E" />
+        <use href="#icon-arrow-up-right" x="14" y="56" width="16" height="16" color="#5B5B65" />
+        <text x="42" y="68" font-size="12" fill="#18181B" font-weight="500">启动</text>
+        <use href="#icon-chevron-right" x="124" y="57" width="14" height="14" color="#85858E" />
+      </g>
+    </g>
+  </g>
+</svg>

@@ -7,6 +7,7 @@ const theme = @import("app_theme.zig");
 const S = @import("command_error_hint_styles.zig");
 const T = @import("terminal_styles.zig");
 const N = @import("notification_styles.zig");
+const Countdown = @import("notification_countdown.zig").View;
 const timeout_ms: u64 = 8000;
 
 pub const View = struct {
@@ -23,6 +24,7 @@ pub const View = struct {
     close_icon: *ui.Node,
     open: *ui.Node,
     open_text: *ui.Node,
+    countdown: Countdown,
     model: policy.Model,
     handler: ?policy.Handler = null,
     colors: ?theme.Colors = null,
@@ -68,15 +70,18 @@ pub const View = struct {
         const actions = try ui.boxStyled(cx, S.actions, .{});
         try root.appendChild(cx.allocator, actions);
         try actions.appendChild(cx.allocator, exit_tag);
+        const action_group = try ui.box(cx, .{ .direction = .row, .align_items = .center, .gap = 12, .flex_shrink = 0 }, .{});
+        try actions.appendChild(cx.allocator, action_group);
+        const countdown = try Countdown.mount(cx, action_group, "terminal.ai-error-hint.countdown");
         const open = try ui.widgets.Button(.{ .variant = .primary, .a11y_label = "在原会话 AI 助手中分析失败命令", .base_style = S.open(cx.tokens), .hover_style = S.openHover(), .on_click = cx.on(View, self, activate) }).mount(scope, cx);
         try @import("app_theme.zig").stylePrimary(cx, scope, open, null);
         open.setStyleInline(cx.allocator, S.open(cx.tokens));
         open.meta.ownership.meta.test_id = "terminal.ai-error-hint.open";
         const open_text = try ui.textStyled(cx, S.actionText, "询问 AI");
         try open.appendChild(cx.allocator, open_text);
-        try actions.appendChild(cx.allocator, open);
+        try action_group.appendChild(cx.allocator, open);
         root.setDisplay(.none);
-        self.* = .{ .cx = cx, .scope = scope, .root = root, .icon = icon, .title = title, .detail = detail, .exit_tag = exit_tag, .command = command, .output = output, .close = close, .close_icon = close_icon, .open = open, .open_text = open_text, .model = policy.Model.init(cx.allocator) };
+        self.* = .{ .cx = cx, .scope = scope, .root = root, .icon = icon, .title = title, .detail = detail, .exit_tag = exit_tag, .command = command, .output = output, .close = close, .close_icon = close_icon, .open = open, .open_text = open_text, .countdown = countdown, .model = policy.Model.init(cx.allocator) };
         root.behavior.events.on_hover = cx.on(View, self, pointerChanged);
         root.behavior.events.on_leave = cx.on(View, self, pointerChanged);
         try cx.addAfterLayoutHook(self, afterLayout);
@@ -125,6 +130,7 @@ pub const View = struct {
             try self.detail.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "退出码 {d}", .{hint.exit_code}));
             self.colors = null; // Repaint the tag even when only the exit code changed.
             self.timeout_deadline_ms = null;
+            try self.countdown.update(self.cx, timeout_ms, false);
             self.root.setDisplay(.flex);
             self.cx.requestRedraw();
         }
@@ -160,6 +166,7 @@ pub const View = struct {
         const focused = if (self.cx.focus_manager.getFocused()) |node| node == self.root or node.isDescendantOf(self.root) else false;
         if (!self.cx.window_active or hovered or focused or @import("material_geometry.zig").snapshot(self.cx, self.root) == null) {
             self.timeout_deadline_ms = null;
+            self.countdown.update(self.cx, timeout_ms, true) catch {};
             return;
         }
         const deadline = self.timeout_deadline_ms orelse now +| timeout_ms;
@@ -168,7 +175,10 @@ pub const View = struct {
             self.dismiss();
             return;
         }
-        self.cx.scheduleRedrawAfterNs((deadline - now) * std.time.ns_per_ms);
+        const remaining = deadline - now;
+        self.countdown.update(self.cx, remaining, false) catch {};
+        // Wake at the next visible second boundary, including the final close.
+        self.cx.scheduleRedrawAfterNs((if (remaining % 1000 == 0) @as(u64, 1000) else remaining % 1000) * std.time.ns_per_ms);
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
@@ -196,6 +206,7 @@ pub const View = struct {
         self.open.setStyleInline(self.cx.allocator, S.open(self.cx.tokens));
         _ = self.icon.setTint(c.danger_ink);
         _ = self.close_icon.setTint(c.fg_2);
+        self.countdown.retheme();
         self.colors = c;
         self.cx.requestRedraw();
     }

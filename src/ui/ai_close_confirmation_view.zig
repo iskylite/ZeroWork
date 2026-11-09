@@ -1,5 +1,5 @@
 //! Non-modal close confirmation anchored to the assistant's ×.
-//! Baseline: docs/UI_V3/ai-close-confirmation.html. The host validates the
+//! The host validates the
 //! captured conversation ticket and applies stop/close at its safe boundary.
 const std = @import("std");
 const ui = @import("ui");

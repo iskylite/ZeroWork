@@ -1,7 +1,8 @@
 """Check terminal default and highlighted prompt ink over native wallpaper captures."""
 import collections,json,pathlib,sys
 from PIL import Image
-ROOT=pathlib.Path(__file__).resolve().parents[1];BASE=pathlib.Path(sys.argv[1]);OUT=pathlib.Path(sys.argv[2])if len(sys.argv)>2 else BASE/'terminal-default-report.json';D=json.loads((ROOT/'docs/UI_V3/theme-presets.json').read_text())['terminalPalettes']
+from native_theme_data import load as load_native_theme_data
+ROOT=pathlib.Path(__file__).resolve().parents[1];BASE=pathlib.Path(sys.argv[1]);OUT=pathlib.Path(sys.argv[2])if len(sys.argv)>2 else BASE/'terminal-default-report.json';D=load_native_theme_data()['terminalPalettes']
 def rgb(s):return tuple(int(s[i:i+2],16)for i in(1,3,5))
 def lum(c):return sum((v/255/12.92 if v/255<=.04045 else((v/255+.055)/1.055)**2.4)*w for v,w in zip(c,(.2126,.7152,.0722)))
 def cr(a,b):x,y=sorted((lum(a),lum(b)));return(y+.05)/(x+.05)

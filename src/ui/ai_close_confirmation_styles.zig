@@ -1,4 +1,4 @@
-//! Editable baseline: docs/UI_V3/ai-close-confirmation.html (320×360, 100%).
+//! AI close confirmation styles.
 //! Measured panel 288×106, 12px padding; title 20, detail 18, actions 28.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");

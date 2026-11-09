@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Quick-connect hierarchy: isolated native windows, all registered builtin palettes. */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -7,7 +8,7 @@ import {join,resolve} from 'node:path';
 import * as h from '../vendor/zenit/e2e/client.ts';
 const binary=resolve(process.argv[2]??'/tmp/zw-quick-hierarchy/build/bin/zerowork');
 const out=resolve(process.argv[3]??'/tmp/zw-quick-hierarchy/native');
-const themes=process.argv[4]?.split(',')??Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes);
+const themes=process.argv[4]?.split(',')??Object.keys(nativeThemeData.themes);
 await mkdir(out,{recursive:true});
 const report:any={status:'running',binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),cases:[],limits:['Synthetic Harness events; no physical keyboard or IME claim.','Fixtures never submit a network connection. SIGTERM cleans up only runner-owned processes.']};
 const shown=(n:any)=>n?.rect&&n.hidden!==true&&n.visible!==false&&n.rect.w>0&&n.rect.h>0;

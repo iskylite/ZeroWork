@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {mkdir,mkdtemp,open,readFile,writeFile,realpath} from 'node:fs/promises';
@@ -14,7 +15,7 @@ const click=async(id:string)=>{assert((await h.clickTestId(id)).ok,id);await h.s
 const report:any={status:'running',extraSurfaces:process.env.ZW_THEME_SURFACES==='1',stateContract:'Theme saved first; font-size draft toggles 14/15 without changing selected theme. Captures use 1280x720 logical, native 2x PNG.',prefix,pid:child.pid,rpc,data,items:[],limits:['Synthetic public Harness input, not physical OS input.']};
 const capture=async(name:string)=>{await h.screenshot(join(out,name+'.png'));const ids=['settings.panel','settings.viewport','settings.save','settings.footer.state','settings.theme.strip','toolbar.settings','settings.appearance','settings.appearance.font','settings.field.font_size','sidebar.empty.new','workspace.empty.local','wizard.next.identity','wizard.steps','wizard.protocol','ai.empty.settings','ai.empty.ollama','settings.ai.provider.0.first_model','settings.ai.model.save'];const nodes=Object.fromEntries(await Promise.all(ids.map(async id=>[id,await h.query(id)])));await writeFile(join(out,name+'.json'),JSON.stringify({nodes,focused:await h.focused()},null,2));return nodes;};
 let fontValue='15';try{await h.waitForServerReady();await h.resizeWindow(1280,720);await click('toolbar.settings');await click('settings.nav.appearance');
-for(const theme of process.env.ZW_THEME_IDS?.split(',')??Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes)){
+for(const theme of process.env.ZW_THEME_IDS?.split(',')??Object.keys(nativeThemeData.themes)){
 const strip=await node('settings.theme.strip');let tile=await node('settings.theme.'+theme);
 for(let attempt=0;attempt<12&&(tile.rect.x<strip.rect.x||tile.rect.x+tile.rect.w>strip.rect.x+strip.rect.w);attempt++){await h.scrollAt(strip.rect.x+strip.rect.w/2,strip.rect.y+strip.rect.h/2,tile.rect.x<strip.rect.x?strip.rect.x-tile.rect.x+5:strip.rect.x+strip.rect.w-tile.rect.x-tile.rect.w-5,0);await h.sleep(100);tile=await node('settings.theme.'+theme);}
 assert(tile.rect.x>=strip.rect.x-1&&tile.rect.x+tile.rect.w<=strip.rect.x+strip.rect.w+1,theme+' tile visible');await click('settings.theme.'+theme);await click('settings.save');await h.waitFor(async()=>(await node('settings.footer.state')).text==='已保存'||null);

@@ -88,7 +88,6 @@ pub fn status(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .fill(), .height = .{ .px = status_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 10 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
 pub fn settingsBackdrop(_: *const ui.ThemeTokens) ui.BoxStyle {
-    const color = if (theme.currentName() == .dark) ui.Color.BLACK else theme.baseColors().overlay;
     return .{
         .position = .absolute,
         .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } },
@@ -100,7 +99,7 @@ pub fn settingsBackdrop(_: *const ui.ThemeTokens) ui.BoxStyle {
         .direction = .column,
         .align_items = .center,
         .justify = .center,
-        .background = color.withAlpha(102),
+        .background = theme.modal_barrier,
     };
 }
 
@@ -125,11 +124,8 @@ test "light settings surfaces stay light across transparency and retained theme 
             _ = theme.setMaterialParameters(transparency, 0);
             publication.publish(cx, theme.widgetTheme(name));
             try std.testing.expectEqual(id, backdrop.id);
-            try std.testing.expectEqual(@as(u8, 102), backdrop.getBackground().a);
-            if (name == .dark) {
-                try std.testing.expectEqual(ui.Color.BLACK.withAlpha(102), backdrop.getBackground());
-            } else {
-                try std.testing.expectEqual(theme.baseColors().overlay.withAlpha(102), backdrop.getBackground());
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, backdrop.getBackground());
+            if (name != .dark) {
                 const card = theme.settingsCard();
                 try std.testing.expect(card.r > 210 and card.g > 210 and card.b > 210);
                 try std.testing.expectEqual(theme.current().surface_2.a, card.a);

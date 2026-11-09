@@ -127,6 +127,8 @@ test "v0.4 extensions HTTP SSE handles multiline frames unsupported client reque
     defer client.deinit();
     try client.discover(null);
     try std.testing.expectEqual(@as(usize, 2), client.tools.items.len);
+    try std.testing.expectEqual(@as(f64, 2), client.progress);
+    try std.testing.expectEqualStrings("halfway", client.progress_message);
     const gateway = @import("ai/extension_gateway.zig");
     const first = try gateway.Session.capability(a, fixture.server(), client.tools.items[0]);
     defer a.free(first);
@@ -235,7 +237,7 @@ test "v0.4 extensions gateway catalog actual call idempotent receipt and revocat
     try std.testing.expectEqual(@as(usize, 1), gate.approved);
     const reference = try gateway.Session.capability(a, servers[0], session.clients[0].?.tools.items[0]);
     defer a.free(reference);
-    const wire = try std.json.Stringify.valueAlloc(a, .{ .capability_ref = reference, .request_key = "first", .text = "gateway test" }, .{});
+    const wire = try std.json.Stringify.valueAlloc(a, .{ .capability_ref = reference, .request_key = "first", .arguments = .{ .text = "gateway test" } }, .{});
     defer a.free(wire);
     var result = try gatewayInvoke(&session, journal, &gate, "host.mcp_call", wire);
     defer result.deinit(a);
@@ -395,7 +397,7 @@ test "v0.4 extensions schema change after catalog rejects capability before busi
     defer catalog.deinit(a);
     const reference = try gateway.Session.capability(a, servers[0], session.clients[0].?.tools.items[0]);
     defer a.free(reference);
-    const wire = try std.json.Stringify.valueAlloc(a, .{ .capability_ref = reference, .request_key = "schema-check", .text = "supplied text" }, .{});
+    const wire = try std.json.Stringify.valueAlloc(a, .{ .capability_ref = reference, .request_key = "schema-check", .arguments = .{ .text = "supplied text" } }, .{});
     defer a.free(wire);
     var result = try gatewayInvoke(&session, journal, &gate, "host.mcp_call", wire);
     defer result.deinit(a);
@@ -450,4 +452,383 @@ test "v0.4 readonly task hides effect tools and rejects forged dynamic dispatch 
     try loop.complete("", &.{.{ .id = "forged", .name = "host__test_uwrite", .arguments = "{}" }}, .{ .context = &dummy, .execute = Fake.execute }, .{ .mode = .auto }, 1, null);
     try std.testing.expect(std.mem.indexOf(u8, loop.records.items[0].result_body.?, "ObservationOnlyTask") != null);
     try std.testing.expect(!loop.records.items[0].dispatched);
+}
+
+test "v0.4 extensions collections preserve sibling links and import resources without file count or size caps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "collection/one/references");
+    try tmp.dir.createDirPath(std.testing.io, "collection/group/two");
+    try tmp.dir.createDirPath(std.testing.io, "collection/.git/ignored");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "collection/one/SKILL.md", .data = "---\nname: one\ndescription: First\n---\n[other](../two/SKILL.md) [ref](references/large.txt)\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "collection/group/two/SKILL.md", .data = "---\nname: two\ndescription: Second\n---\nBody\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "collection/.git/ignored/SKILL.md", .data = "invalid" });
+    const large = try a.alloc(u8, 1024 * 1024);
+    defer a.free(large);
+    @memset(large, 'x');
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "collection/one/references/large.txt", .data = large });
+    for (0..2050) |i| {
+        const name = try std.fmt.allocPrint(a, "collection/one/references/{d}.txt", .{i});
+        defer a.free(name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "reference" });
+    }
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, "collection", a);
+    defer a.free(root);
+    const paths = try skills.sources(a, std.testing.io, root);
+    defer {
+        for (paths) |path| a.free(path);
+        a.free(paths);
+    }
+    try std.testing.expectEqual(@as(usize, 2), paths.len);
+    const one = if (std.mem.endsWith(u8, paths[0], "/one")) paths[0] else paths[1];
+    var imported = try skills.importLocal(a, std.testing.io, tmp.dir, one, null);
+    defer imported.deinit();
+    const read = try skills.read(a, std.testing.io, tmp.dir, imported.skill, "references/large.txt");
+    defer a.free(read);
+    try std.testing.expectEqualSlices(u8, large, read);
+    try std.testing.expectError(error.InvalidSkillPath, skills.read(a, std.testing.io, tmp.dir, imported.skill, "../two/SKILL.md"));
+    // Opaque executable resources are copied without text decoding or the old
+    // 8 MiB cap. This also crosses the previous 64 MiB package limit.
+    try tmp.dir.createDirPath(std.testing.io, "collection/one/scripts");
+    var binary = try tmp.dir.createFile(std.testing.io, "collection/one/scripts/tool", .{});
+    try binary.setLength(std.testing.io, 65 * 1024 * 1024);
+    binary.close(std.testing.io);
+    var uncapped = try skills.importLocal(a, std.testing.io, tmp.dir, one, null);
+    defer uncapped.deinit();
+    try std.testing.expect(uncapped.file_count > 2048);
+    try std.testing.expect(uncapped.total_bytes > 64 * 1024 * 1024);
+    try std.testing.expectError(error.SkillResourceNotText, skills.read(a, std.testing.io, tmp.dir, uncapped.skill, "scripts/tool"));
+}
+
+test "v0.4 extensions multi parameter MCP calls validate forward schema and preserve approval idempotency" {
+    const gateway = @import("ai/extension_gateway.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try HttpFixture.start(&tmp, "multi");
+    defer fixture.deinit();
+    var servers = [_]ext.Server{fixture.server()};
+    var session = try gateway.Session.init(a, .{ .servers = &servers }, "/test/extensions-multi");
+    defer session.deinit();
+    const journal = try @import("ai/lifecycle_runtime.zig").ProcessJournal.acquire(.{ .data_root = "/test/extensions-multi", .dir = tmp.dir, .io = std.testing.io });
+    defer journal.release();
+    var gate: TestGate = .{};
+    var catalog = try gatewayInvoke(&session, journal, &gate, "host.mcp_catalog", "{\"action\":\"tools\",\"server_id\":\"http-fixture\"}");
+    defer catalog.deinit(a);
+    try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.succeeded, catalog.status);
+    try std.testing.expect(std.mem.indexOf(u8, catalog.blocks[0].structured, "input_schema") != null);
+    const reference = try gateway.Session.capability(a, servers[0], session.clients[0].?.tools.items[0]);
+    defer a.free(reference);
+    const bad = try std.json.Stringify.valueAlloc(a, .{ .capability_ref = reference, .request_key = "invalid", .arguments = .{ .query = "search", .limit = "wrong type" } }, .{});
+    defer a.free(bad);
+    var rejected = try gatewayInvoke(&session, journal, &gate, "host.mcp_call", bad);
+    defer rejected.deinit(a);
+    try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.rejected, rejected.status);
+    try std.testing.expectEqual(@as(usize, 1), gate.approved);
+    const wire = try std.json.Stringify.valueAlloc(a, .{ .capability_ref = reference, .request_key = "multi-once", .arguments = .{ .query = "search", .limit = 3, .options = .{ .tags = [_][]const u8{ "a", "b" } } } }, .{});
+    defer a.free(wire);
+    var reply = try gatewayInvoke(&session, journal, &gate, "host.mcp_call", wire);
+    defer reply.deinit(a);
+    try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.succeeded, reply.status);
+    try std.testing.expectEqual(@as(usize, 2), gate.approved);
+    // The same arguments in another JSON key order must not dispatch again.
+    const reordered = try std.fmt.allocPrint(a, "{{\"capability_ref\":\"{s}\",\"request_key\":\"multi-once\",\"arguments\":{{\"options\":{{\"tags\":[\"a\",\"b\"]}},\"limit\":3,\"query\":\"search\"}}}}", .{reference});
+    defer a.free(reordered);
+    var replay = try gatewayInvoke(&session, journal, &gate, "host.mcp_call", reordered);
+    defer replay.deinit(a);
+    try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.succeeded, replay.status);
+    try std.testing.expectEqual(@as(usize, 2), gate.approved);
+    const trace = try tmp.dir.readFileAlloc(std.testing.io, "trace", a, .limited(65536));
+    defer a.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "\"method\": \"tools/call\"") / 2);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"limit\": 3") != null);
+}
+
+test "v0.4 extensions skill gateway pages escaped unicode text without dropping bytes" {
+    const gateway = @import("ai/extension_gateway.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "source");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source/SKILL.md", .data = "---\nname: paged\ndescription: Paging test\n---\nBody\n" });
+    const text = try a.alloc(u8, 90 * 1024);
+    defer a.free(text);
+    for (0..text.len / 3) |i| @memcpy(text[i * 3 ..][0..3], if (i % 2 == 0) "中" else "\n\t\\");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source/large.txt", .data = text });
+    const source = try tmp.dir.realPathFileAlloc(std.testing.io, "source", a);
+    defer a.free(source);
+    var imported = try skills.importLocal(a, std.testing.io, tmp.dir, source, null);
+    defer imported.deinit();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    var session = try gateway.Session.init(a, .{ .skills = &.{imported.skill} }, root);
+    defer session.deinit();
+    const journal = try @import("ai/lifecycle_runtime.zig").ProcessJournal.acquire(.{ .data_root = root, .dir = tmp.dir, .io = std.testing.io });
+    defer journal.release();
+    var gate: TestGate = .{};
+    var offset: usize = 0;
+    while (true) {
+        const wire = try std.json.Stringify.valueAlloc(a, .{ .action = "read", .skill_id = imported.skill.id, .revision = imported.skill.revision, .resource = "large.txt", .offset = offset }, .{});
+        defer a.free(wire);
+        var reply = try gatewayInvoke(&session, journal, &gate, "host.skills", wire);
+        defer reply.deinit(a);
+        try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.succeeded, reply.status);
+        const body = try std.json.parseFromSlice(std.json.Value, a, reply.blocks[0].structured, .{});
+        defer body.deinit();
+        const chunk = body.value.object.get("content").?.string;
+        try std.testing.expect(std.unicode.utf8ValidateSlice(chunk));
+        try std.testing.expectEqualSlices(u8, text[offset..][0..chunk.len], chunk);
+        offset += chunk.len;
+        const next = body.value.object.get("next_offset").?;
+        if (next == .null) break;
+        try std.testing.expectEqual(offset, @as(usize, @intCast(next.integer)));
+    }
+    try std.testing.expectEqual(text.len, offset);
+}
+
+test "v0.4 extensions sizes use readable binary units" {
+    const sizes = @import("ai/extension_sizes.zig");
+    const values = [_]u64{ 0, 512, 1024, 1536, 8 * 1024 * 1024, 936824 };
+    const expected = [_][]const u8{ "0 B", "512 B", "1 KiB", "1.50 KiB", "8 MiB", "914.87 KiB" };
+    for (values, expected) |bytes, label| {
+        const formatted = try sizes.format(a, bytes);
+        defer a.free(formatted);
+        try std.testing.expectEqualStrings(label, formatted);
+    }
+}
+
+test "v0.4 extensions standard MCP schemas refs unions nullable patterns and structured output work over HTTP" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "standard", "bad-output" }) |mode| {
+        var fixture = try HttpFixture.start(&tmp, mode);
+        defer fixture.deinit();
+        var client = try mcp.Client.init(a, fixture.server());
+        defer client.deinit();
+        try client.discover(null);
+        const tool = client.tools.items[0];
+        try std.testing.expect(tool.available and tool.output_schema != null);
+        const good = try std.json.parseFromSlice(std.json.Value, a, "{\"target\":{\"host\":\"example\",\"port\":443},\"filter\":null,\"limit\":\"all\",\"mode\":\"read\"}", .{});
+        defer good.deinit();
+        for ([_][]const u8{
+            "{\"target\":{\"host\":\"INVALID\"},\"mode\":\"read\"}",
+            "{\"target\":{\"host\":\"example\",\"port\":0},\"mode\":\"read\"}",
+            "{\"target\":{\"host\":\"example\"},\"mode\":\"invalid\"}",
+            "{\"target\":{\"host\":\"example\"},\"mode\":\"read\",\"extra\":1}",
+        }) |wire| {
+            const bad = try std.json.parseFromSlice(std.json.Value, a, wire, .{});
+            defer bad.deinit();
+            try std.testing.expectError(error.InvalidToolArguments, client.validateCallArguments(tool, bad.value));
+        }
+        if (std.mem.eql(u8, mode, "bad-output")) {
+            try std.testing.expectError(error.InvalidMcpOutput, client.callArguments(tool, good.value, null));
+        } else {
+            const body = try client.callArguments(tool, good.value, null);
+            defer a.free(body);
+            try std.testing.expect(std.mem.indexOf(u8, body, "structuredContent") != null);
+            try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"ok\"") != null);
+        }
+    }
+}
+
+test "v0.4 extensions MCP negotiates older versions and accepts servers without tools" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "legacy-version", "no-tools" }) |mode| {
+        var fixture = try HttpFixture.start(&tmp, mode);
+        defer fixture.deinit();
+        var client = try mcp.Client.init(a, fixture.server());
+        defer client.deinit();
+        try client.discover(null);
+        if (std.mem.eql(u8, mode, "no-tools")) {
+            try std.testing.expectEqual(@as(usize, 0), client.tools.items.len);
+        } else {
+            try std.testing.expectEqualStrings("2025-03-26", client.negotiated_version);
+            const body = try client.call(client.tools.items[0], "negotiated", null);
+            defer a.free(body);
+            try std.testing.expect(std.mem.indexOf(u8, body, "NEGOTIATED") != null);
+        }
+    }
+}
+
+test "v0.4 extensions MCP preserves all standard content types and pages full results without redispatch" {
+    const gateway = @import("ai/extension_gateway.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    const journal = try @import("ai/lifecycle_runtime.zig").ProcessJournal.acquire(.{ .data_root = root, .dir = tmp.dir, .io = std.testing.io });
+    defer journal.release();
+    for ([_][]const u8{ "mixed", "large" }) |mode| {
+        tmp.dir.deleteFile(std.testing.io, "trace") catch {};
+        var fixture = try HttpFixture.start(&tmp, mode);
+        defer fixture.deinit();
+        var servers = [_]ext.Server{fixture.server()};
+        var session = try gateway.Session.init(a, .{ .servers = &servers }, root);
+        defer session.deinit();
+        var gate: TestGate = .{};
+        var catalog = try gatewayInvoke(&session, journal, &gate, "host.mcp_catalog", "{\"action\":\"tools\",\"server_id\":\"http-fixture\"}");
+        defer catalog.deinit(a);
+        const reference = try gateway.Session.capability(a, servers[0], session.clients[0].?.tools.items[0]);
+        defer a.free(reference);
+        const wire = try std.json.Stringify.valueAlloc(a, .{ .capability_ref = reference, .request_key = mode, .arguments = .{ .text = mode } }, .{});
+        defer a.free(wire);
+        var reply = try gatewayInvoke(&session, journal, &gate, "host.mcp_call", wire);
+        defer reply.deinit(a);
+        try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.succeeded, reply.status);
+        try reply.validate(testContext(), 1);
+        try std.testing.expectEqual(@as(usize, 1), session.saved.items.len);
+        const saved = session.saved.items[0];
+        if (std.mem.eql(u8, mode, "mixed")) {
+            try std.testing.expectEqual(@as(usize, 1), reply.images.len);
+            // A decoded MCP image must become a real tool image in the next
+            // provider request, rather than base64 text in the transcript.
+            const plugin = @import("ai/plugin_tools.zig");
+            const loop_mod = @import("ai/tool_loop.zig");
+            const provider = @import("ai/provider.zig");
+            var table = try plugin.RequestTable.initWithHost(a, .{ .owner = testContext().binding, .members = .{} }, &.{}, &.{}, testContext(), &.{.{ .authority = .conversation_context, .definition = .{ .id = "host.test_image", .schema = "{\"type\":\"object\",\"additionalProperties\":false}" } }});
+            defer table.deinit();
+            const definitions = try plugin.providerDefinitions(&table, table.arena.allocator());
+            const Backend = struct {
+                image: @import("ai/image_attachments.zig").ContentRef,
+                fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+                    return error.UnexpectedLegacyDispatch;
+                }
+                fn invoke(raw: *anyopaque, invocation: host.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !host.Result {
+                    const self: *@This() = @ptrCast(@alignCast(raw));
+                    const refs = try allocator.dupe(@import("ai/image_attachments.zig").ContentRef, &.{self.image.retain()});
+                    return .{ .status = .succeeded, .images = refs, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+                }
+            };
+            var backend: Backend = .{ .image = reply.images[0] };
+            var loop = loop_mod.Loop.init(a, .{ .owner = testContext().binding, .members = .{} }, 1, .{ .context_window = 100000 });
+            defer loop.deinit();
+            try loop.start(.{ .model = "gpt-4o", .system = "", .messages = &.{}, .tools = definitions, .tool_table = &table, .vision = true, .tool_images = true });
+            try loop.complete("", &.{.{ .id = "mcp-image", .name = definitions[0].name(), .arguments = "{}" }}, .{ .context = &backend, .execute = Backend.legacy, .execute_host = Backend.invoke }, .{}, 1, null);
+            const next_request = try loop.nextRequest();
+            try std.testing.expectEqual(@as(usize, 1), next_request.messages[next_request.messages.len - 1].images.len);
+
+            try std.testing.expectEqual(@as(u32, 1), reply.images[0].content().?.width);
+            try std.testing.expectEqual(@as(usize, 4), saved.files.len);
+            try std.testing.expect(std.mem.indexOf(u8, reply.blocks[0].structured, "audio/wav") != null);
+            try std.testing.expect(std.mem.indexOf(u8, reply.blocks[0].structured, "resource_link") != null);
+        }
+        var offset: usize = 0;
+        var total: usize = 0;
+        while (true) {
+            const read_wire = try std.json.Stringify.valueAlloc(a, .{ .result_ref = saved.reference, .resource = "result.json", .offset = offset }, .{});
+            defer a.free(read_wire);
+            var page = try gatewayInvoke(&session, journal, &gate, "host.mcp_result", read_wire);
+            defer page.deinit(a);
+            try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.succeeded, page.status);
+            const parsed = try std.json.parseFromSlice(std.json.Value, a, page.blocks[0].structured, .{});
+            defer parsed.deinit();
+            const text = parsed.value.object.get("content").?.string;
+            offset += text.len;
+            total = @intCast(parsed.value.object.get("total_bytes").?.integer);
+            if (parsed.value.object.get("next_offset").? == .null) break;
+            try std.testing.expectEqual(offset, @as(usize, @intCast(parsed.value.object.get("next_offset").?.integer)));
+        }
+        try std.testing.expectEqual(total, offset);
+        try std.testing.expectEqual(@as(usize, 2), gate.approved);
+        const trace = try tmp.dir.readFileAlloc(std.testing.io, "trace", a, .limited(1024 * 1024));
+        defer a.free(trace);
+        var lines = std.mem.splitScalar(u8, trace, '\n');
+        var calls: usize = 0;
+        var previous_id: ?i64 = null;
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            const record = try std.json.parseFromSlice(std.json.Value, a, line, .{});
+            defer record.deinit();
+            const method = record.value.object.get("method").?;
+            if (method == .string and std.mem.eql(u8, method.string, "tools/call")) {
+                const id = record.value.object.get("id").?.integer;
+                if (previous_id) |old_id| try std.testing.expect(old_id != id);
+                previous_id = id;
+                calls += 1;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), calls);
+        gate.revoked = true;
+        const read_wire = try std.json.Stringify.valueAlloc(a, .{ .result_ref = saved.reference }, .{});
+        defer a.free(read_wire);
+        var denied = try gatewayInvoke(&session, journal, &gate, "host.mcp_result", read_wire);
+        defer denied.deinit(a);
+        try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.rejected, denied.status);
+    }
+}
+
+test "v0.4 extensions modern discovery per-request metadata opaque state and non-object output" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try HttpFixture.start(&tmp, "modern");
+    defer fixture.deinit();
+    const Handler = struct {
+        roots: usize = 0,
+        resumed: usize = 0,
+        fn request(raw: *anyopaque, allocator: std.mem.Allocator, method: []const u8, _: std.json.Value, _: ?*@import("ai/provider.zig").CancelToken) ![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (std.mem.eql(u8, method, "roots/list")) {
+                self.roots += 1;
+                return allocator.dupe(u8, "{\"roots\":[{\"uri\":\"file:///tmp/selected-root\"}]}");
+            }
+            if (!std.mem.eql(u8, method, "host/mcp_continue")) return error.UnexpectedMcpRequest;
+            self.resumed += 1;
+            return allocator.dupe(u8, "{}");
+        }
+    };
+    var handler: Handler = .{};
+    var client = try mcp.Client.init(a, fixture.server());
+    defer client.deinit();
+    client.handler = .{ .context = &handler, .request = Handler.request };
+    try client.discover(null);
+    try std.testing.expectEqualStrings("2026-07-28", client.negotiated_version);
+    try std.testing.expect(client.modern and client.session_id[0] == 0);
+    const reply = try client.call(client.tools.items[0], "modern", null);
+    defer a.free(reply);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "MODERN COMPLETE") != null);
+    try std.testing.expectEqual(@as(usize, 1), handler.roots);
+    try std.testing.expectEqual(@as(usize, 1), handler.resumed);
+    const trace = try tmp.dir.readFileAlloc(std.testing.io, "trace", a, .limited(32768));
+    defer a.free(trace);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "initialize") == null);
+    var lines = std.mem.splitScalar(u8, trace, '\n');
+    var calls: usize = 0;
+    var previous_id: ?i64 = null;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const record = try std.json.parseFromSlice(std.json.Value, a, line, .{});
+        defer record.deinit();
+        const method = record.value.object.get("method").?;
+        if (method == .string and std.mem.eql(u8, method.string, "tools/call")) {
+            const id = record.value.object.get("id").?.integer;
+            if (previous_id) |old_id| try std.testing.expect(old_id != id);
+            previous_id = id;
+            calls += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), calls);
+}
+
+test "v0.4 extensions modern unknown input invalid results and explicit unsupported versions fail closed" {
+    for ([_][]const u8{ "modern-unknown-input", "modern-bad-result", "modern-unsupported" }) |mode| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var fixture = try HttpFixture.start(&tmp, mode);
+        defer fixture.deinit();
+        const Handler = struct {
+            fn request(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: std.json.Value, _: ?*@import("ai/provider.zig").CancelToken) ![]u8 {
+                return error.HandlerMustNotRun;
+            }
+        };
+        var flag: u8 = 0;
+        var client = try mcp.Client.init(a, fixture.server());
+        defer client.deinit();
+        client.handler = .{ .context = &flag, .request = Handler.request };
+        if (std.mem.eql(u8, mode, "modern-unknown-input")) {
+            try client.discover(null);
+            try std.testing.expectError(error.McpMethodNotAllowed, client.call(client.tools.items[0], "modern", null));
+        } else if (std.mem.eql(u8, mode, "modern-bad-result")) try std.testing.expectError(error.InvalidMcpResponse, client.discover(null)) else try std.testing.expectError(error.UnsupportedMcpVersion, client.discover(null));
+        const trace = try tmp.dir.readFileAlloc(std.testing.io, "trace", a, .limited(32768));
+        defer a.free(trace);
+        try std.testing.expect(std.mem.indexOf(u8, trace, "initialize") == null);
+    }
 }

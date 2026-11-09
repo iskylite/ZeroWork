@@ -11,7 +11,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, _: *ui.Node, map: *keys.
     self.* = .{ .cx = cx, .map = map, .action = action, .draft = map.*, .callbacks = callbacks, .root = undefined, .status = undefined, .capture = undefined, .open = try scope.createSignal(bool, true), .invalid = try scope.createSignal(bool, true) };
     try scope.onCleanup(Recorder, self, Recorder.cleanup);
     const c = theme.current();
-    const modal = try ui.widgets.Modal(.{ .open = self.open, .width = 390, .max_height = @max(@as(f32, 180), cx.viewport.height - 48), .background = c.overlay, .overlay_color = ui.Color.rgba(6, 6, 9, 153), .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(Recorder, self, Recorder.openChanged) }).mount(scope, cx);
+    const modal = try ui.widgets.Modal(.{ .open = self.open, .width = 390, .max_height = @max(@as(f32, 180), cx.viewport.height - 48), .background = c.overlay, .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(Recorder, self, Recorder.openChanged) }).mount(scope, cx);
     self.root = modal.overlay;
     self.portaled = modal.portaled;
     self.root.meta.ownership.meta.test_id = "settings.keybinding.overlay";

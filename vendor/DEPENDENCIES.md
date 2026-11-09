@@ -151,3 +151,12 @@ fail with a rebuild instruction. `zig build verify-ssh-deps` checks explicitly.
 - Official archive SHA-256: `a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6`
 - License choice: Apache-2.0
 - Status: verified official `mbedtls-3.6.7.tar.bz2` archive vendored under `vendor/mbedtls/`.
+
+## MCP JSON Schema
+
+MCP schema validation embeds Ajv 8.20.0 and ajv-formats 3.0.1 (MIT) and their pinned JavaScript runtime
+dependencies in `src/ai/vendor/mcp_schema.js`. The app executes it using the
+system JavaScriptCore framework, without Node/npm or remote code downloads.
+Sources, exact dependency versions, regeneration instructions and bundled
+license notices are in `vendor/mcp-json-schema/`. Packaging copies those
+notices into `Contents/Resources/MCP-JSON-Schema-Licenses`.

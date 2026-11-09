@@ -1,4 +1,4 @@
-//! Measured editable baseline: docs/UI_V3, 1440×900 and 860×480.
+//! Workspace geometry for 1440×900 and 860×480.
 //! Shared dimensions for the already shipped native modules only.
 pub const title_height: f32 = 36;
 pub const tab_height: f32 = 30;

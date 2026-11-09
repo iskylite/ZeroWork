@@ -2,7 +2,7 @@
 
 RPMs are read with libarchive tar; the conventional Amazon/Alibaba Linux marks
 are embedded images from the cited SUSE/Uyuni slide (requires Poppler pdfimages).
-See src/ui/assets/host-os/OS_LOGO_AUDIT.md for evidence and extraction details.
+See src/ui/assets/host-os/SOURCES.md for evidence and extraction details.
 """
 from collections import deque
 import io

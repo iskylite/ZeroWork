@@ -1,4 +1,4 @@
-//! Native connection attempt, aligned with UI_V3/connection modal and stage rows.
+//! Native connection attempt, modal and stage row styles.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub const width: f32 = 640;

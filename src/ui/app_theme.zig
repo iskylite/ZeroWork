@@ -4,6 +4,8 @@ const std = @import("std");
 const ui = @import("ui");
 
 pub const Name = enum { dark, light, sauber };
+/// Shared modal barrier paint. Keep input blocking separate from surface materials.
+pub const modal_barrier: ui.Color = ui.Color.TRANSPARENT;
 pub const Colors = struct {
     action_accent: ui.Color = ui.Color.TRANSPARENT,
     action_accent_2: ui.Color = ui.Color.TRANSPARENT,
@@ -64,7 +66,6 @@ fn stateColors(colors_: Colors) StateColors {
 
 /// Maximum background transparency by role, not opacity and not tree opacity.
 /// The four shell cards follow the slider exactly; internal/floating roles retain their curves.
-/// Current visual contract and native captures: docs/UI_V3/LAYER_MATERIALS.md.
 /// Shell opacity is 1-T with no readability floor or image-dependent adjustment.
 pub const material_ratio = struct {
     pub const surface_1: f32 = 1.0;
@@ -663,6 +664,7 @@ fn widgetTokensFrom(c: Colors, dark: bool) ui.ThemeTokens {
     var value = if (dark) ui.theme.dark else ui.theme.light;
     const t = &value.tokens.color;
     const s = stateColors(c);
+    t.overlay = modal_barrier;
     t.bg_base = c.app;
     t.bg_primary = c.surface_1;
     t.bg_secondary = c.surface_2;
@@ -790,25 +792,15 @@ test "image readability floor preserves no-image material curves and palette ink
     try std.testing.expectEqual(imported_base, baseColors());
 }
 
-test "theme state contract covers every builtin and matches the editable design palette" {
+test "theme state contract covers every builtin" {
     const previous = currentName();
     defer select(previous);
-    const reference = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "docs/UI_V3/theme-states.json", std.testing.allocator, .limited(256 * 1024));
-    defer std.testing.allocator.free(reference);
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, reference, .{});
-    defer parsed.deinit();
-    const themes = parsed.value.object.get("themes").?.object;
     const contract = @import("theme_states.zig");
     for (@import("../config/theme_presets.zig").ids) |id| {
         errdefer std.debug.print("theme state contract: {s}\n", .{id});
         selectTokens(@import("../config/theme_registry.zig").builtinTokens(id));
         const s = states();
         const c = baseColors();
-        const expected = themes.get(id).?.object;
-        inline for (@typeInfo(StateColors).@"struct".field_names) |role| {
-            const value = expected.get(role).?.string;
-            try std.testing.expectEqual(hex(try std.fmt.parseInt(u24, value[1..], 16)), @field(s, role).withAlpha(255));
-        }
         inline for (contract.material_roles) |mapping|
             try std.testing.expectEqual(@field(current(), mapping[1]).a, @field(s, mapping[0]).a);
         const pairs = [_][2]ui.Color{ .{ s.hover, s.action }, .{ s.pressed, s.hover }, .{ s.selected_hover, s.selected }, .{ s.disabled, s.control } };

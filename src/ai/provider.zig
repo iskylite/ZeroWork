@@ -45,6 +45,39 @@ pub const ToolDefinition = struct {
     pub const DynamicDefinition = struct { id: []const u8, name: []const u8, schema: []const u8, description: []const u8 };
 };
 
+/// Project host-authored guidance only; never rewrite user text or arguments.
+/// Names come from the final catalog, rather than asking the model to encode IDs.
+pub fn projectToolNames(allocator: std.mem.Allocator, tools: []const ToolDefinition, text: []const u8) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    var index: usize = 0;
+    while (index < text.len) {
+        var selected: ?ToolDefinition.DynamicDefinition = null;
+        if (index == 0 or !toolIdByte(text[index - 1])) for (tools) |tool| {
+            const dynamic = tool.dynamic orelse continue;
+            if (dynamic.id.len == 0 or !std.mem.startsWith(u8, text[index..], dynamic.id)) continue;
+            const end = index + dynamic.id.len;
+            if (end < text.len and toolIdByte(text[end])) {
+                // A sentence's final period is punctuation, not an ID suffix.
+                if (text[end] != '.' or (end + 1 < text.len and toolIdByte(text[end + 1]))) continue;
+            }
+            if (selected == null or dynamic.id.len > selected.?.id.len) selected = dynamic;
+        };
+        if (selected) |dynamic| {
+            try output.appendSlice(allocator, dynamic.name);
+            index += dynamic.id.len;
+        } else {
+            try output.append(allocator, text[index]);
+            index += 1;
+        }
+    }
+    return output.toOwnedSlice(allocator);
+}
+
+fn toolIdByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '-' or byte == '.';
+}
+
 /// Shared by initial submission and subsequent tool rounds. The framing
 /// allowance is accounted for separately, as with the existing byte/4 estimate.
 pub fn catalogTextBytes(definitions: []const ToolDefinition) !usize {
@@ -181,4 +214,14 @@ test "provider schema preserves effort and model window" {
     const messages = [_]Message{ .{ .role = .assistant, .content = "answer" }, .{ .role = .tool, .content = "result" } };
     try std.testing.expectEqual(Role.assistant, messages[0].role);
     try std.testing.expectEqual(Role.tool, messages[1].role);
+}
+
+test "tool name guidance uses catalog aliases without replacing longer IDs" {
+    const tools = [_]ToolDefinition{
+        .{ .session_ids = &.{}, .dynamic = .{ .id = "host.run_in_terminal", .name = "catalog_execute", .schema = "{}", .description = "" } },
+        .{ .session_ids = &.{}, .dynamic = .{ .id = "host.run_in_terminal.more", .name = "catalog_more", .schema = "{}", .description = "" } },
+    };
+    const text = try projectToolNames(std.testing.allocator, &tools, "Use host.run_in_terminal. Then host.run_in_terminal/host.run_in_terminal.more; keep host.run_in_terminal_extra, otherhost.run_in_terminal and host.absent unchanged.");
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("Use catalog_execute. Then catalog_execute/catalog_more; keep host.run_in_terminal_extra, otherhost.run_in_terminal and host.absent unchanged.", text);
 }

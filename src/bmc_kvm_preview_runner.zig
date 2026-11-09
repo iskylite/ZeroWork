@@ -536,6 +536,14 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
 
 fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
     const self = active_fixture orelse return null;
+    if (std.mem.eql(u8, path, "/app/bmc-fixture/content-width")) {
+        const parsed = std.json.parseFromSlice(struct { width: f32 }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid width fixture\"}";
+        defer parsed.deinit();
+        if (!std.math.isFinite(parsed.value.width) or parsed.value.width < 228 or parsed.value.width > self.cx.viewport.width - 300) return "{\"error\":\"width outside fixture bounds\"}";
+        self.slot.setStyleInline(self.cx.allocator, .{ .width = .{ .px = parsed.value.width }, .flex_shrink = 0 });
+        self.cx.requestRedraw();
+        return "{\"ok\":true}";
+    }
     if (std.mem.eql(u8, path, "/app/bmc-fixture/appearance")) {
         const parsed = std.json.parseFromSlice(struct { theme: []const u8, transparency: f32, blur: f32 }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid appearance fixture\"}";
         defer parsed.deinit();
@@ -556,7 +564,7 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
         };
         const node = found orelse return "{\"error\":\"node not found\"}";
         const compensated = findById(node, "appearance.material.compensation") != null;
-        return jsonReply(self.cx.allocator, .{ .id = node.id, .background = node.getBackground(), .compensated = compensated, .blur = if (node.style.glass_params()) |glass| glass.backdrop_blur else 0, .current_target = if (node.style.glass_params()) |glass| glass.capture_current_target else false, .bounds = node.globalRect(), .component = node.meta.ownership.meta.component_name, .ink = firstInk(node), .foreground = theme.current().fg_1, .layer_alpha = .{ theme.layerAlpha(1), theme.layerAlpha(2), theme.layerAlpha(3) } }, out);
+        return jsonReply(self.cx.allocator, .{ .id = node.id, .background = node.getBackground(), .compensated = compensated, .blur = if (node.style.glass_params()) |glass| glass.backdrop_blur else 0, .current_target = if (node.style.glass_params()) |glass| glass.capture_current_target else false, .bounds = node.globalRect(), .component = node.meta.ownership.meta.component_name, .ink = firstInk(node), .foreground = theme.current().fg_1, .foreground_secondary = theme.current().fg_2, .layer_alpha = .{ theme.layerAlpha(1), theme.layerAlpha(2), theme.layerAlpha(3) } }, out);
     }
     if (std.mem.eql(u8, path, "/app/bmc-fixture/quit")) {
         if (app_instance) |app| app.quit();

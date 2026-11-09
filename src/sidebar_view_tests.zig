@@ -52,7 +52,9 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     try std.testing.expectEqual(@as(f32, 36), row.node.globalRect().h);
     try std.testing.expectEqual(@as(f32, 72), find(row.node, "sidebar.host.tail").?.globalRect().w);
     try std.testing.expectEqualStrings(":65535后台", row.forward_label.getText().?.content);
-    try std.testing.expect(row.forward.style.display == .flex and row.route.style.display == .none);
+    try std.testing.expect(row.forward.style.display == .flex and row.route.style.display == .flex);
+    const route_with_forward = row.route.globalRect();
+    try std.testing.expect(row.forward.globalRect().x + row.forward.globalRect().w <= route_with_forward.x);
     try std.testing.expect(ui.Color.eql(T.current().fg_2, row.dot.getIcon().?.tint));
     try std.testing.expect(ui.Color.eql(T.current().ok_ink, row.forward_label.getText().?.color));
     row.setMenuOpen(true);
@@ -74,6 +76,7 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     row.setForwardBadge(null);
     h.frames();
     try std.testing.expect(row.forward.style.display == .none and row.route.style.display == .flex);
+    try std.testing.expectApproxEqAbs(route_with_forward.x, row.route.globalRect().x, 0.1);
     try std.testing.expectEqual(V.styles.tail_width, find(row.node, "sidebar.host.tail").?.globalRect().w);
 }
 const Capture = struct {
@@ -182,6 +185,11 @@ fn firstIcon(node: *ui.Node) ?*ui.Node {
     for (node.children.items) |child| if (firstIcon(child)) |result| return result;
     return null;
 }
+fn firstText(node: *ui.Node) ?*ui.Node {
+    if (node.getText() != null) return node;
+    for (node.children.items) |child| if (firstText(child)) |result| return result;
+    return null;
+}
 test "sidebar native chrome gives unused action space back to host names" {
     var c: Capture = .{};
     const h = try H.init();
@@ -193,6 +201,7 @@ test "sidebar native chrome gives unused action space back to host names" {
     const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "prod-eu-central-db-master-01", .detail = "root@10.0.0.1:22", .route = "本机 → 跳板 → 目标", .hops = 2, .online = true }, .{ .context = &c, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
     try list.appendChild(h.cx.allocator, row.node);
     h.frames();
+    try std.testing.expect(row.route.style.display == .flex);
     try std.testing.expectApproxEqAbs(@as(f32, 238), v.root.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 24), v.search_box.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 66), v.search_box.globalRect().y, 0.1);
@@ -227,9 +236,12 @@ test "sidebar host route status never activates the row connection" {
     const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "ScaleX40-AI01", .detail = "root@127.0.0.1:1", .route = "本机 → 主机", .hops = 0, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu });
     try column.appendChild(h.cx.allocator, row.node);
     h.frames();
+    try std.testing.expect(row.route.style.display == .flex);
+    try std.testing.expect(row.name.globalRect().w > 120);
     const r = row.node.globalRect();
     h.cx.handleMouseMove(r.x + 20, r.y + r.h / 2);
     h.frames();
+    try std.testing.expect(row.route.style.display == .flex);
     const route = row.route.globalRect();
     const count = find(row.node, "sidebar.host.hops").?.globalRect();
     const trailing = row.trailing.globalRect();
@@ -247,6 +259,16 @@ test "sidebar host route status never activates the row connection" {
     h.click(row.name);
     try std.testing.expectEqual(@as(usize, 1), capture.selected);
     try std.testing.expectEqual(@as(usize, 1), capture.connected);
+    h.cx.setFocus(null);
+    h.cx.handleMouseMove(800, 700);
+    h.frames();
+    try std.testing.expect(row.route.style.display == .flex);
+    row.setForwardBadge(.{ .port = 8080, .phase = .listening });
+    h.frames();
+    try std.testing.expect(row.forward.style.display == .flex and row.route.style.display == .flex);
+    row.setForwardBadge(null);
+    h.frames();
+    try std.testing.expect(row.forward.style.display == .none and row.route.style.display == .flex);
 }
 
 test "sidebar host hover exposes only connect without activating the row" {
@@ -363,7 +385,7 @@ test "sidebar native group count renders digits without ellipsis at prototype ba
         h.frames();
         const badge = find(row.header, "sidebar.group.badge").?;
         const label = find(badge, "sidebar.group.count").?;
-        try std.testing.expect(badge.globalRect().w >= 6);
+        try std.testing.expectApproxEqAbs(@as(f32, 32), badge.globalRect().w, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 14), badge.globalRect().h, 0.1);
         try std.testing.expect(label.globalRect().w >= 6);
         try std.testing.expectApproxEqAbs(@as(f32, 14), label.globalRect().h, 0.1);
@@ -395,6 +417,15 @@ test "sidebar native late callbacks reenable new group without remount" {
     h.frames();
     v.new_menu.show.invoke();
     h.frames();
+    for ([_][]const u8{ "sidebar.new.host", "sidebar.new.group" }) |id| {
+        const button = find(v.new_menu.content, id).?;
+        const row = button.globalRect();
+        const icon = firstIcon(button).?.globalRect();
+        const label = firstText(button).?.globalRect();
+        try std.testing.expectApproxEqAbs(row.x + 6, icon.x, 0.1);
+        try std.testing.expect(label.x >= icon.x + icon.w);
+        try std.testing.expect(label.x + label.w <= row.x + row.w);
+    }
     h.cx.handleKeyDown(.down, .{});
     h.frames();
     try std.testing.expect(h.cx.isFocused(find(v.new_menu.content, "sidebar.new.group").?));
@@ -433,7 +464,12 @@ test "sidebar native retained chrome and rows follow three themes and global mat
         h.frames();
         try std.testing.expectEqual(T.current().surface_1, v.root.getBackground());
         try std.testing.expectEqual(ui.Color.TRANSPARENT, v.search_box.getBackground());
-        try std.testing.expectEqual(T.popupSelection(), row.node.getBackground());
+        try std.testing.expectEqual(V.styles.hostSelection(), row.node.getBackground());
+        const badge = find(row.node, "sidebar.host.route-badge").?;
+        const count = find(row.node, "sidebar.host.hops").?;
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, badge.getBackground());
+        try std.testing.expectEqual(T.current().fg_2, count.getText().?.color);
+        try std.testing.expect(@import("ui/theme_states.zig").contrast(T.current().surface_1.withAlpha(255), count.getText().?.color) >= 4.5);
         try std.testing.expectEqual(node_id, row.node.id);
         try std.testing.expectEqual(ui.Color.TRANSPARENT, find(v.root, "sidebar.footer.new").?.getBackground());
         try std.testing.expectEqual(ui.Color.TRANSPARENT, find(v.root, "sidebar.empty.new").?.getBackground());
@@ -473,7 +509,16 @@ test "sidebar search expands in header with saved hosts" {
     try std.testing.expect(v.search.node.style.display == .flex);
     try std.testing.expectEqual(v.search.input_container, h.cx.focus_manager.getFocused().?);
     try std.testing.expectApproxEqAbs(initial_x, toggle.globalRect().x, 0.1);
-    try std.testing.expect(v.search_box.globalRect().w > 120);
+    for ([_]f32{ 238, 220, 320, 480, 238 }) |width| {
+        v.root.setStyle(h.cx.allocator, .width, .{ .px = width });
+        h.frames();
+        const search = v.search_box.globalRect();
+        const header = v.header.globalRect();
+        const new_action = new_button.globalRect();
+        try std.testing.expectApproxEqAbs(header.x + 17 + 6, search.x, 0.1);
+        try std.testing.expectApproxEqAbs(new_action.x - 6, search.x + search.w, 0.1);
+        try std.testing.expectApproxEqAbs(header.x + header.w, new_action.x + new_action.w, 0.1);
+    }
     try std.testing.expectEqual(T.current().well_border, v.search_box.getBackground());
     v.search_value.set("demo");
     h.frames();
@@ -507,9 +552,10 @@ test "sidebar native precise empty state keeps new host footer at bottom" {
     try std.testing.expectApproxEqAbs(@as(f32, 222), rect.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 34), rect.h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 2), v.root.globalRect().h - rect.y - rect.h, 0.1);
-    const frame = find(button.parent.?, "sidebar.footer.frame").?;
-    try std.testing.expectApproxEqAbs(rect.y, frame.globalRect().y, 0.1);
-    try std.testing.expectApproxEqAbs(rect.h, frame.globalRect().h, 0.1);
+    try std.testing.expect(find(button.parent.?, "sidebar.footer.frame") == null);
+    const icon = firstIcon(button).?.globalRect();
+    const label = firstText(button).?.globalRect();
+    try std.testing.expectApproxEqAbs(rect.x + rect.w / 2, (icon.x + label.x + label.w) / 2, 1);
     h.click(button);
     try std.testing.expectEqual(@as(usize, 1), capture.new_host);
     try std.testing.expect(find(v.empty, "sidebar.empty.collapse") == null);
@@ -555,7 +601,7 @@ test "sidebar native workspace actual groups search captured assets and collapse
     try std.testing.expectApproxEqAbs(@as(f32, 218), list.globalRect().w, 0.1);
     for (workspace.group_headers.items) |group| try std.testing.expectApproxEqAbs(@as(f32, 218), group.globalRect().w, 0.1);
     for (workspace.host_rows.items) |row| {
-        try std.testing.expectApproxEqAbs(@as(f32, 218), row.node.globalRect().w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 206), row.node.globalRect().w, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
         try std.testing.expect(row.name_node.globalRect().w > 0);
     }
@@ -566,7 +612,7 @@ test "sidebar native workspace actual groups search captured assets and collapse
     h.frames();
     for (workspace.group_headers.items) |group| try std.testing.expectApproxEqAbs(@as(f32, 218), group.globalRect().w, 0.1);
     for (workspace.host_rows.items) |row| {
-        try std.testing.expectApproxEqAbs(@as(f32, 218), row.node.globalRect().w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 206), row.node.globalRect().w, 0.1);
         try std.testing.expect(row.name_node.globalRect().w > 0);
     }
     h.click(workspace.default_group_row.?.header);
@@ -609,7 +655,7 @@ test "sidebar native workspace actual groups search captured assets and collapse
     // The default group deliberately remains collapsed above; validate the
     // visible PRODUCTION row instead of that hidden group's zero-width row.
     for (workspace.host_rows.items) |row| if (row.host_index == 0) {
-        try std.testing.expectApproxEqAbs(@as(f32, 218), row.node.globalRect().w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 206), row.node.globalRect().w, 0.1);
         try std.testing.expect(row.name_node.globalRect().w > 0);
     };
 }
@@ -636,15 +682,25 @@ test "main workspace sidebar follows V4 measured group search and footer geometr
         try std.testing.expect(view.search.node.style.display == .none);
         try std.testing.expectEqual(T.current().fg_2, view.search.state.placeholder_color.?);
         try std.testing.expectApproxEqAbs(@as(f32, 10), group.root.globalRect().x, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 114), group.root.globalRect().y, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 102), group.root.globalRect().y, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 218), group.root.globalRect().w, 0.1);
         try std.testing.expectEqual(ui.Color.TRANSPARENT, group.root.getBackground());
-        try std.testing.expectApproxEqAbs(@as(f32, 10), row.node.globalRect().x, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 218), row.node.globalRect().w, 0.1);
+        try std.testing.expectApproxEqAbs(firstIcon(view.header).?.globalRect().x, firstIcon(group.header).?.globalRect().x, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 22), row.node.globalRect().x, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 206), row.node.globalRect().w, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
+        const guide = find(group.members, "sidebar.group.guide").?.globalRect();
+        try std.testing.expectApproxEqAbs(@as(f32, 15.5), guide.x, 0.1);
+        try std.testing.expectApproxEqAbs(group.header.globalRect().y + 37, guide.y, 0.1);
+        try std.testing.expectApproxEqAbs(row.node.globalRect().y + 18, guide.y + guide.h, 0.1);
         try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
         try std.testing.expectEqualStrings("0", find(row.node, "sidebar.host.hops").?.getText().?.content);
-        try std.testing.expectEqual(V.styles.tail_width, row.trailing.globalRect().w);
+        const group_count = find(group.header, "sidebar.group.count").?.globalRect();
+        const route_icon = find(row.node, "sidebar.host.route-icon").?.globalRect();
+        try std.testing.expectApproxEqAbs(route_icon.x + route_icon.w / 2, group_count.x + group_count.w / 2, 0.1);
+        try std.testing.expectEqual(T.current().fg_3, find(group.header, "sidebar.group.count").?.getText().?.color);
+        try std.testing.expect(row.trailing.style.display == .flex);
+        try std.testing.expect(row.route.style.display == .flex);
 
         const width = row.name.globalRect().w;
         row.setMenuOpen(true);
@@ -654,11 +710,8 @@ test "main workspace sidebar follows V4 measured group search and footer geometr
         try std.testing.expect(row.name.globalRect().w <= width);
         try std.testing.expectEqual(V.styles.tail_width + 4 + V.styles.action_size, row.trailing.globalRect().w);
         const footer = find(view.root, "sidebar.footer.new").?;
-        const frame = find(footer.parent.?, "sidebar.footer.frame").?;
-        try std.testing.expectApproxEqAbs(@as(f32, 218), frame.globalRect().w, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 34), frame.globalRect().h, 0.1);
-        try std.testing.expectApproxEqAbs(footer.globalRect().x, frame.globalRect().x, 0.1);
-        try std.testing.expectApproxEqAbs(footer.globalRect().y, frame.globalRect().y, 0.1);
+        try std.testing.expect(find(footer.parent.?, "sidebar.footer.frame") == null);
+        try std.testing.expectApproxEqAbs(@as(f32, 218), footer.globalRect().w, 0.1);
         try std.testing.expectEqual(ui.Color.TRANSPARENT, footer.getBackground());
         try std.testing.expectApproxEqAbs(@as(f32, 750), footer.globalRect().y, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 34), footer.globalRect().h, 0.1);
@@ -666,7 +719,7 @@ test "main workspace sidebar follows V4 measured group search and footer geometr
     }
 }
 
-test "sidebar production mount draws M NEWHOST dashed well without SVG texture loader" {
+test "sidebar production mount keeps a centered borderless new connection action" {
     const h = try H.init();
     defer h.deinit();
     // The production app does not install a runtime SVG texture loader.
@@ -679,22 +732,22 @@ test "sidebar production mount draws M NEWHOST dashed well without SVG texture l
     try h.root.appendChild(h.cx.allocator, view.root);
     h.frames();
     const footer = find(view.root, "sidebar.footer.new").?;
-    const frame = find(footer.parent.?, "sidebar.footer.frame").?;
+    try std.testing.expect(find(footer.parent.?, "sidebar.footer.frame") == null);
     try std.testing.expectEqual(ui.Color.TRANSPARENT, footer.getBackground());
     const focus: *ui.hooks.FocusRingAnimState = @ptrCast(@alignCast(footer.meta.per_frame.hooks.slots.focus_ring_anim.?));
     try std.testing.expect(focus.surface_cx == null);
     try std.testing.expectEqual(@as(f32, 0), footer.style.border.width);
     try std.testing.expectEqual(@as(f32, 0), focus.focus_width);
-    try std.testing.expect(frame.meta.per_frame.custom_hooks.draw != null);
-    try std.testing.expect(frame.getIcon() == null);
-    try std.testing.expectApproxEqAbs(@as(f32, 218), frame.globalRect().w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 34), frame.globalRect().h, 0.1);
-    try std.testing.expectEqual(T.current().well_border, frame.style.border.color);
-    try std.testing.expectApproxEqAbs(@as(f32, 0), frame.style.border.width, 0.01);
+    const rect = footer.globalRect();
+    const icon = firstIcon(footer).?.globalRect();
+    const label = firstText(footer).?.globalRect();
+    try std.testing.expectApproxEqAbs(@as(f32, 218), rect.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 34), rect.h, 0.1);
+    try std.testing.expectApproxEqAbs(rect.x + rect.w / 2, (icon.x + label.x + label.w) / 2, 1);
     try std.testing.expect(h.cx.svg_textures.loader == null);
 }
 
-test "sidebar new connection retains theme tokens dashed paint and input semantics in all palettes" {
+test "sidebar new connection retains theme states and input semantics in all palettes" {
     const previous = T.currentName();
     const parameters = T.materialParameters();
     const material = T.materialVisible();
@@ -711,7 +764,7 @@ test "sidebar new connection retains theme tokens dashed paint and input semanti
     view.empty.setDisplay(.none);
     try h.root.appendChild(h.cx.allocator, view.root);
     const footer = find(view.root, "sidebar.footer.new").?;
-    const frame = find(footer.parent.?, "sidebar.footer.frame").?;
+    try std.testing.expect(find(footer.parent.?, "sidebar.footer.frame") == null);
     const node_id = footer.id;
     const publication = try h.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
     const Label = struct {
@@ -742,37 +795,32 @@ test "sidebar new connection retains theme tokens dashed paint and input semanti
             h.frames();
             try std.testing.expectEqual(node_id, footer.id);
             try std.testing.expectEqual(ui.Color.TRANSPARENT, footer.getBackground());
-            try std.testing.expectEqual(T.current().well_border, frame.style.border.color);
             try std.testing.expectEqual(T.current().fg_2, label.getText().?.color);
-            var painted = false;
-            for (h.cx.display_list.items.items) |item| switch (item) {
-                .stroke_path => |path| if (path.header.node_id == frame.id) {
-                    painted = true;
-                    try std.testing.expectEqual(@as(f32, 1.5), path.width);
-                    try std.testing.expectEqual(T.current().well_border, path.color);
-                    var gaps: usize = 0;
-                    for (path.geometry.commands) |command| if (command == .move_to) {
-                        gaps += 1;
-                    };
-                    try std.testing.expect(gaps > 20);
-                },
-                else => {},
-            };
-            try std.testing.expect(painted);
+            try std.testing.expectEqual(@as(f32, 0), footer.style.border.width);
             const rect = footer.globalRect();
             h.cx.handleMouseMove(rect.x + rect.w / 2, rect.y + rect.h / 2);
             h.frames();
-            try std.testing.expectEqual(T.states().selected, footer.getBackground());
-            try std.testing.expectEqual(T.current().accent, frame.style.border.color);
-            try std.testing.expectEqual(T.current().accent_ink, label.getText().?.color);
+            const hover = footer.getBackground();
+            try std.testing.expectEqual(T.current().hover.a, hover.a);
+            if (transparency == 0) {
+                const actual = ui.Color.lerp(T.baseColors().surface_1, hover.withAlpha(255), @as(f32, @floatFromInt(hover.a)) / 255);
+                try std.testing.expect(@import("ui/theme_states.zig").contrast(actual, T.current().fg_2) >= 4.5);
+                if (std.mem.eql(u8, id, "reference-light") or std.mem.eql(u8, id, "dark")) {
+                    const expected = T.baseColors().hover;
+                    inline for (.{ "r", "g", "b" }) |channel| {
+                        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(@field(expected, channel))), @as(f32, @floatFromInt(@field(actual, channel))), 1);
+                    }
+                }
+            }
+            try std.testing.expectEqual(T.current().fg_2, label.getText().?.color);
             h.cx.handleMouseDown(rect.x + rect.w / 2, rect.y + rect.h / 2, .{});
             h.frames();
-            try std.testing.expectEqual(T.states().pressed, footer.getBackground());
+            try std.testing.expectEqual(T.states().pressed.a, footer.getBackground().a);
             h.cx.handleMouseMove(600, 400);
             h.cx.handleMouseUp(600, 400);
             h.cx.focus_manager.setFocusWithVisibility(footer, .programmatic, .show);
             h.frames();
-            try std.testing.expectEqual(T.states().focus, footer.getBackground());
+            try std.testing.expectEqual(T.states().focus.a, footer.getBackground().a);
             try std.testing.expectEqual(@as(f32, 0), footer.style.border.width);
             if (footer.style.outline()) |outline| {
                 try std.testing.expectEqual(@as(f32, 0), outline.width);
@@ -784,13 +832,18 @@ test "sidebar new connection retains theme tokens dashed paint and input semanti
             h.cx.handleKeyDown(.@"return", .{});
             h.frames();
             try std.testing.expectEqual(@as(usize, 0), capture.new_host);
-            try std.testing.expectEqual(T.current().well_border, frame.style.border.color);
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, footer.getBackground());
             view.setBridge(capture.bridge());
         }
     }
     h.cx.clearFocus();
     h.click(footer);
     try std.testing.expectEqual(@as(usize, 1), capture.new_host);
+    h.cx.focus_manager.setFocusWithVisibility(footer, .programmatic, .show);
+    h.frames();
+    h.cx.handleKeyDown(.@"return", .{});
+    h.frames();
+    try std.testing.expectEqual(@as(usize, 2), capture.new_host);
 }
 
 test "sidebar icons share Tab artwork and keep source colours across session state changes in three themes" {
@@ -1046,8 +1099,10 @@ test "sidebar theme state selection acquired after focus survives focused paint 
         const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "主机", .detail = "fixture@192.0.2.1", .route = "本机", .hops = 0, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
         try h.root.appendChild(h.cx.allocator, row.node);
         h.frames();
+        try std.testing.expect(row.route.style.display == .flex);
         h.cx.setFocus(row.node);
         h.frames();
+        try std.testing.expect(row.route.style.display == .flex);
         const focused = row.node.getBackground();
         row.setSelected(true);
         h.frames();
@@ -1056,7 +1111,26 @@ test "sidebar theme state selection acquired after focus survives focused paint 
         try std.testing.expect(!ui.Color.eql(focused, row.node.getBackground()));
         h.cx.clearFocus();
         h.frames();
-        try std.testing.expectEqual(T.states().selected, row.node.getBackground());
+        try std.testing.expect(row.route.style.display == .flex);
+        try std.testing.expectEqual(V.styles.hostSelection(), row.node.getBackground());
+        const selection = V.styles.hostSelection();
+        const opacity = @as(f32, @floatFromInt(selection.a)) / 255;
+        const surface = ui.Color.lerp(T.baseColors().surface_1.withAlpha(255), selection.withAlpha(255), opacity);
+        try std.testing.expect(@import("ui/theme_states.zig").contrast(surface, T.current().fg_1) >= 4.5);
         try std.testing.expectEqual(@as(usize, 0), capture.connected);
     }
+}
+
+test "sidebar selected host follows material transparency" {
+    const previous = T.currentName();
+    const parameters = T.materialParameters();
+    defer {
+        T.select(previous);
+        _ = T.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    T.selectTokens(@import("config/theme_registry.zig").builtinTokens("reference-light"));
+    _ = T.setMaterialParameters(0, 0);
+    try std.testing.expectEqual(@as(u8, 255), V.styles.hostSelection().a);
+    _ = T.setMaterialParameters(100, 0);
+    try std.testing.expectEqual(T.states().selected.a, V.styles.hostSelection().a);
 }

@@ -1,4 +1,4 @@
-//! Editable reference: docs/UI_V3/app/startup.html (1440 × 900 logical units).
+//! Startup window styles.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 

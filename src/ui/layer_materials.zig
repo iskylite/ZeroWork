@@ -13,6 +13,14 @@ pub fn card(node: *ui.Node, comptime role: CardRole) void {
     node.meta.ownership.meta.component_name = name;
     declaration_revision +%= 1;
 }
+/// A surface whose pixels can change independently of the application theme.
+/// Floating text over it needs a readable backdrop even at high transparency.
+pub fn variableBackdrop(node: *ui.Node) void {
+    const name = "MaterialBackdrop.variable";
+    if (node.meta.ownership.meta.component_name) |old| if (std.mem.eql(u8, old, name)) return;
+    node.meta.ownership.meta.component_name = name;
+    declaration_revision +%= 1;
+}
 pub fn overlay(node: *ui.Node) void {
     // Backdrop isolation is also used by inline approval cards. Preserve their
     // declared tint and layer role instead of turning them into overlay chrome.
@@ -29,6 +37,7 @@ const Snapshot = geometry.Snapshot;
 pub const Policy = struct {
     cx: *ui.Cx,
     entries: std.ArrayList(Entry) = .empty,
+    variable_backdrops: std.ArrayList(*ui.Node) = .empty,
     scene_ids: std.AutoHashMapUnmanaged(u32, *ui.Node) = .empty,
     paints: std.ArrayList(*Compensation) = .empty,
     paint_ids: std.AutoHashMapUnmanaged(u32, *Compensation) = .empty,
@@ -44,6 +53,7 @@ pub const Policy = struct {
     stats: Stats = .{},
     last_colors: ?theme.Colors = null,
     last_transparency: ?f32 = null,
+    readability_cache: ?struct { overlay: ui.Color, fg_1: ui.Color, fg_2: ui.Color, alpha: u8 } = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope) !void {
         try @import("floating_input.zig").Policy.mount(cx, scope);
@@ -58,6 +68,7 @@ pub const Policy = struct {
         self.paints.deinit(self.cx.allocator);
         self.paint_ids.deinit(self.cx.allocator);
         self.entries.deinit(self.cx.allocator);
+        self.variable_backdrops.deinit(self.cx.allocator);
         self.scene_ids.deinit(self.cx.allocator);
         self.underlays.deinit(self.cx.allocator);
         self.candidates.deinit(self.cx.allocator);
@@ -112,6 +123,8 @@ pub const Policy = struct {
     fn collect(self: *Policy, node: *ui.Node, depth: usize, owner: ?*ui.Node, portal_root: bool) !void {
         if (node.meta.ownership.meta.test_id) |id| if (std.mem.eql(u8, id, "appearance.background") or std.mem.eql(u8, id, "appearance.material.compensation")) return;
         if (!portal_root and self.portal(node)) return;
+        if (std.mem.eql(u8, node.meta.ownership.meta.component_name orelse "", "MaterialBackdrop.variable"))
+            try self.variable_backdrops.append(self.cx.allocator, node);
         const boundary = portal_root or marked(node) or floating(node);
         const level = fixedLevel(node) orelse depth + @as(usize, if (boundary and !portal_root) 1 else 0);
         if (boundary) {
@@ -147,6 +160,7 @@ pub const Policy = struct {
     }
     fn rebuild(self: *Policy, portal_key: u64) !void {
         self.entries.clearRetainingCapacity();
+        self.variable_backdrops.clearRetainingCapacity();
         self.scene_ids.clearRetainingCapacity();
         if (self.cx.root) |root| try self.collect(root, 0, null, false);
         // Overlay content is already sorted by its manager's inherited z-index.
@@ -262,6 +276,36 @@ pub const Policy = struct {
         if (std.mem.indexOfScalar(*Compensation, self.paints.items, paint)) |index| _ = self.paints.swapRemove(index);
         paint.deinit(self.cx.allocator);
     }
+    fn readableAlpha(self: *Policy) u8 {
+        const colors = theme.baseColors();
+        const fill = colors.overlay.withAlpha(255);
+        const fg_1 = colors.fg_1.withAlpha(255);
+        const fg_2 = colors.fg_2.withAlpha(255);
+        if (self.readability_cache) |cached| {
+            if (ui.Color.eql(cached.overlay, fill) and ui.Color.eql(cached.fg_1, fg_1) and ui.Color.eql(cached.fg_2, fg_2)) return cached.alpha;
+        }
+        const contrast = @import("theme_states.zig").contrast;
+        var result: u8 = 255;
+        // Check both extremes: real video and terminal pixels can change at any
+        // time, so a stable tint avoids sampling the content or flickering.
+        for (0..256) |candidate| {
+            const amount = @as(f32, @floatFromInt(candidate)) / 255;
+            var readable = true;
+            for ([_]ui.Color{ ui.Color.BLACK, ui.Color.WHITE }) |backdrop| {
+                const composed = ui.Color.lerp(backdrop, fill, amount);
+                for ([_]ui.Color{ fg_1, fg_2 }) |ink| {
+                    const on_light_side = contrast(fill, ui.Color.BLACK) > contrast(ink, ui.Color.BLACK);
+                    if (contrast(composed, ink) < 4.5 or (contrast(composed, ui.Color.BLACK) > contrast(ink, ui.Color.BLACK)) != on_light_side) readable = false;
+                }
+            }
+            if (readable) {
+                result = @intCast(candidate);
+                break;
+            }
+        }
+        self.readability_cache = .{ .overlay = fill, .fg_1 = fg_1, .fg_2 = fg_2, .alpha = result };
+        return result;
+    }
     fn compensate(self: *Policy, entry: Entry, sample: Snapshot) !void {
         const node = entry.node;
         const nominal = (if (entry.portal_root) theme.baseColors().overlay else cardColor(node)).withAlpha(theme.layerAlpha(entry.level));
@@ -270,6 +314,14 @@ pub const Policy = struct {
             self.discard(node);
             return;
         }
+        if (entry.portal_root) for (self.variable_backdrops.items) |backdrop| {
+            const behind = geometry.snapshot(self.cx, backdrop) orelse continue;
+            if (geometry.overlaps(sample.visible, behind.visible)) {
+                background(node, nominal.withAlpha(@max(nominal.a, self.readableAlpha())));
+                self.discard(node);
+                return;
+            }
+        };
         const blur = node.style.backdrop_blur();
         const reach = Rect.init(sample.visible.x - 3 * blur, sample.visible.y - 3 * blur, sample.visible.w + 6 * blur, sample.visible.h + 6 * blur);
         var needed = entry.level > 1;

@@ -24,7 +24,7 @@ listener.listen(32)
 listener.settimeout(.1)
 port = listener.getsockname()[1]
 (args.out / "ready.json").write_text(json.dumps({"port": port, "known_host": f"[127.0.0.1]:{port} {key.get_name()} {key.get_base64()}\n"}))
-ids = {"kylin", "neokylin", "openkylin", "ubuntukylin", "uos", "deepin", "openeuler", "euleros", "anolis", "opencloudos", "tencentos", "alinux", "loongnix", "aosc", "bclinux", "kylinsec", "nfs", "linx", "isoft", "redflag"}
+ids = {"ubuntu", "sugon", "kylin", "neokylin", "openkylin", "ubuntukylin", "uos", "deepin", "openeuler", "euleros", "anolis", "opencloudos", "tencentos", "alinux", "loongnix", "aosc", "bclinux", "kylinsec", "nfs", "linx", "isoft", "redflag"}
 international_ids = {"rhel": "rhel", "centos": "centos", "almalinux": "almalinux", "oraclelinux": "ol", "sles": "sles", "opensuse": "opensuse-leap", "amazonlinux": "amzn", "nixos": "nixos", "gentoo": "gentoo", "kali": "kali", "linuxmint": "linuxmint", "manjaro": "manjaro", "openbsd": None, "netbsd": None}
 international_ids.update({"debian": "debian", "alpine": "alpine", "freebsd": None})
 ids.update(international_ids)
@@ -72,6 +72,8 @@ class Server(paramiko.ServerInterface):
                 output = f'Linux\nID="{release_id}"\nID_LIKE="rhel debian arch"\n' if release_id else {"openbsd": "OpenBSD\n", "netbsd": "NetBSD\n", "freebsd": "FreeBSD\n"}[user]
             if user == "kylin":
                 output = 'Linux\nNAME="Kylin Linux Advanced Server"\nVERSION="V11 (Swan25)"\nID="kylin"\nVERSION_ID="V11"\nPRETTY_NAME="Kylin Linux Advanced Server V11 (Swan25)"\n'
+            if user == "sugon":
+                output = 'Linux\nNAME="Sugon OS"\nVERSION="8.9"\nID="sugon"\nID_LIKE="rhel fedora centos"\nVERSION_ID="8.9"\nPLATFORM_ID="platform:sga8"\nPRETTY_NAME="Sugon OS 8.9"\n'
             try:
                 channel.sendall(output.encode())
                 channel.send_exit_status(0)

@@ -18,6 +18,7 @@ pub const SubjectKind = enum { network_url, lifecycle, terminal_command, mcp };
 /// Display data comes from a trusted preflight, never an authorization decision.
 /// The owner still checks lifecycle grants, execution modes and live targets.
 pub const Subject = struct {
+    human_review: bool = false,
     kind: SubjectKind,
     target: []const u8,
     detail: []const u8,
@@ -156,7 +157,7 @@ pub const Broker = struct {
         if (subject.target.len == 0 or subject.detail.len == 0 or invocation.tool_id.len == 0 or invocation.call_id.len == 0) return error.InvalidHostApproval;
         switch (subject.kind) {
             .network_url => if (invocation.authority != .local_network_read or !fetch.supports(invocation.tool_id)) return error.InvalidHostApproval,
-            .mcp => if (invocation.authority != .conversation_context or (!std.mem.eql(u8, invocation.tool_id, "host.mcp_catalog") and !std.mem.eql(u8, invocation.tool_id, "host.mcp_call"))) return error.InvalidHostApproval,
+            .mcp => if (invocation.authority != .conversation_context or (!std.mem.eql(u8, invocation.tool_id, "host.mcp_catalog") and !std.mem.eql(u8, invocation.tool_id, "host.mcp_call") and !std.mem.eql(u8, invocation.tool_id, "host.mcp_request"))) return error.InvalidHostApproval,
             .lifecycle => if (invocation.authority != .lifecycle) return error.InvalidHostApproval,
             .terminal_command => if (invocation.authority != .execution_control) return error.InvalidHostApproval,
         }
@@ -179,7 +180,7 @@ pub const Broker = struct {
         var frozen: Snapshot = .{
             .evidence_hash = subject.evidence_hash,
             .kind = subject.kind,
-            .requires_user_input = subject.kind == .terminal_command and args.object.get("host_secret_request") != null,
+            .requires_user_input = subject.human_review or (subject.kind == .terminal_command and args.object.get("host_secret_request") != null),
             .route = if (subject.route) |route| .{ .proposed = route.proposed, .choice = route.choice, .target = route.target, .selectable = route.selectable, .reason = try Fixed(1024).init(route.reason) } else null,
             .target = try Fixed(8192).init(subject.target),
             .detail = try Fixed(65534).init(subject.detail),

@@ -406,7 +406,7 @@ test "BMC view native renderer uses real sink, captures on image, releases on me
     try std.testing.expect(!view.captured);
     const rect = view.viewport.?.globalRect();
     try std.testing.expectApproxEqAbs(@import("plugins/bmc_ikvm/styles.zig").toolbar_height, view.toolbar.?.globalRect().h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 58), view.tool_nodes[0].?.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 64), view.tool_nodes[0].?.globalRect().w, 0.01);
     const event: ui.events.Event = .{ .mouse_down = .{ .x = rect.x + rect.w / 2, .y = rect.y + rect.h / 2 } };
     _ = view.viewport.?.behavior.events.on_event_capture.?(event, view);
     try std.testing.expect(view.captured);
@@ -816,6 +816,43 @@ test "BMC view progress compact card scrolls independently and log close never c
     try std.testing.expectEqualStrings("连接成功", view.progress_status.?.getText().?.content);
 }
 
+test "BMC view progress remains readable across built-in themes and transparency" {
+    const theme = @import("ui/app_theme.zig");
+    const colors = @import("ui/theme_states.zig");
+    const styles = @import("plugins/bmc_ikvm/styles.zig");
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        for ([_]f32{ 0, 1, 50, 100 }) |transparency| {
+            _ = theme.setMaterialParameters(transparency, 24);
+            const palette = theme.current();
+            const surface = styles.progressSurface(theme.widgetTheme(theme.currentName())).background.?;
+            try std.testing.expectEqual(palette.overlay.withAlpha(255), surface);
+            const route = styles.progressRouteBox(theme.widgetTheme(theme.currentName())).background.?;
+            try std.testing.expectEqual(palette.well.withAlpha(255), route);
+            const active = theme.patchPaint(styles.progressCurrentFill(), surface);
+            for ([_]ui.Color{ surface, route, active }) |background| {
+                for ([_]ui.Color{ palette.fg_1, styles.progressSecondary() }) |ink| {
+                    if (colors.contrast(ink, background) < 4.5) std.debug.print("KVM progress contrast: {s}, T={d}\n", .{ id, transparency });
+                    try std.testing.expect(colors.contrast(ink, background) >= 4.5);
+                }
+            }
+            for ([_]ui.Color{ palette.warn_ink, palette.danger_ink, palette.ok_ink }) |ink| {
+                try std.testing.expect(colors.contrast(ink, surface) >= 4.5);
+                try std.testing.expect(colors.contrast(ink, route) >= 4.5);
+            }
+            try std.testing.expect(colors.contrast(palette.accent_ink, active) >= 4.5);
+            const button = theme.widgetTheme(theme.currentName()).tokens.color;
+            try std.testing.expect(colors.contrast(button.button_secondary_fg, theme.patchPaint(button.button_secondary_bg, surface)) >= 4.5);
+        }
+    }
+}
+
 test "BMC view progress slots remain fixed across phase timing legacy and long diagnostics" {
     const theme = @import("ui/app_theme.zig");
     const previous_material = theme.materialParameters();
@@ -834,13 +871,14 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
         defer renderer.vtable.unmount(renderer.context);
         const view: *views.View = @ptrCast(@alignCast(renderer.context));
         renderFrames(cx, 5);
-        // The task surface must remain distinct from the video well without a
-        // frame, and polling must not overwrite its scoped frosted material.
+        // The local card stays opaque over the black waiting viewport, and
+        // polling must not replace either surface with a translucent material.
         const surface = findById(view.waiting.?, "bmc.progress.surface").?;
-        try std.testing.expect(!std.meta.eql(surface.getBackground(), view.viewport.?.getBackground()));
+        try std.testing.expectEqual(ui.Color.BLACK, view.viewport.?.getBackground());
+        try std.testing.expectEqual(theme.current().overlay.withAlpha(255), surface.getBackground());
         try std.testing.expectEqual(@as(f32, 0), view.waiting.?.style.border.width);
         try std.testing.expectEqual(@as(f32, 0), surface.style.border.width);
-        try std.testing.expect(surface.style.glass_params().?.backdrop_blur >= 24);
+        try std.testing.expect(surface.style.glass_params() == null);
         try std.testing.expectEqualDeep(view.waiting.?.globalRect(), surface.globalRect());
         const nodes = [_]*ui.Node{ view.waiting.?, view.waiting_header.?, view.waiting_title.?, view.progress_timing.?, view.progress_total_time.?, view.waiting_body.?.container, view.progress_route.?, view.waiting_actions.?, findById(view.waiting.?, "bmc.connection_log").? };
         var baseline: [nodes.len]ui.ComputedRect = undefined;
@@ -866,7 +904,8 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
                     const body = view.waiting_body.?.container.globalRect();
                     try std.testing.expect(row.y >= body.y - 0.6 and row.y + row.h <= body.y + body.h + 0.6);
                 }
-                try std.testing.expect(!std.meta.eql(surface.getBackground(), view.viewport.?.getBackground()));
+                try std.testing.expectEqual(ui.Color.BLACK, view.viewport.?.getBackground());
+                try std.testing.expectEqual(theme.current().overlay.withAlpha(255), surface.getBackground());
                 try std.testing.expectEqualDeep(view.waiting.?.globalRect(), surface.globalRect());
                 if (stage == .public_script) {
                     try std.testing.expect(view.progress_rows[2].?.getBackground().a > 0);
@@ -886,8 +925,8 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
         const material_tokens = theme.widgetTheme(theme.currentName()).*;
         cx.setTheme(&material_tokens);
         renderFrames(cx, 4);
-        try std.testing.expectEqual(theme.layerAlpha(1), surface.getBackground().a);
-        try std.testing.expectEqual(@as(f32, 40), surface.style.glass_params().?.backdrop_blur);
+        try std.testing.expectEqual(theme.current().overlay.withAlpha(255), surface.getBackground());
+        try std.testing.expect(surface.style.glass_params() == null);
         try std.testing.expectEqualDeep(title_ink, view.waiting_title.?.getText().?.color);
         for (nodes, baseline) |node, expected| {
             const actual = node.globalRect();
@@ -1182,6 +1221,12 @@ test "BMC view workspace aligns floating toolbar and video surface and aligns ho
         try std.testing.expectEqual(@as(f32, 0), view.image_node.?.style.border.radius);
         const icon = findById(view.root.?, "bmc.title.icon").?.globalRect();
         try std.testing.expectApproxEqAbs(card.x + 16, icon.x, 0.01);
+        const title_node = findById(view.root.?, "bmc.title").?;
+        const title = title_node.globalRect();
+        const status = view.disconnect_node.?.globalRect();
+        try std.testing.expect(title_node.isDisplayedInTree());
+        try std.testing.expect(title.w > 0 and icon.x + icon.w <= title.x);
+        try std.testing.expect(title.x + title.w <= status.x + 0.01);
         const last_tool = view.tool_nodes[4].?.globalRect();
         try std.testing.expectApproxEqAbs(@as(f32, 6), last_tool.y, 0.01);
         try std.testing.expectApproxEqAbs(@as(f32, 22), card.y - last_tool.y - last_tool.h, 0.01);
@@ -1218,6 +1263,106 @@ test "BMC view workspace aligns floating toolbar and video surface and aligns ho
         try wire.pump(&service);
         try std.testing.expect(!view.captured);
     }
+}
+
+test "BMC view compact toolbar keeps narrow split controls reachable and opens management from more" {
+    var service = remote.Service.init(owner);
+    defer service.close();
+    try service.setConnected(true, 1);
+    try service.setControl(true, 2);
+    var harness = try InputViewHarness.init(&service);
+    defer harness.deinit();
+    const view = harness.view;
+    // Keep the window wide: only the session's allocated split changes.
+    harness.cx.setViewport(1440, 900);
+    for ([_]f32{ 520, 480, 479, 336, 280, 264, 263, 240, 228, 520, 336 }) |width| {
+        harness.cx.root.?.setStyleInline(a, .{ .width = .{ .px = width } });
+        renderFrames(harness.cx, 8);
+        const compact = width < @import("plugins/bmc_ikvm/styles.zig").expanded_toolbar_width;
+        const overflow = width < @import("plugins/bmc_ikvm/styles.zig").icon_toolbar_width;
+        try std.testing.expectEqual(compact, view.last_compact.?);
+        try std.testing.expectEqual(overflow, view.last_overflow);
+        const bar = view.toolbar.?.globalRect();
+        try std.testing.expectApproxEqAbs(width, bar.w, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 44), bar.h, 0.01);
+        for (view.tool_nodes, 0..) |maybe, index| {
+            const node = maybe.?;
+            try std.testing.expectEqual(!overflow or index < 3, node.isDisplayedInTree());
+            if (node.isDisplayedInTree()) {
+                const rect = node.globalRect();
+                try std.testing.expect(rect.x >= bar.x and rect.x + rect.w <= bar.x + bar.w + 0.01);
+                try std.testing.expectApproxEqAbs(@as(f32, if (compact) 32 else 64), rect.w, 0.01);
+            }
+        }
+        try std.testing.expectEqual(overflow, view.more_node.?.isDisplayedInTree());
+        const connection = view.disconnect_node.?.globalRect();
+        try std.testing.expectApproxEqAbs(@as(f32, if (compact) 32 else 82), connection.w, 0.01);
+        const title = view.connection_title.?.globalRect();
+        const icon = view.connection_icon.?.globalRect();
+        try std.testing.expect(view.connection_title.?.isDisplayedInTree());
+        try std.testing.expect(icon.x + icon.w <= connection.x + 0.01);
+        try std.testing.expect(title.x + title.w <= connection.x + 0.01);
+        try std.testing.expectEqual(compact, view.connection_label.peek().len == 0);
+        harness.cx.handleMouseMove(connection.x + connection.w / 2, connection.y + connection.h / 2);
+        renderFrames(harness.cx, 4);
+        try std.testing.expectEqual(ui.icons.unplug.icon_id, view.connection_symbol.peek().?.icon_id);
+        harness.cx.handleMouseMove(0, 0);
+        renderFrames(harness.cx, 4);
+        try std.testing.expectEqual(ui.icons.circle_check.icon_id, view.connection_symbol.peek().?.icon_id);
+        if (!overflow) {
+            for (3..5) |index| {
+                harness.click(view.tool_nodes[index].?);
+                renderFrames(harness.cx, 8);
+                try std.testing.expect(view.open[index].peek());
+                const menu = view.menus[index].?.chrome.globalRect();
+                try std.testing.expect(menu.x >= 0 and menu.x + menu.w <= harness.cx.viewport.width);
+                harness.cx.handleKeyDown(.escape, .{});
+                renderFrames(harness.cx, 8);
+                try std.testing.expect(!view.open[index].peek());
+            }
+            continue;
+        }
+        const video_before = view.viewport.?.globalRect();
+        harness.click(view.more_node.?);
+        renderFrames(harness.cx, 8);
+        try std.testing.expect(view.more_open.?.peek());
+        try std.testing.expect(harness.cx.focus_manager.getFocused() == view.more_rows[0].?);
+        const popup = view.more.?.chrome.globalRect();
+        try std.testing.expect(popup.x >= bar.x and popup.x + popup.w <= bar.x + bar.w + 0.01);
+        try std.testing.expect(popup.y >= bar.y + bar.h);
+        try std.testing.expectEqual(video_before, view.viewport.?.globalRect());
+        for ([_][]const u8{ "bmc.more.power", "bmc.more.boot" }, 3..) |id, index| {
+            if (!view.more_open.?.peek()) {
+                harness.click(view.more_node.?);
+                renderFrames(harness.cx, 8);
+            }
+            harness.click(findById(view.more.?.content, id).?);
+            renderFrames(harness.cx, 8);
+            try std.testing.expect(!view.more_open.?.peek());
+            try std.testing.expect(view.open[index].peek());
+            const menu = view.menus[index].?.chrome.globalRect();
+            try std.testing.expect(menu.x >= 0 and menu.x + menu.w <= harness.cx.viewport.width);
+            harness.cx.handleKeyDown(.escape, .{});
+            renderFrames(harness.cx, 8);
+            try std.testing.expect(!view.open[index].peek());
+            try std.testing.expect(harness.cx.focus_manager.getFocused() == view.more_node.?);
+        }
+        for (0..2) |_| {
+            harness.click(view.more_node.?);
+            renderFrames(harness.cx, 8);
+            harness.cx.handleKeyDown(.escape, .{});
+            renderFrames(harness.cx, 8);
+            try std.testing.expect(!view.more_open.?.peek());
+            try std.testing.expect(harness.cx.focus_manager.getFocused() == view.more_node.?);
+        }
+        harness.click(view.more_node.?);
+        renderFrames(harness.cx, 8);
+        harness.cx.root.?.setStyleInline(a, .{ .width = .{ .px = 520 } });
+        renderFrames(harness.cx, 8);
+        try std.testing.expect(!view.more_open.?.peek());
+        try std.testing.expect(!view.more_node.?.isDisplayedInTree());
+    }
+    try std.testing.expectEqual(@as(usize, 0), (try service.snapshot(service.binding())).queued);
 }
 
 test "BMC view final coalesced mouse move schedules its own deadline and flushes without another event" {
@@ -1624,9 +1769,10 @@ test "BMC material nested summaries and progress content follow real surface own
             const surface = findById(h.view.waiting.?, "bmc.progress.surface").?;
             const route_card = findById(h.view.waiting.?, "bmc.progress.route").?;
             try std.testing.expectEqual(surface, route_card.parent.?);
-            try std.testing.expectEqual(theme.layerAlpha(1), surface.getBackground().a);
-            try std.testing.expect(surface.style.glass_params().?.capture_current_target);
-            try std.testing.expectEqual(theme.current().well.withAlpha(theme.layerAlpha(2)), route_card.getBackground());
+            try std.testing.expectEqual(theme.current().overlay.withAlpha(255), surface.getBackground());
+            try std.testing.expect(surface.style.glass_params() == null);
+            try std.testing.expectEqual(ui.Color.BLACK, h.view.viewport.?.getBackground());
+            try std.testing.expectEqual(theme.current().well.withAlpha(255), route_card.getBackground());
             try std.testing.expectEqualDeep(h.view.waiting.?.globalRect(), surface.globalRect());
             try std.testing.expectEqual(ui.Color.rgba(18, 20, 24, 199), h.view.fps_hud.?.getBackground());
             h.fixture.route = .connected;
@@ -1693,14 +1839,30 @@ test "BMC FPS HUD defaults on, preserves pointer routing and toggles without cha
     try std.testing.expect(wire.len > 0);
     h.view.open[@backingInt(vm.Menu.display)].set(true);
     renderFrames(h.cx, 3);
+    const display = h.view.menus[@backingInt(vm.Menu.display)].?;
+    const fit_rect = findById(display.content, "bmc.display.fit").?.globalRect();
+    const original_rect = findById(display.content, "bmc.display.original").?.globalRect();
+    try std.testing.expectApproxEqAbs(fit_rect.w, original_rect.w, 0.1);
+    const refresh_rect = findById(display.content, "bmc.display.refresh").?.globalRect();
+    const log_rect = findById(display.content, "bmc.display.connection_log").?.globalRect();
+    try std.testing.expectApproxEqAbs(refresh_rect.y, log_rect.y, 0.1);
+    try std.testing.expect(refresh_rect.x + refresh_rect.w <= log_rect.x);
+    const expanded_height = display.chrome.globalRect().h;
     const toggle = findById(h.cx.root.?, "bmc.display.fps").?;
     h.click(toggle);
     renderFrames(h.cx, 3);
     try std.testing.expect(!h.view.show_fps.peek());
+    try std.testing.expectEqual(.none, h.view.fps_detail.?.style.display);
+    try std.testing.expect(display.chrome.globalRect().h < expanded_height);
     try std.testing.expectEqual(before, h.view.viewport.?.globalRect());
     h.click(toggle);
     renderFrames(h.cx, 3);
     try std.testing.expect(h.view.show_fps.peek());
+    try std.testing.expectEqual(.flex, h.view.fps_detail.?.style.display);
+    try std.testing.expectApproxEqAbs(expanded_height, display.chrome.globalRect().h, 0.1);
+    h.click(findById(display.chrome, "bmc.display.close").?);
+    renderFrames(h.cx, 3);
+    try std.testing.expectEqual(h.view.tool_nodes[@backingInt(vm.Menu.display)], h.cx.focus_manager.getFocused());
 }
 
 test "BMC Select keyboard highlight remains visible inside compact dropdown" {

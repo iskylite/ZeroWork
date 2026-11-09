@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Own Metal windows + loopback model; no user storage, hosts or external AI. */
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -20,7 +21,7 @@ const shown=(n:any)=>n&&n.hidden!==true&&n.visible!==false&&n.rect?.w>0&&n.rect?
 const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,15000);
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok,id);};
 try{
- const themes=process.env.ZW_THEME_IDS?.split(',')??Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes);
+ const themes=process.env.ZW_THEME_IDS?.split(',')??Object.keys(nativeThemeData.themes);
  const transparencies=process.env.ZW_THEME_MATERIAL_TRANSPARENCIES?.split(',').map(Number)??[0,50,100];
  for(const theme of themes){for(const t of transparencies){const b=0;
   const name=`${theme}-t${t}`,iso=await mkdtemp('/private/tmp/zw-theme-material-'),data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);

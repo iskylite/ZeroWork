@@ -1,5 +1,4 @@
 //! Production SOCKS card. Values are copied into stable text nodes on the UI thread.
-//! Editable reference: docs/UI_V3/workspace/forwarding/index.html.
 const std = @import("std");
 const ui = @import("ui");
 const S = @import("socks_info_styles.zig");

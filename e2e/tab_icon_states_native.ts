@@ -11,6 +11,8 @@ const prefix = resolve(process.argv[2]), python = process.argv[3];
 const out = resolve(process.argv[4] ?? '/tmp/zerowork-tab-icons-evidence');
 const primary = process.argv[5] ?? 'kylin';
 const expectedBackdrop = primary === 'isoft' ? 0xffffffff : 0;
+const assetRegistry = await readFile('src/ui/host_os_assets.zig', 'utf8');
+const iconIds = Object.fromEntries([...assetRegistry.matchAll(/pub const (\w+) = source\("[^"]+", (\d+)\);/g)].map(match => [match[1], Number(match[2])]));
 await mkdir(out, {recursive: true});
 const base = await realpath(await mkdtemp('/tmp/zw-tab-icons-'));
 const rpc = join(base, 'rpc'), data = join(base, 'data'), peerOut = join(base, 'peer');
@@ -63,6 +65,7 @@ try {
     const connect = await h.waitFor(async () => (await h.query('sidebar.host.connect')).find((node: any) => shown(node) && node.rect.y >= row.rect.y && node.rect.y < row.rect.y + row.rect.h) ?? null);
     await h.clickAt(connect.rect.x + connect.rect.w / 2, connect.rect.y + connect.rect.h / 2);
     await h.waitFor(async () => {try {await readFile(join(peerOut, `probed-${kind}`)); return true;} catch {return null;}}, 15000);
+    await h.waitFor(async () => (await tabs()).find((row: any) => row.title === kind && row.icon === iconIds[kind] && row.state === 'normal') ?? null, 15000);
     await h.sleep(400);
     await writeFile(join(peerOut, `output-${kind}`), `MENU_ROW_${kind}\r\n`);
     await menuRow(kind, row => row.original_colours && row.has_icon && row.icon_tint === 0xffffffff && row.icon_backdrop === (kind === primary ? expectedBackdrop : 0));

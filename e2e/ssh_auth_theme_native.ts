@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Actual authentication dialog paints for every theme at T0/T100.
  * node e2e/ssh_auth_theme_native.ts <evidence-dir> <owned-peer.json> <binary>
  * The peer must use an encrypted fixture key and remain alive for the run.
@@ -15,7 +16,7 @@ assert(Number.isInteger(fixture.port)&&fixture.port>0&&fixture.port<65536);
 assert(fixture.key&&fixture.fingerprint,'Encrypted fixture path and expected fingerprint are required');
 assert((await realpath(fixture.key)).startsWith('/private/tmp/'),'Only a generated temporary fixture key is allowed');
 await mkdir(out,{recursive:true});
-const themes=Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes);
+const themes=Object.keys(nativeThemeData.themes);
 const report:any={status:'running',binary,sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),cases:[],limits:['Owned loopback encrypted-key fixture; no external host or user key is accessed.','Synthetic input on real native windows; physical keyboard and IME are outside this run.']};
 const shown=(n:any)=>n?.rect&&n.visible!==false&&n.hidden!==true&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0;
 const text=(n:any):string=>(n.text??'')+(n.children??[]).map(text).join(' ');

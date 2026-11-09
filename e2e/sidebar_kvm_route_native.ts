@@ -53,6 +53,7 @@ const app = spawn(join(prefix, 'bin/zerowork'), [], {
 const ended = new Promise(resolve => app.once('close', resolve));
 const shown = (node: any) => node?.visible !== false && node?.hidden !== true && node?.rect?.w > 0 && node?.rect?.h > 0;
 const flat = (node: any): any[] => [node, ...(node.children ?? []).flatMap(flat)];
+const visibleFlat = (node: any): any[] => shown(node) ? [node, ...(node.children ?? []).flatMap(visibleFlat)] : [];
 const text = (node: any) => flat(node).map(node => node.text ?? '').join('');
 const report: any = {status: 'running', checks: []};
 async function row(name: string) {
@@ -62,11 +63,22 @@ async function row(name: string) {
   return found;
 }
 async function checkCounts() {
+  let alignedX: number | undefined;
   for (const fixture of fixtures) {
     const host = await row(fixture.name);
-    const count = flat(host).find(node => node.test_id === 'sidebar.host.hops' && shown(node));
-    if (fixture.hops === null) assert(!count, `${fixture.name}: invalid payload must not claim zero hops`);
-    else assert.equal(count?.text, String(fixture.hops), `${fixture.name}: hop count`);
+    const count = visibleFlat(host).find(node => node.test_id === 'sidebar.host.hops');
+    if (fixture.hops === null) {
+      assert(!count, `${fixture.name}: unavailable route must not claim zero hops`);
+      continue;
+    }
+    assert.equal(count?.text, String(fixture.hops), `${fixture.name}: hop count`);
+    const icon = visibleFlat(host).find(node => node.test_id === 'sidebar.host.route-icon');
+    const badge = visibleFlat(host).find(node => node.test_id === 'sidebar.host.route-badge');
+    assert(icon && badge, `${fixture.name}: route icon and badge visible`);
+    assert(Math.abs(badge.rect.x - (icon.rect.x + 12)) < 0.5, `${fixture.name}: badge anchored to icon corner`);
+    assert(Math.abs(badge.rect.y - (icon.rect.y - 4)) < 0.5, `${fixture.name}: badge anchored above icon`);
+    if (alignedX === undefined) alignedX = badge.rect.x;
+    else assert(Math.abs(badge.rect.x - alignedX) < 0.5, `${fixture.name}: badges share a column`);
   }
 }
 try {
@@ -80,6 +92,9 @@ try {
     const name = flat(host).find(node => node.test_id === 'sidebar.host.name');
     await h.mouseMove(name.rect.x + Math.min(10, name.rect.w / 2), name.rect.y + name.rect.h / 2);
     const hint = await h.waitFor(async () => (await h.query('sidebar.host.info')).find((node: any) => shown(node) && text(node).includes(fixture.route)) ?? null);
+    const count = visibleFlat(await row(fixture.name)).find(node => node.test_id === 'sidebar.host.hops');
+    if (fixture.hops === null) assert(!count, `${fixture.name}: invalid payload must not claim zero hops`);
+    else assert.equal(count?.text, String(fixture.hops), `${fixture.name}: hovered hop count`);
     report.checks.push({name: fixture.name, hops: fixture.hops, hint: text(hint)});
     if (fixture.name === 'KVM-multi' || fixture.name === 'KVM-missing') {
       assert((await h.screenshot(join(out, `${fixture.name}.png`))).ok);
@@ -91,6 +106,8 @@ try {
   await h.waitFor(async () => (await h.query('sidebar.restore')).some(shown) || null);
   assert((await h.clickTestId('sidebar.restore')).ok);
   await h.waitFor(async () => (await h.query('sidebar.host')).filter(shown).length === fixtures.length || null);
+  await h.mouseMove(900, 700);
+  await h.waitFor(async () => visibleFlat(await row('Jump-A')).some(node => node.test_id === 'sidebar.host.hops') || null);
   await checkCounts();
   report.status = 'passed';
 } catch (error) {

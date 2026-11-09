@@ -47,6 +47,7 @@ pub const Kind = enum(u8) {
     manjaro,
     openbsd,
     netbsd,
+    sugon,
 };
 pub const command = "sh -c \"uname -s || exit; if test -r /etc/os-release; then cat /etc/os-release; elif test -r /usr/lib/os-release; then cat /usr/lib/os-release; fi\" || cmd /c ver";
 pub fn parse(bytes: []const u8) Kind {
@@ -62,7 +63,7 @@ pub fn parse(bytes: []const u8) Kind {
         if (std.mem.indexOf(u8, line, "Microsoft Windows") != null or std.mem.startsWith(u8, line, "MINGW") or std.mem.startsWith(u8, line, "MSYS") or std.mem.startsWith(u8, line, "CYGWIN")) return .windows;
         if (std.mem.startsWith(u8, line, "ID=")) {
             const id = std.mem.trim(u8, line[3..], " \t\"'");
-            inline for (.{ "ubuntu", "debian", "fedora", "arch", "alpine", "rocky", "kylin", "neokylin", "openkylin", "ubuntukylin", "uos", "deepin", "openeuler", "euleros", "anolis", "opencloudos", "tencentos", "alinux", "loongnix", "aosc", "bclinux", "kylinsec", "nfs", "linx", "isoft", "redflag", "rhel", "centos", "almalinux", "sles", "nixos", "gentoo", "kali", "linuxmint", "manjaro" }) |name| if (std.ascii.eqlIgnoreCase(id, name)) return @field(Kind, name);
+            inline for (.{ "ubuntu", "debian", "fedora", "arch", "alpine", "rocky", "kylin", "neokylin", "openkylin", "ubuntukylin", "uos", "deepin", "openeuler", "euleros", "anolis", "opencloudos", "tencentos", "alinux", "loongnix", "aosc", "bclinux", "kylinsec", "nfs", "linx", "isoft", "redflag", "sugon", "rhel", "centos", "almalinux", "sles", "nixos", "gentoo", "kali", "linuxmint", "manjaro" }) |name| if (std.ascii.eqlIgnoreCase(id, name)) return @field(Kind, name);
             if (std.ascii.eqlIgnoreCase(id, "kylinos")) return .kylin;
             if (std.ascii.eqlIgnoreCase(id, "uniontech") or std.ascii.eqlIgnoreCase(id, "uniontechos")) return .uos;
             if (std.ascii.eqlIgnoreCase(id, "tencent")) return .tencentos;
@@ -118,6 +119,8 @@ test "OS identification distinguishes domestic distributions from their upstream
         .{ Kind.linx, "ID=linx\n" },
         .{ Kind.isoft, "ID=isoft\n" },
         .{ Kind.redflag, "ID=redflag\n" },
+        .{ Kind.sugon, "NAME=\"Sugon OS\"\nVERSION=\"8.9\"\nID=\"sugon\"\nID_LIKE=\"rhel fedora centos\"\nVERSION_ID=\"8.9\"\nPLATFORM_ID=\"platform:sga8\"\nPRETTY_NAME=\"Sugon OS 8.9\"\n" },
+        .{ Kind.sugon, "ID=SUGON\n" },
     };
     inline for (cases) |case| try std.testing.expectEqual(case[0], parse("Linux\n" ++ case[1]));
     try std.testing.expectEqual(Kind.linux, parse("Linux\nID=custom\nID_LIKE=\"openEuler kylin uos\"\n"));

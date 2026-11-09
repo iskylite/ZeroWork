@@ -84,10 +84,13 @@ pub const Result = struct {
     verification: ?@import("readonly_verification.zig").Anchor = null,
     status: @import("plugin_tools.zig").Status,
     blocks: []const Block = &.{},
+    images: []@import("image_attachments.zig").ContentRef = &.{},
     receipt: Receipt,
 
     pub fn validate(self: Result, context: Context, operation_id: u64) !void {
         if (!self.receipt.conversation_id.eql(context.conversation_id) or !self.receipt.task_id.eql(context.task_id) or self.receipt.operation_id != operation_id or self.receipt.binding_revision != context.binding_revision or self.blocks.len > 32) return error.InvalidHostToolResult;
+        if (self.images.len > 32) return error.InvalidHostToolResult;
+        for (self.images) |ref| if (ref.content() == null) return error.InvalidHostToolResult;
         var bytes: usize = 0;
         for (self.blocks) |block| {
             const value = switch (block) {
@@ -108,6 +111,8 @@ pub const Result = struct {
             .text, .structured => |text| allocator.free(text),
         };
         allocator.free(self.blocks);
+        for (self.images) |*ref| ref.release();
+        allocator.free(self.images);
         self.* = undefined;
     }
 };

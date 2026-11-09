@@ -1,4 +1,5 @@
-/** Latest V3 settings/themes, real isolated native application and file RPC. */
+import {nativeThemeData} from './native_theme_data.mjs';
+/** Settings and themes in a real isolated native application using file RPC. */
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
@@ -25,7 +26,7 @@ const click=async(id:string)=>{
 const capture=async(name:string)=>{await sleep(250);await screenshot(join(output,name+'.png'));report.captures.push(name);};
 try{
  await waitForServerReady();await click('toolbar.settings');await click('settings.nav.appearance');
- const preset=JSON.parse(await readFile('docs/UI_V3/theme-presets.json','utf8'));
+ const preset=nativeThemeData;
  for(const id of Object.keys(preset.themes)){
   await click('settings.theme.'+id);await click('settings.save');
   await waitFor(async()=> (await readFile(join(data,'config.toml'),'utf8')).includes('theme = "'+id+'"')?true:null,10000);

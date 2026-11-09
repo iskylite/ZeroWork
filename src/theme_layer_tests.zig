@@ -38,6 +38,7 @@ test "floating shadows unify tooltip popover modal and retained panels" {
             w.frame();
             open.set(true);
             w.frame();
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, modal.overlay.getBackground());
             for ([_]*ui.Node{ panel, popup.chrome, hint.content, modal.dialog }) |node| {
                 const shadows = node.style.shadowSlice();
                 try std.testing.expectEqual(@as(usize, 1), shadows.len);
@@ -61,6 +62,47 @@ test "material snapshot ignores content clipped by a collapsed accordion" {
     clip.setStyle(w.cx.allocator, .height, .{ .px = 60 });
     w.frame();
     try std.testing.expect(@import("ui/material_geometry.zig").snapshot(w.cx, child) != null);
+}
+
+test "floating text stays readable over changing video and terminal backdrops" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    const w = try Window.init();
+    defer w.deinit();
+    const materials = @import("ui/layer_materials.zig");
+    try materials.Policy.mount(w.cx, w.scope);
+    const backdrop = try ui.box(w.cx, .{ .position = .absolute, .width = .{ .px = 700 }, .height = .{ .px = 700 } }, .{});
+    materials.variableBackdrop(backdrop);
+    try w.cx.root.?.appendChild(w.cx.allocator, backdrop);
+    const open = try w.scope.createSignal(bool, true);
+    const menu = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .enter_transition = .none, .exit_transition = .none, .width = 200 }).mount(w.scope, w.cx);
+    menu.wrapper.setStyleInline(w.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 100 }, .top = .{ .px = 100 } } });
+    try menu.trigger.appendChild(w.cx.allocator, try ui.box(w.cx, .{ .width = .{ .px = 32 }, .height = .{ .px = 32 } }, .{}));
+    try menu.content.appendChild(w.cx.allocator, try ui.text(w.cx, "Readable menu", .{}));
+    try w.cx.root.?.appendChild(w.cx.allocator, menu.wrapper);
+    const contrast = @import("ui/theme_states.zig").contrast;
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        for ([_]f32{ 0, 75, 100 }) |t| {
+            _ = theme.setMaterialParameters(t, 0);
+            w.publish.publish(w.cx, theme.widgetTheme(theme.currentName()));
+            w.frame();
+            const fill = menu.chrome.getBackground();
+            const base = theme.baseColors();
+            for ([_]ui.Color{ ui.Color.BLACK, ui.Color.WHITE }) |behind| {
+                const composed = ui.Color.lerp(behind, fill.withAlpha(255), @as(f32, @floatFromInt(fill.a)) / 255);
+                for ([_]ui.Color{ base.fg_1, base.fg_2 }) |ink| try std.testing.expect(contrast(composed, ink) >= 4.5);
+            }
+            if (t == 0) try std.testing.expectEqual(@as(u8, 255), fill.a);
+        }
+    }
+    backdrop.setStyleInline(w.cx.allocator, .{ .inset = .{ .left = .{ .px = 1000 }, .top = .{ .px = 700 } }, .width = .{ .px = 100 }, .height = .{ .px = 100 } });
+    w.frame();
+    try std.testing.expectEqual(theme.layerAlpha(1), menu.chrome.getBackground().a);
 }
 
 test "floating material follows portaled owners rather than widget kinds" {

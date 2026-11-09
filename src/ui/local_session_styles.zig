@@ -1,7 +1,6 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 
-// Editable baseline: docs/UI_V3/workspace/session-notice/index.html.
 pub fn pane() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 0, .background = theme.current().terminal, .border = .{ .radius = 11 } };
 }

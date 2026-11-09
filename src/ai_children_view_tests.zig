@@ -40,6 +40,11 @@ test "v0.4 child list retains exact identity under updates, hides removed rows a
     view.open.set(false);
     try view.update(&.{ first, second });
     try std.testing.expectEqualStrings("1", view.badge.getText().?.content);
+    try std.testing.expect(view.badge.style.display == .flex);
+    try view.updateWithCount(&.{ first, second }, 0);
+    try std.testing.expect(view.badge.style.display == .none);
+    try view.updateWithCount(&.{first}, 2);
+    try std.testing.expectEqualStrings("2", view.badge.getText().?.content);
     view.open.set(true);
     try view.update(&.{ first, second });
     var key: [64]u8 = undefined;

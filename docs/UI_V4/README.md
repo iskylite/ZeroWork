@@ -2,13 +2,23 @@
 
 当前三个设计稿使用独立的“晴霜”主题，配色取自最初参考图。
 
-本目录以可编辑 SVG 为设计基准，与 `docs/UI_V3` 的 HTML/CSS 原型分开。
+本目录保存当前可编辑 SVG 设计稿及其说明。
 
 | 当前设计稿 | 逻辑视口 |
 | --- | --- |
 | [主工作区](mist-workspace.svg) | 1440 × 900 |
 | [窄窗口收起态](mist-workspace-compact.svg) | 860 × 480 |
 | [窄窗口展开态](mist-workspace-compact-expanded.svg) | 860 × 480 |
+| [主机分组侧栏](host-group-sidebar.svg) | 262 × 600 |
+| [MCP 服务列表](mcp-services.svg) | 640 × 390 |
+| [MCP 服务列表窄版](mcp-services-compact.svg) | 440 × 390 |
+| [本地技能](skills.svg) | 640 × 390 |
+| [本地技能窄版](skills-compact.svg) | 440 × 390 |
+
+[KVM 工具栏](kvm-toolbar-responsive.svg) 展示 520／336／240 点会话宽度：左侧显示图标和主机名，右侧显示连接状态及操作；不足 480 点时，五项操作和连接状态都转为纯图标，主机名按可用宽度省略；不足完整图标行所需的 264 点时，电源与启动才收进三点菜单。工具栏高 44、图标按钮 32、视频间距 16。原生实现同时验证 480／264 点切换边界和 228 点最小排列宽度。
+
+MCP 服务列表的尺寸、状态和原生交互见 [MCP 服务规范](mcp-services.md)。
+本地技能的导入区、列表和正文归属见 [本地技能规范](skills.md)。
 
 设计前阅读 [设计要求](DESIGN_REQUIREMENTS.md) 和 [风格指南](STYLE_GUIDE.md)。精确布局与行为约束见 [主界面规范](mist-design.md)。
 

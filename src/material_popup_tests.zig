@@ -50,6 +50,10 @@ test "AI sessions retained native rows follow every builtin theme publication" {
     };
     const list = try Sessions.View.mount(cx, scope, anchor, .{ .context = &context, .select = callbacks.ignore, .request_close = callbacks.ignore, .remove = callbacks.ignore });
     try assistant.appendChild(a, list.root);
+    try std.testing.expect(list.badge.style.display == .none);
+    try list.updateBoundCount(12);
+    try std.testing.expectEqualStrings("12", list.badge.getText().?.content);
+    try std.testing.expect(list.badge.style.display == .flex);
     try list.show(&.{ .{ .id = 1, .title = "等待审批", .owner = "当前终端", .active = true, .phase = .approval }, .{ .id = 2, .title = "正在运行", .owner = "当前终端", .phase = .running } });
     const row = findTestId(list.content, "ai.session.row.1").?;
     const publication = try cx.bindState(shell.ThemePublication, .{});
@@ -60,11 +64,15 @@ test "AI sessions retained native rows follow every builtin theme publication" {
         try std.testing.expect(list.open.peek());
         try std.testing.expectEqual(row, findTestId(list.content, "ai.session.row.1").?);
         try std.testing.expectEqual(theme.layerBackground(2), list.chrome.getBackground());
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, list.badge.getBackground());
+        try std.testing.expectEqual(theme.current().accent_ink, list.badge.getText().?.color);
         try std.testing.expectEqual(@as(f32, 24), list.chrome.style.backdrop_blur());
         try std.testing.expectEqual(ui.Color.TRANSPARENT, list.surface.getBackground());
         try std.testing.expectEqual(theme.current().warn_ink, findTestId(list.content, "ai.session.status.approval").?.getIcon().?.tint);
         try std.testing.expectEqual(theme.current().accent_ink, findTestId(list.content, "ai.session.status.running").?.getIcon().?.tint);
     }
+    try list.updateBoundCount(0);
+    try std.testing.expect(list.badge.style.display == .none);
 }
 
 test "production AI permission popover reveals the single global material in the final paint stream" {

@@ -1568,7 +1568,7 @@ pub const Workspace = struct {
             tooltip.wrapper.style.height = .fill();
             tooltip.trigger.style.width = .fill();
             tooltip.trigger.style.height = .fill();
-            const tab_box = try ui.box(self.cx, tab_styles.tab(width, active), .{});
+            const tab_box = try ui.box(self.cx, tab_styles.tab(width, active, ordinal == 0 and !overflow), .{});
             const identity_color = if (group_id) |id| self.groupTabColor(id) orelse app_theme.current().accent else if (tab.?.tab_color) |color| ui.Color.hex(@intCast(color)) else app_theme.current().accent;
             const marker = try ui.box(self.cx, tab_styles.groupMarker(identity_color), .{});
             marker.meta.ownership.meta.test_id = if (group_id != null) "tabs.group_marker" else "tabs.color_marker";
@@ -1682,7 +1682,7 @@ pub const Workspace = struct {
                 .order = index,
                 .title = model_tab.name(),
                 .icon_svg = asset.svg_data,
-                .icon_rgba = if (artwork.index(asset.icon_id.?)) |i| if (state == .normal) artwork.display_pixels[i] else artwork.pixels[i] else &.{},
+                .icon_rgba = if (artwork.index(asset.icon_id.?)) |i| if (state == .normal) artwork.display_pixels[i] else artwork.status_pixels[i] else &.{},
                 .icon_original = state == .normal and artwork.index(asset.icon_id.?) != null,
                 .icon_bouncing = self.tabIsBouncing(model_tab.id),
                 .icon_id = asset.icon_id.?,
@@ -3862,7 +3862,7 @@ pub const Workspace = struct {
             .z_index = 350,
             .align_items = .center,
             .justify = .center,
-            .background = ui.Color.rgba(236, 255, 244, 128),
+            .background = app_theme.modal_barrier,
         }, .{});
         const card = try ui.box(cx, .{
             .width = .{ .px = 430 },
@@ -4319,7 +4319,7 @@ pub const Workspace = struct {
     // ── Close confirmation card ──────────────────────────────────────
 
     /// One-shot mount of the close-confirmation overlay onto terminal_area:
-    /// an absolute, centered, high-z scrim with a translucent background
+    /// an absolute, centered, high-z scrim with the shared barrier paint
     /// plus the themed overlay card. Hidden right away; showing it later only
     /// rewrites the dynamic texts and flips display.
     fn mountCloseConfirm(self: *Workspace) !void {
@@ -4337,7 +4337,7 @@ pub const Workspace = struct {
             .direction = .column,
             .align_items = .center,
             .justify = .center,
-            .background = ui.Color.rgba(15, 23, 42, 110),
+            .background = app_theme.modal_barrier,
         }, .{});
 
         const card = try ui.box(cx, .{

@@ -1,4 +1,4 @@
-//! Semantic UI and terminal palettes shared with docs/UI_V3/theme-presets.json.
+//! Semantic UI and terminal palettes for the application.
 //! Source terminal palettes are independent of UI contrast and material adjustments.
 const std = @import("std");
 pub const product_ids = [_][]const u8{ "dark", "light", "sauber", "reference-light", "mist", "midnight", "forest", "ocean", "plum", "ember", "graphite", "paper", "sand", "ice" };

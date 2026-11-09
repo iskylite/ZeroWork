@@ -188,6 +188,38 @@ test "dynamic tool directory keeps 300 frozen members while each call stays boun
     try std.testing.expectError(error.InvalidTargetCount, loop.scope.validate(loop.scope.memberIds()));
 }
 
+test "tool name guidance in descriptions and recovery matches registered functions" {
+    const a = std.testing.allocator;
+    const context: tools.host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = captured.owner, .binding_revision = 1, .grant_revision = 1 };
+    const contributions = @import("host_execution.zig").contributions ++ @import("host_queries.zig").contributions ++ @import("host_terminal_queries.zig").contributions;
+    var table = try tools.RequestTable.initWithHost(a, captured, &.{}, &.{}, context, &contributions);
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const run = table.lookup("host__run_uin_uterminal").?;
+    try std.testing.expect(table.lookup("host__run_in_terminal") == null);
+    try std.testing.expectError(error.ToolNotInRequest, table.parse(a, "host__run_in_terminal", "{}"));
+    const ids = [_][]const u8{ "host.read_terminal", "host.get_session", "host.attach_shell", "host.wait_execution" };
+    var description: []const u8 = "";
+    for (wire) |tool| if (std.mem.eql(u8, tool.name(), run.provider_name)) {
+        description = tool.dynamic.?.description;
+        break;
+    };
+    for (ids) |id| {
+        var name: [64]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, description, try tools.encodeName(&name, id)) != null);
+        try std.testing.expect(std.mem.indexOf(u8, description, id) == null);
+    }
+    for (wire) |tool| if (std.mem.eql(u8, tool.dynamic.?.id, "host.attach_shell")) {
+        try std.testing.expect(std.mem.indexOf(u8, tool.dynamic.?.description, run.provider_name) != null);
+        try std.testing.expect(std.mem.indexOf(u8, tool.dynamic.?.description, "host__read_uterminal") != null);
+    };
+    // Projection never changes the host's canonical definitions or authority.
+    try std.testing.expect(std.mem.indexOf(u8, run.definition.description, "host.attach_shell") != null);
+    const hint = try tools.toolHints(a, &.{ "host.read_terminal", "host.get_session", "host.attach_shell" });
+    defer a.free(hint);
+    try std.testing.expectEqualStrings("host__read_uterminal/host__get_usession/host__attach_ushell", hint);
+}
+
 test "API2 names are reversible collision-free and preserve all four legacy names" {
     for ([_][]const u8{ "fixture_probe.ping", "a__b.c_d", "plain-name", "run_command", "read_terminal", "list_remote_files", "read_remote_file" }) |id| {
         var encoded: [64]u8 = undefined;

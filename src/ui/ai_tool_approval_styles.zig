@@ -1,4 +1,4 @@
-//! Compact approval; editable reference: docs/UI_V3/ai/conversation.html?approval.
+//! Compact approval styles.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");

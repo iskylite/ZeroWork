@@ -208,7 +208,8 @@ pub const TerminalViewNode = struct {
     observed_input_revision: u64 = 0,
     user_input_revision: u64 = 0,
     observed_input_anchor: ?completion_input.Anchor = null,
-    observed_submission: ?struct { text: []u8, anchor: completion_input.Anchor, expires_ms: i64 } = null,
+    observed_tab_version: ?u64 = null,
+    observed_submission: ?struct { text: []u8, anchor: completion_input.Anchor, expires_ms: i64, tab_completed: bool = false } = null,
     completion_refresh_stamp: ?struct { input: u64, projection: u64, allowed: bool } = null,
     trusted_draft: std.ArrayList(u8) = .empty,
     completion_enabled: bool = true,
@@ -2199,6 +2200,7 @@ pub const TerminalViewNode = struct {
                 surface.showError(error.TrustedEditRejected);
             }
         }
+        self.recoverObservedTab();
         self.collectObservedSubmission();
         const stamp: @typeInfo(@FieldType(TerminalViewNode, "completion_refresh_stamp")).optional.child = .{ .input = self.observed_input_revision, .projection = if (surface.snapshot) |snapshot| snapshot.projection.version else 0, .allowed = self.completionAllowed() };
         if (changed or self.completion_refresh_stamp == null or !std.meta.eql(self.completion_refresh_stamp.?, stamp)) {
@@ -2439,7 +2441,8 @@ pub const TerminalViewNode = struct {
         try self.completion.add(command, .path, 1, wallClockMs());
     }
 
-    fn recordCompletionHistory(self: *TerminalViewNode, command: []const u8) void {
+    fn recordCompletionHistory(self: *TerminalViewNode, raw_command: []const u8) void {
+        const command = std.mem.trimEnd(u8, raw_command, " ");
         if (command.len == 0 or containsControlByte(command) or !std.unicode.utf8ValidateSlice(command)) return;
         for (self.completion.candidates.items) |*candidate| {
             if (candidate.source == .history and std.mem.eql(u8, candidate.text, command)) {
@@ -3451,7 +3454,9 @@ pub const TerminalViewNode = struct {
         if (!owner.eql(surface.owner)) return;
         self.observed_input_revision +|= 1;
         const modes = if (surface.snapshot) |snapshot| snapshot.projection.modes else terminal_service.Modes{};
+        self.recoverObservedTab();
         if (modes.alternate_screen or modes.application_cursor or modes.mouse_tracking != .none) {
+            self.observed_tab_version = null;
             self.line.markUnknown();
         } else switch (payload) {
             .bytes, .paste => |bytes| self.observeShellBytes(bytes),
@@ -3461,14 +3466,23 @@ pub const TerminalViewNode = struct {
                         self.observeShellSubmission();
                         self.line.clearLine();
                         self.observed_input_anchor = null;
+                        self.observed_tab_version = null;
                     },
-                    .backspace => if (!key.modifiers.alt and !key.modifiers.control) self.line.record(self.cx.allocator, "\x7f") else self.line.markUnknown(),
+                    .tab => self.observeShellTab(),
+                    .backspace => {
+                        self.observed_tab_version = null;
+                        if (!key.modifiers.alt and !key.modifiers.control) self.line.record(self.cx.allocator, "\x7f") else self.line.markUnknown();
+                    },
                     .c, .u => if (key.modifiers.control) {
                         self.line.clearLine();
                         self.observed_input_anchor = null;
+                        self.observed_tab_version = null;
                     } else self.line.markUnknown(),
                     .page_up, .page_down => {},
-                    else => self.line.markUnknown(),
+                    else => {
+                        self.observed_tab_version = null;
+                        self.line.markUnknown();
+                    },
                 }
             },
         }
@@ -3481,9 +3495,39 @@ pub const TerminalViewNode = struct {
                 if (self.terminal_surface.?.snapshot) |snapshot| self.observed_input_anchor = completion_input.anchor(snapshot.projection);
             }
             if (byte == '\r' or byte == '\n') self.observeShellSubmission();
+            if (byte == '\t') {
+                self.observeShellTab();
+                continue;
+            }
+            // Further edits need the completed echo first. If it has not
+            // arrived, keep the line unknown instead of guessing its contents.
+            self.observed_tab_version = null;
             self.line.record(self.cx.allocator, &.{byte});
             if (self.line.atLineStart()) self.observed_input_anchor = null;
         }
+    }
+
+    fn observeShellTab(self: *TerminalViewNode) void {
+        if ((!self.line.unknown or self.observed_tab_version != null) and self.line.content.items.len != 0 and self.observed_input_anchor != null) {
+            if (self.terminal_surface.?.snapshot) |snapshot| self.observed_tab_version = snapshot.projection.version;
+            // A recovered Tab result is history input, not a request to reopen
+            // the application's menu over the shell's own completion UI.
+            self.trusted_suppressed = self.completionRevision();
+        }
+        self.line.markUnknown();
+    }
+
+    fn recoverObservedTab(self: *TerminalViewNode) void {
+        const version = self.observed_tab_version orelse return;
+        const start = self.observed_input_anchor orelse return;
+        const surface = self.terminal_surface orelse return;
+        const snapshot = surface.snapshot orelse return;
+        if (snapshot.read_only or snapshot.projection.version <= version) return;
+        const text = (completion_input.completedLine(self.cx.allocator, snapshot.projection, start, self.line.content.items, false) catch return) orelse return;
+        defer self.cx.allocator.free(text);
+        self.line.clearLine();
+        self.line.record(self.cx.allocator, text);
+        self.observed_tab_version = null;
     }
 
     fn clearObservedSubmission(self: *TerminalViewNode) void {
@@ -3492,12 +3536,19 @@ pub const TerminalViewNode = struct {
     }
 
     fn observeShellSubmission(self: *TerminalViewNode) void {
+        self.recoverObservedTab();
         self.collectObservedSubmission();
         self.clearObservedSubmission();
-        if (self.line.unknown or self.line.content.items.len == 0) return;
         const surface = self.terminal_surface orelse return;
         const snapshot = surface.snapshot orelse return;
         const text = self.line.content.items;
+        if (self.line.unknown) {
+            if (self.observed_tab_version != null) if (self.observed_input_anchor) |start| {
+                self.observed_submission = .{ .text = self.cx.allocator.dupe(u8, text) catch return, .anchor = start, .expires_ms = wallClockMs() + 10000, .tab_completed = true };
+            };
+            return;
+        }
+        if (text.len == 0) return;
         const trusted = if (self.trusted_snapshot) |edit| edit.owner.eql(surface.owner) and edit.editable() and std.mem.eql(u8, edit.buffer, text) else false;
         if (trusted or completion_input.atCursor(snapshot.projection, text)) {
             self.recordCompletionHistory(text);
@@ -3512,6 +3563,16 @@ pub const TerminalViewNode = struct {
         const value = self.observed_submission orelse return;
         const surface = self.terminal_surface orelse return;
         const snapshot = surface.snapshot orelse return;
+        if (value.tab_completed) {
+            if (!snapshot.read_only) if (completion_input.completedLine(self.cx.allocator, snapshot.projection, value.anchor, value.text, true) catch null) |text| {
+                defer self.cx.allocator.free(text);
+                self.recordCompletionHistory(text);
+                self.clearObservedSubmission();
+                return;
+            };
+            if (wallClockMs() >= value.expires_ms or snapshot.read_only) self.clearObservedSubmission();
+            return;
+        }
         if (!snapshot.projection.modes.alternate_screen and completion_input.echoed(snapshot.projection, value.anchor, value.text)) {
             self.recordCompletionHistory(value.text);
             self.clearObservedSubmission();
@@ -3540,6 +3601,7 @@ pub const TerminalViewNode = struct {
         self.trusted_suppressed = null;
         self.clearObservedSubmission();
         self.observed_input_anchor = null;
+        self.observed_tab_version = null;
         self.observed_input_revision = 0;
         self.completion_refresh_stamp = null;
         self.line.clearLine();
@@ -6550,6 +6612,104 @@ test "observed completion records nested shell input after delayed echo and auto
     try std.testing.expectEqual(base_count + 1, view.completion.candidates.items.len);
 }
 
+test "observed completion records the echoed Tab result and automatically suggests cat bench.log" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(8, 80);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 500);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    cx.setFocus(view.root);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try transport.controller.feedOutput(fixture.owner, 1, "root# ", 100);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleTextInput("cat ben");
+    try transport.controller.feedOutput(fixture.owner, 2, "cat ben", 200);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleKeyDown(.tab, .{});
+    try std.testing.expect(view.line.unknown);
+    const base_count = view.completion.candidates.items.len;
+    try transport.controller.feedOutput(fixture.owner, 3, "ch.log ", 300);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expectEqualStrings("cat bench.log ", view.line.content.items);
+    try std.testing.expect(!view.line.unknown);
+    try std.testing.expect(!view.completion.state.menu_open);
+    try std.testing.expectEqual(base_count, view.completion.candidates.items.len);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectEqualStrings("cat ben\t\r", transport.written.items);
+    try std.testing.expectEqual(base_count + 1, view.completion.candidates.items.len);
+    try std.testing.expectEqualStrings("cat bench.log", view.completion.candidates.items[base_count].text);
+    try transport.controller.feedOutput(fixture.owner, 4, "\r\nlog output\r\nroot# ", 400);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleTextInput("cat");
+    try transport.controller.feedOutput(fixture.owner, 5, "cat", 500);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expect(view.completion.state.menu_open);
+    try std.testing.expectEqual(@as(usize, 1), view.completion_count);
+    try std.testing.expectEqualStrings("cat bench.log", view.completion_matches[0].candidate.text);
+    cx.handleKeyDown(.right, .{});
+    try std.testing.expectEqualStrings("cat ben\t\rcat bench.log", transport.written.items);
+}
+
+test "observed completion waits for a submitted Tab echo and excludes hidden and cancelled drafts" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(12, 80);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 500);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    cx.setFocus(view.root);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try transport.controller.feedOutput(fixture.owner, 1, "root# ", 100);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    const base_count = view.completion.candidates.items.len;
+    cx.handleTextInput("cat ben");
+    cx.handleKeyDown(.tab, .{});
+    // The original prefix can arrive before the Tab response. It must not
+    // become a known command merely because the projection version changed.
+    try transport.controller.feedOutput(fixture.owner, 2, "cat ben", 200);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expect(view.line.unknown);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectEqual(base_count, view.completion.candidates.items.len);
+    try transport.controller.feedOutput(fixture.owner, 3, "ch.log \r\nlog output\r\nroot# ", 300);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expectEqual(base_count + 1, view.completion.candidates.items.len);
+    try std.testing.expectEqualStrings("cat bench.log", view.completion.candidates.items[base_count].text);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expectEqual(@as(u32, 1), view.completion.candidates.items[base_count].frequency);
+
+    cx.handleTextInput("hidden-value");
+    cx.handleKeyDown(.tab, .{});
+    cx.handleKeyDown(.@"return", .{});
+    try transport.controller.feedOutput(fixture.owner, 4, "\r\nroot# ", 400);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expectEqual(base_count + 1, view.completion.candidates.items.len);
+    cx.handleTextInput("cat cancel");
+    cx.handleKeyDown(.tab, .{});
+    cx.handleKeyDown(.c, .{ .ctrl = true });
+    try transport.controller.feedOutput(fixture.owner, 5, "cat cancelled.log\r\nroot# ", 500);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectEqual(base_count + 1, view.completion.candidates.items.len);
+}
+
 test "observed completion preserves Enter and Tab and excludes hidden input and alternate screen" {
     const fixture = @import("terminal_surface_tests.zig");
     var transport: fixture.FakeTransport = undefined;
@@ -6604,6 +6764,7 @@ test "observed completion preserves Enter and Tab and excludes hidden input and 
 }
 
 test "observed completion echo handles Unicode soft wraps and rejects a cursor inside the line" {
+    const a = std.testing.allocator;
     const fixture = @import("terminal_surface_tests.zig");
     var transport: fixture.FakeTransport = undefined;
     try transport.init(8, 12);
@@ -6619,6 +6780,9 @@ test "observed completion echo handles Unicode soft wraps and rejects a cursor i
     try std.testing.expect(completion_input.echoed(after.projection, start, command));
     try std.testing.expect(after.projection.scrollback.viewport_offset > 0);
     try std.testing.expect(completion_input.atCursor(after.projection, command));
+    const completed = (try completion_input.completedLine(a, after.projection, start, "echo 中", false)).?;
+    defer a.free(completed);
+    try std.testing.expectEqualStrings(command, completed);
     var scrolled = after.projection;
     scrolled.scrollback.viewport_offset -= 1;
     try std.testing.expect(!completion_input.atCursor(scrolled, command));

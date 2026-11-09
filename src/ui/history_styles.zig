@@ -1,4 +1,4 @@
-//! Editable HTML baseline: docs/UI_V3/workspace/session-history/app.js.
+//! Session history styles.
 const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");

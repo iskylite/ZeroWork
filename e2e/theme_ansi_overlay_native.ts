@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Native overlays over real local PTY truecolor output, without a wallpaper.
  * node e2e/theme_ansi_overlay_native.ts BINARY EVIDENCE_DIR [theme,theme]
  */
@@ -8,7 +9,7 @@ import {join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import * as h from '../vendor/zenit/e2e/client.ts';
 const binary=resolve(process.argv[2]),out=resolve(process.argv[3]);await mkdir(out,{recursive:true});
-const palettes=JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes;
+const palettes=nativeThemeData.themes;
 const themes=process.argv[4]?.split(',')??Object.keys(palettes);
 const report:any={status:'running',binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),cases:[],limits:['Actual local zsh PTY output; no external host or model request.','1440×900 pt, no background image, transparency 100, blur 0.','Black and white use explicit 24-bit SGR backgrounds, independent of each theme ANSI slots.']};
 const shown=(n:any)=>n?.rect&&n.visible!==false&&n.hidden!==true&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0;

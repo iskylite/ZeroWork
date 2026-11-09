@@ -1091,7 +1091,7 @@ test "session capabilities Local native catalog excludes shell attachment and ke
     try std.testing.expect(!prompt.has(bridge.wire, "host.attach_shell"));
     const system = try prompt.build(a, .auto, bridge.wire);
     defer a.free(system);
-    try std.testing.expect(std.mem.indexOf(u8, system, "Use host.run_in_terminal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, system, "Use host__run_uin_uterminal") != null);
     try std.testing.expect(std.mem.indexOf(u8, system, "host.attach_shell") == null);
     // The terminal-read facade can omit native execution. Reading the screen
     // must not advertise PTY control merely because it has a terminal.

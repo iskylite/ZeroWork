@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import * as h from '../zig-out/share/zenit/harness/client.ts';
 const out=resolve(process.argv[2]??'/tmp/zerowork-sidebar-drag');await mkdir(out,{recursive:true});
+const binary=resolve(process.argv[3]??'zig-out/bin/zerowork');
 const isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-sidebar-drag-'))),data=join(isolated,'data');await mkdir(data);
 await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n');
 const names=['Alpha','Beta','Gamma','Delta','Echo'];
@@ -34,7 +35,7 @@ async function drop(name:string,target:()=>Promise<any>,after=false,cancel=false
 async function launch(round:number,run:()=>Promise<void>){
  const rpc=join(isolated,'rpc-'+round);await mkdir(rpc);process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
  const log=await open(join(out,'app-'+round+'.log'),'w');
- const child=spawn(resolve('zig-out/bin/zerowork'),[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});
+ const child=spawn(binary,[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});
  const ended=new Promise<void>(done=>child.once('close',()=>done()));
  try{await h.waitForServerReady();await h.resizeWindow(1100,800);await run();assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);await Promise.race([ended,new Promise((_,reject)=>setTimeout(()=>reject(Error('quit timeout')),15000))]);assert.equal(child.exitCode,0);}
  finally{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGTERM');await ended;await log.close();}

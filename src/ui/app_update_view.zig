@@ -84,7 +84,7 @@ pub const View = struct {
         const open = try scope.createSignal(bool, false);
         const disabled = try scope.createSignal(bool, false);
         const cancel_disabled = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = ui.split(open, cx.on(View, self, closed)), .width = 520, .max_height = 378, .background = S.theme.current().overlay, .overlay_color = S.theme.current().app.withAlpha(92), .close_on_overlay = false }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = ui.split(open, cx.on(View, self, closed)), .width = 520, .max_height = 378, .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         modal.dialog.setStyleInline(cx.allocator, S.dialog(cx.viewport.width, cx.viewport.height, 378));
         modal.body.setStyleInline(cx.allocator, S.body(cx.viewport.height));
@@ -276,7 +276,6 @@ pub const View = struct {
         self.body.setStyleInline(self.cx.allocator, S.body(self.cx.viewport.height));
         self.scroll.setStyleInline(self.cx.allocator, .{ .margin = .{ .top = m.body_top, .bottom = if (self.has_actions) m.footer_gap else 0 } });
         self.summary.setStyleInline(self.cx.allocator, S.summary(self.cx.viewport.height));
-        self.overlay.setBackground(c.app.withAlpha(92));
         self.heading.setTextColor(c.fg_1);
         self.description.setTextColor(c.fg_1);
         self.summary_text.setTextColor(c.fg_1);

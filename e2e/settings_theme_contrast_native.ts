@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Settings card and selection feedback in isolated native windows.
  * node e2e/settings_theme_contrast_native.ts BINARY OUTPUT_DIR
  */
@@ -15,7 +16,7 @@ const cases = [
 ] as const;
 const requestedCase = process.argv[4];
 const report: any = {status: 'running', cases: []};
-const palettes = JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json', import.meta.url), 'utf8')).themes;
+const palettes = nativeThemeData.themes;
 const shown = (node: any) => node && node.visible !== false && !node.hidden && node.rect?.w > 0 && node.rect?.h > 0;
 const descendants = (node: any): any[] => [node, ...(node.children ?? []).flatMap(descendants)];
 

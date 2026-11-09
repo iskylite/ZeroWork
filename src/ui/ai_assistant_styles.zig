@@ -26,6 +26,12 @@ pub fn ownerText(_: *const ui.ThemeTokens) ui.TextStyle {
 pub fn windowControl() ButtonStyle {
     return .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .padding = .{}, .gap = 0, .corner_radius = 6, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
+pub fn countBadge(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .position = .absolute, .inset = .{ .top = .{ .px = -1 }, .right = .{ .px = 0 } }, .height = .{ .px = 14 }, .background = ui.Color.TRANSPARENT, .padding = .{}, .border = .{ .width = 0, .radius = 0 } };
+}
+pub fn countBadgeText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 9, .font_weight = 700, .line_height = 12.0 / 9.0, .text_align = .center, .color = theme.current().accent_ink };
+}
 pub fn controlHover(kind: enum { collapse, maximize, close }) ButtonStyle {
     _ = kind;
     return .{ .background = theme.states().hover };

@@ -2,10 +2,12 @@
 
 AI 答复恢复专项：`zig build ai-recovery-preview -Dtest-mode=true -j2` 后运行 `node e2e/ai_answer_recovery_native.ts /tmp/zerowork-answer-recovery`。隔离窗口复用生产恢复卡片，以合成快照检查未知结果、冷却、上下文失败的可见说明、按钮禁用、详情及 600/360 逻辑宽度。命令不重放、未知回执保留、异常工具调用拒绝和归属／预算检查由 `zig build test -Dtest-filter='answer retry' -j2` 验证；卡片预览不代表真实 SSH 已核查。
 
-原调用只读核查：同一 `ai-recovery-preview` 构建后运行 `node e2e/ai_readonly_verification_native.ts /tmp/zw-readonly-verification`，检查原目标、追加证据、旧记录缺少定位信息、原连接失效及 600/360 布局，核查后新计划仍禁用。`zig build test -Dtest-filter='readonly verification' -j2` 和 `zig build test-ui -Dui-test-filter='readonly verification' -j2` 覆盖调用/参数与generation绑定、原SSH快照、零取消/关闭/重放、终端观察不回退到有副作用的snapshot、证据复制及journal重启。`docs/UI_V3/ai/readonly-verification.html` 是可编辑参考；预览与受控回执不代替真实服务器业务后果核验。
+原调用只读核查：同一 `ai-recovery-preview` 构建后运行 `node e2e/ai_readonly_verification_native.ts /tmp/zw-readonly-verification`，检查原目标、追加证据、旧记录缺少定位信息、原连接失效及 600/360 布局，核查后新计划仍禁用。`zig build test -Dtest-filter='readonly verification' -j2` 和 `zig build test-ui -Dui-test-filter='readonly verification' -j2` 覆盖调用/参数与generation绑定、原SSH快照、零取消/关闭/重放、终端观察不回退到有副作用的snapshot、证据复制及journal重启。预览与受控回执不代替真实服务器业务后果核验。
 
 
 使用仓库实际依赖的 Zenit Harness 和本机 Node 26，无需安装服务或 npm 依赖。
+
+KVM 窄分屏工具栏：`zig build bmc-kvm-preview -Dtest-mode=true -j2 --prefix /tmp/zw-kvm-toolbar-build` 后运行 `node e2e/kvm_toolbar_native.ts /tmp/zw-kvm-toolbar-build/bin/bmc-kvm-preview /tmp/zw-kvm-toolbar-evidence`。独立窗口复用生产 renderer，在宽窗口内分别分配 520、336、280、240 点会话宽度，检查图文→五项纯图标→三点收纳、连接状态图标及提示、所有直接入口、菜单边界、键盘进入与回焦、外部点击和拉宽恢复；覆盖晴霜与深色主题并保存原生截图。使用本地合成视频与类型化服务，不连接真实 BMC、不执行电源或启动写入。布局与输入回归使用 `zig build test -Dtest-filter='BMC view' -j2`。
 
 ```sh
 zig build -Dtest-mode=true -De2e-port=19818 -j2
@@ -97,7 +99,7 @@ AI gateway 专项默认跳过；明确开启后必须同时提供 `ZEROWORK_AI_G
 
 分层与保留面板回归：`zig build -Dtest-mode=true -j2 --prefix /tmp/zw-layer-build` 后运行 `node e2e/layer_regressions_native.ts /tmp/zw-layer-build/bin/zerowork /tmp/zw-layer-regressions`。通过生产设置在 AI 首次打开前、收起后切换三主题，核对原节点、未发送草稿、反复重开及860×480；使用合成背景和独立Local PTY，不发送模型或SSH请求。脚本调用 `layer_regression_pixels.py`（与现有像素回归一样依赖 Pillow），拒绝空白浮层变为整块实色，检查重复重开没有累计加实，以及深色主题草稿确实绘制浅色文字。对应生产组件alpha和内部菜单归属断言：`zig build test-ui -Dui-test-filter=material -j2`。截图仍需人工查看。
 
-KVM 视频及 HUD 分层：`zig build bmc-kvm-preview -Dtest-mode=true -j2 --prefix /tmp/zw-kvm-material-build` 后运行 `node e2e/bmc_material_layers_native.ts /tmp/zw-kvm-material-build/bin/bmc-kvm-preview /tmp/zw-kvm-material-evidence`。生产 View 挂载全局材质策略，覆盖同窗三主题、标准／最小尺寸、透明度端点、FPS、输入提示、五类菜单及嵌套下拉框、说明气泡、启动顺序、日志、断开确认、连接／等待／失败 HUD；Python Pillow 检查真实 Metal 视频像素、HUD 混色及进度玻璃采样。独立原始 typed services 和本地 RGBA 不访问设备；电源及启动写入计数必须为零。对应组件回归为 `BMC material`、`BMC view`、`BMC Select`、`BMC FPS HUD` 的 test-bmc 过滤器。连续视频呈现继续使用 `bmc_kvm_video_frames_native.ts`，场景与限制见 [分层说明](../docs/UI_V3/LAYER_MATERIALS.md#kvm-视频与-hud-的原生分层验收2026-11-05)。
+KVM 视频及 HUD 分层：`zig build bmc-kvm-preview -Dtest-mode=true -j2 --prefix /tmp/zw-kvm-material-build` 后运行 `node e2e/bmc_material_layers_native.ts /tmp/zw-kvm-material-build/bin/bmc-kvm-preview /tmp/zw-kvm-material-evidence`。生产 View 挂载全局材质策略，覆盖同窗三主题、标准／最小尺寸、透明度端点、FPS、输入提示、五类菜单及嵌套下拉框、说明气泡、启动顺序、日志、断开确认、连接／等待／失败 HUD；Python Pillow 检查真实 Metal 视频像素、HUD 混色以及进度卡片底色和文字对比度。独立原始 typed services 和本地 RGBA 不访问设备；电源及启动写入计数必须为零。对应组件回归为 `BMC material`、`BMC view`、`BMC Select`、`BMC FPS HUD` 的 test-bmc 过滤器。连续视频呈现继续使用 `bmc_kvm_video_frames_native.ts`。
 
 开机命令回显回归：先运行 `zig build ssh-shell-execution-acceptance -j2 -Doptimize=ReleaseFast`，再用已安装 Paramiko 的 Python 执行 `e2e/ssh_startup_commands.py --runner zig-out/bin/ssh-shell-execution-runner --output /tmp/zerowork-startup-check`。测试使用隔离的本地 SSH 和真实 Bash/Zsh PTY，检查延迟提示符下逐条执行与单次回显、提示符超时，以及交互式命令后的人工输入恢复；不连接已保存主机。
 
@@ -121,4 +123,28 @@ v0.4 默认策略与活动子任务交接：构建 `zig build -Dtest-mode=true -
 对应定向检查：`./scripts/test_isolated.sh test -Dtest-filter='v0.4' -j2`，`./scripts/test_isolated.sh test -Dtest-filter='settings' -j2`，`./scripts/test_isolated.sh test-ui -Dui-test-filter='lifecycle controller' -j2` 和 `./scripts/test_isolated.sh test-ui -Dui-test-filter='tab grouping native drop' -j2`。异常复用覆盖当前账本与恢复事实、只读新任务不改写旧 unknown、伪造动态写调用被宿主拦截、目标不相交与 reconnect generation 不能绕过重叠约束；拖放检查等待期间不建半成品组、原目标成员版本变化时不发布。
 
 
-v0.4 子智能体对话与设置气泡：`zig build -Dtest-mode=true --prefix /tmp/zw-child-ui-build -j2` 后运行 `ZW_AI_TEST_PREFIX=/tmp/zw-child-ui-build node e2e/ai_child_dialog_native.ts /tmp/zw-child-dialog-new-run`。使用隔离数据、真实 Local PTY 与 loopback Provider，验证子提问／审批只消费原子票据、命令仅执行一次、父子草稿和真实拖入图片隔离、非复用子对话的显式用户续行、子模型独立与父权限上限、后台 queue／steer、主标题栏打开列表及标题／LOGO／状态列对齐、主子共用 600×456 默认尺寸、设置气泡宽 320 且自然撑高、名称同行与任务记录折叠／展开／数量不截断、时间线几何不变、最大化恢复、收起重开保留草稿、860×480、历史子详情只读与显式恢复父对话不发模型请求，最后正常 Quit。报告记录二进制 SHA-256、请求、journal 和 Metal 截图，必须实际查看。核心与 UI 定向使用 `v0.4`、`AI composer`、`v0.4 child list`、`conversation UI` 过滤器。HTML 基准见 `docs/UI_V3/workspace/child-agents/index.html`；受控回答不替代真实模型／外部 MCP／远端业务验收。
+v0.4 子智能体对话与设置气泡：`zig build -Dtest-mode=true --prefix /tmp/zw-child-ui-build -j2` 后运行 `ZW_AI_TEST_PREFIX=/tmp/zw-child-ui-build node e2e/ai_child_dialog_native.ts /tmp/zw-child-dialog-new-run`。使用隔离数据、真实 Local PTY 与 loopback Provider，验证子提问／审批只消费原子票据、命令仅执行一次、父子草稿和真实拖入图片隔离、非复用子对话的显式用户续行、子模型独立与父权限上限、后台 queue／steer、主标题栏打开列表及标题／LOGO／状态列对齐、主子共用 600×456 默认尺寸、设置气泡宽 320 且自然撑高、名称同行与任务记录折叠／展开／数量不截断、时间线几何不变、最大化恢复、收起重开保留草稿、860×480、历史子详情只读与显式恢复父对话不发模型请求，最后正常 Quit。报告记录二进制 SHA-256、请求、journal 和 Metal 截图，必须实际查看。核心与 UI 定向使用 `v0.4`、`AI composer`、`v0.4 child list`、`conversation UI` 过滤器。受控回答不替代真实模型／外部 MCP／远端业务验收。
+
+标准 MCP 与飞书 CLI 只读验收：先构建启用 harness 的应用，运行
+`ZW_AI_TEST_PREFIX=/tmp/zw-standard-mcp-build node e2e/ai_extensions_native.ts /tmp/zw-standard-mcp-native`。
+真实飞书验证使用 `e2e/lark_cli_mcp_native.ts`，要求现有 `lark-cli` 用户登录，
+`ZW_LARK_TEST_DOC_FILE` 指向保存现有已授权文档 URL 的本地文件。
+适配器只开放身份、文档目录及搜索读取，复用 CLI 凭据、不导出 token，
+只在隔离数据目录配置 MCP。若账号缺少搜索权限，验收确认错误被正确返回，
+不会发起额外授权。报告只记录状态与调用名，不保存文档正文或凭据。
+
+
+## 官方 MCP 参考服务
+
+先构建 `zig build -Dtest-mode=true --prefix /tmp/zw-standard-mcp-build -j2`，再安装固定的官方服务依赖并运行：
+
+```sh
+npm ci --prefix e2e/fixtures/mcp-reference --ignore-scripts
+ZW_MCP_REFERENCE="$PWD/e2e/fixtures/mcp-reference" node e2e/mcp_reference_native.ts /tmp/zerowork-mcp-reference-evidence
+```
+
+Runner 使用未修改的官方 Everything 2.2.1 和 SDK 1.32.2 两个 HTTP 示例，独立启动 Node 服务、原生应用、data/RPC 目录与本地 Provider 响应服务；不接触正式应用配置或飞书数据。验证 stdio／Streamable HTTP、resources／templates／prompts／completion、roots、采样前后人工审阅、表单默认值和拒绝、多轮 opaque requestState、2026 URL 输入、Mcp-Param 请求头及独立 POST SSE 订阅更新、OAuth 401 提示／浏览器 PKCE 登录／受保护工具、URL 导航审阅及 -32042 不自动重放。浏览器会打开 localhost 授权及演示页面；URL accept 表示同意访问，不代表网页事务完成。示例页面不需要真实密钥或付款。
+
+输出包含报告、原生截图和日志。报告记录实际服务版本与执行步骤，最后必须正常退出原生应用并结束自建服务。生产应用不依赖这些 Node 包。`ZW_MCP_START_PHASE=1` 或 `2` 仅用于定向调试后半段；完整验收不设置此变量。
+
+Everything 的 stdio／HTTP 必须实际协商为 2026-07-28；旧版 SDK 示例继续覆盖 2025-11-25 兼容。`ZW_MCP_UI_ONLY=1 ZW_MCP_THEME=reference-light` 可只运行 V4 服务列表的浅色／860×480 几何与原生操作验收，完整运行同时覆盖深色界面。

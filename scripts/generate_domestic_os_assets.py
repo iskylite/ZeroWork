@@ -22,7 +22,6 @@ SOURCES = {
     "openkylin": "https://gitee.com/openkylin/openkylin-theme/raw/36f233d1d0cb7c8ca446d34ed3b6687ecfdcc282/icons/ukui-icon-theme-default/256x256/apps/distributor-logo-kylin.png",
     "ubuntukylin": "https://raw.githubusercontent.com/ubuntukylin/ubuntukylin-theme/d6038b6dfaeb1b4761458e0950753a0598d49a1b/icons/ukui/256x256/places/distributor-logo-kylin.png",
     "uos": "https://www.chinauos.com/assets/image/website_logo.ico",
-    "deepin": "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/deepin.svg",
     "openeuler": "https://www.openeuler.org/favicon.ico",
     "euleros": "https://mirrors.huaweicloud.com/euler/2.0/os/x86_64/Packages/euleros-logos-2.0-6.noarch.rpm",
     "anolis": "https://img.alicdn.com/imgextra/i1/O1CN01oJnJZg1yK4RzI4Rx2_!!6000000006559-2-tps-118-118.png",
@@ -38,15 +37,12 @@ SOURCES = {
     "isoft": "https://www.i-soft.com.cn/uploads/images/2022/0526/LsAysk68qNl5rhhIxydktnOaSPRaoghu1TXRKKNt.png",
     "redflag": "https://www.chinaredflag.cn/static/img/hd-logo.png",
 }
-COLOURS = {"deepin": "007CFF"}
 
 
 def generate(name, raw):
     raw = prepare(name, raw)
     if raw.lstrip().startswith((b"<svg", b"<?xml")):
         svg = raw.decode("utf-8-sig")
-        if name in COLOURS:
-            svg = svg.replace("<svg ", f'<svg fill="#{COLOURS[name]}" ', 1)
         (DEST / f"{name}.svg").write_text(svg)
         image = Image.open(io.BytesIO(resvg_py.svg_to_bytes(svg_string=svg, width=288, height=288))).convert("RGBA")
     else:

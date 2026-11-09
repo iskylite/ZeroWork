@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Retained production views/recipes in the isolated native button acceptance window. */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -9,7 +10,7 @@ import { pathToFileURL } from "node:url";
 const prefix = resolve(process.argv[2]), out = resolve(process.argv[3]);
 const h = await import(pathToFileURL(join(prefix, "share/zenit/harness/client.ts")).href);
 const binary = join(prefix, "bin/button-policy-preview");
-const themes = Object.keys(JSON.parse(await readFile(new URL("../docs/UI_V3/theme-presets.json", import.meta.url), "utf8")).themes);
+const themes = Object.keys(nativeThemeData.themes);
 const selected = new Set(["dark", "light", "sauber", "mist", "nord", "solarized-light", "reference-light"]);
 await mkdir(out, { recursive: true });
 const iso = await realpath(await mkdtemp("/tmp/zw-button-policy-"));

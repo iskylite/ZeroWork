@@ -222,7 +222,9 @@ pub const Bridge = struct {
         if (self.route_broker) |broker| broker.execution_route.consume(invocation.context, target, command);
     }
     fn planChange(invocation: host_tools.Invocation, allocator: std.mem.Allocator, selected: routing.Route, requires_creation: bool) !host_tools.Result {
-        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = "requires_plan_change", .state = "cancelled_unsent", .selected_route = @tagName(selected), .requires_new_session = requires_creation, .host_fact = "当前运行方式已确定，当前工具没有派发。请直接使用 next_tool 指定的工具；无需为了重新确认运行模式查询上下文。仅补充缺少的目标、能力或创建依赖信息，命令权限仍由宿主验证。", .next_tool = if (requires_creation and selected == .batch) "host.create_group/host.open_session/run_command" else if (selected == .batch) "run_command" else if (selected == .current_terminal) "host.run_in_terminal" else "host.create_group/host.open_session/host.run_in_terminal", .side_effect_started = false }, .{});
+        const next_tool = try tools.toolHints(allocator, if (requires_creation and selected == .batch) &.{ "host.create_group", "host.open_session", "run_command" } else if (selected == .batch) &.{"run_command"} else if (selected == .current_terminal) &.{"host.run_in_terminal"} else &.{ "host.create_group", "host.open_session", "host.run_in_terminal" });
+        defer allocator.free(next_tool);
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = "requires_plan_change", .state = "cancelled_unsent", .selected_route = @tagName(selected), .requires_new_session = requires_creation, .host_fact = "当前运行方式已确定，当前工具没有派发。请直接使用 next_tool 指定的工具；无需为了重新确认运行模式查询上下文。仅补充缺少的目标、能力或创建依赖信息，命令权限仍由宿主验证。", .next_tool = next_tool, .side_effect_started = false }, .{});
         errdefer allocator.free(body);
         const blocks = try allocator.alloc(host_tools.Block, 1);
         blocks[0] = .{ .structured = body };
@@ -1929,7 +1931,7 @@ test "fixed execution mode mismatch gives actionable route without dispatch or d
         defer parsed.deinit();
         try std.testing.expectEqualStrings("requires_plan_change", parsed.value.object.get("error_code").?.string);
         try std.testing.expect(!parsed.value.object.get("side_effect_started").?.bool);
-        try std.testing.expectEqualStrings(if (mode == .isolated_exec) "run_command" else if (mode == .attached_pty) "host.run_in_terminal" else "host.create_group/host.open_session/host.run_in_terminal", parsed.value.object.get("next_tool").?.string);
+        try std.testing.expectEqualStrings(if (mode == .isolated_exec) "run_command" else if (mode == .attached_pty) "host__run_uin_uterminal" else "host__create_ugroup/host__open_usession/host__run_uin_uterminal", parsed.value.object.get("next_tool").?.string);
         try std.testing.expect(bridge.running == null and bridge.pending == null and bridge.host_exchange == null);
     }
 }

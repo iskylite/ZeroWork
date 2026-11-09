@@ -448,6 +448,7 @@ pub const Loop = struct {
             var image_owner: ?@import("../host/identity.zig").SessionHandle = null;
             var image_transform: u64 = 0;
             for (self.records.items) |resolved| if (std.mem.eql(u8, resolved.key.call_id, call.id)) {
+                if (self.request.vision and self.request.tool_images) if (resolved.host_result) |result| for (result.images) |ref| try refs.append(a, ref);
                 if (resolved.generic_results) |results| for (results) |result| for (result.blocks) |block| if (block == .image_ref) {
                     try refs.append(a, block.image_ref);
                     image_owner = result.receipt.owner;

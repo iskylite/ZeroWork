@@ -3,6 +3,7 @@ const ui = @import("ui");
 const S = @import("ai_sessions_styles.zig");
 const T = @import("app_theme.zig");
 const RowView = @import("ai_session_row.zig");
+const Header = @import("ai_assistant_header.zig");
 pub const Action = RowView.Action;
 pub const Entry = RowView.Entry;
 pub const Hooks = RowView.Hooks;
@@ -18,6 +19,9 @@ pub const View = struct {
     surface: *ui.Node,
     chrome: *ui.Node,
     painted_colors: T.Colors,
+    button: *ui.Node,
+    badge: *ui.Node,
+    a11y_label: [96]u8 = undefined,
     scroll: ui.widgets.ScrollAreaResult,
     rows: ?*ui.Scope = null,
     pending: ?u64 = null,
@@ -51,7 +55,8 @@ pub const View = struct {
         scroll.content.setStyleInline(cx.allocator, S.menu());
         scroll.container.meta.ownership.meta.test_id = "ai.sessions.menu";
         try popup.content.appendChild(cx.allocator, scroll.container);
-        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = popup.wrapper, .surface = scroll.container, .chrome = popup.chrome, .painted_colors = T.current(), .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
+        const badge = try Header.mountCountBadge(cx, anchor, "ai.sessions.count");
+        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = popup.wrapper, .surface = scroll.container, .chrome = popup.chrome, .painted_colors = T.current(), .button = anchor, .badge = badge, .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
         const modal = try ui.widgets.Modal(.{ .open = confirmation, .width = 320, .max_height = 220, .background = T.current().overlay }).mount(scope, cx);
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.dialog = modal.dialog;
@@ -149,6 +154,7 @@ pub const View = struct {
         repaint(self.dialog, self.painted_colors);
         repaint(self.history_dialog, self.painted_colors);
         self.chrome.setStyleInline(self.cx.allocator, S.popover());
+        Header.repaintCountBadge(self.cx, self.badge);
         self.dialog.setStyleInline(self.cx.allocator, S.dialog());
         _ = self.title_icon.setTint(next.warn_ink);
         self.control_styles[0].set(S.control(false));
@@ -156,6 +162,11 @@ pub const View = struct {
         self.reflow();
         self.painted_colors = next;
         self.cx.requestRedraw();
+    }
+    pub fn updateBoundCount(self: *View, count: usize) !void {
+        try Header.updateCountBadge(self.cx, self.badge, count);
+        const label = try @import("std").fmt.bufPrint(&self.a11y_label, "AI 会话列表，{d} 个已绑定", .{count});
+        if (self.button.behavior.interaction.a11y) |*a11y| a11y.label = label;
     }
     fn repaint(node: *ui.Node, previous: T.Colors) void {
         node.setBackground(remap(node.getBackground(), previous));

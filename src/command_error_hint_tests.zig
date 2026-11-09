@@ -201,6 +201,7 @@ test "AI error hint times out without replay and a newer failure restarts the ti
     cx.layout();
     cx.frame_time_ms = 1000;
     view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
+    try std.testing.expectEqualStrings("8 秒后关闭", view.countdown.label.getText().?.content);
     cx.frame_time_ms = 5000;
     _ = try adapter.feed(failure);
     var second = try adapter.copyProjection(a);
@@ -208,6 +209,9 @@ test "AI error hint times out without replay and a newer failure restarts the ti
     try view.observe(owner, &second);
     cx.layout();
     view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
+    cx.frame_time_ms = 6000;
+    view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
+    try std.testing.expectEqualStrings("7 秒后关闭", view.countdown.label.getText().?.content);
     cx.frame_time_ms = 12999;
     view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
     try std.testing.expectEqual(@as(@TypeOf(view.root.style.display), .flex), view.root.style.display);
@@ -251,6 +255,7 @@ test "AI error hint timeout restarts after hover focus or hidden window" {
     cx.mouse_y = card.y + 10;
     cx.hovered_node = view.open;
     view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
+    try std.testing.expectEqual(ui.types.Display.none, view.countdown.root.style.display);
     cx.frame_time_ms = 15000;
     view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
     try std.testing.expectEqual(@as(@TypeOf(view.root.style.display), .flex), view.root.style.display);
@@ -259,10 +264,12 @@ test "AI error hint timeout restarts after hover focus or hidden window" {
     cx.mouse_y = 0;
     view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
     try std.testing.expectEqual(@as(?u64, 23000), view.timeout_deadline_ms);
+    try std.testing.expectEqualStrings("8 秒后关闭", view.countdown.label.getText().?.content);
     cx.hovered_node = null;
     cx.frame_time_ms = 18000;
     cx.setFocus(view.close);
     view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
+    try std.testing.expectEqual(ui.types.Display.none, view.countdown.root.style.display);
     cx.frame_time_ms = 30000;
     view.updateTimeoutAt(@intFromFloat(cx.frame_time_ms));
     try std.testing.expectEqual(@as(@TypeOf(view.root.style.display), .flex), view.root.style.display);

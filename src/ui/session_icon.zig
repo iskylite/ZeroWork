@@ -48,6 +48,7 @@ pub fn forOs(kind: Os) ?ui.SvgAsset {
         .macos => @import("assets_generated.zig").local_apple,
         .windows => os.windows,
         .ubuntu => os.ubuntu,
+        .sugon => os.sugon,
         .rocky => os.rocky,
         .linux => os.linux,
         .debian => os.debian,
@@ -84,6 +85,7 @@ pub fn forHost(source: @import("../host/plugin_registry.zig").Registry, protocol
     const os = @import("host_os_assets.zig");
     return switch (kind) {
         .ubuntu => os.ubuntu,
+        .sugon => os.sugon,
         .rocky => os.rocky,
         .debian => os.debian,
         .fedora => os.fedora,
@@ -125,7 +127,7 @@ pub fn refreshHostTint(node: *ui.Node) void {
 test "saved host and tab OS artwork share source colours" {
     const std = @import("std");
     const artwork = @import("host_os_assets.zig");
-    const kinds = [_]Os{ .ubuntu, .debian, .fedora, .arch, .alpine, .freebsd, .windows, .linux, .rocky };
+    const kinds = [_]Os{ .ubuntu, .sugon, .debian, .fedora, .arch, .alpine, .freebsd, .windows, .linux, .rocky };
     for (kinds, 0..) |kind, i| {
         const saved = forHost(.{}, "ssh", kind);
         const index = artwork.index(saved.icon_id.?).?;
@@ -134,12 +136,31 @@ test "saved host and tab OS artwork share source colours" {
     }
     try std.testing.expectEqual(artwork.linux.icon_id, forHost(.{}, "ssh", .unknown).icon_id);
     try std.testing.expectEqual(artwork.ubuntu.icon_id, forOs(.ubuntu).?.icon_id);
+    try std.testing.expectEqual(artwork.sugon.icon_id, forOs(.sugon).?.icon_id);
+}
+
+test "square OS badges keep their foreground in connection-state masks" {
+    const std = @import("std");
+    const artwork = @import("host_os_assets.zig");
+    for ([_]Os{ .ubuntu, .sugon }) |kind| {
+        const index = artwork.index(forOs(kind).?.icon_id.?).?;
+        const badge = artwork.pixels[index];
+        const mask = artwork.status_pixels[index];
+        try std.testing.expectEqual(@as(usize, 72 * 72 * 4), mask.len);
+        try std.testing.expectEqual(@as(u8, 255), badge[3]);
+        try std.testing.expectEqual(@as(u8, 0), mask[3]);
+        var ink: usize = 0;
+        for (0..72 * 72) |i| if (mask[i * 4 + 3] > 127) {
+            ink += 1;
+        };
+        try std.testing.expect(ink > 0 and ink < 72 * 72 / 2);
+    }
 }
 
 test "identified OS logos replace the Linux fallback in both host and tab artwork" {
     const std = @import("std");
     const artwork = @import("host_os_assets.zig");
-    const kinds = [_]Os{ .kylin, .neokylin, .openkylin, .ubuntukylin, .uos, .deepin, .openeuler, .euleros, .anolis, .opencloudos, .tencentos, .alinux, .loongnix, .aosc, .bclinux, .kylinsec, .nfs, .linx, .isoft, .redflag, .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd };
+    const kinds = [_]Os{ .sugon, .kylin, .neokylin, .openkylin, .ubuntukylin, .uos, .deepin, .openeuler, .euleros, .anolis, .opencloudos, .tencentos, .alinux, .loongnix, .aosc, .bclinux, .kylinsec, .nfs, .linx, .isoft, .redflag, .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd };
     for (kinds) |kind| {
         const host = forHost(.{}, "ssh", kind);
         try std.testing.expectEqual(host.icon_id, forOs(kind).?.icon_id);
@@ -157,7 +178,7 @@ test "tab OS colour uses original artwork except connecting and failed states" {
     defer theme.select(previous);
     for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
         theme.select(name);
-        for ([_]Os{ .linux, .ubuntu, .kylin, .uos, .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd }) |kind| {
+        for ([_]Os{ .linux, .ubuntu, .sugon, .kylin, .uos, .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd }) |kind| {
             const logo = forOs(kind).?;
             try std.testing.expectEqual(ui.Color.WHITE, tabTint(.normal, logo));
             try std.testing.expectEqual(theme.current().danger_ink, tabTint(.failed, logo));

@@ -160,6 +160,18 @@ pub fn decodeName(buffer: []u8, name: []const u8) ![]const u8 {
     if (!std.mem.eql(u8, try encodeName(&encoded, buffer[0..dst]), name)) return error.InvalidToolName;
     return buffer[0..dst];
 }
+
+/// Model-facing next-tool hints use the same encoding as registration.
+pub fn toolHints(allocator: std.mem.Allocator, ids: []const []const u8) ![]u8 {
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    for (ids, 0..) |id, index| {
+        if (index != 0) try text.append(allocator, '/');
+        var name: [64]u8 = undefined;
+        try text.appendSlice(allocator, try encodeName(&name, id));
+    }
+    return text.toOwnedSlice(allocator);
+}
 pub fn validateDefinition(definition: ToolDefinition) !void {
     var name: [64]u8 = undefined;
     _ = try encodeName(&name, definition.id);
@@ -611,14 +623,17 @@ fn validateValue(schema: std.json.Value, value: std.json.Value, depth: usize) an
 }
 
 /// Generates wire definitions from the same captured table used for execution.
-/// Target IDs and narrowed terminal-read schemas live in the caller allocator;
-/// other definitions retain the captured table's lifetime.
+/// Target IDs, narrowed schemas and descriptions live in the caller allocator.
+/// Descriptions project internal IDs to the final catalog's provider names.
 pub fn providerDefinitions(table: *const RequestTable, allocator: std.mem.Allocator) ![]@import("provider.zig").ToolDefinition {
     const output = try allocator.alloc(@import("provider.zig").ToolDefinition, table.entries.len);
     for (table.entries, output) |entry, *definition| {
         const ids = try allocator.alloc(u64, entry.targets.len);
         for (entry.targets, ids) |target, *id| id.* = @backingInt(target.owner.session_id);
         definition.* = .{ .session_ids = ids, .authority = entry.authority, .dynamic = .{ .id = entry.definition.id, .name = entry.provider_name, .schema = try builtinTargetSchema(allocator, entry, ids), .description = entry.definition.description } };
+    }
+    for (output) |*definition| {
+        definition.dynamic.?.description = try @import("provider.zig").projectToolNames(allocator, output, definition.dynamic.?.description);
     }
     return output;
 }

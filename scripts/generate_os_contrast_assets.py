@@ -12,11 +12,8 @@ from PIL import Image, ImageFilter
 
 DEST = Path(__file__).resolve().parents[1] / "src/ui/assets/host-os"
 TREATMENTS = {
-    "debian": "fine rose contour",
     "alpine": "ice-blue mountain negative space",
-    "freebsd": "fine warm-gray contour",
     "bclinux": "cream penguin negative space",
-    "netbsd": "local ivory contour around gray lettering",
     "redflag": "local ivory contour around the black Linux lettering",
 }
 
@@ -55,13 +52,13 @@ def generate(name):
         colour = "#dcebf2" if name == "alpine" else "#f1e6c9"
     else:
         mask = alpha
-        if name in ("netbsd", "redflag"):
+        if name == "redflag":
             mask = Image.new("L", source.size)
             mask.putdata([a if max(r, g, b) - min(r, g, b) < 48 and max(r, g, b) < 180
-                          and (name != "redflag" or i // 72 >= 40) else 0
+                          and i // 72 >= 40 else 0
                           for i, (r, g, b, a) in enumerate(source.get_flattened_data())])
-        mask = contour(mask, .8 if name in ("netbsd", "redflag") else .6)
-        colour = {"debian": "#e9c3cd", "freebsd": "#e5d4ce"}.get(name, "#eee5d4")
+        mask = contour(mask, .8)
+        colour = "#eee5d4"
     helper = Image.new("RGBA", source.size, colour)
     helper.putalpha(mask)
     result = Image.alpha_composite(helper, source)

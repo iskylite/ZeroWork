@@ -219,7 +219,7 @@ pub const View = struct {
         const scope = try self.scope.childScope();
         self.preview_scope = scope;
         self.modal_open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = self.modal_open.?, .width = 480, .max_height = @max(200, cx.viewport.height - 32), .background = S.theme.current().overlay, .overlay_color = ui.Color.TRANSPARENT, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = self.modal_open.?, .width = 480, .max_height = @max(200, cx.viewport.height - 32), .background = S.theme.current().overlay, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.modal = modal;
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.preview_panel = modal.dialog;

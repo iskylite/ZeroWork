@@ -176,6 +176,8 @@ pub const Driver = struct {
         }
         var result = original;
         result.blocks = blocks;
+        result.images = try allocator.dupe(@import("image_attachments.zig").ContentRef, original.images);
+        for (result.images) |ref| _ = ref.retain();
         return result;
     }
     /// UI-safe nonblocking stop request. Queue admission is not native input
@@ -1018,6 +1020,5 @@ test "execution deadline expired busy observation cannot retry forever or stop t
         }
         try std.testing.expectEqual(@as(usize, 0), fixture.effects);
         try std.testing.expectEqual(terminal.execution.State.running, driver.controller.entries.items[0].snapshot.state);
-
     }
 }

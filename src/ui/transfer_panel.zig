@@ -329,7 +329,7 @@ pub const Panel = struct {
         self.resume_label = try scope.createText("", .{});
         self.md5_label = try scope.createText("", .{});
         self.notify_label = try scope.createText("", .{});
-        const modal = try ui.widgets.Modal(.{ .open = self.open, .width = @as(f32, 520), .max_height = @as(f32, 10000), .close_on_overlay = false, .overlay_color = ui.Color.TRANSPARENT, .on_open_change = cx.on(Panel, self, openChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = self.open, .width = @as(f32, 520), .max_height = @as(f32, 10000), .close_on_overlay = false, .on_open_change = cx.on(Panel, self, openChanged) }).mount(scope, cx);
         self.root = modal.overlay;
         self.card = modal.dialog;
         self.body = modal.body;

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>KVM 工作区</title>
+<style>
+  @font-face { font-family: Inter; src: url('../../assets/fonts/InterVariable.ttf'); }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f6f6f7; color: #18181b; font: 500 12px Inter, sans-serif; }
+  .workspace { display: flex; flex-direction: column; gap: 16px; width: 100%; height: 100vh; padding: 12px; }
+  .toolbar { display: flex; align-items: center; gap: 4px; flex: none; height: 44px; padding: 6px 6px 6px 16px; border-radius: 18px; background: #fff; }
+  .identity { display: flex; align-items: center; flex: 1; min-width: 0; gap: 8px; }
+  .identity-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; }
+  .monitor { width: 18px; height: 18px; flex: none; color: #5b5b65; }
+  .status, .tool { flex: none; display: flex; justify-content: center; align-items: center; height: 32px; gap: 4px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #18181b; font: inherit; }
+  .status { width: 82px; } .tool { width: 64px; }
+  .button-icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .status-mark { width: 14px; height: 14px; color: #15b8a6; }
+  .video-area { position: relative; flex: 1; min-height: 0; }
+  .video-card { padding: 8px; width: 100%; height: 100%; background: #000; border-radius: 16px; overflow: hidden; }
+  .video { width: 100%; height: 100%; background: #000; }
+  .popover { position: absolute; top: -14px; right: 0; width: 296px; padding: 12px; border-radius: 12px; background: rgba(255,255,255,.83137); color: #18181b; backdrop-filter: blur(24px); }
+  .popover h2 { margin: 0 0 24px; font-size: 13px; } .popover p { margin: 0 0 12px; color: #5b5b65; font-size: 11px; }
+  .key { height: 32px; display: grid; place-items: center; margin-top: 6px; border-radius: 7px; background: #efefef; color: #5b5b65; }
+</style>
+<main class="workspace">
+  <svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden"><symbol id="check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></symbol><symbol id="pointer" viewBox="0 0 24 24"><path d="m4 3 16 8-7 1-3 7z"/></symbol><symbol id="keyboard" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 15h8"/></symbol><symbol id="screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1"/><path d="M8 21h8m-4-4v4"/></symbol><symbol id="power" viewBox="0 0 24 24"><path d="M12 2v10M6.4 5.7a8 8 0 1 0 11.2 0"/></symbol><symbol id="launch" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></symbol></svg>
+  <div class="toolbar">
+    <div class="identity"><svg class="monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="1"/><path d="M8 21h8m-4-4v4"/></svg><span class="identity-name">P3C9-KVM</span></div>
+    <button class="status"><svg class="button-icon status-mark"><use href="#check"/></svg>已连接</button>
+    <button class="tool"><svg class="button-icon"><use href="#pointer"/></svg>控制</button><button class="tool"><svg class="button-icon"><use href="#keyboard"/></svg>按键</button><button class="tool"><svg class="button-icon"><use href="#screen"/></svg>显示</button><button class="tool"><svg class="button-icon"><use href="#power"/></svg>电源</button><button class="tool"><svg class="button-icon"><use href="#launch"/></svg>启动</button>
+  </div>
+  <div class="video-area"><div class="video-card"><div class="video"></div></div><div class="popover"><h2>按键</h2><p>需要已获控制权；不会自动抢占。</p><div class="key">Ctrl + Alt + Delete</div><div class="key">Ctrl + Alt + F1</div></div></div>
+</main>
+</html>

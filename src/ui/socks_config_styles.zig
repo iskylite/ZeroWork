@@ -7,7 +7,7 @@ pub const panel_height: f32 = 650;
 pub const chrome_height: f32 = 120;
 pub const inset: f32 = 22;
 pub fn overlay() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .display = .none, .z_index = 80, .align_items = .center, .justify = .center, .background = ui.Color.BLACK.withAlpha(96), .hit_behavior = .@"opaque" };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .display = .none, .z_index = 80, .align_items = .center, .justify = .center, .background = theme.modal_barrier, .hit_behavior = .@"opaque" };
 }
 pub fn panel() ui.BoxStyle {
     return .{ .width = .{ .px = width }, .direction = .column, .gap = 0, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = theme.current().shadow }, .flex_shrink = 0 };

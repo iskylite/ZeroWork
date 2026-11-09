@@ -1,4 +1,4 @@
-//! Measured baseline: docs/UI_V3/ai/composer-interactions.html, 600×456, 1×.
+//! Composer interaction styles for the 600×456 assistant.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");

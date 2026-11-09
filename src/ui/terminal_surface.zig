@@ -191,6 +191,7 @@ pub const Surface = struct {
         const root = try ui.boxStyled(cx, S.surface, .{});
         errdefer cx.destroyDetached(root);
         root.meta.ownership.meta.test_id = "terminal.surface";
+        @import("layer_materials.zig").variableBackdrop(root);
         const viewport = try ui.box(cx, .{ .position = .absolute, .overflow = .hidden, .overflow_hidden = true, .hit_behavior = .pass_through }, .{});
         viewport.meta.ownership.meta.test_id = "terminal.surface.viewport";
         try root.appendChild(cx.allocator, viewport);

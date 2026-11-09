@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Actual native black/white image boundaries; only runner-owned files/configuration. */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -6,7 +7,7 @@ import {resolve,join} from 'node:path';
 import {createHash} from 'node:crypto';
 import * as h from '../vendor/zenit/e2e/client.ts';
 const root=resolve(import.meta.dirname,'..'),binary=resolve(process.argv[2]),out=resolve(process.argv[3]);await mkdir(out,{recursive:true});
-const palettes=JSON.parse(await readFile(join(root,'docs/UI_V3/theme-presets.json'),'utf8')).themes;
+const palettes=nativeThemeData.themes;
 const themes=process.argv[4]?.split(',')??Object.keys(palettes),levels=process.argv[5]?.split(',')??['0','50','100'],images=process.argv[6]?.split(',')??['black','white'];
 const assets=join(out,'assets');await mkdir(assets,{recursive:true});
 const solid={checker:'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAa0lEQVR4nO2VwQlAMQhDq5PpZDqam/lv4qFQCvUg35wiBAIPJLCSVDW8iIRn5vBmdpXHVSxsXwAV3C3l+yPC6gJw9+fcNeX7I8LqAiCi59wl5fsjwuoCyMfswU6zB3/4A589OGj24Kj+f/AB9YxesxodZDUAAAAASUVORK5CYII=',black:'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAADElEQVR4nGNgGB4AAADIAAGtQHYiAAAAAElFTkSuQmCC',white:'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFUlEQVR4nGP8//8/AzbAhFV00EoAAFbUAw037MyjAAAAAElFTkSuQmCC'};for(const [name,png]of Object.entries(solid))await writeFile(join(assets,name+'.png'),Buffer.from(png,'base64'));

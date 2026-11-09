@@ -1,4 +1,4 @@
-//! Frozen UI_V3 transfer views. The application owns IO and native windows. Closing
+//! Transfer views. The application owns IO and native windows. Closing
 //! these views never changes jobs; snapshots and displayed strings are copied.
 const std = @import("std");
 const ui = @import("ui");
@@ -1477,7 +1477,7 @@ pub const Panel = struct {
                 return .done;
             }
         }
-        // UI_V3 placeOverlay: 12px window bounds, 8px anchor gap, flip before clamping.
+        // 12px window bounds, 8px anchor gap, flip before clamping.
         top = std.math.clamp(top, @as(f32, 12), @max(@as(f32, 12), bounds.h - height - 12));
         right = std.math.clamp(right, @as(f32, 12), @max(@as(f32, 12), bounds.w - width - 12));
         const ext = p.root.style.ensureExtPanic(p.cx.allocator);

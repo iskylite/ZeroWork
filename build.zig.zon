@@ -1,10 +1,10 @@
 .{
     .name = .zerowork,
-    .version = "0.4.0-rc3",
+    .version = "0.4.0",
     .fingerprint = 0xaebecab990406644,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zenit = .{ .path = "vendor/zenit" },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "tools/mockups", "README.md", "LICENSE", "vendor/DEPENDENCIES.md", "vendor/zenit", "vendor/libvterm", "vendor/libssh2", "vendor/mbedtls", "scripts/verify_vendor_zenit.py", "scripts/build_ssh_deps.sh", "scripts/verify_ssh_deps.py", "scripts/ssh_smoke.sh" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "tools/mockups", "README.md", "LICENSE", "vendor/DEPENDENCIES.md", "vendor/mcp-json-schema", "vendor/zenit", "vendor/libvterm", "vendor/libssh2", "vendor/mbedtls", "scripts/verify_vendor_zenit.py", "scripts/build_ssh_deps.sh", "scripts/verify_ssh_deps.py", "scripts/ssh_smoke.sh" },
 }

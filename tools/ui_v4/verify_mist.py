@@ -14,7 +14,11 @@ JS='''document.fonts.ready.then(()=>{
  const tabs=[...document.querySelectorAll('g[id^="tab."]')].map(g=>({id:g.id,bounds:rect(g.querySelector('[data-role="hit-area"]')),name:rect(g.querySelector('text')),close:g.querySelector('rect[id$=".close.hit"]')?rect(g.querySelector('rect[id$=".close.hit"]')):null}));
  const content=[...get('terminal.content').querySelectorAll('text')].map(e=>({text:e.textContent,...rect(e)}));
  const prompt=get('terminal.current-prompt');
- const report={size:[Number(document.documentElement.getAttribute('width')),Number(document.documentElement.getAttribute('height'))],sidebar:measure('sidebar.surface'),tabs:measure('toolbar.tabs.surface'),compactToggle:measure('toolbar.compact-toggle.surface'),tools,rows,tabItems:tabs,footer:measure('sidebar.footer.surface'),footerContent:measure('sidebar.footer.content'),headerSearch:measure('sidebar.search.toggle.hit'),headerNew:measure('sidebar.new.hit'),sidebarCollapse:measure('sidebar.collapse.hit'),terminalViewport:measure('terminal.viewport'),terminalText:measure('terminal.text.bounds'),firstLine:measure('terminal.first-line'),lastPrompt:measure('terminal.current-prompt'),promptAdvance:prompt.getComputedTextLength(),cursor:measure('terminal.cursor'),ai:measure('ai.status-strip.surface'),aiHit:measure('ai.status-strip.hit'),terminalLines:content};
+ const footerGroup=get('sidebar.footer.content'),footerIcon=footerGroup.querySelector('use'),footerText=rect(footerGroup.querySelector('text'));
+ const iconSlot={x:Number(footerIcon.getAttribute('x')),y:Number(footerIcon.getAttribute('y')),w:Number(footerIcon.getAttribute('width')),h:Number(footerIcon.getAttribute('height'))};
+ const footerContent={x:Math.min(iconSlot.x,footerText.x),y:Math.min(iconSlot.y,footerText.y),right:Math.max(iconSlot.x+iconSlot.w,footerText.right),bottom:Math.max(iconSlot.y+iconSlot.h,footerText.bottom)};
+ footerContent.w=footerContent.right-footerContent.x;footerContent.h=footerContent.bottom-footerContent.y;
+ const report={size:[Number(document.documentElement.getAttribute('width')),Number(document.documentElement.getAttribute('height'))],sidebar:measure('sidebar.surface'),tabs:measure('toolbar.tabs.surface'),compactToggle:measure('toolbar.compact-toggle.surface'),tools,rows,tabItems:tabs,footer:measure('sidebar.footer.surface'),footerContent,headerSearch:measure('sidebar.search.toggle.hit'),headerNew:measure('sidebar.new.hit'),sidebarCollapse:measure('sidebar.collapse.hit'),firstGroup:measure('host-group.生产环境.hit'),firstGuide:measure('host-group.生产环境.guide'),firstHost:measure('host.prod-web-01.hit'),lastGroupHost:measure('host.prod-bastion.hit'),secondGroup:measure('host-group.开发环境.hit'),terminalViewport:measure('terminal.viewport'),terminalText:measure('terminal.text.bounds'),firstLine:measure('terminal.first-line'),lastPrompt:measure('terminal.current-prompt'),promptAdvance:prompt.getComputedTextLength(),cursor:measure('terminal.cursor'),ai:measure('ai.status-strip.surface'),aiHit:measure('ai.status-strip.hit'),terminalLines:content};
  document.documentElement.setAttribute('data-layout-audit',JSON.stringify(report));
 });'''
 
@@ -25,6 +29,11 @@ def inside(a,b,margin=0):
 def audit(name):
  raw=(BASE/(name+'.svg')).read_text();root=ET.fromstring(raw);ns={'s':'http://www.w3.org/2000/svg'}
  ids=[e.get('id') for e in root.iter() if e.get('id')];assert len(ids)==len(set(ids)), 'duplicate IDs'
+ header_icon=next(e for e in root.iter() if e.get('id')=='sidebar.header.icon')
+ group_icon=next(e for e in root.iter() if e.get('id')=='host-group.生产环境.chevron')
+ assert header_icon.get('x')==group_icon.get('x'), 'sidebar heading and group icons must align'
+ footer_content=next(e for e in root.iter() if e.get('id')=='sidebar.footer.content')
+ assert footer_content.get('transform') is None, 'footer content uses native slot coordinates without translation'
  contract=json.loads(root.find('s:metadata[@id="design.contract"]',ns).text)
  assert contract['status']=='final_design' and contract['visible_annotations'] is False
  assert contract['canvas']==[int(root.get('width')),int(root.get('height'))]
@@ -77,17 +86,26 @@ def audit(name):
   assert tab['name']['right']+4 <= tab['close']['x']
  for row in r['rows']:
   if row['route']:assert row['name']['right']+8<=row['route']['x'],row
+ near(r['firstGroup']['y']-r['headerSearch']['bottom'],12)
+ near(r['firstHost']['x']-r['firstGroup']['x'],12)
+ near(r['firstGroup']['right'],r['firstHost']['right'])
+ near(r['firstHost']['y']-r['firstGroup']['bottom'],6)
+ near(r['secondGroup']['y']-r['lastGroupHost']['bottom'],15)
+ near(r['firstGuide']['x']-r['firstGroup']['x'],6)
+ near(r['firstGuide']['y'],r['firstGroup']['y']+37)
+ near(r['firstGuide']['bottom'],r['lastGroupHost']['y']+18)
+ assert 'host.prod-web-01.hops' in ids and 'host.prod-db-01.hops' in ids
  inside(r['footerContent'],r['footer'])
  near(r['footerContent']['x']+r['footerContent']['w']/2,r['footer']['x']+r['footer']['w']/2,1)
  near(r['footerContent']['y']+r['footerContent']['h']/2,r['footer']['y']+r['footer']['h']/2,1)
- near(r['footer']['x']-.75,22);near(r['footer']['right']+.75,r['sidebar']['right']-10)
+ near(r['footer']['x'],22);near(r['footer']['right'],r['sidebar']['right']-10)
  near(r['ai']['w'],120);near(r['ai']['h'],6);near(r['aiHit']['w'],120);near(r['aiHit']['h'],6)
  near(r['ai']['x']+60,(r['terminalViewport']['x']+r['terminalViewport']['right'])/2)
  near(r['ai']['y']+r['ai']['h']/2,(caps[0]['bottom']+r['firstLine']['y'])/2)
  assert r['ai']['bottom'] < r['terminalText']['y']
  near(r['terminalViewport']['y']-caps[0]['bottom'],12)
- for id in ['headerNew','sidebarCollapse']:near(r[id]['right'],r['footer']['right']+.75)
- near(r['headerNew']['x']-r['headerSearch']['right'],4)
+ for id in ['headerNew','sidebarCollapse']:near(r[id]['right'],r['footer']['right'])
+ near(r['headerNew']['x']-r['headerSearch']['right'],6)
  assert not any(t.text in ['SSH','SFTP','KVM'] for t in root.findall('.//s:text',ns))
  assert not any(re.search(r'设计说明|尺寸标注|逻辑像素|最终定稿', ''.join(t.itertext())) for t in root.findall('.//s:text',ns))
  return r

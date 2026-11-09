@@ -149,7 +149,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_app_menu.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_menu_bar.m"), .flags = if (test_mode) &.{ "-fobjc-arc", "-DZW_MENU_BAR_TEST=1" } else &.{"-fobjc-arc"} });
     exe.root_module.addAnonymousImport("app_icon_assets", .{ .root_source_file = b.path("assets/macos/icons.zig") });
-    exe.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+    exe.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("assets/fonts/native.zig") });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_file_promises.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_host_secret.m"), .flags = &.{"-fobjc-arc"} });
@@ -550,7 +550,7 @@ pub fn build(b: *std.Build) void {
     const bmc_preview = b.addExecutable(.{ .name = "bmc-kvm-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/bmc_kvm_preview_runner.zig"), .target = target, .optimize = optimize }) });
     zenit.attach(zenit_dep, bmc_preview);
     bmc_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
-    bmc_preview.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+    bmc_preview.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("assets/fonts/native.zig") });
     bmc_preview.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
     bmc_preview.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
     bmc_preview.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
@@ -563,7 +563,7 @@ pub fn build(b: *std.Build) void {
     const bmc_live = b.addExecutable(.{ .name = "bmc-live-readonly", .root_module = b.createModule(.{ .root_source_file = b.path("src/bmc_live_readonly_runner.zig"), .target = target, .optimize = optimize }) });
     zenit.attach(zenit_dep, bmc_live);
     bmc_live.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
-    bmc_live.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+    bmc_live.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("assets/fonts/native.zig") });
     bmc_live.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
     bmc_live.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
     bmc_live.root_module.addImport("generated_ghostty_vt", ghostty_translate.createModule());
@@ -584,8 +584,8 @@ pub fn build(b: *std.Build) void {
         zenit.attach(zenit_dep, preview);
         preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
         if (std.mem.eql(u8, name, "close-confirmation") or std.mem.eql(u8, name, "ai-empty-recent") or std.mem.eql(u8, name, "ai-recovery") or std.mem.eql(u8, name, "composer-interaction")) {
-            // Match the production UI font chain when comparing this HTML baseline.
-            preview.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+            // Match the production UI font chain in the native preview.
+            preview.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("assets/fonts/native.zig") });
             preview.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
         }
         if (std.mem.eql(u8, name, "ai-empty-recent")) preview.root_module.addAnonymousImport("app_icon_assets", .{ .root_source_file = b.path("assets/macos/icons.zig") });
@@ -602,7 +602,7 @@ pub fn build(b: *std.Build) void {
     }) });
     font_tests.root_module.addImport("zenit_app", zenit_dep.module("zenit_app"));
     addCoreTextBridgeForTest(zenit_dep, font_tests);
-    font_tests.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+    font_tests.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("assets/fonts/native.zig") });
     font_tests.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
     b.step("test-font", "Resolve appearance fonts and verify actual native metrics without windows").dependOn(&b.addRunArtifact(font_tests).step);
 
@@ -926,6 +926,7 @@ fn buildCommand(b: *std.Build, argv: []const []const u8) ?[]const u8 {
 fn addUrlFetchFrameworks(module: *std.Build.Module) void {
     module.linkFramework("CoreFoundation", .{});
     module.linkFramework("CFNetwork", .{});
+    module.linkFramework("JavaScriptCore", .{});
 }
 
 /// The BMC library and every test consumer use the same pinned crypto/codec ABI.

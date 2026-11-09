@@ -1,5 +1,5 @@
 //! Host approval card. Reuses the existing native approval styles/widgets;
-//! reference: docs/UI_V3/ai/host-approval.html. Main-thread UI only.
+//! Main-thread UI only.
 const std = @import("std");
 const ui = @import("ui");
 const approval = @import("../ai/host_approval.zig");
@@ -254,7 +254,7 @@ pub const View = struct {
                 .terminal_command => if (interaction) "来源 · 已授权执行 · 受控交互输入" else "来源 · 当前对话 · 交互式终端命令",
             });
             try self.feedback.setTextContent(self.cx.allocator, if (pending.impact.len != 0) pending.impact.text() else switch (pending.kind) {
-                .mcp => "仅向此服务发送本次明确提供的材料。",
+                .mcp => "仅批准当前工具和本次参数。",
                 .network_url => impact_copy,
                 .lifecycle => "仅批准本调用列明的对象与操作。",
                 .terminal_command => "仅批准本调用列明的终端与命令。",

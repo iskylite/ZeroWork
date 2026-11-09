@@ -49,6 +49,12 @@ pub fn actionLabel(_: *const ui.ThemeTokens) ui.TextStyle {
 pub fn line(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 18.0 / 11.0, .color = theme.current().fg_2, .text_overflow = .ellipsis, .selectable = false };
 }
+pub fn countdown(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .width = .{ .px = 80 }, .height = .{ .px = 18 }, .flex_shrink = 0 };
+}
+pub fn countdownText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 10, .line_height = 1.8, .color = theme.current().fg_2, .selectable = false };
+}
 pub fn lineBox(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 18 }, .min_width = 0, .overflow = .hidden, .flex_shrink = 0 };
 }

@@ -5,6 +5,7 @@ const theme = @import("app_theme.zig");
 const projection = @import("../ai/child_projection.zig");
 const Logo = @import("ai_child_logo.zig");
 const S = @import("ai_children_styles.zig");
+const Header = @import("ai_assistant_header.zig");
 const id = @import("../host/identity.zig");
 pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, id.AgentId, u64) void };
 pub const View = struct {
@@ -42,12 +43,7 @@ pub const View = struct {
         scroll.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column });
         scroll.container.meta.ownership.meta.test_id = "ai.children.list";
         try popup.content.appendChild(cx.allocator, scroll.container);
-        const badge = try ui.text(cx, "", .{ .font_size = 9, .font_weight = 700, .color = theme.current().accent_ink });
-        badge.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = -3 }, .right = .{ .px = -4 } }, .background = theme.current().accent, .padding = .{ .left = 4, .right = 4, .top = 1, .bottom = 1 }, .border = .{ .radius = 8 } });
-        badge.meta.ownership.meta.test_id = "ai.children.count";
-        badge.setDisplay(.none);
-        badge.setHitTestVisible(false);
-        try button.appendChild(cx.allocator, badge);
+        const badge = try Header.mountCountBadge(cx, button, "ai.children.count");
         const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .root = popup.wrapper, .content = scroll.content, .chrome = popup.chrome, .painted_colors = theme.current(), .button = button, .badge = badge, .heading_count = heading_count });
         try scope.onCleanup(View, self, cleanup);
         _ = ui.clickable(button, cx.on(View, self, toggle));
@@ -70,8 +66,7 @@ pub const View = struct {
         if (!std.meta.eql(self.painted_colors, theme.current())) {
             self.painted_colors = theme.current();
             self.chrome.setStyleInline(self.cx.allocator, S.popup(self.cx.tokens));
-            self.badge.setStyleInline(self.cx.allocator, .{ .background = theme.current().accent });
-            self.badge.setTextColor(theme.current().accent_ink);
+            Header.repaintCountBadge(self.cx, self.badge);
             for (self.rows.items) |row| row.repaint();
         }
         var count: usize = 0;
@@ -87,12 +82,9 @@ pub const View = struct {
         var count_buffer: [64]u8 = undefined;
         const count_label = try std.fmt.bufPrint(&count_buffer, "{d} 个运行中", .{count});
         if (!sameText(self.heading_count, count_label)) try self.heading_count.setTextContent(self.cx.allocator, count_label);
-        var buf: [80]u8 = undefined;
         const label = try std.fmt.bufPrint(&self.a11y_label, "子智能体，{d} 个运行中", .{count});
         if (self.button.behavior.interaction.a11y) |*a11y| a11y.label = label;
-        const number = try std.fmt.bufPrint(&buf, "{d}", .{count});
-        if (!sameText(self.badge, number)) try self.badge.setTextContent(self.cx.allocator, number);
-        self.badge.setDisplay(if (count == 0) .none else .flex);
+        try Header.updateCountBadge(self.cx, self.badge, count);
         if (!self.open.peek()) {
             self.fingerprint = 0;
             return;

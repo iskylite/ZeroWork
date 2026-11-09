@@ -1,4 +1,4 @@
-//! UI_V3/connection KVM form, measured at 1488×1040 CSS px, zoom 1,
+//! KVM connection form, measured at 1488×1040 CSS px, zoom 1,
 //! DPR 1 (App 1440×900). The shared Wizard owns the 760px modal/header.
 const ui = @import("ui");
 pub const host = @import("../../ui/wizard_styles.zig");

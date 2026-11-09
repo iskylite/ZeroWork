@@ -1,4 +1,4 @@
-//! docs/UI_V3/kvm/certificate-trust.html. Shared SSH authentication geometry
+//! Shared SSH authentication geometry
 //! and color roles; the wider surface keeps a full SHA-256 on one line.
 const ui = @import("ui");
 pub const shared = @import("auth_challenge_styles.zig");

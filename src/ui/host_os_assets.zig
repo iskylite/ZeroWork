@@ -51,6 +51,7 @@ pub const linuxmint = source("linuxmint", 54139);
 pub const manjaro = source("manjaro", 54140);
 pub const openbsd = source("openbsd", 54141);
 pub const netbsd = source("netbsd", 54142);
+pub const sugon = source("sugon", 54143);
 pub fn index(id: u32) ?usize {
     return if (id >= 54100 and id < 54100 + pixels.len) @intCast(id - 54100) else null;
 }
@@ -98,17 +99,23 @@ pub const pixels = [_][]const u8{
     @embedFile("assets/host-os/manjaro.rgba"),
     @embedFile("assets/host-os/openbsd.rgba"),
     @embedFile("assets/host-os/netbsd.rgba"),
+    @embedFile("assets/host-os/sugon.rgba"),
 };
 
-/// Selective readability helpers for source-colour artwork. Original pixels
-/// remain the source for warning-state alpha masks and logo provenance.
+/// Selective readability helpers for source-colour artwork.
 pub const display_pixels = blk: {
     var result = pixels;
-    result[index(debian.icon_id.?).?] = @embedFile("assets/host-os/debian-contrast.rgba");
     result[index(alpine.icon_id.?).?] = @embedFile("assets/host-os/alpine-contrast.rgba");
-    result[index(freebsd.icon_id.?).?] = @embedFile("assets/host-os/freebsd-contrast.rgba");
     result[index(bclinux.icon_id.?).?] = @embedFile("assets/host-os/bclinux-contrast.rgba");
-    result[index(netbsd.icon_id.?).?] = @embedFile("assets/host-os/netbsd-contrast.rgba");
     result[index(redflag.icon_id.?).?] = @embedFile("assets/host-os/redflag-contrast.rgba");
+    break :blk result;
+};
+
+/// Badges with opaque backgrounds use the foreground alone for state tints.
+pub const status_pixels = blk: {
+    var result = pixels;
+    result[index(ubuntu.icon_id.?).?] = @embedFile("assets/host-os/ubuntu-status.rgba");
+    result[index(sugon.icon_id.?).?] = @embedFile("assets/host-os/sugon-status.rgba");
+    result[index(deepin.icon_id.?).?] = @embedFile("assets/host-os/deepin-status.rgba");
     break :blk result;
 };

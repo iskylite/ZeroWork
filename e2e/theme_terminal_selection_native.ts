@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Real local PTY default-foreground selection, without modifying ANSI content.
  * node e2e/theme_terminal_selection_native.ts BINARY OUT [theme,theme] [transparency=0] [prompt]
  */
@@ -8,7 +9,7 @@ import {join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import * as h from '../vendor/zenit/e2e/client.ts';
 const binary=resolve(process.argv[2]),out=resolve(process.argv[3]);await mkdir(out,{recursive:true});
-const palettes=JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).terminalPalettes,themes=process.argv[4]?.split(',')??Object.keys(palettes);
+const palettes=nativeThemeData.terminalPalettes,themes=process.argv[4]?.split(',')??Object.keys(palettes);
 const transparency=Number(process.argv[5]??0),capturePrompt=process.argv[6]==='prompt';assert([0,50,100].includes(transparency));
 const report:any={status:'running',transparency,binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),cases:[],limits:['Actual zsh PTY default text and native mouse drag; no remote host or user data.','1280×900pt Retina; no image, CLI transparency (default0); opaque terminal selection is independent of material transparency.']};
 const shown=(n:any)=>n?.rect&&n.visible!==false&&n.hidden!==true&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0;

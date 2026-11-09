@@ -1,6 +1,5 @@
 //! Component state colors are part of the theme, never per-page color fixes.
 //! Builtins and imported palettes use the same derivation and contrast policy.
-//! scripts/sync_theme_states.mjs publishes the identical roles to editable HTML.
 const std = @import("std");
 const ui = @import("ui");
 

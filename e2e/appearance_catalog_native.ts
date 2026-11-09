@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Native catalogue, persistence and font-search acceptance. Uses isolated local data only.
  * node e2e/appearance_catalog_native.ts /absolute/evidence [binary]
  */
@@ -12,7 +13,7 @@ const isolated=await realpath(await mkdtemp('/private/tmp/zerowork-appearance-ca
 await mkdir(rpc);await mkdir(data);await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision = 1\n[ui]\ntheme = "dark"\nfont_family = "Menlo"\nfont_size = 14\nfont_weight = "regular"\n');
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const log=await open(join(out,'app.log'),'w');
-const design=JSON.parse(await readFile('docs/UI_V3/theme-presets.json','utf8'));
+const design=nativeThemeData;
 const report:any={status:'running',data,binary,themes:[],checks:[],captures:[],limits:['Synthetic Harness input; no physical keyboard/IME verification.','Bundled fonts register inside the process; the test does not install system fonts.']};
 let child:any,ended:Promise<unknown>;
 function launch(){child=spawn(binary,[],{env:{...process.env,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1',ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0'},stdio:['ignore',log.fd,log.fd]});ended=new Promise(r=>child.once('close',r));}

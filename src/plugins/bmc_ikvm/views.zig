@@ -61,6 +61,8 @@ pub const View = struct {
     disconnect_node: ?*ui.Node = null,
     disconnect_disabled: *ui.Signal(bool) = undefined,
     disconnect_style: *ui.Signal(ui.BoxStyle) = undefined,
+    disconnect_icon_only: *ui.Signal(bool) = undefined,
+    disconnect_hint: ?*ui.Signal(bool) = null,
     connection_symbol: *ui.Signal(?ui.SvgAsset) = undefined,
     connection_tint: *ui.Signal(?ui.Color) = undefined,
     connection_hint: *ui.Signal([]const u8) = undefined,
@@ -76,10 +78,22 @@ pub const View = struct {
     connection_focused: ?*ui.Signal(bool) = null,
     tool_nodes: [5]?*ui.Node = @splat(null),
     tool_styles: [5]*ui.Signal(ui.BoxStyle) = undefined,
+    tool_labels: [5]*ui.Signal([]const u8) = undefined,
+    tool_icon_only: *ui.Signal(bool) = undefined,
+    tool_hints: [5]?*ui.Signal(bool) = @splat(null),
+    more: ?Popover = null,
+    more_node: ?*ui.Node = null,
+    more_open: ?*ui.Signal(bool) = null,
+    more_style: ?*ui.Signal(ui.BoxStyle) = null,
+    more_row_style: *ui.Signal(ui.BoxStyle) = undefined,
+    more_chevrons: [2]?*ui.Node = @splat(null),
+    more_rows: [2]?*ui.Node = @splat(null),
+    more_focus_pending: bool = false,
     tool_hover: *ui.Signal(?ui.BoxStyle) = undefined,
     key_style: *ui.Signal(ui.BoxStyle) = undefined,
     last_theme_version: u32 = std.math.maxInt(u32),
     last_compact: ?bool = null,
+    last_overflow: bool = false,
     viewport: ?*ui.Node = null,
     scroll: ?ui.widgets.ScrollAreaResult = null,
     image_node: ?*ui.Node = null,
@@ -167,6 +181,8 @@ pub const View = struct {
     fps_display: ?*ui.Node = null,
     fps_decode: ?*ui.Node = null,
     fps_detail: ?*ui.Node = null,
+    fps_gap_value: ?*ui.Node = null,
+    fps_age_value: ?*ui.Node = null,
     decoded_meter: performance.Meter = .{},
     decoded_total: ?u64 = null,
     decoded_generation: u64 = 0,
@@ -245,15 +261,43 @@ pub const View = struct {
     }
     fn anyMenu(self: *const View) bool {
         if (self.closed) return false;
+        if (self.more_open) |open| if (open.peek()) return true;
         if (self.order_open) |open| if (open.peek()) return true;
         if (self.log_open) |open| if (open.peek()) return true;
         for (self.open[0..self.menu_signal_count]) |signal| if (signal.peek()) return true;
         return false;
     }
     fn closeMenus(self: *View) void {
+        self.more_focus_pending = false;
+        self.returnMoreFocus();
+        if (self.more_open) |open| {
+            open.set(false);
+            self.syncMoreStyle();
+        }
         for (self.open[0..self.menu_signal_count]) |signal| signal.set(false);
         if (self.order_open) |open| open.set(false);
         if (self.log_open) |open| open.set(false);
+    }
+    fn returnMoreFocus(self: *View) void {
+        const popup = self.more orelse return;
+        const focused = self.mount_request.cx.focus_manager.getFocused() orelse return;
+        if (focused.isDescendantOf(popup.content)) self.mount_request.cx.setFocus(self.more_node);
+    }
+    fn syncMoreStyle(self: *View) void {
+        const source = self.more_style orelse return;
+        var style = S.iconTool();
+        if (self.more_open.?.peek()) {
+            style.background = S.theme.popupSelection();
+            style.text_color = S.theme.current().accent_ink;
+        }
+        source.set(style);
+    }
+    fn syncHint(self: *View, open: *ui.Signal(bool), node: *ui.Node) void {
+        const cx = self.mount_request.cx;
+        const rect = node.globalRect();
+        // Retained nested triggers can miss leave/re-enter while a portal
+        // detaches. Keep hints tied to the current visible button bounds.
+        open.set((self.last_compact orelse false) and node.isDisplayedInTree() and !self.anyMenu() and cx.mouse_x >= rect.x and cx.mouse_x < rect.x + rect.w and cx.mouse_y >= rect.y and cx.mouse_y < rect.y + rect.h);
     }
     fn releaseInput(self: *View, cause: input.ReleaseCause) void {
         self.captured = false;
@@ -509,6 +553,10 @@ pub const View = struct {
             self.refresh(now) catch |err| self.showMessage(@errorName(err));
         }
         self.updateGeometry();
+        for (self.tool_hints, 0..) |maybe, index| if (maybe) |open| {
+            self.syncHint(open, self.tool_nodes[index].?);
+        };
+        if (self.disconnect_hint) |open| self.syncHint(open, self.disconnect_node.?);
         self.syncConnectionIndicator();
         _ = self.updatePopovers();
         self.flushPointerWhenDue();
@@ -583,6 +631,7 @@ pub const View = struct {
         const now: u64 = @intCast(@max(0, @import("../../platform/realtime.zig").monotonicNs()) / std.time.ns_per_ms);
         const live = value.video == .streaming and self.texture != null;
         if (self.fps_hud) |hud| hud.setDisplay(if (self.show_fps.peek() and live) .flex else .none);
+        if (self.fps_detail) |detail| detail.setDisplay(if (self.show_fps.peek()) .flex else .none);
         if (self.decoded_generation != value.frame_generation or (self.decoded_total != null and value.decoded_frames < self.decoded_total.?)) {
             self.decoded_meter = .{};
             self.decoded_total = null;
@@ -605,10 +654,9 @@ pub const View = struct {
             try std.fmt.bufPrint(&buf, "解码 {d:.1} FPS", .{self.decoded_meter.fps(now).?})
         else
             "解码 — FPS");
-        try setText(self, self.fps_detail, if (live and meter != null and meter.?.last_ms != null)
-            try std.fmt.bufPrint(&buf, "最近 10 秒最大帧间隔：{d} ms\n距上一显示帧：{d} ms", .{ meter.?.maxGap(now), now -| meter.?.last_ms.? })
-        else
-            "等待视频帧统计");
+        const has_stats = live and meter != null and meter.?.last_ms != null;
+        try setText(self, self.fps_gap_value, if (has_stats) try std.fmt.bufPrint(&buf, "{d} ms", .{meter.?.maxGap(now)}) else "— ms");
+        try setText(self, self.fps_age_value, if (has_stats) try std.fmt.bufPrint(&buf, "{d} ms", .{now -| meter.?.last_ms.?}) else "— ms");
     }
     fn fpsChanged(self: *View, enabled: bool) void {
         self.show_fps.set(enabled);
@@ -648,7 +696,7 @@ pub const View = struct {
             node.setDisplay(if (title.len == 0) .none else .flex);
         }
         if (self.image_node) |node| node.setDisplay(if (current_texture and (title.len == 0 or interrupted)) .flex else .none);
-        if (self.viewport) |node| node.setBackground(if (title.len != 0) S.theme.current().well else ui.Color.BLACK);
+        if (self.viewport) |node| node.setBackground(ui.Color.BLACK);
         try setText(self, self.waiting_title, title);
     }
     fn projectProgress(self: *View, value: console.Snapshot) !void {
@@ -814,6 +862,12 @@ pub const View = struct {
         self.presentFrame(snapshot.value) catch |err| self.showMessage(@errorName(err));
         self.updateGeometry();
         const popup_changed = self.updatePopovers();
+        if (self.more_focus_pending) {
+            if (self.more_rows[0]) |row| if (row.isDisplayedInTree() and row.globalRect().h > 0) {
+                self.more_focus_pending = false;
+                self.mount_request.cx.setFocus(row);
+            };
+        }
         const progress_scrolled = if (!popup_changed) self.scrollToProgressStep() else false;
         const log_changed = self.updateLogLayout();
         const bounds_changed = self.bounds_layout_pending;
@@ -911,7 +965,8 @@ pub const View = struct {
             const scroll = maybe_scroll orelse continue;
             const natural_height = popup.content.globalRect().h;
             if (natural_height <= 0) continue;
-            const cap = @max(1, @min(self.mount_request.cx.viewport.height - 24, popup.chrome.style.max_height()) - S.popup_header_height);
+            const header_height = if (index == @backingInt(Menu.display)) S.display_header_height else S.popup_header_height;
+            const cap = @max(1, @min(self.mount_request.cx.viewport.height - 24, popup.chrome.style.max_height()) - header_height);
             const wanted = @max(1, @min(natural_height, cap));
             const current = switch (scroll.container.style.height) {
                 .px => |value| value,
@@ -1108,27 +1163,42 @@ pub const View = struct {
             }
         }
         if (self.toolbar != null) {
-            // The measured compact prototype reduces button width, retaining all
-            // five entries in one row at the product's minimum window width.
-            const compact = rect.w < 1000;
-            if (self.last_compact == null or self.last_compact.? != compact or self.last_theme_version != self.mount_request.cx.theme_version) {
+            const width = self.toolbar.?.globalRect().w;
+            const compact = width < S.expanded_toolbar_width;
+            const overflow = width < S.icon_toolbar_width;
+            if (self.last_compact == null or self.last_compact.? != compact or self.last_overflow != overflow or self.last_theme_version != self.mount_request.cx.theme_version) {
+                if (self.last_compact != null and (self.last_compact.? != compact or self.last_overflow != overflow)) self.closeMenus();
                 self.last_compact = compact;
+                self.last_overflow = overflow;
                 self.last_theme_version = self.mount_request.cx.theme_version;
                 if (self.connection_icon) |icon| _ = icon.setTint(S.theme.current().fg_2);
-                var style = S.tool();
-                style.width = .{ .px = if (compact) 58 else 82 };
-                style.font_size = if (compact) 11 else 12;
+                const style = if (compact) S.iconTool() else S.tool();
                 for (self.tool_styles) |source| source.set(style);
+                for (self.tool_labels, menu_names) |source, name| source.set(if (compact) "" else name);
+                self.tool_icon_only.set(compact);
+                for (self.menus[3..]) |maybe| if (maybe) |popup| popup.wrapper.setDisplay(if (overflow) .none else .flex);
+                if (self.more) |popup| {
+                    popup.wrapper.setDisplay(if (overflow) .flex else .none);
+                    var popup_style = S.popup();
+                    popup_style.padding = ui.Padding.all(4);
+                    popup.chrome.setStyleInline(alloc, popup_style);
+                }
+                self.syncMoreStyle();
+                self.more_row_style.set(S.moreRow());
+                for (self.more_rows) |maybe| if (maybe) |row| row.setStyleInline(alloc, .{ .justify = .start });
+                for (self.more_chevrons) |maybe| {
+                    if (maybe) |node| _ = node.setTint(S.theme.current().fg_2);
+                }
                 self.tool_hover.set(S.toolHover());
                 self.key_style.set(S.keyButton());
-                var disconnect_style = S.disconnect();
-                disconnect_style.font_size = if (compact) 11 else 12;
-                self.disconnect_style.set(disconnect_style);
+                self.disconnect_icon_only.set(compact);
+                self.disconnect_style.set(if (compact) S.iconTool() else S.disconnect());
                 if (self.disconnect_confirm_dialog) |dialog| dialog.setStyleInline(alloc, .{ .background = S.theme.current().overlay });
                 self.fit_style.set(S.segment(self.mode == .fit));
                 self.original_style.set(S.segment(self.mode == .original));
                 for (self.menus) |maybe| if (maybe) |popup| popup.chrome.setStyleInline(alloc, S.popup());
                 if (self.order_modal) |modal| modal.dialog.setStyleInline(alloc, .{ .background = S.theme.current().overlay, .glass = S.theme.overlayGlass() });
+                self.bounds_layout_pending = true;
             }
         }
     }
@@ -1150,7 +1220,9 @@ pub const View = struct {
             a11y.disabled = self.disconnect_disabled.peek();
         };
         const status = self.connectionState();
-        const hovered = if (self.connection_hovered) |signal| signal.peek() else false;
+        const indicator_cx = self.mount_request.cx;
+        const rect = if (self.disconnect_node) |node| node.globalRect() else ui.ComputedRect{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        const hovered = (if (self.connection_hovered) |signal| signal.peek() else false) and indicator_cx.mouse_x >= rect.x and indicator_cx.mouse_x < rect.x + rect.w and indicator_cx.mouse_y >= rect.y and indicator_cx.mouse_y < rect.y + rect.h;
         const focused = if (self.connection_focused) |signal| signal.peek() else false;
         const hot = (hovered or focused) and !self.disconnect_disabled.peek();
         const asset: ui.SvgAsset = if (hot) ui.icons.unplug else switch (status.state) {
@@ -1169,7 +1241,7 @@ pub const View = struct {
         if (self.connection_tint.peek() == null or !std.meta.eql(self.connection_tint.peek().?, color)) self.connection_tint.set(color);
         const hint = if (hot) (if (status.state == .connecting) "取消连接" else "断开连接") else if (status.state == .online) "已连接" else status.label;
         if (!std.mem.eql(u8, self.connection_hint.peek(), hint)) self.connection_hint.set(hint);
-        const label = if (hot) hint else switch (status.state) {
+        const label = if (self.last_compact orelse false) "" else if (hot) hint else switch (status.state) {
             .connecting => "连接中",
             .online => "已连接",
             .degraded => "连接失败",
@@ -1244,6 +1316,10 @@ pub const View = struct {
         // owned. Unmount releases presentation references and never joins IO.
         self.root = null;
         self.toolbar = null;
+        self.more = null;
+        self.more_node = null;
+        self.more_chevrons = @splat(null);
+        self.more_rows = @splat(null);
         self.connection_icon = null;
         self.connection_title = null;
         self.connection_state = null;
@@ -1312,6 +1388,12 @@ pub const View = struct {
         self.order_scroll = null;
         self.message = null;
         self.input_hint = null;
+        self.fps_hud = null;
+        self.fps_display = null;
+        self.fps_decode = null;
+        self.fps_detail = null;
+        self.fps_gap_value = null;
+        self.fps_age_value = null;
         self.menus = @splat(null);
         self.menu_scrolls = @splat(null);
         self.tool_nodes = @splat(null);
@@ -1564,18 +1646,44 @@ pub const View = struct {
 const MenuAction = struct {
     view: *View,
     menu: Menu,
+    fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+        const self: *MenuAction = @ptrCast(@alignCast(raw));
+        const node = if (self.view.last_overflow) self.view.more_node else self.view.tool_nodes[@backingInt(self.menu)];
+        const rect = (node orelse return .{ .x = 0, .y = 0, .w = 0, .h = 0 }).globalRect();
+        return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    }
     fn toggle(self: *MenuAction) void {
         const index = @backingInt(self.menu);
         const should_open = !self.view.open[index].peek();
+        // The compact management panel replaces the overflow menu. Its focus
+        // return target must outlive the disappearing menu row.
+        if (index >= 3 and self.view.last_overflow) self.view.mount_request.cx.setFocus(self.view.more_node);
         self.view.releaseInput(.released);
         self.view.closeMenus();
         self.view.open[index].set(should_open);
     }
     fn close(self: *MenuAction) void {
         self.view.open[@backingInt(self.menu)].set(false);
+        if (self.menu == .display) self.view.mount_request.cx.setFocus(self.view.tool_nodes[@backingInt(self.menu)]);
     }
     fn changed(self: *MenuAction, open: bool) void {
         if (open) self.view.releaseInput(.released);
+    }
+};
+const MoreAction = struct {
+    fn toggle(self: *View) void {
+        const should_open = !self.more_open.?.peek();
+        self.releaseInput(.released);
+        self.closeMenus();
+        self.more_open.?.set(should_open);
+        self.more_focus_pending = should_open;
+        self.syncMoreStyle();
+    }
+    fn changed(self: *View, open: bool) void {
+        if (open) self.releaseInput(.released);
+        if (!open) self.returnMoreFocus();
+        self.more_focus_pending = open;
+        self.syncMoreStyle();
     }
 };
 const ChordAction = struct {
@@ -1634,6 +1742,11 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     }
     state.keys_disabled = try scope.createSignal(bool, true);
     for (&state.tool_styles) |*source| source.* = try scope.createSignal(ui.BoxStyle, S.tool());
+    for (&state.tool_labels, menu_names) |*source, name| source.* = try scope.createSignal([]const u8, name);
+    state.tool_icon_only = try scope.createSignal(bool, false);
+    state.more_open = try scope.createSignal(bool, false);
+    state.more_style = try scope.createSignal(ui.BoxStyle, S.iconTool());
+    state.more_row_style = try scope.createSignal(ui.BoxStyle, S.moreRow());
     state.tool_hover = try scope.createSignal(?ui.BoxStyle, S.toolHover());
     state.key_style = try scope.createSignal(ui.BoxStyle, S.keyButton());
     state.request_disabled = try scope.createSignal(bool, true);
@@ -1657,6 +1770,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     state.cancel_disabled = try scope.createSignal(bool, false);
     state.disconnect_disabled = try scope.createSignal(bool, true);
     state.disconnect_style = try scope.createSignal(ui.BoxStyle, S.disconnect());
+    state.disconnect_icon_only = try scope.createSignal(bool, false);
     state.connection_symbol = try scope.createSignal(?ui.SvgAsset, ui.icons.loader_circle);
     state.connection_tint = try scope.createSignal(?ui.Color, S.theme.current().accent_ink);
     state.connection_hint = try scope.createSignal([]const u8, "连接中");
@@ -1675,6 +1789,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     try request.slot.appendChild(cx.allocator, root);
     state.root = root;
     const bar = try ui.hstackStyled(cx, S.toolbar, .{});
+    bar.meta.ownership.meta.test_id = "bmc.toolbar";
     try root.appendChild(cx.allocator, bar);
     state.toolbar = bar;
     const identity = try ui.hstackStyled(cx, S.connectionIdentity, .{});
@@ -1688,16 +1803,18 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     connection_title.meta.ownership.meta.test_id = "bmc.title";
     try identity.appendChild(cx.allocator, connection_title);
     state.connection_title = connection_title;
-    const disconnect = try ui.widgets.Button(.{ .label = state.connection_label, .variant = .ghost, .icon_asset = state.connection_symbol, .icon_tint = state.connection_tint, .icon_size = @as(f32, 14), .a11y_label = state.connection_hint, .base_style = state.disconnect_style, .hover_style = state.tool_hover, .on_click = cx.on(View, state, View.disconnectConnection) }).mount(scope, cx);
+    const disconnect = try ui.widgets.Button(.{ .label = state.connection_label, .icon_only = state.disconnect_icon_only, .variant = .ghost, .icon_asset = state.connection_symbol, .icon_tint = state.connection_tint, .icon_size = @as(f32, 14), .a11y_label = state.connection_hint, .base_style = state.disconnect_style, .hover_style = state.tool_hover, .on_click = cx.on(View, state, View.disconnectConnection) }).mount(scope, cx);
     disconnect.meta.ownership.meta.test_id = "bmc.disconnect";
-    try bar.appendChild(cx.allocator, disconnect);
+    const connection_tooltip = try @import("../../ui/control_hint.zig").mount(cx, scope, disconnect, state.connection_hint, .{ .id = "bmc.disconnect.tooltip", .enabled = state.tool_icon_only });
+    state.disconnect_hint = connection_tooltip.open;
+    try bar.appendChild(cx.allocator, connection_tooltip.wrapper);
     state.disconnect_node = disconnect;
     state.connection_state = disconnect;
     state.connection_hovered = try ui.hooks.useHover(scope, disconnect);
     state.connection_focused = (try ui.hooks.useFocusState(scope, cx, disconnect)).focused;
     for (menu_names, menu_ids, menu_icons, 0..) |name, id, icon, index| {
         const action = try cx.bindState(MenuAction, .{ .view = state, .menu = @fromBackingInt(@intCast(index)) });
-        var popup = try ui.widgets.Popover(.{ .trigger = .manual, .open = state.open[index], .position = .bottom_start, .width = if (index == 4) S.boot_width else S.popup_width, .max_width = if (index == 4) S.boot_width else S.popup_width, .constrain_width_to_viewport = true, .max_height = @as(f32, 730), .viewport_padding = @as(f32, 12), .shift_main_axis = true, .offset = .{ .static = 8 }, .size_policy = .fit_content, .enter_transition = .fade, .exit_transition = .fade, .on_open_change = cx.on(MenuAction, action, MenuAction.changed) }).mount(scope, cx);
+        var popup = try ui.widgets.Popover(.{ .trigger = .manual, .open = state.open[index], .position = @as(ui.widgets.popover.PopoverPosition, if (index >= 3) .bottom_end else .bottom_start), .anchor = if (index >= 3) ui.widgets.popover.Anchor{ .virtual = .{ .ctx = action, .getRect = MenuAction.anchor } } else null, .width = if (index == 4) S.boot_width else S.popup_width, .max_width = if (index == 4) S.boot_width else S.popup_width, .constrain_width_to_viewport = true, .max_height = @as(f32, 730), .viewport_padding = @as(f32, 12), .shift_main_axis = true, .offset = .{ .static = 8 }, .size_policy = .fit_content, .enter_transition = .fade, .exit_transition = .fade, .on_open_change = cx.on(MenuAction, action, MenuAction.changed) }).mount(scope, cx);
         popup.chrome.setStyleInline(cx.allocator, S.popup());
         popup.chrome.meta.ownership.meta.test_id = try scopedId(scope, id, ".popover");
         // This vendor's fit_or_scroll fixes its height to max_height. Keep the
@@ -1705,35 +1822,63 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
         const menu_scroll = try ui.widgets.ScrollArea(.{ .height = @as(f32, 1), .direction = .vertical, .rubber_band_y = false }).mount(popup.scope, cx);
         menu_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
         try popup.content.appendChild(cx.allocator, menu_scroll.container);
-        const body = try ui.vstackStyled(cx, S.popupBody, .{});
+        const is_display = index == @backingInt(Menu.display);
+        const body = if (is_display) try ui.vstackStyled(cx, S.displayBody, .{}) else try ui.vstackStyled(cx, S.popupBody, .{});
         body.meta.ownership.meta.test_id = try scopedId(scope, id, ".body");
         try menu_scroll.content.appendChild(cx.allocator, body);
         popup.content = body;
         state.menus[index] = popup;
         state.menu_scrolls[index] = menu_scroll;
-        const button = try ui.widgets.Button(.{ .label = name, .variant = .ghost, .icon_asset = icon, .icon_size = @as(f32, 14), .base_style = state.tool_styles[index], .hover_style = state.tool_hover, .pressed_style = state.tool_hover, .focus_ring = ui.FocusRingConfig{ .width = 0 }, .on_click = cx.on(MenuAction, action, MenuAction.toggle) }).mount(scope, cx);
+        const button = try ui.widgets.Button(.{ .label = state.tool_labels[index], .a11y_label = name, .icon_only = state.tool_icon_only, .variant = .ghost, .icon_asset = icon, .icon_size = @as(f32, 16), .base_style = state.tool_styles[index], .hover_style = state.tool_hover, .pressed_style = state.tool_hover, .on_click = cx.on(MenuAction, action, MenuAction.toggle) }).mount(scope, cx);
         button.meta.ownership.meta.test_id = id;
         state.tool_nodes[index] = button;
-        try popup.trigger.appendChild(cx.allocator, button);
+        const tooltip = try @import("../../ui/control_hint.zig").mount(cx, scope, button, name, .{ .id = try scopedId(scope, id, ".tooltip"), .enabled = state.tool_icon_only });
+        state.tool_hints[index] = tooltip.open;
+        try popup.trigger.appendChild(cx.allocator, tooltip.wrapper);
         try bar.appendChild(cx.allocator, popup.wrapper);
-        const head = try ui.hstackStyled(cx, S.popupHead, .{});
+        const head = if (is_display) try ui.hstackStyled(cx, S.displayHead, .{}) else try ui.hstackStyled(cx, S.popupHead, .{});
         // Header is a fixed sibling of the scroller. Close remains visible
         // while the tall key menu scrolls to its last actions.
         cx.detachChild(popup.chrome, menu_scroll.container);
         try popup.chrome.appendChild(cx.allocator, head);
         try popup.chrome.appendChild(cx.allocator, menu_scroll.container);
-        try head.appendChild(cx.allocator, try ui.textStyled(cx, S.title, name));
+        try head.appendChild(cx.allocator, if (is_display) try ui.textStyled(cx, S.displayTitle, name) else try ui.textStyled(cx, S.title, name));
         try head.appendChild(cx.allocator, try ui.spacer(cx));
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_asset = ui.icons.x, .icon_size = @as(f32, 14), .a11y_label = "关闭菜单", .base_style = S.close(), .on_click = cx.on(MenuAction, action, MenuAction.close) }).mount(popup.scope, cx);
+        if (is_display) close.setStyleInline(cx.allocator, .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .border = .{ .width = 0, .radius = 14 } });
         close.meta.ownership.meta.test_id = try scopedId(scope, id, ".close");
         try head.appendChild(cx.allocator, close);
         try mountMenu(state, @fromBackingInt(@intCast(index)), popup);
+    }
+    const more = try ui.widgets.Popover(.{ .trigger = .manual, .open = state.more_open.?, .position = .bottom_end, .width = @as(f32, 152), .constrain_width_to_viewport = true, .viewport_padding = @as(f32, 12), .offset = .{ .static = 8 }, .size_policy = .fit_content, .enter_transition = .fade, .exit_transition = .fade, .on_open_change = cx.on(View, state, MoreAction.changed) }).mount(scope, cx);
+    state.more = more;
+    more.chrome.meta.ownership.meta.test_id = "bmc.more.popover";
+    var more_popup_style = S.popup();
+    more_popup_style.padding = ui.Padding.all(4);
+    more.chrome.setStyleInline(cx.allocator, more_popup_style);
+    const more_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.ellipsis, .icon_size = @as(f32, 16), .a11y_label = "更多 KVM 操作", .base_style = state.more_style.?, .hover_style = state.tool_hover, .pressed_style = state.tool_hover, .on_click = cx.on(View, state, MoreAction.toggle) }).mount(scope, cx);
+    more_button.meta.ownership.meta.test_id = "bmc.more";
+    state.more_node = more_button;
+    try more.trigger.appendChild(cx.allocator, more_button);
+    try bar.appendChild(cx.allocator, more.wrapper);
+    more.wrapper.setDisplay(.none);
+    for (3..5) |index| {
+        const action = try cx.bindState(MenuAction, .{ .view = state, .menu = @fromBackingInt(@intCast(index)) });
+        const row = try ui.widgets.Button(.{ .label = menu_names[index], .variant = .ghost, .icon_asset = menu_icons[index], .icon_size = @as(f32, 16), .base_style = state.more_row_style, .hover_style = state.tool_hover, .pressed_style = state.tool_hover, .on_click = cx.on(MenuAction, action, MenuAction.toggle) }).mount(more.scope, cx);
+        row.meta.ownership.meta.test_id = if (index == 3) "bmc.more.power" else "bmc.more.boot";
+        row.setStyleInline(cx.allocator, .{ .justify = .start });
+        state.more_rows[index - 3] = row;
+        const chevron = try ui.iconTintStyled(cx, ui.icons.chevron_right, S.theme.current().fg_2, .{ .position = .absolute, .width = .{ .px = 14 }, .height = .{ .px = 14 }, .inset = .{ .right = .{ .px = 8 }, .top = .{ .px = 13 } } });
+        state.more_chevrons[index - 3] = chevron;
+        try row.appendChild(cx.allocator, chevron);
+        try more.content.appendChild(cx.allocator, row);
     }
     const workspace = try ui.boxStyled(cx, S.videoWorkspace, .{});
     workspace.meta.ownership.meta.test_id = "bmc.video_workspace";
     try root.appendChild(cx.allocator, workspace);
     const video_card = try ui.boxStyled(cx, S.videoCard, .{});
     video_card.meta.ownership.meta.test_id = "bmc.video_card";
+    @import("../../ui/layer_materials.zig").variableBackdrop(video_card);
     try workspace.appendChild(cx.allocator, video_card);
     const scroll = try ui.widgets.ScrollArea(.{ .direction = .both, .rubber_band_x = false, .rubber_band_y = false, .background = ui.Color.BLACK }).mount(scope, cx);
     scroll.container.setStyleInline(cx.allocator, S.video());
@@ -1834,8 +1979,6 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     try parent.appendChild(cx.allocator, waiting);
     state.waiting = waiting;
     const surface = try ui.boxStyled(cx, S.progressSurface, .{});
-    // Video progress keeps its own tint; it is still one material boundary.
-    @import("../../ui/layer_materials.zig").card(surface, .custom);
     surface.meta.ownership.meta.test_id = "bmc.progress.surface";
     try waiting.appendChild(cx.allocator, surface);
     const header = try ui.vstackStyled(cx, S.progressHeader, .{});
@@ -1846,7 +1989,6 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     state.waiting_title.?.meta.ownership.meta.test_id = "bmc.progress.stage";
     try header.appendChild(cx.allocator, state.waiting_title.?);
     const route = try ui.boxStyled(cx, S.progressRouteBox, .{});
-    @import("../../ui/layer_materials.zig").card(route, .well);
     route.meta.ownership.meta.test_id = "bmc.progress.route";
     try surface.appendChild(cx.allocator, route);
     state.progress_route = route;
@@ -2106,27 +2248,56 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
             for ([_]u32{ 0xffbf, 0xffc7, 0xffc8, 0xffc9 }, [_][]const u8{ "F2", "F10", "F11", "F12" }, [_][]const u8{ "bmc.keys.f2", "bmc.keys.f10", "bmc.keys.f11", "bmc.keys.f12" }) |key, label, id| try chordButton(state, scope, function_row, label, id, &.{key});
         },
         .display => {
-            const row = try ui.hstackStyled(cx, S.keyRow, .{});
-            try parent.appendChild(cx.allocator, row);
+            const controls = try ui.vstackStyled(cx, S.displayControls, .{});
+            try parent.appendChild(cx.allocator, controls);
+            const row = try ui.hstackStyled(cx, S.displayScale, .{});
+            row.meta.ownership.meta.test_id = "bmc.display.scale";
+            try controls.appendChild(cx.allocator, row);
             const fit = try ui.widgets.Button(.{ .label = "适应窗口", .variant = .ghost, .base_style = state.fit_style, .on_click = cx.on(View, state, View.fit) }).mount(scope, cx);
             fit.meta.ownership.meta.test_id = "bmc.display.fit";
             try row.appendChild(cx.allocator, fit);
             const original = try ui.widgets.Button(.{ .label = "100%", .variant = .ghost, .base_style = state.original_style, .on_click = cx.on(View, state, View.original) }).mount(scope, cx);
             original.meta.ownership.meta.test_id = "bmc.display.original";
-            const original_hint = try @import("../../ui/control_hint.zig").mount(cx, scope, original, "按逻辑原尺寸显示。超出区域可在释放键鼠后滚动。", .{ .id = "bmc.display.original.tooltip", .width = 300, .visible = state.open[@backingInt(Menu.display)] });
+            const original_hint = try @import("../../ui/control_hint.zig").mount(cx, scope, original, "按逻辑原尺寸显示。超出区域可在释放键鼠后滚动。", .{ .id = "bmc.display.original.tooltip", .layout = .{ .width = .fill(), .min_width = 0 }, .width = 300, .visible = state.open[@backingInt(Menu.display)] });
             try row.appendChild(cx.allocator, original_hint.wrapper);
-            const fullscreen = try ui.widgets.Button(.{ .label = state.fullscreen_label, .variant = .secondary, .base_style = S.action(), .on_click = cx.on(View, state, View.fullscreen) }).mount(scope, cx);
+            var full_style = S.displayAction();
+            full_style.width = .fill();
+            const fullscreen = try ui.widgets.Button(.{ .label = state.fullscreen_label, .icon_asset = ui.icons.maximize, .icon_size = @as(f32, 16), .variant = .secondary, .base_style = full_style, .on_click = cx.on(View, state, View.fullscreen) }).mount(scope, cx);
             fullscreen.meta.ownership.meta.test_id = "bmc.display.fullscreen";
-            try parent.appendChild(cx.allocator, fullscreen);
+            try controls.appendChild(cx.allocator, fullscreen);
+
+            const performance_section = try ui.vstackStyled(cx, S.displayPerformance, .{});
+            try parent.appendChild(cx.allocator, performance_section);
+            try performance_section.appendChild(cx.allocator, try ui.boxStyled(cx, S.displayDivider, .{}));
             const fps_toggle = try ui.widgets.Switch(.{ .label = "显示 FPS", .checked = state.show_fps, .on_change = cx.on(View, state, View.fpsChanged) }).mount(scope, cx);
+            fps_toggle.setStyleInline(cx.allocator, S.displaySwitch(cx.tokens));
             fps_toggle.meta.ownership.meta.test_id = "bmc.display.fps";
             const fps_hint = try @import("../../ui/control_hint.zig").mount(cx, scope, fps_toggle, "显示：每秒提交到窗口的新视频帧数。\n解码：每秒发布的完整视频帧数。\n无新帧不一定表示卡顿。", .{ .id = "bmc.display.fps.tooltip", .layout = .{ .width = .fill(), .flex_shrink = 0 }, .width = 320, .visible = state.open[@backingInt(Menu.display)] });
-            try parent.appendChild(cx.allocator, fps_hint.wrapper);
-            state.fps_detail = try ui.textStyled(cx, S.hint, "等待视频帧统计");
-            state.fps_detail.?.meta.ownership.meta.test_id = "bmc.fps.detail";
-            try parent.appendChild(cx.allocator, state.fps_detail.?);
-            _ = try actionButton(state, scope, parent, "请求完整视频帧", "bmc.display.refresh", null, View.refreshVideo);
-            _ = try actionButton(state, scope, parent, "连接日志", "bmc.display.connection_log", null, View.showLog);
+            try performance_section.appendChild(cx.allocator, fps_hint.wrapper);
+            const detail = try ui.vstackStyled(cx, S.displayStats, .{});
+            state.fps_detail = detail;
+            detail.meta.ownership.meta.test_id = "bmc.fps.detail";
+            detail.setDisplay(if (state.show_fps.peek()) .flex else .none);
+            try performance_section.appendChild(cx.allocator, detail);
+            for ([_][]const u8{ "最近 10 秒最大帧间隔", "距上一显示帧" }, [_][]const u8{ "bmc.fps.max_gap", "bmc.fps.frame_age" }, 0..) |label, id, index| {
+                const stat_row = try ui.hstackStyled(cx, S.displayStatRow, .{});
+                try detail.appendChild(cx.allocator, stat_row);
+                try stat_row.appendChild(cx.allocator, try ui.textStyled(cx, S.displayStatLabel, label));
+                const value = try ui.textStyled(cx, S.displayStatValue, "— ms");
+                value.meta.ownership.meta.test_id = id;
+                try stat_row.appendChild(cx.allocator, value);
+                if (index == 0) state.fps_gap_value = value else state.fps_age_value = value;
+            }
+            try parent.appendChild(cx.allocator, try ui.boxStyled(cx, S.displayDivider, .{}));
+            const actions = try ui.hstackStyled(cx, S.displayFooter, .{});
+            actions.meta.ownership.meta.test_id = "bmc.display.actions";
+            try parent.appendChild(cx.allocator, actions);
+            const refresh_button = try ui.widgets.Button(.{ .label = "请求完整视频帧", .icon_asset = ui.icons.refresh_cw, .icon_size = @as(f32, 16), .variant = .secondary, .base_style = full_style, .on_click = cx.on(View, state, View.refreshVideo) }).mount(scope, cx);
+            refresh_button.meta.ownership.meta.test_id = "bmc.display.refresh";
+            try actions.appendChild(cx.allocator, refresh_button);
+            const log_button = try ui.widgets.Button(.{ .label = "连接日志", .icon_asset = ui.icons.file_text, .icon_size = @as(f32, 16), .variant = .ghost, .base_style = S.displayAction(), .on_click = cx.on(View, state, View.showLog) }).mount(scope, cx);
+            log_button.meta.ownership.meta.test_id = "bmc.display.connection_log";
+            try actions.appendChild(cx.allocator, log_button);
         },
         .power => {
             state.power_mapping_warning = try mappingWarning(state, parent, "bmc.power.mapping_warning");

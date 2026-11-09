@@ -1,6 +1,6 @@
 # 开发与验证手册
 
-目标为 Apple Silicon、macOS 13+、Zig 0.17.0。原生界面使用仓库固定的 Zenit 依赖；设计基准位于 `docs/DESIGN`、`docs/SPEC` 和可编辑的 `docs/UI_V3`。
+目标为 Apple Silicon、macOS 13+、Zig 0.17.0。原生界面使用仓库固定的 Zenit 依赖；设计基准位于 `docs/DESIGN`、`docs/SPEC` 和可编辑的 `docs/UI_V4`。
 
 ## 构建与测试
 
@@ -17,7 +17,7 @@ sh scripts/test_ssh_native.sh
 
 ## 可编辑原型与原生预览
 
-在仓库根目录运行 `python3 -m http.server 8768 --bind 127.0.0.1 --directory.`，打开 `/docs/UI_V3/index.html`。原型场景与组件约束见 [设计入口](../UI_V3/README.md)和[设计规范](../DESIGN/DESIGN_STANDARDS.md)。
+当前可编辑设计稿及组件约束见 [UI 设计说明](../UI_V4/README.md)和[设计规范](../DESIGN/DESIGN_STANDARDS.md)。
 
 独立原生预览使用 `zig build mockup -Dmockup=<name>`；`scripts/preview_mockup.sh <name> --bg` 将其包装为 macOS App。预览只用于核对组件，不替代主程序中的真实状态与数据接线。
 

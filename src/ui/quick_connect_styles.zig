@@ -1,4 +1,4 @@
-//! Quick-connect hierarchy contract: docs/UI_V3/workspace/quick-connect/.
+//! Quick-connect hierarchy styles.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub const width: f32 = 520;

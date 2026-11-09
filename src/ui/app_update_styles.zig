@@ -1,4 +1,4 @@
-//! Editable baseline: docs/UI_V3/app-update/{index.html,styles.css}.
+//! Application update styles.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub fn dialog(width: f32, height: f32, target: f32) ui.BoxStyle {

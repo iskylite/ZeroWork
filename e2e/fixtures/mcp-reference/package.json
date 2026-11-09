@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "description": "Independent official MCP servers for ZeroWork native acceptance",
+  "dependencies": {
+    "@modelcontextprotocol/server-everything": "2.2.1",
+    "@modelcontextprotocol/sdk": "1.32.2"
+  }
+}

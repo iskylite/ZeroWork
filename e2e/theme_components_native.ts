@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Complete built-in palette acceptance through production UI; only isolated local fixtures. */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -6,7 +7,7 @@ import {mkdir,mkdtemp,writeFile,readFile,open,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import * as h from '../vendor/zenit/e2e/client.ts';
 const binary=resolve(process.argv[2]),out=resolve(process.argv[3]);await mkdir(out,{recursive:true});
-const themes=process.argv[4]?.split(',')??Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes);
+const themes=process.argv[4]?.split(',')??Object.keys(nativeThemeData.themes);
 const report:any={status:'running',binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),cases:[],limits:['Production native components with synthetic Harness input; physical IME and VoiceOver not covered.','No saved configuration, remote connection or notification permission action. The local PTY writes runner-owned readiness data and runs a bounded sleep to exercise busy-process close confirmation; cancellation preserves the session and Ctrl+C stops the fixture.']};
 const shown=(n:any)=>n?.rect&&n.visible!==false&&n.hidden!==true&&n.rect.w>0&&n.rect.h>0;
 const vis=async(id:string)=>h.waitFor(async()=>{const a=await h.query(id);return Array.isArray(a)?a.find(shown)??null:null},10000);

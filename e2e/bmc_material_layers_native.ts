@@ -27,7 +27,7 @@ async function appearance(name:string,t:number){theme=name;transparency=t;assert
 async function state(name:string){assert((await h.request('POST','/app/bmc-fixture/state',{state:name})).ok);await h.sleep(180);}
 async function capture(label:string,ids:string[],pixels:any[]=[]){
   report.step=label;
-  if(ids.includes('bmc.progress.surface')){ids=[...ids,'bmc.viewport'];pixels.push({kind:'progress',id:'bmc.progress.surface',underNode:'bmc.viewport',staleFrame:label==='disconnected'?[240,240,240]:null});}
+  if(ids.includes('bmc.progress.surface')){ids=[...new Set([...ids,'bmc.viewport','bmc.progress.stage','bmc.progress.route','bmc.progress.status'])];pixels.push({kind:'progress',id:'bmc.progress.surface',underNode:'bmc.viewport',staleFrame:label==='disconnected'?[240,240,240]:null});}
   if(!ids.some(id=>id.endsWith('.tooltip')))await h.mouseMove(4,4);await h.sleep(150);
   const name=`${theme}-${width}x${height}-t${transparency}-${label}`;
   const nodes:any={};for(const id of ids){await visible(id);nodes[id]=await paint(id);if(id.endsWith('.tooltip')&&JSON.stringify(nodes[id].ink)!==JSON.stringify(nodes[id].foreground))report.violations.push({theme,width,height,id,reason:'stale help ink',actual:nodes[id].ink,expected:nodes[id].foreground});}
@@ -38,6 +38,7 @@ async function capture(label:string,ids:string[],pixels:any[]=[]){
   return nodes;
 }
 function alpha(id:string,node:any,level:number){const expected=node.layer_alpha[level-1];if(node.background.a!==expected&&!(node.background.a===0&&node.compensated))report.violations.push({theme,width,height,transparency,id,actual:node.background.a,expected,level});}
+function protectedPopup(id:string,node:any){if(node.background.a<node.layer_alpha[0])report.violations.push({theme,width,height,transparency,id,reason:'popup backdrop is weaker than the selected material',actual:node.background.a});}
 async function close(menu:string){await click(`bmc.${menu}.close`);await h.sleep(120);}
 async function frame(rgb:number[]){assert((await h.request('POST','/app/bmc-fixture/frame',{red:rgb[0],green:rgb[1],blue:rgb[2]})).ok);await h.sleep(180);}
 try{
@@ -66,9 +67,10 @@ try{
     for(const menu of ['control','keys','display','power','boot']){
       await click(`bmc.${menu}`);
       const ids=[`bmc.${menu}.popover`];if(menu==='power'||menu==='boot')ids.push(`bmc.${menu}.summary`);
-      const nodes=await capture(menu,ids);alpha(ids[0],nodes[ids[0]],1);if(ids[1])alpha(ids[1],nodes[ids[1]],2);
+      const nodes=await capture(menu,ids,[{kind:'popup',id:ids[0]}]);protectedPopup(ids[0],nodes[ids[0]]);if(ids[1])alpha(ids[1],nodes[ids[1]],2);
+      await frame([0,0,0]);await capture(menu+'-black-video',ids,[{kind:'popup',id:ids[0]}]);await frame([240,240,240]);
       if(menu==='boot'){
-        await click('bmc.boot.target.trigger');let p=await capture('boot-dropdown',['bmc.boot.popover','bmc.boot.target.dropdown','bmc.boot.option.none']);alpha('bmc.boot.target.dropdown',p['bmc.boot.target.dropdown'],2);
+        await click('bmc.boot.target.trigger');let p=await capture('boot-dropdown',['bmc.boot.popover','bmc.boot.target.dropdown','bmc.boot.option.none']);protectedPopup('bmc.boot.target.dropdown',p['bmc.boot.target.dropdown']);
         if(JSON.stringify(p['bmc.boot.option.none'].ink)!==JSON.stringify(p['bmc.boot.option.none'].foreground))report.violations.push({theme,width,height,id:'bmc.boot.option.none',reason:'stale option ink',actual:p['bmc.boot.option.none'].ink,expected:p['bmc.boot.option.none'].foreground});
         await click('bmc.boot.option.none');
         if(!(await h.request('GET','/app/bmc-fixture/menus')).open[4])await click('bmc.boot');
@@ -92,11 +94,11 @@ try{
     for(const s of ['read_only','no_signal','disconnected']){await state(s);await capture(s,s==='read_only'?['bmc.fps']:['bmc.progress','bmc.progress.surface']);}
     for(const phase of ['public_script','waiting_certificate','waiting_credentials','redfish_discovery']){
       assert((await h.request('POST','/app/bmc-fixture/progress',{stage:phase,revision:12,elapsed_ms:9900,stage_elapsed_ms:900,log_generation:1})).ok);await h.sleep(180);
-      const p=await capture(phase,['bmc.progress','bmc.progress.surface','bmc.progress.route']);alpha('bmc.progress.surface',p['bmc.progress.surface'],1);alpha('bmc.progress.route',p['bmc.progress.route'],2);
+      const p=await capture(phase,['bmc.progress','bmc.progress.surface','bmc.progress.route']);assert.equal(p['bmc.progress.surface'].background.a,255);assert.equal(p['bmc.progress.route'].background.a,255);
     }
     assert((await h.request('POST','/app/bmc-fixture/progress',{stage:'public_script',revision:13,elapsed_ms:9900,stage_elapsed_ms:900,failure:true,log_generation:1})).ok);await h.sleep(180);
     await capture('failed',['bmc.progress','bmc.progress.surface']);
-    for(const t of [0,100]){await appearance(name,t);const p=await capture('failed-material',['bmc.progress','bmc.progress.surface']);alpha('bmc.progress.surface',p['bmc.progress.surface'],1);}
+    for(const t of [0,1,100]){await appearance(name,t);const p=await capture('failed-material',['bmc.progress','bmc.progress.surface']);assert.equal(p['bmc.progress.surface'].background.a,255);}
     await state('controlled');
   }
   const stats=await h.request('GET','/app/bmc-fixture/stats');assert.equal(stats.power_writes,0);assert.equal(stats.boot_writes,0);

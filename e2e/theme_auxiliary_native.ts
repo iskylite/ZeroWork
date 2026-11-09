@@ -1,9 +1,10 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Production native auxiliary text contrast matrix; isolated configuration, real user-selected model. */
 import assert from 'node:assert/strict';import{spawn}from'node:child_process';import{mkdir,mkdtemp,rm,open,readFile,writeFile,realpath}from'node:fs/promises';import * as h from '../vendor/zenit/e2e/client.ts';
 import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 const root=resolve(import.meta.dirname,'..'),binary=resolve(process.argv[2]),out=resolve(process.argv[3]??'/tmp/zerowork-followup-contrast/native');await mkdir(out,{recursive:true});const iso=await realpath(await mkdtemp('/private/tmp/zw-theme-matrix-deep-')),data=iso+'/data',rpc=iso+'/rpc',shell=iso+'/shell';for(const d of [data,rpc,shell])await mkdir(d);process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;await writeFile(shell+'/.zshrc',"PS1='theme-check%# '\nbindkey -e\n");
-const palettes=JSON.parse(await readFile(root+'/docs/UI_V3/theme-presets.json','utf8'));
+const palettes=nativeThemeData;
 await writeFile(data+'/config.toml','[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\n[ai]\ndefault_provider="Magpie 实机验收"\npermission_mode="confirm"\n[[ai.providers]]\nid="Magpie 实机验收"\nkind="openai_compat"\nendpoint="http://127.0.0.1:3425/v1/chat/completions"\napi_key="local-gateway"\nenabled=true\n[[ai.providers.models]]\nname="grok/grok-4.7@500k"\ncontext_window=500000\ndefault=true\nefforts=["low","medium","high","xhigh"]\n');
 await writeFile(data+'/hosts.toml','[registry]\nschema_version=2\nrevision=1\nnext_connection_id=2\nnext_group_id=1\n[[hosts]]\nconnection_id=1\nrevision=1\nprotocol="ssh"\nauth_mode="agent"\nname="Theme review server"\nhost="127.0.0.1"\nport=1\nuser="review"\n');
 for(const key of ['ZEROWORK_AI_MOCK','ZEROWORK_AI_ENDPOINT','ZEROWORK_AI_MODEL','ZEROWORK_AI_PROVIDER'])delete process.env[key];

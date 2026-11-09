@@ -1,3 +1,4 @@
+import {nativeThemeData} from './native_theme_data.mjs';
 /** Actual selected quick-connect rows over a white image at all material endpoints. */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -5,7 +6,7 @@ import {mkdir,mkdtemp,rm,realpath,readFile,writeFile,open} from 'node:fs/promise
 import {join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import * as h from '../vendor/zenit/e2e/client.ts';
-const root=resolve(import.meta.dirname,'..'),binary=resolve(process.argv[2]),out=resolve(process.argv[3]);await mkdir(out,{recursive:true});const themes=process.argv[4]?.split(',')??Object.keys(JSON.parse(await readFile(join(root,'docs/UI_V3/theme-presets.json'),'utf8')).themes);
+const root=resolve(import.meta.dirname,'..'),binary=resolve(process.argv[2]),out=resolve(process.argv[3]);await mkdir(out,{recursive:true});const themes=process.argv[4]?.split(',')??Object.keys(nativeThemeData.themes);
 const iso=await realpath(await mkdtemp('/private/tmp/zw-quick-selection-')),data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;const image=join(iso,'white.png');await writeFile(image,Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFUlEQVR4nGP8//8/AzbAhFV00EoAAFbUAw037MyjAAAAAElFTkSuQmCC','base64'));await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n[ui.materials]\nblur_px=0\n[ui.materials.background]\nenabled=true\npath=${JSON.stringify(image)}\ntransparency=0\n`);await writeFile(join(data,'hosts.toml'),'[registry]\nschema_version=2\nrevision=1\nnext_connection_id=2\nnext_group_id=1\n[[hosts]]\nconnection_id=1\nrevision=1\nprotocol="ssh"\nauth_mode="agent"\nname="Selected boundary host"\nhost="127.0.0.1"\nport=1\nuser="review"\n');
 const log=await open(join(out,'app.log'),'w'),app=spawn(binary,[],{env:{...process.env,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});const ended=new Promise(r=>app.once('close',r));const report:any={status:'running',binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),iso,cases:[]};
 const shown=(n:any)=>n?.rect&&n.visible!==false&&n.hidden!==true&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0,vis=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,15000);
