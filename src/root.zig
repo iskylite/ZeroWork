@@ -18,6 +18,8 @@ pub const ai_attached_service = @import("ai/attached_service.zig");
 pub const ai_session_journal = @import("ai/session_journal.zig");
 pub const host_queries = @import("ai/host_queries.zig");
 comptime {
+    _ = @import("ai/host_tool_catalog.zig");
+    _ = @import("ai/live_reasoning.zig");
     _ = @import("ui/copy_button.zig");
     _ = @import("host_recording_queries_tests.zig");
     _ = @import("ai_inventory_grant_tests.zig");

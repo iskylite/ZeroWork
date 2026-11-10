@@ -1233,3 +1233,41 @@ test "AI composer streaming usage and effort retain model rows and ignore repeat
     try std.testing.expectEqualStrings("quiet", f.last.?.action.model.model_id);
     try std.testing.expectEqual(@as(u64, 3), f.last.?.revision);
 }
+
+test "AI composer live context usage updates the open menu without rebuilding model controls" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const live = @import("ai/live_context_usage.zig");
+    var tracker: live.Tracker = .{};
+    var mailbox: live.Mailbox = .{};
+    mailbox.reset(17);
+    const request: @import("ai/provider.zig").ChatRequest = .{ .model = "alpha", .system = "system", .messages = &.{.{ .content = "question" }} };
+    const initial = try tracker.update(request, 125494, 0);
+    mailbox.publish(17, initial);
+    var snapshot = f.snapshot();
+    var parts = [_]Controls.UsagePart{
+        .{ .name = "基准输入（实测）", .tokens = 125494, .estimated = false },
+        .{ .name = "新增内容（估算）", .tokens = 0, .estimated = true },
+    };
+    snapshot.usage = .{ .used_tokens = initial.summary.tokens, .limit_tokens = 1000000, .estimated = false, .parts = &parts };
+    try f.view.update(snapshot);
+    f.settle();
+    f.click(f.view.buttons[4]);
+    const version = f.view.model_version.peek();
+    for (0..8) |_| {
+        mailbox.publish(17, tracker.appendText(512).?);
+        const current = mailbox.read(17).?;
+        parts[1].tokens = current.summary.added_tokens;
+        snapshot.usage.?.used_tokens = current.summary.tokens;
+        snapshot.usage.?.estimated = current.summary.estimated;
+        try f.view.update(snapshot);
+        f.settle();
+        const menu = find(f.cx.root.?, "ai.usage.menu").?;
+        try std.testing.expect(hasText(menu, "125.5K"));
+        try std.testing.expect(!hasText(menu, "~125.5K"));
+        try std.testing.expect(hasText(menu, "12%"));
+        try std.testing.expectEqual(version, f.view.model_version.peek());
+        try std.testing.expectEqualStrings("alpha", f.view.labels[2].?.getText().?.content);
+    }
+}

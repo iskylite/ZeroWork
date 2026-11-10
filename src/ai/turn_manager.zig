@@ -9,6 +9,7 @@ const tool_scope = @import("tool_scope.zig");
 pub const tool_loop = @import("tool_loop.zig");
 test {
     _ = @import("tool_loop_tests.zig");
+    _ = @import("live_context_usage.zig");
 }
 
 fn RequestBudget(comptime Timing: type) type {
@@ -86,6 +87,7 @@ pub const Manager = struct {
         round_start: ?*const fn (*anyopaque) void = null,
         input_consumed: ?*const fn (*anyopaque, @import("../host/identity.zig").SubmissionId, []const u8) anyerror!void = null,
         tool_rejected: ?*const fn (*anyopaque, provider.ToolCall, []const u8) anyerror!void = null,
+        context_usage: ?*const fn (*anyopaque, u64, @import("live_context_usage.zig").Snapshot) void = null,
     };
     allocator: std.mem.Allocator,
     read_only: bool = false,
@@ -93,6 +95,7 @@ pub const Manager = struct {
     shared_task: ?struct { root: *@import("task_budget.zig").Root, task: @import("../host/identity.zig").TaskId } = null,
     compaction_config: ?@import("provider_config.zig").ProviderConfig = null,
     last_context_usage: ?@import("context_usage.zig").Sample = null,
+    live_context_usage: @import("live_context_usage.zig").Tracker = .{},
     observer: ?Observer = null,
     turn: turn_model.Turn,
     cards: card_stream.Stream,
@@ -213,6 +216,7 @@ pub const Manager = struct {
             try budget.check();
         }
         self.last_context_usage = null;
+        self.live_context_usage = .{};
         try self.turn.resetForRun();
         self.last_error = null;
         self.saw_done = false;
@@ -475,6 +479,7 @@ pub const Manager = struct {
             attempt_request.timeout_ms = @intCast(@divTrunc(remaining_ns + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             attempt_request.retry_after_ms = &retry_after_ms;
             self.retry_attempt = attempt;
+            self.publishContextUsage(attempt_request, null, 0);
             const result = p.chat(p.ctx, attempt_request, receive, self);
             if (retry_after_ms) |delay| self.cooldown_deadline_ms = monotonicMs() +| delay;
             // Stop wins on both success and failure. Providers and their
@@ -498,6 +503,7 @@ pub const Manager = struct {
                     return if (self.last_error != null) error.StreamCallbackFailed else error.ProviderMissingDone;
                 }
                 if (stats.usage_reported and stats.input_tokens > 0) self.last_context_usage = @import("context_usage.zig").Sample.capture(attempt_request, stats.input_tokens) catch null;
+                self.publishContextUsage(attempt_request, if (stats.usage_reported and stats.input_tokens > 0) stats.input_tokens else null, self.round_text.items.len);
                 var reported = stats;
                 reported.request_count = @as(u32, attempt) + 1;
                 return reported;
@@ -560,6 +566,7 @@ pub const Manager = struct {
         };
         switch (delta) {
             .text => |value| {
+                if (self.live_context_usage.appendText(value.len)) |snapshot| self.notifyContextUsage(snapshot);
                 self.round_text.appendSlice(self.allocator, value) catch {
                     self.last_error = "response allocation failed";
                 };
@@ -606,6 +613,7 @@ pub const Manager = struct {
 
     fn execute(raw: *anyopaque, invocation: tool_loop.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !tool_loop.Outcome {
         const self: *Manager = @ptrCast(@alignCast(raw));
+        self.publishTranscriptUsage();
         self.turn.state = if (invocation.verdict == .need_confirm) .await_confirm else .executing;
         const host = self.tool_host.?;
         return host.execute(host.context, invocation, allocator, cancel);
@@ -613,6 +621,7 @@ pub const Manager = struct {
 
     fn executeDynamic(raw: *anyopaque, invocation: @import("plugin_tools.zig").DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) ![]@import("plugin_tools.zig").ToolResult {
         const self: *Manager = @ptrCast(@alignCast(raw));
+        self.publishTranscriptUsage();
         const engine = self.permissionEngine();
         self.turn.state = if (try @import("plugin_tools.zig").callNeedsApproval(invocation.parsed, .{ .engine = engine, .full_control = engine.mode == .auto }, invocation.table.captured_scope.owner == .group)) .await_confirm else .executing;
         const host = self.tool_host.?;
@@ -621,6 +630,7 @@ pub const Manager = struct {
     }
     fn executeHost(raw: *anyopaque, invocation: @import("host_tools.zig").Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !@import("host_tools.zig").Result {
         const self: *Manager = @ptrCast(@alignCast(raw));
+        self.publishTranscriptUsage();
         self.turn.state = .executing;
         const host = self.tool_host.?;
         const execute_host = host.execute_host orelse return error.ToolNotAvailable;
@@ -633,6 +643,7 @@ pub const Manager = struct {
     }
 
     fn completeTools(self: *Manager, cancel: ?*provider.CancelToken, policy: permission.Engine, policy_revision: u64) !void {
+        defer self.publishTranscriptUsage();
         defer self.clearPending();
         // Sort the received slots, without allocating from a provider-supplied
         // index or imposing a fixed batch size.
@@ -667,6 +678,22 @@ pub const Manager = struct {
             // render protocol JSON as an assistant answer or map unknown to
             // the legacy Card.Phase.failed/aborted projection.
         }
+    }
+
+    fn notifyContextUsage(self: *Manager, snapshot: @import("live_context_usage.zig").Snapshot) void {
+        if (self.observer) |observer| if (observer.context_usage) |notify| notify(observer.context, self.turn_id, snapshot);
+    }
+    fn publishContextUsage(self: *Manager, request: provider.ChatRequest, measured: ?u32, response_bytes: usize) void {
+        const observer = self.observer orelse return;
+        if (observer.context_usage == null) return;
+        const snapshot = self.live_context_usage.update(request, measured, response_bytes) catch return;
+        self.notifyContextUsage(snapshot);
+    }
+    fn publishTranscriptUsage(self: *Manager) void {
+        const loop = self.tool_run orelse return;
+        var request = loop.request;
+        request.messages = loop.messages.items;
+        self.publishContextUsage(request, null, 0);
     }
 
     fn truncateCards(self: *Manager, count: usize) void {
@@ -1555,8 +1582,9 @@ test "Stop racing provider completion cannot record stream_done" {
     try std.testing.expectEqualStrings("stream_failed", manager.audit_log.entries.items[0].verdict);
 }
 
-test "empty text in a tool round produces no observer text or blank answer card before final response" {
+test "live context usage empty text in a tool round produces no observer text or blank answer card before final response" {
     const Fixture = struct {
+        usage_mailbox: @import("live_context_usage.zig").Mailbox = .{},
         rounds: usize = 0,
         executions: usize = 0,
         text_events: usize = 0,
@@ -1571,6 +1599,10 @@ test "empty text in a tool round produces no observer text or blank answer card 
                 1 => sink(ctx, .{ .tool_plan = .{ .call_id = "empty-delta-df", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df -h\"}" } }),
                 2 => {
                     try std.testing.expectEqual(@as(usize, 1), self.executions);
+                    const live = self.usage_mailbox.read(901).?;
+                    try std.testing.expectEqual(@as(?usize, 1000), live.summary.measured_tokens);
+                    try std.testing.expect(live.summary.tokens > 1000); // Real result already counted before the next response.
+
                     try std.testing.expectEqual(@as(usize, 3), request.messages.len);
                     const original = request.messages[1];
                     try std.testing.expectEqual(provider.Role.assistant, original.role);
@@ -1594,8 +1626,16 @@ test "empty text in a tool round produces no observer text or blank answer card 
         fn execute(raw: *anyopaque, invocation: tool_loop.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !tool_loop.Outcome {
             const self: *@This() = @ptrCast(@alignCast(raw));
             try std.testing.expectEqualStrings("df -h", invocation.call.command);
+            const live = self.usage_mailbox.read(901).?;
+            try std.testing.expectEqual(@as(?usize, 1000), live.summary.measured_tokens);
+            try std.testing.expect(live.summary.tokens > 1000); // Current tool call is counted while the command is still running.
+
             self.executions += 1;
             return tool_loop.Outcome.copy(allocator, &.{.{ .session_id = 101, .status = .succeeded, .transport = .local, .stdout = "Filesystem Size Used Avail Capacity Mounted on", .exit = 0, .local_released = true }});
+        }
+        fn usage(raw: *anyopaque, turn: u64, snapshot: @import("live_context_usage.zig").Snapshot) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.usage_mailbox.publish(turn, snapshot);
         }
         fn reset(_: *anyopaque) void {}
         fn observe(raw: *anyopaque, delta: provider.Delta) !void {
@@ -1612,17 +1652,22 @@ test "empty text in a tool round produces no observer text or blank answer card 
         }
     };
     var fixture: Fixture = .{};
+    fixture.usage_mailbox.reset(901);
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     manager.scope = .{ .owner = .{ .session = 101 }, .members = .{ .ids = .{101} ++ @as([15]u64, @splat(0)), .len = 1 } };
     manager.turn_id = 901;
     manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute };
-    manager.observer = .{ .context = &fixture, .reset = Fixture.reset, .delta = Fixture.observe };
+    manager.observer = .{ .context = &fixture, .reset = Fixture.reset, .delta = Fixture.observe, .context_usage = Fixture.usage };
     const usage = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "two-round-fixture", .system = "", .messages = &.{.{ .content = "read capacity" }}, .tools = &.{.{ .tool = .run_command, .session_ids = &.{101} }} });
     try std.testing.expectEqual(@as(usize, 2), fixture.rounds);
     try std.testing.expectEqual(@as(u32, 2), usage.request_count);
     try std.testing.expectEqual(@as(u32, 3000), usage.input_tokens);
     try std.testing.expectEqual(@as(usize, 2000), manager.last_context_usage.?.input_tokens);
+    const live = fixture.usage_mailbox.read(901).?;
+    try std.testing.expectEqual(@as(?usize, 2000), live.summary.measured_tokens);
+    try std.testing.expectEqual(2000 + @import("local_text_request.zig").draftTokens("DF_READONLY_DONE"), live.summary.tokens);
+
     try std.testing.expect(manager.last_context_usage.?.matches(manager.tool_run.?.messages.items));
     try std.testing.expectEqual(@as(usize, 1), fixture.executions);
     try std.testing.expectEqual(@as(usize, 1), fixture.tool_events);

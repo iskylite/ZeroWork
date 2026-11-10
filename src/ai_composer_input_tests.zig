@@ -12,6 +12,8 @@ const Fixture = struct {
     disabled: *ui.Signal(bool),
     error_message: *ui.Signal([]const u8),
     outside: *ui.Node,
+    submissions: usize = 0,
+    alternates: usize = 0,
 
     fn init(self: *Fixture, borderless: bool) !void {
         const cx = try ui.Cx.init(a, std.testing.io);
@@ -33,7 +35,22 @@ const Fixture = struct {
         const outside = try ui.widgets.Button(.{ .label = "外部控件" }).mount(scope, cx);
         try cx.root.?.appendChild(a, outside);
         self.* = .{ .cx = cx, .scope = scope, .input = input, .value = value, .disabled = disabled, .error_message = error_message, .outside = outside };
+        input.input.behavior.events.capture_context = self;
+        input.input.behavior.events.on_event_capture = composerKey;
         self.settle();
+    }
+    fn composerKey(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *Fixture = @ptrCast(@alignCast(raw orelse return .ignored));
+        if (event == .key_down and event.key_down.key == .@"return") {
+            switch (@import("ui/ai_composer_keys.zig").handleReturn(event.key_down, self.input.state)) {
+                .composing => return .ignored,
+                .newline => {},
+                .submit => self.submissions += 1,
+                .alternate => self.alternates += 1,
+            }
+            return .stop;
+        }
+        return .ignored;
     }
     fn deinit(self: *Fixture) void {
         self.cx.clearFocus();
@@ -256,4 +273,31 @@ test "multiline input uses the same typography for painted rows caret wrapping a
             try std.testing.expectEqual(@as(u16, 600), row.resolveTextFontWeight().?);
         }
     }
+}
+
+test "AI composer Shift Return inserts a newline while Return submits and queue shortcuts remain separate" {
+    var f: Fixture = undefined;
+    try f.init(true);
+    defer f.deinit();
+    f.cx.setFocus(f.input.input);
+    f.cx.handleTextInput("first");
+    f.cx.handleKeyDown(.@"return", .{ .shift = true });
+    f.cx.handleTextInput("第二行");
+    f.settle();
+    try std.testing.expectEqualStrings("first\n第二行", f.value.peek());
+    try std.testing.expectEqual(@as(usize, 0), f.submissions);
+    f.cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectEqual(@as(usize, 1), f.submissions);
+    try std.testing.expectEqualStrings("first\n第二行", f.value.peek());
+    f.cx.handleKeyDown(.@"return", .{ .super = true, .shift = true });
+    f.cx.handleKeyDown(.@"return", .{ .ctrl = true, .shift = true });
+    try std.testing.expectEqual(@as(usize, 2), f.alternates);
+    f.cx.handleKeyDown(.@"return", .{ .super = true });
+    try std.testing.expectEqualStrings("first\n第二行\n", f.value.peek());
+    f.cx.handleImePreedit("zhong", 5);
+    f.cx.handleKeyDown(.@"return", .{ .shift = true });
+    try std.testing.expectEqual(@as(usize, 1), f.submissions);
+    f.cx.handleImeCommit("中");
+    f.settle();
+    try std.testing.expect(std.mem.endsWith(u8, f.value.peek(), "中"));
 }

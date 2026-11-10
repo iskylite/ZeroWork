@@ -113,6 +113,8 @@ const Fixture = struct {
     late_release_checks: usize = 0,
     fail_worker_release: bool = false,
     pending_worker_release: bool = false,
+    reasoning_test: bool = false,
+    reasoning: @import("ai/live_reasoning.zig").State = .{},
     calls: std.atomic.Value(usize) = .init(0),
     release: std.atomic.Value(bool) = .init(false),
     fn init() Fixture {
@@ -139,7 +141,7 @@ const Fixture = struct {
     fn prepare(raw: *anyopaque, _: std.mem.Allocator, _: std.Io, context: runtime.Context) !runtime.Prepared {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         try std.testing.expect(self.controller_thread != std.Thread.getCurrentId());
-        return .{ .provider = .{ .ctx = self, .chat = chat, .models = models }, .request = .{ .model = "test", .system = "", .messages = &.{}, .tools = self.definitions, .tool_table = if (self.table) |*table| table else null }, .scope = .{ .owner = context.owner, .members = .{} }, .host = if (self.query) .{ .context = self, .execute = unsupported, .execute_host = invoke } else null };
+        return .{ .reasoning = if (self.reasoning_test) &self.reasoning else null, .provider = .{ .ctx = self, .chat = chat, .models = models }, .request = .{ .model = "test", .system = "", .messages = &.{}, .tools = self.definitions, .tool_table = if (self.table) |*table| table else null }, .scope = .{ .owner = context.owner, .members = .{} }, .host = if (self.query) .{ .context = self, .execute = unsupported, .execute_host = invoke } else null };
     }
     fn unsupported(_: *anyopaque, _: @import("ai/tool_loop.zig").Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !@import("ai/tool_loop.zig").Outcome {
         return error.UnexpectedLegacyDispatch;
@@ -156,6 +158,9 @@ const Fixture = struct {
                 try std.testing.expect(value.invocation.context.conversation_id.eql(context.fence.conversation));
                 try std.testing.expect(value.invocation.context.task_id.eql(context.task));
                 value.fixture.controller_calls += 1;
+                if (value.fixture.reasoning_test) {
+                    value.fixture.reasoning.set(if (value.fixture.controller_calls == 1) .high else null, value.fixture.controller_calls == 1);
+                }
             }
         };
         var exchange: Exchange = .{ .fixture = self, .invocation = invocation };
@@ -171,6 +176,15 @@ const Fixture = struct {
         while (!self.release.load(.acquire)) {
             if (request.cancel) |cancel| if (cancel.isCancelled()) return error.Cancelled;
             std.Thread.yield() catch {};
+        }
+        if (self.reasoning_test) {
+            try std.testing.expectEqual(if (call == 0) @as(?provider.Effort, .low) else if (call == 1) @as(?provider.Effort, .high) else null, request.effort);
+            try std.testing.expectEqual(@as(?bool, call < 2), request.thinking);
+            if (call < 2) {
+                sink(sink_context, .{ .tool_plan = .{ .index = 0, .call_id = if (call == 0) "reasoning-low" else "reasoning-high", .name = self.definitions[0].name(), .arguments = "{}" } });
+                sink(sink_context, .done);
+                return .{};
+            }
         }
         if (self.fail_answer_once and call == 1) {
             self.fail_answer_once = false;
@@ -814,4 +828,23 @@ test "v0.4 Worker waits for backend save and real release without discarding rec
     try std.testing.expectEqual(@as(usize, 1), fixture.controller_calls);
     try shared.pump();
     try std.testing.expectEqual(@as(usize, 1), fixture.controller_calls);
+}
+
+test "AI reasoning controller edits apply to the next provider round of a running group conversation" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    var shared = attached.Host.init(a);
+    defer shared.deinit() catch unreachable;
+    fixture.query = true;
+    fixture.reasoning_test = true;
+    fixture.reasoning.set(.low, true);
+    const runner = try fixture.attach(&shared, .{ .group = 7 }, @fromBackingInt(1));
+    const ticket = try shared.service.store.create(runner.agent.id);
+    _ = try shared.service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "check group" }, .steer);
+    fixture.release.store(true, .release);
+    try awaitIdle(&shared, fixture.runner.?);
+    try std.testing.expect(fixture.runner.?.failure == null);
+    try std.testing.expectEqual(@as(usize, 3), fixture.calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), fixture.controller_calls);
+    try std.testing.expectEqual(@as(usize, 1), fixture.capture_count);
 }

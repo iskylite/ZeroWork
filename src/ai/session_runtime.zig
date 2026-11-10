@@ -30,6 +30,7 @@ pub const Context = struct {
     }
 };
 pub const Prepared = struct {
+    reasoning: ?*const @import("live_reasoning.zig").State = null,
     provider: provider.Provider,
     request: provider.ChatRequest,
     scope: scope.Scope,
@@ -238,7 +239,7 @@ pub const Runner = struct {
         var task_control: TaskControl = .{ .runner = self };
         var task_cancel: provider.CancelToken = .{ .source = .{ .context = &task_control, .poll = TaskControl.cancelled, .user_wait = TaskControl.userWait, .resource_wait = TaskControl.resourceWait } };
         request.cancel = &task_cancel;
-        var projection: Projection = .{ .allocator = self.allocator, .original = prepared.provider, .context = self.context.?, .historical_messages = self.historical_messages, .root = self.task_root.?, .slots = self.slots.?, .read_only = self.observation_only };
+        var projection: Projection = .{ .allocator = self.allocator, .original = prepared.provider, .context = self.context.?, .historical_messages = self.historical_messages, .root = self.task_root.?, .slots = self.slots.?, .read_only = self.observation_only, .reasoning = prepared.reasoning };
         const adapter: provider.Provider = .{ .ctx = &projection, .chat = Projection.chat, .models = Projection.models };
         if (self.answer_only) {
             if (self.worker.?.manager.tool_run) |loop| loop.request.cancel = &task_cancel;
@@ -297,6 +298,7 @@ pub const Runner = struct {
         root: *task_budget.Root,
         slots: *task_budget.Slots,
         read_only: bool = false,
+        reasoning: ?*const @import("live_reasoning.zig").State = null,
         fn models(raw: *anyopaque, a: std.mem.Allocator) ![]provider.ModelInfo {
             const self: *@This() = @ptrCast(@alignCast(raw));
             return self.original.models(self.original.ctx, a);
@@ -336,6 +338,7 @@ pub const Runner = struct {
             waiting = false;
             if (request.cancel) |cancel| if (cancel.isCancelled()) return error.Cancelled;
             try self.root.take(self.context.task, 1, 0);
+            if (self.reasoning) |live| projected = live.apply(projected);
             const result = self.original.chat(self.original.ctx, projected, sink, ctx);
             try self.root.usage(self.context.task, if (result) |stats| stats else |_| null);
             return result;

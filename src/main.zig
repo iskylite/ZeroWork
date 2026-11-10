@@ -486,8 +486,10 @@ const AiHost = struct {
     attachment_preview_scroll_y: ?f32 = null,
     composer_hash: ?u64 = null,
     composer_usage: @import("ai/composer_usage_cache.zig").Cache = .{},
+    context_usage_mailbox: @import("ai/live_context_usage.zig").Mailbox = .{},
     gestures: ?*@import("ui/ai_float_gestures.zig").View = null,
     request_effort: ?ai_provider.Effort = null,
+    live_reasoning: @import("ai/live_reasoning.zig").State = .{},
     request_thinking: ?bool = null,
     model_discovery: @import("ai/model_discovery.zig").Service = .{},
     request_vision: bool = false,
@@ -536,7 +538,7 @@ const AiHost = struct {
     pending_execution_action: ?ExecutionAction = null,
     released_task_contexts: std.ArrayList(@import("ai/host_tools.zig").Context) = .empty,
     pending_ai_completions: std.ArrayList(?PendingAiCompletion) = .empty,
-    host_catalog: [32]@import("ai/host_tools.zig").Contribution = undefined,
+    host_catalog: @import("ai/host_tool_catalog.zig").Buffer = undefined,
     host_catalog_len: usize = 0,
     turn_footer: ?*ui.Node = null,
     // Borrowed from tool_bridge's request table; never read after clear().
@@ -1946,6 +1948,15 @@ const AiHost = struct {
         return summary;
     }
 
+    fn liveComposerUsage(self: *AiHost, selected: ?ai_provider_config.ProviderConfig) ?@import("ai/live_context_usage.zig").Snapshot {
+        if (!self.requestDisplayed() or self.execution().thread_state.load(.acquire) == 0) return null;
+        const binding = self.execution().native_binding orelse return null;
+        const model = selected orelse return null;
+        const usage = @import("ai/context_usage.zig");
+        if (usage.modelKey(model) != usage.modelKey(binding.config)) return null;
+        return self.execution().context_usage_mailbox.read(self.current_turn.id);
+    }
+
     fn composerReserve(self: *AiHost) !usize {
         const budget = @import("ai/local_text_request.zig");
         return self.composerUsageFixed().tokens() + budget.draftTokens(self.prompt.peek());
@@ -2025,6 +2036,7 @@ const AiHost = struct {
                 if (controls.effort == value.value and controls.thinking != false) return;
                 controls.effort = value.value;
                 if (try ai_provider_config.supportsThinking(self.effectiveAi(), key)) controls.thinking = true;
+                try self.publishReasoning(controls);
             },
             .thinking => |value| {
                 const key: ai_provider_config.ModelSelection = .{ .provider_id = value.model.provider_id, .model_id = value.model.model_id };
@@ -2036,6 +2048,7 @@ const AiHost = struct {
                 if (!try ai_provider_config.supportsThinking(self.effectiveAi(), key)) return error.UnsupportedThinking;
                 controls.thinking = value.enabled;
                 if (!value.enabled) controls.effort = null;
+                try self.publishReasoning(controls);
             },
             .attachment => |kind| switch (kind) {
                 .image => try self.chooseImage(envelope.owner),
@@ -2050,6 +2063,17 @@ const AiHost = struct {
         }
         self.composer_hash = null;
         self.cx.requestRedraw();
+    }
+
+    fn publishReasoning(self: *AiHost, controls: *const @import("ai/assistant_store.zig").Controls) !void {
+        if (!self.requestDisplayed()) return;
+        const backend = self.execution();
+        const binding = backend.native_binding orelse return;
+        const selected = try ai_provider_config.fromSettingsSelection(self.effectiveAi(), controls.model);
+        // A model picker change applies to later submissions. Never apply its
+        // reasoning choices to a different model's currently running request.
+        if (binding.config.kind != selected.kind or !std.mem.eql(u8, binding.config.endpoint, selected.endpoint) or !std.mem.eql(u8, binding.config.model, selected.model)) return;
+        backend.live_reasoning.set(controls.effort, controls.thinking);
     }
 
     fn compactionIdentity(self: *AiHost) ?@import("ai/context_compaction.zig").Identity {
@@ -2104,7 +2128,7 @@ const AiHost = struct {
         }
         config.ai = self.effectiveAi();
         controls.ensureEffort(config.ai);
-        const auto_selected = ai_provider_config.fromSettingsSelection(config.ai, controls.model) catch null;
+        const auto_selected = if (self.execution().thread_state.load(.acquire) == 0) ai_provider_config.fromSettingsSelection(config.ai, controls.model) catch null else null;
         if (auto_selected) |model| {
             const summary = try self.composerUsage(model);
             const reserve = try self.composerReserve();
@@ -2143,11 +2167,12 @@ const AiHost = struct {
             hash.update(key.model_id);
         }
         const selected = ai_provider_config.fromSettingsSelection(config.ai, controls.model) catch null;
-        const fixed_usage = self.composerUsageFixed();
+        const live_usage = self.liveComposerUsage(selected);
+        const fixed_usage = if (live_usage) |live| live.fixed else self.composerUsageFixed();
         const context_tokens = fixed_usage.system_tokens;
-        const history_usage = try self.composerUsage(selected);
+        const history_usage = if (live_usage) |live| live.summary else try self.composerUsage(selected);
         var response_bytes: usize = 0;
-        if (self.execution().thread_state.load(.acquire) != 0) for (self.controller.stream.cards.items) |card| {
+        if (live_usage == null and self.execution().thread_state.load(.acquire) != 0) for (self.controller.stream.cards.items) |card| {
             response_bytes += switch (card) {
                 .text => |text| text.len,
                 .code => |code| code.body.len,
@@ -2161,7 +2186,7 @@ const AiHost = struct {
         std.hash.autoHash(&hash, can_compact);
         const reserved_image_tokens = history_usage.reserved_image_tokens;
         const draft_tokens = @import("ai/local_text_request.zig").draftTokens(self.prompt.peek());
-        const live_tokens = (response_bytes + 3) / 4 + if (self.requestDisplayed() and self.execution().thread_state.load(.acquire) != 0 and !self.execution().answer_only) @import("ai/local_text_request.zig").draftTokens(self.execution().request_text orelse "") else @as(usize, 0);
+        const live_tokens = if (live_usage != null) 0 else (response_bytes + 3) / 4 + if (self.requestDisplayed() and self.execution().thread_state.load(.acquire) != 0 and !self.execution().answer_only) @import("ai/local_text_request.zig").draftTokens(self.execution().request_text orelse "") else @as(usize, 0);
         const catalog_tokens = fixed_usage.tool_tokens;
         const Part = @import("ui/ai_composer_controls_view.zig").UsagePart;
         const fallback_parts = [_]Part{
@@ -4432,13 +4457,15 @@ const AiHost = struct {
             } else if ((key.key == .up or key.key == .down) and !key.modifiers.super and !key.modifiers.alt and !key.modifiers.shift and !textarea.imeIsComposing()) {
                 if (self.recallPrompt(key.key == .up)) return .stop;
             } else if (key.key == .@"return") {
-                if (textarea.imeIsComposing()) return .ignored;
-                if (key.modifiers.shift and (key.modifiers.super or key.modifiers.ctrl)) {
-                    const configured = (self.runtime_config orelse return .stop).value.ai.follow_up_mode;
-                    self.submitAttached(self.prompt.get(), if (configured == .steer) .queue else .steer) catch |err| self.refresh(@errorName(err));
-                } else if (key.modifiers.super) {
-                    _ = ui.widgets.input.textareaEventHandler(.{ .key_down = .{ .key = .@"return" } }, textarea);
-                } else self.sendPrompt();
+                switch (@import("ui/ai_composer_keys.zig").handleReturn(key, textarea)) {
+                    .composing => return .ignored,
+                    .alternate => {
+                        const configured = (self.runtime_config orelse return .stop).value.ai.follow_up_mode;
+                        self.submitAttached(self.prompt.get(), if (configured == .steer) .queue else .steer) catch |err| self.refresh(@errorName(err));
+                    },
+                    .newline => {},
+                    .submit => self.sendPrompt(),
+                }
                 return .stop;
             },
             .drag => |drag| {
@@ -4577,6 +4604,7 @@ const AiHost = struct {
         const state = self.assistant_states.?.findConversation(context.fence.conversation) orelse return error.ConversationNotFound;
         self.request_conversation = state.id;
         self.request_owner = context.owner;
+        self.context_usage_mailbox.reset(context.turn);
         self.managerRef().turn_id = context.turn;
         if (self.request_config) |*old| old.deinit();
         var generation_config = input.config.?.value;
@@ -4604,6 +4632,7 @@ const AiHost = struct {
         self.model = selected_config.model;
         self.request_effort = controls.effort;
         self.request_thinking = controls.thinking;
+        self.live_reasoning.set(controls.effort, controls.thinking);
         self.request_vision = selected_config.vision;
         self.request_image_token_reservation = selected_config.image_token_reservation;
         self.request_image_token_max_width = selected_config.image_token_max_width;
@@ -4734,7 +4763,7 @@ const AiHost = struct {
         self.provider = self.native_binding.?.asProvider();
         const prepared_request = self.native_binding.?.config.chatRequest(.{ .model = self.model, .system = self.request_context.?.text, .messages = &.{}, .effort = self.request_effort, .thinking = self.request_thinking, .tools = self.request_tools[0..self.request_tools_len], .tool_table = self.tool_bridge.requestTable(), .tool_images = self.request_vision, .max_output = self.request_max_output });
         self.request_usage_fixed = try @import("ai/context_usage.zig").Fixed.capture(prepared_request);
-        return .{ .context = self, .destroy = finishPreparedAttached, .provider = self.provider, .request = prepared_request, .scope = if (self.answer_only) self.managerRef().tool_run.?.scope else self.managerRef().scope.?, .host = self.managerRef().tool_host, .policy = self.managerRef().permission_engine, .policy_revision = self.request_policy_revision, .limits = .{ .context_window = self.native_binding.?.config.context_window }, .compaction = self.native_binding.?.config, .observer = .{ .context = self, .reset = streamReset, .delta = streamDelta, .tool_rejected = streamToolRejected, .round_start = streamRoundStart, .input_consumed = streamInputConsumed } };
+        return .{ .context = self, .destroy = finishPreparedAttached, .reasoning = &self.live_reasoning, .provider = self.provider, .request = prepared_request, .scope = if (self.answer_only) self.managerRef().tool_run.?.scope else self.managerRef().scope.?, .host = self.managerRef().tool_host, .policy = self.managerRef().permission_engine, .policy_revision = self.request_policy_revision, .limits = .{ .context_window = self.native_binding.?.config.context_window }, .compaction = self.native_binding.?.config, .observer = .{ .context = self, .reset = streamReset, .delta = streamDelta, .tool_rejected = streamToolRejected, .round_start = streamRoundStart, .context_usage = streamContextUsage, .input_consumed = streamInputConsumed } };
     }
     fn finishPreparedAttached(raw: *anyopaque) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
@@ -5323,6 +5352,11 @@ const AiHost = struct {
     fn streamRoundStart(raw: *anyopaque) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         self.execution().step_mailbox.push(.{ .kind = .round_start, .phase = .assembling, .at_ms = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)) }) catch {};
+    }
+
+    fn streamContextUsage(raw: *anyopaque, turn: u64, snapshot: @import("ai/live_context_usage.zig").Snapshot) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        self.execution().context_usage_mailbox.publish(turn, snapshot);
     }
 
     fn streamInputConsumed(raw: *anyopaque, id: @import("host/identity.zig").SubmissionId, text: []const u8) !void {
@@ -13863,7 +13897,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const model = provider_config.model;
     ai_host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = ai_provider_instance, .native_context = native_context, .native_client = native_client, .native_binding = native_binding, .endpoint = endpoint, .model = model, .panel = ai_panel, .status = ai_status, .card_node = ai_card, .prompt = ai_prompt, .conversation = ai_conversation };
     ai_host.data_root = data_paths.directory;
-    ai_host.manager.observer = .{ .context = ai_host, .reset = AiHost.streamReset, .delta = AiHost.streamDelta, .tool_rejected = AiHost.streamToolRejected, .round_start = AiHost.streamRoundStart, .input_consumed = AiHost.streamInputConsumed };
+    ai_host.manager.observer = .{ .context = ai_host, .reset = AiHost.streamReset, .delta = AiHost.streamDelta, .tool_rejected = AiHost.streamToolRejected, .round_start = AiHost.streamRoundStart, .context_usage = AiHost.streamContextUsage, .input_consumed = AiHost.streamInputConsumed };
     ai_host.window_base = ai_window_base;
     for (ai_window_hovers, 0..) |hover, index| ai_host.window_hovers[index] = hover;
     ai_host.window_icons = .{ ai_collapse_icon, ai_maximize_icon, ai_close_icon };
