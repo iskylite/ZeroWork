@@ -354,6 +354,12 @@ test "connection host cancellation during retry delay prevents another TCP conne
 }
 
 test "connection host released failure leaves the idle scene clean" {
+    // Reproduce a preceding test/window whose animation clock is ahead of the
+    // new Cx. Mount must bind its own clock before creating hidden auth inputs.
+    const previous = try ui.Cx.init(a, std.testing.io);
+    previous.frame_time_ms = 50_000;
+    previous.bindFrameClock();
+    previous.deinit();
     const socket = try Socket.init(false);
     defer socket.deinit();
     var f: Fixture = undefined;

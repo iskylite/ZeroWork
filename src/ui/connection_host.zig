@@ -26,6 +26,10 @@ pub const Host = struct {
     totp_clock: @import("../proto/ssh/totp_prefill.zig").Clock = .{},
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, workspace: *Workspace, application: *ApplicationHost) !*Host {
+        // Mount runs outside a render/input entry. Inputs created below can
+        // start transitions immediately; use this window's clock rather than
+        // the last rendered window's (potentially much later) timestamp.
+        cx.bindFrameClock();
         const self = try cx.allocator.create(Host);
         var registered = false;
         errdefer if (!registered) cx.allocator.destroy(self);
