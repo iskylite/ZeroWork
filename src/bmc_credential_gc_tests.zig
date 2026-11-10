@@ -157,6 +157,37 @@ test "BMC credential GC bootstrap before plugin registry leaves opaque credentia
     try expectSecret(ref_plugin, "plugin-secret");
 }
 
+test "BMC credential GC bootstrap missing files preserve all existing secrets" {
+    for ([_]struct { config_exists: bool, hosts_exist: bool }{
+        .{ .config_exists = false, .hosts_exist = false },
+        .{ .config_exists = true, .hosts_exist = false },
+        .{ .config_exists = false, .hosts_exist = true },
+        .{ .config_exists = true, .hosts_exist = true },
+    }) |case| {
+        var memory: credentials.MemoryBackend = .{};
+        defer memory.deinit();
+        const previous = credentials.useBackendForTesting(memory.backend());
+        defer credentials.restoreBackendForTesting(previous);
+        try seed(&memory, ref_ai, "recoverable-ai-secret");
+        try seed(&memory, ref_ssh, "recoverable-host-password");
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        if (case.config_exists) try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = "[ui]\nfont_size=16\n" });
+        if (case.hosts_exist) try tmp.dir.writeFile(io, .{ .sub_path = "hosts.toml", .data = "" });
+        const status = try store.prepareCredentialsWithOptions(io, tmp.dir, a, "config.toml", "hosts.toml", .{});
+        if (case.config_exists and case.hosts_exist) {
+            // Both explicit empty files are authoritative; ordinary orphan
+            // cleanup continues to work when neither source is missing.
+            try std.testing.expectEqual(store.CleanupStatus.complete, status);
+            try std.testing.expectEqual(@as(usize, 0), memory.values.count());
+        } else {
+            try std.testing.expectEqual(store.CleanupStatus.deferred, status);
+            try expectSecret(ref_ai, "recoverable-ai-secret");
+            try expectSecret(ref_ssh, "recoverable-host-password");
+        }
+    }
+}
+
 test "BMC credential GC known plugin reference retires only after its final host is removed" {
     var memory: credentials.MemoryBackend = .{};
     defer memory.deinit();

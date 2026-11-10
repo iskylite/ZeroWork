@@ -46,7 +46,9 @@ pub fn mount(_: ?*anyopaque, args: contract.EditorMount) !contract.EditorInstanc
     if (args.initial) |initial| {
         var arena = std.heap.ArenaAllocator.init(args.cx.allocator);
         defer arena.deinit();
-        const host = try envelopes.decodeLegacy(arena.allocator(), initial);
+        var reader: @import("../ssh/connection_source.zig").CredentialReader = .{ .allocator = args.cx.allocator };
+        defer reader.deinit();
+        const host = try reader.resolve(try envelopes.decodeLegacy(arena.allocator(), initial));
         self.editor.loadDraft(types.Draft.fromHost(host));
     } else self.editor.loadDraft(.{ .protocol = self.editor.protocol });
     self.editor.show();

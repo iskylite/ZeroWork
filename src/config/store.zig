@@ -363,6 +363,7 @@ pub fn prepareCredentialsWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std
     paths.config_path = config_path;
     paths.hosts_path = hosts_path;
     var cleanup: CleanupStatus = .complete;
+    var sources_complete = true;
     // Validate both source files before collecting unreferenced crash leftovers.
     // A backend cleanup failure still blocks staging; an unavailable payload
     // enumerator instead preserves the scope until a registry is available.
@@ -375,20 +376,31 @@ pub fn prepareCredentialsWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std
             else => return err,
         };
         const raw_config: config.Config = if (source) |text| try config.Config.parseWithAllocator(a, text) else .{};
-        var raw_hosts = (try readHostBaseline(io, dir, hosts_path)) orelse try config.hosts.Registry.parse(allocator, "");
+        const host_source = try readHostBaseline(io, dir, hosts_path);
+        sources_complete = source != null and host_source != null;
+        var raw_hosts = host_source orelse try config.hosts.Registry.parse(allocator, "");
         defer raw_hosts.deinit();
-        cleanup = try reconcileCredentialsWithProvider(raw_config, &raw_hosts, paths.provider);
+        // A missing file is not an authoritative empty snapshot. It may have
+        // been moved by an uninstaller and can still be restored with its refs.
+        cleanup = if (sources_complete) try reconcileCredentialsWithProvider(raw_config, &raw_hosts, paths.provider) else .deferred;
     }
     var loaded: ?LoadedConfig = loadWithOptions(io, dir, allocator, config_path, paths) catch |err| switch (err) {
-        error.FileNotFound => null,
+        error.FileNotFound => blk: {
+            sources_complete = false;
+            break :blk null;
+        },
         else => return err,
     };
     defer if (loaded) |*value| value.deinit(allocator);
     var registry = loadHostsWithOptions(io, dir, allocator, hosts_path, paths) catch |err| switch (err) {
-        error.FileNotFound => try config.hosts.Registry.parse(allocator, ""),
+        error.FileNotFound => blk: {
+            sources_complete = false;
+            break :blk try config.hosts.Registry.parse(allocator, "");
+        },
         else => return err,
     };
     defer registry.deinit();
+    if (!sources_complete) return .deferred;
     const final_cleanup = try reconcileCredentialsWithProvider(if (loaded) |value| value.value else .{}, &registry, paths.provider);
     return if (cleanup == .deferred or final_cleanup == .deferred) .deferred else .complete;
 }

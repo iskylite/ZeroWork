@@ -650,6 +650,14 @@ pub const RemoteEditor = struct {
     agent_ring: ?*ui.Node = null,
     agent_dot: ?*ui.Node = null,
     cred_pw_row: ?*ui.Node = null,
+    password_input: ?ui.widgets.input.InputResult = null,
+    password_reveal_button: ?*ui.Node = null,
+    password_reveal_error: ?*ui.Node = null,
+    password_reveal_disabled: ?*ui.Signal(bool) = null,
+    password_authorization: @import("../../platform/password_reveal.zig").Request = .{},
+    password_visible: bool = false,
+    password_visible_until: i128 = 0,
+    password_approval_deadline: i128 = 0,
     cred_key_row: ?*ui.Node = null,
     topo_name: ?*ui.Node = null,
     topo_addr: ?*ui.Node = null,
@@ -693,6 +701,7 @@ pub const RemoteEditor = struct {
         self.sig_port = try scope.createText("22", .{});
         self.sig_user = try scope.createText("", .{});
         self.sig_password = try scope.createText("", .{});
+        self.password_reveal_disabled = try scope.createSignal(bool, true);
         self.sig_save_password = try scope.createSignal(bool, true);
         self.sig_key_path = try scope.createText("", .{});
         self.sig_key_passphrase = try scope.createText("", .{});
@@ -826,12 +835,14 @@ pub const RemoteEditor = struct {
 
     fn releaseFieldFeedback(self: *RemoteEditor) void {
         if (!self.nodes_alive) return;
+        self.resetPasswordVisibility();
         // This guard scope is created before Input child scopes. Restore SDK
         // handlers while their nodes and edit states still exist.
         for (self.field_feedback.items) |feedback| feedback.releaseBlur();
     }
 
     fn removeViewportHook(self: *RemoteEditor) void {
+        self.password_authorization.cancel();
         self.cx.removeAfterLayoutHook(self);
         if (self.test_source) |*source| source.deinit();
         self.releaseAssetValues();
@@ -860,6 +871,7 @@ pub const RemoteEditor = struct {
         // The retained logs ScrollArea must not publish interaction updates
         // after the whole wizard has closed underneath another modal.
         if (!self.isVisible()) return .done;
+        self.pollPasswordVisibility();
         for (self.selects.items) |select| {
             paintSelectTypography(select.trigger);
             paintSelectTypography(select.panel);
@@ -1118,6 +1130,7 @@ pub const RemoteEditor = struct {
         self.onFieldChange("");
     }
     pub fn loadDraft(self: *RemoteEditor, draft: Draft) void {
+        self.resetPasswordVisibility();
         // Loading an existing host is the edit path.  A later save should
         // update that host unless the user explicitly picks another source
         // from the copy row after this load.
@@ -1452,6 +1465,7 @@ pub const RemoteEditor = struct {
 
     /// 关闭向导（不触发回调；保存/取消路径已自带 hide + on_result）。
     pub fn hide(self: *RemoteEditor) void {
+        self.resetPasswordVisibility();
         self.closeCopy();
         _ = self.advanceTestGeneration();
         const r = self.root orelse return;
@@ -1730,6 +1744,7 @@ pub const RemoteEditor = struct {
     // ── 步进与刷新 ───────────────────────────────────────────────────
 
     fn applyStep(self: *RemoteEditor) void {
+        if (self.step != .protocol) self.resetPasswordVisibility();
         for (self.scrolls, 0..) |slot, i| if (slot) |scroll| scroll.container.setDisplay(if (i == @backingInt(self.step)) .flex else .none);
         const review = self.step == .confirm;
         self.back_btn.?.setDisplay(if (self.step != .protocol) .flex else .none);
@@ -1790,7 +1805,89 @@ pub const RemoteEditor = struct {
         self.paintSteps();
     }
 
+    fn refreshPasswordRevealControl(self: *RemoteEditor) void {
+        if (self.password_reveal_disabled) |disabled| disabled.set(self.isLocked() or self.password_authorization.active or self.sig_password.?.peek().len == 0);
+        if (self.password_reveal_button) |button| {
+            if (button.behavior.interaction.a11y) |*a11y| a11y.label = if (self.password_visible) "隐藏密码" else "查看密码";
+            const asset = if (self.password_visible) ui.icons.eye_off else ui.icons.eye;
+            for (self.buttons.items) |entry| if (entry.node == button) {
+                if (entry.icon) |icon| if (asset.icon_id) |id| if (asset.pickRep(16)) |rep| icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = S.theme.current().fg_2 });
+            };
+        }
+    }
+
+    fn resetPasswordVisibility(self: *RemoteEditor) void {
+        self.password_authorization.cancel();
+        self.password_visible = false;
+        self.password_visible_until = 0;
+        self.password_approval_deadline = 0;
+        if (!self.nodes_alive) return;
+        if (self.password_input) |input| {
+            input.state.input_type = .password;
+            if (input.input_container.behavior.interaction.a11y) |*a11y| {
+                a11y.secure = true;
+                a11y.value_text = null;
+                a11y.editable_text = null;
+            }
+            input.state.markVisualDirty();
+        }
+        if (self.password_reveal_error) |node| node.setDisplay(.none);
+        self.refreshPasswordRevealControl();
+    }
+
+    fn passwordRevealFailed(self: *RemoteEditor) void {
+        self.resetPasswordVisibility();
+        if (self.password_reveal_error) |node| node.setDisplay(.flex);
+        self.cx.requestRedraw();
+    }
+
+    fn onPasswordReveal(self: *RemoteEditor) void {
+        if (self.isLocked() or self.auth != .password or self.sig_password.?.peek().len == 0) return;
+        if (self.password_visible) {
+            self.resetPasswordVisibility();
+        } else if (!self.password_authorization.active) {
+            self.password_authorization.begin() catch {
+                self.passwordRevealFailed();
+                return;
+            };
+            if (self.password_reveal_error) |node| node.setDisplay(.none);
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+        }
+        self.refreshPasswordRevealControl();
+        self.cx.requestRedraw();
+    }
+
+    fn pollPasswordVisibility(self: *RemoteEditor) void {
+        if (self.password_authorization.active) switch (self.password_authorization.result()) {
+            .pending => {},
+            .approved => {
+                if (!self.cx.window_active) {
+                    // The system sheet may finish before AppKit restores focus.
+                    // Allow that transition, but never retain a grant indefinitely.
+                    const now = @import("../../platform/realtime.zig").monotonicNs();
+                    if (self.password_approval_deadline == 0) self.password_approval_deadline = now + 3 * std.time.ns_per_s;
+                    if (now >= self.password_approval_deadline) self.resetPasswordVisibility();
+                } else {
+                    self.password_authorization.cancel();
+                    self.password_visible = true;
+                    self.password_visible_until = @import("../../platform/realtime.zig").monotonicNs() + 30 * std.time.ns_per_s;
+                    if (self.password_input) |input| {
+                        input.state.input_type = .text;
+                        if (input.input_container.behavior.interaction.a11y) |*a11y| a11y.secure = false;
+                        input.state.markVisualDirty();
+                    }
+                    self.refreshPasswordRevealControl();
+                }
+            },
+            .cancelled => self.resetPasswordVisibility(),
+            .failed => self.passwordRevealFailed(),
+        };
+        if (self.password_visible and (!self.cx.window_active or @import("../../platform/realtime.zig").monotonicNs() >= self.password_visible_until)) self.resetPasswordVisibility();
+        if (self.password_authorization.active or self.password_visible) self.cx.scheduleRedrawAfterNs((if (self.password_authorization.active) @as(u64, 50) else 250) * std.time.ns_per_ms);
+    }
+
     fn refreshAuth(self: *RemoteEditor) void {
+        if (self.auth != .password) self.resetPasswordVisibility();
         self.cred_pw_row.?.setDisplay(if (self.auth == .password) .flex else .none);
         self.cred_key_row.?.setDisplay(if (self.auth == .key) .flex else .none);
         self.agent_notice.?.setDisplay(if (self.auth == .agent) .flex else .none);
@@ -1858,6 +1955,7 @@ pub const RemoteEditor = struct {
 
     fn refreshSaveState(self: *RemoteEditor) void {
         const busy = self.isLocked();
+        self.refreshPasswordRevealControl();
         if (self.locked) |v| v.set(busy);
         if (self.save_disabled) |v| v.set(!self.canSave());
         if (self.open_disabled) |v| v.set(!self.canOpen());
@@ -2608,6 +2706,7 @@ pub const RemoteEditor = struct {
     }
 
     fn onFieldChange(self: *RemoteEditor, _: []const u8) void {
+        if (self.password_authorization.active) self.resetPasswordVisibility();
         if (self.isLocked()) return;
         self.save_failure = null;
         self.clearTestProjection();
@@ -2843,7 +2942,14 @@ fn field(w: *RemoteEditor, parent: *ui.Node, label: []const u8, value: *ui.Signa
     input.state.dirty = true;
     if (feedback) |f| try f.attach(input, group, label);
     try w.inputs.append(w.alloc, input);
-    try group.appendChild(w.alloc, input.node);
+    if (std.mem.eql(u8, id, "wizard.password")) {
+        w.password_input = input;
+        const control = try ui.box(w.cx, S.groupControl(), .{});
+        input.input_container.setStyleInline(w.alloc, S.groupInput());
+        try control.appendChild(w.alloc, input.node);
+        w.password_reveal_button = try action(w, control, "查看密码", "wizard.password.reveal", 32, 32, false, w.password_reveal_disabled, RemoteEditor.onPasswordReveal, ui.icons.eye);
+        try group.appendChild(w.alloc, control);
+    } else try group.appendChild(w.alloc, input.node);
     try parent.appendChild(w.alloc, group);
     return input;
 }
@@ -3023,6 +3129,12 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     w.remember_checkbox = remember;
     paintCheckboxLabels(remember);
     try password_row.appendChild(w.alloc, remember);
+    const reveal_error = try ui.textStyled(cx, S.hint, "无法完成系统身份验证，密码保持隐藏，请重试。");
+    reveal_error.setTextColor(S.theme.current().danger);
+    reveal_error.setDisplay(.none);
+    reveal_error.meta.ownership.meta.test_id = "wizard.password.reveal.error";
+    w.password_reveal_error = reveal_error;
+    try pw.appendChild(w.alloc, reveal_error);
     try auth_body.appendChild(w.alloc, pw);
     const agent = try ui.textStyled(cx, S.paragraph, "建立连接时从本机 SSH Agent 获取可用身份，不读取或保存私钥。");
     agent.meta.ownership.meta.test_id = "wizard.auth.agent_notice";
@@ -3613,6 +3725,71 @@ fn ownedId(w: *RemoteEditor, buf: []u8, comptime format: []const u8, value: usiz
 test "refAllDecls forces analysis of the full mounting path" {
     std.testing.refAllDecls(RemoteEditor);
     std.testing.refAllDecls(@This());
+}
+
+test "password reveal stays masked until fresh authorization and hides on lifecycle changes" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{}, .{});
+    cx.root = root;
+    cx.window_active = true;
+    var editor: RemoteEditor = .{};
+    try root.appendChild(a, try editor.mount(cx, scope));
+    editor.loadDraft(.{ .name = "fixture", .host = "fixture.invalid", .user = "fixture", .password = "owned-fixture-password" });
+    editor.show();
+    editor.onPasswordReveal();
+    try std.testing.expect(editor.password_authorization.active);
+    try std.testing.expectEqual(ui.widgets.input.InputType.password, editor.password_input.?.state.input_type);
+    editor.password_authorization.test_result = .cancelled;
+    editor.pollPasswordVisibility();
+    try std.testing.expect(!editor.password_visible);
+    editor.onPasswordReveal();
+    editor.password_authorization.test_result = .failed;
+    editor.pollPasswordVisibility();
+    try std.testing.expect(!editor.password_visible);
+    try std.testing.expect(editor.password_reveal_error.?.style.display != .none);
+    editor.onPasswordReveal();
+    editor.password_authorization.test_result = .approved;
+    editor.pollPasswordVisibility();
+    try std.testing.expect(editor.password_visible);
+    try std.testing.expectEqual(ui.widgets.input.InputType.text, editor.password_input.?.state.input_type);
+    editor.onPasswordReveal();
+    try std.testing.expectEqual(ui.widgets.input.InputType.password, editor.password_input.?.state.input_type);
+    try std.testing.expect(editor.password_input.?.input_container.behavior.interaction.a11y.?.value_text == null);
+    editor.onPasswordReveal();
+    editor.password_authorization.test_result = .approved;
+    editor.hide();
+    try std.testing.expect(!editor.password_visible and !editor.password_authorization.active);
+    editor.show();
+    editor.onPasswordReveal();
+    try std.testing.expectEqual(@import("../../platform/password_reveal.zig").Result.pending, editor.password_authorization.result());
+    editor.password_authorization.test_result = .approved;
+    editor.pollPasswordVisibility();
+    cx.window_active = false;
+    editor.pollPasswordVisibility();
+    try std.testing.expect(!editor.password_visible);
+    cx.window_active = true;
+    editor.onPasswordReveal();
+    editor.password_authorization.test_result = .approved;
+    editor.pollPasswordVisibility();
+    editor.password_visible_until = 0;
+    editor.pollPasswordVisibility();
+    try std.testing.expect(!editor.password_visible);
+    editor.onPasswordReveal();
+    cx.window_active = false;
+    editor.password_authorization.test_result = .approved;
+    editor.pollPasswordVisibility();
+    try std.testing.expect(!editor.password_visible and editor.password_authorization.active);
+    editor.password_approval_deadline = -1;
+    editor.pollPasswordVisibility();
+    try std.testing.expect(!editor.password_visible and !editor.password_authorization.active);
+    cx.window_active = true;
+    editor.onPasswordReveal();
+    editor.loadDraft(.{ .name = "next", .host = "next.invalid", .user = "fixture" });
+    try std.testing.expect(!editor.password_authorization.active and !editor.password_visible);
 }
 
 test "authentication radio labels cannot create a text selection highlight" {

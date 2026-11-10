@@ -143,6 +143,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_notifications.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.linkFramework("UserNotifications", .{});
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_data_alert.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_password_reveal.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_transfer_picker.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_background_picker.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/app_icon.m"), .flags = &.{"-fobjc-arc"} });
@@ -441,6 +442,15 @@ pub fn build(b: *std.Build) void {
     native_credentials_run.addFileArg(native_credentials_binary);
     root_test_step.dependOn(&native_credentials_run.step);
     b.step("test-credentials-native", "Run credential cache and no-UI regressions with mocked Security APIs").dependOn(&native_credentials_run.step);
+    const reveal_native = b.addSystemCommand(&.{ "xcrun", "clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter" });
+    reveal_native.addFileArg(b.path("src/platform/macos_password_reveal_tests.m"));
+    reveal_native.addFileInput(b.path("src/platform/macos_password_reveal.m"));
+    reveal_native.addArgs(&.{ "-framework", "Foundation", "-framework", "LocalAuthentication", "-o" });
+    const reveal_native_binary = reveal_native.addOutputFileArg("password-reveal-native-mock");
+    const reveal_native_run = std.Build.Step.Run.create(b, "password-reveal-native-mock");
+    reveal_native_run.addFileArg(reveal_native_binary);
+    root_test_step.dependOn(&reveal_native_run.step);
+    b.step("test-password-reveal-native", "Run password reveal authorization regressions without real authentication").dependOn(&reveal_native_run.step);
     const secret_transport = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos13.0", "-std=c11", "-Wall", "-Wextra", "-Werror" });
     secret_transport.addFileArg(b.path("src/local/secret_native.c"));
     secret_transport.addFileArg(b.path("src/local/secret_native_tests.c"));
@@ -693,6 +703,7 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     ui_tests.root_module.linkFramework("Metal", .{});
     ui_tests.root_module.linkFramework("QuartzCore", .{});
+    ui_tests.root_module.linkFramework("JavaScriptCore", .{});
     const ui_test_files = b.addWriteFiles();
     const ui_test_binary = ui_test_files.addCopyFile(ui_tests.getEmittedBin(), "ui-tests");
     _ = ui_test_files.addCopyFile(zsh_bridge_file, "zw_ipc.so");

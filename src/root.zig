@@ -32,6 +32,7 @@ test {
     _ = @import("ai_conversation_commands_tests.zig");
     _ = @import("ai_session_patch_tests.zig");
     _ = @import("ui/application_host.zig");
+    _ = @import("plugins/ssh/connection_source.zig");
     _ = @import("ai/execution_result_projection.zig");
     _ = @import("ai/image_offload.zig");
     _ = @import("ai/context_compaction.zig");

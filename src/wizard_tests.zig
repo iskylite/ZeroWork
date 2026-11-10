@@ -1215,6 +1215,48 @@ test "wizard explicit password persistence writes a credential reference and reh
     }
 }
 
+test "wizard saved password envelope rehydrates editor without exposing plaintext before authorization" {
+    const credentials = @import("config/credential_store.zig");
+    const envelopes = @import("config/connection_envelope.zig");
+    const factory = @import("plugins/remote/editor_factory.zig");
+    var memory: credentials.MemoryBackend = .{};
+    defer memory.deinit();
+    const previous = credentials.useBackendForTesting(memory.backend());
+    defer credentials.restoreBackendForTesting(previous);
+    const reference = "zw1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const backend = memory.backend();
+    try backend.add(backend.context, try credentials.scopeService(), reference, "owned-editor-password");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{}, .{});
+    cx.root = root;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const envelope = try envelopes.fromLegacy(arena.allocator(), .{ .connection_id = @fromBackingInt(1), .name = "saved", .host = "fixture.invalid", .user = "fixture", .auth_mode = .password, .password_ref = reference });
+    var context: u8 = 0;
+    const instance = try factory.mount(null, .{
+        .cx = cx,
+        .scope = scope,
+        .slot = root,
+        .protocol_id = "ssh",
+        .draft_revision = 1,
+        .initial = envelope,
+        .events = .{ .context = &context, .changed = struct {
+            fn call(_: *anyopaque) void {}
+        }.call, .submit = struct {
+            fn call(_: *anyopaque, _: envelopes.Envelope, _: @import("host/plugin_ui_contract.zig").SubmitIntent) !void {}
+        }.call },
+    });
+    defer instance.vtable.unmount(instance.context);
+    const editor = &factory.fromInstance(instance).?.editor;
+    try std.testing.expectEqualStrings("owned-editor-password", editor.currentDraft().password.?);
+    try std.testing.expectEqual(ui.widgets.input.InputType.password, editor.password_input.?.state.input_type);
+    try std.testing.expect(editor.password_input.?.input_container.behavior.interaction.a11y.?.value_text == null);
+    try std.testing.expect(!editor.password_visible and !editor.password_authorization.active);
+}
+
 test "wizard unchecked and cancelled passwords never enter credential storage" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
