@@ -477,3 +477,32 @@ test "conversation UI session list keeps phase and binding tags with icon action
         }
     }
 }
+
+test "conversation UI retained queue changes one row and keeps the editor and current callback ticket" {
+    var f: Fixture = undefined;
+    try f.init(600, 456);
+    defer f.deinit();
+    var entries = [_]V.Item{ item(1), item(2), item(3) };
+    _ = try f.pending.update(&entries, 1, false, false);
+    f.settle();
+    const first = find(f.cx.root.?, "ai.pending.card.0").?.id;
+    const last = find(f.cx.root.?, "ai.pending.card.2").?.id;
+    entries[1].text = "只更新中间一项";
+    _ = try f.pending.update(&entries, 2, false, false);
+    f.settle();
+    try std.testing.expectEqual(first, find(f.cx.root.?, "ai.pending.card.0").?.id);
+    try std.testing.expectEqual(last, find(f.cx.root.?, "ai.pending.card.2").?.id);
+    f.click("ai.pending.now.2");
+    try std.testing.expectEqual(@as(u64, 2), f.last.?.queue_revision);
+    f.click("ai.pending.edit.0");
+    _ = try f.pending.update(&entries, 2, false, false);
+    f.settle();
+    const editor = find(f.cx.root.?, "ai.pending.editor").?;
+    f.pending.edit_text.set("输入不应因别的行变化而被打断");
+    entries[1].text = "其他行继续变化";
+    _ = try f.pending.update(&entries, 3, false, false);
+    f.settle();
+    try std.testing.expectEqual(editor, find(f.cx.root.?, "ai.pending.editor").?);
+    try std.testing.expect(f.cx.isFocused(editor));
+    try std.testing.expectEqualStrings("输入不应因别的行变化而被打断", f.pending.edit_text.peek());
+}

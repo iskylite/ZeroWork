@@ -52,7 +52,6 @@ fn facts(record: Record) Facts {
     return .{ .owner = record.owner, .operation_id = record.operation_id, .arguments_hash = record.arguments_hash, .authorization_revision = record.authorization_revision, .event_revision = record.event_revision, .stage = record.stage, .resources_released = record.resources_released, .owner_closed = record.owner_closed, .query_of = record.query_of };
 }
 pub const Store = struct {
-    pub const capacity = 128;
     allocator: std.mem.Allocator,
     // Internal storage; callers must use count/lookup/snapshot across threads.
     records: std.ArrayList(Record) = .empty,
@@ -99,7 +98,6 @@ pub const Store = struct {
             if (!std.mem.eql(u8, record.tool_id, tool_id) or !std.mem.eql(u8, &record.arguments_hash, &arguments_hash) or record.authorization_revision != authorization_revision) return error.OperationIdentityConflict;
             return record;
         }
-        if (self.records.items.len >= capacity) return error.OperationHistoryFull;
         const owned = try self.allocator.dupe(u8, tool_id);
         errdefer self.allocator.free(owned);
         try self.records.append(self.allocator, .{ .owner = owner, .operation_id = operation_id, .tool_id = owned, .arguments_hash = arguments_hash, .authorization_revision = authorization_revision });
@@ -283,8 +281,9 @@ test "operation history full applies backpressure without evicting unknown facts
     var store = Store.init(std.testing.allocator);
     defer store.deinit();
     const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(1) };
-    for (0..Store.capacity) |i| _ = try store.begin(owner, i + 1, "fixture.ping", @splat(0), 1);
-    try std.testing.expectError(error.OperationHistoryFull, store.begin(owner, 999, "fixture.ping", @splat(0), 1));
+    for (0..256) |i| _ = try store.begin(owner, i + 1, "fixture.ping", @splat(0), 1);
+    _ = try store.begin(owner, 999, "fixture.ping", @splat(0), 1);
+    try std.testing.expectEqual(@as(usize, 257), store.count());
     try std.testing.expectError(error.OperationIdentityConflict, store.begin(owner, 1, "fixture.write", @splat(0), 1));
 }
 
@@ -327,7 +326,7 @@ test "operation snapshots own complete strings across updates cleanup and store 
 test "operation closing empty owners cannot exhaust history or block resource release" {
     var store = Store.init(std.testing.allocator);
     defer store.deinit();
-    for (1..Store.capacity * 3) |id| try store.ownerClosed(.{ .session_id = @fromBackingInt(id) });
+    for (1..384) |id| try store.ownerClosed(.{ .session_id = @fromBackingInt(id) });
     try std.testing.expectEqual(@as(usize, 0), store.count());
     const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(999) };
     _ = try store.beginNew(owner, 1, "fixture.write", @splat(0), 1);

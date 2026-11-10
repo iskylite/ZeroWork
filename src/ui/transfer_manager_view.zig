@@ -182,6 +182,24 @@ fn snapshotEql(a: Snapshot, b: Snapshot) bool {
     }
     return true;
 }
+// Progress is independent of row identity, controls and borrowed metadata.
+fn progressOnly(a: Snapshot, b: Snapshot) bool {
+    if (!scopeEql(a.scope, b.scope) or !std.mem.eql(u8, a.scope_label, b.scope_label) or
+        !std.mem.eql(u8, a.notice, b.notice) or a.rows.len != b.rows.len or a.choices.len != b.choices.len) return false;
+    for (a.choices, b.choices) |left, right| {
+        if (!scopeEql(left.scope, right.scope) or !std.mem.eql(u8, left.label, right.label)) return false;
+    }
+    for (a.rows, b.rows) |left, right| {
+        var normalized = left;
+        normalized.done_bytes = right.done_bytes;
+        normalized.total_bytes = right.total_bytes;
+        normalized.speed_bps = right.speed_bps;
+        normalized.reading_source = right.reading_source;
+        if (!taskEql(normalized, right)) return false;
+    }
+    return true;
+}
+
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
     value: Snapshot,
@@ -623,6 +641,37 @@ pub const Panel = struct {
                 return;
             }
         }
+        if (self.pending_source == null and !self.dirty and !self.in_action) {
+            if (self.source) |*source| if (progressOnly(source.value, snapshot)) {
+                // Keep the existing arena: retained tooltips and a11y labels borrow
+                // its unchanged strings. Only copy numeric progress facts.
+                source.value.revision = snapshot.revision;
+                self.revision = snapshot.revision;
+                self.counts.speed_bps = 0;
+                for (snapshot.rows) |row| if (belongs(self.selected_scope, row.target.owner) and
+                    (self.direction_filter == null or self.direction_filter.? == row.direction) and row.phase == .running)
+                {
+                    self.counts.speed_bps +|= row.speed_bps;
+                };
+                for (self.virtual.pool_bindings, self.virtual.pool_nodes) |binding, node| {
+                    const index = binding orelse continue;
+                    if (index < self.visible.items.len) {
+                        const row_index = self.visible.items[index];
+                        if (!taskEql(source.value.rows[row_index], snapshot.rows[row_index]))
+                            try self.patchProgress(node, snapshot.rows[row_index]);
+                    }
+                }
+                for (@constCast(source.value.rows), snapshot.rows) |*row, next| {
+                    row.done_bytes = next.done_bytes;
+                    row.total_bytes = next.total_bytes;
+                    row.speed_bps = next.speed_bps;
+                    row.reading_source = next.reading_source;
+                }
+                var buffer: [40]u8 = undefined;
+                try self.format(self.footer_rate, "{d} 进行中 · {s} · {d} 等待", .{ self.counts.active, formatSpeed(&buffer, self.counts.speed_bps), self.counts.waiting });
+                return;
+            };
+        }
         const owned = try Owned.init(self.cx.allocator, snapshot);
         if (self.pending_source) |*old| old.arena.deinit();
         self.pending_source = owned;
@@ -906,6 +955,7 @@ pub const Panel = struct {
         lower.meta.ownership.meta.test_id = "transfer.task.meta";
         try row.appendChild(cx.allocator, lower);
         const progress = try self.label(lower, "", 11, 400, true);
+        progress.meta.ownership.meta.test_id = "transfer.task.bytes";
         var done_buffer: [40]u8 = undefined;
         var total_buffer: [40]u8 = undefined;
         const done_text = try byteLabel(&done_buffer, task_.done_bytes);
@@ -973,6 +1023,41 @@ pub const Panel = struct {
         tip.content.behavior.interaction.a11y = .{ .role = .dialog, .label = "传输任务详情" };
         tip.trigger.behavior.interaction.a11y = .{ .role = .button, .label = task_.name };
         return root;
+    }
+    fn progressNode(root: *ui.Node, id: []const u8) ?*ui.Node {
+        if (root.meta.ownership.meta.test_id) |value| if (std.mem.eql(u8, value, id)) return root;
+        for (root.children.items) |child| if (progressNode(child, id)) |found| return found;
+        return null;
+    }
+    fn patchProgress(self: *Panel, root: *ui.Node, task_: Task) !void {
+        var buffer: [96]u8 = undefined;
+        if (task_.phase == .running) if (progressNode(root, "transfer.task.rate")) |node|
+            try node.setTextContent(self.cx.allocator, formatSpeed(&buffer, task_.speed_bps));
+        const progress = progressNode(root, "transfer.task.bytes") orelse return;
+        var done_buffer: [40]u8 = undefined;
+        var total_buffer: [40]u8 = undefined;
+        const done = try byteLabel(&done_buffer, task_.done_bytes);
+        if (task_.total_bytes) |total| {
+            const total_text = try byteLabel(&total_buffer, total);
+            if (task_.phase == .running and task_.speed_bps > 0 and total > task_.done_bytes) {
+                const remaining = total - task_.done_bytes;
+                const seconds = remaining / task_.speed_bps + @intFromBool(remaining % task_.speed_bps != 0);
+                try self.format(progress, "{s} / {s} · 约 {d}s", .{ done, total_text, seconds });
+            } else try self.format(progress, "{s} / {s}", .{ done, total_text });
+        } else try self.format(progress, "{s} / 大小未知", .{done});
+        const fraction: f64 = if (task_.phase == .succeeded) 1 else if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
+        if (progressNode(root, "transfer.task.status")) |status| {
+            const label_ = if (task_.reading_source) "读取源文件" else phaseLabel(task_.phase);
+            if (task_.phase == .succeeded or (task_.total_bytes != null and task_.total_bytes.? > 0)) {
+                try self.format(status, "{s} {d:.0}%", .{ label_, fraction * 100 });
+            } else try self.format(status, "{s} —%", .{label_});
+        }
+        if (progressNode(root, "transfer.task.progress")) |track| if (track.children.items.len > 0) {
+            const fill = track.children.items[0];
+            const width: f32 = @floatCast(fraction * 100);
+            if (!std.meta.eql(fill.style.width, S.fill(@floatCast(fraction), progressColor(task_.phase)).width.?))
+                fill.setStyleInline(self.cx.allocator, .{ .width = .{ .percent = width } });
+        };
     }
     fn detailLabel(self: *Panel, parent: *ui.Node, value: []const u8, mono: bool, secondary: bool, test_id: []const u8) !*ui.Node {
         var style = S.text(11, 400, secondary);

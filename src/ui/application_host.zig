@@ -3052,6 +3052,18 @@ const OwnedSessionFixture = struct {
         std.debug.print("owned shell startup id={d} pid={any} marker={any} foreground={any} cwd={any}\n", .{ @backingInt(handle.session_id), observed_pid, marker_ready, foreground_ready, cwd_ready });
         return error.ControlledShellStartupNotReady;
     }
+    fn queueOwned(self: *@This(), request: lifecycle.OpenRequest, deadline: i128) !lifecycle.Snapshot {
+        while (true) {
+            // Copying the source cwd is a nonblocking worker query. Retry the
+            // same operation identity until it is available; no create is
+            // enqueued before that source snapshot has been captured.
+            return self.app.queueOwnedSession(request) catch |err| {
+                if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() >= deadline) return err;
+                try self.tick();
+                continue;
+            };
+        }
+    }
     fn finish(self: *@This()) void {
         for (self.app.sessions.sessions.items) |entry| {
             if (self.app.findHandle(entry.handle)) |mapping| {
@@ -3138,14 +3150,14 @@ test "owned Local session reserves before dispatch commits once and rolls back f
     workspace.allocator = a;
     const group_owner: identity.GroupOwner = .{ .id = @fromBackingInt(group_id) };
     var request: lifecycle.OpenRequest = .{ .operation_ref = identity.HostOperationId.generate(), .context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = group_id }, .binding_revision = 2, .grant_revision = 1 }, .group = group_owner, .source = source.handle, .connection_policy = .new_only, .retention = .auto_idle };
-    _ = try app.queueOwnedSession(request);
+    _ = try fixture.queueOwned(request, deadline);
     try fixture.tick();
     var snapshot = try app.queryOwnedSession(request.operation_ref, request.context);
     try std.testing.expectEqual(lifecycle.State.prepared, snapshot.state);
     try std.testing.expectEqual(@as(usize, 1), workspace.tabs.items.len);
     try std.testing.expect(app.findHandle(snapshot.session.?) == null);
     try std.testing.expectEqual(@as(usize, 1), roster.findById(group_id).?.members.items.len);
-    _ = try app.queueOwnedSession(request);
+    _ = try fixture.queueOwned(request, deadline);
     try std.testing.expectEqual(@as(usize, 1), app.lifecycle_supervisor.entries.items.len);
     try std.testing.expectError(error.ScopeChanged, app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, snapshot.revision + 1, snapshot.session.?));
     _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, snapshot.revision, snapshot.session.?);
@@ -3165,7 +3177,7 @@ test "owned Local session reserves before dispatch commits once and rolls back f
     try fixture.tick();
     try std.testing.expectEqual(@as(usize, 2), roster.findById(group_id).?.members.items.len);
     request.operation_ref = identity.HostOperationId.generate();
-    _ = try app.queueOwnedSession(request);
+    _ = try fixture.queueOwned(request, deadline);
     try fixture.tick();
     const cancelled = try app.queryOwnedSession(request.operation_ref, request.context);
     _ = try app.cancelOwnedSession(request.operation_ref, request.context);
@@ -3173,7 +3185,7 @@ test "owned Local session reserves before dispatch commits once and rolls back f
     try std.testing.expectEqual(lifecycle.State.cancelled, (try app.queryOwnedSession(request.operation_ref, request.context)).state);
     try std.testing.expect(app.findHandle(cancelled.session.?) == null);
     request.operation_ref = identity.HostOperationId.generate();
-    _ = try app.queueOwnedSession(request);
+    _ = try fixture.queueOwned(request, deadline);
     try fixture.tick();
     const failed = try app.queryOwnedSession(request.operation_ref, request.context);
     _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, failed.revision, failed.session.?);
@@ -3200,7 +3212,7 @@ test "owned Local session reserves before dispatch commits once and rolls back f
     request.connection_policy = .prefer_reuse;
     try std.testing.expectError(error.FallbackAuthorizationRequired, app.queueOwnedSession(request));
     request.connection_policy = .new_only;
-    _ = try app.queueOwnedSession(request);
+    _ = try fixture.queueOwned(request, deadline);
     try fixture.tick();
     const saved_reservation = try app.queryOwnedSession(request.operation_ref, request.context);
     try std.testing.expectEqual(lifecycle.State.prepared, saved_reservation.state);
@@ -3511,11 +3523,11 @@ test "task finish real Local records observed intervals and retains unverified a
     for (cases, 0..) |case, case_index| {
         const context: @import("../ai/host_tools.zig").Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .group = group_id }, .binding_revision = 1, .grant_revision = 1 };
         const request: lifecycle.OpenRequest = .{ .operation_ref = .generate(), .context = context, .group = .{ .id = @fromBackingInt(group_id) }, .source = source.handle, .connection_policy = .new_only, .retention = case.retention };
-        _ = try app.queueOwnedSession(request);
+        const until = @import("../platform/realtime.zig").monotonicNs() + 12 * std.time.ns_per_s;
+        _ = try fixture.queueOwned(request, until);
         try fixture.tick();
         var opened = try app.queryOwnedSession(request.operation_ref, context);
         _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, context, opened.revision, opened.session.?);
-        const until = @import("../platform/realtime.zig").monotonicNs() + 12 * std.time.ns_per_s;
         while (opened.state != .ready) {
             try fixture.tick();
             opened = try app.queryOwnedSession(request.operation_ref, context);

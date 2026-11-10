@@ -18,6 +18,7 @@ pub const Segment = struct {
     started_ms: u64,
     ended_ms: ?u64 = null,
     expanded: bool = false,
+    submission: ?identity.SubmissionId = null,
     scroll: ?*ThinkingScroll = null,
     pub fn retain(self: *Segment) void {
         self.references += 1;
@@ -31,7 +32,7 @@ pub const Segment = struct {
     }
     fn clone(self: *const Segment, a: std.mem.Allocator) !*Segment {
         const result = try a.create(Segment);
-        result.* = .{ .allocator = a, .started_ms = self.started_ms, .ended_ms = self.ended_ms, .expanded = self.expanded };
+        result.* = .{ .allocator = a, .started_ms = self.started_ms, .ended_ms = self.ended_ms, .expanded = self.expanded, .submission = self.submission };
         errdefer result.release();
         try result.text.appendSlice(a, self.text.items);
         if (self.scroll) |scroll| {
@@ -44,13 +45,14 @@ pub const Segment = struct {
 };
 pub const TimelineItem = union(enum) {
     message: *Segment,
+    input: *Segment,
     thinking: *Segment,
     tool: usize,
     notice: usize,
     fn deinit(self: TimelineItem, a: std.mem.Allocator) void {
         _ = a;
         switch (self) {
-            .message, .thinking => |segment| segment.release(),
+            .message, .thinking, .input => |segment| segment.release(),
             .tool, .notice => {},
         }
     }
@@ -58,6 +60,7 @@ pub const TimelineItem = union(enum) {
         return switch (self) {
             .message => |segment| .{ .message = try segment.clone(a) },
             .thinking => |segment| .{ .thinking = try segment.clone(a) },
+            .input => |segment| .{ .input = try segment.clone(a) },
             .tool, .notice => self,
         };
     }
@@ -139,6 +142,17 @@ pub const Turn = struct {
     /// it again or moves it ahead of model content emitted in the meantime.
     pub fn applyEvent(self: *Turn, a: std.mem.Allocator, event: events.Event) !void {
         switch (event.kind) {
+            .input => {
+                const id = event.submission orelse return error.InvalidSubmission;
+                if (self.hasInput(id)) return;
+                const segment = try a.create(Segment);
+                segment.* = .{ .allocator = a, .started_ms = event.at_ms, .ended_ms = event.at_ms, .submission = id };
+                errdefer segment.release();
+                try segment.text.appendSlice(a, event.detail);
+                try self.timeline.ensureUnusedCapacity(a, 1);
+                self.finishSegment(event.at_ms);
+                self.timeline.appendAssumeCapacity(.{ .input = segment });
+            },
             .text => {
                 try self.appendSegment(a, false, event.detail, event.at_ms);
                 try self.prose.appendSlice(a, event.detail);
@@ -170,7 +184,7 @@ pub const Turn = struct {
                 self.open_segment = null;
                 var retained = self.round_timeline_len;
                 for (self.timeline.items[self.round_timeline_len..]) |item| {
-                    if (item == .notice) {
+                    if (item == .notice or item == .input) {
                         // Host facts are independent of a failed provider attempt.
                         self.timeline.items[retained] = item;
                         retained += 1;
@@ -209,6 +223,12 @@ pub const Turn = struct {
             },
         }
         if (event.kind != .thinking and self.thinking.items.len > 0 and self.thinking_ended_ms == null) self.thinking_ended_ms = event.at_ms;
+    }
+    pub fn hasInput(self: *const Turn, id: identity.SubmissionId) bool {
+        for (self.timeline.items) |item| if (item == .input) {
+            if (item.input.submission) |stored| if (stored.eql(id)) return true;
+        };
+        return false;
     }
     pub fn appendNotice(self: *Turn, a: std.mem.Allocator, notice: HostNotice, at_ms: u64) !void {
         try self.host_notices.ensureUnusedCapacity(a, 1);
@@ -412,4 +432,45 @@ test "timeline adds tool slots at gateway time rather than out of order declarat
     try std.testing.expectEqualStrings("explanation before dispatch", turn.timeline.items[1].message.text.items);
     try std.testing.expectEqualStrings("first-tool", turn.steps.items[turn.timeline.items[2].tool].call_id);
     try std.testing.expectEqualStrings("second-tool", turn.steps.items[turn.timeline.items[3].tool].call_id);
+}
+
+test "steering timeline splits groups and survives retries cloning and presentation restore" {
+    const a = std.testing.allocator;
+    const groups = @import("step_groups.zig");
+    var turn: Turn = .{ .id = 7 };
+    defer turn.deinit(a);
+    const id = identity.SubmissionId.generate();
+    try turn.applyEvent(a, .{ .kind = .thinking, .detail = "before", .phase = .running, .at_ms = 1 });
+    try turn.applyEvent(a, .{ .call_id = "old", .name = "read_terminal", .detail = "not_dispatched_due_to_new_input", .phase = .skipped, .at_ms = 2 });
+    try turn.applyEvent(a, .{ .kind = .input, .submission = id, .detail = "补充消息", .phase = .succeeded, .at_ms = 3 });
+    try turn.applyEvent(a, .{ .kind = .round_start, .phase = .assembling, .at_ms = 4 });
+    try turn.applyEvent(a, .{ .kind = .thinking, .detail = "discarded attempt", .phase = .running, .at_ms = 5 });
+    try groups.sync(a, &turn, false);
+    try std.testing.expectEqual(@as(usize, 2), turn.step_groups.items.len);
+    try turn.applyEvent(a, .{ .kind = .reset, .phase = .assembling, .at_ms = 6 });
+    try turn.applyEvent(a, .{ .kind = .thinking, .detail = "after", .phase = .running, .at_ms = 7 });
+    try groups.sync(a, &turn, false);
+    try std.testing.expectEqual(@as(usize, 2), turn.step_groups.items.len);
+    try std.testing.expectEqual(@as(usize, 2), groups.rangeEnd(&turn, 0));
+    try std.testing.expectEqual(events.Phase.succeeded, groups.summarize(&turn, 0, 2, 8).phase);
+    try std.testing.expect(turn.hasInput(id));
+    try std.testing.expectEqualStrings("补充消息", turn.timeline.items[2].input.text.items);
+    try std.testing.expectEqualStrings("after", turn.timeline.items[3].thinking.text.items);
+    var copy = try turn.clone(a);
+    defer copy.deinit(a);
+    try std.testing.expect(copy.hasInput(id));
+    const snapshot = try @import("conversation_presentation.zig").capture(a, &.{.{ .user = true, .text = @constCast("initial"), .turn = turn }}, null, &.{});
+    defer a.free(snapshot);
+    var restored = try @import("conversation_presentation.zig").restore(a, snapshot, 0);
+    defer {
+        for (restored.items) |*message| message.deinit(a);
+        restored.deinit(a);
+    }
+    const recovered = &restored.items[0].turn.?;
+    try std.testing.expect(recovered.hasInput(id));
+    try std.testing.expectEqualStrings("补充消息", recovered.timeline.items[2].input.text.items);
+    try std.testing.expectEqual(@as(usize, 2), recovered.step_groups.items.len);
+    // Reconciliation/retry must not insert an already consumed message twice.
+    try recovered.applyEvent(a, .{ .kind = .input, .submission = id, .detail = "补充消息", .phase = .succeeded, .at_ms = 9 });
+    try std.testing.expectEqual(@as(usize, 4), recovered.timeline.items.len);
 }

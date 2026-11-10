@@ -2373,11 +2373,11 @@ pub const TerminalViewNode = struct {
         // does not emit them). Keep the observed empty-line trigger while
         // excluding terminal application modes, as in the legacy input path.
         if (self.worker != null and self.tombstone.allowsRemoteInput() and !self.palette.isOpen() and
-            text.len > 0 and text[0] == '@' and !containsControlByte(text) and self.line.atLineStart() and
+            text.len > 0 and text[0] == '@' and !containsControlByte(text) and
             self.remote_input_context.prompt_editing and !self.remote_input_context.alternate_screen and
             surface.snapshot != null and !surface.snapshot.?.read_only and
             !surface.snapshot.?.projection.modes.alternate_screen and !surface.snapshot.?.projection.modes.application_cursor and
-            surface.snapshot.?.projection.modes.mouse_tracking == .none)
+            surface.snapshot.?.projection.modes.mouse_tracking == .none and self.sshCommandAtLineStart())
         {
             self.hideCommandMessage();
             self.openCommandPalette();
@@ -2434,6 +2434,22 @@ pub const TerminalViewNode = struct {
         self.completion.dismiss();
         self.renderCompletion();
         return false;
+    }
+
+    fn sshCommandAtLineStart(self: *TerminalViewNode) bool {
+        if (self.line.atLineStart()) return true;
+        const surface = self.terminal_surface orelse return false;
+        if (surface.pending.items.len != 0 or surface.pending_paste != null or surface.paste_requested != null) return false;
+        // Control keys, history edits and program exits can leave the local
+        // tracker unknown after the shell has redrawn an empty prompt. Read
+        // fresh owner-scoped shell evidence; screen text alone cannot reset it.
+        const state = surface.service.executionSnapshot() catch return false;
+        if (!state.owner.eql(surface.owner) or state.shell.prompt_ready != true or state.shell.suspended or
+            !state.input_ready or !state.local_released or state.grant != null) return false;
+        self.line.clearLine();
+        self.observed_input_anchor = null;
+        self.observed_tab_version = null;
+        return true;
     }
 
     /// SFTP can feed only paths actually observed, never screenshot samples.
@@ -2521,7 +2537,10 @@ pub const TerminalViewNode = struct {
         if (self.completion.state.menu_open) {
             if (key == .up or key == .down) {
                 if (self.completion_count > 0) self.completion_selected = if (key == .up) self.completion_selected -| 1 else @min(self.completion_selected + 1, self.completion_count - 1);
-                self.rebuildCompletionRows() catch {};
+                for (self.completion_rows.items, 0..) |row, index| {
+                    const background = overlay_styles.rowBackground(index == self.completion_selected);
+                    if (!ui.Color.eql(row.getBackground(), background)) row.setBackground(background);
+                }
                 ui.widgets.scrollRectIntoView(self.completion_scroll.state, self.completion_scroll.content, @as(f32, @floatFromInt(self.completion_selected)) * 29, 29, .nearest);
                 return true;
             }
@@ -6318,6 +6337,13 @@ test "terminal overlay global completion and replay repaint preserve retained in
     const label = row.children.items[0];
     const span_start = label.getText().?.spans[0].start;
     const span_end = label.getText().?.spans[0].end;
+    const completion_epoch = view.root.ownedTreeStructureRevision();
+    const second_row = view.completion_rows.items[1].id;
+    try std.testing.expect(view.handleCompletionKey(.down, .{}));
+    try std.testing.expectEqual(row_id, view.completion_rows.items[0].id);
+    try std.testing.expectEqual(second_row, view.completion_rows.items[1].id);
+    try std.testing.expectEqual(completion_epoch, view.root.ownedTreeStructureRevision());
+    try std.testing.expect(view.handleCompletionKey(.up, .{}));
     const menu_geometry = view.completion_cache;
     const history_id = view.history_bar.?.id;
     const HistoryNodes = struct {
@@ -7386,6 +7412,56 @@ test "builtin command SSH surface works without prompt markers and preserves she
     view.terminal_surface.?.snapshot.?.read_only = true;
     try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
     try std.testing.expectEqualStrings("echo ", transport.written.items);
+}
+
+test "builtin command SSH surface recovers a redrawn empty prompt before repeated upload" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(12, 80);
+    defer transport.deinit();
+    var worker: ClipboardTestWorker = .{};
+    try worker.init();
+    defer worker.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 500);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    view.bindWorker(worker.presentation());
+    try view.bindTerminalService(transport.service());
+    cx.setFocus(view.root);
+    _ = cx.render();
+    _ = try transport.vt.feed("\x1b]133;A\x07[root@localhost ~]# \x1b]133;B\x07");
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleTextInput("@up");
+    try std.testing.expect(view.palette.isOpen());
+    cx.handleKeyDown(.escape, .{});
+    cx.handleTextInput("ls");
+    cx.handleKeyDown(.@"return", .{});
+    _ = try transport.vt.feed("ls\r\nfile.txt\r\n\x1b]133;A\x07[root@localhost ~]# \x1b]133;B\x07");
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    // Readline can redraw an empty prompt after a control key. The local
+    // byte tracker is unknown, but the shell integration has fresh evidence.
+    cx.handleKeyDown(.l, .{ .ctrl = true });
+    try std.testing.expect(view.line.unknown);
+    try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
+    transport.execution = .{ .owner = fixture.owner, .completion_source = .shell_reported, .shell = .{ .prompt_ready = false } };
+    try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
+    transport.execution.?.shell.prompt_ready = true;
+    transport.execution.?.input_ready = false;
+    try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
+    transport.execution.?.input_ready = true;
+    transport.execution.?.owner.generation += 1;
+    try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
+    transport.execution.?.owner = fixture.owner;
+    cx.handleTextInput("@");
+    cx.handleTextInput("u");
+    cx.handleTextInput("p");
+    try std.testing.expect(view.palette.isOpen());
+    try std.testing.expectEqualStrings("up", view.palette.query.items);
+    try std.testing.expect(view.line.atLineStart());
+    try std.testing.expectEqualStrings("ls\r\x0c", transport.written.items);
 }
 
 test "builtin command whole SSH paste stays local and invalid parameters explain recovery" {

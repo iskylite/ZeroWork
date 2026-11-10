@@ -112,11 +112,11 @@ pub const Driver = struct {
     scheduler_cancel: provider.CancelToken = .{},
     active_request: ?*Request = null,
     evidence_mutex: std.atomic.Mutex = .unlocked,
-    evidence: [128]?TaskEvidence = @splat(null),
-    target_evidence: [128]?TargetEvidence = @splat(null),
-    execution_input_evidence: [128]?ExecutionInputRecord = @splat(null),
-    closing_targets: [128]?identity.SessionHandle = @splat(null),
-    command_records: [128]?CommandRecord = @splat(null),
+    evidence: []?TaskEvidence = &.{},
+    target_evidence: []?TargetEvidence = &.{},
+    execution_input_evidence: []?ExecutionInputRecord = &.{},
+    closing_targets: std.ArrayList(identity.SessionHandle) = .empty,
+    command_records: []?CommandRecord = &.{},
 
     /// Configuration/acquisition itself performs no journal IO. The caller's
     /// allocator must support calls from the owner and UI scheduler threads;
@@ -302,6 +302,11 @@ pub const Driver = struct {
         if (self.thread) |thread| thread.join();
         self.thread = null;
         self.wake.deinit();
+        self.allocator.free(self.evidence);
+        self.allocator.free(self.target_evidence);
+        self.allocator.free(self.execution_input_evidence);
+        self.allocator.free(self.command_records);
+        self.closing_targets.deinit(self.allocator);
         self.allocator.destroy(self);
     }
     fn lock(self: *Driver) void {
@@ -362,19 +367,13 @@ pub const Driver = struct {
     fn process(self: *Driver, request: *Request, clock: i64) bool {
         switch (request.kind) {
             .stop_target => |value| {
-                var slot: ?usize = null;
-                var registered = false;
-                for (self.closing_targets, 0..) |target, index| {
-                    if (target) |prior| {
-                        if (prior.eql(value.target)) registered = true;
-                    } else if (slot == null) slot = index;
-                }
-                if (!registered) self.closing_targets[
-                    slot orelse {
-                        self.complete(request, error.ExecutionLimit);
-                        return true;
-                    }
-                ] = value.target;
+                const registered = for (self.closing_targets.items) |prior| {
+                    if (prior.eql(value.target)) break true;
+                } else false;
+                if (!registered) self.closing_targets.append(self.allocator, value.target) catch |err| {
+                    self.complete(request, err);
+                    return true;
+                };
                 self.controller.stopTarget(value.context, value.target);
                 self.complete(request, null);
                 return true;
@@ -500,7 +499,7 @@ pub const Driver = struct {
             slot.* = null;
         };
         while (!self.evidence_mutex.tryLock()) std.atomic.spinLoopHint();
-        self.command_records = @splat(null);
+        @memset(self.command_records, null);
         self.evidence_mutex.unlock();
         self.controller.deinit();
         self.journal_owner.release();
@@ -508,19 +507,26 @@ pub const Driver = struct {
         self.finished.store(true, .release);
     }
     fn publishEvidence(self: *Driver) void {
-        var next: [128]?TaskEvidence = @splat(null);
-        var targets: [128]?TargetEvidence = @splat(null);
-        var inputs: [128]?ExecutionInputRecord = @splat(null);
+        const next = self.allocator.alloc(?TaskEvidence, self.controller.finished_tasks.items.len + self.controller.entries.items.len) catch return;
+        var transferred = false;
+        defer if (!transferred) self.allocator.free(next);
+        const targets = self.allocator.alloc(?TargetEvidence, self.closing_targets.items.len + self.controller.entries.items.len) catch return;
+        defer if (!transferred) self.allocator.free(targets);
+        const inputs = self.allocator.alloc(?ExecutionInputRecord, self.controller.entries.items.len) catch return;
+        defer if (!transferred) self.allocator.free(inputs);
+        const commands = self.allocator.alloc(?CommandRecord, self.controller.entries.items.len) catch return;
+        defer if (!transferred) self.allocator.free(commands);
+        @memset(next, null);
+        @memset(targets, null);
+        @memset(inputs, null);
+        @memset(commands, null);
         var input_count: usize = 0;
-        var commands: [128]?CommandRecord = @splat(null);
         var command_count: usize = 0;
-        for (self.closing_targets) |target| if (target) |value| {
-            _ = targetIndex(&targets, value);
-        };
-        for (self.controller.finished_tasks) |context| if (context) |value| {
-            const index = evidenceIndex(&next, value) orelse continue;
+        for (self.closing_targets.items) |value| _ = targetIndex(targets, value);
+        for (self.controller.finished_tasks.items) |value| {
+            const index = evidenceIndex(next, value) orelse continue;
             next[index].?.model_done = true;
-        };
+        }
         for (self.controller.entries.items) |entry| {
             const snapshot = entry.snapshot;
             if (entry.submitted_command) |command| if (snapshot.submit_sent and snapshot.execution_id != null and snapshot.execution_id.?.eql(entry.id) and snapshot.owner.eql(entry.target) and command_count < commands.len) {
@@ -536,9 +542,9 @@ pub const Driver = struct {
                 inputs[input_count] = .{ .conversation_id = entry.context.conversation_id, .task_id = entry.context.task_id, .value = .{ .execution_id = entry.id, .target = entry.target, .state = snapshot.state, .terminal = terminal_state, .input_handed_off = snapshot.input_handed_off, .local_released = snapshot.local_released, .input_ready = snapshot.input_ready, .has_grant = snapshot.grant != null } };
                 input_count += 1;
             }
-            const index = evidenceIndex(&next, entry.context) orelse continue;
+            const index = evidenceIndex(next, entry.context) orelse continue;
             const fact = &next[index].?;
-            const target_index = targetIndex(&targets, entry.target) orelse continue;
+            const target_index = targetIndex(targets, entry.target) orelse continue;
             const target_fact = &targets[target_index].?;
             target_fact.execution_count += 1;
             fact.execution_count += 1;
@@ -576,29 +582,29 @@ pub const Driver = struct {
             if (active or !released) fact.active_references += 1;
         }
         for (self.waiting) |request| if (request) |pending| if (pending.kind == .execute) {
-            const index = evidenceIndex(&next, pending.kind.execute.context) orelse continue;
+            const index = evidenceIndex(next, pending.kind.execute.context) orelse continue;
             if (pending.wait != null) next[index].?.pending_waits += 1;
         };
-        for (&next) |*value| if (value.*) |*fact| {
+        for (next) |*value| if (value.*) |*fact| {
             fact.cleanup_pending = !fact.input_grants_released or !fact.recordings_settled;
         };
         var changed = false;
         while (!self.evidence_mutex.tryLock()) std.atomic.spinLoopHint();
-        for (&next) |*value| if (value.*) |*fact| {
+        for (next) |*value| if (value.*) |*fact| {
             for (self.evidence) |old| if (old) |prior| if (prior.task_id.eql(fact.task_id)) {
                 fact.revision = prior.revision;
                 if (!std.meta.eql(prior, fact.*)) fact.revision +|= 1;
                 break;
             };
         };
-        for (&targets) |*value| if (value.*) |*fact| {
+        for (targets) |*value| if (value.*) |*fact| {
             for (self.target_evidence) |old| if (old) |prior| if (prior.target.eql(fact.target)) {
                 fact.revision = prior.revision;
                 if (!std.meta.eql(prior, fact.*)) fact.revision +|= 1;
                 break;
             };
         };
-        for (&inputs) |*value| if (value.*) |*record| {
+        for (inputs) |*value| if (value.*) |*record| {
             for (self.execution_input_evidence) |old| if (old) |prior| {
                 if (prior.conversation_id.eql(record.conversation_id) and prior.task_id.eql(record.task_id) and prior.value.execution_id.eql(record.value.execution_id)) {
                     record.value.revision = prior.value.revision;
@@ -607,11 +613,16 @@ pub const Driver = struct {
                 }
             };
         };
-        changed = !std.meta.eql(self.evidence, next) or !std.meta.eql(self.target_evidence, targets) or !std.meta.eql(self.execution_input_evidence, inputs);
+        changed = !sameEvidence(?TaskEvidence, self.evidence, next) or !sameEvidence(?TargetEvidence, self.target_evidence, targets) or !sameEvidence(?ExecutionInputRecord, self.execution_input_evidence, inputs);
+        self.allocator.free(self.evidence);
+        self.allocator.free(self.target_evidence);
+        self.allocator.free(self.execution_input_evidence);
+        self.allocator.free(self.command_records);
         self.evidence = next;
         self.target_evidence = targets;
         self.execution_input_evidence = inputs;
         self.command_records = commands;
+        transferred = true;
         self.evidence_mutex.unlock();
         if (changed) @import("../platform/presentation_wakeup.zig").notify();
     }
@@ -780,7 +791,12 @@ fn now() i64 {
     return @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
 }
 
-fn evidenceIndex(values: *[128]?TaskEvidence, context: host.Context) ?usize {
+fn sameEvidence(comptime T: type, left: []const T, right: []const T) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| if (!std.meta.eql(a, b)) return false;
+    return true;
+}
+fn evidenceIndex(values: []?TaskEvidence, context: host.Context) ?usize {
     var available: ?usize = null;
     for (values, 0..) |value, index| {
         if (value) |fact| {
@@ -792,7 +808,7 @@ fn evidenceIndex(values: *[128]?TaskEvidence, context: host.Context) ?usize {
     return index;
 }
 
-fn targetIndex(values: *[128]?TargetEvidence, target: identity.SessionHandle) ?usize {
+fn targetIndex(values: []?TargetEvidence, target: identity.SessionHandle) ?usize {
     var available: ?usize = null;
     for (values, 0..) |value, index| {
         if (value) |fact| {

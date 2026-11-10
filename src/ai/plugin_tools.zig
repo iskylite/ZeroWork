@@ -6,10 +6,6 @@ const identity = @import("../host/identity.zig");
 const images = @import("image_attachments.zig");
 pub const host = @import("host_tools.zig");
 
-pub const max_plugin_tools = 8;
-pub const max_plugin_request_tools = @import("provider.zig").max_plugin_tool_definitions;
-pub const max_host_request_tools = @import("provider.zig").max_host_tool_definitions;
-pub const max_request_tools = max_plugin_request_tools + max_host_request_tools;
 pub const Effect = enum { read_state, observe_image, remote_input, resource_write };
 // `always_confirm` is retained as a legacy manifest spelling. Automatic
 // execution overrides both confirmation policies after deny/capability gates.
@@ -188,7 +184,6 @@ pub fn sameDefinition(a: ToolDefinition, b: ToolDefinition) bool {
     return true;
 }
 pub fn validateBindings(plugin_id: []const u8, definitions: []const ToolDefinition, bindings: []const ToolBinding, declared: []const services.Definition) !void {
-    if (bindings.len > max_plugin_tools) return error.TooManyPluginTools;
     for (bindings, 0..) |binding, index| {
         if (std.mem.startsWith(u8, binding.definition_id, "host.")) return error.ReservedToolNamespace;
         if (!std.mem.eql(u8, plugin_id, binding.plugin_id)) return error.ToolPluginMismatch;
@@ -240,7 +235,6 @@ pub const RequestTable = struct {
             _ = try captured_scope.validate(&.{@backingInt(member.owner.session_id)});
             for (members[0..member_index]) |previous| if (previous.owner.session_id == member.owner.session_id) return error.DuplicateTarget;
             if (!member.authorized) continue;
-            if (member.bindings.len > max_plugin_tools) return error.TooManyPluginTools;
             for (member.bindings, 0..) |binding, binding_index| {
                 if (std.mem.startsWith(u8, binding.definition_id, "host.")) return error.ReservedToolNamespace;
                 if (!std.mem.eql(u8, member.plugin_id, binding.plugin_id)) return error.ToolPluginMismatch;
@@ -257,7 +251,6 @@ pub const RequestTable = struct {
                     break;
                 };
                 const index = found orelse blk: {
-                    if (entries.items.len == max_plugin_request_tools) return error.TooManyRequestTools;
                     var encoded: [64]u8 = undefined;
                     const name = try encodeName(&encoded, definition.id);
                     const owned_definition = try copyDefinition(a, definition);
@@ -288,7 +281,6 @@ pub const RequestTable = struct {
     pub fn initWithHost(allocator: std.mem.Allocator, captured_scope: scope.Scope, definitions: []const ToolDefinition, members: []const Member, context: host.Context, contributions: []const host.Contribution) !RequestTable {
         try context.validate();
         if (!context.binding.eql(captured_scope.owner)) return error.InvalidHostAuthority;
-        if (contributions.len > max_host_request_tools) return error.ToolCatalogLimit;
         var table = try init(allocator, captured_scope, definitions, members);
         errdefer table.deinit();
         const a = table.arena.allocator();
@@ -735,7 +727,6 @@ pub const Runtime = struct {
         if (invocation.dispatch_fence) |fence| try fence.check();
         const parsed = invocation.parsed;
         if (parsed.entry.authority != .session_targets) return error.InvalidHostAuthority;
-        if (self.operations.count() + parsed.targets.len > @import("../host/operation_store.zig").Store.capacity) return error.OperationHistoryFull;
         var ticket: ?ApprovalTicket = null;
         // No effects or approval prompts before complete group preflight.
         try preflight(invocation.table, parsed, try self.live_scope(self.context), try self.live_members(self.context));

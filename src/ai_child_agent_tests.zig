@@ -373,7 +373,7 @@ test "v0.4 child execution journal uses explicit schema and retains origin witho
     var first = try execution_journal.Journal.open(a, std.testing.io, tmp.dir, "executions.json");
     const token = try first.begin(request);
     first.deinit();
-    const text = try tmp.dir.readFileAlloc(std.testing.io, "executions.json", a, .limited(execution_journal.max_file_bytes));
+    const text = try tmp.dir.readFileAlloc(std.testing.io, "executions.json", a, .unlimited);
     defer a.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "\"schema_version\":2") != null);
     var second = try execution_journal.Journal.open(a, std.testing.io, tmp.dir, "executions.json");

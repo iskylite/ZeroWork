@@ -56,7 +56,7 @@ pub const Info = struct {
         }
         if (self.context_mode == .inherit) {
             const source = self.context_source orelse return error.MissingInheritanceSnapshot;
-            if (!source.conversation.eql(self.owning_parent_conversation) or source.content_revision == 0 or source.turn == 0 or source.message_count == 0 or source.message_count > @import("wire_history.zig").History.max_messages) return error.InvalidInheritanceSnapshot;
+            if (!source.conversation.eql(self.owning_parent_conversation) or source.content_revision == 0 or source.turn == 0 or source.message_count == 0) return error.InvalidInheritanceSnapshot;
         } else if (self.context_source != null) return error.InvalidInheritanceSnapshot;
     }
     pub fn clone(self: Info, a: std.mem.Allocator) !Info {

@@ -134,6 +134,7 @@ pub const Surface = struct {
     pending: std.ArrayList(Pending) = .empty,
     pending_bytes: usize = 0,
     force_snapshot: bool = true,
+    paint_pending: bool = true,
     active: bool = false,
     focused: bool = false,
     blink: bool = true,
@@ -414,7 +415,7 @@ pub const Surface = struct {
         }
         const activated = active and !self.active;
         self.active = active;
-        if (activated) self.force_snapshot = true;
+        if (activated) self.paint_pending = true;
         // The public preferences reader is fed by the native NSWorkspace
         // accessibility notification. Host/renderer overrides also apply.
         const reduced = ui.a11y.preferences.reduceMotion() or self.cx.reduced_motion or self.cx.renderer_reduced_motion;
@@ -538,7 +539,10 @@ pub const Surface = struct {
         // Retain fresh input/mode/notification facts for hidden group members,
         // but do not generate glyph/layout work until the pane is visible.
         if (!self.host.isDisplayedInTree()) {
-            self.force_snapshot = true;
+            // The owned snapshot is already current. Only its glyphs need
+            // catching up when revealed; forcing another capture here makes
+            // every idle hidden tab copy and decode its viewport each frame.
+            self.paint_pending = true;
             return changed;
         }
         try self.resize();
@@ -581,7 +585,10 @@ pub const Surface = struct {
                 changed = true;
             }
         }
-        if (changed or was_focused != self.focused or self.glyphs_pending) try self.render(now);
+        if (changed or self.paint_pending or was_focused != self.focused or self.glyphs_pending) {
+            try self.render(now);
+            self.paint_pending = false;
+        }
         if (changed and self.dragging) input.refreshDragSelection(self);
         self.updateCommandHover();
         if (blink_running) {

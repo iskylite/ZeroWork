@@ -66,12 +66,15 @@ try{
  }
  report.popup_reopen_passed=true;
  await workload('sidebar-wheel','sidebar.viewport','sidebar.group.badge');
+ // Collapsed settings fit a tall window; use a real compact viewport with overflow.
+ await h.resizeWindow(1440,650);report.settings_viewport={width:1440,height:650};
  await click('toolbar.settings');await click('settings.nav.appearance');
- await workload('settings-wheel','settings.viewport',null);
- await workload('settings-trackpad','settings.viewport',null,true);
- await click('settings.nav.ssh');
- await workload('settings-ssh-wheel','settings.viewport',null);
- await click('settings.close');await click('toolbar.transfers');await visible('transfer.manager');
+ await click('settings.appearance.font.header');await h.sleep(250);
+ await workload('settings-wheel','settings.viewport','settings.appearance.app_icon.header');
+ await workload('settings-trackpad','settings.viewport','settings.appearance.app_icon.header',true);
+ await click('settings.nav.ssh');await click('settings.ssh.connection.header');await h.sleep(250);
+ await workload('settings-ssh-wheel','settings.viewport','settings.ssh.connection.header');
+ await click('settings.close');await h.resizeWindow(1440,900);await click('toolbar.transfers');await visible('transfer.manager');
  await click('transfer.scope.select');await visible('transfer.scope.menu');
  assert((await h.query('transfer.scope.menu')).some((n:any)=>JSON.stringify(n).includes('全局')),'empty transfer registry offers the global scope');
  await h.key('escape');await h.sleep(250);await click('transfer.window.close');

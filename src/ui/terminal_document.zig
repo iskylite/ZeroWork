@@ -42,6 +42,8 @@ pub const Document = struct {
     preview_rebuilds: u64 = 0,
     last_composed_rows: usize = 0,
     profile_compose_us: u64 = 0,
+    row_positions: std.AutoHashMapUnmanaged(vt.RowId, u32) = .{},
+    indexed_rows: std.ArrayList(vt.RowId) = .empty,
     pending_patch_start: ?usize = null,
     tail_cache: ?struct { fingerprint: u64, row: usize } = null,
     full_rebuilds: u64 = 0,
@@ -82,6 +84,8 @@ pub const Document = struct {
         self.source_map.deinit(self.cache_allocator);
         self.metadata.deinit(self.cache_allocator);
         self.stamps.deinit(self.cache_allocator);
+        self.row_positions.deinit(self.cache_allocator);
+        self.indexed_rows.deinit(self.cache_allocator);
         if (self.cached) |*d| d.deinit(self.cache_allocator);
     }
     pub fn composed(self: *const Document) bool {
@@ -153,10 +157,10 @@ pub const Document = struct {
         if (native.projection.modes.alternate_screen) return;
         self.height = native.projection.rows;
         try self.rebuild(&native);
-        // An async viewport-only preview cannot establish the scroll range.
-        // Keep the wheel delta pending until the full history scan arrives,
-        // otherwise maximum=0 consumes the gesture and snaps back to live.
-        if (!self.source_complete) return error.WorkerBusy;
+        // A preview or an older complete capture cannot establish the current
+        // scroll range. Inactive output can outrun the bounded tail query;
+        // keep the wheel delta pending instead of anchoring at the old bottom.
+        if (!self.source_complete or self.source_version != native.projection.version) return error.WorkerBusy;
         if (!self.composed()) {
             self.top = @intCast(native.projection.scrollback.viewport_offset);
             self.follow = native.projection.scrollback.viewport_offset + native.projection.scrollback.viewport_rows >= native.projection.scrollback.total_rows;
@@ -506,6 +510,16 @@ pub const Document = struct {
     fn compose(self: *Document, doc: *const search.Document, native: *const terminal.TerminalSnapshot, patch_start: ?usize) !void {
         const started = profileNow();
         defer self.profile_compose_us = (profileNow() -| started) / 1000;
+        // Maintain identity lookup for only the replaced tail. Resolving each
+        // command must not scan the complete scrollback on every output batch.
+        const index_start = if (patch_start) |value| (if (value <= self.indexed_rows.items.len and value <= doc.rows.len and
+            (value == 0 or std.meta.eql(self.indexed_rows.items[value - 1], doc.rows[value - 1].id))) value else 0) else 0;
+        for (self.indexed_rows.items[index_start..]) |id| _ = self.row_positions.remove(id);
+        self.indexed_rows.shrinkRetainingCapacity(index_start);
+        for (doc.rows[index_start..]) |row| {
+            try self.indexed_rows.append(self.cache_allocator, row.id);
+            try self.row_positions.put(self.cache_allocator, row.id, row.screen_row);
+        }
         var positions: [256]?u32 = @splat(null);
         for (self.records.items, 0..) |*r, i| {
             const p = try self.raw.resolveAnchor(r.anchor);
@@ -513,10 +527,11 @@ pub const Document = struct {
             if (p) |point| if (!point.alternate_screen) {
                 if (point.source_version == doc.source_version) {
                     positions[i] = point.row;
-                    for (doc.rows) |row| if (row.screen_row == point.row) {
-                        r.row_id = row.id;
-                        break;
-                    };
+                    const base_row = if (doc.rows.len > 0) doc.rows[0].screen_row else 0;
+                    if (point.row >= base_row and point.row - base_row < doc.rows.len) {
+                        const row = doc.rows[point.row - base_row];
+                        if (row.screen_row == point.row) r.row_id = row.id;
+                    }
                 } else {
                     // Never apply current screen coordinates to an older
                     // capture. Resolve by stable row identity across output.
@@ -524,10 +539,7 @@ pub const Document = struct {
                         r.row_id = row.id;
                         break;
                     };
-                    if (r.row_id) |id| for (doc.rows) |row| if (std.meta.eql(row.id, id)) {
-                        positions[i] = row.screen_row;
-                        break;
-                    };
+                    if (r.row_id) |id| positions[i] = self.row_positions.get(id);
                 }
             };
         }
@@ -1746,6 +1758,57 @@ test "terminal surface pixel scroll retains historical styles and leaves alterna
     defer returned.deinit(a);
     try std.testing.expect(document.follow);
     try std.testing.expect(!returned.projection.modes.alternate_screen);
+}
+
+test "terminal surface pixel scroll waits for current history after inactive output" {
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 6, 60);
+    defer adapter.destroy();
+    for (0..30) |_| _ = try adapter.feed("before tab switch\r\n");
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    // A previous wheel gesture leaves a complete history cache, even after
+    // returning to the native live viewport at the bottom.
+    try document.scrollPixels(-0.5);
+    try document.scrollPixels(100000);
+    var before = try document.service().snapshot(a);
+    defer before.deinit(a);
+    try std.testing.expect(!document.composed());
+    const old_top = document.top;
+    // Hidden output outruns the bounded tail query. Until the next capture is
+    // eligible, rebuild retains the old complete cache for presentation.
+    for (0..100) |_| _ = try adapter.feed("output while inactive\r\n");
+    document.full_capture_eligible_at_ns = std.math.maxInt(u64);
+    var returned = try document.service().snapshot(a);
+    defer returned.deinit(a);
+    try std.testing.expect(returned.projection.scrollback.viewport_offset > before.projection.scrollback.viewport_offset);
+    try std.testing.expectError(error.WorkerBusy, document.scrollPixels(-0.5));
+    try std.testing.expect(document.follow);
+    try std.testing.expect(!document.pixel_scrolling);
+    try std.testing.expectEqual(old_top, document.top);
+    // Retrying the same pending delta must start half a pixel above the new
+    // bottom, rather than anchoring at the old cache's final row.
+    document.full_capture_eligible_at_ns = 0;
+    try document.scrollPixels(-0.5);
+    var scrolled = try document.service().snapshot(a);
+    defer scrolled.deinit(a);
+    const origin = Document.rowOrigin(&document.cached.?, document.top) + document.pixel_offset;
+    try std.testing.expectApproxEqAbs(document.maxPixelOrigin(&document.cached.?) - 0.5, origin, 0.001);
+    try std.testing.expect(scrolled.projection.scrollback.viewport_offset > before.projection.scrollback.viewport_offset);
+    try std.testing.expect(!document.follow);
+    // Output must still preserve a deliberate historical reading position.
+    _ = try adapter.feed("new output after scrolling\r\n");
+    var reading = try document.service().snapshot(a);
+    defer reading.deinit(a);
+    try std.testing.expectEqual(scrolled.projection.visible_rows[0].id, reading.projection.visible_rows[0].id);
+    try std.testing.expectApproxEqAbs(scrolled.projection.visible_rows[0].presentation.y.?, reading.projection.visible_rows[0].presentation.y.?, 0.001);
+    try document.scrollPixels(100000);
+    _ = try adapter.feed("latest output\r\n");
+    var latest = try document.service().snapshot(a);
+    defer latest.deinit(a);
+    try std.testing.expect(document.follow);
+    try std.testing.expectEqual(latest.projection.scrollback.total_rows, latest.projection.scrollback.viewport_offset + latest.projection.scrollback.viewport_rows);
 }
 
 test "terminal surface pixel scroll crosses command card gaps without quantizing their layout" {

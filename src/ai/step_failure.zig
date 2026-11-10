@@ -13,6 +13,7 @@ pub const Description = struct {
 
 pub fn explanation(code: []const u8) []const u8 {
     const mappings = .{
+        .{ "not_dispatched_due_to_new_input", "收到新的引导消息，已跳过旧计划中的本次调用，工具未执行。" },
         .{ "ShellContextExitedWithoutCompletion", "该 Shell 已返回父层，但本条命令没有收到完整结束事件，结果仍待核实。请在原终端查看结果；不要自动重发。" },
         .{ "ShellContextRequired", "当前位于内层 Shell，尚未确认命令的目标环境。请让 AI 重新检查当前终端后再执行。" },
         .{ "ShellContextChanged", "当前 Shell 层级已经变化，本次命令未发送。请重新读取当前 Shell 状态后再执行，避免命令落到错误的主机或用户环境。" },
@@ -72,8 +73,8 @@ pub fn describe(a: std.mem.Allocator, step: events.Step) !Description {
     const raw = std.mem.trim(u8, step.detail, " \t\r\n");
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, scratch, raw, .{}) catch null;
     const code = if (parsed) |value| errorCode(scratch, value, 0) orelse "ToolRequestFailed" else if (raw.len > 0 and std.mem.indexOfAny(u8, raw, " \t\r\n{[") == null) raw else "ToolRequestFailed";
-    const status = if (step.phase == .cancelled) "已取消 · 未执行" else if (std.mem.eql(u8, code, "ToolApprovalRejected")) "用户已拒绝 · 未执行" else "请求失败 · 未执行";
-    const summary = try std.fmt.allocPrint(a, "{s} · {s}", .{ status, code });
+    const status = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) "因新消息跳过 · 未执行" else if (step.phase == .cancelled) "已取消 · 未执行" else if (std.mem.eql(u8, code, "ToolApprovalRejected")) "用户已拒绝 · 未执行" else "请求失败 · 未执行";
+    const summary = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) try a.dupe(u8, status) else try std.fmt.allocPrint(a, "{s} · {s}", .{ status, code });
     errdefer a.free(summary);
     var name_buffer: [64]u8 = undefined;
     const name = @import("plugin_tools.zig").decodeName(&name_buffer, step.name) catch step.name;
@@ -108,4 +109,14 @@ test "AI step failure reads routed target receipts without losing the original e
     try std.testing.expect(std.mem.indexOf(u8, value.detail, raw) != null);
     try std.testing.expect(std.mem.indexOf(u8, value.summary, "ToolRequestFailed") == null);
     try std.testing.expect(std.mem.indexOf(u8, explanation("TargetNotAuthorized"), "授权未通过校验") != null);
+}
+
+test "steering skip has a readable nonfailure summary and retains its receipt" {
+    const a = std.testing.allocator;
+    const raw = "{\"status\":\"rejected\",\"error_code\":\"not_dispatched_due_to_new_input\"}";
+    const description = try describe(a, .{ .call_id = @constCast("skipped"), .name = @constCast("host.read_terminal"), .command = @constCast("{}"), .detail = @constCast(raw), .phase = .skipped, .started_ms = 1 });
+    defer description.deinit(a);
+    try std.testing.expect(std.mem.startsWith(u8, description.summary, "因新消息跳过 · 未执行"));
+    try std.testing.expect(std.mem.indexOf(u8, description.detail, "收到新的引导消息") != null);
+    try std.testing.expect(std.mem.indexOf(u8, description.detail, raw) != null);
 }

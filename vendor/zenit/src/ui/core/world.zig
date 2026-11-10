@@ -99,6 +99,8 @@ pub const World = struct {
     dirty_set: id_hash.U32HashMapUnmanaged(DirtyFlags),
     /// Monotonic notification serial, including repeated marks of an already dirty node.
     mutation_epoch: u64 = 0,
+    /// Topology serial local to this window, including detached retained trees.
+    structure_revision: u64 = 0,
     /// DevTools-only sparse source table. Node body does not allocate for 50+ StyleFields;
     /// only styled / setStyle-modified nodes occupy an entry.
     style_origins: id_hash.U32HashMapUnmanaged(NodeStyleOrigins),

@@ -21,8 +21,7 @@ pub const Adapter = struct {
     anthropic_input: u32 = 0,
     anthropic_cache_read: u32 = 0,
     anthropic_cache_write: u32 = 0,
-    anthropic_tools: [provider.max_tool_calls]AnthropicTool = @splat(.{}),
-    anthropic_tool_count: usize = 0,
+    anthropic_tools: std.ArrayList(AnthropicTool) = .empty,
     const AnthropicUsage = struct {
         input_tokens: ?u32 = null,
         output_tokens: ?u32 = null,
@@ -55,6 +54,10 @@ pub const Adapter = struct {
 
     pub fn init(allocator: std.mem.Allocator, sink: JsonDeltaSink, sink_ctx: *anyopaque) Adapter {
         return .{ .allocator = allocator, .sink = sink, .sink_ctx = sink_ctx };
+    }
+
+    pub fn deinit(self: *Adapter) void {
+        self.anthropic_tools.deinit(self.allocator);
     }
 
     pub fn receiveFrame(ctx: *anyopaque, frame: sse.Frame) void {
@@ -142,11 +145,9 @@ pub const Adapter = struct {
         if (std.mem.eql(u8, event, "content_block_start")) {
             const block = value.content_block orelse return error.MissingContentBlock;
             if (std.mem.eql(u8, block.type orelse "", "tool_use")) {
-                if (self.anthropic_tool_count == provider.max_tool_calls) return error.TooManyTools;
-                for (self.anthropic_tools[0..self.anthropic_tool_count]) |previous| if (previous.block_index == value.index) return error.DuplicateToolBlock;
-                const slot = self.anthropic_tool_count;
-                self.anthropic_tool_count += 1;
-                self.anthropic_tools[slot] = .{ .block_index = value.index, .active = true };
+                for (self.anthropic_tools.items) |previous| if (previous.block_index == value.index) return error.DuplicateToolBlock;
+                const slot = self.anthropic_tools.items.len;
+                try self.anthropic_tools.append(self.allocator, .{ .block_index = value.index, .active = true });
                 const id = block.id orelse return error.MissingToolCallId;
                 const name = block.name orelse return error.MissingToolName;
                 self.sink(self.sink_ctx, .{ .tool_plan = .{ .call_id = id, .name = name, .index = @intCast(slot), .arguments = "" } });
@@ -155,7 +156,7 @@ pub const Adapter = struct {
                     if (input.object.count() != 0) {
                         const encoded = try std.json.Stringify.valueAlloc(self.allocator, input, .{});
                         defer self.allocator.free(encoded);
-                        self.anthropic_tools[slot].arguments_seen = true;
+                        self.anthropic_tools.items[slot].arguments_seen = true;
                         self.sink(self.sink_ctx, .{ .tool_plan = .{ .call_id = null, .index = @intCast(slot), .arguments = encoded } });
                     }
                 }
@@ -166,7 +167,7 @@ pub const Adapter = struct {
                 if (delta.thinking) |thinking| self.sink(self.sink_ctx, .{ .thinking = thinking });
                 if (delta.partial_json) |partial| {
                     var found = false;
-                    for (self.anthropic_tools[0..self.anthropic_tool_count], 0..) |*tool, index| {
+                    for (self.anthropic_tools.items, 0..) |*tool, index| {
                         if (tool.block_index != value.index or !tool.active) continue;
                         tool.arguments_seen = true;
                         self.sink(self.sink_ctx, .{ .tool_plan = .{ .call_id = null, .index = @intCast(index), .arguments = partial } });
@@ -177,7 +178,7 @@ pub const Adapter = struct {
                 }
             }
         } else if (std.mem.eql(u8, event, "content_block_stop")) {
-            for (self.anthropic_tools[0..self.anthropic_tool_count], 0..) |*tool, index| {
+            for (self.anthropic_tools.items, 0..) |*tool, index| {
                 if (tool.block_index != value.index) continue;
                 if (!tool.active) return error.DuplicateToolBlockStop;
                 tool.active = false;
@@ -191,7 +192,7 @@ pub const Adapter = struct {
                 } else self.fail("anthropic stopped before a complete response");
             };
         } else if (std.mem.eql(u8, event, "message_stop")) {
-            for (self.anthropic_tools[0..self.anthropic_tool_count]) |tool| if (tool.active) return error.IncompleteToolBlock;
+            for (self.anthropic_tools.items) |tool| if (tool.active) return error.IncompleteToolBlock;
             if (!self.anthropic_stop) return error.MissingStopReason;
             self.complete();
         }
@@ -234,6 +235,7 @@ pub const Stream = struct {
 
     pub fn deinit(self: *Stream) void {
         self.decoder.deinit();
+        self.adapter.deinit();
         self.line_buffer.deinit(self.adapter.allocator);
         self.* = undefined;
     }
@@ -310,9 +312,7 @@ pub const Stream = struct {
             if (message.thinking) |thinking| if (thinking.len != 0) self.adapter.sink(self.adapter.sink_ctx, .{ .thinking = thinking });
             if (message.tool_calls) |calls| for (calls) |call| {
                 if (call.function.arguments != .object) return error.InvalidToolArguments;
-                if (self.ollama_call_count >= provider.max_tool_calls) return error.TooManyTools;
                 const index = call.function.index orelse self.ollama_call_count;
-                if (index >= provider.max_tool_calls) return error.TooManyTools;
                 var id_buffer: [96]u8 = undefined;
                 // Native Ollama usually has no ID. Use a per-request host
                 // correlation ID; preserve an actual provider ID verbatim.
@@ -320,7 +320,7 @@ pub const Stream = struct {
                 const arguments = try std.json.Stringify.valueAlloc(self.adapter.allocator, call.function.arguments, .{});
                 defer self.adapter.allocator.free(arguments);
                 self.adapter.sink(self.adapter.sink_ctx, .{ .tool_plan = .{ .call_id = id, .name = call.function.name, .index = index, .arguments = arguments } });
-                self.ollama_call_count += 1;
+                self.ollama_call_count +|= 1;
             };
         }
         if (parsed.value.done and !self.ollama_done) {
@@ -362,6 +362,7 @@ test "json delta adapter parses real mimo stream frames" {
     };
     var capture: Capture = .{};
     var adapter = Adapter.init(std.testing.allocator, Capture.receive, &capture);
+    defer adapter.deinit();
     // First frame: empty content, role set, everything null.
     try adapter.receive("{\"id\":\"9ec57133-0712\",\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1791744564,\"model\":\"mimo-v2.6-flash\",\"object\":\"chat.completion.chunk\"}");
     // Reasoning frame: content null, reasoning_content set.
@@ -393,6 +394,7 @@ test "json delta adapter maps content and finish" {
     };
     var capture: Capture = .{};
     var adapter = Adapter.init(std.testing.allocator, Capture.receive, &capture);
+    defer adapter.deinit();
     try adapter.receive("{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}");
     try adapter.receive("{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}");
     try std.testing.expectEqual(@as(usize, 1), capture.count);
@@ -414,6 +416,7 @@ test "anthropic delta adapter maps message stream" {
     };
     var capture: Capture = .{};
     var adapter = Adapter.init(std.testing.allocator, Capture.receive, &capture);
+    defer adapter.deinit();
     try adapter.receiveAnthropic("{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}");
     try adapter.receiveAnthropic("{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}");
     try adapter.receiveAnthropic("{\"type\":\"message_stop\"}");
@@ -649,6 +652,7 @@ test "json delta adapter response metadata counts text and original tool deltas"
         fn receive(_: *anyopaque, _: provider.Delta) void {}
     };
     var adapter = Adapter.init(std.testing.allocator, Sink.receive, undefined);
+    defer adapter.deinit();
     try adapter.receive("{\"choices\":[{\"delta\":{\"content\":\"checking\"}}]}");
     try adapter.receive("{\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"original\",\"function\":{\"name\":\"read_terminal\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}");
     try std.testing.expectEqual(@as(usize, 1), adapter.openai_text_deltas);
@@ -669,4 +673,53 @@ test "context usage Anthropic cached input is normalized once across partial and
     try stream.feed("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n");
     try std.testing.expectEqual(@as(u32, 12002), stream.stats.input_tokens);
     try std.testing.expectEqual(@as(u32, 3), stream.stats.output_tokens);
+}
+
+test "all streaming protocols accept more than sixteen calls in one response" {
+    const a = std.testing.allocator;
+    const Capture = struct {
+        calls: usize = 0,
+        done: bool = false,
+        fn receive(raw: *anyopaque, delta: provider.Delta) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (delta) {
+                .tool_plan => |call| if (call.call_id != null) {
+                    self.calls += 1;
+                },
+                .done => self.done = true,
+                else => {},
+            }
+        }
+    };
+    for ([_]StreamKind{ .openai_compat, .anthropic, .ollama }) |kind| {
+        var capture: Capture = .{};
+        var stream = Stream.initWithKind(a, kind, Capture.receive, &capture);
+        defer stream.deinit();
+        for (0..20) |index| {
+            const id = try std.fmt.allocPrint(a, "call-{d}", .{index});
+            defer a.free(id);
+            const payload = switch (kind) {
+                .openai_compat => try std.json.Stringify.valueAlloc(a, .{ .choices = .{.{ .delta = .{ .tool_calls = .{.{ .index = index, .id = id, .function = .{ .name = "read_terminal", .arguments = "{}" } }} } }} }, .{}),
+                .anthropic => try std.json.Stringify.valueAlloc(a, .{ .type = "content_block_start", .index = index, .content_block = .{ .type = "tool_use", .id = id, .name = "read_terminal" } }, .{}),
+                .ollama => try std.json.Stringify.valueAlloc(a, .{ .message = .{ .tool_calls = .{.{ .function = .{ .name = "read_terminal", .arguments = struct {}{} } }} }, .done = false }, .{}),
+            };
+            defer a.free(payload);
+            const frame = if (kind == .ollama) try std.fmt.allocPrint(a, "{s}\n", .{payload}) else try std.fmt.allocPrint(a, "data: {s}\n\n", .{payload});
+            defer a.free(frame);
+            try stream.feed(frame);
+            if (kind == .anthropic) {
+                const stop = try std.fmt.allocPrint(a, "data: {{\"type\":\"content_block_stop\",\"index\":{d}}}\n\n", .{index});
+                defer a.free(stop);
+                try stream.feed(stop);
+            }
+        }
+        try stream.feed(switch (kind) {
+            .openai_compat => "data: [DONE]\n\n",
+            .anthropic => "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+            .ollama => "{\"done\":true,\"done_reason\":\"stop\"}\n",
+        });
+        try stream.finish();
+        try std.testing.expectEqual(@as(usize, 20), capture.calls);
+        try std.testing.expect(capture.done and !stream.adapter.failed);
+    }
 }

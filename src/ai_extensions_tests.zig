@@ -64,6 +64,7 @@ test "v0.4 extensions stdio initializes pages tools validates inner schema and c
         \\ if m=='initialize': out={'protocolVersion':'2025-11-25','capabilities':{'tools':{}}}
         \\ elif m=='tools/list': out={'tools':[]} if r.get('params',{}).get('cursor')=='page-two' else {'tools':[{'name':'material','description':'fixture','inputSchema':{'type':'object','additionalProperties':False,'properties':{'text':{'type':'string','maxLength':64}},'required':['text']}}],'nextCursor':'page-two'}
         \\ elif m=='tools/call': out={'content':[{'type':'text','text':r['params']['arguments']['text'].upper()}]}
+        \\ for _ in range(140): print(json.dumps({'jsonrpc':'2.0','method':'notifications/progress','params':{'progressToken':'fixture','progress':1}}),flush=True)
         \\ print(json.dumps({'jsonrpc':'2.0','id':i,'result':out}),flush=True)
     ;
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "server.py", .data = script });
@@ -785,8 +786,8 @@ test "v0.4 extensions modern discovery per-request metadata opaque state and non
     const reply = try client.call(client.tools.items[0], "modern", null);
     defer a.free(reply);
     try std.testing.expect(std.mem.indexOf(u8, reply, "MODERN COMPLETE") != null);
-    try std.testing.expectEqual(@as(usize, 1), handler.roots);
-    try std.testing.expectEqual(@as(usize, 1), handler.resumed);
+    try std.testing.expectEqual(@as(usize, 20), handler.roots);
+    try std.testing.expectEqual(@as(usize, 20), handler.resumed);
     const trace = try tmp.dir.readFileAlloc(std.testing.io, "trace", a, .limited(32768));
     defer a.free(trace);
     try std.testing.expect(std.mem.indexOf(u8, trace, "initialize") == null);
@@ -805,7 +806,7 @@ test "v0.4 extensions modern discovery per-request metadata opaque state and non
             calls += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 2), calls);
+    try std.testing.expectEqual(@as(usize, 21), calls);
 }
 
 test "v0.4 extensions modern unknown input invalid results and explicit unsupported versions fail closed" {

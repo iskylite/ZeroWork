@@ -6,8 +6,6 @@ const host = @import("host_tools.zig");
 const scope = @import("tool_scope.zig");
 const Digest = [32]u8;
 const ExecutionReceipt = @import("../host/terminal_execution.zig").PublicReceipt;
-pub const max_records = 512;
-pub const max_file_bytes = 2 * 1024 * 1024;
 pub const Stage = enum { prepared, dispatch_started, committed, running, succeeded, failed, rejected, cancelled_unsent, outcome_unknown, cleanup_pending };
 pub const Ownership = enum { borrowed_user, created_task, handed_to_user };
 pub const Record = struct {
@@ -101,7 +99,7 @@ pub const Journal = struct {
             journal.records.deinit(a);
             a.free(journal.path);
         }
-        const source = dir.readFileAlloc(io, path, a, .limited(max_file_bytes)) catch |err| switch (err) {
+        const source = dir.readFileAlloc(io, path, a, .unlimited) catch |err| switch (err) {
             error.FileNotFound => return journal,
             else => return err,
         };
@@ -110,7 +108,6 @@ pub const Journal = struct {
         const parsed = try std.json.parseFromSlice(Disk, a, source, .{});
         defer parsed.deinit();
         if (parsed.value.schema_version != 1 and parsed.value.schema_version != 2) return error.UnsupportedJournalSchema;
-        if (parsed.value.records.len > max_records) return error.JournalLimit;
         try journal.records.ensureTotalCapacity(a, parsed.value.records.len);
         var recovered = false;
         for (parsed.value.records) |value| {
@@ -162,7 +159,6 @@ pub const Journal = struct {
             if (!std.mem.eql(u8, &record.canonical_hash, &request.canonical_hash)) return error.IdempotencyConflict;
             return .{ .index = index, .operation_ref = record.operation_ref, .reused = true };
         };
-        if (self.records.items.len >= max_records) return error.JournalLimit;
         try self.records.ensureUnusedCapacity(self.allocator, 1);
         var record = try (Record{ .context = request.context, .operation_ref = identity.HostOperationId.generate(), .tool_id = request.tool_id, .request_key = request.request_key, .canonical_hash = request.canonical_hash, .original_turn = request.turn_id, .original_call = request.call_id }).clone(self.allocator);
         errdefer record.deinit(self.allocator);
@@ -256,7 +252,7 @@ pub const Journal = struct {
         self.records.items[handle.index] = record;
     }
     fn persist(self: *Journal, records: []const Record) !void {
-        const current = self.dir.readFileAlloc(self.io, self.path, self.allocator, .limited(max_file_bytes)) catch |err| switch (err) {
+        const current = self.dir.readFileAlloc(self.io, self.path, self.allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -268,7 +264,6 @@ pub const Journal = struct {
         } else false;
         const encoded = try std.json.Stringify.valueAlloc(self.allocator, Disk{ .schema_version = if (extended) 2 else 1, .records = records }, .{});
         defer self.allocator.free(encoded);
-        if (encoded.len > max_file_bytes) return error.JournalLimit;
         var atomic = try self.dir.createFileAtomic(self.io, self.path, .{ .permissions = @fromBackingInt(0o600), .make_path = true, .replace = true });
         defer atomic.deinit(self.io);
         try atomic.file.writeStreamingAll(self.io, encoded);

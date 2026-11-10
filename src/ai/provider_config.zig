@@ -45,6 +45,7 @@ pub const ProviderConfig = struct {
     auth: Auth,
     context_window: u32 = 8192,
     vision: bool = false,
+    output_limit: ?u32 = null,
     /// Per-image admission reservation for a custom model with unknown local
     /// tokenization; never an assertion of actual provider usage.
     image_token_reservation: ?u32 = null,
@@ -73,6 +74,9 @@ pub const ProviderConfig = struct {
     pub fn chatRequest(self: ProviderConfig, request: provider.ChatRequest) provider.ChatRequest {
         var configured = request;
         configured.model = self.model;
+        // Anthropic requires max_tokens. Prefer advertised model metadata;
+        // older gateways without it keep the previous compatible request size.
+        if (self.kind == .anthropic and configured.max_output == 0) configured.max_output = self.output_limit orelse 4096;
         configured.vision = self.vision;
         configured.image_token_reservation = self.image_token_reservation;
         configured.image_token_max_width = self.image_token_max_width;
@@ -101,7 +105,7 @@ pub fn fromSettingsSelection(ai: app_config.Ai, selection: ?ModelSelection) !Pro
         .anthropic => if (p.api_key.len == 0) return error.MissingApiKey else .{ .anthropic_memory = p.api_key },
         .openai_compat => if (p.api_key.len != 0) .{ .bearer_memory = p.api_key } else if (allowsNoAuth(p.kind, p.endpoint)) .none else return error.MissingApiKey,
     };
-    const result = ProviderConfig{ .kind = p.kind, .endpoint = p.endpoint, .model = resolved.model.id, .auth = auth, .context_window = resolved.model.context_window, .vision = resolved.model.vision, .image_token_reservation = resolved.model.image_token_reservation, .image_token_max_width = resolved.model.image_token_max_width, .image_token_max_height = resolved.model.image_token_max_height, .native_effort = resolved.model.reasoning_discovered, .reasoning_wire = if (p.kind == .anthropic and resolved.model.reasoning_adaptive) .anthropic_adaptive else toggleProtocol(p.kind, p.endpoint, resolved.model.id) };
+    const result = ProviderConfig{ .kind = p.kind, .endpoint = p.endpoint, .model = resolved.model.id, .auth = auth, .context_window = resolved.model.context_window, .output_limit = resolved.model.output_discovered, .vision = resolved.model.vision, .image_token_reservation = resolved.model.image_token_reservation, .image_token_max_width = resolved.model.image_token_max_width, .image_token_max_height = resolved.model.image_token_max_height, .native_effort = resolved.model.reasoning_discovered, .reasoning_wire = if (p.kind == .anthropic and resolved.model.reasoning_adaptive) .anthropic_adaptive else toggleProtocol(p.kind, p.endpoint, resolved.model.id) };
     try result.validate();
     return result;
 }

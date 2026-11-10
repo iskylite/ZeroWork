@@ -315,7 +315,7 @@ const Job = struct {
                     } else |_| {}
                 }
                 // Missing capability metadata is resolved independently of list availability.
-                if (!self.require_list and !fallback_attempted and (capability.reasoning == null or !capability.control_known or capability.context == null or capability.vision == null)) {
+                if (!self.require_list and !fallback_attempted and (capability.reasoning == null or !capability.control_known or capability.context == null or capability.vision == null or (p.kind == .anthropic and capability.output == null))) {
                     fallback_attempted = true;
                     const public_plan: http.RequestPlan = .{ .method = .GET, .endpoint = "https://models.dev/api.json", .accept = "application/json", .auth_style = .none, .timeout_ms = 10000, .cancel = &self.cancel };
                     if (self.fetch(t, public_plan, "")) |bytes| {
@@ -341,6 +341,9 @@ const Job = struct {
                 if (capability.context == null) if (supplement) |c| {
                     capability.context = c.context;
                 };
+                if (capability.output == null) if (supplement) |c| {
+                    capability.output = c.output;
+                };
                 if (capability.vision == null) if (supplement) |c| {
                     capability.vision = c.vision;
                 };
@@ -350,6 +353,7 @@ const Job = struct {
                     m.context_window = v;
                     m.context_discovered = true;
                 }
+                if (capability.output) |v| m.output_discovered = v;
                 if (capability.vision) |v| m.vision = v;
                 if (capability.control_known) {
                     m.reasoning_discovered = true;

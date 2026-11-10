@@ -326,3 +326,29 @@ test "status popover local status keyboard triggers retain the selected generati
     try std.testing.expectEqual(@as(usize, 1), recorder.themes);
     try std.testing.expectEqual(@as(u64, 2), recorder.owner.?.generation);
 }
+
+test "status popover numeric samples and anchors retain rows icons and callbacks" {
+    var f: StatusFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var p = StatusFixture.projection();
+    p.source_revision = 2;
+    p.rtt = .{ .milliseconds = 1 };
+    p.owner_kind = .ssh;
+    try f.view.update(p);
+    try f.view.show(.rtt, f.trigger, 860, false);
+    f.settle();
+    const row = f.view.rows.children.items[0].id;
+    const icon = f.view.header_icon.children.items[0].id;
+    const epoch = f.view.root.ownedTreeStructureRevision();
+    for (3..123) |i| {
+        p.source_revision = i;
+        p.rtt.?.milliseconds = i;
+        try f.view.update(p);
+        try f.view.flush();
+    }
+    try std.testing.expectEqual(row, f.view.rows.children.items[0].id);
+    try std.testing.expectEqual(icon, f.view.header_icon.children.items[0].id);
+    try std.testing.expectEqual(epoch, f.view.root.ownedTreeStructureRevision());
+    try std.testing.expectEqualStrings("122 ms", f.view.labels.items[1].getText().?.content);
+}

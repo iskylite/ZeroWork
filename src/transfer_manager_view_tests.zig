@@ -1834,3 +1834,32 @@ test "transfer startup failure projection preserves reason events and retry sepa
         }
     }
 }
+
+test "transfer projection numeric progress retains row controls scopes and tooltip ownership" {
+    const h = try H.init(1000, 700);
+    defer h.deinit();
+    var capture: Capture = .{};
+    const p = try h.panel(&capture, .window);
+    var rows = [_]V.Task{ row(1, 101, .running), row(2, 101, .running) };
+    rows[0].total_bytes = 1000;
+    try p.update(.{ .revision = 1, .rows = &rows });
+    p.show();
+    h.frames();
+    const task_id = id(p.root, "transfer.task").?.id;
+    const menu_id = id(p.root, "transfer.scope.select").?.id;
+    const epoch = p.root.ownedTreeStructureRevision();
+    for (2..122) |revision| {
+        rows[0].done_bytes = revision;
+        rows[0].speed_bps = revision * 10;
+        try p.update(.{ .revision = revision, .rows = &rows });
+    }
+    try std.testing.expectEqual(epoch, p.root.ownedTreeStructureRevision());
+    try std.testing.expectEqual(task_id, id(p.root, "transfer.task").?.id);
+    try std.testing.expectEqual(menu_id, id(p.root, "transfer.scope.select").?.id);
+    try std.testing.expectEqual(@as(u64, 121), p.source.?.value.rows[0].done_bytes);
+    try std.testing.expectEqualStrings("传输中 12%", id(p.root, "transfer.task.status").?.getText().?.content);
+    rows[0].phase = .succeeded;
+    try p.update(.{ .revision = 122, .rows = &rows });
+    h.frames();
+    try std.testing.expectEqualStrings("已完成 100%", id(p.root, "transfer.task.status").?.getText().?.content);
+}

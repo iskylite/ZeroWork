@@ -16,7 +16,6 @@ const Store = @import("../ai/assistant_store.zig").Store;
 const Roster = @import("group_model.zig").Roster;
 const Content = @import("../host/content_context.zig");
 const Window = @import("plugin_window_host.zig").Host;
-const capacity = 128;
 
 pub const Prepared = struct {
     arena: std.heap.ArenaAllocator,
@@ -143,7 +142,7 @@ pub const Init = struct {
     approval: *approvals.Broker,
 };
 pub const Context = struct {
-    attachments: [capacity]?AttachmentRecord = @splat(null),
+    attachments: std.ArrayList(?AttachmentRecord) = .empty,
     secret_host: ?SecretHost = null,
     app: *Application,
     roster: *Roster,
@@ -151,11 +150,16 @@ pub const Context = struct {
     lookup_context: *anyopaque,
     lookup_task: *const fn (*anyopaque, identity.ConversationId, identity.TaskId) ?*Controller,
     approval: *approvals.Broker,
-    tasks: [capacity]?Task = @splat(null),
-    admissions: [capacity]?Admission = @splat(null),
+    tasks: std.ArrayList(?Task) = .empty,
+    admissions: std.ArrayList(?Admission) = .empty,
 
     pub fn init(options: Init) !Context {
         return .{ .secret_host = options.secret_host, .app = options.app, .roster = options.roster, .store = options.store, .lookup_context = options.lookup_context, .lookup_task = options.lookup_task, .approval = options.approval };
+    }
+    pub fn deinit(self: *Context) void {
+        self.tasks.deinit(self.app.allocator);
+        self.admissions.deinit(self.app.allocator);
+        self.attachments.deinit(self.app.allocator);
     }
     pub fn backend(self: *Context) supervisor.Backend {
         return .{ .context = self, .authorize = authorize, .resolve = resolve, .retained_shell_snapshots = true, .terminal_call = terminalCall, .handed_to_user = handedToUser, .authorize_input = authorizeInput, .request_secret = requestSecret, .authorize_read = authorizeRead };
@@ -166,7 +170,7 @@ pub const Context = struct {
     /// This grants only observation/revocation of the already issued execution.
     pub fn beginClose(self: *Context, handle: identity.SessionHandle, out: []host.Context) !usize {
         var count: usize = 0;
-        for (self.admissions) |item| if (item) |record| if (record.authorized and record.boundary.handle.eql(handle)) {
+        for (self.admissions.items) |item| if (item) |record| if (record.authorized and record.boundary.handle.eql(handle)) {
             const duplicate = for (out[0..count]) |prior| {
                 if (sameTask(prior, record.context)) break true;
             } else false;
@@ -176,7 +180,7 @@ pub const Context = struct {
                 count += 1;
             }
         };
-        for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.boundary.handle.eql(handle)) {
+        for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.boundary.handle.eql(handle)) {
             record.cleanup_only = true;
         };
         return count;
@@ -187,16 +191,13 @@ pub const Context = struct {
         try controller.authority.validate();
         const policy = controller.bridge.policy;
         const value: Task = .{ .initial = controller.authority, .config_revision = controller.config_revision, .mode = controller.execution_policy.execution_mode, .allow_input = policy.allow_input, .allow_write = policy.allow_write };
-        var empty: ?usize = null;
-        for (self.tasks, 0..) |item, index| if (item) |task| {
+        for (self.tasks.items) |item| if (item) |task| {
             if (sameTask(task.initial, value.initial)) {
                 if (!std.meta.eql(task, value)) return error.ScopeChanged;
                 return;
             }
-        } else if (empty == null) {
-            empty = index;
         };
-        self.tasks[empty orelse return error.ExecutionLimit] = value;
+        try self.tasks.append(self.app.allocator, value);
     }
     /// Model queries require the current binding or its exact closed receipts;
     /// same-conversation historical reads may cross Tasks. Actions still need
@@ -211,7 +212,7 @@ pub const Context = struct {
         const reference = try string(invocation.arguments, "execution_ref");
         if (!std.mem.startsWith(u8, reference, "x1:")) return error.TargetNotAuthorized;
         const id = identity.ExecutionId.parse(reference[3..]) catch return error.TargetNotAuthorized;
-        for (self.admissions) |item| if (item) |record| {
+        for (self.admissions.items) |item| if (item) |record| {
             if (!record.authorized or record.execution_id == null or !record.execution_id.?.eql(id)) continue;
             const observing = std.mem.eql(u8, invocation.tool_id, "host.get_execution") or std.mem.eql(u8, invocation.tool_id, "host.wait_execution");
             if (observing) {
@@ -227,7 +228,7 @@ pub const Context = struct {
         const id = anchor.execution_id orelse return error.VerificationSourceUnavailable;
         try authorizeRead(self, read_context, original, anchor.owner, id);
         if (!self.app.sessions.bindingIsLive(anchor.service)) return error.StaleBinding;
-        for (self.admissions) |item| if (item) |record| {
+        for (self.admissions.items) |item| if (item) |record| {
             if (!record.authorized or !record.context.eql(original) or !record.boundary.handle.eql(anchor.owner) or record.execution_id == null or !record.execution_id.?.eql(id)) continue;
             if (record.turn_id != anchor.turn_id or !std.mem.eql(u8, &record.call_hash, &anchor.call_hash) or !std.mem.eql(u8, &record.arguments_hash, &anchor.arguments_hash)) return error.VerificationIdentityMismatch;
             if (!record.boundary.service.binding.eql(anchor.service)) return error.StaleBinding;
@@ -246,7 +247,7 @@ pub const Context = struct {
         const self: *Context = @ptrCast(@alignCast(raw));
         if (!original.conversation_id.eql(context.conversation_id)) return error.TargetNotAuthorized;
         const controller = try self.current(context, true);
-        for (self.admissions) |item| if (item) |record| {
+        for (self.admissions.items) |item| if (item) |record| {
             if (!record.authorized or !record.context.eql(original) or !record.boundary.handle.eql(handle) or record.execution_id == null or !record.execution_id.?.eql(id)) continue;
             if (!controller.inBinding(handle) and !controller.permitsHistoricalOwner(handle)) return error.TargetNotAuthorized;
             return;
@@ -265,17 +266,14 @@ pub const Context = struct {
         try checkForbidden(command);
         const evidence = try describe(invocation.context, boundary);
         const record: Admission = .{ .context = invocation.context, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .call_hash = execution.digest(invocation.call_id), .arguments_hash = invocation.arguments_hash, .canonical_hash = invocation.canonical_arguments_hash, .command_hash = hash, .boundary = boundary, .evidence = evidence };
-        var empty: ?usize = null;
-        for (&self.admissions, 0..) |*item, index| if (item.*) |*prior| {
+        for (self.admissions.items) |*item| if (item.*) |*prior| {
             if (prior.context.eql(invocation.context) and prior.operation_id == invocation.operation_id) {
                 if (prior.authorized) return error.OperationBusy;
                 prior.* = record;
                 return evidence;
             }
-        } else if (empty == null) {
-            empty = index;
         };
-        self.admissions[empty orelse return error.ExecutionLimit] = record;
+        try self.admissions.append(self.app.allocator, record);
         return evidence;
     }
     /// Attachment intentionally does not require an already integrated prompt.
@@ -287,7 +285,7 @@ pub const Context = struct {
         const boundary = try self.captureBoundaryMode(controller, handle, true, false, execution.digest("@shell attach"), true);
         const key_hash = execution.digest(request.key);
         var duplicate = false;
-        for (self.attachments) |item| if (item) |record| if (record.context.eql(invocation.context) and std.mem.eql(u8, &record.key_hash, &key_hash)) {
+        for (self.attachments.items) |item| if (item) |record| if (record.context.eql(invocation.context) and std.mem.eql(u8, &record.key_hash, &key_hash)) {
             if (!record.target.eql(handle) or !std.mem.eql(u8, &record.arguments_hash, &invocation.canonical_arguments_hash)) return error.IdempotencyConflict;
             duplicate = true;
         };
@@ -306,9 +304,8 @@ pub const Context = struct {
         const now = try self.captureBoundaryMode(controller, prepared.boundary.handle, true, false, execution.digest("@shell attach"), true);
         if (!sameService(now.service, prepared.boundary.service) or now.membership_revision != prepared.boundary.membership_revision or now.ownership_revision != prepared.boundary.ownership_revision or !std.meta.eql(now.input, prepared.boundary.input)) return error.ScopeChanged;
         if (!prepared.duplicate) {
-            const slot = for (&self.attachments) |*item| {
-                if (item.* == null) break item;
-            } else return error.RecordingExecutionCapacity;
+            try self.attachments.append(self.app.allocator, null);
+            const slot = &self.attachments.items[self.attachments.items.len - 1];
             const legacy = self.app.legacyForHandle(now.handle) orelse return error.StaleReference;
             const tab = self.app.workspace.sessionTab(legacy) orelse return error.StaleReference;
             const runtime = tab.runtime orelse return error.UnsupportedShell;
@@ -360,7 +357,7 @@ pub const Context = struct {
         const reference = try string(invocation.arguments, "execution_ref");
         if (!std.mem.startsWith(u8, reference, "x1:")) return error.ExecutionNotFound;
         const id = identity.ExecutionId.parse(reference[3..]) catch return error.ExecutionNotFound;
-        for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(id) and sameTask(record.context, invocation.context)) {
+        for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(id) and sameTask(record.context, invocation.context)) {
             if (record.handed_to_user or record.cleanup_only) return error.OwnershipChanged;
             const controller = try self.current(invocation.context, true);
             const service = try self.resolveAdmission(record, false);
@@ -402,7 +399,7 @@ pub const Context = struct {
             .denied => return error.PermissionDenied,
             .scope_changed => return error.ScopeChanged,
         }
-        for (self.admissions) |item| if (item) |record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(id) and record.boundary.handle.eql(handle) and sameTask(record.context, invocation.context)) {
+        for (self.admissions.items) |item| if (item) |record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(id) and record.boundary.handle.eql(handle) and sameTask(record.context, invocation.context)) {
             const snapshot = try record.boundary.service.executionSnapshot();
             if (snapshot.grant == null or !std.meta.eql(snapshot.grant.?, request.grant) or snapshot.input_wait == null or snapshot.input_wait.?.sequence != request.wait_sequence) return error.InputConflict;
             return;
@@ -423,7 +420,7 @@ pub const Context = struct {
     pub fn observeSecret(self: *Context, authority: host.Context, handle: identity.SessionHandle, request: execution.InputRequest) !execution.Snapshot {
         if (request.kind != .host_secret or request.text.len != 0 or !request.grant.task_id.eql(authority.task_id)) return error.InvalidArguments;
         _ = try self.current(authority, true);
-        for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(request.grant.execution_id) and record.boundary.handle.eql(handle) and sameTask(record.context, authority)) {
+        for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(request.grant.execution_id) and record.boundary.handle.eql(handle) and sameTask(record.context, authority)) {
             if (record.cleanup_only or request.grant.ownership_revision != record.boundary.ownership_revision) return error.OwnershipChanged;
             const service = try self.resolveAdmission(record, false);
             if (record.cleanup_only) return error.PermissionDenied;
@@ -436,7 +433,7 @@ pub const Context = struct {
     }
     pub fn cancelSecret(self: *Context, authority: host.Context, handle: identity.SessionHandle, request: execution.InputRequest) !execution.InputReceipt {
         if (request.kind != .host_secret or request.text.len != 0) return error.InvalidArguments;
-        for (self.admissions) |item| if (item) |record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(request.grant.execution_id) and record.boundary.handle.eql(handle) and sameTask(record.context, authority)) {
+        for (self.admissions.items) |item| if (item) |record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(request.grant.execution_id) and record.boundary.handle.eql(handle) and sameTask(record.context, authority)) {
             const service = try self.cleanupService(&record);
             return service.executionSecret(.{ .cancel = request });
         };
@@ -445,7 +442,7 @@ pub const Context = struct {
     fn secretService(self: *Context, authority: host.Context, handle: identity.SessionHandle, request: execution.InputRequest, registered: bool) !terminal.Service {
         if (request.kind != .host_secret or request.text.len != 0) return error.InvalidArguments;
         const controller = try self.current(authority, true);
-        for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(request.grant.execution_id) and record.boundary.handle.eql(handle) and sameTask(record.context, authority)) {
+        for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(request.grant.execution_id) and record.boundary.handle.eql(handle) and sameTask(record.context, authority)) {
             if (record.handed_to_user or record.cleanup_only) return error.OwnershipChanged;
             const service = try self.resolveAdmission(record, false);
             if (record.cleanup_only) return error.PermissionDenied;
@@ -469,7 +466,7 @@ pub const Context = struct {
         return handler.request(handler.context, invocation, handle, request);
     }
     fn taskGrant(self: *Context, authority: host.Context) !Task {
-        for (self.tasks) |item| if (item) |value| if (sameTask(value.initial, authority)) return value;
+        for (self.tasks.items) |item| if (item) |value| if (sameTask(value.initial, authority)) return value;
         return error.TargetNotAuthorized;
     }
     fn current(self: *Context, authority: host.Context, old_execution: bool) !*Controller {
@@ -569,7 +566,7 @@ pub const Context = struct {
         return .{ .handle = handle, .service = service, .capability_revision = capability_revision, .ownership_revision = ownership_revision, .membership_revision = membership_revision, .shell = snapshot.shell, .execution_revision = snapshot.revision, .input_epoch = snapshot.input_epoch, .next_input = next_input, .input = input };
     }
     fn admission(self: *Context, invocation: host.Invocation) ?*Admission {
-        for (&self.admissions) |*item| if (item.*) |*value| if (value.context.eql(invocation.context) and value.operation_id == invocation.operation_id and value.turn_id == invocation.turn_id and std.mem.eql(u8, &value.call_hash, &execution.digest(invocation.call_id)) and std.mem.eql(u8, &value.arguments_hash, &invocation.arguments_hash) and std.mem.eql(u8, &value.canonical_hash, &invocation.canonical_arguments_hash)) return value;
+        for (self.admissions.items) |*item| if (item.*) |*value| if (value.context.eql(invocation.context) and value.operation_id == invocation.operation_id and value.turn_id == invocation.turn_id and std.mem.eql(u8, &value.call_hash, &execution.digest(invocation.call_id)) and std.mem.eql(u8, &value.arguments_hash, &invocation.arguments_hash) and std.mem.eql(u8, &value.canonical_hash, &invocation.canonical_arguments_hash)) return value;
         return null;
     }
     fn resolveAdmission(self: *Context, record: *Admission, idle: bool) !terminal.Service {
@@ -657,16 +654,16 @@ pub const Context = struct {
         const self: *Context = @ptrCast(@alignCast(raw));
         // Close can revoke the policy/store binding before Driver.stopTask is
         // consumed. Exact previously admitted owners still need its receipts.
-        for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.context.eql(authority) and record.boundary.handle.eql(handle) and (record.cleanup_only or self.closing())) {
+        for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.context.eql(authority) and record.boundary.handle.eql(handle) and (record.cleanup_only or self.closing())) {
             record.cleanup_only = true;
             return self.cleanupService(record);
         };
         const controller = self.current(authority, true) catch |err| {
-            for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.context.eql(authority) and record.boundary.handle.eql(handle)) return self.restrictToCleanup(record);
+            for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.context.eql(authority) and record.boundary.handle.eql(handle)) return self.restrictToCleanup(record);
             return err;
         };
         var failure: ?anyerror = null;
-        for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.boundary.handle.eql(handle) and (record.context.eql(authority) or (sameTask(record.context, authority) and controller.authority.eql(authority)))) {
+        for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.boundary.handle.eql(handle) and (record.context.eql(authority) or (sameTask(record.context, authority) and controller.authority.eql(authority)))) {
             return self.resolveAdmission(record, false) catch |err| {
                 failure = err;
                 continue;
@@ -681,7 +678,7 @@ pub const Context = struct {
             .request => |request| {
                 var failure: ?anyerror = null;
                 if (self.closing()) return error.WorkspaceClosed;
-                for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and !record.submitted and !record.handed_to_user and !record.cleanup_only and record.execution_id != null and record.execution_id.?.eql(request.execution_id) and record.context.task_id.eql(request.task_id) and sameService(record.boundary.service, service) and std.mem.eql(u8, &record.command_hash, &request.command_hash)) {
+                for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and !record.submitted and !record.handed_to_user and !record.cleanup_only and record.execution_id != null and record.execution_id.?.eql(request.execution_id) and record.context.task_id.eql(request.task_id) and sameService(record.boundary.service, service) and std.mem.eql(u8, &record.command_hash, &request.command_hash)) {
                     if (request.ownership_revision != record.boundary.ownership_revision or request.expected_input_epoch != record.boundary.input_epoch) continue;
                     _ = self.resolveAdmission(record, true) catch |err| {
                         failure = err;
@@ -696,7 +693,7 @@ pub const Context = struct {
             },
             .input => |request| {
                 if (self.closing()) return error.WorkspaceClosed;
-                for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(request.grant.execution_id) and record.context.task_id.eql(request.grant.task_id) and sameService(record.boundary.service, service)) {
+                for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(request.grant.execution_id) and record.context.task_id.eql(request.grant.task_id) and sameService(record.boundary.service, service)) {
                     if (record.handed_to_user or record.cleanup_only) return error.OwnershipChanged;
                     _ = try self.resolveAdmission(record, false);
                     if (record.cleanup_only) return error.PermissionDenied;
@@ -709,7 +706,7 @@ pub const Context = struct {
             },
             .renew => |grant| {
                 if (self.closing()) return error.WorkspaceClosed;
-                for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(grant.execution_id) and record.context.task_id.eql(grant.task_id) and sameService(record.boundary.service, service)) {
+                for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(grant.execution_id) and record.context.task_id.eql(grant.task_id) and sameService(record.boundary.service, service)) {
                     if (record.handed_to_user) return error.OwnershipChanged;
                     if (record.cleanup_only) return error.WorkspaceClosed;
                     if (grant.ownership_revision != record.boundary.ownership_revision) return error.OwnershipChanged;
@@ -722,7 +719,7 @@ pub const Context = struct {
             // Revoking an already issued fence must remain possible after its
             // policy/ownership changes. Native service checks the exact grant.
             .revoke => |value| {
-                for (self.admissions) |item| if (item) |record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(value.grant.execution_id) and record.context.task_id.eql(value.grant.task_id) and sameService(record.boundary.service, service)) return supervisor.performTerminal(service, action);
+                for (self.admissions.items) |item| if (item) |record| if (record.authorized and record.execution_id != null and record.execution_id.?.eql(value.grant.execution_id) and record.context.task_id.eql(value.grant.task_id) and sameService(record.boundary.service, service)) return supervisor.performTerminal(service, action);
                 return error.StaleFence;
             },
             .snapshot, .snapshot_for, .output => return supervisor.performTerminal(service, action),
@@ -730,12 +727,12 @@ pub const Context = struct {
     }
     fn handedToUser(raw: *anyopaque, handle: identity.SessionHandle) !void {
         const self: *Context = @ptrCast(@alignCast(raw));
-        for (self.admissions) |item| if (item) |record| if (record.authorized and record.boundary.handle.eql(handle)) {
+        for (self.admissions.items) |item| if (item) |record| if (record.authorized and record.boundary.handle.eql(handle)) {
             if (self.app.legacyForHandle(handle) == null) return error.StaleReference;
             if (self.app.lifecycle_supervisor.resource(handle)) |resource| {
                 if (resource.snapshot.ownership == .created_task) try self.app.handedToUser(handle);
             }
-            for (&self.admissions) |*saved| if (saved.*) |*admitted| if (admitted.authorized and admitted.boundary.handle.eql(handle)) {
+            for (self.admissions.items) |*saved| if (saved.*) |*admitted| if (admitted.authorized and admitted.boundary.handle.eql(handle)) {
                 admitted.handed_to_user = true;
             };
             return;

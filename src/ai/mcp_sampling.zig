@@ -5,7 +5,7 @@ pub fn generate(a: std.mem.Allocator, backend: provider.Provider, model: []const
     const wire = params.object.get("messages") orelse return error.InvalidMcpSamplingRequest;
     const maximum = params.object.get("maxTokens") orelse return error.InvalidMcpSamplingRequest;
     if (wire != .array or wire.array.items.len == 0 or maximum != .integer or maximum.integer <= 0) return error.InvalidMcpSamplingRequest;
-    const limit: u32 = @intCast(@min(maximum.integer, max_output));
+    const limit: u32 = @intCast(@min(maximum.integer, if (max_output == 0) std.math.maxInt(u32) else max_output));
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const owned = arena.allocator();
@@ -44,10 +44,6 @@ pub fn generate(a: std.mem.Allocator, backend: provider.Provider, model: []const
             const self: *@This() = @ptrCast(@alignCast(raw));
             switch (delta) {
                 .text => |text| {
-                    if (self.text.items.len + text.len > 256 * 1024) {
-                        self.problem = error.McpSamplingResultLimit;
-                        return;
-                    }
                     self.text.appendSlice(self.a, text) catch {
                         self.problem = error.OutOfMemory;
                     };

@@ -30,7 +30,8 @@ test "AI request budget retains a complete escaped 64 KiB local text for every p
 
 test "AI request budget measures exact complete JSON boundaries for every adapter" {
     const a = std.testing.allocator;
-    const empty: provider.ChatRequest = .{ .model = "m", .system = "scope", .messages = &.{.{ .content = "" }} };
+    // Keep the numeric output field width fixed while varying only input bytes.
+    const empty: provider.ChatRequest = .{ .model = "m", .system = "scope", .messages = &.{.{ .content = "" }}, .max_output = 1 };
     for ([_]registry.Kind{ .openai_compat, .anthropic, .ollama }) |kind| {
         const overhead = try http.requestBodySize(kind, empty, 200_000);
         const content = try a.alloc(u8, http.max_text_request_bytes - overhead + 1);
@@ -167,8 +168,8 @@ test "AI context budget fixed overhead rejects before compaction and preserves h
     defer service.deinit();
     const config: @import("ai/provider_config.zig").ProviderConfig = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:1/v1", .model = "fixture", .auth = .none, .context_window = 8192 };
     const identity: compaction.Identity = .{ .owner = .{ .session = 101 }, .conversation = 1, .revision = 1 };
-    // 6,145 fixed input + 2,048 output cannot fit, even with empty history.
-    try std.testing.expectError(error.ContextFixedOverhead, service.startReserved(config, identity, &history, 6145));
+    // Fixed input alone exceeds the window, including with automatic output.
+    try std.testing.expectError(error.ContextFixedOverhead, service.startReserved(config, identity, &history, 8193));
     try std.testing.expect(service.job == null);
     try std.testing.expectEqual(compaction.Status.idle, service.status);
     try std.testing.expectEqual(original, compaction.fingerprint(history.messages));

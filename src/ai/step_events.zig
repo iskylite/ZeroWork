@@ -1,8 +1,9 @@
 //! Owned worker events; the UI never reads the live tool loop.
 const std = @import("std");
-pub const Phase = enum { assembling, running, approval, approved, rejected, succeeded, failed, cancelled };
+pub const Phase = enum { assembling, running, approval, approved, rejected, succeeded, failed, cancelled, skipped };
 pub const Event = struct {
-    kind: enum { step, plan, text, thinking, round_start, reset } = .step,
+    kind: enum { step, plan, text, thinking, input, round_start, reset } = .step,
+    submission: ?@import("../host/identity.zig").SubmissionId = null,
     text_offset: usize = 0,
     call_id: []const u8 = "",
     name: []const u8 = "",
@@ -39,7 +40,7 @@ pub const Mailbox = struct {
         errdefer a.free(command);
         const detail = try a.dupe(u8, event.detail);
         errdefer a.free(detail);
-        try self.pending.append(a, .{ .kind = event.kind, .text_offset = event.text_offset, .call_id = id, .name = name, .command = command, .detail = detail, .phase = event.phase, .at_ms = event.at_ms });
+        try self.pending.append(a, .{ .kind = event.kind, .submission = event.submission, .text_offset = event.text_offset, .call_id = id, .name = name, .command = command, .detail = detail, .phase = event.phase, .at_ms = event.at_ms });
     }
     pub fn drain(self: *Mailbox) ![]Event {
         self.lock();
@@ -134,7 +135,7 @@ pub fn apply(a: std.mem.Allocator, steps: *std.ArrayList(Step), e: Event) !void 
 }
 pub fn terminal(phase: Phase) bool {
     return switch (phase) {
-        .succeeded, .failed, .cancelled, .rejected => true,
+        .succeeded, .failed, .cancelled, .rejected, .skipped => true,
         else => false,
     };
 }

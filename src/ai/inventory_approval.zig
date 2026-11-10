@@ -46,6 +46,8 @@ pub const Snapshot = struct { ticket: Ticket, target: Fixed(512), detail: Fixed(
 const Entry = struct { snapshot: Snapshot, decision: ?Decision = null, once_claimed: bool = false };
 const Authority = struct { context: host.Context, policy_revision: u64, sequence: u64 };
 
+const Seen = struct { key: [32]u8, context: host.Context, invocation: inventory.InvocationIdentity, sequence: u64, consumed: bool = false };
+
 pub const Broker = struct {
     mutex: std.atomic.Mutex = .unlocked,
     live_context: ?host.Context = null,
@@ -53,15 +55,9 @@ pub const Broker = struct {
     sequence: u64 = 0,
     stopped: bool = false,
     entry: ?Entry = null,
-    continuous: [64]?Authority = @splat(null),
-    // Decisions are bounded per Task. Once full, fail closed instead of asking
-    // again or silently evicting a denied semantic request.
-    seen: [128][32]u8 = undefined,
-    seen_contexts: [128]host.Context = undefined,
-    seen_invocations: [128]inventory.InvocationIdentity = undefined,
-    seen_sequences: [128]u64 = undefined,
-    seen_consumed: [128]bool = undefined,
-    seen_len: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    continuous: std.ArrayList(?Authority) = .empty,
+    seen: std.ArrayList(Seen) = .empty,
 
     fn lock(self: *Broker) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -75,13 +71,13 @@ pub const Broker = struct {
             if (!previous.eql(context) or self.policy_revision != policy_revision) self.entry = null;
         }
         var index: usize = 0;
-        while (index < self.seen_len) {
-            const saved = self.seen_contexts[index];
+        while (index < self.seen.items.len) {
+            const saved = self.seen.items[index].context;
             if (saved.conversation_id.eql(context.conversation_id) and (!saved.eql(context) or (self.live_context != null and self.live_context.?.conversation_id.eql(context.conversation_id) and self.policy_revision != policy_revision))) {
                 self.removeSeen(index);
             } else index += 1;
         }
-        for (&self.continuous) |*slot| if (slot.*) |grant| {
+        for (self.continuous.items) |*slot| if (slot.*) |grant| {
             if (grant.context.conversation_id.eql(context.conversation_id) and (!sameAuthority(grant.context, context) or grant.policy_revision != policy_revision)) slot.* = null;
         };
         self.live_context = context;
@@ -102,23 +98,18 @@ pub const Broker = struct {
         const continuous = self.currentAuthority(invocation.context, policy_revision) != null;
         if (!continuous) {
             const exact = inventory.InvocationIdentity.capture(invocation);
-            for (self.seen[0..self.seen_len], 0..) |previous, index| {
-                if (self.seen_consumed[index]) {
-                    if (self.seen_invocations[index].eql(exact)) return error.InventoryAlreadyConsumed;
-                } else if (std.mem.eql(u8, &key, &previous)) return error.InventoryApprovalDenied;
+            for (self.seen.items) |previous| {
+                if (previous.consumed) {
+                    if (previous.invocation.eql(exact)) return error.InventoryAlreadyConsumed;
+                } else if (std.mem.eql(u8, &key, &previous.key)) return error.InventoryApprovalDenied;
             }
-            if (self.seen_len == self.seen.len) return error.InventoryRequestLimit;
+            try self.seen.ensureUnusedCapacity(self.allocator, 1);
         }
         self.sequence = std.math.add(u64, self.sequence, 1) catch return error.InventorySequenceExhausted;
         const ticket: Ticket = .{ .context = invocation.context, .selection = selection, .sequence = self.sequence, .policy_revision = policy_revision, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .canonical_arguments_hash = invocation.canonical_arguments_hash, .tool = try Fixed(provider.max_tool_name_bytes).init(invocation.tool_id), .call = try Fixed(provider.max_tool_call_id_bytes).init(invocation.call_id) };
         self.entry = .{ .snapshot = .{ .ticket = ticket, .target = try Fixed(512).init("工作区中打开的会话与会话组"), .detail = try Fixed(1024).init("AI 需要查看已打开会话和会话组的名称、连接状态与分组。不会读取终端内容或执行命令。") }, .decision = if (continuous) .allow_conversation else null };
         if (!continuous) {
-            self.seen[self.seen_len] = key;
-            self.seen_contexts[self.seen_len] = invocation.context;
-            self.seen_invocations[self.seen_len] = inventory.InvocationIdentity.capture(invocation);
-            self.seen_sequences[self.seen_len] = ticket.sequence;
-            self.seen_consumed[self.seen_len] = false;
-            self.seen_len += 1;
+            self.seen.appendAssumeCapacity(.{ .key = key, .context = invocation.context, .invocation = inventory.InvocationIdentity.capture(invocation), .sequence = ticket.sequence });
         }
         return ticket;
     }
@@ -137,13 +128,17 @@ pub const Broker = struct {
         if (self.stopped or entry.decision != null or !entry.snapshot.ticket.eql(ticket)) return error.StaleInventoryDecision;
         if (decision == .allow_conversation) {
             var target: ?*?Authority = null;
-            for (&self.continuous) |*slot| {
+            for (self.continuous.items) |*slot| {
                 if (slot.* == null or slot.*.?.context.conversation_id.eql(ticket.context.conversation_id)) {
                     target = slot;
                     if (slot.* != null) break;
                 }
             }
-            const slot = target orelse return error.InventoryRequestLimit;
+            if (target == null) {
+                try self.continuous.append(self.allocator, null);
+                target = &self.continuous.items[self.continuous.items.len - 1];
+            }
+            const slot = target.?;
             slot.* = .{ .context = ticket.context, .policy_revision = ticket.policy_revision, .sequence = ticket.sequence };
         }
         entry.decision = decision;
@@ -194,8 +189,8 @@ pub const Broker = struct {
         defer self.mutex.unlock();
         if (self.entry) |entry| if (entry.snapshot.ticket.eql(ticket)) {
             if (entry.decision == .allow_once or entry.decision == .allow_conversation) {
-                for (self.seen_sequences[0..self.seen_len], 0..) |sequence, index| {
-                    if (sequence == ticket.sequence) self.seen_consumed[index] = true;
+                for (self.seen.items) |*record| {
+                    if (record.sequence == ticket.sequence) record.consumed = true;
                 }
             }
             self.entry = null;
@@ -205,7 +200,7 @@ pub const Broker = struct {
     pub fn conversationAllowed(self: *Broker, conversation_id: @import("../host/identity.zig").ConversationId, binding: @import("tool_scope.zig").Owner, binding_revision: u64, policy_revision: u64) bool {
         self.lock();
         defer self.mutex.unlock();
-        for (&self.continuous) |*slot| if (slot.*) |grant| {
+        for (self.continuous.items) |*slot| if (slot.*) |grant| {
             if (!grant.context.conversation_id.eql(conversation_id)) continue;
             if (grant.context.binding.eql(binding) and grant.context.binding_revision == binding_revision and grant.policy_revision == policy_revision) return true;
             // Observing a changed binding/configuration invalidates authority;
@@ -217,7 +212,7 @@ pub const Broker = struct {
     pub fn revokeConversation(self: *Broker, conversation_id: @import("../host/identity.zig").ConversationId) void {
         self.lock();
         defer self.mutex.unlock();
-        for (&self.continuous) |*slot| if (slot.*) |grant| {
+        for (self.continuous.items) |*slot| if (slot.*) |grant| {
             if (grant.context.conversation_id.eql(conversation_id)) slot.* = null;
         };
         if (self.entry) |entry| if (entry.snapshot.ticket.context.conversation_id.eql(conversation_id)) {
@@ -247,7 +242,7 @@ pub const Broker = struct {
     pub fn revoke(self: *Broker) void {
         self.lock();
         defer self.mutex.unlock();
-        if (self.live_context) |context| for (&self.continuous) |*slot| if (slot.*) |grant| {
+        if (self.live_context) |context| for (self.continuous.items) |*slot| if (slot.*) |grant| {
             if (grant.context.conversation_id.eql(context.conversation_id)) slot.* = null;
         };
         self.entry = null;
@@ -255,15 +250,15 @@ pub const Broker = struct {
     pub fn clearConversation(self: *Broker, conversation_id: @import("../host/identity.zig").ConversationId) void {
         self.lock();
         defer self.mutex.unlock();
-        for (&self.continuous) |*slot| if (slot.*) |grant| {
+        for (self.continuous.items) |*slot| if (slot.*) |grant| {
             if (grant.context.conversation_id.eql(conversation_id)) slot.* = null;
         };
         if (self.entry) |entry| if (entry.snapshot.ticket.context.conversation_id.eql(conversation_id)) {
             self.entry = null;
         };
         var index: usize = 0;
-        while (index < self.seen_len) {
-            if (self.seen_contexts[index].conversation_id.eql(conversation_id)) self.removeSeen(index) else index += 1;
+        while (index < self.seen.items.len) {
+            if (self.seen.items[index].context.conversation_id.eql(conversation_id)) self.removeSeen(index) else index += 1;
         }
         if (self.live_context) |context| if (context.conversation_id.eql(conversation_id)) {
             self.live_context = null;
@@ -271,15 +266,10 @@ pub const Broker = struct {
         };
     }
     fn removeSeen(self: *Broker, index: usize) void {
-        self.seen_len -= 1;
-        self.seen[index] = self.seen[self.seen_len];
-        self.seen_contexts[index] = self.seen_contexts[self.seen_len];
-        self.seen_invocations[index] = self.seen_invocations[self.seen_len];
-        self.seen_sequences[index] = self.seen_sequences[self.seen_len];
-        self.seen_consumed[index] = self.seen_consumed[self.seen_len];
+        _ = self.seen.swapRemove(index);
     }
     fn currentAuthority(self: *const Broker, context: host.Context, policy_revision: u64) ?Authority {
-        for (self.continuous) |slot| if (slot) |grant| {
+        for (self.continuous.items) |slot| if (slot) |grant| {
             if (sameAuthority(grant.context, context) and grant.policy_revision == policy_revision) return grant;
         };
         return null;
@@ -290,9 +280,11 @@ pub const Broker = struct {
         defer self.mutex.unlock();
         self.live_context = null;
         self.entry = null;
-        self.continuous = @splat(null);
+        self.continuous.deinit(self.allocator);
+        self.continuous = .empty;
         self.policy_revision = 0;
-        self.seen_len = 0;
+        self.seen.deinit(self.allocator);
+        self.seen = .empty;
         self.stopped = true;
     }
 };

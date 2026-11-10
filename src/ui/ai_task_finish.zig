@@ -217,7 +217,6 @@ pub const Controller = struct {
             publish(task);
             return;
         }
-        if (self.tasks.items.len == 128) return error.TaskFinishLimit;
         const order = self.next_order;
         self.next_order = try identity.advance(self.next_order);
         try self.tasks.append(self.allocator, .{ .context = context, .order = order });
@@ -1115,4 +1114,15 @@ test "task status does not call an idle owned terminal a running execution" {
     task.active_executions = 0;
     task.phase = .retained;
     try std.testing.expect(controller.snapshotFor(context).?.visible);
+}
+
+test "task finish history does not impose a lifetime task quota" {
+    var controller = Controller.init(std.testing.allocator);
+    defer controller.deinit();
+    for (0..256) |_| {
+        const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 4 }, .binding_revision = 1, .grant_revision = 1 };
+        try controller.registerTask(context);
+        try std.testing.expect(controller.snapshotFor(context) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 256), controller.tasks.items.len);
 }

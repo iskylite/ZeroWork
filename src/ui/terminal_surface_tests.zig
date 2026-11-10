@@ -114,6 +114,7 @@ pub const FakeTransport = struct {
     written: std.ArrayList(u8) = .empty,
     sequence: u64 = 0,
     resize_calls: usize = 0,
+    snapshot_calls: usize = 0,
     scroll_calls: usize = 0,
     read_only: bool = false,
     input_leased: bool = false,
@@ -184,6 +185,7 @@ pub const FakeTransport = struct {
     }
     fn snapshot(raw: *anyopaque, _: host.ServiceHandle, allocator: std.mem.Allocator) !terminal.TerminalSnapshot {
         const self = get(raw);
+        self.snapshot_calls += 1;
         if (self.snapshot_error) |err| return err;
         return .{ .owner = owner, .geometry_revision = self.controller.geometry.revision, .input_revision = self.sequence, .read_only = self.read_only, .eof_seen = self.read_only, .projection = try self.controller.copyProjection(owner, allocator), .applied_theme_revision = if (self.controller.theme) |theme| theme.revision else 0 };
     }
@@ -1847,7 +1849,7 @@ test "legacy history search locates an original earlier frame from the final fra
     try std.testing.expect(view.worker == null and view.terminal_surface == null);
 }
 
-test "terminal surface defers hidden painting but preserves latest output when revealed" {
+test "terminal surface defers hidden painting without recapturing unchanged tabs and reveals latest output" {
     var transport: FakeTransport = undefined;
     try transport.init(4, 16);
     defer transport.deinit();
@@ -1864,13 +1866,26 @@ test "terminal surface defers hidden painting but preserves latest output when r
     _ = try view.refreshTerminalService(owner, false);
     try std.testing.expectEqual(@as(usize, 0), view.terminal_surface.?.rows.items.len);
     try std.testing.expect(transport.slot.canPublish());
+    const captured = transport.snapshot_calls;
+    for (0..20) |_| _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expectEqual(captured, transport.snapshot_calls);
+    // New output still advances the hidden pane's owned snapshot once.
+    try transport.controller.feedOutput(owner, 2, " OUTPUT", 200);
+    _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expectEqual(captured + 1, transport.snapshot_calls);
+    for (0..20) |_| _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expectEqual(captured + 1, transport.snapshot_calls);
     view.root.setDisplay(.flex);
     _ = cx.render();
     _ = try view.refreshTerminalService(owner, false);
     const surface = view.terminal_surface.?;
     try std.testing.expect(surface.rows.items.len > 0);
-    try std.testing.expectEqualStrings("LATEST", surface.rows.items[0].glyphs.items[0].node.getText().?.content);
-    try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "LATEST") != null);
+    try std.testing.expectEqualStrings("LATEST OUTPUT", surface.rows.items[0].glyphs.items[0].node.getText().?.content);
+    try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "LATEST OUTPUT") != null);
+    const revealed = transport.snapshot_calls;
+    // Tab activation only repaints the current publication.
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expectEqual(revealed, transport.snapshot_calls);
 }
 
 test "terminal surface visible grouped inactive pane resizes but hidden group does not" {

@@ -86,7 +86,8 @@ pub fn draftTokens(text: []const u8) usize {
     return if (text.len == 0) 0 else textTokens(text.len +| 32);
 }
 pub fn outputTokens(max_output: u32, window: u32) u32 {
-    return @min(max_output, @max(window / 4, 1));
+    const planned = @max(window / 4, 1);
+    return if (max_output == 0) 0 else @min(max_output, planned);
 }
 /// A summary cannot reduce system/tool definitions or other reserved input.
 pub fn checkFixedBudget(reserve: usize, output: usize, window: u32) !void {

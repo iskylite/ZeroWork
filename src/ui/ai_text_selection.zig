@@ -22,7 +22,19 @@ pub fn ownsFocus(cx: *ui.Cx) bool {
     return focused.behavior.events.on_event == Selection.event;
 }
 
+/// Clear overlays while every referenced text node is still alive.
+pub fn clear(root: *ui.Node) void {
+    if (root.behavior.events.on_event != Selection.event) return;
+    const self: *Selection = @ptrCast(@alignCast(root.behavior.events.event_context orelse return));
+    self.anchor = null;
+    self.head = null;
+    self.paint() catch {};
+}
+
 pub fn attach(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node) !void {
+    _ = try retained(cx, scope, root);
+}
+pub fn retained(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node) !*Selection {
     const generation = try cx.node_registry.trackGeneration(root);
     const self = try scope.createState(Selection, .{ .cx = cx, .root = root, .handle = .{ .id = root.id, .generation = generation } });
     try scope.onCleanup(Selection, self, Selection.release);
@@ -31,8 +43,9 @@ pub fn attach(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node) !void {
     root.setFocusable(true);
     root.behavior.events.on_event = Selection.event;
     root.behavior.events.event_context = self;
+    return self;
 }
-const Selection = struct {
+pub const Selection = struct {
     cx: *ui.Cx,
     root: *ui.Node,
     handle: ui.hit.NodeHandle,
@@ -41,6 +54,21 @@ const Selection = struct {
     head: ?Position = null,
     geometry: u64 = 0,
 
+    /// New bindings belong to the chunk scope, while the selection owner stays stable.
+    pub fn append(self: *Selection, scope: *ui.Scope, root: *ui.Node) !void {
+        const count = self.entries.items.len;
+        errdefer self.truncate(count);
+        try self.collect(scope, root);
+    }
+    pub fn truncate(self: *Selection, count: usize) void {
+        if (self.anchor != null) {
+            // Clear before any removed chunk or highlight is freed.
+            self.anchor = null;
+            self.head = null;
+            self.paint() catch {};
+        }
+        self.entries.shrinkRetainingCapacity(count);
+    }
     fn release(self: *Selection) void {
         self.cx.removeAfterLayoutHook(self);
         if (self.cx.node_registry.resolve(self.handle, null)) |root| {

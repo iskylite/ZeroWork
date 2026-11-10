@@ -79,6 +79,22 @@ const Fixture = struct {
         var unused: [1]std.c.pollfd = undefined;
         _ = std.c.poll(&unused, 0, 2);
     }
+    fn waitAuthentication(self: *Fixture, request: @import("proto/ssh/auth_challenge.zig").RequestIdentity) !void {
+        const deadline = clock.monotonicNs() + 2 * std.time.ns_per_s;
+        while (clock.monotonicNs() < deadline) {
+            // Match the native frame loop while awaiting this modal, including
+            // the scheduled wakeup that may be its only work after idle.
+            _ = self.cx.wantsFrame();
+            try self.tick();
+            const view = self.host.authentication;
+            const current = view.current orelse continue;
+            const captured = self.host.bridge.current orelse continue;
+            const layer = self.cx.overlay_stack.topmost() orelse continue;
+            if (view.isVisible() and current.request_id == request.request_id and
+                captured.identity.eql(request) and layer.content_node == view.modal.dialog and layer.state == .visible) return;
+        }
+        return error.AuthenticationPresentationTimeout;
+    }
     fn deinit(self: *Fixture) void {
         var ids: [16]@import("ui/workspace.zig").SessionId = undefined;
         const count = @min(ids.len, self.workspace.tabs.items.len);
@@ -529,6 +545,9 @@ test "connection host external protected authentication uses real modal without 
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
+    // Only this interaction test needs deterministic overlay motion; real IO
+    // deadlines and other connection/idle tests keep their existing clocks.
+    try f.cx.setTestFrameStep(16);
     // Actual local tabs supply real domain identities and focus changes. The
     // external challenge is a UI fixture; it claims no remote capability.
     const first = try f.application.createLocal(null);
@@ -550,7 +569,7 @@ test "connection host external protected authentication uses real modal without 
     defer f.workspace.external_auth = null;
     const original = try external.bridge.offerChallenge(.{ .key = key, .hop_index = 0, .kind = .keyboard_interactive, .endpoint_identity = .{ .host = "original-file.example", .port = 2222, .user = "file-user" }, .prompts = &.{ .{ .text = "Account:", .echo = true }, .{ .text = "Recovery response:", .echo = false } }, .presentation = .protected_form, .presentation_config_revision = 19 });
     try std.testing.expect(f.workspace.connectionProgress(key) == null);
-    for (0..2) |_| try f.tick();
+    try f.waitAuthentication(original);
     const view = f.host.authentication;
     try std.testing.expect(f.host.last_error == null);
     try std.testing.expect(f.host.blocksGlobalActions());
@@ -594,6 +613,7 @@ test "connection host external protected authentication uses real modal without 
     try std.testing.expectEqualStrings("generic recovery phrase", view.fields[1].input.state.getText());
     try std.testing.expect(!view.submit_disabled.peek());
     f.cx.setFocus(view.fields[1].input.input_container);
+    try std.testing.expectEqual(view.fields[1].input.input_container, f.cx.focus_manager.getFocused());
     f.cx.handleKeyDown(.@"return", .{});
     try f.tick();
     try std.testing.expectEqual(@as(usize, 1), external.submitted);
@@ -609,7 +629,7 @@ test "connection host external protected authentication uses real modal without 
     try std.testing.expect(!f.host.progress.isVisible());
 
     const next = try external.bridge.offerChallenge(.{ .key = key, .hop_index = 0, .kind = .keyboard_interactive, .endpoint_identity = .{ .host = "original-file.example", .port = 2222, .user = "file-user" }, .prompts = &.{.{ .text = "Server next round:", .echo = false }}, .presentation = .protected_form, .presentation_config_revision = 19 });
-    for (0..2) |_| try f.tick();
+    try f.waitAuthentication(next);
     try std.testing.expect(next.request_id > original.request_id);
     f.cx.setFocus(view.fields[0].input.input_container);
     f.cx.handleKeyDown(.escape, .{});

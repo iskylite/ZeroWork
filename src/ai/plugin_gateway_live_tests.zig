@@ -136,7 +136,6 @@ test "API2 LIVE gateway verifies unpredictable text tool result through producti
     manager.scope = captured;
     manager.turn_id = 1;
     manager.tool_limits.context_window = config.context_window;
-    manager.tool_limits.max_rounds = 3;
     manager.retry_policy.max_attempts = 0;
     manager.tool_host = .{ .context = &host, .execute = Host.old, .execute_dynamic = TokenHost.invoke, .execute_host = TokenHost.invokeHost };
     var failure: ?[]const u8 = null;
@@ -218,7 +217,6 @@ test "API2 LIVE gateway model discovery tool image roundtrip through production 
         manager.turn_id = 1;
         manager.policy_revision = 1;
         manager.tool_limits.context_window = 100_000;
-        manager.tool_limits.max_rounds = 4;
         manager.retry_policy.max_attempts = 0;
         manager.tool_host = .{ .context = &host, .execute = Host.old, .execute_dynamic = Host.invoke };
         var failure: ?[]const u8 = null;

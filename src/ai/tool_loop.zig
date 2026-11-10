@@ -7,10 +7,6 @@ const scope_mod = @import("tool_scope.zig");
 const permission = @import("permission.zig");
 
 pub const Limits = struct {
-    max_rounds: u16 = 8,
-    max_calls: u16 = 64,
-    max_transcript_bytes: usize = 512 * 1024,
-    max_retained_output_bytes: usize = 4 * 1024 * 1024,
     context_window: u32 = 8192,
 };
 pub const Key = struct { owner: scope_mod.Owner, turn_id: u64, call_id: []const u8 };
@@ -84,8 +80,8 @@ pub const Invocation = struct {
     dispatch_fence: ?provider.DispatchFence = null,
     key: Key,
     scope: scope_mod.Scope,
-    round_index: u16,
-    call_index: u16,
+    round_index: u64,
+    call_index: usize,
     arguments: []const u8,
     arguments_hash: [32]u8,
     call: scope_mod.Call,
@@ -153,7 +149,7 @@ pub const Loop = struct {
     request: provider.ChatRequest,
     messages: std.ArrayList(provider.Message) = .empty,
     records: std.ArrayList(Record) = .empty,
-    round_index: u16 = 0,
+    round_index: u64 = 0,
     verification_notes: std.ArrayList(u8) = .empty,
     uncertain: bool = false,
     /// A valid unknown host receipt permits observation, never fresh effects.
@@ -195,19 +191,12 @@ pub const Loop = struct {
         self.* = undefined;
     }
     pub fn start(self: *Loop, input: provider.ChatRequest) !void {
-        if (self.limits.max_rounds == 0 or self.limits.max_rounds > 32 or self.limits.max_calls == 0 or self.limits.max_calls > 64 or self.limits.max_transcript_bytes == 0 or self.limits.max_transcript_bytes > 1024 * 1024 or self.limits.max_retained_output_bytes == 0 or self.limits.max_retained_output_bytes > 4 * 1024 * 1024 or self.limits.context_window == 0) return error.InvalidToolLoopLimits;
-        var initial_bytes = input.system.len + input.model.len;
-        for (input.messages) |message| {
-            initial_bytes = std.math.add(usize, initial_bytes, message.content.len) catch return error.ToolTranscriptLimit;
-            for (message.tool_calls) |call| initial_bytes = std.math.add(usize, initial_bytes, call.id.len + call.name.len + call.arguments.len) catch return error.ToolTranscriptLimit;
-        }
-        if (initial_bytes > self.limits.max_transcript_bytes) return error.ToolTranscriptLimit;
+        if (self.limits.context_window == 0) return error.InvalidToolLoopLimits;
         const a = self.arena.allocator();
         self.scope = try self.scope.clone(a);
         self.request = input;
         self.request.model = try a.dupe(u8, input.model);
         self.request.system = try a.dupe(u8, input.system);
-        if (input.tools.len > provider.max_tool_definitions) return error.ToolCatalogLimit;
         const definitions = try a.alloc(provider.ToolDefinition, input.tools.len);
         for (input.tools, definitions, 0..) |definition, *owned, definition_index| {
             for (input.tools[0..definition_index]) |previous| if (std.mem.eql(u8, previous.name(), definition.name())) return error.InvalidToolDefinition;
@@ -230,7 +219,6 @@ pub const Loop = struct {
             self.tool_table = try dynamic.cloneTable(table, self.allocator);
             self.request.tool_table = &self.tool_table.?;
         }
-        if (input.messages.len > 512) return error.ToolTranscriptLimit;
         for (input.messages) |message| {
             var owned = message;
             owned.content = try a.dupe(u8, message.content);
@@ -246,7 +234,6 @@ pub const Loop = struct {
         try self.checkBudget();
     }
     pub fn nextRequest(self: *Loop) !provider.ChatRequest {
-        if (self.round_index >= self.limits.max_rounds) return error.ToolRoundLimit;
         if (self.uncertain and !self.host_observation_only) return error.ToolOutcomeUnknown;
         if (self.host_observation_only or self.read_only) {
             var visible: std.ArrayList(provider.ToolDefinition) = .empty;
@@ -263,7 +250,7 @@ pub const Loop = struct {
         }
         try self.checkBudget();
         self.request.messages = self.messages.items;
-        self.round_index += 1;
+        self.round_index +|= 1;
         return self.request;
     }
     /// Called only after every call/result pair in the old provider batch is
@@ -367,13 +354,6 @@ pub const Loop = struct {
     /// a retry after a partial history allocation.
     pub fn prepareMessage(self: *Loop, message: provider.Message) !provider.Message {
         if (message.tool_calls.len != 0 or message.tool_call_id != null) return error.InvalidToolCall;
-        if (self.messages.items.len >= @import("wire_history.zig").History.max_messages) return error.ToolTranscriptLimit;
-        var bytes: usize = message.content.len + self.request.system.len;
-        for (self.messages.items) |prior| {
-            bytes = std.math.add(usize, bytes, prior.content.len + 32) catch return error.ToolTranscriptLimit;
-            for (prior.tool_calls) |call| bytes = std.math.add(usize, bytes, call.id.len + call.name.len + call.arguments.len) catch return error.ToolTranscriptLimit;
-        }
-        if (bytes > self.limits.max_transcript_bytes) return error.ToolTranscriptLimit;
         const a = self.arena.allocator();
         try self.messages.ensureUnusedCapacity(a, 1);
         var owned = message;
@@ -382,7 +362,15 @@ pub const Loop = struct {
         owned.offloaded_images = try a.dupe(provider.OffloadedImage, message.offloaded_images);
         var candidate = self.request;
         candidate.messages = self.preparedTranscript(owned);
-        try @import("local_text_request.zig").checkContext(candidate, self.limits.context_window);
+        @import("local_text_request.zig").checkContext(candidate, self.limits.context_window) catch |err| {
+            if (err != error.ContextBudgetExceeded or self.compaction_config == null) return err;
+            const budget = @import("local_text_request.zig");
+            const reserve = (try budget.fixedTokens(self.request)) + (try budget.inputTokens(.{ .model = self.request.model, .system = "", .messages = &.{owned}, .max_output = self.request.max_output }));
+            try self.compact(reserve);
+            try self.messages.ensureUnusedCapacity(a, 1);
+            candidate.messages = self.preparedTranscript(owned);
+            try budget.checkContext(candidate, self.limits.context_window);
+        };
         return owned;
     }
     pub fn appendPrepared(self: *Loop, message: provider.Message) void {
@@ -434,7 +422,7 @@ pub const Loop = struct {
     }
     /// Retains results even when Stop wins or the next request exceeds budget.
     pub fn complete(self: *Loop, text: []const u8, calls: []const provider.ToolCall, host: Host, policy: permission.Engine, policy_revision: u64, cancel: ?*provider.CancelToken) !void {
-        if (calls.len == 0 or calls.len > provider.max_tool_calls) return error.InvalidToolCall;
+        if (calls.len == 0) return error.InvalidToolCall;
         const a = self.arena.allocator();
         const owned_calls = try self.copyCalls(calls);
         for (owned_calls, 0..) |call, index| {
@@ -481,7 +469,6 @@ pub const Loop = struct {
         };
     }
     fn copyCalls(self: *Loop, calls: []const provider.ToolCall) ![]provider.ToolCall {
-        if (calls.len > provider.max_tool_calls) return error.InvalidToolCall;
         const a = self.arena.allocator();
         const owned = try a.alloc(provider.ToolCall, calls.len);
         for (calls, owned) |call, *copy| {
@@ -490,14 +477,13 @@ pub const Loop = struct {
         }
         return owned;
     }
-    fn resolve(self: *Loop, call: provider.ToolCall, index: u16, host: Host, policy: permission.Engine, policy_revision: u64, cancel: ?*provider.CancelToken) ![]const u8 {
+    fn resolve(self: *Loop, call: provider.ToolCall, index: usize, host: Host, policy: permission.Engine, policy_revision: u64, cancel: ?*provider.CancelToken) ![]const u8 {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(call.arguments, &hash, .{});
         for (self.records.items) |record| if (std.mem.eql(u8, record.key.call_id, call.id)) {
             if (!std.mem.eql(u8, record.name, call.name) or !std.mem.eql(u8, &record.arguments_hash, &hash) or !std.mem.eql(u8, record.arguments, call.arguments)) return self.errorBody("CallIdentityConflict", null);
             return record.result_body orelse return error.ToolOutcomeUnknown;
         };
-        if (self.records.items.len >= self.limits.max_calls) return self.errorBody("ToolCallLimit", null);
         const a = self.arena.allocator();
         try self.records.append(a, .{ .key = .{ .owner = self.scope.owner, .turn_id = self.turn_id, .call_id = call.id }, .name = call.name, .arguments = call.arguments, .arguments_hash = hash });
         const record = &self.records.items[self.records.items.len - 1];
@@ -550,10 +536,6 @@ pub const Loop = struct {
         }
         // Reserve the worst permitted per-target output before crossing the
         // effect boundary. Known results are never dropped to make room.
-        if (selected.targets.len * 64 * 1024 > self.limits.max_retained_output_bytes -| self.retained_output_bytes) {
-            record.result_body = try self.errorBody("ToolResultCapacity", &selected.targets);
-            return record.result_body.?;
-        }
         if (!self.planCurrent()) {
             record.result_body = try self.errorBody("not_dispatched_due_to_new_input", null);
             return record.result_body.?;
@@ -590,10 +572,6 @@ pub const Loop = struct {
         const affecting = parsed.entry.definition.effect == .remote_input or parsed.entry.definition.effect == .resource_write;
         if (self.uncertain and affecting and !std.mem.eql(u8, parsed.entry.definition.id, "host.stop_execution")) {
             record.result_body = try self.errorBody("EarlierToolOutcomeUnknown", null);
-            return record.result_body.?;
-        }
-        if (64 * 1024 > self.limits.max_retained_output_bytes -| self.retained_output_bytes) {
-            record.result_body = try self.errorBody("ToolResultCapacity", null);
             return record.result_body.?;
         }
         const operation_id = next_dynamic_operation.fetchAdd(1, .monotonic);
@@ -731,59 +709,53 @@ pub const Loop = struct {
             const omitted = try @import("image_offload.zig").apply(self.arena.allocator(), self.messages.items, self.request, self.limits.context_window, if (self.compaction_config) |config| config.kind else .openai_compat);
             if (omitted != 0) @import("tool_trace.zig").emit(.{ .event = "image_offload", .count = omitted, .turn_id = self.turn_id, .owner = self.scope.owner });
         }
-        var bytes: usize = self.request.system.len + self.request.model.len;
-        for (self.messages.items) |message| {
-            bytes = std.math.add(usize, bytes, message.content.len + 32) catch return error.ToolTranscriptLimit;
-            if (message.tool_call_id) |id| bytes += id.len;
-            for (message.tool_calls) |call| bytes += call.id.len + call.name.len + call.arguments.len + 64;
-        }
-        // Tool schemas and message framing also occupy context. This is the
-        // existing byte/4 estimate, not fabricated provider usage accounting.
-        bytes = std.math.add(usize, bytes, try provider.catalogTextBytes(self.request.tools)) catch return error.ToolTranscriptLimit;
         // Share the admission calculation with offload and submission; a
         // different output clamp/overhead must not reject a repaired request.
         const estimated = try budget.inputTokens(self.request);
         const output = budget.outputTokens(self.request.max_output, self.limits.context_window);
-        if (bytes > self.limits.max_transcript_bytes) return error.ToolTranscriptLimit;
         if (self.compaction_failure != null) return error.ContextCompactionFailed;
-        if (self.compaction_config) |config| {
+        if (self.compaction_config != null) {
             const compaction = @import("context_compaction.zig");
             if (compaction.reachesThreshold(estimated, output, self.limits.context_window) and compaction.cutoff(self.messages.items) != null) {
-                var next = compaction.compactNowWithProvider(config, self.messages.items, try budget.fixedTokens(self.request), self.request.cancel, self.compaction_provider) catch |err| {
-                    if (err == error.ContextFixedOverhead) return err;
-                    self.compaction_failure = err;
-                    return error.ContextCompactionFailed;
-                };
-                errdefer next.deinit();
-                var next_request = self.request;
-                next_request.messages = next.messages;
-                @import("local_text_request.zig").checkContext(next_request, self.limits.context_window) catch |err| {
-                    self.compaction_failure = err;
-                    return error.ContextCompactionFailed;
-                };
-                const owned = try self.arena.allocator().dupe(provider.Message, next.messages);
-                for (self.messages.items) |message| for (message.images) |reference| {
-                    var ref = reference;
-                    ref.release();
-                };
-                for (self.messages.items) |message| for (message.offloaded_images) |image| {
-                    var ref = image.reference;
-                    ref.release();
-                };
-                self.compacted.deinit();
-                self.compacted = next;
-                self.messages = .fromOwnedSlice(owned);
-                for (owned) |message| for (message.images) |reference| {
-                    _ = reference.retain();
-                };
-                for (owned) |message| {
-                    for (message.offloaded_images) |image| _ = image.reference.retain();
-                }
-                self.request.messages = self.messages.items;
+                try self.compact(try budget.fixedTokens(self.request));
                 return;
             }
         }
         if (estimated + output > self.limits.context_window) return error.ToolContextBudget;
+    }
+    /// Completed history can be compacted before admitting new user input.
+    fn compact(self: *Loop, reserve: usize) !void {
+        var next = @import("context_compaction.zig").compactNowWithProvider(self.compaction_config.?, self.messages.items, reserve, self.request.cancel, self.compaction_provider) catch |err| {
+            if (err == error.ContextFixedOverhead) return err;
+            self.compaction_failure = err;
+            return error.ContextCompactionFailed;
+        };
+        errdefer next.deinit();
+        var next_request = self.request;
+        next_request.messages = next.messages;
+        @import("local_text_request.zig").checkContext(next_request, self.limits.context_window) catch |err| {
+            self.compaction_failure = err;
+            return error.ContextCompactionFailed;
+        };
+        const owned = try self.arena.allocator().dupe(provider.Message, next.messages);
+        for (self.messages.items) |message| for (message.images) |reference| {
+            var ref = reference;
+            ref.release();
+        };
+        for (self.messages.items) |message| for (message.offloaded_images) |image| {
+            var ref = image.reference;
+            ref.release();
+        };
+        self.compacted.deinit();
+        self.compacted = next;
+        self.messages = .fromOwnedSlice(owned);
+        for (owned) |message| for (message.images) |reference| {
+            _ = reference.retain();
+        };
+        for (owned) |message| {
+            for (message.offloaded_images) |image| _ = image.reference.retain();
+        }
+        self.request.messages = self.messages.items;
     }
     fn errorBody(self: *Loop, code: []const u8, targets: ?*const scope_mod.Targets) ![]const u8 {
         return std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = Status.rejected, .error_code = code, .session_ids = if (targets) |ids| ids.slice() else &.{} }, .{});

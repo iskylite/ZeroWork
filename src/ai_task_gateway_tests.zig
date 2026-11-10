@@ -9,32 +9,25 @@ const Clock = @import("ai/retry.zig").Clock;
 fn fact(root: id.TaskId) budget.Fact {
     return .{ .root = root, .task = root, .agent = .generate(), .conversation = .generate(), .generation = 1 };
 }
-test "v0.4 task shared counters and child reservations cannot multiply or refill the root budget" {
+test "v0.4 task shared counters record unlimited requests and calls across answer recovery" {
     var root = budget.Root.init(a);
     defer root.deinit();
     const parent = fact(.generate());
     try root.add(parent);
-    root.counters.max_requests = 2;
-    root.counters.max_calls = 3;
-    try root.take(parent.task, 1, 1);
+    try root.take(parent.task, 80, 160);
     var child = fact(parent.root);
     child.task = .generate();
     child.parent = parent.task;
     try root.add(child);
-    try root.take(child.task, 1, 2);
-    try std.testing.expectError(error.SharedRequestLimit, root.take(parent.task, 1, 0));
-    try std.testing.expectError(error.SharedToolCallLimit, root.take(child.task, 0, 1));
+    try root.take(child.task, 80, 160);
     try root.state(child.task, .succeeded, "child fact");
-    try root.state(parent.task, .failed, "retry requires remaining budget");
+    try root.state(parent.task, .failed, "answer recovery");
     try root.resumeAnswer(parent.task);
-    try std.testing.expectEqual(@as(u32, 2), root.counters.requests);
-    try std.testing.expectError(error.SharedRequestLimit, root.take(parent.task, 1, 0));
-    // A new child identity/generation still uses the exhausted root.
-    child.task = .generate();
-    child.generation = 2;
-    try root.add(child);
-    try std.testing.expectError(error.SharedRequestLimit, root.take(child.task, 1, 0));
+    try root.take(parent.task, 1, 0);
+    try std.testing.expectEqual(@as(u64, 161), root.counters.requests);
+    try std.testing.expectEqual(@as(u64, 320), root.counters.calls);
 }
+
 test "v0.4 task human waits pause only when every machine branch is waiting" {
     var root = budget.Root.init(a);
     defer root.deinit();
@@ -54,9 +47,11 @@ test "v0.4 task human waits pause only when every machine branch is waiting" {
     (Clock{}).sleep(2 * std.time.ns_per_ms);
     try root.check();
     try std.testing.expectEqual(paused, root.counters.elapsed_ns);
-    root.counters.elapsed_ns = root.counters.timeout_ns;
+    root.counters.timeout_ns = root.counters.elapsed_ns;
     try std.testing.expectError(error.SharedTaskTimeout, root.check());
-    try std.testing.expectError(error.SharedTaskTimeout, root.resumeAnswer(parent.task));
+    try root.state(child.task, .succeeded, "settled");
+    try root.resumeAnswer(parent.task);
+    try root.check();
 }
 test "v0.4 task four unfinished children and durable dispatch counters fail closed" {
     var root = budget.Root.init(a);
@@ -437,7 +432,8 @@ test "v0.4 task automatic compaction uses the same provider slot budget and usag
     defer service.deinit();
     const runner = try service.attach(.{ .session = 11 }, .{ .context = &fixture, .prepare = Compact.prepare });
     const fence = try service.store.create(runner.agent.id);
-    const long = try a.alloc(u8, 24000);
+    // Cross the context compaction threshold without a fixed output reservation.
+    const long = try a.alloc(u8, 30000);
     defer a.free(long);
     @memset(long, 'm');
     try service.store.checkpoint(fence, 1, &.{ .{ .content = long }, .{ .role = .assistant, .content = "prior complete answer" } }, true);

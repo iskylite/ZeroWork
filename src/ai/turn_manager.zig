@@ -61,6 +61,11 @@ fn RequestBudget(comptime Timing: type) type {
         fn check(self: *const @This()) !void {
             if (self.reason()) |err| return err;
         }
+        fn deadline(self: *const @This()) i128 {
+            const mutable = self.lock();
+            defer mutable.mutex.unlock();
+            return mutable.deadline_ns;
+        }
         fn cancelled(raw: *const anyopaque) bool {
             const self: *const @This() = @ptrCast(@alignCast(raw));
             return self.reason() != null;
@@ -79,6 +84,7 @@ pub const Manager = struct {
         delta: *const fn (*anyopaque, provider.Delta) anyerror!void,
         /// Calls rejected by parsing or preflight may never reach the tool host.
         round_start: ?*const fn (*anyopaque) void = null,
+        input_consumed: ?*const fn (*anyopaque, @import("../host/identity.zig").SubmissionId, []const u8) anyerror!void = null,
         tool_rejected: ?*const fn (*anyopaque, provider.ToolCall, []const u8) anyerror!void = null,
     };
     allocator: std.mem.Allocator,
@@ -173,7 +179,7 @@ pub const Manager = struct {
     }
 
     fn runWithTiming(self: *Manager, p: provider.Provider, request: provider.ChatRequest, timing: anytype) !provider.ChatStats {
-        var budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = timing.now() + @as(i128, request.timeout_ms) * std.time.ns_per_ms, .stop = request.cancel };
+        var budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = if (request.run_timeout_ms) |timeout_ms| timing.now() + @as(i128, timeout_ms) * std.time.ns_per_ms else std.math.maxInt(i128), .stop = request.cancel };
         var cancel = budget.childToken();
         return self.runWithinBudget(p, request, &budget, &cancel) catch |err| return budget.reason() orelse err;
     }
@@ -246,6 +252,7 @@ pub const Manager = struct {
         var total: provider.ChatStats = .{};
         while (true) {
             try budget.check();
+            if (self.input) |inbox| inbox.setWorkPhase(self.turn_id, .continuing);
             const input_revision = if (self.input != null) try self.consumeInputs() else 0;
             var current = if (self.tool_run) |loop| try loop.nextRequest() else request;
             if (self.input) |inbox| self.tool_run.?.dispatch_gate = .{ .context = inbox, .revision = input_revision, .current = inputPlanCurrent };
@@ -253,6 +260,7 @@ pub const Manager = struct {
             // bounded token borrows the active run and must never escape it.
             current.cancel = cancel;
             self.turn.state = .streaming;
+            if (self.input) |inbox| inbox.setWorkPhase(self.turn_id, .response);
             const stats = try self.runRoundUntil(p, current, budget.deadline_ns, budget.timing);
             try budget.check();
             if (self.tool_run) |loop| if (self.tool_host) |host| try loop.acknowledgeNotice(host, cancel);
@@ -287,6 +295,7 @@ pub const Manager = struct {
                 return total;
             }
             if (self.shared_task) |shared| try shared.root.take(shared.task, 0, @intCast(self.pending_tools.items.len));
+            if (self.input) |inbox| inbox.setWorkPhase(self.turn_id, .tools);
             try self.completeTools(current.cancel, self.permissionEngine(), frozen_policy_revision);
             try budget.check();
             if (self.tool_run.?.uncertain and !self.tool_run.?.host_observation_only) return error.ToolOutcomeUnknown;
@@ -306,16 +315,34 @@ pub const Manager = struct {
         const inbox = self.input.?;
         const loop = self.tool_run.?;
         inbox.lock();
-        defer inbox.unlock();
-        if (!inbox.admission) return error.Cancelled;
-        if (loop.round_index >= loop.limits.max_rounds) return error.ToolRoundLimit;
-        for (inbox.entries.items) |entry| {
-            if (entry.receipt.delivery != .accepted or entry.receipt.pause != null or entry.receipt.turn != inbox.active_turn or !entry.receipt.fence.eql(inbox.fence)) continue;
-            const prepared = try loop.prepareMessage(entry.payload.messages[0]);
-            try inbox.consumedLocked(entry, @as(u64, loop.round_index) + 1, loop.preparedTranscript(prepared));
-            loop.appendPrepared(prepared);
+        if (!inbox.admission) {
+            inbox.unlock();
+            return error.Cancelled;
         }
-        return inbox.revision;
+        const count = inbox.entries.items.len;
+        const revision = inbox.revision;
+        inbox.unlock();
+        for (0..count) |index| {
+            const entry = pending: {
+                inbox.lock();
+                defer inbox.unlock();
+                const entry = inbox.entries.items[index];
+                if (entry.receipt.delivery != .accepted or entry.receipt.pause != null or entry.receipt.turn != inbox.active_turn or !entry.receipt.fence.eql(inbox.fence)) break :pending null;
+                break :pending entry;
+            } orelse continue;
+            // Accepted payloads are owned and immutable until this worker joins.
+            // Compaction may call the provider; never hold the inbox lock here.
+            const prepared = try loop.prepareMessage(entry.payload.messages[0]);
+            inbox.lock();
+            defer inbox.unlock();
+            if (!inbox.admission) return error.Cancelled;
+            if (entry.receipt.delivery != .accepted or entry.receipt.pause != null or entry.receipt.turn != inbox.active_turn or !entry.receipt.fence.eql(inbox.fence)) continue;
+            try inbox.consumedLocked(entry, loop.round_index +| 1, loop.preparedTranscript(prepared));
+            loop.appendPrepared(prepared);
+            if (entry.receipt.route == .steer) if (self.observer) |observer| if (observer.input_consumed) |notify| try notify(observer.context, entry.receipt.id, entry.payload.messages[0].content);
+        }
+        // Inputs admitted after the snapshot invalidate the old dispatch plan.
+        return revision;
     }
 
     /// An explicit answer-only retry preserves the original turn, transcript
@@ -410,7 +437,11 @@ pub const Manager = struct {
         return self.runRoundUntil(p, request, deadline_ns, timing);
     }
 
-    fn runRoundUntil(self: *Manager, p: provider.Provider, request: provider.ChatRequest, deadline_ns: i128, timing: anytype) !provider.ChatStats {
+    fn runRoundUntil(self: *Manager, p: provider.Provider, request: provider.ChatRequest, parent_deadline_ns: i128, timing: anytype) !provider.ChatStats {
+        // Queueing for model capacity suspends this round's retry budget as
+        // well as the enclosing run. Provider work and backoff still share it.
+        var round_budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = @min(parent_deadline_ns, timing.now() + @as(i128, request.timeout_ms) * std.time.ns_per_ms), .stop = request.cancel };
+        var round_cancel = round_budget.childToken();
         if (self.observer) |observer| if (observer.round_start) |notify| notify(observer.context);
         self.clearPending();
         self.round_text.clearRetainingCapacity();
@@ -431,7 +462,9 @@ pub const Manager = struct {
             const audit_start = self.audit_log.len();
             var retry_after_ms: ?u32 = null;
             var attempt_request = request;
-            const remaining_ns: i128 = if (self.shared_task) |shared| try shared.root.remainingNs() else deadline_ns - timing.now();
+            attempt_request.cancel = &round_cancel;
+            const deadline_ns = round_budget.deadline();
+            const remaining_ns: i128 = @min(deadline_ns - timing.now(), if (self.shared_task) |shared| @as(i128, try shared.root.remainingNs()) else std.math.maxInt(i128));
             if (remaining_ns <= 0) {
                 self.turn.abort();
                 try self.recordFailure(request.model);
@@ -446,11 +479,11 @@ pub const Manager = struct {
             if (retry_after_ms) |delay| self.cooldown_deadline_ms = monotonicMs() +| delay;
             // Stop wins on both success and failure. Providers and their
             // epilogues must also stay within the original retry budget.
-            const cancelled = if (request.cancel) |token| token.isCancelled() else false;
-            const timed_out = if (self.shared_task) |shared| expired: {
+            const cancelled = round_cancel.cancelled.load(.acquire) or if (request.cancel) |token| token.isCancelled() else false;
+            const timed_out = round_budget.reason() != null or if (self.shared_task) |shared| expired: {
                 shared.root.check() catch break :expired true;
                 break :expired false;
-            } else timing.now() >= deadline_ns;
+            } else false;
             if (cancelled or timed_out) {
                 self.audit_log.truncate(audit_start);
                 self.turn.abort();
@@ -479,7 +512,7 @@ pub const Manager = struct {
                     const actual_delay = @max(delay_ms, retry_after_ms orelse 0);
                     // Do not retry ahead of Retry-After or wait indefinitely
                     // when the server asks for a delay beyond this turn's budget.
-                    const retry_deadline = if (self.shared_task) |shared| timing.now() + @as(i128, try shared.root.remainingNs()) else deadline_ns;
+                    const retry_deadline = @min(round_budget.deadline(), if (self.shared_task) |shared| timing.now() + @as(i128, try shared.root.remainingNs()) else std.math.maxInt(i128));
                     if (@as(i128, actual_delay) * std.time.ns_per_ms >= retry_deadline - timing.now()) {
                         self.turn.abort();
                         try self.recordFailure(request.model);
@@ -527,10 +560,6 @@ pub const Manager = struct {
         };
         switch (delta) {
             .text => |value| {
-                if (self.round_text.items.len + value.len > self.tool_limits.max_transcript_bytes) {
-                    self.last_error = "provider response too large";
-                    return;
-                }
                 self.round_text.appendSlice(self.allocator, value) catch {
                     self.last_error = "response allocation failed";
                 };
@@ -605,29 +634,30 @@ pub const Manager = struct {
 
     fn completeTools(self: *Manager, cancel: ?*provider.CancelToken, policy: permission.Engine, policy_revision: u64) !void {
         defer self.clearPending();
-        var calls: [provider.max_tool_calls]provider.ToolCall = undefined;
-        var count: usize = 0;
-        // Provider tool indices, rather than fragment arrival order, define
-        // assistant transcript and result ordering.
-        for (0..provider.max_tool_calls) |index| {
-            for (self.pending_tools.items) |tool| {
-                if (tool.index != index) continue;
-                calls[count] = .{ .id = tool.call_id orelse return error.MissingToolCallId, .name = tool.name orelse return error.MissingToolName, .arguments = tool.arguments.items };
-                count += 1;
+        // Sort the received slots, without allocating from a provider-supplied
+        // index or imposing a fixed batch size.
+        std.mem.sort(PendingTool, self.pending_tools.items, {}, struct {
+            fn less(_: void, left: PendingTool, right: PendingTool) bool {
+                return left.index < right.index;
             }
+        }.less);
+        const calls = try self.allocator.alloc(provider.ToolCall, self.pending_tools.items.len);
+        defer self.allocator.free(calls);
+        for (self.pending_tools.items, calls) |tool, *call| {
+            call.* = .{ .id = tool.call_id orelse return error.MissingToolCallId, .name = tool.name orelse return error.MissingToolName, .arguments = tool.arguments.items };
         }
         const loop = self.tool_run.?;
         const records_start = loop.records.items.len;
-        try loop.complete(self.round_text.items, calls[0..count], .{ .context = self, .execute = execute, .current_permission = currentPermission, .execute_dynamic = executeDynamic, .execute_host = executeHost, .accepted_host_result = acceptedHostResult }, policy, policy_revision, cancel);
+        try loop.complete(self.round_text.items, calls, .{ .context = self, .execute = execute, .current_permission = currentPermission, .execute_dynamic = executeDynamic, .execute_host = executeHost, .accepted_host_result = acceptedHostResult }, policy, policy_revision, cancel);
         if (self.observer) |observer| if (observer.tool_rejected) |notify| {
-            for (calls[0..count]) |call| {
+            for (calls) |call| {
                 const record = blk: {
                     for (loop.records.items) |*record| if (std.mem.eql(u8, record.key.call_id, call.id)) break :blk record;
                     break :blk null;
                 };
                 if (record) |result| {
                     if (!result.dispatched) try notify(observer.context, call, result.result_body orelse "工具未执行");
-                } else try notify(observer.context, call, "工具调用次数已达上限");
+                } else try notify(observer.context, call, "缺少工具调用回执");
             }
         };
         self.open_text_card = null;
@@ -677,7 +707,6 @@ pub const Manager = struct {
     }
 
     fn queueTool(self: *Manager, index: u32, call_id: ?[]const u8, name: ?[]const u8, arguments: []const u8) !void {
-        if (index >= 16) return error.TooManyTools;
         if (call_id) |id| if (id.len == 0 or id.len > provider.max_tool_call_id_bytes or std.mem.indexOfScalar(u8, id, 0) != null) return error.InvalidToolCall;
         if (name) |value| if (value.len == 0 or value.len > provider.max_tool_name_bytes) return error.InvalidToolCall;
         var found: ?usize = null;
@@ -686,7 +715,6 @@ pub const Manager = struct {
             break;
         };
         if (found == null) {
-            if (self.pending_tools.items.len == 16) return error.TooManyTools;
             try self.pending_tools.append(self.allocator, .{ .index = index });
             found = self.pending_tools.items.len - 1;
         }
@@ -761,7 +789,7 @@ const TestRetryTiming = struct {
     }
 };
 const TestRetryProvider = struct {
-    const Step = struct { work_ms: u32 = 0, err: ?anyerror = null, hint_ms: ?u32 = null, stop: bool = false };
+    const Step = struct { work_ms: u32 = 0, resource_wait_ms: u32 = 0, err: ?anyerror = null, hint_ms: ?u32 = null, stop: bool = false };
     timing: *TestRetryTiming,
     steps: []const Step,
     calls: usize = 0,
@@ -772,6 +800,9 @@ const TestRetryProvider = struct {
         self.budgets[self.calls] = request.timeout_ms;
         const step = self.steps[self.calls];
         self.calls += 1;
+        const waiting = provider.CancelToken.beginResourceWait(request.cancel);
+        self.timing.ns += @as(i128, step.resource_wait_ms) * std.time.ns_per_ms;
+        waiting.end();
         self.timing.ns += @as(i128, step.work_ms) * std.time.ns_per_ms;
         if (step.hint_ms) |hint| request.retry_after_ms.?.* = hint;
         if (step.stop) request.cancel.?.cancel();
@@ -800,6 +831,19 @@ test "retry deadline attempts share provider work and Retry-After wait budget" {
     try std.testing.expectEqual(@as(usize, 3), scripted.calls);
     try std.testing.expectEqualSlices(u32, &.{ 100, 70, 25 }, scripted.budgets[0..3]);
     try std.testing.expectEqual(@as(usize, 2), timing.sleeps);
+}
+test "retry deadline model capacity wait pauses only waiting time across retries" {
+    var timing: TestRetryTiming = .{};
+    var scripted: TestRetryProvider = .{ .timing = &timing, .steps = &.{
+        .{ .resource_wait_ms = 800, .work_ms = 20, .err = error.Transient },
+        .{ .resource_wait_ms = 1200, .work_ms = 30 },
+    } };
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    manager.retry_policy = .{ .delays_ms = .{ 10, 0, 0 } };
+    _ = try manager.runRoundWithTiming(scripted.interface(), .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 100 }, &timing);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 70 }, scripted.budgets[0..2]);
+    try std.testing.expectEqual(@as(i128, 2060 * std.time.ns_per_ms), timing.ns);
 }
 test "retry deadline overslept backoff stops at the original request budget" {
     var timing: TestRetryTiming = .{ .oversleep_ns = 125 * std.time.ns_per_ms };
@@ -1010,7 +1054,7 @@ const TestMultiRun = struct {
         return result;
     }
     fn makeRequest(stop: ?*provider.CancelToken, ms: u32) provider.ChatRequest {
-        return .{ .model = "fixture", .system = "", .messages = &.{}, .tools = &.{.{ .tool = .read_terminal, .session_ids = &.{101} }}, .timeout_ms = ms, .cancel = stop };
+        return .{ .model = "fixture", .system = "", .messages = &.{}, .tools = &.{.{ .tool = .read_terminal, .session_ids = &.{101} }}, .timeout_ms = ms, .run_timeout_ms = ms, .cancel = stop };
     }
 };
 const TestRunSetup = struct {

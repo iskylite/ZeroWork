@@ -12,7 +12,8 @@ const oauth = @import("../ai/mcp_oauth.zig");
 const Cancel = @import("../ai/provider.zig").CancelToken;
 pub const Hooks = struct { context: *anyopaque, changed: *const fn (*anyopaque) void };
 const Field = enum { name, program, arguments, cwd, environment, endpoint, headers, timeout, bindings, roots, oauth_client_id, oauth_scope };
-const Action = enum { import_path, choose_file, choose_folder, cancel_job, toggle_skill, reimport, view_skill, view_server, remove_skill, new_server, edit_server, toggle_server, remove_server, test_server, authorize_server, logout_server, apply, cancel_editor, stdio, http, clear_environment, clear_headers };
+const Action = enum { choose_skill, cancel_job, toggle_skill, reimport, view_skill, view_server, remove_skill, new_server, edit_server, toggle_server, remove_server, test_server, authorize_server, logout_server, apply, cancel_editor, stdio, http, clear_environment, clear_headers };
+extern "c" fn zw_pick_skill_path([*]u8, c_int) c_int;
 pub const View = struct {
     root: *ui.Node,
     scope: *ui.Scope,
@@ -32,8 +33,6 @@ pub const View = struct {
         skill: struct { id: []const u8, revision: []const u8 },
         server: struct { id: []const u8, revision: u64 },
     } = null,
-    path: ?*ui.Signal([]const u8) = null,
-    path_value: []const u8 = "",
     test_results: [16]?struct { id: []const u8, revision: u64, label: []const u8, detail: []const u8 = "", failed: bool = false } = @splat(null),
     form_values: [@typeInfo(Field).@"enum".field_names.len]?[]const u8 = @splat(null),
     editing: bool = false,
@@ -246,7 +245,6 @@ pub const View = struct {
         return value;
     }
     fn rebuild(self: *View) !void {
-        if (self.path) |signal| self.path_value = try controls.owned(self.scope, signal.peek());
         for (self.fields, 0..) |maybe, i| if (maybe) |signal| {
             self.form_values[i] = try controls.owned(self.scope, signal.peek());
         };
@@ -261,20 +259,23 @@ pub const View = struct {
         }
         self.render_scope = try self.scope.childScope();
         self.fields = @splat(null);
-        self.path = null;
         const skills_card = try self.card("本地技能", "导入 SKILL.md 或技能文件夹，保存后供助手使用。", "settings.ai.skills", ui.icons.sparkles, 31);
-        const drop = try ui.boxStyled(self.cx, S.column, .{});
-        drop.style.width = .fill();
-        drop.style.gap = 6;
-        drop.meta.ownership.meta.test_id = "settings.skills.drop";
-        drop.behavior.events.on_event = dropEvent;
-        drop.behavior.events.event_context = self;
-        self.path = try self.input(drop, "拖入技能或目录，或输入绝对路径", self.path_value, "settings.skills.path", false, false);
-        const import_row = try self.row(drop);
-        try self.compactButton(import_row, "导入", .import_path, 0, "settings.skills.import");
-        try self.compactButton(import_row, "选择文件", .choose_file, 0, "settings.skills.file");
-        try self.compactButton(import_row, "选择文件夹", .choose_folder, 0, "settings.skills.folder");
-        try skills_card.appendChild(self.cx.allocator, drop);
+        skills_card.meta.ownership.meta.test_id = "settings.skills.drop";
+        skills_card.behavior.events.on_event = dropEvent;
+        skills_card.behavior.events.event_context = self;
+        const toolbar = try ui.boxStyled(self.cx, M.skillsToolbar, .{});
+        toolbar.meta.ownership.meta.test_id = "settings.skills.toolbar";
+        const skills = self.controller.model.value.ai.extensions.skills;
+        var enabled: usize = 0;
+        for (skills) |skill| if (skill.enabled) {
+            enabled += 1;
+        };
+        const summary = try ui.textStyled(self.cx, M.metadata, try std.fmt.allocPrint(self.render_scope.?.allocator, "{d} 个技能 · {d} 个启用", .{ skills.len, enabled }));
+        summary.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1 });
+        summary.meta.ownership.meta.test_id = "settings.skills.summary";
+        try toolbar.appendChild(self.cx.allocator, summary);
+        try self.compactButton(toolbar, "添加技能", .choose_skill, 0, "settings.skills.add");
+        try skills_card.appendChild(self.cx.allocator, toolbar);
         for (self.controller.model.value.ai.extensions.skills, 0..) |skill, i| try self.skillRow(skills_card, skill, i);
         if (self.status_area == .skills) try self.statusText(skills_card);
         const mcp_card = try self.card("MCP 服务", "连接外部工具与资源，供助手在对话中使用。", "settings.ai.mcp", ui.icons.plug, 32);
@@ -354,7 +355,7 @@ pub const View = struct {
         }.run);
         try top.appendChild(self.cx.allocator, toggle);
         try self.compactButton(top, if (self.skillExpanded(skill)) "收起" else "查看", .view_skill, index, try std.fmt.allocPrint(a, "settings.skill.{d}.view", .{index}));
-        const items = [_]ui.widgets.MenuItem{ try self.menuItem(index, "从路径重新导入", .reimport, ui.icons.refresh_cw, false), .{ .kind = .separator }, try self.menuItem(index, "移除", .remove_skill, ui.icons.trash, true) };
+        const items = [_]ui.widgets.MenuItem{ try self.menuItem(index, "重新导入", .reimport, ui.icons.refresh_cw, false), .{ .kind = .separator }, try self.menuItem(index, "移除", .remove_skill, ui.icons.trash, true) };
         const open = try scope.createSignal(bool, false);
         const menu = try ui.widgets.Menu(.{ .trigger = .manual, .open = open, .items = &items, .width = @as(f32, 180), .position = .bottom_end }).mount(scope, self.cx);
         menu.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .flex_shrink = 0 });
@@ -570,12 +571,12 @@ pub const View = struct {
             if (v.job != null or v.controller.state() == .saving) return error.SettingsBusy;
             var extensions = v.controller.model.value.ai.extensions;
             switch (self.action) {
-                .import_path, .reimport => try v.start(.import_skill, if (self.action == .reimport) self.index else null, v.path.?.peek()),
-                .choose_file, .choose_folder => {
+                .choose_skill, .reimport => {
                     var buffer: [4096]u8 = undefined;
-                    const sdk = v.cx.system_sdk orelse return error.FilePickerUnavailable;
-                    const path = (try sdk.runDialog(.{ .kind = if (self.action == .choose_folder) .pick_folder else .open_file }, &buffer)) orelse return;
-                    try v.start(.import_skill, null, path);
+                    const length = zw_pick_skill_path(&buffer, @intCast(buffer.len));
+                    if (length < 0) return error.FilePickerUnavailable;
+                    if (length == 0) return;
+                    try v.start(.import_skill, if (self.action == .reimport) self.index else null, buffer[0..@intCast(length)]);
                 },
                 .toggle_skill, .remove_skill => {
                     var list: std.ArrayList(ext.Skill) = .empty;
@@ -846,6 +847,7 @@ const Job = struct {
 
 fn errorMessage(err: anyerror) []const u8 {
     return switch (err) {
+        error.FilePickerUnavailable => "无法打开技能选择器，请重试或拖入技能文件／文件夹。",
         error.SkillReplaceCollection => "重新导入时请选择单个技能文件夹。",
         error.ExtensionLimit => "最多支持 16 个 MCP 服务。",
         error.MissingSkillFile => "未找到 SKILL.md，请选择技能文件或包含技能的目录。",

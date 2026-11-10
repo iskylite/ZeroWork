@@ -354,7 +354,17 @@ test "host execution catalog and journal controller instantiate without a sessio
     const parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"session_ref\":\"s1:no-authority\",\"command\":\"true\",\"request_key\":\"run-one\"}", .{});
     defer parsed.deinit();
     const invocation: @import("ai/host_tools.zig").Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "call-one", .tool_id = "host.run_in_terminal", .arguments = parsed.value, .arguments_json = "", .arguments_hash = @splat(1), .canonical_arguments_hash = @splat(2) };
-    try std.testing.expectError(error.PermissionDenied, controller.execute(invocation, 0));
+    const response = try controller.execute(invocation, 0);
+    try std.testing.expect(response == .result);
+    var result = response.result;
+    defer result.deinit(a);
+    try result.validate(context, invocation.operation_id);
+    try std.testing.expectEqual(.rejected, result.status);
+    try std.testing.expect(result.receipt.local_released and !result.receipt.side_effect_started and !result.receipt.remote_effect_unknown);
+    try std.testing.expectEqual(@as(usize, 0), controller.entries.items.len);
+    const body = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings("PermissionDenied", body.value.object.get("error_code").?.string);
     controller.tick(0);
     try std.testing.expectError(error.ExecutionNotFound, controller.takeover(context, "x1:bad", 0));
     const wait: host_execution.Wait = .{ .context = context, .operation_id = 1, .index = 0, .after_revision = 1, .deadline = 1, .output_cursor = 0, .max_bytes = 8192 };

@@ -97,11 +97,11 @@ try{
  assert.equal((await indicator()).activity.opacity??1,0);
  assert.deepEqual((await h.query('ai.step_group.title'))[0].rect,originalTitle,'icon swap does not move title');
  await capture('00-collapsed-hover');
- // Keep the pointer stationary while live steps replace the transcript nodes.
+ // Keep the pointer stationary while live steps update the transcript.
  for(let i=0;i<4;i++){
   held.write(frame({reasoning_content:`正在核对当前会话 ${i}。`}));
   await h.waitFor(async()=>text(await h.query('ai.step_group.projection')).includes(`当前会话 ${i}`)||null,5000);
-  assert.equal((await indicator()).arrow.opacity??1,1,'stationary hover survives live transcript replacement');
+  assert.equal((await indicator()).arrow.opacity??1,1,'stationary hover survives live transcript updates');
   assert.equal((await indicator()).activity.opacity??1,0);
  }
  await capture('00-live-stationary-hover');await leaveHeader();
@@ -181,16 +181,17 @@ try{
  await capture('05-new-default-expanded');
  await clickHeader(2);await h.waitFor(async()=>(await groups())[2].rect.h===32||null,5000);
  held.write(frame({reasoning_content:' 追加文本仍然保持手动收起。'}));
- await h.waitFor(async()=>text(await h.query('ai.step.projection')).includes('追加文本')||null,5000);
+ await h.waitFor(async()=>text(await h.query('ai.step_group.projection')).includes('追加文本')||null,5000);
  assert.equal((await groups())[2].rect.h,32);
  held.end(frame({tool_calls:[{index:0,id:'aggregation-fail-1',type:'function',function:{name:wire('host.run_in_terminal'),arguments:'{}'}},{index:1,id:'aggregation-fail-2',type:'function',function:{name:wire('host.read_terminal'),arguments:'{}'}}]})+'data: [DONE]\n\n');held=null;await visible('ai.turn.complete');
  await waitGroups(3);
+ // Collapsed details are created only when disclosed.
+ await clickHeader(2);await h.waitFor(async()=>(await groups())[2].rect.h>32||null,5000);
  const failures=await h.query('ai.request.unsent');assert.equal(failures.length,2,'both unsent failures retained');
  const descendants=flat((await groups())[2]);
  assert.equal(descendants.filter((n:any)=>n.test_id==='ai.request.unsent').length,2,'all failures belong to the existing third group');
  assert(text(await h.query('ai.step_group.summary')).includes('3 个步骤'),'failures counted alongside thinking');
  assert(text((await h.query('ai.step_group.projection'))[2]).includes('有步骤失败'),'collapsed group exposes earlier failures in its projection');
- await clickHeader(2);await h.waitFor(async()=>(await groups())[2].rect.h>32||null,5000);
  for(const failure of await h.query('ai.request.unsent')){
   assert(text(failure).includes('未执行'),'failure summary states dispatch outcome');
   const projection=flat(failure).find((n:any)=>n.test_id==='ai.step.projection');
@@ -260,7 +261,7 @@ try{
  await capture('07-expanded-details-new-cards');
  held.end(frame({content:'SCROLL_STABILITY_COMPLETE'})+'data: [DONE]\n\n');held=null;
  await visible('ai.turn.complete');
- report.checks.push('Stationary hover survives repeated live replacements; with thought and tool details open, four newly executed cards preserve the scrolled transcript position within 1px');
+ report.checks.push('Stationary hover survives repeated live updates; with thought and tool details open, four newly executed cards preserve the scrolled transcript position within 1px');
  report.status='passed';report.requests=requests;
 }catch(error){report.status='failed';report.error=String(error);await h.screenshot(join(out,'failure.png')).catch(()=>{});await writeFile(join(out,'failure.json'),JSON.stringify(await h.query('ai.panel'),null,2)).catch(()=>{});process.exitCode=1;}
 finally{

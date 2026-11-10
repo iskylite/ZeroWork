@@ -28,7 +28,7 @@ pub fn boundary(item: turns.TimelineItem) bool {
     // Independent host notices must remain visible in chronological position.
     return switch (item) {
         .message => |segment| std.mem.trim(u8, segment.text.items, " \t\r\n").len != 0,
-        .notice => true,
+        .notice, .input => true,
         else => false,
     };
 }

@@ -6,7 +6,6 @@ const terminal = @import("../host/terminal_service.zig");
 const execution = terminal.execution;
 const host = @import("host_tools.zig");
 const journal_mod = @import("lifecycle_journal.zig");
-const max_executions = 128;
 const ref_field = "\"execution_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
 const key_field = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
 const wait_fields = "\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}";
@@ -143,7 +142,7 @@ pub const Controller = struct {
     entries: std.ArrayList(Entry) = .empty,
     inputs: std.ArrayList(InputOperation) = .empty,
     next_input_sequence: u64 = 1,
-    finished_tasks: [128]?host.Context = @splat(null),
+    finished_tasks: std.ArrayList(host.Context) = .empty,
     pub fn init(allocator: std.mem.Allocator, journal: *journal_mod.Journal, backend: Backend) Controller {
         return initWithJournal(allocator, JournalAccess.from(journal_mod.Journal, journal), backend);
     }
@@ -178,6 +177,7 @@ pub const Controller = struct {
             }
         }
         self.entries.deinit(self.allocator);
+        self.finished_tasks.deinit(self.allocator);
         self.inputs.deinit(self.allocator);
     }
     pub fn execute(self: *Controller, invocation: host.Invocation, now: i64) !Response {
@@ -262,19 +262,14 @@ pub const Controller = struct {
     /// Host control loop calls this independently of model polling; an abandoned
     /// tool worker therefore stops renewing and the terminal watchdog releases.
     pub fn finishTask(self: *Controller, context: host.Context) !void {
-        var slot: ?usize = null;
-        for (self.finished_tasks, 0..) |value, index| {
-            if (value) |prior| {
-                if (sameAuthority(prior, context)) return;
-            } else if (slot == null) slot = index;
-        }
-        self.finished_tasks[slot orelse return error.ExecutionLimit] = context;
+        for (self.finished_tasks.items) |prior| if (sameAuthority(prior, context)) return;
+        try self.finished_tasks.append(self.allocator, context);
         // A known-unsent mailbox operation cannot become a new effect after
         // model_done. Already accepted/running commands keep their lease.
         for (self.entries.items, 0..) |entry, index| if (sameAuthority(entry.context, context) and entry.dispatch_pending != null) try self.cancelPending(index, "TaskFinishing");
     }
     fn taskFinishing(self: *const Controller, context: host.Context) bool {
-        for (self.finished_tasks) |value| if (value) |prior| if (sameAuthority(prior, context)) return true;
+        for (self.finished_tasks.items) |prior| if (sameAuthority(prior, context)) return true;
         return false;
     }
     fn requestStop(self: *Controller, index: usize, takeover_value: bool, now: i64) void {
@@ -368,7 +363,6 @@ pub const Controller = struct {
             try self.journal.update(operation, record.revision, .{ .stage = .cancelled_unsent });
             return error.TaskFinishing;
         }
-        if (self.entries.items.len >= max_executions) return error.ExecutionLimit;
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
         const target = self.backend.authorize(self.backend.context, invocation, ref, command, hash) catch |err| {
             if (err == error.WorkerBusy or err == error.ApprovalRequired) return err;
@@ -450,7 +444,6 @@ pub const Controller = struct {
         if (payload.kind == .text and payload.text.len > wait.max_bytes) return error.InputLimit;
         const authorize = self.backend.authorize_input orelse return error.PermissionDenied;
         if (retry_input == null) {
-            if (self.inputs.items.len >= 128) return error.InputLimit;
             try self.inputs.ensureUnusedCapacity(self.allocator, 1);
         }
         const sequence = if (retry_input) |input_index| self.inputs.items[input_index].input_sequence else try identity.advance(self.next_input_sequence);
@@ -885,7 +878,7 @@ test "execution interval publication retains durable receipt before next input p
     var controller = Controller.init(a, &journal, .{ .context = &mock, .authorize = Mock.authorize, .resolve = Mock.resolve, .terminal_call = Mock.call });
     defer controller.deinit();
     try controller.entries.append(a, .{ .context = context, .id = id, .target = target, .journal = operation, .journal_revision = 3, .journal_stage = .running, .snapshot = previous, .next_renew_at = 0 });
-    const durable = try tmp.dir.readFileAlloc(std.testing.io, "publication.json", a, .limited(journal_mod.max_file_bytes));
+    const durable = try tmp.dir.readFileAlloc(std.testing.io, "publication.json", a, .unlimited);
     defer a.free(durable);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.json", .data = "external change" });
     try std.testing.expectError(error.JournalConflict, controller.refresh(0, 10));
@@ -1055,7 +1048,7 @@ fn testInputReceiptRecovery(stream: bool, cancel_before_input: bool) !void {
     defer after_revoke.result.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
     try std.testing.expect(std.mem.indexOf(u8, after_revoke.result.blocks[0].structured, if (stream) "written" else "consumed") != null);
-    const stored = try tmp.dir.readFileAlloc(std.testing.io, "inputs.json", a, .limited(journal_mod.max_file_bytes));
+    const stored = try tmp.dir.readFileAlloc(std.testing.io, "inputs.json", a, .unlimited);
     defer a.free(stored);
     try std.testing.expect(std.mem.indexOf(u8, stored, "ordinary line") == null);
     var recovered = Controller.init(a, &journal, .{ .context = &mock, .authorize = Mock.authorize, .resolve = Mock.resolve, .terminal_call = Mock.call });

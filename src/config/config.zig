@@ -433,6 +433,7 @@ pub const AiModel = struct {
     reasoning: bool = false,
     /// Discovery-only metadata, never persisted into the user configuration.
     context_discovered: bool = false,
+    output_discovered: ?u32 = null,
     reasoning_toggle: bool = false,
     reasoning_discovered: bool = false,
     reasoning_adaptive: bool = false,

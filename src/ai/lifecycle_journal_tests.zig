@@ -35,7 +35,7 @@ test "lifecycle journal durably reuses semantic keys across calls and restart wi
     try std.testing.expectError(error.IdempotencyConflict, second.begin(input));
     input.context.task_id = identity.TaskId.generate();
     try std.testing.expect(!(try second.begin(input)).reused);
-    const source = try tmp.dir.readFileAlloc(io, "lifecycle.json", a, .limited(journal.max_file_bytes));
+    const source = try tmp.dir.readFileAlloc(io, "lifecycle.json", a, .unlimited);
     defer a.free(source);
     try std.testing.expect(std.mem.indexOf(u8, source, "canonical_hash") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "arguments_json") == null);
@@ -70,7 +70,7 @@ test "journal failed publication preserves prior memory and durable receipts and
     defer tmp.cleanup();
     var store = try journal.Journal.open(a, io, tmp.dir, "journal.json");
     const handle = try store.begin(request());
-    const original = try tmp.dir.readFileAlloc(io, "journal.json", a, .limited(journal.max_file_bytes));
+    const original = try tmp.dir.readFileAlloc(io, "journal.json", a, .unlimited);
     defer a.free(original);
     try tmp.dir.writeFile(io, .{ .sub_path = "journal.json", .data = "external change" });
     try std.testing.expectError(error.JournalConflict, store.update(handle, 1, .{ .stage = .dispatch_started }));
@@ -137,7 +137,7 @@ test "lifecycle execution receipts persist precise monotonic native and recordin
     recovered.deinit();
     // Legacy v1 JSON contains no execution_receipt member. Remove only that
     // member and prove the same committed operation remains readable.
-    const source = try tmp.dir.readFileAlloc(io, "execution.json", a, .limited(journal.max_file_bytes));
+    const source = try tmp.dir.readFileAlloc(io, "execution.json", a, .unlimited);
     defer a.free(source);
     const parsed = try std.json.parseFromSlice(std.json.Value, a, source, .{});
     defer parsed.deinit();
@@ -182,7 +182,7 @@ test "lifecycle interval receipt owns attribution reasons across publication sna
     var before = try store.snapshot(a, handle);
     defer before.deinit(a);
     try std.testing.expectEqualStrings("OutputProcessIdentityUnknown", before.execution_receipt.?.output_attribution_reason.?);
-    const durable = try tmp.dir.readFileAlloc(io, "interval.json", a, .limited(journal.max_file_bytes));
+    const durable = try tmp.dir.readFileAlloc(io, "interval.json", a, .unlimited);
     defer a.free(durable);
     try tmp.dir.writeFile(io, .{ .sub_path = "interval.json", .data = "external change" });
     receipt.output_attribution_reason = "ConcurrentOutputOwner";

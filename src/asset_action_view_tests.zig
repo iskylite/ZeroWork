@@ -45,6 +45,9 @@ const Fixture = struct {
         try store.saveHosts(io, self.tmp.dir, "hosts.toml", self.live);
         self.live.deinit();
         self.live = try store.loadHosts(io, self.tmp.dir, a, "hosts.toml");
+        // Drive overlay transitions in logical frame time, independent of
+        // compiler speed and filesystem latency between retries.
+        try self.cx.setTestFrameStep(16);
         self.cx.setViewport(1440, 900);
         self.cx.setTheme(theme.widgetTheme(theme.currentName()));
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
@@ -141,6 +144,7 @@ test "asset action view failed file write retains confirmation original owner ta
     try f.init();
     defer f.deinit();
     const owner = f.live.hosts[0].owner();
+    const destination = f.live.groups[2].group_id;
     const before = try f.read();
     defer a.free(before);
     try f.show(.move);
@@ -151,6 +155,7 @@ test "asset action view failed file write retains confirmation original owner ta
     f.click(f.view.primary);
     try std.testing.expectEqual(V.Step.move_select, f.view.step);
     try std.testing.expect(f.view.failure.? == error.NotDir);
+    try std.testing.expectEqual(@as(usize, 1), f.submitted);
     try std.testing.expect(f.view.receipt == null);
     try std.testing.expectEqual(@as(?usize, 1), f.view.selected.peek());
     try std.testing.expectEqualStrings("目标分组  STAGING", f.view.to.getText().?.content);
@@ -165,6 +170,14 @@ test "asset action view failed file write retains confirmation original owner ta
     try std.testing.expectEqual(V.Step.move_success, f.view.step);
     try std.testing.expectEqualStrings("STAGING", f.view.target_name.getText().?.content);
     try std.testing.expectEqual(@as(usize, 2), f.submitted);
+    try std.testing.expect(f.view.receipt != null);
+    try std.testing.expect(!f.view.isVisible());
+    // The retry must produce an actual durable move of the captured asset.
+    var saved = try store.loadHosts(io, f.tmp.dir, a, "hosts.toml");
+    defer saved.deinit();
+    try std.testing.expectEqual(owner.id, saved.hosts[0].connection_id);
+    try std.testing.expectEqual(owner.revision + 1, saved.hosts[0].revision);
+    try std.testing.expectEqual(destination, saved.hosts[0].asset_group_id.?);
 }
 
 test "asset action view delete defaults focus to keep and dismisses only after a matching receipt" {

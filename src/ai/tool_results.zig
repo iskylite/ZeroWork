@@ -112,11 +112,8 @@ pub const Store = struct {
     records: std.ArrayList(*Record) = .empty,
     retained_bytes: usize = 0,
     retained_image_bytes: usize = 0,
-    pub const max_records = 128;
-    pub const max_bytes = 16 * 1024 * 1024;
     // Decoded screenshots are shared immutable refs, but retaining them keeps
     // their PNG and RGBA storage alive. Budget them separately from text facts.
-    pub const max_image_bytes = 128 * 1024 * 1024;
     pub fn init(allocator: std.mem.Allocator) Store {
         return .{ .allocator = allocator };
     }
@@ -312,7 +309,6 @@ pub const Store = struct {
             };
         }
         if (added == 0) return false;
-        if (self.records.items.len + added > max_records or needed > max_bytes -| self.retained_bytes or needed_images > max_image_bytes -| self.retained_image_bytes) return error.ToolResultStoreCapacity;
         try self.records.ensureUnusedCapacity(self.allocator, added);
         const start = self.records.items.len;
         errdefer {
@@ -512,7 +508,7 @@ test "tool result store budgets full resolution observations separately from lat
     try Append.imageRecord(&run, first, 0);
     try Append.imageRecord(&run, second, 1);
     try std.testing.expect(try store.capture(&run, &.{}));
-    try std.testing.expect(store.retained_image_bytes > Store.max_bytes);
+    try std.testing.expect(store.retained_image_bytes > 16 * 1024 * 1024);
     try std.testing.expect(store.retained_bytes < 4096);
     try std.testing.expect(!try store.capture(&run, &.{}));
     // The next pure-text exchange remains admissible after both observations.
@@ -521,13 +517,11 @@ test "tool result store budgets full resolution observations separately from lat
     const two_images = store.retained_image_bytes;
     store.recount();
     try std.testing.expectEqual(two_images, store.retained_image_bytes);
-    // Shared snapshots are charged once, while distinct physical images still
-    // exhaust the finite image store independently of the later text exchange.
+    // Shared snapshots are charged once; distinct snapshots remain available.
     try Append.imageRecord(&run, first, 2);
     try std.testing.expect(try store.capture(&run, &.{}));
     try std.testing.expectEqual(two_images, store.retained_image_bytes);
-    const image_size = first.content().?.bytes.len + first.content().?.pixels.len;
-    const admitted = Store.max_image_bytes / image_size;
+    const admitted = 4;
     for (2..admitted) |index| {
         var distinct = try image.capture(a, snapshot, mapping, index + 10);
         defer distinct.release();
@@ -537,8 +531,8 @@ test "tool result store budgets full resolution observations separately from lat
     var overflow = try image.capture(a, snapshot, mapping, 999);
     defer overflow.release();
     try Append.imageRecord(&run, overflow, admitted + 1);
-    try std.testing.expectError(error.ToolResultStoreCapacity, store.capture(&run, &.{}));
-    try std.testing.expectEqual(admitted + 2, store.records.items.len);
+    try std.testing.expect(try store.capture(&run, &.{}));
+    try std.testing.expectEqual(admitted + 3, store.records.items.len);
     store.keepTurns(&.{});
     try std.testing.expectEqual(@as(usize, 0), store.retained_bytes);
     try std.testing.expectEqual(@as(usize, 0), store.retained_image_bytes);
@@ -551,10 +545,10 @@ test "tool result store budgets full resolution observations separately from lat
     var targets: [16]loop.TargetResult = undefined;
     for (&targets, 1..) |*target, id| target.* = .{ .session_id = id, .status = .succeeded, .transport = .local, .stdout = oversized };
     // Each group member stays within its valid 64 KiB output limit; the
-    // aggregate retained text still must respect the unchanged 16 MiB cap.
+    // aggregate retained text can grow beyond the former 16 MiB ceiling.
     for (0..17) |index| try text_run.records.append(text_run.arena.allocator(), .{ .key = .{ .owner = .{ .session = 171 }, .turn_id = 3, .call_id = try std.fmt.allocPrint(text_run.arena.allocator(), "text-{d}", .{index}) }, .name = "read_terminal", .arguments = "{}", .arguments_hash = @splat(0), .outcome = try loop.Outcome.copy(a, &targets) });
-    try std.testing.expectError(error.ToolResultStoreCapacity, store.capture(&text_run, &.{}));
-    try std.testing.expectEqual(@as(usize, 0), store.records.items.len);
+    try std.testing.expect(try store.capture(&text_run, &.{}));
+    try std.testing.expectEqual(@as(usize, 17), store.records.items.len);
 }
 
 test "host result snapshot retains exact content and receipt without a fake session target" {

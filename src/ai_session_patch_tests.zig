@@ -12,8 +12,13 @@ const RuntimeFixture = struct {
     calls: std.atomic.Value(usize) = .init(0),
     cleaned: bool = true,
     uses_tools: bool = false,
+    hold_prepare: bool = false,
+    preparing: std.atomic.Value(bool) = .init(false),
+    release_prepare: std.atomic.Value(bool) = .init(false),
     fn prepare(raw: *anyopaque, _: std.mem.Allocator, _: std.Io, context: runtime.Context) !runtime.Prepared {
         const self: *@This() = @ptrCast(@alignCast(raw));
+        self.preparing.store(true, .release);
+        while (self.hold_prepare and !self.release_prepare.load(.acquire)) std.Thread.yield() catch {};
         return .{ .provider = .{ .ctx = raw, .chat = chat, .models = models }, .request = .{ .model = "mock", .system = "", .messages = &.{} }, .scope = .{ .owner = context.owner, .members = .{} }, .host = if (self.uses_tools) .{ .context = self, .execute = unexpectedTool } else null };
     }
     fn unexpectedTool(_: *anyopaque, _: @import("ai/tool_loop.zig").Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !@import("ai/tool_loop.zig").Outcome {
@@ -190,13 +195,31 @@ test "AI session PATCH tool-free steering stays in the same turn and preserves b
         inbox: *input.Inbox,
         ticket: input.Fence,
         calls: usize = 0,
+        observed: usize = 0,
+        fn reset(_: *anyopaque) void {}
+        fn delta(_: *anyopaque, _: provider.Delta) !void {}
+        fn consumed(raw: *anyopaque, id: identity.SubmissionId, text: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(@as(usize, 1), self.calls);
+            try std.testing.expect(id.valid());
+            try std.testing.expectEqualStrings("correction", text);
+            self.observed += 1;
+        }
         fn chat(raw: *anyopaque, request: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.calls += 1;
             if (self.calls == 1) {
                 try std.testing.expectEqualStrings("first", request.messages[request.messages.len - 1].content);
-                _ = try self.inbox.admit(self.ticket, identity.SubmissionId.generate(), .{ .content = "correction" }, .steer);
                 sink(ctx, .{ .text = "initial response" });
+                try std.testing.expectEqual(input.Route.steer, self.inbox.previewRoute(.steer));
+                const accepted = try self.inbox.admit(self.ticket, identity.SubmissionId.generate(), .{ .content = "correction" }, .steer);
+                try std.testing.expectEqual(input.Delivery.accepted, accepted.delivery);
+                try std.testing.expectEqual(@as(usize, 0), self.observed);
+                self.inbox.lock();
+                const phase = self.inbox.work_phase;
+                self.inbox.unlock();
+                try std.testing.expectEqualStrings("当前响应结束后处理", phase.waitingHint());
+                try std.testing.expect(!self.inbox.tryClose());
             } else {
                 try std.testing.expectEqualStrings("correction", request.messages[request.messages.len - 1].content);
                 try std.testing.expectEqualStrings("initial response", request.messages[request.messages.len - 2].content);
@@ -221,9 +244,11 @@ test "AI session PATCH tool-free steering stays in the same turn and preserves b
     defer manager.deinit();
     manager.turn_id = 1;
     manager.input = inbox;
+    manager.observer = .{ .context = &fixture, .reset = Fixture.reset, .delta = Fixture.delta, .input_consumed = Fixture.consumed };
     manager.scope = .{ .owner = a.owner, .members = .{} };
     _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "mock", .system = "", .messages = &.{} });
     try std.testing.expectEqual(@as(usize, 2), fixture.calls);
+    try std.testing.expectEqual(@as(usize, 1), fixture.observed);
     try std.testing.expectEqual(@as(u64, 1), manager.turn_id);
     try std.testing.expectEqualStrings("corrected", manager.round_text.items);
     try std.testing.expectEqual(input.Delivery.consumed, inbox.receipt(initial.id).?.delivery);
@@ -389,13 +414,33 @@ test "AI session PATCH steering between tools keeps completed result and prevent
         inbox: *input.Inbox,
         ticket: input.Fence,
         executed: usize = 0,
-        fn current(raw: *anyopaque, revision: u64) bool {
-            return @as(*input.Inbox, @ptrCast(@alignCast(raw))).planCurrent(revision);
+        requests: usize = 0,
+        fn chat(raw: *anyopaque, request: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.requests += 1;
+            if (self.requests == 1) {
+                sink(ctx, .{ .tool_plan = .{ .call_id = "first", .name = "read_terminal", .index = 0, .arguments = "{\"session_ids\":[1]}" } });
+                sink(ctx, .{ .tool_plan = .{ .call_id = "second", .name = "read_terminal", .index = 1, .arguments = "{\"session_ids\":[1]}" } });
+            } else {
+                try std.testing.expectEqualStrings("change plan", request.messages[request.messages.len - 1].content);
+                sink(ctx, .{ .text = "updated answer" });
+            }
+            sink(ctx, .done);
+            return .{};
+        }
+        fn models(_: *anyopaque, a: std.mem.Allocator) ![]provider.ModelInfo {
+            return a.alloc(provider.ModelInfo, 0);
         }
         fn execute(raw: *anyopaque, _: loop_mod.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.executed += 1;
-            _ = try self.inbox.admit(self.ticket, identity.SubmissionId.generate(), .{ .content = "change plan" }, .steer);
+            try std.testing.expectEqual(input.Route.steer, self.inbox.previewRoute(.steer));
+            self.inbox.lock();
+            const phase = self.inbox.work_phase;
+            self.inbox.unlock();
+            try std.testing.expectEqualStrings("当前工具返回后处理", phase.waitingHint());
+            const accepted = try self.inbox.admit(self.ticket, identity.SubmissionId.generate(), .{ .content = "change plan" }, .steer);
+            try std.testing.expectEqual(input.Delivery.accepted, accepted.delivery);
             const targets = try allocator.alloc(loop_mod.TargetResult, 1);
             targets[0] = .{ .session_id = 1, .status = .succeeded, .transport = .local, .stdout = try allocator.dupe(u8, "first tool actually completed"), .stderr = try allocator.dupe(u8, ""), .exit = 0 };
             return .{ .targets = targets };
@@ -409,15 +454,24 @@ test "AI session PATCH steering between tools keeps completed result and prevent
     const first = try inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "start" }, .queue);
     _ = try inbox.claim(first.id, first.revision, null, 9, .start);
     var fixture: Fixture = .{ .inbox = inbox, .ticket = ticket };
-    var run = loop_mod.Loop.init(std.testing.allocator, .{ .owner = agent.owner, .members = .{ .ids = .{1} ++ @as([15]u64, @splat(0)), .len = 1 } }, 9, .{});
-    defer run.deinit();
-    try run.start(.{ .model = "test", .system = "", .messages = &.{}, .tools = &.{.{ .tool = .read_terminal, .session_ids = &.{1} }} });
-    run.dispatch_gate = .{ .context = inbox, .revision = inbox.inputRevision(), .current = Fixture.current };
-    try run.complete("", &.{ .{ .id = "first", .name = "read_terminal", .arguments = "{\"session_ids\":[1]}" }, .{ .id = "second", .name = "read_terminal", .arguments = "{\"session_ids\":[1]}" } }, .{ .context = &fixture, .execute = Fixture.execute }, .{}, 1, null);
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    manager.input = inbox;
+    manager.turn_id = 9;
+    manager.scope = .{ .owner = agent.owner, .members = .{ .ids = .{1} ++ @as([15]u64, @splat(0)), .len = 1 } };
+    manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute };
+    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "test", .system = "", .messages = &.{}, .tools = &.{.{ .tool = .read_terminal, .session_ids = &.{1} }} });
+    const run = manager.tool_run.?;
+    try std.testing.expectEqual(@as(usize, 2), fixture.requests);
     try std.testing.expectEqual(@as(usize, 1), fixture.executed);
     try std.testing.expect(run.records.items[0].dispatched and !run.records.items[1].dispatched and !run.uncertain);
-    try std.testing.expect(std.mem.indexOf(u8, run.messages.items[1].content, "first tool actually completed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, run.messages.items[2].content, "not_dispatched_due_to_new_input") != null);
+    var completed = false;
+    var skipped = false;
+    for (run.messages.items) |message| if (message.role == .tool) {
+        completed = completed or std.mem.indexOf(u8, message.content, "first tool actually completed") != null;
+        skipped = skipped or std.mem.indexOf(u8, message.content, "not_dispatched_due_to_new_input") != null;
+    };
+    try std.testing.expect(completed and skipped);
     try @import("ai/provider_http.zig").validateToolMessages(try run.nextRequest());
 }
 
@@ -427,8 +481,8 @@ test "AI session PATCH saturated inbox still permits stop and explicit same bind
     const agent = try store.attach(.{ .session = 1 });
     const ticket = try store.create(agent.id);
     const record = store.find(ticket.conversation).?;
-    for (0..input.Inbox.max_count) |_| _ = try record.inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "queued" }, .queue);
-    try std.testing.expectError(error.InputQueueFull, record.inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "overflow" }, .queue));
+    for (0..64) |_| _ = try record.inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "queued" }, .queue);
+    _ = try record.inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "additional input" }, .queue);
     try std.testing.expectError(error.InvalidSubmission, record.inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "\xff" }, .queue));
     record.inbox.pauseAll(.stop);
     try std.testing.expect(record.inbox.next() == null);
@@ -790,4 +844,207 @@ test "AI session PATCH journal owns actual image bytes and preserves distinct hi
     try std.testing.expect(message.image_owner.?.eql(first) and message.offloaded_images[0].owner.?.eql(other));
     try std.testing.expectEqual(@as(u64, 99), message.image_transform);
     try std.testing.expectEqualSlices(u8, png, message.offloaded_images[0].reference.content().?.bytes);
+}
+
+test "AI session PATCH follow-up preview shares startup admission and keeps early input queued" {
+    var service = runtime.Service.init(std.testing.allocator);
+    defer service.deinit();
+    var fixture: RuntimeFixture = .{ .hold_prepare = true };
+    defer fixture.release_prepare.store(true, .release);
+    const runner = try service.attach(.{ .session = 1 }, fixture.backend());
+    const ticket = try service.store.create(runner.agent.id);
+    try std.testing.expectEqual(input.Route.start, try service.previewInput(ticket, .steer));
+    _ = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "first" }, .steer);
+    // Preparation is held on the worker, leaving the controller free to receive input.
+    try std.testing.expectEqual(input.Route.queue, try service.previewInput(ticket, .steer));
+    try std.testing.expectEqual(input.Route.queue, try service.previewInput(ticket, .queue));
+    const early = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "after startup" }, .steer);
+    try std.testing.expectEqual(input.Route.queue, early.route);
+    try std.testing.expectEqual(input.Mode.steer, early.mode);
+    fixture.release_prepare.store(true, .release);
+    try waitStarted(&fixture);
+    const first_turn = runner.context.?.turn;
+    try std.testing.expectEqual(input.Route.steer, try service.previewInput(ticket, .steer));
+    try std.testing.expectEqual(input.Route.queue, try service.previewInput(ticket, .queue));
+    fixture.release.store(true, .release);
+    try waitIdle(&service, runner);
+    const delivered = service.store.find(ticket.conversation).?.inbox.receipt(early.id).?;
+    try std.testing.expectEqual(input.Route.start, delivered.route);
+    try std.testing.expect(delivered.turn.? > first_turn);
+    try std.testing.expectEqual(@as(usize, 2), fixture.calls.load(.acquire));
+}
+
+test "AI session PATCH follow-up close boundary queues late input and never reopens the old turn" {
+    var store = lifecycle.Store.init(std.testing.allocator);
+    defer store.deinit();
+    const agent = try store.attach(.{ .session = 1 });
+    const ticket = try store.create(agent.id);
+    const inbox = &store.find(ticket.conversation).?.inbox;
+    const first = try inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "first" }, .queue);
+    _ = try inbox.claim(first.id, first.revision, null, 7, .start);
+    inbox.lock();
+    try inbox.consumedLocked(inbox.findLocked(first.id).?, 1, &.{});
+    inbox.unlock();
+    try std.testing.expectEqual(input.Route.steer, inbox.previewRoute(.steer));
+    // The view saw steer; completion wins the mutex before the click is admitted.
+    try std.testing.expect(inbox.tryClose());
+    try std.testing.expectEqual(input.Route.queue, inbox.previewRoute(.steer));
+    const late = try inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "late" }, .steer);
+    try std.testing.expectEqual(input.Route.queue, late.route);
+    try std.testing.expectEqual(@as(?u64, null), late.turn);
+    try std.testing.expectError(error.TurnChanged, inbox.claim(late.id, late.revision, null, 7, .steer));
+    inbox.setWorkPhase(7, .response);
+    try std.testing.expectEqual(input.Route.queue, inbox.previewRoute(.steer));
+    inbox.finish(7, null);
+    try std.testing.expectEqual(input.Route.queue, inbox.previewRoute(.steer));
+    const claimed = try inbox.claim(late.id, late.revision, null, 8, .start);
+    try std.testing.expectEqual(@as(?u64, 8), claimed.turn);
+    try std.testing.expectEqual(input.Route.start, claimed.route);
+}
+
+test "AI session PATCH steering compaction leaves inbox unlocked for stop and new input" {
+    const Fixture = struct {
+        inbox: *input.Inbox,
+        ticket: input.Fence,
+        update: []const u8,
+        calls: usize = 0,
+        compacted: bool = false,
+        fn chat(raw: *anyopaque, request: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (std.mem.indexOf(u8, request.system, "Summarize") != null or std.mem.indexOf(u8, request.system, "summary") != null) {
+                try std.testing.expect(self.inbox.mutex.tryLock());
+                self.inbox.mutex.unlock();
+                self.compacted = true;
+                sink(ctx, .{ .text = "Original task summary." });
+            } else {
+                self.calls += 1;
+                if (self.calls == 1) {
+                    _ = try self.inbox.admit(self.ticket, .generate(), .{ .content = self.update }, .steer);
+                    sink(ctx, .{ .text = "Initial result." });
+                } else {
+                    try std.testing.expect(self.compacted);
+                    try std.testing.expectEqualStrings(self.update, request.messages[request.messages.len - 1].content);
+                    sink(ctx, .{ .text = "Completed." });
+                }
+            }
+            sink(ctx, .done);
+            return .{};
+        }
+        fn models(_: *anyopaque, a: std.mem.Allocator) ![]provider.ModelInfo {
+            return a.alloc(provider.ModelInfo, 0);
+        }
+    };
+    var store = lifecycle.Store.init(std.testing.allocator);
+    defer store.deinit();
+    const agent = try store.attach(.{ .session = 1 });
+    const ticket = try store.create(agent.id);
+    const inbox = &store.find(ticket.conversation).?.inbox;
+    const old = try std.testing.allocator.alloc(u8, 27000);
+    defer std.testing.allocator.free(old);
+    @memset(old, 'a');
+    const update = try std.testing.allocator.alloc(u8, 6000);
+    defer std.testing.allocator.free(update);
+    @memset(update, 'b');
+    const initial = try inbox.admit(ticket, .generate(), .{ .content = old }, .queue);
+    _ = try inbox.claim(initial.id, initial.revision, null, 1, .start);
+    var fixture: Fixture = .{ .inbox = inbox, .ticket = ticket, .update = update };
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    manager.turn_id = 1;
+    manager.input = inbox;
+    manager.scope = .{ .owner = agent.owner, .members = .{} };
+    manager.tool_limits.context_window = 8192;
+    manager.compaction_config = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:1", .model = "mock", .auth = .none, .context_window = 8192 };
+    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "mock", .system = "", .messages = &.{}, .max_output = 512 });
+    try std.testing.expect(fixture.compacted);
+    try std.testing.expectEqual(@as(usize, 2), fixture.calls);
+}
+
+test "AI session PATCH asynchronous checkpoint acknowledges durability before publication and retries errors" {
+    const Gate = struct {
+        ready_value: bool = false,
+        fail: bool = false,
+        starts: usize = 0,
+        releases: usize = 0,
+        fn write(_: *anyopaque, _: lifecycle.Event) !void {}
+        fn begin(raw: *anyopaque, _: lifecycle.Event) !lifecycle.Persistence.Write {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.starts += 1;
+            return .{ .context = self, .ready = ready, .finish = finish, .release = release };
+        }
+        fn ready(raw: *anyopaque) bool {
+            return @as(*@This(), @ptrCast(@alignCast(raw))).ready_value;
+        }
+        fn finish(raw: *anyopaque) !void {
+            if (@as(*@This(), @ptrCast(@alignCast(raw))).fail) return error.StorageUnavailable;
+        }
+        fn release(raw: *anyopaque) void {
+            @as(*@This(), @ptrCast(@alignCast(raw))).releases += 1;
+        }
+    };
+    var fixture: RuntimeFixture = .{};
+    fixture.release.store(true, .release);
+    var gate: Gate = .{};
+    var service = runtime.Service.init(std.testing.allocator);
+    defer service.deinit();
+    const runner = try service.attach(.{ .session = 123 }, fixture.backend());
+    const ticket = try service.store.create(runner.agent.id);
+    service.store.persist = .{ .context = &gate, .write = Gate.write, .checkpoint = Gate.begin };
+    _ = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "input" }, null);
+    const deadline = @import("platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+    while (runner.state.load(.acquire) == .running) {
+        if (@import("platform/realtime.zig").monotonicNs() > deadline) return error.WorkerDidNotFinish;
+        std.Thread.yield() catch {};
+    }
+    const record = service.store.find(ticket.conversation).?;
+    const revision = record.content_revision;
+    record.content_revision = std.math.maxInt(u64);
+    try std.testing.expectError(error.RevisionExhausted, service.poll());
+    try std.testing.expectEqual(@as(usize, 0), gate.starts);
+    record.content_revision = revision;
+    for (0..20) |_| try service.poll();
+    try std.testing.expect(runner.agent.busy and runner.pending_commit);
+    try std.testing.expectEqual(@as(usize, 0), record.history.messages.len);
+    try std.testing.expectEqual(@as(usize, 1), gate.starts);
+    gate.ready_value = true;
+    gate.fail = true;
+    try std.testing.expectError(error.StorageUnavailable, service.poll());
+    try std.testing.expectEqual(@as(usize, 0), record.history.messages.len);
+    try std.testing.expect(runner.agent.busy and runner.pending_commit);
+    gate.fail = false;
+    for (0..3) |_| try service.poll();
+    try std.testing.expect(!runner.agent.busy and !runner.pending_commit);
+    try std.testing.expectEqualStrings("done", record.history.messages[record.history.messages.len - 1].content);
+    try std.testing.expectEqual(@as(usize, 2), gate.starts);
+    try std.testing.expectEqual(@as(usize, 2), gate.releases);
+}
+
+test "AI session PATCH async journal checkpoint survives concurrent binding handoff and replay" {
+    const a = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var journal = try Journal.open(a, std.testing.io, temp.dir, "async.jsonl");
+    defer journal.deinit();
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    try journal.bind(&store);
+    const agent = try store.attach(.{ .session = 1 });
+    const original = try store.create(agent.id);
+    var snapshot = try @import("ai/wire_history.zig").History.copy(a, &.{.{ .role = .assistant, .content = "durable async result" }}, "");
+    defer snapshot.deinit();
+    const write = try store.persist.?.checkpoint.?(store.persist.?.context, .{ .kind = .checkpoint, .conversation = original.conversation, .agent = original.agent, .revision = original.binding, .turn = 1, .messages = snapshot.messages });
+    defer write.release(write.context);
+    const latest = try store.handoff(original, .{ .group = 9 });
+    const deadline = @import("platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+    while (!write.ready(write.context)) {
+        if (@import("platform/realtime.zig").monotonicNs() > deadline) return error.WorkerDidNotFinish;
+        std.Thread.yield() catch {};
+    }
+    try write.finish(write.context);
+    try store.publishDurableCheckpoint(latest, 1, &snapshot, true);
+    var restored = lifecycle.Store.init(a);
+    defer restored.deinit();
+    try journal.bind(&restored);
+    try std.testing.expectEqualStrings("durable async result", restored.find(original.conversation).?.history.messages[0].content);
+    try std.testing.expectEqual(latest.binding, restored.find(original.conversation).?.revision);
 }

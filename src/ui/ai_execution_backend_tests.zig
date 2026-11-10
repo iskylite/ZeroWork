@@ -280,6 +280,7 @@ test "execution backend real Local service requires precise approval and runs th
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     var call = try Call.init(controller.authority, target, "printf 'backend-real-中文\\n'\r\ntrue", 11);
     defer call.deinit();
@@ -405,6 +406,7 @@ test "execution backend wait retains approved identity while native dispatch is 
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     var call = try Call.initWithWait(controller.authority, target, "printf 'pending-read-ok\\n'", 19, 2000);
     defer call.deinit();
@@ -457,6 +459,7 @@ test "execution backend fixed modes deny borrowed new PTY and forbid rules prece
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     var call = try Call.init(controller.authority, target, "ls", 21);
     defer call.deinit();
@@ -465,10 +468,12 @@ test "execution backend fixed modes deny borrowed new PTY and forbid rules prece
     try std.testing.expectError(error.ModeConflict, ctx.preflight(prepared.invocation, prepared.command, prepared.command_hash));
     controller.execution_policy.execution_mode = .isolated_exec;
     var isolated = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer isolated.deinit();
     try isolated.captureTask(&controller);
     try std.testing.expectError(error.ModeConflict, isolated.preflight(prepared.invocation, prepared.command, prepared.command_hash));
     controller.execution_policy.execution_mode = .auto;
     var allowed = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer allowed.deinit();
     try allowed.captureTask(&controller);
     var forbidden = try Call.init(controller.authority, target, "printf safe; rm -rf /", 22);
     defer forbidden.deinit();
@@ -494,6 +499,7 @@ test "execution backend keeps admitted handoff lineage but rejects old binding n
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     const original = controller.authority;
     var call = try Call.init(original, target, "true", 31);
@@ -530,6 +536,7 @@ test "execution backend new PTY accepts only this Task actual owned creation and
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     const current = try handoff(&fixture, &store, &roster, &controller, &bridge, source);
     const operation = identity.HostOperationId.generate();
@@ -600,6 +607,7 @@ fn revokeWithdrawnAuthorityBody(fixture: *Fixture, roster: *groups.Roster, kind:
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     if (kind == .membership) _ = try handoff(fixture, &store, roster, &controller, &bridge, target);
     const owner = controller.authority;
@@ -722,6 +730,7 @@ test "execution backend retains adapter service through Surface removal and the 
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     var call = try Call.init(controller.authority, target, "printf 'never-submitted'", 97);
     defer call.deinit();
@@ -780,6 +789,7 @@ test "execution backend controlled input requires separate exact approval and re
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     var call = try Call.init(controller.authority, target, "zerowork_read", 71);
     defer call.deinit();
@@ -930,6 +940,7 @@ test "execution backend keeps config policy revision distinct from exact metadat
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     var call = try Call.init(controller.authority, target, "true", 81);
     defer call.deinit();
@@ -994,6 +1005,7 @@ test "current-tab execution preflight rejects external existing and nonexistent 
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
     var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
     try ctx.captureTask(&controller);
     var own = try Call.init(controller.authority, current, "true", 70);
     defer own.deinit();

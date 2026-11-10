@@ -14,7 +14,7 @@ extern fn zw_mcp_callback_wait(c_int, [*]u8, usize, c_uint, Cancel, ?*anyopaque)
 extern fn zw_mcp_callback_close(c_int) void;
 const a = std.heap.page_allocator;
 const Entry = struct { key: [32]u8, bytes: []u8 };
-var cache: [16]?Entry = @splat(null);
+var cache: std.ArrayList(?Entry) = .empty;
 var mutex: std.atomic.Mutex = .unlocked;
 var refresh_mutex: std.atomic.Mutex = .unlocked;
 fn lock(cancel: ?*provider.CancelToken) !void {
@@ -45,7 +45,7 @@ pub fn logout(server: config.Server) void {
     lock(null) catch unreachable;
     defer mutex.unlock();
     const wanted = key(server);
-    for (&cache) |*entry| if (entry.*) |old| {
+    for (cache.items) |*entry| if (entry.*) |old| {
         if (std.mem.eql(u8, &old.key, &wanted)) clear(entry);
     };
 }
@@ -53,7 +53,7 @@ pub fn authorized(server: config.Server) bool {
     lock(null) catch unreachable;
     defer mutex.unlock();
     const wanted = key(server);
-    for (cache) |entry| if (entry) |old| {
+    for (cache.items) |entry| if (entry) |old| {
         if (std.mem.eql(u8, &old.key, &wanted)) return true;
     };
     return false;
@@ -196,18 +196,18 @@ fn store(server: config.Server, value: Tokens) !void {
     const wanted = key(server);
     const bytes = try std.json.Stringify.valueAlloc(a, value, .{});
     errdefer a.free(bytes);
-    for (&cache) |*entry| if (entry.*) |old| {
+    for (cache.items) |*entry| if (entry.*) |old| {
         if (std.mem.eql(u8, &old.key, &wanted)) {
             clear(entry);
             entry.* = .{ .key = wanted, .bytes = bytes };
             return;
         }
     };
-    for (&cache) |*entry| if (entry.* == null) {
+    for (cache.items) |*entry| if (entry.* == null) {
         entry.* = .{ .key = wanted, .bytes = bytes };
         return;
     };
-    return error.McpOAuthSessionLimit;
+    try cache.append(a, .{ .key = wanted, .bytes = bytes });
 }
 pub fn accessToken(owned: std.mem.Allocator, server: config.Server, cancel: ?*provider.CancelToken) !?[]const u8 {
     for (server.headers) |header| if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) return null;
@@ -223,7 +223,7 @@ pub fn accessToken(owned: std.mem.Allocator, server: config.Server, cancel: ?*pr
     try lock(cancel);
     const snapshot = snapshot: {
         defer mutex.unlock();
-        for (cache) |entry| if (entry) |old| {
+        for (cache.items) |entry| if (entry) |old| {
             if (std.mem.eql(u8, &old.key, &wanted)) break :snapshot try scratch.dupe(u8, old.bytes);
         };
         return null;
@@ -240,7 +240,7 @@ pub fn accessToken(owned: std.mem.Allocator, server: config.Server, cancel: ?*pr
     try lock(cancel);
     defer mutex.unlock();
     // Logout or a new authorization while HTTP was in flight wins over refresh.
-    const unchanged = for (cache) |entry| {
+    const unchanged = for (cache.items) |entry| {
         if (entry) |old| if (std.mem.eql(u8, &old.key, &wanted) and std.mem.eql(u8, old.bytes, snapshot)) break true;
     } else false;
     if (!unchanged) return error.McpAuthorizationRequired;
@@ -417,4 +417,22 @@ test "v0.4 extensions OAuth refresh rotates tokens without replaying a business 
     const trace = try tmp.dir.readFileAlloc(std.testing.io, "trace", owned, .limited(4096));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "\n"));
     try std.testing.expect(std.mem.indexOf(u8, trace, "tools/call") == null);
+}
+
+test "v0.4 extensions OAuth token cache supports more than sixteen servers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var servers: [24]config.Server = undefined;
+    for (&servers, 0..) |*server, index| server.* = .{ .id = "cache-fixture", .name = "Fixture", .transport = .http, .endpoint = try std.fmt.allocPrint(arena.allocator(), "https://cache-{d}.example.test/mcp", .{index}) };
+    defer for (servers) |server| logout(server);
+    try lock(null);
+    defer mutex.unlock();
+    for (servers) |server| try store(server, .{ .access_token = "private-fixture-token", .client_id = "client", .token_endpoint = "https://auth.example.test/token", .resource = server.endpoint });
+    for (servers) |server| {
+        const wanted = key(server);
+        const present = for (cache.items) |entry| {
+            if (entry) |value| if (std.mem.eql(u8, &value.key, &wanted)) break true;
+        } else false;
+        try std.testing.expect(present);
+    }
 }

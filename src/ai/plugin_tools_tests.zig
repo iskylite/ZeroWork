@@ -459,7 +459,7 @@ test "API2 approved controller input preserves focus rejection before dispatch" 
     try std.testing.expectError(error.ToolOperationAlreadyRecorded, runtime.execute(invocation, a, null));
 }
 
-test "API2 per-plugin eight and request union sixteen are independent limits" {
+test "API2 plugin and request tool catalogs grow without fixed count quotas" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -471,14 +471,18 @@ test "API2 per-plugin eight and request union sixteen are independent limits" {
         definition_value.* = .{ .id = id, .schema = schema };
         binding_value.* = .{ .plugin_id = "example", .definition_id = id, .handler = Fake.handler };
     }
-    try std.testing.expectError(error.TooManyPluginTools, tools.RequestTable.init(a, captured, definitions, &.{member(&fake, 101, bindings[0..9])}));
+    var single = try tools.RequestTable.init(a, captured, definitions, &.{member(&fake, 101, bindings[0..9])});
+    defer single.deinit();
+    try std.testing.expectEqual(@as(usize, 9), single.entries.len);
     var two = try tools.RequestTable.init(a, captured, definitions, &.{ member(&fake, 101, bindings[0..8]), member(&fake, 102, bindings[8..16]) });
     defer two.deinit();
     try std.testing.expectEqual(@as(usize, 16), two.entries.len);
     var three_scope = captured;
     three_scope.members.ids[2] = 103;
     three_scope.members.len = 3;
-    try std.testing.expectError(error.TooManyRequestTools, tools.RequestTable.init(a, three_scope, definitions, &.{ member(&fake, 101, bindings[0..8]), member(&fake, 102, bindings[8..16]), member(&fake, 103, bindings[16..17]) }));
+    var three = try tools.RequestTable.init(a, three_scope, definitions, &.{ member(&fake, 101, bindings[0..8]), member(&fake, 102, bindings[8..16]), member(&fake, 103, bindings[16..17]) });
+    defer three.deinit();
+    try std.testing.expectEqual(@as(usize, 17), three.entries.len);
 }
 
 test "API2 required services verify type major authorization and current binding identity" {

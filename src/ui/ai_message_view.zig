@@ -9,6 +9,9 @@ pub fn mountWithWidth(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f3
     return mountWithImages(cx, scope, value, width, null);
 }
 pub fn mountWithImages(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context) !*ui.Node {
+    return mountContent(cx, scope, value, width, images, true, null);
+}
+fn mountContent(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context, selection: bool, retained_code: ?*?*CodeState) !*ui.Node {
     const root = try ui.box(cx, S.assistantMessage(), .{});
     var lines: std.ArrayList([]const u8) = .empty;
     defer lines.deinit(cx.allocator);
@@ -33,7 +36,8 @@ pub fn mountWithImages(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f
             defer cx.allocator.free(code);
             const source = if (end < lines.items.len and end > i + 1) try std.mem.concat(cx.allocator, u8, &.{ code, "\n" }) else try cx.allocator.dupe(u8, code);
             defer cx.allocator.free(source);
-            try appendCode(cx, scope, root, code, source, trimmed[fence_len..]);
+            const code_state = try appendCode(cx, scope, root, code, source, trimmed[fence_len..]);
+            if (retained_code) |slot| slot.* = code_state;
             i = end;
             start = @min(end + 1, lines.items.len);
             continue;
@@ -61,12 +65,12 @@ pub fn mountWithImages(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f
         start = end;
     }
     try appendMarkdown(cx, scope, root, lines.items[start..]);
-    try @import("ai_text_selection.zig").attach(cx, scope, root);
+    if (selection) try @import("ai_text_selection.zig").attach(cx, scope, root);
     return root;
 }
 pub fn mountCode(cx: *ui.Cx, scope: *ui.Scope, code: []const u8, language: []const u8) !*ui.Node {
     const root = try ui.box(cx, S.assistantMessage(), .{});
-    try appendCode(cx, scope, root, code, code, language);
+    _ = try appendCode(cx, scope, root, code, code, language);
     try @import("ai_text_selection.zig").attach(cx, scope, root);
     return root;
 }
@@ -268,6 +272,7 @@ fn compact(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node) !void {
 const CodeState = struct {
     cx: *ui.Cx,
     source: *ui.Signal([]const u8),
+    language: *ui.Signal([]const u8),
     copy_button: *@import("copy_button.zig").Button = undefined,
     wrap_label: *ui.Signal([]const u8),
     wrap_style: *ui.Signal(S.ButtonStyle),
@@ -277,6 +282,17 @@ const CodeState = struct {
     natural_width: f32 = 1,
     available_width: f32 = -1,
     wrapped: bool = false,
+    fn update(self: *CodeState, code: []const u8, source: []const u8) !void {
+        const before = self.text.getText().?.content;
+        if (!std.mem.eql(u8, before, code)) {
+            const start = if (std.mem.startsWith(u8, code, before)) (if (std.mem.lastIndexOfScalar(u8, before, '\n')) |i| i + 1 else 0) else 0;
+            const width = textWidth(self.cx, code[start..], 11, 450);
+            self.natural_width = if (start > 0) @max(self.natural_width, width) else width;
+            try self.text.setTextContent(self.cx.allocator, code);
+            self.available_width = -1;
+        }
+        if (!std.mem.eql(u8, self.source.peek(), source)) self.source.set(source);
+    }
     fn copy(self: *CodeState) void {
         self.copy_button.copy(self.source.get());
     }
@@ -313,18 +329,19 @@ const CodeState = struct {
         self.cx.removeAfterLayoutHook(self);
     }
 };
-fn appendCode(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, code: []const u8, source: []const u8, language: []const u8) !void {
+fn appendCode(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, code: []const u8, source: []const u8, language: []const u8) !*CodeState {
     const block = try ui.box(cx, S.codeBlock(), .{});
     block.meta.ownership.meta.test_id = "ai.message.code";
     @import("layer_materials.zig").card(block, .control);
     const toolbar = try ui.box(cx, S.codeToolbar(), .{});
     toolbar.meta.ownership.meta.test_id = "ai.message.code.header";
-    const label = try ui.text(cx, languageLabel(language), S.codeLanguage());
+    const label = try ui.text(cx, "", S.codeLanguage());
+    try label.setTextContent(cx.allocator, languageLabel(language));
     @import("app_theme.zig").bindInk(label, "fg_2");
     label.meta.ownership.meta.test_id = "ai.message.code.language";
     label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1 });
     try toolbar.appendChild(cx.allocator, label);
-    const state = try scope.createState(CodeState, .{ .cx = cx, .source = try scope.createText(source, .{}), .wrap_label = try scope.createText("自动换行", .{}), .wrap_style = try scope.createSignal(S.ButtonStyle, S.codeWrapButton(false)) });
+    const state = try scope.createState(CodeState, .{ .cx = cx, .source = try scope.createText(source, .{}), .language = try scope.createText(language, .{}), .wrap_label = try scope.createText("自动换行", .{}), .wrap_style = try scope.createSignal(S.ButtonStyle, S.codeWrapButton(false)) });
     const wrap = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get("wrap-text").?, .icon_size = @as(f32, 13), .a11y_label = state.wrap_label, .base_style = state.wrap_style, .on_click = cx.on(CodeState, state, CodeState.toggleWrap) }).mount(scope, cx);
     wrap.meta.ownership.meta.test_id = "ai.message.code.wrap";
     state.button = wrap;
@@ -355,6 +372,7 @@ fn appendCode(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, code: []const u8, 
     try cx.addAfterLayoutHook(state, CodeState.afterLayout);
     try block.appendChild(cx.allocator, scroll.container);
     try parent.appendChild(cx.allocator, block);
+    return state;
 }
 
 // Zenit's Markdown emitter skips empty code lines. Keep a visual blank line
@@ -396,4 +414,138 @@ pub fn textWidth(cx: *ui.Cx, value: []const u8, size: f32, weight: u16) f32 {
         width = @max(width, visual.width + 1);
     }
     return width;
+}
+
+/// Stable completed Markdown blocks with one mutable tail. Parsing of each
+/// chunk uses the same renderer as a completed message (fences/tables/images).
+pub const Retained = struct {
+    cx: *ui.Cx,
+    scope: *ui.Scope,
+    root: *ui.Node,
+    chunks: std.ArrayList(Chunk) = .empty,
+    selection: *@import("ai_text_selection.zig").Selection = undefined,
+    width: f32 = 0,
+    const Chunk = struct { root: *ui.Node, scope: *ui.Scope, source: []const u8, owned: *ui.Signal([]const u8), selection_start: usize, plain: ?*ui.Node = null, code: ?*CodeState = null };
+    pub fn mount(cx: *ui.Cx, scope: *ui.Scope) !*Retained {
+        const self = try scope.createState(Retained, .{ .cx = cx, .scope = scope, .root = try ui.box(cx, S.assistantMessage(), .{}) });
+        self.selection = try @import("ai_text_selection.zig").retained(cx, scope, self.root);
+        try scope.onCleanup(Retained, self, cleanup);
+        return self;
+    }
+    fn cleanup(self: *Retained) void {
+        self.chunks.deinit(self.cx.allocator);
+    }
+    fn truncate(self: *Retained, count: usize) void {
+        while (self.chunks.items.len > count) {
+            const old = self.chunks.pop().?;
+            self.selection.truncate(old.selection_start);
+            self.cx.detachChild(self.root, old.root);
+            old.scope.dispose();
+            self.cx.destroyDetached(old.root);
+        }
+    }
+    pub fn update(self: *Retained, source: []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context) !void {
+        if (self.width != width) self.truncate(0);
+        self.width = width;
+        var start: usize = 0;
+        var offset: usize = 0;
+        var slot: usize = 0;
+        var fence: u8 = 0;
+        var fence_len: usize = 0;
+        while (offset < source.len) {
+            const end = if (std.mem.indexOfScalarPos(u8, source, offset, '\n')) |pos| pos + 1 else source.len;
+            const complete = source[end - 1] == '\n';
+            const line = std.mem.trim(u8, source[offset..end], " \t\r\n");
+            var closed = false;
+            if (std.mem.startsWith(u8, line, "```") or std.mem.startsWith(u8, line, "~~~")) {
+                var count: usize = 0;
+                while (count < line.len and line[count] == line[0]) : (count += 1) {}
+                if (fence == 0) {
+                    fence = line[0];
+                    fence_len = count;
+                } else if (fence == line[0] and count >= fence_len and std.mem.trim(u8, line[count..], " \t\r").len == 0) {
+                    fence = 0;
+                    closed = true;
+                }
+            }
+            if (complete and fence == 0 and (line.len == 0 or closed)) {
+                try self.chunk(&slot, source[start..end], width, images);
+                start = end;
+            }
+            offset = end;
+        }
+        try self.chunk(&slot, source[start..], width, images);
+        self.truncate(slot);
+    }
+    fn chunk(self: *Retained, slot: *usize, text: []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context) !void {
+        if (std.mem.trim(u8, text, " \t\r\n").len == 0) return;
+        const index = slot.*;
+        slot.* += 1;
+        if (index < self.chunks.items.len and std.mem.eql(u8, self.chunks.items[index].source, text)) return;
+        if (index + 1 == self.chunks.items.len) {
+            const old = &self.chunks.items[index];
+            if (old.code) |code| if (codeParts(text)) |parts| {
+                if (std.mem.eql(u8, code.language.peek(), parts.language)) {
+                    try code.update(parts.code, parts.source);
+                    old.owned.set(text);
+                    old.source = old.owned.peek();
+                    return;
+                }
+            };
+        }
+        if (index + 1 == self.chunks.items.len and plainSource(text)) {
+            const old = &self.chunks.items[index];
+            if (old.plain) |node| {
+                try node.setTextContent(self.cx.allocator, text);
+                old.owned.set(text);
+                old.source = old.owned.peek();
+                return;
+            }
+        }
+        self.truncate(index);
+        const scope = try self.scope.childScope();
+        errdefer scope.dispose();
+        const owned = try scope.createText(text, .{});
+        var code_state: ?*CodeState = null;
+        const root = try mountContent(self.cx, scope, owned.peek(), width, images, false, &code_state);
+        errdefer self.cx.destroyDetached(root);
+        try self.chunks.ensureUnusedCapacity(self.cx.allocator, 1);
+        try self.root.appendChild(self.cx.allocator, root);
+        const selection_start = self.selection.entries.items.len;
+        try self.selection.append(scope, root);
+        self.chunks.appendAssumeCapacity(.{ .root = root, .scope = scope, .source = owned.peek(), .owned = owned, .selection_start = selection_start, .plain = if (plainSource(text)) plainNode(root, text) else null, .code = if (codeParts(text) != null) code_state else null });
+    }
+};
+
+fn plainSource(text: []const u8) bool {
+    return text.len != 0 and std.mem.trim(u8, text, " ").len == text.len and std.mem.indexOfAny(u8, text, "\n\r\t`*_[]<>#!|~\\-+.") == null;
+}
+fn plainNode(root: *ui.Node, text: []const u8) ?*ui.Node {
+    if (root.getText()) |value| if (value.spans.len == 0 and std.mem.eql(u8, value.content, text)) return root;
+    for (root.children.items) |child| if (plainNode(child, text)) |node| return node;
+    return null;
+}
+
+const CodeParts = struct { language: []const u8, code: []const u8, source: []const u8 };
+fn codeParts(text: []const u8) ?CodeParts {
+    const first_end = std.mem.indexOfScalar(u8, text, '\n') orelse return null;
+    const first = std.mem.trim(u8, text[0..first_end], " \t\r");
+    if (!std.mem.startsWith(u8, first, "```") and !std.mem.startsWith(u8, first, "~~~")) return null;
+    var length: usize = 0;
+    while (length < first.len and first[length] == first[0]) : (length += 1) {}
+    const start = first_end + 1;
+    var offset = start;
+    while (offset < text.len) {
+        const end = std.mem.indexOfScalarPos(u8, text, offset, '\n') orelse text.len;
+        const line = std.mem.trim(u8, text[offset..end], " \t\r");
+        var count: usize = 0;
+        while (count < line.len and line[count] == first[0]) : (count += 1) {}
+        if (count >= length and std.mem.trim(u8, line[count..], " \t\r").len == 0) {
+            if (std.mem.trim(u8, text[end..], " \t\r\n").len != 0) return null;
+            const code_end = if (offset > start and text[offset - 1] == '\n') offset - 1 else offset;
+            return .{ .language = first[length..], .code = text[start..code_end], .source = text[start..offset] };
+        }
+        offset = @min(text.len, end + 1);
+    }
+    return .{ .language = first[length..], .code = text[start..], .source = text[start..] };
 }

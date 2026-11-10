@@ -76,21 +76,90 @@ pub const Callbacks = struct {
     error_context: ?*anyopaque = null,
     on_error: ?*const fn (*anyopaque, anyerror) void = null,
 };
+const ListingStats = struct {
+    size: f32 = 36,
+    date: f32 = 58,
+    selectable: usize = 0,
+    fn add(self: *ListingStats, entry: Entry) void {
+        if (!parentEntry(entry)) self.selectable += 1;
+        var buffer: [64]u8 = undefined;
+        const size = if (entry.kind == .directory or parentEntry(entry)) "—" else if (entry.size) |bytes| formatSize(&buffer, bytes) catch "未知" else "未知";
+        self.size = @max(self.size, 2 + Pane.monoWidth(size, 12));
+        self.date = @max(self.date, 11 + Pane.monoWidth(entry.modified_label, 11));
+    }
+};
+const Listing = struct {
+    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+    entries: []const Entry,
+    by_path: std.StringHashMapUnmanaged(usize),
+    stats: ListingStats,
+    references: usize = 1,
+    fn init(allocator: std.mem.Allocator, input: []const Entry) !*Listing {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        const entries = try a.alloc(Entry, input.len);
+        for (input, entries) |entry, *copy| {
+            copy.* = entry;
+            inline for (.{ "absolute_path", "raw_name", "display_name", "modified_label", "modified_full" }) |field|
+                @field(copy, field) = try a.dupe(u8, @field(entry, field));
+        }
+        var by_path: std.StringHashMapUnmanaged(usize) = .{};
+        try by_path.ensureTotalCapacity(a, @intCast(entries.len));
+        var stats: ListingStats = .{};
+        for (entries, 0..) |entry, i| {
+            try by_path.put(a, entry.absolute_path, i);
+            stats.add(entry);
+        }
+        const result = try allocator.create(Listing);
+        result.* = .{ .allocator = allocator, .arena = arena, .entries = entries, .by_path = by_path, .stats = stats };
+        return result;
+    }
+    fn retain(self: *Listing) *Listing {
+        self.references += 1;
+        return self;
+    }
+    fn release(self: *Listing) void {
+        self.references -= 1;
+        if (self.references == 0) {
+            const a = self.allocator;
+            self.arena.deinit();
+            a.destroy(self);
+        }
+    }
+};
+fn entriesEql(a: []const Entry, b: []const Entry) bool {
+    if (a.len != b.len) return false;
+    if (a.ptr == b.ptr) return true;
+    for (a, b) |x, y| {
+        if (x.kind != y.kind or x.size != y.size) return false;
+        inline for (.{ "absolute_path", "raw_name", "display_name", "modified_label", "modified_full" }) |field|
+            if (!std.mem.eql(u8, @field(x, field), @field(y, field))) return false;
+    }
+    return true;
+}
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
     value: Projection,
-    fn init(allocator: std.mem.Allocator, source: Projection, previous: ?Projection) !Owned {
-        try validate(source);
+    listings: [2]*Listing,
+    selected: [2]std.StringHashMapUnmanaged(void),
+    fn init(allocator: std.mem.Allocator, source: Projection, previous: ?*const Owned) !Owned {
+        try validate(source, if (previous) |old| old.value else null);
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
         var result = source;
+        var listings: [2]*Listing = undefined;
+        var acquired: usize = 0;
+        var selected: [2]std.StringHashMapUnmanaged(void) = .{ .{}, .{} };
+        errdefer for (listings[0..acquired]) |listing| listing.release();
         for (&result.panes, source.panes, 0..) |*pane, input, index| {
             var value = input;
             // A read failure is never a successful empty directory. Retain
             // the last successful rows/path rather than manufacturing emptiness.
             if (previous) |old| if (value.state == .failed or value.state == .stale) {
-                const before = old.panes[index];
+                const before = old.value.panes[index];
                 if (std.meta.eql(value.stamp.endpoint, before.stamp.endpoint)) {
                     value.entries = before.entries;
                     value.resolved_path = before.resolved_path;
@@ -106,27 +175,29 @@ const Owned = struct {
             pane.badge = try a.dupe(u8, value.badge);
             pane.resolved_path = try a.dupe(u8, value.resolved_path);
             pane.failure = try a.dupe(u8, value.failure);
-            const entries = try a.alloc(Entry, value.entries.len);
-            for (value.entries, entries) |entry, *copy| {
-                copy.* = entry;
-                copy.absolute_path = try a.dupe(u8, entry.absolute_path);
-                copy.raw_name = try a.dupe(u8, entry.raw_name);
-                copy.display_name = try a.dupe(u8, entry.display_name);
-                copy.modified_label = try a.dupe(u8, entry.modified_label);
-                copy.modified_full = try a.dupe(u8, entry.modified_full);
-            }
+            listings[index] = if (previous) |old| (if (entriesEql(value.entries, old.listings[index].entries)) old.listings[index].retain() else try Listing.init(allocator, value.entries)) else try Listing.init(allocator, value.entries);
+            acquired += 1;
+            const entries = listings[index].entries;
             pane.entries = entries;
             var keys: std.ArrayList([]const u8) = .empty;
             for (value.selected_keys) |key| {
-                if (entryIndex(entries, key)) |i| {
-                    if (!parentEntry(entries[i]) and !contains(keys.items, key)) try keys.append(a, try a.dupe(u8, key));
+                if (listings[index].by_path.get(key)) |i| {
+                    if (!parentEntry(entries[i]) and !selected[index].contains(key)) {
+                        const owned_key = try a.dupe(u8, key);
+                        try keys.append(a, owned_key);
+                        try selected[index].put(a, owned_key, {});
+                    }
                 }
             }
             pane.selected_keys = try keys.toOwnedSlice(a);
-            pane.anchor = if (value.anchor) |key| if (entryIndex(entries, key) != null) try a.dupe(u8, key) else null else null;
-            pane.focused_key = if (value.focused_key) |key| if (entryIndex(entries, key) != null) try a.dupe(u8, key) else null else null;
+            pane.anchor = if (value.anchor) |key| if (listings[index].by_path.contains(key)) try a.dupe(u8, key) else null else null;
+            pane.focused_key = if (value.focused_key) |key| if (listings[index].by_path.contains(key)) try a.dupe(u8, key) else null else null;
         }
-        return .{ .arena = arena, .value = result };
+        return .{ .arena = arena, .value = result, .listings = listings, .selected = selected };
+    }
+    fn deinit(self: *Owned) void {
+        for (self.listings) |listing| listing.release();
+        self.arena.deinit();
     }
 };
 const DragSource = struct { arena: std.heap.ArenaAllocator, side: Side, stamp: Stamp, selection_revision: u64, selection: Selection, directory: []const u8 };
@@ -192,8 +263,9 @@ pub const View = struct {
                 if (std.meta.eql(before.stamp.endpoint, after.stamp.endpoint) and (after.stamp.request_id < before.stamp.request_id or after.stamp.directory_revision < before.stamp.directory_revision or after.selection_revision < before.selection_revision)) return error.StaleFileProjection;
             }
         }
-        const next = try Owned.init(self.cx.allocator, source, previous);
-        if (self.pending) |*old| old.arena.deinit();
+        const previous_owned: ?*const Owned = if (self.pending) |*value| value else if (self.source) |*value| value else null;
+        const next = try Owned.init(self.cx.allocator, source, previous_owned);
+        if (self.pending) |*old| old.deinit();
         self.pending = next;
         self.cx.requestRedraw();
     }
@@ -207,7 +279,7 @@ pub const View = struct {
         self.pending = null;
         var old = self.source;
         self.source = next;
-        defer if (old) |*value| value.arena.deinit();
+        defer if (old) |*value| value.deinit();
         for (self.panes, 0..) |pane, i| try pane.apply(if (old) |value| value.value.panes[i] else null);
         self.root.setDisplay(.flex);
         return true;
@@ -373,10 +445,16 @@ pub const View = struct {
         var dirty = self.flush() catch false;
         if (self.source != null) for (self.panes) |pane| {
             if (pane.filter_pending) {
-                pane.filter_pending = false;
-                pane.apply(null) catch |err| pane.report(err);
+                pane.apply(pane.projection()) catch |err| pane.report(err);
                 ui.widgets.setScrollY(pane.list.state, pane.list.content, 0);
                 dirty = true;
+            }
+            if (pane.filter_running) {
+                if (pane.filterStep() catch false) {
+                    pane.apply(pane.projection()) catch |err| pane.report(err);
+                    ui.widgets.setScrollY(pane.list.state, pane.list.content, 0);
+                    dirty = true;
+                } else self.cx.scheduleRedrawAfterNs(std.time.ns_per_ms);
             }
             dirty = pane.geometry() or dirty;
         };
@@ -385,10 +463,13 @@ pub const View = struct {
     }
     fn cleanup(self: *View) void {
         self.cx.removeAfterLayoutHook(self);
-        if (self.source) |*owned| owned.arena.deinit();
-        if (self.pending) |*owned| owned.arena.deinit();
+        if (self.source) |*owned| owned.deinit();
+        if (self.pending) |*owned| owned.deinit();
         if (self.drag_source) |*owned| owned.arena.deinit();
-        for (self.panes) |pane| pane.filtered.deinit(self.cx.allocator);
+        for (self.panes) |pane| {
+            pane.filtered.deinit(self.cx.allocator);
+            pane.filter_staging.deinit(self.cx.allocator);
+        }
     }
 };
 
@@ -456,6 +537,14 @@ pub const Pane = struct {
     filter: ui.widgets.input.InputResult = undefined,
     filter_value: *ui.Signal([]const u8) = undefined,
     filter_pending: bool = false,
+    filter_running: bool = false,
+    filter_rows_changed: bool = false,
+    filter_cursor: usize = 0,
+    filter_source: ?[*]const Entry = null,
+    filter_source_len: usize = 0,
+    filter_staging: std.ArrayList(Entry) = .empty,
+    filter_stats: ListingStats = .{},
+    filter_staging_stats: ListingStats = .{},
     filtered: std.ArrayList(Entry) = .empty,
     measured_columns: bool = false,
     measured_compact: bool = false,
@@ -640,9 +729,13 @@ pub const Pane = struct {
     }
     /// Only row presentation is filtered. Authority, selections and stamps stay
     /// in the original immutable projection; all row indices share this slice.
+    fn selected(self: *const Pane, key: []const u8) bool {
+        const source_ = self.view.source orelse return false;
+        return source_.selected[@backingInt(self.side)].contains(key);
+    }
     fn rowProjection(self: *const Pane) ?PaneProjection {
         var p = self.projection() orelse return null;
-        p.entries = self.filtered.items;
+        if (self.filter_value.peek().len != 0) p.entries = self.filtered.items;
         return p;
     }
     fn filterChanged(self: *Pane, _: []const u8) void {
@@ -651,11 +744,46 @@ pub const Pane = struct {
     }
     fn rebuildFilter(self: *Pane) !void {
         const p = self.projection() orelse return;
+        if (self.filter_source != p.entries.ptr or self.filter_source_len != p.entries.len) {
+            self.filtered.clearRetainingCapacity();
+            self.measured_columns = false;
+            self.filter_rows_changed = true;
+        }
+        self.filter_source = p.entries.ptr;
+        self.filter_source_len = p.entries.len;
+        self.filter_staging.clearRetainingCapacity();
+        self.filter_staging_stats = .{};
+        self.filter_cursor = 0;
+        self.filter_running = self.filter_value.peek().len != 0;
+        if (!self.filter_running) {
+            self.filtered.clearRetainingCapacity();
+            self.measured_columns = false;
+            self.filter_rows_changed = true;
+            return;
+        }
+        _ = try self.filterStep();
+    }
+    fn filterStep(self: *Pane) !bool {
+        const p = self.projection() orelse return false;
+        const end = @min(p.entries.len, self.filter_cursor + 2048);
+        const deadline = @import("../platform/realtime.zig").monotonicNs() + 2 * std.time.ns_per_ms;
+        while (self.filter_cursor < end) {
+            const entry = p.entries[self.filter_cursor];
+            if (matchesFilter(entry, self.filter_value.peek())) {
+                try self.filter_staging.append(self.view.cx.allocator, entry);
+                self.filter_staging_stats.add(entry);
+            }
+            self.filter_cursor += 1;
+            if (self.filter_cursor % 128 == 0 and @import("../platform/realtime.zig").monotonicNs() >= deadline) break;
+        }
+        if (self.filter_cursor < p.entries.len) return false;
+        std.mem.swap(std.ArrayList(Entry), &self.filtered, &self.filter_staging);
+        self.filter_staging.clearRetainingCapacity();
+        self.filter_running = false;
+        self.filter_stats = self.filter_staging_stats;
         self.measured_columns = false;
-        self.filtered.clearRetainingCapacity();
-        for (p.entries) |entry| if (matchesFilter(entry, self.filter_value.peek())) {
-            try self.filtered.append(self.view.cx.allocator, entry);
-        };
+        self.filter_rows_changed = true;
+        return true;
     }
     /// The draft is a form, never a filesystem Entry or a selected file. Its
     /// stable Input lives outside recycled VirtualList rows but inside the same
@@ -692,7 +820,7 @@ pub const Pane = struct {
                 self.filter_value.set("");
                 self.rebuildFilter() catch return;
                 self.filter_pending = true;
-                ui.widgets.virtual_list.updateItemCount(self.virtual, self.filtered.items.len + @intFromBool(self.draft_open));
+                ui.widgets.virtual_list.updateItemCount(self.virtual, self.rowProjection().?.entries.len + @intFromBool(self.draft_open));
             }
         }
         const p = self.rowProjection() orelse return;
@@ -748,8 +876,11 @@ pub const Pane = struct {
     }
     fn apply(self: *Pane, before: ?PaneProjection) !void {
         const cx = self.view.cx;
-        try self.rebuildFilter();
         const p = self.projection().?;
+        if (self.filter_pending or self.filter_source != p.entries.ptr or self.filter_source_len != p.entries.len) {
+            self.filter_pending = false;
+            try self.rebuildFilter();
+        }
         if (self.refresh_receipt) |receipt| {
             if (!receipt.stamp.owner.eql(p.stamp.owner) or !std.meta.eql(receipt.stamp.endpoint, p.stamp.endpoint) or receipt.stamp.request_id != p.stamp.request_id or p.state == .failed or p.state == .stale) {
                 self.refresh_receipt = null;
@@ -782,12 +913,14 @@ pub const Pane = struct {
         self.mkdir_disabled.set(!fresh(p) or !p.writable or !p.can_mkdir);
         const destination = self.view.source.?.value.panes[1 - @backingInt(self.side)];
         self.write_disabled.set(!fresh(p) or !p.can_transfer or p.selected_keys.len == 0 or !fresh(destination) or !destination.writable);
-        var selectable: usize = 0;
-        var visible_selected: usize = 0;
-        for (rows.entries) |entry| if (!parentEntry(entry)) {
-            selectable += 1;
-            visible_selected += @intFromBool(contains(p.selected_keys, entry.absolute_path));
-        };
+        const stats = if (self.filter_value.peek().len == 0) self.view.source.?.listings[@backingInt(self.side)].stats else self.filter_stats;
+        const selectable = stats.selectable;
+        var visible_selected: usize = if (self.filter_value.peek().len == 0) p.selected_keys.len else 0;
+        if (self.filter_value.peek().len != 0 and p.selected_keys.len != 0) {
+            for (rows.entries) |entry| if (!parentEntry(entry)) {
+                visible_selected += @intFromBool(self.selected(entry.absolute_path));
+            };
+        }
         self.all_checked.set(selectable > 0 and visible_selected == selectable);
         self.mixed.set(visible_selected > 0 and visible_selected < selectable);
         const has_error = p.state == .failed or p.state == .stale;
@@ -811,7 +944,9 @@ pub const Pane = struct {
             var known_files: usize = 0;
             var unknown: usize = 0;
             var directories: usize = 0;
-            for (p.entries) |entry| if (contains(p.selected_keys, entry.absolute_path)) {
+            const listing = self.view.source.?.listings[@backingInt(self.side)];
+            for (p.selected_keys) |key| if (listing.by_path.get(key)) |index| {
+                const entry = p.entries[index];
                 if (entry.kind == .directory) {
                     directories += 1;
                 } else if (entry.size) |size| {
@@ -842,7 +977,9 @@ pub const Pane = struct {
         try self.empty_text.setTextContent(cx.allocator, if (has_error) "目录读取失败" else if (p.state == .loading) "正在读取目录…" else if (self.filter_value.peek().len > 0) "没有匹配的项目" else "目录为空");
         // Keep row nodes for selection-only acknowledgements, otherwise the
         // native double-click target would be replaced after the first click.
-        if (before == null or !sameRows(before.?, p)) ui.widgets.virtual_list.updateItemCount(self.virtual, rows.entries.len + @intFromBool(self.draft_open));
+        if (self.filter_rows_changed or before == null or !sameRows(before.?, p)) ui.widgets.virtual_list.updateItemCount(self.virtual, rows.entries.len + @intFromBool(self.draft_open));
+        self.filter_rows_changed = false;
+        if (self.filter_running) self.view.cx.scheduleRedrawAfterNs(std.time.ns_per_ms);
         if (path_changed) ui.widgets.setScrollY(self.list.state, self.list.content, 0);
         self.paint.set(self.paint.peek() +% 1);
         self.root.markLayoutDirty();
@@ -874,13 +1011,24 @@ pub const Pane = struct {
             var preferred_name: f32 = 36;
             var preferred_size: f32 = 36;
             var preferred_date: f32 = 58;
-            if (self.rowProjection()) |p| for (p.entries) |entry| {
-                preferred_name = @max(preferred_name, 27 + @min(if (compact) @as(f32, 110) else 130, cx.text.measureTextWidth(entry.display_name, 12, 400, false)));
-                var size_buffer: [64]u8 = undefined;
-                const size_label = if (entry.kind == .directory or parentEntry(entry)) "—" else if (entry.size) |size_| formatSize(&size_buffer, size_) catch "未知" else "未知";
-                preferred_size = @max(preferred_size, 2 + monoWidth(size_label, 12));
-                preferred_date = @max(preferred_date, 11 + monoWidth(entry.modified_label, 11));
-            };
+            if (self.rowProjection()) |p| {
+                if (p.entries.len > 512) {
+                    // At scale use the existing capped name preference; metadata
+                    // extrema were accumulated with the immutable listing/filter.
+                    preferred_name = 27 + (if (compact) @as(f32, 110) else 130);
+                    const stats = if (self.filter_value.peek().len == 0) self.view.source.?.listings[@backingInt(self.side)].stats else self.filter_stats;
+                    preferred_size = stats.size;
+                    preferred_date = stats.date;
+                } else {
+                    for (p.entries) |entry| {
+                        preferred_name = @max(preferred_name, 27 + @min(if (compact) @as(f32, 110) else 130, cx.text.measureTextWidth(entry.display_name, 12, 400, false)));
+                        var size_buffer: [64]u8 = undefined;
+                        const size_label = if (entry.kind == .directory or parentEntry(entry)) "—" else if (entry.size) |size_| formatSize(&size_buffer, size_) catch "未知" else "未知";
+                        preferred_size = @max(preferred_size, 2 + monoWidth(size_label, 12));
+                        preferred_date = @max(preferred_date, 11 + monoWidth(entry.modified_label, 11));
+                    }
+                }
+            }
             self.preferred_columns = .{ preferred_name, preferred_size, preferred_date };
             self.measured_columns = true;
             self.measured_compact = compact;
@@ -1049,10 +1197,13 @@ pub const Pane = struct {
         const p = self.projection() orelse return;
         var keys: std.ArrayList([]const u8) = .empty;
         defer keys.deinit(self.view.cx.allocator);
-        for (p.selected_keys) |key| if (entryIndex(self.filtered.items, key) == null) {
-            try keys.append(self.view.cx.allocator, key);
-        };
-        if (checked) for (self.filtered.items) |entry| if (!parentEntry(entry)) {
+        if (self.filter_value.peek().len != 0 and p.selected_keys.len != 0) {
+            var visible: std.StringHashMapUnmanaged(void) = .{};
+            defer visible.deinit(self.view.cx.allocator);
+            for (self.rowProjection().?.entries) |entry| try visible.put(self.view.cx.allocator, entry.absolute_path, {});
+            for (p.selected_keys) |key| if (!visible.contains(key)) try keys.append(self.view.cx.allocator, key);
+        }
+        if (checked) for (self.rowProjection().?.entries) |entry| if (!parentEntry(entry)) {
             try keys.append(self.view.cx.allocator, entry.absolute_path);
         };
         try self.emit(.{ .selection = .{ .keys = keys.items, .anchor = if (keys.items.len > 0) keys.items[0] else null, .focused_key = p.focused_key } });
@@ -1072,9 +1223,9 @@ pub const Pane = struct {
         if (entry_at >= p.entries.len) return error.StaleFileProjection;
         const entry = p.entries[entry_at];
         const key = try scope.createText(entry.absolute_path, .{});
-        const checked = try scope.createSignal(bool, contains(p.selected_keys, entry.absolute_path));
+        const checked = try scope.createSignal(bool, self.selected(entry.absolute_path));
         const style = try scope.createSignal(S.ButtonStyle, S.fileRow(self.column_width, checked.peek(), sameOptional(p.focused_key, entry.absolute_path)));
-        const row = try scope.createState(Row, .{ .pane = self, .stamp = p.stamp, .key = key.peek(), .node = undefined, .columns = undefined, .name_cell = undefined, .checked = checked, .style = style, .tooltip_open = try scope.createSignal(bool, false) });
+        const row = try scope.createState(Row, .{ .pane = self, .stamp = p.stamp, .key = key.peek(), .index = entry_at, .node = undefined, .columns = undefined, .name_cell = undefined, .checked = checked, .style = style, .tooltip_open = try scope.createSignal(bool, false) });
         const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = key, .base_style = style, .on_event = @as(*const fn (ui.events.Event, ?*anyopaque) ui.events.EventResult, Row.event), .event_context = @as(?*anyopaque, row) }).mount(scope, cx);
         node.meta.ownership.meta.test_id = "files.row";
         row.node = node;
@@ -1180,6 +1331,7 @@ const Control = struct {
 };
 const Row = struct {
     pane: *Pane,
+    index: usize,
     stamp: Stamp,
     key: []const u8,
     node: *ui.Node,
@@ -1193,7 +1345,7 @@ const Row = struct {
     fn current(self: *Row) ?PaneProjection {
         if (self.pane.view.pending != null) return null;
         const p = self.pane.rowProjection() orelse return null;
-        if (!std.meta.eql(self.stamp, p.stamp) or entryIndex(p.entries, self.key) == null) return null;
+        if (!std.meta.eql(self.stamp, p.stamp) or self.index >= p.entries.len or !std.mem.eql(u8, p.entries[self.index].absolute_path, self.key)) return null;
         return p;
     }
     fn paint(self: *Row) void {
@@ -1202,7 +1354,7 @@ const Row = struct {
         if (self.pane.view.confirmation_open.get()) self.tooltip_open.set(false);
         self.columns.setCursor(if (self.canDrag()) .grab else .inherit);
         const p = self.current() orelse return;
-        const selected = contains(p.selected_keys, self.key);
+        const selected = self.pane.selected(self.key);
         self.checked.set(selected);
         const hovering = self.pane.view.drop_side == self.pane.side and std.mem.eql(u8, self.pane.view.drop_path[0..self.pane.view.drop_path_len], self.key);
         self.style.set(S.fileRow(self.pane.column_width, selected, sameOptional(p.focused_key, self.key)));
@@ -1417,16 +1569,18 @@ fn sameOptional(key: ?[]const u8, value: []const u8) bool {
 }
 fn sameRows(a: PaneProjection, b: PaneProjection) bool {
     if (!std.meta.eql(a.stamp, b.stamp) or a.entries.len != b.entries.len) return false;
+    if (a.entries.ptr == b.entries.ptr) return true;
     for (a.entries, b.entries) |x, y| {
         if (!std.mem.eql(u8, x.absolute_path, y.absolute_path) or !std.mem.eql(u8, x.display_name, y.display_name) or x.kind != y.kind or x.size != y.size or !std.mem.eql(u8, x.modified_label, y.modified_label)) return false;
     }
     return true;
 }
-fn validate(source: Projection) !void {
+fn validate(source: Projection, previous: ?Projection) !void {
     if (source.revision == 0 or @backingInt(source.owner.session_id) == 0 or source.owner.generation == 0) return error.InvalidFileProjection;
     for (source.panes, 0..) |p, i| {
         if (!source.owner.eql(p.stamp.owner) or p.stamp.endpoint.binding_id == 0 or p.stamp.endpoint.binding_generation == 0 or p.stamp.request_id == 0 or p.stamp.directory_revision == 0 or p.selection_revision == 0 or !absolute(p.resolved_path)) return error.InvalidFileProjection;
         if ((i == 0 and p.stamp.endpoint.kind != .local_fs) or (i == 1 and p.stamp.endpoint.kind != .sftp) or p.entries.len > 100_000 or p.selected_keys.len > p.entries.len) return error.InvalidFileProjection;
+        if (previous) |old| if (entriesEql(p.entries, old.panes[i].entries)) continue;
         var seen: std.StringHashMap(void) = .init(std.heap.page_allocator);
         defer seen.deinit();
         for (p.entries) |entry| {

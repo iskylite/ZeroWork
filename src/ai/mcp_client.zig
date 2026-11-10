@@ -174,7 +174,6 @@ pub const Client = struct {
         bytes: std.ArrayList(u8) = .empty,
         data: std.ArrayList(u8) = .empty,
         offset: usize = 0,
-        events: usize = 0,
         request_id: ?u64,
         response: ?[]u8 = null,
         subscription_stream: bool = false,
@@ -186,8 +185,6 @@ pub const Client = struct {
                 self.offset = end + 1;
                 if (line.len == 0) {
                     if (self.data.items.len == 0) continue;
-                    self.events += 1;
-                    if (self.events > 128) return error.McpMessageLimit;
                     if (self.session[0] != 0) {
                         if (self.client.session_id[0] != 0 and !std.mem.eql(u8, std.mem.sliceTo(&self.client.session_id, 0), std.mem.sliceTo(self.session, 0))) return error.McpSessionChanged;
                         self.client.session_id = self.session.*;
@@ -598,7 +595,8 @@ pub const Client = struct {
         const a = arena.allocator();
         const original = try self.parameters(a, params, self.sequence);
         var current = original;
-        for (0..16) |_| {
+        while (true) {
+            if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
             const response = try self.rpcOnce(method, current, cancel);
             var release_response = true;
             defer if (release_response) response.deinit();
@@ -621,7 +619,7 @@ pub const Client = struct {
             var answers: std.json.ObjectMap = .empty;
             var url_interaction = false;
             if (requests) |items| {
-                if (items != .object or items.object.count() > 32) return error.InvalidMcpResponse;
+                if (items != .object) return error.InvalidMcpResponse;
                 var it = items.object.iterator();
                 while (it.next()) |entry| {
                     const embedded_request = entry.value_ptr.*;
@@ -647,7 +645,6 @@ pub const Client = struct {
             const review = try handler.request(handler.context, self.allocator, if (url_interaction) "host/mcp_continue_url" else "host/mcp_continue", current, cancel);
             self.allocator.free(review);
         }
-        return error.McpInteractionRoundLimit;
     }
     fn rpcOnce(self: *Client, method: []const u8, params: anytype, cancel: ?*Provider.CancelToken) !std.json.Parsed(std.json.Value) {
         try self.start();
@@ -693,7 +690,9 @@ pub const Client = struct {
         const line = try std.fmt.allocPrint(self.allocator, "{s}\n", .{body});
         defer self.allocator.free(line);
         try code(zw_mcp_write(self.process.?, line.ptr, line.len, timeout, cancelled, cancel));
-        for (0..128) |_| {
+        while (true) {
+            if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
+            if ((Clock{}).now() >= deadline) return error.McpTimeout;
             while (std.mem.indexOfScalar(u8, self.input.items, '\n') == null) {
                 if (self.input.items.len > max_response_bytes) return error.McpResponseLimit;
                 const remaining = deadline - (Clock{}).now();
@@ -711,7 +710,6 @@ pub const Client = struct {
             self.input.shrinkRetainingCapacity(self.input.items.len - end - 1);
             if (result) |response| return response;
         }
-        return error.McpMessageLimit;
     }
     pub fn initialize(self: *Client, cancel: ?*Provider.CancelToken) !void {
         if (self.ready) return;

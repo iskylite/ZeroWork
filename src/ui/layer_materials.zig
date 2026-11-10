@@ -6,12 +6,11 @@ const theme = @import("app_theme.zig");
 const geometry = @import("material_geometry.zig");
 const Rect = ui.ComputedRect;
 pub const CardRole = enum { overlay, surface_1, surface_2, well, action, control, settings_card, custom, global_notification };
-var declaration_revision: u64 = 0;
 pub fn card(node: *ui.Node, comptime role: CardRole) void {
     const name = "MaterialSurface." ++ @tagName(role);
     if (node.meta.ownership.meta.component_name) |old| if (std.mem.eql(u8, old, name)) return;
     node.meta.ownership.meta.component_name = name;
-    declaration_revision +%= 1;
+    node.invalidateTreeStructure();
 }
 /// A surface whose pixels can change independently of the application theme.
 /// Floating text over it needs a readable backdrop even at high transparency.
@@ -19,7 +18,7 @@ pub fn variableBackdrop(node: *ui.Node) void {
     const name = "MaterialBackdrop.variable";
     if (node.meta.ownership.meta.component_name) |old| if (std.mem.eql(u8, old, name)) return;
     node.meta.ownership.meta.component_name = name;
-    declaration_revision +%= 1;
+    node.invalidateTreeStructure();
 }
 pub fn overlay(node: *ui.Node) void {
     // Backdrop isolation is also used by inline approval cards. Preserve their
@@ -44,7 +43,6 @@ pub const Policy = struct {
     underlays: std.ArrayList(geometry.Shape) = .empty,
     candidates: std.ArrayList(geometry.Shape) = .empty,
     scene_revision: u64 = std.math.maxInt(u64),
-    declared_revision: u64 = std.math.maxInt(u64),
     portal_revision: u64 = 0,
     scene_order: u64 = 0,
     scene_root: ?*ui.Node = null,
@@ -178,8 +176,7 @@ pub const Policy = struct {
             }
         }.less);
         for (portals.items) |entry| try self.collect(entry.node, entry.level, entry.owner, true);
-        self.scene_revision = ui.Node.treeStructureRevision();
-        self.declared_revision = declaration_revision;
+        self.scene_revision = self.structureRevision();
         self.portal_revision = portal_key;
         self.scene_root = self.cx.root;
         self.scene_overlay = theme.baseColors().overlay;
@@ -217,11 +214,14 @@ pub const Policy = struct {
     fn background(node: *ui.Node, color: ui.Color) void {
         if (!ui.Color.eql(node.getBackground(), color)) node.setBackground(color);
     }
+    fn structureRevision(self: *Policy) u64 {
+        return self.cx.world.structure_revision;
+    }
     pub fn sync(self: *Policy) void {
         const portal_key = self.portalKey();
         // Topology is checked before reading indexed pointers: a disposed Scope
         // may have freed them. Z-order changes also invalidate the paint order.
-        if (self.scene_root != self.cx.root or self.scene_revision != ui.Node.treeStructureRevision() or self.declared_revision != declaration_revision or self.portal_revision != portal_key or !ui.Color.eql(self.scene_overlay, theme.baseColors().overlay) or self.scene_order != self.orderKey()) self.rebuild(portal_key) catch return;
+        if (self.scene_root != self.cx.root or self.scene_revision != self.structureRevision() or self.portal_revision != portal_key or !ui.Color.eql(self.scene_overlay, theme.baseColors().overlay) or self.scene_order != self.orderKey()) self.rebuild(portal_key) catch return;
         const colors = theme.current();
         const transparency = theme.materialParameters().transparency;
         const material_changed = self.last_colors == null or !std.meta.eql(self.last_colors.?, colors) or self.last_transparency != transparency;
@@ -263,7 +263,7 @@ pub const Policy = struct {
             self.underlays.append(self.cx.allocator, .{ .rect = sample.rect, .clip = sample.clip, .radius = node.style.effectiveRadius(), .level = entry.level }) catch {};
         }
         // Only our excluded paint children changed topology during sync.
-        self.scene_revision = ui.Node.treeStructureRevision();
+        self.scene_revision = self.structureRevision();
     }
     fn discard(self: *Policy, node: *ui.Node) void {
         const removed = self.paint_ids.fetchRemove(node.id) orelse return;

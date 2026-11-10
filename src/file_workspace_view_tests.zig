@@ -791,3 +791,62 @@ test "retained file copy confirmation repaints all builtins and keeps frozen pat
     }
     view.dismiss();
 }
+
+test "file workspace large listing reuses immutable data and cancels superseded filter slices" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const data = arena.allocator();
+    const large = try data.alloc(files.Entry, 100000);
+    for (large, 0..) |*entry, i| {
+        const name = try std.fmt.allocPrint(data, "item-{d}.txt", .{i});
+        entry.* = .{ .absolute_path = try std.fmt.allocPrint(data, "/tmp/fixture/{s}", .{name}), .raw_name = name, .display_name = name, .kind = .file, .size = i };
+    }
+    var f: Fixture = undefined;
+    try f.init(1200, 800);
+    defer f.deinit();
+    var p = source();
+    p.revision = 2;
+    p.panes[0].stamp.directory_revision = 2;
+    p.panes[0].entries = large;
+    try f.view.update(p);
+    f.settle();
+    const stored = f.view.panes[0].projection().?.entries.ptr;
+    const first = f.row(.local, large[0].absolute_path).id;
+    p.revision += 1;
+    p.panes[0].selection_revision += 1;
+    p.panes[0].selected_keys = &.{large[99999].absolute_path};
+    try f.view.update(p);
+    f.settle();
+    try std.testing.expectEqual(stored, f.view.panes[0].projection().?.entries.ptr);
+    try std.testing.expectEqual(first, f.row(.local, large[0].absolute_path).id);
+    try std.testing.expectEqual(@as(usize, 0), f.view.panes[0].filtered.items.len);
+    const pane = f.view.panes[0];
+    pane.filter_value.set("item-99");
+    pane.filter_pending = true;
+    _ = f.cx.render();
+    try std.testing.expect(pane.filter_running);
+    pane.filter_value.set("item-12345.txt");
+    pane.filter_pending = true;
+    for (0..1000) |_| {
+        if (!pane.filter_running and !pane.filter_pending) break;
+        f.cx.frame_count += 1;
+        f.cx.requestRedraw();
+        f.cx.advanceFrameClock();
+        _ = f.cx.render();
+    }
+    try std.testing.expect(!pane.filter_running);
+    try std.testing.expectEqual(@as(usize, 1), pane.filtered.items.len);
+    try std.testing.expectEqualStrings("item-12345.txt", pane.filtered.items[0].raw_name);
+    // Changing directory while work is staged cannot publish old matches.
+    pane.filter_value.set("item");
+    pane.filter_pending = true;
+    _ = f.cx.render();
+    p.revision += 1;
+    p.panes[0].stamp.directory_revision += 1;
+    p.panes[0].entries = &entries;
+    p.panes[0].selected_keys = &.{};
+    try f.view.update(p);
+    f.settle();
+    try std.testing.expect(!pane.filter_running);
+    try std.testing.expectEqual(@as(usize, 0), pane.filtered.items.len);
+}

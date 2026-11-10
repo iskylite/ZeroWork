@@ -589,19 +589,28 @@ test "Stop preserves proven completed result and prevents followup provider roun
     try std.testing.expectEqual(@as(usize, 1), script.index);
 }
 
-test "bounded rounds preserve completed ledger and never continue infinitely" {
-    var second = df;
-    second.id = "call-second";
-    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .calls = &.{second} } } };
+test "tool execution continues beyond former round and call limits" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var calls: [80]provider.ToolCall = undefined;
+    var rounds: [81]Round = undefined;
+    for (&calls, 0..) |*call, index| {
+        call.* = df;
+        call.id = try std.fmt.allocPrint(arena.allocator(), "call-{d}", .{index});
+        rounds[index] = .{ .calls = calls[index .. index + 1] };
+    }
+    rounds[80] = .{ .text = "all completed" };
+    var script: Script = .{ .rounds = &rounds };
     defer script.deinit();
     var host: ControlledHost = .{};
     var manager = managerFor(&host);
     defer manager.deinit();
-    manager.tool_limits.max_rounds = 2;
-    try std.testing.expectError(error.ToolRoundLimit, manager.run(script.interface(), makeRequest(null)));
-    try std.testing.expectEqual(@as(usize, 2), host.count);
-    try std.testing.expectEqual(@as(usize, 2), manager.tool_run.?.records.items.len);
-    try std.testing.expect(manager.tool_run.?.records.items[1].outcome != null);
+    manager.tool_limits.context_window = 200_000;
+    _ = try manager.run(script.interface(), makeRequest(null));
+    try std.testing.expectEqual(@as(usize, 80), host.count);
+    try std.testing.expectEqual(@as(usize, 80), manager.tool_run.?.records.items.len);
+    try std.testing.expectEqual(@as(u64, 81), manager.tool_run.?.round_index);
+    try std.testing.expectEqualStrings("all completed", manager.round_text.items);
 }
 
 test "duplicate call IDs in one completed round reject all before dispatch" {
@@ -710,18 +719,14 @@ test "next round context overflow preserves full actual bounded output" {
     try std.testing.expectEqual(loop_mod.Status.succeeded, target.status);
 }
 
-test "result storage capacity is checked before any irreversible dispatch" {
+test "retained output size does not prevent a later tool dispatch" {
     var host: ControlledHost = .{};
     var manager = managerFor(&host);
     defer manager.deinit();
-    manager.tool_limits.max_retained_output_bytes = 1024;
-    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .text = "capacity rejection received" } } };
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .text = "completed" } } };
     defer script.deinit();
     _ = try manager.run(script.interface(), makeRequest(null));
-    try std.testing.expectEqual(@as(usize, 0), host.count);
-    var result = try resultFromBody(script.requests.items[1], 3);
-    defer result.deinit();
-    try std.testing.expectEqualStrings("ToolResultCapacity", result.value.object.get("error_code").?.string);
+    try std.testing.expectEqual(@as(usize, 1), host.count);
 }
 
 test "binary stdout is preserved with explicit encoding and no fabricated exit" {
@@ -952,7 +957,7 @@ test "failed request snapshot construction leaves no resumable uninitialized led
     defer manager.deinit();
     manager.scope = scope;
     manager.turn_id = 84;
-    manager.tool_limits.max_rounds = 0;
+    manager.tool_limits.context_window = 0;
     var request = makeRequest(null);
     request.tools = &.{};
     try std.testing.expectError(error.InvalidToolLoopLimits, manager.run(script.interface(), request));
@@ -1013,15 +1018,15 @@ test "host uncertain execution blocks a fresh command while preserving exact rea
     try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
 }
 
-test "operation history capacity rejects unsent plugin calls without inventing unknown effects" {
+test "plugin dispatch remains available after a large completed operation history" {
     const tools = @import("plugin_tools.zig");
     const operations = @import("../host/operation_store.zig");
     const identity = @import("../host/identity.zig");
     var history = operations.Store.init(a);
     defer history.deinit();
     const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 3 };
-    for (0..operations.Store.capacity) |index| {
-        const id = index + 1;
+    for (0..256) |index| {
+        const id = index + 10000;
         _ = try history.beginNew(owner, id, "fixture.completed", @splat(0), 1);
         try history.markSent(owner, id);
         try history.finish(owner, id, true, "observed");
@@ -1036,9 +1041,9 @@ test "operation history capacity rejects unsent plugin calls without inventing u
         fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
             return error.UnexpectedLegacyDispatch;
         }
-        fn handler(raw: *anyopaque, _: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
+        fn handler(raw: *anyopaque, invocation: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
             @as(*@This(), @ptrCast(@alignCast(raw))).effects += 1;
-            return error.UnexpectedPluginDispatch;
+            return .{ .status = .succeeded, .receipt = .{ .owner = invocation.owner, .operation_id = invocation.operation_id } };
         }
         fn liveScope(_: *anyopaque) !scope_mod.Scope {
             return scope;
@@ -1079,16 +1084,15 @@ test "operation history capacity rejects unsent plugin calls without inventing u
         .{ .id = "capacity-second", .name = wire[0].name(), .arguments = "{\"session_ids\":[101]}" },
     }, .{ .context = &fixture, .execute = Fixture.legacy, .execute_dynamic = Fixture.invoke }, .{}, 1, null);
     try std.testing.expectEqual(@as(usize, 2), fixture.gateway_calls);
-    try std.testing.expectEqual(@as(usize, 0), fixture.approvals);
-    try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+    try std.testing.expectEqual(@as(usize, 2), fixture.approvals);
+    try std.testing.expectEqual(@as(usize, 2), fixture.effects);
     try std.testing.expect(!run.uncertain);
-    try std.testing.expectEqual(@as(usize, operations.Store.capacity), history.count());
+    try std.testing.expectEqual(@as(usize, 258), history.count());
     for (run.records.items) |record| {
-        try std.testing.expect(!record.dispatched);
+        try std.testing.expect(record.dispatched);
         const body = try std.json.parseFromSlice(std.json.Value, a, record.result_body.?, .{});
         defer body.deinit();
-        try std.testing.expectEqualStrings("rejected", body.value.object.get("status").?.string);
-        try std.testing.expectEqualStrings("OperationHistoryFull", body.value.object.get("error_code").?.string);
+        try std.testing.expect(record.generic_results != null);
     }
     try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
 }
@@ -1161,4 +1165,23 @@ test "AI context budget tool overhead does not attempt first-turn compaction" {
     try std.testing.expectEqual(@as(usize, 0), run.round_index);
     try std.testing.expectEqualStrings("look at terminal", run.messages.items[0].content);
     try std.testing.expectError(error.ContextFixedOverhead, run.nextRequest());
+}
+
+test "one model response dispatches more than sixteen tool calls" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var calls: [20]provider.ToolCall = undefined;
+    for (&calls, 0..) |*call, index| {
+        call.* = df;
+        call.id = try std.fmt.allocPrint(arena.allocator(), "batch-{d}", .{index});
+    }
+    var script: Script = .{ .rounds = &.{ .{ .calls = &calls }, .{ .text = "batch completed" } } };
+    defer script.deinit();
+    var host: ControlledHost = .{};
+    var manager = managerFor(&host);
+    defer manager.deinit();
+    _ = try manager.run(script.interface(), makeRequest(null));
+    try std.testing.expectEqual(@as(usize, 20), host.count);
+    try std.testing.expectEqual(@as(usize, 20), manager.tool_run.?.records.items.len);
+    try http.validateToolMessages(manager.tool_run.?.request);
 }

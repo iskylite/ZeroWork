@@ -407,3 +407,7 @@ comptime {
 test {
     _ = @import("host/terminal_files.zig");
 }
+
+test {
+    _ = @import("ai_limits_tests.zig");
+}

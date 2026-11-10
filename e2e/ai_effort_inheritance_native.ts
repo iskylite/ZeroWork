@@ -72,6 +72,7 @@ try{
   assert((await h.clickAt(track.rect.x+1+(track.rect.w-2)*ratio,track.rect.y+track.rect.h/2)).ok);
   await value(expected);
   const samples=await h.trackStop();
+  report.last_effort_samples={effort:expected,samples};
   assert(samples.length>1,'Effort switch must capture intermediate frames');
   for(const sample of samples){
    assert(sample.found,'Popup disappeared during effort switch');

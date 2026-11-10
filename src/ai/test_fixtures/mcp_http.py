@@ -18,6 +18,7 @@ ping_replied=threading.Event()
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     list_count = 0
+    call_count = 0
     def log_message(self, *args): pass
     def response(self, status, obj=None, session=False):
         raw = json.dumps(obj).encode() if obj is not None else b''
@@ -56,7 +57,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if method=='tools/call':
                 assert self.headers.get('Mcp-Name')=='material'
                 params=r['params']
-                if 'inputResponses' not in params:
+                Handler.call_count += 1
+                if 'inputResponses' in params:
+                    assert params['requestState']=='opaque::#/% unchanged'
+                    assert params['inputResponses']['roots']['roots']==[{'uri':'file:///tmp/selected-root'}]
+                    assert params['arguments']=={'text':'modern'}
+                if 'inputResponses' not in params or (mode=='modern' and Handler.call_count<=20):
                     request={'method':'host/run_command','params':{}} if mode=='modern-unknown-input' else {'method':'roots/list'}
                     self.response(200,{'jsonrpc':'2.0','id':rid,'result':{'resultType':'input_required','inputRequests':{'roots':request},'requestState':'opaque::#/% unchanged'}});return
                 assert params['requestState']=='opaque::#/% unchanged'

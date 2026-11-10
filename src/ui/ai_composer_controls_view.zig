@@ -87,6 +87,17 @@ pub fn effortLabel(value: Effort) []const u8 {
 }
 const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
 const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
+// Discovery provenance changes authority/configuration, but does not change a
+// model row when all resolved capabilities and displayed values are identical.
+fn modelRowsEql(a: Projection, b: Projection) bool {
+    if (!a.owner.eql(b.owner) or !optionalKeyEql(a.current, b.current) or a.editable != b.editable or a.models.len != b.models.len) return false;
+    for (a.models, b.models) |left, right| {
+        if (!left.key.eql(right.key) or left.enabled != right.enabled or left.context_window != right.context_window or
+            left.reasoning != right.reasoning or left.vision != right.vision or left.toggle != right.toggle or
+            left.thinking_default != right.thinking_default or !std.meta.eql(left.efforts, right.efforts)) return false;
+    }
+    return true;
+}
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
     value: Projection,
@@ -197,6 +208,7 @@ pub const View = struct {
     source: ?Owned = null,
     pending: ?Owned = null,
     clear_pending: bool = false,
+    usage_dirty: bool = true,
     filtered: std.ArrayList(usize) = .empty,
     model_rows: std.ArrayList(struct { index: usize, header: bool }) = .empty,
     collapsed_providers: std.ArrayList([]u8) = .empty,
@@ -229,6 +241,7 @@ pub const View = struct {
     slider_value: *ui.Signal(f32),
     reasoning_choices: [8]ReasoningChoice = undefined,
     reasoning_count: usize = 0,
+    proposed_reasoning: ?ReasoningChoice = null,
     slider: ui.widgets.slider.SliderResult = undefined,
     slider_markers: [8]*ui.Node = undefined,
     slider_thumb: *ui.Node = undefined,
@@ -772,13 +785,19 @@ pub const View = struct {
             try self.toggleProvider(index);
         }
         var changed = false;
+        var controls_changed = false;
+        var models_changed = false;
         if (self.clear_pending) {
             self.clear_pending = false;
             self.dismiss();
             if (self.source) |*old| old.deinit();
             self.source = null;
             changed = true;
+            controls_changed = true;
+            models_changed = true;
         } else if (self.pending) |next| {
+            controls_changed = if (self.source) |old| !controlsEql(old.value, next.value) else true;
+            models_changed = if (self.source) |old| !modelRowsEql(old.value, next.value) else true;
             if (self.source) |*old| {
                 if (!old.value.owner.eql(next.value.owner) or old.value.revision != next.value.revision) {
                     const keep_model = self.keep_model_popup_on_update and old.value.owner.eql(next.value.owner) and self.popups[@backingInt(S.Kind.model)].widget.open.?.peek();
@@ -795,6 +814,7 @@ pub const View = struct {
             self.pending = null;
             changed = true;
         }
+        if (controls_changed) self.proposed_reasoning = null;
         self.keep_model_popup_on_update = false;
         const colors = S.theme.current();
         const themed = !std.meta.eql(colors, self.colors);
@@ -803,12 +823,18 @@ pub const View = struct {
             for (self.popups) |popup| repaint(popup.widget.chrome, self.colors);
         }
         if (changed or themed) {
-            try self.refresh();
-            try self.filterModels();
-            try self.refreshUsage();
-            self.colors = colors;
+            try self.refreshUsageBadge();
+            self.usage_dirty = true;
         }
-        if (changed or themed or self.popup_layout_dirty or !std.meta.eql(self.viewport, self.cx.viewport)) {
+        if (controls_changed or themed) try self.refresh();
+        if (models_changed or themed) try self.filterModels();
+        if (self.usage_dirty and self.popups[4].widget.open.?.peek()) {
+            try self.refreshUsage();
+            self.usage_dirty = false;
+            self.popup_layout_dirty = true;
+        }
+        self.colors = colors;
+        if (controls_changed or themed or self.popup_layout_dirty or !std.meta.eql(self.viewport, self.cx.viewport)) {
             for (0..6) |index| {
                 const kind: S.Kind = @fromBackingInt(@intCast(index));
                 var style = S.panel(kind, self.cx.viewport);
@@ -953,6 +979,11 @@ pub const View = struct {
             return;
         };
         self.last_error = null;
+        switch (action) {
+            .effort => |value| self.proposed_reasoning = .{ .effort = value.value },
+            .thinking => |value| self.proposed_reasoning = if (value.enabled) .on else .off,
+            else => {},
+        }
         if (kind != .effort and kind != .model and kind != .usage) self.close(kind, true);
     }
     fn chooseReasoning(self: *View, index: usize) void {
@@ -967,6 +998,15 @@ pub const View = struct {
     fn effortProposed(self: *View, raw: f32) void {
         if (!std.math.isFinite(raw) or self.reasoning_count == 0) return;
         const index: usize = @intFromFloat(@round(std.math.clamp(raw, 0, 4) * @as(f32, @floatFromInt(self.reasoning_count - 1)) / 4));
+        const source = if (self.pending) |value| value.value else if (self.source) |value| value.value else return;
+        const choice = self.reasoning_choices[index];
+        if (self.proposed_reasoning) |proposed| {
+            if (std.meta.eql(proposed, choice)) return;
+        } else switch (choice) {
+            .effort => |effort| if (source.effort == effort and source.thinking != false) return,
+            .off => if (source.thinking == false) return,
+            .on => if (source.thinking == true) return,
+        }
         self.chooseReasoning(index);
     }
     fn sliderKey(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
@@ -1098,7 +1138,6 @@ pub const View = struct {
             }
         };
         self.disabled[3].set(!editable or self.reasoning_count == 0);
-        self.disabled[4].set(source == null or source.?.usage == null);
         if (self.disabled[0].peek()) self.close(.attachment, false);
         if (self.disabled[1].peek()) self.close(.permission, false);
         if (self.disabled[2].peek()) self.close(.model, false);
@@ -1188,6 +1227,11 @@ pub const View = struct {
         self.effort_title.setTextColor(colors.fg_2);
         self.effort_name.setTextColor(if (selected_choice != null) colors.accent_ink else colors.fg_2);
         if (self.buttons[3].behavior.interaction.a11y) |*attrs| attrs.label = self.effort_name.getText().?.content;
+    }
+    fn refreshUsageBadge(self: *View) !void {
+        const source = if (self.source) |*value| &value.value else null;
+        self.disabled[4].set(source == null or source.?.usage == null);
+        if (self.disabled[4].peek()) self.close(.usage, false);
         var buffer: [64]u8 = undefined;
         const usage = if (source) |value| value.usage else null;
         try self.labels[4].?.setTextContent(self.cx.allocator, if (usage) |value| try percentText(&buffer, value) else "—");
@@ -1428,6 +1472,13 @@ fn percentage(value: Usage) u64 {
 fn optionalKeyEql(first: ?ModelKey, second: ?ModelKey) bool {
     if (first) |key| return if (second) |other| key.eql(other) else false;
     return second == null;
+}
+fn controlsEql(first: Projection, second: Projection) bool {
+    var one = first;
+    var two = second;
+    one.usage = null;
+    two.usage = null;
+    return projectionEql(one, two);
 }
 fn projectionEql(first: Projection, second: Projection) bool {
     return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);

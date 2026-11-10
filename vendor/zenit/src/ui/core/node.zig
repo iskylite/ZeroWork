@@ -803,6 +803,16 @@ pub const Node = struct {
         return node_tree.structureRevision();
     }
 
+    /// Window-local topology serial. Unregistered test trees use the global serial.
+    pub fn ownedTreeStructureRevision(self: *const Node) u64 {
+        return if (self.world_ref) |world| world.structure_revision else node_tree.structureRevision();
+    }
+
+    /// Also used when indexed structural metadata changes on an existing node.
+    pub fn invalidateTreeStructure(self: *Node) void {
+        node_tree.recordStructureChange(self);
+    }
+
     /// read rect from global World, fallback standalone fallback storage on fail. For cx-less
     /// functions (computeStickyOffset/tickBeforeRender etc) use.
     pub fn rectFromWorldOrFallback(self: *const Node) ComputedRect {

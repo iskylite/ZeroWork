@@ -161,6 +161,7 @@ pub const Runner = struct {
     stats: provider.ChatStats = .{},
     has_tools: bool = false,
     pending_commit: bool = false,
+    checkpoint_write: ?lifecycle.Persistence.Write = null,
     pending_notify: bool = false,
     persistence_retry_at_ns: i128 = 0,
     controller_busy: bool = false,
@@ -201,7 +202,7 @@ pub const Runner = struct {
         var prepared = try self.backend.prepare(self.backend.context, self.allocator, io, self.context.?);
         defer prepared.deinit();
         if (!prepared.scope.owner.eql(self.context.?.owner)) return error.BindingChanged;
-        try self.task_root.?.configure(self.context.?.task, prepared.request.timeout_ms, prepared.limits.max_rounds, prepared.limits.max_calls);
+        if (prepared.request.run_timeout_ms) |timeout_ms| try self.task_root.?.configure(self.context.?.task, timeout_ms);
         self.has_tools = prepared.host != null;
         if (self.has_tools and self.backend.local_released == null) return error.HostCleanupContractRequired;
         if (prepared.request.tool_table) |table| if (table.host_context) |captured| {
@@ -375,6 +376,8 @@ pub const Runner = struct {
     fn deinit(self: *Runner) void {
         self.stopWorker();
         if (self.thread) |thread| thread.join();
+        if (self.checkpoint_write) |write| write.release(write.context);
+        self.checkpoint_write = null;
         self.releaseWorker();
         self.allocator.destroy(self);
     }
@@ -499,6 +502,13 @@ pub const Service = struct {
         try self.store.retire(agent_id);
         runner.stopWorker();
     }
+    pub fn previewInput(self: *Service, ticket: input.Fence, mode: input.Mode) !input.Route {
+        const record = try self.store.validateExecution(ticket);
+        const runner = self.runnerFor(ticket.agent) orelse return error.AgentNotFound;
+        const route = record.inbox.previewRoute(mode);
+        if (route == .start and (runner.controller_busy or runner.thread != null or runner.agent.busy or runner.pending_commit or runner.pending_notify or !readyForNext(runner))) return .queue;
+        return route;
+    }
     pub fn submit(self: *Service, ticket: input.Fence, id: identity.SubmissionId, message: provider.Message, override: ?input.Mode) !input.Receipt {
         const record = try self.store.validateExecution(ticket);
         const runner = self.runnerFor(ticket.agent) orelse return error.AgentNotFound;
@@ -572,6 +582,7 @@ pub const Service = struct {
         try runner.worker.?.approvals.configure(context.authority(), ticket.environment);
         runner.worker.?.questions.configure(context.authority());
         _ = try record.inbox.claim(queued.id, queued.revision, null, self.next_turn, .start);
+        record.inbox.setWorkPhase(context.turn, .starting);
         runner.worker.?.base.deinit();
         runner.worker.?.base = base;
         owned = false;
@@ -613,6 +624,13 @@ pub const Service = struct {
             return err;
         };
     }
+    fn commitSync(self: *Service, runner: *Runner, turn: u64) !void {
+        self.store.checkpoint(runner.commit_fence.?, turn, runner.worker.?.result.messages, true) catch |err| {
+            runner.persistence_failure = err;
+            runner.record.?.inbox.pauseAll(.failure);
+            return err;
+        };
+    }
     fn readyForNext(runner: *Runner) bool {
         if (runner.worker_released or !runner.has_tools) return true;
         const context = runner.context orelse return true;
@@ -648,11 +666,32 @@ pub const Service = struct {
             const context = runner.context.?;
             const record = runner.record.?;
             if (runner.worker.?.result.messages.len != 0) {
-                self.store.checkpoint(runner.commit_fence.?, context.turn, runner.worker.?.result.messages, true) catch |err| {
-                    runner.persistence_failure = err;
-                    record.inbox.pauseAll(.failure);
-                    return err;
-                };
+                if (self.store.persist) |persistence| if (persistence.checkpoint) |begin| {
+                    if (runner.checkpoint_write == null) {
+                        _ = try self.store.validate(runner.commit_fence.?);
+                        _ = try identity.advance(record.content_revision);
+                        runner.checkpoint_write = begin(persistence.context, .{ .kind = .checkpoint, .conversation = record.id, .agent = runner.commit_fence.?.agent, .revision = record.revision, .turn = context.turn, .messages = runner.worker.?.result.messages, .recoverable = true }) catch |err| {
+                            if (err == error.WorkerBusy) return;
+                            runner.persistence_failure = err;
+                            record.inbox.pauseAll(.failure);
+                            return err;
+                        };
+                    }
+                    const write = runner.checkpoint_write.?;
+                    if (!write.ready(write.context)) return;
+                    write.finish(write.context) catch |err| {
+                        write.release(write.context);
+                        runner.checkpoint_write = null;
+                        runner.persistence_failure = err;
+                        record.inbox.pauseAll(.failure);
+                        return err;
+                    };
+                    write.release(write.context);
+                    runner.checkpoint_write = null;
+                    try self.store.publishDurableCheckpoint(runner.commit_fence.?, context.turn, &runner.worker.?.result, true);
+                } else {
+                    try self.commitSync(runner, context.turn);
+                } else try self.commitSync(runner, context.turn);
                 runner.persistence_failure = null;
                 if (runner.commit_fence.?.environment != context.fence.environment) record.historical_messages = record.history.messages.len;
             }

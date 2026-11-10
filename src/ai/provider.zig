@@ -17,11 +17,6 @@ pub const Effort = enum {
 };
 pub const Role = enum { user, assistant, tool };
 pub const Tool = @import("tool_scope.zig").Tool;
-pub const max_plugin_tool_definitions = 16;
-pub const max_host_tool_definitions = 32;
-pub const max_tool_definitions = max_plugin_tool_definitions + max_host_tool_definitions;
-pub const max_tool_catalog_text_bytes = 96 * 1024;
-pub const max_tool_calls = 16;
 pub const max_tool_call_id_bytes = 256;
 pub const max_tool_name_bytes = 64;
 /// Wire ceiling includes JSON escaping for bounded file contents. Dispatch
@@ -85,7 +80,6 @@ pub fn catalogTextBytes(definitions: []const ToolDefinition) !usize {
     for (definitions) |definition| if (definition.dynamic) |dynamic| {
         for ([_][]const u8{ dynamic.name, dynamic.description, dynamic.schema }) |text| {
             bytes = std.math.add(usize, bytes, text.len) catch return error.ToolCatalogLimit;
-            if (bytes > max_tool_catalog_text_bytes) return error.ToolCatalogLimit;
         }
     };
     return bytes;
@@ -183,11 +177,12 @@ pub const ChatRequest = struct {
     image_token_max_width: ?u32 = null,
     image_token_max_height: ?u32 = null,
     vision: bool = false,
-    max_output: u32 = 4096,
-    /// Active automatic-run budget across provider/tool rounds and retries.
-    /// Time awaiting an explicit user decision does not consume this budget.
-    /// An explicit manual answer retry starts a new budget, retaining results.
+    /// Zero leaves output length to the provider instead of imposing a local cap.
+    max_output: u32 = 0,
+    /// Per-provider-request timeout. Continuous multi-round tasks have no
+    /// cumulative deadline unless a caller explicitly supplies one.
     timeout_ms: u32 = 10 * 60_000,
+    run_timeout_ms: ?u32 = null,
     /// Stream inactivity limit, reset by received bytes.
     idle_timeout_ms: u32 = 60_000,
     cancel: ?*CancelToken = null,

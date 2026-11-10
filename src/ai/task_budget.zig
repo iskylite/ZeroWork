@@ -11,13 +11,12 @@ pub fn terminal(status: Status) bool {
     };
 }
 pub const Counters = struct {
-    requests: u32 = 0,
-    calls: u32 = 0,
-    pending_requests: u32 = 0,
+    requests: u64 = 0,
+    calls: u64 = 0,
+    pending_requests: u64 = 0,
     elapsed_ns: u64 = 0,
-    timeout_ns: u64 = 10 * 60 * std.time.ns_per_s,
-    max_requests: u32 = 16,
-    max_calls: u32 = 64,
+    /// Optional explicit task deadline; zero means no cumulative time limit.
+    timeout_ns: u64 = 0,
     input_tokens: u64 = 0,
     output_tokens: u64 = 0,
     usage_complete: bool = true,
@@ -56,7 +55,7 @@ pub const Fact = struct {
         if (self.parent) |parent| {
             if (!parent.eql(self.root) or self.task.eql(self.root)) return error.InvalidTaskFact;
         } else if (!self.task.eql(self.root)) return error.InvalidTaskFact;
-        if (self.counters.pending_requests > self.counters.requests or self.counters.requests > self.counters.max_requests or self.counters.calls > self.counters.max_calls or self.counters.max_requests == 0 or self.counters.max_calls == 0 or self.counters.timeout_ns == 0) return error.InvalidTaskFact;
+        if (self.counters.pending_requests > self.counters.requests) return error.InvalidTaskFact;
     }
 };
 pub const Owned = struct {
@@ -81,7 +80,7 @@ pub const Root = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     mutex: std.atomic.Mutex = .unlocked,
-    facts: [32]Fact = undefined,
+    facts: []Fact = &.{},
     count: usize = 0,
     counters: Counters = .{},
     revision: u64 = 0,
@@ -98,6 +97,9 @@ pub const Root = struct {
     pub fn lock(self: *Root) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
+    fn ensureFactCapacity(self: *Root) !void {
+        if (self.count == self.facts.len) self.facts = try self.arena.allocator().realloc(self.facts, @max(16, self.facts.len * 2));
+    }
     fn machineActive(self: *Root) bool {
         for (self.facts[0..self.count]) |fact| if (fact.status == .running or fact.status == .settling) return true;
         return false;
@@ -111,7 +113,7 @@ pub const Root = struct {
         self.settleClock();
         if (self.cancelled) return error.Cancelled;
         if (self.failed_storage) return error.TaskPersistenceFailed;
-        if (self.counters.elapsed_ns >= self.counters.timeout_ns) return error.SharedTaskTimeout;
+        if (self.counters.timeout_ns != 0 and self.counters.elapsed_ns >= self.counters.timeout_ns) return error.SharedTaskTimeout;
     }
     pub fn check(self: *Root) !void {
         self.lock();
@@ -147,7 +149,7 @@ pub const Root = struct {
         self.lock();
         defer self.mutex.unlock();
         try self.checkLocked();
-        if (self.count == self.facts.len) return error.TaskHistoryLimit;
+        try self.ensureFactCapacity();
         if (original.parent != null) {
             var active: usize = 0;
             for (self.facts[0..self.count]) |fact| if (fact.parent != null and !terminal(fact.status)) {
@@ -168,7 +170,7 @@ pub const Root = struct {
         self.lock();
         defer self.mutex.unlock();
         try self.checkLocked();
-        if (self.count == self.facts.len) return error.TaskHistoryLimit;
+        try self.ensureFactCapacity();
         var active: usize = 0;
         for (self.facts[0..self.count]) |fact| if (fact.parent != null and !terminal(fact.status)) {
             active += 1;
@@ -194,7 +196,7 @@ pub const Root = struct {
         self.lock();
         defer self.mutex.unlock();
         try self.checkLocked();
-        if (self.count == self.facts.len) return error.TaskHistoryLimit;
+        try self.ensureFactCapacity();
         const index_ = try self.index(previous);
         const prior = self.facts[index_];
         if (prior.parent == null or !std.meta.eql(prior.parent, original.parent) or !prior.agent.eql(original.agent) or !prior.conversation.eql(original.conversation) or !prior.root.eql(original.root) or !terminal(outcome) or original.task.eql(previous)) return error.InvalidTaskFact;
@@ -217,7 +219,7 @@ pub const Root = struct {
         self.lock();
         defer self.mutex.unlock();
         try self.checkLocked();
-        return self.counters.timeout_ns -| self.counters.elapsed_ns;
+        return if (self.counters.timeout_ns == 0) std.math.maxInt(u64) else self.counters.timeout_ns -| self.counters.elapsed_ns;
     }
     pub fn userWait(self: *Root, task: id.TaskId, entering: bool) !void {
         self.lock();
@@ -232,14 +234,12 @@ pub const Root = struct {
         fact.status = status;
         self.facts[i] = try self.write(fact);
     }
-    pub fn configure(self: *Root, task: id.TaskId, timeout_ms: u32, requests: u16, calls: u16) !void {
+    pub fn configure(self: *Root, task: id.TaskId, timeout_ms: u32) !void {
         self.lock();
         defer self.mutex.unlock();
         const i = try self.index(task);
         if (self.facts[i].parent == null and self.counters.requests == 0 and self.counters.calls == 0) {
             self.counters.timeout_ns = @as(u64, timeout_ms) * std.time.ns_per_ms;
-            self.counters.max_requests = requests;
-            self.counters.max_calls = calls;
         }
     }
     pub fn resumeAnswer(self: *Root, task: id.TaskId) !void {
@@ -247,7 +247,6 @@ pub const Root = struct {
         defer self.mutex.unlock();
         self.settleClock();
         if (self.failed_storage) return error.TaskPersistenceFailed;
-        if (self.counters.elapsed_ns >= self.counters.timeout_ns) return error.SharedTaskTimeout;
         const i = try self.index(task);
         if (self.facts[i].status == .cancelled or self.facts[i].status == .interrupted) return error.TaskAlreadyFinished;
         for (self.facts[0..self.count]) |fact| if (fact.parent != null and !terminal(fact.status)) return error.ChildSettlementRequired;
@@ -257,6 +256,7 @@ pub const Root = struct {
         fact.attempt = try std.math.add(u32, fact.attempt, 1);
         self.facts[i] = try self.write(fact);
         self.cancelled = false;
+        self.counters.timeout_ns = 0;
     }
     pub fn acknowledge(self: *Root, task: id.TaskId, sequence: u64) !void {
         self.lock();
@@ -274,12 +274,10 @@ pub const Root = struct {
         try self.checkLocked();
         const i = try self.index(task);
         if (terminal(self.facts[i].status)) return error.TaskAlreadyFinished;
-        if (requests > self.counters.max_requests -| self.counters.requests) return error.SharedRequestLimit;
-        if (calls > self.counters.max_calls -| self.counters.calls) return error.SharedToolCallLimit;
         const prior = self.counters;
-        self.counters.requests += requests;
-        self.counters.pending_requests += requests;
-        self.counters.calls += calls;
+        self.counters.requests +|= requests;
+        self.counters.pending_requests +|= requests;
+        self.counters.calls +|= calls;
         self.facts[i] = self.write(self.facts[i]) catch |err| {
             self.counters = prior;
             return err;

@@ -5,7 +5,6 @@ const lifecycle = @import("session_lifecycle.zig");
 const input = @import("session_input.zig");
 const provider = @import("provider.zig");
 const images = @import("image_attachments.zig");
-pub const max_bytes = 128 * 1024 * 1024;
 const compact_bytes = 8 * 1024 * 1024;
 const Image = struct { path: []const u8, encoded: []const u8, captured_at: i64, offloaded: bool = false, owner: ?@import("../host/identity.zig").SessionHandle = null };
 pub const Message = struct {
@@ -65,6 +64,7 @@ pub const Journal = struct {
     stamp: ?Stamp = null,
     compact_at: usize = compact_bytes,
     mutex: std.atomic.Mutex = .unlocked,
+    checkpoint_job: ?*Checkpoint = null,
 
     const Stamp = struct {
         inode: std.Io.File.INode,
@@ -88,7 +88,7 @@ pub const Journal = struct {
         errdefer a.free(owned);
         var result: Journal = .{ .allocator = a, .io = io, .dir = dir, .path = owned, .lock_file = lock_file };
         errdefer result.bytes.deinit(a);
-        const source = dir.readFileAlloc(io, path, a, .limited(max_bytes)) catch |err| switch (err) {
+        const source = dir.readFileAlloc(io, path, a, .unlimited) catch |err| switch (err) {
             error.FileNotFound => return result,
             else => return err,
         };
@@ -102,6 +102,7 @@ pub const Journal = struct {
         return result;
     }
     pub fn deinit(self: *Journal) void {
+        std.debug.assert(self.checkpoint_job == null);
         self.lock_file.close(self.io);
         self.allocator.free(self.path);
         self.bytes.deinit(self.allocator);
@@ -124,8 +125,9 @@ pub const Journal = struct {
             if (row.schema == 1) if (row.event) |event| if (event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.child_info != null or event.parent_binding != null or event.targets != null or event.children != null or event.task_fact != null or event.kind == .task_fact or event.kind == .child_launch or event.initial_text != null) return error.InvalidSessionJournal;
             if (row.order) |order| {
                 const record = store.find(order.fence.conversation) orelse return error.InvalidSessionJournal;
-                if (order.ids.len != record.inbox.entries.items.len or order.ids.len > @import("wire_history.zig").History.max_messages) return error.InvalidSessionJournal;
-                var ordered: [@import("wire_history.zig").History.max_messages]*input.Entry = undefined;
+                if (order.ids.len != record.inbox.entries.items.len) return error.InvalidSessionJournal;
+                const ordered = try self.allocator.alloc(*input.Entry, order.ids.len);
+                defer self.allocator.free(ordered);
                 for (order.ids, 0..) |id, i| {
                     for (order.ids[0..i]) |prior| if (prior.eql(id)) return error.InvalidSessionJournal;
                     ordered[i] = record.inbox.findLocked(id) orelse return error.InvalidSessionJournal;
@@ -168,7 +170,7 @@ pub const Journal = struct {
         } else if (self.stamp) |stamp| if (stamp.size != self.bytes.items.len) {
             try self.replaceBytes(self.bytes.items);
         };
-        store.persist = .{ .context = self, .write = writeEvent };
+        store.persist = .{ .context = self, .write = writeEvent, .checkpoint = checkpoint };
         store.input_persist = .{ .context = self, .write = writeInput, .consumed = writeConsumed, .order = writeOrder };
         for (store.records.items) |record| record.inbox.persist = store.input_persist;
     }
@@ -199,6 +201,51 @@ pub const Journal = struct {
             decoded.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = normal.items, .offloaded_images = offloaded.items, .image_owner = message.image_owner, .image_transform = message.image_transform };
         }
         return messages;
+    }
+    const Checkpoint = struct {
+        journal: *Journal,
+        event: lifecycle.Event,
+        latest_revision: u64,
+        thread: ?std.Thread = null,
+        done: std.atomic.Value(bool) = .init(false),
+        failure: ?anyerror = null,
+        fn run(self: *Checkpoint) void {
+            writeEvent(self.journal, self.event) catch |err| {
+                self.failure = err;
+            };
+            while (!self.journal.mutex.tryLock()) std.Thread.yield() catch {};
+            self.journal.checkpoint_job = null;
+            self.journal.mutex.unlock();
+            self.done.store(true, .release);
+        }
+        fn ready(raw: *anyopaque) bool {
+            const self: *Checkpoint = @ptrCast(@alignCast(raw));
+            return self.done.load(.acquire);
+        }
+        fn finish(raw: *anyopaque) !void {
+            const self: *Checkpoint = @ptrCast(@alignCast(raw));
+            std.debug.assert(self.done.load(.acquire));
+            if (self.failure) |err| return err;
+        }
+        fn release(raw: *anyopaque) void {
+            const self: *Checkpoint = @ptrCast(@alignCast(raw));
+            if (self.thread) |thread| thread.join();
+            self.journal.allocator.destroy(self);
+        }
+    };
+    fn checkpoint(raw: *anyopaque, event: lifecycle.Event) !lifecycle.Persistence.Write {
+        const self: *Journal = @ptrCast(@alignCast(raw));
+        // Controller ticks never wait on another agent's journal IO.
+        if (!self.mutex.tryLock()) return error.WorkerBusy;
+        defer self.mutex.unlock();
+        if (self.checkpoint_job != null) return error.WorkerBusy;
+        const job = try self.allocator.create(Checkpoint);
+        errdefer self.allocator.destroy(job);
+        job.* = .{ .journal = self, .event = event, .latest_revision = event.revision };
+        self.checkpoint_job = job;
+        errdefer self.checkpoint_job = null;
+        job.thread = try std.Thread.spawn(.{}, Checkpoint.run, .{job});
+        return .{ .context = job, .ready = Checkpoint.ready, .finish = Checkpoint.finish, .release = Checkpoint.release };
     }
     fn writeEvent(raw: *anyopaque, original: lifecycle.Event) !void {
         const self: *Journal = @ptrCast(@alignCast(raw));
@@ -235,18 +282,30 @@ pub const Journal = struct {
         return messages;
     }
     fn append(self: *Journal, original: Line, source: []const provider.Message, transcript: []const provider.Message) !void {
-        // Different agent workers can commit consumed receipts concurrently.
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        defer self.mutex.unlock();
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
         var line = original;
+        // Immutable caller-owned messages remain pinned through acknowledgement.
+        // Encode outside the journal lock so other agents' small controller
+        // writes do not wait on full transcript serialization.
         line.messages = try encode(a, source);
         line.transcript = try encode(a, transcript);
-        const encoded = try std.json.Stringify.valueAlloc(a, line, .{});
-        if (self.bytes.items.len >= self.compact_at or encoded.len + 1 > max_bytes -| self.bytes.items.len) try self.compactLocked();
-        if (encoded.len + 1 > max_bytes -| self.bytes.items.len) return error.JournalLimit;
+        var encoded = try std.json.Stringify.valueAlloc(a, line, .{});
+        // Serialize only the append, boundary checks and durable acknowledgement.
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        if (line.event) |*event| if (event.kind == .checkpoint) {
+            if (self.checkpoint_job) |job| if (event.conversation.eql(job.event.conversation) and event.turn == job.event.turn) {
+                if (event.revision != job.latest_revision) {
+                    event.revision = job.latest_revision;
+                    // A handoff won the race; only that uncommon path needs
+                    // to re-encode with the just-committed binding revision.
+                    encoded = try std.json.Stringify.valueAlloc(a, line, .{});
+                }
+            };
+        };
+        if (self.bytes.items.len >= self.compact_at) try self.compactLocked();
         const prior = self.bytes.items.len;
         try self.bytes.ensureUnusedCapacity(self.allocator, encoded.len + 1);
         self.bytes.appendSliceAssumeCapacity(encoded);
@@ -267,6 +326,14 @@ pub const Journal = struct {
         try file.writePositionalAll(self.io, self.bytes.items[prior..], prior);
         try file.sync(self.io);
         self.stamp = Stamp.of(try file.stat(self.io));
+        // A live handoff may commit before the checkpoint worker acquires the
+        // journal. Use that committed binding revision in the later checkpoint;
+        // the reverse ordering already has checkpoint-before-handoff semantics.
+        if (line.event) |event| if (event.kind == .handoff) {
+            if (self.checkpoint_job) |job| if (event.conversation.eql(job.event.conversation)) {
+                job.latest_revision = event.revision;
+            };
+        };
     }
 
     fn rollbackAppend(self: *Journal, file: std.Io.File, prior: usize) !void {
@@ -335,6 +402,6 @@ pub const Journal = struct {
             self.bytes.deinit(self.allocator);
             self.bytes = kept;
         } else kept.deinit(self.allocator);
-        self.compact_at = @min(max_bytes, @max(compact_bytes, self.bytes.items.len * 2));
+        self.compact_at = @max(compact_bytes, self.bytes.items.len *| 2);
     }
 };

@@ -59,6 +59,8 @@ pub const VirtualListProps = struct {
     data_version: Source(u64) = .{ .value = 0 },
     /// Fixed height of each item (px)
     item_height: f32 = 32,
+    /// False when an enclosing ScrollArea owns the content translation.
+    translate_content: bool = true,
     /// Container width
     width: ?f32 = null,
     /// Container height
@@ -374,7 +376,7 @@ pub const VirtualListState = struct {
         // Quantize to physical pixel grid like scroll event layer, else per-frame
         // sub-pixel translate causes text jitter/blur on Retina.
         const desired_translate_y = -self.scroll_state.snapToPixel(effective_y);
-        if (self.content_node.style.translate_y != desired_translate_y) {
+        if (self.props.translate_content and self.content_node.style.translate_y != desired_translate_y) {
             self.content_node.style.translate_y = desired_translate_y;
             self.content_node.markCompositePropDirty();
         }

@@ -15,12 +15,6 @@ pub const History = struct {
     failure: ?anyerror = null,
     /// Copies/edits/compaction deliberately start without an old measurement.
     usage: ?@import("context_usage.zig").Baseline = null,
-    pub const max_messages = 512;
-    pub const max_text_bytes = 512 * 1024;
-    // Aggregate retained image memory is finite across the conversation, in
-    // addition to each image's existing decode and request/context limits.
-    pub const max_image_bytes = images.max_bytes * images.max_count;
-    pub const max_image_pixels = 64 * 1024 * 1024;
 
     pub fn deinit(self: *History) void {
         for (self.messages) |message| for (message.images) |reference| {
@@ -49,33 +43,15 @@ pub const History = struct {
     /// must surface capture failures instead of silently dropping a tool turn.
     pub fn copy(allocator: std.mem.Allocator, source: []const provider.Message, final_text: []const u8) !History {
         const count = source.len + @as(usize, if (final_text.len != 0) 1 else 0);
-        if (count > max_messages) return error.ToolTranscriptLimit;
         // Stop and errors may interrupt result allocation. Never persist a
         // dangling assistant call as reusable context or invent its result.
         try @import("provider_http.zig").validateToolMessages(.{ .model = "", .system = "", .messages = source });
-        var text_bytes: usize = final_text.len;
-        var physical_images = std.AutoHashMap(usize, void).init(allocator);
-        defer physical_images.deinit();
-        var image_bytes: usize = 0;
-        var image_pixels: usize = 0;
+        // Per-image decoding and per-request transport/context checks bound
+        // external input. Retaining owned references is not a lifetime quota.
         for (source) |message| {
-            text_bytes = std.math.add(usize, text_bytes, message.content.len + 32) catch return error.ToolTranscriptLimit;
-            if (message.tool_call_id) |id| text_bytes = std.math.add(usize, text_bytes, id.len) catch return error.ToolTranscriptLimit;
-            for (message.tool_calls) |call| text_bytes = std.math.add(usize, text_bytes, call.id.len + call.name.len + call.arguments.len + 64) catch return error.ToolTranscriptLimit;
-            for (message.images) |reference| {
-                const image = reference.content() orelse return error.EmptyAttachmentResult;
-                if ((try physical_images.getOrPut(@intFromPtr(reference.snapshot.?))).found_existing) continue;
-                image_bytes = std.math.add(usize, image_bytes, image.bytes.len) catch return error.ToolTranscriptLimit;
-                image_pixels = std.math.add(usize, image_pixels, @as(usize, image.width) * image.height) catch return error.ToolTranscriptLimit;
-            }
-            for (message.offloaded_images) |entry| {
-                const image = entry.reference.content() orelse return error.EmptyAttachmentResult;
-                if ((try physical_images.getOrPut(@intFromPtr(entry.reference.snapshot.?))).found_existing) continue;
-                image_bytes = std.math.add(usize, image_bytes, image.bytes.len) catch return error.ToolTranscriptLimit;
-                image_pixels = std.math.add(usize, image_pixels, @as(usize, image.width) * image.height) catch return error.ToolTranscriptLimit;
-            }
+            for (message.images) |reference| if (reference.content() == null) return error.EmptyAttachmentResult;
+            for (message.offloaded_images) |entry| if (entry.reference.content() == null) return error.EmptyAttachmentResult;
         }
-        if (text_bytes > max_text_bytes or image_bytes > max_image_bytes or image_pixels > max_image_pixels) return error.ToolTranscriptLimit;
         var result: History = .{ .arena = std.heap.ArenaAllocator.init(allocator), .revision = next_revision.fetchAdd(1, .monotonic) };
         errdefer result.deinit();
         const a = result.arena.?.allocator();
@@ -118,18 +94,22 @@ test "wire history keeps actual tool identities and final answer after source re
     try std.testing.expectEqual(@as(usize, 0), next.messages[3].tool_calls.len);
 }
 
-test "wire history is bounded and failure never mutates existing context" {
+test "wire history retains long transcripts without mutating the prior snapshot" {
     const a = std.testing.allocator;
     var history = try History.copy(a, &.{.{ .content = "retained" }}, "");
     defer history.deinit();
-    const oversized = try a.alloc(u8, History.max_text_bytes + 1);
+    const oversized = try a.alloc(u8, 512 * 1024 + 1);
     defer a.free(oversized);
     @memset(oversized, 'x');
-    try std.testing.expectError(error.ToolTranscriptLimit, History.copy(a, &.{}, oversized));
-    const too_many = try a.alloc(provider.Message, History.max_messages + 1);
+    var large = try History.copy(a, &.{}, oversized);
+    defer large.deinit();
+    try std.testing.expectEqual(oversized.len, large.messages[0].content.len);
+    const too_many = try a.alloc(provider.Message, 513);
     defer a.free(too_many);
     @memset(too_many, .{ .content = "" });
-    try std.testing.expectError(error.ToolTranscriptLimit, History.copy(a, too_many, ""));
+    var many = try History.copy(a, too_many, "");
+    defer many.deinit();
+    try std.testing.expectEqual(@as(usize, 513), many.messages.len);
     try std.testing.expectEqualStrings("retained", history.messages[0].content);
 }
 

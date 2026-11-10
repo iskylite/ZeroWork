@@ -17,6 +17,7 @@ pub fn phaseLabel(phase: @import("../ai/step_events.zig").Phase) []const u8 {
         .failed => "失败",
         .rejected => "已拒绝",
         .cancelled => "已取消",
+        .skipped => "因新消息跳过",
     };
 }
 

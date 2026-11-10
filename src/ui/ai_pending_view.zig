@@ -18,9 +18,13 @@ pub const View = struct {
     surface: *ui.Node,
     collapsed: bool = false,
     toggle_focus_requested: bool = false,
-    menus: [input.Inbox.max_count]?*ui.Signal(bool) = @splat(null),
+    menus: []?*ui.Signal(bool) = &.{},
     scroll: ui.widgets.ScrollAreaResult,
     rows: ?*ui.Scope = null,
+    retained: std.ArrayList(RetainedRow) = .empty,
+    header_hash: ?u64 = null,
+    header_ticket: ?*Ticket = null,
+    toggle_node: ?*ui.Node = null,
     hash: ?u64 = null,
     editing: ?Ticket = null,
     edit_requested: ?Ticket = null,
@@ -31,6 +35,7 @@ pub const View = struct {
     edit_original: *ui.Signal([]const u8),
     error_text: *ui.Signal([]const u8),
     error_node: *ui.Node,
+    const RetainedRow = struct { root: *ui.Node, scope: *ui.Scope, hash: u64, ticket: *Ticket, editor: ?*ui.Node = null };
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
         const root = try ui.box(cx, S.root(), .{});
         root.meta.ownership.meta.test_id = "ai.pending";
@@ -52,18 +57,30 @@ pub const View = struct {
         error_node.setDisplay(.none);
         try root.appendChild(cx.allocator, error_node);
         root.setDisplay(.none);
-        return scope.createState(View, .{ .cx = cx, .scope = scope, .hooks = hooks, .root = root, .header = header, .surface = surface, .scroll = scroll, .edit_text = try scope.createText("", .{}), .edit_original = try scope.createText("", .{}), .error_text = error_text, .error_node = error_node });
+        const result = try scope.createState(View, .{ .cx = cx, .scope = scope, .hooks = hooks, .root = root, .header = header, .surface = surface, .scroll = scroll, .edit_text = try scope.createText("", .{}), .edit_original = try scope.createText("", .{}), .error_text = error_text, .error_node = error_node });
+        try scope.onCleanup(View, result, cleanup);
+        return result;
+    }
+    fn cleanup(self: *View) void {
+        self.retained.deinit(self.cx.allocator);
+        self.cx.allocator.free(self.menus);
+    }
+    fn removeRow(self: *View, index: usize) void {
+        const old = self.retained.orderedRemove(index);
+        self.cx.detachChild(self.scroll.content, old.root);
+        old.scope.dispose();
+        self.cx.destroyDetached(old.root);
     }
     const Cell = struct {
         view: *View,
-        ticket: Ticket,
+        ticket: *Ticket,
         action: Action = .remove,
         initial: []const u8 = "",
         fn run(self: *Cell) void {
-            self.view.hooks.act(self.view.hooks.context, self.ticket, self.action, if (self.action == .save) self.view.edit_text.peek() else "") catch |err| self.view.fail(@errorName(err));
+            self.view.hooks.act(self.view.hooks.context, self.ticket.*, self.action, if (self.action == .save) self.view.edit_text.peek() else "") catch |err| self.view.fail(@errorName(err));
         }
         fn edit(self: *Cell) void {
-            self.view.edit_requested = self.ticket;
+            self.view.edit_requested = self.ticket.*;
             self.view.edit_text.set(self.initial);
             self.view.edit_original.set(self.initial);
             self.view.cx.requestRedraw();
@@ -213,45 +230,79 @@ pub const View = struct {
             self.cx.cancelPointerInteractions(.explicit);
             open.set(false);
         };
-        self.menus = @splat(null);
         if (self.cx.pressed_node) |node| if (node.isDescendantOf(self.root)) self.cx.cancelPointerInteractions(.explicit);
-        if (self.cx.focus_manager.current_focus) |node| if (node.isDescendantOf(self.root)) self.cx.clearFocus();
-        self.clear(self.header);
-        self.clear(self.scroll.content);
-        if (self.rows) |old| old.dispose();
-        const scope = try self.scope.childScope();
-        self.rows = scope;
-        const arena = try scope.createState(std.heap.ArenaAllocator, .init(self.cx.allocator));
-        try scope.onCleanup(std.heap.ArenaAllocator, arena, struct {
-            fn cleanup(value: *std.heap.ArenaAllocator) void {
-                value.deinit();
-            }
-        }.cleanup);
-        const data = arena.allocator();
-        self.root.setStyleInline(self.cx.allocator, S.root());
-        self.surface.setStyleInline(self.cx.allocator, S.surface());
-        self.root.setDisplay(if (items.len == 0) .none else .flex);
-        const label = try std.fmt.allocPrint(data, "待处理 · {d}", .{items.len});
-        try self.header.appendChild(self.cx.allocator, try ui.text(self.cx, label, S.queueText(true)));
-        try self.header.appendChild(self.cx.allocator, try ui.spacer(self.cx));
-        if (items.len > 0 and continuing) {
-            const cell = try scope.createState(Cell, .{ .view = self, .ticket = .{ .receipt = items[0].receipt, .queue_revision = queue_revision }, .action = .continue_queue });
-            _ = try self.button(scope, self.header, "play", "继续队列", "ai.pending.continue", false, self.cx.on(Cell, cell, Cell.run), null);
+        self.menus = try self.cx.allocator.realloc(self.menus, items.len);
+        // Retained rows own their scopes independently of the header.
+        while (self.retained.items.len > items.len) self.removeRow(self.retained.items.len - 1);
+        var header_hash = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&header_hash, .{ items.len, continuing, self.collapsed, self.editing != null, T.current() });
+        if (self.header_ticket) |ticket| {
+            if (items.len > 0) ticket.* = .{ .receipt = items[0].receipt, .queue_revision = queue_revision };
         }
-        var toggle_node: ?*ui.Node = null;
-        if (items.len > 0) {
-            const cell = try scope.createState(Cell, .{ .view = self, .ticket = .{ .receipt = items[0].receipt, .queue_revision = queue_revision } });
-            const toggle = try self.button(scope, self.header, if (self.collapsed) "chevron-down" else "chevron-up", if (self.collapsed) "展开消息队列" else "收起消息队列", "ai.pending.toggle", self.editing != null, self.cx.on(Cell, cell, Cell.toggle), null);
-            toggle_node = toggle.node;
+        if (self.header_hash != header_hash.final()) {
+            self.clear(self.header);
+            if (self.rows) |old| old.dispose();
+            const scope = try self.scope.childScope();
+            self.rows = scope;
+            const arena = try scope.createState(std.heap.ArenaAllocator, .init(self.cx.allocator));
+            try scope.onCleanup(std.heap.ArenaAllocator, arena, struct {
+                fn cleanup(value: *std.heap.ArenaAllocator) void {
+                    value.deinit();
+                }
+            }.cleanup);
+            const data = arena.allocator();
+            self.header_ticket = try scope.createState(Ticket, if (items.len > 0) .{ .receipt = items[0].receipt, .queue_revision = queue_revision } else undefined);
+            self.root.setStyleInline(self.cx.allocator, S.root());
+            self.surface.setStyleInline(self.cx.allocator, S.surface());
+            self.root.setDisplay(if (items.len == 0) .none else .flex);
+            const label = try std.fmt.allocPrint(data, "待处理 · {d}", .{items.len});
+            try self.header.appendChild(self.cx.allocator, try ui.text(self.cx, label, S.queueText(true)));
+            try self.header.appendChild(self.cx.allocator, try ui.spacer(self.cx));
+            if (items.len > 0 and continuing) {
+                const cell = try scope.createState(Cell, .{ .view = self, .ticket = self.header_ticket.?, .action = .continue_queue });
+                _ = try self.button(scope, self.header, "play", "继续队列", "ai.pending.continue", false, self.cx.on(Cell, cell, Cell.run), null);
+            }
+            self.toggle_node = null;
+            if (items.len > 0) {
+                const cell = try scope.createState(Cell, .{ .view = self, .ticket = self.header_ticket.? });
+                const toggle = try self.button(scope, self.header, if (self.collapsed) "chevron-down" else "chevron-up", if (self.collapsed) "展开消息队列" else "收起消息队列", "ai.pending.toggle", self.editing != null, self.cx.on(Cell, cell, Cell.toggle), null);
+                self.toggle_node = toggle.node;
+            }
+            self.header_hash = header_hash.final();
         }
         var content_height: f32 = 0;
         var editor_node: ?*ui.Node = null;
         var has_editor = false;
         for (items, 0..) |item, index| {
-            const ticket: Ticket = .{ .receipt = item.receipt, .queue_revision = queue_revision };
+            const editing = if (self.editing) |edit| edit.receipt.id.eql(item.receipt.id) else false;
+            var row_hash = std.hash.Wyhash.init(0);
+            std.hash.autoHash(&row_hash, .{ item.receipt, item.attachments, item.mutable, index, index + 1 == items.len, editing, T.current() });
+            row_hash.update(item.text);
+            const fingerprint = row_hash.final();
+            if (index < self.retained.items.len and self.retained.items[index].hash == fingerprint) {
+                const kept = self.retained.items[index];
+                kept.ticket.* = .{ .receipt = item.receipt, .queue_revision = queue_revision };
+                if (editing) {
+                    has_editor = true;
+                    editor_node = kept.editor;
+                }
+                content_height += if (editing) @as(f32, 70) else 18;
+                continue;
+            }
+            const before = if (index < self.retained.items.len) self.retained.items[index].root else null;
+            const scope = try self.scope.childScope();
+            errdefer scope.dispose();
+            const arena = try scope.createState(std.heap.ArenaAllocator, .init(self.cx.allocator));
+            try scope.onCleanup(std.heap.ArenaAllocator, arena, struct {
+                fn release(value: *std.heap.ArenaAllocator) void {
+                    value.deinit();
+                }
+            }.release);
+            const data = arena.allocator();
+            const ticket = try scope.createState(Ticket, .{ .receipt = item.receipt, .queue_revision = queue_revision });
+            self.menus[index] = null;
             const card = try ui.box(self.cx, S.card(), .{});
             card.meta.ownership.meta.test_id = try std.fmt.allocPrint(data, "ai.pending.card.{d}", .{index});
-            const editing = if (self.editing) |edit| edit.receipt.id.eql(item.receipt.id) else false;
             if (editing) {
                 has_editor = true;
                 self.editor_scroll_requested = content_height;
@@ -285,7 +336,7 @@ pub const View = struct {
                 }
             } else try row.appendChild(self.cx.allocator, try ui.spacer(self.cx));
             const mutable = item.mutable and item.receipt.delivery == .queued and !item.receipt.archived;
-            const cell = try scope.createState(Cell, .{ .view = self, .ticket = if (editing) self.editing.? else ticket, .initial = try data.dupe(u8, item.text) });
+            const cell = try scope.createState(Cell, .{ .view = self, .ticket = if (editing) try scope.createState(Ticket, self.editing.?) else ticket, .initial = try data.dupe(u8, item.text) });
             if (editing) {
                 cell.action = .save;
                 _ = try self.button(scope, row, "x", "取消编辑", "ai.pending.cancel", false, self.cx.on(Cell, cell, Cell.cancel), null);
@@ -318,7 +369,12 @@ pub const View = struct {
                     _ = try self.button(scope, row, "x", "移除排队消息", "ai.pending.remove_paused", false, self.cx.on(Cell, remove, Cell.run), null);
                 }
             }
-            try self.scroll.content.appendChild(self.cx.allocator, card);
+            try self.scroll.content.insertChildBefore(self.cx.allocator, card, before);
+            const next: RetainedRow = .{ .root = card, .scope = scope, .hash = fingerprint, .ticket = ticket, .editor = if (editing) editor_node else null };
+            if (before != null) {
+                self.removeRow(index);
+                try self.retained.insert(self.cx.allocator, index, next);
+            } else try self.retained.append(self.cx.allocator, next);
             content_height += if (editing) @as(f32, 70) else 18;
         }
         self.scroll.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (self.collapsed and !has_editor) 0 else @min(if (has_editor) @as(f32, 70) else if (compact) @as(f32, 36) else 54, content_height) } });
@@ -329,7 +385,7 @@ pub const View = struct {
         self.scroll.container.setDisplay(if (self.collapsed and !has_editor) .none else .flex);
         if (self.toggle_focus_requested) {
             self.toggle_focus_requested = false;
-            if (toggle_node) |node| self.cx.setFocus(node);
+            if (self.toggle_node) |node| self.cx.setFocus(node);
         }
         // Focus only a newly requested editor after its row is attached.
         if (begin_edit) if (editor_node) |node| self.cx.setFocus(node);

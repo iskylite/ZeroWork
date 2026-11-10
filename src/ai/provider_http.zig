@@ -206,7 +206,7 @@ pub const Response = struct { status: u16, kind: ResponseKind, retry_after_ms: ?
 /// local text or tool result may expand sixfold when JSON-escaped. This wire
 /// ceiling is separate from the model's context/token budget.
 pub const max_request_bytes: usize = 64 * 1024 * 1024;
-pub const max_text_request_bytes: usize = 1024 * 1024;
+pub const max_text_request_bytes: usize = max_request_bytes;
 pub const max_tool_request_bytes: usize = max_request_bytes;
 
 pub fn parseRetryAfter(value: []const u8) ?u32 {
@@ -274,9 +274,15 @@ const BodyCounter = struct {
     }
 };
 
+fn outputLimit(request: provider.ChatRequest, window: u32) !u32 {
+    const input = try @import("local_text_request.zig").inputTokens(request);
+    const available: u32 = @intCast(@max(@as(usize, window) -| input, 1));
+    return if (request.max_output == 0) available else @min(request.max_output, available);
+}
+
 fn writeRequestBody(fw: *std.Io.Writer, kind: registry.Kind, request: provider.ChatRequest, context_window: u32) !void {
     if (kind != .openai_compat) return writeNativeRequestBody(fw, kind, request, context_window);
-    const max_tokens = @min(request.max_output, @max(context_window / 4, 1));
+    const max_tokens = if (request.max_output == 0) 0 else try outputLimit(request, context_window);
     try fw.writeAll("{\"model\":\"");
     try writeJsonString(fw, request.model);
     try fw.writeAll("\",\"messages\":[");
@@ -350,8 +356,8 @@ fn writeRequestBody(fw: *std.Io.Writer, kind: registry.Kind, request: provider.C
             }
         }
     }
-    try fw.writeAll("],\"max_tokens\":");
-    try fw.print("{d}", .{max_tokens});
+    try fw.writeByte(']');
+    if (max_tokens != 0) try fw.print(",\"max_tokens\":{d}", .{max_tokens});
     try fw.writeAll(",\"stream\":true");
     if (systemAllowed(kind)) {
         try fw.writeAll(",\"system\":\"");
@@ -396,12 +402,16 @@ fn writeNativeRequestBody(writer: *std.Io.Writer, kind: registry.Kind, request: 
     };
     if (kind == .anthropic and request.reasoning_wire == .anthropic_adaptive) if (request.thinking) |enabled| try writer.print("\"thinking\":{{\"type\":\"{s}\"}},", .{if (enabled) "adaptive" else "disabled"});
     if (kind == .ollama and request.effort == null) if (request.thinking) |enabled| try writer.print("\"think\":{s},", .{if (enabled) "true" else "false"});
-    const limit = @min(request.max_output, @max(context_window / 4, 1));
+    const limit = if (request.max_output != 0 or kind == .anthropic) try outputLimit(request, context_window) else 0;
     if (kind == .anthropic) {
         try writer.print("\"max_tokens\":{d},\"system\":\"", .{limit});
         try writeJsonString(writer, request.system);
         try writer.writeAll("\",");
-    } else try writer.print("\"options\":{{\"num_predict\":{d},\"num_ctx\":{d}}},", .{ limit, context_window });
+    } else {
+        try writer.print("\"options\":{{\"num_ctx\":{d}", .{context_window});
+        if (limit != 0) try writer.print(",\"num_predict\":{d}", .{limit});
+        try writer.writeAll("},");
+    }
     try writer.writeAll("\"messages\":[");
     var comma = false;
     if (kind == .ollama and request.system.len != 0) {
@@ -588,18 +598,11 @@ fn validCallId(value: []const u8) bool {
 }
 
 pub fn validateToolMessages(request: provider.ChatRequest) !void {
-    if (request.tools.len > provider.max_tool_definitions) return error.ToolCatalogLimit;
     _ = try provider.catalogTextBytes(request.tools);
-    var plugin_count: usize = 0;
-    var host_count: usize = 0;
     for (request.tools, 0..) |definition, definition_index| {
         if (definition.authority == .session_targets) {
-            plugin_count += 1;
-            if (plugin_count > provider.max_plugin_tool_definitions) return error.ToolCatalogLimit;
             if (definition.session_ids.len == 0 or (definition.dynamic == null and definition.session_ids.len > @import("tool_scope.zig").max_targets)) return error.InvalidToolDefinition;
         } else {
-            host_count += 1;
-            if (host_count > provider.max_host_tool_definitions) return error.ToolCatalogLimit;
             if (definition.dynamic == null or definition.session_ids.len != 0) return error.InvalidToolDefinition;
         }
         for (request.tools[0..definition_index]) |previous| if (std.mem.eql(u8, previous.name(), definition.name())) return error.InvalidToolDefinition;
@@ -613,37 +616,32 @@ pub fn validateToolMessages(request: provider.ChatRequest) !void {
             if (id == 0 or std.mem.indexOfScalar(u64, definition.session_ids[0..index], id) != null) return error.InvalidToolDefinition;
         }
     }
-    var pending: [provider.max_tool_calls][]const u8 = undefined;
-    var received: [provider.max_tool_calls]bool = @splat(false);
-    var count: usize = 0;
+    var pending: []const provider.ToolCall = &.{};
+    var results_start: usize = 0;
     var remaining: usize = 0;
-    for (request.messages) |message| {
-        if (message.tool_calls.len > provider.max_tool_calls) return error.InvalidToolCall;
+    for (request.messages, 0..) |message, message_index| {
         if (message.role != .assistant and message.tool_calls.len != 0) return error.InvalidToolMessage;
         if (message.role == .tool) {
             const id = message.tool_call_id orelse return error.InvalidToolMessage;
             if (!validCallId(id) or remaining == 0) return error.InvalidToolMessage;
-            var found = false;
-            for (pending[0..count], 0..) |original, index| {
-                if (!std.mem.eql(u8, id, original)) continue;
-                if (received[index]) return error.InvalidToolMessage;
-                received[index] = true;
-                remaining -= 1;
-                found = true;
-                break;
-            }
+            const found = for (pending) |call| {
+                if (std.mem.eql(u8, id, call.id)) break true;
+            } else false;
             if (!found) return error.InvalidToolMessage;
+            for (request.messages[results_start..message_index]) |previous| {
+                if (previous.tool_call_id) |received| if (std.mem.eql(u8, received, id)) return error.InvalidToolMessage;
+            }
+            remaining -= 1;
             continue;
         }
         if (message.tool_call_id != null or remaining != 0) return error.InvalidToolMessage;
-        count = message.tool_calls.len;
-        remaining = count;
-        received = @splat(false);
-        for (message.tool_calls, 0..) |call, index| {
+        pending = message.tool_calls;
+        remaining = pending.len;
+        results_start = message_index + 1;
+        for (pending, 0..) |call, index| {
             if (!validCallId(call.id) or call.name.len == 0 or call.name.len > provider.max_tool_name_bytes or call.arguments.len > provider.max_tool_arguments_bytes) return error.InvalidToolCall;
             for (call.name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return error.InvalidToolCall;
-            for (pending[0..index]) |earlier| if (std.mem.eql(u8, earlier, call.id)) return error.InvalidToolCall;
-            pending[index] = call.id;
+            for (pending[0..index]) |earlier| if (std.mem.eql(u8, earlier.id, call.id)) return error.InvalidToolCall;
         }
     }
     if (remaining != 0) return error.InvalidToolMessage;
@@ -717,7 +715,7 @@ test "request body clamps output and escapes JSON" {
     const body = try requestBody(std.testing.allocator, .openai_compat, .{ .model = "m", .effort = .high, .system = "sys", .messages = &messages, .max_output = 9000 }, 4096);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\\\"hi\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_tokens\":1024") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_tokens\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning_effort\":\"high\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"role\":\"system\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\",\"system\":") == null);
@@ -923,7 +921,7 @@ test "native tool protocols encode their actual request shapes" {
             try std.testing.expect(result.get("is_error").?.bool);
         } else {
             try std.testing.expect(root.get("max_tokens") == null and root.get("system") == null);
-            try std.testing.expect(root.get("options").?.object.get("num_predict") != null);
+            try std.testing.expect(root.get("options").?.object.get("num_predict") == null);
             try std.testing.expectEqualStrings("system", encoded[0].object.get("role").?.string);
             const call = encoded[1].object.get("tool_calls").?.array.items[0].object;
             try std.testing.expectEqualStrings("original", call.get("id").?.string);
@@ -948,61 +946,45 @@ test "tool declaration validation rejects duplicate empty zero and excessive tar
     try std.testing.expectError(error.InvalidToolDefinition, requestBody(std.testing.allocator, .openai_compat, .{ .model = "m", .system = "", .messages = &.{}, .tools = &excessive }, 8192));
 }
 
-test "host catalog uses a separate pool and no fabricated session targets across wire protocols" {
+test "large host and plugin catalogs preserve authority across wire protocols" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var catalog: [49]provider.ToolDefinition = undefined;
-    for (catalog[0..32], 0..) |*definition, index| {
+    var catalog: [96]provider.ToolDefinition = undefined;
+    for (catalog[0..64], 0..) |*definition, index| {
         const id = try std.fmt.allocPrint(a, "host.query{d}", .{index});
         var encoded: [64]u8 = undefined;
         definition.* = .{ .session_ids = &.{}, .authority = .conversation_context, .dynamic = .{ .id = id, .name = try a.dupe(u8, try @import("plugin_tools.zig").encodeName(&encoded, id)), .description = "Read authorized context", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}" } };
     }
-    for (catalog[32..48], 0..) |*definition, index| {
+    for (catalog[64..96], 0..) |*definition, index| {
         const id = try std.fmt.allocPrint(a, "plugin.read{d}", .{index});
         var encoded: [64]u8 = undefined;
         definition.* = .{ .session_ids = &.{101}, .dynamic = .{ .id = id, .name = try a.dupe(u8, try @import("plugin_tools.zig").encodeName(&encoded, id)), .description = "Read a session", .schema = "{\"type\":\"object\"}" } };
     }
-    const request: provider.ChatRequest = .{ .model = "model", .system = "", .messages = &.{}, .tools = catalog[0..48] };
+    const request: provider.ChatRequest = .{ .model = "model", .system = "", .messages = &.{}, .tools = catalog[0..96] };
     for ([_]registry.Kind{ .openai_compat, .anthropic, .ollama }) |kind| {
         const body = try requestBody(a, kind, request, 32768);
         const parsed = try std.json.parseFromSlice(std.json.Value, a, body, .{});
         const declarations = parsed.value.object.get("tools").?.array.items;
-        try std.testing.expectEqual(@as(usize, 48), declarations.len);
+        try std.testing.expectEqual(@as(usize, 96), declarations.len);
         const first = if (kind == .anthropic) declarations[0].object else declarations[0].object.get("function").?.object;
         const parameters = first.get(if (kind == .anthropic) "input_schema" else "parameters").?.object;
         try std.testing.expect(parameters.get("properties").?.object.get("session_ids") == null);
         try std.testing.expect(first.get("authority") == null);
     }
-    // Neither pool may borrow unused capacity from the other.
-    catalog[32] = catalog[0];
-    catalog[32].dynamic.?.id = "host.extra";
-    catalog[32].dynamic.?.name = "host__extra";
-    var excessive = request;
-    excessive.tools = catalog[0..33];
-    try std.testing.expectError(error.ToolCatalogLimit, validateToolMessages(excessive));
-    catalog[48] = catalog[47];
-    catalog[48].dynamic.?.id = "plugin.extra";
-    catalog[48].dynamic.?.name = "plugin__extra";
-    excessive.tools = catalog[33..49];
-    // Restore the sixteenth contribution overwritten above, then add a seventeenth.
-    catalog[32] = catalog[48];
-    catalog[32].dynamic.?.id = "plugin.sixteenth";
-    catalog[32].dynamic.?.name = "plugin__sixteenth";
-    excessive.tools = catalog[32..49];
-    try std.testing.expectError(error.ToolCatalogLimit, validateToolMessages(excessive));
     var forged = catalog[0];
     forged.authority = .session_targets;
     forged.session_ids = &.{101};
-    excessive.tools = &.{forged};
-    try std.testing.expectError(error.InvalidToolDefinition, validateToolMessages(excessive));
+    var invalid = request;
+    invalid.tools = &.{forged};
+    try std.testing.expectError(error.InvalidToolDefinition, validateToolMessages(invalid));
     forged = catalog[0];
     forged.session_ids = &.{101};
-    excessive.tools = &.{forged};
-    try std.testing.expectError(error.InvalidToolDefinition, validateToolMessages(excessive));
+    invalid.tools = &.{forged};
+    try std.testing.expectError(error.InvalidToolDefinition, validateToolMessages(invalid));
 }
 
-test "catalog text budget is shared by serialization and initial context admission" {
+test "catalog text uses actual context instead of a fixed cumulative byte quota" {
     const a = std.testing.allocator;
     const description = try a.alloc(u8, 4096);
     defer a.free(description);
@@ -1014,8 +996,9 @@ test "catalog text budget is shared by serialization and initial context admissi
     try std.testing.expectError(error.ContextFixedOverhead, @import("local_text_request.zig").checkContext(request, 1024));
     const catalog: [24]provider.ToolDefinition = @splat(definition);
     request.tools = &catalog;
-    try std.testing.expectError(error.ToolCatalogLimit, validateToolMessages(request));
-    try std.testing.expectError(error.ToolCatalogLimit, @import("local_text_request.zig").inputTokens(request));
+    try std.testing.expectError(error.InvalidToolDefinition, validateToolMessages(request));
+    try std.testing.expect((try @import("local_text_request.zig").inputTokens(request)) > 24 * 1024);
+    try std.testing.expectError(error.ContextFixedOverhead, @import("local_text_request.zig").checkContext(request, 1024));
 }
 
 test "tool message correlation rejects orphan duplicate missing and interrupted result slots" {

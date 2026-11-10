@@ -25,6 +25,10 @@ pub const View = struct {
     scroll: ui.widgets.ScrollAreaResult = undefined,
     open: *ui.Signal(bool),
     row_scope: ?*ui.Scope = null,
+    row_key: ?u64 = null,
+    labels: std.ArrayList(*ui.Node) = .empty,
+    label_cursor: usize = 0,
+    patch_rows: bool = false,
     dirty: bool = false,
     viewport: ui.Size = .ZERO,
 
@@ -132,17 +136,29 @@ pub const View = struct {
         }
         if (!self.dirty or self.controller.popover == null) return;
         self.dirty = false;
-        while (self.rows.children.items.len != 0) {
-            const child = self.rows.children.items[0];
-            self.cx.detachChild(self.rows, child);
-            self.cx.destroyDetached(child);
-        }
-        if (self.row_scope) |old| old.dispose();
-        self.row_scope = null;
-        const scope = try self.scope.childScope();
-        self.row_scope = scope;
         const current = self.controller.popover.?;
         const source = self.controller.source.?.value;
+        var hash = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hash, .{ current.kind, current.owner, current.narrow_more, source.encoding, styles.theme.current() });
+        if (current.kind == .more) {
+            var kinds: [4]model.Kind = undefined;
+            for (self.controller.moreItems(&kinds, current.narrow_more)) |kind| std.hash.autoHash(&hash, kind);
+        }
+        const key = hash.final();
+        self.patch_rows = self.row_key == key;
+        self.label_cursor = 0;
+        if (!self.patch_rows) {
+            while (self.rows.children.items.len != 0) {
+                const child = self.rows.children.items[0];
+                self.cx.detachChild(self.rows, child);
+                self.cx.destroyDetached(child);
+            }
+            if (self.row_scope) |old| old.dispose();
+            self.row_scope = null;
+            self.labels.clearRetainingCapacity();
+            self.row_scope = try self.scope.childScope();
+        }
+        const scope = self.row_scope.?;
         const size = try self.controller.placement(.{ .width = self.cx.viewport.width, .height = self.cx.viewport.height });
         const panel_style = if (current.kind == .identity) @import("status_connection_styles.zig").panel(size.height, self.cx.viewport.width) else styles.panel();
         self.chrome.setStyleInline(self.cx.allocator, .{ .padding = panel_style.padding, .background = panel_style.background, .border = panel_style.border, .shadow = panel_style.shadow });
@@ -175,31 +191,33 @@ pub const View = struct {
             .readonly => "只读回放",
             .theme => "全局主题",
         });
-        while (self.header_icon.children.items.len != 0) {
-            const child = self.header_icon.children.items[0];
-            self.cx.detachChild(self.header_icon, child);
-            self.cx.destroyDetached(child);
+        if (!self.patch_rows) {
+            while (self.header_icon.children.items.len != 0) {
+                const child = self.header_icon.children.items[0];
+                self.cx.detachChild(self.header_icon, child);
+                self.cx.destroyDetached(child);
+            }
+            const icon = switch (current.kind) {
+                .identity => ui.icons.terminal,
+                .grid => ui.icons.get("move-diagonal").?,
+                .encoding => ui.icons.get("type").?,
+                .more => ui.icons.ellipsis,
+                .rtt => ui.icons.activity,
+                .readonly => ui.icons.lock,
+                .theme => ui.icons.palette,
+            };
+            try self.header_icon.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icon, @import("app_theme.zig").current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }));
         }
-        const icon = switch (current.kind) {
-            .identity => ui.icons.terminal,
-            .grid => ui.icons.get("move-diagonal").?,
-            .encoding => ui.icons.get("type").?,
-            .more => ui.icons.ellipsis,
-            .rtt => ui.icons.activity,
-            .readonly => ui.icons.lock,
-            .theme => ui.icons.palette,
-        };
-        try self.header_icon.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icon, @import("app_theme.zig").current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }));
         self.header_icon.setDisplay(if (current.kind == .identity) .none else .flex);
         switch (current.kind) {
             .identity => {
                 const S = @import("status_connection_styles.zig");
                 self.content.setStyle(self.cx.allocator, .gap, 12);
                 self.rows.setStyle(self.cx.allocator, .gap, 9);
-                const summary = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(12), .direction = .column, .gap = 4, .margin = .{ .bottom = 10 }, .background = S.theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+                const summary = if (self.patch_rows) undefined else try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(12), .direction = .column, .gap = 4, .margin = .{ .bottom = 10 }, .background = S.theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
                 _ = try self.rowLabel(summary, "本地终端", @import("connection_details_styles.zig").text(15, 600, 24, false), styles.labelBox(24));
                 _ = try self.rowLabel(summary, "本机 · macOS", S.address(), styles.labelBox(20));
-                try self.rows.appendChild(self.cx.allocator, summary);
+                if (!self.patch_rows) try self.rows.appendChild(self.cx.allocator, summary);
                 try self.fact("协议", "本地 · 交互式 Shell");
                 try self.fact("Shell", "/bin/zsh");
                 try self.fact("目录", source.cwd orelse "目录未知");
@@ -232,9 +250,6 @@ pub const View = struct {
                 @memcpy(ordered[0..available.len], available);
                 if (!current.narrow_more and available.len == 3 and ordered[2] == .rtt) ordered[0..3].* = .{ .rtt, .encoding, .grid };
                 for (ordered[0..available.len]) |kind| {
-                    const row = try self.cx.allocator.create(Row);
-                    row.* = .{ .view = self, .owner = current.owner, .kind = kind };
-                    try scope.onCleanup(Row, row, Row.cleanup);
                     const text = switch (kind) {
                         .encoding => "文本编码",
                         .grid => "终端网格",
@@ -242,25 +257,32 @@ pub const View = struct {
                         .theme => "全局主题",
                         else => unreachable,
                     };
-                    const disabled = kind == .theme and self.hooks.theme == null;
-                    const button = try ui.widgets.Button(.{ .a11y_label = text, .variant = .ghost, .base_style = styles.action(), .hover_style = styles.hover(), .disabled = disabled, .on_click = self.cx.on(Row, row, Row.click) }).mount(scope, self.cx);
-                    button.meta.ownership.meta.test_id = switch (kind) {
-                        .encoding => "status.more.encoding",
-                        .grid => "status.more.grid",
-                        .rtt => "status.more.rtt",
-                        .theme => "status.more.theme",
-                        else => unreachable,
-                    };
-                    const content = try ui.box(self.cx, styles.actionContent(), .{});
-                    try button.appendChild(self.cx.allocator, content);
-                    const asset = switch (kind) {
-                        .encoding => ui.icons.get("type").?,
-                        .grid => ui.icons.get("move-diagonal").?,
-                        .rtt => ui.icons.activity,
-                        .theme => ui.icons.palette,
-                        else => unreachable,
-                    };
-                    try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, styles.theme.current().fg_2, styles.icon(14)));
+                    var button: *ui.Node = undefined;
+                    var content: *ui.Node = undefined;
+                    if (!self.patch_rows) {
+                        const row = try self.cx.allocator.create(Row);
+                        row.* = .{ .view = self, .owner = current.owner, .kind = kind };
+                        try scope.onCleanup(Row, row, Row.cleanup);
+                        const disabled = kind == .theme and self.hooks.theme == null;
+                        button = try ui.widgets.Button(.{ .a11y_label = text, .variant = .ghost, .base_style = styles.action(), .hover_style = styles.hover(), .disabled = disabled, .on_click = self.cx.on(Row, row, Row.click) }).mount(scope, self.cx);
+                        button.meta.ownership.meta.test_id = switch (kind) {
+                            .encoding => "status.more.encoding",
+                            .grid => "status.more.grid",
+                            .rtt => "status.more.rtt",
+                            .theme => "status.more.theme",
+                            else => unreachable,
+                        };
+                        content = try ui.box(self.cx, styles.actionContent(), .{});
+                        try button.appendChild(self.cx.allocator, content);
+                        const asset = switch (kind) {
+                            .encoding => ui.icons.get("type").?,
+                            .grid => ui.icons.get("move-diagonal").?,
+                            .rtt => ui.icons.activity,
+                            .theme => ui.icons.palette,
+                            else => unreachable,
+                        };
+                        try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, styles.theme.current().fg_2, styles.icon(14)));
+                    }
                     _ = try self.rowLabel(content, text, styles.infoText(false), styles.labelBox(16));
                     var buffer: [96]u8 = undefined;
                     const trailing: []const u8 = switch (kind) {
@@ -271,7 +293,7 @@ pub const View = struct {
                         else => unreachable,
                     };
                     _ = try self.rowLabel(content, trailing, styles.infoText(true), styles.trailingBox(if (kind == .theme) 140 else 100));
-                    try self.rows.appendChild(self.cx.allocator, button);
+                    if (!self.patch_rows) try self.rows.appendChild(self.cx.allocator, button);
                 }
             },
             .rtt => {
@@ -283,10 +305,20 @@ pub const View = struct {
             .readonly => try self.label("只读回放 · 输入与执行已停用", 26, styles.text()),
             .theme => {},
         }
+        self.row_key = key;
         self.cx.requestRedraw();
     }
 
     fn info(self: *View, icon: ui.SvgAsset, text: []const u8, trailing: ?[]const u8) !void {
+        if (self.patch_rows) {
+            _ = try self.rowLabel(undefined, text, styles.infoText(false), styles.labelBox(16));
+            if (trailing) |value| {
+                var style = styles.infoText(true);
+                if (std.mem.eql(u8, value, "当前")) style.color = styles.theme.current().accent_ink;
+                _ = try self.rowLabel(undefined, value, style, styles.trailingBox(100));
+            }
+            return;
+        }
         const row = try ui.box(self.cx, styles.infoRow(), .{});
         const tint = if (trailing != null and std.mem.eql(u8, trailing.?, "当前")) styles.theme.current().accent else styles.theme.current().fg_2;
         try row.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icon, tint, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
@@ -300,12 +332,21 @@ pub const View = struct {
     }
 
     fn label(self: *View, text: []const u8, height: f32, style: ui.TextStyle) !void {
+        if (self.patch_rows) {
+            _ = try self.rowLabel(undefined, text, style, styles.labelBox(height));
+            return;
+        }
         const row = try ui.box(self.cx, styles.row(height), .{});
         _ = try self.rowLabel(row, text, style, styles.labelBox(height));
         try self.rows.appendChild(self.cx.allocator, row);
     }
     fn fact(self: *View, name: []const u8, value: []const u8) !void {
         const S = @import("status_connection_styles.zig");
+        if (self.patch_rows) {
+            _ = try self.rowLabel(undefined, name, S.infoText(false), S.factLabel());
+            _ = try self.rowLabel(undefined, value, S.infoText(true), S.factValue());
+            return;
+        }
         const row = try ui.box(self.cx, S.info(), .{});
         _ = try self.rowLabel(row, name, S.infoText(false), S.factLabel());
         _ = try self.rowLabel(row, value, S.infoText(true), S.factValue());
@@ -313,10 +354,18 @@ pub const View = struct {
     }
 
     fn rowLabel(self: *View, row: *ui.Node, text: []const u8, style: ui.TextStyle, box: ui.BoxStyle) !*ui.Node {
+        if (self.patch_rows) {
+            const node = self.labels.items[self.label_cursor];
+            self.label_cursor += 1;
+            if (!std.mem.eql(u8, node.getText().?.content, text)) try node.setTextContent(self.cx.allocator, text);
+            if (!ui.Color.eql(node.getText().?.color, style.color)) node.setTextColor(style.color);
+            return node;
+        }
         const node = try ui.text(self.cx, "", style);
         node.setStyleInline(self.cx.allocator, box);
         try node.setTextContent(self.cx.allocator, text);
         try row.appendChild(self.cx.allocator, node);
+        try self.labels.append(self.cx.allocator, node);
         return node;
     }
     /// Hover previews close without returning keyboard focus to their trigger.
@@ -340,6 +389,7 @@ pub const View = struct {
         return .{ .x = open.anchor.x, .y = open.anchor.y, .w = open.anchor.width, .h = if (open.anchor.y < 72) open.anchor.height else 0 };
     }
     fn cleanup(self: *View) void {
+        self.labels.deinit(self.cx.allocator);
         self.controller.deinit();
         self.cx.allocator.destroy(self);
     }

@@ -1,6 +1,9 @@
 //! Shared extension list geometry from docs/UI_V4/mcp-services*.svg and skills*.svg.
 const ui = @import("ui");
 const S = @import("settings_styles.zig");
+pub fn skillsToolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 28 }, .min_width = 0, .direction = .row, .align_items = .center, .gap = 12, .flex_shrink = 0 };
+}
 pub fn service(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .min_height = 66, .direction = .column, .gap = 6, .padding = .{ .left = 10, .right = 10, .top = 12, .bottom = 12 }, .background = S.theme.current().well, .border = .{ .radius = 10 }, .flex_shrink = 0 };
 }

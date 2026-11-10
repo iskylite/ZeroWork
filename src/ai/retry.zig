@@ -13,7 +13,7 @@ pub const Policy = struct {
 /// existing bounded retry behavior.
 pub fn isRetryable(err: anyerror) bool {
     return switch (err) {
-        error.ContextFixedOverhead => false,
+        error.ContextFixedOverhead, error.SharedTaskTimeout, error.TaskAlreadyFinished, error.TaskPersistenceFailed => false,
         error.Cancelled, error.Timeout, error.ProviderFailure, error.MissingApiKey, error.ResponseTooLarge, error.RequestTooLarge, error.InsecureEndpoint, error.StreamCallbackFailed, error.MissingEndpoint, error.MissingModel, error.InvalidContextWindow, error.MissingAuthEnvironment, error.InvalidAuth, error.ProviderDisabled, error.MissingProviderConfiguration, error.ProviderMissingDone, error.OutOfMemory, error.UnsupportedToolProtocol, error.InvalidToolDefinition, error.InvalidToolCall, error.InvalidToolMessage, error.ToolRequestTooLarge, error.InvalidUtf8, error.UnsupportedEffort, error.ProviderProtocolMismatch, error.InvalidToolArguments => false,
         else => true,
     };
@@ -128,4 +128,8 @@ test "retry deadline submillisecond remaining wait is not rounded down" {
     try waitWithTiming(1, null, null, &timing);
     try std.testing.expectEqual(@as(usize, 2), timing.sleeps);
     try std.testing.expectEqual(@as(u64, 1), timing.last_sleep_ns);
+}
+
+test "local task failures cannot be repaired by repeating model requests" {
+    for ([_]anyerror{ error.SharedTaskTimeout, error.TaskAlreadyFinished, error.TaskPersistenceFailed }) |err| try std.testing.expect(!isRetryable(err));
 }

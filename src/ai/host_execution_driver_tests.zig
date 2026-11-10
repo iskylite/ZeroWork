@@ -371,7 +371,7 @@ test "execution driver precise input takeover preserves Task and read-only obser
     try std.testing.expect(only_observers);
     // Input-only takeover must also be durable while the original foreground
     // and recording are still active, including same-stage running updates.
-    const handoff_source = try tmp.dir.readFileAlloc(std.testing.io, "takeover-driver.json", a, .limited(@import("lifecycle_journal.zig").max_file_bytes));
+    const handoff_source = try tmp.dir.readFileAlloc(std.testing.io, "takeover-driver.json", a, .unlimited);
     defer a.free(handoff_source);
     const handoff_disk = try std.json.parseFromSlice(std.json.Value, a, handoff_source, .{});
     defer handoff_disk.deinit();
@@ -486,7 +486,7 @@ test "execution driver saved interval settles control without RPC uncertainty or
         pause();
     }
     try std.testing.expect(settled);
-    const source = try tmp.dir.readFileAlloc(std.testing.io, "interval-driver.json", a, .limited(@import("lifecycle_journal.zig").max_file_bytes));
+    const source = try tmp.dir.readFileAlloc(std.testing.io, "interval-driver.json", a, .unlimited);
     defer a.free(source);
     const disk = try std.json.parseFromSlice(std.json.Value, a, source, .{});
     defer disk.deinit();
@@ -653,6 +653,9 @@ test "execution command index copies only exact conversation generation and host
     const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(7), .generation = 3 };
     const id = identity.ExecutionId.generate();
     var driver: driver_mod.Driver = .{ .allocator = a, .journal_owner = undefined, .scheduler = undefined, .backend = undefined, .controller = undefined, .wake = undefined };
+    driver.command_records = try a.alloc(@typeInfo(@TypeOf(driver.command_records)).pointer.child, 3);
+    defer a.free(driver.command_records);
+    @memset(driver.command_records, null);
     driver.command_records[0] = .{ .conversation_id = cid, .target = target, .execution_id = id, .command = "printf approved", .submitted_at_ms = 20, .revision = 9, .verified = true, .exit_code = 0, .complete = false };
     driver.command_records[1] = .{ .conversation_id = .generate(), .target = target, .execution_id = .generate(), .command = "other conversation", .submitted_at_ms = 21, .revision = 10, .verified = false, .exit_code = null, .complete = false };
     var next_generation = target;

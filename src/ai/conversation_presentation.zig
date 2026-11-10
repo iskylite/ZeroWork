@@ -7,8 +7,8 @@ const journal = @import("session_journal.zig");
 const wire = @import("wire_history.zig");
 const text = @import("local_text_attachments.zig");
 const images = @import("image_attachments.zig");
-const Segment = struct { text: []const u8, started_ms: u64, ended_ms: ?u64, expanded: bool };
-const Timeline = union(enum) { message: Segment, thinking: Segment, tool: usize, notice: usize };
+const Segment = struct { text: []const u8, started_ms: u64, ended_ms: ?u64, expanded: bool, submission: ?@import("../host/identity.zig").SubmissionId = null };
+const Timeline = union(enum) { message: Segment, thinking: Segment, input: Segment, tool: usize, notice: usize };
 const Group = struct { first: usize, expanded: bool };
 const Turn = struct {
     id: u64,
@@ -56,9 +56,9 @@ fn encodeTurn(a: std.mem.Allocator, source: *const turns.Turn) !Turn {
     for (source.timeline.items, timeline) |item, *dest| dest.* = switch (item) {
         .tool => |index| .{ .tool = index },
         .notice => |index| .{ .notice = index },
-        .thinking, .message => |segment| blk: {
-            const value: Segment = .{ .text = segment.text.items, .started_ms = segment.started_ms, .ended_ms = segment.ended_ms, .expanded = segment.expanded };
-            break :blk if (item == .message) .{ .message = value } else .{ .thinking = value };
+        .thinking, .message, .input => |segment| blk: {
+            const value: Segment = .{ .text = segment.text.items, .started_ms = segment.started_ms, .ended_ms = segment.ended_ms, .expanded = segment.expanded, .submission = segment.submission };
+            break :blk if (item == .message) .{ .message = value } else if (item == .input) .{ .input = value } else .{ .thinking = value };
         },
     };
     result.timeline = timeline;
@@ -140,12 +140,12 @@ fn decodeTurn(a: std.mem.Allocator, source: Turn, refs: *std.ArrayList(images.Co
         result.timeline.appendAssumeCapacity(switch (item) {
             .tool => |index| .{ .tool = index },
             .notice => |index| .{ .notice = index },
-            .message, .thinking => |stored| blk: {
+            .message, .thinking, .input => |stored| blk: {
                 const segment = try a.create(turns.Segment);
-                segment.* = .{ .allocator = a, .started_ms = stored.started_ms, .ended_ms = stored.ended_ms, .expanded = stored.expanded };
+                segment.* = .{ .allocator = a, .started_ms = stored.started_ms, .ended_ms = stored.ended_ms, .expanded = stored.expanded, .submission = stored.submission };
                 errdefer segment.release();
                 try segment.text.appendSlice(a, stored.text);
-                break :blk if (item == .message) .{ .message = segment } else .{ .thinking = segment };
+                break :blk if (item == .message) .{ .message = segment } else if (item == .input) .{ .input = segment } else .{ .thinking = segment };
             },
         });
     }

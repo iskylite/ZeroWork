@@ -10,6 +10,7 @@ pub const Capability = struct {
     adaptive: bool = false,
     efforts: [7]bool = @splat(false),
     context: ?u32 = null,
+    output: ?u32 = null,
     vision: ?bool = null,
     pub fn hasControl(self: Capability) bool {
         return self.toggle or !std.mem.eql(bool, &self.efforts, &@as([7]bool, @splat(false)));
@@ -112,6 +113,7 @@ fn integer(v: ?std.json.Value) ?u32 {
 }
 pub fn metadata(v: std.json.Value) Capability {
     var c: Capability = .{ .reasoning = boolean(field(v, "reasoning")), .context = integer(field(v, "context_length")) orelse integer(field(v, "context_window")) orelse integer(field(v, "max_input_tokens")), .vision = boolean(field(v, "vision")) };
+    c.output = integer(field(v, "max_output_tokens")) orelse integer(field(v, "max_tokens"));
     c.control_known = c.reasoning != null and !c.reasoning.?;
     if (field(v, "thinking")) |thinking| if (field(thinking, "values")) |values| {
         if (values == .array) {
@@ -147,7 +149,10 @@ pub fn metadata(v: std.json.Value) Capability {
             }
         }
     }
-    if (field(v, "limit")) |limit| c.context = integer(field(limit, "context")) orelse c.context;
+    if (field(v, "limit")) |limit| {
+        c.context = integer(field(limit, "context")) orelse c.context;
+        c.output = integer(field(limit, "output")) orelse c.output;
+    }
     if (field(v, "modalities")) |m| if (field(m, "input")) |input| {
         if (input == .array) {
             c.vision = false;

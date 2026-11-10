@@ -1144,6 +1144,7 @@ const ShellProductExecution = struct {
         self.* = .{ .fixture = fixture, .controller = controller, .broker = broker, .backend = undefined, .driver = undefined };
         controller.bridge.host_binding = .{ .context = controller.authority, .handler_context = self, .invoke = unavailable, .contributions = &@import("../ai/host_execution.zig").contributions };
         self.backend = try Backend.Context.init(.{ .app = fixture.app, .roster = controller.roster, .store = controller.store, .lookup_context = self, .lookup_task = lookup, .approval = broker });
+        errdefer self.backend.deinit();
         try self.backend.captureTask(controller);
         self.driver = try Driver.start(a, journal, .{ .context = controller.bridge, .call = testScheduler }, self.backend.backend());
     }
@@ -1151,6 +1152,7 @@ const ShellProductExecution = struct {
         self.driver.requestShutdown();
         while (!self.driver.shutdownReady()) self.fixture.tick(self.controller.bridge) catch unreachable;
         self.driver.finish() catch unreachable;
+        self.backend.deinit();
         self.controller.bridge.host_binding = null;
     }
     fn invoke(self: *@This(), tool: []const u8, arguments: anytype) !host.Result {

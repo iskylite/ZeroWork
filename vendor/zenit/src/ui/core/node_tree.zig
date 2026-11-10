@@ -31,6 +31,12 @@ pub fn structureRevision() u64 {
     return g_structure_revision;
 }
 
+/// Invalidates retained topology consumers without coupling independent windows.
+pub fn recordStructureChange(node: *Node) void {
+    g_structure_revision +%= 1;
+    if (node.world_ref) |world| world.structure_revision +%= 1;
+}
+
 /// Sync one parent-child chain change to the node's owner World's elements table.
 ///
 /// Prefers the direct `world_ref`; null (cx-less mock) falls back to the global
@@ -98,7 +104,7 @@ pub fn appendChild(self: *Node, allocator: Allocator, child: *Node) !void {
     }
     if (child.parent) |old_parent| old_parent.removeChildRetained(child);
     self.children.appendAssumeCapacity(child);
-    g_structure_revision +%= 1;
+    recordStructureChange(self);
     child.parent = self;
     // Child has custom_draw -> bubble mark.
     if (child.frame_state.state_bits.flags.has_custom_draw_subtree) {
@@ -138,7 +144,7 @@ pub fn insertChildBefore(self: *Node, allocator: Allocator, child: *Node, before
     // shifts down.
     const index = std.mem.indexOfScalar(*Node, self.children.items, anchor) orelse unreachable;
     self.children.insertAssumeCapacity(index, child);
-    g_structure_revision +%= 1;
+    recordStructureChange(self);
     child.parent = self;
     if (child.frame_state.state_bits.flags.has_custom_draw_subtree) self.markCustomDrawSubtree();
     if (child.frame_state.state_bits.flags.has_text_subtree) self.markSubtreeText();
@@ -211,7 +217,7 @@ pub fn replaceChildOrder(self: *Node, allocator: Allocator, ordered_children: []
         child.parent = null;
     }
     self.children.clearRetainingCapacity();
-    g_structure_revision +%= 1;
+    recordStructureChange(self);
     for (order) |child| {
         if (child.parent) |old_parent| old_parent.removeChildRetained(child);
         self.children.appendAssumeCapacity(child);
@@ -256,7 +262,7 @@ fn removeChildRetainedInternal(self: *Node, child: *Node, full_runtime_rebuild: 
     if (child.parent != self) return;
     const index = std.mem.indexOfScalar(*Node, self.children.items, child) orelse return;
     _ = self.children.orderedRemove(index);
-    g_structure_revision +%= 1;
+    recordStructureChange(self);
     if (full_runtime_rebuild) {
         self.markRuntimeIndexFullRebuild();
     }

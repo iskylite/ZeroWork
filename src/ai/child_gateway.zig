@@ -181,9 +181,12 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
         .list => {
             const Item = struct { agent_id: id.AgentId, conversation: id.ConversationId, name: []const u8, reusable: bool, bound: bool };
             const TaskItem = struct { task: id.TaskId, agent: id.AgentId, status: budget.Status, sequence: u64, generation: u64, request_key: []const u8 };
-            var tasks: [32]TaskItem = undefined;
-            var task_count: usize = 0;
             root.lock();
+            const tasks = a.alloc(TaskItem, root.count) catch |err| {
+                root.mutex.unlock();
+                return err;
+            };
+            var task_count: usize = 0;
             for (root.facts[0..root.count]) |f| if (f.parent != null) {
                 tasks[task_count] = .{ .task = f.task, .agent = f.agent, .status = f.status, .sequence = f.sequence, .generation = f.generation, .request_key = f.request_key };
                 task_count += 1;

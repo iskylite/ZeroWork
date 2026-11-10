@@ -1178,3 +1178,51 @@ test "AI composer context usage marks measured and estimated parts independently
     try std.testing.expect(hasText(menu, "~200"));
     try std.testing.expect(!hasText(menu, "~24.0K"));
 }
+
+test "AI composer streaming usage and effort retain model rows and ignore repeated effort stops" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.click(f.view.buttons[2]);
+    const row = modelOption(f.cx.root.?, "quiet").?;
+    const row_id = row.id;
+    const version = f.view.model_version.peek();
+    var snapshot = f.snapshot();
+    for (0..8) |index| {
+        snapshot.usage = .{ .used_tokens = 1000 + index, .limit_tokens = 200000 };
+        snapshot.effort = if (index % 2 == 0) .low else .high;
+        try f.view.update(snapshot);
+        f.settle();
+        try std.testing.expectEqual(version, f.view.model_version.peek());
+        try std.testing.expectEqual(row_id, modelOption(f.cx.root.?, "quiet").?.id);
+    }
+    const track = find(f.cx.root.?, "ai.effort.slider.track").?.globalRect();
+    const calls = f.calls;
+    for (0..4) |_| {
+        f.cx.handleMouseDown(track.x + track.w - 1, track.y + track.h / 2, .{});
+        f.cx.handleMouseUp(track.x + track.w - 1, track.y + track.h / 2);
+        f.settle();
+    }
+    try std.testing.expectEqual(calls, f.calls);
+    // A catalog provenance update keeps identical rows, with the latest authority.
+    f.models[0].context_discovered = true;
+    snapshot.revision = 2;
+    f.view.preserveModelPopup();
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expectEqual(version, f.view.model_version.peek());
+    try std.testing.expectEqual(row_id, modelOption(f.cx.root.?, "quiet").?.id);
+    f.click(modelOption(f.cx.root.?, "quiet").?);
+    try std.testing.expectEqual(@as(u64, 2), f.last.?.revision);
+    // A real capability change still replaces rows and refreshes their facts.
+    f.models[1].context_window = 64000;
+    snapshot.revision = 3;
+    f.view.preserveModelPopup();
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expect(f.view.model_version.peek() > version);
+    // Retained choices still own their callback strings after old projections die.
+    f.click(modelOption(f.cx.root.?, "quiet").?);
+    try std.testing.expectEqualStrings("quiet", f.last.?.action.model.model_id);
+    try std.testing.expectEqual(@as(u64, 3), f.last.?.revision);
+}

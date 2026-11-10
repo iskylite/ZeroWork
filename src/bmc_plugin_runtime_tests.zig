@@ -518,7 +518,6 @@ test "BMC plugin runtime preserves read tools and cannot enable management write
     try T.expectEqual(svc.Reason.permission_denied, boot.apply(b.context, .{ .execution = execution, .baseline = .{}, .target = "Pxe" }).rejected);
     const manifest = h.plugin.manifest();
     try T.expectEqual(tools.definitions.len, manifest.tools.len);
-    try T.expect(manifest.tools.len <= ai.max_plugin_tools);
     for (manifest.tool_definitions, 0..) |definition, index| {
         try ai.validateDefinition(definition);
         if (index < 3) {

@@ -105,7 +105,7 @@ pub fn compactNowWithProvider(config: pc.ProviderConfig, messages: []const p.Mes
 }
 fn budgetCutoff(config: pc.ProviderConfig, messages: []const p.Message, reserve: usize) !usize {
     const budget = @import("local_text_request.zig");
-    const output = budget.outputTokens(4096, config.context_window);
+    const output = budget.outputTokens(0, config.context_window);
     try budget.checkFixedBudget(reserve, output, config.context_window);
     const cut = cutoff(messages) orelse return error.InsufficientContext;
     const request = config.chatRequest(.{ .model = config.model, .system = "", .messages = messages[cut..], .tool_images = config.vision });
@@ -259,11 +259,6 @@ const Job = struct {
         const self: *Job = @ptrCast(@alignCast(raw));
         switch (delta) {
             .text => |text| {
-                if (self.output.items.len + text.len > 32 * 1024) {
-                    self.failure = error.SummaryTooLarge;
-                    self.cancel.cancel();
-                    return;
-                }
                 self.output.appendSlice(self.arena.allocator(), text) catch {
                     self.failure = error.OutOfMemory;
                     self.cancel.cancel();
@@ -283,7 +278,6 @@ const Job = struct {
     }
     fn summarize(self: *Job, client: *@import("provider_client.zig").Client, source: []const p.Message) anyerror![]const u8 {
         if (self.cancel.isCancelled()) return error.Cancelled;
-        if (self.summary_requests >= 32) return error.CompactionRequestLimit;
         const a = self.arena.allocator();
         const Entry = struct { role: []const u8, content: []const u8, tool_calls: []const p.ToolCall, tool_call_id: ?[]const u8 };
         var entries: std.ArrayList(Entry) = .empty;
@@ -297,7 +291,7 @@ const Job = struct {
         }
         const transcript = try std.json.Stringify.valueAlloc(a, .{ .historical_transcript = entries.items }, .{});
         const messages = [_]p.Message{.{ .role = .user, .content = transcript, .images = images.items }};
-        const request = self.config.chatRequest(.{ .model = self.config.model, .system = instruction, .messages = &messages, .tool_images = self.config.vision, .max_output = @min(2048, self.config.context_window / 4), .cancel = &self.cancel });
+        const request = self.config.chatRequest(.{ .model = self.config.model, .system = instruction, .messages = &messages, .tool_images = self.config.vision, .cancel = &self.cancel });
         @import("local_text_request.zig").checkContext(request, self.config.context_window) catch |err| {
             if (err != error.ContextBudgetExceeded and err != error.InvalidImageMessage) return err;
             var pieces: [2]p.Message = undefined;
@@ -358,7 +352,7 @@ const Job = struct {
         const before_tokens = try budget.inputTokens(before_request);
         const after_tokens = try budget.inputTokens(after_request);
         if (after_tokens >= before_tokens) return error.SummaryDidNotReduceContext;
-        const output = @min(@as(usize, 4096), @max(@as(usize, self.config.context_window / 4), 1));
+        const output = budget.outputTokens(0, self.config.context_window);
         const total = std.math.add(usize, after_tokens, self.reserve_tokens) catch return error.ContextBudgetExceeded;
         if (total > self.config.context_window or output > self.config.context_window - total) return error.ContextBudgetExceeded;
         self.before_tokens = before_tokens;

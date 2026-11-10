@@ -37,7 +37,8 @@ test "execution deadline Stop racing approved or denied inventory does not consu
         }
     };
     for ([_]bool{ true, false }) |allow| {
-        var broker: approval.Broker = .{};
+        var broker: approval.Broker = .{ .allocator = std.testing.allocator };
+        defer broker.clear();
         const ctx = context();
         try broker.configure(ctx, 1);
         var call = try Call.init(ctx, "{\"scope\":\"workspace\"}");
@@ -52,7 +53,8 @@ test "execution deadline Stop racing approved or denied inventory does not consu
     }
 }
 test "inventory on-demand owns pending snapshot and rejects stale or forged decisions" {
-    var broker: approval.Broker = .{};
+    var broker: approval.Broker = .{ .allocator = std.testing.allocator };
+    defer broker.clear();
     const ctx = context();
     const frozen = try selection();
     try broker.configure(ctx, 1);
@@ -90,7 +92,8 @@ test "inventory on-demand owns pending snapshot and rejects stale or forged deci
     try std.testing.expectError(error.StaleInventoryDecision, broker.decide(next_ticket, .allow_conversation));
 }
 test "inventory allow once is exact invocation claimed once and does not expand other authorities" {
-    var broker: approval.Broker = .{};
+    var broker: approval.Broker = .{ .allocator = std.testing.allocator };
+    defer broker.clear();
     const ctx = context();
     const frozen = try selection();
     try broker.configure(ctx, 1);
@@ -131,7 +134,8 @@ test "inventory allow once is exact invocation claimed once and does not expand 
     try std.testing.expectError(error.InventoryApprovalDenied, broker.begin(call.invocation, frozen, 1, std.testing.allocator));
 }
 test "inventory continuous is per conversation spans tasks and new sessions and revokes locally" {
-    var broker: approval.Broker = .{};
+    var broker: approval.Broker = .{ .allocator = std.testing.allocator };
+    defer broker.clear();
     const ctx = context();
     const frozen = try selection();
     try broker.configure(ctx, 7);
@@ -193,7 +197,8 @@ test "inventory continuous is per conversation spans tasks and new sessions and 
     try std.testing.expect(!broker.continuousAllowed());
 }
 test "inventory begin rejects default scope guessed refs changed hashes and nonmetadata tools" {
-    var broker: approval.Broker = .{};
+    var broker: approval.Broker = .{ .allocator = std.testing.allocator };
+    defer broker.clear();
     const ctx = context();
     const frozen = try selection();
     try broker.configure(ctx, 1);
@@ -209,4 +214,43 @@ test "inventory begin rejects default scope guessed refs changed hashes and nonm
     try std.testing.expectError(error.InvalidInventoryApproval, broker.begin(call.invocation, frozen, 1, std.testing.allocator));
     call.invocation.tool_id = "read_terminal";
     try std.testing.expectError(error.InvalidInventoryApproval, broker.begin(call.invocation, frozen, 1, std.testing.allocator));
+}
+
+test "inventory approved receipts do not impose a task lifetime quota" {
+    var broker: approval.Broker = .{ .allocator = std.testing.allocator };
+    defer broker.clear();
+    const ctx = context();
+    const frozen = try selection();
+    try broker.configure(ctx, 1);
+    var call = try Call.init(ctx, "{\"scope\":\"workspace\"}");
+    defer call.deinit();
+    for (0..256) |index| {
+        call.invocation.operation_id = index + 1;
+        const ticket = try broker.begin(call.invocation, frozen, 1, std.testing.allocator);
+        try broker.decide(ticket, .allow_once);
+        try broker.wait(ticket, null);
+        try std.testing.expect(broker.grantForInvocation(call.invocation, frozen, 1) != null);
+        broker.finish(ticket);
+    }
+    try std.testing.expectEqual(@as(usize, 256), broker.seen.items.len);
+    try std.testing.expectError(error.InventoryAlreadyConsumed, broker.begin(call.invocation, frozen, 1, std.testing.allocator));
+}
+
+test "inventory continuous grants are not limited to sixty four conversations" {
+    var broker: approval.Broker = .{ .allocator = std.testing.allocator };
+    defer broker.clear();
+    const frozen = try selection();
+    for (0..80) |_| {
+        var ctx = context();
+        ctx.conversation_id = .generate();
+        try broker.configure(ctx, 1);
+        var call = try Call.init(ctx, "{\"scope\":\"workspace\"}");
+        defer call.deinit();
+        const ticket = try broker.begin(call.invocation, frozen, 1, std.testing.allocator);
+        try broker.decide(ticket, .allow_conversation);
+        try broker.wait(ticket, null);
+        broker.finish(ticket);
+        try std.testing.expect(broker.continuousAllowed());
+    }
+    try std.testing.expectEqual(@as(usize, 80), broker.continuous.items.len);
 }

@@ -444,13 +444,13 @@ test "AI conversation inline edit preserves actual call results and clone trunca
     defer store.deinit();
     _ = try store.capture(&ledger, &.{});
     const messages = [_]@import("ai/assistant_store.zig").Message{.{ .user = true, .text = @constCast("request"), .turn = .{ .id = 7 } }};
-    store.retained_bytes = facts.Store.max_bytes; // Discarded turns must not consume the fork budget.
+    store.retained_bytes = 16 * 1024 * 1024; // Discarded turns must not consume the fork budget.
     var fork = try store.cloneTurns(&messages);
     defer fork.deinit();
     store.keepTurns(&.{});
     try std.testing.expectEqual(@as(usize, 0), store.records.items.len);
     try std.testing.expectEqualStrings("actual stdout", fork.records.items[0].targets[0].result.stdout);
-    try std.testing.expect(fork.retained_bytes < facts.Store.max_bytes);
+    try std.testing.expect(fork.retained_bytes < 16 * 1024 * 1024);
 }
 
 test "AI conversation rollback clears manager transcript while preserving prepared next request" {
@@ -858,4 +858,111 @@ test "AI step aggregation native disclosure keeps existing step cards and adds o
     header.behavior.events.on_click.?.invoke();
     try std.testing.expect(!group.expanded);
     try std.testing.expect(step_expanded);
+}
+
+test "AI timeline retains existing messages across appends and disposes reset row callbacks" {
+    const Retained = @import("ui/ai_timeline_view.zig");
+    const Fixture = struct {
+        count: usize = 2,
+        released: usize = 0,
+        fn toggled(_: *@This()) void {}
+        fn release(self: *@This()) void {
+            self.released += 1;
+        }
+        fn sync(raw: *anyopaque, view: *Retained.View) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            for (0..self.count) |index| {
+                const row = try view.row(index, index, .message);
+                if (row.root.children.items.len == 0) {
+                    try row.scope.onCleanup(@This(), self, release);
+                    try row.root.appendChild(a, try ui.text(view.cx, "retained message", .{}));
+                }
+            }
+            view.truncate(self.count);
+        }
+    };
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(600, 456);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    var fixture: Fixture = .{};
+    const view = try Retained.View.mount(cx, scope, cx.root.?, &fixture, Fixture.sync, cx.on(Fixture, &fixture, Fixture.toggled));
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    const first = view.rows.items[0].root.id;
+    const discarded = view.rows.items[1].root.id;
+    fixture.count = 6;
+    view.invalidate();
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectEqual(first, view.rows.items[0].root.id);
+    try std.testing.expectEqual(discarded, view.rows.items[1].root.id);
+    fixture.count = 1;
+    view.invalidate();
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectEqual(@as(usize, 5), fixture.released);
+    fixture.count = 2;
+    view.invalidate();
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectEqual(first, view.rows.items[0].root.id);
+    try std.testing.expect(discarded != view.rows.items[1].root.id);
+}
+
+test "AI retained thinking updates preserve open detail nodes and own streamed bytes" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(600, 456);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    var expanded = false;
+    const Step = @import("ui/ai_step_view.zig");
+    var props: Step.Props = .{ .title = "思考", .projection = "initial", .detail = "long thinking before disclosure", .copy_detail = false, .phase = .running, .elapsed_ms = 0, .expanded = &expanded };
+    const result = try Step.mountRetained(cx, scope, props);
+    try cx.root.?.appendChild(a, result.root);
+    const header = find(result.root, "ai.step.header").?;
+    const detail = find(result.root, "ai.step.detail").?;
+    try std.testing.expectEqualStrings("", detail.getText().?.content);
+    header.behavior.events.on_click.?.invoke();
+    try std.testing.expect(expanded);
+    try std.testing.expectEqualStrings(props.detail, detail.getText().?.content);
+    for (0..20) |index| {
+        var buffer: [128]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buffer, "thinking fragment {d}", .{index});
+        props.detail = text;
+        props.projection = text;
+        try result.update(props);
+        @memset(&buffer, 'x');
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+        try std.testing.expect(find(result.root, "ai.step.header").? == header);
+        try std.testing.expect(find(result.root, "ai.step.detail").? == detail);
+        try std.testing.expect(expanded);
+        try std.testing.expect(!std.mem.startsWith(u8, detail.getText().?.content, "xxx"));
+    }
+    header.behavior.events.on_click.?.invoke();
+    props.detail = "new bytes while collapsed";
+    props.projection = "new summary";
+    try result.update(props);
+    try std.testing.expect(!expanded);
+    try std.testing.expect(!std.mem.eql(u8, props.detail, detail.getText().?.content));
+    header.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqualStrings(props.detail, detail.getText().?.content);
 }

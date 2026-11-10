@@ -101,7 +101,7 @@ try {
         if (peer.exitCode !== null) throw new Error('SSH peer exited');
         try { return JSON.parse(await readFile(join(iso, 'peer/ready.json'), 'utf8')); } catch { return null; }
     }, 15000);
-    await writeFile(join(iso, 'data/config.toml'), '[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n[ssh]\nauto_reconnect=false\nauto_shell_integration=true\n[updates]\nauto_check=false\n');
+    await writeFile(join(iso, 'data/config.toml'), '[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n[ssh]\nauto_reconnect=false\nauto_shell_integration=true\n[updates]\nauto_check=false\n' + (process.env.ZEROWORK_PERF_INTEGRATION === '1' ? '[ai]\ndefault_provider="fixture"\n[[ai.providers]]\nid="fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:9/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="fixture"\ncontext_window=200000\ndefault=true\n' : ''));
     await writeFile(join(iso, 'data/hosts.toml'), `[registry]\nschema_version=2\nrevision=1\nnext_connection_id=2\nnext_group_id=1\n[[hosts]]\nconnection_id=1\nrevision=1\nprotocol="ssh"\nauth_mode="password"\noptions={strict_host_key=true}\nname="SSH output fixture"\nhost="127.0.0.1"\nport=${ready.port}\nuser="${ready.user}"\nauth={password="${ready.password}"}\n`);
     appLog = await open(join(out, 'app.log'), 'w');
     app = spawn(binary, [], {env: {...process.env, OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', ZEROWORK_DATA_DIR: join(iso, 'data'), ZEROWORK_AUTOCONNECT: '0', ZENIT_E2E_BACKGROUND: '1', ZENIT_E2E_ISOLATE_POINTER: '1'}, stdio: ['ignore', appLog.fd, appLog.fd]});
@@ -159,12 +159,16 @@ try {
         assert(activeFrames > 100, 'active SSH window presents output');
         assert(siblingFrames < Math.max(20, activeFrames / 10), 'unrelated window avoids output-rate redraw');
         report.integration = {settings_open_tree_nodes: openTree, settings_closed_tree_nodes: closedTree, search: searched, search_after_cancel: drained, active_frames: activeFrames, sibling_frames: siblingFrames};
-        await select(sibling.window); await h.request('POST', '/zerowork/windows', {action: 'close', window: sibling.window});
-        await h.waitFor(async () => {
-            const state = await windows(); if (!state.windows.some((w: any) => w.window === sibling.window)) return true;
-            for (const id of ['session.close.accept', 'local.close.accept']) if ((await h.query(id)).some(shown)) await h.clickTestId(id);
-            return null;
-        }, 20000, 100);
+        await select(sibling.window);
+        const beforeClose = (await windows()).sessions.filter((s: any) => s.window === sibling.window).map((s: any) => [s.session,s.generation,s.lifecycle,s.close_operation]);
+        assert(beforeClose.length > 0, 'sibling owns its SSH session');
+        assert((await h.request('POST', '/zerowork/windows', {action: 'close', window: sibling.window})).ok);
+        // AppNavHost.nativeCloseRequest(.window) intentionally hides the window.
+        // Its session must survive; application Quit below drains both windows.
+        const retained = await windows();
+        assert(retained.windows.some((w: any) => w.window === sibling.window), 'ordinary window close retains the window host');
+        assert.deepEqual(retained.sessions.filter((s: any) => s.window === sibling.window).map((s: any) => [s.session,s.generation,s.lifecycle,s.close_operation]), beforeClose, 'ordinary close preserves the SSH session');
+        report.integration.close_retains_sibling_session = true;
         await select(first);
     }
     if (process.env.ZEROWORK_PERF_SAMPLE === '1') {
@@ -180,7 +184,7 @@ try {
     }
     // Exercise the real close/worker drain path after measurement, including
     // the VT mutex lifetime. Forced termination below is failure cleanup only.
-    const quit = await h.request('POST', '/quit');
+    const quit = await h.request('POST', '/zerowork/windows', {action: 'quit'});
     assert(quit.ok, 'normal application Quit accepted');
     const quitStarted = performance.now();
     let rpcUnavailable = false;

@@ -41,6 +41,14 @@ pub const Event = struct {
 pub const Persistence = struct {
     context: *anyopaque,
     write: *const fn (*anyopaque, Event) anyerror!void,
+    /// Optional durable worker path; message bytes stay pinned until release.
+    checkpoint: ?*const fn (*anyopaque, Event) anyerror!Write = null,
+    pub const Write = struct {
+        context: *anyopaque,
+        ready: *const fn (*anyopaque) bool,
+        finish: *const fn (*anyopaque) anyerror!void,
+        release: *const fn (*anyopaque) void,
+    };
 };
 pub const Record = struct {
     id: identity.ConversationId,
@@ -332,7 +340,7 @@ pub const Store = struct {
     }
     pub fn setChildDraft(self: *Store, conversation: identity.ConversationId, revision: u64, text: []const u8) !u64 {
         const record = self.find(conversation) orelse return error.ConversationNotFound;
-        if (record.child == null or record.draft_revision != revision or text.len > wire.History.max_text_bytes or !std.unicode.utf8ValidateSlice(text)) return error.StaleDraft;
+        if (record.child == null or record.draft_revision != revision or !std.unicode.utf8ValidateSlice(text)) return error.StaleDraft;
         const next = try identity.advance(revision);
         const owned = try self.allocator.dupe(u8, text);
         errdefer self.allocator.free(owned);
@@ -344,7 +352,7 @@ pub const Store = struct {
     }
     pub fn setDraft(self: *Store, expected: input.Fence, revision: u64, text: []const u8) !u64 {
         const record = try self.validate(expected);
-        if (record.draft_revision != revision or text.len > wire.History.max_text_bytes or !std.unicode.utf8ValidateSlice(text)) return error.StaleDraft;
+        if (record.draft_revision != revision or !std.unicode.utf8ValidateSlice(text)) return error.StaleDraft;
         const next = try identity.advance(revision);
         const owned = try self.allocator.dupe(u8, text);
         errdefer self.allocator.free(owned);
@@ -358,12 +366,20 @@ pub const Store = struct {
     /// separate immutable snapshot, never pointers into its growing tool loop.
     pub fn checkpoint(self: *Store, expected: input.Fence, turn: u64, messages: []const provider.Message, recoverable: bool) !void {
         const record = try self.validate(expected);
-        const next = try identity.advance(record.content_revision);
+        _ = try identity.advance(record.content_revision);
         var snapshot = try wire.History.copy(self.allocator, messages, "");
         errdefer snapshot.deinit();
         try self.save(.{ .kind = .checkpoint, .conversation = record.id, .agent = expected.agent, .revision = record.revision, .turn = turn, .messages = snapshot.messages, .recoverable = recoverable });
+        try self.publishDurableCheckpoint(expected, turn, &snapshot, recoverable);
+    }
+    /// UI-thread publication only, after a successful durable write acknowledgement.
+    /// Moving the already-owned worker snapshot avoids another full history copy.
+    pub fn publishDurableCheckpoint(self: *Store, expected: input.Fence, turn: u64, snapshot: *wire.History, recoverable: bool) !void {
+        const record = try self.validate(expected);
+        const next = try identity.advance(record.content_revision);
         record.history.deinit();
-        record.history = snapshot;
+        record.history = snapshot.*;
+        snapshot.* = .{};
         record.recovery_history.deinit();
         record.content_revision = next;
         record.last_turn = turn;
@@ -738,7 +754,6 @@ pub const Store = struct {
         return ticket;
     }
     fn validateTargets(live: scope.Scope, targets: []const identity.SessionHandle) !void {
-        if (targets.len > wire.History.max_messages) return error.InvalidTargetCount;
         for (targets, 0..) |handle, i| {
             if (@backingInt(handle.session_id) == 0 or handle.generation == 0) return error.TargetOutsideAssistant;
             try live.validateDirectory(&.{@backingInt(handle.session_id)});
@@ -846,8 +861,8 @@ pub const Store = struct {
         const targets = event.targets orelse return error.InvalidSessionJournal;
         const agent_id = event.agent orelse return error.InvalidSessionJournal;
         if (!agent_id.eql(info.agent) or record.binding != null or record.ending != null or !info.owning_parent_conversation.eql(parent.conversation) or parent_record.child != null or parent_record.ending != null or !(try self.fence(parent.conversation)).eql(parent) or !owner.eql(parent_record.binding.?.owner) or event.revision != try identity.advance(record.revision) or event.environment != try identity.advance(agent_value.environment)) return error.InvalidSessionJournal;
-        if (targets.len > wire.History.max_messages) return error.InvalidSessionJournal;
-        var ids: [wire.History.max_messages]u64 = undefined;
+        const ids = try self.allocator.alloc(u64, targets.len);
+        defer self.allocator.free(ids);
         for (targets, 0..) |handle, i| ids[i] = @backingInt(handle.session_id);
         try validateTargets(.{ .owner = owner, .members = .{}, .inventory = ids[0..targets.len] }, targets);
         const owned_targets = try self.allocator.dupe(identity.SessionHandle, targets);
@@ -1084,7 +1099,6 @@ pub const Store = struct {
             if (!prior.receipt.fence.eql(receipt.fence) or prior.receipt.sequence != receipt.sequence or prior.receipt.mode != receipt.mode or prior.receipt.revision > receipt.revision or prior.receipt.attempt > receipt.attempt or (input.terminal(prior.receipt.delivery) and prior.receipt.delivery != receipt.delivery)) return error.InvalidSessionJournal;
         }
         if (entry == null) {
-            if (record.inbox.entries.items.len >= wire.History.max_messages) return error.InputQueueFull;
             try record.inbox.entries.ensureUnusedCapacity(self.allocator, 1);
             const created = try self.allocator.create(input.Entry);
             created.* = .{ .receipt = receipt, .payload = .{}, .text_bytes = messages[0].content.len };

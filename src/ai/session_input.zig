@@ -7,6 +7,21 @@ const wire = @import("wire_history.zig");
 pub const Mode = @import("../config/config.zig").FollowUpMode;
 pub const Delivery = enum { queued, submitting, accepted, consumed, failed, cancelled, outcome_unknown };
 pub const Route = enum { start, queue, steer };
+pub const WorkPhase = enum {
+    starting,
+    continuing,
+    response,
+    tools,
+
+    pub fn waitingHint(self: WorkPhase) []const u8 {
+        return switch (self) {
+            .starting => "当前任务启动后处理",
+            .continuing => "下一次请求时处理",
+            .response => "当前响应结束后处理",
+            .tools => "当前工具返回后处理",
+        };
+    }
+};
 pub const Pause = enum { stop, end, environment, failure, budget, unknown };
 pub const Fence = struct {
     agent: identity.AgentId,
@@ -54,12 +69,9 @@ pub const Budget = struct {
     mutex: std.atomic.Mutex = .unlocked,
     count: usize = 0,
     text_bytes: usize = 0,
-    pub const max_count = 256;
-    pub const max_text_bytes = 8 * 1024 * 1024;
     fn reserve(self: *Budget, count: usize, bytes: usize) !void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
-        if (count > max_count -| self.count or bytes > max_text_bytes -| self.text_bytes) return error.InputQueueFull;
         self.count += count;
         self.text_bytes += bytes;
     }
@@ -77,6 +89,7 @@ pub const Inbox = struct {
     admission: bool = true,
     active_turn: ?u64 = null,
     closing: bool = false,
+    work_phase: WorkPhase = .continuing,
     revision: u64 = 1,
     queue_revision: u64 = 1,
     next_sequence: u64 = 1,
@@ -85,8 +98,6 @@ pub const Inbox = struct {
     /// Application controller owns this budget. It serializes admissions and
     /// removals; workers only change delivery under their inbox lock.
     budget: ?*Budget = null,
-    pub const max_count = 32;
-    pub const max_text_bytes = 512 * 1024;
 
     pub fn init(a: std.mem.Allocator, fence: Fence) Inbox {
         return .{ .allocator = a, .fence = fence };
@@ -111,6 +122,27 @@ pub const Inbox = struct {
     }
     pub fn admit(self: *Inbox, fence: Fence, id: identity.SubmissionId, message: provider.Message, mode: Mode) !Receipt {
         return self.admitWithOrigin(fence, id, message, mode, null);
+    }
+    /// Preview and admission share this decision under the same inbox mutex.
+    /// The controller separately checks whether an idle runtime can start.
+    pub fn previewRoute(self: *Inbox, mode: Mode) Route {
+        self.lock();
+        defer self.unlock();
+        return self.routeLocked(mode);
+    }
+    fn routeLocked(self: *Inbox, mode: Mode) Route {
+        if (!self.admission) return .queue;
+        if (self.active_turn != null) return if (mode == .steer and !self.closing and self.work_phase != .starting) .steer else .queue;
+        for (self.entries.items) |entry| {
+            if (entry.receipt.archived) continue;
+            if (entry.receipt.delivery == .outcome_unknown or (entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(self.fence))) return .queue;
+        }
+        return .start;
+    }
+    pub fn setWorkPhase(self: *Inbox, turn: u64, phase: WorkPhase) void {
+        self.lock();
+        defer self.unlock();
+        if (self.active_turn == turn and !self.closing) self.work_phase = phase;
     }
     pub fn reissue(self: *Inbox, fence: Fence, original: identity.SubmissionId, revision: u64, id: identity.SubmissionId, message: provider.Message, mode: Mode) !Receipt {
         self.lock();
@@ -147,19 +179,11 @@ pub const Inbox = struct {
             payload.deinit();
             return prior.receipt;
         }
-        var bytes: usize = 0;
-        var count: usize = 0;
-        for (self.entries.items) |entry| if (!terminal(entry.receipt.delivery) and !entry.receipt.archived) {
-            count += 1;
-            bytes += entry.text_bytes;
-        };
-        if (count >= max_count or message.content.len > max_text_bytes -| bytes) return error.InputQueueFull;
-        if (self.entries.items.len >= wire.History.max_messages) return error.ToolTranscriptLimit;
         if (self.budget) |b| try b.reserve(1, message.content.len);
         errdefer if (self.budget) |b| b.release(1, message.content.len);
         const next_sequence = try identity.advance(self.next_sequence);
         const queue_rev = try identity.advance(self.queue_revision);
-        const is_steer = mode == .steer and self.active_turn != null and !self.closing;
+        const is_steer = self.routeLocked(mode) == .steer;
         const input_rev = if (is_steer) try identity.advance(self.revision) else self.revision;
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
         const entry = try self.allocator.create(Entry);
@@ -173,7 +197,7 @@ pub const Inbox = struct {
         self.revision = input_rev;
         return value;
     }
-    pub fn claim(self: *Inbox, id: identity.SubmissionId, revision: u64, expected_queue: ?u64, turn: u64, route: Route) !Receipt {
+    pub fn claim(self: *Inbox, id: identity.SubmissionId, revision: u64, expected_queue: ?u64, turn: u64, target_route: Route) !Receipt {
         self.lock();
         defer self.unlock();
         if (!self.admission) return error.ConversationEnding;
@@ -182,17 +206,17 @@ pub const Inbox = struct {
         if (!entry.receipt.fence.eql(self.fence) or entry.receipt.revision != revision) return error.BindingChanged;
         if (entry.receipt.delivery != .queued or entry.receipt.pause != null) return error.SubmissionNotReady;
         for (self.entries.items) |other| if (other.receipt.delivery == .outcome_unknown and !other.receipt.archived) return error.SubmissionUnconfirmed;
-        if (route == .steer) {
+        if (target_route == .steer) {
             if (self.active_turn != turn or self.closing) return error.TurnChanged;
-        } else if (route == .start) {
+        } else if (target_route == .start) {
             if (self.active_turn != null) return error.AgentBusy;
         } else return error.InvalidSubmission;
         var value = entry.receipt;
         value.attempt = std.math.add(u64, value.attempt, 1) catch return error.RevisionExhausted;
         value.revision = try identity.advance(value.revision);
-        value.route = route;
+        value.route = target_route;
         value.turn = turn;
-        value.expected_turn = if (route == .steer) turn else null;
+        value.expected_turn = if (target_route == .steer) turn else null;
         value.delivery = .accepted;
         const next_queue = try identity.advance(self.queue_revision);
         const next_input = try identity.advance(self.revision);
@@ -200,7 +224,7 @@ pub const Inbox = struct {
         entry.receipt = value;
         self.queue_revision = next_queue;
         self.revision = next_input;
-        if (route == .start) {
+        if (target_route == .start) {
             self.active_turn = turn;
             self.closing = false;
         }
@@ -223,11 +247,6 @@ pub const Inbox = struct {
         const entry = self.findLocked(id) orelse return error.SubmissionNotFound;
         if (!self.admission or !entry.receipt.fence.eql(self.fence)) return error.BindingChanged;
         if (entry.receipt.revision != revision or entry.receipt.delivery != .queued) return error.SubmissionNotReady;
-        var bytes: usize = 0;
-        for (self.entries.items) |other| if (other != entry and !terminal(other.receipt.delivery) and !other.receipt.archived) {
-            bytes += other.text_bytes;
-        };
-        if (message.content.len > max_text_bytes -| bytes) return error.InputQueueFull;
         const extra = message.content.len -| entry.text_bytes;
         if (self.budget) |b| try b.reserve(0, extra);
         errdefer if (self.budget) |b| b.release(0, extra);
@@ -247,14 +266,16 @@ pub const Inbox = struct {
         self.lock();
         defer self.unlock();
         if (!self.admission or expected != self.queue_revision) return error.QueueChanged;
-        var slots: [max_count]usize = undefined;
+        const slots = try self.allocator.alloc(usize, self.entries.items.len);
+        defer self.allocator.free(slots);
         var count: usize = 0;
         for (self.entries.items, 0..) |entry, i| if (entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(self.fence)) {
             slots[count] = i;
             count += 1;
         };
         if (count != order.len) return error.InvalidQueueOrder;
-        var ordered: [max_count]*Entry = undefined;
+        const ordered = try self.allocator.alloc(*Entry, order.len);
+        defer self.allocator.free(ordered);
         for (order, 0..) |id, i| {
             for (order[0..i]) |prior| if (id.eql(prior)) return error.InvalidQueueOrder;
             const entry = self.findLocked(id) orelse return error.InvalidQueueOrder;
@@ -264,7 +285,8 @@ pub const Inbox = struct {
         const next_queue = try identity.advance(self.queue_revision);
         if (self.persist) |p| {
             const commit = p.order orelse return error.DurableQueueOrderUnavailable;
-            var full: [wire.History.max_messages]identity.SubmissionId = undefined;
+            const full = try self.allocator.alloc(identity.SubmissionId, self.entries.items.len);
+            defer self.allocator.free(full);
             for (self.entries.items, 0..) |entry, i| full[i] = entry.receipt.id;
             for (slots[0..count], order) |i, id| full[i] = id;
             try commit(p.context, self.fence, full[0..self.entries.items.len]);
