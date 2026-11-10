@@ -206,13 +206,17 @@ pub const View = struct {
             const card = try ui.box(self.cx, S.row(), .{});
             card.meta.ownership.meta.test_id = "notifications.history.record";
             try self.scroll.content.appendChild(self.cx.allocator, card);
-            const main = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 8, .min_width = 0, .flex_shrink = 0 }, .{});
+            const main = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .start, .gap = 8, .min_width = 0, .flex_shrink = 0 }, .{});
             try card.appendChild(self.cx.allocator, main);
             const assets = [_]ui.SvgAsset{ ui.icons.info, ui.icons.circle_check, ui.icons.triangle_alert, ui.icons.circle_alert };
             try main.appendChild(self.cx.allocator, try ui.iconTint(self.cx, assets[@backingInt(record.event.severity)], feedback.statusInk(@backingInt(record.event.severity)), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
-            const title = try ui.text(self.cx, record.event.title, S.text(false));
+            var title_style = S.text(false);
+            title_style.wrap = .word;
+            title_style.text_overflow = .clip;
+            const title = try ui.text(self.cx, record.event.title, title_style);
             title.meta.ownership.meta.test_id = "notifications.history.title";
             title.setStyleInline(self.cx.allocator, S.line());
+            title.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
             try main.appendChild(self.cx.allocator, title);
             const age = try ui.text(self.cx, "", .{ .font_size = 10.5, .line_height = 18.0 / 10.5, .color = theme.current().fg_2, .selectable = false });
             age.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 18 }, .max_width = 76, .flex_shrink = 0 });
@@ -230,10 +234,12 @@ pub const View = struct {
             summary.meta.ownership.meta.test_id = "notifications.history.summary";
             summary.setStyleInline(self.cx.allocator, S.line());
             try secondary.appendChild(self.cx.allocator, summary);
-            // The common single action stays inline. Additional actions remain
-            // available with the complete content in the expanded section.
-            if (record.event.actions.len > 0) try self.mountAction(scope, secondary, record, 0);
-            const expandable = detail.len > 0 or record.event.actions.len > 1 or sources > 1;
+            secondary.setDisplay(if (summary_text.len > 0) .flex else .none);
+            const action_footer = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .flex_wrap = .wrap, .align_items = .center, .justify = .end, .gap = 6, .padding = .{ .left = 22, .top = 4 }, .flex_shrink = 0 }, .{});
+            action_footer.meta.ownership.meta.test_id = "notifications.history.actions";
+            for (0..record.event.actions.len) |index| try self.mountAction(scope, action_footer, record, index);
+            const failure = record.event.severity == .failure;
+            const expandable = (!failure and detail.len > 0) or sources > 1;
             const expanded = expandable and self.expanded_fact == record.fact_id;
             if (expandable) {
                 const expand_handler = try scope.createState(Expand, .{ .view = self, .fact_id = record.fact_id });
@@ -241,19 +247,26 @@ pub const View = struct {
                 expand.meta.ownership.meta.test_id = "notifications.history.expand";
                 expand_handler.node = expand;
                 expand.behavior.interaction.a11y.?.expanded = expanded;
-                try secondary.appendChild(self.cx.allocator, expand);
+                try action_footer.appendChild(self.cx.allocator, expand);
                 if (self.pending_detail_focus == record.fact_id) {
                     self.cx.setFocus(expand);
                     self.pending_anchor = expand;
                 }
             }
-            if (expanded) {
-                const details = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{ .left = 22, .top = 4, .bottom = 2 }, .direction = .column, .gap = 4, .min_width = 0, .flex_shrink = 0 }, .{});
-                details.meta.ownership.meta.test_id = "notifications.history.details";
-                try card.appendChild(self.cx.allocator, details);
+            if (expanded or (failure and detail.len > 0)) {
+                const message_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, self.cx);
+                message_scroll.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .max_height = 240, .min_height = 0, .min_width = 0, .flex_shrink = 1 });
+                message_scroll.container.meta.ownership.meta.test_id = "notifications.history.details";
+                const details = message_scroll.content;
+                details.meta.ownership.meta.test_id = "notifications.history.message";
+                details.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{ .left = 22, .top = 4, .bottom = 2 }, .direction = .column, .gap = 4, .min_width = 0, .flex_shrink = 0 });
+                try card.insertChildBefore(self.cx.allocator, message_scroll.container, secondary);
                 var text_style = S.text(true);
                 text_style.wrap = .word;
                 text_style.text_overflow = .clip;
+                text_style.font_size = 12;
+                text_style.line_height = 1.5;
+                if (failure) text_style.color = theme.current().danger_ink;
                 if (detail.len > 0) {
                     const line = try ui.text(self.cx, detail, text_style);
                     line.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
@@ -271,14 +284,10 @@ pub const View = struct {
                         try self.mountAction(scope, source_row, source, action_index);
                         break;
                     };
-                    try details.appendChild(self.cx.allocator, source_row);
+                    try action_footer.appendChild(self.cx.allocator, source_row);
                 };
-                if (record.event.actions.len > 1) {
-                    const actions = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .flex_wrap = .wrap, .gap = 6, .flex_shrink = 0 }, .{});
-                    try details.appendChild(self.cx.allocator, actions);
-                    for (1..record.event.actions.len) |index| try self.mountAction(scope, actions, record, index);
-                }
             }
+            if (record.event.actions.len > 0 or expandable) try card.appendChild(self.cx.allocator, action_footer) else self.cx.destroyDetached(action_footer);
         }
         self.pending_detail_focus = null;
         self.age_minute = std.math.maxInt(u64);

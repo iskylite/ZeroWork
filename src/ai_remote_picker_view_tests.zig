@@ -196,3 +196,82 @@ test "AI remote source tooltip follows selected name and clears stale names on e
     try picker.open(.{ .group = 1 }, &.{});
     try std.testing.expectEqualStrings("远程来源", picker.source_hint_label.getText().?.content);
 }
+
+test "AI remote reference owns only its source and path through prompt and persistence" {
+    const std = @import("std");
+    const attachments = @import("ai/local_text_attachments.zig");
+    const a = std.testing.allocator;
+    const owner: attachments.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 7 };
+    var source_name = "remote fixture".*;
+    var path = "/not-a-local-file/Rocky.iso".*;
+    var reference = try attachments.ContentRef.createRemoteReference(a, owner, &source_name, &path);
+    defer reference.release();
+    @memset(&source_name, 'x');
+    @memset(&path, 'x');
+    const content = reference.content().?;
+    try std.testing.expectEqualStrings("remote fixture", content.source.remote_file.source_name);
+    try std.testing.expectEqualStrings("/not-a-local-file/Rocky.iso", content.path);
+    try std.testing.expect(content.source.remote_file.reference_only);
+    try std.testing.expect(content.source.remote_file.operation == null);
+    try std.testing.expectEqual(@as(usize, 0), content.bytes.len);
+
+    var draft = try attachments.Draft.init(a, .{ .session = 101 });
+    defer draft.deinit();
+    const ticket = try draft.begin();
+    var incoming = reference.retain();
+    _ = try draft.complete(ticket, &incoming);
+    var sent = try draft.freeze();
+    defer sent.deinit();
+    const wire = try @import("ai/local_text_request.zig").compose(a, "inspect this reference", &sent, 4096);
+    defer a.free(wire);
+    for ([_][]const u8{ "<remote_file_reference>", "source_session=101", "source_generation=7", "source_name=remote fixture", "path=/not-a-local-file/Rocky.iso", "File contents are not included", "file tool" }) |expected| {
+        try std.testing.expect(std.mem.indexOf(u8, wire, expected) != null);
+    }
+    for ([_][]const u8{ "text:", "read_bytes=", "captured_at_ms=", "<remote_file_attachment>" }) |absent| {
+        try std.testing.expect(std.mem.indexOf(u8, wire, absent) == null);
+    }
+
+    const encoded = try std.json.Stringify.valueAlloc(a, content, .{});
+    defer a.free(encoded);
+    const parsed = try std.json.parseFromSlice(attachments.Content, a, encoded, .{});
+    defer parsed.deinit();
+    var restored = try attachments.ContentRef.restore(a, parsed.value);
+    defer restored.release();
+    try std.testing.expect(restored.content().?.source.remote_file.reference_only);
+    try std.testing.expect(restored.content().?.source.remote_file.owner.eql(owner));
+    try std.testing.expectEqualStrings(content.path, restored.content().?.path);
+    try std.testing.expectEqual(@as(usize, 0), restored.content().?.bytes.len);
+    try std.testing.expectError(error.InvalidRemotePath, attachments.ContentRef.createRemoteReference(a, owner, "remote", "relative.iso"));
+}
+
+test "AI remote reference confirmation discards preview bytes while preserving the preview snapshot" {
+    const std = @import("std");
+    const attachments = @import("ai/local_text_attachments.zig");
+    const a = std.testing.allocator;
+    const owner: attachments.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 7 };
+    var preview = try attachments.ContentRef.restore(a, .{
+        .path = "/fixture/secret.txt",
+        .bytes = "preview-only confidential text",
+        .captured_at_ms = 123,
+        .sha256 = @splat(0),
+        .bom_preserved = false,
+        .source = .{ .remote_file = .{ .owner = owner, .source_name = "remote fixture", .source_revision = 2, .operation = .{ .owner = .{ .session = owner }, .operation_id = 3 }, .actual_path = "/fixture/secret.txt", .original_size = 30, .read_bytes = 30, .read_limit = 4096, .truncated = false } },
+    });
+    defer preview.release();
+    var draft = try attachments.Draft.init(a, .{ .session = 101 });
+    defer draft.deinit();
+    const ticket = try draft.begin();
+    var incoming = preview.retain();
+    try draft.stage(ticket, &incoming);
+    _ = try draft.attach(ticket);
+    const attached = draft.items.items[0].reference.content().?;
+    try std.testing.expect(attached.source.remote_file.reference_only);
+    try std.testing.expectEqual(@as(usize, 0), attached.bytes.len);
+    try std.testing.expectEqualStrings(preview.content().?.path, attached.path);
+    try std.testing.expectEqualStrings("preview-only confidential text", preview.content().?.bytes);
+    var bundle = try draft.freeze();
+    defer bundle.deinit();
+    const wire = try @import("ai/local_text_request.zig").compose(a, "inspect", &bundle, 4096);
+    defer a.free(wire);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "preview-only confidential text") == null);
+}

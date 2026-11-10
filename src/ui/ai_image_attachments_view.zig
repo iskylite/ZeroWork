@@ -24,6 +24,7 @@ const Card = struct {
     retry_button: *ui.Node = undefined,
     remove_button: *ui.Node = undefined,
     reference: images.ContentRef = .{},
+    problem: ?anyerror = null,
     texture: ?u32 = null,
     fn open(self: *Card) void {
         self.view.open(self) catch |err| self.view.fail(err);
@@ -159,6 +160,7 @@ pub const View = struct {
                 continue;
             }
             const item = draft.?.items.items[index];
+            card.problem = item.problem;
             try self.updateCard(card, item.ticket, item.path, item.state, item.reference);
         }
         self.root.setDisplay(if (count > 0) .flex else .none);
@@ -181,6 +183,7 @@ pub const View = struct {
                 continue;
             }
             const item = bundle.items[index];
+            card.problem = null;
             const content = item.reference.content() orelse return error.EmptyAttachmentResult;
             try self.updateCard(card, .{ .owner = bundle.owner, .conversation_id = bundle.conversation_id, .draft_epoch = bundle.draft_epoch, .id = item.id }, content.path, .ready, item.reference);
         }
@@ -210,6 +213,7 @@ pub const View = struct {
         }
     }
     fn open(self: *View, card: *Card) !void {
+        if (card.reference.content() == null) return card.problem orelse error.ImageNotReady;
         if (self.readonly) if (self.callbacks.preview_sent) |callback| return callback(self.callbacks.context, card.reference);
         try self.openPreview(card.reference, if (self.readonly) null else card.ticket);
     }

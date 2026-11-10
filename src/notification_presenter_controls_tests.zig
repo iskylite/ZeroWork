@@ -188,20 +188,21 @@ test "notification presenter bounds longest admitted content and all actions at 
         try view.update(1, true, owner, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } });
         cx.layout();
     }
-    // Every source starts with the same compact card; additional content is explicit.
+    // Complete failure causes remain in a bounded scrolling middle layer.
     for (view.slots[0..1]) |slot| {
-        try std.testing.expectEqual(ui.types.Display.none, slot.detail.style.display);
-        slot.expand.behavior.events.on_click.?.invoke();
-        for (0..8) |_| {
-            try view.update(1, true, owner, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } });
-            cx.layout();
-        }
+        try std.testing.expectEqual(ui.types.Display.flex, slot.detail.style.display);
+        const message_viewport = historyNode(slot.root, "notifications.message.viewport").?;
+        try std.testing.expect(message_viewport.globalRect().h <= 240);
+        try std.testing.expect(slot.root.globalRect().h <= 360);
+        try std.testing.expect(slot.footer.globalRect().y >= message_viewport.globalRect().y + message_viewport.globalRect().h);
+        for (slot.actions) |action| try std.testing.expectEqual(slot.action_row, action.root.parent.?);
+        try std.testing.expectEqual(slot.footer, slot.close.parent.?);
     }
     const rect = view.root.globalRect();
 
     try std.testing.expectEqual(@as(f32, 62), rect.y);
     try std.testing.expect(rect.y + rect.h <= 480);
-    try std.testing.expect(view.content.globalRect().h > view.viewport.globalRect().h);
+    try std.testing.expect(view.content.globalRect().h <= view.viewport.globalRect().h + 0.5);
     for (view.slots[0..1]) |slot| {
         const card = slot.root.globalRect();
         for (slot.actions) |action| {
@@ -217,16 +218,20 @@ test "notification presenter bounds longest admitted content and all actions at 
         try std.testing.expect(slot.detail.globalRect().h > 18);
         for (slot.actions) |action| try std.testing.expectEqual(@as(f32, 22), action.root.globalRect().h);
     }
-    const last = view.slots[0].actions[2].root;
-    const before = last.globalRect().y;
-    cx.handleScroll(.{ .x = rect.x + 20, .y = rect.y + 100, .dx = 0, .dy = -100000 });
+    const slot = &view.slots[0];
+    const viewport = historyNode(slot.root, "notifications.message.viewport").?;
+    const before = slot.detail.globalRect().y;
+    const footer_before = slot.footer.globalRect();
+    const middle = viewport.globalRect();
+    cx.handleScroll(.{ .x = middle.x + middle.w / 2, .y = middle.y + middle.h / 2, .dx = 0, .dy = -100000 });
     for (0..8) |_| {
         cx.layout();
         _ = cx.render();
     }
-    const after = last.globalRect();
-    try std.testing.expect(after.y < before);
-    try std.testing.expect(after.y >= rect.y and after.y + after.h <= rect.y + rect.h + 0.5);
+    try std.testing.expect(slot.detail.globalRect().y < before);
+    try std.testing.expectEqual(footer_before, slot.footer.globalRect());
+    const last = slot.actions[2].root.globalRect();
+    try std.testing.expect(last.y >= rect.y and last.y + last.h <= rect.y + rect.h + 0.5);
 }
 
 fn cycled(comptime text: []const u8, comptime length: usize) [length]u8 {
@@ -287,6 +292,10 @@ test "notification sources appear once below event titles for every built-in kin
                 .plugin_cancelled => .cancelled,
                 else => .outcome_unknown,
             }, .title = "插件连接状态", .object_name = "prod-web-01" }),
+        }
+        if (case == .feedback_failure or case == .feedback_warning or case == .transfer_failed) {
+            try std.testing.expectEqual(@as(usize, 1), notice.coordinator.historyCount(false));
+            continue;
         }
         if (case != .reconnect_failed) {
             try std.testing.expectEqual(@as(usize, 0), notice.coordinator.historyCount(false));
@@ -358,16 +367,16 @@ test "notification host retains structured details and dispatches built-in actio
     try std.testing.expectEqualStrings("没有文件访问权限", facts[0].event.detail);
     try std.testing.expectEqualStrings("prod-web-01", facts[0].event.owner_name);
     try std.testing.expectEqualStrings("文件传输失败", facts[0].event.title);
-    try std.testing.expectEqualStrings("连接超时", facts[1].event.detail);
-    try std.testing.expectEqual(.warning, facts[2].event.severity);
+    try std.testing.expectEqualStrings("连接超时", facts[2].event.detail);
+    try std.testing.expectEqual(.warning, facts[3].event.severity);
     // Explicit cancellation is silent: no application fact, system delivery
     // record, or queued toast is added by publishTransfer.
-    try std.testing.expectEqual(@as(usize, 3), facts.len);
+    try std.testing.expectEqual(@as(usize, 4), facts.len);
     try std.testing.expectEqual(@as(usize, 3), notice.coordinator.records.items.len);
-    try std.testing.expectEqual(@as(usize, 0), notice.coordinator.presentation_count);
+    try std.testing.expectEqual(@as(usize, 1), notice.coordinator.presentation_count);
     for (facts) |fact| try std.testing.expect(fact.event.operation_id != 4);
     for ([_]host.notifications.Kind{ .transfer_done, .reconnect, .ai_ready }, 0..) |kind, index| {
-        try notice.dispatchAction(facts[index].fact_id, 0);
+        try notice.dispatchAction(facts[if (index == 0) 0 else index + 1].fact_id, 0);
         try std.testing.expectEqual(kind, probe.kind.?);
     }
 }
@@ -484,7 +493,7 @@ test "notification close control hides the banner without deleting the pending r
     try std.testing.expectEqual(@as(usize, 1), notice.coordinator.historyCount(true));
 }
 
-test "notification history compact rows retain full long detail behind an explicit expandable control" {
+test "notification history shows complete errors in a bounded scrolling middle layer" {
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     cx.setViewport(860, 480);
@@ -506,33 +515,13 @@ test "notification history compact rows retain full long detail behind an explic
         cx.layout();
         _ = cx.render();
     }
-    const card = historyNode(view.root, "notifications.history.record").?;
-    try std.testing.expectEqual(@as(f32, 68), card.globalRect().h);
-    try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
-    var expand = historyNode(view.root, "notifications.history.expand").?;
-    var rect = expand.globalRect();
-    const anchor_y = rect.y - view.scroll.container.globalRect().y;
-    cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
-    for (0..8) |_| {
-        cx.layout();
-        _ = cx.render();
-    }
     const details = historyNode(view.root, "notifications.history.details").?;
-    try std.testing.expectEqual(@as(usize, 1), details.children.items.len);
-    try std.testing.expectEqualStrings(&detail, details.children.items[0].getText().?.content);
-    try std.testing.expect(details.globalRect().h > view.scroll.container.globalRect().h);
+    const message = historyNode(view.root, "notifications.history.message").?;
+    try std.testing.expectEqualStrings(&detail, message.children.items[0].getText().?.content);
+    try std.testing.expect(details.globalRect().h <= 240);
+    try std.testing.expect(message.globalRect().h > details.globalRect().h);
+    try std.testing.expect(historyNode(view.root, "notifications.history.expand") == null);
     try std.testing.expect(view.scroll.container.globalRect().h <= 320);
-    expand = historyNode(view.root, "notifications.history.expand").?;
-    try std.testing.expectEqual(expand, cx.focused_node.?);
-    try std.testing.expectApproxEqAbs(anchor_y, expand.globalRect().y - view.scroll.container.globalRect().y, 0.1);
-    rect = expand.globalRect();
-    cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
-    for (0..8) |_| {
-        cx.layout();
-        _ = cx.render();
-    }
-    try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
-    try std.testing.expectEqual(@as(f32, 68), historyNode(view.root, "notifications.history.record").?.globalRect().h);
 }
 
 fn historyNode(root: *ui.Node, id: []const u8) ?*ui.Node {
@@ -658,20 +647,13 @@ test "notification history expands only independent details without repeating ti
             cx.layout();
             _ = cx.render();
         }
-        const expand = historyNode(view.root, "notifications.history.expand");
+        try std.testing.expect(historyNode(view.root, "notifications.history.expand") == null);
         if (operation < 6) {
-            try std.testing.expect(expand == null);
             try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
         } else {
-            const rect = expand.?.globalRect();
-            cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
-            for (0..8) |_| {
-                cx.layout();
-                _ = cx.render();
-            }
-            const details = historyNode(view.root, "notifications.history.details").?;
-            try std.testing.expectEqual(@as(usize, 1), details.children.items.len);
-            try std.testing.expectEqualStrings(detail, details.children.items[0].getText().?.content);
+            const message = historyNode(view.root, "notifications.history.message").?;
+            try std.testing.expectEqual(@as(usize, 1), message.children.items.len);
+            try std.testing.expectEqualStrings(detail, message.children.items[0].getText().?.content);
         }
     }
 }
@@ -776,4 +758,29 @@ test "notification countdown covers risk banners and hides during interaction be
         // Closing the banner never resolves the source or removes its record.
         try std.testing.expect(notice.coordinator.recordFor(published.fact_id).?.pending());
     }
+}
+
+test "notification operation failure remains visible above its settings modal with cause expanded" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-23:59" }, .{}) };
+    defer {
+        notice.coordinator.deinit();
+        notice.activity.deinit();
+    }
+    const presenter = try Presenter.mount(cx, scope, &notice, @fromBackingInt(1));
+    _ = try notice.coordinator.publishNotification(.{ .definition_id = "host.operation_error", .owner = .{ .window_id = 1, .window_only = true }, .operation_id = 1, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "无法保存设置", .detail = "SCNetX · API Key：请填写 API Key，或停用此服务提供方。", .attention = .{ .kind = .operation_failed, .requires_action = true, .time_sensitive = true } }, .{ .monotonic_ms = 0, .local_minute = 1 });
+    for (0..8) |_| {
+        try presenter.update(0, true, null, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 }, .avoid = &.{.{ .x = 16, .y = 16, .w = 828, .h = 448 }} });
+        cx.layout();
+    }
+    try std.testing.expectEqual(ui.types.Display.flex, presenter.root.style.display);
+    try std.testing.expect(!presenter.slots[0].obscured);
+    try std.testing.expectEqual(ui.types.Display.flex, presenter.slots[0].detail.style.display);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").current().danger_ink, presenter.slots[0].detail.getText().?.color);
+    try std.testing.expect(presenter.slots[0].detail.globalRect().h > 18);
 }

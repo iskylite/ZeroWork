@@ -9,13 +9,13 @@ pub fn overlay(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .position = .absolute, .direction = .column, .width = .{ .px = width }, .height = .{ .fit = .{} }, .gap = ui.arb.px(gap), .hit_behavior = .children_only, .z_index = 2000 };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .align_items = .stretch, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 12 }, .gap = 4, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = ui.arb.px(12) }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .max_height = 360, .min_height = 0, .direction = .column, .align_items = .stretch, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 12 }, .gap = 8, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = ui.arb.px(12) }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .flex_shrink = 0 };
 }
 pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .direction = .column, .padding = .{ .left = 22 }, .gap = 4, .flex_shrink = 0 };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .direction = .row, .align_items = .center, .gap = 8 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .direction = .row, .align_items = .start, .gap = 8, .flex_shrink = 0 };
 }
 pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = ui.arb.px(12), .font_weight = 500, .line_height = 18.0 / 12.0, .color = theme.current().fg_1, .text_overflow = .ellipsis, .selectable = false };
@@ -59,7 +59,7 @@ pub fn lineBox(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 18 }, .min_width = 0, .overflow = .hidden, .flex_shrink = 0 };
 }
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 24, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 6 }, .flex_shrink = 0 };
 }
 pub fn statusInk(severity: u8) ui.Color {
     const c = theme.current();

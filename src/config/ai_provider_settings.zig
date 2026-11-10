@@ -36,6 +36,7 @@ pub const ProviderView = struct {
     focus_pending: bool = false,
     focus_address: ?draft.Address = null,
     editor_node: ?*ui.Node = null,
+    editor_region: ?*ui.Node = null,
     error_text: []const u8 = "",
     error_node: ?*ui.Node = null,
     model_editor: ?*ModelEditor = null,
@@ -103,6 +104,16 @@ pub const ProviderView = struct {
         self.pending = true;
         self.root.markLayoutDirty();
         self.notify();
+    }
+    pub fn revealProblem(self: *ProviderView, address: draft.Address) void {
+        if (address.provider >= self.controller.model.value.ai.provider_count) return;
+        self.controller.ai_fields.provider_open.put(self.scope.allocator, address.provider, true) catch return;
+        self.controller.ai_fields.connection_open.put(self.scope.allocator, address.provider, true) catch return;
+        if (address.field == .model_id or address.field == .context_window) {
+            const p = self.controller.model.value.ai.providers[address.provider];
+            if (address.model < p.model_count) self.edit_request = .{ .provider = address.provider, .model = address.model };
+        } else self.focus_address = address;
+        self.schedule();
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *ProviderView = @ptrCast(@alignCast(raw));
@@ -178,13 +189,14 @@ pub const ProviderView = struct {
         if (self.focus_pending) {
             self.focus_pending = false;
             if (self.editor_node) |node| {
+                const region = self.editor_region orelse node;
                 var moved = false;
                 var ancestor = node.parent;
                 while (ancestor) |parent| : (ancestor = parent.parent) {
                     if (parent.tag != .scroll) continue;
                     const ctx: *ui.widgets.scroll_area.ScrollEventCtx = @ptrCast(@alignCast(parent.behavior.events.event_context orelse continue));
                     if (ctx.content) |content| {
-                        const rect = node.globalRect();
+                        const rect = region.globalRect();
                         const viewport = parent.globalRect();
                         ui.widgets.scrollRectIntoView(ctx.state, content, rect.y - viewport.y + ctx.state.scroll_y, rect.h, .nearest);
                         moved = moved or rect.y < viewport.y - 1 or rect.y + rect.h > viewport.y + viewport.h + 1;
@@ -247,6 +259,7 @@ pub const ProviderView = struct {
     }
     fn rebuild(self: *ProviderView) !void {
         self.editor_node = null;
+        self.editor_region = null;
         self.error_node = null;
         // Detach invokes blur; release interaction references while its scope is still alive.
         for (self.root.children.items) |child| self.cx.invalidateReferencesTo(child);
@@ -496,6 +509,9 @@ pub const ProviderView = struct {
             try input_wrapper.appendChild(self.cx.allocator, eye);
         }
         try r.appendChild(self.cx.allocator, input_wrapper);
+        if (self.focus_address) |target| if (target.eql(.{ .provider = i, .field = field })) {
+            self.editor_region = r;
+        };
         return r;
     }
     fn textAction(self: *ProviderView, action: Action, i: usize, caption: []const u8, icon: ?ui.SvgAsset, danger: bool) !*ui.Node {
@@ -872,7 +888,15 @@ const Field = struct {
     }
     fn refresh(self: *Field) void {
         const raw = self.view.controller.ai_fields.get(self.address);
-        const problem = if (raw) |value| value.problem else null;
+        var problem = if (raw) |value| value.problem else null;
+        if (problem == null and self.view.controller.validationProblem() != null) {
+            const ai = self.view.controller.model.value.ai;
+            if (self.address.provider < ai.provider_count and ai.providers[self.address.provider].enabled) {
+                if (draft.connectionProblem(ai.providers[self.address.provider], self.address.provider)) |missing| {
+                    if (self.address.eql(missing.address)) problem = missing.err;
+                }
+            }
+        }
         self.error_node.setTextContent(self.view.cx.allocator, if (problem) |err| draft.problemText(err) else "") catch {};
         self.error_node.setDisplay(if (problem != null) .flex else .none);
         S.theme.paintInputValidation(self.input, problem != null);

@@ -61,7 +61,15 @@ const Entry = struct {
     rollback: bool = false,
     release_requested: bool = false,
     released: bool = false,
+    reported_directory_failure: [2]?u64 = @splat(null),
 
+    fn operationError(raw: *anyopaque, err: anyerror) void {
+        const self: *Entry = @ptrCast(@alignCast(raw));
+        if (self.host.options.app.file_failure) |feedback| {
+            var buffer: [768]u8 = undefined;
+            feedback.publish(feedback.context, self.owner, @import("feedback_message.zig").message(@errorName(err), &buffer));
+        }
+    }
     fn beginExport(raw: ?*anyopaque, request: View.ExternalExport) !bool {
         const self: *Entry = @ptrCast(@alignCast(raw orelse return error.FilePresentationUnavailable));
         if (!self.model_live or self.model.closing or self.scope_disposed or self.host.options.exports.start == null or self.host.options.exports.poll == null) return error.FileTransferUnavailable;
@@ -282,7 +290,11 @@ const Entry = struct {
     fn retry(self: *Entry, side: View.Side) void {
         if (!self.model_live or self.model.closing or self.scope_disposed) return;
         self.model.retryInitial(side) catch |err| {
-            if (self.statuses[@backingInt(side)]) |node| node.setTextContent(self.host.cx().allocator, @errorName(err)) catch {};
+            if (self.statuses[@backingInt(side)]) |node| {
+                var buffer: [768]u8 = undefined;
+                node.setTextContent(self.host.cx().allocator, @import("feedback_message.zig").message(@errorName(err), &buffer)) catch {};
+                node.setTextColor(S.theme.current().danger_ink);
+            }
         };
         self.host.cx().requestRedraw();
     }
@@ -490,6 +502,8 @@ pub const Presentation = struct {
             try entry.loading.?.appendChild(self.allocator, card);
         }
         entry.view = try View.View.mount(self.cx(), scope, entry.model.viewCallbacks());
+        entry.view.?.callbacks.error_context = entry;
+        entry.view.?.callbacks.on_error = Entry.operationError;
         entry.view.?.callbacks.export_context = entry;
         entry.view.?.callbacks.export_files = Entry.beginExport;
         try root.appendChild(self.allocator, entry.view.?.root);
@@ -506,6 +520,16 @@ pub const Presentation = struct {
     }
     fn publish(self: *Presentation, entry: *Entry) !void {
         if (entry.scope_disposed or entry.view == null) return;
+        for (0..2) |i| {
+            const state = entry.model.paneStatus(@fromBackingInt(@intCast(i)));
+            if ((state.state == .failed or state.state == .stale) and state.failure.len > 0) {
+                const hash = std.hash.Wyhash.hash(0, state.failure);
+                if (entry.reported_directory_failure[i] != hash) {
+                    entry.reported_directory_failure[i] = hash;
+                    if (self.options.app.file_failure) |feedback| feedback.publish(feedback.context, entry.owner, state.failure);
+                }
+            } else entry.reported_directory_failure[i] = null;
+        }
         for (entry.action_views) |optional| if (optional) |view| try view.sync();
         for (entry.mkdir_views) |optional| if (optional) |view| try view.sync();
         if (entry.model.projection()) |projection| {
@@ -519,7 +543,11 @@ pub const Presentation = struct {
             inline for (0..2) |i| {
                 const state = entry.model.paneStatus(@fromBackingInt(@intCast(i)));
                 const text = if (state.failure.len > 0) state.failure else if (state.state == .loading) "正在读取目录…" else if (state.state == .empty) "目录为空" else "目录已读取";
-                if (entry.statuses[i]) |node| try node.setTextContent(self.allocator, text);
+                if (entry.statuses[i]) |node| {
+                    var buffer: [768]u8 = undefined;
+                    try node.setTextContent(self.allocator, @import("feedback_message.zig").message(text, &buffer));
+                    node.setTextColor(if (state.failure.len > 0) S.theme.current().danger_ink else S.theme.current().fg_2);
+                }
                 if (entry.retry_disabled[i]) |signal| signal.set(entry.model.closing or state.state == .loading or entry.model.panes[i].directory != null);
             }
         }

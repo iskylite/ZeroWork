@@ -335,6 +335,55 @@ test "native provider endpoint policy rejects credentials fragments missing host
     try std.testing.expect(!f.controller.canSave());
 }
 
+test "native provider save identifies a different collapsed provider missing its API key" {
+    var f: Fixture = undefined;
+    try f.init(true);
+    defer f.deinit();
+    var owned = try @import("config/runtime_config.zig").Snapshot.init(std.testing.allocator, f.controller.model.value);
+    defer owned.deinit();
+    const providers = try owned.arena.allocator().alloc(Config.AiProvider, 2);
+    providers[0] = owned.value.ai.providers[0];
+    providers[1] = .{ .name = "SCNetX", .endpoint = "https://example.test/v1", .enabled = true, .models = providers[0].models, .model_count = 1 };
+    owned.value.ai.providers = providers;
+    owned.value.ai.provider_count = 2;
+    try f.controller.editProviders(owned.value.ai);
+    const problem = f.controller.validationProblem().?;
+    try std.testing.expectEqual(@as(usize, 1), problem.ai_address.?.provider);
+    try std.testing.expectEqual(draft.Field.api_key, problem.ai_address.?.field);
+    var buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("SCNetX · API Key：请填写 API Key，或停用此服务提供方。", f.controller.validationMessage(&buffer));
+    try f.remount();
+    f.mounted.revealProblem(problem.ai_address.?);
+    for (0..10) |_| f.frame();
+    const field = byId(f.mounted.root, "settings.ai.provider.1.api_key").?;
+    try std.testing.expect(field.isDisplayedInTree());
+    try std.testing.expectEqual(field, f.cx.focus_manager.getFocused().?);
+    try std.testing.expect(hasText(byId(f.mounted.root, "settings.ai.provider.1.api_key.error").?, "请填写 API Key，或停用此服务提供方。"));
+    f.replace("settings.ai.provider.1.api_key", "fixture-key");
+    try std.testing.expect(f.controller.validationProblem() == null);
+    try std.testing.expect(f.controller.canSave());
+}
+
+test "native provider first configuration becomes saveable after required connection fields" {
+    var f: Fixture = undefined;
+    try f.init(false);
+    defer f.deinit();
+    f.clickId("settings.ai.add_provider");
+    try std.testing.expectEqual(draft.Field.name, f.controller.validationProblem().?.ai_address.?.field);
+    f.replace("settings.ai.provider.0.name", "First provider");
+    try std.testing.expectEqual(draft.Field.endpoint, f.controller.validationProblem().?.ai_address.?.field);
+    f.replace("settings.ai.provider.0.endpoint", "http://127.0.0.1:3425/v1");
+    try std.testing.expect(f.controller.canSave());
+    try std.testing.expect(f.controller.validationProblem() == null);
+    f.clickId("settings.ai.provider.0.add_model");
+    f.replace("settings.ai.model.id", "new-model");
+    f.replace("settings.ai.model.context", "128000");
+    f.clickId("settings.ai.model.save");
+    try std.testing.expect(!f.mounted.hasModelEditor());
+    try std.testing.expect(f.controller.model.value.ai.providers[0].models[0].default);
+    try std.testing.expect(f.controller.canSave());
+}
+
 test "native provider disclosure accepts actual Cx pointer independently of enable" {
     var f: Fixture = undefined;
     try f.init(true);

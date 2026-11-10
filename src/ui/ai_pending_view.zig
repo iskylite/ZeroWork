@@ -79,7 +79,8 @@ pub const View = struct {
             self.view.cx.requestRedraw();
         }
     };
-    pub fn fail(self: *View, message: []const u8) void {
+    pub fn fail(self: *View, label: []const u8) void {
+        const message = @import("../ai/error_feedback.zig").localFailureLabel(label) orelse label;
         self.error_text.set(message);
         self.error_node.setTextContent(self.cx.allocator, message) catch {};
         self.error_node.setDisplay(.flex);

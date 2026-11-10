@@ -1,4 +1,4 @@
-//! Atomic, exclusively locked session outbox. Replaying data never starts a
+//! Durable, exclusively locked session outbox. Replaying data never starts a
 //! worker. Model credentials and live pointers are not part of this format.
 const std = @import("std");
 const lifecycle = @import("session_lifecycle.zig");
@@ -6,6 +6,7 @@ const input = @import("session_input.zig");
 const provider = @import("provider.zig");
 const images = @import("image_attachments.zig");
 pub const max_bytes = 128 * 1024 * 1024;
+const compact_bytes = 8 * 1024 * 1024;
 const Image = struct { path: []const u8, encoded: []const u8, captured_at: i64, offloaded: bool = false, owner: ?@import("../host/identity.zig").SessionHandle = null };
 pub const Message = struct {
     role: provider.Role,
@@ -61,8 +62,20 @@ pub const Journal = struct {
     path: []u8,
     lock_file: std.Io.File,
     bytes: std.ArrayList(u8) = .empty,
-    hash: ?[32]u8 = null,
+    stamp: ?Stamp = null,
+    compact_at: usize = compact_bytes,
     mutex: std.atomic.Mutex = .unlocked,
+
+    const Stamp = struct {
+        inode: std.Io.File.INode,
+        size: u64,
+        mtime: std.Io.Timestamp,
+        ctime: std.Io.Timestamp,
+
+        fn of(stat: std.Io.File.Stat) Stamp {
+            return .{ .inode = stat.inode, .size = stat.size, .mtime = stat.mtime, .ctime = stat.ctime };
+        }
+    };
 
     pub fn open(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !Journal {
         if (path.len == 0 or std.fs.path.isAbsolute(path) or std.mem.indexOf(u8, path, "..") != null) return error.InvalidJournalPath;
@@ -80,9 +93,12 @@ pub const Journal = struct {
             else => return err,
         };
         defer a.free(source);
-        if (source.len != 0 and source[source.len - 1] != '\n') return error.InvalidSessionJournal;
-        try result.bytes.appendSlice(a, source);
-        result.hash = digest(source);
+        // A crash can interrupt an unacknowledged append. Only complete lines
+        // are committed; bind validates all of them before repairing the tail.
+        const committed = if (source.len == 0 or source[source.len - 1] == '\n') source.len else if (std.mem.lastIndexOfScalar(u8, source, '\n')) |index| index + 1 else 0;
+        if (source.len != 0 and committed == 0) return error.InvalidSessionJournal;
+        try result.bytes.appendSlice(a, source[0..committed]);
+        result.stamp = Stamp.of(try dir.statFile(io, path, .{}));
         return result;
     }
     pub fn deinit(self: *Journal) void {
@@ -145,6 +161,13 @@ pub const Journal = struct {
                 }
             }
         }
+        // Validate replay before touching the original file. Presentation
+        // events replace a full display snapshot, not individual chat messages.
+        if (self.bytes.items.len >= self.compact_at) {
+            try self.compactLocked();
+        } else if (self.stamp) |stamp| if (stamp.size != self.bytes.items.len) {
+            try self.replaceBytes(self.bytes.items);
+        };
         store.persist = .{ .context = self, .write = writeEvent };
         store.input_persist = .{ .context = self, .write = writeInput, .consumed = writeConsumed, .order = writeOrder };
         for (store.records.items) |record| record.inbox.persist = store.input_persist;
@@ -222,27 +245,96 @@ pub const Journal = struct {
         line.messages = try encode(a, source);
         line.transcript = try encode(a, transcript);
         const encoded = try std.json.Stringify.valueAlloc(a, line, .{});
+        if (self.bytes.items.len >= self.compact_at or encoded.len + 1 > max_bytes -| self.bytes.items.len) try self.compactLocked();
         if (encoded.len + 1 > max_bytes -| self.bytes.items.len) return error.JournalLimit;
         const prior = self.bytes.items.len;
         try self.bytes.ensureUnusedCapacity(self.allocator, encoded.len + 1);
         self.bytes.appendSliceAssumeCapacity(encoded);
         self.bytes.appendAssumeCapacity('\n');
         errdefer self.bytes.shrinkRetainingCapacity(prior);
-        const current = self.dir.readFileAlloc(self.io, self.path, a, .limited(max_bytes)) catch |err| switch (err) {
+        const file = if (self.stamp != null) self.dir.openFile(self.io, self.path, .{ .mode = .read_write }) catch |err| switch (err) {
+            error.FileNotFound => return error.JournalConflict,
+            else => return err,
+        } else self.dir.createFile(self.io, self.path, .{ .exclusive = true, .read = true, .permissions = @fromBackingInt(0o600) }) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.JournalConflict,
+            else => return err,
+        };
+        defer file.close(self.io);
+        if (self.stamp) |stamp| if (!std.meta.eql(stamp, Stamp.of(try file.stat(self.io)))) return error.JournalConflict;
+        // Append only the new record. fsync precedes publication to the store;
+        // on failure roll back to the last acknowledged boundary.
+        errdefer self.rollbackAppend(file, prior) catch {};
+        try file.writePositionalAll(self.io, self.bytes.items[prior..], prior);
+        try file.sync(self.io);
+        self.stamp = Stamp.of(try file.stat(self.io));
+    }
+
+    fn rollbackAppend(self: *Journal, file: std.Io.File, prior: usize) !void {
+        try file.setLength(self.io, prior);
+        try file.sync(self.io);
+        self.stamp = Stamp.of(try file.stat(self.io));
+    }
+
+    fn checkUnchanged(self: *Journal) !void {
+        const current: ?Stamp = if (self.dir.statFile(self.io, self.path, .{})) |stat| Stamp.of(stat) else |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
-        if (!std.meta.eql(self.hash, if (current) |value| @as(?[32]u8, digest(value)) else null)) return error.JournalConflict;
+        if (!std.meta.eql(self.stamp, current)) return error.JournalConflict;
+    }
+
+    fn replaceBytes(self: *Journal, bytes: []const u8) !void {
+        try self.checkUnchanged();
         var atomic = try self.dir.createFileAtomic(self.io, self.path, .{ .permissions = @fromBackingInt(0o600), .make_path = true, .replace = true });
         defer atomic.deinit(self.io);
-        try atomic.file.writeStreamingAll(self.io, self.bytes.items);
+        try atomic.file.writeStreamingAll(self.io, bytes);
         try atomic.file.sync(self.io);
         try atomic.replace(self.io);
-        self.hash = digest(self.bytes.items);
+        self.stamp = Stamp.of(try self.dir.statFile(self.io, self.path, .{}));
+    }
+
+    /// Keep every lifecycle/receipt event, and the last complete display
+    /// snapshot of each conversation at its original position in the stream.
+    /// Forks carry their own pinned snapshots. No chat messages are discarded.
+    pub fn compact(self: *Journal) !void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        try self.compactLocked();
+    }
+
+    fn compactLocked(self: *Journal) !void {
+        const Header = struct { event: ?struct { kind: @FieldType(lifecycle.Event, "kind"), conversation: @FieldType(lifecycle.Event, "conversation") } = null };
+        const Span = struct { start: usize, end: usize, superseded: bool = false };
+        var latest = std.AutoHashMap(@FieldType(lifecycle.Event, "conversation"), usize).init(self.allocator);
+        defer latest.deinit();
+        var spans: std.ArrayList(Span) = .empty;
+        defer spans.deinit(self.allocator);
+        var lines = std.mem.splitScalar(u8, self.bytes.items, '\n');
+        var offset: usize = 0;
+        while (lines.next()) |line| {
+            if (line.len == 0) {
+                offset += 1;
+                continue;
+            }
+            const parsed = try std.json.parseFromSlice(Header, self.allocator, line, .{ .ignore_unknown_fields = true });
+            defer parsed.deinit();
+            const index = spans.items.len;
+            try spans.append(self.allocator, .{ .start = offset, .end = offset + line.len + 1 });
+            if (parsed.value.event) |event| if (event.kind == .presentation) {
+                const entry = try latest.getOrPut(event.conversation);
+                if (entry.found_existing) spans.items[entry.value_ptr.*].superseded = true;
+                entry.value_ptr.* = index;
+            };
+            offset += line.len + 1;
+        }
+        var kept: std.ArrayList(u8) = .empty;
+        errdefer kept.deinit(self.allocator);
+        for (spans.items) |span| if (!span.superseded) try kept.appendSlice(self.allocator, self.bytes.items[span.start..span.end]);
+        if (kept.items.len < self.bytes.items.len or (self.stamp != null and self.stamp.?.size != self.bytes.items.len)) {
+            try self.replaceBytes(kept.items);
+            self.bytes.deinit(self.allocator);
+            self.bytes = kept;
+        } else kept.deinit(self.allocator);
+        self.compact_at = @min(max_bytes, @max(compact_bytes, self.bytes.items.len * 2));
     }
 };
-fn digest(bytes: []const u8) [32]u8 {
-    var result: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &result, .{});
-    return result;
-}

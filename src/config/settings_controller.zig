@@ -14,6 +14,12 @@ pub const ai_draft = @import("settings_ai_draft.zig");
 pub const State = enum { clean, dirty_valid, dirty_invalid, saving, save_failed };
 pub const CloseDecision = enum { allow, confirmation_required, blocked_saving };
 pub const RawField = struct { input: ?[]u8 = null, problem: ?anyerror = null };
+pub const ValidationProblem = struct {
+    page: usize,
+    message: []const u8,
+    ai_address: ?ai_draft.Address = null,
+    field_index: ?usize = null,
+};
 
 pub const SaveRequest = struct {
     draft_id: u64,
@@ -220,22 +226,56 @@ pub const Controller = struct {
 
     pub fn state(self: *const Controller) State {
         if (self.save_operation != null) return .saving;
-        for (self.raw_fields, 0..) |field, index| if (field.problem != null and self.fieldApplicable(index)) return .dirty_invalid;
-        if (self.transferPolicyProblem() != null) return .dirty_invalid;
-        if (self.ai_fields.invalid()) return .dirty_invalid;
-        if (self.dirty_fields.isSet(schema.providers_index) or self.dirty_fields.isSet(schema.find("ai", "default_provider").?)) {
-            ai_draft.validate(self.model.value.ai) catch return .dirty_invalid;
-            ai_draft.validateDefault(self.model.value.ai, self.original.value.ai) catch return .dirty_invalid;
-        }
-        if (self.ai_fields.new_provider) |i| if (i >= self.model.value.ai.provider_count or !ai_draft.connectionValid(self.model.value.ai.providers[i])) return .dirty_invalid;
-        if (self.ai_fields.new_model) |new| {
-            if (new.provider >= self.model.value.ai.provider_count) return .dirty_invalid;
-            const p = self.model.value.ai.providers[new.provider];
-            if (new.model >= p.model_count or !ai_draft.modelValid(p.models[new.model])) return .dirty_invalid;
-        }
-        if (self.model.dirty and !self.background.canSave(self.model.value.ui.materials.background)) return .dirty_invalid;
+        if (self.validationProblem() != null) return .dirty_invalid;
         if (self.save_failed) return .save_failed;
         return if (self.model.dirty) .dirty_valid else .clean;
+    }
+
+    pub fn validationProblem(self: *const Controller) ?ValidationProblem {
+        for (self.raw_fields, 0..) |field, index| if (field.problem != null and self.fieldApplicable(index)) {
+            const entry = schema.fields[index];
+            var page: usize = 0;
+            for (@import("settings_pages.zig").pages, 0..) |candidate, i| if (std.mem.eql(u8, entry.page, candidate.name)) {
+                page = i;
+                break;
+            };
+            return .{ .page = page, .field_index = index, .message = if (std.mem.eql(u8, entry.key, "quiet_hours")) "勿扰时段：请输入 HH:MM-HH:MM，例如 22:00-08:00。" else "此项的格式或数值无效，请按字段说明修正。" };
+        };
+        if (self.transferPolicyProblem() != null) return .{ .page = 3, .message = "传输窗口超过内存预算，请减小分块大小、滑动窗口或并发任务数。" };
+        for (self.ai_fields.fields.items) |raw| if (raw.problem) |err| return .{ .page = 4, .ai_address = raw.address, .message = ai_draft.problemText(err) };
+        if (self.dirty_fields.isSet(schema.providers_index) or self.dirty_fields.isSet(schema.find("ai", "default_provider").?)) {
+            if (ai_draft.firstProblem(self.model.value.ai)) |problem| return .{ .page = 4, .ai_address = problem.address, .message = ai_draft.problemText(problem.err) };
+            ai_draft.validateDefault(self.model.value.ai, self.original.value.ai) catch return .{ .page = 4, .message = ai_draft.problemText(error.DefaultProtected) };
+        }
+        if (self.ai_fields.new_provider) |i| {
+            if (i >= self.model.value.ai.provider_count) return .{ .page = 4, .message = "新增服务提供方尚未完成，请完成配置或取消新增。" };
+            if (ai_draft.connectionProblem(self.model.value.ai.providers[i], i)) |problem| return .{ .page = 4, .ai_address = problem.address, .message = ai_draft.problemText(problem.err) };
+        }
+        if (self.ai_fields.new_model) |new| {
+            if (new.provider >= self.model.value.ai.provider_count) return .{ .page = 4, .message = "新增模型尚未完成，请完成配置或取消新增。" };
+            const p = self.model.value.ai.providers[new.provider];
+            if (new.model >= p.model_count or !ai_draft.modelValid(p.models[new.model])) return .{ .page = 4, .ai_address = .{ .provider = new.provider, .model = new.model, .field = .model_id }, .message = "请补齐模型 ID、上下文窗口和推理等级，或取消新增。" };
+        }
+        if (self.model.dirty and !self.background.canSave(self.model.value.ui.materials.background)) return .{ .page = 0, .message = if (self.background.state == .loading) "背景图片正在准备，请稍后保存。" else "背景图片未准备完成，请重新选择图片或关闭背景图片。" };
+        return null;
+    }
+
+    pub fn validationMessage(self: *const Controller, buffer: []u8) []const u8 {
+        const problem = self.validationProblem() orelse return "";
+        if (problem.ai_address) |address| if (address.provider < self.model.value.ai.provider_count) {
+            const p = self.model.value.ai.providers[address.provider];
+            const field_name = switch (address.field) {
+                .name => "服务提供方名称",
+                .endpoint => "API 地址",
+                .api_key => "API Key",
+                .model_id => "模型",
+                .context_window => "上下文窗口",
+            };
+            if ((address.field == .model_id or address.field == .context_window) and address.model < p.model_count) return std.fmt.bufPrint(buffer, "{s} · {s} · {s}：{s}", .{ ai_draft.providerName(p), p.models[address.model].id, field_name, problem.message }) catch problem.message;
+            return std.fmt.bufPrint(buffer, "{s} · {s}：{s}", .{ ai_draft.providerName(p), field_name, problem.message }) catch problem.message;
+        };
+        if (problem.field_index) |index| return std.fmt.bufPrint(buffer, "{s} · {s}：{s}", .{ schema.fields[index].page, schema.fields[index].key, problem.message }) catch problem.message;
+        return problem.message;
     }
 
     pub fn canSave(self: *const Controller) bool {

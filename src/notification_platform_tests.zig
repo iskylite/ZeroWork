@@ -606,7 +606,7 @@ test "notification permission feedback retains waiting and native failure indepe
     try std.testing.expectEqual(@as(usize, 0), fake.sends);
 }
 
-test "ordinary feedback and typed failures stay outside global history" {
+test "operation failures enter global history once while success stays local" {
     var fake: Fake = .{};
     const host = try notification_host.Host.createWithApi(a, .{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
     defer host.destroy();
@@ -617,7 +617,8 @@ test "ordinary feedback and typed failures stay outside global history" {
     try std.testing.expectEqual(@as(usize, 0), host.coordinator.notification_records.items.len);
     try host.publishFeedbackSeverity(id, target.owner, "连接失败: ChallengeTimeout", .failure);
     try host.publishFeedbackSeverity(id, target.owner, "连接失败: ChallengeTimeout", .failure);
-    try std.testing.expectEqual(@as(usize, 0), host.coordinator.notification_records.items.len);
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.notification_records.items.len);
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(false));
     try std.testing.expect(!host.coordinator.hasDot(target.owner));
     try std.testing.expectEqual(@as(usize, 0), fake.sends);
 }
@@ -889,4 +890,48 @@ test "activity badge menu follows Tab projection, refreshes metadata and merges 
     try std.testing.expectEqual(@as(usize, 0), changed.items[0].presentation.order);
     try std.testing.expectEqual(probe.tint, changed.items[0].presentation.icon_tint);
     try std.testing.expect(!changed.items[0].presentation.current);
+}
+
+test "notification window operation errors deduplicate route actions and resolve without a session" {
+    const ActionProbe = struct {
+        calls: usize = 0,
+        fn action(raw: *anyopaque, id: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (id == @backingInt(notification_host.Host.OperationAction.settings_problem)) self.calls += 1;
+        }
+        fn owns(_: *anyopaque, _: notifications.Target) bool {
+            return false;
+        }
+        fn activate(_: *anyopaque, _: notifications.Target) bool {
+            return false;
+        }
+        fn feedback(_: *anyopaque, _: []const u8) void {}
+        fn callbacks(self: *@This()) notification_host.Window {
+            return .{ .context = self, .owns = owns, .activate = activate, .feedback = feedback, .operation_action = action };
+        }
+    };
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-23:59" }, fake.api());
+    defer host.destroy();
+    var first: ActionProbe = .{};
+    var second: ActionProbe = .{};
+    const one = try host.registerWindow(first.callbacks());
+    const two = try host.registerWindow(second.callbacks());
+    for (0..100) |_| try host.publishOperationError(one, null, "偏好设置", "无法保存设置", "SCNetX 缺少 API Key", .settings_problem);
+    try host.publishOperationError(two, null, "偏好设置", "无法保存设置", "SCNetX 缺少 API Key", .settings_problem);
+    try std.testing.expectEqual(@as(usize, 2), host.coordinator.historyCount(true));
+    try std.testing.expect(host.coordinator.notification_records.items[0].event.owner.window_only);
+    try std.testing.expectEqual(@as(usize, 2), host.coordinator.presentation_count);
+    const first_id = host.coordinator.notification_records.items[0].fact_id;
+    const second_id = host.coordinator.notification_records.items[1].fact_id;
+    try host.dispatchAction(second_id, 0);
+    try std.testing.expectEqual(@as(usize, 0), first.calls);
+    try std.testing.expectEqual(@as(usize, 1), second.calls);
+    host.resolveOperationErrors(one, "偏好设置");
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    host.removeWindow(one);
+    try std.testing.expectError(error.NotificationOwnerEnded, host.dispatchAction(first_id, 0));
+    try std.testing.expect(!host.coordinator.recordFor(second_id).?.owner_ended);
+    try std.testing.expectEqual(@as(usize, 0), fake.sends);
+    try std.testing.expectEqual(@as(usize, 0), fake.requests);
 }

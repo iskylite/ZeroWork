@@ -189,9 +189,12 @@ pub const View = struct {
         try self.rows.appendChild(self.cx.allocator, button);
     }
     fn fail(self: *View, err: anyerror) void {
+        self.pane.report(err);
         if (self.feedback) |node| {
             node.setDisplay(.flex);
-            node.setTextContent(self.cx.allocator, @errorName(err)) catch {};
+            var buffer: [768]u8 = undefined;
+            node.setTextContent(self.cx.allocator, @import("feedback_message.zig").message(@errorName(err), &buffer)) catch {};
+            node.setTextColor(S.theme.current().danger_ink);
         }
         self.cx.requestRedraw();
     }

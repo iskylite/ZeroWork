@@ -285,7 +285,8 @@ pub const View = struct {
     pub fn reportError(self: *View, message: []const u8) !void {
         self.clearRequested();
         self.feedback = .failure;
-        try self.feedbackText(message, true);
+        var buffer: [768]u8 = undefined;
+        try self.feedbackText(@import("feedback_message.zig").message(message, &buffer), true);
         self.cx.requestRedraw();
     }
 
@@ -328,6 +329,15 @@ pub const View = struct {
         if (!std.mem.eql(u8, self.feedback_label.getText().?.content, text)) try self.feedback_label.setTextContent(self.cx.allocator, text);
         const color = if (failure) S.theme.current().danger_ink else S.theme.current().fg_1;
         if (!ui.Color.eql(self.feedback_label.getText().?.color, color)) self.feedback_label.setTextColor(color);
+        if (self.feedback_label.getText()) |old| {
+            var props = old;
+            props.wrap = .word;
+            props.text_overflow = .clip;
+            self.feedback_label.setText(props);
+        }
+        self.feedback_label.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
+        self.feedback_row.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
+        self.feedback_row.setStyle(self.cx.allocator, .min_height, @as(f32, 32));
         tint(self.feedback_icon, S.theme.current().ok_ink);
         tint(self.feedback_failure, S.theme.current().danger_ink);
         const pending = !failure and (self.feedback == .pending or self.disabled.peek());

@@ -108,7 +108,7 @@ pub fn errorBox(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .gap = 4, .padding = ui.Padding.all(8), .background = theme.current().surface_2, .border = .{ .radius = 9 }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn errorText(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11.5, .line_height = 18.0 / 11.5, .color = theme.current().danger_ink, .wrap = .none };
+    return .{ .font_size = 12, .font_weight = 500, .line_height = 1.5, .color = theme.current().danger_ink, .wrap = .word };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };

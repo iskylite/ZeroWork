@@ -20,10 +20,13 @@ const Call = struct {
     parsed: std.json.Parsed(std.json.Value),
     value: host.Invocation,
     fn init(context: host.Context, target: identity.SessionHandle, command: []const u8, operation: u64) !Call {
+        return initWithWait(context, target, command, operation, null);
+    }
+    fn initWithWait(context: host.Context, target: identity.SessionHandle, command: []const u8, operation: u64, wait_ms: ?u32) !Call {
         const reference = try @import("../ai/host_queries.zig").sessionRef(a, context, target);
         defer a.free(reference);
         var request_key: [32]u8 = undefined;
-        const raw = try std.json.Stringify.valueAlloc(a, .{ .session_ref = reference, .command = command, .request_key = try std.fmt.bufPrint(&request_key, "backend-{d}", .{operation}) }, .{});
+        const raw = try std.json.Stringify.valueAlloc(a, .{ .session_ref = reference, .command = command, .request_key = try std.fmt.bufPrint(&request_key, "backend-{d}", .{operation}), .wait_ms = wait_ms }, .{ .emit_null_optional_fields = false });
         errdefer a.free(raw);
         const parsed = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
         errdefer parsed.deinit();
@@ -288,8 +291,15 @@ test "execution backend real Local service requires precise approval and runs th
     const accepted = try authorize(&ctx, prepared);
     const api = ctx.backend();
     const snapshot = try accepted.service.executionSnapshot();
-    const execution_id = identity.ExecutionId.generate();
+    const execution_id = accepted.execution_id.?;
+    // wait_ms reads the original execution before a busy native mailbox has
+    // accepted it. This must retain the exact approved read authority.
+    try api.authorize_read.?(api.context, controller.authority, controller.authority, target, execution_id);
+    try std.testing.expectError(error.TargetNotAuthorized, api.authorize_read.?(api.context, controller.authority, controller.authority, target, identity.ExecutionId.generate()));
     const request: execution.Request = .{ .execution_id = execution_id, .task_id = controller.authority.task_id, .expected_input_epoch = snapshot.input_epoch, .ownership_revision = accepted.ownership_revision, .command = prepared.command, .command_hash = prepared.command_hash };
+    var wrong_request = request;
+    wrong_request.execution_id = identity.ExecutionId.generate();
+    try std.testing.expectError(error.TargetNotAuthorized, api.terminal_call.?(api.context, accepted.service, .{ .request = wrong_request }));
     var submitted = false;
     const until = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
     while (!submitted) {
@@ -300,6 +310,7 @@ test "execution backend real Local service requires precise approval and runs th
         };
         submitted = true;
     }
+    try std.testing.expectError(error.TargetNotAuthorized, api.terminal_call.?(api.context, accepted.service, .{ .request = request }));
     while (true) {
         try fixture.tick();
         const current = accepted.service.executionSnapshot() catch |err| {
@@ -351,6 +362,83 @@ test "execution backend real Local service requires precise approval and runs th
     try std.testing.expectError(error.WorkspaceClosed, api.terminal_call.?(api.context, accepted.service, .{ .renew = old_grant }));
     state.closed = false;
     fixture.config_.config_revision -= 1;
+}
+
+test "execution backend wait retains approved identity while native dispatch is busy" {
+    const supervisor = @import("../ai/host_execution.zig");
+    const Busy = struct {
+        api: supervisor.Backend,
+        blocked: bool = true,
+        requests: usize = 0,
+        fn authorizeRun(raw: *anyopaque, invocation: host.Invocation, reference: []const u8, command: []const u8, hash: [32]u8) !supervisor.Target {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.api.authorize(self.api.context, invocation, reference, command, hash);
+        }
+        fn resolve(raw: *anyopaque, context: host.Context, target: identity.SessionHandle) !terminal.Service {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.blocked) return error.WorkerBusy;
+            return self.api.resolve(self.api.context, context, target);
+        }
+        fn call(raw: *anyopaque, service: terminal.Service, action: supervisor.TerminalAction) !supervisor.TerminalResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const result = try self.api.terminal_call.?(self.api.context, service, action);
+            if (action == .request) self.requests += 1;
+            return result;
+        }
+        fn read(raw: *anyopaque, context: host.Context, original: host.Context, target: identity.SessionHandle, id: identity.ExecutionId) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.api.authorize_read.?(self.api.context, context, original, target, id);
+        }
+    };
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const target = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .attached_pty);
+    defer controller.deinitAfterWorker();
+    var lookup: Lookup = .{ .controller = &controller };
+    var broker: approvals.Broker = .{};
+    var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    try ctx.captureTask(&controller);
+    var call = try Call.initWithWait(controller.authority, target, "printf 'pending-read-ok\\n'", 19, 2000);
+    defer call.deinit();
+    var prepared = try backend.prepare(call.value, a);
+    defer prepared.deinit();
+    const permit = try approve(&ctx, &broker, &prepared);
+    defer broker.finish(permit);
+    var journal = try @import("../ai/lifecycle_journal.zig").Journal.open(a, std.testing.io, fixture.tmp.dir, "pending-read.json");
+    defer journal.deinit();
+    var busy: Busy = .{ .api = ctx.backend() };
+    var runner = supervisor.Controller.init(a, &journal, .{ .context = &busy, .authorize = Busy.authorizeRun, .resolve = Busy.resolve, .terminal_call = Busy.call, .authorize_read = Busy.read, .retained_shell_snapshots = true });
+    defer runner.deinit();
+    const started = try runner.execute(prepared.invocation, 1);
+    try std.testing.expect(started == .wait);
+    const wait = started.wait;
+    try std.testing.expect((try runner.pollWait(wait, 2)) == null);
+    try std.testing.expectEqual(@as(usize, 0), busy.requests);
+    const id = runner.entries.items[wait.index].id;
+    try busy.api.authorize_read.?(busy.api.context, controller.authority, controller.authority, target, id);
+    busy.blocked = false;
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (true) {
+        var result = (runner.pollWait(wait, wait.deadline) catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() >= deadline) return err;
+            try fixture.tick();
+            continue;
+        }).?;
+        result.deinit(a);
+        if (busy.requests == 1 and runner.entries.items[wait.index].snapshot.state == .interval_recorded) break;
+        if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.ExecutionNotFinished;
+        try fixture.tick();
+    }
+    try std.testing.expectEqual(@as(usize, 1), busy.requests);
+    try std.testing.expect(runner.entries.items[wait.index].id.eql(id));
 }
 
 test "execution backend fixed modes deny borrowed new PTY and forbid rules precede approval" {
@@ -530,7 +618,7 @@ fn revokeWithdrawnAuthorityBody(fixture: *Fixture, roster: *groups.Roster, kind:
     const api = ctx.backend();
     const initial = try awaitWorker(fixture, deadline, @import("../host/terminal_service.zig").Service.executionSnapshot, .{accepted.service});
     fixture.diagnostic_last_execution = initial;
-    const id = identity.ExecutionId.generate();
+    const id = accepted.execution_id.?;
     fixture.diagnostic_execution_id = id;
     const request: execution.Request = .{ .execution_id = id, .task_id = owner.task_id, .expected_input_epoch = initial.input_epoch, .ownership_revision = accepted.ownership_revision, .command = prepared.command, .command_hash = prepared.command_hash };
     while (true) {
@@ -701,7 +789,7 @@ test "execution backend controlled input requires separate exact approval and re
     const accepted = try authorize(&ctx, prepared);
     const api = ctx.backend();
     const initial = try accepted.service.executionSnapshot();
-    const id = identity.ExecutionId.generate();
+    const id = accepted.execution_id.?;
     const request: execution.Request = .{ .execution_id = id, .task_id = controller.authority.task_id, .expected_input_epoch = initial.input_epoch, .ownership_revision = accepted.ownership_revision, .command = prepared.command, .command_hash = prepared.command_hash };
     const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
     while (true) {

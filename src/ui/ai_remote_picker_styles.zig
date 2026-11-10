@@ -11,6 +11,9 @@ pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn text(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .text_overflow = .ellipsis };
 }
+pub fn feedback(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 12, .line_height = 16.0 / 12.0, .color = theme.current().fg_1, .text_overflow = .ellipsis };
+}
 pub fn heading(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 16, .line_height = 24.0 / 16.0, .font_weight = 600, .color = theme.current().fg_1 };
 }

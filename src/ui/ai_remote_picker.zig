@@ -24,7 +24,7 @@ pub const Callbacks = struct {
     stage: *const fn (*anyopaque, scope_mod.Owner, *attachments.ContentRef) anyerror!void,
     attach: ?*const fn (*anyopaque, scope_mod.Owner, *attachments.ContentRef) anyerror!void = null,
 };
-const Active = struct { reader: *capture.Reader, context: capture.Context, delivered: bool = false, direct: bool = false };
+const Active = struct { reader: *capture.Reader, context: capture.Context, delivered: bool = false };
 const Row = struct {
     view: *View,
     index: usize,
@@ -50,6 +50,7 @@ pub const View = struct {
     source_items: [16]ui.widgets.SelectOption = undefined,
     source_ids: [16][4]u8 = undefined,
     status: *ui.Node = undefined,
+    feedback: *ui.Node = undefined,
     empty: *ui.Node = undefined,
     list_node: *ui.Node = undefined,
     read_disabled: *ui.Signal(bool) = undefined,
@@ -72,8 +73,7 @@ pub const View = struct {
     filtered_count: usize = 0,
     selected: ?[]u8 = null,
     selections: std.ArrayList([]u8) = .empty,
-    queued: std.ArrayList([]u8) = .empty,
-    direct_read: bool = false,
+    want_attach: bool = false,
     readers: std.ArrayList(Active) = .empty,
     want_list: bool = false,
     want_read: bool = false,
@@ -164,11 +164,14 @@ pub const View = struct {
         self.attach_disabled = try scope.createSignal(bool, true);
         const info_button = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.get("info").?, .icon_size = 16, .a11y_label = "文件信息", .variant = .ghost, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.navigationButton, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, cx, scope, S.hover, .{}) }).mount(scope, cx);
         info_button.meta.ownership.meta.test_id = "ai.remote.info";
-        const info_hint = try @import("control_hint.zig").mount(cx, scope, info_button, "未选择文件\n附加文件内容，每文件最多 4 KiB。", .{ .id = "ai.remote.info.tooltip", .visible = self.modal_open, .width = 280 });
+        const info_hint = try @import("control_hint.zig").mount(cx, scope, info_button, "未选择文件\n附加仅引用来源和路径；预览读取文本，最多 4 KiB。", .{ .id = "ai.remote.info.tooltip", .visible = self.modal_open, .width = 280 });
         self.status = info_hint.content.children.items[0];
         self.status.meta.ownership.meta.test_id = "ai.remote.status";
         try footer.appendChild(cx.allocator, info_hint.wrapper);
-        try footer.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill(), .min_width = 0 }, .{}));
+        self.feedback = try ui.textStyled(cx, S.feedback, "");
+        self.feedback.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        self.feedback.meta.ownership.meta.test_id = "ai.remote.feedback";
+        try footer.appendChild(cx.allocator, self.feedback);
         const preview = try ui.widgets.Button(.{ .label = "预览文件", .variant = .secondary, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.button, .{}), .disabled = self.read_disabled, .on_click = cx.on(View, self, readSelected) }).mount(scope, cx);
         preview.meta.ownership.meta.test_id = "ai.remote.read";
         try footer.appendChild(cx.allocator, preview);
@@ -234,9 +237,7 @@ pub const View = struct {
         self.selected = null;
         for (self.selections.items) |path| self.cx.allocator.free(path);
         self.selections.clearRetainingCapacity();
-        for (self.queued.items) |path| self.cx.allocator.free(path);
-        self.queued.clearRetainingCapacity();
-        self.direct_read = false;
+        self.want_attach = false;
     }
     fn sourceChanged(self: *View, value: ?[]const u8) void {
         const id = value orelse return;
@@ -301,29 +302,33 @@ pub const View = struct {
     }
     fn attachSelected(self: *View) void {
         if (self.callbacks.attach == null or self.selections.items.len == 0 or self.readers.items.len != 0) return;
-        for (self.queued.items) |path| self.cx.allocator.free(path);
-        self.queued.clearRetainingCapacity();
-        for (self.selections.items) |path| {
-            const copy = self.cx.allocator.dupe(u8, path) catch return;
-            self.queued.append(self.cx.allocator, copy) catch {
-                self.cx.allocator.free(copy);
-                return;
-            };
-        }
-        self.direct_read = true;
-        self.want_read = true;
+        self.want_attach = true;
+        self.want_read = false;
         self.want_list = false;
-        self.message("正在附加文件…") catch {};
+        self.showFeedback("正在附加引用…") catch {};
         self.cx.requestRedraw();
+    }
+    fn attachReferences(self: *View) !void {
+        const owner = self.owner orelse return error.StaleOwner;
+        const live = self.callbacks.live(self.callbacks.context, owner) orelse return error.StaleOwner;
+        const source = self.sources[self.source_index];
+        _ = try live.validate(&.{@backingInt(source.session.session_id)});
+        const attach = self.callbacks.attach orelse return error.AttachmentUnavailable;
+        for (self.selections.items) |path| {
+            var reference = try attachments.ContentRef.createRemoteReference(self.cx.allocator, source.session, source.name, path);
+            defer reference.release();
+            try attach(self.callbacks.context, owner, &reference);
+        }
+        self.close();
     }
     fn readSelected(self: *View) void {
         if (self.selections.items.len != 1) {
             self.message("请先选择文件") catch {};
             return;
         }
-        self.direct_read = false;
         self.want_read = true;
         self.want_list = false;
+        self.showFeedback("正在读取预览…") catch {};
         self.cx.requestRedraw();
     }
     fn liveContext(self: *View, context: capture.Context) ?capture.Context {
@@ -340,7 +345,7 @@ pub const View = struct {
                 active.delivered = true;
                 var result = active.reader.take() orelse return error.MissingRemoteResult;
                 defer result.release();
-                if (self.liveContext(active.context) != null) try self.accept(result, active.direct);
+                if (self.liveContext(active.context) != null) self.accept(result) catch |err| self.fail(err);
             }
             if (active.reader.cleanupReceipt() == .released and active.reader.retired) {
                 try active.reader.deinit();
@@ -349,20 +354,19 @@ pub const View = struct {
             }
             index += 1;
         }
-        if (self.open_state and self.direct_read and self.readers.items.len == 0) {
-            if (self.queued.items.len > 0) self.want_read = true else if (!self.want_read) self.close();
+        if (self.open_state and self.want_attach and self.readers.items.len == 0) {
+            self.want_attach = false;
+            self.attachReferences() catch |err| self.fail(err);
         }
         if (self.open_state and (self.want_list or self.want_read) and self.readers.items.len == 0) {
             const bindings = self.bindings orelse return;
             const state = self.host.state(bindings.directory) orelse {
-                self.want_list = false;
-                self.want_read = false;
-                return self.message("文件来源连接已关闭，请重新选择来源");
+                self.stopPendingRead();
+                return self.showFeedback("文件来源连接已关闭，请重新选择来源");
             };
             if (state.phase == .failed or state.phase == .cleanup_unknown) {
-                self.want_list = false;
-                self.want_read = false;
-                return self.message("远程文件连接失败，请重新选择来源");
+                self.stopPendingRead();
+                return self.showFeedback("远程文件连接失败，请重新选择来源");
             }
             if (state.phase == .ready) {
                 const live = self.callbacks.live(self.callbacks.context, self.owner.?) orelse {
@@ -370,38 +374,53 @@ pub const View = struct {
                     return;
                 };
                 const context: capture.Context = .{ .scope = live, .source = .{ .session = self.sources[self.source_index].session, .revision = self.revision, .bindings = bindings } };
-                try self.readers.ensureUnusedCapacity(self.cx.allocator, 1);
-                const reader = capture.Reader.start(self.cx.allocator, self.host, context, if (self.want_read) (if (self.direct_read) self.queued.items[0] else self.selected.?) else self.path.peek(), if (self.want_read) .{ .read = .{} } else .{ .list = .{} }) catch |err| {
-                    self.want_list = false;
-                    self.want_read = false;
-                    return self.message(@errorName(err));
+                self.readers.ensureUnusedCapacity(self.cx.allocator, 1) catch |err| {
+                    self.fail(err);
+                    return;
                 };
-                self.readers.appendAssumeCapacity(.{ .reader = reader, .context = context, .direct = self.direct_read });
-                if (self.direct_read and self.want_read) self.cx.allocator.free(self.queued.orderedRemove(0));
-                try self.message(if (self.want_read) (if (self.direct_read) "附加文件…" else "读取预览…") else "读取目录…");
+                const reader = capture.Reader.start(self.cx.allocator, self.host, context, if (self.want_read) self.selected.? else self.path.peek(), if (self.want_read) .{ .read = .{} } else .{ .list = .{} }) catch |err| {
+                    self.fail(err);
+                    return;
+                };
+                self.readers.appendAssumeCapacity(.{ .reader = reader, .context = context });
+                if (self.want_read) try self.showFeedback("正在读取预览…") else try self.message("读取目录…");
                 self.want_list = false;
                 self.want_read = false;
             }
         }
         self.updateActions();
-        if (self.readers.items.len != 0 or self.want_list or self.want_read) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        if (self.readers.items.len != 0 or self.want_list or self.want_read or self.want_attach) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
     }
-    fn accept(self: *View, result: capture.ResultRef, direct: bool) !void {
+    fn accept(self: *View, result: capture.ResultRef) !void {
         const value = result.value().?;
         switch (value.body) {
             .failure => |failure| {
-                for (self.queued.items) |path| self.cx.allocator.free(path);
-                self.queued.clearRetainingCapacity();
-                self.direct_read = false;
+                self.stopPendingRead();
                 const reason = switch (failure) {
                     .remote => |remote| switch (remote) {
                         .not_found => "目录或文件不存在，请检查路径",
                         .permission_denied => "没有权限读取此目录或文件",
-                        else => "远程读取失败，请检查连接后重新打开目录",
+                        .unsupported_binary => "无法预览 ISO 等二进制文件，可附加路径引用",
+                        .unsupported_encoding => "无法预览：文件不是有效的 UTF-8 文本",
+                        .not_regular_file => "此项不是可读取的普通文件",
+                        .connection => "远程文件连接已断开，请重新选择来源",
+                        .subsystem_denied => "远程服务器拒绝 SFTP 服务，无法读取文件",
+                        .already_exists => "远程服务器报告文件已存在，读取失败",
+                        .unsupported => "远程服务器不支持此文件读取操作",
+                        .path_limit => "远程路径过长，无法读取",
+                        .entry_limit => "远程目录条目超出读取上限",
+                        .source_changed => "文件在读取期间发生变化，请重新读取",
+                        .timeout => "远程读取超时，请重试",
+                        .close_failed => "远程文件关闭失败，请重新连接",
+                        .out_of_memory => "内存不足，无法读取文件",
+                        .protocol => "远程文件服务返回了无效数据，请重新连接",
                     },
-                    else => "远程读取已中断，请重新打开目录",
+                    .cancelled => "远程读取已取消",
+                    .source_changed => "文件来源已变化，请重新选择文件",
+                    .out_of_memory => "内存不足，无法读取文件",
+                    .protocol => "远程文件读取结果无效，请重新读取",
                 };
-                try self.message(reason);
+                try self.showFeedback(reason);
             },
             .listing => |listing| {
                 self.listing.release();
@@ -418,14 +437,8 @@ pub const View = struct {
             .text => {
                 var reference = try attachments.ContentRef.createRemote(self.cx.allocator, result, self.sources[self.source_index].name);
                 defer reference.release();
-                if (direct) {
-                    const attach = self.callbacks.attach orelse return error.AttachmentUnavailable;
-                    try attach(self.callbacks.context, self.owner.?, &reference);
-                    try self.message(if (self.queued.items.len == 0) "所选文件已附加" else "继续附加所选文件…");
-                } else {
-                    try self.callbacks.stage(self.callbacks.context, self.owner.?, &reference);
-                    self.close();
-                }
+                try self.callbacks.stage(self.callbacks.context, self.owner.?, &reference);
+                self.close();
             },
         }
     }
@@ -498,9 +511,7 @@ pub const View = struct {
         if (entry.attributes.kind != .file) return self.message("此项不是可读取的普通文件");
         self.revision +|= 1;
         for (self.readers.items) |active| active.reader.cancel();
-        for (self.queued.items) |queued_path| self.cx.allocator.free(queued_path);
-        self.queued.clearRetainingCapacity();
-        self.direct_read = false;
+        self.want_attach = false;
         self.want_read = false;
         if (self.selected) |previous| self.cx.allocator.free(previous);
         self.selected = try self.cx.allocator.dupe(u8, path);
@@ -523,12 +534,13 @@ pub const View = struct {
         try self.message(if (self.selections.items.len > 0) try std.fmt.bufPrint(&buffer, "已选择 {d} 个文件", .{self.selections.items.len}) else try std.fmt.bufPrint(&buffer, "{d} 个项目 · 未选择文件", .{self.filtered_count}));
     }
     fn updateActions(self: *View) void {
-        const busy = self.want_list or self.want_read or self.readers.items.len != 0;
+        const busy = self.want_list or self.want_read or self.want_attach or self.readers.items.len != 0;
         self.read_disabled.set(busy or self.selections.items.len != 1);
         self.attach_disabled.set(busy or self.selections.items.len == 0 or self.callbacks.attach == null);
     }
     fn message(self: *View, value: []const u8) !void {
-        const help = try std.fmt.allocPrint(self.cx.allocator, "{s}\n附加文件内容，每文件最多 4 KiB。", .{value});
+        try self.feedback.setTextContent(self.cx.allocator, "");
+        const help = try std.fmt.allocPrint(self.cx.allocator, "{s}\n附加仅引用来源和路径；预览读取文本，最多 4 KiB。", .{value});
         defer self.cx.allocator.free(help);
         try self.status.setTextContent(self.cx.allocator, help);
         const no_entries = self.filtered_count == 0;
@@ -538,14 +550,30 @@ pub const View = struct {
         self.updateActions();
         self.cx.requestRedraw();
     }
+    fn showFeedback(self: *View, value: []const u8) !void {
+        try self.message(value);
+        if (self.filtered_count > 0) try self.feedback.setTextContent(self.cx.allocator, value);
+    }
+    fn stopPendingRead(self: *View) void {
+        self.want_attach = false;
+        self.want_list = false;
+        self.want_read = false;
+    }
     fn fail(self: *View, err: anyerror) void {
-        self.message(@errorName(err)) catch {};
+        self.stopPendingRead();
+        self.showFeedback(switch (err) {
+            error.StaleOwner, error.StaleRemoteSource, error.TargetOutsideAssistant, error.TargetNotAuthorized => "远程来源已失效，请重新选择来源",
+            error.OutOfMemory => "内存不足，无法附加或预览文件",
+            error.RemotePathTooLong => "远程路径过长，无法附加或预览文件",
+            error.InvalidRemotePath => "远程路径无效，请重新选择文件",
+            error.AttachmentUnavailable => "附加功能不可用，请重新打开文件选择器",
+            else => @errorName(err),
+        }) catch {};
     }
     pub fn release(self: *View) error{Busy}!void {
         if (self.readers.items.len != 0) return error.Busy;
         self.readers.deinit(self.cx.allocator);
         self.selections.deinit(self.cx.allocator);
-        self.queued.deinit(self.cx.allocator);
     }
     /// A tab close must retire captures before releasing its original file
     /// service. Other sources cannot stand in for an awaiting operation.

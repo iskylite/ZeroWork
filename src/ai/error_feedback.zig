@@ -1,6 +1,13 @@
 const std = @import("std");
 const error_model = @import("error.zig");
 
+pub fn localFailureLabel(label: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, label, "JournalLimit")) return "本地聊天记录存储已达上限，暂时无法保存新内容；请先备份记录，再导出或整理历史会话";
+    if (std.mem.eql(u8, label, "JournalConflict")) return "本地聊天记录文件已变化，已暂停写入；请重新打开应用后继续";
+    if (std.mem.eql(u8, label, "TurnChanged")) return "当前回复轮次已结束或变化，消息仍在待处理列表中，请再次发送";
+    return null;
+}
+
 pub const Feedback = struct {
     info: ?error_model.Info = null,
     retry_available: bool = false,
@@ -32,6 +39,7 @@ pub fn budgetFailureMessage(err: anyerror) ?[]const u8 {
 /// Preserve the actual failure category. A local result-retention failure can
 /// follow a successful remote action and must never be called a network loss.
 pub fn recoveryReason(err: anyerror, diagnostic: []const u8, http_status: u16) []const u8 {
+    if (localFailureLabel(@errorName(err))) |message| return message;
     if (budgetFailureMessage(err)) |message| return message;
     if (http_status != 0) return diagnostic;
     return switch (err) {
@@ -41,6 +49,13 @@ pub fn recoveryReason(err: anyerror, diagnostic: []const u8, http_status: u16) [
         error.MissingApiKey, error.ProviderFailure => "服务请求失败，请检查 AI 设置",
         else => diagnostic,
     };
+}
+
+test "AI journal failures and stale queued turns explain retained records" {
+    try std.testing.expect(std.mem.indexOf(u8, localFailureLabel("JournalLimit").?, "本地聊天记录") != null);
+    try std.testing.expect(std.mem.indexOf(u8, localFailureLabel("TurnChanged").?, "待处理列表") != null);
+    try std.testing.expectEqualStrings(localFailureLabel("JournalConflict").?, recoveryReason(error.JournalConflict, "JournalConflict", 0));
+    try std.testing.expect(localFailureLabel("Timeout") == null);
 }
 
 test "AI recovery distinguishes retained tool capacity from transport failure and keeps diagnostic codes" {

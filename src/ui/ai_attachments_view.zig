@@ -325,8 +325,8 @@ pub const View = struct {
         @import("layer_materials.zig").card(card, .control);
         errdefer self.cx.destroyDetached(card);
         state.root = card;
-        card.meta.ownership.meta.test_id = if (content.source == .terminal) "ai.attachment.terminal_text" else if (content.source == .remote_file) "ai.attachment.remote_file" else "ai.attachment.local_text";
-        state.preview = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = if (content.source == .terminal) "预览终端文本" else if (content.source == .remote_file) "预览远程文件" else "预览本地文本", .base_style = state.preview_style, .hover_style = state.hover_style, .on_click = self.cx.on(Card, state, Card.open) }).mount(scope, self.cx);
+        card.meta.ownership.meta.test_id = if (content.source == .terminal) "ai.attachment.terminal_text" else if (content.source == .remote_file) "ai.attachment.remote_file" else if (content.source == .local_reference) "ai.attachment.local_reference" else "ai.attachment.local_text";
+        state.preview = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = if (content.source == .terminal) "预览终端文本" else if (content.source == .remote_file) (if (content.source.remote_file.reference_only) "查看远程引用" else "预览远程文件") else if (content.source == .local_reference) "查看本机路径引用" else "预览本地文本", .base_style = state.preview_style, .hover_style = state.hover_style, .on_click = self.cx.on(Card, state, Card.open) }).mount(scope, self.cx);
         state.preview.setStyleInline(self.cx.allocator, S.previewSlot());
         state.preview.meta.ownership.meta.test_id = "ai.attachment.open";
         state.icons[0] = try ui.iconTint(self.cx, if (content.source == .terminal) ui.icons.terminal else ui.icons.get("file-text").?, S.theme.current().accent, icon(S.icon_size));
@@ -345,8 +345,9 @@ pub const View = struct {
         const metadata = try ui.textStyled(self.cx, S.metadata, "");
         state.metadata = metadata;
         try metadata.setTextContent(self.cx.allocator, switch (content.source) {
+            .local_reference => "本机 · 路径引用",
             .local_file => try std.fmt.bufPrint(&buffer, "本地 · {d} B", .{content.bytes.len}),
-            .remote_file => |remote| try std.fmt.bufPrint(&buffer, "#{d} · {d} B · {s}", .{ @backingInt(remote.owner.session_id), content.bytes.len, if (remote.truncated) "已截断" else "完整" }),
+            .remote_file => |remote| if (remote.reference_only) try std.fmt.bufPrint(&buffer, "#{d} · 远程引用", .{@backingInt(remote.owner.session_id)}) else try std.fmt.bufPrint(&buffer, "#{d} · {d} B · {s}", .{ @backingInt(remote.owner.session_id), content.bytes.len, if (remote.truncated) "已截断" else "完整" }),
             .terminal => |terminal| try std.fmt.bufPrint(&buffer, "#{d} · {d} B · {d} 行", .{ @backingInt(terminal.owner.session_id), content.bytes.len, terminal.line_count }),
         });
         metadata.setStyleInline(self.cx.allocator, S.metadataSlot());
@@ -355,6 +356,7 @@ pub const View = struct {
         const remove = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = switch (content.source) {
             .terminal => "移除终端文本附件",
             .local_file => "移除本地文本附件",
+            .local_reference => "移除本机路径引用",
             .remote_file => "移除远程文件附件",
         }, .base_style = state.remove_style, .hover_style = state.hover_style, .disabled = state.removing, .on_click = self.cx.on(Card, state, Card.remove) }).mount(scope, self.cx);
         remove.setStyleInline(self.cx.allocator, S.removeSlot());
@@ -388,13 +390,15 @@ pub const View = struct {
         try self.preview_identity.setTextContent(self.cx.allocator, content.path);
         try self.preview_path_hint.setTextContent(self.cx.allocator, content.path);
         const metadata = switch (content.source) {
+            .local_reference => try self.cx.allocator.dupe(u8, "本机 · 绝对路径引用"),
             .local_file => try std.fmt.allocPrint(self.cx.allocator, "本地 · {s} · {d} B · 完整", .{ if (content.bom_preserved) "UTF-8 BOM" else "UTF-8", content.bytes.len }),
-            .remote_file => |remote| try std.fmt.allocPrint(self.cx.allocator, "{s} · 会话 #{d} · {d} B · {s}", .{ remote.source_name, @backingInt(remote.owner.session_id), content.bytes.len, if (remote.truncated) "已截断" else "完整" }),
+            .remote_file => |remote| if (remote.reference_only) try std.fmt.allocPrint(self.cx.allocator, "{s} · 会话 #{d}", .{ remote.source_name, @backingInt(remote.owner.session_id) }) else try std.fmt.allocPrint(self.cx.allocator, "{s} · 会话 #{d} · {d} B · {s}", .{ remote.source_name, @backingInt(remote.owner.session_id), content.bytes.len, if (remote.truncated) "已截断" else "完整" }),
             .terminal => |terminal| try std.fmt.allocPrint(self.cx.allocator, "{s} #{d} · {d} 行 · {d} B", .{ terminal.source_name, @backingInt(terminal.owner.session_id), terminal.line_count, content.bytes.len }),
         };
         defer self.cx.allocator.free(metadata);
         try self.preview_metadata.setTextContent(self.cx.allocator, metadata);
-        try self.preview_title.setTextContent(self.cx.allocator, "文件预览");
+        const remote_reference = content.source == .remote_file and content.source.remote_file.reference_only;
+        try self.preview_title.setTextContent(self.cx.allocator, if (remote_reference) "远程文件引用" else if (content.source == .local_reference) "本机文件引用" else "文件预览");
         var time_buffer: [8]u8 = undefined;
         const capture_time = try @import("terminal_surface_input.zig").localTimestamp(&time_buffer, content.captured_at_ms);
         var info_buffer: [40]u8 = undefined;
@@ -402,7 +406,7 @@ pub const View = struct {
         self.preview_info.setDisplay(if (content.source == .terminal) .flex else .none);
         self.preview_icons[0].setDisplay(if (content.source == .terminal) .none else .flex);
         self.preview_terminal_icon.setDisplay(if (content.source == .terminal) .flex else .none);
-        try self.preview_label.setTextContent(self.cx.allocator, content.bytes);
+        try self.preview_label.setTextContent(self.cx.allocator, if (remote_reference) "仅引用远程来源和路径" else if (content.source == .local_reference) localReferenceNotice(content.source.local_reference) else content.bytes);
         self.layoutPreview();
         self.preview_reference.release();
         self.preview_reference = reference.retain();
@@ -412,6 +416,7 @@ pub const View = struct {
         if (self.preview_primary.behavior.interaction.a11y) |*attrs| attrs.label = switch (kind) {
             .candidate => switch (content.source) {
                 .local_file => "附加本地文本",
+                .local_reference => "附加本机路径引用",
                 .remote_file => "附加远程文件",
                 .terminal => |terminal| if (terminal.origin == .selection) "附加终端选区" else "附加命令上下文",
             },
@@ -419,12 +424,12 @@ pub const View = struct {
             .history => "关闭预览",
         };
         self.preview_primary.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (kind == .candidate) 88 else 52 } });
-        setButtonCopy(self.cx, self.preview_primary, if (kind == .candidate) "附加快照" else "关闭");
+        setButtonCopy(self.cx, self.preview_primary, if (kind == .candidate) (if (content.source == .remote_file or content.source == .local_reference) "附加引用" else "附加快照") else "关闭");
         const candidate_plus = false;
         self.preview_primary_plus.setDisplay(if (candidate_plus) .flex else .none);
         self.preview_primary_check.setDisplay(if (candidate_plus) .none else .flex);
         self.preview_remove.setDisplay(if (kind == .history or self.callbacks.remove == null) .none else .flex);
-        self.preview_reselect.setDisplay(if (kind == .history or content.source != .local_file or self.callbacks.reselect == null) .none else .flex);
+        self.preview_reselect.setDisplay(if (kind == .history or (content.source != .local_file and content.source != .local_reference) or self.callbacks.reselect == null) .none else .flex);
         if (self.popup) |popup| popup.open.?.set(true) else {
             self.inline_open = true;
             if (self.modal_open) |open| open.set(true) else self.preview_panel.setDisplay(.flex);
@@ -636,6 +641,16 @@ fn matches(bundle: ?attachments.Bundle, draft: ?*const attachments.Draft) bool {
 }
 fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size } };
+}
+fn localReferenceNotice(reference: attachments.LocalReference) []const u8 {
+    return switch (reference.reason) {
+        .binary => "无法文本预览：此文件为二进制格式。仅引用本机绝对路径。",
+        .encoding => "无法文本预览：文件不是有效的 UTF-8 文本。仅引用本机绝对路径。",
+        .size_limit => "文件超出内容附加大小限制。已仅引用本机绝对路径。",
+        .text_limit => "文本超过 64 KiB 内容附加限制。已仅引用本机绝对路径。",
+        .image_limit => "图片超出大小、尺寸或像素限制。已仅引用本机绝对路径。",
+        .image_count => "图片数量已达上限。已仅引用本机绝对路径。",
+    };
 }
 fn tintIcons(node: *ui.Node) void {
     if (node.getIcon()) |_| _ = node.setTint(S.theme.current().fg_2);

@@ -25,6 +25,8 @@ const Fixture = struct {
     shared: ?*attached.Host = null,
     final_draft: ?[]const u8 = null,
     fail_projection_once: bool = false,
+    projection_failure: ?anyerror = null,
+    completion_attempts: usize = 0,
     worker_releases: usize = 0,
     late_release_checks: usize = 0,
     fail_worker_release: bool = false,
@@ -99,6 +101,8 @@ const Fixture = struct {
     }
     fn complete(raw: *anyopaque, runner: *runtime.Runner) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.completion_attempts += 1;
+        if (self.projection_failure) |err| return err;
         try std.testing.expectEqual(self.controller_thread, std.Thread.getCurrentId());
         try std.testing.expect(runner.thread == null and runner.saved and !runner.agent.busy);
         if (self.fail_projection_once) {
@@ -467,6 +471,37 @@ test "AiHost integration accepted input survives controller capture failure and 
     try std.testing.expectEqualStrings("must retain this accepted input", shared.service.store.find(ticket.conversation).?.inbox.entries.items[0].payload.messages[0].content);
     try shared.service.endConversation(ticket, identity.HostOperationId.generate());
     try std.testing.expect(shared.service.store.find(ticket.conversation).?.binding == null);
+}
+
+test "AiHost integration journal limit backs off completion retries and retains the same turn" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    fixture.release.store(true, .release);
+    fixture.projection_failure = error.JournalLimit;
+    var shared = attached.Host.init(a);
+    defer shared.deinit() catch unreachable;
+    const runner = try fixture.attach(&shared, .{ .session = 1 }, @fromBackingInt(1));
+    const ticket = try shared.service.store.create(runner.agent.id);
+    _ = try shared.service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "保存失败也不能重发模型请求" }, null);
+    const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    while (runner.state.load(.acquire) == .running) {
+        if (start.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() > 3000) return error.WorkerTimeout;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectError(error.JournalLimit, shared.pump());
+    const turn = runner.context.?.turn;
+    try std.testing.expect(runner.pending_notify and runner.saved and !runner.agent.busy and runner.persistenceRetryDelayNs() > 0);
+    for (0..1000) |_| try shared.pump();
+    try std.testing.expectEqual(@as(usize, 1), fixture.completion_attempts);
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls.load(.acquire));
+    try std.testing.expectEqual(turn, runner.context.?.turn);
+    try std.testing.expectEqualStrings("completed", shared.service.store.find(ticket.conversation).?.history.messages[1].content);
+    fixture.projection_failure = null;
+    runner.persistence_retry_at_ns = 0;
+    try shared.pump();
+    try std.testing.expect(!runner.pending_notify);
+    try std.testing.expectEqual(@as(usize, 1), fixture.completed);
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls.load(.acquire));
 }
 
 test "conversation presentation persists across restart fork source deletion and rebind without starting tools" {

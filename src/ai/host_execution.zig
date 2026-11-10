@@ -81,7 +81,16 @@ pub fn performTerminal(service: terminal.Service, action: TerminalAction) !Termi
         .output => |value| .{ .output = try service.executionOutput(value.id, value.allocator, value.cursor, value.max_bytes) },
     };
 }
-pub const Target = struct { verification_service: ?@import("../host/session_host.zig").ServiceHandle = null, create_key: ?@import("../host/operation.zig").OperationKey = null, handle: identity.SessionHandle, service: terminal.Service, ownership_revision: u64 };
+pub const Target = struct {
+    /// Backends with receipt read authorization reserve this identity at
+    /// approval, before native mailbox admission (which may return WorkerBusy).
+    execution_id: ?identity.ExecutionId = null,
+    verification_service: ?@import("../host/session_host.zig").ServiceHandle = null,
+    create_key: ?@import("../host/operation.zig").OperationKey = null,
+    handle: identity.SessionHandle,
+    service: terminal.Service,
+    ownership_revision: u64,
+};
 pub const Backend = struct {
     retained_shell_snapshots: bool = false,
     context: *anyopaque,
@@ -364,7 +373,12 @@ pub const Controller = struct {
         const target = self.backend.authorize(self.backend.context, invocation, ref, command, hash) catch |err| {
             if (err == error.WorkerBusy or err == error.ApprovalRequired) return err;
             try self.journal.update(operation, record.revision, .{ .stage = if (err == error.CancelledBeforeDispatch) .cancelled_unsent else .rejected });
-            return err;
+            if (err == error.CancelledBeforeDispatch) return err;
+            const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .error_code = @errorName(err), .message = @import("step_failure.zig").explanation(@errorName(err)), .state = "cancelled_unsent", .side_effect_started = false, .local_released = true, .remote_effect_unknown = false }, .{});
+            errdefer self.allocator.free(body);
+            var response = try ownedResult(self.allocator, invocation.context, invocation.operation_id, body, false, false);
+            response.status = .rejected;
+            return response;
         };
         self.tick(now);
         const snapshot = try self.terminalSnapshot(target.service);
@@ -376,7 +390,7 @@ pub const Controller = struct {
             try self.journal.update(operation, record.revision, .{ .stage = .cancelled_unsent });
             return error.CancelledBeforeDispatch;
         };
-        const id = identity.ExecutionId.generate();
+        const id = target.execution_id orelse identity.ExecutionId.generate();
         const index_command = try self.allocator.dupe(u8, command);
         const frozen_command = self.allocator.dupe(u8, command) catch |err| {
             self.allocator.free(index_command);
@@ -733,6 +747,42 @@ fn ownedResult(a: std.mem.Allocator, context: host.Context, operation_id: u64, b
     const blocks = try a.alloc(host.Block, 1);
     blocks[0] = .{ .structured = body };
     return .{ .status = if (unknown) .outcome_unknown else .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .binding_revision = context.binding_revision, .side_effect_started = started, .remote_effect_unknown = unknown } };
+}
+
+test "execution authorization rejection retains known unsent facts" {
+    const Mock = struct {
+        fn authorize(_: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !Target {
+            return error.TargetNotAuthorized;
+        }
+        fn resolve(_: *anyopaque, _: host.Context, _: identity.SessionHandle) !terminal.Service {
+            return error.UnexpectedDispatch;
+        }
+    };
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var journal = try journal_mod.Journal.open(a, std.testing.io, tmp.dir, "denied.json");
+    defer journal.deinit();
+    var marker: u8 = 0;
+    var controller = Controller.init(a, &journal, .{ .context = &marker, .authorize = Mock.authorize, .resolve = Mock.resolve });
+    defer controller.deinit();
+    const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const json = "{\"session_ref\":\"approved-target\",\"command\":\"pwd\",\"request_key\":\"denied\",\"wait_ms\":2000}";
+    const args = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer args.deinit();
+    const invocation: host.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "denied-call", .tool_id = "host.run_in_terminal", .arguments = args.value, .arguments_json = json, .arguments_hash = execution.digest(json), .canonical_arguments_hash = try @import("canonical_arguments.zig").digest(a, args.value) };
+    const response = try controller.execute(invocation, 1);
+    try std.testing.expect(response == .result);
+    var result = response.result;
+    defer result.deinit(a);
+    try result.validate(context, 1);
+    try std.testing.expectEqual(.rejected, result.status);
+    try std.testing.expect(!result.receipt.side_effect_started and result.receipt.local_released and !result.receipt.remote_effect_unknown);
+    try std.testing.expectEqual(@as(usize, 0), controller.entries.items.len);
+    const body = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings("TargetNotAuthorized", body.value.object.get("error_code").?.string);
+    try std.testing.expectEqualStrings("cancelled_unsent", body.value.object.get("state").?.string);
 }
 
 test "execution unknown receipt retains its uncertainty and never becomes a successful RPC" {

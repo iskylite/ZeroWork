@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Owned memory-only SSH/SFTP peer for AI selection; never executes shell input."""
-import argparse, base64, hashlib, io, json, logging, signal, socket, stat, threading, time
+import argparse, base64, hashlib, json, logging, signal, socket, stat, threading, time
 from pathlib import Path
 import paramiko
 logging.getLogger('paramiko').setLevel(logging.CRITICAL)
@@ -8,6 +8,9 @@ p=argparse.ArgumentParser();p.add_argument('--out',required=True);o=Path(p.parse
 stop=threading.Event();signal.signal(signal.SIGTERM,lambda *_:stop.set())
 key=paramiko.RSAKey.generate(2048)
 entries={'/fixture/a.txt':b'first captured source\n','/fixture/b.log':b'second captured source\n','/fixture/logs/c.log':b'nested captured source\n'}
+binary_path='/fixture/logs/Rocky-8.10-x86_64-dvd1.iso'
+entries[binary_path]=b'\x00'*8192
+entries['/fixture/logs/invalid-utf8.txt']=b'\xff\xfe\xfa'
 directories=('/', '/fixture', '/fixture/logs')
 class Server(paramiko.ServerInterface):
  def check_auth_password(self,u,p):return paramiko.AUTH_SUCCESSFUL if (u,p)==('fixture','ai-readonly') else paramiko.AUTH_FAILED
@@ -21,7 +24,7 @@ class Server(paramiko.ServerInterface):
 class Files(paramiko.SFTPServerInterface):
  def canonicalize(self,path):return '/fixture' if path=='.' else path
  def stat(self,path):
-  a=paramiko.SFTPAttributes();a.st_mode=(stat.S_IFDIR|0o755) if path in (*directories,'.') else (stat.S_IFREG|0o644);a.st_size=len(entries.get(path,b''));a.st_mtime=1700000000;a.st_atime=1700000000;return a if path in (*directories,'.') or path in entries else paramiko.SFTP_NO_SUCH_FILE
+  a=paramiko.SFTPAttributes();a.st_mode=(stat.S_IFDIR|0o755) if path in (*directories,'.') else (stat.S_IFREG|0o644);a.st_size=16487612416 if path==binary_path else len(entries.get(path,b''));a.st_mtime=1700000000;a.st_atime=1700000000;return a if path in (*directories,'.') or path in entries else paramiko.SFTP_NO_SUCH_FILE
  lstat=stat
  def list_folder(self,path):
   if path not in directories:return paramiko.SFTP_NO_SUCH_FILE
@@ -32,7 +35,13 @@ class Files(paramiko.SFTPServerInterface):
   return result
  def open(self,path,flags,attr):
   if path not in entries:return paramiko.SFTP_NO_SUCH_FILE
-  h=paramiko.SFTPHandle(flags);h.readfile=io.BytesIO(entries[path]);h.stat=lambda:self.stat(path);return h
+  with (o/'opens.jsonl').open('a') as log:log.write(json.dumps({'path':path,'flags':flags})+'\n')
+  def read(offset,length):
+   if path==binary_path:time.sleep(.5)
+   data=entries[path][offset:offset+length]
+   with (o/'reads.jsonl').open('a') as log:log.write(json.dumps({'path':path,'offset':offset,'requested':length,'returned':len(data)})+'\n')
+   return data
+  h=paramiko.SFTPHandle(flags);h.read=read;h.stat=lambda:self.stat(path);return h
 sock=socket.socket();sock.bind(('127.0.0.1',0));sock.listen(8);sock.settimeout(.2)
 (o/'ready.json').write_text(json.dumps({'port':sock.getsockname()[1],'known_host':f'[127.0.0.1]:{sock.getsockname()[1]} {key.get_name()} {key.get_base64()}\n'}))
 transports=[]

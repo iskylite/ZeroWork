@@ -1008,7 +1008,8 @@ pub const Workspace = struct {
         }
         if (self.status_feedback) |feedback| feedback.publish(feedback.context, if (self.active_tab) |index| (if (index < self.tabs.items.len) self.tabs.items[index].content_owner else null) else null, text, kind);
         const target = self.status_node orelse return;
-        target.setTextContent(self.allocator, text) catch return;
+        var buffer: [768]u8 = undefined;
+        target.setTextContent(self.allocator, @import("feedback_message.zig").message(text, &buffer)) catch return;
         target.markRenderDirty();
         self.cx.requestRedraw();
     }

@@ -138,6 +138,7 @@ pub const Coordinator = struct {
         try self.registerDefinition(.{ .id = "host.reconnect", .category = .connection_change, .system_policy = .reconnect });
         try self.registerDefinition(.{ .id = "host.ai_ready", .category = .attention, .system_policy = .ai_ready });
         try self.registerDefinition(.{ .id = "host.feedback", .category = .operation_result, .default_channels = .{ .attention = false } });
+        try self.registerDefinition(.{ .id = "host.operation_error", .category = .operation_result, .default_channels = .{ .system = false, .attention = false } });
         try self.registerDefinition(.{ .id = "host.command_error", .category = .operation_result, .default_channels = .{ .in_app = false, .system = false, .attention = false } });
         try self.registerDefinition(.{ .id = "host.ai_attention", .category = .attention, .default_channels = .{ .system = true }, .system_policy = .ai_ready });
         try self.registerDefinition(.{ .id = "host.ai_unknown", .category = .attention, .default_channels = .{ .system = true }, .system_policy = .ai_ready });
@@ -227,7 +228,7 @@ pub const Coordinator = struct {
     /// No system policy/authorization change can replay an old revision.
     pub fn publishNotification(self: *Coordinator, event: NotificationEvent, clock: Clock) !NotificationPublication {
         try validClock(clock);
-        try validOwner(event.owner.content);
+        if (!event.owner.window_only) try validOwner(event.owner.content);
         const definition = self.definitionFor(event.definition_id) orelse return error.UnknownNotificationDefinition;
         if (definition.version != event.definition_version) return error.NotificationDefinitionVersionMismatch;
         if (event.owner.window_id == 0 or event.operation_id == 0 or event.event_revision == 0 or event.attempt_id == 0) return error.InvalidNotificationIdentity;
@@ -284,7 +285,7 @@ pub const Coordinator = struct {
         try self.notification_records.ensureUnusedCapacity(self.allocator, 1);
         try self.consumed_notifications.ensureUnusedCapacity(self.allocator, 1);
         const show = record.listed and event.attention.app_focused and event.attention.kind != .completion and
-            definition.default_channels.in_app and !self.policy.quiet_hours.contains(clock.local_minute) and self.open_centers == 0;
+            definition.default_channels.in_app and (event.attention.kind == .operation_failed or !self.policy.quiet_hours.contains(clock.local_minute)) and self.open_centers == 0;
         if (!show) record.presentation = .hidden;
         if (self.notification_records.items.len >= history_limit) {
             for (self.notification_records.items, 0..) |old, index| if (!self.incidentPending(old)) {
@@ -293,7 +294,7 @@ pub const Coordinator = struct {
             };
         }
         self.notification_records.appendAssumeCapacity(record);
-        const watermark: ConsumedNotification = .{ .definition_id = definition.id, .owner = event.owner.content, .operation_id = event.operation_id, .attempt_id = event.attempt_id, .revision = event.event_revision, .fact_id = record.fact_id, .was_listed = record.listed };
+        const watermark: ConsumedNotification = .{ .definition_id = definition.id, .owner = event.owner, .operation_id = event.operation_id, .attempt_id = event.attempt_id, .revision = event.event_revision, .fact_id = record.fact_id, .was_listed = record.listed };
         if (consumed) |index| self.consumed_notifications.items[index] = watermark else self.consumed_notifications.appendAssumeCapacity(watermark);
         self.history_revision +|= 1;
         if (consumed == null) self.next_fact += 1;
@@ -323,7 +324,7 @@ pub const Coordinator = struct {
     /// resolved history has been cleared. Old revisions still cannot replay.
     pub fn nextOperationId(self: *const Coordinator, definition_id: []const u8, owner: Owner) !u64 {
         var next: u64 = 1;
-        for (self.consumed_notifications.items) |entry| if (entry.owner.eql(owner) and std.mem.eql(u8, entry.definition_id, definition_id)) {
+        for (self.consumed_notifications.items) |entry| if (!entry.owner.window_only and entry.owner.content.eql(owner) and std.mem.eql(u8, entry.definition_id, definition_id)) {
             if (entry.operation_id == std.math.maxInt(u64)) return error.NotificationOperationIdentityExhausted;
             next = @max(next, entry.operation_id + 1);
         };
@@ -342,6 +343,7 @@ pub const Coordinator = struct {
     fn qualifies(self: *const Coordinator, event: NotificationEvent, definition: NotificationDefinition) bool {
         const facts = event.attention;
         if (facts.resolved) return false;
+        if (facts.kind == .operation_failed) return true;
         if (facts.kind == .completion) return event.phase == .succeeded and !facts.app_focused and event.system_enabled and
             if (definition.system_policy) |kind| self.policy.enabled(kind) else false;
         if (facts.kind == .local or !facts.requires_action or !facts.time_sensitive) return false;
@@ -412,6 +414,16 @@ pub const Coordinator = struct {
             break;
         };
         self.dequeue(fact_id);
+    }
+    pub fn revealNotification(self: *Coordinator, fact_id: u64) void {
+        for (self.notification_records.items) |*record| if (record.fact_id == fact_id) {
+            record.remaining_ms = if (record.event.actions.len > 0) 8000 else 4000;
+            record.last_tick_ms = record.published_ms;
+            record.presentation = .queued;
+            if (self.open_centers == 0) self.enqueue(fact_id);
+            self.history_revision +|= 1;
+            return;
+        };
     }
     pub fn pauseNotification(self: *Coordinator, fact_id: u64, paused: bool) void {
         for (self.notification_records.items) |*record| if (record.fact_id == fact_id) {
@@ -704,9 +716,12 @@ pub const Phase = enum { accepted, verifying, succeeded, failed, outcome_unknown
 pub const Severity = enum { info, success, warning, failure };
 pub const NotificationOwner = struct {
     window_id: u64,
-    content: Owner,
+    /// First-party application/settings operations can exist before a session.
+    /// This explicit scope never pretends that the zero handle is live content.
+    window_only: bool = false,
+    content: Owner = .{ .session = .{ .session_id = @fromBackingInt(0) } },
     pub fn eql(a: NotificationOwner, b: NotificationOwner) bool {
-        return a.window_id == b.window_id and a.content.eql(b.content);
+        return a.window_id == b.window_id and a.window_only == b.window_only and (a.window_only or a.content.eql(b.content));
     }
 };
 pub const ActionKind = enum { locate_owner, view_result, safe_query };
@@ -759,20 +774,20 @@ pub const NotificationPublication = struct { fact_id: u64, duplicate: bool, upda
 const OwnedDefinition = struct { value: NotificationDefinition };
 const ConsumedNotification = struct {
     definition_id: []const u8,
-    owner: Owner,
+    owner: NotificationOwner,
     operation_id: u64,
     attempt_id: ?u64,
     revision: u64,
     fact_id: u64,
     was_listed: bool,
     fn matches(self: ConsumedNotification, event: NotificationEvent) bool {
-        return std.mem.eql(u8, self.definition_id, event.definition_id) and self.owner.eql(event.owner.content) and self.operation_id == event.operation_id and self.attempt_id == event.attempt_id;
+        return std.mem.eql(u8, self.definition_id, event.definition_id) and sameEventOwner(self.owner, event.owner) and self.operation_id == event.operation_id and self.attempt_id == event.attempt_id;
     }
 };
 /// Facts originate in a business controller. Severity/text never grant a
 /// global channel. Incident IDs must identify a host-confirmed shared cause.
 pub const AttentionFacts = struct {
-    kind: enum { local, completion, task_blocked, connection_stopped, transfer_batch_stopped, outcome_unknown, application_risk } = .local,
+    kind: enum { local, completion, task_blocked, connection_stopped, transfer_batch_stopped, outcome_unknown, application_risk, operation_failed } = .local,
     requires_action: bool = false,
     time_sensitive: bool = false,
     resolved: bool = false,
@@ -785,7 +800,10 @@ pub fn sameIncident(a: NotificationRecord, b: NotificationRecord) bool {
     return a.fact_id == b.fact_id;
 }
 fn sameNotification(a: NotificationEvent, b: NotificationEvent) bool {
-    return std.mem.eql(u8, a.definition_id, b.definition_id) and a.owner.content.eql(b.owner.content) and a.operation_id == b.operation_id and a.attempt_id == b.attempt_id;
+    return std.mem.eql(u8, a.definition_id, b.definition_id) and sameEventOwner(a.owner, b.owner) and a.operation_id == b.operation_id and a.attempt_id == b.attempt_id;
+}
+fn sameEventOwner(a: NotificationOwner, b: NotificationOwner) bool {
+    return a.window_only == b.window_only and (if (a.window_only) a.window_id == b.window_id else a.content.eql(b.content));
 }
 fn legalPhase(from: Phase, to: Phase) bool {
     if (from == to) return true;

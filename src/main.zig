@@ -341,7 +341,7 @@ const NativeContext = @import("ai/provider_transport.zig").NativeContext;
 const ai_provider_config = @import("ai/provider_config.zig");
 const ai_attachments = @import("ai/local_text_attachments.zig");
 const ai_attachment_request = @import("ai/local_text_request.zig");
-const AiAttachmentReader = @import("host/ai_local_text_snapshot.zig").Reader;
+const AiAttachmentReader = @import("host/ai_local_file_snapshot.zig").Reader;
 const ai_images = @import("ai/image_attachments.zig");
 const AiImageReader = @import("host/ai_image_snapshot.zig").Reader;
 
@@ -449,6 +449,7 @@ const AiHost = struct {
     panel: *ui.Node,
     status: *ui.Node,
     feedback: ?*@import("ui/ai_feedback_view.zig").View = null,
+    model_gate: ?anyerror = null,
     rollback_to_start: bool = false,
     card_node: *ui.Node,
     prompt: *ui.Signal([]const u8),
@@ -566,6 +567,8 @@ const AiHost = struct {
     /// internal buffer would be overwritten by the next keystroke).
     request_text: ?[]u8 = null,
     failure_label: []const u8 = "AI request failed",
+    attached_finalized: bool = false,
+    presentation_saved_at_ns: i128 = 0,
     failure_detail: [1400]u8 = undefined,
     request_failure: ?anyerror = null,
     request_stats: ai_provider.ChatStats = .{ .usage_reported = false },
@@ -1026,7 +1029,14 @@ const AiHost = struct {
         const owner_changed = self.display_owner == null or !self.display_owner.?.eql(current_owner);
         if (self.display_owner == null or !self.display_owner.?.eql(current_owner) or self.display_conversation != selected_id) try self.preservePendingEdit();
         try self.persistDisplayedDraft();
-        try self.saveDisplayedPresentation();
+        const switching = owner_changed or self.display_conversation != selected_id;
+        const now = @import("platform/realtime.zig").monotonicNs();
+        // Capture an in-flight display at most once every two seconds. Final
+        // completion, tab switches and explicit actions still flush immediately.
+        if (switching or (self.execution().thread_state.load(.acquire) == 1 and now - self.presentation_saved_at_ns >= 2 * std.time.ns_per_s)) {
+            self.presentation_saved_at_ns = now;
+            try self.saveDisplayedPresentation();
+        }
         _ = try self.bindAttached(current_owner);
         if (self.display_owner) |owner| if (Owner.eql(owner, current_owner) and self.display_conversation == selected_id) return;
         if (self.gestures) |gestures| gestures.cancel();
@@ -1201,6 +1211,8 @@ const AiHost = struct {
         const content = reference.content() orelse return error.EmptyAttachmentResult;
         if (content.source != .remote_file) return error.InvalidRemoteSource;
         _ = try scope.validate(&.{@backingInt(content.source.remote_file.owner.session_id)});
+        const source = self.remoteFileSource(@backingInt(content.source.remote_file.owner.session_id)) orelse return error.StaleOwner;
+        if (!source.available or !source.session.eql(content.source.remote_file.owner)) return error.StaleOwner;
         const draft = try self.attachmentDraft(owner);
         const ticket = try draft.begin();
         errdefer _ = draft.cancel(ticket);
@@ -1301,8 +1313,11 @@ const AiHost = struct {
     }
 
     fn addImageToDraft(self: *AiHost, draft: *ai_images.Draft, path: []const u8) !void {
-        if (draft.items.items.len >= ai_images.max_count) return error.TooManyImages;
-        try @import("host/ai_image_snapshot.zig").preflight(self.cx.io, path, .{});
+        @import("host/ai_image_snapshot.zig").preflight(self.cx.io, path, .{}) catch |err| switch (err) {
+            error.ImageTooLarge => return self.attachLocalReference(draft.conversation_id, path, .{ .reason = .size_limit }),
+            else => return err,
+        };
+        if (draft.items.items.len >= ai_images.max_count) return self.attachLocalReference(draft.conversation_id, path, .{ .reason = .image_count });
         const ticket = try draft.begin(path, .{});
         errdefer _ = draft.remove(ticket.id);
         const reader = try AiImageReader.start(self.allocator, ticket, path, .{});
@@ -1311,6 +1326,25 @@ const AiHost = struct {
         try self.image_readers.append(self.allocator, reader);
         self.promptChanged(self.prompt.get());
         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+    }
+
+    fn attachLocalReference(self: *AiHost, conversation_id: ?@import("host/identity.zig").ConversationId, path: []const u8, reason: ai_attachments.LocalReference) !void {
+        const state = self.attachmentConversation(conversation_id) orelse return error.StaleAttachment;
+        const draft = try self.assistant_states.?.attachmentDraftForState(state.id);
+        const ticket = try draft.begin();
+        errdefer _ = draft.cancel(ticket);
+        var metadata = reason;
+        if (metadata.size_bytes == null) {
+            const stat = try std.Io.Dir.cwd().statFile(self.cx.io, path, .{ .follow_symlinks = false });
+            if (stat.kind != .file) return error.NotRegularLocalFile;
+            metadata.size_bytes = stat.size;
+        }
+        var reference = try ai_attachments.ContentRef.createLocalReference(self.allocator, path, metadata);
+        defer reference.release();
+        _ = try draft.complete(ticket, &reference);
+        if (self.attachmentTicketDisplayed(ticket)) if (self.attachments_view) |view| try view.update(draft);
+        self.promptChanged(self.prompt.get());
+        self.cx.requestRedraw();
     }
 
     fn pasteImages(self: *AiHost, owner: ai_images.Owner) !void {
@@ -1366,8 +1400,22 @@ const AiHost = struct {
             var reference = completion.result catch |err| {
                 if (err == error.Cancelled) {
                     _ = draft.remove(completion.ticket.id);
+                } else if (err == error.ImageTooLarge) {
+                    const item = draft.find(completion.ticket) orelse continue;
+                    if (!std.fs.path.isAbsolute(item.path)) {
+                        _ = draft.fail(completion.ticket, err);
+                        if (self.attachmentTicketDisplayed(completion.ticket)) attachmentViewError(self, err);
+                        continue;
+                    }
+                    self.attachLocalReference(completion.ticket.conversation_id, item.path, .{ .reason = .image_limit }) catch |fallback_error| {
+                        _ = draft.fail(completion.ticket, fallback_error);
+                        if (self.attachmentTicketDisplayed(completion.ticket)) attachmentViewError(self, fallback_error);
+                        continue;
+                    };
+                    _ = draft.remove(completion.ticket.id);
                 } else {
                     _ = draft.fail(completion.ticket, err);
+                    if (self.attachmentTicketDisplayed(completion.ticket)) attachmentViewError(self, err);
                 }
                 continue;
             };
@@ -1478,7 +1526,7 @@ const AiHost = struct {
         for (bundle.items) |item| {
             const content = item.reference.content() orelse continue;
             const source = switch (content.source) {
-                .local_file => continue,
+                .local_file, .local_reference => continue,
                 .terminal => |value| value.owner,
                 .remote_file => |value| value.owner,
             };
@@ -1562,7 +1610,7 @@ const AiHost = struct {
         self.attachment_picker_active = true;
         defer self.attachment_picker_active = false;
         var buffer: [4096]u8 = undefined;
-        const path = try sdk.runDialog(.{ .kind = .open_file, .title = "选择本地文本" }, &buffer) orelse {
+        const path = try sdk.runDialog(.{ .kind = .open_file, .title = "选择本地文件" }, &buffer) orelse {
             if (self.attachmentDraftForTicket(ticket)) |current| {
                 _ = current.cancel(ticket);
             } else |_| {}
@@ -1577,7 +1625,7 @@ const AiHost = struct {
         reader.conversation = (self.attachmentConversation(ticket.conversation_id) orelse return error.StaleAttachment).id;
         try self.attachment_readers.append(self.allocator, reader);
         self.promptChanged(self.prompt.get());
-        if (self.attachmentTicketDisplayed(ticket)) self.refresh("正在读取本地文本…");
+        if (self.attachmentTicketDisplayed(ticket)) self.refresh("正在处理本地文件…");
         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
     }
 
@@ -1638,11 +1686,50 @@ const AiHost = struct {
                 _ = draft.cancel(completion.ticket);
                 continue;
             }
-            var reference = completion.result catch |err| {
+            var selected = completion.result catch |err| {
                 _ = draft.cancel(completion.ticket);
                 self.attachmentFailure(completion.ticket, err);
                 continue;
             };
+            defer selected.release();
+            if (selected == .image) {
+                if (!draft.contains(completion.ticket)) continue;
+                _ = draft.cancel(completion.ticket);
+                const state = self.attachmentConversation(completion.ticket.conversation_id) orelse continue;
+                if (replacement) |old| {
+                    var found = draft.candidate(old) != null;
+                    for (draft.items.items) |item| if (item.id == old.id) {
+                        found = true;
+                        break;
+                    };
+                    if (!found or old.draft_epoch != draft.epoch) continue;
+                }
+                const image_draft = store.imageDraftForState(state.id) catch |err| {
+                    self.attachmentFailure(completion.ticket, err);
+                    continue;
+                };
+                const image_ticket = image_draft.begin(selected.image.content().?.path, .{}) catch |err| {
+                    if (err == error.TooManyImages) {
+                        self.attachLocalReference(completion.ticket.conversation_id, selected.image.content().?.path, .{ .reason = .image_count }) catch |fallback_error| {
+                            self.attachmentFailure(completion.ticket, fallback_error);
+                            continue;
+                        };
+                        if (replacement) |old| _ = draft.remove(old.id);
+                        continue;
+                    }
+                    self.attachmentFailure(completion.ticket, err);
+                    continue;
+                };
+                image_draft.complete(image_ticket, &selected.image) catch |err| {
+                    _ = image_draft.remove(image_ticket.id);
+                    self.attachmentFailure(completion.ticket, err);
+                    continue;
+                };
+                if (replacement) |old| _ = draft.remove(old.id);
+                if (self.attachmentTicketDisplayed(completion.ticket)) self.refresh("AI 助手");
+                continue;
+            }
+            var reference = selected.file.retain();
             const byte_count = reference.content().?.bytes.len;
             draft.stageReplacing(completion.ticket, &reference, replacement) catch |err| {
                 _ = draft.cancel(completion.ticket);
@@ -1670,11 +1757,17 @@ const AiHost = struct {
         if (draft.epoch != ticket.draft_epoch) return;
         self.refresh(switch (err) {
             error.LocalTextTooLarge => "文本超过 64 KiB，请选择其他文件",
+            error.NotRegularLocalFile, error.NotRegularLocalText => "所选路径不是普通文件，无法附加或预览",
+            error.FileNotFound, error.NotDir => "本机文件不存在，请重新选择",
             error.BinaryLocalText => "此文件不是受支持的文本格式",
             error.InvalidLocalTextEncoding => "文本需要使用 UTF-8 编码",
             error.AccessDenied, error.PermissionDenied => "没有权限读取所选文件",
             error.LocalTextSourceChanged => "文件在读取期间发生变化，请重新选择",
             error.OutOfMemory => "内存不足，未添加附件",
+            error.ImageTooLarge => "图片超过大小或像素限制，无法附加或预览",
+            error.UnsupportedImage, error.InvalidImage => "图片格式不受支持或文件已损坏，无法预览",
+            error.AnimatedImageUnsupported => "不支持多帧或动态图片，请选择静态图片",
+            error.TooManyImages => "最多附加 4 张图片，请先移除其他图片",
             else => @errorName(err),
         });
     }
@@ -1716,7 +1809,15 @@ const AiHost = struct {
 
     fn attachmentViewError(raw: *anyopaque, err: anyerror) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
-        self.refresh(@errorName(err));
+        self.refresh(switch (err) {
+            error.ImageNotReady => "图片仍在处理中，请稍后预览",
+            error.InvalidImage, error.UnsupportedImage => "图片格式不受支持或文件已损坏，无法预览",
+            error.AnimatedImageUnsupported => "不支持多帧或动态图片，无法预览",
+            error.ImageTooLarge => "图片超过大小或像素限制，无法预览",
+            error.FileNotFound, error.NotDir => "本机文件不存在，无法预览",
+            error.AccessDenied, error.PermissionDenied => "没有权限读取本机文件，无法预览",
+            else => @errorName(err),
+        });
     }
 
     fn previewSentAttachment(raw: *anyopaque, ticket: ai_attachments.Ticket, reference: ai_attachments.ContentRef) !void {
@@ -2123,9 +2224,21 @@ const AiHost = struct {
     }
 
     fn setFeedback(self: *AiHost, label: []const u8) void {
-        const view = self.feedback orelse return;
-        const message = if (std.mem.eql(u8, label, "InvalidImage") or std.mem.eql(u8, label, "UnsupportedImage")) "无法识别此图片，请选择 PNG、JPEG 等有效图片" else if (std.mem.eql(u8, label, "ImageTooLarge")) "图片超过大小或尺寸限制，请缩小后重试" else if (std.mem.eql(u8, label, "TooManyImages")) "最多添加 4 张图片，请先移除已有图片" else if (std.mem.eql(u8, label, "AnimatedImageUnsupported")) "暂不支持动态图，请选择静态图片" else label;
-        view.show(message, .warning);
+        if (label.len == 0) {
+            if (self.feedback) |view| view.show("", .warning);
+            return;
+        }
+        if (std.mem.startsWith(u8, label, "已") or std.mem.startsWith(u8, label, "正在") or std.mem.startsWith(u8, label, "图片处理中") or std.mem.startsWith(u8, label, "子配置已保存") or std.mem.startsWith(u8, label, "未保存的排队编辑已保留")) {
+            if (self.feedback) |view| view.show(label, .warning);
+            return;
+        }
+        const notifications = process_notifications orelse return;
+        const window = self.notification_window orelse return;
+        const before = notifications.coordinator.history_revision;
+        var buffer: [2048]u8 = undefined;
+        const text = if (@import("ai/error_feedback.zig").localFailureLabel(label)) |message| message else @import("ui/feedback_message.zig").message(label, &buffer);
+        notifications.publishOperationError(window, null, "AI 助手", "AI 操作未完成", text, if (std.mem.indexOf(u8, text, "AI 设置") != null) .ai_settings else null) catch |err| applog.warn(.ui, "AI failure notification: {s}", .{@errorName(err)});
+        if (notifications.coordinator.history_revision != before) self.cx.requestRedraw();
     }
 
     fn imageGateLabel(problem: anyerror) []const u8 {
@@ -3926,6 +4039,7 @@ const AiHost = struct {
         for (self.managerRef().cards.cards.items) |card| _ = self.controller.stream.append(card) catch return;
         self.execution().retry_prefix_count = self.controller.stream.count();
         self.execution().answer_only = true;
+        self.execution().attached_finalized = false;
         self.execution().request_stats = .{ .usage_reported = false };
         self.cancelRef().* = .{};
         self.execution().request_failure = null;
@@ -3998,10 +4112,21 @@ const AiHost = struct {
         if (self.send_disabled) |disabled| disabled.set((self.child_identity != null and !self.childCanWrite()) or ending or !self.hasSelectedModel() or (std.mem.trim(u8, text, " \t\r\n").len == 0 and ready == 0) or processing or image_problem != null);
         const gate_changed = self.image_gate != image_problem;
         self.image_gate = image_problem;
+        var model_problem: ?anyerror = null;
+        if (self.runtime_config != null and (std.mem.trim(u8, text, " \t\r\n").len != 0 or ready > 0)) {
+            const controls = self.selectedControls() catch null;
+            _ = ai_provider_config.fromSettingsSelection(self.effectiveAi(), if (controls) |value| value.model else null) catch |err| blk: {
+                model_problem = err;
+                break :blk null;
+            };
+        }
+        const model_gate_changed = self.model_gate != model_problem;
+        self.model_gate = model_problem;
+        if (model_gate_changed and model_problem == null and image_problem == null) if (process_notifications) |notifications| if (self.notification_window) |window| notifications.resolveOperationErrors(window, "AI 助手");
         // Keep the reason visible through unrelated refreshes while sending is
         // blocked. Clearing the last image also clears the obsolete warning.
         if (self.execution().thread_state.load(.acquire) != 1) {
-            if (image_problem) |problem| self.setFeedback(imageGateLabel(problem)) else if (gate_changed) self.setFeedback("");
+            if (image_problem) |problem| self.setFeedback(imageGateLabel(problem)) else if (model_problem) |problem| self.setFeedback(@errorName(problem)) else if (gate_changed or model_gate_changed) self.setFeedback("");
         }
     }
 
@@ -4148,6 +4273,7 @@ const AiHost = struct {
     }
     fn captureAttached(raw: *anyopaque, context: @import("ai/session_runtime.zig").Context) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
+        self.attached_finalized = false;
         const stamp = try self.resourceStamp();
         if (self.resource_stamp) |previous_stamp| if (stamp != previous_stamp) {
             self.resource_stamp = stamp;
@@ -4345,11 +4471,16 @@ const AiHost = struct {
         self.request_failure = runner.failure;
         if (runner.failure) |err| self.failure_label = if (self.native_context) |native| native.diagnostic.format(&self.failure_detail, err) else @errorName(err);
         const state: u8 = if (runner.worker.?.cancel.isCancelled()) 4 else if (runner.failure != null) 3 else 2;
-        self.thread_state.store(state, .release);
         const view = self.attachedView();
         const previous = self.withAttachedView();
         defer view.execution_host = previous;
-        view.finalizeWorker(state);
+        // Saving can fail after finalization. Retrying persistence must never
+        // finish the turn again, change its counters or rebuild its UI.
+        if (!self.attached_finalized) {
+            self.thread_state.store(state, .release);
+            view.finalizeWorker(state);
+            self.attached_finalized = true;
+        }
         try view.saveConversationPresentation(self.request_conversation orelse return);
         var index: usize = 0;
         while (index < self.attached_inputs.items.len) {
@@ -6811,10 +6942,12 @@ const AiHost = struct {
             const host = self.host;
             if (host.shared_service) |shared_host| {
                 shared_host.pump() catch |err| host.setFeedback(@errorName(err));
-                for (shared_host.service.runners.items) |runner| if (runner.agent.busy or runner.pending_commit) {
-                    host.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
-                    break;
+                var poll_delay: ?u64 = null;
+                for (shared_host.service.runners.items) |runner| if (runner.agent.busy or runner.pending_commit or runner.pending_notify) {
+                    const delay = @max(16 * std.time.ns_per_ms, runner.persistenceRetryDelayNs());
+                    poll_delay = @min(poll_delay orelse delay, delay);
                 };
+                if (poll_delay) |delay| host.cx.scheduleRedrawAfterNs(delay);
             }
 
             if (host.assistant_states) |store| {
@@ -8660,6 +8793,7 @@ const SettingsHost = struct {
     search_input: ?ui.widgets.input.InputResult = null,
     picker: ?*ui.Node = null,
     providers: ?*@import("config/ai_provider_settings.zig").ProviderView = null,
+    pending_ai_problem: ?@import("config/settings_ai_draft.zig").Address = null,
     pending_rebuild: bool = false,
     workspace: ?*ws.Workspace = null,
     mounted_page: ?settings_content_view.Mounted = null,
@@ -9071,13 +9205,30 @@ const SettingsHost = struct {
     }
 
     fn refresh(self: *SettingsHost, prefix: []const u8) void {
+        if (self.controller.validationProblem() != null or self.controller.state() == .save_failed) {
+            self.notifyProblem(prefix);
+            if (self.mounted_page) |page| page.refreshFooter();
+            self.cx.requestRedraw();
+            return;
+        }
         var buffer: [256]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         writer.print("{s}{s}", .{ prefix, if (self.controller.model.dirty) " · 未保存" else "" }) catch return;
         self.status.setTextContent(self.allocator, writer.buffered()) catch return;
         self.status.setDisplay(.none);
-        if (self.mounted_page) |page| page.status_label.setTextContent(self.allocator, writer.buffered()) catch {};
+        if (self.mounted_page) |page| page.refreshFooter();
+        if (prefix.len > 0 and !std.mem.startsWith(u8, prefix, "已") and !std.mem.startsWith(u8, prefix, "正在")) self.notifyProblem(prefix);
         self.status.markRenderDirty();
+        self.cx.requestRedraw();
+    }
+
+    fn notifyProblem(self: *SettingsHost, fallback: []const u8) void {
+        const notifications = process_notifications orelse return;
+        const window = self.notification_window orelse return;
+        var buffer: [2048]u8 = undefined;
+        const invalid = self.controller.validationProblem() != null;
+        const message = if (invalid) self.controller.validationMessage(&buffer) else @import("ui/feedback_message.zig").message(fallback, &buffer);
+        notifications.publishOperationError(window, null, "偏好设置", if (invalid) "无法保存设置" else "设置操作失败", message, if (invalid) .settings_problem else null) catch |err| applog.warn(.ui, "settings failure notification: {s}", .{@errorName(err)});
         self.cx.requestRedraw();
     }
 
@@ -9200,6 +9351,17 @@ const SettingsHost = struct {
         self.saveWithClose(false);
     }
 
+    fn locateSettingsProblem(self: *SettingsHost) void {
+        const problem = self.controller.validationProblem() orelse return;
+        self.cancelDecision();
+        self.dismissPicker();
+        self.pending_ai_problem = problem.ai_address;
+        if (problem.page != 4) self.controller.folded_sections = 0;
+        self.selectPage(problem.page);
+        self.controller.scroll_offsets[problem.page] = 0;
+        self.cx.requestRedraw();
+    }
+
     fn saveWithClose(self: *SettingsHost, close_after_save: bool) void {
         if (self.busy()) return;
         if (self.extensions_view) |view| if (view.busy() or view.hasEditor()) {
@@ -9210,6 +9372,11 @@ const SettingsHost = struct {
         if (self.providers) |providers| if (providers.isComposing() or providers.hasModelEditor()) return;
         if (!self.controller.model.dirty) {
             if (close_after_save) self.closeNow();
+            return;
+        }
+        if (self.controller.validationProblem() != null) {
+            self.notifyProblem("");
+            self.locateSettingsProblem();
             return;
         }
         self.validateFont();
@@ -9288,6 +9455,7 @@ const SettingsHost = struct {
             return;
         };
         if (!completed) return;
+        if (process_notifications) |notifications| if (self.notification_window) |window| notifications.resolveOperationErrors(window, "偏好设置");
         self.updateBackgroundIdentity();
         if (self.installation) |*receipt| receipt.deinit();
         self.installation = null;
@@ -9470,7 +9638,13 @@ const SettingsHost = struct {
         self.decision_cancel_label.?.set(if (kind == .close) "继续编辑" else "取消");
         self.decision_cancel.?.setStyle(self.allocator, .width, .{ .px = if (kind == .close) @as(f32, 112) else 96 });
         self.decision_title.?.set(if (kind == .close) "未保存的设置" else "恢复默认设置？");
-        self.decision_message.?.set(if (kind == .close) "主题预览与其他分类的编辑尚未保存。" else "载入默认值草稿？默认主题 Sauber；保存前仍可放弃。");
+        var problem_buffer: [2048]u8 = undefined;
+        const invalid = kind == .close and self.controller.validationProblem() != null;
+        self.decision_message.?.set(if (invalid) self.controller.validationMessage(&problem_buffer) else if (kind == .close) "设置更改尚未保存。" else "载入默认值草稿？默认主题 Sauber；保存前仍可放弃。");
+        self.decision_message_node.?.setTextColor(if (invalid) colors.danger_ink else colors.fg_2);
+        self.decision_notice.?.setTextContent(self.allocator, if (invalid) "请返回设置修正后保存，草稿已保留。" else "保存失败保留草稿；恢复默认值也需保存后生效。") catch {};
+        if (findSettingsText(self.decision_save.?, "保存关闭") orelse findSettingsText(self.decision_save.?, "返回修正")) |label| label.setTextContent(self.allocator, if (invalid) "返回修正" else "保存关闭") catch {};
+        if (self.decision_save.?.behavior.interaction.a11y) |*a11y| a11y.label = if (invalid) "返回修正" else "保存关闭";
         self.decision_save.?.setDisplay(if (kind == .close) .flex else .none);
         self.decision_discard.?.setDisplay(if (kind == .close) .flex else .none);
         self.decision_reset.?.setDisplay(if (kind == .reset) .flex else .none);
@@ -9853,6 +10027,7 @@ const SettingsHost = struct {
 
     fn contentChanged(raw: *anyopaque) void {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
+        if (self.controller.validationProblem() == null) if (process_notifications) |notifications| if (self.notification_window) |window| notifications.resolveOperationErrors(window, "偏好设置");
         self.pending_rebuild = true;
         self.cx.requestRedraw();
     }
@@ -10320,11 +10495,16 @@ const SettingsHost = struct {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
         const providers = try @import("config/ai_provider_settings.zig").ProviderView.mountWithHooks(cx, scope, &self.controller, .{ .context = raw, .changed = providersChanged });
         self.providers = providers;
+        if (self.pending_ai_problem) |address| {
+            self.pending_ai_problem = null;
+            providers.revealProblem(address);
+        }
         return providers.root;
     }
 
     fn providersChanged(raw: *anyopaque) void {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
+        if (self.controller.validationProblem() == null) if (process_notifications) |notifications| if (self.notification_window) |window| notifications.resolveOperationErrors(window, "偏好设置");
         if (self.mounted_page) |page| page.refreshFooter();
         self.cx.requestRedraw();
     }
@@ -14327,7 +14507,7 @@ const NotificationWindowHook = struct {
     fn mount(cx: *ui.Cx, scope: *ui.Scope, host: *NotificationHost, workspace: *ws.Workspace, settings: *SettingsHost, nav: *AppNavHost, transfer: *TransferHost) !*NotificationWindowHook {
         const self = try cx.allocator.create(NotificationWindowHook);
         self.* = .{ .host = host, .cx = cx, .workspace = workspace, .settings = settings, .nav = nav, .transfer = transfer, .id = undefined };
-        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .prepare_activity = prepareActivity, .tab_presentation = tabPresentation, .feedback = feedback, .owner_name = ownerName, .result_presented = resultPresented, .transfer_presented = transferPresented, .maintenance = maintain }) catch |err| {
+        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .prepare_activity = prepareActivity, .tab_presentation = tabPresentation, .feedback = feedback, .operation_action = operationAction, .owner_name = ownerName, .result_presented = resultPresented, .transfer_presented = transferPresented, .maintenance = maintain }) catch |err| {
             cx.allocator.destroy(self);
             return err;
         };
@@ -14394,14 +14574,27 @@ const NotificationWindowHook = struct {
     fn publishFileFailure(raw: *anyopaque, owner: @import("host/identity.zig").SessionHandle, message: []const u8) void {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
         self.workspace.status(message);
-        self.host.publishFeedbackSeverity(self.id, .{ .session = owner }, message, .failure) catch |err| applog.warn(.ui, "file creation failure notification: {s}", .{@errorName(err)});
+        self.host.publishOperationError(self.id, .{ .session = owner }, "文件", "文件操作失败", message, null) catch |err| applog.warn(.ui, "file creation failure notification: {s}", .{@errorName(err)});
         self.cx.requestRedraw();
     }
     fn publishStatus(raw: *anyopaque, owner: ?@import("host/identity.zig").ContentOwner, message: []const u8, kind: ws.Workspace.StatusKind) void {
         if (kind != .failure) return;
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
-        const source = owner orelse return;
-        self.host.publishFeedbackSeverity(self.id, source, message, .failure) catch |err| applog.warn(.ui, "failure feedback: {s}", .{@errorName(err)});
+        var buffer: [2048]u8 = undefined;
+        self.host.publishOperationError(self.id, owner, "工作区", "操作未完成", @import("ui/feedback_message.zig").message(message, &buffer), null) catch |err| applog.warn(.ui, "failure feedback: {s}", .{@errorName(err)});
+        self.cx.requestRedraw();
+    }
+    fn operationAction(raw: *anyopaque, action: u64) void {
+        const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
+        switch (action) {
+            1 => self.settings.locateSettingsProblem(),
+            2 => if (self.nav.ai) |ai| {
+                ai.settings_request = false;
+                ai.openRequestedSettings();
+            },
+            else => {},
+        }
+        self.cx.requestRedraw();
     }
     fn cleanup(self: *NotificationWindowHook) void {
         self.cx.removeAfterLayoutHook(self);

@@ -15,6 +15,7 @@ pub const Window = struct {
     prepare_activity: ?*const fn (*anyopaque) bool = null,
     tab_presentation: ?*const fn (*anyopaque, ContentOwner) ?@import("tab_presentation.zig").Presentation = null,
     feedback: *const fn (*anyopaque, []const u8) void,
+    operation_action: ?*const fn (*anyopaque, u64) void = null,
     owner_name: ?*const fn (*anyopaque, ContentOwner) []const u8 = null,
     result_presented: ?*const fn (*anyopaque, notifications.Kind, ContentOwner) bool = null,
     transfer_presented: ?*const fn (*anyopaque, u64) bool = null,
@@ -121,7 +122,13 @@ pub const Host = struct {
         for (self.windows.items, 0..) |item, index| if (item.id == id) {
             // Result facts survive their UI, but callbacks borrowed from that
             // window may not remain dispatchable after its Cx is destroyed.
-            for (self.coordinator.notification_records.items) |record| if (record.event.owner.window_id == @backingInt(id)) self.ownerEnded(record.event.owner.content);
+            for (self.coordinator.notification_records.items) |*record| if (record.event.owner.window_id == @backingInt(id)) {
+                if (record.event.owner.window_only) {
+                    record.owner_ended = true;
+                    self.coordinator.dismissNotification(record.fact_id);
+                    self.coordinator.history_revision +|= 1;
+                } else self.ownerEnded(record.event.owner.content);
+            };
             var owner_index: usize = 0;
             while (owner_index < self.bound_owners.items.len) {
                 if (self.bound_owners.items[owner_index].window_id == @backingInt(id)) {
@@ -290,6 +297,10 @@ pub const Host = struct {
             .cancelled => "本次请求已停止。",
             .unverified => "执行结果尚未确认，请查看结果后核查。",
         } });
+        if (completion.result == .failed) for (self.ai_origins.items) |origin| if (origin.operation_id == operation_id) {
+            try self.publishOperationError(origin.window, owner, "AI 助手", "AI 请求失败", if (completion.details.detail.len > 0) completion.details.detail else "请求未完成，请在 AI 助手中查看原因并重试。", null);
+            break;
+        };
         self.activity.observeAi(owner, operation_id, turn_id) catch |err| std.log.warn("menu bar AI activity: {s}", .{@errorName(err)});
     }
     pub fn publishTransfer(self: *Host, owner: ContentOwner, job: u64, attempt: u64, completion: TransferCompletion) !void {
@@ -318,6 +329,10 @@ pub const Host = struct {
             .failed => "传输未完成，请查看任务中的失败原因。",
             .cancelled => "传输已取消，可在任务中查看已传输内容。",
         } });
+        if (completion.result == .failed) for (self.windows.items) |window| if (window.value.owns(window.value.context, .{ .owner = owner, .kind = .transfer_done, .operation_id = job, .attempt_or_turn_id = attempt })) {
+            try self.publishOperationError(window.id, owner, "文件传输", "文件传输失败", if (completion.details.detail.len > 0) completion.details.detail else "传输未完成，请在传输任务中查看原因后重试。", null);
+            break;
+        };
     }
     pub const TransferBatchState = enum { active, blocked, ended };
     /// The transfer controller supplies the frozen source count and a real
@@ -526,6 +541,7 @@ pub const Host = struct {
     /// Public plugin facade validates current window/owner on first publication.
     /// An existing fact may finish after close without reviving that owner.
     pub fn publish(self: *Host, event: notifications.NotificationEvent) !notifications.NotificationPublication {
+        if (event.owner.window_only or std.mem.eql(u8, event.definition_id, "host.operation_error")) return error.ReservedNotificationDefinition;
         const window = self.windowFor(@fromBackingInt(event.owner.window_id));
         const previous = self.coordinator.factFor(event);
         if (previous == null) {
@@ -570,20 +586,49 @@ pub const Host = struct {
         };
         return self.coordinator.publishNotification(gated, try localClock());
     }
-    /// Ordinary feedback stays at its source, including warnings/failures.
-    /// Only typed impact facts may request global presentation.
+    /// Successful acknowledgments remain local; operation failures share the
+    /// existing global presenter and history, including before a session exists.
     pub fn publishFeedback(self: *Host, window_id: WindowId, owner: ContentOwner, summary: []const u8) !void {
         return self.publishFeedbackSeverity(window_id, owner, summary, .info);
     }
-    /// Compatibility entry for local receipts; severity is not global authority.
     pub fn publishFeedbackSeverity(self: *Host, window_id: WindowId, owner: ContentOwner, summary: []const u8, severity: notifications.Severity) !void {
-        // The originating field, transcript or task owns ordinary receipts.
-        // Global delivery requires structured impact, never an error level.
-        _ = self;
-        _ = window_id;
-        _ = owner;
-        _ = summary;
-        _ = severity;
+        if (severity != .failure and severity != .warning) return;
+        try self.publishOperationError(window_id, owner, "工作区", "操作未完成", summary, null);
+    }
+
+    pub const OperationAction = enum(u64) { settings_problem = 1, ai_settings = 2 };
+    pub fn publishOperationError(self: *Host, window_id: WindowId, owner: ?ContentOwner, topic: []const u8, title: []const u8, detail: []const u8, action: ?OperationAction) !void {
+        const window = self.windowFor(window_id) orelse return error.NotificationWindowClosed;
+        const source: notifications.NotificationOwner = if (owner) |content| .{ .window_id = @backingInt(window_id), .content = content } else .{ .window_id = @backingInt(window_id), .window_only = true };
+        const now = try localClock();
+        for (self.coordinator.notification_records.items) |*record| {
+            if (!record.owner_ended and record.event.owner.eql(source) and std.mem.eql(u8, record.event.definition_id, "host.operation_error") and !record.event.attention.resolved and std.mem.eql(u8, record.event.object_name, topic) and std.mem.eql(u8, record.event.detail, bounded(detail, 4096))) {
+                if (record.presentation == .expired or record.presentation == .hidden) {
+                    record.published_ms = now.monotonic_ms;
+                    self.coordinator.revealNotification(record.fact_id);
+                }
+                return;
+            }
+        }
+        if (self.next_feedback == std.math.maxInt(u64)) return error.NotificationOperationIdentityExhausted;
+        const operation = self.next_feedback;
+        self.next_feedback += 1;
+        const actions: [1]notifications.NotificationAction = .{.{ .kind = .view_result, .label = if (action == .settings_problem) "定位问题" else "AI 设置", .action_id = if (action) |value| @backingInt(value) else 0 }};
+        var focused = false;
+        for (self.windows.items) |registration| if (registration.id == window_id) {
+            focused = registration.focused;
+            break;
+        };
+        _ = window;
+        _ = try self.coordinator.publishNotification(.{ .definition_id = "host.operation_error", .owner = source, .operation_id = operation, .event_revision = 1, .phase = .failed, .severity = .failure, .title = bounded(title, 256), .detail = bounded(detail, 4096), .owner_name = topic, .object_name = topic, .system_enabled = false, .attention = .{ .kind = .operation_failed, .requires_action = true, .time_sensitive = true, .app_focused = focused }, .actions = if (action != null) &actions else &.{} }, now);
+    }
+
+    pub fn resolveOperationErrors(self: *Host, window_id: WindowId, topic: []const u8) void {
+        for (self.coordinator.notification_records.items) |*record| if (record.event.owner.window_id == @backingInt(window_id) and std.mem.eql(u8, record.event.definition_id, "host.operation_error") and std.mem.eql(u8, record.event.object_name, topic) and !record.event.attention.resolved) {
+            record.event.attention.resolved = true;
+            self.coordinator.dismissNotification(record.fact_id);
+            self.coordinator.history_revision +|= 1;
+        };
     }
     pub fn setWindowFocus(self: *Host, window_id: WindowId, focused: bool) void {
         for (self.windows.items) |*window| if (window.id == window_id) {
@@ -603,6 +648,13 @@ pub const Host = struct {
         const record = self.coordinator.recordFor(fact_id) orelse return error.UnknownNotificationEvent;
         if (action_index >= record.event.actions.len) return error.UnknownNotificationAction;
         const action = record.event.actions[action_index];
+        if (std.mem.eql(u8, record.event.definition_id, "host.operation_error")) {
+            if (record.owner_ended) return error.NotificationOwnerEnded;
+            const window = self.windowFor(@fromBackingInt(record.event.owner.window_id)) orelse return error.NotificationWindowClosed;
+            const invoke = window.operation_action orelse return error.UnregisteredNotificationAction;
+            invoke(window.context, action.action_id);
+            return;
+        }
         if (action.kind == .locate_owner) {
             if (std.mem.startsWith(u8, record.event.definition_id, "host.ai_")) {
                 if (!record.owner_ended and self.activateAi(.{ .owner = record.event.owner.content, .kind = .ai_ready, .operation_id = record.event.operation_id, .attempt_or_turn_id = record.event.attempt_id })) return;

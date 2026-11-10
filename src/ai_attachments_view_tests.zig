@@ -649,3 +649,158 @@ test "AI attachments sent history forwards original content into stable inline p
     try std.testing.expect(!f.view.isPreviewOpen());
     try std.testing.expectEqual(@as(usize, 0), f.draft.items.items.len);
 }
+
+test "local file selection captures text and images but only references binary and non-UTF8 data" {
+    const capture = @import("host/ai_local_file_snapshot.zig");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var token: @import("ai/provider.zig").CancelToken = .{};
+    for ([_]struct { name: []const u8, bytes: []const u8, reference: bool }{
+        .{ .name = "plain.bin", .bytes = "UTF-8 文本", .reference = false },
+        .{ .name = "archive.txt", .bytes = "PK\x03\x04private binary bytes", .reference = true },
+        .{ .name = "document.pdf", .bytes = "%PDF-1.7\nprivate PDF content", .reference = true },
+        .{ .name = "unknown.dat", .bytes = "\xff\xfe\xfa", .reference = true },
+    }) |fixture| {
+        try tmp.dir.writeFile(io, .{ .sub_path = fixture.name, .data = fixture.bytes });
+        const path = try tmp.dir.realPathFileAlloc(io, fixture.name, a);
+        defer a.free(path);
+        var selected = try capture.capture(a, io, path, &token);
+        defer selected.release();
+        const content = selected.file.content().?;
+        try std.testing.expectEqual(fixture.reference, content.source == .local_reference);
+        try std.testing.expectEqualStrings(if (fixture.reference) "" else fixture.bytes, content.bytes);
+        try std.testing.expectEqualStrings(path, content.path);
+    }
+    const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" ++
+        "\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
+        "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d" ++
+        "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+    try tmp.dir.writeFile(io, .{ .sub_path = "image.txt", .data = png });
+    const image_path = try tmp.dir.realPathFileAlloc(io, "image.txt", a);
+    defer a.free(image_path);
+    var image = try capture.capture(a, io, image_path, &token);
+    defer image.release();
+    try std.testing.expect(image == .image);
+    try std.testing.expectEqualStrings(png, image.image.content().?.bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = "image.txt", .data = png[0..20] });
+    try std.testing.expectError(error.InvalidImage, capture.capture(a, io, image_path, &token));
+    token.cancel();
+    try std.testing.expectError(error.Cancelled, capture.capture(a, io, image_path, &token));
+}
+
+test "local file selection bounds binary reads and preserves source across persistence and remote prompts" {
+    const capture = @import("host/ai_local_file_snapshot.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "large.iso", .{});
+    try file.setLength(std.testing.io, 16 * 1024 * 1024 * 1024);
+    file.close(std.testing.io);
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "large.iso", a);
+    defer a.free(path);
+    var token: @import("ai/provider.zig").CancelToken = .{};
+    var selected = try capture.capture(a, std.testing.io, path, &token);
+    defer selected.release();
+    const content = selected.file.content().?;
+    try std.testing.expect(content.source == .local_reference);
+    try std.testing.expectEqual(@as(usize, 0), content.bytes.len);
+    const encoded = try std.json.Stringify.valueAlloc(a, content, .{});
+    defer a.free(encoded);
+    const parsed = try std.json.parseFromSlice(A.Content, a, encoded, .{});
+    defer parsed.deinit();
+    var restored = try A.ContentRef.restore(a, parsed.value);
+    defer restored.release();
+    var draft = try A.Draft.init(a, .{ .session = 777 }); // An SSH assistant still gets a host-local locator.
+    defer draft.deinit();
+    const ticket = try draft.begin();
+    _ = try draft.complete(ticket, &restored);
+    var bundle = try draft.freeze();
+    defer bundle.deinit();
+    const wire = try @import("ai/local_text_request.zig").compose(a, "inspect", &bundle, 4096);
+    defer a.free(wire);
+    for ([_][]const u8{ "<local_file_reference>", "source_kind=host_local", "source_name=本机", path, "Never pass this path to SSH", "If no host-local tool is available", "reason=size_limit", "file_size_bytes=17179869184", "content_limit_bytes=10000000", "reference_only=true", "content_included=false", "suggested_max_read_bytes=4096", "Do not automatically read, load, upload or decode the entire file", "do not automatically paginate through the entire file" }) |expected| try std.testing.expect(std.mem.indexOf(u8, wire, expected) != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "<remote_file_reference>") == null);
+    try std.testing.expectError(error.InvalidAttachmentPath, A.ContentRef.createLocalReference(a, "relative.iso", .{}));
+}
+
+test "local file reference preview names the host and explains binary and encoding failures" {
+    var f: Fixture = undefined;
+    try f.initInline();
+    defer f.deinit();
+    for ([_]A.LocalReference{ .{}, .{ .reason = .encoding }, .{ .reason = .size_limit }, .{ .reason = .text_limit }, .{ .reason = .image_limit }, .{ .reason = .image_count } }) |reason| {
+        const ticket = try f.draft.begin();
+        var reference = try A.ContentRef.createLocalReference(a, "/tmp/local-fixture.iso", reason);
+        _ = try f.draft.complete(ticket, &reference);
+        try f.view.update(&f.draft);
+        f.settle();
+        try f.view.openPreview(ticket.id);
+        f.settle();
+        try std.testing.expectEqualStrings("本机文件引用", f.view.preview_title.getText().?.content);
+        const explanation = f.view.preview_label.getText().?.content;
+        try std.testing.expect(std.mem.indexOf(u8, explanation, switch (reason.reason) {
+            .binary => "二进制",
+            .encoding => "UTF-8",
+            .size_limit => "大小限制",
+            .text_limit => "64 KiB",
+            .image_limit => "像素限制",
+            .image_count => "数量",
+        }) != null);
+        try std.testing.expect(std.mem.indexOf(u8, explanation, "本机绝对路径") != null);
+        f.view.dismiss();
+    }
+}
+
+test "local file limits attach references for oversized text image bytes and image dimensions" {
+    const capture = @import("host/ai_local_file_snapshot.zig");
+    const images = @import("ai/image_attachments.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var token: @import("ai/provider.zig").CancelToken = .{};
+    const text = try a.alloc(u8, A.max_bytes + 1);
+    defer a.free(text);
+    @memset(text, 't');
+    for ([_]usize{ A.max_bytes, text.len }) |size| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "selected.log", .data = text[0..size] });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "selected.log", a);
+        defer a.free(path);
+        var selected = try capture.capture(a, std.testing.io, path, &token);
+        defer selected.release();
+        const content = selected.file.content().?;
+        if (size == A.max_bytes) {
+            try std.testing.expect(content.source == .local_file);
+            try std.testing.expectEqual(size, content.bytes.len);
+        } else {
+            try std.testing.expect(content.source.local_reference.reason == .text_limit);
+            try std.testing.expectEqual(@as(?u64, A.max_bytes + 1), content.source.local_reference.size_bytes);
+            try std.testing.expectEqual(@as(usize, 0), content.bytes.len);
+            var draft = try A.Draft.init(a, .{ .session = 101 });
+            defer draft.deinit();
+            const ticket = try draft.begin();
+            var incoming = selected.file.retain();
+            _ = try draft.complete(ticket, &incoming);
+            var bundle = try draft.freeze();
+            defer bundle.deinit();
+            const wire = try @import("ai/local_text_request.zig").compose(a, "inspect", &bundle, 4096);
+            defer a.free(wire);
+            for ([_][]const u8{ "reason=text_limit", "file_size_bytes=65537", "content_limit_bytes=65536", "Do not automatically read", "at most 4096 bytes per call" }) |expected| try std.testing.expect(std.mem.indexOf(u8, wire, expected) != null);
+            try std.testing.expect(std.mem.indexOf(u8, wire, text[0..256]) == null);
+        }
+    }
+    const encoded = "iVBORw0KGgoAAAANSUhEUgAAIygAAAABCAYAAACzIwVFAAAAPUlEQVR4nO3DQQ0AAAwDofNvurOxByS0mqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqr64wFXfA3LIKy7pwAAAABJRU5ErkJggg==";
+    var png: [118]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&png, encoded);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "wide.png", .data = &png });
+    const image_path = try tmp.dir.realPathFileAlloc(std.testing.io, "wide.png", a);
+    defer a.free(image_path);
+    var wide = try capture.capture(a, std.testing.io, image_path, &token);
+    defer wide.release();
+    try std.testing.expect(wide.file.content().?.source.local_reference.reason == .image_limit);
+    try std.testing.expectEqual(@as(?u64, png.len), wide.file.content().?.source.local_reference.size_bytes);
+    const file = try tmp.dir.openFile(std.testing.io, "wide.png", .{ .mode = .read_write });
+    try file.setLength(std.testing.io, images.max_bytes + 1);
+    file.close(std.testing.io);
+    var huge = try capture.capture(a, std.testing.io, image_path, &token);
+    defer huge.release();
+    try std.testing.expect(huge.file.content().?.source.local_reference.reason == .size_limit);
+    try std.testing.expectEqual(@as(usize, 0), huge.file.content().?.bytes.len);
+}

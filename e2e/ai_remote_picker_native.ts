@@ -8,7 +8,7 @@ const out=resolve(process.argv[2]??'/tmp/zw-ai-picker');await mkdir(out,{recursi
 const sourceName=process.env.ZW_AI_PICKER_SOURCE_NAME??'AI memory peer';
 const iso=await realpath(await mkdtemp('/tmp/zw-ai-picker-')),data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);
 const plog=await open(join(out,'peer.log'),'w'),log=await open(join(out,'app.log'),'w');
-const peer=spawn('python3',['e2e/ai_remote_picker_peer.py','--out',join(iso,'peer')],{stdio:['ignore',plog.fd,plog.fd]});
+const peer=spawn(process.env.ZW_TEST_PYTHON??'python3',['e2e/ai_remote_picker_peer.py','--out',join(iso,'peer')],{stdio:['ignore',plog.fd,plog.fd]});
 let app:any;const report:any={status:'running',checks:[],scope:'owned loopback SSH/SFTP and synthetic native Harness; no external server, physical file chooser not covered'};
 const shown=(n:any)=>n&&n.hidden!==true&&n.visible!==false&&(n.effective_opacity??1)>0&&n.rect?.w>0&&n.rect?.h>0;
 const actual=async(id:string)=>(await h.query(id)).filter(shown);
@@ -60,7 +60,7 @@ try{
  const statusIncludes=async(needle:string)=>{
   const info=await visible('ai.remote.info');await h.mouseMove(info.rect.x+info.rect.w/2,info.rect.y+info.rect.h/2);
   await h.waitFor(async()=>(await visible('ai.remote.status')).text.includes(needle)||null,5000);
-  assert((await visible('ai.remote.status')).text.includes('每文件最多 4 KiB'));
+  assert((await visible('ai.remote.status')).text.includes('附加仅引用来源和路径'));
   await h.mouseMove(20,20);
  };
  const hoverText=async(id:string,tipId:string,expected:string)=>{
@@ -82,7 +82,7 @@ try{
  assert.equal((await actual('ai.remote.status')).length,0,'status help stays hidden until hover');await statusIncludes('未选择文件');await cap('01-directory');report.checks.push('Slash stays ordinary text; the plus-menu opens the native picker, preserves the prompt, and automatically resolves /fixture without shell OSC 7');
  await click('ai.remote.filter');await h.type_('no-match');await h.waitFor(async()=>(await visible('ai.remote.empty')).text.includes('没有匹配')||null,5000);
  await h.key('a',{cmd:true});await h.key('backspace');await waitEntries(3);
- await filename('logs');await waitEntries(1);assert.equal((await h.inputState('ai.remote.path')).buffer,'/fixture/logs');await click('ai.remote.parent');await waitEntries(3);
+ await filename('logs');await waitEntries(3);assert.equal((await h.inputState('ai.remote.path')).buffer,'/fixture/logs');await click('ai.remote.parent');await waitEntries(3);
  await setPath('/missing');await h.waitFor(async()=>(await visible('ai.remote.empty')).text.includes('不存在')||null,10000);await cap('02-missing-directory');await click('ai.remote.home');await waitEntries(3);
  await setPath('/');await waitEntries(1);await filename('fixture');await waitEntries(3);
  report.checks.push('Enter opens a path; directory entry, parent, root, home, empty filter and missing-path recovery work through real SFTP');
@@ -91,12 +91,45 @@ try{
  await statusIncludes('2 个文件');await cap('03-two-selected');await click('ai.remote.attach');
  await h.waitFor(async()=>(await actual('ai.attachment.remote_file')).length===2||null,20000);await h.waitFor(async()=>(await actual('ai.remote.picker')).length===0||null,5000);await cap('04-two-attached');
  report.checks.push('Filename and checkbox selection produce two independent native draft attachments; successful attachment closes the picker');
- await h.resizeWindow(860,480);await click('ai.attachment.open');await visible('ai.attachment.preview');await hoverText('ai.attachment.preview.path','ai.attachment.preview.path.tooltip',(await visible('ai.attachment.preview.path')).text);await cap('05-compact-preview');await click('ai.attachment.preview.close');
+ const fileIO=async()=>{
+  const lines=async(name:string)=>{try{return (await readFile(join(iso,'peer',name),'utf8')).trim().split('\n').filter(Boolean).map(line=>JSON.parse(line))}catch(error:any){if(error.code==='ENOENT')return [];throw error}};
+  return {opens:await lines('opens.jsonl'),reads:await lines('reads.jsonl')};
+ };
+ assert.deepEqual(await fileIO(),{opens:[],reads:[]},'attaching two remote paths must not open or read either file');
+ const metadata=(await actual('ai.attachment.metadata')).map(n=>n.text);assert(metadata.every(text=>text.includes('远程引用')&&!text.includes('0 B')));
+ await h.resizeWindow(860,480);await click('ai.attachment.open');await visible('ai.attachment.preview');
+ assert.equal((await visible('ai.attachment.preview.text')).text,'仅引用远程来源和路径');
+ await hoverText('ai.attachment.preview.path','ai.attachment.preview.path.tooltip',(await visible('ai.attachment.preview.path')).text);await cap('05-compact-reference');await click('ai.attachment.preview.close');
+ assert.deepEqual(await fileIO(),{opens:[],reads:[]},'viewing a reference displays its locator without file IO');
  await openRemotePicker();await waitEntries(3);await cap('06-compact-picker');
  const sourceControl=await visible('ai.remote.source'),pathControl=await visible('ai.remote.path');
  assert.equal(sourceControl.rect.w,180);assert.equal(sourceControl.rect.y,pathControl.rect.y);assert(pathControl.rect.w>=400);assert(sourceControl.rect.x+sourceControl.rect.w<pathControl.rect.x);
- const picker=await visible('ai.remote.picker');assert(picker.rect.y>=0&&picker.rect.y+picker.rect.h<=480);report.pickerRect=picker.rect;await statusIncludes('未选择文件');const info=await visible('ai.remote.info');await h.mouseMove(info.rect.x+info.rect.w/2,info.rect.y+info.rect.h/2);await visible('ai.remote.info.tooltip');await cap('06-compact-info-tooltip');await h.mouseMove(20,20);await filename('b.log');await click('ai.remote.read');await visible('ai.attachment.preview');await h.waitFor(async()=>(await visible('ai.attachment.preview.text')).text.includes('second captured source')||null,10000);assert.equal((await actual('ai.attachment.remote_file')).length,2);await hoverText('ai.attachment.preview.path','ai.attachment.preview.path.tooltip',(await visible('ai.attachment.preview.path')).text);await cap('07-read-before-attach');await click('ai.attachment.preview.close');await h.waitFor(async()=>(await actual('ai.attachment.preview.path.tooltip')).length===0||null,5000);
- report.checks.push('Plus-menu entry opens the same picker; it fits 860×480, and explicit single-file preview reads the chosen content without attaching it');
+ const picker=await visible('ai.remote.picker');assert(picker.rect.y>=0&&picker.rect.y+picker.rect.h<=480);report.pickerRect=picker.rect;
+ const feedbackIncludes=async(needle:string)=>h.waitFor(async()=>{const n=(await actual('ai.remote.feedback'))[0];return n?.text?.includes(needle)?n:null},10000);
+ await setPath('/fixture/logs');await waitEntries(3);await filename('Rocky-8.10-x86_64-dvd1.iso');await click('ai.remote.read');
+ await feedbackIncludes('正在读取预览');assert(!(await visible('ai.remote.read')).focusable,'preview is disabled during the read');
+ const binaryFeedback=await feedbackIncludes('二进制文件');await visible('ai.remote.picker');
+ assert.equal((await actual('ai.attachment.remote_file')).length,2);
+ assert((await visible('ai.remote.attach')).focusable,'attach remains usable after a failed preview');
+ const previewButton=await visible('ai.remote.read');assert(binaryFeedback.rect.x+binaryFeedback.rect.w<=previewButton.rect.x,'error fits before the actions');
+ await cap('06-binary-preview-error');
+ const binaryIO=await fileIO();assert.equal(binaryIO.opens.length,1);assert.equal(binaryIO.reads.length,1);report.binaryReads=binaryIO.reads;
+ await click('ai.remote.attach');await h.waitFor(async()=>(await actual('ai.attachment.remote_file')).length===3||null,10000);await h.waitFor(async()=>(await actual('ai.remote.picker')).length===0||null,5000);
+ assert.deepEqual(await fileIO(),binaryIO,'attaching the ISO must not trigger another file open or read');await cap('06-binary-reference-attached');
+ await openRemotePicker();await waitEntries(3);await setPath('/fixture/logs');await waitEntries(3);await filename('invalid-utf8.txt');await click('ai.remote.read');await feedbackIncludes('UTF-8');await cap('06-encoding-preview-error');
+ const encodingIO=await fileIO();await click('ai.remote.attach');await h.waitFor(async()=>(await actual('ai.attachment.remote_file')).length===4||null,10000);await h.waitFor(async()=>(await actual('ai.remote.picker')).length===0||null,5000);
+ assert.deepEqual(await fileIO(),encodingIO,'invalid encoding does not prevent path attachment or cause another read');
+ report.checks.push('Text, 16.5 GB ISO and invalid-UTF8 paths attach without opening or reading files; explicit ISO/encoding previews show specific inline errors, and attach remains usable');
+ await openRemotePicker();await waitEntries(3);await filename('b.log');await click('ai.remote.read');await visible('ai.attachment.preview');
+ await h.waitFor(async()=>(await visible('ai.attachment.preview.text')).text.includes('second captured source')||null,10000);assert.equal((await actual('ai.attachment.remote_file')).length,4);
+ await hoverText('ai.attachment.preview.path','ai.attachment.preview.path.tooltip',(await visible('ai.attachment.preview.path')).text);await cap('07-explicit-text-preview');
+ const previewIO=await fileIO();assert(previewIO.reads.some(read=>read.path==='/fixture/b.log'));
+ assert(flat(await visible('ai.attachment.preview.keep')).some(n=>n.text==='附加引用'));await click('ai.attachment.preview.keep');
+ await h.waitFor(async()=>(await actual('ai.attachment.remote_file')).length===5||null,10000);await h.waitFor(async()=>(await actual('ai.attachment.preview')).length===0||null,5000);
+ assert.deepEqual(await fileIO(),previewIO,'confirming a preview adds only the reference and performs no additional read');
+ assert((await actual('ai.attachment.metadata')).every(n=>n.text.includes('远程引用')));report.fileIO=await fileIO();await cap('07-all-references');
+ report.checks.push('Explicit text preview still reads file content; confirming it adds a remote reference, and all five draft entries are labeled as references at 860×480');
+ if(!process.argv.includes('--attachments-only')){
  if((await actual('ai.remote.picker')).length)await click('ai.remote.close');await h.resizeWindow(1440,900);await click('ai.close');await click(localTab);
  await click('toolbar.ai');await visible('ai.prompt');await remoteMenu(false,'08-local-after-ssh');await click('ai.close');
  const existingTabs=await tabs();await click('toolbar.new_session');await click('session.menu.local');await visible('terminal.surface');
@@ -109,6 +142,9 @@ try{
  const reopenedSource=await visible('ai.remote.source');await h.mouseMove(reopenedSource.rect.x+reopenedSource.rect.w/2,reopenedSource.rect.y+reopenedSource.rect.h/2);assert.equal(flat(await visible('ai.remote.source.tooltip')).map(n=>n.text??'').join(''),sourceName);
  await click('ai.remote.close');await h.waitFor(async()=>(await actual('ai.remote.source.tooltip')).length===0||null,5000);await h.waitFor(async()=>(await actual('ai.remote.info.tooltip')).length===0||null,5000);
  report.checks.push('Switching SSH to Local refreshes the menu; Local-only group disables remote attachment; adding a readable SSH member enables it and lists real remote files');
+ }
+ const exited=new Promise(resolve=>app.once('exit',resolve));assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);
+ await Promise.race([exited,h.sleep(10000)]);assert.equal(app.exitCode,0,'Normal Quit exits cleanly');
  report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);report.authNodes=Object.fromEntries(await Promise.all(['plugin.challenge.secret','plugin.challenge.answer.0','auth.challenge.answer.0','plugin.challenge.modal','auth.challenge.modal'].map(async id=>[id,(await h.query(id)).map(n=>({id:n.id,rect:n.rect,opacity:n.effective_opacity}))])));process.exitCode=1;await cap('failure').catch(()=>{})}
 finally{for(const child of [app,peer]){if(child&&child.exitCode===null&&child.signalCode===null){const closed=new Promise(r=>child.once('close',r));child.kill('SIGTERM');await closed;}}await log.close();await plog.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report))}

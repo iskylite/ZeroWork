@@ -29,6 +29,16 @@ test "AI images show processing and error retry in the original four fixed slots
     try std.testing.expect(draft.fail(ticket, error.AccessDenied));
     try view.update(&draft);
     try std.testing.expectEqual(ui.types.Display.flex, view.cards[0].retry_button.style.display);
+    var preview_error: ?anyerror = null;
+    view.callbacks.context = &preview_error;
+    view.callbacks.on_error = struct {
+        fn report(raw: *anyopaque, problem: anyerror) void {
+            const target: *?anyerror = @ptrCast(@alignCast(raw));
+            target.* = problem;
+        }
+    }.report;
+    click(cx, view.cards[0].preview);
+    try std.testing.expectEqual(error.AccessDenied, preview_error.?);
     _ = try draft.retry(ticket);
     try view.update(&draft);
     try std.testing.expectEqual(ui.types.Display.none, view.cards[0].retry_button.style.display);

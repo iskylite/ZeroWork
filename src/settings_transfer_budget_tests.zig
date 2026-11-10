@@ -151,7 +151,7 @@ test "settings transfer budget actual Cx inputs show field issue and clear it wh
     const error_note = byId(page.root, "settings.error.window_chunks").?;
     try std.testing.expect(std.mem.indexOf(u8, error_note.getText().?.content, "2 MiB") != null);
     try std.testing.expectEqual(.flex, error_note.style.display);
-    try std.testing.expect(page.save_button.behavior.interaction.a11y.?.disabled);
+    try std.testing.expect(!page.save_button.behavior.interaction.a11y.?.disabled);
     replaceInput(cx, inputFor(page, "settings.field.chunk_kb"), "32");
     cx.layout();
     try std.testing.expectEqualStrings("33", window_input.getText());

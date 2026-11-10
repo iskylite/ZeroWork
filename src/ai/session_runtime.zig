@@ -162,12 +162,17 @@ pub const Runner = struct {
     has_tools: bool = false,
     pending_commit: bool = false,
     pending_notify: bool = false,
+    persistence_retry_at_ns: i128 = 0,
     controller_busy: bool = false,
     saved: bool = true,
     capture_failed: bool = false,
     capture_final: bool = false,
     answer_only: bool = false,
     observation_only: bool = false,
+
+    pub fn persistenceRetryDelayNs(self: *const Runner) u64 {
+        return @intCast(@max(0, self.persistence_retry_at_ns - @import("../platform/realtime.zig").monotonicNs()));
+    }
 
     fn resetOutput(raw: *anyopaque) void {
         const self: *Runner = @ptrCast(@alignCast(raw));
@@ -572,6 +577,7 @@ pub const Service = struct {
         owned = false;
         runner.worker.?.result.deinit();
         runner.failure = null;
+        runner.persistence_retry_at_ns = 0;
         runner.stats = .{};
         runner.worker.?.cancel = .{};
         runner.saved = false;
@@ -619,11 +625,18 @@ pub const Service = struct {
     pub fn poll(self: *Service) !void {
         var failure: ?anyerror = null;
         for (self.runners.items) |runner| self.pollRunner(runner) catch |err| {
+            // A full/conflicted/unwritable journal cannot recover on the next
+            // display frame. Keep the durable work pending without a hot loop.
+            switch (err) {
+                error.JournalLimit, error.JournalConflict, error.NoSpaceLeft, error.DiskQuota, error.InputOutput, error.AccessDenied => runner.persistence_retry_at_ns = @import("../platform/realtime.zig").monotonicNs() + 5 * std.time.ns_per_s,
+                else => {},
+            }
             if (failure == null) failure = err;
         };
         if (failure) |err| return err;
     }
     fn pollRunner(self: *Service, runner: *Runner) !void {
+        if (runner.persistenceRetryDelayNs() != 0) return;
         const state = runner.state.load(.acquire);
         if (runner.thread != null and state != .running) {
             runner.thread.?.join();
@@ -795,6 +808,7 @@ pub const Service = struct {
         runner.failure = null;
         runner.saved = false;
         runner.answer_only = true;
+        runner.persistence_retry_at_ns = 0;
         runner.capture_final = false;
         runner.capture_failed = false;
         runner.stats = .{};

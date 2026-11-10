@@ -244,7 +244,7 @@ fn footerStateText(controller: *const Controller) []const u8 {
         // remain clean while the selected resource still needs attention.
         .clean => if (backgroundNeedsAttention(controller)) "背景图片准备失败，草稿已保留" else "",
         .dirty_valid => "未保存",
-        .dirty_invalid => "请修正设置中的错误",
+        .dirty_invalid => "未保存",
         .saving => "正在保存…",
         .save_failed => controller.last_error orelse "保存失败，草稿已保留",
     };
@@ -422,7 +422,9 @@ pub const Binding = struct {
         return false;
     }
     pub fn refreshFooter(self: *Binding) void {
-        var available = self.controller.canSave();
+        // Invalid drafts keep a working action: the host reveals the error
+        // without attempting a disk write. Only clean/busy drafts are inert.
+        var available = self.controller.model.dirty and self.controller.state() != .saving;
         if (self.hooks.appearance) |host| {
             if (host.isBusy()) available = false;
             if (host.font_status) |read_font| {
@@ -451,6 +453,7 @@ pub const Binding = struct {
         }
         if (self.status_label) |label| label.setTextContent(self.cx.allocator, message) catch {};
     }
+
     pub fn valuesChanged(self: *Binding) void {
         self.refreshFooter();
         if (self.hooks.appearance) |appearance| appearance.send(.draft_values_changed);

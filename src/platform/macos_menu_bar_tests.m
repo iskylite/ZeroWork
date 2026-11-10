@@ -111,9 +111,9 @@ int main(int argc, const char **argv) {
         [menuBar quit:nil];
         assert(zw_menu_bar_take_action() == 2);
         // Render identical production drawing code at native Retina scale.
-        const uint64_t counts[] = {0, 1, 12, 123};
+        const uint64_t counts[] = {0, 1, 2, 12, 123};
         NSBitmapImageRep *bareLogo = nil;
-        for (int i = 0; i < 4; i++) {
+        for (NSUInteger i = 0; i < sizeof(counts)/sizeof(counts[0]); i++) {
             NSImage *image = [menuBar imageForCount:counts[i]];
             assert(image.size.height == 22 && !image.isTemplate);
             NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:image.size.width*2 pixelsHigh:44 bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
@@ -130,17 +130,17 @@ int main(int argc, const char **argv) {
                 assert(image.size.width == 21 && maxY-minY+1 >= 41 && maxY-minY+1 <= 43);
             }
             else {
-                int whiteInk = 0, darkOutline = 0, transparent = 0;
+                int whiteInk = 0, redFill = 0, transparent = 0;
                 for (NSInteger y=0;y<28;y++) for (NSInteger x=28;x<rep.pixelsWide;x++) {
                     NSColor *base = x < bareLogo.pixelsWide ? [bareLogo colorAtX:x y:y] : NSColor.clearColor;
                     if (base.alphaComponent > .01) continue;
                     NSColor *pixel = [[rep colorAtX:x y:y] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
                     if (pixel.alphaComponent > .1) {
                         if (pixel.alphaComponent > .9 && pixel.redComponent > .9 && pixel.greenComponent > .9 && pixel.blueComponent > .9) whiteInk++;
-                        if (pixel.alphaComponent > .9 && pixel.redComponent < .55 && pixel.greenComponent < .55 && pixel.blueComponent < .55) darkOutline++;
+                        if (pixel.alphaComponent > .9 && pixel.redComponent > .9 && pixel.greenComponent < .3 && pixel.blueComponent < .3) redFill++;
                     } else transparent++;
                 }
-                assert(whiteInk > 0 && darkOutline > 0 && transparent > 20);
+                assert(whiteInk > 0 && redFill > 100 && transparent > 20);
                 assert([rep colorAtX:rep.pixelsWide-1 y:0].alphaComponent < .01);
             }
             NSString *path = [@(argv[2]) stringByAppendingPathComponent:[NSString stringWithFormat:@"badge-%llu.png", (unsigned long long)counts[i]]];
@@ -162,7 +162,8 @@ int main(int argc, const char **argv) {
             zw_menu_bar_update(contrastNames.count);
             for (NSUInteger i=0;i<contrastNames.count;i++) {
                 NSString *name = contrastNames[i];
-                NSString *file = [name stringByAppendingString:state == 0 ? @"-contrast.rgba" : @".rgba"];
+                BOOL hasContrast = [@[@"alpine", @"bclinux", @"redflag"] containsObject:name];
+                NSString *file = [name stringByAppendingString:state == 0 && hasContrast ? @"-contrast.rgba" : @".rgba"];
                 NSData *pixels = [NSData dataWithContentsOfFile:[assetDirectory stringByAppendingPathComponent:file]];
                 assert(pixels.length == 72*72*4);
                 NSData *title = [name dataUsingEncoding:NSUTF8StringEncoding];

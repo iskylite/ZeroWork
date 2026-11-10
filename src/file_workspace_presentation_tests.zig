@@ -350,7 +350,7 @@ test "file workspace presentation context and history use real menus and reject 
     if (navigation.behavior.events.on_click) |handler| handler.invoke();
     try std.testing.expectEqualStrings(path_before, model.projection().?.panes[0].resolved_path);
     try std.testing.expect(model.projection().?.revision > original_revision);
-    try std.testing.expectEqualStrings("StaleFileAction", menu.feedback.?.getText().?.content);
+    try std.testing.expectEqualStrings("文件列表或选择已变化，请关闭菜单后重新选择。", menu.feedback.?.getText().?.content);
     projection = model.projection().?;
     const entry = projection.panes[0].entries[0].absolute_path;
     const keys = [_][]const u8{entry};

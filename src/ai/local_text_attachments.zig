@@ -25,14 +25,20 @@ pub const RemoteSource = struct {
     owner: SessionHandle,
     source_name: []const u8,
     source_revision: u64,
-    operation: @import("../host/operation.zig").OperationKey,
+    operation: ?@import("../host/operation.zig").OperationKey,
     actual_path: ?[]const u8,
     original_size: ?u64,
     read_bytes: usize,
     read_limit: u32,
     truncated: bool,
+    /// A locator only: no file content has been captured for this attachment.
+    reference_only: bool = false,
 };
-pub const Source = union(enum) { local_file, terminal: TerminalSource, remote_file: RemoteSource };
+pub const LocalReference = struct {
+    reason: enum { binary, encoding, size_limit, text_limit, image_limit, image_count } = .binary,
+    size_bytes: ?u64 = null,
+};
+pub const Source = union(enum) { local_file, local_reference: LocalReference, terminal: TerminalSource, remote_file: RemoteSource };
 /// Existing Ghostty selection service bound, independent of local-file 64KiB.
 pub const max_terminal_bytes: usize = 1024 * 1024;
 
@@ -64,6 +70,10 @@ pub const ContentRef = struct {
     pub fn create(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8, captured_at_ms: i64) !ContentRef {
         try validateText(bytes);
         return createSnapshot(allocator, path, bytes, captured_at_ms, .local_file);
+    }
+    pub fn createLocalReference(allocator: std.mem.Allocator, path: []const u8, reason: LocalReference) !ContentRef {
+        if (!std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) return error.InvalidAttachmentPath;
+        return createSnapshot(allocator, path, "", 0, .{ .local_reference = reason });
     }
     /// Already captured plain VT bytes only. This reads no terminal or file.
     pub fn createTerminal(allocator: std.mem.Allocator, source: TerminalSource, bytes: []const u8, captured_at_ms: i64) !ContentRef {
@@ -101,16 +111,39 @@ pub const ContentRef = struct {
             .truncated = value.body.text.truncated,
         } });
     }
+    pub fn createRemoteReference(allocator: std.mem.Allocator, owner: SessionHandle, source_name: []const u8, path: []const u8) !ContentRef {
+        if (@backingInt(owner.session_id) == 0 or owner.generation == 0) return error.InvalidAttachmentOwner;
+        if (source_name.len == 0 or !std.unicode.utf8ValidateSlice(source_name) or std.mem.indexOfScalar(u8, source_name, 0) != null) return error.InvalidRemoteSource;
+        try @import("../host/ai_remote_file_snapshot.zig").validatePath(path);
+        return createSnapshot(allocator, path, "", 0, .{ .remote_file = .{
+            .owner = owner,
+            .source_name = source_name,
+            .source_revision = 0,
+            .operation = null,
+            .actual_path = null,
+            .original_size = null,
+            .read_bytes = 0,
+            .read_limit = 0,
+            .truncated = false,
+            .reference_only = true,
+        } });
+    }
     /// Rehydrate already captured bytes; never reread a local/remote source.
     pub fn restore(allocator: std.mem.Allocator, value: Content) !ContentRef {
+        if (value.source == .local_reference) return createLocalReference(allocator, value.path, value.source.local_reference);
         if (!std.unicode.utf8ValidateSlice(value.bytes)) return error.InvalidLocalTextEncoding;
+        if (value.source == .remote_file) {
+            const remote = value.source.remote_file;
+            if (remote.reference_only) return createRemoteReference(allocator, remote.owner, remote.source_name, value.path);
+            if (remote.operation == null) return error.InvalidRemoteSource;
+        }
         return createSnapshot(allocator, value.path, value.bytes, value.captured_at_ms, value.source);
     }
     fn createSnapshot(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8, captured_at_ms: i64, source: Source) !ContentRef {
         if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAttachmentPath;
         var owned_source = source;
         switch (source) {
-            .local_file => {},
+            .local_file, .local_reference => {},
             .remote_file => |remote| {
                 owned_source.remote_file.source_name = try allocator.dupe(u8, remote.source_name);
                 errdefer allocator.free(owned_source.remote_file.source_name);
@@ -289,8 +322,16 @@ pub const Draft = struct {
     pub fn attach(self: *Draft, ticket: Ticket) !Id {
         const pending_index = self.pendingIndex(ticket) orelse return error.StaleAttachment;
         const selected = self.candidate(ticket) orelse return error.AttachmentNotReady;
+        const content = selected.reference.content() orelse return error.EmptyAttachmentResult;
+        // Confirming a remote preview attaches its locator, never preview bytes.
+        var attached = if (content.source == .remote_file and !content.source.remote_file.reference_only)
+            try ContentRef.createRemoteReference(self.allocator, content.source.remote_file.owner, content.source.remote_file.source_name, content.path)
+        else
+            selected.reference.retain();
+        defer attached.release();
         try self.items.ensureUnusedCapacity(self.allocator, 1);
-        self.items.appendAssumeCapacity(.{ .id = ticket.id, .reference = selected.reference.retain() });
+        self.items.appendAssumeCapacity(.{ .id = ticket.id, .reference = attached });
+        attached = .{};
         _ = self.pending.orderedRemove(pending_index);
         self.removeCandidate(ticket.id);
         if (selected.replaces) |id| _ = self.remove(id);
@@ -401,7 +442,7 @@ fn validateCompletion(ticket: Ticket, incoming: ContentRef) !void {
 
 fn freeSource(allocator: std.mem.Allocator, source: Source) void {
     switch (source) {
-        .local_file => {},
+        .local_file, .local_reference => {},
         .remote_file => |remote| {
             allocator.free(remote.source_name);
             if (remote.actual_path) |path_value| allocator.free(path_value);

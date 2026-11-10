@@ -14,6 +14,8 @@ const Slot = struct {
     fact_id: ?u64 = null,
     revision: u64 = 0,
     root: *ui.Node,
+    header: *ui.Node,
+    message_viewport: *ui.Node,
     icons: [4]*ui.Node,
     title: *ui.Node,
     detail: *ui.Node,
@@ -127,15 +129,14 @@ pub const Presenter = struct {
                 1 => "notifications.dismiss.1",
                 else => "notifications.dismiss.2",
             };
-            try header.appendChild(cx.allocator, close);
-            const body = try ui.boxStyled(cx, S.body, .{});
-            try card.appendChild(cx.allocator, body);
+            const body_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
+            body_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .max_height = 240, .min_height = 0, .min_width = 0, .flex_shrink = 1 });
+            body_scroll.container.meta.ownership.meta.test_id = "notifications.message.viewport";
+            const body = body_scroll.content;
+            body.setStyleInline(cx.allocator, S.body(cx.tokens));
+            try card.appendChild(cx.allocator, body_scroll.container);
             const source = try ui.textStyled(cx, S.line, "");
             source.setStyleInline(cx.allocator, S.lineBox(cx.tokens));
-            const secondary = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .justify = .end, .gap = 6, .min_width = 0, .height = .{ .px = 22 }, .flex_shrink = 0 }, .{});
-            try body.appendChild(cx.allocator, secondary);
-            source.setStyleInline(cx.allocator, .{ .flex = 1, .height = .{ .px = 18 } });
-            try secondary.appendChild(cx.allocator, source);
             const expand = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.chevron_down, .icon_size = @as(f32, 12), .variant = .ghost, .a11y_label = "展开通知详情", .base_style = @import("notification_history_styles.zig").expand(), .on_click = cx.on(Slot, slot, Slot.toggle) }).mount(scope, cx);
             expand.meta.ownership.meta.test_id = "notifications.expand";
             source.meta.ownership.meta.test_id = "notifications.metadata";
@@ -143,18 +144,21 @@ pub const Presenter = struct {
             detail.meta.ownership.meta.test_id = "notifications.detail";
             detail.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .fit = .{} }, .flex_shrink = 0 });
             try body.appendChild(cx.allocator, detail);
+            try body.appendChild(cx.allocator, source);
             const footer = try ui.boxStyled(cx, S.footer, .{});
-            try body.appendChild(cx.allocator, footer);
+            footer.meta.ownership.meta.test_id = "notifications.footer";
+            try card.appendChild(cx.allocator, footer);
             const status_tag = try ui.box(cx, S.statusTag(0), .{});
             const status_label = try ui.textStyled(cx, S.line, "");
             try status_tag.appendChild(cx.allocator, status_label);
             try footer.appendChild(cx.allocator, status_tag);
-            const countdown_view = try Countdown.mount(cx, secondary, "notifications.countdown");
+            const countdown_view = try Countdown.mount(cx, footer, "notifications.countdown");
             const countdown = countdown_view.label;
             const action_row = try ui.boxStyled(cx, S.actions, .{});
             try footer.appendChild(cx.allocator, action_row);
-            try secondary.appendChild(cx.allocator, expand);
-            slot.* = .{ .presenter = self, .root = card, .icons = icons, .title = title, .detail = detail, .source = source, .footer = footer, .status_tag = status_tag, .status_label = status_label, .countdown = countdown, .countdown_view = countdown_view, .close = close, .action_row = action_row, .actions = undefined, .expand = expand };
+            try footer.appendChild(cx.allocator, expand);
+            try footer.appendChild(cx.allocator, close);
+            slot.* = .{ .presenter = self, .root = card, .header = header, .message_viewport = body_scroll.container, .icons = icons, .title = title, .detail = detail, .source = source, .footer = footer, .status_tag = status_tag, .status_label = status_label, .countdown = countdown, .countdown_view = countdown_view, .close = close, .action_row = action_row, .actions = undefined, .expand = expand };
             card.behavior.events.on_hover = cx.on(Slot, slot, Slot.pointerChanged);
             card.behavior.events.on_leave = cx.on(Slot, slot, Slot.pointerChanged);
             inline for (&slot.actions, 0..) |*action, j| {
@@ -165,7 +169,7 @@ pub const Presenter = struct {
                 try button.appendChild(cx.allocator, label);
                 action.* = .{ .slot = slot, .index = j, .root = button, .label = label };
                 button.meta.ownership.meta.test_id = "notifications.action";
-                if (j == 0) try secondary.insertChildBefore(cx.allocator, button, expand) else try action_row.appendChild(cx.allocator, button);
+                try action_row.appendChild(cx.allocator, button);
                 button.setDisplay(.none);
             }
             try scroll.content.appendChild(cx.allocator, card);
@@ -211,11 +215,11 @@ pub const Presenter = struct {
             const detail = @import("notification_card.zig").extraDetail(record.event);
             const tagged = false;
             slot.action_row.setStyle(self.cx.allocator, .flex_wrap, if (record.event.actions.len > 1) .wrap else .no_wrap);
-            // Reserve the body inset, countdown, expand control, three gaps
-            // and a readable source preview before bounding the first action.
-            const body_width = @max(1, width - 32 - 22);
-            for (&slot.actions, 0..) |*action, j| {
-                const action_width = if (j == 0) @max(1, body_width - 80 - 22 - 18 - 48) else body_width;
+            // Action controls share only the bottom layer. Multiple actions
+            // wrap within their column instead of crowding the explanation.
+            const body_width = @max(1, width - 32);
+            for (&slot.actions) |*action| {
+                const action_width = @max(1, body_width - 80 - 22 - 19 - 24);
                 action.root.setStyle(self.cx.allocator, .max_width, action_width);
                 action.label.setStyle(self.cx.allocator, .max_width, @max(1, action_width - 20));
             }
@@ -228,7 +232,18 @@ pub const Presenter = struct {
                 // Toasts remain a compact preview even without actions. The
                 // history expansion retains the complete title and details.
                 try setLine(self.cx, slot.title, record.event.title);
-                try setLine(self.cx, slot.detail, record.event.detail);
+                const failure = record.event.severity == .failure;
+                if (failure) {
+                    if (slot.title.getText()) |old| {
+                        var props = old;
+                        props.wrap = .word;
+                        props.text_overflow = .clip;
+                        slot.title.setText(props);
+                    }
+                    slot.title.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
+                }
+                slot.title.setTextColor(if (failure) colors.danger_ink else colors.fg_1);
+                try slot.detail.setTextContent(self.cx.allocator, record.event.detail);
                 slot.detail.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 0 });
                 if (slot.detail.getText()) |text| {
                     var wrapped = text;
@@ -240,9 +255,10 @@ pub const Presenter = struct {
                 slot.status_tag.setStyleInline(self.cx.allocator, S.statusTag(@backingInt(record.event.severity)));
                 slot.status_label.setTextColor(S.statusInk(@backingInt(record.event.severity)));
                 slot.status_tag.setDisplay(if (tagged) .flex else .none);
-                slot.footer.setDisplay(if (slot.expanded and record.event.actions.len > 1) .flex else .none);
-                slot.detail.setDisplay(if (slot.expanded and detail.len != 0) .flex else .none);
-                slot.expand.setDisplay(if (detail.len > 0 or record.event.actions.len > 1) .flex else .none);
+                slot.footer.setDisplay(.flex);
+                slot.detail.setTextColor(if (failure) colors.danger_ink else colors.fg_2);
+                slot.detail.setDisplay(if ((slot.expanded or failure) and detail.len != 0) .flex else .none);
+                slot.expand.setDisplay(if (!failure and detail.len > 0) .flex else .none);
                 slot.expand.setStyle(self.cx.allocator, .rotate, if (slot.expanded) @as(f32, std.math.pi) else @as(f32, 0));
                 if (slot.expand.behavior.interaction.a11y) |*attrs| {
                     attrs.expanded = slot.expanded;
@@ -256,14 +272,19 @@ pub const Presenter = struct {
                     }
                     try action.label.setTextContent(self.cx.allocator, record.event.actions[j].label);
                     action.root.behavior.interaction.a11y = .{ .role = .button, .label = action.label.getText().?.content };
-                    action.root.setDisplay(if (j == 0 or slot.expanded) .flex else .none);
+                    action.root.setDisplay(.flex);
                 }
-                slot.action_row.setDisplay(if (record.event.actions.len == 0 and record.priorityRisk()) .none else .flex);
+                slot.action_row.setDisplay(.flex);
             }
             const identified = try @import("notification_card.zig").summary(self.cx.allocator, record.event, record.owner_ended);
             defer self.cx.allocator.free(identified);
             try setLine(self.cx, slot.source, identified);
             slot.source.setDisplay(if (identified.len == 0) .none else .flex);
+            const card_limit = @min(@as(f32, 360), @max(1, placement.content.h - layout.top - layout.clearance));
+            const header_height = @max(@as(f32, 18), slot.header.globalRect().h);
+            const footer_height = @max(@as(f32, 30), slot.footer.globalRect().h);
+            slot.root.setStyle(self.cx.allocator, .max_height, card_limit);
+            slot.message_viewport.setStyle(self.cx.allocator, .max_height, @max(0, @min(240, card_limit - header_height - footer_height - 40)));
             slot.root.setDisplay(.flex);
         }
         // Measure the currently visible slots. Text/width changes settle after
@@ -294,15 +315,19 @@ pub const Presenter = struct {
                 break;
             }
         }
+        var any_visible = false;
         for (self.slots[0..count], records[0..count]) |*slot, record| {
-            slot.obscured = covered;
+            // Errors caused by the active modal must be visible above that
+            // modal, otherwise Save appears to do nothing again.
+            slot.obscured = covered and !std.mem.eql(u8, record.event.definition_id, "host.operation_error");
+            any_visible = any_visible or !slot.obscured;
             slot.root.setOpacityRaw(if (slot.obscured) 0 else 1);
             slot.root.setStyle(self.cx.allocator, .hit_behavior, if (slot.obscured) .pass_through else .@"opaque");
             self.host.coordinator.pauseNotification(record.fact_id, slot.hovered() or slot.obscured or slot.expanded or (if (self.cx.focus_manager.getFocused()) |focused| focused == slot.root or focused.isDescendantOf(slot.root) else false));
             try slot.countdown_view.update(self.cx, record.remaining_ms, record.paused);
         }
 
-        self.root.setDisplay(if (covered or count == 0) .none else .flex);
+        self.root.setDisplay(if (!any_visible or count == 0) .none else .flex);
         if (count != 0) self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
     }
 };

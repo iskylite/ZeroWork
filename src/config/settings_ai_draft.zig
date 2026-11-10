@@ -12,6 +12,7 @@ pub const Address = struct {
     }
 };
 pub const Raw = struct { address: Address, input: []u8, problem: ?anyerror = null };
+pub const Problem = struct { address: Address, err: anyerror };
 pub const State = struct {
     fields: std.ArrayList(Raw) = .empty,
     provider_open: std.AutoHashMapUnmanaged(usize, bool) = .empty,
@@ -206,34 +207,50 @@ pub fn modelValid(model: config.AiModel) bool {
 pub fn connectionValid(p: config.AiProvider) bool {
     return std.mem.trim(u8, p.name, " \t\r\n").len > 0 and endpointValid(p.endpoint) and (p.api_key.len > 0 or @import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint));
 }
+pub fn connectionProblem(p: config.AiProvider, index: usize) ?Problem {
+    if (std.mem.trim(u8, p.name, " \t\r\n").len == 0) return .{ .address = .{ .provider = index, .field = .name }, .err = error.EmptyProviderName };
+    if (!endpointValid(p.endpoint)) return .{ .address = .{ .provider = index, .field = .endpoint }, .err = error.InvalidEndpoint };
+    if (p.api_key.len == 0 and !@import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint)) return .{ .address = .{ .provider = index, .field = .api_key }, .err = error.MissingApiKey };
+    return null;
+}
+
+/// Preserve the location and cause instead of reducing all provider failures
+/// to InvalidDraft. This is shared by save validation and inline feedback.
+pub fn firstProblem(ai: config.Ai) ?Problem {
+    if (ai.provider_count > ai.providers.len) return .{ .address = .{ .provider = 0, .field = .name }, .err = error.InvalidProviderCount };
+    var any_enabled = false;
+    var default_found = false;
+    for (ai.providers[0..ai.provider_count], 0..) |p, i| {
+        if (p.model_count > p.models.len) return .{ .address = .{ .provider = i, .field = .model_id }, .err = error.InvalidModelCount };
+        for (ai.providers[0..i]) |other| if (std.mem.eql(u8, providerName(p), providerName(other))) return .{ .address = .{ .provider = i, .field = .name }, .err = error.DuplicateProviderName };
+        if (!p.enabled) continue;
+        if (connectionProblem(p, i)) |problem| return problem;
+        for (p.models[0..p.model_count], 0..) |model, j| {
+            const address: Address = .{ .provider = i, .model = j, .field = .model_id };
+            if (std.mem.trim(u8, model.id, " \t\r\n").len == 0) return .{ .address = address, .err = error.EmptyModelId };
+            if (model.context_window == 0) return .{ .address = .{ .provider = i, .model = j, .field = .context_window }, .err = error.InvalidContextWindow };
+            if (!modelValid(model)) return .{ .address = address, .err = error.LastEffortRequired };
+            for (p.models[0..j]) |other| if (std.mem.eql(u8, model.id, other.id)) return .{ .address = address, .err = error.DuplicateModelId };
+        }
+        if (p.model_count == 0) continue;
+        var defaults: usize = 0;
+        for (p.models[0..p.model_count]) |model| if (model.default) {
+            defaults += 1;
+        };
+        if (defaults != 1) return .{ .address = .{ .provider = i, .field = .model_id }, .err = error.InvalidDefaultModel };
+        any_enabled = true;
+        if (std.mem.eql(u8, providerName(p), ai.default_provider)) default_found = true;
+    }
+    if (any_enabled and !default_found) return .{ .address = .{ .provider = 0, .field = .name }, .err = error.InvalidDefaultProvider };
+    return null;
+}
 pub fn eligible(p: config.AiProvider) bool {
     if (!endpointValid(p.endpoint) or p.model_count == 0 or p.model_count > p.models.len or (p.api_key.len == 0 and !@import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint))) return false;
     for (p.models[0..p.model_count]) |model| if (!modelValid(model)) return false;
     return true;
 }
 pub fn validate(ai: config.Ai) !void {
-    if (ai.provider_count > ai.providers.len) return error.InvalidProviderCount;
-    var any_enabled = false;
-    var default_found = false;
-    for (ai.providers[0..ai.provider_count], 0..) |p, i| {
-        if (p.model_count > p.models.len) return error.InvalidModelCount;
-        for (ai.providers[0..i]) |other| if (std.mem.eql(u8, providerName(p), providerName(other))) return error.DuplicateProviderName;
-        if (!p.enabled) continue;
-        for (p.models[0..p.model_count], 0..) |model, j| {
-            if (!modelValid(model)) return error.InvalidModel;
-            for (p.models[0..j]) |other| if (std.mem.eql(u8, model.id, other.id)) return error.DuplicateModelId;
-        }
-        if (!connectionValid(p)) return error.IncompleteProvider;
-        if (p.model_count == 0) continue;
-        var default_models: usize = 0;
-        for (p.models[0..p.model_count]) |model| if (model.default) {
-            default_models += 1;
-        };
-        if (default_models != 1) return error.InvalidDefaultModel;
-        any_enabled = true;
-        if (std.mem.eql(u8, providerName(p), ai.default_provider)) default_found = true;
-    }
-    if (any_enabled and !default_found) return error.InvalidDefaultProvider;
+    if (firstProblem(ai)) |problem| return problem.err;
 }
 pub fn validateDefault(ai: config.Ai, original: config.Ai) !void {
     var had_default = false;
@@ -252,7 +269,10 @@ pub fn problemText(err: anyerror) []const u8 {
         error.EmptyModelId => "模型 ID 不能为空",
         error.DuplicateModelId => "同一 Provider 内模型 ID 不能重复",
         error.InvalidContextWindow => "上下文窗口须为 1–4294967295 的整数",
-        error.LastEffortRequired => "推理模型至少保留一个 effort 档位",
+        error.MissingApiKey => "请填写 API Key，或停用此服务提供方。",
+        error.LastEffortRequired => "请编辑模型，至少选择一个推理等级。",
+        error.InvalidDefaultModel => "请选择一个默认模型：点击模型右侧的星标。",
+        error.InvalidDefaultProvider => "请在「其他行为」中选择已启用的默认服务提供方。",
         error.DefaultProtected => "请先选择已有合法的默认替代项",
         error.IncompleteProvider => "请补齐连接信息和至少一个有效模型",
         error.InvalidText => "内容包含配置不支持的字符",

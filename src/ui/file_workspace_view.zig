@@ -73,6 +73,8 @@ pub const Callbacks = struct {
     external_upload: ?*const fn (*anyopaque, ExternalUpload) anyerror!void = null,
     current_stamp: ?*const fn (*anyopaque, Side) Stamp = null,
     current_projection: ?*const fn (*anyopaque) ?Projection = null,
+    error_context: ?*anyopaque = null,
+    on_error: ?*const fn (*anyopaque, anyerror) void = null,
 };
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
@@ -959,8 +961,11 @@ pub const Pane = struct {
         const p = self.projection() orelse return error.FileProjectionUnavailable;
         try self.view.callbacks.action(self.view.callbacks.context, .{ .side = self.side, .stamp = p.stamp, .projection_revision = self.view.source.?.value.revision, .selection_revision = p.selection_revision, .action = action });
     }
-    fn report(self: *Pane, err: anyerror) void {
-        self.status.setTextContent(self.view.cx.allocator, @errorName(err)) catch {};
+    pub fn report(self: *Pane, err: anyerror) void {
+        if (self.view.callbacks.on_error) |notify| notify(self.view.callbacks.error_context orelse self.view.callbacks.context, err);
+        var buffer: [768]u8 = undefined;
+        self.status.setTextContent(self.view.cx.allocator, @import("feedback_message.zig").message(@errorName(err), &buffer)) catch {};
+        self.status.setTextColor(S.theme.current().danger_ink);
         self.view.cx.requestRedraw();
     }
     fn submitPath(self: *Pane) void {

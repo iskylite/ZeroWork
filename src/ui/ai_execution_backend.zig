@@ -125,6 +125,7 @@ const Admission = struct {
     evidence: ApprovalEvidence,
     authorized: bool = false,
     execution_id: ?identity.ExecutionId = null,
+    submitted: bool = false,
     handed_to_user: bool = false,
     cleanup_only: bool = false,
 };
@@ -645,8 +646,12 @@ pub const Context = struct {
         try checkForbidden(command);
         try self.validateApproval(invocation, command, hash);
         const service = try self.resolveAdmission(record, true);
+        // The controller can expose/await its receipt while native admission
+        // is still busy. Bind reads to this approved operation now, not after
+        // the terminal has accepted its request.
+        if (record.execution_id == null) record.execution_id = identity.ExecutionId.generate();
         record.authorized = true;
-        return .{ .verification_service = service.binding, .create_key = (self.app.sessions.queryState(handle) orelse return error.StaleSession).create_operation, .handle = handle, .service = service, .ownership_revision = record.boundary.ownership_revision };
+        return .{ .execution_id = record.execution_id, .verification_service = service.binding, .create_key = (self.app.sessions.queryState(handle) orelse return error.StaleSession).create_operation, .handle = handle, .service = service, .ownership_revision = record.boundary.ownership_revision };
     }
     fn resolve(raw: *anyopaque, authority: host.Context, handle: identity.SessionHandle) !terminal.Service {
         const self: *Context = @ptrCast(@alignCast(raw));
@@ -676,14 +681,14 @@ pub const Context = struct {
             .request => |request| {
                 var failure: ?anyerror = null;
                 if (self.closing()) return error.WorkspaceClosed;
-                for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and !record.handed_to_user and !record.cleanup_only and record.execution_id == null and record.context.task_id.eql(request.task_id) and sameService(record.boundary.service, service) and std.mem.eql(u8, &record.command_hash, &request.command_hash)) {
+                for (&self.admissions) |*item| if (item.*) |*record| if (record.authorized and !record.submitted and !record.handed_to_user and !record.cleanup_only and record.execution_id != null and record.execution_id.?.eql(request.execution_id) and record.context.task_id.eql(request.task_id) and sameService(record.boundary.service, service) and std.mem.eql(u8, &record.command_hash, &request.command_hash)) {
                     if (request.ownership_revision != record.boundary.ownership_revision or request.expected_input_epoch != record.boundary.input_epoch) continue;
                     _ = self.resolveAdmission(record, true) catch |err| {
                         failure = err;
                         continue;
                     };
                     const result = try supervisor.performTerminal(service, action);
-                    record.execution_id = request.execution_id;
+                    record.submitted = true;
                     return result;
                 };
                 if (failure) |err| return err;

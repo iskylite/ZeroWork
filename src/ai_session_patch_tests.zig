@@ -232,6 +232,93 @@ test "AI session PATCH tool-free steering stays in the same turn and preserves b
 const Journal = @import("ai/session_journal.zig").Journal;
 const all_released: lifecycle.Released = .{ .worker_joined = true, .dispatch_closed = true, .local_released = true, .transcript_saved = true };
 
+test "AI session PATCH journal compaction preserves chat forks drafts receipts and incremental writes" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var journal = try Journal.open(a, std.testing.io, tmp.dir, "sessions.jsonl");
+    var store = lifecycle.Store.init(a);
+    const ticket = blk: {
+        try journal.bind(&store);
+        const agent = try store.attach(.{ .session = 1 });
+        break :blk try store.create(agent.id);
+    };
+    try store.checkpoint(ticket, 1, &.{ .{ .content = "原始提问 🙂" }, .{ .role = .assistant, .content = "第一轮答复" } }, true);
+    try store.savePresentation(ticket.conversation, "first complete snapshot");
+    const forked = try store.fork(ticket.conversation, store.find(ticket.conversation).?.content_revision);
+    const inode = (try tmp.dir.statFile(std.testing.io, "sessions.jsonl", .{})).inode;
+    try store.savePresentation(ticket.conversation, "streaming intermediate snapshot");
+    try store.checkpoint(ticket, 2, &.{ .{ .content = "原始提问 🙂" }, .{ .role = .assistant, .content = "最终答复和工具结果" } }, true);
+    try store.savePresentation(ticket.conversation, "latest full snapshot with all messages");
+    try std.testing.expectEqual(inode, (try tmp.dir.statFile(std.testing.io, "sessions.jsonl", .{})).inode);
+    const record = store.find(ticket.conversation).?;
+    _ = try store.setDraft(ticket, record.draft_revision, "未发送的草稿");
+    const pending = try record.inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "排队消息不能丢失或自动执行" }, .queue);
+    const prior_len = journal.bytes.items.len;
+    const content_revision = record.content_revision;
+    const draft_revision = record.draft_revision;
+    try journal.compact();
+    try std.testing.expect(journal.bytes.items.len < prior_len);
+    try std.testing.expect(std.mem.indexOf(u8, journal.bytes.items, "streaming intermediate snapshot") == null);
+    // Exercise automatic compaction before the next append as well.
+    journal.compact_at = journal.bytes.items.len;
+    try store.savePresentation(ticket.conversation, "final full snapshot with all messages");
+    store.deinit();
+    journal.deinit();
+    var reopened = try Journal.open(a, std.testing.io, tmp.dir, "sessions.jsonl");
+    defer reopened.deinit();
+    var restored = lifecycle.Store.init(a);
+    defer restored.deinit();
+    try reopened.bind(&restored);
+    const original = restored.find(ticket.conversation).?;
+    try std.testing.expectEqualStrings("最终答复和工具结果", original.history.messages[1].content);
+    try std.testing.expectEqualStrings("final full snapshot with all messages", original.presentation.?);
+    try std.testing.expectEqualStrings("未发送的草稿", original.draft.?);
+    try std.testing.expectEqual(content_revision, original.content_revision);
+    try std.testing.expectEqual(draft_revision, original.draft_revision);
+    try std.testing.expect(original.inbox.receipt(pending.id).?.archived);
+    try std.testing.expectEqualStrings("排队消息不能丢失或自动执行", original.inbox.entries.items[0].payload.messages[0].content);
+    try std.testing.expectEqualStrings("第一轮答复", restored.find(forked).?.history.messages[1].content);
+    try std.testing.expectEqualStrings("first complete snapshot", restored.find(forked).?.presentation.?);
+}
+
+test "AI session PATCH journal repairs only an interrupted tail after validating committed records" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var journal = try Journal.open(a, std.testing.io, tmp.dir, "sessions.jsonl");
+    var store = lifecycle.Store.init(a);
+    try journal.bind(&store);
+    const ticket = try store.create((try store.attach(.{ .session = 1 })).id);
+    try store.savePresentation(ticket.conversation, "完整聊天记录");
+    const committed = try a.dupe(u8, journal.bytes.items);
+    defer a.free(committed);
+    store.deinit();
+    journal.deinit();
+    const file = try tmp.dir.openFile(std.testing.io, "sessions.jsonl", .{ .mode = .read_write });
+    try file.writePositionalAll(std.testing.io, "{\"schema\":1,\"event\":", committed.len);
+    file.close(std.testing.io);
+    var reopened = try Journal.open(a, std.testing.io, tmp.dir, "sessions.jsonl");
+    var restored = lifecycle.Store.init(a);
+    try reopened.bind(&restored);
+    try std.testing.expectEqualStrings("完整聊天记录", restored.find(ticket.conversation).?.presentation.?);
+    const repaired = try tmp.dir.readFileAlloc(std.testing.io, "sessions.jsonl", a, .limited(65536));
+    defer a.free(repaired);
+    try std.testing.expectEqualStrings(committed, repaired);
+    try restored.savePresentation(ticket.conversation, "恢复后继续保存");
+    restored.deinit();
+    reopened.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "invalid.jsonl", .data = "{bad committed record}\n{unfinished" });
+    var invalid = try Journal.open(a, std.testing.io, tmp.dir, "invalid.jsonl");
+    defer invalid.deinit();
+    var rejected = lifecycle.Store.init(a);
+    defer rejected.deinit();
+    if (invalid.bind(&rejected)) |_| return error.InvalidJournalWasAccepted else |_| {}
+    const preserved = try tmp.dir.readFileAlloc(std.testing.io, "invalid.jsonl", a, .limited(65536));
+    defer a.free(preserved);
+    try std.testing.expectEqualStrings("{bad committed record}\n{unfinished", preserved);
+}
+
 test "AI session PATCH journal restores orphan as fenced data and resumes only after release" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

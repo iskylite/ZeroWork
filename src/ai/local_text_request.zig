@@ -35,17 +35,35 @@ pub fn compose(allocator: std.mem.Allocator, prompt: []const u8, bundle: *const 
 fn attachmentHeader(allocator: std.mem.Allocator, content: attachments.Content) ![]u8 {
     return switch (content.source) {
         .local_file => std.fmt.allocPrint(allocator, "\n\n<local_text_attachment path=\"{s}\">\n", .{content.path}),
-        .remote_file => |source| std.fmt.allocPrint(allocator, "\n\n<remote_file_attachment>\nsource_session={d}\nsource_generation={d}\nsource_name={s}\nsource_revision={d}\noperation={d}\nrequested_path={s}\nactual_path={s}\ncaptured_at_ms={d}\noriginal_size={?d}\nread_bytes={d}\nreturned_bytes={d}\nread_limit={d}\ntruncated={}\nencoding=utf8\ntext:\n", .{ @backingInt(source.owner.session_id), source.owner.generation, source.source_name, source.source_revision, source.operation.operation_id, content.path, source.actual_path orelse content.path, content.captured_at_ms, source.original_size, source.read_bytes, content.bytes.len, source.read_limit, source.truncated }),
+        .local_reference => localReferenceHeader(allocator, content),
+        .remote_file => |source| if (source.reference_only)
+            std.fmt.allocPrint(allocator, "\n\n<remote_file_reference>\nsource_session={d}\nsource_generation={d}\nsource_name={s}\npath={s}\nFile contents are not included. If needed, read with an available file tool for this source session. This is a remote path, not a local file.\n", .{ @backingInt(source.owner.session_id), source.owner.generation, source.source_name, content.path })
+        else
+            std.fmt.allocPrint(allocator, "\n\n<remote_file_attachment>\nsource_session={d}\nsource_generation={d}\nsource_name={s}\nsource_revision={d}\noperation={d}\nrequested_path={s}\nactual_path={s}\ncaptured_at_ms={d}\noriginal_size={?d}\nread_bytes={d}\nreturned_bytes={d}\nread_limit={d}\ntruncated={}\nencoding=utf8\ntext:\n", .{ @backingInt(source.owner.session_id), source.owner.generation, source.source_name, source.source_revision, (source.operation orelse return error.InvalidRemoteSource).operation_id, content.path, source.actual_path orelse content.path, content.captured_at_ms, source.original_size, source.read_bytes, content.bytes.len, source.read_limit, source.truncated }),
         .terminal => |source| switch (source.origin) {
             .selection => |selected| std.fmt.allocPrint(allocator, "\n\n<terminal_selection_attachment>\nsource_session={d}\nsource_generation={d}\nsource_name={s}\ncaptured_at_ms={d}\nselected_rows={d}\nsource_version={d}\nrectangle={}\ntext:\n", .{ @backingInt(source.owner.session_id), source.owner.generation, source.source_name, content.captured_at_ms, source.line_count, selected.source_version, selected.selection.rectangle }),
             .command => |command| std.fmt.allocPrint(allocator, "\n\n<terminal_command_context>\nsource_session={d}\nsource_generation={d}\nsource_name={s}\ncaptured_at_ms={d}\ncontext_rows={d}\ncommand_id={d}\ncommand_end={d}\nexit_code={d}\ncommand={s}\ntext:\n", .{ @backingInt(source.owner.session_id), source.owner.generation, source.source_name, content.captured_at_ms, source.line_count, command.command_id, command.end_sequence, command.exit_code, command.command }),
         },
     };
 }
+fn localReferenceHeader(allocator: std.mem.Allocator, content: attachments.Content) ![]u8 {
+    const reference = content.source.local_reference;
+    const image_limits = @import("image_attachments.zig").Limits{};
+    const byte_limit: ?usize = switch (reference.reason) {
+        .text_limit => attachments.max_bytes,
+        .size_limit, .image_limit => image_limits.bytes,
+        else => null,
+    };
+    return std.fmt.allocPrint(allocator, "\n\n<local_file_reference>\nsource_kind=host_local\nsource_name=本机\nabsolute_path={s}\nreference_only=true\ncontent_included=false\nreason={s}\nfile_size_bytes={?d}\ncontent_limit_bytes={?d}\nimage_max_dimension={?d}\nimage_max_pixels={?d}\nsuggested_max_read_bytes=4096\nFile contents are not included. The reason and limits above explain why only a path was attached. Do not automatically read, load, upload or decode the entire file. If the user's task requires inspection, first inspect metadata and use bounded reads of at most 4096 bytes per call; do not automatically paginate through the entire file. Use an authorized tool explicitly targeting this host's local filesystem. Never pass this path to SSH, SFTP or another remote session's file tools. If no host-local tool is available, explain that you cannot read this file; do not substitute a remote path.\n", .{
+        content.path,                                                                        @tagName(reference.reason),                                                       reference.size_bytes, byte_limit,
+        if (reference.reason == .image_limit) @as(?usize, image_limits.dimension) else null, if (reference.reason == .image_limit) @as(?usize, image_limits.pixels) else null,
+    });
+}
 fn attachmentEnd(content: attachments.Content) []const u8 {
     return switch (content.source) {
         .local_file => "\n</local_text_attachment>",
-        .remote_file => "\n</remote_file_attachment>",
+        .local_reference => "</local_file_reference>",
+        .remote_file => |source| if (source.reference_only) "</remote_file_reference>" else "\n</remote_file_attachment>",
         .terminal => |source| switch (source.origin) {
             .selection => "\n</terminal_selection_attachment>",
             .command => "\n</terminal_command_context>",

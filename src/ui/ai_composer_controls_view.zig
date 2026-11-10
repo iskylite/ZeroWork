@@ -402,7 +402,7 @@ pub const View = struct {
         return .{ .widget = result, .body = body, .title = title };
     }
     fn mountAttachments(self: *View) !void {
-        const names = [_][]const u8{ "选择图片…", "选择本地文本…", "引用远程文件…", "粘贴图片" };
+        const names = [_][]const u8{ "选择图片…", "选择本地文件…", "引用远程文件…", "粘贴图片" };
         const assets = [_]ui.SvgAsset{ ui.icons.get("image").?, ui.icons.get("file-text").?, ui.icons.get("server").?, ui.icons.get("clipboard-paste").? };
         const parent = self.popups[@backingInt(S.Kind.attachment)].body;
         for (0..4) |index| {

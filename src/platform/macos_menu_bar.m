@@ -90,13 +90,10 @@ static NSString *ActivityBadgeLabel(uint64_t count) {
 }
 - (NSImage *)imageForCount:(uint64_t)count {
     NSString *label = ActivityBadgeLabel(count);
-    NSDictionary *attributes = @{NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:9 weight:NSFontWeightBold], NSForegroundColorAttributeName: NSColor.whiteColor};
-    NSMutableDictionary *outlineAttributes = [attributes mutableCopy];
-    outlineAttributes[NSStrokeColorAttributeName] = [NSColor colorWithSRGBRed:41/255.0 green:44/255.0 blue:50/255.0 alpha:1];
-    outlineAttributes[NSStrokeWidthAttributeName] = @(10);
+    NSDictionary *attributes = @{NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:8 weight:NSFontWeightMedium], NSForegroundColorAttributeName: NSColor.whiteColor};
     NSSize textSize = [label sizeWithAttributes:attributes];
-    CGFloat badgeWidth = MAX(13, ceil(textSize.width) + 6);
-    NSSize size = NSMakeSize(count ? 16 + badgeWidth + 1 : 21, 22);
+    CGFloat badgeWidth = MAX(11, ceil(textSize.width) + 4);
+    NSSize size = NSMakeSize(count ? 14 + badgeWidth + 1 : 21, 22);
     NSImage *logo = self.logo;
     NSImage *image = [NSImage imageWithSize:size flipped:NO drawingHandler:^BOOL(NSRect bounds) {
         (void)bounds;
@@ -107,9 +104,10 @@ static NSString *ActivityBadgeLabel(uint64_t count) {
         CGFloat logoWidth = 21 * 934/943.0;
         [logo drawInRect:NSMakeRect((21 - logoWidth)/2, .5, logoWidth, 21) fromRect:source operation:NSCompositingOperationSourceOver fraction:1];
         if (count) {
-            NSRect badge = NSMakeRect(16, 8, badgeWidth, 13);
+            NSRect badge = NSMakeRect(14, 11, badgeWidth, 11);
+            [[NSColor colorWithSRGBRed:1 green:59/255.0 blue:48/255.0 alpha:1] setFill];
+            [[NSBezierPath bezierPathWithRoundedRect:badge xRadius:5.5 yRadius:5.5] fill];
             NSPoint origin = NSMakePoint(NSMidX(badge) - textSize.width / 2, NSMidY(badge) - textSize.height / 2);
-            [label drawAtPoint:origin withAttributes:outlineAttributes];
             [label drawAtPoint:origin withAttributes:attributes];
         }
         return YES;

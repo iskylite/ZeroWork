@@ -28,6 +28,7 @@ pub fn explanation(code: []const u8) []const u8 {
         .{ "RecordingNotClosed", "该录制仍在进行，当前工具只能读取已结束的历史录制。请改用当前会话的实时终端读取工具；无需为读取当前输出而关闭会话。" },
         .{ "ToolApprovalRejected", "用户拒绝了本次工具操作。" },
         .{ "ToolApprovalRequired", "本次操作尚未取得所需确认。" },
+        .{ "TargetNotAuthorized", "本次调用的目标或任务授权未通过校验。请重新读取当前会话与授权范围后再执行。" },
         .{ "ToolExecutionDenied", "当前权限策略禁止执行本次命令。" },
         .{ "IntegrationUnavailable", "当前终端缺少可用的 Shell 集成，无法确认命令输入与完成边界。" },
         .{ "InputConflict", "终端存在未完成的输入、粘贴或编辑状态，无法提交新的命令。" },
@@ -48,7 +49,7 @@ fn errorCode(a: std.mem.Allocator, value: std.json.Value, depth: u8) ?[]const u8
     switch (value) {
         .object => |object| {
             if (object.get("error_code")) |code| if (code == .string) return code.string;
-            for ([_][]const u8{ "content", "structured", "text" }) |key| if (object.get(key)) |child| {
+            for ([_][]const u8{ "targets", "content", "structured", "text" }) |key| if (object.get(key)) |child| {
                 if (errorCode(a, child, depth + 1)) |code| return code;
             };
         },
@@ -94,4 +95,17 @@ test "AI step failure retains nested host errors arguments and readable causes" 
     const other = try describe(a, step);
     defer other.deinit(a);
     try std.testing.expect(std.mem.indexOf(u8, other.detail, "实时终端读取工具") != null);
+}
+
+test "AI step failure reads routed target receipts without losing the original error" {
+    const a = std.testing.allocator;
+    const raw = "{\"targets\":[{\"status\":\"cancelled_unsent\",\"content\":[{\"type\":\"structured\",\"text\":\"{\\\"error_code\\\":\\\"requires_plan_change\\\",\\\"next_tool\\\":\\\"host__run_uin_uterminal\\\",\\\"side_effect_started\\\":false}\"}]}]}";
+    const value = try describe(a, .{ .call_id = @constCast("routed"), .name = @constCast("run_command"), .command = @constCast("pwd"), .detail = @constCast(raw), .phase = .cancelled, .started_ms = 1 });
+    defer value.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, value.summary, "requires_plan_change") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value.summary, "未执行") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value.detail, "运行方式不匹配") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value.detail, raw) != null);
+    try std.testing.expect(std.mem.indexOf(u8, value.summary, "ToolRequestFailed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, explanation("TargetNotAuthorized"), "授权未通过校验") != null);
 }

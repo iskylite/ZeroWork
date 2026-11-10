@@ -737,6 +737,12 @@ pub const Bridge = struct {
     }
     fn executeDynamic(raw: *anyopaque, invocation: tools.DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) ![]tools.ToolResult {
         const self: *Bridge = @ptrCast(@alignCast(raw));
+        return self.executeDynamicInner(invocation, allocator, cancel) catch |err| {
+            self.emitStep(invocation, if (err == error.CancelledBeforeDispatch or (if (cancel) |token| token.isCancelled() else false)) .cancelled else .failed, @errorName(err));
+            return err;
+        };
+    }
+    fn executeDynamicInner(self: *Bridge, invocation: tools.DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) ![]tools.ToolResult {
         if (self.queries_only) return error.ToolNotAvailable;
         if (self.route_broker == null and std.mem.eql(u8, invocation.parsed.entry.definition.id, "run_command") and (self.execution_mode == .attached_pty or self.execution_mode == .new_pty)) return error.ModeConflict;
         _ = self.validation_arena.reset(.retain_capacity);
@@ -780,11 +786,11 @@ pub const Bridge = struct {
                 const binding = self.host_binding orelse return error.InvalidHostAuthority;
                 route_invocation = .{ .context = binding.context, .authority = .execution_control, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .call_id = invocation.call_id, .tool_id = "run_command", .arguments = invocation.parsed.json.value, .arguments_json = invocation.arguments, .arguments_hash = invocation.parsed.arguments_hash, .canonical_arguments_hash = try @import("../ai/canonical_arguments.zig").digest(allocator, invocation.parsed.json.value) };
                 route_subject = .{ .kind = .terminal_command, .target = try std.fmt.bufPrint(&route_label, "会话 #{d} · generation {d}", .{ @backingInt(target.session_id), target.generation }), .detail = command_value.string, .impact = "仅执行上述完整命令。新工作终端将以此会话为来源，创建前会单独确认；会话按本次任务的设置保留。" };
-                if (try self.prepareHostRoute(route_invocation, &route_subject, target, .batch, allocator)) |changed| return try dynamicRouteResult(invocation, target, changed, allocator);
+                if (try self.prepareHostRoute(route_invocation, &route_subject, target, .batch, allocator)) |changed| return try self.dynamicRouteResult(invocation, target, changed, allocator);
                 if (self.execution_mode == .ask or route_subject.route.?.choice.route == .batch and self.route_broker.?.execution_route.resolve(binding.context, target, command_value.string, .batch).trusted) {
                     const permit = try self.requestHostRoute(route_invocation, route_subject, allocator, cancel);
                     route_permit = permit;
-                    if (try self.hostRouteChange(route_invocation, route_subject, permit, allocator)) |changed| return try dynamicRouteResult(invocation, target, changed, allocator);
+                    if (try self.hostRouteChange(route_invocation, route_subject, permit, allocator)) |changed| return try self.dynamicRouteResult(invocation, target, changed, allocator);
                     self.active_route = .{ .permit = permit, .invocation = route_invocation, .subject = route_subject };
                 }
             }
@@ -794,10 +800,7 @@ pub const Bridge = struct {
             const target = route_subject.route.?.target;
             self.consumeHostRoute(route_invocation, target, route_subject.detail);
         }
-        const results = runtime.execute(invocation, allocator, cancel) catch |err| {
-            self.emitStep(invocation, if (err == error.CancelledBeforeDispatch or (if (cancel) |token| token.isCancelled() else false)) .cancelled else .failed, @errorName(err));
-            return err;
-        };
+        const results = try runtime.execute(invocation, allocator, cancel);
         var detail: std.ArrayList(u8) = .empty;
         defer detail.deinit(allocator);
         var phase: @import("../ai/step_events.zig").Phase = .succeeded;
@@ -817,9 +820,14 @@ pub const Bridge = struct {
         self.emitStep(invocation, phase, detail.items);
         return results;
     }
-    fn dynamicRouteResult(invocation: tools.DynamicInvocation, target: identity.SessionHandle, changed: host_tools.Result, allocator: std.mem.Allocator) ![]tools.ToolResult {
+    fn dynamicRouteResult(self: *Bridge, invocation: tools.DynamicInvocation, target: identity.SessionHandle, changed: host_tools.Result, allocator: std.mem.Allocator) ![]tools.ToolResult {
         var owned = changed;
         defer owned.deinit(allocator);
+        // A route change returns before Runtime.execute. Publish its real
+        // unsent receipt too, rather than leaving the plan's arguments as error.
+        const detail = try std.json.Stringify.valueAlloc(allocator, .{ .status = changed.status, .content = changed.blocks, .receipt = changed.receipt }, .{});
+        defer allocator.free(detail);
+        self.emitStep(invocation, .cancelled, detail);
         const blocks = try allocator.alloc(tools.ContentBlock, changed.blocks.len);
         errdefer allocator.free(blocks);
         for (changed.blocks, blocks) |block, *output| output.* = switch (block) {
@@ -1261,6 +1269,10 @@ pub const Bridge = struct {
 fn pause() void {
     var duration: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
     _ = std.c.nanosleep(&duration, null);
+}
+
+test {
+    _ = @import("../ai/step_failure.zig");
 }
 
 test "automation proof outlives borrowed call cancellation and ends with the complete run" {
@@ -1882,6 +1894,7 @@ test "routing run_command to current terminal returns real plan change with zero
     defer a.free(events);
     var pending_event = false;
     var approved_event = false;
+    var cancelled_event = false;
     for (events) |event| {
         defer event.deinit(a);
         try std.testing.expectEqualStrings("route-one", event.call_id);
@@ -1890,8 +1903,15 @@ test "routing run_command to current terminal returns real plan change with zero
             try std.testing.expect(pending_event);
             approved_event = true;
         }
+        if (event.phase == .cancelled) {
+            cancelled_event = true;
+            const failure = try @import("../ai/step_failure.zig").describe(a, .{ .call_id = @constCast(event.call_id), .name = @constCast(event.name), .command = @constCast(event.command), .detail = @constCast(event.detail), .phase = event.phase, .started_ms = event.at_ms });
+            defer failure.deinit(a);
+            try std.testing.expect(std.mem.indexOf(u8, failure.summary, "requires_plan_change") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.detail, "host__run_uin_uterminal") != null);
+        }
     }
-    try std.testing.expect(pending_event and approved_event);
+    try std.testing.expect(pending_event and approved_event and cancelled_event);
 }
 
 test "routing intent and approval grants cannot expand retired metadata only bridge" {

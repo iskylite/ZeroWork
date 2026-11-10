@@ -9,6 +9,9 @@ pub fn extraDetail(event: Event) []const u8 {
     return detail;
 }
 pub fn summary(allocator: std.mem.Allocator, event: Event, ended: bool) ![]u8 {
+    // Operation topics identify records internally; they add no context to the error.
+    if (std.mem.eql(u8, event.definition_id, "host.operation_error")) return allocator.dupe(u8, "");
+    if (event.severity == .failure) return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ event.owner_name, if (event.owner_name.len > 0 and event.object_name.len > 0 and !std.mem.eql(u8, event.owner_name, event.object_name)) " · " else "", if (!std.mem.eql(u8, event.owner_name, event.object_name)) event.object_name else "" });
     const detail = extraDetail(event);
     const first_line = std.mem.trim(u8, detail[0 .. std.mem.indexOfScalar(u8, detail, '\n') orelse detail.len], " \t\r");
     const preview = if (event.object_name.len > 0 and !std.mem.eql(u8, event.object_name, event.owner_name)) event.object_name else first_line;

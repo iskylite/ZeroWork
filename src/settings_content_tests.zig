@@ -901,7 +901,7 @@ test "global material settings keep flat sections and shared chooser roles while
         try std.testing.expectEqualStrings("97", inputFor(rebuilt, "settings.field.font_size").getText());
         try std.testing.expectEqual(@as(u16, 15), f.controller.model.value.ui.font_size);
         try std.testing.expectEqual(ui.Color.TRANSPARENT, rebuilt.root.getBackground());
-        try std.testing.expect(rebuilt.save_button.behavior.interaction.a11y.?.disabled);
+        try std.testing.expect(!rebuilt.save_button.behavior.interaction.a11y.?.disabled);
     }
 }
 
@@ -1059,7 +1059,7 @@ test "native settings invalid inline raw and IME survive without remount and Esc
     try std.testing.expectEqualStrings("0", input.getText());
     try std.testing.expectEqual(@as(u16, 30), f.controller.model.value.ssh.keepalive_sec);
     try std.testing.expectEqual(@import("config/settings_controller.zig").State.dirty_invalid, f.controller.state());
-    try std.testing.expect(mounted.save_button.behavior.interaction.a11y.?.disabled);
+    try std.testing.expect(!mounted.save_button.behavior.interaction.a11y.?.disabled);
     try std.testing.expect(textNode(mounted.root, "请输入 1–65535 的整数") != null);
     try std.testing.expectEqual(@as(usize, 0), f.rebuilds);
     f.cx.setFocus(input.input_container_node);
