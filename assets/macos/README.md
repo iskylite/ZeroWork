@@ -10,9 +10,9 @@
 - `icons.zig`：将三种 PNG 编入应用，无需运行时访问源码目录。
 - `preview.html`：三种底色的实际素材预览。
 
-设置 → 外观与主题 → 应用图标提供透明背景、白底、黑底。配置为 `[ui] icon_background = "transparent" | "light" | "dark"`，默认 `transparent`。选择经现有设置事务保存后，同时更新运行中的 Dock 图标和应用文件的自定义图标；取消不更新，退出后保留，启动时重新应用。使用 `NSWorkspace.setIcon` 保存自定义图标，不替换签名 `Contents` 内的资源；Finder 等系统位置也使用所选图标。应用必须位于当前用户可写的目录中，从只读磁盘映像启动时无法持久保存。直接运行未打包的可执行文件时只更新运行中的 Dock 图标。
+设置 → 外观与主题 → 应用图标提供透明背景、白底、黑底。配置为 `[ui] icon_background = "transparent" | "light" | "dark"`，默认 `transparent`。选择经现有设置事务保存后，更新运行中的 Dock 图标，并将这一外观值同步给随应用签名的 `NSDockTilePlugIn`。Dock 扩展在应用未运行时使用同一选择；取消设置不更新，启动时重新应用已保存配置。扩展只读取图标选择，不读取应用配置或凭据。直接运行未打包的可执行文件时只更新运行中的 Dock 图标。
 
-签名验证：Finder 自定义图标会在应用文件上增加 `com.apple.FinderInfo` 等元数据，`codesign --verify --strict` 会将其报告为不允许的附加数据；常规 `codesign --verify --deep` 及更新器使用的 `SecStaticCodeCheckValidity(kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)` 仍应通过。打包时先对无自定义文件图标的新应用完成严格签名校验，再由安装后的应用设置自定义图标。
+签名验证：不使用 `NSWorkspace.setIcon`，不向已安装的应用添加 `Icon\r`、FinderInfo 或 ResourceFork，也不要求应用目录可写。图标切换后仍须通过 `codesign --verify --deep --strict`。Finder 文件图标继续由安装包资源和系统决定，独立于 Dock 的外观选择。
 
 重建默认安装图标：
 
@@ -20,7 +20,9 @@
 sh scripts/build_app_icon.sh
 ```
 
-正式打包、本地 UI 验收和原生输入验收包使用 `Contents/Resources/AppIcon.icns`，由 `CFBundleIconFile=AppIcon` 声明。更新后需使用新应用包启动；既有安装包不会随源码资源自动更新。
+正式打包和本地 UI 验收包使用 `Contents/Resources/AppIcon.icns`，由 `CFBundleIconFile=AppIcon` 声明。`scripts/build_dock_icon_plugin.py` 同时编译并签名 `Contents/PlugIns/ZeroWorkDockIcon.docktileplugin`，携带三种 PNG；主应用签名在扩展签名之后进行。更新后需使用新应用包启动；既有安装包不会随源码资源自动更新。
+
+运行 `sh scripts/test_dock_icon_plugin.sh` 可在隔离应用中验证三种选择的发布、扩展图像、已保存选择恢复、释放订阅和切换前后的严格签名校验。
 
 ## 素材来源与署名
 

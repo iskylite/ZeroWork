@@ -1501,7 +1501,7 @@ fn appIconSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const labels = try ui.boxStyled(cx, S.labelGroup, .{});
     labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, "图标背景"));
-    try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.icon_background", "保存后更新应用图标，退出后保留。请将应用放在可写目录中。", ui.icons.circle_help, S.theme.current().fg_2));
+    try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.icon_background", "保存后更新 Dock 图标，启动和退出后均使用此选择。", ui.icons.circle_help, S.theme.current().fg_2));
 
     try row.appendChild(cx.allocator, labels);
     const select = try bound.scope.allocator.create(AppIconSelect);

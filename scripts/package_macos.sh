@@ -56,7 +56,7 @@ if match is None or (match[2] is not None and int(match[2])>255):
     raise SystemExit('Unsupported package version; expected X.Y.Z or X.Y.Z-rc1..rc255')
 short_version=match[1]
 build_version=short_version+('fc'+match[2] if match[2] is not None else '')
-info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'13.0','LSArchitecturePriority':['arm64']}
+info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleDisplayName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'13.0','LSArchitecturePriority':['arm64']}
 with (app/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
 binary=(app/'Contents/MacOS/ZeroWork').read_bytes()
 for marker in [b'fixture_probe',b'fixture_uprobe',b'/zerowork/windows']:
@@ -64,6 +64,7 @@ for marker in [b'fixture_probe',b'fixture_uprobe',b'/zerowork/windows']:
 PY
 # Always resolve a persistent identity before the build; never fall back to ad-hoc.
 python3 scripts/build_credential_agent.py "$APP" --identifier com.zerowork.app --identity "$SIGNING_IDENTITY"
+python3 scripts/build_dock_icon_plugin.py "$APP" --identifier com.zerowork.app --identity "$SIGNING_IDENTITY"
 codesign --force --sign "$SIGNING_IDENTITY" --identifier com.zerowork.updater "$APP/Contents/Helpers/ZeroWorkUpdater"
 for binary in "$APP"/Contents/MacOS/zw_*; do
   codesign --force --sign "$SIGNING_IDENTITY" "$binary"

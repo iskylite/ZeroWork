@@ -47,6 +47,7 @@ plist = {
     'CFBundleExecutable': 'ZeroWork',
     'CFBundleIdentifier': bundle_id,
     'CFBundleName': name,
+    'CFBundleDisplayName': 'ZeroWork',
     'CFBundleIconFile': 'AppIcon',
     'CFBundlePackageType': 'APPL',
     'LSMinimumSystemVersion': '13.0',
@@ -60,6 +61,7 @@ with (Path(app) / 'Contents/Info.plist').open('wb') as f:
     plistlib.dump(plist, f)
 PY
 python3 scripts/build_credential_agent.py "$APP" --identifier "$BUNDLE_ID" --identity "$SIGNING_IDENTITY"
+python3 scripts/build_dock_icon_plugin.py "$APP" --identifier "$BUNDLE_ID" --identity "$SIGNING_IDENTITY"
 # Sign nested code first; --deep would overwrite the agent's distinct identity.
 for binary in "$APP"/Contents/MacOS/zw_*; do
   codesign --force --sign "$SIGNING_IDENTITY" "$binary"
