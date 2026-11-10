@@ -7,6 +7,27 @@ const inputs = @import("ai/session_input.zig");
 const wire = @import("ai/wire_history.zig");
 const provider = @import("ai/provider.zig");
 
+test "AI limits legacy counters decode retired quotas without restoring limits" {
+    const source = "{\"requests\":128,\"calls\":256,\"pending_requests\":1,\"elapsed_ns\":42,\"timeout_ns\":600000000000,\"input_tokens\":23,\"output_tokens\":7,\"usage_complete\":false,\"max_requests\":16,\"max_calls\":64}";
+    const parsed = try std.json.parseFromSlice(task.Counters, a, source, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u64, 128), parsed.value.requests);
+    try std.testing.expectEqual(@as(u64, 256), parsed.value.calls);
+    try std.testing.expectEqual(@as(u64, 600000000000), parsed.value.timeout_ns);
+    try std.testing.expect(!parsed.value.usage_complete);
+    const value = try std.json.parseFromSlice(std.json.Value, a, source, .{});
+    defer value.deinit();
+    const from_value = try std.json.parseFromValue(task.Counters, a, value.value, .{});
+    defer from_value.deinit();
+    try std.testing.expectEqualDeep(parsed.value, from_value.value);
+    const encoded = try std.json.Stringify.valueAlloc(a, parsed.value, .{});
+    defer a.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "max_requests") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "max_calls") == null);
+    try std.testing.expectError(error.UnknownField, std.json.parseFromSlice(task.Counters, a, "{\"unexpected_authority\":true}", .{}));
+    try std.testing.expectError(error.UnexpectedToken, std.json.parseFromSlice(task.Counters, a, "{\"max_calls\":false}", .{}));
+}
+
 test "AI limits completed operation history does not prevent new operations" {
     var store = operations.Store.init(a);
     defer store.deinit();

@@ -879,7 +879,11 @@ const AiHost = struct {
         if (self.shared_service) |service| return service;
         const app = self.application_host orelse return error.ContextUnavailable;
         const service = try app.domain.aiService();
-        try service.ensurePersistence(self.data_root);
+        const already_failed = service.persistence_failure != null;
+        service.ensurePersistence(self.data_root) catch |err| {
+            if (!already_failed) self.setFeedback(@errorName(err));
+            return err;
+        };
         self.shared_service = service;
         self.assistant_states = &service.presentations;
         return service;
@@ -7334,7 +7338,9 @@ const AiHost = struct {
             }
             const previous_owner = host.display_owner;
             host.applyExecutionAction() catch |err| host.setFeedback(@errorName(err));
-            host.syncOwner() catch {};
+            // An untouched terminal does not need AI history. Explicit AI
+            // entry points initialize it; existing/background owners keep syncing.
+            if (host.shared_service != null or host.controller.model.visible) host.syncOwner() catch {};
             host.applyVerification() catch |err| host.setFeedback(@errorName(err));
             host.pumpAttachments() catch |err| host.refresh(@errorName(err));
             host.pumpImages() catch |err| host.refresh(@errorName(err));

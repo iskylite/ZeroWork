@@ -20,6 +20,32 @@ pub const Counters = struct {
     input_tokens: u64 = 0,
     output_tokens: u64 = 0,
     usage_complete: bool = true,
+
+    // Schema 3 journals written before unbounded tasks retain these two
+    // retired quota fields. Accept them only on input; new writes stay canonical.
+    const Stored = struct {
+        requests: u64 = 0,
+        calls: u64 = 0,
+        pending_requests: u64 = 0,
+        elapsed_ns: u64 = 0,
+        timeout_ns: u64 = 0,
+        input_tokens: u64 = 0,
+        output_tokens: u64 = 0,
+        usage_complete: bool = true,
+        max_requests: ?u32 = null,
+        max_calls: ?u32 = null,
+    };
+    fn fromStored(value: Stored) Counters {
+        var result: Counters = .{};
+        inline for (@typeInfo(Counters).@"struct".field_names) |name| @field(result, name) = @field(value, name);
+        return result;
+    }
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Counters {
+        return fromStored(try std.json.innerParse(Stored, allocator, source, options));
+    }
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, value: std.json.Value, options: std.json.ParseOptions) !Counters {
+        return fromStored(try std.json.innerParseFromValue(Stored, allocator, value, options));
+    }
 };
 pub const Fact = struct {
     root: id.TaskId,

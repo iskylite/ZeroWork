@@ -7,6 +7,88 @@ const legacy = @import("ai/assistant_store.zig");
 const tools = @import("ai/plugin_tools.zig");
 const host = @import("ai/host_tools.zig");
 const a = std.testing.allocator;
+
+test "AiHost integration private history replay fixture preserves readable recovery" {
+    const fixture = std.c.getenv("ZEROWORK_AI_HISTORY_REPLAY_FIXTURE") orelse return error.SkipZigTest;
+    // Never open the supplied file for writing or locking. Recovery owns only
+    // a second copy in the test directory, including any appended recovery facts.
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, std.mem.span(fixture), a, .limited(64 * 1024 * 1024));
+    defer a.free(bytes);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ai-sessions.jsonl", .data = bytes });
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    var conversations: usize = 0;
+    {
+        var recovered = attached.Host.init(a);
+        defer recovered.deinit() catch unreachable;
+        try recovered.ensurePersistence(path);
+        conversations = recovered.service.store.records.items.len;
+        try std.testing.expect(conversations != 0);
+        try std.testing.expectEqual(@as(usize, 0), recovered.service.runners.items.len);
+        std.debug.print("PRIVATE_HISTORY_REPLAY_PASS conversations={d} facts={d} workers=0\n", .{ conversations, recovered.service.store.task_facts.items.len });
+    }
+    var reopened = attached.Host.init(a);
+    defer reopened.deinit() catch unreachable;
+    try reopened.ensurePersistence(path);
+    try std.testing.expectEqual(conversations, reopened.service.store.records.items.len);
+    try std.testing.expectEqual(@as(usize, 0), reopened.service.runners.items.len);
+}
+
+test "AiHost integration legacy task counters replay without changing history or executing work" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    var conversation: identity.ConversationId = undefined;
+    {
+        var first = attached.Host.init(a);
+        defer first.deinit() catch unreachable;
+        try first.ensurePersistence(path);
+        const agent = try first.service.store.attach(.{ .session = 7 });
+        const ticket = try first.service.store.create(agent.id);
+        conversation = ticket.conversation;
+        try first.service.store.checkpoint(ticket, 1, &.{ .{ .content = "legacy question" }, .{ .role = .assistant, .content = "preserved answer" } }, true);
+        const root = identity.TaskId.generate();
+        try @import("ai/session_lifecycle.zig").Store.persistTask(&first.service.store, .{ .root = root, .task = root, .conversation = conversation, .agent = agent.id, .generation = 1, .status = .succeeded, .counters = .{ .requests = 2, .calls = 3 } });
+    }
+    const current = try tmp.dir.readFileAlloc(std.testing.io, "ai-sessions.jsonl", a, .unlimited);
+    defer a.free(current);
+    const old = try std.mem.replaceOwned(u8, a, current, "\"counters\":{", "\"counters\":{\"max_requests\":16,\"max_calls\":64,");
+    defer a.free(old);
+    try std.testing.expect(old.len > current.len);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ai-sessions.jsonl", .data = old });
+    var recovered = attached.Host.init(a);
+    defer recovered.deinit() catch unreachable;
+    try recovered.ensurePersistence(path);
+    try recovered.ensurePersistence(path);
+    try std.testing.expectEqualStrings("preserved answer", recovered.service.store.find(conversation).?.history.messages[1].content);
+    try std.testing.expectEqual(@as(usize, 1), recovered.service.store.task_facts.items.len);
+    try std.testing.expectEqual(@as(u64, 2), recovered.service.store.task_facts.items[0].fact.counters.requests);
+    try std.testing.expectEqual(@as(usize, 0), recovered.service.runners.items.len);
+    try std.testing.expect(recovered.persistence_failure == null);
+}
+
+test "AiHost integration failed journal initialization stays failed instead of replaying on each poll" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ai-sessions.jsonl", .data = "{\"schema\":255}\n" });
+    var failed = attached.Host.init(a);
+    defer failed.deinit() catch unreachable;
+    try std.testing.expectError(error.InvalidSessionJournal, failed.ensurePersistence(path));
+    try std.testing.expect(failed.journal == null and failed.data_root == null);
+    // A changed file would make a repeated open observable. Only a fresh Host
+    // retries recovery; ordinary layout polling keeps the captured failure.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ai-sessions.jsonl", .data = "" });
+    for (0..16) |_| try std.testing.expectError(error.InvalidSessionJournal, failed.ensurePersistence(path));
+    var fresh = attached.Host.init(a);
+    defer fresh.deinit() catch unreachable;
+    try fresh.ensurePersistence(path);
+    try std.testing.expect(fresh.persistence_failure == null);
+}
 const Fixture = struct {
     controller_thread: std.Thread.Id,
     runner: ?*runtime.Runner = null,

@@ -28,6 +28,7 @@ pub const Host = struct {
     journal_io: ?*std.Io.Threaded = null,
     journal_dir: ?std.Io.Dir = null,
     data_root: ?[]u8 = null,
+    persistence_failure: ?anyerror = null,
     pub fn init(a: std.mem.Allocator) Host {
         return .{ .allocator = a, .service = runtime.Service.init(a), .presentations = legacy.Store.init(a) };
     }
@@ -43,6 +44,15 @@ pub const Host = struct {
             if (!std.mem.eql(u8, root, data_root)) return error.AiDataScopeChanged;
             return;
         }
+        // Layout/owner polling must not repeatedly reopen and replay a journal
+        // which already failed. A fresh Host (application restart) retries it.
+        if (self.persistence_failure) |err| return err;
+        self.loadPersistence(data_root) catch |err| {
+            self.persistence_failure = err;
+            return err;
+        };
+    }
+    fn loadPersistence(self: *Host, data_root: []const u8) !void {
         if (self.service.store.records.items.len != 0 or self.service.runners.items.len != 0 or self.presentations.states.items.len != 0) return error.JournalRequiresEmptyStore;
         const io = try self.allocator.create(std.Io.Threaded);
         errdefer self.allocator.destroy(io);
