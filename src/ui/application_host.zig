@@ -3583,6 +3583,13 @@ test "task finish real Local records observed intervals and retains unverified a
         gates.approvals = 1;
         try controller.registerTask(context);
         _ = try controller.tick(app, execution_source, gate_source);
+        // A busy worker can defer the first nonblocking evidence read. Wait
+        // for the controller to observe it before submitting a real control.
+        if (case.control != null) while (controller.snapshotFor(context).?.active_executions == 0) {
+            if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.ExecutionNeverRan;
+            try fixture.tick();
+            _ = try controller.tick(app, execution_source, gate_source);
+        };
         try std.testing.expect(!facts.model_done);
         try std.testing.expect(!controller.snapshotFor(context).?.model_done);
         if (case.control == .takeover) {

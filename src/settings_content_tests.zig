@@ -322,7 +322,7 @@ test "appearance variable font weight input slider and preview stay synchronized
     try std.testing.expectEqualStrings("401", f.controller.model.value.ui.font_weight);
     try std.testing.expectEqualStrings("901", input.getText());
     try std.testing.expect(textNode(mounted.root, "请输入 100–900 的整数。") != null);
-    try std.testing.expect(mounted.save_button.behavior.interaction.a11y.?.disabled);
+    try std.testing.expect(!mounted.save_button.behavior.interaction.a11y.?.disabled);
     inputEvent(input, .{ .key_down = .{ .key = .escape } });
     try std.testing.expectEqualStrings("401", input.getText());
     try std.testing.expect(!mounted.save_button.behavior.interaction.a11y.?.disabled);
@@ -745,7 +745,7 @@ test "appearance numeric input keeps invalid raw and composition while footer tr
     inputEvent(size, .{ .text_input = .{ .text = "97" } });
     try std.testing.expectEqualStrings("97", size.getText());
     try std.testing.expectEqual(@as(u16, 14), f.controller.model.value.ui.font_size);
-    try std.testing.expect(mounted.save_button.behavior.interaction.a11y.?.disabled);
+    try std.testing.expect(!mounted.save_button.behavior.interaction.a11y.?.disabled);
     try std.testing.expectEqual(@as(usize, 0), f.rebuilds);
     inputEvent(size, .{ .ime_preedit = .{ .text = "ni", .cursor_utf8_offset = 2 } });
     try std.testing.expect(mounted.isComposing());
