@@ -651,6 +651,7 @@ pub const RemoteEditor = struct {
     agent_dot: ?*ui.Node = null,
     cred_pw_row: ?*ui.Node = null,
     password_input: ?ui.widgets.input.InputResult = null,
+    password_control: ?*ui.Node = null,
     password_reveal_button: ?*ui.Node = null,
     password_reveal_error: ?*ui.Node = null,
     password_reveal_disabled: ?*ui.Signal(bool) = null,
@@ -2663,11 +2664,17 @@ pub const RemoteEditor = struct {
         };
         if (self.review_test_card) |card| card.setBackground(S.testResult(undefined).background.?);
         for (self.inputs.items) |input| {
-            input.input_container.setStyleInline(self.alloc, S.input());
+            const id = input.input_container.meta.ownership.meta.test_id orelse "";
+            const compound = std.mem.eql(u8, id, "wizard.group") or std.mem.eql(u8, id, "wizard.password");
+            input.input_container.setStyleInline(self.alloc, if (compound) S.groupInput() else S.input());
             input.state.tokens = self.cx.tokens;
             input.state.dirty = true;
         }
-        for (self.selects.items) |select| select.trigger.setBackground(S.input().background.?);
+        if (self.password_control) |control| control.setBackground(S.groupControl().background.?);
+        for (self.selects.items) |select| {
+            const group_picker = std.mem.eql(u8, select.trigger.meta.ownership.meta.test_id orelse "", "wizard.group.pick");
+            if (group_picker) select.trigger.setStyleInline(self.alloc, S.groupPicker()) else select.trigger.setBackground(S.input().background.?);
+        }
         if (self.remember_checkbox) |checkbox| paintCheckboxLabels(checkbox);
         if (self.compression_checkbox) |group| paintAuthLabels(group);
         if (self.startup_textarea) |area| {
@@ -2929,7 +2936,7 @@ fn field(w: *RemoteEditor, parent: *ui.Node, label: []const u8, value: *ui.Signa
         try group.appendChild(w.alloc, label_row);
     } else try group.appendChild(w.alloc, title);
     const feedback = try FieldFeedback.prepare(w, id);
-    const input = try ui.widgets.Input(.{ .error_msg = if (feedback) |f| ui.Source([]const u8){ .signal = f.message } else ui.Source([]const u8){ .value = "" }, .value = value, .readonly = std.mem.eql(u8, id, "wizard.encoding"), .placeholder = if (std.mem.eql(u8, id, "wizard.scrollback")) ui.Source([]const u8){ .signal = w.sig_scrollback_hint.? } else ui.Source([]const u8){ .value = placeholder }, .input_type = @as(ui.widgets.input.InputType, if (secret) .password else .text), .disabled = w.locked.?, .on_change = if (std.mem.eql(u8, id, "wizard.scrollback")) w.cx.on(RemoteEditor, w, RemoteEditor.onScrollbackChanged) else w.cx.on(RemoteEditor, w, RemoteEditor.onFieldChange), .on_submit = w.cx.on(RemoteEditor, w, RemoteEditor.onFieldSubmit) }).mountResult(w.scope, w.cx);
+    const input = try ui.widgets.Input(.{ .error_msg = if (feedback) |f| ui.Source([]const u8){ .signal = f.message } else ui.Source([]const u8){ .value = "" }, .value = value, .embedded = std.mem.eql(u8, id, "wizard.password"), .readonly = std.mem.eql(u8, id, "wizard.encoding"), .placeholder = if (std.mem.eql(u8, id, "wizard.scrollback")) ui.Source([]const u8){ .signal = w.sig_scrollback_hint.? } else ui.Source([]const u8){ .value = placeholder }, .input_type = @as(ui.widgets.input.InputType, if (secret) .password else .text), .disabled = w.locked.?, .on_change = if (std.mem.eql(u8, id, "wizard.scrollback")) w.cx.on(RemoteEditor, w, RemoteEditor.onScrollbackChanged) else w.cx.on(RemoteEditor, w, RemoteEditor.onFieldChange), .on_submit = w.cx.on(RemoteEditor, w, RemoteEditor.onFieldSubmit) }).mountResult(w.scope, w.cx);
     @import("../../ui/app_theme.zig").styleInput(input);
     input.node.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .px = 34 }, .min_width = 0, .flex_shrink = 1 });
     input.input_container.setStyleInline(w.alloc, S.input());
@@ -2945,6 +2952,7 @@ fn field(w: *RemoteEditor, parent: *ui.Node, label: []const u8, value: *ui.Signa
     if (std.mem.eql(u8, id, "wizard.password")) {
         w.password_input = input;
         const control = try ui.box(w.cx, S.groupControl(), .{});
+        w.password_control = control;
         input.input_container.setStyleInline(w.alloc, S.groupInput());
         try control.appendChild(w.alloc, input.node);
         w.password_reveal_button = try action(w, control, "查看密码", "wizard.password.reveal", 32, 32, false, w.password_reveal_disabled, RemoteEditor.onPasswordReveal, ui.icons.eye);

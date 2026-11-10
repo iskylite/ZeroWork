@@ -887,7 +887,13 @@ test "wizard retained backgrounds match initial styles for embedded and standalo
                     try std.testing.expectEqual(S.reviewRoute().background.?, editor.summary_route_card.?.getBackground());
                     try std.testing.expectEqual(S.testResult(undefined).background.?, editor.review_test_card.?.getBackground());
                     try std.testing.expectEqual(S.testLogs().background.?, editor.test_logs_area.getBackground());
-                    for (editor.selects.items) |select| try std.testing.expectEqual(S.input().background.?, select.trigger.getBackground());
+                    for (editor.selects.items) |select| {
+                        const group_picker = std.mem.eql(u8, select.trigger.meta.ownership.meta.test_id orelse "", "wizard.group.pick");
+                        const expected_background = if (group_picker) S.groupPicker().background.? else S.input().background.?;
+                        try std.testing.expectEqual(expected_background, select.trigger.getBackground());
+                    }
+                    try std.testing.expectEqual(S.groupControl().background.?, editor.password_control.?.getBackground());
+                    try std.testing.expectEqual(ui.Color.TRANSPARENT, editor.password_input.?.input_container.getBackground());
                     const menu = editor.selects.items[0].chrome;
                     const menu_material = theme.layerBackground(2);
                     menu.setBackground(menu_material);
