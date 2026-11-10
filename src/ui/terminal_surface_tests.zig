@@ -345,9 +345,9 @@ test "terminal surface binds real owned VT projection and preserves over sixty r
     try std.testing.expectEqual(@as(usize, 70), surface.rows.items.len);
     const glyph = surface.rows.items[0].glyphs.items[0].node;
     const stamp = surface.rows.items[0].time.?;
-    try std.testing.expectApproxEqAbs(@as(f32, 16), stamp.globalRect().x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), stamp.globalRect().x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 12), glyph.globalRect().x - stamp.globalRect().x - stamp.globalRect().w, 0.001);
-    try std.testing.expectEqual(@as(f32, 16), glyph.globalRect().y);
+    try std.testing.expectEqual(@as(f32, 8), glyph.globalRect().y);
     try std.testing.expectEqual(@as(u8, 0), glyph.getText().?.color.r);
     try std.testing.expectEqualStrings("界", surface.rows.items[0].glyphs.items[1].node.getText().?.content);
     try std.testing.expectEqualStrings("e\u{301}", surface.rows.items[0].glyphs.items[2].node.getText().?.content);
@@ -366,7 +366,7 @@ test "terminal surface fractional viewport keeps clipped history selection and b
     try transport.controller.feedOutput(owner, 1, "old\r\none\r\ntwo\r\n$ ", 1);
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
-    cx.setViewport(300, 109); // 3 complete 22px rows plus 11px, and 16px insets.
+    cx.setViewport(300, 93); // 3 complete 22px rows plus 11px, and 8px insets.
     var view = try View.mount(cx);
     cx.root = view.root;
     defer view.releaseBuffers(cx);
@@ -380,7 +380,7 @@ test "terminal surface fractional viewport keeps clipped history selection and b
     try std.testing.expectEqual(@as(usize, 4), surface.rows.items.len);
     try std.testing.expectApproxEqAbs(viewport.y - 11, surface.rows.items[0].root.globalRect().y, 0.001);
     const bottom = surface.rows.items[3].root.globalRect();
-    try std.testing.expectApproxEqAbs(surface.root.globalRect().y + 93, bottom.y + bottom.h, 0.001);
+    try std.testing.expectApproxEqAbs(surface.root.globalRect().y + 85, bottom.y + bottom.h, 0.001);
     const x = surface.rows.items[0].root.globalRect().x + surface.bodyX();
     // The visible lower half of the historical row still selects its original text.
     cx.handleMouseDownEx(x, viewport.y + 2, .left, .{});
@@ -536,7 +536,7 @@ test "terminal surface edge drag scrolls stationary selection and copies offscre
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     cx.setSystemSdk(&sdk);
-    cx.setViewport(600, 112);
+    cx.setViewport(600, 96); // Preserve the 80px text viewport with 8px insets.
     var view = try View.mount(cx);
     cx.root = view.root;
     defer view.releaseBuffers(cx);
@@ -1899,7 +1899,7 @@ test "terminal surface visible grouped inactive pane resizes but hidden group do
     _ = cx.render();
     _ = try view.refreshTerminalService(owner, false);
     try std.testing.expectEqual(@as(usize, 2), transport.resize_calls);
-    try std.testing.expectEqual(@as(u16, 21), transport.controller.geometry.rows);
+    try std.testing.expectEqual(@as(u16, 22), transport.controller.geometry.rows);
 }
 
 test "global backdrop survives OSC default backgrounds while explicit ANSI cells keep their color" {
