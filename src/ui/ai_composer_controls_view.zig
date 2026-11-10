@@ -590,13 +590,14 @@ pub const View = struct {
         const model = source.models[entry.index];
         if (entry.header) {
             const state = try scope.createState(ProviderGroup, .{ .view = self, .index = entry.index });
-            const row = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = model.key.provider_id, .base_style = S.groupLabel(), .on_click = cx.on(ProviderGroup, state, ProviderGroup.toggle) }).mount(scope, cx);
+            const provider_name = try scope.createText(model.key.provider_id, .{});
+            const row = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = provider_name, .base_style = S.groupLabel(), .on_click = cx.on(ProviderGroup, state, ProviderGroup.toggle) }).mount(scope, cx);
             row.meta.ownership.meta.test_id = "ai.model.provider";
             const collapsed = self.providerCollapsed(model.key.provider_id);
             try row.appendChild(cx.allocator, try ui.iconTint(cx, if (collapsed) ui.icons.chevron_right else ui.icons.chevron_down, S.theme.current().fg_2, S.icon(12)));
             const brand = @import("ai_brand.zig");
-            try row.appendChild(cx.allocator, try brand.mount(cx, brand.provider(model.key.provider_id, ""), model.key.provider_id, 16));
-            _ = try self.label(row, model.key.provider_id, S.text(13, 600, 18, false), S.flexibleLabel(18));
+            try row.appendChild(cx.allocator, try brand.mount(cx, brand.provider(provider_name.peek(), ""), provider_name.peek(), 16));
+            _ = try self.label(row, provider_name.peek(), S.text(13, 600, 18, false), S.flexibleLabel(18));
             return row;
         }
         const id = try scope.createText(model.key.model_id, .{});
@@ -1171,7 +1172,7 @@ pub const View = struct {
         var model_text = self.labels[2].?.getText().?;
         model_text.text_overflow = .ellipsis;
         self.labels[2].?.setText(model_text);
-        if (self.buttons[2].behavior.interaction.a11y) |*attrs| attrs.label = full_model_name;
+        if (self.buttons[2].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[2].?.getText().?.content;
         for (0..2) |index| {
             const selected = source != null and @backingInt(source.?.permission) == index;
             self.permission_styles[index].set(S.option(32, selected));

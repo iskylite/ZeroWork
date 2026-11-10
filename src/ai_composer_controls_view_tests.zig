@@ -1193,6 +1193,13 @@ test "AI composer streaming usage and effort retain model rows and ignore repeat
         snapshot.effort = if (index % 2 == 0) .low else .high;
         try f.view.update(snapshot);
         f.settle();
+        // The catalog projection is replaced even when retained rows do not
+        // rebuild. Accessibility strings must belong to their retained nodes.
+        const current_name = f.view.labels[2].?.getText().?.content;
+        const accessible_name = f.view.buttons[2].behavior.interaction.a11y.?.label.?;
+        try std.testing.expectEqual(@intFromPtr(current_name.ptr), @intFromPtr(accessible_name.ptr));
+        try std.testing.expectEqualStrings("alpha", accessible_name);
+        try std.testing.expectEqualStrings("lab", find(f.cx.root.?, "ai.model.provider").?.behavior.interaction.a11y.?.label.?);
         try std.testing.expectEqual(version, f.view.model_version.peek());
         try std.testing.expectEqual(row_id, modelOption(f.cx.root.?, "quiet").?.id);
     }
