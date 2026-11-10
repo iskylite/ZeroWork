@@ -391,6 +391,25 @@ test "connection host released failure leaves the idle scene clean" {
     }
 }
 
+test "quick group duplicate uses the real local provider and settles through the frame hook" {
+    var roster = @import("ui/group_model.zig").Roster.init(a);
+    defer roster.deinit();
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.workspace.group_roster = &roster;
+    _ = try f.application.createLocal(null);
+    const deadline = clock.monotonicNs() + 5 * std.time.ns_per_s;
+    while (f.workspace.tabs.items[0].local_state != .running and clock.monotonicNs() < deadline) try f.tick();
+    try f.workspace.renameTab(0, "Local clone");
+    try f.workspace.duplicateSessionIntoGroup(0);
+    try std.testing.expectEqual(@as(usize, 2), f.workspace.tabs.items.len);
+    while (roster.groups.items.len == 0 and clock.monotonicNs() < deadline) try f.tick();
+    try std.testing.expectEqual(@as(usize, 1), roster.groups.items.len);
+    try std.testing.expectEqualStrings("Local clone", roster.groups.items[0].name);
+    try std.testing.expectEqual(@as(usize, 2), roster.groups.items[0].members.items.len);
+}
+
 test "connection host mounts and disposes the actual Workspace ApplicationHost and native modal scopes" {
     var f: Fixture = undefined;
     try f.init();

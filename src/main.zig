@@ -7669,6 +7669,7 @@ const MenuHost = struct {
     captured_terminal_intent: ?AiHost.TerminalIntent = null,
     captured_host: ?ws.HostId = null,
     captured_asset: ?@import("host/identity.zig").AssetOwner = null,
+    captured_group_target: ?@import("host/identity.zig").TabId = null,
     asset_action_view: ?*@import("ui/asset_action_view.zig").View = null,
     asset_action_colors: ?app_theme.Colors = null,
     sidebar_search_value: ?*ui.Signal([]const u8) = null,
@@ -7704,6 +7705,7 @@ const MenuHost = struct {
         self.captured_tab = null;
         self.captured_owner = null;
         self.captured_terminal_intent = null;
+        self.captured_group_target = if (self.workspace) |workspace| workspace.currentGroupTarget() else null;
         if (self.workspace) |workspace| if (self.context_tab) |index| if (index < workspace.tabs.items.len) {
             self.captured_tab = workspace.tabs.items[index].tab_id;
             self.captured_owner = workspace.tabs.items[index].content_owner;
@@ -7722,6 +7724,8 @@ const MenuHost = struct {
             .multi_tabs = if (self.workspace) |w| w.model.tabs.items.len > 1 else false,
             .background_socks = self.backgroundAvailable(),
             .background_active = if (self.background_socks) |background| if (self.captured_asset) |asset| background.hasAsset(asset) else false else false,
+            .group_target_available = self.captured_group_target != null,
+            .single_session = if (self.workspace) |workspace| workspace.active_group_view == null else false,
         });
         self.render() catch |err| {
             if (self.workspace) |workspace| workspace.setTabMenuOpen(false);
@@ -8066,7 +8070,7 @@ const MenuHost = struct {
             .delete_host => "trash-2",
             .reconnect => "refresh-cw",
             .close_session => "power",
-            .join_session_group => "group",
+            .join_session_group, .open_in_current_group, .duplicate_into_group => "group",
             .rename_tab => "pencil",
             .tab_color => "palette",
             .view_jump_chain => "network",
@@ -8339,6 +8343,15 @@ const MenuHost = struct {
                 } else if (self.context_host) |host| {
                     workspace.newSession(host) catch |err| workspace.statusFailure(@errorName(err));
                 }
+            },
+            .open_in_current_group => {
+                const host = self.context_host orelse return;
+                const target = self.captured_group_target orelse return;
+                workspace.openHostInGroup(host, target) catch |err| workspace.statusFailure(@errorName(err));
+            },
+            .duplicate_into_group => {
+                const index = self.context_tab orelse return;
+                workspace.duplicateSessionIntoGroup(index) catch |err| workspace.statusFailure(@errorName(err));
             },
             .reuse_connection => {
                 if (self.context_tab) |tab| workspace.reuseSessionFromTab(tab) catch |err| workspace.statusFailure(@errorName(err));
@@ -12100,21 +12113,7 @@ const AppNavHost = struct {
             participants = approval.participantCount(facts);
             running = participants > 0;
         };
-        var buffer: [64]u8 = undefined;
-        const wide = self.cx.viewport.width >= 1000;
-        const label = if (wide) (if (running) std.fmt.bufPrint(&buffer, "广播 · {d}", .{participants}) catch "广播" else "广播") else if (running) std.fmt.bufPrint(&buffer, "{d}", .{participants}) catch "" else "";
-        if (!std.mem.eql(u8, controls.broadcast_label.getText().?.content, label)) {
-            controls.broadcast_label.setTextContent(self.allocator, label) catch {};
-            controls.broadcast_style.set(@import("ui/status_connection_styles.zig").metricTrigger(if (wide) 86 else if (running) 48 else 28));
-            controls.broadcast_label.setStyleInline(self.allocator, @import("ui/status_connection_styles.zig").metricLabel(if (wide) 86 else 48));
-        }
-        controls.broadcast_label.setDisplay(if (label.len == 0) .none else .flex);
-        const label_color = if (running) app_theme.current().accent else app_theme.current().fg_2;
-        if (controls.broadcast_icon.getIcon()) |icon| {
-            if (!ui.Color.eql(icon.tint, label_color)) _ = controls.broadcast_icon.setTint(label_color);
-        }
-        if (!std.meta.eql(controls.broadcast_label.getText().?.color, label_color)) controls.broadcast_label.setTextColor(label_color);
-        controls.broadcast_button.behavior.interaction.a11y.?.label = if (running) "组广播 · 已开启 · 查看参与终端" else "组广播 · 已关闭";
+        controls.setBroadcastState(self.cx, running, participants) catch {};
         if (self.broadcast_view) |view| if (view.open.peek()) {
             if (group_id) |id| {
                 if (self.broadcastFor(id)) |approval| {
@@ -12994,6 +12993,10 @@ fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *Setti
     controls.setDisplay(.flex);
     try bar.appendChild(cx.allocator, controls);
     const tabs = try ui.boxStyled(cx, shell_styles.tabCapsule, .{});
+    // The entire tab capsule is a client drag surface, including the title
+    // text and gaps. AppKit must not consume these presses as window drags.
+    tabs.behavior.interaction.window_region = .client;
+    tabs.setStyleInline(cx.allocator, .{ .hit_roles = .{ .pointer = true }, .hit_behavior = .@"opaque" });
     tabs.meta.ownership.meta.test_id = "workspace.tabs.capsule";
     tabs.setStyleInline(cx.allocator, .{ .gap = 4, .padding = ui.Padding.all(4) });
     try controls.appendChild(cx.allocator, tabs);

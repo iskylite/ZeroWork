@@ -474,6 +474,63 @@ test "SSH status theme name follows committed display name and fits long names" 
     try std.testing.expectApproxEqAbs(short_width, controls.theme_button.globalRect().w, 0.1);
 }
 
+test "workspace toolbar state updates keep broadcast chain forwarding and theme icon only" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const Chrome = @import("ui/workspace_chrome.zig");
+    const controls = f.bar.controls;
+    controls.workspace_chrome = true;
+    const tools = try ui.hstack(f.cx, .{ .width = .{ .fit = .{} }, .height = .{ .px = 36 }, .gap = 4 }, .{});
+    try f.cx.root.?.appendChild(a, tools);
+    const buttons = [_]*ui.Node{ controls.chain_button, controls.socks_button, controls.theme_button, controls.broadcast_button };
+    const labels = [_]*ui.Node{ controls.chain_label, controls.forward_label, controls.theme_label, controls.broadcast_label };
+    const icons = [_]*ui.Node{ f.bar.chain_icon, controls.icons[6], controls.icons[7], controls.broadcast_icon };
+    for (buttons, labels, icons) |button, label, icon| {
+        Chrome.iconOnly(f.cx, button, icon, label);
+        try Chrome.move(f.cx, tools, button);
+    }
+    controls.broadcast_button.setDisplay(.flex);
+    var source = try snapshot(key, "DB-A");
+    for ([_]f32{ 1440, 820, 1100 }) |width| {
+        f.cx.setViewport(width, 900);
+        for ([_]bool{ false, true, false }, [_]usize{ 0, 128, 0 }) |running, participants| {
+            source.revision += 1;
+            source.hops[1].status = if (running) .online else .negotiating;
+            try f.host.updateActive(.{ .details = source, .ended = !running });
+            try controls.setThemeName(f.cx, "自定义配色 · Catppuccin Mocha Extended");
+            try controls.setBroadcastState(f.cx, running, participants);
+            f.cx.setTheme(if (running) &ui.theme.light else &ui.theme.dark);
+            f.settle();
+            for (buttons, labels) |button, label| {
+                try std.testing.expectEqual(.none, label.style.display);
+                try std.testing.expectApproxEqAbs(@as(f32, 28), button.globalRect().w, 0.01);
+                try std.testing.expectApproxEqAbs(@as(f32, 28), button.globalRect().h, 0.01);
+            }
+            try std.testing.expectEqualStrings("", controls.broadcast_label.getText().?.content);
+            try std.testing.expectEqual(running, controls.broadcast_button.behavior.interaction.a11y.?.pressed);
+            try std.testing.expectEqualStrings(if (running) "组广播 · 已开启 · 查看参与终端" else "组广播 · 已关闭", controls.broadcast_button.behavior.interaction.a11y.?.label.?);
+        }
+    }
+}
+
+test "legacy broadcast status retains participant text across viewport changes" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const controls = f.bar.controls;
+    controls.broadcast_button.setDisplay(.flex);
+    try controls.setBroadcastState(f.cx, true, 3);
+    f.settle();
+    try std.testing.expectEqualStrings("广播 · 3", controls.broadcast_label.getText().?.content);
+    try std.testing.expectEqual(.flex, controls.broadcast_label.style.display);
+    f.cx.setViewport(820, 900);
+    try controls.setBroadcastState(f.cx, true, 3);
+    try std.testing.expectEqualStrings("3", controls.broadcast_label.getText().?.content);
+    try controls.setBroadcastState(f.cx, false, 0);
+    try std.testing.expectEqual(.none, controls.broadcast_label.style.display);
+}
+
 test "SSH status host reuses original graphical bar and trims terminal and transfer entries" {
     var fixture: Fixture = undefined;
     try fixture.init();

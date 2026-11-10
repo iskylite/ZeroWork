@@ -109,6 +109,30 @@ pub const Controls = struct {
             try self.theme_label.setTextContent(cx.allocator, name);
         }
     }
+
+    pub fn setBroadcastState(self: *Controls, cx: *ui.Cx, running: bool, participants: usize) !void {
+        var buffer: [64]u8 = undefined;
+        const wide = cx.viewport.width >= 1000;
+        const label = if (self.workspace_chrome) "" else if (wide)
+            (if (running) try std.fmt.bufPrint(&buffer, "广播 · {d}", .{participants}) else "广播")
+        else if (running)
+            try std.fmt.bufPrint(&buffer, "{d}", .{participants})
+        else
+            "";
+        if (!std.mem.eql(u8, self.broadcast_label.getText().?.content, label)) {
+            try self.broadcast_label.setTextContent(cx.allocator, label);
+            self.broadcast_style.set(S.metricTrigger(if (self.workspace_chrome) 28 else if (wide) 86 else if (running) 48 else 28));
+            self.broadcast_label.setStyleInline(cx.allocator, S.metricLabel(if (wide) 86 else 48));
+        }
+        self.broadcast_label.setDisplay(if (label.len == 0) .none else .flex);
+        const color = if (running) S.theme.current().accent else S.theme.current().fg_2;
+        if (self.broadcast_icon.getIcon()) |icon| {
+            if (!ui.Color.eql(icon.tint, color)) _ = self.broadcast_icon.setTint(color);
+        }
+        if (!ui.Color.eql(self.broadcast_label.getText().?.color, color)) self.broadcast_label.setTextColor(color);
+        self.broadcast_button.behavior.interaction.a11y.?.label = if (running) "组广播 · 已开启 · 查看参与终端" else "组广播 · 已关闭";
+        self.broadcast_button.behavior.interaction.a11y.?.pressed = running;
+    }
 };
 pub const StatusBar = struct {
     bar: *ui.Node,

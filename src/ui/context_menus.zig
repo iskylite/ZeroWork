@@ -16,6 +16,8 @@ pub const Action = enum {
     search,
     export_selection,
     new_tab,
+    open_in_current_group,
+    duplicate_into_group,
     new_window,
     reuse_connection,
     clone_host,
@@ -49,6 +51,7 @@ pub const Item = struct {
 };
 
 pub fn isVisible(action: Action, context: Context) bool {
+    if (action == .duplicate_into_group and !context.single_session) return false;
     if (context.has_saved_connection) |saved| if (!saved and action == .edit_host) return false;
     if (action == .save_host and !context.has_unsaved_connection) return false;
     if (context.capability_snapshot) |snapshot| if (catalogAction(action)) |id| return actions.project(id, snapshot).visible;
@@ -79,7 +82,7 @@ fn catalogAction(action: Action) ?actions.ActionId {
         .close_session => .request_close,
         .join_session_group => .join_group,
         .rename_tab => .rename_tab,
-        .clone_session => .duplicate_session,
+        .clone_session, .duplicate_into_group => .duplicate_session,
         .view_jump_chain => .open_route_details,
         .open_theme => .open_theme_chooser,
         .close_others => .close_other_tabs,
@@ -91,6 +94,9 @@ pub fn isEnabled(action: Action, context: Context) bool {
     if (!isVisible(action, context)) return false;
     if (projection(action, context)) |value| if (!value.enabled) return false;
     return switch (action) {
+        .open_in_current_group => context.group_target_available,
+        .duplicate_into_group => context.single_session and !context.read_only and !context.session_ended and
+            (if (context.capability_snapshot) |snapshot| actions.project(.join_group, snapshot).enabled else true),
         .new_window => context.new_window_available,
         .reuse_connection => context.reuse_connection_available and !context.session_ended,
         .ask_ai, .copy, .export_selection => context.has_selection,
@@ -120,6 +126,8 @@ pub const Context = struct {
     transfer_available: bool = false,
     background_socks: bool = false,
     background_active: bool = false,
+    group_target_available: bool = false,
+    single_session: bool = false,
 };
 
 pub fn items(kind: Kind, context: Context) []const Item {
@@ -137,6 +145,7 @@ const tab_menu = [_]Item{
     .{ .action = .rename_tab, .label = "重命名页签", .icon = "pencil", .shortcut = "⌘⇧R" },
     .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
     .{ .action = .join_session_group, .label = "加入会话组…", .icon = "group" },
+    .{ .action = .duplicate_into_group, .label = "复制并创建会话组", .icon = "panels-top-left" },
     .{ .action = .new_tab, .label = "新标签连接", .icon = "plus" },
     .{ .action = .reuse_connection, .label = "复用连接", .icon = "copy" },
     .{ .action = .new_window, .label = "新窗口连接", .icon = "app-window" },
@@ -156,6 +165,7 @@ const local_tab = [_]Item{
     .{ .action = .rename_tab, .label = "重命名", .icon = "pencil", .shortcut = "⌘⇧R" },
     .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
     .{ .action = .join_session_group, .label = "加入会话组…", .icon = "group" },
+    .{ .action = .duplicate_into_group, .label = "复制并创建会话组", .icon = "panels-top-left" },
     .{ .action = .command_history, .label = "命令历史", .icon = "list-restart", .shortcut = "⇧⌘B" },
     .{ .action = .history, .label = "当前会话历史", .icon = "history" },
     .{ .action = .search, .label = "搜索终端", .icon = "search", .shortcut = "⌘F" },
@@ -172,21 +182,23 @@ const local_terminal = [_]Item{
     .{ .action = .history, .label = "当前会话历史", .icon = "history" },
     .{ .action = .search, .label = "在终端中搜索", .icon = "search", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "download" },
+    .{ .action = .duplicate_into_group, .label = "复制并创建会话组", .icon = "panels-top-left", .separator_before = true },
 };
 
 test "local menus expose current local capabilities without remote or future operations" {
     for ([_]Kind{ .tab, .session_ended }) |kind| {
         const list = items(kind, .{ .local_session = true });
-        try std.testing.expectEqual(@as(usize, 10), list.len);
+        try std.testing.expectEqual(@as(usize, 11), list.len);
         try std.testing.expectEqual(Action.new_tab, list[0].action);
         try std.testing.expectEqual(Action.clone_session, list[1].action);
         try std.testing.expect(list[1].shortcut == null);
         try std.testing.expectEqual(Action.tab_color, list[3].action);
         try std.testing.expectEqual(Action.join_session_group, list[4].action);
-        try std.testing.expectEqual(Action.command_history, list[5].action);
-        try std.testing.expectEqual(Action.history, list[6].action);
-        try std.testing.expectEqual(Action.search, list[7].action);
-        try std.testing.expectEqual(Action.export_session, list[8].action);
+        try std.testing.expectEqual(Action.duplicate_into_group, list[5].action);
+        try std.testing.expectEqual(Action.command_history, list[6].action);
+        try std.testing.expectEqual(Action.history, list[7].action);
+        try std.testing.expectEqual(Action.search, list[8].action);
+        try std.testing.expectEqual(Action.export_session, list[9].action);
         for (list) |item| try std.testing.expect(item.action != .edit_host and item.action != .view_jump_chain and item.action != .reconnect);
     }
     const context: Context = .{ .local_session = true };
@@ -208,6 +220,7 @@ test "new-window action stays unavailable until shared application host supports
 }
 
 const terminal_selection = [_]Item{
+    .{ .action = .duplicate_into_group, .label = "复制并创建会话组", .icon = "panels-top-left" },
     .{ .action = .ask_ai, .label = "问 AI（附选中输出）", .icon = "✨", .shortcut = "⌘J" },
     .{ .action = .copy, .label = "复制", .icon = "⧉", .shortcut = "⌘C" },
     .{ .action = .paste, .label = "粘贴", .icon = "📋", .shortcut = "⌘V" },
@@ -222,6 +235,7 @@ const terminal_selection = [_]Item{
 };
 
 const terminal_empty = [_]Item{
+    .{ .action = .duplicate_into_group, .label = "复制并创建会话组", .icon = "panels-top-left" },
     .{ .action = .ask_ai, .label = "问 AI（附选中输出）", .icon = "✨", .shortcut = "⌘J" },
     .{ .action = .copy, .label = "复制", .icon = "⧉", .shortcut = "⌘C" },
     .{ .action = .paste, .label = "粘贴", .icon = "📋", .shortcut = "⌘V" },
@@ -238,6 +252,7 @@ const terminal_empty = [_]Item{
 const host_asset = [_]Item{
     .{ .action = .new_tab, .label = "新标签连接", .icon = "▶", .shortcut = "双击同效" },
     .{ .action = .new_window, .label = "新窗口连接", .icon = "🗔" },
+    .{ .action = .open_in_current_group, .label = "在当前会话组内打开", .icon = "panels-top-left" },
     .{ .action = .clone_host, .label = "复制配置（克隆主机）", .icon = "⧉", .separator_before = true },
     .{ .action = .edit_host, .label = "修改连接配置…", .icon = "✏️" },
     .{ .action = .history, .label = "查看历史会话日志", .icon = "📜" },
@@ -270,21 +285,27 @@ test "menu actions respect selection and session context" {
     try std.testing.expect(isEnabled(.copy, .{ .has_selection = true }));
     try std.testing.expect(!isEnabled(.reconnect, .{}));
     try std.testing.expect(isEnabled(.reconnect, .{ .session_ended = true }));
+    try std.testing.expect(!isEnabled(.open_in_current_group, .{}));
+    try std.testing.expect(isEnabled(.open_in_current_group, .{ .group_target_available = true }));
+    try std.testing.expect(isEnabled(.duplicate_into_group, .{ .single_session = true }));
+    try std.testing.expect(!isEnabled(.duplicate_into_group, .{ .single_session = true, .read_only = true }));
+    try std.testing.expect(!isVisible(.duplicate_into_group, .{ .single_session = false }));
 }
 
 test "context menus keep terminal and host actions separate" {
     const terminal = items(.terminal, .{});
     const host = items(.host_asset, .{});
-    try std.testing.expectEqual(@as(usize, 11), terminal.len);
-    try std.testing.expectEqual(Action.copy, terminal[1].action);
+    try std.testing.expectEqual(@as(usize, 12), terminal.len);
+    try std.testing.expectEqual(Action.duplicate_into_group, terminal[0].action);
+    try std.testing.expectEqual(Action.copy, terminal[2].action);
     try std.testing.expectEqual(Action.new_tab, host[0].action);
-    try std.testing.expect(host[7].danger);
+    try std.testing.expect(host[8].danger);
     try std.testing.expectEqual(Action.reconnect, items(.session_ended, .{ .session_ended = true })[0].action);
 }
 
 test "tab menu carries session lifecycle actions, disjoint from text ops" {
     const tab = items(.tab, .{});
-    try std.testing.expectEqual(@as(usize, 13), tab.len);
+    try std.testing.expectEqual(@as(usize, 14), tab.len);
     try std.testing.expectEqual(Action.rename_tab, tab[0].action);
     // Terminal text operations never appear on the tab menu (zero-overlap rule).
     for (tab) |item| {
@@ -293,8 +314,8 @@ test "tab menu carries session lifecycle actions, disjoint from text ops" {
         try std.testing.expect(item.action != .search);
     }
     // Danger styling on disconnect+close.
-    try std.testing.expect(tab[12].danger);
-    try std.testing.expectEqual(Action.close_session, tab[12].action);
+    try std.testing.expect(tab[13].danger);
+    try std.testing.expectEqual(Action.close_session, tab[13].action);
     // "Close others" requires multiple open tabs.
     try std.testing.expect(!isEnabled(.close_others, .{ .multi_tabs = false }));
     try std.testing.expect(isEnabled(.close_others, .{ .multi_tabs = true }));
@@ -302,9 +323,9 @@ test "tab menu carries session lifecycle actions, disjoint from text ops" {
 
 test "SSH connection actions are confined to the tab menu" {
     const tab = items(.tab, .{});
-    try std.testing.expectEqual(Action.new_tab, tab[3].action);
-    try std.testing.expectEqual(Action.reuse_connection, tab[4].action);
-    try std.testing.expectEqual(Action.new_window, tab[5].action);
+    try std.testing.expectEqual(Action.new_tab, tab[4].action);
+    try std.testing.expectEqual(Action.reuse_connection, tab[5].action);
+    try std.testing.expectEqual(Action.new_window, tab[6].action);
     for ([_]Context{ .{}, .{ .has_selection = true }, .{ .local_session = true } }) |context| {
         for (items(.terminal, context)) |item| {
             try std.testing.expect(item.action != .new_tab and item.action != .reuse_connection and item.action != .new_window);

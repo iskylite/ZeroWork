@@ -388,6 +388,9 @@ pub const Workspace = struct {
     sidebar_drag_owner: ?identity.AssetOwner = null,
     sidebar_drop: ?@import("../config/asset_actions.zig").Request = null,
     pending_sidebar_drop: ?@import("../config/asset_actions.zig").Request = null,
+    sidebar_session_drop: ?identity.TabId = null,
+    pending_host_group_drop: ?struct { owner: identity.AssetOwner, target: identity.TabId } = null,
+    group_drop_hint: ?*ui.Node = null,
     sidebar_drop_marker: ?*ui.Node = null,
     search_query: [128]u8 = undefined,
     search_len: usize = 0,
@@ -1168,8 +1171,15 @@ pub const Workspace = struct {
 
     fn updateSidebarDrop(self: *Workspace, point: ui.interaction.drag.Point) void {
         self.sidebar_drop = null;
+        self.sidebar_session_drop = null;
+        self.clearTabDropFeedback();
         const marker = self.sidebar_drop_marker orelse return;
         marker.setDisplay(.none);
+        if (self.groupingTargetAt(point, null)) |target| {
+            self.sidebar_session_drop = target;
+            self.showGroupDropFeedback(target, point);
+            return;
+        }
         const clip = if (self.sidebar_chrome) |view| view.viewport.globalRect() else self.sidebar_list.globalRect();
         if (point.x < clip.x or point.x > clip.x + clip.w or point.y < clip.y or point.y > clip.y + clip.h) return;
         const owner = self.sidebar_drag_owner orelse return;
@@ -1213,8 +1223,13 @@ pub const Workspace = struct {
             .end, .cancel => {
                 if (event.phase == .end) {
                     self.updateSidebarDrop(event.position_window);
-                    self.pending_sidebar_drop = self.sidebar_drop;
+                    if (self.sidebar_session_drop) |target| {
+                        if (self.pending_host_group_drop == null and self.pending_tab_drop == null)
+                            self.pending_host_group_drop = .{ .owner = context.asset_owner.?, .target = target };
+                    } else self.pending_sidebar_drop = self.sidebar_drop;
                 }
+                self.sidebar_session_drop = null;
+                self.clearTabDropFeedback();
                 self.sidebar_drag_owner = null;
                 self.sidebar_drop = null;
                 if (self.sidebar_drop_marker) |marker| marker.setDisplay(.none);
@@ -1997,6 +2012,44 @@ pub const Workspace = struct {
     }
     fn clearTabDropFeedback(self: *Workspace) void {
         for (self.tab_nodes.items) |node| node.node.setStyle(self.allocator, .outline, @as(?ui.Outline, null));
+        if (self.group_drop_hint) |hint| hint.setDisplay(.none);
+    }
+    fn containsDrop(rect: ui.ComputedRect, point: ui.interaction.drag.Point) bool {
+        return rect.w > 0 and rect.h > 0 and point.x >= rect.x and point.x <= rect.x + rect.w and point.y >= rect.y and point.y <= rect.y + rect.h;
+    }
+    pub fn canGroupTarget(self: *Workspace, target: identity.TabId) bool {
+        if (self.group_roster == null) return false;
+        if (self.groupIdByTab(target)) |id| return !self.groupClosing(id) and self.group_roster != null and self.group_roster.?.findById(id) != null;
+        const index = self.tabIndexById(target) orelse return false;
+        const tab = self.tabs.items[index];
+        return !tab.archived and !tab.closing and !tab.owned_pending and tab.content_owner == .session;
+    }
+    pub fn currentGroupTarget(self: *Workspace) ?identity.TabId {
+        const target = if (self.active_group_view) |id| self.groupTabId(id) orelse return null else if (self.active_tab) |index| (if (index < self.tabs.items.len) self.tabs.items[index].tab_id else return null) else return null;
+        return if (self.canGroupTarget(target)) target else null;
+    }
+    fn groupingTargetAt(self: *Workspace, point: ui.interaction.drag.Point, source: ?identity.TabId) ?identity.TabId {
+        for (self.tab_nodes.items) |node| {
+            if (source == node.tab_id or !self.canGroupTarget(node.tab_id)) continue;
+            const r = node.node.globalRect();
+            if (containsDrop(.{ .x = r.x + r.w * 0.25, .y = r.y, .w = r.w * 0.5, .h = r.h }, point)) return node.tab_id;
+        }
+        if (!containsDrop(self.terminal_area.globalRect(), point)) return null;
+        const target = self.currentGroupTarget() orelse return null;
+        return if (source == target) null else target;
+    }
+    fn showGroupDropFeedback(self: *Workspace, target: identity.TabId, point: ui.interaction.drag.Point) void {
+        if (containsDrop(self.terminal_area.globalRect(), point)) {
+            if (self.group_drop_hint == null) {
+                const hint = ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 2 }, .top = .{ .px = 2 } }, .width = .fill(), .height = .fill(), .outline = .{ .color = app_theme.current().accent, .width = 2, .offset = -2 }, .z_index = 100 }, .{}) catch return;
+                hint.meta.ownership.meta.test_id = "groups.external_drop_hint";
+                self.terminal_area.appendChild(self.allocator, hint) catch return;
+                self.group_drop_hint = hint;
+            }
+            self.group_drop_hint.?.setDisplay(.flex);
+        } else for (self.tab_nodes.items) |node| if (node.tab_id == target) {
+            node.node.setStyle(self.allocator, .outline, @as(?ui.Outline, .{ .color = app_theme.current().accent, .width = 2, .offset = -2 }));
+        };
     }
     fn onTabDrag(event: ui.interaction.drag.Event, context: *anyopaque) void {
         const cell: *ClickCtx = @ptrCast(@alignCast(context));
@@ -2013,18 +2066,12 @@ pub const Workspace = struct {
             .move => {},
             .end, .cancel => {
                 if (event.phase == .end) {
-                    if (self.tab_drop_target) |target| {
-                        for (self.tab_nodes.items) |node| if (node.tab_id == target) {
-                            const r = node.node.globalRect();
-                            const p = event.position_window;
-                            if (p.x >= r.x + r.w * 0.25 and p.x <= r.x + r.w * 0.75 and p.y >= r.y and p.y <= r.y + r.h) {
-                                if (self.pending_tab_drop == null) self.pending_tab_drop = .{ .source = id, .target = target };
-                            }
-                            break;
+                    if (self.tabIndexById(id) != null and self.canGroupTarget(id)) if (self.groupingTargetAt(event.position_window, id)) |target|
+                        if (self.pending_tab_drop == null) {
+                            self.pending_tab_drop = .{ .source = id, .target = target };
                         };
-                    }
                 }
-                if (event.phase == .end and self.pending_tab_drop == null) {
+                if (event.phase == .end and self.pending_tab_drop == null and containsDrop(self.tab_bar.globalRect(), event.position_window)) {
                     if (self.tab_reorder_target) |target| if (self.model.indexOf(target)) |at| self.model.moveTab(id, at) catch {};
                 }
                 self.tab_drop_target = null;
@@ -2040,20 +2087,13 @@ pub const Workspace = struct {
             },
         }
         self.tab_drop_target = null;
-        if (self.tabIndexById(id) != null) {
-            for (self.tab_nodes.items) |node| {
-                if (node.tab_id == id) continue;
-                const r = node.node.globalRect();
-                const p = event.position_window;
-                if (p.x >= r.x + r.w * 0.25 and p.x <= r.x + r.w * 0.75 and p.y >= r.y and p.y <= r.y + r.h) {
-                    self.tab_drop_target = node.tab_id;
-                    node.node.setStyle(self.allocator, .outline, @as(?ui.Outline, .{ .color = app_theme.current().accent, .width = 2, .offset = -2 }));
-                    if (self.drag_gap) |gap| {
-                        gap.setDisplay(.none);
-                    }
-                    self.cx.requestRedraw();
-                    return;
-                }
+        if (self.tabIndexById(id) != null and self.canGroupTarget(id)) {
+            if (self.groupingTargetAt(event.position_window, id)) |target| {
+                self.tab_drop_target = target;
+                self.showGroupDropFeedback(target, event.position_window);
+                if (self.drag_gap) |gap| gap.setDisplay(.none);
+                self.cx.requestRedraw();
+                return;
             }
         }
         self.drag_pointer_x = event.position_window.x;
@@ -2078,8 +2118,7 @@ pub const Workspace = struct {
         } else fresh: {
             const target = self.tabs.items[self.tabIndexById(target_id) orelse return error.StaleSession];
             if (target.archived or target.closing or target.owned_pending or target.content_owner != .session) return error.StaleSession;
-            const name = try std.fmt.allocPrint(self.allocator, "{s} 会话组 #{d}", .{ target.titleSlice(), target.id });
-            defer self.allocator.free(name);
+            const name = target.titleSlice();
             var prepared = try roster.prepareNew(name, 0xff818cf8, target.id);
             defer prepared.deinit();
             const entry = &prepared.entry.?;
@@ -2969,7 +3008,6 @@ pub const Workspace = struct {
         root.meta.ownership.meta.test_id = "groups.workspace";
         view.root = root;
         for (self.tabs.items) |tab| tab.root.setDisplay(.none);
-        var visible: usize = 0;
         var ordered: std.ArrayList(group_model.Member) = .empty;
         defer ordered.deinit(self.allocator);
         if (group.pinned_pane) |pinned| for (group.members.items) |member| {
@@ -3084,7 +3122,6 @@ pub const Workspace = struct {
             tab.root.setDisplay(.flex);
             try pane.appendChild(self.allocator, tab.root);
 
-            visible += 1;
             if (view.focused == null or self.sessionTab(view.focused.?) == null) view.focused = tab.id;
         }
         if (view.focused) |focused| {
@@ -3095,12 +3132,6 @@ pub const Workspace = struct {
             if (!found) view.focused = if (view.panes.items.len != 0) view.panes.items[0].session else null;
         }
         for (view.panes.items) |pane| if (pane.node.children.items.len > 0) pane.node.children.items[0].setBackground(if (pane.session == view.focused) app_theme.current().selection else app_theme.current().surface_2);
-        if (visible == 1 and view.panes.items.len == 1) {
-            const waiting = try ui.text(self.cx, "等待其他会话加入", group_styles.label());
-            waiting.setStyleInline(self.allocator, .{ .width = .fill(), .height = .{ .px = 30 }, .flex_shrink = 0, .padding = .{ .left = 12 } });
-            waiting.meta.ownership.meta.test_id = "groups.waiting";
-            try view.panes.items[0].node.appendChild(self.allocator, waiting);
-        }
         const ids = try self.allocator.alloc(u64, view.panes.items.len);
         defer self.allocator.free(ids);
         for (view.panes.items, ids) |pane, *id_| id_.* = pane.session;
@@ -3178,6 +3209,15 @@ pub const Workspace = struct {
     }
 
     fn pollGroupWorkspace(self: *Workspace) bool {
+        if (self.pending_host_group_drop) |drop| {
+            self.pending_host_group_drop = null;
+            _ = self.registry.get(drop.owner) catch |err| {
+                self.statusFailure(@errorName(err));
+                return false;
+            };
+            const index = self.registry.indexOf(drop.owner.id) orelse return false;
+            self.openHostInGroup(index, drop.target) catch |err| self.statusFailure(@errorName(err));
+        }
         if (self.pending_sidebar_drop) |request| {
             self.pending_sidebar_drop = null;
             _ = self.applyAssetAction(request) catch |err| {
@@ -3188,13 +3228,17 @@ pub const Workspace = struct {
         }
         if (self.pending_tab_drop) |drop| {
             const ready = self.settleTabDrop() catch |err| {
+                applog.warn(.workspace, "group settle failed: {s}", .{@errorName(err)});
                 self.releaseTabDrop();
                 self.statusFailure(@errorName(err));
                 return false;
             };
             if (!ready) return false;
             defer self.releaseTabDrop();
-            self.dropTabIntoGroup(drop.source, drop.target) catch |err| self.statusFailure(@errorName(err));
+            self.dropTabIntoGroup(drop.source, drop.target) catch |err| {
+                applog.warn(.workspace, "group drop failed: {s}", .{@errorName(err)});
+                self.statusFailure(@errorName(err));
+            };
         }
 
         for (self.model.tabs.items) |tab| self.restoreStandaloneIfUngrouped(tab.id);
@@ -4580,6 +4624,37 @@ pub const Workspace = struct {
         try self.newSession(index);
     }
 
+    fn validateGroupCreation(self: *Workspace, target: identity.TabId) !void {
+        if (self.shutting_down or self.model.window_close != null) return error.WorkspaceClosed;
+        if (!self.canGroupTarget(target)) return error.StaleSession;
+        if (self.pending_tab_drop != null or self.pending_host_group_drop != null) return error.GroupingBusy;
+    }
+    fn groupCreatedSession(self: *Workspace, before: usize, target: identity.TabId) !void {
+        if (self.tabs.items.len != before + 1) return error.SessionNotCreated;
+        self.pending_tab_drop = .{ .source = self.tabs.items[before].tab_id, .target = target };
+        self.cx.requestRedraw();
+    }
+    /// Create through the existing provider, then use the same deferred AI
+    /// settlement/membership transaction as a tab drop. The original session
+    /// remains standalone if creation fails.
+    pub fn openHostInGroup(self: *Workspace, index: usize, target: identity.TabId) !void {
+        try self.validateGroupCreation(target);
+        const before = self.tabs.items.len;
+        const ambient = self.creation_group;
+        self.creation_group = null;
+        defer self.creation_group = ambient;
+        try self.newSession(index);
+        try self.groupCreatedSession(before, target);
+    }
+    pub fn duplicateSessionIntoGroup(self: *Workspace, index: usize) !void {
+        if (index >= self.tabs.items.len) return error.InvalidTab;
+        const target = self.tabs.items[index].tab_id;
+        try self.validateGroupCreation(target);
+        const before = self.tabs.items.len;
+        try self.duplicateSession(index, false);
+        try self.groupCreatedSession(before, target);
+    }
+
     /// Always creates a distinct session for this asset, even if already open.
     pub fn newSession(self: *Workspace, index: usize) !void {
         if (index >= self.registry.hosts.len) return error.InvalidHost;
@@ -5255,6 +5330,9 @@ pub const Workspace = struct {
     /// A missing OSC directory explicitly skips cd; never invent a path or
     /// claim the remote shell has successfully changed directories.
     pub fn duplicateSessionFromTab(self: *Workspace, index: usize) !void {
+        return self.duplicateSession(index, true);
+    }
+    fn duplicateSession(self: *Workspace, index: usize, inherit_group: bool) !void {
         if (index >= self.tabs.items.len) return error.InvalidTab;
         const source = self.tabs.items[index];
         if (source.archived) return error.ArchivedSessionReadOnly;
@@ -5262,7 +5340,7 @@ pub const Workspace = struct {
         const previous_color = self.creation_tab_color;
         self.creation_tab_color = source.tab_color;
         const previous_output = self.command_output;
-        self.creation_group = self.creationGroupFor(source.id);
+        self.creation_group = if (inherit_group) self.creationGroupFor(source.id) else null;
         self.command_output = null;
         defer {
             self.creation_group = previous_group;
@@ -5935,10 +6013,12 @@ test "tab grouping native drop preserves target conversation and refreshes exist
     try root.appendChild(allocator, strip);
     const area = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     try root.appendChild(allocator, area);
+    const empty = try ui.box(cx, .{ .display = .none }, .{});
+    try area.appendChild(allocator, empty);
     const config: config_mod.Config = .{};
     var roster = group_model.Roster.init(allocator);
     defer roster.deinit();
-    var workspace: Workspace = .{ .allocator = allocator, .cx = cx, .scope = scope, .io = std.testing.io, .app_config = &config, .palette = Palette.fromTheme(), .registry = .{ .arena = std.heap.ArenaAllocator.init(allocator), .hosts = &.{} }, .hosts_path = "", .sidebar_list = root, .tab_bar = strip, .terminal_area = area, .empty_state = area, .group_roster = &roster, .model = .{ .allocator = allocator, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) } };
+    var workspace: Workspace = .{ .allocator = allocator, .cx = cx, .scope = scope, .io = std.testing.io, .app_config = &config, .palette = Palette.fromTheme(), .registry = .{ .arena = std.heap.ArenaAllocator.init(allocator), .hosts = &.{} }, .hosts_path = "", .sidebar_list = root, .tab_bar = strip, .terminal_area = area, .empty_state = empty, .group_roster = &roster, .model = .{ .allocator = allocator, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) } };
     defer {
         if (workspace.poll_hook) |hook| {
             cx.removeAfterLayoutHook(hook);
@@ -6022,7 +6102,19 @@ test "tab grouping native drop preserves target conversation and refreshes exist
     try std.testing.expect(workspace.pending_tab_drop == null);
     try std.testing.expectEqual(@as(usize, 0), probe.preparations);
     try std.testing.expectEqual(@as(usize, 0), probe.stops);
-    workspace.pending_tab_drop = .{ .source = tabs[0].tab_id, .target = tabs[1].tab_id };
+    // Drag a real tab into the currently displayed session's content area.
+    workspace.selectTab(workspace.tabIndexById(tabs[1].tab_id).?);
+    try workspace.renderTabBar();
+    cx.layout();
+    var source_rect: ui.ComputedRect = undefined;
+    for (workspace.tab_nodes.items) |node| if (node.tab_id == tabs[0].tab_id) {
+        source_rect = node.node.globalRect();
+    };
+    const content_rect = area.globalRect();
+    cx.handleMouseDown(source_rect.x + 45, source_rect.y + 15, .{});
+    cx.handleMouseMove(content_rect.x + content_rect.w / 2, content_rect.y + content_rect.h / 2);
+    cx.handleMouseUp(content_rect.x + content_rect.w / 2, content_rect.y + content_rect.h / 2);
+    try std.testing.expectEqual(tabs[1].tab_id, workspace.pending_tab_drop.?.target);
     _ = workspace.pollGroupWorkspace();
     _ = workspace.pollGroupWorkspace();
     try std.testing.expectEqual(@as(usize, 1), probe.captures);
@@ -6034,6 +6126,7 @@ test "tab grouping native drop preserves target conversation and refreshes exist
     try std.testing.expect(workspace.pending_tab_drop == null);
     try std.testing.expectEqual(@as(usize, 1), probe.releases);
     const group = roster.groups.items[0].id;
+    try std.testing.expectEqualStrings("Target B", roster.groups.items[0].name);
     const parent = workspace.groupTabId(group).?;
     try std.testing.expect(probe.store.find(conversations[0]).?.ended);
     try std.testing.expect(probe.store.active(.{ .group = group }).?.conversation_id.eql(b_identity));
@@ -7840,6 +7933,9 @@ test "group session creation new and duplicate preserve group without duplicate 
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.feedback += 1;
         }
+        fn host(raw: ?*anyopaque, _: hosts_mod.HostConfig, _: HostId, _: usize, _: []const u8) !void {
+            try create(raw, 0);
+        }
     };
     var factory: Factory = .{ .workspace = workspace };
     workspace.session_bridge = .{ .context = &factory, .recreate = Factory.create, .duplicate_local = Factory.create };
@@ -7872,6 +7968,31 @@ test "group session creation new and duplicate preserve group without duplicate 
     try std.testing.expectEqual(created.tab_id, workspace.model.active.?);
     workspace.command_output = null;
     workspace.status_feedback = null;
+    const standalone = try workspace.createLocalSessionDirect(.{ .session_id = @fromBackingInt(99) });
+    try workspace.renameTab(workspace.tabIndex(standalone).?, "Quick session");
+    workspace.selectTab(workspace.tabIndex(standalone).?);
+    try workspace.duplicateSessionIntoGroup(workspace.tabIndex(standalone).?);
+    try std.testing.expectEqual(@as(usize, 1), roster.groups.items.len);
+    _ = workspace.pollGroupWorkspace();
+    try std.testing.expect(workspace.pending_tab_drop == null);
+    const quick_group = workspace.active_group_view.?;
+    try std.testing.expectEqualStrings("Quick session", roster.findById(quick_group).?.name);
+    try std.testing.expectEqual(@as(usize, 2), roster.findById(quick_group).?.members.items.len);
+    try std.testing.expect(roster.findById(quick_group).?.contains(standalone));
+    const host_index = try workspace.appendHost(.{ .name = "Another asset", .host = "fixture.invalid", .user = "fixture" });
+    workspace.session_bridge.create = Factory.host;
+    const before_calls = factory.calls;
+    const parent = workspace.groupTabId(quick_group).?;
+    try workspace.openHostInGroup(host_index, parent);
+    try std.testing.expectEqual(before_calls + 1, factory.calls);
+    _ = workspace.pollGroupWorkspace();
+    try std.testing.expectEqual(@as(usize, 3), roster.findById(quick_group).?.members.items.len);
+    try std.testing.expectEqual(@as(usize, 2), roster.groups.items.len);
+    // A stale captured asset must not start another connection on drop.
+    workspace.pending_host_group_drop = .{ .owner = workspace.registry.hosts[host_index].owner(), .target = parent };
+    workspace.registry.hosts[host_index].revision += 1;
+    _ = workspace.pollGroupWorkspace();
+    try std.testing.expectEqual(before_calls + 1, factory.calls);
 }
 
 test "material workspace confirmation cards retain overlay alpha and blur across publication" {

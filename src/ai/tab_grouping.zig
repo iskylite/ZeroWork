@@ -33,9 +33,12 @@ pub const Settlement = struct {
 pub fn capture(store: *assistant.Store, source: identity.SessionHandle, target: ?identity.SessionHandle) !Settlement {
     var intent: Settlement = .{ .operation = identity.HostOperationId.generate(), .source_handle = source, .target_handle = target };
     if (store.authority) |service| {
-        if (store.active(.{ .session = @backingInt(source.session_id) })) |state| intent.source = try service.store.fence(state.conversation_id);
+        if (store.active(.{ .session = @backingInt(source.session_id) })) |state| {
+            // Empty welcome presentations have no runtime conversation yet.
+            if (service.store.find(state.conversation_id) != null) intent.source = try service.store.fence(state.conversation_id);
+        }
         if (target) |handle_| if (store.active(.{ .session = @backingInt(handle_.session_id) })) |state| {
-            intent.target = try service.store.fence(state.conversation_id);
+            if (service.store.find(state.conversation_id) != null) intent.target = try service.store.fence(state.conversation_id);
         };
     }
     return intent;
@@ -165,4 +168,26 @@ test "tab grouping absent assistants starts no activity and leaves store empty" 
     try commit(&store, plan, &probe, StopProbe.stop);
     try std.testing.expect(probe.stopped == null);
     try std.testing.expectEqual(@as(usize, 0), store.states.items.len);
+}
+
+test "tab grouping empty welcomes need no runtime settlement but newly bound conversations invalidate capture" {
+    const a = std.testing.allocator;
+    var service = @import("session_runtime.zig").Service.init(a);
+    defer service.deinit();
+    var store = assistant.Store.init(a);
+    defer store.deinit();
+    store.authority = &service;
+    _ = try store.get(.{ .session = 1 });
+    _ = try store.get(.{ .session = 2 });
+    const intent = try capture(&store, handle(1), handle(2));
+    try std.testing.expect(intent.source == null and intent.target == null);
+    try std.testing.expect(try settle(&store, intent));
+    const agent = try service.store.attach(.{ .session = 2 });
+    const ticket = try service.store.create(agent.id);
+    store.active(.{ .session = 2 }).?.conversation_id = ticket.conversation;
+    store.active(.{ .session = 2 }).?.binding_revision = ticket.binding;
+    try std.testing.expectError(error.BindingChanged, settle(&store, intent));
+    const bound = try capture(&store, handle(1), handle(2));
+    try std.testing.expect(bound.target.?.eql(ticket));
+    try std.testing.expect(try settle(&store, bound));
 }
