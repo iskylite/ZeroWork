@@ -928,6 +928,9 @@ fn addCoreTextBridgeForTest(zenit_dep: *std.Build.Dependency, exe: *std.Build.St
 // Capture metadata on each build invocation so packaged binaries retain their
 // source identity and timestamp even when launched outside the checkout.
 fn buildCommand(b: *std.Build, argv: []const []const u8) ?[]const u8 {
+    // Git state and wall time are not tracked configure inputs. Zig 0.17 can
+    // otherwise reuse the entire graph, including stale generated options.
+    b.graph.poisonCache();
     return switch (b.runFallible(argv, .{ .cwd = .{ .path = b.root.joinString(b.allocator, "") catch @panic("OOM") }, .stderr_behavior = .ignore })) {
         .success => |stdout| std.mem.trim(u8, stdout, " \t\r\n"),
         else => null,

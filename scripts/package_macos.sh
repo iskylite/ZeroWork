@@ -49,7 +49,7 @@ python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution.
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_secret_consume.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution_guard"
 python3 - "$APP" "$VERSION" <<'PY'
-import pathlib,plistlib,re,sys
+import pathlib,plistlib,re,subprocess,sys
 app=pathlib.Path(sys.argv[1]);version=sys.argv[2]
 match=re.fullmatch(r'([0-9]+\.[0-9]+\.[0-9]+)(?:-rc([1-9][0-9]{0,2}))?',version)
 if match is None or (match[2] is not None and int(match[2])>255):
@@ -59,6 +59,12 @@ build_version=short_version+('fc'+match[2] if match[2] is not None else '')
 info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleDisplayName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'13.0','LSArchitecturePriority':['arm64']}
 with (app/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
 binary=(app/'Contents/MacOS/ZeroWork').read_bytes()
+commit=subprocess.check_output(['git','rev-parse','--short=12','HEAD'],text=True).strip()
+branch=subprocess.check_output(['git','rev-parse','--abbrev-ref','HEAD'],text=True).strip()
+dirty=bool(subprocess.check_output(['git','status','--porcelain','--untracked-files=normal'],text=True).strip())
+metadata=f'{branch}@{commit}{"*" if dirty else ""} · '.encode()
+if metadata not in binary:
+    raise SystemExit('Packaged build metadata does not match current Git state; refusing stale package')
 for marker in [b'fixture_probe',b'fixture_uprobe',b'/zerowork/windows']:
     if marker in binary: raise SystemExit('Refusing to package a fixture or Harness build')
 PY
