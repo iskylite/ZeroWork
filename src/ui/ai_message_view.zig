@@ -108,6 +108,118 @@ pub fn tableSeparator(line: []const u8) bool {
     }
     return true;
 }
+const TableLayout = struct {
+    cx: *ui.Cx,
+    scroll: ui.widgets.ScrollAreaResult,
+    columns: usize,
+    preferred: [16]f32 = @splat(0),
+    measured: bool = false,
+
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *TableLayout = @ptrCast(@alignCast(raw));
+        const viewport = self.scroll.container.globalRect();
+        if (viewport.w <= 0) return .done;
+        if (!self.measured) {
+            for (self.scroll.content.children.items) |row| {
+                for (row.children.items, 0..) |cell, column| {
+                    const edges = cell.style.border.resolvedWidths();
+                    const natural = tableContentWidth(self.cx, cell.children.items[0]) + cell.style.padding.horizontal() + edges[1] + edges[3];
+                    self.preferred[column] = @max(self.preferred[column], std.math.clamp(natural, S.table_min_column_width, S.table_preferred_column_max_width));
+                }
+            }
+            self.measured = true;
+        }
+        var minimum: f32 = 0;
+        var weight: f32 = 0;
+        for (self.preferred[0..self.columns]) |preferred| {
+            minimum += @min(preferred, S.table_wrapped_column_min_width);
+            weight += @max(0, preferred - S.table_wrapped_column_min_width);
+        }
+        // Compact columns keep their measured width. Columns that need wrapping
+        // share the remaining viewport according to their rendered content.
+        const total = if (weight > 0) @max(minimum, viewport.w) else minimum;
+        var widths: [16]f32 = @splat(0);
+        for (self.preferred[0..self.columns], 0..) |preferred, column| {
+            widths[column] = @min(preferred, S.table_wrapped_column_min_width);
+            if (weight > 0) widths[column] += (total - minimum) * @max(0, preferred - S.table_wrapped_column_min_width) / weight;
+        }
+        var widths_changed = false;
+        if (@abs(self.scroll.content.globalRect().w - total) > 0.1) {
+            self.scroll.content.setStyleInline(self.cx.allocator, .{ .width = .{ .px = total } });
+            widths_changed = true;
+        }
+        for (self.scroll.content.children.items) |row| {
+            for (row.children.items, 0..) |cell, column| if (@abs(cell.globalRect().w - widths[column]) > 0.1) {
+                cell.setStyleInline(self.cx.allocator, .{ .width = .{ .px = widths[column] } });
+                widths_changed = true;
+            };
+        }
+        if (widths_changed) return .needs_layout;
+        var resized = false;
+        for (self.scroll.content.children.items) |row| {
+            var height: f32 = 34;
+            for (row.children.items) |cell| {
+                const edges = cell.style.border.resolvedWidths();
+                height = @max(height, cell.children.items[0].globalRect().h + cell.style.padding.vertical() + edges[0] + edges[2]);
+            }
+            for (row.children.items) |cell| if (@abs(cell.globalRect().h - height) > 0.1) {
+                cell.setStyleInline(self.cx.allocator, .{ .height = .{ .px = height } });
+                resized = true;
+            };
+        }
+        return if (resized) .needs_layout else .done;
+    }
+
+    fn release(self: *TableLayout) void {
+        self.cx.removeAfterLayoutHook(self);
+    }
+};
+
+// Measure parsed Markdown text with the same font/span choices as rendering,
+// rather than counting source bytes (which include markup and vary for CJK).
+fn tableContentWidth(cx: *ui.Cx, node: *ui.Node) f32 {
+    var width: f32 = 0;
+    if (node.getText()) |text| {
+        var start: usize = 0;
+        while (start < text.content.len) {
+            const line_end = std.mem.indexOfScalarPos(u8, text.content, start, '\n') orelse text.content.len;
+            var pos = start;
+            var line_width: f32 = 0;
+            while (pos < line_end) {
+                var end = line_end;
+                var weight = text.font_weight;
+                var mono = text.use_monospace_font;
+                var italic = text.use_italic_font;
+                var padding: f32 = 0;
+                for (text.spans) |span| {
+                    if (span.start > pos) end = @min(end, span.start);
+                    if (span.start <= pos and span.end > pos) {
+                        end = @min(end, span.end);
+                        weight = span.font_weight orelse weight;
+                        mono = mono or span.use_monospace_font;
+                        italic = italic or span.use_italic_font;
+                        if (pos == span.start) padding += span.inline_box_padding_left;
+                        if (end == span.end) padding += span.inline_box_padding_right;
+                        break;
+                    }
+                }
+                const visual = cx.text.visualLine(.{ .text = text.content[pos..end], .font_family = "system", .font_family_id = text.font_family, .font_size = text.font_size, .font_weight = weight, .use_monospace = mono, .use_italic = italic, .use_symbols = text.use_symbols_font }) catch null;
+                line_width += padding + if (visual) |line| line.width else cx.text.measureTextWidth(text.content[pos..end], text.font_size, weight, italic);
+                pos = end;
+            }
+            width = @max(width, line_width);
+            start = line_end + 1;
+        }
+    }
+    var children_width: f32 = 0;
+    for (node.children.items) |child| {
+        const child_width = tableContentWidth(cx, child) + child.style.marginHorizontal();
+        if (node.style.direction == .row) children_width += child_width else children_width = @max(children_width, child_width);
+    }
+    const edges = node.style.border.resolvedWidths();
+    return @max(width, children_width) + node.style.padding.horizontal() + edges[1] + edges[3];
+}
+
 fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []const u8, width: f32) !void {
     var columns: usize = 1;
     for (std.mem.trim(u8, lines[0], " \t\r|")) |byte| if (byte == '|') {
@@ -125,8 +237,8 @@ fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []
         if (index == 1) continue;
         const row = try ui.box(cx, .{ .width = .fill(), .min_height = 34, .direction = .row, .flex_shrink = 0 }, .{});
         var cells = std.mem.splitScalar(u8, std.mem.trim(u8, line, " \t\r|"), '|');
-        for (0..columns) |_| {
-            const cell = try ui.box(cx, .{ .width = .{ .px = column_width }, .min_height = 34, .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT }, .background = if (index == 0) @import("app_theme.zig").current().well else ui.Color.TRANSPARENT, .overflow = .hidden, .flex_shrink = 0 }, .{});
+        for (0..columns) |column| {
+            const cell = try ui.box(cx, S.tableCell(column_width, index == 0, column == 0), .{});
             const value = std.mem.trim(u8, cells.next() orelse "", " \t\r");
             const text = try ui.widgets.Markdown(.{ .text = try scope.createText(value, .{}), .options = S.markdownOptions() }).mount(scope, cx);
             try compact(cx, scope, text);
@@ -135,6 +247,11 @@ fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []
         }
         try scroll.content.appendChild(cx.allocator, row);
     }
+    // The mount width is only a seed. Use the actual viewport after layout so
+    // retained messages reflow without rebuilding text, selection or controls.
+    const layout = try scope.createState(TableLayout, .{ .cx = cx, .scroll = scroll, .columns = columns });
+    try scope.onCleanup(TableLayout, layout, TableLayout.release);
+    try cx.addAfterLayoutHook(layout, TableLayout.afterLayout);
     try parent.appendChild(cx.allocator, scroll.container);
 }
 

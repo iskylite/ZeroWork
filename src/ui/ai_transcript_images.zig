@@ -235,6 +235,31 @@ const View = struct {
         if (self.texture) |id| if (self.context.app) |app| app.renderer.image_renderer.unloadTexture(id);
     }
 };
+const ImageLayout = struct {
+    cx: *ui.Cx,
+    card: *ui.Node,
+    raster: *ui.Node,
+    width: f32,
+    height: f32,
+
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *ImageLayout = @ptrCast(@alignCast(raw));
+        const bounds = self.card.globalRect();
+        if (bounds.w <= 0) return .done;
+        const available = @max(1, bounds.w - self.card.style.padding.horizontal());
+        const scale = @min(@as(f32, 1), @min(available / self.width, 240 / self.height));
+        const width = self.width * scale;
+        const height = self.height * scale;
+        const raster = self.raster.globalRect();
+        if (@abs(raster.w - width) <= 0.1 and @abs(raster.h - height) <= 0.1) return .done;
+        self.raster.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width }, .height = .{ .px = height } });
+        return .needs_layout;
+    }
+
+    fn release(self: *ImageLayout) void {
+        self.cx.removeAfterLayoutHook(self);
+    }
+};
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, context: Context, ref: Reference, width: f32) !*ui.Node {
     const root = try ui.boxStyled(cx, S.card, .{});
     @import("layer_materials.zig").card(root, .control);
@@ -263,6 +288,9 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, context: Context, ref: Reference, wid
             raster.setImage(.{ .texture_id = view.texture.? });
         }
         try root.appendChild(cx.allocator, raster);
+        const layout = try scope.createState(ImageLayout, .{ .cx = cx, .card = root, .raster = raster, .width = @floatFromInt(content.width), .height = @floatFromInt(content.height) });
+        try scope.onCleanup(ImageLayout, layout, ImageLayout.release);
+        try cx.addAfterLayoutHook(layout, ImageLayout.afterLayout);
         var time_buffer: [64]u8 = undefined;
         const captured = @import("history_styles.zig").dateLabel(&time_buffer, @intCast(content.captured_at_ms));
         const dimensions = try std.fmt.allocPrint(cx.allocator, "{d} × {d} · {d} 字节 · {s}", .{ content.width, content.height, content.bytes.len, captured });

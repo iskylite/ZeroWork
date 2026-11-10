@@ -121,7 +121,7 @@ test "AI conversation table rows contain wrapped inline code at narrow widths" {
         "| `clusbench-4.5.1-1120.x86_64.rpm`、`clusbench.yaml` | 集群基准测试包及其配置 |\n" ++
         "| `cluskit-0.6.2-1...run`、`cluskit-0.6.2-3...run` | 两个版本的 cluskit 安装脚本 |\n\n后续正文", 572);
     try root.appendChild(a, message);
-    for ([_]f32{ 572, 400, 240, 572 }) |width| {
+    for ([_]f32{ 572, 1000, 400, 180, 572 }) |width| {
         root.setStyleInline(a, .{ .width = .{ .px = width } });
         for (0..3) |_| {
             cx.advanceFrameClock();
@@ -130,9 +130,15 @@ test "AI conversation table rows contain wrapped inline code at narrow widths" {
         }
         const table = find(root, "ai.message.table").?;
         const content = table.children.items[0];
+        try std.testing.expectApproxEqAbs(@max(240, width), content.globalRect().w, 0.1);
+        const first_row = content.children.items[0];
+        if (width > 240) try std.testing.expect(first_row.children.items[0].globalRect().w > first_row.children.items[1].globalRect().w);
         for (content.children.items) |row| {
-            for (row.children.items) |cell| {
+            for (row.children.items, 0..) |cell, column| {
                 const bounds = cell.globalRect();
+                try std.testing.expect(bounds.w >= 120 - 0.1);
+                try std.testing.expectApproxEqAbs(first_row.children.items[column].globalRect().w, bounds.w, 0.1);
+                try std.testing.expectApproxEqAbs(row.globalRect().h, bounds.h, 0.1);
                 const markdown = cell.children.items[0];
                 for (markdown.children.items) |paragraph| {
                     const rect = paragraph.globalRect();
@@ -144,7 +150,7 @@ test "AI conversation table rows contain wrapped inline code at narrow widths" {
         try std.testing.expectApproxEqAbs(content.globalRect().h, table.globalRect().h, 0.1);
         const following = message.children.items[message.children.items.len - 1];
         try std.testing.expect(following.globalRect().y >= table.globalRect().y + table.globalRect().h);
-        if (width == 240) {
+        if (width == 180) {
             const bounds = table.globalRect();
             const before = content.globalRect().x;
             cx.handleScroll(.{ .x = bounds.x + 20, .y = bounds.y + 20, .dx = -80, .dy = 0 });
@@ -152,6 +158,132 @@ test "AI conversation table rows contain wrapped inline code at narrow widths" {
             _ = cx.render();
             try std.testing.expect(content.globalRect().x < before);
         }
+    }
+}
+
+test "AI conversation retained Markdown reflows prose tables and wrapped code after resize" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(1000, 2000);
+    const root = try ui.box(cx, .{ .width = .{ .px = 360 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const prose = try std.mem.join(a, " ", &@as([8][]const u8, @splat("普通正文包含 **加粗**、`inline_code` 与链接，调整窗口后应重新换行。")));
+    defer a.free(prose);
+    const command = try std.mem.join(a, "", &@as([12][]const u8, @splat("long_command_argument_")));
+    defer a.free(command);
+    const value = try std.mem.concat(a, u8, &.{ "## 检查结果\n\n", prose, "\n\n- 列表内容也应跟随实际宽度重新布局。\n\n> 引用内容保持正常换行。\n\n" ++
+        "| # | 动作 | 回执 | 结论 |\n| --- | --- | --- | --- |\n" ++
+        "| 1 | 检查主机网络与资源 | `status=outcome_unknown,error_code=TargetNotAuthorized` | 结果需要核对，保留完整回执 |\n\n" ++
+        "```sh\nprintf '", command, "'\n```\n\n后续正文" });
+    defer a.free(value);
+    const message_scope = try scope.childScope();
+    const message = try @import("ui/ai_message_view.zig").mountWithWidth(cx, message_scope, value, 540);
+    try root.appendChild(a, message);
+    const table = find(message, "ai.message.table").?;
+    const content = table.children.items[0];
+    const code = find(message, "ai.message.code.text").?;
+    const code_scroll = find(message, "ai.message.code.scroll").?;
+    find(message, "ai.message.code.wrap").?.behavior.events.on_click.?.invoke();
+    var narrow_height: f32 = 0;
+    for ([_]f32{ 360, 1000, 540, 360 }) |width| {
+        root.setStyleInline(a, .{ .width = .{ .px = width } });
+        for (0..3) |_| {
+            cx.layout();
+            _ = cx.render();
+        }
+        try std.testing.expectApproxEqAbs(@max(400, width), content.globalRect().w, 0.1);
+        const cells = content.children.items[0].children.items;
+        try std.testing.expectApproxEqAbs(@as(f32, 40), cells[0].globalRect().w, 0.1);
+        if (width > 400) try std.testing.expect(cells[2].globalRect().w > cells[1].globalRect().w);
+        try std.testing.expectApproxEqAbs(width - 20, code.globalRect().w, 0.1);
+        try std.testing.expect(code_scroll.globalRect().h <= 136);
+        if (width == 360) {
+            if (narrow_height == 0) narrow_height = message.globalRect().h else try std.testing.expectApproxEqAbs(narrow_height, message.globalRect().h, 0.1);
+        } else try std.testing.expect(message.globalRect().h < narrow_height);
+        const following = message.children.items[message.children.items.len - 1];
+        try std.testing.expect(following.globalRect().y >= code_scroll.globalRect().y + code_scroll.globalRect().h);
+        // A pure resize retains the original nodes and wrap toggle state.
+        try std.testing.expect(table == find(message, "ai.message.table").?);
+        try std.testing.expect(code.getText().?.wrap == .char);
+    }
+    // Disposing the message releases all geometry hooks before a later frame.
+    message_scope.dispose();
+    root.removeChild(message);
+    cx.destroyDetached(message);
+    cx.layout();
+    _ = cx.render();
+}
+
+test "AI conversation table distributes rendered content independent of column names and order" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(1000, 1000);
+    const root = try ui.box(cx, .{ .width = .{ .px = 360 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const message = try @import("ui/ai_message_view.zig").mount(cx, scope, "| 内容 | 结果 | ID |\n| --- | --- | --- |\n" ++
+        "| 自动分配较长的中文说明和 `inline_code`，保留完整内容并在窗口变化后重新换行。 | **完成** | 12345 |\n" ++
+        "| 第二行同样使用对齐的列边界。 | 正常 | 2 |");
+    try root.appendChild(a, message);
+    var compact: [2]f32 = @splat(0);
+    for ([_]f32{ 360, 900, 480, 360 }) |width| {
+        root.setStyleInline(a, .{ .width = .{ .px = width } });
+        for (0..3) |_| {
+            cx.layout();
+            _ = cx.render();
+        }
+        const table = find(message, "ai.message.table").?;
+        const content = table.children.items[0];
+        const cells = content.children.items[0].children.items;
+        try std.testing.expectApproxEqAbs(width, content.globalRect().w, 0.1);
+        for (cells[1..], 0..) |cell, i| {
+            const actual = cell.globalRect().w;
+            try std.testing.expect(actual >= 40 and actual < 80);
+            if (compact[i] == 0) compact[i] = actual else try std.testing.expectApproxEqAbs(compact[i], actual, 0.1);
+        }
+        try std.testing.expect(cells[0].globalRect().w > width * 0.6);
+    }
+}
+
+test "AI conversation transcript image follows actual card width and preserves aspect ratio after resize" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const preview = @import("ui/ai_transcript_images.zig");
+    var store: preview.Store = .{ .allocator = a };
+    defer store.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const source: @import("ai/terminal_file_source.zig").Source = .{ .owner = .{ .session_id = @fromBackingInt(1) }, .cwd = "/" };
+    const entry = try store.entry(source, 1, 1, "/preview.png");
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "assets/macos/AppIcon.png", a, .limited(10_000_000));
+    defer a.free(bytes);
+    entry.image = try @import("ai/image_attachments.zig").ContentRef.create(a, "/preview.png", bytes, 1, .{});
+    entry.phase = .ready;
+    const Callback = struct {
+        fn open(_: *anyopaque, _: @import("ai/image_attachments.zig").ContentRef) !void {}
+    };
+    cx.setViewport(1000, 1500);
+    const root = try ui.box(cx, .{ .width = .{ .px = 600 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const message = try @import("ui/ai_message_view.zig").mountWithImages(cx, scope, "![预览](/preview.png)\n\n后续正文", 540, .{ .store = &store, .source = source, .conversation = 1, .turn = 1, .app = null, .preview_context = &store, .preview = Callback.open });
+    try root.appendChild(a, message);
+    const raster = find(message, "ai.transcript.image.raster").?;
+    for ([_]f32{ 600, 180, 360, 120, 600 }) |width| {
+        root.setStyleInline(a, .{ .width = .{ .px = width } });
+        for (0..3) |_| {
+            cx.layout();
+            _ = cx.render();
+        }
+        const bounds = raster.globalRect();
+        const image = entry.image.content().?;
+        const scale = @min(@as(f32, 1), @min((width - 20) / @as(f32, @floatFromInt(image.width)), 240 / @as(f32, @floatFromInt(image.height))));
+        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(image.width)) * scale, bounds.w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(image.height)) * scale, bounds.h, 0.1);
+        try std.testing.expect(bounds.w <= width - 20 + 0.1);
+        try std.testing.expect(raster == find(message, "ai.transcript.image.raster").?);
     }
 }
 

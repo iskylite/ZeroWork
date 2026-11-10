@@ -106,6 +106,26 @@ pub fn markdownOptions() ui.widgets.MarkdownOptions {
     return .{ .base_font_size = 12.5, .code_font_size = 11, .text_color = theme.current().fg_1, .code_color = theme.current().fg_1, .code_bg = theme.popupInset(), .link_color = theme.current().accent_ink, .rule_color = theme.current().border, .heading_color = theme.current().fg_1, .paragraph_gap = 4, .line_height = 1.65, .code_line_height = 16.0 / 11.0 };
 }
 
+pub const table_min_column_width: f32 = 40;
+pub const table_wrapped_column_min_width: f32 = 120;
+pub const table_preferred_column_max_width: f32 = 480;
+
+pub fn tableCell(width: f32, is_header: bool, first_column: bool) ui.BoxStyle {
+    return .{
+        .width = .{ .px = width },
+        .min_height = 34,
+        .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 },
+        // Own the bottom/right rules; only the first row/column add top/left.
+        // Shared edges therefore stay one logical pixel wide.
+        .border = .{ .width = 1, .color = theme.current().fg_3.withAlpha(255) },
+        .border_top_width = if (is_header) 1 else 0,
+        .border_left_width = if (first_column) 1 else 0,
+        .background = if (is_header) theme.current().well else ui.Color.TRANSPARENT,
+        .overflow = .hidden,
+        .flex_shrink = 0,
+    };
+}
+
 pub const body_font_size: f32 = 12.5;
 pub const body_line_height: f32 = 1.65;
 pub const heading_font_size: f32 = 13;
