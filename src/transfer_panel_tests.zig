@@ -3,6 +3,7 @@
 //! exe 依赖的模块上会传播成重复链接（zenit build.zig 同款警告）。
 // Load the nested host UI contract even under a narrow test filter.
 comptime {
+    _ = @import("ui/file_workspace_icons.zig");
     _ = @import("remaining_ui_tests.zig");
     _ = @import("incremental_ui_tests.zig");
     _ = @import("ui/icon_button_feedback.zig");

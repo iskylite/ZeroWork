@@ -5,7 +5,8 @@ const ui = @import("ui");
 const App = @import("zenit_app").App;
 const files = @import("ui/file_workspace_view.zig");
 const theme = @import("ui/app_theme.zig");
-const FixtureState = enum { normal, empty, failed };
+const FixtureState = enum { normal, empty, failed, icons };
+const icon_samples = [_][]const u8{ "Rocky-8.10-x86_64-dvd1.iso", "backup.tar.zst", "report.pdf", "sheet.xlsx", "slides.pptx", "photo.heic", "track.flac", "clip.mkv", "cache.sqlite3", "server.pem", "font.woff2", "setup.deb", "module.wasm", "main.rs", "build.zig", "README.md", "app.tsx", "config.yaml", ".env.production", "Dockerfile", "unknown.format" };
 var selected_state: FixtureState = .normal;
 var selected_theme: []const u8 = "dark";
 const owner = @import("host/identity.zig").SessionHandle{ .session_id = @fromBackingInt(301), .generation = 7 };
@@ -34,7 +35,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     const rows = try scope.createState([48]files.Entry, undefined);
     for (rows, 0..) |*entry, i| {
         var name_buffer: [128]u8 = undefined;
-        const name = if (i == 0) ".." else if (i == 1) "fixtures" else if (i == 4) try std.fmt.bufPrint(&name_buffer, "deployment-fixture-with-a-long-name-for-native-layout-{d}.yaml", .{i}) else try std.fmt.bufPrint(&name_buffer, "native-fixture-{d:0>3}.txt", .{i});
+        const name = if ((selected_state == .icons) and i >= 2 and i - 2 < icon_samples.len) icon_samples[i - 2] else if (i == 0) ".." else if (i == 1) "fixtures" else if (i == 4) try std.fmt.bufPrint(&name_buffer, "deployment-fixture-with-a-long-name-for-native-layout-{d}.yaml", .{i}) else try std.fmt.bufPrint(&name_buffer, "native-fixture-{d:0>3}.txt", .{i});
         const owned_name = try scope.createText(name, .{});
         const path = try std.fmt.allocPrint(cx.allocator, "/fixtures/local/{s}", .{name});
         defer cx.allocator.free(path);
@@ -54,7 +55,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
         .{ .stamp = .{ .owner = owner, .endpoint = .{ .kind = .sftp, .binding_id = 7, .binding_generation = 2 }, .request_id = 1, .directory_revision = 1 }, .title = "远程 · UI Fixture", .subtitle = "SFTP · #301", .badge = "SFTP #301", .resolved_path = "/fixtures/remote/", .entries = remote_rows, .writable = true, .can_transfer = true },
     } };
     try fixture.view.update(projection);
-    if (selected_state != .normal) {
+    if (selected_state == .empty or selected_state == .failed) {
         _ = try fixture.view.flush();
         projection.revision += 1;
         projection.panes[1].stamp.request_id += 1;
@@ -63,8 +64,26 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
         projection.panes[1].failure = if (selected_state == .failed) "Connection lost" else "";
         try fixture.view.update(projection);
     }
-    const backdrop = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .background = theme.baseColors().app }, .{});
+    const backdrop = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .background = theme.baseColors().app }, .{});
     try backdrop.appendChild(cx.allocator, fixture.view.root);
+    if (selected_state == .icons) {
+        const A = @import("ai/local_text_attachments.zig");
+        var draft = try A.Draft.init(cx.allocator, .{ .session = 301 });
+        defer draft.deinit();
+        for (icon_samples[0..3]) |name| {
+            const path = try std.fmt.allocPrint(cx.allocator, "/fixtures/{s}", .{name});
+            defer cx.allocator.free(path);
+            const ticket = try draft.begin();
+            var reference = try A.ContentRef.createLocalReference(cx.allocator, path, .{ .reason = .binary });
+            defer reference.release();
+            _ = try draft.complete(ticket, &reference);
+        }
+        const attachments = try @import("ui/ai_attachments_view.zig").View.mount(cx, scope, .{ .context = fixture });
+        try attachments.update(&draft);
+        const rail = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 52 }, .flex_shrink = 0, .padding = .{ .left = 16, .right = 16 } }, .{});
+        try rail.appendChild(cx.allocator, attachments.root);
+        try backdrop.appendChild(cx.allocator, rail);
+    }
     return backdrop;
 }
 pub fn main(init: std.process.Init) !void {

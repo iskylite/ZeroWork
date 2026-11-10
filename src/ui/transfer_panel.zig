@@ -739,7 +739,11 @@ pub const Panel = struct {
         for (0..count) |index| {
             const row = try ui.box(self.cx, S.pathRow(), .{});
             try self.source_rows.appendChild(self.cx.allocator, row);
-            try row.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.file, T.current().fg_2, S.icon(16)));
+            const file_icons = @import("file_workspace_icons.zig");
+            const source_path = if (sources.len == 0) "" else sources[index];
+            const type_icon = try ui.iconTint(self.cx, file_icons.asset(source_path), file_icons.color(source_path), S.icon(16));
+            type_icon.meta.ownership.meta.test_id = "transfer.source.type-icon";
+            try row.appendChild(self.cx.allocator, type_icon);
             const caption = try self.text(row, if (self.mode == .upload) "本地文件" else "远程文件", 10.5, 400, true);
             caption.setStyleInline(self.cx.allocator, S.label(72));
             const path = try self.text(row, if (sources.len == 0) "请选择文件" else sources[index], 11, 400, false);

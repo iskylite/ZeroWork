@@ -804,3 +804,54 @@ test "local file limits attach references for oversized text image bytes and ima
     try std.testing.expect(huge.file.content().?.source.local_reference.reason == .size_limit);
     try std.testing.expectEqual(@as(usize, 0), huge.file.content().?.bytes.len);
 }
+
+test "file type icons follow local and remote attachments, preview and sent history across themes" {
+    const icons = @import("ui/file_workspace_icons.zig");
+    const old_theme = theme.currentName();
+    defer theme.select(old_theme);
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const iso = try f.draft.begin();
+    var local = try A.ContentRef.createLocalReference(a, "/Rocky-8.10-x86_64-dvd1.iso", .{ .reason = .binary });
+    defer local.release();
+    _ = try f.draft.complete(iso, &local);
+    const pdf = try f.draft.begin();
+    var remote = try A.ContentRef.createRemoteReference(a, .{ .session_id = @fromBackingInt(301), .generation = 7 }, "SFTP", "/report.PDF");
+    defer remote.release();
+    _ = try f.draft.complete(pdf, &remote);
+    _ = try f.add("/main.rs", "fn main() {}");
+    var sent = try f.draft.freeze();
+    defer sent.deinit();
+    try f.view.update(&f.draft);
+    f.settle();
+    for ([_]bool{ false, true }) |history| {
+        if (history) {
+            try f.view.updateSent(&sent);
+            f.settle();
+        }
+        for ([_]theme.Name{ .light, .dark, .sauber }) |name| {
+            theme.select(name);
+            f.cx.setTheme(theme.widgetTheme(name));
+            f.settle();
+            if (f.view.preview_reference.content()) |content| {
+                try std.testing.expectEqual(icons.asset(content.path).icon_id.?, f.view.preview_icon.getIcon().?.icon_id);
+                try std.testing.expectEqual(icons.color(content.path), f.view.preview_icon.getIcon().?.tint);
+            }
+            for (f.view.cards.items, sent.items) |card, item| {
+                const path = item.reference.content().?.path;
+                const icon = card.icons[0].getIcon().?;
+                try std.testing.expectEqual(icons.asset(path).icon_id.?, icon.icon_id);
+                try std.testing.expectEqual(icons.color(path), icon.tint);
+            }
+            try f.view.openPreview(iso.id);
+            f.settle();
+            try std.testing.expectEqual(icons.asset("Rocky.iso").icon_id.?, f.view.preview_icon.getIcon().?.icon_id);
+            try std.testing.expectEqual(icons.color("Rocky.iso"), f.view.preview_icon.getIcon().?.tint);
+            try f.view.openPreview(pdf.id);
+            f.settle();
+            try std.testing.expectEqual(icons.asset("report.pdf").icon_id.?, f.view.preview_icon.getIcon().?.icon_id);
+            try std.testing.expectEqual(icons.color("report.pdf"), f.view.preview_icon.getIcon().?.tint);
+        }
+    }
+}

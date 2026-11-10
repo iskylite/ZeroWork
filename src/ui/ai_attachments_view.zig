@@ -3,6 +3,7 @@ const std = @import("std");
 const ui = @import("ui");
 const attachments = @import("../ai/local_text_attachments.zig");
 const S = @import("ai_attachments_styles.zig");
+const file_icons = @import("file_workspace_icons.zig");
 pub const Callbacks = struct {
     context: *anyopaque,
     remove: ?*const fn (*anyopaque, attachments.Ticket) anyerror!void = null,
@@ -24,6 +25,7 @@ const Card = struct {
     hover_style: *ui.Signal(?ui.BoxStyle),
     removing: *ui.Signal(bool),
     icons: [2]*ui.Node = undefined,
+    file_color: ?ui.Color = null,
     fn open(self: *Card) void {
         self.view.openCaptured(self.ticket) catch |err| self.view.fail(err);
     }
@@ -44,7 +46,7 @@ const Card = struct {
         self.root.setBackground(S.card(undefined).background.?);
         self.filename.setTextColor(S.theme.current().fg_1);
         self.metadata.setTextColor(S.theme.current().fg_2);
-        _ = self.icons[0].setTint(S.theme.current().accent);
+        _ = self.icons[0].setTint(self.file_color orelse S.theme.current().accent);
         _ = self.icons[1].setTint(S.theme.current().fg_2);
     }
 };
@@ -329,7 +331,9 @@ pub const View = struct {
         state.preview = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = if (content.source == .terminal) "预览终端文本" else if (content.source == .remote_file) (if (content.source.remote_file.reference_only) "查看远程引用" else "预览远程文件") else if (content.source == .local_reference) "查看本机路径引用" else "预览本地文本", .base_style = state.preview_style, .hover_style = state.hover_style, .on_click = self.cx.on(Card, state, Card.open) }).mount(scope, self.cx);
         state.preview.setStyleInline(self.cx.allocator, S.previewSlot());
         state.preview.meta.ownership.meta.test_id = "ai.attachment.open";
-        state.icons[0] = try ui.iconTint(self.cx, if (content.source == .terminal) ui.icons.terminal else ui.icons.get("file-text").?, S.theme.current().accent, icon(S.icon_size));
+        state.file_color = if (content.source == .terminal) null else file_icons.color(content.path);
+        state.icons[0] = try ui.iconTint(self.cx, if (content.source == .terminal) ui.icons.terminal else file_icons.asset(content.path), state.file_color orelse S.theme.current().accent, icon(S.icon_size));
+        state.icons[0].meta.ownership.meta.test_id = "ai.attachment.type-icon";
         try state.preview.appendChild(self.cx.allocator, state.icons[0]);
         try card.appendChild(self.cx.allocator, state.preview);
         const name_hint = try ui.widgets.Tooltip(.{ .text = content.path }).mount(scope, self.cx);
@@ -387,6 +391,7 @@ pub const View = struct {
     }
     fn showPreview(self: *View, ticket: attachments.Ticket, reference: attachments.ContentRef, kind: PreviewKind) !void {
         const content = reference.content() orelse return error.EmptyAttachmentResult;
+        self.setPreviewIcon(content);
         try self.preview_identity.setTextContent(self.cx.allocator, content.path);
         try self.preview_path_hint.setTextContent(self.cx.allocator, content.path);
         const metadata = switch (content.source) {
@@ -567,12 +572,12 @@ pub const View = struct {
             for (self.cards.items) |card| card.retheme();
             self.preview_panel.setBackground(S.theme.current().overlay);
             self.preview_title.setTextColor(self.colors.fg_1);
-            _ = self.preview_icon.setTint(self.colors.accent);
             self.preview_identity_box.setBackground(S.theme.popupInset());
             self.preview_identity.setTextColor(self.colors.fg_1);
             self.preview_metadata.setTextColor(self.colors.fg_2);
             self.preview_label.setTextColor(self.colors.fg_1);
             tintIcons(self.preview_panel);
+            if (self.preview_reference.content()) |content| self.setPreviewIcon(content);
             _ = self.preview_icons[0].setTint(S.theme.current().accent);
             _ = self.preview_terminal_icon.setTint(S.theme.current().accent);
         }
@@ -588,6 +593,11 @@ pub const View = struct {
             break;
         };
         return if (changed or themed) .needs_layout else .done;
+    }
+    fn setPreviewIcon(self: *View, content: attachments.Content) void {
+        const terminal = content.source == .terminal;
+        const asset = if (terminal) ui.icons.terminal else file_icons.asset(content.path);
+        if (asset.icon_id) |id| if (asset.pickRep(18)) |rep| self.preview_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = if (terminal) S.theme.current().accent else file_icons.color(content.path) });
     }
     fn layoutPreview(self: *View) void {
         const rect = @import("ai_preview_geometry.zig").bounds(self.cx, self.preview_content);
@@ -640,7 +650,7 @@ fn matches(bundle: ?attachments.Bundle, draft: ?*const attachments.Draft) bool {
     return true;
 }
 fn icon(size: f32) ui.Style {
-    return .{ .width = .{ .px = size }, .height = .{ .px = size } };
+    return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };
 }
 fn localReferenceNotice(reference: attachments.LocalReference) []const u8 {
     return switch (reference.reason) {
