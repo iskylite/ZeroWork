@@ -7078,8 +7078,8 @@ test "SSH clipboard nested pane maps native window coordinates to its actual VT 
     const content = view.rows_box.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 238), content.x, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 66), content.y, 0.01);
-    try std.testing.expectApproxEqAbs(content.x + 16, view.metrics.origin_x, 0.01);
-    try std.testing.expectApproxEqAbs(content.y + 16, view.metrics.origin_y, 0.01);
+    try std.testing.expectApproxEqAbs(content.x + 8, view.metrics.origin_x, 0.01);
+    try std.testing.expectApproxEqAbs(content.y + 8, view.metrics.origin_y, 0.01);
     const x = view.metrics.origin_x + view.cell_width * 0.25;
     const y = view.metrics.origin_y + view.cell_height * 0.5;
     const end = x + view.cell_width * 2;
