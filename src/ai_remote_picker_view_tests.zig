@@ -102,9 +102,11 @@ test "AI remote picker leaves a reused earlier authentication modal accessible" 
     // The window creates its shared authentication presenter before the AI
     // picker. Its later challenge reuses that original portal node.
     const shared = try Shared.mount(cx, scope);
+    const assistant = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 450 }, .top = .{ .px = 80 } }, .width = .{ .px = 620 }, .height = .{ .px = 480 } }, .{});
+    try cx.root.?.appendChild(allocator, assistant);
     var unused_host: files.FileBindingHost = undefined;
     var context: u8 = 0;
-    const picker = try V.View.mount(cx, scope, &unused_host, .{ .context = &context, .ensure = Callbacks.ensure, .live = Callbacks.live, .stage = Callbacks.stage });
+    const picker = try V.View.mount(cx, scope, &unused_host, .{ .context = &context, .overlay_owner = assistant, .ensure = Callbacks.ensure, .live = Callbacks.live, .stage = Callbacks.stage });
     defer picker.release() catch unreachable;
     try cx.root.?.appendChild(allocator, picker.root);
     try picker.open(.{ .session = 1 }, &.{});
@@ -117,7 +119,7 @@ test "AI remote picker leaves a reused earlier authentication modal accessible" 
     cx.layout();
     _ = cx.render();
     try std.testing.expect(cx.overlay_stack.topmost().?.content_node == shared.view.modal.dialog);
-    try std.testing.expect(cx.focus_manager.activeScope() == shared.view.modal.overlay);
+    try std.testing.expect(cx.focus_manager.getFocused().?.isDescendantOf(shared.view.modal.dialog));
     const action_id = ui.a11y.AXId.fromRaw(shared.view.trust_actions[0].element_id_raw);
     const action = cx.accessibility_tree.get(action_id).?;
     try std.testing.expect(!action.state.hidden);
@@ -134,7 +136,7 @@ test "AI remote picker leaves a reused earlier authentication modal accessible" 
         _ = cx.render();
     }
     try std.testing.expect(picker.open_state);
-    try std.testing.expect(cx.focus_manager.activeScope() != shared.view.modal.overlay);
+    if (cx.focus_manager.getFocused()) |focused| try std.testing.expect(!focused.isDescendantOf(shared.view.modal.dialog));
     const close = struct {
         fn find(node: *ui.Node) ?*ui.Node {
             if (node.meta.ownership.meta.test_id) |id| if (std.mem.eql(u8, id, "ai.remote.close")) return node;

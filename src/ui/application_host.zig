@@ -609,8 +609,17 @@ pub const ApplicationHost = struct {
     }
 
     pub fn fileProgressKey(self: *ApplicationHost) ?OperationKey {
+        return self.findFileProgressKey(null);
+    }
+
+    pub fn fileProgressKeyFor(self: *ApplicationHost, owner: identity.SessionHandle) ?OperationKey {
+        return self.findFileProgressKey(owner);
+    }
+
+    fn findFileProgressKey(self: *ApplicationHost, owner: ?identity.SessionHandle) ?OperationKey {
         for (self.file_sources.items) |source| {
             if (source.progress_dismissed) continue;
+            if (owner) |expected| if (!source.handle.eql(expected)) continue;
             const state = self.sessions.queryState(source.handle) orelse continue;
             if (state.create_operation.eql(source.key) and (state.lifecycle == .creating or state.lifecycle == .ready or state.lifecycle == .failed)) return source.key;
         }
@@ -625,7 +634,6 @@ pub const ApplicationHost = struct {
 
     pub fn fileConnectionProgress(self: *ApplicationHost, key: OperationKey) ?@import("../host/sftp_adapter.zig").ConnectionProgress {
         if (key.owner != .session) return null;
-        for (self.file_sources.items) |source| if (source.key.eql(key) and source.progress_dismissed) return null;
         const plugin = self.file_plugin orelse return null;
         return if (plugin.progress) |get| get(plugin.context, key.owner.session, key) else null;
     }
@@ -637,6 +645,47 @@ pub const ApplicationHost = struct {
         return error.StaleFileCreate;
     }
 
+    fn syncPendingFileTabs(self: *ApplicationHost) !void {
+        if (self.workspace.shutting_down or self.windowClosePending()) return;
+        for (self.file_sources.items) |entry| {
+            const state = self.sessions.queryState(entry.handle) orelse continue;
+            if (!state.create_operation.eql(entry.key) or !std.meta.eql(state.target, self.target())) continue;
+            if (state.lifecycle != .creating and state.lifecycle != .ready and state.lifecycle != .failed) continue;
+            if (self.findHandle(entry.handle)) |mapping| {
+                const tab = self.workspace.sessionTab(mapping.legacy_id) orelse continue;
+                if (!tab.file_ready and tab.failed != (state.lifecycle == .failed)) {
+                    tab.failed = state.lifecycle == .failed;
+                    self.workspace.rebuildTabBar() catch {};
+                }
+                continue;
+            }
+            var reused = false;
+            for (self.mappings.items) |*mapping| {
+                if (mapping.handle.session_id != entry.handle.session_id or mapping.handle.generation >= entry.handle.generation) continue;
+                const tab = self.workspace.sessionTab(mapping.legacy_id) orelse continue;
+                if (tab.closing or tab.file_ready or tab.file_scope == null) continue;
+                try self.workspace.bindSessionOwner(tab.id, entry.handle);
+                tab.generation = entry.handle.generation;
+                tab.failed = state.lifecycle == .failed;
+                if (tab.remote_notice) |notice| notice.update(.{});
+                mapping.handle = entry.handle;
+                mapping.create_operation = entry.key;
+                mapping.legacy_generation = tab.generation;
+                mapping.owner = tab.content_owner;
+                self.workspace.rebuildTabBar() catch {};
+                reused = true;
+                break;
+            }
+            if (reused) continue;
+            try self.mappings.ensureUnusedCapacity(self.allocator, 1);
+            const source = entry.source.value;
+            const id = try self.workspace.createPendingFileSession(entry.handle, source.host, source.host_id, source.source_index);
+            const tab = self.workspace.sessionTab(id).?;
+            tab.failed = state.lifecycle == .failed;
+            self.mappings.appendAssumeCapacity(.{ .handle = entry.handle, .create_operation = entry.key, .legacy_id = id, .legacy_generation = tab.generation, .tab_id = tab.tab_id, .owner = tab.content_owner, .source = null });
+        }
+    }
+
     /// Presentation callback invoked after the real adapter publishes ready.
     /// Content/scope ownership transfers only on success, as in Workspace.
     pub fn attachFileSession(self: *ApplicationHost, owner: identity.SessionHandle, key: OperationKey, content: *ui.Node, scope: *ui.Scope) !session.Attachment {
@@ -644,13 +693,13 @@ pub const ApplicationHost = struct {
         if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
         if (!state.create_operation.eql(key) or state.lifecycle != .ready) return error.FileSessionNotReady;
         if (!std.meta.eql(state.target, self.target())) return error.WrongAttachmentTarget;
-        if (self.findHandle(owner) != null) return error.FileSessionAlreadyAttached;
-        const source = try self.fileSource(owner, key);
-        try self.mappings.ensureUnusedCapacity(self.allocator, 1);
-        const id = try self.workspace.createFileSessionDirect(owner, source.host, source.host_id, source.source_index, content, scope);
-        const tab = self.workspace.sessionTab(id).?;
-        tab.file_ready = true;
-        self.mappings.appendAssumeCapacity(.{ .handle = owner, .create_operation = key, .legacy_id = id, .legacy_generation = tab.generation, .tab_id = tab.tab_id, .owner = tab.content_owner, .source = null, .ready_published = true });
+        if (self.findHandle(owner) == null) try self.syncPendingFileTabs();
+        const mapping = self.findHandle(owner) orelse return error.StaleFileCreate;
+        if (!mapping.create_operation.eql(key)) return error.StaleFileCreate;
+        if (mapping.ready_published) return error.FileSessionAlreadyAttached;
+        try self.workspace.attachPendingFileSession(mapping.legacy_id, owner, content, scope);
+        const tab = self.workspace.sessionTab(mapping.legacy_id).?;
+        mapping.ready_published = true;
         if (@import("../platform/runtime_mode.zig").automation) std.debug.print("SFTP_WORKSPACE_TRACE {{\"event\":\"attached\",\"owner\":{{\"session_id\":{d},\"generation\":{d}}},\"create_operation\":{d},\"tab_id\":{d},\"plugin\":\"sftp\",\"terminal_present\":{},\"runtime_present\":{}}}\n", .{ @backingInt(owner.session_id), owner.generation, key.operation_id, @backingInt(tab.tab_id), tab.terminal != null, tab.runtime != null });
         return .{ .target = state.target, .tab_id = tab.tab_id };
     }
@@ -1497,6 +1546,15 @@ pub const ApplicationHost = struct {
     pub fn requestSshReconnect(self: *ApplicationHost, id: LegacySessionId) !void {
         if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
         const mapping = self.findLegacyId(id) orelse return error.UnknownSession;
+        if (self.supportsIntegration(mapping.handle, "directory_recovery")) {
+            const tab = self.workspace.sessionTab(id) orelse return error.StaleSession;
+            if (tab.closing or tab.file_ready) return error.LifecycleDoesNotAllowRetry;
+            _ = try self.sessions.retry(mapping.handle);
+            self.dismissFileProgress(mapping.create_operation);
+            if (tab.remote_notice) |notice| notice.update(.{});
+            self.workspace.cx.requestRedraw();
+            return;
+        }
         if (!self.supportsIntegration(mapping.handle, "transport_loss")) return error.LocalSessionDoesNotReconnect;
         _ = try self.syncSshReconnect(mapping);
         const state = self.sessions.queryState(mapping.handle) orelse return error.StaleSession;
@@ -1749,7 +1807,7 @@ pub const ApplicationHost = struct {
     fn installBackgroundAuth(self: *ApplicationHost) void {
         if (self.workspace.external_auth) |installed| if (installed.context == @as(*anyopaque, self)) return;
         self.background_previous_auth = self.workspace.external_auth;
-        self.workspace.external_auth = .{ .context = self, .pending = backgroundPendingAuth, .submit = backgroundSubmitAuth, .cancel = backgroundCancelAuth, .host = backgroundAuthHost, .parent = backgroundAuthParent, .host_key = backgroundAuthHostKey, .totp = backgroundAuthTotp };
+        self.workspace.external_auth = .{ .context = self, .pending = backgroundPendingAuth, .pending_for = backgroundPendingAuthFor, .submit = backgroundSubmitAuth, .cancel = backgroundCancelAuth, .host = backgroundAuthHost, .parent = backgroundAuthParent, .host_key = backgroundAuthHostKey, .totp = backgroundAuthTotp };
     }
     fn backgroundPolicy(self: *ApplicationHost) background.Policy {
         const saved = self.workspace.app_config.*;
@@ -2089,7 +2147,10 @@ pub const ApplicationHost = struct {
             }
         };
         var file_pending = false;
-        if (self.file_plugin) |plugin| file_pending = try plugin.tick(plugin.context, self.sessions);
+        if (self.file_plugin) |plugin| {
+            try self.syncPendingFileTabs();
+            file_pending = try plugin.tick(plugin.context, self.sessions);
+        }
         for (self.mappings.items) |mapping| if (self.supportsIntegration(mapping.handle, "transport_loss") and mapping.source != null) {
             self.workspace.pollConnectionResults();
             break;
@@ -2902,6 +2963,16 @@ pub const ApplicationHost = struct {
             if (recipient == self) return value;
         };
         return if (self.background_previous_auth) |previous| previous.pending(previous.context) else null;
+    }
+    fn backgroundPendingAuthFor(raw: *anyopaque, owner: identity.SessionHandle) ?background.auth.Snapshot {
+        const self: *ApplicationHost = @ptrCast(@alignCast(raw));
+        if (self.domain.backgrounds) |host| if (host.owns(owner)) {
+            if (backgroundPendingAuth(raw)) |value| if (value.identity.key.owner.eql(.{ .session = owner })) return value;
+        };
+        const previous = self.background_previous_auth orelse return null;
+        if (previous.pending_for) |pending| return pending(previous.context, owner);
+        const value = previous.pending(previous.context) orelse return null;
+        return if (value.identity.key.owner.eql(.{ .session = owner })) value else null;
     }
     fn backgroundSubmitAuth(raw: *anyopaque, request: background.auth.RequestIdentity, reply: background.auth.Reply) !void {
         const self: *ApplicationHost = @ptrCast(@alignCast(raw));

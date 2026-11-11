@@ -585,7 +585,10 @@ pub const Presentation = struct {
                 const workspace = self.options.app.workspace;
                 const at = workspace.tabIndexById(attachment.tab_id) orelse return .unknown;
                 const tab = workspace.tabs.items[at];
-                if (!tab.content_owner.eql(.{ .session = entry.owner }) or tab.generation != entry.owner.generation or tab.root != entry.root or tab.file_scope != entry.scope or tab.terminal != null or !std.meta.eql(attachment.target, entry.target)) return .unknown;
+                const content = entry.root orelse return .unknown;
+                // SFTP established in a pending pane retains its tab root;
+                // direct file sessions use the presentation itself as root.
+                if (!tab.content_owner.eql(.{ .session = entry.owner }) or tab.generation != entry.owner.generation or (tab.root != content and content.parent != tab.root) or tab.file_scope != entry.scope or tab.terminal != null or !std.meta.eql(attachment.target, entry.target)) return .unknown;
                 workspace.receiveCloseReceipt(attachment.tab_id, .{ .session = entry.owner }, true);
                 return .awaiting;
             }

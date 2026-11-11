@@ -12,7 +12,7 @@ const data = join(isolated, 'data'), rpc = join(isolated, 'rpc'), local = join(i
 await Promise.all([mkdir(data), mkdir(rpc), mkdir(local)]);
 process.env.ZENIT_E2E_FILE_RPC_DIR = rpc;
 const peerLog = await open(join(out, 'peer.log'), 'w'), appLog = await open(join(out, 'app.log'), 'w');
-const peer = spawn('python3', [resolve('e2e/sftp_v3_peer.py'), '--out', peerOut], { stdio: ['ignore', peerLog.fd, peerLog.fd] });
+const peer = spawn(process.env.ZW_SFTP_TEST_PYTHON ?? 'python3', [resolve('e2e/sftp_v3_peer.py'), '--out', peerOut], { stdio: ['ignore', peerLog.fd, peerLog.fd] });
 let app: ReturnType<typeof spawn> | undefined;
 const report: any = { status: 'running', checks: [], isolated, screenshots: [], external_hosts: 0 };
 function shown(n: any) { return n?.rect?.w > 0 && n.rect.h > 0 && n.hidden !== true && n.visible !== false && (n.effective_opacity ?? 1) > 0; }
@@ -32,7 +32,7 @@ async function drag(from: any, x: number, y: number) {
 async function confirm() { const modal = await visible('files.copy.confirmation'); await capture('transfer-confirm-' + report.screenshots.length); const button = inside(modal, 'files.copy.submit'); assert(button, text(modal)); await clickNode(button); }
 try {
   const ready = await h.waitFor(async () => { try { return JSON.parse(await readFile(join(peerOut, 'ready.json'), 'utf8')); } catch { return null; } }, 15000);
-  const host = (id: number, name: string, port: number) => `\n[[hosts]]\nconnection_id=${id}\nrevision=1\nprotocol="sftp"\nauth_mode="password"\noptions={strict_host_key=true}\nname="${name}"\nhost="127.0.0.1"\nport=${port}\nuser="${ready.user}"\nauth={password="${ready.password}"}\n`;
+  const host = (id: number, name: string, port: number) => `\n[[hosts]]\nconnection_id=${id}\nrevision=1\nprotocol="sftp"\nauth_mode="password"\noptions={strict_host_key=true}\nname="${name}"\nhost="127.0.0.1"\nport=${port}\nuser="${ready.user}"\n`;
   await writeFile(join(data, 'hosts.toml'), '[registry]\nschema_version=2\nrevision=1\nnext_connection_id=3\nnext_group_id=1\n' + host(1, 'SFTP Refused', 1) + host(2, 'SFTP Owned Peer', ready.port));
   await writeFile(join(data, 'config.toml'), '[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\n');
   const payload = Buffer.from('SFTP drag upload verification\n');
@@ -49,7 +49,8 @@ try {
   console.log('app ready');
   const hosts = (await h.query('sidebar.host')).filter(shown); assert.equal(hosts.length, 2);
   await clickNode(hosts[0]);
-  await visible("connection.progress.spinner"); await capture("connection-connecting");
+  await click('sidebar.host.connect');
+  await visible('workspace.file.content');
   await h.waitFor(async () => { const p = (await h.query('connection.progress')).find(shown); return p && text(p).includes('连接失败') && text(p).includes('Connect') ? p : null; }, 20000);
   await capture('connection-failed');
   await click('connection.progress.logs.toggle');
@@ -57,9 +58,12 @@ try {
   await click('connection.progress.retry');
   await h.waitFor(async () => { const p = (await h.query('connection.progress')).find(shown); return p && text(p).includes('尝试 2') && text(p).includes('连接失败') ? p : null; }, 20000);
   await capture('connection-retry-failed');
-  await click('connection.progress.close');
+  await click('connection.progress.dismiss');
   await h.waitFor(async () => !(await h.query('connection.progress')).some(shown) || null);
   await h.sleep(300); assert(!(await h.query('connection.progress')).some(shown));
+  await click('remote.notice.logs');
+  await visible('connection.progress.logs');
+  await click('connection.progress.dismiss');
   console.log('checkpoint', report.checks.length + 1);
   report.checks.push('Actual refused TCP connection exposes failure/code/logs; retries original session generation; dismiss remains dismissed');
   await click('sidebar.new'); await click('sidebar.new.host');
@@ -72,13 +76,32 @@ try {
   console.log('checkpoint', report.checks.length + 1);
   report.checks.push('Native radio choices switch password/key/agent fields; save password starts checked');
   await clickNode((await h.query('sidebar.host')).filter(shown)[1]);
+  await click('sidebar.host.connect');
+  let switchedDuringAuth = false;
   await h.waitFor(async () => {
     if ((await h.query('files.workspace')).some(shown)) return true;
     const plugin = (await h.query('plugin.challenge.title')).find(shown);
     if (plugin) {
-      const material = text(await visible('plugin.challenge.material'));
-      assert(material.includes(ready.fingerprint));
-      await click('plugin.challenge.choice.0');
+      const title = text(plugin).trim();
+      if (title === '核对主机密钥') {
+        if (!switchedDuringAuth) {
+          switchedDuringAuth = true;
+          const strip = await visible('tabs.strip');
+          const tab = (name: string) => nodes(strip).find(n => /^tabs\.tab\.\d+$/.test(n.test_id ?? '') && text(n).includes(name));
+          await clickNode(tab('SFTP Refused'));
+          await h.waitFor(async () => !(await h.query('plugin.challenge.modal')).some(shown) || null);
+          await visible('remote.notice.logs');
+          await clickNode(tab('SFTP Owned Peer'));
+          await visible('plugin.challenge.title');
+        }
+        const material = text(await visible('plugin.challenge.material'));
+        assert(material.includes(ready.fingerprint));
+        await click('plugin.challenge.choice.0');
+      } else if (title === 'SSH 密码认证') {
+        await click('plugin.challenge.answer.0');
+        await h.type_(ready.password);
+        await click('plugin.challenge.submit');
+      } else throw new Error(`Unexpected authentication: ${title}`);
       await h.sleep(150);
       return null;
     }
@@ -87,6 +110,8 @@ try {
     if (trust?.focusable) { assert(text(modal).includes(ready.fingerprint)); await clickNode(trust); }
     return null;
   }, 30000);
+  assert(switchedDuringAuth);
+  report.checks.push('The original SFTP tab owns trust and password prompts; switching tabs preserves the exact request and leaves the other result interactive');
   await capture('sftp-connected');
   { const field = inside(await visible('files.local'), 'files.path.edit'); await h.clickAt(field.rect.x + 3, field.rect.y + field.rect.h / 2); }
   await clickNode(await visible('files.path')); await h.key('a', { cmd: true }); await h.type_(local); await h.key('return');

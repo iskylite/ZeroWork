@@ -13,6 +13,7 @@ pub const ActionState = struct { enabled: bool = true, reason: ?[]const u8 = nul
 pub const Key = struct { section: []const u8, key: []const u8 };
 pub const Hooks = struct {
     context: *anyopaque,
+    overlay_owner: ?*ui.Node = null,
     changed: *const fn (*anyopaque) void,
     request_edit: *const fn (*anyopaque, Key, *ui.Node) void,
     action: *const fn (*anyopaque, Action) void,

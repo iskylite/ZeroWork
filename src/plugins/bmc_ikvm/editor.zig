@@ -2,6 +2,7 @@
 //! Wizard owns its Modal, protocol picker, child SSH editor and persistence.
 const std = @import("std");
 const ui = @import("ui");
+const scoped_modal = @import("../../ui/scoped_modal.zig");
 const contract = @import("../../host/plugin_ui_contract.zig");
 const content = @import("../../host/content_context.zig");
 const envelopes = @import("../../config/connection_envelope.zig");
@@ -730,10 +731,6 @@ pub const EditorView = struct {
         if (self.mount.cx.viewport.width <= 860 or self.mount.cx.viewport.height <= 480) return 400;
         return 590;
     }
-    fn parentVisible(raw: *anyopaque) bool {
-        const self: *EditorView = @ptrCast(@alignCast(raw));
-        return self.child_request == null;
-    }
     fn visibility(raw: *anyopaque, visible: bool) void {
         const self: *EditorView = @ptrCast(@alignCast(raw));
         self.hidden = !visible;
@@ -963,8 +960,9 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     try button(self, footer, "保存并连接", "bmc.editor.save_and_open", true, self.locked.?, EditorView.saveAndOpen);
     try root.appendChild(cx.allocator, footer);
     self.footer = footer;
-    const log_modal = try ui.widgets.Modal(.{ .title = "管理测试日志", .open = self.log_open.?, .width = @as(f32, 560), .max_height = @as(f32, 420), .background = S.theme.current().overlay, .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
+    const log_modal = try ui.widgets.Modal(.{ .title = "管理测试日志", .managed_focus = false, .open = self.log_open.?, .width = @as(f32, 560), .max_height = @as(f32, 420), .background = S.theme.current().overlay, .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
     if (!log_modal.portaled) try root.appendChild(cx.allocator, log_modal.overlay);
+    _ = try scoped_modal.bind(cx, scope, log_modal, .{ .owner = .{ .node = mount.parent_dialog orelse root } });
     log_modal.dialog.meta.ownership.meta.test_id = "bmc.editor.log_modal";
     if (log_modal.dialog.children.items.len != 0) {
         const header = log_modal.dialog.children.items[0];
@@ -1015,7 +1013,6 @@ const vtable: contract.EditorInstance.VTable = .{
     .cancel = EditorView.cancel,
     .preferred_modal_height = EditorView.preferredHeight,
     .modal_presentation = EditorView.presentation,
-    .parent_presentation_visible = EditorView.parentVisible,
     .visibility_changed = EditorView.visibility,
     .child_completed = EditorView.childCompleted,
 };

@@ -7,14 +7,15 @@ pub fn dialog() ui.BoxStyle {
     value.height = .{ .px = 220 };
     value.padding = .{};
     value.border = .{ .radius = 14 };
+    value.overflow_hidden = true;
     return value;
 }
 pub fn dialogPaint() ui.BoxStyle {
     const c = theme.current();
     return .{ .background = c.overlay, .glass = theme.overlayGlass(), .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
 }
-pub fn body() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 6, .padding = ui.Padding.all(12) };
+pub fn body(compact: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .gap = if (compact) 4 else 6, .padding = ui.Padding.all(if (compact) 8 else 12) };
 }
 pub fn row(height: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 };

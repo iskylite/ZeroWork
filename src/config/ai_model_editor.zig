@@ -8,6 +8,7 @@ const controls = @import("settings_parts/settings_controls.zig");
 
 pub const Hooks = struct {
     context: *anyopaque,
+    overlay_owner: ?*ui.Node = null,
     commit: *const fn (*anyopaque, usize, ?usize, config.AiModel) anyerror!void,
     fetch_models: *const fn (*anyopaque, usize) void,
     test_model: *const fn (*anyopaque, usize, config.AiModel) void,
@@ -61,7 +62,8 @@ pub const Editor = struct {
         self.candidates = try scope.allocator.dupe(config.AiModel, candidates);
         for (@constCast(self.candidates)) |*candidate| candidate.id = try controls.owned(scope, candidate.id);
         try scope.onCleanup(Editor, self, release);
-        self.modal = try ui.widgets.Modal(.{ .open = ui.split(self.open, cx.on(Editor, self, opened)), .width = @as(f32, 480), .max_height = @as(f32, 640), .background = S.theme.current().overlay, .close_on_overlay = true }).mount(scope, cx);
+        self.modal = try ui.widgets.Modal(.{ .managed_focus = hooks.overlay_owner == null, .open = ui.split(self.open, cx.on(Editor, self, opened)), .width = @as(f32, 480), .max_height = @as(f32, 640), .background = S.theme.current().overlay, .close_on_overlay = true }).mount(scope, cx);
+        if (hooks.overlay_owner) |owner| _ = try @import("../ui/scoped_modal.zig").bind(cx, scope, self.modal, .{ .owner = .{ .node = owner } });
         self.modal.overlay.meta.ownership.meta.test_id = "settings.ai.model.overlay";
         self.modal.dialog.meta.ownership.meta.test_id = "settings.ai.model.dialog";
         self.modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 480 }, .height = .{ .px = 550 }, .padding = .{}, .direction = .column, .gap = 0, .background = S.theme.current().overlay, .glass = S.theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow_hidden = true });
@@ -188,10 +190,8 @@ pub const Editor = struct {
         const cx = self.cx;
         const scope = self.scope;
         const overlay = self.modal.overlay;
-        cx.invalidateReferencesTo(overlay);
-        if (overlay.parent) |parent| cx.detachChild(parent, overlay);
+        if (!self.modal.portaled) if (overlay.parent) |parent| cx.detachChild(parent, overlay);
         scope.dispose();
-        cx.destroyDetached(overlay);
     }
     pub fn resize(self: *Editor) void {
         if (self.save_button) |button| {

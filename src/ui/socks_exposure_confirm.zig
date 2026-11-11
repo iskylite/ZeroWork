@@ -26,6 +26,7 @@ pub const Hooks = struct {
     context: *anyopaque,
     confirm: *const fn (*anyopaque, []const u8) void,
     cancel: *const fn (*anyopaque) void,
+    overlay_owner: ?*const fn (*anyopaque) ?*ui.Node = null,
 };
 
 pub const View = struct {
@@ -61,7 +62,8 @@ pub const View = struct {
         try scope.onCleanup(View, self, cleanup);
 
         self.open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = self.open, .width = 430, .max_height = 450, .background = theme.current().overlay, .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, modalChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = self.open, .width = 430, .max_height = 450, .background = theme.current().overlay, .managed_focus = hooks.overlay_owner == null, .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, modalChanged) }).mount(scope, cx);
+        if (hooks.overlay_owner) |get| _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = hooks.context, .get = get } } });
         self.root = modal.overlay;
         self.root.setDisplay(.none);
         self.card = modal.dialog;
@@ -157,6 +159,13 @@ pub const View = struct {
         try self.bind_text.setTextContent(self.cx.allocator, label);
     }
 
+    pub fn showBackground(self: *View, bind: []const u8, port: u16, name: []const u8) !void {
+        try self.show(bind);
+        const label = try std.fmt.allocPrint(self.cx.allocator, "后台转发 · {s} · {s}:{d}", .{ name, bind, port });
+        defer self.cx.allocator.free(label);
+        try self.bind_text.setTextContent(self.cx.allocator, label);
+    }
+
     fn modalChanged(self: *View, value: bool) void {
         if (!value and self.visible) self.cancelNow();
     }
@@ -193,7 +202,11 @@ pub const View = struct {
 
     pub fn updateGeometry(self: *View) bool {
         if (!self.visible) return false;
-        const bounds: ui.ComputedRect = .{ .x = 0, .y = 0, .w = self.cx.viewport.width, .h = self.cx.viewport.height };
+        const bounds: ui.ComputedRect = if (self.hooks.overlay_owner) |get| blk: {
+            const owner = get(self.hooks.context) orelse return false;
+            if (!owner.isDisplayedInTree()) return false;
+            break :blk owner.globalRect();
+        } else .{ .x = 0, .y = 0, .w = self.cx.viewport.width, .h = self.cx.viewport.height };
         const width = @max(@as(f32, 1), @min(@as(f32, 430), bounds.w - 32));
         const natural = self.body.content.globalRect().h;
         const body_h = @max(@as(f32, 1), @min(natural, bounds.h - 122));
@@ -220,7 +233,7 @@ pub const View = struct {
             self.cx.requestRedraw();
             return true;
         }
-        if (self.focus_pending) {
+        if (self.focus_pending and self.card.isDisplayedInTree()) {
             self.cx.setFocus(self.card);
             self.focus_pending = false;
         }

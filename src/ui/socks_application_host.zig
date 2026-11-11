@@ -35,6 +35,7 @@ pub const Host = struct {
     config: ?*Config.View = null,
     config_host_id: ?ws.HostId = null,
     config_session_id: ?ws.SessionId = null,
+    config_owner: ?identity.SessionHandle = null,
     exposure_approval: ?Exposure.ApprovalScope = null,
     exposure_request: ?Exposure.ApprovalScope = null,
     exposure: ?*@import("socks_exposure_confirm.zig").View = null,
@@ -64,12 +65,33 @@ pub const Host = struct {
     }
     pub fn bindAuthentication(self: *Host) void {
         self.previous_auth = self.workspace.external_auth;
-        self.workspace.external_auth = .{ .context = self, .pending = pendingAuth, .submit = submitAuth, .cancel = cancelAuth, .host = authHost, .parent = authParent, .host_key = authHostKey, .totp = authTotp };
+        self.workspace.external_auth = .{ .context = self, .pending = pendingAuth, .pending_for = pendingAuthFor, .submit = submitAuth, .cancel = cancelAuth, .host = authHost, .parent = authParent, .host_key = authHostKey, .totp = authTotp };
     }
     fn pendingAuth(raw: *anyopaque) ?routes.auth.Snapshot {
         const self: *Host = @ptrCast(@alignCast(raw));
         if (self.previous_auth) |previous| if (previous.pending(previous.context)) |value| return value;
-        return self.backend.pendingAuthentication();
+        return self.backend.pendingAuthenticationFor(self, ownsAuth);
+    }
+    fn ownsAuth(raw: *const anyopaque, owner: identity.SessionHandle) bool {
+        const self: *const Host = @ptrCast(@alignCast(raw));
+        return self.application.domain.ownerForHandle(owner) == self.application;
+    }
+    fn pendingAuthFor(raw: *anyopaque, owner: identity.SessionHandle) ?routes.auth.Snapshot {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.previous_auth) |previous| {
+            if (previous.pending_for) |pending| {
+                if (pending(previous.context, owner)) |value| return value;
+            } else if (previous.pending(previous.context)) |value| {
+                if (value.identity.key.owner.eql(.{ .session = owner })) return value;
+            }
+        }
+        if (!ownsAuth(raw, owner)) return null;
+        return self.backend.pendingAuthenticationFor(&owner, struct {
+            fn accepts(context: *const anyopaque, candidate: identity.SessionHandle) bool {
+                const requested: *const identity.SessionHandle = @ptrCast(@alignCast(context));
+                return candidate.eql(requested.*);
+            }
+        }.accepts);
     }
     fn submitAuth(raw: *anyopaque, request: routes.auth.RequestIdentity, reply: routes.auth.Reply) !void {
         const self: *Host = @ptrCast(@alignCast(raw));
@@ -89,7 +111,15 @@ pub const Host = struct {
     }
     fn authParent(raw: *anyopaque, request: routes.auth.RequestIdentity) ?*ui.Node {
         const self: *Host = @ptrCast(@alignCast(raw));
-        if (self.backend.authenticationHostFor(request) != null) return self.workspace.terminal_area;
+        if (self.backend.authenticationHostFor(request) != null) {
+            const owner = switch (request.key.owner) {
+                .session => |value| value,
+                else => return null,
+            };
+            if (!ownsAuth(raw, owner)) return null;
+            if (self.application.domain.backgrounds) |background| if (background.owns(owner)) return self.cx.root;
+            return self.workspace.overlayOwner(owner);
+        }
         return if (self.previous_auth) |previous| previous.parent(previous.context, request) else null;
     }
     fn authHostKey(raw: *anyopaque, request: routes.auth.RequestIdentity) ?routes.host_key.Request {
@@ -103,6 +133,10 @@ pub const Host = struct {
         return self.backend.authenticationTotp(request, now);
     }
     fn activeSession(self: *Host) ?ws.SessionId {
+        if (self.workspace.active_group_view) |group| {
+            for (self.workspace.group_views.items) |view| if (view.id == group) return view.focused;
+            return null;
+        }
         const active = self.workspace.active_tab orelse return null;
         return self.workspace.tabs.items[active].id;
     }
@@ -188,13 +222,13 @@ pub const Host = struct {
             return;
         };
     }
-    fn testProxy(self: *Host) void {
-        if (self.activeSession()) |legacy| if (self.desiredForward(legacy)) |desired| if (desired.mode != .socks5) {
+    fn testProxy(self: *Host, legacy: ws.SessionId, owner: identity.SessionHandle) void {
+        if (self.desiredForward(legacy)) |desired| if (desired.mode != .socks5) {
             if (self.config) |view| view.setError("固定转发请连接监听端口验证目标服务");
             self.workspace.status("固定转发请连接监听端口验证目标服务");
             return;
         };
-        const value = self.activeSnapshot() orelse {
+        const value = self.backend.snapshot(owner) orelse {
             if (self.config) |view| view.setError("请先开启当前会话的转发");
             return;
         };
@@ -223,14 +257,18 @@ pub const Host = struct {
     }
     fn showConfig(self: *Host) void {
         const view = self.config orelse return;
+        if (view.visible) {
+            if (configOverlayOwner(self) == null) self.workspace.status("请返回原会话完成端口转发配置");
+            return;
+        }
         const legacy = self.activeSession() orelse return;
         const host = self.configured(legacy) orelse return;
         const owner = self.application.ownerForLegacy(legacy) orelse return;
         const tab = self.workspace.sessionTab(legacy) orelse return;
-        self.exposure_for_start = false;
+        const hops = self.backend.sourceRoute(owner) catch return;
         self.config_host_id = tab.host_id;
         self.config_session_id = legacy;
-        const hops = self.backend.sourceRoute(owner) catch return;
+        self.config_owner = owner;
         var choices: [9]Config.Route = undefined;
         choices[0] = .{ .label = "链路末端", .index = null };
         for (hops, 0..) |hop, index| choices[index + 1] = .{ .label = if (hop.display_name.len == 0) hop.endpoint.host else hop.display_name, .index = index };
@@ -240,10 +278,29 @@ pub const Host = struct {
         self.info_owner = null;
         view.show(.{ .mode = if (desired) |d| d.mode else .socks5, .target_host = if (desired) |*d| if (d.target.len > 0) d.target.name() else "127.0.0.1" else "127.0.0.1", .target_port = if (desired) |d| if (d.target.port != 0) d.target.port else 8080 else 8080, .port = host.socks_port, .bind = host.socks_bind, .exit = host.socks_exit, .auto_start = host.socks_auto_start, .max_connections = host.socks_max_connections }, choices[0 .. hops.len + 1]) catch |err| view.setError(@errorName(err));
     }
+    fn currentConfigOwner(self: *Host) ?identity.SessionHandle {
+        const original = self.config_owner orelse return null;
+        const current = self.application.ownerForLegacy(self.config_session_id orelse return null) orelse return null;
+        return if (original.eql(current)) original else null;
+    }
+    pub fn configOverlayOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        return self.workspace.overlayOwner(self.currentConfigOwner() orelse return null);
+    }
+    pub fn exposureOverlayOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        const request = self.exposure_request orelse return null;
+        if (self.exposure_for_start) return self.workspace.overlayOwner(request.owner);
+        const owner = self.currentConfigOwner() orelse return null;
+        if (!request.owner.eql(owner) or self.workspace.overlayOwner(owner) == null) return null;
+        const view = self.config orelse return null;
+        return if (view.visible) view.card else null;
+    }
     pub fn saveConfig(raw: *anyopaque, draft: Config.Draft) void {
         const self: *Host = @ptrCast(@alignCast(raw));
         const view = self.config orelse return;
         const legacy = self.config_session_id orelse return;
+        _ = self.currentConfigOwner() orelse return;
         const tab = self.workspace.sessionTab(legacy) orelse {
             view.setError("会话已关闭");
             return;
@@ -305,11 +362,13 @@ pub const Host = struct {
     }
     pub fn testConfig(raw: *anyopaque, draft: Config.Draft) void {
         const self: *Host = @ptrCast(@alignCast(raw));
+        const legacy = self.config_session_id orelse return;
+        const owner = self.currentConfigOwner() orelse return;
         if (draft.mode != .socks5) {
             if (self.config) |view| view.setError("固定转发请应用配置后连接监听端口验证目标服务");
             return;
         }
-        const value = self.activeSnapshot() orelse {
+        const value = self.backend.snapshot(owner) orelse {
             if (self.config) |view| view.setError("请先开启当前会话的转发");
             return;
         };
@@ -317,18 +376,23 @@ pub const Host = struct {
             if (self.config) |view| view.setError("请先应用这组参数，再测试当前代理");
             return;
         }
-        self.testProxy();
+        self.testProxy(legacy, owner);
     }
     pub fn cancelConfig(raw: *anyopaque) void {
         const self: *Host = @ptrCast(@alignCast(raw));
+        if (!self.exposure_for_start and self.exposure_request != null) {
+            if (self.exposure) |view| view.hide();
+            exposureCancelled(self);
+        }
         if (self.config) |view| view.hide();
     }
     pub fn confirmExposure(raw: *anyopaque, bind: []const u8) bool {
         const self: *Host = @ptrCast(@alignCast(raw));
-        const owner = self.application.ownerForLegacy(self.config_session_id orelse return false) orelse return false;
+        const owner = self.currentConfigOwner() orelse return false;
         const draft = (self.config orelse return false).draft;
         const request: Exposure.ApprovalScope = .{ .owner = owner, .mode = draft.mode, .exit_index = draft.exit, .port = draft.port, .target = if (draft.mode == .socks5) .{} else routes.listener.Target.init(draft.target_host, draft.target_port) catch return false };
         if (self.exposure_approval) |approved| if (approved.eql(request)) return true;
+        if (self.exposure_request != null) return false;
         self.exposure_request = request;
         self.exposure_for_start = false;
         if (self.exposure) |view| view.showScoped(bind, request, self.exposureExitName(request)) catch {};
@@ -337,7 +401,7 @@ pub const Host = struct {
     pub fn exposureConfirmed(raw: *anyopaque, _: []const u8) void {
         const self: *Host = @ptrCast(@alignCast(raw));
         const requested = self.exposure_request orelse return;
-        const current = self.application.ownerForLegacy(self.config_session_id orelse return) orelse return;
+        const current = if (self.exposure_for_start) self.application.ownerForLegacy(self.pending_start orelse return) orelse return else self.currentConfigOwner() orelse return;
         if (!requested.owner.eql(current)) return;
         self.exposure_approval = requested;
         self.exposure_request = null;
@@ -432,7 +496,7 @@ pub const Host = struct {
             .start => self.commandToggle(null),
             .stop => _ = self.stopForSession(self.activeSession() orelse return),
             .config => self.showConfig(),
-            .test_proxy => self.testProxy(),
+            .test_proxy => self.testProxy(self.activeSession() orelse return, self.info_owner orelse return),
             .copy_export => {
                 const value = self.activeSnapshot() orelse return;
                 if (value.phase != .ready) return;
@@ -468,9 +532,9 @@ pub const Host = struct {
         const request: Exposure.ApprovalScope = .{ .owner = owner, .mode = if (desired) |d| d.mode else .socks5, .exit_index = host.socks_exit, .port = host.socks_port, .target = if (desired) |d| d.target else .{} };
         const exposed = if (self.exposure_approval) |approved| approved.eql(request) else false;
         if (!std.mem.eql(u8, host.socks_bind, "127.0.0.1") and !exposed) {
+            if (self.exposure_request != null) return;
             self.pending_start = legacy;
             self.pending_port = requested_port;
-            self.config_session_id = legacy;
             self.exposure_request = request;
             self.exposure_for_start = true;
             if (self.exposure) |view| view.showScoped(host.socks_bind, request, self.exposureExitName(request)) catch {};
@@ -536,6 +600,14 @@ pub const Host = struct {
         label.markRenderDirty();
     }
     fn poll(self: *Host) void {
+        if (self.config) |view| if (view.visible and self.currentConfigOwner() == null) cancelConfig(self);
+        if (self.exposure_request) |request| if (self.exposure_for_start) {
+            const current = if (self.pending_start) |legacy| self.application.ownerForLegacy(legacy) else null;
+            if (current == null or !request.owner.eql(current.?)) {
+                if (self.exposure) |view| view.hide();
+                exposureCancelled(self);
+            }
+        };
         if (self.probe_success_expires_ns) |deadline| {
             if (@import("../platform/realtime.zig").monotonicNs() >= deadline) {
                 self.probe_message_len = 0;
@@ -572,7 +644,9 @@ pub const Host = struct {
                     self.probe_message_len = text.len;
                     self.probe_success_expires_ns = if (succeeded) @import("../platform/realtime.zig").monotonicNs() + 5 * std.time.ns_per_s else null;
                     if (succeeded) self.cx.scheduleRedrawAfterNs(5 * std.time.ns_per_s);
-                    if (self.config) |view| if (view.visible) if (succeeded) view.setSuccess(text) else view.setError(text);
+                    if (self.config) |view| if (view.visible) if (self.currentConfigOwner()) |owner| if (owner.eql(value.?.owner)) {
+                        if (succeeded) view.setSuccess(text) else view.setError(text);
+                    };
                 }
                 probe.deinit();
                 self.proxy_probe = null;

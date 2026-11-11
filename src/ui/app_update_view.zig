@@ -2,6 +2,7 @@
 const std = @import("std");
 const ui = @import("ui");
 const S = @import("app_update_styles.zig");
+const ScopedModal = @import("scoped_modal.zig");
 pub const Action = enum { primary, cancel, release_page };
 pub const Hooks = struct { context: *anyopaque, action: *const fn (*anyopaque, Action) void };
 pub const Tone = enum { neutral, accent, warning, success };
@@ -22,6 +23,7 @@ pub const Presentation = struct {
     danger: bool = false,
     warning: bool = false,
     show_release: bool = false,
+    blocking: bool = false,
 };
 pub const View = struct {
     cx: *ui.Cx,
@@ -31,6 +33,7 @@ pub const View = struct {
     cancel_disabled: *ui.Signal(bool),
     dialog: *ui.Node,
     overlay: *ui.Node,
+    binding: *ScopedModal.Binding,
     body: *ui.Node,
     scroll: *ui.Node,
     actions: *ui.Node,
@@ -72,6 +75,7 @@ pub const View = struct {
     close_icon: *ui.Node,
     colors: S.theme.Colors,
     focus_pending: bool = false,
+    blocking: bool = false,
     danger: bool = false,
     warning: bool = false,
     primary_width: f32 = 84,
@@ -84,8 +88,8 @@ pub const View = struct {
         const open = try scope.createSignal(bool, false);
         const disabled = try scope.createSignal(bool, false);
         const cancel_disabled = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = ui.split(open, cx.on(View, self, closed)), .width = 520, .max_height = 378, .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        const modal = try ui.widgets.Modal(.{ .managed_focus = false, .open = ui.split(open, cx.on(View, self, closed)), .width = 520, .max_height = 378, .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
+        const binding = try ScopedModal.bind(cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = cx, .get = rootOwner } }, .mode = .panel });
         modal.dialog.setStyleInline(cx.allocator, S.dialog(cx.viewport.width, cx.viewport.height, 378));
         modal.body.setStyleInline(cx.allocator, S.body(cx.viewport.height));
         modal.dialog.meta.ownership.meta.test_id = "update.modal";
@@ -166,15 +170,19 @@ pub const View = struct {
         primary.meta.ownership.meta.test_id = "update.primary";
         const primary_label = firstText(primary).?;
         try actions.appendChild(cx.allocator, primary);
-        self.* = .{ .cx = cx, .hooks = hooks, .open = open, .disabled = disabled, .cancel_disabled = cancel_disabled, .dialog = modal.dialog, .overlay = modal.overlay, .body = modal.body, .scroll = scroll.container, .actions = actions, .content = content, .heading = heading, .heading_icon = heading_icon, .description = description, .help = help.wrapper, .help_icon = help_icon, .help_text = help_text, .progress = progress, .progress_value = progress_value, .summary = summary, .summary_text = summary_text, .message = message, .footer = footer, .row_nodes = row_nodes, .row_labels = row_labels, .row_values = row_values, .row_icons = row_icons, .primary_interaction = primary_interaction, .primary_base = primary_base, .cancel_base = cancel_base, .release_base = release_base, .primary_variant = primary_variant, .primary_text = primary_text, .cancel_text = cancel_text, .primary = primary, .primary_label = primary_label, .cancel = cancel, .cancel_label = cancel_label, .release = release, .release_label = release_label, .close = close_button, .close_icon = close_icon, .colors = S.theme.current() };
+        self.* = .{ .cx = cx, .hooks = hooks, .open = open, .disabled = disabled, .cancel_disabled = cancel_disabled, .dialog = modal.dialog, .overlay = modal.overlay, .binding = binding, .body = modal.body, .scroll = scroll.container, .actions = actions, .content = content, .heading = heading, .heading_icon = heading_icon, .description = description, .help = help.wrapper, .help_icon = help_icon, .help_text = help_text, .progress = progress, .progress_value = progress_value, .summary = summary, .summary_text = summary_text, .message = message, .footer = footer, .row_nodes = row_nodes, .row_labels = row_labels, .row_values = row_values, .row_icons = row_icons, .primary_interaction = primary_interaction, .primary_base = primary_base, .cancel_base = cancel_base, .release_base = release_base, .primary_variant = primary_variant, .primary_text = primary_text, .cancel_text = cancel_text, .primary = primary, .primary_label = primary_label, .cancel = cancel, .cancel_label = cancel_label, .release = release, .release_label = release_label, .close = close_button, .close_icon = close_icon, .colors = S.theme.current() };
         try scope.onCleanup(View, self, cleanup);
         try cx.addAfterLayoutHook(self, frame);
         self.retheme();
         return self;
     }
+    fn rootOwner(raw: *anyopaque) ?*ui.Node {
+        const cx: *ui.Cx = @ptrCast(@alignCast(raw));
+        return cx.root;
+    }
     pub fn show(self: *View) void {
         self.open.set(true);
-        self.focus_pending = true;
+        self.focus_pending = self.blocking;
         self.cx.requestRedraw();
     }
     pub fn hide(self: *View) void {
@@ -182,6 +190,9 @@ pub const View = struct {
         self.cx.requestRedraw();
     }
     pub fn update(self: *View, p: Presentation) !void {
+        if (p.blocking and !self.blocking) self.focus_pending = true;
+        self.blocking = p.blocking;
+        self.binding.setMode(if (p.blocking) .content else .panel);
         try self.heading.setTextContent(self.cx.allocator, p.title);
         try self.description.setTextContent(self.cx.allocator, p.description);
         try self.summary_text.setTextContent(self.cx.allocator, p.summary);

@@ -72,14 +72,21 @@ async function capture(name: string) {
     }
 }
 
-async function openWebWizard(name: string) {
+async function openWebWizard(name: string, keyboard = false) {
     await click('toolbar.new_session');
-    await click('session.menu.new_profile');
-    await find('wizard.protocol');
-    if (!(await h.query('web.editor.name')).some(visible)) {
-        await click('wizard.protocol');
-        await click('wizard.protocol.web');
+    assert(!(await h.query('session.menu.notes_float')).some(visible));
+    const row = await find('session.menu.new_web');
+    if (keyboard) {
+        assert(row.rect.y >= 0 && row.rect.y + row.rect.h <= 480);
+        await capture('new-web-menu-compact');
+        for (let i = 0; i < 8 && (await h.focused()).test_id !== 'session.menu.new_web'; i++) await h.key('up');
+        assert.equal((await h.focused()).test_id, 'session.menu.new_web');
+        await h.key('return');
+    } else {
+        if (name === 'Owned direct web') await capture('new-web-menu');
+        await click('session.menu.new_web');
     }
+    await find('web.editor.name');
     await fill('web.editor.name', name);
 }
 
@@ -118,12 +125,19 @@ try {
         return payload && JSON.parse(JSON.parse(payload)).bookmarks.length === 1 ? true : null;
     }, 12000);
     await capture('direct-web');
+    stage = 'show the saved web origin in Quick Connect';
+    await h.key('k', {cmd: true});
+    await fill('quick.query', 'Owned direct web');
+    await find('quick.saved.endpoint', node => content(node).includes(new URL(ready.direct).origin));
+    await click('quick.close');
     stage = 'edit the existing bookmark without navigating';
     await click('web.address.bookmark');
     await fill('web.bookmark.edit.name', 'Fixture bookmark');
     await click('web.bookmark.edit.save');
     await h.waitFor(async () => (await readFile(join(data, 'hosts.toml'), 'utf8')).includes('Fixture bookmark') || null, 12000);
     assert.equal((await traffic()).filter(event => event.path === '/direct').length, 1);
+    const webTabs = async () => (await h.query('tabs.strip')).flatMap(flatten).filter((node: any) => /^tabs\.tab\.\d+$/.test(node.test_id ?? '') && visible(node));
+    const directTab = (await webTabs())[0].test_id;
 
     stage = 'website dialogs retain user choices and distinguish empty input from cancel';
     await openWebWizard('Web interaction fixture');
@@ -145,6 +159,13 @@ try {
         await find('plugin.challenge.modal', node => content(node).includes(title) && content(node).includes(message));
         await find('plugin.challenge.source', node => content(node).includes(new URL(ready.direct).origin));
     };
+    await prompt('网页提示', 'fixture visible alert');
+    const interactionTab = (await webTabs()).find((node: any) => node.test_id !== directTab).test_id;
+    await click(directTab);
+    await h.waitFor(async () => !(await h.query('plugin.challenge.modal')).some(visible) || null, 12000);
+    await find('web.address', node => content(node).includes(ready.direct));
+    assert.equal((await traffic()).filter(event => event.path === '/direct').length, 1);
+    await click(interactionTab);
     await prompt('网页提示', 'fixture visible alert');
     await capture('website-alert');
     await click('plugin.challenge.choice.0');
@@ -168,7 +189,7 @@ try {
     assert.equal(values.get('empty'), '""');
     assert.equal(values.get('cancelled'), 'null');
 
-    stage = 'website HTTP authentication uses a window-owned one-time challenge';
+    stage = 'website HTTP authentication uses a session-owned one-time challenge';
     await fill('web.address', new URL('/auth-fixture', ready.direct).href);
     await h.key('return');
     await prompt('网站登录', 'Web fixture');
@@ -181,7 +202,9 @@ try {
     assert(!(await readFile(join(data, 'hosts.toml'), 'utf8')).includes('local-auth-only'));
 
     stage = 'configure two hops with the shared SSH asset picker';
-    await openWebWizard('Owned routed web');
+    await h.resizeWindow(860, 480);
+    await openWebWizard('Owned routed web', true);
+    await h.resizeWindow(1280, 800);
     await click('web.editor.mode.manual');
     await click('wizard.access.jump');
     for (const hop of [1, 2]) {

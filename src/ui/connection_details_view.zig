@@ -89,6 +89,7 @@ pub const View = struct {
     selection: ?Selection = null,
     node_open: *ui.Signal(bool),
     node_modal: ?ui.widgets.ModalResult = null,
+    node_owner: ?@import("scoped_modal.zig").Owner = null,
     node_scope: ?*ui.Scope = null,
     node_dirty: bool = false,
     node_fingerprint: ?*ui.Node = null,
@@ -430,8 +431,9 @@ pub const View = struct {
         const snapshot = if (self.source) |*value| value else return;
         const selection = self.selection orelse return;
         if (self.node_modal == null) {
-            self.node_modal = try ui.widgets.Modal(.{ .open = self.node_open, .width = S.node_width, .max_height = @max(160, self.cx.viewport.height - S.margin * 2), .background = S.theme.current().overlay, .on_open_change = self.cx.on(View, self, nodeOpenChanged) }).mount(self.scope, self.cx);
-            if (!self.node_modal.?.portaled) if (self.cx.root) |root| try root.appendChild(self.cx.allocator, self.node_modal.?.overlay);
+            self.node_modal = try ui.widgets.Modal(.{ .open = self.node_open, .width = S.node_width, .max_height = @max(160, self.cx.viewport.height - S.margin * 2), .background = S.theme.current().overlay, .on_open_change = self.cx.on(View, self, nodeOpenChanged), .managed_focus = self.node_owner == null }).mount(self.scope, self.cx);
+            if (self.node_owner) |owner| _ = try @import("scoped_modal.zig").bind(self.cx, self.scope, self.node_modal.?, .{ .owner = owner, .mode = .panel });
+            if (!self.node_modal.?.portaled and self.node_modal.?.overlay.parent == null) if (self.cx.root) |root| try root.appendChild(self.cx.allocator, self.node_modal.?.overlay);
         }
         const modal = self.node_modal.?;
         if (self.material) |material| try material.isolate(self.scope, modal.dialog);

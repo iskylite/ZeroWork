@@ -262,6 +262,12 @@ pub const NodeRegistry = struct {
         return entry.ptr;
     }
 
+    /// For relationships tied to a monotone Cx node ID across retained reparenting.
+    pub fn resolveLiveId(self: *const NodeRegistry, id: u32) ?*Node {
+        const entry = self.entries.get(id) orelse return null;
+        return entry.ptr;
+    }
+
     pub fn trackGeneration(self: *NodeRegistry, node: *Node) !u32 {
         const gop = try self.generations.getOrPut(node.id);
         if (!gop.found_existing) {

@@ -61,8 +61,10 @@ pub const Host = struct {
         self.feedback_label.setStyleInline(cx.allocator, .{ .max_width = 340 });
         try self.feedback.content.appendChild(cx.allocator, self.feedback_label);
         try cx.root.?.appendChild(cx.allocator, self.feedback.wrapper);
-        self.logs = try Logs.View.mount(cx, scope, .{ .context = self, .copy_logs = copy });
+        const owner: @import("scoped_modal.zig").Owner = .{ .resolve = .{ .context = self, .get = resolveOwner } };
+        self.logs = try Logs.View.mountWithOwner(cx, scope, .{ .context = self, .copy_logs = copy }, owner);
         self.view = try View.mount(cx, scope, .{ .context = self, .request_sample = requestSample, .cancel_sample = cancelSample, .copy = copy, .logs = openLogs });
+        self.view.node_owner = owner;
         try cx.root.?.appendChild(cx.allocator, self.view.root);
         self.ssh_status = try SSH.Host.mount(cx, scope, .{ .context = self, .capture = captureStatus, .copy = copy, .logs = openLogs, .reconnect = reconnect, .hide_chain = hideChain });
         try cx.addAfterLayoutHook(self, hook);
@@ -70,8 +72,10 @@ pub const Host = struct {
         return self;
     }
 
-    pub fn blocksGlobalActions(self: *const Host) bool {
-        return self.logs.isVisible() or self.view.isVisible() or self.ssh_status.isOpen();
+    fn resolveOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        const key = self.key orelse return null;
+        return if (key.owner == .session) self.workspace.overlayOwner(key.owner.session) else null;
     }
 
     fn captureStatus(raw: *anyopaque, snapshot: @import("connection_details_view.zig").Snapshot) !void {
@@ -260,6 +264,12 @@ pub const Host = struct {
         if (!self.view.isVisible() and !self.logs.isVisible() and !self.ssh_status.info.isVisible()) return .done;
         const key = self.key orelse return .done;
         if (key.owner != .session) return .done;
+        if (self.workspace.overlayOwner(key.owner.session) == null) {
+            self.view.dismiss();
+            self.logs.hide();
+            self.ssh_status.info.dismiss();
+            return .done;
+        }
         const snapshot = self.application.sshConnectionDetails(key.owner.session) catch |err| {
             // A contended snapshot is not a stale session. Invalidating here
             // cancels the live RTT and permanently expires the open card.

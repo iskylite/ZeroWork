@@ -363,6 +363,7 @@ fn applyCommandInfoSettings(workspace: *ws.Workspace, global: bool) void {
 const ws = @import("ui/workspace.zig");
 const quick_connect_mod = @import("ui/quick_connect.zig");
 const hosts_mod = @import("config/hosts.zig");
+const scoped_modal = @import("ui/scoped_modal.zig");
 const wizard_mod = @import("ui/wizard.zig");
 const remote_editor = @import("plugins/remote/editor_factory.zig");
 const transfer_mod = @import("transfer/manager.zig");
@@ -388,6 +389,7 @@ const AiClient = @import("ai/provider_client.zig").Client;
 const NativeContext = @import("ai/provider_transport.zig").NativeContext;
 const ai_provider_config = @import("ai/provider_config.zig");
 const ai_attachments = @import("ai/local_text_attachments.zig");
+const FileSheet = @import("platform/file_sheet.zig").Sheet;
 const ai_attachment_request = @import("ai/local_text_request.zig");
 const AiAttachmentReader = @import("host/ai_local_file_snapshot.zig").Reader;
 const ai_images = @import("ai/image_attachments.zig");
@@ -520,7 +522,7 @@ const AiHost = struct {
     workspace_view: ?*@import("ui/ai_workspace_view.zig").View = null,
     attachments_view: ?*@import("ui/ai_attachments_view.zig").View = null,
     attachment_readers: std.ArrayList(*AiAttachmentReader) = .empty,
-    attachment_picker_active: bool = false,
+    attachment_picker: ?AttachmentPicker = null,
     images_view: ?*@import("ui/ai_image_attachments_view.zig").View = null,
     image_readers: std.ArrayList(*AiImageReader) = .empty,
     transcript_images: ?*@import("ui/ai_transcript_images.zig").Store = null,
@@ -1183,6 +1185,16 @@ const AiHost = struct {
         self.last_user_attachments = saved.last_user_attachments;
         self.last_user_images = saved.last_user_images;
         if (self.images_view) |view| view.dismiss();
+        if (self.attachments_view) |view| view.dismiss();
+        if (self.remote_picker) |view| view.close();
+        if (self.sessions_view) |view| {
+            view.open.set(false);
+            view.history_open.set(false);
+            if (view.pending != null) {
+                view.pending = null;
+                view.confirmation.set(false);
+            }
+        }
         self.controller.model = saved.model;
         if (owner_changed) {
             if (self.controller.model.visible) self.dock.pin() else self.dock.hide();
@@ -1333,7 +1345,7 @@ const AiHost = struct {
         const scope = remoteScope(self, owner) orelse return error.StaleOwner;
         const files = self.file_application orelse return error.FileSourceUnavailable;
         if (self.remote_picker == null) {
-            const view = try @import("ui/ai_remote_picker.zig").View.mount(self.cx, self.scope orelse return error.MissingAssistantScope, files.file_host orelse return error.FileSourceUnavailable, .{ .context = self, .ensure = remoteEnsure, .live = remoteScope, .stage = stageRemote, .attach = attachRemote });
+            const view = try @import("ui/ai_remote_picker.zig").View.mount(self.cx, self.scope orelse return error.MissingAssistantScope, files.file_host orelse return error.FileSourceUnavailable, .{ .context = self, .ensure = remoteEnsure, .live = remoteScope, .stage = stageRemote, .attach = attachRemote, .overlay_owner = self.card_box orelse self.panel });
             const parent = self.attachment_preview_holder orelse return error.MissingAssistantScope;
             // The holder already has 14px outer padding.
             view.root.setStyleInline(self.allocator, .{ .padding = .{} });
@@ -1381,16 +1393,11 @@ const AiHost = struct {
     }
 
     fn chooseImage(self: *AiHost, owner: ai_images.Owner) !void {
-        if (self.attachment_picker_active) return error.AttachmentPickerBusy;
-        const sdk = self.cx.system_sdk orelse return error.NotSupported;
+        if (self.attachment_picker != null) return error.AttachmentPickerBusy;
         const conversation_id = (try self.imageDraft(owner)).conversation_id;
-        self.attachment_picker_active = true;
-        defer self.attachment_picker_active = false;
-        var buffer: [4096]u8 = undefined;
-        const path = try sdk.runDialog(.{ .kind = .open_file, .title = "选择图片（最多 4 张，单张 10 MB）" }, &buffer) orelse return;
-        const state = self.attachmentConversation(conversation_id) orelse return error.StaleAttachment;
-        const draft = self.assistant_states.?.imageDraftFor(state.id) orelse return error.StaleAttachment;
-        try self.addImageToDraft(draft, path);
+        const sheet = try FileSheet.begin(self.cx, .{ .kind = .file, .title = "选择图片（最多 4 张，单张 10 MB）" });
+        self.attachment_picker = .{ .sheet = sheet, .request = .{ .image = conversation_id } };
+        self.cx.requestRedraw();
     }
 
     fn addImagePath(self: *AiHost, owner: ai_images.Owner, path: []const u8) !void {
@@ -1582,7 +1589,7 @@ const AiHost = struct {
     fn appendSentImages(self: *AiHost, parent: *ui.Node, bundle: *const ai_images.Bundle) !void {
         if (bundle.items.len == 0) return;
         if (self.conversation_scope == null) self.conversation_scope = try (self.scope orelse return error.MissingAssistantScope).childScope();
-        const view = try @import("ui/ai_image_attachments_view.zig").View.mount(self.cx, self.conversation_scope.?, .{ .context = self, .preview_sent = previewSentImage, .on_error = attachmentViewError }, self.attachment_preview_holder.?);
+        const view = try @import("ui/ai_image_attachments_view.zig").View.mount(self.cx, self.conversation_scope.?, .{ .context = self, .preview_sent = previewSentImage, .on_error = attachmentViewError, .overlay_owner = self.card_box orelse self.panel }, self.attachment_preview_holder.?);
         if (self.images_view) |draft_view| view.app = draft_view.app;
         try view.updateSent(bundle);
         try parent.appendChild(self.allocator, view.root);
@@ -1752,26 +1759,35 @@ const AiHost = struct {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         const visible = self.displayedWorkspace() orelse return error.StaleWorkspace;
         if (!visible.editable or !visible.ticket.eql(ticket)) return error.StaleWorkspace;
-        if (self.attachment_picker_active) return error.AttachmentPickerBusy;
+        if (self.attachment_picker != null) return error.AttachmentPickerBusy;
         const shared_host = try self.shared();
         const store = &shared_host.service.store;
         const starting_fence = store.fence(ticket.conversation) catch |err| switch (err) {
             error.ConversationNotFound => null,
             else => return err,
         };
-        var path_buffer: [4096]u8 = undefined;
-        const path: ?[]const u8 = switch (action) {
-            .remove => null,
-            .choose => select: {
-                // AppKit enters a nested run loop. Do not borrow record-owned
-                // directory bytes, or trust the selection on return.
-                const initial = if (visible.directory) |dir| try self.allocator.dupe(u8, dir) else null;
-                defer if (initial) |dir| self.allocator.free(dir);
-                self.attachment_picker_active = true;
-                defer self.attachment_picker_active = false;
-                break :select try WorkspaceUI.pickLocalPath(self.cx, .directory, initial, &path_buffer) orelse return;
-            },
-        };
+        if (action == .choose) {
+            const sheet = try FileSheet.begin(self.cx, .{ .kind = .folder, .title = "选择本地工作区", .prompt = "选择", .initial = visible.directory });
+            self.attachment_picker = .{ .sheet = sheet, .request = .{ .workspace = .{ .ticket = ticket, .fence = starting_fence } } };
+            self.cx.requestRedraw();
+            return;
+        }
+        try self.applyWorkspaceSelection(ticket, starting_fence, null);
+    }
+
+    const WorkspaceFence = @import("ai/session_input.zig").Fence;
+    const AttachmentPicker = struct {
+        sheet: FileSheet,
+        request: union(enum) {
+            image: ?@import("host/identity.zig").ConversationId,
+            text: struct { ticket: ai_attachments.Ticket, replacement: ?ai_attachments.Ticket },
+            workspace: struct { ticket: WorkspaceUI.Ticket, fence: ?WorkspaceFence },
+        },
+    };
+
+    fn applyWorkspaceSelection(self: *AiHost, ticket: WorkspaceUI.Ticket, starting_fence: ?WorkspaceFence, path: ?[]const u8) !void {
+        const shared_host = try self.shared();
+        const store = &shared_host.service.store;
         const latest = self.displayedWorkspace() orelse return error.StaleWorkspace;
         if (!latest.editable or !latest.ticket.eql(ticket)) return error.StaleWorkspace;
         const current_fence = store.fence(ticket.conversation) catch |err| switch (err) {
@@ -1800,15 +1816,12 @@ const AiHost = struct {
         }
     }
     fn chooseLocalText(self: *AiHost, owner: ai_attachments.Owner, replacement: ?ai_attachments.Ticket) !void {
-        if (self.attachment_picker_active) return error.AttachmentPickerBusy;
+        if (self.attachment_picker != null) return error.AttachmentPickerBusy;
         const draft = if (replacement) |ticket| try self.attachmentDraftForTicket(ticket) else try self.attachmentDraft(owner);
         const ticket = try draft.begin();
         errdefer if (self.attachmentDraftForTicket(ticket)) |current| {
             _ = current.cancel(ticket);
         } else |_| {};
-        self.attachment_picker_active = true;
-        defer self.attachment_picker_active = false;
-        var buffer: [4096]u8 = undefined;
         const initial = initial: {
             if (self.workspaceScopeRevision(owner) == null) break :initial null;
             const id = ticket.conversation_id orelse break :initial null;
@@ -1819,13 +1832,12 @@ const AiHost = struct {
             break :initial try self.allocator.dupe(u8, record.workspace.resolved_directory.?);
         };
         defer if (initial) |dir| self.allocator.free(dir);
-        const path = try WorkspaceUI.pickLocalPath(self.cx, .file, initial, &buffer) orelse {
-            if (self.attachmentDraftForTicket(ticket)) |current| {
-                _ = current.cancel(ticket);
-            } else |_| {}
-            self.promptChanged(self.prompt.get());
-            return;
-        };
+        const sheet = try FileSheet.begin(self.cx, .{ .kind = .file, .title = "选择本地文件", .prompt = "选择", .initial = initial });
+        self.attachment_picker = .{ .sheet = sheet, .request = .{ .text = .{ .ticket = ticket, .replacement = replacement } } };
+        self.cx.requestRedraw();
+    }
+
+    fn completeLocalText(self: *AiHost, ticket: ai_attachments.Ticket, replacement: ?ai_attachments.Ticket, path: []const u8) !void {
         const current = try self.attachmentDraftForTicket(ticket);
         if (!current.contains(ticket)) return error.StaleAttachment;
         const reader = try AiAttachmentReader.start(self.allocator, ticket, path);
@@ -1836,6 +1848,46 @@ const AiHost = struct {
         self.promptChanged(self.prompt.get());
         if (self.attachmentTicketDisplayed(ticket)) self.refresh("正在处理本地文件…");
         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+    }
+
+    fn cancelLocalTextSelection(self: *AiHost, ticket: ai_attachments.Ticket) void {
+        if (self.attachmentDraftForTicket(ticket)) |draft| {
+            _ = draft.cancel(ticket);
+        } else |_| {}
+    }
+
+    fn closeAttachmentPicker(self: *AiHost) void {
+        const picker = self.attachment_picker orelse return;
+        self.attachment_picker = null;
+        if (picker.request == .text) self.cancelLocalTextSelection(picker.request.text.ticket);
+        picker.sheet.deinit();
+    }
+
+    fn pollAttachmentPicker(self: *AiHost) !void {
+        const picker = self.attachment_picker orelse return;
+        const count = picker.sheet.count() orelse {
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+            return;
+        };
+        self.attachment_picker = null;
+        defer picker.sheet.deinit();
+        errdefer if (picker.request == .text) self.cancelLocalTextSelection(picker.request.text.ticket);
+        if (count == 0) {
+            if (picker.request == .text) self.cancelLocalTextSelection(picker.request.text.ticket);
+            self.promptChanged(self.prompt.get());
+            return;
+        }
+        var buffer: [4096]u8 = undefined;
+        const path = try picker.sheet.path(0, &buffer);
+        switch (picker.request) {
+            .image => |conversation_id| {
+                const state = self.attachmentConversation(conversation_id) orelse return error.StaleAttachment;
+                const draft = self.assistant_states.?.imageDraftFor(state.id) orelse return error.StaleAttachment;
+                try self.addImageToDraft(draft, path);
+            },
+            .text => |request| try self.completeLocalText(request.ticket, request.replacement, path),
+            .workspace => |request| try self.applyWorkspaceSelection(request.ticket, request.fence, path),
+        }
     }
 
     fn attachmentOwnerExists(self: *AiHost, owner: ai_attachments.Owner) bool {
@@ -1869,6 +1921,7 @@ const AiHost = struct {
     }
 
     fn pumpAttachments(self: *AiHost) !void {
+        try self.pollAttachmentPicker();
         var index: usize = 0;
         while (index < self.attachment_readers.items.len) {
             const reader = self.attachment_readers.items[index];
@@ -4125,7 +4178,7 @@ const AiHost = struct {
     fn appendSentAttachments(self: *AiHost, parent: *ui.Node, bundle: *const ai_attachments.Bundle) !void {
         if (bundle.items.len == 0) return;
         if (self.conversation_scope == null) self.conversation_scope = try (self.scope orelse return error.MissingAssistantScope).childScope();
-        const view = try @import("ui/ai_attachments_view.zig").View.mount(self.cx, self.conversation_scope.?, .{ .context = self, .preview_sent = AiHost.previewSentAttachment, .on_error = AiHost.attachmentViewError });
+        const view = try @import("ui/ai_attachments_view.zig").View.mount(self.cx, self.conversation_scope.?, .{ .context = self, .preview_sent = AiHost.previewSentAttachment, .on_error = AiHost.attachmentViewError, .overlay_owner = self.card_box orelse self.panel });
         try view.updateSent(bundle);
         try parent.appendChild(self.cx.allocator, view.root);
     }
@@ -5260,7 +5313,7 @@ const AiHost = struct {
         self.refreshSendHint();
 
         var ready: usize = 0;
-        var processing = self.attachment_picker_active;
+        var processing = self.attachment_picker != null;
         var image_problem: ?anyerror = null;
         var has_images = if (self.last_user_images) |bundle| bundle.items.len > 0 else false;
         for (self.history.items) |message| if (message.images) |bundle| {
@@ -8891,6 +8944,7 @@ const AiHost = struct {
         self.lifecycle_controller = null;
         if (self.lifecycle_runtime) |runtime| runtime.journal_owner.release();
         self.lifecycle_runtime = null;
+        self.closeAttachmentPicker();
         self.cancelAttachmentReaders(null);
         self.attachment_readers.deinit(self.allocator);
         self.cancelImageReaders(null);
@@ -8981,8 +9035,9 @@ const ChildDialog = struct {
         const scope = try parent.scope.?.childScope();
         errdefer scope.dispose();
         const open = try scope.createSignal(bool, true);
-        const modal = try ui.widgets.Modal(.{ .open = open, .width = 600, .max_height = @min(456, cx.viewport.height - 32), .background = app_theme.current().overlay }).mount(scope, cx);
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        const overlay_owner = parent.card_box orelse parent.panel;
+        const modal = try ui.widgets.Modal(.{ .open = open, .managed_focus = false, .width = 600, .max_height = @min(456, cx.viewport.height - 32), .background = app_theme.current().overlay }).mount(scope, cx);
+        _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .node = overlay_owner } });
         modal.dialog.setStyleInline(cx.allocator, @import("ui/ai_assistant_styles.zig").panel(cx.tokens));
         modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = @min(600, cx.viewport.width - 32) }, .height = .{ .px = @min(456, cx.viewport.height - 32) }, .max_height = @min(456, cx.viewport.height - 32) });
         modal.dialog.meta.ownership.meta.test_id = "ai.child.dialog";
@@ -9401,9 +9456,10 @@ const ChildDialog = struct {
             self.dialog.setBackground(app_theme.current().overlay);
             _ = self.history_arrow.setTint(app_theme.current().fg_2);
         }
-        if (self.layout_width != self.host.cx.viewport.width or self.layout_height != self.host.cx.viewport.height) {
-            self.layout_width = self.host.cx.viewport.width;
-            self.layout_height = self.host.cx.viewport.height;
+        const owner_bounds = (self.parent.card_box orelse self.parent.panel).globalRect();
+        if (self.layout_width != owner_bounds.w or self.layout_height != owner_bounds.h) {
+            self.layout_width = owner_bounds.w;
+            self.layout_height = owner_bounds.h;
             self.props_scroll.setStyleInline(self.host.cx.allocator, @import("ui/ai_children_styles.zig").settingsBody(self.layout_height));
             self.dialog.setStyleInline(self.host.cx.allocator, .{ .width = .{ .px = @max(0, if (self.maximized) self.layout_width - 32 else @min(600, self.layout_width - 32)) }, .height = .{ .px = @max(0, if (self.maximized) self.layout_height - 32 else @min(456, self.layout_height - 32)) }, .max_height = @max(0, if (self.maximized) self.layout_height - 32 else @min(456, self.layout_height - 32)) });
         }
@@ -9443,7 +9499,17 @@ const RenameTabCtx = struct {
 };
 
 const MenuHost = struct {
+    const ExportPicker = struct {
+        sheet: FileSheet,
+        capture: @import("ui/session_export.zig").SessionCapture,
+        format: @import("ui/session_export.zig").Format,
+        runtime: @FieldType(ws.SessionTab, "runtime"),
+        archive: @FieldType(ws.SessionTab, "archive_document"),
+        local_service: ?@import("host/terminal_service.zig").Service,
+    };
+
     pending_sidebar_action: ?struct { owner: @import("host/identity.zig").AssetOwner, action: @import("ui/sidebar_view.zig").HostAction } = null,
+    export_picker: ?ExportPicker = null,
 
     allocator: std.mem.Allocator,
     cx: *ui.Cx,
@@ -10131,11 +10197,7 @@ const MenuHost = struct {
             },
             .export_selection => {
                 const terminal = self.activeTerminal() orelse return;
-                const saved = terminal.exportText(self.cx, workspace.io, .selection) catch |err| {
-                    workspace.statusFailure(@errorName(err));
-                    return;
-                };
-                if (saved) workspace.status("已导出选中内容");
+                terminal.exportText(self.cx, .selection) catch |err| workspace.statusFailure(@errorName(err));
             },
             .ask_ai => if (self.ai) |ai| {
                 const intent = if (self.using_capture) self.captured_terminal_intent else if (self.context_tab) |index| self.terminalIntent(index) else null;
@@ -10209,6 +10271,7 @@ const MenuHost = struct {
                     workspace.statusFailure(@import("ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "无法打开主机配置。请从侧栏重新打开后重试。");
                     return;
                 };
+                if (self.context_tab) |index| scopeWizardToTab(workspace, host.wizard, index);
                 self.edit_host_index = host_index;
             },
             .save_host => {
@@ -10224,7 +10287,11 @@ const MenuHost = struct {
                     },
                     .plugin => |value| value,
                 };
-                WizardHost.openConnectionDraft(host, value) catch |err| workspace.statusFailure(@errorName(err));
+                WizardHost.openConnectionDraft(host, value) catch |err| {
+                    workspace.statusFailure(@errorName(err));
+                    return;
+                };
+                scopeWizardToTab(workspace, host.wizard, index);
             },
             .pin_host => {
                 const host_index = self.context_host orelse return;
@@ -10298,46 +10365,14 @@ const MenuHost = struct {
                     workspace.statusFailure(@errorName(err));
                     return;
                 };
-                const sdk = self.cx.system_sdk orelse return;
-                var path_buffer: [4096]u8 = undefined;
-                const path = sdk.runDialog(.{ .kind = .save_file, .title = format.defaultFilename() }, &path_buffer) catch |err| {
+                if (self.export_picker != null) return;
+                const filename = format.defaultFilename();
+                const sheet = FileSheet.begin(self.cx, .{ .kind = .save, .title = filename, .initial = filename }) catch |err| {
                     workspace.statusFailure(@errorName(err));
                     return;
                 };
-                const destination = path orelse return;
-                const current_index = workspace.tabIndexById(capture.tab_id) orelse return;
-                const current_tab = workspace.tabs.items[current_index];
-                if (!capture.matches(current_tab.tab_id, current_tab.content_owner) or current_tab.runtime != runtime or current_tab.archive_document != archived_document or current_tab.closing) {
-                    workspace.status("StaleExportOwner");
-                    return;
-                }
-                const Jobs = @import("ui/session_export_jobs.zig");
-                const manager = Jobs.Manager.forCx(self.cx) orelse return;
-                if (manager.job != null) {
-                    workspace.status("日志正在导出中");
-                    return;
-                }
-                const source: Jobs.Source = if (archived_document) |document| blk: {
-                    const history = self.history_host orelse return;
-                    break :blk .{ .archive_record = Jobs.ArchiveRecord.capture(std.heap.c_allocator, history.archive, document.record.descriptor.archive_key, document.record.descriptor.manifest_revision) catch |err| {
-                        workspace.statusFailure(@errorName(err));
-                        return;
-                    } };
-                } else if (local_service) |service| blk: {
-                    const surface = (current_tab.terminal orelse return).terminal_surface orelse return;
-                    if (!surface.service.binding.eql(service.binding)) return;
-                    break :blk .{ .live = service.recordingLease() catch |err| {
-                        workspace.statusFailure(@errorName(err));
-                        return;
-                    } };
-                } else if (runtime) |current| blk: {
-                    if (current.torn_down) return;
-                    break :blk .{ .frozen = current.captureExport(std.heap.c_allocator) catch |err| {
-                        workspace.statusFailure(@errorName(err));
-                        return;
-                    } };
-                } else return;
-                manager.start(source, format, destination) catch |err| workspace.statusFailure(@errorName(err));
+                self.export_picker = .{ .sheet = sheet, .capture = capture, .format = format, .runtime = runtime, .archive = archived_document, .local_service = local_service };
+                self.cx.requestRedraw();
             },
             .close_others => {
                 const tab_index = self.context_tab orelse return;
@@ -10426,7 +10461,58 @@ const MenuHost = struct {
         return .ignored;
     }
 
+    fn pollExportPicker(self: *MenuHost) void {
+        const picker = self.export_picker orelse return;
+        const count = picker.sheet.count() orelse {
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+            return;
+        };
+        self.export_picker = null;
+        defer picker.sheet.deinit();
+        if (count == 0) return;
+        const workspace = self.workspace orelse return;
+        var buffer: [4096]u8 = undefined;
+        const destination = picker.sheet.path(0, &buffer) catch |err| {
+            workspace.statusFailure(@errorName(err));
+            return;
+        };
+        const current_index = workspace.tabIndexById(picker.capture.tab_id) orelse return;
+        const current_tab = workspace.tabs.items[current_index];
+        if (!picker.capture.matches(current_tab.tab_id, current_tab.content_owner) or current_tab.runtime != picker.runtime or current_tab.archive_document != picker.archive or current_tab.closing) {
+            workspace.status("StaleExportOwner");
+            return;
+        }
+        const Jobs = @import("ui/session_export_jobs.zig");
+        const manager = Jobs.Manager.forCx(self.cx) orelse return;
+        if (manager.job != null) {
+            workspace.status("日志正在导出中");
+            return;
+        }
+        const source: Jobs.Source = if (picker.archive) |document| blk: {
+            const history = self.history_host orelse return;
+            break :blk .{ .archive_record = Jobs.ArchiveRecord.capture(std.heap.c_allocator, history.archive, document.record.descriptor.archive_key, document.record.descriptor.manifest_revision) catch |err| {
+                workspace.statusFailure(@errorName(err));
+                return;
+            } };
+        } else if (picker.local_service) |service| blk: {
+            const surface = (current_tab.terminal orelse return).terminal_surface orelse return;
+            if (!surface.service.binding.eql(service.binding)) return;
+            break :blk .{ .live = service.recordingLease() catch |err| {
+                workspace.statusFailure(@errorName(err));
+                return;
+            } };
+        } else if (picker.runtime) |current| blk: {
+            if (current.torn_down) return;
+            break :blk .{ .frozen = current.captureExport(std.heap.c_allocator) catch |err| {
+                workspace.statusFailure(@errorName(err));
+                return;
+            } };
+        } else return;
+        manager.start(source, picker.format, destination) catch |err| workspace.statusFailure(@errorName(err));
+    }
+
     fn cleanup(self: *MenuHost) void {
+        if (self.export_picker) |picker| picker.sheet.deinit();
         if (self.rename_scope) |scope| scope.dispose();
         // The parent already disposed Popover and row child scopes.
         self.row_scope = null;
@@ -10439,7 +10525,21 @@ const MenuHost = struct {
 const HistoryHost = @import("ui/history_host.zig").Host;
 
 const SettingsHost = struct {
+    const SettingsFilePicker = struct {
+        sheet: FileSheet,
+        request: union(enum) {
+            diagnostics: @import("host/diagnostic_export.zig").Plan,
+            directory: struct { draft_id: u64, key: settings_content_view.Key },
+        },
+
+        fn deinit(self: *SettingsFilePicker) void {
+            self.sheet.deinit();
+            if (self.request == .diagnostics) self.request.diagnostics.deinit();
+        }
+    };
+
     const RecordCleanup = @import("host/record_cleanup.zig");
+
     const RecordCleanupView = @import("ui/record_cleanup_view.zig");
     const DataCleanupView = @import("ui/application_data_cleanup_view.zig");
     const CleanupOrigin = struct { draft_id: u64, page: usize, scroll: f32, focus: ?ui.hit.NodeHandle };
@@ -10451,6 +10551,7 @@ const SettingsHost = struct {
     const AppearanceApply = @import("config/appearance_apply.zig");
     const BackgroundTexture = @import("ui/background_texture.zig").Texture;
     const DecisionKind = enum { close, reset };
+    file_picker: ?SettingsFilePicker = null,
     notification_window: ?@import("host/notification_host.zig").WindowId = null,
     application_host: ?*application_host_mod.ApplicationHost = null,
     recorded_keys: @import("config/keybindings.zig").Map = .{},
@@ -10604,7 +10705,6 @@ const SettingsHost = struct {
         if (dispatched) {
             // An explicit re-selection of the saved source refreshes its
             // resources even when the configuration identity is unchanged.
-            if (command == .pick_background and worker.busy()) self.loading_saved_background = std.mem.eql(u8, worker.selectedPath(), self.runtime.value.ui.materials.background.path);
             self.appearance_context.selected_image_path = worker.selectedPath();
             self.pending_rebuild = true;
         } else switch (command) {
@@ -10680,15 +10780,17 @@ const SettingsHost = struct {
     /// Called by the application's safe hook even while the settings panel is
     /// hidden. It never destroys a node from inside its own input callback.
     fn poll(self: *SettingsHost) bool {
+        self.pollFilePicker() catch |err| self.refresh(@errorName(err));
         self.pollBackgroundRotation();
         self.pollRecordCleanup();
         if (self.data_cleanup_view) |view| if (view.open.get() and view.mode == .confirm) view.setBlocked(self.dataCleanupBlocked()) catch {};
         const worker = if (self.resource_worker) |*value| value else return false;
         if (!worker.busy()) return false;
         const result = worker.poll(&self.controller, &self.registry, self.runtime.value.ui.theme);
+        if (result.selected_background) self.loading_saved_background = std.mem.eql(u8, worker.selectedPath(), self.runtime.value.ui.materials.background.path);
         self.appearance_context.selected_image_path = worker.selectedPath();
         if (result.pending) {
-            self.cx.requestRedraw();
+            if (worker.picker != null) self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms) else self.cx.requestRedraw();
             return false;
         }
         if (result.problem) |problem| {
@@ -11261,8 +11363,8 @@ const SettingsHost = struct {
             const open = try self.scope.createSignal(bool, false);
             const title = try self.scope.createText("", .{});
             const message = try self.scope.createText("", .{});
-            const modal = try ui.widgets.Modal(.{ .open = open, .width = @as(f32, 480), .max_height = @as(f32, 208), .background = app_theme.current().overlay, .close_on_overlay = false }).mount(self.scope, self.cx);
-            if (!modal.portaled) try self.panel.appendChild(self.allocator, modal.overlay);
+            const modal = try ui.widgets.Modal(.{ .open = open, .managed_focus = false, .width = @as(f32, 480), .max_height = @as(f32, 208), .background = app_theme.current().overlay, .close_on_overlay = false }).mount(self.scope, self.cx);
+            _ = try scoped_modal.bind(self.cx, self.scope, modal, .{ .owner = .{ .node = self.card orelse self.panel } });
             modal.dialog.style.width = .{ .px = 480 };
             modal.dialog.style.height = .{ .px = 208 };
             modal.dialog.style.padding = ui.Padding.ZERO;
@@ -11554,6 +11656,7 @@ const SettingsHost = struct {
             .request_edit = requestContentEdit,
             .action = contentAction,
             .action_state = contentActionState,
+            .overlay_owner = self.card orelse self.panel,
             .mount_providers = mountProviders,
             .mount_extensions = mountExtensions,
             .mount_provider_action = mountProviderAction,
@@ -11732,6 +11835,10 @@ const SettingsHost = struct {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
         switch (action) {
             .check_updates => {
+                if (process_windows) |process| if (process.updater) |updater| if (self.application_host) |host| {
+                    updater.openFromWindow(host.window_id);
+                    return;
+                };
                 @import("update/client.zig").zw_update_open();
                 return;
             },
@@ -11845,14 +11952,14 @@ const SettingsHost = struct {
         self.refresh("已打开配置目录");
     }
 
-    /// Explicit diagnostics only. Capture the bounded original files before
-    /// AppKit's nested picker; later output and rotation do not expand them.
+    /// Capture the bounded original files before opening the destination
+    /// sheet so later output and rotation do not expand the export.
     fn exportLogs(self: *SettingsHost) !void {
         const Export = @import("host/diagnostic_export.zig");
         const Sequence = struct {
             var next: u64 = 1;
         };
-        const sdk = self.cx.system_sdk orelse return error.NativeDialogUnavailable;
+        if (self.file_picker != null) return error.FileSheetUnavailable;
         if (Sequence.next == 0) return error.DiagnosticOperationExhausted;
         const operation_id = Sequence.next;
         Sequence.next = if (Sequence.next == std.math.maxInt(u64)) 0 else Sequence.next + 1;
@@ -11866,9 +11973,14 @@ const SettingsHost = struct {
             self.refresh(std.fmt.bufPrint(&message, "读取诊断日志失败 · {s} · {s}", .{ capture_failure.sourceName(), @errorName(err) }) catch "读取诊断日志失败");
             return;
         };
-        defer plan.deinit();
-        var path_buffer: [4096]u8 = undefined;
-        const target = (try sdk.runDialog(.{ .kind = .save_file, .title = "zerowork-diagnostics.tar.gz" }, &path_buffer)) orelse return;
+        errdefer plan.deinit();
+        const filename = "zerowork-diagnostics.tar.gz";
+        const sheet = try FileSheet.begin(self.cx, .{ .kind = .save, .title = filename, .initial = filename });
+        self.file_picker = .{ .sheet = sheet, .request = .{ .diagnostics = plan } };
+        self.cx.requestRedraw();
+    }
+
+    fn finishDiagnosticExport(self: *SettingsHost, plan: *@import("host/diagnostic_export.zig").Plan, target: []const u8) void {
         plan.write(target, .{}) catch |err| {
             var message: [240]u8 = undefined;
             const phase = if (plan.failure.stage == .publish) "发布诊断日志失败" else "写入诊断日志失败";
@@ -11899,13 +12011,18 @@ const SettingsHost = struct {
             const root = managed.app.cx.root orelse continue;
             const nav: *AppNavHost = @ptrCast(@alignCast(root.behavior.events.capture_context orelse continue));
             if (nav.native_close_pending) return "请等待窗口关闭完成";
+            if (nav.hosts_import_picker != null) return "请先完成主机配置导入";
+            if (nav.menu_host) |menu| if (menu.export_picker != null) return "请先完成会话日志导出";
+            if (@import("ui/session_export_jobs.zig").Manager.forCx(managed.app.cx)) |exports| {
+                if (exports.picker != null or exports.job != null) return "请先完成会话日志导出";
+            }
             if (nav.settings) |settings| {
-                if (settings.busy() or settings.installation != null) return "请先完成设置资源操作";
+                if (settings.busy() or settings.installation != null or settings.file_picker != null) return "请先完成设置资源操作";
                 if (settings.record_cleanup) |*operation| if (operation.running) return "正在清理会话记录";
             }
             if (nav.wizard_host) |wizard| if (wizard.probe_controller.jobs.items.len != 0) return "请先结束连接测试";
             if (nav.ai) |ai| {
-                if (ai.execution().thread_state.load(.acquire) != 0 or ai.model_discovery.busy() or ai.attachment_readers.items.len != 0 or ai.image_readers.items.len != 0 or (if (ai.transcript_images) |store| store.busy() else false)) return "请先结束 AI 请求与文件读取";
+                if (ai.execution().thread_state.load(.acquire) != 0 or ai.model_discovery.busy() or ai.attachment_picker != null or ai.attachment_readers.items.len != 0 or ai.image_readers.items.len != 0 or (if (ai.transcript_images) |store| store.busy() else false)) return "请先结束 AI 请求与文件读取";
             }
         }
         return null;
@@ -11913,7 +12030,7 @@ const SettingsHost = struct {
 
     fn showDataCleanup(self: *SettingsHost) !void {
         if (process_windows) |process| if (process.data_cleanup_owner != null) return error.CleanupAlreadyRunning;
-        if (self.data_cleanup_view == null) self.data_cleanup_view = try DataCleanupView.View.mount(self.cx, self.scope, .{ .context = self, .action = dataCleanupAction });
+        if (self.data_cleanup_view == null) self.data_cleanup_view = try DataCleanupView.View.mount(self.cx, self.scope, .{ .context = self, .action = dataCleanupAction, .overlay_owner = self.card orelse self.panel });
         self.rememberScroll();
         const focused = if (self.mounted_page) |page| findSettingsTestId(page.root, "settings.data.clear_all") else self.cx.focus_manager.getFocused();
         self.data_cleanup_origin = .{ .draft_id = self.controller.draft_id, .page = self.mounted_page_index, .scroll = self.mountedScrollOffset().*, .focus = if (focused) |node| self.cx.node_registry.handleFor(node) else null };
@@ -12051,7 +12168,7 @@ const SettingsHost = struct {
     fn clearLogs(self: *SettingsHost) !void {
         try RecordCleanup.requireIdle(self.hasActiveCleanupSessions());
         if (self.record_cleanup) |*operation| if (operation.running) return error.CleanupAlreadyRunning;
-        if (self.record_cleanup_view == null) self.record_cleanup_view = try RecordCleanupView.View.mount(self.cx, self.scope, .{ .context = self, .action = recordCleanupAction });
+        if (self.record_cleanup_view == null) self.record_cleanup_view = try RecordCleanupView.View.mount(self.cx, self.scope, .{ .context = self, .action = recordCleanupAction, .overlay_owner = self.card orelse self.panel });
         self.rememberScroll();
         const focused = if (self.mounted_page) |page| findSettingsTestId(page.root, "settings.data.clear_logs") else self.cx.focus_manager.getFocused();
         self.record_cleanup_origin = .{ .draft_id = self.controller.draft_id, .page = self.mounted_page_index, .scroll = self.mountedScrollOffset().*, .focus = if (focused) |node| self.cx.node_registry.handleFor(node) else null };
@@ -12189,7 +12306,7 @@ const SettingsHost = struct {
     }
     fn mountProviders(raw: *anyopaque, cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
-        const providers = try @import("config/ai_provider_settings.zig").ProviderView.mountWithHooks(cx, scope, &self.controller, .{ .context = raw, .changed = providersChanged });
+        const providers = try @import("config/ai_provider_settings.zig").ProviderView.mountWithHooks(cx, scope, &self.controller, .{ .context = raw, .changed = providersChanged, .overlay_owner = self.card orelse self.panel });
         self.providers = providers;
         if (self.pending_ai_problem) |address| {
             self.pending_ai_problem = null;
@@ -12225,7 +12342,7 @@ const SettingsHost = struct {
             self.picker = recorder.root;
             self.keybinding_recorder = recorder;
             self.recording = true;
-            if (!recorder.portaled) {
+            if (!recorder.portaled and recorder.root.parent == null) {
                 self.picker_nodes.append(self.allocator, recorder.root) catch return;
                 (self.card orelse self.panel).appendChild(self.allocator, recorder.root) catch return;
             }
@@ -12269,15 +12386,35 @@ const SettingsHost = struct {
 
     fn chooseSettingsDirectory(raw: *anyopaque, controller: *SettingsController, key: settings_content_view.Key) void {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
-        const sdk = self.cx.system_sdk orelse return;
-        var buffer: [4096]u8 = undefined;
-        const directory = (sdk.runDialog(.{ .kind = .pick_folder }, &buffer) catch return) orelse return;
-        controller.editKey(key.section, key.key, .{ .text = directory }) catch |err| {
+        if (self.file_picker != null) return;
+        const sheet = FileSheet.begin(self.cx, .{ .kind = .folder, .title = "选择默认下载目录" }) catch |err| {
             self.refresh(@errorName(err));
             return;
         };
-        self.pending_rebuild = true;
+        self.file_picker = .{ .sheet = sheet, .request = .{ .directory = .{ .draft_id = controller.draft_id, .key = key } } };
         self.cx.requestRedraw();
+    }
+
+    fn pollFilePicker(self: *SettingsHost) !void {
+        var picker = self.file_picker orelse return;
+        const count = picker.sheet.count() orelse {
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+            return;
+        };
+        self.file_picker = null;
+        defer picker.deinit();
+        if (count == 0) return;
+        var buffer: [4096]u8 = undefined;
+        const path = try picker.sheet.path(0, &buffer);
+        switch (picker.request) {
+            .diagnostics => |*plan| self.finishDiagnosticExport(plan, path),
+            .directory => |request| {
+                if (!self.open or request.draft_id != self.controller.draft_id or self.controller.state() == .saving) return;
+                try self.controller.editKey(request.key.section, request.key.key, .{ .text = path });
+                self.pending_rebuild = true;
+                self.cx.requestRedraw();
+            },
+        }
     }
 
     fn rebuildLegacyContent(self: *SettingsHost) !void {
@@ -12351,6 +12488,7 @@ const SettingsHost = struct {
     }
 
     fn cleanup(self: *SettingsHost) void {
+        if (self.file_picker) |*picker| picker.deinit();
         self.releaseRecordCleanup();
         if (self.appearance_initialized) {
             self.background_rotation.deinit();
@@ -12444,6 +12582,7 @@ fn onSettingsToggleClick(raw: *anyopaque) void {
 /// Root-level keyboard shortcuts (⌘B sidebar, ⌘K quick connect).
 const MistChrome = @import("ui/workspace_chrome.zig");
 const AppNavHost = struct {
+    hosts_import_picker: ?FileSheet = null,
     mist: ?*MistChrome.View = null,
     mist_transfer: ?*@import("ui/transfer_toolbar_view.zig").View = null,
     startup_view: ?*@import("ui/startup_view.zig").View = null,
@@ -12652,6 +12791,27 @@ const AppNavHost = struct {
         host.wizard.reset() catch return;
         host.wizard.show();
     }
+    fn newWebProfile(raw: *anyopaque) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        const host = self.wizard_host orelse return;
+        if (host.wizard.isVisible()) return;
+        host.refreshAssets() catch |err| {
+            host.workspace.statusFailure(@errorName(err));
+            return;
+        };
+        host.selected_group = null;
+        host.edit_host_index = null;
+        host.wizard.selectContribution(@import("plugins/web/config.zig").protocol_id) catch |err| {
+            host.workspace.statusFailure(@errorName(err));
+            return;
+        };
+        host.wizard.reset() catch |err| {
+            host.workspace.statusFailure(@errorName(err));
+            return;
+        };
+        host.wizard.show();
+    }
+
     fn quickSession(raw: *anyopaque) void {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
         self.toggleQuickConnect();
@@ -12860,7 +13020,7 @@ const AppNavHost = struct {
         self.empty_has_hosts = has_hosts;
         if (self.empty_choose_label) |label| label.set(if (has_hosts) "快速连接" else "新建连接");
         if (self.empty_choose_icon) |icon| icon.set(if (has_hosts) @import("ui/quick_connect_icon.zig").asset else ui.icons.plus);
-        if (self.chrome.empty_description) |node| node.setTextContent(self.allocator, if (has_hosts) "直接打开本地终端，或从左侧选择已保存的 SSH / SFTP 连接。" else "直接打开本地终端，或新建一个 SSH / SFTP 连接。") catch {};
+        if (self.chrome.empty_description) |node| node.setTextContent(self.allocator, if (has_hosts) "直接打开本地终端，或从左侧选择已保存的连接。" else "直接打开本地终端，或新建一个连接。") catch {};
     }
     fn toggleQuickConnect(self: *AppNavHost) void {
         const host = self.quick_host orelse return;
@@ -12874,9 +13034,14 @@ const AppNavHost = struct {
         const self: *AppNavHost = @ptrCast(@alignCast(ctx));
         if (self.menu_host) |menu| menu.drainSidebarAction();
         if (self.wizard_host) |host| if (self.workspace) |workspace| {
+            if (host.wizard.overlay_session) |owner| {
+                if (!workspace.hasSessionOwner(owner)) host.wizard.hide();
+            }
             if (remote_editor.editor(host.wizard)) |editor| editor.setScrollbackDefault(workspace.app_config.ui.scrollback_limit);
         };
         if (process_windows) |process| if (process.data_cleanup_owner != null) return .done;
+        if (self.menu_host) |menu| menu.pollExportPicker();
+        self.pollHostsImport();
         if (self.quick_host) |host| if (host.view.isOpen()) host.refreshAssets() catch |err| {
             if (self.workspace) |workspace| workspace.statusFailure(@errorName(err));
         };
@@ -13065,10 +13230,6 @@ const AppNavHost = struct {
                     badge.children.items[0].setTextContent(self.allocator, label) catch {};
                 }
             }
-            if (self.transfer_host) |transfer| {
-                const pane: ?*ui.Node = if (workspace.active_tab) |active| if (active < workspace.tabs.items.len) workspace.tabs.items[active].root else null else null;
-                transfer.panel.setPaneAnchor(pane);
-            }
             if (self.ai) |ai| if (ai.ownerBounds()) |pane| {
                 const owner_bounds: @import("ai/float_model.zig").Rect = .{ .x = pane.x, .y = pane.y, .width = pane.w, .height = pane.h };
                 const window_bounds: @import("ai/float_model.zig").Rect = .{ .x = 0, .y = 0, .width = self.cx.viewport.width, .height = self.cx.viewport.height };
@@ -13151,7 +13312,9 @@ const AppNavHost = struct {
 
     fn modalOwnsInput(self: *const AppNavHost) bool {
         for (&self.cx.overlay_stack.layers) |*slot| if (slot.*) |*layer| {
-            if (layer.config.kind == .modal and !layer.suspended and layer.state != .exiting) return true;
+            if (layer.suspended or layer.state == .exiting) continue;
+            if (layer.config.kind == .modal) return true;
+            if (layer.config.scoped_mask and self.cx.node_registry.resolve(layer.trigger_handle, null) == self.cx.root) return true;
         };
         return false;
     }
@@ -13192,28 +13355,13 @@ const AppNavHost = struct {
             .drag => return .stop,
             else => {},
         };
-        if (self.connection_host) |host| if (host.blocksGlobalActions()) switch (event) {
-            .key_down, .key_up => return .ignored,
-            .drag => return .stop,
-            else => {},
-        };
-        if (self.probe_connection_host) |host| if (host.blocksGlobalActions()) switch (event) {
-            .key_down, .key_up => return .ignored,
-            .drag => return .stop,
-            else => {},
-        };
-        if (self.connection_details_host) |host| if (host.blocksGlobalActions()) switch (event) {
-            .key_down, .key_up => return .ignored,
-            .drag => return .stop,
-            else => {},
-        };
         if (self.menu_host) |menu| if (menu.asset_action_view) |view| if (view.isVisible()) switch (event) {
             .key_down, .key_up => return .ignored,
             .drag => return .stop,
             else => {},
         };
-        if (self.transfer_host) |transfer| if (transfer.conflict_view) |view| if (view.isVisible()) switch (event) {
-            .key_down, .key_up => return .ignored,
+        if (self.modalOwnsInput()) switch (event) {
+            .key_down => return .ignored,
             .drag => return .stop,
             else => {},
         };
@@ -13290,22 +13438,6 @@ const AppNavHost = struct {
                     if (handled != .ignored) return handled;
                 }
                 if (key.key == .escape) {
-                    if (self.socks_host) |socks| if (socks.exposure) |exposure| if (exposure.visible) {
-                        exposure.hide();
-                        return .stop;
-                    };
-                    if (self.wizard) |wizard| if (wizard.root) |root| if (root.style.display != .none) {
-                        wizard.cancel();
-                        return .stop;
-                    };
-                    if (self.transfer_host) |transfer| if (transfer.panel.isVisible()) {
-                        transfer.panel.hide();
-                        return .stop;
-                    };
-                    if (self.socks_host) |socks| if (socks.config) |config| if (config.visible) {
-                        config.hide();
-                        return .stop;
-                    };
                     if (self.socks_host) |socks| if (socks.info) |info| if (info.root.style.display != .none) {
                         info.hide();
                         return .stop;
@@ -13477,11 +13609,8 @@ const AppNavHost = struct {
     fn recentTabBlocked(self: *AppNavHost) bool {
         if (self.focusedTextEditor() or self.quick.quick_connect_open) return true;
         if (self.menu_host) |menu| if (menu.state.open != null) return true;
-        if (self.wizard) |wizard| if (wizard.root) |root| if (root.style.display != .none) return true;
-        if (self.transfer_host) |transfer| if (transfer.panel.isVisible()) return true;
+        if (self.wizard) |wizard| if (wizard.overlay_session == null and wizard.isVisible()) return true;
         if (self.socks_host) |socks| {
-            if (socks.exposure) |view| if (view.visible) return true;
-            if (socks.config) |view| if (view.visible) return true;
             if (socks.info) |view| if (view.root.style.display != .none) return true;
         }
         if (self.help_overlay) |view| if (view.style.display != .none) return true;
@@ -13500,17 +13629,39 @@ const AppNavHost = struct {
     }
 
     fn importHosts(self: *AppNavHost) void {
-        self.importHostsFile() catch |err| {
-            applog.warn(.ui, "import hosts: {s}", .{@errorName(err)});
-            if (self.workspace) |workspace| workspace.statusFailure(if (err == error.DuplicateConnectionName) "存在同名连接。请修改导入文件中的连接名称。" else @import("ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "无法导入主机。请检查文件格式和连接配置后重试。");
+        if (self.workspace == null or self.hosts_import_picker != null) return;
+        const sheet = FileSheet.begin(self.cx, .{ .kind = .file, .title = "导入 hosts.toml" }) catch |err| {
+            self.importHostsFailure(err);
+            return;
         };
+        self.hosts_import_picker = sheet;
+        self.cx.requestRedraw();
     }
 
-    fn importHostsFile(self: *AppNavHost) !void {
-        const workspace = self.workspace orelse return error.WorkspaceUnavailable;
-        const sdk = self.cx.system_sdk orelse return error.NativeDialogUnavailable;
+    fn importHostsFailure(self: *AppNavHost, err: anyerror) void {
+        applog.warn(.ui, "import hosts: {s}", .{@errorName(err)});
+        if (self.workspace) |workspace| workspace.statusFailure(if (err == error.DuplicateConnectionName) "存在同名连接。请修改导入文件中的连接名称。" else @import("ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "无法导入主机。请检查文件格式和连接配置后重试。");
+    }
+
+    fn pollHostsImport(self: *AppNavHost) void {
+        const sheet = self.hosts_import_picker orelse return;
+        const count = sheet.count() orelse {
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+            return;
+        };
+        self.hosts_import_picker = null;
+        defer sheet.deinit();
+        if (count == 0) return;
         var buffer: [4096]u8 = undefined;
-        const path = (try sdk.runDialog(.{ .kind = .open_file, .title = "导入 hosts.toml" }, &buffer)) orelse return;
+        const path = sheet.path(0, &buffer) catch |err| {
+            self.importHostsFailure(err);
+            return;
+        };
+        self.importHostsFile(path) catch |err| self.importHostsFailure(err);
+    }
+
+    fn importHostsFile(self: *AppNavHost, path: []const u8) !void {
+        const workspace = self.workspace orelse return error.WorkspaceUnavailable;
         var skipped_credentials: usize = 0;
         var imported = try @import("config/store.zig").loadHostsForImport(self.cx.io, std.Io.Dir.cwd(), self.allocator, path, &skipped_credentials);
         defer imported.deinit();
@@ -13519,6 +13670,7 @@ const AppNavHost = struct {
     }
 
     fn cleanup(self: *AppNavHost) void {
+        if (self.hosts_import_picker) |sheet| sheet.deinit();
         if (self.app_runtime) |app| if (self.ai_logo_texture) |id| app.renderer.image_renderer.unloadTexture(id);
         if (self.app_runtime) |app| if (self.empty_logo_texture) |id| app.renderer.image_renderer.unloadTexture(id);
         if (self.app_runtime) |app| for (self.host_artwork) |texture| if (texture) |id| app.renderer.image_renderer.unloadTexture(id);
@@ -13568,6 +13720,10 @@ const AppNavHost = struct {
     fn localDrag(self: *AppNavHost, drag: ui.events.DragEvent) ui.events.EventResult {
         if (drag.kind == .exited) {
             if (drag.session_ended) self.local_drop = null;
+            return .ignored;
+        }
+        if (scoped_modal.coversPoint(self.cx, drag.x, drag.y)) {
+            self.local_drop = null;
             return .ignored;
         }
         const workspace = self.workspace orelse return .ignored;
@@ -13855,6 +14011,13 @@ const AppNavHost = struct {
             workspace.resolveLocalCloseConfirmation(session_id, false);
             workspace.statusFailure(@errorName(err));
         };
+    }
+
+    fn localCloseOverlayOwner(raw: *anyopaque, id: ws.SessionId) ?*ui.Node {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        const workspace = self.workspace orelse return null;
+        const tab = workspace.sessionTab(id) orelse return null;
+        return if (tab.content_owner == .session) workspace.overlayOwner(tab.content_owner.session) else null;
     }
 
     fn resolveLocalClose(raw: *anyopaque, session_id: ws.SessionId, accepted: bool) void {
@@ -14845,9 +15008,28 @@ const QuickConnectHost = struct {
         if (self.painted_revision == revision) return;
         var assets: std.ArrayList(QuickView.SavedAsset) = .empty;
         defer assets.deinit(self.allocator);
+        var metadata_arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer metadata_arena.deinit();
+        const web = @import("plugins/web/config.zig");
+        const icons = @import("ui/session_icon.zig");
         for (self.workspace.registry.hosts) |host| {
             if (@backingInt(host.connection_id) == 0) continue;
-            try assets.append(self.allocator, .{ .owner = host.owner(), .name = host.name, .host = host.host, .user = host.user, .port = host.port, .group = host.group, .hops = host.jump_chain.len, .protocol = host.protocol, .os = @import("ui/session_os_cache.zig").load(self.allocator, self.workspace.io, self.workspace.hosts_path, host) });
+            const os = @import("ui/session_os_cache.zig").load(self.allocator, self.workspace.io, self.workspace.hosts_path, host);
+            var asset: QuickView.SavedAsset = .{ .owner = host.owner(), .name = host.name, .host = host.host, .user = host.user, .port = host.port, .group = host.group, .hops = host.jump_chain.len, .protocol = host.protocol, .os = os, .icon = icons.forHost(self.workspace.plugins, host.protocolId(), os) };
+            if (std.mem.eql(u8, host.protocolId(), web.protocol_id)) {
+                asset.endpoint = "网页配置不可用";
+                if (web.decode(self.allocator, host.payload_version, host.plugin_payload orelse "")) |value| {
+                    var decoded = value;
+                    defer decoded.deinit();
+                    const payload = switch (decoded.content) {
+                        .ready => |ready| ready,
+                        .repair => |repair| repair.base,
+                    };
+                    asset.hops = payload.route.hop_asset_ids.len;
+                    asset.endpoint = if (payload.start_url) |url| (try @import("plugins/web/urls.zig").normalize(metadata_arena.allocator(), url)).origin() else "手动输入网址";
+                } else |err| if (err == error.OutOfMemory) return err;
+            }
+            try assets.append(self.allocator, asset);
         }
         // Recency only reorders real saved identities; never fabricate fallback recent rows.
         var ordered: std.ArrayList(QuickView.SavedAsset) = .empty;
@@ -15158,10 +15340,10 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     ai_preview_holder.setDisplay(.none);
     try ai_scroll.content.insertChildBefore(cx.allocator, ai_preview_holder, ai_conversation);
     ai_host.attachment_preview_holder = ai_preview_holder;
-    ai_host.attachments_view = try @import("ui/ai_attachments_view.zig").View.mountInline(cx, scope, .{ .context = ai_host, .remove = AiHost.removeAttachment, .attach = AiHost.attachAttachment, .reselect = AiHost.reselectAttachment, .preview_visibility = AiHost.textPreviewVisibility, .on_error = AiHost.attachmentViewError }, ai_preview_holder);
+    ai_host.attachments_view = try @import("ui/ai_attachments_view.zig").View.mountInline(cx, scope, .{ .context = ai_host, .remove = AiHost.removeAttachment, .attach = AiHost.attachAttachment, .reselect = AiHost.reselectAttachment, .preview_visibility = AiHost.textPreviewVisibility, .on_error = AiHost.attachmentViewError, .overlay_owner = ai_host.card_box orelse ai_card_box }, ai_preview_holder);
     ai_card_box.behavior.events.capture_context = ai_host;
     ai_card_box.behavior.events.on_event_capture = AiHost.attachmentPreviewEvent;
-    ai_host.images_view = try @import("ui/ai_image_attachments_view.zig").View.mount(cx, scope, .{ .context = ai_host, .remove = AiHost.removeImage, .retry = AiHost.retryImage, .visibility = AiHost.imagePreviewVisibility, .on_error = AiHost.attachmentViewError }, ai_preview_holder);
+    ai_host.images_view = try @import("ui/ai_image_attachments_view.zig").View.mount(cx, scope, .{ .context = ai_host, .remove = AiHost.removeImage, .retry = AiHost.retryImage, .visibility = AiHost.imagePreviewVisibility, .on_error = AiHost.attachmentViewError, .overlay_owner = ai_host.card_box orelse ai_card_box }, ai_preview_holder);
 
     try ai_host.images_view.?.shareRail(ai_host.attachments_view.?.rail.content);
     ai_host.attachments_view.?.external_rail = ai_host.images_view.?.root;
@@ -15395,7 +15577,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
 
     ai_host.children_view = try @import("ui/ai_children_view.zig").View.mount(cx, scope, ai_children, .{ .context = ai_host, .select = AiHost.childSelected });
     try ai_header.appendChild(cx.allocator, ai_host.children_view.?.root);
-    ai_host.sessions_view = try @import("ui/ai_sessions_view.zig").View.mount(cx, scope, ai_sessions, .{ .context = ai_host, .select = AiHost.selectConversation, .request_close = AiHost.requestConversationClose, .remove = AiHost.deleteConversation, .act = AiHost.conversationAction, .confirmed = AiHost.lifecycleConfirmed });
+    ai_host.sessions_view = try @import("ui/ai_sessions_view.zig").View.mountOwned(cx, scope, ai_sessions, ai_card_box, .{ .context = ai_host, .select = AiHost.selectConversation, .request_close = AiHost.requestConversationClose, .remove = AiHost.deleteConversation, .act = AiHost.conversationAction, .confirmed = AiHost.lifecycleConfirmed });
     try ai_header.appendChild(cx.allocator, ai_host.sessions_view.?.root);
     ai_host.close_confirmation_view = try @import("ui/ai_close_confirmation_view.zig").View.mount(cx, scope, ai_close, .{ .context = ai_host, .on_confirm = AiHost.confirmCloseWindow, .on_cancel = AiHost.cancelCloseWindow });
     try ai_header.appendChild(cx.allocator, ai_host.close_confirmation_view.?.root);
@@ -15424,6 +15606,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
 
     // Frozen V3 settings: centered shell, independently scrolling navigation and content.
     const settings_panel = try ui.boxStyled(cx, shell_styles.settingsBackdrop, .{});
+    try scoped_modal.registerWindowCover(cx, settings_panel);
     settings_panel.meta.ownership.meta.test_id = "settings.overlay";
     settings_panel.setDisplay(.none);
     const settings_card = try ui.boxStyled(cx, shell_styles.settingsPanel, .{});
@@ -15559,7 +15742,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     empty_title.style.height = .{ .px = 24 };
     empty_title.style.flex_shrink = 0;
     try empty_guide.appendChild(cx.allocator, empty_title);
-    const empty_description = try ui.textStyled(cx, shell_styles.emptyDescription, "直接打开本地终端，或从左侧选择已保存的 SSH / SFTP 连接。");
+    const empty_description = try ui.textStyled(cx, shell_styles.emptyDescription, "直接打开本地终端，或从左侧选择已保存的连接。");
     empty_description.style.height = .{ .px = 18.15 };
     empty_description.style.flex_shrink = 0;
     try empty_guide.appendChild(cx.allocator, empty_description);
@@ -15673,14 +15856,14 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_host.native_close_waiter = &nav_host.native_close_pending;
     nav_host.notes_float = try @import("plugins/notes/floating.zig").View.mount(workspace, scope, root);
     workspace.content_focus = .{ .context = nav_host, .focus = AppNavHost.focusContentOwner };
-    const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .new_sftp = AppNavHost.newSftpProfile, .new_kvm = AppNavHost.newKvmProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .notes = AppNavHost.openNotes, .notes_float = AppNavHost.toggleNotesFloat, .saved = AppNavHost.savedSession });
+    const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .new_sftp = AppNavHost.newSftpProfile, .new_kvm = AppNavHost.newKvmProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .notes = AppNavHost.openNotes, .new_web = AppNavHost.newWebProfile, .saved = AppNavHost.savedSession });
     session_menu.root.style.position = .absolute;
     session_menu.root.style.width = .{ .px = 0 };
     session_menu.root.style.height = .{ .px = 0 };
     nav_host.session_menu = session_menu;
     try background_view.isolate(session_menu.scope, session_menu.chrome);
     try root.appendChild(cx.allocator, session_menu.root);
-    nav_host.local_close_view = try @import("ui/local_close_view.zig").View.mount(cx, scope, .{ .context = nav_host, .resolve = AppNavHost.resolveLocalClose });
+    nav_host.local_close_view = try @import("ui/local_close_view.zig").View.mount(cx, scope, .{ .context = nav_host, .resolve = AppNavHost.resolveLocalClose, .overlay_owner = AppNavHost.localCloseOverlayOwner });
     try background_view.isolate(scope, nav_host.local_close_view.?.dialog);
     workspace.close_bridge = .{ .context = @ptrCast(nav_host), .risk = AppNavHost.closeRisk, .impact = AppNavHost.closeImpact, .cleanup = AppNavHost.cleanupSession, .confirm = AppNavHost.showLocalClose };
     const file_application = try file_application_mod.Host.create(cx.allocator, workspace);
@@ -15834,11 +16017,11 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     nav_host.transfer_host = transfer_host;
     menu_host.transfer_host = transfer_host;
     file_application.setTransferHandler(.{ .context = transfer_host, .submit = TransferHost.showFileTransfer, .confirm = TransferHost.confirmFileTransfer, .export_start = TransferHost.exportFileTransfer, .export_poll = TransferHost.pollFileExport, .export_cancel = TransferHost.cancelFileExport });
-    const download_list = try transfer_manager_view.mountGlobalPopover(cx, scope, transfer_host.manager, .{ .context = transfer_host, .action = TransferHost.managerAction, .owner = TransferHost.jobOwner, .owner_label = TransferHost.jobOwnerLabel, .scope_choices = TransferHost.transferScopeChoices, .can_reveal = TransferHost.canReveal });
+    const download_list = try transfer_manager_view.mountGlobalPopover(cx, scope, transfer_host.manager, .{ .context = transfer_host, .action = TransferHost.managerAction, .resolve_conflict = TransferHost.managerConflictAction, .owner = TransferHost.jobOwner, .owner_label = TransferHost.jobOwnerLabel, .scope_choices = TransferHost.transferScopeChoices, .can_reveal = TransferHost.canReveal });
     transfer_host.manager_panel = download_list;
     download_list.hooks.closed = TransferHost.managerClosed;
     try background_view.isolate(download_list.scope, download_list.root);
-    transfer_host.conflict_view = try transfer_conflict_view.View.mount(cx, scope, .{ .context = transfer_host, .decision = TransferHost.conflictDecision, .defer_conflict = TransferHost.deferConflict });
+    transfer_host.conflict_view = try transfer_conflict_view.View.mount(cx, scope, .{ .context = transfer_host, .decision = TransferHost.conflictDecision, .defer_conflict = TransferHost.deferConflict, .overlay_owner = TransferHost.conflictOverlayOwner });
     try background_view.isolate(scope, transfer_host.conflict_view.?.dialog);
     if (nav_host.transfer_anchor) |anchor| download_list.setAnchor(anchor);
     try root.appendChild(cx.allocator, download_list.root);
@@ -15868,12 +16051,13 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         .test_cb = Socks5Host.testConfig,
         .cancel = Socks5Host.cancelConfig,
         .confirm_exposure = Socks5Host.confirmExposure,
+        .overlay_owner = Socks5Host.configOverlayOwner,
     });
     socks_host.config = socks_config;
-    if (!socks_config.portaled) try root.appendChild(cx.allocator, socks_config.root);
-    const exposure = try @import("ui/socks_exposure_confirm.zig").View.mount(cx, scope, .{ .context = @ptrCast(socks_host), .confirm = Socks5Host.exposureConfirmed, .cancel = Socks5Host.exposureCancelled });
+    if (!socks_config.portaled and socks_config.root.parent == null) try root.appendChild(cx.allocator, socks_config.root);
+    const exposure = try @import("ui/socks_exposure_confirm.zig").View.mount(cx, scope, .{ .context = @ptrCast(socks_host), .confirm = Socks5Host.exposureConfirmed, .cancel = Socks5Host.exposureCancelled, .overlay_owner = Socks5Host.exposureOverlayOwner });
     socks_host.exposure = exposure;
-    if (!exposure.portaled) try root.appendChild(cx.allocator, exposure.root);
+    if (!exposure.portaled and exposure.root.parent == null) try root.appendChild(cx.allocator, exposure.root);
     nav_host.socks_host = socks_host;
     status_bar.socks_chip.behavior.events.on_click = .{ .callback = onSocksChipClick, .context = @ptrCast(socks_host) };
     try scope.onCleanup(Socks5Host, socks_host, Socks5Host.cleanup);
@@ -15883,7 +16067,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try status_bar.bar.insertChildBefore(cx.allocator, background_socks.view.remote_entry, status_bar.controls.theme_button);
     try local_status.root.insertChildBefore(cx.allocator, background_socks.view.local_entry, local_status.theme_button);
     try root.appendChild(cx.allocator, background_socks.view.popover.wrapper);
-    if (!background_socks.exposure.portaled) try root.appendChild(cx.allocator, background_socks.exposure.root);
+    if (!background_socks.exposure.portaled and background_socks.exposure.root.parent == null) try root.appendChild(cx.allocator, background_socks.exposure.root);
     try background_view.isolate(background_socks.view.popover.scope, background_socks.view.popover.chrome);
     try background_view.isolate(background_socks.exposure.scope, background_socks.exposure.card);
     try background_view.isolate(exposure.scope, exposure.card);
@@ -15896,6 +16080,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const wiz_host = try cx.allocator.create(WizardHost);
     wiz_host.* = .{ .allocator = cx.allocator, .workspace = workspace, .wizard = wiz, .application_host = application_host, .cx_ptr = cx, .probe_controller = @import("ui/wizard_probe.zig").Controller.init(cx.allocator, &application_host.sessions.journal) };
     wiz.setRegistry(application_host.registry());
+    wiz.overlay_owner = .{ .context = workspace, .get = ws.Workspace.sessionOverlayOwner };
     wiz.connection_configs = @import("host/connection_config_resolver.zig").Resolver.init(&workspace.registry);
     wiz.credential_host = if (application_host.domain.editor_credentials) |*host| host else null;
     wiz.on_envelope = WizardHost.submitEnvelope;
@@ -15920,6 +16105,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     nav_host.connection_host = try @import("ui/connection_host.zig").Host.mount(cx, scope, workspace, application_host);
     try background_view.isolate(nav_host.connection_host.?.progress.scope, nav_host.connection_host.?.progress.dialog);
     nav_host.probe_connection_host = try @import("ui/probe_connection_host.zig").Host.mount(cx, scope, &wiz_host.probe_controller, wiz, wiz.authentication_area);
+    nav_host.probe_connection_host.?.child_wizard = &child_editor.host.child;
     wiz_host.probe_presentation = nav_host.probe_connection_host;
     menu_host.asset_action_view = try @import("ui/asset_action_view.zig").View.mount(cx, scope, .{ .context = menu_host, .submit = MenuHost.submitAssetAction, .anchor = MenuHost.assetActionAnchor, .completed = MenuHost.assetActionCompleted, .close = MenuHost.assetActionClosed, .view_group = MenuHost.viewAssetGroup, .view_sessions = MenuHost.viewAssetSessions });
     try background_view.isolate(menu_host.asset_action_view.?.scope, menu_host.asset_action_view.?.dialog);
@@ -16653,6 +16839,13 @@ const NotificationWindowHook = struct {
     }
 };
 
+fn scopeWizardToTab(workspace: *ws.Workspace, wizard: *wizard_mod.Wizard, index: usize) void {
+    const tab = workspace.tabs.items[index];
+    if (tab.content_owner != .session) return;
+    wizard.overlay_session = tab.content_owner.session;
+    if (workspace.overlayOwner(tab.content_owner.session) == null) workspace.activateTabId(tab.tab_id);
+}
+
 const TransferHost = struct {
     files: *file_application_mod.Host,
     tasks: *task_domain_mod.Domain,
@@ -16685,6 +16878,7 @@ const TransferHost = struct {
     conflict_view: ?*transfer_conflict_view.View = null,
     conflict_job: ?transfer_mod.JobId = null,
     conflict_manual: bool = false,
+    conflict_origin: ?u32 = null,
     conflict_presented: bool = false,
     manager_visible: bool = false,
     manager_open_requested: bool = false,
@@ -16696,7 +16890,7 @@ const TransferHost = struct {
     session_owner: ?@import("host/identity.zig").SessionHandle = null,
 
     command_picker: ?CommandPicker = null,
-    picker_running: bool = false,
+    panel_picker: ?PanelPicker = null,
 
     const CommandPicker = struct {
         owner: @import("host/identity.zig").SessionHandle,
@@ -16707,21 +16901,28 @@ const TransferHost = struct {
         source: [:0]u8,
         started: u64,
         requested_frame: u64,
+        native: ?struct { sheet: FileSheet, cwd: []const u8 } = null,
     };
 
-    extern fn zw_pick_upload_files(initial: [*:0]const u8, context: *anyopaque, receive: *const fn (*anyopaque, [*:0]const u8) callconv(.c) c_int) c_int;
+    const PanelPicker = struct {
+        sheet: FileSheet,
+        target: union(enum) {
+            source: struct { index: usize, revision: u64 },
+            directory: struct {
+                ticket: transfer_panel_mod.DirectoryTicket,
+                operation: @import("host/operation.zig").OperationKey,
+                capability_revision: u64,
+            },
+        },
+    };
 
     const PickedFiles = struct {
         allocator: std.mem.Allocator,
         paths: std.ArrayList([]const u8) = .empty,
-        fn receive(raw: *anyopaque, path: [*:0]const u8) callconv(.c) c_int {
-            const self: *PickedFiles = @ptrCast(@alignCast(raw));
-            const owned = self.allocator.dupe(u8, std.mem.span(path)) catch return 0;
-            self.paths.append(self.allocator, owned) catch {
-                self.allocator.free(owned);
-                return 0;
-            };
-            return 1;
+        fn append(self: *PickedFiles, path: []const u8) !void {
+            const owned = try self.allocator.dupe(u8, path);
+            errdefer self.allocator.free(owned);
+            try self.paths.append(self.allocator, owned);
         }
         fn deinit(self: *PickedFiles) void {
             for (self.paths.items) |path| self.allocator.free(path);
@@ -16766,7 +16967,7 @@ const TransferHost = struct {
     }
 
     fn requestCommandTransfer(self: *TransferHost, index: usize, mode: transfer_panel_mod.Data.Mode, source: ?[]const u8) !void {
-        if (self.command_picker != null or self.picker_running) return error.FileSelectionInProgress;
+        if (self.command_picker != null or self.panel_picker != null) return error.FileSelectionInProgress;
         const tab = self.workspace.tabs.items[index];
         const owner = switch (tab.content_owner) {
             .session => |value| value,
@@ -16793,28 +16994,36 @@ const TransferHost = struct {
         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
     }
 
-    fn runCommandPicker(self: *TransferHost, request: CommandPicker, remote_dir: []const u8) !?[]u8 {
+    fn beginCommandSheet(self: *TransferHost, request: CommandPicker, remote_dir: []const u8) !void {
+        const cwd = try self.allocator.dupe(u8, remote_dir);
+        errdefer self.allocator.free(cwd);
+        const sheet = if (request.mode == .upload)
+            try FileSheet.begin(self.cx, .{ .kind = .multiple_files, .title = "选择要上传的文件", .prompt = "上传", .initial = request.source })
+        else download: {
+            const home = try @import("platform/account.zig").home(self.allocator);
+            defer self.allocator.free(home);
+            const initial = try @import("config/transfer_defaults.zig").downloadDirectory(self.allocator, self.workspace.app_config.transfer.download_dir, home);
+            defer self.allocator.free(initial);
+            break :download try FileSheet.begin(self.cx, .{ .kind = .folder, .title = "选择下载保存位置", .initial = initial });
+        };
+        self.command_picker.?.native = .{ .sheet = sheet, .cwd = cwd };
+        self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+    }
+
+    fn completeCommandPicker(self: *TransferHost, request: CommandPicker, count: usize) !?[]u8 {
         try self.validatePicker(request);
+        if (count == 0) return null;
+        const native = request.native.?;
+        const remote_dir = native.cwd;
         const policy = self.workspace.app_config.transfer;
         var files: PickedFiles = .{ .allocator = self.allocator };
         defer files.deinit();
         var buffer: [4096]u8 = undefined;
-        var local_dir: []const u8 = "";
-        if (request.mode == .upload) {
-            const result = zw_pick_upload_files(request.source, &files, PickedFiles.receive);
-            if (result < 0) return error.FileSelectionFailed;
-            if (result == 0 or files.paths.items.len == 0) return null;
-        } else {
-            const sdk = self.cx.system_sdk orelse return error.NativeDialogUnavailable;
-            const home = try @import("platform/account.zig").home(self.allocator);
-            defer self.allocator.free(home);
-            const initial = try @import("config/transfer_defaults.zig").downloadDirectory(self.allocator, policy.download_dir, home);
-            defer self.allocator.free(initial);
-            local_dir = (try sdk.runDialog(.{ .kind = .pick_folder, .title = "选择下载保存位置", .default_path = initial }, &buffer)) orelse return null;
-        }
-        // AppKit runs a nested event loop. Revalidate the captured session,
-        // rather than using whichever tab happens to be active afterwards.
-        try self.validatePicker(request);
+        const local_dir: []const u8 = if (request.mode == .upload) upload: {
+            if (count > transfer_panel_mod.max_sources) return error.TooManySources;
+            for (0..count) |index| try files.append(try native.sheet.path(index, &buffer));
+            break :upload "";
+        } else try native.sheet.path(0, &buffer);
         const sources: []const []const u8 = if (request.mode == .upload) files.paths.items else &.{request.source};
         if (request.mode == .upload) if (request.command_id) |id| {
             for (self.workspace.tabs.items) |tab| {
@@ -16844,20 +17053,41 @@ const TransferHost = struct {
         return message;
     }
 
+    fn disposeCommandPicker(self: *TransferHost) void {
+        const request = self.command_picker orelse return;
+        self.command_picker = null;
+        self.allocator.free(request.source);
+        if (request.native) |native| {
+            native.sheet.deinit();
+            self.allocator.free(native.cwd);
+        }
+    }
+
     fn pollCommandPicker(self: *TransferHost) void {
         const request = self.command_picker orelse return;
-        // The native modal blocks Metal presentation. Let a full frame paint
-        // the dismissed command palette before entering AppKit's modal loop.
         if (self.cx.frame_count <= request.requested_frame +| 1) {
             self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
             return;
         }
         self.validatePicker(request) catch |err| {
-            self.command_picker = null;
-            defer self.allocator.free(request.source);
             self.finishPicker(request, .failure, @errorName(err));
+            self.disposeCommandPicker();
             return;
         };
+        if (request.native) |native| {
+            const count = native.sheet.count() orelse {
+                self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+                return;
+            };
+            defer self.disposeCommandPicker();
+            const message = self.completeCommandPicker(request, count) catch |err| {
+                self.finishPicker(request, .failure, @errorName(err));
+                return;
+            };
+            defer if (message) |value| self.allocator.free(value);
+            self.finishPicker(request, .success, message orelse "已取消选择，未添加传输任务");
+            return;
+        }
         var cwd: ?[]u8 = null;
         defer if (cwd) |value| self.allocator.free(value);
         if (request.mode == .upload or !std.fs.path.isAbsolute(request.source)) {
@@ -16868,22 +17098,15 @@ const TransferHost = struct {
                     self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
                     return;
                 }
-                self.command_picker = null;
-                defer self.allocator.free(request.source);
                 self.finishPicker(request, .failure, "无法读取当前远程目录，请在终端空闲时重试传输指令");
+                self.disposeCommandPicker();
                 return;
             }
         }
-        self.command_picker = null;
-        defer self.allocator.free(request.source);
-        self.picker_running = true;
-        defer self.picker_running = false;
-        const message = self.runCommandPicker(request, cwd orelse "") catch |err| {
+        self.beginCommandSheet(request, cwd orelse "") catch |err| {
             self.finishPicker(request, .failure, @errorName(err));
-            return;
+            self.disposeCommandPicker();
         };
-        defer if (message) |value| self.allocator.free(value);
-        self.finishPicker(request, .success, message orelse "已取消选择，未添加传输任务");
     }
 
     const AuxiliaryConnection = task_domain_mod.AuxiliaryConnection;
@@ -17663,6 +17886,32 @@ const TransferHost = struct {
         if (!tab.closing and !tab.archived) if (tab.terminal) |*terminal| terminal.focus();
     }
 
+    fn managerConflictAction(raw: *anyopaque, id: transfer_mod.JobId, panel: *ui.Node) void {
+        const self: *TransferHost = @ptrCast(@alignCast(raw));
+        self.conflict_origin = panel.id;
+        managerAction(raw, id, .resolve_conflict);
+    }
+
+    fn confirmationOverlayOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *TransferHost = @ptrCast(@alignCast(raw));
+        const owner = self.panel.capturedOwner() orelse return null;
+        return self.workspace.overlayOwner(owner);
+    }
+
+    fn conflictOverlayOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *TransferHost = @ptrCast(@alignCast(raw));
+        const job = self.conflict_job orelse return null;
+        if (self.conflict_manual) return self.cx.node_registry.resolveLiveId(self.conflict_origin orelse return null);
+        const owner = jobOwner(raw, job) orelse return null;
+        const pane = self.workspace.overlayOwner(owner) orelse return null;
+        if (self.files.presentation) |presentation| if (self.manager.progress(job)) |progress| {
+            if (self.revealSpec(job, progress.attempt)) |spec| {
+                if (presentation.transferSlotFor(owner, if (spec.direction == .upload) .remote else .local)) |slot| return slot;
+            }
+        };
+        return pane;
+    }
+
     fn managerAction(raw: *anyopaque, id: transfer_mod.JobId, action: transfer_manager_view.Action) void {
         const self: *TransferHost = @ptrCast(@alignCast(raw));
         if (action == .reveal) {
@@ -17786,6 +18035,11 @@ const TransferHost = struct {
 
     fn refreshConflict(self: *TransferHost) !void {
         const view = self.conflict_view orelse return;
+        if (self.conflict_job != null and !self.conflict_manual and conflictOverlayOwner(self) == null) {
+            self.conflict_job = null;
+            self.conflict_presented = false;
+            view.hide();
+        }
         if (self.conflict_job == null) {
             for (0..self.manager.count()) |index| {
                 const progress = self.manager.progressAt(index).?;
@@ -17794,6 +18048,8 @@ const TransferHost = struct {
                     const has_context = candidate.value.context != null;
                     candidate.deinit();
                     if (!has_context) continue;
+                    const owner = jobOwner(self, progress.job) orelse continue;
+                    if (self.workspace.overlayOwner(owner) == null) continue;
                     self.conflict_job = progress.job;
                     break;
                 }
@@ -18014,7 +18270,7 @@ const TransferHost = struct {
         const panel = try cx.allocator.create(transfer_panel_mod.Panel);
         panel.* = .{};
         self.panel = panel;
-        const root = try panel.mount(cx, scope);
+        const root = try panel.mountScoped(cx, scope, self, confirmationOverlayOwner);
         panel.on_submit = onTransferSubmit;
         panel.on_submit_frozen = onTransferSubmitFrozen;
         panel.submit_ctx = @ptrCast(self);
@@ -18027,39 +18283,58 @@ const TransferHost = struct {
 
     fn browseSource(raw: *anyopaque) void {
         const self: *TransferHost = @ptrCast(@alignCast(raw));
-        const revision = self.panel.source_revision;
-        var buffer: [4096]u8 = undefined;
-        const path = ui.platform_services.openFilePanel(self.cx.system_sdk, &buffer) orelse return;
-        self.panel.replaceSource(0, revision, path) catch |err| self.panel.setError(@errorName(err));
-        self.cx.requestRedraw();
+        replaceSource(raw, 0, self.panel.source_revision);
     }
 
     fn replaceSource(raw: *anyopaque, index: usize, revision: u64) void {
         const self: *TransferHost = @ptrCast(@alignCast(raw));
-        var buffer: [4096]u8 = undefined;
-        const path = ui.platform_services.openFilePanel(self.cx.system_sdk, &buffer) orelse return;
-        self.panel.replaceSource(index, revision, path) catch |err| self.panel.setError(@errorName(err));
+        if (self.panel_picker != null or self.command_picker != null) return;
+        const sheet = FileSheet.begin(self.cx, .{ .kind = .file, .title = "选择要上传的文件" }) catch |err| {
+            self.panel.setError(@errorName(err));
+            return;
+        };
+        self.panel_picker = .{ .sheet = sheet, .target = .{ .source = .{ .index = index, .revision = revision } } };
         self.cx.requestRedraw();
     }
 
     fn browseDirectory(raw: *anyopaque) void {
         const self: *TransferHost = @ptrCast(@alignCast(raw));
-        const sdk = self.cx.system_sdk orelse return;
+        if (self.panel_picker != null or self.command_picker != null) return;
         const ticket = self.panel.directoryTicket() catch return;
         const state = self.application.sessions.queryState(ticket.owner) orelse return;
         const capabilities = (self.application.sessions.capabilitySnapshot(ticket.owner) catch return) orelse return;
         if (!@import("host/actions.zig").project(if (self.panel.mode == .upload) .upload else .download, capabilities).enabled) return;
-        const operation = state.create_operation;
-        // Keep this path alive across AppKit's nested run loop. Cancelling
-        // yields no selection and never changes the confirmation's receipt.
-        const initial = self.allocator.dupe(u8, self.panel.local_dir_sig.peek()) catch return;
-        defer self.allocator.free(initial);
+        const sheet = FileSheet.begin(self.cx, .{ .kind = .folder, .initial = self.panel.local_dir_sig.peek() }) catch |err| {
+            self.panel.setError(@errorName(err));
+            return;
+        };
+        self.panel_picker = .{ .sheet = sheet, .target = .{ .directory = .{ .ticket = ticket, .operation = state.create_operation, .capability_revision = capabilities.revision } } };
+        self.cx.requestRedraw();
+    }
+
+    fn pollPanelPicker(self: *TransferHost) void {
+        const picker = self.panel_picker orelse return;
+        const count = picker.sheet.count() orelse {
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+            return;
+        };
+        self.panel_picker = null;
+        defer picker.sheet.deinit();
+        if (count == 0 or !self.panel.open.get()) return;
         var buffer: [4096]u8 = undefined;
-        const path = (sdk.runDialog(.{ .kind = .pick_folder, .default_path = initial }, &buffer) catch return) orelse return;
-        const current = self.application.sessions.queryState(ticket.owner) orelse return;
-        const current_capabilities = (self.application.sessions.capabilitySnapshot(ticket.owner) catch return) orelse return;
-        if (current_capabilities.revision != capabilities.revision or current.lifecycle != .attached or !current.create_operation.eql(operation)) return;
-        self.panel.applyDirectorySelection(ticket, path) catch return;
+        const path = picker.sheet.path(0, &buffer) catch |err| {
+            self.panel.setError(@errorName(err));
+            return;
+        };
+        switch (picker.target) {
+            .source => |target| self.panel.replaceSource(target.index, target.revision, path) catch |err| self.panel.setError(@errorName(err)),
+            .directory => |target| {
+                const state = self.application.sessions.queryState(target.ticket.owner) orelse return;
+                const capabilities = (self.application.sessions.capabilitySnapshot(target.ticket.owner) catch return) orelse return;
+                if (capabilities.revision != target.capability_revision or state.lifecycle != .attached or !state.create_operation.eql(target.operation)) return;
+                self.panel.applyDirectorySelection(target.ticket, path) catch return;
+            },
+        }
         self.cx.requestRedraw();
     }
 
@@ -18130,7 +18405,8 @@ const TransferHost = struct {
 
     /// after-layout 轮询：连接完成→消费挂起任务；活跃→tick + 进度行。
     fn poll(self: *TransferHost) void {
-        if (!self.picker_running) self.pollCommandPicker();
+        self.pollCommandPicker();
+        self.pollPanelPicker();
         if (self.cwd_pending) |pending| cwd: {
             if (!self.panel.open.peek()) {
                 self.cwd_pending = null;
@@ -18297,7 +18573,7 @@ const TransferHost = struct {
             for ([_]@import("ui/file_workspace_view.zig").Side{ .local, .remote }, 0..) |side, index| {
                 const slot = presentation.transferSlotFor(owner, side) orelse continue;
                 if (tab.transfer_trays[index] == null) {
-                    const panel = transfer_manager_view.mountSessionTray(self.cx, scope, self.manager, .{ .context = self, .action = managerAction, .scope_choices = transferScopeChoices, .owner = jobOwner, .owner_label = jobOwnerLabel, .can_reveal = canReveal, .open_sftp = requestSessionSftp, .open_manager = requestGlobalManager }) catch continue;
+                    const panel = transfer_manager_view.mountSessionTray(self.cx, scope, self.manager, .{ .context = self, .action = managerAction, .resolve_conflict = managerConflictAction, .scope_choices = transferScopeChoices, .owner = jobOwner, .owner_label = jobOwnerLabel, .can_reveal = canReveal, .open_sftp = requestSessionSftp, .open_manager = requestGlobalManager }) catch continue;
                     panel.setDirectionFilter(if (side == .local) .upload else .download);
                     const link = scope.createState(FileTrayLink, .{ .tab = tab, .index = index }) catch continue;
                     scope.onCleanup(FileTrayLink, link, FileTrayLink.release) catch continue;
@@ -18427,7 +18703,8 @@ const TransferHost = struct {
     fn cleanup(self: *TransferHost) void {
         self.ai_transfers.deinit();
         self.seen_transfers.deinit(self.allocator);
-        if (self.command_picker) |request| self.allocator.free(request.source);
+        self.disposeCommandPicker();
+        if (self.panel_picker) |picker| picker.sheet.deinit();
         self.cx.removeAfterLayoutHook(self);
         if (self.ticker_scope_arena) |*arena| arena.deinit();
         // Native transfer resources are exclusively owned by the process task

@@ -5,6 +5,8 @@ const ui = @import("ui");
 const contract = @import("../../host/plugin_ui_contract.zig");
 const identity = @import("../../host/identity.zig");
 const icons = @import("../../ui/file_workspace_icons.zig");
+const scoped_modal = @import("../../ui/scoped_modal.zig");
+const FileSheet = @import("../../platform/file_sheet.zig").Sheet;
 const model = @import("model.zig");
 const Store = @import("store.zig").Store;
 const sessions = @import("document_sessions.zig");
@@ -129,6 +131,7 @@ const View = struct {
     image_open: *ui.Signal(bool),
     image_modal_node: *ui.Node = undefined,
     viewed_image: ?*editor_images.Image = null,
+    image_picker: ?struct { sheet: FileSheet, lease: sessions.Lease } = null,
     import_notice: ?ImportNotice = null,
     import_input: ?struct { lease: sessions.Lease, input: editor_images.ImportInput } = null,
     import_ticket: ?sessions.ImportTicket = null,
@@ -229,6 +232,7 @@ const View = struct {
         };
         errdefer if (next_lease) |lease| self.documents.release(lease) catch {};
         if (self.lease) |old| try self.documents.release(old);
+        self.cancelImagePicker();
         self.lease = next_lease;
         self.body_generation_seen = null;
         self.read_revision_seen = null;
@@ -523,9 +527,11 @@ const View = struct {
             self.pending = null;
             self.perform(pending) catch |err| self.showError(err);
         }
+        self.pollImagePicker();
         const width = self.root.globalRect().w;
         const compact = (if (width > 0) width else self.cx.viewport.width) < S.compact_width;
         var changed = self.manager.tick();
+        if (self.fitImageViewer()) changed = true;
         if (self.compact != compact or self.layout_dirty) {
             self.applyLayout(compact);
             changed = true;
@@ -962,6 +968,7 @@ const View = struct {
 
     fn clearDocument(self: *View) void {
         self.cancelSaveTimer();
+        self.cancelImagePicker();
         self.clearImportInput();
         self.import_feedback = .idle;
         self.syncImportFeedback();
@@ -1494,13 +1501,25 @@ const View = struct {
         self.closeImageViewer();
         self.viewed_image = image;
         image.pinned = true;
-        const width: f32 = @floatFromInt(image.decoded.width);
-        const height: f32 = @floatFromInt(image.decoded.height);
-        const scale = @max(0, @min(1, @min((self.cx.viewport.width - 96) / width, (self.cx.viewport.height - 120) / height)));
-        self.image_modal_node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width * scale }, .height = .{ .px = height * scale } });
+        _ = self.fitImageViewer();
         self.image_modal_node.setImage(.{ .texture_id = texture });
         self.image_open.set(true);
         self.redraw();
+    }
+
+    fn fitImageViewer(self: *View) bool {
+        const image = self.viewed_image orelse return false;
+        const bounds = self.root.globalRect();
+        if (bounds.w <= 0 or bounds.h <= 0) return false;
+        const width: f32 = @floatFromInt(image.decoded.width);
+        const height: f32 = @floatFromInt(image.decoded.height);
+        const scale = @max(0, @min(1, @min((bounds.w - 96) / width, (bounds.h - 120) / height)));
+        const fit_width = width * scale;
+        const fit_height = height * scale;
+        const node = self.image_modal_node;
+        if (node.style.width == .px and node.style.width.px == fit_width and node.style.height == .px and node.style.height.px == fit_height) return false;
+        node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = fit_width }, .height = .{ .px = fit_height } });
+        return true;
     }
 
     fn closeImageViewer(self: *View) void {
@@ -1923,10 +1942,30 @@ const View = struct {
     }
 
     fn chooseImage(self: *View) void {
-        if (!self.acceptsNewEdits()) return;
+        if (!self.acceptsNewEdits() or self.image_picker != null) return;
+        const lease = self.lease orelse return;
+        const sheet = FileSheet.begin(self.cx, .{ .kind = .file, .title = "选择笔记图片" }) catch |err| return self.importFailed(err);
+        self.image_picker = .{ .sheet = sheet, .lease = lease };
+        self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+    }
+
+    fn pollImagePicker(self: *View) void {
+        const picker = self.image_picker orelse return;
+        const count = picker.sheet.count() orelse {
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+            return;
+        };
+        self.image_picker = null;
+        defer picker.sheet.deinit();
+        if (count == 0 or !self.acceptsNewEdits() or !std.meta.eql(self.lease, @as(?sessions.Lease, picker.lease))) return;
         var path_buffer: [4096]u8 = undefined;
-        const path = ui.platform_services.openFilePanel(self.cx.system_sdk, &path_buffer) orelse return;
+        const path = picker.sheet.path(0, &path_buffer) catch |err| return self.importFailed(err);
         self.queueImport(.{ .file = path }) catch |err| self.importFailed(err);
+    }
+
+    fn cancelImagePicker(self: *View) void {
+        if (self.image_picker) |picker| picker.sheet.deinit();
+        self.image_picker = null;
     }
 
     fn pasteImage(self: *View) bool {
@@ -2322,11 +2361,14 @@ const View = struct {
             .open = self.name_open,
             .title = self.name_title,
             .width = @as(f32, 352),
+            .managed_focus = false,
             .close_on_overlay = false,
             .enter_transition = .none,
             .exit_transition = .none,
         }).mount(scope, cx);
+        modal.overlay.meta.ownership.meta.test_id = "notes.directory.overlay";
         if (!modal.portaled) try self.root.appendChild(cx.allocator, modal.overlay);
+        _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .node = self.root } });
         const form = try ui.box(cx, S.stack(12), .{});
         try modal.body.appendChild(cx.allocator, form);
         const name = try ui.widgets.Input(.{
@@ -2352,6 +2394,7 @@ const View = struct {
             .open = self.lock_choice,
             .title = "设为只读",
             .width = @as(f32, 420),
+            .managed_focus = false,
             .background = S.theme.current().overlay,
             .close_on_overlay = false,
             .enter_transition = .none,
@@ -2360,6 +2403,7 @@ const View = struct {
         modal.dialog.meta.ownership.meta.test_id = "notes.read-only.import-choice";
         modal.dialog.setStyleInline(cx.allocator, .{ .border = .{ .radius = 14 } });
         if (!modal.portaled) try self.root.appendChild(cx.allocator, modal.overlay);
+        _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .node = self.root } });
         modal.body.setStyleInline(cx.allocator, .{ .padding = ui.Padding.all(24), .gap = 16 });
         try modal.body.appendChild(cx.allocator, try ui.text(cx, "这篇笔记有尚未完成的图片导入。", S.text(14, 400, S.theme.current().fg_2)));
         const actions = try ui.box(cx, S.row(34, 8), .{});
@@ -2439,6 +2483,7 @@ const View = struct {
             }
             self.name_open.set(false);
             self.lock_choice.set(false);
+            self.cancelImagePicker();
             self.settings.dismiss();
             self.manager.dismiss();
             self.closeImageViewer();
@@ -2470,6 +2515,7 @@ const View = struct {
     fn dispose(self: *View) void {
         if (self.disposed) return;
         self.disposed = true;
+        self.cancelImagePicker();
         self.cancelPreview();
         self.cancelImagePoll();
         self.cancelSaveTimer();
@@ -2814,9 +2860,11 @@ pub fn mount(request: contract.ContentMount, store: *Store, documents: *sessions
         .open = self.image_open,
         .width = @max(240, cx.viewport.width - 64),
         .max_height = @max(160, cx.viewport.height - 32),
+        .managed_focus = false,
         .on_open_change = cx.on(View, self, View.imageModalChanged),
     }).mount(scope, cx);
     if (!image_modal.portaled) try self.root.appendChild(cx.allocator, image_modal.overlay);
+    _ = try scoped_modal.bind(cx, scope, image_modal, .{ .owner = .{ .node = self.root } });
     image_modal.dialog.meta.ownership.meta.test_id = "notes.document.image-viewer";
     self.image_modal_node = try ui.box(cx, .{ .flex_shrink = 0 }, .{});
     try image_modal.body.appendChild(cx.allocator, self.image_modal_node);

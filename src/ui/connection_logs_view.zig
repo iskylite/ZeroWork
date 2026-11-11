@@ -71,6 +71,10 @@ pub const View = struct {
     new_records: usize = 0,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
+        return mountWithOwner(cx, scope, callbacks, null);
+    }
+
+    pub fn mountWithOwner(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks, owner: ?@import("scoped_modal.zig").Owner) !*View {
         const self = try cx.allocator.create(View);
         var registered = false;
         errdefer if (!registered) cx.allocator.destroy(self);
@@ -79,14 +83,15 @@ pub const View = struct {
         self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .root = undefined, .dialog = undefined, .form = undefined, .open = open, .copy_disabled = disabled };
         try scope.onCleanup(View, self, cleanup);
         registered = true;
-        const modal = try ui.widgets.Modal(.{ .open = open, .width = S.width, .max_height = @max(160, cx.viewport.height - S.margin * 2), .background = S.theme.current().overlay, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = open, .width = S.width, .max_height = @max(160, cx.viewport.height - S.margin * 2), .background = S.theme.current().overlay, .on_open_change = cx.on(View, self, openChanged), .managed_focus = owner == null }).mount(scope, cx);
+        if (owner) |value| _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = value, .mode = .panel });
         self.root = modal.overlay;
         self.dialog = modal.dialog;
         self.form = modal.body;
         self.dialog.meta.ownership.meta.test_id = "connection.logs";
         self.dialog.setStyleInline(cx.allocator, S.panel(cx.viewport));
         self.form.setStyleInline(cx.allocator, S.form());
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        if (!modal.portaled and modal.overlay.parent == null) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         try cx.addAfterLayoutHook(self, afterLayout);
         return self;
     }

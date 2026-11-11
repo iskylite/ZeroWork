@@ -5,7 +5,11 @@ const styles = @import("local_close_styles.zig");
 const theme = @import("app_theme.zig");
 const SessionId = @import("session_lifecycle.zig").SessionId;
 const Risk = @import("../host/process_service.zig").CloseRiskSnapshot;
-pub const Hooks = struct { context: *anyopaque, resolve: *const fn (*anyopaque, SessionId, bool) void };
+pub const Hooks = struct {
+    context: *anyopaque,
+    resolve: *const fn (*anyopaque, SessionId, bool) void,
+    overlay_owner: ?*const fn (*anyopaque, SessionId) ?*ui.Node = null,
+};
 pub const View = struct {
     cx: *ui.Cx,
     hooks: Hooks,
@@ -15,10 +19,13 @@ pub const View = struct {
     identity: *ui.Node,
     risk_title: *ui.Node,
     risk_detail: *ui.Node,
-    extra: *ui.Node,
     extra_text: *ui.Node,
+    scroll: ui.widgets.ScrollAreaResult = undefined,
     dialog: *ui.Node,
+    body: *ui.Node,
     cancel_button: *ui.Node,
+    compact: bool = false,
+    focus_pending: bool = false,
     confirm_button: *ui.Node = undefined,
     risk: *ui.Node = undefined,
     title_icon: *ui.Node = undefined,
@@ -30,27 +37,34 @@ pub const View = struct {
         const self = try cx.allocator.create(View);
         errdefer cx.allocator.destroy(self);
         const open = try scope.createSignal(bool, false);
-        self.* = .{ .cx = cx, .hooks = hooks, .open = open, .overlay = undefined, .identity = undefined, .risk_title = undefined, .risk_detail = undefined, .extra = undefined, .extra_text = undefined, .dialog = undefined, .cancel_button = undefined, .colors = theme.current() };
-        const modal = try ui.widgets.Modal(.{ .open = open, .width = 480, .max_height = 500, .background = theme.current().overlay, .on_open_change = cx.on(View, self, changed) }).mount(scope, cx);
+        self.* = .{ .cx = cx, .hooks = hooks, .open = open, .overlay = undefined, .identity = undefined, .risk_title = undefined, .risk_detail = undefined, .extra_text = undefined, .dialog = undefined, .body = undefined, .cancel_button = undefined, .colors = theme.current() };
+        const modal = try ui.widgets.Modal(.{ .open = open, .width = 480, .max_height = 500, .background = theme.current().overlay, .managed_focus = false, .on_open_change = cx.on(View, self, changed) }).mount(scope, cx);
         self.overlay = modal.overlay;
+        self.overlay.meta.ownership.meta.test_id = "local.close.overlay";
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        if (hooks.overlay_owner != null) _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = self, .get = overlayOwner } } });
         self.dialog = modal.dialog;
+        self.body = modal.body;
         modal.dialog.setStyleInline(cx.allocator, styles.dialog());
         modal.dialog.meta.ownership.meta.test_id = "local.close.confirmation";
-        modal.body.setStyleInline(cx.allocator, styles.body());
+        modal.body.setStyleInline(cx.allocator, styles.body(false));
         const head = try ui.box(cx, styles.row(28), .{});
         self.title_icon = try ui.iconTint(cx, ui.icons.terminal, theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } });
         try head.appendChild(cx.allocator, self.title_icon);
         self.title = try ui.text(cx, "关闭本地会话？", styles.text(13, true));
+        self.title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1 });
         try head.appendChild(cx.allocator, self.title);
-        try head.appendChild(cx.allocator, try ui.spacer(cx));
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .a11y_label = "取消关闭本地会话", .on_click = cx.on(View, self, cancel) }).mount(scope, cx);
         close.setStyleInline(cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .border = .{ .radius = 7 } });
         close.meta.ownership.meta.test_id = "local.close.dismiss";
         const close_hint = try @import("control_hint.zig").mount(cx, scope, close, "取消关闭，返回原终端；进程继续运行", .{ .id = "local.close.dismiss.tooltip", .visible = open });
         try head.appendChild(cx.allocator, close_hint.wrapper);
         try modal.body.appendChild(cx.allocator, head);
-        self.identity = try self.label(modal.body, "", 18, styles.text(12, true));
+        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
+        self.scroll = scroll;
+        scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .grow = .{ .min = 0 } }, .min_height = 0, .flex = 1 });
+        scroll.content.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6 });
+        self.identity = try self.label(scroll.content, "", 18, styles.text(12, true));
         const risk = try ui.box(cx, styles.risk(), .{});
         @import("layer_materials.zig").card(risk, .action);
         self.risk = risk;
@@ -58,16 +72,16 @@ pub const View = struct {
         var detail_style = styles.text(11.5, false);
         detail_style.use_monospace_font = true;
         self.risk_detail = try self.label(risk, "", 18, detail_style);
-        try modal.body.appendChild(cx.allocator, risk);
-        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
-        self.extra = scroll.container;
-        scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 0 }, .flex_shrink = 0, .display = .none });
+        try scroll.content.appendChild(cx.allocator, risk);
         const jobs_style = styles.text(11.5, false);
         const extra_text = try ui.text(cx, "", .{ .font_size = jobs_style.font_size, .color = jobs_style.color, .wrap = .word, .use_monospace_font = true });
         self.extra_text = extra_text;
+        extra_text.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .display = .none });
         try scroll.content.appendChild(cx.allocator, extra_text);
+        self.notice = try ui.text(cx, "关闭将结束该本地会话及其进程。历史记录保留。", .{ .font_size = 12, .color = theme.current().fg_2, .wrap = .word });
+        self.notice.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0 });
+        try scroll.content.appendChild(cx.allocator, self.notice);
         try modal.body.appendChild(cx.allocator, scroll.container);
-        self.notice = try self.label(modal.body, "关闭将结束该本地会话及其进程。历史记录保留。", 18, styles.text(12, false));
         const actions = try ui.box(cx, styles.row(30), .{});
         try actions.appendChild(cx.allocator, try ui.spacer(cx));
         self.cancel_button = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .on_click = cx.on(View, self, cancel) }).mount(scope, cx);
@@ -123,20 +137,20 @@ pub const View = struct {
         self.risk_detail.setDisplay(if (detail.len == 0) .none else .flex);
         const bytes = extra.writer.buffered();
         try self.extra_text.setTextContent(self.cx.allocator, bytes);
-        self.extra.setDisplay(if (bytes.len == 0) .none else .flex);
-        self.extra.setStyle(self.cx.allocator, .height, .{ .px = 88 });
-        self.dialog.setStyle(self.cx.allocator, .height, .{ .px = if (bytes.len == 0) 220 else 314 });
+        self.extra_text.setDisplay(if (bytes.len == 0) .none else .flex);
+        ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
+        self.dialog.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (bytes.len == 0) 220 else 314 } });
         self.session = id;
+        self.focus_pending = true;
         self.open.set(true);
-        self.cx.setFocus(self.cancel_button);
         self.cx.requestRedraw();
     }
     fn retheme(self: *View) void {
         const c = theme.current();
         self.dialog.setStyleInline(self.cx.allocator, styles.dialogPaint());
         self.risk.setBackground(theme.popupAction());
-        self.cancel_button.setBackground(theme.popupAction());
-        self.confirm_button.setStyleInline(self.cx.allocator, styles.button(112, true));
+        self.cancel_button.setStyleInline(self.cx.allocator, styles.button(if (self.compact) 44 else 72, false));
+        self.confirm_button.setStyleInline(self.cx.allocator, styles.button(if (self.compact) 76 else 112, true));
         _ = self.title_icon.setTint(c.accent);
         for ([_]*ui.Node{ self.title, self.identity, self.risk_title }) |node| node.setTextColor(c.fg_1);
         for ([_]*ui.Node{ self.risk_detail, self.extra_text, self.notice }) |node| node.setTextColor(c.fg_2);
@@ -146,7 +160,26 @@ pub const View = struct {
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
         if (!std.meta.eql(self.colors, theme.current())) self.retheme();
+        const rect = self.dialog.globalRect();
+        if (self.open.peek() and rect.w > 0 and rect.h > 0) {
+            const compact = rect.w < 224 or rect.h < 132;
+            if (self.compact != compact) {
+                self.compact = compact;
+                self.body.setStyleInline(self.cx.allocator, styles.body(compact));
+                self.cancel_button.setStyleInline(self.cx.allocator, styles.button(if (compact) 44 else 72, false));
+                self.confirm_button.setStyleInline(self.cx.allocator, styles.button(if (compact) 76 else 112, true));
+                return .needs_layout;
+            }
+        }
+        if (self.focus_pending and self.cancel_button.isDisplayedInTree()) {
+            self.focus_pending = false;
+            self.cx.setFocus(self.cancel_button);
+        }
         return .done;
+    }
+    fn overlayOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *View = @ptrCast(@alignCast(raw));
+        return (self.hooks.overlay_owner orelse return null)(self.hooks.context, self.session orelse return null);
     }
     pub fn cancel(self: *View) void {
         self.resolve(false);
@@ -157,6 +190,7 @@ pub const View = struct {
     fn resolve(self: *View, accepted: bool) void {
         const id = self.session orelse return;
         self.session = null;
+        self.focus_pending = false;
         self.open.set(false);
         self.hooks.resolve(self.hooks.context, id, accepted);
         self.cx.requestRedraw();

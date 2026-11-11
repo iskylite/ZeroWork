@@ -1,5 +1,6 @@
 const std = @import("std");
 const ui = @import("ui");
+const App = @import("zenit_app").App;
 const client = @import("client.zig");
 const admission = @import("admission.zig");
 const close = @import("close_coordinator.zig");
@@ -17,6 +18,8 @@ pub fn Host(comptime Process: type) type {
         sources: std.ArrayList(Source) = .empty,
         visible_sources: std.ArrayList(bool) = .empty,
         view: ?*View.View = null,
+        view_scope: ?*ui.Scope = null,
+        requested_window: ?identity.WindowId = null,
         view_window: ?identity.WindowId = null,
         phase: enum { idle, confirm, closing, blocked, handoff, cancel_pending, committed } = .idle,
         snapshot: ?[:0]u8 = null,
@@ -66,12 +69,44 @@ pub fn Host(comptime Process: type) type {
             for (self.process.domain.attachments.items) |host| try self.source(.{ .aux = host.window_id });
             for (self.process.domain.sessions.sessions.items) |entry| if (entry.state != .closed) try self.source(.{ .session = entry.handle });
         }
+        pub fn openFromWindow(self: *Self, window: identity.WindowId) void {
+            self.requested_window = window;
+            client.zw_update_open();
+        }
+        fn presentationWindow(self: *Self, requested: ?identity.WindowId) ?*App {
+            if (requested) |id| {
+                for (self.process.runtime.windows.items) |managed| {
+                    const nav = Process.navFor(managed.app) orelse continue;
+                    const host = nav.application_host orelse continue;
+                    if (host.window_id == id and nav.settings != null) return managed.app;
+                }
+                return null;
+            }
+            if (self.process.runtime.activeWindow()) |app| {
+                if (Process.navFor(app)) |nav| if (nav.settings != null and nav.application_host != null) return app;
+            }
+            for (self.process.runtime.windows.items) |managed| {
+                const nav = Process.navFor(managed.app) orelse continue;
+                if (nav.settings != null and nav.application_host != null) return managed.app;
+            }
+            return null;
+        }
         fn show(self: *Self) !void {
-            if (self.view == null) {
-                const app = self.process.primary orelse return;
-                const nav = Process.navFor(app) orelse return;
-                self.view = try View.View.mount(app.cx, nav.settings.?.scope, .{ .context = self, .action = action });
-                self.view_window = nav.application_host.?.window_id;
+            const requested = self.requested_window;
+            self.requested_window = null;
+            if (self.view == null or self.phase == .idle) {
+                const app = self.presentationWindow(requested) orelse return;
+                const nav = Process.navFor(app).?;
+                const window = nav.application_host.?.window_id;
+                if (self.view_window != window) {
+                    const scope = try nav.settings.?.scope.childScope();
+                    errdefer scope.dispose();
+                    const view = try View.View.mount(app.cx, scope, .{ .context = self, .action = action });
+                    if (self.view_scope) |old_scope| old_scope.dispose();
+                    self.view = view;
+                    self.view_scope = scope;
+                    self.view_window = window;
+                }
             }
             self.view.?.show();
             self.dirty = true;
@@ -79,6 +114,7 @@ pub fn Host(comptime Process: type) type {
         pub fn windowGone(self: *Self, id: identity.WindowId) void {
             if (self.view_window == id) {
                 self.view = null;
+                self.view_scope = null;
                 self.view_window = null;
             }
         }
@@ -338,11 +374,10 @@ pub fn Host(comptime Process: type) type {
                 self.previous = self.status;
                 self.dirty = true;
             }
-            if (client.zw_update_take_present() != 0) try self.show();
             if (self.view_window) |id| if (self.process.domain.ownerForWindow(id) == null) {
-                self.view = null;
-                self.view_window = null;
+                self.windowGone(id);
             };
+            if (client.zw_update_take_present() != 0) try self.show();
             for (self.coordinator.work.items) |work| if (work.operation == null and self.receipt(self.sources.items[work.owner - 1]) == .released) self.coordinator.observeReleased(work.owner);
             // Poll issued operations even after cancellation and before a new plan.
             for (self.coordinator.work.items) |work| if (work.operation) |operation| {
@@ -596,6 +631,7 @@ pub fn Host(comptime Process: type) type {
                 p.danger = self.can_force;
                 p.warning = true;
             }
+            p.blocking = self.phase == .confirm or admission.blocked();
             try v.update(p);
         }
         fn now() u64 {

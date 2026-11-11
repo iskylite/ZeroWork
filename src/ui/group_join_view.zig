@@ -4,7 +4,12 @@ const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 const roster_mod = @import("group_model.zig");
-pub const Hooks = struct { context: *anyopaque, join: *const fn (*anyopaque, []const u8) anyerror!void, leave: *const fn (*anyopaque) anyerror!void };
+pub const Hooks = struct {
+    context: *anyopaque,
+    join: *const fn (*anyopaque, []const u8) anyerror!void,
+    leave: *const fn (*anyopaque) anyerror!void,
+    overlay_owner: *const fn (*anyopaque) ?*ui.Node,
+};
 pub const View = struct {
     hooks: Hooks,
     scope: *ui.Scope,
@@ -13,18 +18,25 @@ pub const View = struct {
     open: *ui.Signal(bool),
     name: *ui.Signal([]const u8),
     error_label: *ui.Node,
+    input: *ui.Node = undefined,
+    focus_pending: bool = true,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, roster: *roster_mod.Roster, hooks: Hooks) !*View {
         const open = try scope.createSignal(bool, false);
         const self = try scope.createState(View, .{ .hooks = hooks, .scope = scope, .overlay = undefined, .cx = cx, .open = open, .name = try scope.createText("", .{}), .error_label = undefined });
-        const modal = try ui.widgets.Modal(.{ .open = open, .title = "加入会话组", .width = @as(f32, 380), .max_height = @as(f32, 460), .background = theme.current().overlay }).mount(scope, cx);
-        self.overlay = modal.overlay;
-        if (!modal.portaled) try parent.appendChild(cx.allocator, modal.overlay);
-        modal.dialog.meta.ownership.meta.test_id = "groups.join.dialog";
-        modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 10, .padding = ui.Padding.all(16) });
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } }, .position = .bottom_start, .offset = .{ .static = 6 }, .width = @as(f32, 380), .max_height = @as(f32, 460), .viewport_padding = 8, .constrain_width_to_viewport = true, .shift_main_axis = true, .flip = true, .size_policy = .fit_content, .close_on_escape = true, .close_on_outside_click = true, .consume_outside_click = false, .a11y_role = .dialog }).mount(scope, cx);
+        self.overlay = popup.wrapper;
+        try parent.appendChild(cx.allocator, popup.wrapper);
+        popup.chrome.meta.ownership.meta.test_id = "groups.join.dialog";
+        popup.chrome.behavior.interaction.a11y = .{ .role = .dialog, .label = "加入会话组" };
+        try theme.bindMaterial(cx, scope, popup.chrome, "overlay");
+        const body = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 10, .padding = ui.Padding.all(16) }, .{});
+        try popup.content.appendChild(cx.allocator, body);
+        try body.appendChild(cx.allocator, try ui.text(cx, "加入会话组", .{ .font_size = 14, .font_weight = 600, .color = theme.current().fg_1 }));
         const input = try ui.widgets.Input(.{ .value = self.name, .placeholder = "输入新组名或现有组名", .on_submit = cx.on(View, self, submitted) }).mountResult(scope, cx);
         theme.styleInput(input);
+        self.input = input.input_container;
         input.input_container.meta.ownership.meta.test_id = "groups.join.name";
-        try modal.body.appendChild(cx.allocator, input.node);
+        try body.appendChild(cx.allocator, input.node);
         const area = try ui.widgets.ScrollArea(.{}).mount(scope, cx);
         area.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = @min(180, @as(f32, @floatFromInt(roster.groups.items.len)) * 34) }, .flex_shrink = 0 });
         area.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 2 });
@@ -34,10 +46,10 @@ pub const View = struct {
             button.meta.ownership.meta.test_id = "groups.join.existing";
             try area.content.appendChild(cx.allocator, button);
         }
-        try modal.body.appendChild(cx.allocator, area.container);
+        try body.appendChild(cx.allocator, area.container);
         self.error_label = try ui.text(cx, "", .{ .font_size = 11, .color = theme.current().danger_ink, .wrap = .word });
         self.error_label.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} } });
-        try modal.body.appendChild(cx.allocator, self.error_label);
+        try body.appendChild(cx.allocator, self.error_label);
         const actions = try ui.hstack(cx, .{ .width = .fill(), .gap = 8 }, .{});
         const leave_button = try ui.widgets.Button(.{ .label = "移出所有组", .variant = .secondary, .size = .sm, .on_click = cx.on(View, self, leave) }).mount(scope, cx);
         leave_button.meta.ownership.meta.test_id = "groups.join.leave";
@@ -47,10 +59,35 @@ pub const View = struct {
         const accept = try ui.widgets.Button(.{ .label = "加入 / 创建", .size = .sm, .on_click = cx.on(View, self, submit) }).mount(scope, cx);
         accept.meta.ownership.meta.test_id = "groups.join.accept";
         try actions.appendChild(cx.allocator, accept);
-        try modal.body.appendChild(cx.allocator, actions);
+        try body.appendChild(cx.allocator, actions);
+        try scope.onCleanup(View, self, cleanup);
+        try cx.addAfterLayoutHook(self, afterLayout);
         open.set(true);
-        cx.setFocus(input.input_container);
+        cx.requestRedraw();
         return self;
+    }
+    fn anchorRect(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+        const self: *View = @ptrCast(@alignCast(raw));
+        const node = self.hooks.overlay_owner(self.hooks.context) orelse return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        const rect = node.globalRect();
+        return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    }
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *View = @ptrCast(@alignCast(raw));
+        if (!self.open.peek()) return .done;
+        const anchor = self.hooks.overlay_owner(self.hooks.context);
+        if (anchor == null or !anchor.?.isDisplayedInTree()) {
+            self.open.set(false);
+            return .needs_layout;
+        }
+        if (self.focus_pending and self.input.isDisplayedInTree()) {
+            self.focus_pending = false;
+            self.cx.setFocus(self.input);
+        }
+        return .done;
+    }
+    fn cleanup(self: *View) void {
+        self.cx.removeAfterLayoutHook(self);
     }
     fn showError(self: *View, err: anyerror) void {
         self.error_label.setTextContent(self.cx.allocator, switch (err) {

@@ -8,12 +8,14 @@ pub const Conflict = transfer.Conflict;
 pub const domain = @import("../transfer/conflict.zig");
 const Name = @import("../host/directory_name.zig");
 const S = @import("transfer_conflict_styles.zig");
+const scoped_modal = @import("scoped_modal.zig");
 
 pub const Callbacks = struct {
     context: *anyopaque,
     /// Request strings borrow the View until this callback returns.
     decision: *const fn (*anyopaque, Conflict.Request) anyerror!void,
     defer_conflict: *const fn (*anyopaque, domain.Key) anyerror!void,
+    overlay_owner: ?*const fn (*anyopaque) ?*ui.Node = null,
 };
 const values = [_][]const u8{ "skip", "save_as", "keep_both", "overwrite" };
 const ids = [_][]const u8{ "transfer.conflict.skip", "transfer.conflict.save_as", "transfer.conflict.keep_both", "transfer.conflict.overwrite" };
@@ -137,7 +139,7 @@ pub const View = struct {
         };
         try scope.onCleanup(View, self, cleanup);
         registered = true;
-        const modal = try ui.widgets.Modal(.{ .open = ui.split(self.open, cx.on(View, self, openChanged)), .width = S.width(.choice), .max_height = @max(0, cx.viewport.height - 16), .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = ui.split(self.open, cx.on(View, self, openChanged)), .width = S.width(.choice), .max_height = @max(0, cx.viewport.height - 16), .background = S.theme.current().overlay, .managed_focus = callbacks.overlay_owner == null, .close_on_overlay = false }).mount(scope, cx);
         self.root = modal.overlay;
         self.interaction_ready = true;
         self.dialog = modal.dialog;
@@ -226,6 +228,7 @@ pub const View = struct {
         self.confirmation.setDisplay(.none);
         self.error_text.setDisplay(.none);
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, self.root);
+        if (callbacks.overlay_owner) |get| _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = callbacks.context, .get = get } } });
         try cx.addAfterLayoutHook(self, afterLayout);
         return self;
     }
@@ -324,20 +327,22 @@ pub const View = struct {
         self.syncLayout();
     }
     fn syncLayout(self: *View) void {
-        self.viewport = self.cx.viewport;
+        const bounds = self.root.globalRect();
+        self.viewport = if (self.callbacks.overlay_owner != null and bounds.w > 0 and bounds.h > 0) .{ .width = bounds.w, .height = bounds.h } else self.cx.viewport;
         const style = S.panel(self.mode, self.viewport, self.scroll.content.globalRect().h);
         if (!std.meta.eql(self.form.style.padding, ui.Padding.ZERO)) self.form.setStyleInline(self.cx.allocator, S.form());
         if (!std.meta.eql(self.dialog.style.width, style.width.?) or !std.meta.eql(self.dialog.style.height, style.height.?)) self.dialog.setStyleInline(self.cx.allocator, style);
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
-        if (!self.visible) return .done;
+        if (!self.visible or !self.root.isDisplayedInTree()) return .done;
         const old = self.dialog.globalRect();
         const padded = !std.meta.eql(self.form.style.padding, ui.Padding.ZERO);
         self.flush() catch {};
         if (self.focus_pending) {
             self.focus_pending = false;
-            self.cx.setFocus(self.close);
+            const focused = self.cx.focus_manager.getFocused();
+            if (self.callbacks.overlay_owner == null or focused == null or focused.?.isDescendantOf(self.root)) self.cx.setFocus(self.close);
         }
         if (padded or self.dialog.style.width.px != old.w or self.dialog.style.height.px != old.h) return .needs_layout;
         return .done;

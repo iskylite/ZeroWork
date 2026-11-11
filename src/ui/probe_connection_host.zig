@@ -17,6 +17,7 @@ pub const Host = struct {
     cx: *ui.Cx,
     controller: *Probe.Controller,
     wizard: ?*Wizard = null,
+    child_wizard: ?*Wizard = null,
     remote: ?*RemoteEditor = null,
     authentication: *Presenter,
     challenges: *Shared,
@@ -39,6 +40,7 @@ pub const Host = struct {
         self.* = .{ .cx = cx, .controller = controller, .wizard = wizard, .remote = remote, .authentication = shared.view, .challenges = shared };
         try scope.onCleanup(Host, self, cleanup);
         registered = true;
+        shared.bindProbeOwner(.{ .context = self, .get = resolveOwner });
         try cx.addAfterLayoutHook(self, hook);
         controller.setInteractionSink(.{ .context = self, .consume = consume });
         return self;
@@ -52,8 +54,29 @@ pub const Host = struct {
         return if (self.wizard) |wizard| wizard.isVisible() else if (self.remote) |remote| remote.isVisible() else false;
     }
 
-    pub fn blocksGlobalActions(self: *const Host) bool {
-        return self.bridge.visible();
+    fn resolveOwner(raw: *anyopaque, owner: @import("../host/challenge_host.zig").Owner) ?*ui.Node {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.bridge.current) |current| if (owner.eql(Bridge.Bridge.owner(current.identity))) {
+            if (!self.visible()) return null;
+            return if (self.wizard) |wizard| wizard.modal else if (self.remote) |remote| remote.modal else null;
+        };
+        const handle = switch (owner) {
+            .session => |value| value,
+            .operation => |key| if (key.owner == .session) key.owner.session else return null,
+        };
+        if (self.child_wizard) |wizard| if (pluginProbeOwner(wizard, handle)) |panel| return panel;
+        return if (self.wizard) |wizard| pluginProbeOwner(wizard, handle) else null;
+    }
+
+    fn pluginProbeOwner(wizard: *Wizard, handle: @import("../host/identity.zig").SessionHandle) ?*ui.Node {
+        if (!wizard.isVisible()) return null;
+        const host = wizard.probe_host orelse if (wizard.editor_host) |facade| facade.probe_host orelse return null else return null;
+        for (host.entries.items) |entry| {
+            if (!entry.token.handle.eql(handle) or entry.complete or !entry.editor.alive) continue;
+            if (entry.editor.id != wizard.draft_id or entry.token.draft_revision != wizard.draft_revision) return null;
+            return wizard.modal;
+        }
+        return null;
     }
 
     fn consume(raw: *anyopaque, _: *Probe.Job) void {
@@ -153,6 +176,7 @@ pub const Host = struct {
 
     fn cleanup(self: *Host) void {
         self.controller.setInteractionSink(null);
+        self.challenges.clearProbeOwner(self);
         self.bridge.clear();
         if (self.editor()) |current_editor| if (current_editor.cancel_test_ctx == @as(?*anyopaque, @ptrCast(self))) {
             current_editor.on_cancel_test = null;

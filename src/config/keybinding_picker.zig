@@ -4,16 +4,17 @@ const ui = @import("ui");
 const theme = @import("../ui/app_theme.zig");
 const keys = @import("keybindings.zig");
 pub const Callbacks = struct { context: *anyopaque, changed: *const fn (*anyopaque) void, dismiss: *const fn (*anyopaque) void };
-pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, _: *ui.Node, map: *keys.Map, label: []const u8, callbacks: Callbacks) !*Recorder {
+pub fn mount(cx: *ui.Cx, scope: *ui.Scope, owner: *ui.Node, _: *ui.Node, map: *keys.Map, label: []const u8, callbacks: Callbacks) !*Recorder {
     const action = std.meta.stringToEnum(keys.Action, label) orelse return error.FixedMouseRow;
     if (action == .recent_tab or action == .accept_completion) return error.FixedMouseRow;
     const self = try cx.allocator.create(Recorder);
     self.* = .{ .cx = cx, .map = map, .action = action, .draft = map.*, .callbacks = callbacks, .root = undefined, .status = undefined, .capture = undefined, .open = try scope.createSignal(bool, true), .invalid = try scope.createSignal(bool, true) };
     try scope.onCleanup(Recorder, self, Recorder.cleanup);
     const c = theme.current();
-    const modal = try ui.widgets.Modal(.{ .open = self.open, .width = 390, .max_height = @max(@as(f32, 180), cx.viewport.height - 48), .background = c.overlay, .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(Recorder, self, Recorder.openChanged) }).mount(scope, cx);
+    const modal = try ui.widgets.Modal(.{ .managed_focus = false, .open = self.open, .width = 390, .max_height = @max(@as(f32, 180), cx.viewport.height - 48), .background = c.overlay, .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(Recorder, self, Recorder.openChanged) }).mount(scope, cx);
+    _ = try @import("../ui/scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .node = owner } });
     self.root = modal.overlay;
-    self.portaled = modal.portaled;
+    self.portaled = modal.portaled or modal.overlay.parent != null;
     self.root.meta.ownership.meta.test_id = "settings.keybinding.overlay";
     modal.dialog.meta.ownership.meta.test_id = "settings.keybinding.dialog";
     try theme.bindMaterial(cx, scope, modal.dialog, "overlay");

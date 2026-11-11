@@ -1,6 +1,5 @@
 //! The assistant header projects the currently displayed conversation's
 //! workspace. All directory changes go back through the host's captured ticket.
-const builtin = @import("builtin");
 const std = @import("std");
 const ui = @import("ui");
 const identity = @import("../host/identity.zig");
@@ -314,21 +313,4 @@ fn unavailableMessage(reason: []const u8) []const u8 {
 fn basename(path: []const u8) []const u8 {
     const name = std.fs.path.basename(path);
     return if (name.len != 0) name else path;
-}
-
-extern fn zw_pick_ai_local_path(initial: [*:0]const u8, buffer: [*]u8, size: usize, directory: c_int) isize;
-
-pub fn pickLocalPath(cx: *ui.Cx, kind: enum { file, directory }, initial: ?[]const u8, buffer: []u8) !?[]const u8 {
-    const folder = kind == .directory;
-    const title = if (folder) "选择本地工作区" else "选择本地文件";
-    if (comptime builtin.os.tag == .macos) if (folder or initial != null) {
-        const path_z = try cx.allocator.dupeSentinel(u8, initial orelse "", 0);
-        defer cx.allocator.free(path_z);
-        const length = zw_pick_ai_local_path(path_z.ptr, buffer.ptr, buffer.len, @intFromBool(folder));
-        if (length < 0) return error.BackendFailure;
-        if (length == 0) return null;
-        return buffer[0..@intCast(length)];
-    };
-    const sdk = cx.system_sdk orelse return error.NotSupported;
-    return sdk.runDialog(.{ .kind = if (folder) .pick_folder else .open_file, .title = title, .default_path = initial orelse "" }, buffer);
 }

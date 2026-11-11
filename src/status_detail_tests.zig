@@ -66,6 +66,46 @@ test "local close modal keeps captured session and resolves once after user deci
     try std.testing.expect(recorder.accepted);
 }
 
+test "local close with unknown process details keeps actions inside a narrow owning pane" {
+    const Close = @import("ui/local_close_view.zig");
+    const Risk = @import("host/process_service.zig").CloseRiskSnapshot;
+    const Owner = struct {
+        pane: *ui.Node,
+        fn get(raw: *anyopaque, _: u64) ?*ui.Node {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.pane;
+        }
+        fn resolve(_: *anyopaque, _: u64, _: bool) void {}
+    };
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(480, 320);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(cx.allocator, null, cx.owner);
+    defer scope.dispose();
+    var owner: Owner = .{ .pane = try ui.box(cx, .{ .width = .{ .px = 160 }, .height = .{ .px = 100 } }, .{}) };
+    try cx.root.?.appendChild(cx.allocator, owner.pane);
+    const view = try Close.View.mount(cx, scope, .{ .context = &owner, .resolve = Owner.resolve, .overlay_owner = Owner.get });
+    const risk: Risk = .{ .owner = .{ .session_id = @fromBackingInt(41) }, .process_state = .running, .shell_pid = null, .foreground = null, .foreground_state = .unknown, .observed_monotonic_ms = 0, .active_exec = &.{}, .unknown = true };
+    try view.show(41, &risk);
+    for (0..8) |_| {
+        cx.frame_count += 1;
+        cx.frame_time_ms += 16;
+        _ = cx.render();
+    }
+    try std.testing.expectEqualStrings("部分进程状态无法核实\n", view.extra_text.getText().?.content);
+    const bounds = owner.pane.globalRect();
+    const card = view.dialog.globalRect();
+    try std.testing.expect(card.w > 0 and card.h > 0);
+    try std.testing.expect(card.w <= bounds.w and card.h <= bounds.h);
+    for ([_]*ui.Node{ view.cancel_button, view.confirm_button }) |button| {
+        const rect = button.globalRect();
+        try std.testing.expect(rect.w > 0 and rect.h > 0);
+        try std.testing.expect(rect.x >= card.x and rect.x + rect.w <= card.x + card.w);
+        try std.testing.expect(rect.y >= card.y and rect.y + rect.h <= card.y + card.h);
+    }
+}
+
 test "registry global theme publication preserves RGBA roles beyond three legacy names" {
     const theme = @import("ui/app_theme.zig");
     const previous = theme.currentName();

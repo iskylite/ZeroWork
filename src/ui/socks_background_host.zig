@@ -26,7 +26,7 @@ pub const Host = struct {
         const tasks = application.domain.tasks orelse return error.TaskDomainUnavailable;
         self.model = tasks.bindBackgrounds(.{ .context = application.domain, .create = rejectCreate, .snapshots = snapshots, .listener = listener, .start = start, .close_listener = closeListener, .close_owner = closeOwner, .reconnect = reconnect });
         self.view = try List.View.mount(cx, scope, .{ .context = self, .action = action });
-        self.exposure = try Exposure.View.mount(cx, scope, .{ .context = self, .confirm = confirmExposure, .cancel = cancelExposure });
+        self.exposure = try Exposure.View.mount(cx, scope, .{ .context = self, .confirm = confirmExposure, .cancel = cancelExposure, .overlay_owner = exposureOwner });
         workspace.setBackgroundForwardBridge(.{ .context = self, .badge = badge });
         try cx.addAfterLayoutHook(self, afterLayout);
         try scope.onCleanup(Host, self, cleanup);
@@ -48,8 +48,10 @@ pub const Host = struct {
         if (!std.mem.eql(u8, bind, "127.0.0.1") and !std.mem.eql(u8, bind, "0.0.0.0")) return error.InvalidSocksBind;
         const options: M.Routes.StartOptions = .{ .exit_index = host.socks_exit, .listener = .{ .requested_port = if (host.socks_enabled) host.socks_port else self.workspace.app_config.ssh.socks_port, .bind127 = std.mem.eql(u8, bind, "127.0.0.1"), .max_connections = host.socks_max_connections } };
         if (!options.listener.bind127) {
+            if (self.pending != null) return error.ExposureConfirmationAlreadyOpen;
             self.pending = .{ .host_id = host_id, .asset = asset, .options = options };
-            try self.exposure.show(bind);
+            errdefer self.pending = null;
+            try self.exposure.showBackground(bind, options.listener.requested_port, host.name);
             return;
         }
         try self.begin(.{ .host_id = host_id, .asset = asset, .options = options });
@@ -70,6 +72,11 @@ pub const Host = struct {
     }
     fn cancelExposure(raw: *anyopaque) void {
         cast(raw).pending = null;
+    }
+    fn exposureOwner(raw: *anyopaque) ?*ui.Node {
+        const self = cast(raw);
+        if (self.pending == null) return null;
+        return self.cx.root;
     }
     fn cast(raw: *anyopaque) *Host {
         return @ptrCast(@alignCast(raw));

@@ -13,12 +13,12 @@ pub const Callbacks = struct {
     new_sftp: ?*const fn (*anyopaque) void = null,
     new_kvm: ?*const fn (*anyopaque) void = null,
     notes: ?*const fn (*anyopaque) void = null,
-    notes_float: ?*const fn (*anyopaque) void = null,
+    new_web: *const fn (*anyopaque) void,
     saved: ?*const fn (*anyopaque, identity.AssetOwner) void = null,
 };
-const Action = enum(usize) { local, new_profile, new_sftp, new_kvm, notes, notes_float };
-const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM", "笔记", "笔记浮窗" };
-const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp", "session.menu.new_kvm", "session.menu.notes", "session.menu.notes_float" };
+const Action = enum(usize) { local, new_profile, new_sftp, new_kvm, new_web, notes };
+const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM", "新建网页", "笔记" };
+const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp", "session.menu.new_kvm", "session.menu.new_web", "session.menu.notes" };
 
 pub const View = struct {
     cx: *ui.Cx,
@@ -74,7 +74,7 @@ pub const View = struct {
         self.chrome.behavior.interaction.a11y = .{ .role = .menu, .label = "新建会话" };
         self.chrome.behavior.events.capture_context = self;
         self.chrome.behavior.events.on_event_capture = onEvent;
-        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder, ui.icons.monitor, ui.icons.notebook, ui.icons.panel_right };
+        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder, ui.icons.monitor, ui.icons.globe, ui.icons.notebook };
         for (labels, 0..) |label, index| {
             if (index == 1) {
                 const area = try ui.widgets.ScrollArea(.{}).mount(self.scope, cx);
@@ -95,7 +95,7 @@ pub const View = struct {
             const action = try self.scope.createState(Row, .{ .view = self, .action = @fromBackingInt(@intCast(index)) });
             const node = try ui.widgets.Button(.{ .a11y_label = label, .variant = .ghost, .disabled = index == 0 and callbacks.local == null, .base_style = S.row(), .hover_style = self.hover_style, .on_click = cx.on(Row, action, Row.choose) }).mount(self.scope, cx);
             node.setStyleInline(cx.allocator, S.row());
-            if ((action.action == .notes and callbacks.notes == null) or (action.action == .notes_float and !self.hasNotesFloat())) node.setDisplay(.none);
+            if (action.action == .notes and callbacks.notes == null) node.setDisplay(.none);
             @import("sidebar_view.zig").setFocusRing(node);
             node.meta.ownership.meta.test_id = ids[index];
             if (node.behavior.interaction.a11y) |*a| a.role = .menuitem;
@@ -172,7 +172,7 @@ pub const View = struct {
             .escape => self.hide(),
             .up, .down => {
                 const more_index = self.saved_rows.items.len + 1;
-                const total = more_index + labels.len - @as(usize, @intFromBool(self.callbacks.notes == null)) - @as(usize, @intFromBool(!self.hasNotesFloat()));
+                const total = more_index + labels.len - @as(usize, @intFromBool(self.callbacks.notes == null));
                 const current = if (self.selected_saved) |i| i + 1 else if (self.selected_more_trigger) more_index else if (self.selected == .local) 0 else more_index + @backingInt(self.selected);
                 var next = if (key == .down) (current + 1) % total else (current + total - 1) % total;
                 if (next == 0 and self.callbacks.local == null) next = if (key == .down) 1 else total - 1;
@@ -194,7 +194,7 @@ pub const View = struct {
         return .stop;
     }
     fn activate(self: *View, action: Action) void {
-        if (!self.isOpen() or self.chosen or (action == .local and self.callbacks.local == null) or (action == .notes and self.callbacks.notes == null) or (action == .notes_float and !self.hasNotesFloat())) return;
+        if (!self.isOpen() or self.chosen or (action == .local and self.callbacks.local == null) or (action == .notes and self.callbacks.notes == null)) return;
         self.chosen = true;
         self.hide();
         switch (action) {
@@ -203,11 +203,8 @@ pub const View = struct {
             .new_sftp => if (self.callbacks.new_sftp) |create| create(self.callbacks.context),
             .new_kvm => if (self.callbacks.new_kvm) |create| create(self.callbacks.context),
             .notes => self.callbacks.notes.?(self.callbacks.context),
-            .notes_float => self.callbacks.notes_float.?(self.callbacks.context),
+            .new_web => self.callbacks.new_web(self.callbacks.context),
         }
-    }
-    fn hasNotesFloat(self: *const View) bool {
-        return self.callbacks.notes != null and self.callbacks.notes_float != null;
     }
     fn paintSelection(self: *View) void {
         for (self.saved_rows.items, 0..) |row, index| row.button.setBackground(if (self.selected_saved == index) S.theme.popupSelection() else ui.Color.TRANSPARENT);
@@ -443,10 +440,15 @@ const Probe = struct {
     quick: usize = 0,
     saved: usize = 0,
     kvm: usize = 0,
+    web: usize = 0,
     notes: usize = 0,
     fn onNotes(raw: *anyopaque) void {
         const self: *Probe = @ptrCast(@alignCast(raw));
         self.notes += 1;
+    }
+    fn onWeb(raw: *anyopaque) void {
+        const self: *Probe = @ptrCast(@alignCast(raw));
+        self.web += 1;
     }
     fn onKvm(raw: *anyopaque) void {
         const self: *Probe = @ptrCast(@alignCast(raw));
@@ -476,9 +478,9 @@ test "new session menu maps each creation command once and restores focus" {
     anchor.behavior.interaction.focusable = true;
     try cx.root.?.appendChild(cx.allocator, anchor);
     var probe: Probe = .{};
-    const view = try View.mount(cx, scope, .{ .context = &probe, .local = Probe.onLocal, .quick = Probe.onQuick, .new_profile = Probe.onSaved, .new_kvm = Probe.onKvm });
+    const view = try View.mount(cx, scope, .{ .context = &probe, .local = Probe.onLocal, .quick = Probe.onQuick, .new_profile = Probe.onSaved, .new_kvm = Probe.onKvm, .new_web = Probe.onWeb });
     try cx.root.?.appendChild(cx.allocator, view.root);
-    for ([_]Action{ .local, .new_profile, .new_sftp, .new_kvm }) |action| {
+    for ([_]Action{ .local, .new_profile, .new_sftp, .new_kvm, .new_web }) |action| {
         try view.show(anchor);
         view.selected = action;
         _ = view.handleKey(.@"return");
@@ -492,12 +494,12 @@ test "new session menu maps each creation command once and restores focus" {
     try std.testing.expectEqual(@as(usize, 1), probe.saved);
     try view.show(anchor);
     _ = view.handleKey(.up);
-    try std.testing.expectEqual(Action.new_kvm, view.selected);
+    try std.testing.expectEqual(Action.new_web, view.selected);
     _ = view.handleKey(.down);
     try std.testing.expectEqual(Action.local, view.selected);
     _ = view.handleKey(.up);
     _ = view.handleKey(.@"return");
-    try std.testing.expectEqual(@as(usize, 2), probe.kvm);
+    try std.testing.expectEqual(@as(usize, 2), probe.web);
     try view.show(anchor);
     _ = view.handleKey(.escape);
     try std.testing.expectEqual(@as(usize, 1), probe.local);
@@ -543,7 +545,7 @@ test "new session menu skips unavailable local command and clamps compact menu" 
     const anchor = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
     try cx.root.?.appendChild(cx.allocator, anchor);
     var probe: Probe = .{};
-    const view = try View.mount(cx, scope, .{ .context = &probe, .quick = Probe.onQuick, .new_profile = Probe.onSaved, .new_kvm = Probe.onKvm });
+    const view = try View.mount(cx, scope, .{ .context = &probe, .quick = Probe.onQuick, .new_profile = Probe.onSaved, .new_kvm = Probe.onKvm, .new_web = Probe.onWeb });
     try cx.root.?.appendChild(cx.allocator, view.root);
     try view.show(anchor);
     _ = view.handleKey(.up);
@@ -560,7 +562,7 @@ test "new session menu skips unavailable local command and clamps compact menu" 
     }
     const r = view.chrome.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 240), r.w, 0.5);
-    try std.testing.expect(r.h > 150 and r.h < 260);
+    try std.testing.expect(r.h > 150 and r.h < 300);
     try std.testing.expect(r.x >= 8 and r.x + r.w <= 852.5);
 }
 
@@ -582,7 +584,7 @@ test "saved session menu refreshes rows and captures stable owner" {
         fn noop(_: *anyopaque) void {}
     };
     var capture: Capture = .{};
-    const view = try View.mount(cx, scope, .{ .context = &capture, .local = Capture.noop, .quick = Capture.noop, .new_profile = Capture.noop, .saved = Capture.connect });
+    const view = try View.mount(cx, scope, .{ .context = &capture, .local = Capture.noop, .quick = Capture.noop, .new_profile = Capture.noop, .new_web = Capture.noop, .saved = Capture.connect });
     try cx.root.?.appendChild(cx.allocator, view.root);
     const owner: identity.AssetOwner = .{ .id = @fromBackingInt(42), .revision = 7 };
     try view.setSaved(&.{.{ .owner = owner, .name = "Saved SSH", .icon = ui.icons.terminal }});

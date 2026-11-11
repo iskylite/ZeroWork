@@ -5,6 +5,7 @@ const Command = @import("appearance_ui_context.zig").Command;
 const Worker = @import("appearance_ui_worker.zig").Worker;
 const Controller = @import("settings_controller.zig").Controller;
 const themes = @import("theme_registry.zig");
+const FileSheet = @import("../platform/file_sheet.zig").Sheet;
 
 /// Returns false for commands handled by SettingsHost (font validation,
 /// material preview/restore, and ordinary draft changes).
@@ -17,35 +18,18 @@ pub fn dispatch(cx: *ui.Cx, worker: *Worker, controller: *Controller, registry: 
             }
             const active = controller.theme_library.import_operation orelse return error.StaleThemeImport;
             if (active.draft_id != request.draft_id or active.operation_id != request.operation_id) return error.StaleThemeImport;
-            var buffer: [4096]u8 = undefined;
-            const path = choose(cx, worker, "导入 .itermcolors 主题", &buffer) catch |err| {
-                _ = controller.failThemeImport(request, err);
-                return err;
-            } orelse {
-                controller.cancelThemeImport(request);
-                return true;
-            };
-            const current = controller.theme_library.import_operation orelse return error.StaleThemeImport;
-            if (current.draft_id != request.draft_id or current.operation_id != request.operation_id) return error.StaleThemeImport;
-            worker.startThemeImport(request, path) catch |err| {
+            const sheet = FileSheet.begin(cx, .{ .kind = .file, .title = "导入 .itermcolors 主题" }) catch |err| {
                 _ = controller.failThemeImport(request, err);
                 return err;
             };
+            worker.picker = .{ .sheet = sheet, .request = .{ .theme = request } };
             return true;
         },
         .pick_background => |request| {
             if (worker.busy()) return error.AppearanceBusy;
             if (controller.draft_id != request.draft_id or controller.background.asset_revision != request.asset_revision) return error.StaleBackgroundRequest;
-            var buffer: [4096]u8 = undefined;
-            const path = try chooseBackground(worker, &buffer) orelse return true;
-            if (controller.draft_id != request.draft_id or controller.background.asset_revision != request.asset_revision) return error.StaleBackgroundRequest;
-            var owned = try controller.requestBackground(path);
-            owned.request.detect_source = true;
-            worker.startBackground(&owned) catch |err| {
-                _ = controller.failBackground(owned.request, err);
-                owned.deinit();
-                return err;
-            };
+            const sheet = try FileSheet.begin(cx, .{ .kind = .file_or_folder, .title = "选择背景图片或目录", .prompt = "选择", .message = "选择一张图片，或选择一个目录用于轮播。" });
+            worker.picker = .{ .sheet = sheet, .request = .{ .background = request } };
             return true;
         },
         .favorite => |request| {
@@ -58,23 +42,4 @@ pub fn dispatch(cx: *ui.Cx, worker: *Worker, controller: *Controller, registry: 
         },
         else => return false,
     }
-}
-
-extern "c" fn zw_pick_background_path([*]u8, c_int) c_int;
-fn chooseBackground(worker: *Worker, buffer: []u8) !?[]const u8 {
-    worker.picker_active = true;
-    defer worker.picker_active = false;
-    const length = zw_pick_background_path(buffer.ptr, @intCast(buffer.len));
-    if (length < 0) return error.BackgroundPickerFailed;
-    if (length == 0) return null;
-    return buffer[0..@intCast(length)];
-}
-
-fn choose(cx: *ui.Cx, worker: *Worker, title: []const u8, buffer: []u8) !?[]const u8 {
-    const sdk = cx.system_sdk orelse return error.NotSupported;
-    worker.picker_active = true;
-    defer worker.picker_active = false;
-    // The current SDK has no content-type filter. The worker validates the
-    // actual selected format; this is a real system open-file panel.
-    return sdk.runDialog(.{ .kind = .open_file, .title = title }, buffer);
 }

@@ -36,10 +36,10 @@ const panes=async()=>flat(await visible('groups.workspace')).filter(n=>/^groups\
 const tabNodes=async()=>flat(await visible('tabs.strip')).filter(n=>/^tabs\.tab\.\d+$/.test(n.test_id??''));
 const capture=async(name:string)=>{await h.sleep(160);assert((await h.screenshot(join(out,name+'.png'))).ok);report.captures.push(name);await writeFile(join(out,name+'.json'),JSON.stringify(await h.query('groups.workspace'),null,2));await save()};
 async function joinActive(existing:boolean){
- const tabs=await tabNodes(),tab=tabs[tabs.length-1];
+ const tab=(await tabNodes()).filter(n=>!text(n).startsWith('组 ·')).at(-1);assert(tab);
  const x=tab.rect.x+tab.rect.w/2,y=tab.rect.y+tab.rect.h/2;
  assert((await h.request('POST','/mouse_down',{x,y,button:'right'})).ok);await h.request('POST','/mouse_up',{x,y,button:'right'});
- await click('context.menu.join_session_group');await visible('groups.join.dialog');
+ await click('context.menu.join_session_group');const popup=await visible('groups.join.dialog');assert(Math.abs(popup.rect.x-tab.rect.x)<2);assert(popup.rect.y>=tab.rect.y+tab.rect.h&&popup.rect.y<tab.rect.y+tab.rect.h+18,'Join selector opens beside its tab control');
  if(existing)await click('groups.join.existing');else{await click('groups.join.name');await h.type_('Mixed Native');await click('groups.join.accept')}
  await visible('groups.workspace');await h.waitFor(async()=>!(await h.query('groups.join.dialog')).some(shown)||null,10000);
 }
@@ -72,7 +72,7 @@ async function settleRemote(ready:any){
 }
 async function savedHost(name:string){
  const rows=(await h.query('sidebar.host')).filter(shown);const row=rows.find(n=>text(n).includes(name));
- assert(row, 'Saved fixture '+name);await h.clickAt(row.rect.x+65,row.rect.y+row.rect.h/2);
+ assert(row, 'Saved fixture '+name);await h.mouseMove(row.rect.x+65,row.rect.y+row.rect.h/2);const connect=await h.waitFor(async()=>(await h.query('sidebar.host.connect')).find(n=>shown(n)&&n.rect.y>=row.rect.y&&n.rect.y<row.rect.y+row.rect.h)??null);await clickNode(connect);
 }
 async function switchLayout(label:string){
  const p=(await panes())[0],id=p.test_id.split('.').at(-1);await click('groups.menu.'+id);

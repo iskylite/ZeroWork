@@ -6,7 +6,7 @@ const S = @import("local_session_styles.zig");
 const theme = @import("app_theme.zig");
 const Control = @import("../vt/reconnect.zig").Control;
 
-pub const State = enum { connected, cancelled, exited, disconnected, reconnecting, retry_failed };
+pub const State = enum { connected, cancelled, failed, exited, disconnected, reconnecting, retry_failed };
 pub const Snapshot = struct {
     state: State = .connected,
     cleanup: @import("../proto/ssh/session.zig").ReleaseReceipt = .released,
@@ -32,7 +32,7 @@ pub const Snapshot = struct {
     }
     pub fn canRetry(self: Snapshot) bool {
         return self.cleanup == .released and switch (self.state) {
-            .cancelled, .exited, .disconnected, .retry_failed => true,
+            .cancelled, .failed, .exited, .disconnected, .retry_failed => true,
             .connected, .reconnecting => false,
         };
     }
@@ -41,6 +41,7 @@ pub const Snapshot = struct {
         return switch (self.state) {
             .connected => "已连接",
             .cancelled => "连接已取消",
+            .failed => "连接失败",
             .exited => "远程终端已退出",
             .disconnected => "与远程主机的连接已断开",
             .reconnecting => "正在重新连接远程主机…",
@@ -61,7 +62,7 @@ pub const Snapshot = struct {
         };
         const text: []const u8 = switch (self.state) {
             .connected => "",
-            .cancelled => "尚未建立远程会话，可重新连接或关闭此页签",
+            .cancelled, .failed => "尚未建立远程会话，可重新连接或关闭此页签",
             .exited => "历史输出仍可查看",
             .disconnected => "历史输出仍可查看，请检查网络后重新连接",
             .reconnecting => if (self.buffer_input) "历史输出仍可查看；已开启输入缓冲，键入内容将在重连后发送" else "历史输出仍可查看，连接恢复后即可继续输入",
@@ -85,6 +86,11 @@ pub const Hooks = struct {
     without_initialization: ?*const fn (*anyopaque, u64) void = null,
 };
 pub const View = struct {
+    pub const Logs = struct {
+        context: *anyopaque,
+        key: @import("../host/operation.zig").OperationKey,
+        show: *const fn (*anyopaque, @import("../host/operation.zig").OperationKey) void,
+    };
     cx: *ui.Cx,
     hooks: Hooks,
     root: *ui.Node,
@@ -97,6 +103,8 @@ pub const View = struct {
     reconnect: *ui.Node,
     retry: *ui.Node,
     close: *ui.Node,
+    logs_button: *ui.Node = undefined,
+    logs: ?Logs = null,
     without_initialization: *ui.Node,
     snapshot: ?Snapshot = null,
 
@@ -121,6 +129,7 @@ pub const View = struct {
         detail_node.meta.ownership.meta.test_id = "remote.notice.detail";
         try copy.appendChild(cx.allocator, detail_node);
         self.* = .{ .cx = cx, .hooks = hooks, .root = root, .title_node = title_node, .detail_node = detail_node, .icon = icon, .spinner = spinner, .spinner_color = spinner_color, .reconnect = undefined, .retry = undefined, .close = undefined, .without_initialization = undefined };
+        self.logs_button = try self.button(scope, "查看连接日志", "remote.notice.logs", false, onLogs);
         self.close = try self.button(scope, "关闭页签", "remote.notice.close", false, onClose);
         self.reconnect = try self.button(scope, "重新连接", "remote.notice.reconnect", true, onReconnect);
         self.retry = try self.button(scope, "重试连接", "remote.notice.retry", true, onReconnect);
@@ -128,6 +137,14 @@ pub const View = struct {
         try scope.onCleanup(View, self, destroy);
         self.update(.{});
         return self;
+    }
+    pub fn bindLogs(self: *View, logs: Logs) void {
+        self.logs = logs;
+        if (self.snapshot) |state| self.updateLogs(state);
+    }
+    fn updateLogs(self: *View, value: Snapshot) void {
+        if (value.state != .cancelled and value.state != .failed) self.logs = null;
+        visible(self.logs_button, self.logs != null);
     }
     fn button(self: *View, scope: *ui.Scope, label: []const u8, id: []const u8, comptime primary: bool, comptime callback: fn (*View) void) !*ui.Node {
         const node = try ui.widgets.Button(.{ .label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(View, self, callback) }).mount(scope, self.cx);
@@ -154,6 +171,7 @@ pub const View = struct {
         visible(self.icon, value.state != .reconnecting);
         visible(self.spinner, value.state == .reconnecting);
         visible(self.close, value.state != .connected);
+        self.updateLogs(value);
         const initialization_failure = (value.failure != null and value.failure.? == error.ShellInitializationFailed);
         visible(self.reconnect, !initialization_failure and value.canRetry() and value.state != .retry_failed);
         visible(self.retry, !initialization_failure and value.canRetry() and value.state == .retry_failed);
@@ -170,6 +188,9 @@ pub const View = struct {
     }
     fn onClose(self: *View) void {
         self.hooks.close(self.hooks.context, self.hooks.session_id);
+    }
+    fn onLogs(self: *View) void {
+        if (self.logs) |logs| logs.show(logs.context, logs.key);
     }
     fn onWithoutInitialization(self: *View) void {
         const state = self.snapshot orelse return;

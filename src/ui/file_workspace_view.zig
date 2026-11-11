@@ -212,7 +212,6 @@ pub const View = struct {
     source: ?Owned = null,
     pending: ?Owned = null,
     paint_colors: S.theme.Colors,
-    confirmation_open: *ui.Signal(bool),
     drag_source: ?DragSource = null,
     drag_ghost: *ui.Node = undefined,
     drag_ghost_label: *ui.Node = undefined,
@@ -223,7 +222,7 @@ pub const View = struct {
     drop_path_len: usize = 0,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .root = undefined, .callbacks = callbacks, .panes = undefined, .columns = undefined, .paint_colors = S.theme.current(), .confirmation_open = try scope.createSignal(bool, false) });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .root = undefined, .callbacks = callbacks, .panes = undefined, .columns = undefined, .paint_colors = S.theme.current() });
         self.root = try ui.boxStyled(cx, S.root, .{});
         self.root.meta.ownership.meta.test_id = "files.workspace";
         self.root.setDisplay(.none);
@@ -477,6 +476,7 @@ pub const Pane = struct {
     view: *View,
     side: Side,
     root: *ui.Node,
+    confirmation_open: *ui.Signal(bool),
     title: *ui.Node,
     subtitle: *ui.Node,
     endpoint_tip: *ui.Signal([]const u8),
@@ -553,7 +553,7 @@ pub const Pane = struct {
     fn mount(view: *View, side: Side) !*Pane {
         const cx = view.cx;
         const scope = view.scope;
-        const self = try scope.createState(Pane, .{ .view = view, .side = side, .root = undefined, .title = undefined, .subtitle = undefined, .endpoint_tip = try scope.createText("", .{}), .badge = undefined, .path = undefined, .path_value = try scope.createText("", .{}), .nav_disabled = try scope.createSignal(bool, true), .back_disabled = try scope.createSignal(bool, true), .parent_disabled = try scope.createSignal(bool, true), .write_disabled = try scope.createSignal(bool, true), .mkdir_disabled = try scope.createSignal(bool, true), .table = undefined, .header = undefined, .headings = undefined, .heading_buttons = undefined, .all_checked = try scope.createSignal(bool, false), .mixed = try scope.createSignal(bool, false), .list = undefined, .virtual = undefined, .empty = undefined, .empty_text = undefined, .footer = undefined, .summary = undefined, .mode = undefined, .actions = undefined, .status = undefined, .error_box = undefined, .error_text = undefined, .error_detail = undefined, .recovery_detail = undefined, .paint = try scope.createSignal(u64, 0) });
+        const self = try scope.createState(Pane, .{ .view = view, .side = side, .root = undefined, .confirmation_open = try scope.createSignal(bool, false), .title = undefined, .subtitle = undefined, .endpoint_tip = try scope.createText("", .{}), .badge = undefined, .path = undefined, .path_value = try scope.createText("", .{}), .nav_disabled = try scope.createSignal(bool, true), .back_disabled = try scope.createSignal(bool, true), .parent_disabled = try scope.createSignal(bool, true), .write_disabled = try scope.createSignal(bool, true), .mkdir_disabled = try scope.createSignal(bool, true), .table = undefined, .header = undefined, .headings = undefined, .heading_buttons = undefined, .all_checked = try scope.createSignal(bool, false), .mixed = try scope.createSignal(bool, false), .list = undefined, .virtual = undefined, .empty = undefined, .empty_text = undefined, .footer = undefined, .summary = undefined, .mode = undefined, .actions = undefined, .status = undefined, .error_box = undefined, .error_text = undefined, .error_detail = undefined, .recovery_detail = undefined, .paint = try scope.createSignal(u64, 0) });
         self.root = try ui.boxStyled(cx, S.card, .{});
         @import("layer_materials.zig").card(self.root, .overlay);
         self.root.meta.ownership.meta.test_id = if (side == .local) "files.local" else "files.remote";
@@ -1351,7 +1351,7 @@ const Row = struct {
     fn paint(self: *Row) void {
         _ = self.pane.paint.get();
         _ = self.tooltip_open.get();
-        if (self.pane.view.confirmation_open.get()) self.tooltip_open.set(false);
+        if (self.pane.confirmation_open.get()) self.tooltip_open.set(false);
         self.columns.setCursor(if (self.canDrag()) .grab else .inherit);
         const p = self.current() orelse return;
         const selected = self.pane.selected(self.key);

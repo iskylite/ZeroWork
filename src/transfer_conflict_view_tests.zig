@@ -31,6 +31,7 @@ const Fixture = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
     view: *mod.View,
+    overlay_owner: ?*ui.Node = null,
     decisions: usize = 0,
     pauses: usize = 0,
     last: ?Conflict.Request = null,
@@ -38,6 +39,9 @@ const Fixture = struct {
     name: [4096]u8 = undefined,
     reject: bool = false,
     fn init(self: *Fixture) !void {
+        return self.initImpl(false);
+    }
+    fn initImpl(self: *Fixture, scoped: bool) !void {
         self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .view = undefined };
         self.cx.setViewport(860, 480);
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill() }, .{});
@@ -48,9 +52,17 @@ const Fixture = struct {
         self.cx.layout();
         _ = self.cx.render();
         self.scope = try ui.Scope.init(a, null, self.cx.owner);
-        self.view = try mod.View.mount(self.cx, self.scope, .{ .context = self, .decision = decision, .defer_conflict = pause });
+        if (scoped) {
+            self.overlay_owner = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 260 }, .top = .{ .px = 60 } }, .width = .{ .px = 580 }, .height = .{ .px = 395 } }, .{});
+            try self.cx.root.?.appendChild(a, self.overlay_owner.?);
+        }
+        self.view = try mod.View.mount(self.cx, self.scope, .{ .context = self, .decision = decision, .defer_conflict = pause, .overlay_owner = if (scoped) getOverlayOwner else null });
         try self.view.show(source());
         self.settle();
+    }
+    fn getOverlayOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return self.overlay_owner;
     }
     fn deinit(self: *Fixture) void {
         self.cx.clearFocus();
@@ -88,6 +100,28 @@ const Fixture = struct {
         self.settle();
     }
 };
+
+test "transfer conflict view suspends with its original task panel without pausing or changing the draft" {
+    var f: Fixture = undefined;
+    try f.initImpl(true);
+    defer f.deinit();
+    const task_panel = f.overlay_owner.?;
+    const card = f.view.dialog.globalRect();
+    const bounds = task_panel.globalRect();
+    try std.testing.expect(card.x >= bounds.x and card.x + card.w <= bounds.x + bounds.w);
+    try std.testing.expect(card.y >= bounds.y and card.y + card.h <= bounds.y + bounds.h);
+    f.click(f.view.rows[1]);
+    f.view.rename.set("draft.txt");
+    task_panel.setDisplay(.none);
+    f.settle();
+    try std.testing.expect(!f.view.root.isDisplayedInTree());
+    try std.testing.expectEqual(@as(usize, 0), f.pauses);
+    task_panel.setDisplay(.flex);
+    f.settle();
+    try std.testing.expect(f.view.root.isDisplayedInTree());
+    try std.testing.expectEqualStrings("draft.txt", f.view.rename.peek());
+    try std.testing.expectEqualStrings("save_as", f.view.selected.peek().?);
+}
 
 test "transfer conflict view has exact default geometry and no automatic selection or decision" {
     var f: Fixture = undefined;

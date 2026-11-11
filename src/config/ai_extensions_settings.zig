@@ -10,10 +10,10 @@ const local = @import("../ai/local_skills.zig");
 const mcp = @import("../ai/mcp_client.zig");
 const oauth = @import("../ai/mcp_oauth.zig");
 const Cancel = @import("../ai/provider.zig").CancelToken;
+const FileSheet = @import("../platform/file_sheet.zig").Sheet;
 pub const Hooks = struct { context: *anyopaque, changed: *const fn (*anyopaque) void };
 const Field = enum { name, program, arguments, cwd, environment, endpoint, headers, timeout, bindings, roots, oauth_client_id, oauth_scope };
 const Action = enum { choose_skill, cancel_job, toggle_skill, reimport, view_skill, view_server, remove_skill, new_server, edit_server, toggle_server, remove_server, test_server, authorize_server, logout_server, apply, cancel_editor, stdio, http, clear_environment, clear_headers };
-extern "c" fn zw_pick_skill_path([*]u8, c_int) c_int;
 pub const View = struct {
     root: *ui.Node,
     scope: *ui.Scope,
@@ -23,6 +23,7 @@ pub const View = struct {
     hooks: Hooks,
     data_root: []const u8,
     job: ?*Job = null,
+    picker: ?struct { sheet: FileSheet, draft_id: u64, index: ?usize } = null,
     pending: bool = false,
     status: []const u8 = "",
     status_error: bool = false,
@@ -50,6 +51,7 @@ pub const View = struct {
     }
     fn cleanup(self: *View) void {
         self.cx.removeAfterLayoutHook(self);
+        if (self.picker) |picker| picker.sheet.deinit();
         if (self.job) |job| {
             job.cancel.cancel();
             job.thread.?.join();
@@ -58,7 +60,7 @@ pub const View = struct {
         self.scope.allocator.destroy(self);
     }
     pub fn busy(self: *const View) bool {
-        return self.job != null;
+        return self.job != null or self.picker != null;
     }
     pub fn hasEditor(self: *const View) bool {
         return self.editing;
@@ -80,6 +82,22 @@ pub const View = struct {
 
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
+        if (self.picker) |picker| {
+            if (picker.sheet.count()) |count| {
+                self.picker = null;
+                defer picker.sheet.deinit();
+                if (count != 0 and picker.draft_id == self.controller.draft_id) {
+                    var buffer: [4096]u8 = undefined;
+                    const path = picker.sheet.path(0, &buffer) catch |err| failed: {
+                        self.failure(err);
+                        break :failed "";
+                    };
+                    if (path.len > 0) self.start(.import_skill, picker.index, path) catch |err| self.failure(err);
+                }
+                self.pending = true;
+                self.notify();
+            } else self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+        }
         if (self.job) |job| {
             if (job.done.load(.acquire)) {
                 job.thread.?.join();
@@ -540,7 +558,7 @@ pub const View = struct {
         self.message("");
     }
     fn start(self: *View, kind: Job.Kind, index: ?usize, path: []const u8) !void {
-        if (self.job != null or self.controller.state() == .saving) return error.SettingsBusy;
+        if (self.busy() or self.controller.state() == .saving) return error.SettingsBusy;
         self.status_area = if ((kind == .test_connection or kind == .authorize)) .mcp else .skills;
         self.status = "";
         self.status_error = false;
@@ -568,15 +586,13 @@ pub const View = struct {
                 if (v.job) |job| job.cancel.cancel();
                 return;
             }
-            if (v.job != null or v.controller.state() == .saving) return error.SettingsBusy;
+            if (v.busy() or v.controller.state() == .saving) return error.SettingsBusy;
             var extensions = v.controller.model.value.ai.extensions;
             switch (self.action) {
                 .choose_skill, .reimport => {
-                    var buffer: [4096]u8 = undefined;
-                    const length = zw_pick_skill_path(&buffer, @intCast(buffer.len));
-                    if (length < 0) return error.FilePickerUnavailable;
-                    if (length == 0) return;
-                    try v.start(.import_skill, if (self.action == .reimport) self.index else null, buffer[0..@intCast(length)]);
+                    const sheet = FileSheet.begin(v.cx, .{ .kind = .file_or_folder, .title = "选择技能文件或文件夹", .prompt = "添加" }) catch return error.FilePickerUnavailable;
+                    v.picker = .{ .sheet = sheet, .draft_id = v.controller.draft_id, .index = if (self.action == .reimport) self.index else null };
+                    v.notify();
                 },
                 .toggle_skill, .remove_skill => {
                     var list: std.ArrayList(ext.Skill) = .empty;

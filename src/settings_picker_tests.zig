@@ -94,7 +94,7 @@ test "picker measured height flips above bottom anchor and follows resized card"
     try std.testing.expect(p.body.state.maxScrollY() > 0);
 }
 
-test "V3 key recorder uses a centered 390px Modal independent of the shortcut anchor" {
+test "V3 key recorder centers its 390px dialog within the settings card and leaves outside input reachable" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
     cx.setViewport(860, 480);
@@ -103,11 +103,25 @@ test "V3 key recorder uses a centered 390px Modal independent of the shortcut an
     const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
     defer scope.dispose();
     var map: @import("config/keybindings.zig").Map = .{};
+    const Probe = struct {
+        clicks: usize = 0,
+
+        fn click(self: *@This()) void {
+            self.clicks += 1;
+        }
+    };
+    var probe: Probe = .{};
     var context: u8 = 0;
-    const anchor = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 820 }, .top = .{ .px = 440 } }, .width = .{ .px = 20 }, .height = .{ .px = 20 } }, .{});
-    try root.appendChild(cx.allocator, anchor);
-    const p = try @import("config/keybinding_picker.zig").mount(cx, scope, root, anchor, &map, "search", .{ .context = &context, .changed = call, .dismiss = call });
-    try root.appendChild(cx.allocator, p.root);
+    const card = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 70 }, .top = .{ .px = 48 } }, .width = .{ .px = 620 }, .height = .{ .px = 390 } }, .{});
+    try root.appendChild(cx.allocator, card);
+    const outside = try ui.widgets.Button(.{ .label = "Outside", .base_style = ui.BoxStyle{ .width = .{ .px = 72 }, .height = .{ .px = 24 } }, .on_click = cx.on(Probe, &probe, Probe.click) }).mount(scope, cx);
+    outside.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 752 }, .top = .{ .px = 90 } } });
+    try root.appendChild(cx.allocator, outside);
+    const anchor = try ui.widgets.Button(.{ .label = "Shortcut", .base_style = ui.BoxStyle{ .width = .{ .px = 72 }, .height = .{ .px = 24 } }, .on_click = cx.on(Probe, &probe, Probe.click) }).mount(scope, cx);
+    anchor.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 520 }, .top = .{ .px = 348 } } });
+    try card.appendChild(cx.allocator, anchor);
+    const p = try @import("config/keybinding_picker.zig").mount(cx, scope, card, anchor, &map, "search", .{ .context = &context, .changed = call, .dismiss = call });
+    cx.layout();
     _ = cx.render();
     const Find = struct {
         fn tagged(node: *ui.Node, id: []const u8) ?*ui.Node {
@@ -118,9 +132,17 @@ test "V3 key recorder uses a centered 390px Modal independent of the shortcut an
     };
     const r = Find.tagged(p.root, "settings.keybinding.dialog").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 390), r.w, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 430), r.x + r.w / 2, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 240), r.y + r.h / 2, 0.5);
-    try std.testing.expect(r.y >= 24 and r.y + r.h <= 456);
+    try std.testing.expectApproxEqAbs(@as(f32, 380), r.x + r.w / 2, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 243), r.y + r.h / 2, 0.5);
+    try std.testing.expectEqual(card.globalRect(), p.root.globalRect());
+    const inside_rect = anchor.globalRect();
+    cx.handleMouseDown(inside_rect.x + 5, inside_rect.y + 5, .{});
+    cx.handleMouseUp(inside_rect.x + 5, inside_rect.y + 5);
+    try std.testing.expectEqual(@as(usize, 0), probe.clicks);
+    const outside_rect = outside.globalRect();
+    cx.handleMouseDown(outside_rect.x + 5, outside_rect.y + 5, .{});
+    cx.handleMouseUp(outside_rect.x + 5, outside_rect.y + 5);
+    try std.testing.expectEqual(@as(usize, 1), probe.clicks);
 }
 
 test "short picker scroll exposes final choice and numeric input receives focus" {

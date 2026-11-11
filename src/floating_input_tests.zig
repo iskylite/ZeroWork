@@ -161,6 +161,78 @@ test "floating input modal shields dialog and scrim including a previously captu
     try std.testing.expectEqual(@as(usize, 0), f.wheels);
 }
 
+test "scoped modal blocks only its owner, suspends on switch and leaves panel backdrop interactive" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const cx = f.cx;
+    const pane = try ui.box(cx, .{
+        .position = .absolute,
+        .inset = .{ .left = .{ .px = 160 }, .top = .{ .px = 100 } },
+        .width = .{ .px = 420 },
+        .height = .{ .px = 350 },
+        .hit_roles = .{ .pointer = true },
+    }, .{});
+    pane.setFocusable(true);
+    const open = try f.scope.createSignal(bool, false);
+    const modal = try ui.widgets.Modal(.{
+        .open = open,
+        .managed_focus = false,
+        .width = 240,
+        .enter_transition = .none,
+        .exit_transition = .none,
+    }).mount(f.scope, cx);
+    const binding = try @import("ui/scoped_modal.zig").bind(cx, f.scope, modal, .{ .owner = .{ .node = pane } });
+    try f.background.appendChild(cx.allocator, pane);
+    const button = try ui.widgets.Button(.{ .label = "Cancel" }).mount(f.scope, cx);
+    try modal.body.appendChild(cx.allocator, button);
+    f.frames();
+    cx.setFocus(pane);
+    open.set(true);
+    f.frames();
+
+    try std.testing.expectEqual(pane.globalRect(), modal.overlay.globalRect());
+    try std.testing.expect(cx.focus_manager.getFocused().?.isDescendantOf(modal.dialog));
+    try std.testing.expect(!cx.overlay_stack.allowsSemanticAction(pane));
+    try std.testing.expect(cx.overlay_stack.allowsSemanticAction(f.background));
+    cx.setFocus(pane);
+    try std.testing.expect(cx.focus_manager.getFocused() != pane);
+    f.wheel(170, 110);
+    try std.testing.expectEqual(@as(usize, 0), f.wheels);
+    f.click(750, 120);
+    f.wheel(750, 120);
+    try std.testing.expectEqual(@as(usize, 1), f.clicks);
+    try std.testing.expectEqual(@as(usize, 1), f.wheels);
+    try std.testing.expect(open.peek());
+    cx.handleKeyDown(.escape, .{});
+    try std.testing.expect(open.peek());
+
+    pane.setDisplay(.none);
+    f.frames();
+    try std.testing.expectEqual(@TypeOf(modal.overlay.style.display).none, modal.overlay.style.display);
+    try std.testing.expect(open.peek());
+    pane.setDisplay(.flex);
+    f.frames();
+    try std.testing.expectEqual(pane.globalRect(), modal.overlay.globalRect());
+
+    cx.detachChildRetained(f.background, pane);
+    f.frames();
+    try std.testing.expect(!modal.overlay.isDisplayedInTree());
+    try f.background.appendChild(cx.allocator, pane);
+    f.frames();
+    try std.testing.expectEqual(pane.globalRect(), modal.overlay.globalRect());
+
+    binding.setMode(.panel);
+    f.frames();
+    f.wheel(170, 110);
+    try std.testing.expectEqual(@as(usize, 2), f.wheels);
+    try std.testing.expect(cx.overlay_stack.allowsSemanticAction(pane));
+    cx.setFocus(button);
+    cx.handleKeyDown(.escape, .{});
+    f.frames();
+    try std.testing.expect(!open.peek());
+    try std.testing.expectEqual(@as(usize, 0), cx.focus_manager.scope_count);
+}
+
 test "floating input display only Tooltip drag ghosts and FPS remain pass through on reopen" {
     const f = try Fixture.init();
     defer f.deinit();

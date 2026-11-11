@@ -6,6 +6,7 @@ const C = @import("../host/file_workspace_controller.zig");
 const S = @import("file_workspace_styles.zig");
 const M = @import("file_mkdir_styles.zig");
 const V3 = @import("file_copy_styles.zig");
+const scoped_modal = @import("scoped_modal.zig");
 pub const Options = struct { resume_transfer: bool = true, md5_check: bool = false };
 pub const Submit = *const fn (?*anyopaque, C.FrozenTransfer, Options) anyerror!void;
 const Frozen = struct { arena: std.heap.ArenaAllocator, intent: C.FrozenTransfer };
@@ -37,13 +38,14 @@ pub const View = struct {
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, pane: *Files.Pane, context: ?*anyopaque, callback: Submit) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .pane = pane, .context = context, .callback = callback, .open_value = try scope.createSignal(bool, false), .primary_label = try scope.createText("开始上传", .{}), .confirm_icon = try scope.createSignal(?ui.SvgAsset, ui.icons.arrow_down_to_line), .resume_value = try scope.createSignal(bool, true), .md5_value = try scope.createSignal(bool, false) });
         try scope.onCleanup(View, self, cleanup);
-        const modal = try ui.widgets.Modal(.{ .open = self.open_value, .width = @as(f32, 480), .max_height = @as(f32, 420), .close_on_overlay = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = self.open_value, .width = @as(f32, 480), .max_height = @as(f32, 420), .managed_focus = false, .close_on_overlay = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.overlay = modal.overlay;
         self.overlay.meta.ownership.meta.test_id = "files.copy.overlay";
         self.root = modal.body;
         self.root.setStyleInline(cx.allocator, V3.root());
-        modal.dialog.setStyleInline(cx.allocator, .{ .padding = ui.Padding.all(0), .height = .{ .fit = .{} }, .background = S.theme.current().overlay, .border = .{ .radius = 14 } });
+        modal.dialog.setStyleInline(cx.allocator, .{ .padding = ui.Padding.all(0), .height = .{ .px = V3.dialog_height }, .background = S.theme.current().overlay, .border = .{ .radius = 14 } });
         if (!modal.portaled) try pane.root.appendChild(cx.allocator, modal.overlay);
+        _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .node = pane.root } });
         self.root.meta.ownership.meta.test_id = "files.copy.confirmation";
         const header = try ui.box(cx, V3.header(), .{});
         try self.root.appendChild(cx.allocator, header);
@@ -59,8 +61,12 @@ pub const View = struct {
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 14), .a11y_label = "关闭传输确认", .base_style = M.button(), .on_click = cx.on(View, self, dismiss) }).mount(scope, cx);
         close.meta.ownership.meta.test_id = "files.copy.close";
         try header.appendChild(cx.allocator, close);
+        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+        scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
+        scroll.content.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} } });
+        try self.root.appendChild(cx.allocator, scroll.container);
         const body = try ui.box(cx, V3.body(), .{});
-        try self.root.appendChild(cx.allocator, body);
+        try scroll.content.appendChild(cx.allocator, body);
         const summary = try ui.boxStyled(cx, summaryPaint, .{});
         try body.appendChild(cx.allocator, summary);
         try summary.appendChild(cx.allocator, try V3.theme.icon(cx, ui.icons.files, "accent_ink", .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0 }));
@@ -127,13 +133,13 @@ pub const View = struct {
         try self.target.setTextContent(self.cx.allocator, frozen.destination.directory);
         try self.feedback.setTextContent(self.cx.allocator, "");
         self.shown = true;
-        self.pane.view.confirmation_open.set(true);
+        self.pane.confirmation_open.set(true);
         self.open_value.set(true);
         self.cx.requestRedraw();
     }
     pub fn dismiss(self: *View) void {
         self.shown = false;
-        self.pane.view.confirmation_open.set(false);
+        self.pane.confirmation_open.set(false);
         self.open_value.set(false);
         self.cx.requestRedraw();
     }

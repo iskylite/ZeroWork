@@ -6,6 +6,7 @@ pub const progress = @import("../proto/ssh/connection_progress.zig");
 const operations = @import("../host/operation.zig");
 const ssh = @import("../proto/ssh/session.zig");
 const S = @import("connection_progress_styles.zig");
+const scoped_modal = @import("scoped_modal.zig");
 pub const OperationKey = operations.OperationKey;
 pub const State = enum { connecting, waiting_auth, waiting_host_key, retrying, protocol_ready, attaching, failed, cancelled };
 pub const Hop = struct { name: []const u8, host: []const u8, user: []const u8, port: u16 = 22 };
@@ -91,18 +92,40 @@ const Owned = struct {
 };
 const ActionContext = struct {
     view: *View,
-    key: OperationKey,
+    key: ?OperationKey = null,
+    revision: u64 = 0,
+    pressed_revision: ?u64 = null,
+    fn bind(self: *ActionContext, key: ?OperationKey) void {
+        if (std.meta.eql(self.key, key)) return;
+        self.key = key;
+        self.revision +%= 1;
+    }
+    fn onEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *ActionContext = @ptrCast(@alignCast(raw orelse return .ignored));
+        switch (event) {
+            .mouse_down => self.pressed_revision = self.revision,
+            .key_down => self.pressed_revision = null,
+            else => {},
+        }
+        return .ignored;
+    }
+    fn canInvoke(self: *ActionContext) bool {
+        const pressed = self.pressed_revision;
+        self.pressed_revision = null;
+        if (pressed != null and pressed.? != self.revision) return false;
+        return self.view.matches(self.key orelse return false);
+    }
     fn cancel(self: *ActionContext) void {
-        if (self.view.matches(self.key)) self.view.cancel();
+        if (self.canInvoke()) self.view.cancel();
     }
     fn close(self: *ActionContext) void {
-        if (self.view.matches(self.key)) self.view.close();
+        if (self.canInvoke()) self.view.close();
     }
     fn retry(self: *ActionContext) void {
-        if (self.view.matches(self.key)) self.view.retry();
+        if (self.canInvoke()) self.view.retry();
     }
     fn copy(self: *ActionContext) void {
-        if (self.view.matches(self.key)) self.view.copyLogs();
+        if (self.canInvoke()) self.view.copyLogs();
     }
 };
 const TipFocus = struct {
@@ -177,6 +200,9 @@ pub const View = struct {
     dialog: *ui.Node,
     modal_body: *ui.Node,
     open: *ui.Signal(bool),
+    owner: ?scoped_modal.Owner = null,
+    binding: ?*scoped_modal.Binding = null,
+    refresh_layout_pending: bool = false,
     source: ?Owned = null,
     visible: bool = false,
     compact: bool = false,
@@ -191,7 +217,7 @@ pub const View = struct {
     cancel_requested: bool = false,
     retry_requested: bool = false,
     copy_result: ?bool = null,
-    action_scope: ?*ui.Scope = null,
+    actions: ActionContext = undefined,
     action_skins: [3]ActionSkin = undefined,
     action_skin_count: usize = 0,
     action_tips: [2]ui.widgets.TooltipResult = undefined,
@@ -234,6 +260,8 @@ pub const View = struct {
     logs_disclosure: *@import("layout_motion.zig").Disclosure = undefined,
     log_rows: [progress.Journal.capacity]LogRow = undefined,
     log_row_count: usize = 0,
+    log_slot_count: usize = 0,
+    log_empty: *ui.Node = undefined,
     log_rows_hash: ?u64 = null,
     diagnostic_row: ?*LogRow = null,
     diagnostic_open: *ui.Signal(bool) = undefined,
@@ -260,11 +288,15 @@ pub const View = struct {
     close_label: ?*ui.Node = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
+        return mountWithOwner(cx, scope, callbacks, null);
+    }
+
+    pub fn mountWithOwner(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks, owner: ?scoped_modal.Owner) !*View {
         const self = try cx.allocator.create(View);
         var registered = false;
         errdefer if (!registered) cx.allocator.destroy(self);
         const open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = ui.split(open, cx.on(View, self, openChanged)), .width = S.width, .max_height = @max(160, cx.viewport.height - 16), .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = ui.split(open, cx.on(View, self, openChanged)), .width = S.width, .max_height = @max(160, cx.viewport.height - 16), .background = S.theme.current().overlay, .close_on_overlay = false, .managed_focus = owner == null }).mount(scope, cx);
         self.* = .{
             .cx = cx,
             .scope = scope,
@@ -274,6 +306,7 @@ pub const View = struct {
             .dialog = modal.dialog,
             .modal_body = modal.body,
             .open = open,
+            .owner = owner,
             .retry_disabled = try scope.createSignal(bool, true),
             .copy_disabled = try scope.createSignal(bool, true),
             .cancel_disabled = try scope.createSignal(bool, false),
@@ -301,12 +334,13 @@ pub const View = struct {
         };
         try scope.onCleanup(View, self, cleanup);
         registered = true;
+        if (owner) |value| self.binding = try scoped_modal.bind(cx, scope, modal, .{ .owner = value });
         modal.dialog.setStyleInline(cx.allocator, S.panel(S.normal_height, cx.viewport.width));
         modal.dialog.meta.ownership.meta.test_id = "connection.progress";
         modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .padding = .{}, .gap = 0 });
         // The panel supplies its own header/body insets.
         modal.body.setStyle(cx.allocator, .padding, ui.Padding{});
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        if (!modal.portaled and modal.overlay.parent == null) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.compact = cx.viewport.width <= 860 or cx.viewport.height <= 480;
         const header = try ui.box(cx, S.attemptHeader(self.compact), .{});
         self.header = header;
@@ -427,11 +461,13 @@ pub const View = struct {
 
         self.logs_scroll.container.meta.ownership.meta.test_id = "connection.progress.logs";
         self.logs_scroll.content.setStyleInline(cx.allocator, S.logContent());
+        self.log_empty = try self.appendLabel(self.logs_scroll.content, "暂无当前节点的阶段日志", S.text(10.5, 400, true));
         self.logs_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, self.logs_scroll.container, false);
         try content.appendChild(cx.allocator, self.logs_disclosure.root);
         self.footer = try ui.box(cx, S.footer(self.compact), .{});
         self.footer.meta.ownership.meta.test_id = "connection.progress.actions";
         try modal.body.appendChild(cx.allocator, self.footer);
+        try self.buildActions();
         try cx.addAfterLayoutHook(self, afterLayout);
         return self;
     }
@@ -463,6 +499,7 @@ pub const View = struct {
         errdefer if (!transferred) copy.deinit();
         self.observeUserScroll();
         if (!same) {
+            self.refresh_layout_pending = true;
             self.closeLogTip();
             self.log_rows_hash = null;
             self.cancel_requested = false;
@@ -476,11 +513,14 @@ pub const View = struct {
         self.source = copy;
         transferred = true;
         self.updateLogMarker();
-        if (!same or self.action_scope == null) {
-            try self.buildActions();
+        self.actions.bind(snapshot.key);
+        if (self.slot_count != snapshot.hops.len + 1) {
             try self.buildChain();
+        } else {
+            for (self.slots[0..self.slot_count]) |*slot| slot.key = snapshot.key;
         }
         self.visible = !snapshot.attached;
+        if (self.binding) |binding| binding.setMode(if (self.canDismiss()) .panel else .content);
         try self.refresh();
         self.open.set(!snapshot.attached);
         if (snapshot.attached) {
@@ -493,6 +533,7 @@ pub const View = struct {
     pub fn hide(self: *View) void {
         if (!self.visible and !self.open.peek() and self.authentication_area.style.display == .none) return;
         self.visible = false;
+        self.actions.bind(null);
         self.closeLogTip();
         self.identity_tip_open.set(false);
         for (self.action_tips[0..self.action_tip_count]) |tip| tip.open.?.set(false);
@@ -576,6 +617,7 @@ pub const View = struct {
         self.logs_expanded = !self.logs_expanded;
         if (!self.logs_expanded) self.closeLogTip();
         self.logs_disclosure.setExpanded(self.logs_expanded);
+        if (self.logs_expanded) self.logs_scroll.content.markSizingDirty();
         self.toggle_label.setTextContent(self.cx.allocator, if (self.logs_expanded) "收起连接日志" else "查看连接日志") catch {};
         self.toggle_button.behavior.interaction.a11y.?.expanded = self.logs_expanded;
         const asset = if (self.logs_expanded) ui.icons.chevron_down else ui.icons.chevron_right;
@@ -666,22 +708,10 @@ pub const View = struct {
         self.resize();
     }
     fn buildActions(self: *View) !void {
-        self.clearNodes(self.header_action);
-        self.clearNodes(self.copy_host);
-        self.clearNodes(self.footer);
-        if (self.action_scope) |scope| scope.dispose();
-        self.action_skin_count = 0;
-        self.action_tip_count = 0;
         const scope = try self.scope.childScope();
-        self.action_scope = scope;
-        const ctx = try self.cx.allocator.create(ActionContext);
-        ctx.* = .{ .view = self, .key = self.source.?.value.key };
-        try scope.adoptResource(ctx, struct {
-            fn destroy(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-                allocator.destroy(@as(*ActionContext, @ptrCast(@alignCast(ptr))));
-            }
-        }.destroy);
-        const close_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .icon_only = true, .base_style = S.iconButton(28), .a11y_label = "关闭或取消当前连接", .disabled = self.header_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.close) }).mount(scope, self.cx);
+        self.actions = .{ .view = self };
+        const ctx = &self.actions;
+        const close_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .icon_only = true, .base_style = S.iconButton(28), .a11y_label = "关闭或取消当前连接", .disabled = self.header_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.close), .on_event = ActionContext.onEvent, .event_context = ctx }).mount(scope, self.cx);
         prepareCustomButton(close_button);
         self.close_icon = try ui.iconTint(self.cx, ui.icons.x, S.theme.current().fg_2, S.icon(16));
         try close_button.appendChild(self.cx.allocator, self.close_icon.?);
@@ -689,7 +719,7 @@ pub const View = struct {
         close_button.unsetStyleInline(.{ .background = ui.Color.TRANSPARENT });
         close_button.meta.ownership.meta.test_id = "connection.progress.close";
         try self.header_action.appendChild(self.cx.allocator, try self.actionTip(scope, close_button, "关闭窗口将取消本次连接", "connection.progress.close.tooltip", S.iconButton(28)));
-        const copy_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .base_style = S.copyButton(), .a11y_label = "复制连接日志", .disabled = self.copy_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.copy) }).mount(scope, self.cx);
+        const copy_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .base_style = S.copyButton(), .a11y_label = "复制连接日志", .disabled = self.copy_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.copy), .on_event = ActionContext.onEvent, .event_context = ctx }).mount(scope, self.cx);
         prepareCustomButton(copy_button);
         self.copy_icon = try ui.iconTint(self.cx, ui.icons.copy, S.theme.current().fg_2, S.icon(16));
         try copy_button.appendChild(self.cx.allocator, self.copy_icon.?);
@@ -835,9 +865,9 @@ pub const View = struct {
         const fault = self.currentFailure();
         self.summary.setStyleInline(self.cx.allocator, S.notice(fault != null or source.state == .failed));
         self.summary_title.setTextColor(if (fault != null or source.state == .failed) S.theme.current().danger_ink else S.theme.current().fg_1);
-        self.cancel_button.?.setDisplay(if (source.state == .failed or source.state == .cancelled) .none else .flex);
-        self.close_button.?.setDisplay(if (source.state == .failed or source.state == .cancelled) .flex else .none);
-        self.retry_button.?.setDisplay(if (source.state == .failed) .flex else .none);
+        self.setActionDisplay(self.cancel_button.?, source.state != .failed and source.state != .cancelled);
+        self.setActionDisplay(self.close_button.?, source.state == .failed or source.state == .cancelled);
+        self.setActionDisplay(self.retry_button.?, source.state == .failed);
         try self.footer_hint.setTextContent(self.cx.allocator, if (source.state == .failed or source.state == .cancelled or self.cancel_requested) switch (source.cleanup) {
             .not_started => "正在确认连接状态",
             .releasing => "正在结束上一次连接…",
@@ -971,7 +1001,8 @@ pub const View = struct {
         return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
     }
     fn showDiagnostic(self: *View, row: *LogRow) !void {
-        if (!self.visible or !self.logs_expanded or row.record.entry.status != .failed or row.record.entry.diagnostic.len == 0) return;
+        const key = self.operationKey() orelse return;
+        if (!self.logs_expanded or row.node.style.display == .none or !sameLogicalOwner(key, row.record.key) or row.record.entry.status != .failed or row.record.entry.diagnostic.len == 0) return;
         var text = std.Io.Writer.Allocating.init(self.cx.allocator);
         defer text.deinit();
         try text.writer.print("尝试 {d} · 第 {d} 跳 · {s}\n", .{ row.record.key.attempt_id.?, row.record.entry.hop + 1, phaseName(row.record.entry.phase) });
@@ -988,7 +1019,6 @@ pub const View = struct {
         const hash = std.hash.Wyhash.hash(0, all.writer.buffered());
         if (self.log_rows_hash == hash) return;
         self.closeLogTip();
-        self.clearNodes(self.logs_scroll.content);
         self.log_row_count = 0;
         var style = S.text(10.5, 400, false);
         style.line_height = 16.0 / 10.5;
@@ -1002,20 +1032,30 @@ pub const View = struct {
             defer line.deinit();
             try writeLogRecord(&line.writer, record, false);
             const row = &self.log_rows[self.log_row_count];
-            const node = try ui.box(self.cx, S.logRow(), .{});
-            const label = try self.appendLabel(node, std.mem.trimEnd(u8, line.writer.buffered(), "\n"), style);
-            try @import("log_typography.zig").apply(self.cx, label);
-            row.* = .{ .view = self, .record = record, .node = node, .text = label };
+            const label = std.mem.trimEnd(u8, line.writer.buffered(), "\n");
+            if (self.log_row_count == self.log_slot_count) {
+                const node = try ui.box(self.cx, S.logRow(), .{});
+                const text_node = try self.appendLabel(node, label, style);
+                try @import("log_typography.zig").apply(self.cx, text_node);
+                try self.logs_scroll.content.appendChild(self.cx.allocator, node);
+                row.* = .{ .view = self, .record = record, .node = node, .text = text_node };
+                self.log_slot_count += 1;
+            } else {
+                row.record = record;
+                try row.text.setTextContent(self.cx.allocator, label);
+                row.node.setDisplay(.flex);
+            }
             self.log_row_count += 1;
             const has_diagnostic = record.entry.status == .failed and record.entry.diagnostic.len != 0;
-            node.meta.ownership.meta.test_id = if (has_diagnostic) "connection.progress.logs.failure" else "connection.progress.logs.row";
-            if (has_diagnostic) {
-                node.behavior.events.on_hover = self.cx.on(LogRow, row, LogRow.hover);
-                node.behavior.events.on_leave = self.cx.on(LogRow, row, LogRow.leave);
-            }
-            try self.logs_scroll.content.appendChild(self.cx.allocator, node);
+            row.node.meta.ownership.meta.test_id = if (has_diagnostic) "connection.progress.logs.failure" else "connection.progress.logs.row";
+            row.node.behavior.events.on_hover = if (has_diagnostic) self.cx.on(LogRow, row, LogRow.hover) else null;
+            row.node.behavior.events.on_leave = if (has_diagnostic) self.cx.on(LogRow, row, LogRow.leave) else null;
+            row.node.markInteractionDirty();
         }
-        if (self.log_row_count == 0) _ = try self.appendLabel(self.logs_scroll.content, "暂无当前节点的阶段日志", style);
+        for (self.log_rows[self.log_row_count..self.log_slot_count]) |row| row.node.setDisplay(.none);
+        self.log_empty.setDisplay(if (self.log_row_count == 0) .flex else .none);
+        self.logs_scroll.content.markSizingDirty();
+        self.refresh_layout_pending = true;
         self.log_rows_hash = hash;
     }
     fn writeLogs(self: *View, writer: *std.Io.Writer) !void {
@@ -1083,14 +1123,28 @@ pub const View = struct {
         const source = if (self.source) |source| source.value else return;
         const natural = self.body_scroll.content.globalRect().h;
         const fallback = if (self.currentFailure() != null or source.state == .failed) S.failed_height else S.normal_height;
-        const height = @min(if (natural > 0) natural + (if (self.compact) @as(f32, 118) else 126) else fallback, @max(100, self.cx.viewport.height - 16));
-        const panel = S.panel(height, self.cx.viewport.width);
+        const available = self.availableSize();
+        const height = @min(if (natural > 0) natural + (if (self.compact) @as(f32, 118) else 126) else fallback, @max(100, available.h - 16));
+        const panel = S.panel(height, available.w);
         if (!std.meta.eql(self.dialog.style.width, panel.width.?) or !std.meta.eql(self.dialog.style.height, panel.height.?)) self.dialog.setStyleInline(self.cx.allocator, panel);
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
         if (!self.visible) return .done;
-        const compact = self.cx.viewport.width <= 860 or self.cx.viewport.height <= 480;
+        if (self.refresh_layout_pending and self.root.isDisplayedInTree() and self.dialog.globalRect().w > 0) {
+            // A retained overlay can close and reopen in adjacent batches.
+            // Its hidden layout pass settles children before they are shown.
+            // Measure the updated slots after the overlay has been revealed.
+            self.refresh_layout_pending = false;
+            self.header_action.markSizingDirty();
+            self.footer.markSizingDirty();
+            self.chain_scroll.content.markSizingDirty();
+            self.logs_scroll.content.markSizingDirty();
+            self.modal_body.markSizingDirty();
+            return .needs_layout;
+        }
+        const available = self.availableSize();
+        const compact = available.w <= 860 or available.h <= 480;
         if (compact != self.compact) {
             self.compact = compact;
             self.header.setStyleInline(self.cx.allocator, S.attemptHeader(compact));
@@ -1110,6 +1164,18 @@ pub const View = struct {
         if (self.logs_expanded) self.syncLogScroll();
         return if (std.meta.eql(before_width, self.dialog.style.width) and std.meta.eql(before, self.dialog.style.height)) .done else .needs_layout;
     }
+
+    fn availableSize(self: *const View) struct { w: f32, h: f32 } {
+        const node = if (self.owner) |owner| switch (owner) {
+            .node => |value| value,
+            .resolve => |resolver| resolver.get(resolver.context),
+        } else null;
+        if (node) |value| {
+            const rect = value.globalRect();
+            if (rect.w > 0 and rect.h > 0) return .{ .w = rect.w, .h = rect.h };
+        }
+        return .{ .w = self.cx.viewport.width, .h = self.cx.viewport.height };
+    }
     fn latestEvent(self: *const View, hop: ?usize) ?progress.Journal.Entry {
         const journal = &self.source.?.value.journal;
         var index = journal.count;
@@ -1122,12 +1188,13 @@ pub const View = struct {
     }
     fn currentFailure(self: *const View) ?Failure {
         const source = self.source.?.value;
+        if (self.cancel_requested or source.state == .cancelled) return null;
         if (source.failure) |fault| {
             var result = fault;
             result.reason = inlineFailureText(fault.reason, if (source.journal.failure) |entry| entry.diagnostic.len != 0 else false);
             return result;
         }
-        if (source.state == .retrying or source.state == .cancelled) return null;
+        if (source.state == .retrying) return null;
         const fault = source.journal.failure orelse return null;
         if (fault.status != .failed) return null;
         return .{ .hop = fault.hop, .phase = fault.phase, .reason = inlineFailureText(failureText(fault.failure), fault.diagnostic.len != 0) };
@@ -1187,8 +1254,9 @@ pub const View = struct {
         const skin: ActionSkin = .{ .base = try scope.createSignal(ui.BoxStyle, S.button(w, 32, primary)), .hover = try scope.createSignal(?ui.BoxStyle, S.actionHover(primary, false)), .pressed = try scope.createSignal(?ui.BoxStyle, S.actionHover(primary, true)), .width = w, .primary = primary };
         self.action_skins[self.action_skin_count] = skin;
         self.action_skin_count += 1;
-        const node = try ui.widgets.Button(.{ .variant = variant, .focus_ring = S.focusRing(), .hover_style = skin.hover, .pressed_style = skin.pressed, .base_style = skin.base, .a11y_label = label_text, .disabled = source, .on_click = self.cx.on(ActionContext, ctx, callback) }).mount(scope, self.cx);
+        const node = try ui.widgets.Button(.{ .variant = variant, .focus_ring = S.focusRing(), .hover_style = skin.hover, .pressed_style = skin.pressed, .base_style = skin.base, .a11y_label = label_text, .disabled = source, .on_click = self.cx.on(ActionContext, ctx, callback), .on_event = ActionContext.onEvent, .event_context = ctx }).mount(scope, self.cx);
         prepareCustomButton(node);
+        node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = w }, .height = .{ .px = 32 }, .flex_shrink = 0 });
         node.meta.ownership.meta.test_id = id;
         const style = S.actionText(primary);
         const button_label = try ui.text(self.cx, label_text, style);
@@ -1198,6 +1266,10 @@ pub const View = struct {
         try node.appendChild(self.cx.allocator, button_label);
         try parent.appendChild(self.cx.allocator, node);
         return node;
+    }
+    fn setActionDisplay(self: *View, node: *ui.Node, visible: bool) void {
+        const display: @TypeOf(node.style.display) = if (visible) .flex else .none;
+        if (node.style.display != display) node.setStyleInline(self.cx.allocator, .{ .display = display });
     }
     fn cleanup(self: *View) void {
         self.cx.removeAfterLayoutHook(self);

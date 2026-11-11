@@ -138,7 +138,14 @@ pub const FileAuthentication = struct {
     }
 
     pub fn pendingAuthentication(self: *FileAuthentication) ?auth.Snapshot {
+        return self.findPendingAuthentication(null);
+    }
+    pub fn pendingAuthenticationFor(self: *FileAuthentication, owner: @import("../host/identity.zig").SessionHandle) ?auth.Snapshot {
+        return self.findPendingAuthentication(owner);
+    }
+    fn findPendingAuthentication(self: *FileAuthentication, owner: ?@import("../host/identity.zig").SessionHandle) ?auth.Snapshot {
         for (self.contexts.items) |context| {
+            if (owner) |value| if (!context.source.value.owner.eql(value)) continue;
             if (!self.current(context)) {
                 context.cancel();
                 continue;

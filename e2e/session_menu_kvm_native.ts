@@ -27,12 +27,17 @@ try{
   assert(menu.rect.y+menu.rect.h<=height+.5);
   await h.screenshot(join(out,`menu-${width}.png`));
   if(width===1440)assert((await h.clickTestId('session.menu.new_kvm')).ok);
-  else {await h.key('up');await h.key('return');}
+  else {
+   for(let i=0;i<8&&(await h.focused()).test_id!=='session.menu.new_kvm';i++)await h.key('up');
+   assert.equal((await h.focused()).test_id,'session.menu.new_kvm');
+   await h.key('return');
+  }
   await visible('bmc.editor');await visible('bmc.editor.host');await visible('bmc.editor.port');
   await h.waitFor(async()=>!(await h.query('session.menu')).some(shown)||null);
   await h.screenshot(join(out,`kvm-${width}.png`));
   checks.push({width,height,activation:width===1440?'mouse':'keyboard',editor:'bmc_ikvm'});
-  assert((await h.clickTestId('wizard.close')).ok);
+  await visible('bmc.editor.cancel');
+  assert((await h.clickTestId('bmc.editor.cancel')).ok);
   await h.waitFor(async()=>!(await h.query('wizard.dialog')).some(shown)||null);
  }
  await writeFile(join(out,'report.json'),JSON.stringify({status:'passed',checks},null,2));

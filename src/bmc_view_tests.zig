@@ -755,7 +755,8 @@ test "BMC view progress compact card scrolls independently and log close never c
     const header_close = findById(view.log_modal.?.dialog, "bmc.connection_log.close").?.globalRect();
     const dismiss = findById(view.log_modal.?.dialog, "bmc.connection_log.dismiss").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 760), modal.w, 0.01);
-    try std.testing.expect(modal.y >= 16 and modal.y + modal.h <= 464.1);
+    const pane = slot.globalRect();
+    try std.testing.expect(modal.y >= pane.y + 5.9 and modal.y + modal.h <= pane.y + pane.h - 5.9);
     try std.testing.expect(header_close.y >= modal.y and header_close.y + header_close.h <= modal.y + modal.h);
     try std.testing.expect(dismiss.y >= modal.y and dismiss.y + dismiss.h <= modal.y + modal.h);
     _ = view.log_scroll.?.container.behavior.events.on_event_capture.?(.{ .key_down = .{ .key = .end } }, view);

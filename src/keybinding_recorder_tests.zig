@@ -57,7 +57,7 @@ test "V3 recorder rejects reserved and conflicting chords and cancels without to
     const before = map;
     var probe: Probe = .{};
     const picker = try recorder.mount(cx, scope, root, root, &map, "new_tab", .{ .context = &probe, .changed = Probe.changed, .dismiss = Probe.dismissed });
-    try root.appendChild(cx.allocator, picker.root);
+    if (!picker.portaled and picker.root.parent == null) try root.appendChild(cx.allocator, picker.root);
     _ = cx.render();
     picker.focus();
     cx.handleKeyDown(.x, .{ .ctrl = true, .super = true });

@@ -31,6 +31,7 @@ pub fn mount(_: ?*anyopaque, args: contract.EditorMount) !contract.EditorInstanc
         return err;
     };
     self.editor.protocol_picker = args.protocol_picker;
+    self.editor.parent_dialog = args.parent_dialog;
     self.editor.protocol_id = args.protocol_id;
     self.editor.protocol = std.meta.stringToEnum(types.Protocol, args.protocol_id) orelse return error.UnsupportedProtocol;
     if (self.editor.protocol != .ssh and self.editor.protocol != .sftp) return error.UnsupportedProtocol;
@@ -111,11 +112,7 @@ fn modalPresentation(raw: *anyopaque) contract.ModalPresentation {
         .warning = false,
     };
 }
-fn parentPresentationVisible(raw: *anyopaque) bool {
-    const self: *Instance = @ptrCast(@alignCast(raw));
-    return !self.editor.copy_open.?.peek();
-}
-const vtable: contract.EditorInstance.VTable = .{ .snapshot = snapshot, .clear_secrets = clear, .unmount = release, .cancel = cancel, .preferred_modal_height = preferredModalHeight, .modal_presentation = modalPresentation, .parent_presentation_visible = parentPresentationVisible, .visibility_changed = visibility };
+const vtable: contract.EditorInstance.VTable = .{ .snapshot = snapshot, .clear_secrets = clear, .unmount = release, .cancel = cancel, .preferred_modal_height = preferredModalHeight, .modal_presentation = modalPresentation, .visibility_changed = visibility };
 
 /// Explicit legacy remote UI adapter for the application's existing Draft and
 /// probe callers. A missing/replaced contribution cannot construct this view.

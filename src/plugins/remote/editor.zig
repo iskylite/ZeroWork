@@ -10,6 +10,7 @@ const Stepper = @import("../../ui/connection_stepper.zig");
 const route_view = @import("route_view.zig");
 const hosts_mod = @import("../../config/hosts.zig");
 const identity = @import("../../host/identity.zig");
+const FileSheet = @import("../../platform/file_sheet.zig").Sheet;
 pub const TestProgress = @import("../../ui/wizard_test_progress.zig");
 const auth_options = [_]ui.widgets.checkbox.RadioOption{
     .{ .value = "password", .label = "密码", .test_id = "wizard.auth.password" },
@@ -618,8 +619,8 @@ pub const RemoteEditor = struct {
     advanced_body: ?*ui.Node = null,
     advanced_toggle: ?*ui.Node = null,
     advanced_chevron: ?*ui.Node = null,
-    parent_presentation_visible: bool = true,
-    parent_barrier_color: ui.Color = ui.Color.TRANSPARENT,
+    parent_dialog: ?*ui.Node = null,
+    key_sheet: ?struct { sheet: FileSheet, revision: u64 } = null,
     direct_label: ?*ui.Node = null,
     ssh_card: ?*ui.Node = null,
     sftp_card: ?*ui.Node = null,
@@ -891,6 +892,7 @@ pub const RemoteEditor = struct {
     }
 
     fn removeViewportHook(self: *RemoteEditor) void {
+        self.closeKeySheet();
         self.password_authorization.cancel();
         self.cx.removeAfterLayoutHook(self);
         if (self.test_source) |*source| source.deinit();
@@ -919,7 +921,11 @@ pub const RemoteEditor = struct {
         const self: *RemoteEditor = @ptrCast(@alignCast(raw));
         // The retained logs ScrollArea must not publish interaction updates
         // after the whole wizard has closed underneath another modal.
-        if (!self.isVisible()) return .done;
+        if (!self.isVisible()) {
+            self.closeKeySheet();
+            return .done;
+        }
+        self.pollKeySheet();
         self.pollPasswordVisibility();
         for (self.selects.items) |select| {
             paintSelectTypography(select.trigger);
@@ -937,16 +943,6 @@ pub const RemoteEditor = struct {
         if (self.remember_passphrase_checkbox) |checkbox| paintCheckboxLabels(checkbox);
         if (self.compression_checkbox) |group| paintAuthLabels(group);
         if (self.auth_group) |group| paintAuthLabels(group);
-        if (!self.embedded) {
-            const parent_visible = !self.copy_open.?.peek();
-            if (self.parent_presentation_visible != parent_visible) {
-                if (!parent_visible) self.parent_barrier_color = self.root.?.getBackground();
-                self.root.?.setBackground(if (parent_visible) self.parent_barrier_color else ui.Color.TRANSPARENT);
-                self.modal.?.setDisplay(if (parent_visible) .flex else .none);
-                self.parent_presentation_visible = parent_visible;
-                return .needs_layout;
-            }
-        }
         if (self.copy_open.?.peek()) {
             var corrected = false;
             for ([_]?*ui.Node{ self.copy_dialog, self.copy_body }) |entry| if (entry) |node| {
@@ -1590,6 +1586,7 @@ pub const RemoteEditor = struct {
     /// 关闭向导（不触发回调；保存/取消路径已自带 hide + on_result）。
     pub fn hide(self: *RemoteEditor) void {
         if (self.route_path) |view| view.close();
+        self.closeKeySheet();
         self.resetPasswordVisibility();
         self.closeCopy();
         _ = self.advanceTestGeneration();
@@ -2489,11 +2486,30 @@ pub const RemoteEditor = struct {
         self.onCopy(self.sig_copy_source.?.get());
     }
     fn onPickKey(self: *RemoteEditor) void {
-        if (self.isLocked()) return;
+        if (self.isLocked() or self.key_sheet != null) return;
+        const sheet = FileSheet.begin(self.cx, .{ .kind = .file, .title = "选择私钥文件" }) catch |err| {
+            @import("../../platform/applog.zig").warn(.ui, "identity file sheet: {s}", .{@errorName(err)});
+            return;
+        };
+        self.key_sheet = .{ .sheet = sheet, .revision = self.draft_revision };
+        self.cx.scheduleRedrawAfterNs(30 * std.time.ns_per_ms);
+    }
+    fn pollKeySheet(self: *RemoteEditor) void {
+        const pending = self.key_sheet orelse return;
+        const count = pending.sheet.count() orelse {
+            self.cx.scheduleRedrawAfterNs(30 * std.time.ns_per_ms);
+            return;
+        };
+        defer self.closeKeySheet();
+        if (count == 0 or pending.revision != self.draft_revision or self.auth != .key or self.isLocked()) return;
         var buffer: [4096]u8 = undefined;
-        const path = ui.platform_services.openFilePanel(self.cx.system_sdk, &buffer) orelse return;
+        const path = pending.sheet.path(0, &buffer) catch return;
         self.sig_key_path.?.set(path);
         self.onFieldChange("");
+    }
+    fn closeKeySheet(self: *RemoteEditor) void {
+        if (self.key_sheet) |pending| pending.sheet.deinit();
+        self.key_sheet = null;
     }
     fn onSavePasswordChanged(self: *RemoteEditor, checked: bool) void {
         if (self.isLocked()) return;
@@ -3238,9 +3254,12 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     try card.appendChild(w.alloc, head);
     const details = try ui.boxStyled(cx, S.identityFields, .{});
     w.identity_body = details;
-    const copy_modal = try ui.widgets.Modal(.{ .open = ui.split(w.copy_open.?, cx.on(RemoteEditor, w, RemoteEditor.onCopyOpenChanged)), .width = 440, .max_height = 320, .background = S.theme.current().overlay }).mount(w.scope, cx);
+    const copy_modal = try ui.widgets.Modal(.{ .open = ui.split(w.copy_open.?, cx.on(RemoteEditor, w, RemoteEditor.onCopyOpenChanged)), .width = 440, .max_height = 320, .background = S.theme.current().overlay, .managed_focus = false }).mount(w.scope, cx);
+    if (!copy_modal.portaled) try root.appendChild(w.alloc, copy_modal.overlay);
+    _ = try @import("../../ui/scoped_modal.zig").bind(cx, w.scope, copy_modal, .{ .owner = .{ .node = w.parent_dialog orelse w.modal.? } });
     w.copy_dialog = copy_modal.dialog;
     w.copy_body = copy_modal.body;
+    copy_modal.overlay.meta.ownership.meta.test_id = "wizard.copy.overlay";
     copy_modal.dialog.meta.ownership.meta.test_id = "wizard.copy.dialog";
     copy_modal.dialog.setStyleInline(w.alloc, .{ .width = .{ .px = 440 }, .height = .{ .fit = .{} }, .max_height = 320, .padding = .{}, .gap = 0, .direction = .column, .overflow_hidden = true, .border = .{ .radius = 14 } });
     copy_modal.body.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{}, .gap = 0, .direction = .column });
@@ -3264,7 +3283,6 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     try copy_foot.appendChild(w.alloc, try ui.spacer(cx));
     _ = try action(w, copy_foot, "复制到当前草稿", "wizard.copy.apply", 128, 34, true, w.copy_disabled, RemoteEditor.onCopyApply, null);
     try copy_modal.body.appendChild(w.alloc, copy_foot);
-    if (!copy_modal.portaled) try root.appendChild(w.alloc, copy_modal.overlay);
     _ = try field(w, details, "连接名称", w.sig_name.?, "", "wizard.name", null, false);
     const target_row = try ui.box(cx, S.fieldRow(), .{});
     target_row.style.gap = 12;

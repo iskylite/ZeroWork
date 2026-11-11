@@ -23,7 +23,14 @@ pub const Draft = struct {
         self.* = undefined;
     }
 };
-pub const Hooks = struct { context: *anyopaque, save: *const fn (*anyopaque, Draft) void, test_cb: *const fn (*anyopaque, Draft) void, cancel: *const fn (*anyopaque) void, confirm_exposure: *const fn (*anyopaque, []const u8) bool };
+pub const Hooks = struct {
+    context: *anyopaque,
+    save: *const fn (*anyopaque, Draft) void,
+    test_cb: *const fn (*anyopaque, Draft) void,
+    cancel: *const fn (*anyopaque) void,
+    confirm_exposure: *const fn (*anyopaque, []const u8) bool,
+    overlay_owner: ?*const fn (*anyopaque) ?*ui.Node = null,
+};
 pub const Route = struct { label: []const u8, index: ?usize = null };
 
 pub const View = struct {
@@ -94,7 +101,8 @@ pub const View = struct {
         self.route_options = try scope.createList(ui.widgets.SelectOption, &.{});
         self.route_value = try scope.createSignal(?[]const u8, null);
         self.modal_open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = self.modal_open, .width = S.width, .max_height = S.panel_height, .background = S.theme.current().overlay, .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, modalChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = self.modal_open, .width = S.width, .max_height = S.panel_height, .background = S.theme.current().overlay, .managed_focus = hooks.overlay_owner == null, .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, modalChanged) }).mount(scope, cx);
+        if (hooks.overlay_owner) |get| _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = hooks.context, .get = get } } });
         self.root = modal.overlay;
         self.root.setDisplay(.none);
         self.card = modal.dialog;
@@ -331,7 +339,11 @@ pub const View = struct {
     pub fn updateGeometry(self: *View) bool {
         if (!self.visible) return false;
         if (self.paint_version != self.cx.theme_version or !std.meta.eql(self.colors, S.theme.current())) self.retheme();
-        const bounds: ui.ComputedRect = .{ .x = 0, .y = 0, .w = self.cx.viewport.width, .h = self.cx.viewport.height };
+        const bounds: ui.ComputedRect = if (self.hooks.overlay_owner) |get| blk: {
+            const owner = get(self.hooks.context) orelse return false;
+            if (!owner.isDisplayedInTree()) return false;
+            break :blk owner.globalRect();
+        } else .{ .x = 0, .y = 0, .w = self.cx.viewport.width, .h = self.cx.viewport.height };
         const width = @max(@as(f32, 1), @min(S.width, bounds.w - 32));
         const natural = @max(@as(f32, 1), self.content.globalRect().h);
         const body_h = @max(@as(f32, 1), @min(natural, @min(S.panel_height - S.chrome_height, bounds.h - 32 - S.chrome_height)));
@@ -358,7 +370,7 @@ pub const View = struct {
             self.cx.requestRedraw();
             return true;
         }
-        if (self.focus_pending) {
+        if (self.focus_pending and self.card.isDisplayedInTree()) {
             self.cx.setFocus(self.input_parts[0].input_container);
             self.focus_pending = false;
         }

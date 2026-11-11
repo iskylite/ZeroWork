@@ -4823,10 +4823,10 @@ pub const TerminalViewNode = struct {
 
     pub const ExportKind = enum { selection, retained_session };
 
-    /// true means saved; false means the native dialog was cancelled. Missing
-    /// selection/SDK and write failures remain errors, never false success.
-    pub fn exportText(self: *TerminalViewNode, cx: *ui.Cx, io: std.Io, kind: ExportKind) !bool {
-        const sdk = cx.system_sdk orelse return error.NotSupported;
+    /// Freeze the text before the window's destination sheet opens.
+    pub fn exportText(self: *TerminalViewNode, cx: *ui.Cx, kind: ExportKind) !void {
+        const Jobs = @import("session_export_jobs.zig");
+        const manager = Jobs.Manager.forCx(cx) orelse return error.WorkspaceUnavailable;
         const text = switch (kind) {
             .selection => (try self.copySelectionText(cx.allocator)) orelse return error.NoSelection,
             .retained_session => if (self.history.current()) |entry| try cx.allocator.dupe(u8, if (entry.search) |document| document.text else text_frame.decode(entry.wire).?.text) else if (self.terminal_surface) |surface| blk: {
@@ -4836,13 +4836,8 @@ pub const TerminalViewNode = struct {
             } else try self.legacySearchText(cx.allocator),
         };
         defer cx.allocator.free(text);
-        var path_buffer: [4096]u8 = undefined;
-        const path = (try sdk.runDialog(.{
-            .kind = .save_file,
-            .title = if (kind == .selection) "terminal-selection.txt" else "terminal-session.txt",
-        }, &path_buffer)) orelse return false;
-        try @import("terminal_export.zig").writeSnapshot(io, .cwd(), path, text);
-        return true;
+        const owned = try std.heap.c_allocator.dupe(u8, text);
+        try manager.selectDestination(.{ .text = owned }, .txt, if (kind == .selection) "terminal-selection.txt" else "terminal-session.txt");
     }
 
     /// Plain text without frame metadata: connection banner, tombstone notes.

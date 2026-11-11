@@ -108,7 +108,7 @@ pub const Host = struct {
             .transfer_config = self.workspace.app_config,
             .exports = .{ .context = self, .start = exportStart, .poll = exportPoll, .cancel = exportCancel },
         });
-        self.workspace.external_auth = .{ .context = self, .pending = pendingAuth, .submit = submitAuth, .cancel = cancelAuth, .host = authHost, .totp = authTotp, .parent = authParent, .host_key = authHostKey };
+        self.workspace.external_auth = .{ .context = self, .pending = pendingAuth, .pending_for = pendingAuthFor, .submit = submitAuth, .cancel = cancelAuth, .host = authHost, .totp = authTotp, .parent = authParent, .host_key = authHostKey };
     }
 
     /// Explicit AI resource-picker request. Repeated calls preserve the same
@@ -367,6 +367,14 @@ pub const Host = struct {
         };
         return null;
     }
+    fn pendingAuthFor(raw: *anyopaque, owner: identity.SessionHandle) ?auth.Snapshot {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.authentication) |host| if (host.pendingAuthenticationFor(owner)) |value| return value;
+        const app = self.app orelse return null;
+        if (app.domain.ownerForHandle(owner) != app) return null;
+        const tasks = self.task_domain orelse return null;
+        return tasks.authentication.pendingAuthenticationFor(owner);
+    }
     fn submitAuth(raw: *anyopaque, key: auth.RequestIdentity, reply: auth.Reply) !void {
         const self: *Host = @ptrCast(@alignCast(raw));
         if (self.task_domain) |tasks| if (tasks.authentication.authenticationHostFor(key) != null) return tasks.authentication.submitAuthentication(key, reply);
@@ -389,8 +397,8 @@ pub const Host = struct {
     }
     fn authParent(raw: *anyopaque, key: auth.RequestIdentity) ?*ui.Node {
         const self: *Host = @ptrCast(@alignCast(raw));
-        if (authHost(raw, key) == null) return null;
-        return self.workspace.terminal_area;
+        if (key.key.owner != .session or authHost(raw, key) == null) return null;
+        return self.workspace.overlayOwner(key.key.owner.session);
     }
     fn authHostKey(raw: *anyopaque, key: auth.RequestIdentity) ?host_key.Request {
         const self: *Host = @ptrCast(@alignCast(raw));

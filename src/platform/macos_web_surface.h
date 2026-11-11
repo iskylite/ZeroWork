@@ -53,7 +53,7 @@ ZWWebSurface *zw_web_surface_create_proxied(uint16_t port, const uint8_t *userna
 void zw_web_surface_destroy(ZWWebSurface *surface);
 void zw_web_surface_set_change_callback(ZWWebSurface *surface, ZWWebSurfaceChanged callback);
 int zw_web_surface_sync(ZWWebSurface *surface, void *zenit_window, ZWWebRect slot,
-    ZWWebRect clip, int visible, ZWWebHostKey host_key,
+    ZWWebRect clip, const ZWWebRect *occlusions, size_t occlusion_count, int visible, ZWWebHostKey host_key,
     ZWWebFocusEntered focus_entered, void *focus_context);
 void zw_web_surface_detach(ZWWebSurface *surface);
 void zw_web_surface_release_focus(ZWWebSurface *surface);

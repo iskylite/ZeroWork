@@ -31,12 +31,12 @@ pub fn requestSummary(app: *Application, roster: ?*@import("group_model.zig").Ro
     defer arena.deinit();
     const a = arena.allocator();
     const snapshot = try captureSnapshot(app, roster, context.binding, options, cursor_key, context, @import("../platform/realtime.zig").milliseconds(app), a);
-    const Item = struct { session_ref: []const u8, session_id: u64, generation: u64, protocol: []const u8, ready: bool, connected: bool, read_terminal: bool, batch_execution: bool, interactive_execution: bool, interactive_state: []const u8, failure: ?[]const u8, completion_source: @import("../host/terminal_execution.zig").CompletionSource, shell_id: ?[]const u8, shell_revision: u64, prompt_ready: ?bool };
+    const Item = struct { session_ref: []const u8, session_id: u64, generation: u64, protocol: []const u8, connection_state: ?[]const u8, page_state: ?[]const u8, ready: bool, connected: bool, read_terminal: bool, batch_execution: bool, interactive_execution: bool, interactive_state: []const u8, failure: ?[]const u8, completion_source: @import("../host/terminal_execution.zig").CompletionSource, shell_id: ?[]const u8, shell_revision: u64, prompt_ready: ?bool };
     var items: std.ArrayList(Item) = .empty;
     for (snapshot.sessions) |session| {
         if (items.items.len == 8) break;
         if (session.metadata_only) continue;
-        try items.append(a, .{ .session_ref = try queries.sessionRef(a, context, session.handle), .session_id = @backingInt(session.handle.session_id), .generation = session.handle.generation, .protocol = session.protocol, .ready = session.ready, .connected = session.connected, .read_terminal = session.read_terminal, .batch_execution = session.batch_execution, .interactive_execution = session.trusted_pty_execution, .interactive_state = session.trusted_pty_state, .failure = session.trusted_pty_failure, .completion_source = session.completion_source, .shell_id = if (session.shell.id) |id| try a.dupe(u8, &id) else null, .shell_revision = session.shell.revision, .prompt_ready = session.shell.prompt_ready });
+        try items.append(a, .{ .session_ref = try queries.sessionRef(a, context, session.handle), .session_id = @backingInt(session.handle.session_id), .generation = session.handle.generation, .protocol = session.protocol, .connection_state = session.connection_state, .page_state = session.page_state, .ready = session.ready, .connected = session.connected, .read_terminal = session.read_terminal, .batch_execution = session.batch_execution, .interactive_execution = session.trusted_pty_execution, .interactive_state = session.trusted_pty_state, .failure = session.trusted_pty_failure, .completion_source = session.completion_source, .shell_id = if (session.shell.id) |id| try a.dupe(u8, &id) else null, .shell_revision = session.shell.revision, .prompt_ready = session.shell.prompt_ready });
     }
     return std.json.Stringify.valueAlloc(allocator, .{ .binding = context.binding, .binding_revision = context.binding_revision, .observed_at = snapshot.observed_at, .execution_mode = options.execution_policy.execution_mode, .targets = items.items, .truncated = snapshot.sessions.len > items.items.len, .meaning = "Captured planning metadata only. Use exact advertised references directly when the target is unambiguous; discover only missing facts. Live gates remain authoritative." }, .{ .emit_null_optional_fields = false });
 }
@@ -108,7 +108,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
         const resource = app.lifecycle_supervisor.resource(handle);
         const facts = if (ready) serviceMetadata(app, tab, handle) else ServiceMetadata{};
         const owned = if (resource) |entry| entry.request.context.conversation_id.eql(context.conversation_id) and entry.request.context.task_id.eql(context.task_id) and entry.snapshot.ownership == .created_task else false;
-        try sessions.append(a, .{ .handle = handle, .title = basic.title, .protocol = state.protocol_id, .state = basic.state, .ready = ready, .connected = basic.connected, .connection_state = basic.connection_state, .closing = tab.closing, .read_terminal = read_terminal, .batch_execution = batch_execution, .trusted_pty_execution = pty.ready, .trusted_pty_state = pty.state, .trusted_pty_failure = pty.failure, .completion_source = pty.completion_source, .saved_source = associatedAsset(app, handle), .task_owned = owned, .ownership = if (resource) |entry| entry.snapshot.ownership else .borrowed_user, .ownership_revision = if (resource) |entry| entry.snapshot.ownership_revision else 0, .retention = if (resource) |entry| entry.snapshot.retention else null, .recording_id = facts.recording_id, .recording_generation = facts.recording_generation, .recording_unavailable_reason = facts.recording_unavailable_reason, .control_state = facts.control_state, .has_control_lease = facts.has_control_lease, .shell = facts.shell, .shell_switch = facts.shell_switch, .input_epoch = facts.input_epoch, .output_sequence = facts.output_sequence, .input_ready = facts.input_ready, .local_released = facts.local_released, .capability_revision = app.sessions.capabilityRevisionFor(handle) orelse 0 });
+        try sessions.append(a, .{ .handle = handle, .title = basic.title, .protocol = state.protocol_id, .state = basic.state, .ready = ready, .connected = basic.connected, .connection_state = basic.connection_state, .page_state = basic.page_state, .closing = tab.closing, .read_terminal = read_terminal, .batch_execution = batch_execution, .trusted_pty_execution = pty.ready, .trusted_pty_state = pty.state, .trusted_pty_failure = pty.failure, .completion_source = pty.completion_source, .saved_source = associatedAsset(app, handle), .task_owned = owned, .ownership = if (resource) |entry| entry.snapshot.ownership else .borrowed_user, .ownership_revision = if (resource) |entry| entry.snapshot.ownership_revision else 0, .retention = if (resource) |entry| entry.snapshot.retention else null, .recording_id = facts.recording_id, .recording_generation = facts.recording_generation, .recording_unavailable_reason = facts.recording_unavailable_reason, .control_state = facts.control_state, .has_control_lease = facts.has_control_lease, .shell = facts.shell, .shell_switch = facts.shell_switch, .input_epoch = facts.input_epoch, .output_sequence = facts.output_sequence, .input_ready = facts.input_ready, .local_released = facts.local_released, .capability_revision = app.sessions.capabilityRevisionFor(handle) orelse 0 });
     }
     // Completed host close receipts retain this conversation/binding's exact
     // historical metadata across Tasks, regardless of task-owned status.
@@ -154,7 +154,7 @@ fn appendClosed(a: std.mem.Allocator, sessions: *std.ArrayList(queries.Session),
     try sessions.append(a, item);
 }
 
-/// Host attachment metadata plus the BMC's read-only typed video snapshot.
+/// Host attachment metadata plus read-only facts from typed connection services.
 fn basicMetadata(app: *Application, tab: *const SessionTab, a: std.mem.Allocator) queries.Session {
     const state = app.sessions.queryState(tab.content_owner.session);
     const ready = if (state) |value| !tab.closing and !tab.archived and !tab.failed and !tab.owned_pending and (value.lifecycle == .ready or value.lifecycle == .attached) else false;
@@ -168,6 +168,25 @@ fn basicMetadata(app: *Application, tab: *const SessionTab, a: std.mem.Allocator
         } else connection.state;
         result.ready = ready and connection.ready;
         result.connected = ready and connection.connected;
+    } else if (std.mem.eql(u8, result.protocol, @import("../plugins/web/config.zig").protocol_id)) {
+        const web = @import("../plugins/web/page_service.zig");
+        result.ready = false;
+        result.connected = false;
+        if (result.closing or tab.archived) {
+            result.connection_state = "closed";
+        } else if (tab.failed) {
+            result.connection_state = "failed";
+        } else switch (app.sessions.queryTypedService(result.handle, web.VTable, web.key)) {
+            .available => |service| {
+                var snapshot = service.vtable.snapshot(service.context, result.handle, a) catch return result;
+                defer snapshot.deinit();
+                result.connection_state = @tagName(snapshot.path);
+                result.page_state = @tagName(snapshot.page);
+                result.ready = ready and snapshot.path == .ready;
+                result.connected = result.ready;
+            },
+            else => {},
+        }
     }
     return result;
 }

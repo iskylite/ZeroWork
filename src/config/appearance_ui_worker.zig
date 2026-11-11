@@ -5,6 +5,8 @@ const std = @import("std");
 const themes = @import("theme_registry.zig");
 const background = @import("background_asset.zig");
 const Controller = @import("settings_controller.zig").Controller;
+const AppearanceCommand = @import("appearance_ui_context.zig").Command;
+const FileSheet = @import("../platform/file_sheet.zig").Sheet;
 
 pub const Kind = enum { load_library, theme, background, favorite, remove, installation, abort_installation };
 pub const Poll = struct {
@@ -12,6 +14,7 @@ pub const Poll = struct {
     pending: bool = false,
     changed: bool = false,
     problem: ?anyerror = null,
+    selected_background: bool = false,
 };
 pub const BackgroundPreflight = struct {
     context: *anyopaque,
@@ -29,7 +32,10 @@ pub const Worker = struct {
     job: ?*Job = null,
     installation: ?themes.Installation = null,
     selected_path: []u8,
-    picker_active: bool = false,
+    picker: ?struct {
+        sheet: FileSheet,
+        request: union(enum) { theme: themes.ImportRequest, background: @FieldType(AppearanceCommand, "pick_background") },
+    } = null,
     last_error: ?anyerror = null,
     background_preflight: ?BackgroundPreflight = null,
 
@@ -43,13 +49,13 @@ pub const Worker = struct {
     /// Call after polling every job and taking/aborting its installation. There
     /// is deliberately no file cleanup hidden inside a UI-thread destructor.
     pub fn deinit(self: *Worker) void {
-        std.debug.assert(self.job == null and self.installation == null and !self.picker_active);
+        std.debug.assert(self.job == null and self.installation == null and self.picker == null);
         self.allocator.free(self.metadata_path);
         self.allocator.free(self.selected_path);
         self.* = undefined;
     }
     pub fn busy(self: *const Worker) bool {
-        return self.job != null or self.picker_active;
+        return self.job != null or self.picker != null;
     }
     pub fn selectedPath(self: *const Worker) []const u8 {
         return self.selected_path;
@@ -148,6 +154,10 @@ pub const Worker = struct {
     /// Invalidates draft resources. A completed global metadata transaction is
     /// still published; changing settings selection is never its side effect.
     pub fn cancel(self: *Worker) void {
+        if (self.picker) |picker| {
+            self.picker = null;
+            picker.sheet.deinit();
+        }
         if (self.job) |job| job.cancelled.store(true, .release);
     }
     /// App teardown fallback. It waits for owned jobs, and sends any remaining
@@ -177,6 +187,44 @@ pub const Worker = struct {
     /// write. The host must not mutate that registry while busy() is true.
     /// The saved/draft references are rechecked before a removal is published.
     pub fn poll(self: *Worker, controller: ?*Controller, registry: *themes.Registry, saved_theme: []const u8) Poll {
+        if (self.picker) |picker| {
+            const count = picker.sheet.count() orelse return .{ .pending = true };
+            self.picker = null;
+            defer picker.sheet.deinit();
+            const c = controller orelse return .{};
+            var buffer: [4096]u8 = undefined;
+            switch (picker.request) {
+                .theme => |request| {
+                    if (count == 0) {
+                        c.cancelThemeImport(request);
+                        return .{ .kind = .theme };
+                    }
+                    const active = c.theme_library.import_operation orelse return .{ .kind = .theme };
+                    if (active.draft_id != request.draft_id or active.operation_id != request.operation_id) return .{ .kind = .theme };
+                    const path = picker.sheet.path(0, &buffer) catch |err| {
+                        _ = c.failThemeImport(request, err);
+                        return .{ .kind = .theme, .problem = err };
+                    };
+                    self.startThemeImport(request, path) catch |err| {
+                        _ = c.failThemeImport(request, err);
+                        return .{ .kind = .theme, .problem = err };
+                    };
+                    return .{ .kind = .theme, .pending = true };
+                },
+                .background => |request| {
+                    if (count == 0 or c.draft_id != request.draft_id or c.background.asset_revision != request.asset_revision) return .{ .kind = .background };
+                    const path = picker.sheet.path(0, &buffer) catch |err| return .{ .kind = .background, .problem = err };
+                    var owned = c.requestBackground(path) catch |err| return .{ .kind = .background, .problem = err };
+                    owned.request.detect_source = true;
+                    self.startBackground(&owned) catch |err| {
+                        _ = c.failBackground(owned.request, err);
+                        owned.deinit();
+                        return .{ .kind = .background, .problem = err };
+                    };
+                    return .{ .kind = .background, .pending = true, .selected_background = true };
+                },
+            }
+        }
         const job = self.job orelse return .{};
         if (!job.done.load(.acquire)) return .{ .kind = job.kind, .pending = true };
         if (job.thread) |thread| thread.join();

@@ -16,7 +16,7 @@ pub const Format = enum {
         inline for (std.meta.tags(Format)) |format| if (std.mem.eql(u8, saved, @tagName(format))) return format;
         return error.InvalidExportFormat;
     }
-    pub fn defaultFilename(self: Format) []const u8 {
+    pub fn defaultFilename(self: Format) [:0]const u8 {
         return switch (self) {
             .txt => "session.txt",
             .cast => "session.cast",

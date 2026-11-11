@@ -46,6 +46,9 @@ pub const ModalProps = struct {
     background: ?Color = null,
     /// Click mask to close
     close_on_overlay: bool = true,
+    close_on_escape: bool = true,
+    /// When false the caller owns geometry and focus for a scoped dialog.
+    managed_focus: bool = true,
     /// Close button SVG asset (optional, null fallback text X)
     close_icon_asset: ?svg_assets.Asset = null,
     /// Opening and closing motion. Set to .none for a fixed presentation.
@@ -72,6 +75,7 @@ pub const ModalResult = struct {
     body: *Node,
     portaled: bool,
     open: ?*Signal(bool),
+    open_source: Source(bool) = .{ .value = false },
 
     /// `ui.view` intake: when portal overlay already hung at window root, nothing in parent.
     pub fn viewParts(self: ModalResult) core.ViewParts {
@@ -123,15 +127,17 @@ pub const ModalBuilder = struct {
 
         // Create modal layer via OverlayStack
         const ol = try overlay_stack.overlay(my_scope, cx, .{
-            .kind = .modal,
+            .kind = if (p.managed_focus) .modal else .non_modal,
+            .tier = if (p.managed_focus) .dialog else .overlay,
+            .scoped_dialog = !p.managed_focus,
             .barrier = .{ .color = p.overlay_color orelse t.tokens.color.overlay },
             .dismiss = .{
                 .outside_click = if (p.close_on_overlay) .close else .none,
-                .escape = true,
+                .escape = p.close_on_escape,
             },
             .enter_transition = p.enter_transition,
             .exit_transition = p.exit_transition,
-            .focus = .{ .trap = true, .auto_focus = true, .restore = true },
+            .focus = .{ .trap = p.managed_focus, .auto_focus = p.managed_focus, .restore = p.managed_focus },
             .on_dismiss_request = core.Cx.simpleHandler(ModalRuntime.requestClose, rt),
         });
 
@@ -140,7 +146,7 @@ pub const ModalBuilder = struct {
         // overlay() sets focus_scope on ol.content, but this component doesn't use ol.content;
         // the node that actually does pushScope is barrier, so unless configured on barrier,
         // trap/auto_focus are all no-ops.
-        barrier.setFocusScope(.{ .trap = true, .auto_focus = true });
+        if (p.managed_focus) barrier.setFocusScope(.{ .trap = true, .auto_focus = true });
         barrier.meta.ownership.meta.component_name = "Modal";
         try core.bindScopeToNode(my_scope, barrier);
         scope_bound = true;
@@ -160,6 +166,9 @@ pub const ModalBuilder = struct {
             .on_close = core.Cx.simpleHandler(ModalRuntime.requestClose, rt),
         }).viewMount(my_scope, cx);
         const dialog = panel.root.?;
+        if (!p.managed_focus) if (dialog.behavior.interaction.a11y) |*a11y| {
+            a11y.modal = false;
+        };
         barrier.appendChild(allocator, dialog) catch |err| {
             cx.freeNode(dialog);
             return err;
@@ -210,6 +219,7 @@ pub const ModalBuilder = struct {
                 .barrier = barrier,
                 .visible = open_src,
                 .fm = fm,
+                .managed_focus = p.managed_focus,
                 .scope_pushed = scope_pushed,
                 .cx = cx,
                 .layer_handle = ol.handle,
@@ -227,7 +237,7 @@ pub const ModalBuilder = struct {
                         c.barrier.style.height = .{ .grow = .{} };
                         c.barrier.style.overflow_hidden = false;
                         c.barrier.setHitTestVisible(true);
-                        if (!c.scope_pushed.peek()) {
+                        if (c.managed_focus and !c.scope_pushed.peek()) {
                             c.fm.pushScope(c.barrier);
                             c.scope_pushed.set(true);
                         }
@@ -250,7 +260,7 @@ pub const ModalBuilder = struct {
             }.update);
         }
 
-        return .{ .overlay = barrier, .dialog = dialog, .body = body, .portaled = ol.portaled, .open = rt.open.asSignal() };
+        return .{ .overlay = barrier, .dialog = dialog, .body = body, .portaled = ol.portaled, .open = rt.open.asSignal(), .open_source = rt.open.read };
     }
 };
 

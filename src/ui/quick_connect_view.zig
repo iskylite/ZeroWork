@@ -13,6 +13,8 @@ pub const SavedAsset = struct {
     host: []const u8,
     user: []const u8,
     port: u16 = 22,
+    endpoint: ?[]const u8 = null,
+    icon: ?ui.SvgAsset = null,
     group: ?[]const u8 = null,
     hops: usize = 0,
     protocol: hosts.Protocol = .ssh,
@@ -39,6 +41,7 @@ const Owned = struct {
             asset.name = try a.dupe(u8, asset.name);
             asset.host = try a.dupe(u8, asset.host);
             asset.user = try a.dupe(u8, asset.user);
+            if (asset.endpoint) |endpoint| asset.endpoint = try a.dupe(u8, endpoint);
             if (asset.group) |group| asset.group = try a.dupe(u8, group);
         }
         return .{ .arena = arena, .revision = revision, .assets = copied };
@@ -496,7 +499,7 @@ pub const View = struct {
             try self.scroll.content.appendChild(self.cx.allocator, node);
             const content = try ui.box(self.cx, S.rowContent(), .{});
             try node.appendChild(self.cx.allocator, content);
-            const icon = try ui.iconTint(self.cx, @import("session_icon.zig").forOs(asset.os) orelse (if (asset.protocol == .sftp) ui.icons.folder_open else ui.icons.server), S.theme.current().fg_2, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .flex_shrink = 0 });
+            const icon = try ui.iconTint(self.cx, asset.icon orelse @import("session_icon.zig").forOs(asset.os) orelse (if (asset.protocol == .sftp) ui.icons.folder_open else ui.icons.server), S.theme.current().fg_2, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .flex_shrink = 0 });
             icon.meta.ownership.meta.test_id = "quick.saved.icon";
             try content.appendChild(self.cx.allocator, icon);
             const labels = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 34 }, .flex = 1, .direction = .column, .min_width = 0 }, .{});
@@ -509,8 +512,9 @@ pub const View = struct {
                 next.line_height = 18.0 / 13.0;
                 name.setText(next);
             }
-            const endpoint = try std.fmt.allocPrint(self.cx.allocator, "{s}@{s}:{d}", .{ asset.user, asset.host, asset.port });
-            defer self.cx.allocator.free(endpoint);
+            const legacy_endpoint = if (asset.endpoint == null) try std.fmt.allocPrint(self.cx.allocator, "{s}@{s}:{d}", .{ asset.user, asset.host, asset.port }) else null;
+            defer if (legacy_endpoint) |text| self.cx.allocator.free(text);
+            const endpoint = asset.endpoint orelse legacy_endpoint.?;
             const detail = try label(self.cx, labels, endpoint, 11, 400, true);
             detail.setTextColor(if (selected) ui.Color.lerp(S.theme.current().fg_2, S.theme.current().fg_1, 0.12) else S.theme.current().fg_2);
             detail.meta.ownership.meta.test_id = "quick.saved.endpoint";
@@ -643,7 +647,7 @@ fn contains(text: []const u8, query: []const u8) bool {
     return false;
 }
 fn matchesAsset(asset: SavedAsset, query: []const u8) bool {
-    return contains(asset.name, query) or contains(asset.host, query) or contains(asset.user, query) or contains(asset.group orelse "", query);
+    return contains(asset.name, query) or contains(asset.host, query) or contains(asset.user, query) or contains(asset.group orelse "", query) or contains(asset.endpoint orelse "", query);
 }
 fn splitTarget(query: []const u8) Parts {
     const value = if (std.mem.startsWith(u8, query, "ssh ")) query[4..] else query;

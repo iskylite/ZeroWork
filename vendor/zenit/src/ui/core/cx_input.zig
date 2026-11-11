@@ -454,7 +454,7 @@ fn routeKeyDown(self: *Cx, key: KeyCode, modifiers: Modifiers) bool {
         }
     }
     // OverlayStack: Escape only closes topmost overlay
-    if (key == .escape and self.overlay_stack.handleEscape()) return true;
+    if (key == .escape and self.overlay_stack.handleEscapeFrom(self.focus_manager.getFocused())) return true;
 
     if (key == .tab) {
         // Editors intercept Tab for indent. With a native editor owning focus,

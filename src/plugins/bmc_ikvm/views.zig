@@ -2,6 +2,8 @@
 //! boundary; this file has no Runtime, Controller, credential or token access.
 const std = @import("std");
 const ui = @import("ui");
+const scoped_modal = @import("../../ui/scoped_modal.zig");
+const overlay_bounds = @import("../../ui/overlay_bounds.zig");
 const contract = @import("../../host/plugin_ui_contract.zig");
 const typed = @import("../../host/plugin_services.zig");
 const console = @import("console_service.zig");
@@ -262,8 +264,6 @@ pub const View = struct {
     fn anyMenu(self: *const View) bool {
         if (self.closed) return false;
         if (self.more_open) |open| if (open.peek()) return true;
-        if (self.order_open) |open| if (open.peek()) return true;
-        if (self.log_open) |open| if (open.peek()) return true;
         for (self.open[0..self.menu_signal_count]) |signal| if (signal.peek()) return true;
         return false;
     }
@@ -327,8 +327,13 @@ pub const View = struct {
             node.setDisplay(if (text.len > 0) .flex else .none);
         }
     }
+    fn captureCovered(self: *const View) bool {
+        if (self.disconnect_confirm_open.peek()) return true;
+        const viewport = self.viewport orelse return true;
+        return !viewport.isDisplayedInTree() or overlay_bounds.blocks(self.mount_request.cx, viewport);
+    }
     fn beginCapture(self: *View, requested: ?CaptureAuthority) void {
-        if (self.closed or self.texture == null or self.watch_only_selected or !self.window_focused or !self.mount_request.cx.window_active or self.anyMenu() or self.mount_request.cx.overlay_stack.topmost() != null) return;
+        if (self.closed or self.texture == null or self.watch_only_selected or !self.window_focused or !self.mount_request.cx.window_active or self.anyMenu() or self.captureCovered()) return;
         const service = self.borrowConsole() catch return;
         var snapshot = service.table.snapshot(service.binding.context, service.binding, self.mount_request.cx.allocator) catch return;
         defer snapshot.deinit();
@@ -374,7 +379,7 @@ pub const View = struct {
     }
     fn submit(self: *View, event: input.Event) bool {
         if (self.closed or !self.captured or self.view_only) return false;
-        if (!self.window_focused or !self.mount_request.cx.window_active or self.anyMenu() or self.mount_request.cx.overlay_stack.topmost() != null) {
+        if (!self.window_focused or !self.mount_request.cx.window_active or self.anyMenu() or self.captureCovered()) {
             self.releaseInput(.lost_focus);
             return false;
         }
@@ -546,7 +551,7 @@ pub const View = struct {
     fn beforeRender(node: *ui.Node) void {
         const self: *View = @ptrCast(@alignCast(node.meta.per_frame.hooks.slots.anim_state orelse return));
         if (self.closed) return;
-        if ((self.captured or self.pending_capture) and (!self.mount_request.cx.window_active or (self.captured and self.mount_request.cx.overlay_stack.topmost() != null))) self.releaseInput(.lost_focus);
+        if ((self.captured or self.pending_capture) and (!self.mount_request.cx.window_active or (self.captured and self.captureCovered()))) self.releaseInput(.lost_focus);
         const now = self.mount_request.cx.frame_time_ms;
         if (now - self.last_poll_ms >= 30 or now < self.last_poll_ms) {
             self.last_poll_ms = now;
@@ -566,7 +571,7 @@ pub const View = struct {
             if (self.texture != null and self.texture == sink.texture and self.frame_generation == sink.frame_generation)
                 sink.presentation.stage(self.mount_request.cx.frame_count, sink.frame_generation, sink.revision);
         }
-        if (self.pending_capture and !self.anyMenu() and self.mount_request.cx.overlay_stack.topmost() == null) {
+        if (self.pending_capture and !self.anyMenu() and !self.captureCovered()) {
             const requested = self.pending_capture_authority;
             self.pending_capture = false;
             self.pending_capture_authority = null;
@@ -996,22 +1001,26 @@ pub const View = struct {
             }
         };
         if (self.log_modal) |modal| {
-            const compact = cx.viewport.height < 600;
-            const width = @min(S.log_width, @max(1, cx.viewport.width - 32));
+            const pane = if (modal.overlay.style.display != .none and modal.overlay.globalRect().h > 0)
+                modal.overlay.globalRect()
+            else
+                self.root.?.globalRect();
+            const compact = pane.h < 600;
+            const width = @min(S.log_width, @max(1, @min(cx.viewport.width - 32, pane.w - 12)));
+            const height = @max(1, @min(@as(f32, 600), cx.viewport.height - 32, pane.h - 12));
             const route_height = if (self.log_route_text) |route| route.globalRect().h else 0;
-            const bounds: LogBounds = .{ .width = width, .height = cx.viewport.height, .route_height = route_height, .compact = compact, .theme = cx.theme_version };
+            const bounds: LogBounds = .{ .width = width, .height = height, .route_height = route_height, .compact = compact, .theme = cx.theme_version };
             if (self.log_bounds) |old| if (std.meta.eql(old, bounds)) return changed;
             self.log_bounds = bounds;
             self.bounds_layout_pending = true;
-            modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = width }, .height = .{ .fit = .{ .max = @max(1, cx.viewport.height - 32) } }, .flex_shrink = 0, .background = S.theme.current().overlay, .glass = S.theme.overlayGlass(), .border = .{ .radius = 14 } });
+            modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = width }, .height = .{ .fit = .{ .max = height } }, .flex_shrink = 0, .background = S.theme.current().overlay, .glass = S.theme.overlayGlass(), .border = .{ .radius = 14 } });
             if (modal.dialog.children.items.len != 0) modal.dialog.children.items[0].setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = if (compact) .{ .left = 18, .right = 18, .top = 12, .bottom = 12 } else .{ .left = 20, .right = 20, .top = 14, .bottom = 14 }, .flex_shrink = 0 });
             modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = if (compact) .{ .left = 18, .right = 34, .bottom = 12 } else .{ .left = 24, .right = 40, .bottom = 20 }, .gap = 0, .min_height = 0, .flex_shrink = 0 });
             if (self.log_footer) |footer| footer.setStyleInline(cx.allocator, S.logFooter(compact));
             if (self.log_scroll) |scroll| {
                 scroll.container.setBackground(S.theme.current().well);
-                const cap = @max(1, cx.viewport.height - 32 - (if (compact) @as(f32, 130.5) else @as(f32, 150.5)) - route_height - 12 - 28);
-                const height = @min(if (compact) @as(f32, 200) else @as(f32, 320), cap);
-                changed = setHeight(cx, scroll.container, height) or changed;
+                const cap = @max(1, height - (if (compact) @as(f32, 130.5) else @as(f32, 150.5)) - route_height - 12 - 28);
+                changed = setHeight(cx, scroll.container, @min(if (compact) @as(f32, 200) else @as(f32, 320), cap)) or changed;
             }
         }
         return changed;
@@ -1951,8 +1960,9 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
 fn mountDisconnectConfirmation(state: *View) !void {
     const cx = state.mount_request.cx;
     const scope = state.mount_request.scope;
-    const modal = try ui.widgets.Modal(.{ .title = state.disconnect_confirm_title, .open = state.disconnect_confirm_open, .width = @as(f32, 440), .max_height = @as(f32, 320), .background = S.theme.current().overlay, .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
+    const modal = try ui.widgets.Modal(.{ .title = state.disconnect_confirm_title, .managed_focus = false, .open = state.disconnect_confirm_open, .width = @as(f32, 440), .max_height = @as(f32, 320), .background = S.theme.current().overlay, .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
     if (!modal.portaled) try state.root.?.appendChild(cx.allocator, modal.overlay);
+    _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .node = state.root.? }, .mode = .content });
     modal.dialog.meta.ownership.meta.test_id = "bmc.disconnect.confirmation";
     state.disconnect_confirm_dialog = modal.dialog;
     modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 12, .padding = ui.Padding.all(18), .min_width = 0 });
@@ -2122,8 +2132,9 @@ fn logCell(cx: *ui.Cx, text: []const u8, width: ?f32, right: bool) !*ui.Node {
 fn mountConnectionLog(state: *View) !void {
     const cx = state.mount_request.cx;
     const scope = state.mount_request.scope;
-    const modal = try ui.widgets.Modal(.{ .title = "连接日志", .open = state.log_open.?, .width = S.log_width, .max_height = @as(f32, 600), .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
+    const modal = try ui.widgets.Modal(.{ .title = "连接日志", .managed_focus = false, .open = state.log_open.?, .width = S.log_width, .max_height = @as(f32, 600), .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
     if (!modal.portaled) try state.root.?.appendChild(cx.allocator, modal.overlay);
+    _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .node = state.root.? }, .mode = .panel });
     modal.overlay.meta.ownership.meta.test_id = "bmc.connection_log.overlay";
     modal.dialog.meta.ownership.meta.test_id = "bmc.connection_log.modal";
     if (modal.dialog.children.items.len != 0) {
@@ -2344,8 +2355,9 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
             state.mode_row = mode_row;
             try selectFieldContents(state, scope, mode_row, "下次启动模式", "bmc.boot.mode", state.mode_options, state.mode_value, state.mode_disabled, View.modeChanged);
             _ = try actionButton(state, scope, parent, "查看启动顺序（只读）", "bmc.boot.order", null, View.showOrder);
-            const modal = try ui.widgets.Modal(.{ .title = "启动顺序 · 只读", .open = state.order_open.?, .width = @as(f32, 420), .max_height = @as(f32, 360), .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
+            const modal = try ui.widgets.Modal(.{ .title = "启动顺序 · 只读", .managed_focus = false, .open = state.order_open.?, .width = @as(f32, 420), .max_height = @as(f32, 360), .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
             if (!modal.portaled) try state.root.?.appendChild(cx.allocator, modal.overlay);
+            _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .node = state.root.? }, .mode = .panel });
             modal.dialog.meta.ownership.meta.test_id = "bmc.boot.order_modal";
             if (modal.dialog.children.items.len != 0) {
                 const header = modal.dialog.children.items[0];

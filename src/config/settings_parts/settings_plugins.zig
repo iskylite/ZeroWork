@@ -261,7 +261,7 @@ const InfoAction = struct {
 fn mountDetails(cx: *ui.Cx, bound: *binding.Binding, root: *ui.Node) !*Info {
     const state = try bound.scope.allocator.create(Info);
     const open = try bound.scope.createSignal(bool, false);
-    const modal = try ui.widgets.Modal(.{ .open = open, .width = @as(f32, 390), .max_height = @as(f32, 240), .background = S.theme.current().overlay, .close_on_overlay = true, .enter_transition = .none, .exit_transition = .none }).mount(bound.scope, cx);
+    const modal = try ui.widgets.Modal(.{ .managed_focus = bound.hooks.overlay_owner == null, .open = open, .width = @as(f32, 390), .max_height = @as(f32, 240), .background = S.theme.current().overlay, .close_on_overlay = true, .enter_transition = .none, .exit_transition = .none }).mount(bound.scope, cx);
     state.* = .{ .scope = bound.scope, .cx = cx, .open = open, .modal = modal, .title = undefined, .message = undefined, .header = undefined, .viewport = undefined, .footer = undefined, .close_button = undefined };
     try bound.scope.onCleanup(Info, state, Info.cleanup);
     try bound.registerTooltip(open);
@@ -287,7 +287,9 @@ fn mountDetails(cx: *ui.Cx, bound: *binding.Binding, root: *ui.Node) !*Info {
     state.close_button = try ui.widgets.Button(.{ .label = "关闭", .variant = .secondary, .base_style = S.actionControl(false), .on_click = cx.on(Info, state, Info.close) }).mount(bound.scope, cx);
     try state.footer.appendChild(cx.allocator, state.close_button);
     try modal.body.appendChild(cx.allocator, state.footer);
-    if (!modal.portaled) try root.appendChild(cx.allocator, modal.overlay);
+    if (bound.hooks.overlay_owner) |owner| {
+        _ = try @import("../../ui/scoped_modal.zig").bind(cx, bound.scope, modal, .{ .owner = .{ .node = owner } });
+    } else if (!modal.portaled) try root.appendChild(cx.allocator, modal.overlay);
     return state;
 }
 fn infoButton(cx: *ui.Cx, bound: *binding.Binding, details: *Info, entry: registry.PluginManifest, suffix: []const u8, label: []const u8, title: []const u8, message: []const u8, icon_only: bool) !*ui.Node {

@@ -19,6 +19,7 @@ pub fn filenameButton(scope: *ui.Scope, cx: *ui.Cx, name: []const u8, on_click: 
 pub const Source = struct { session: @import("../host/identity.zig").SessionHandle, name: []const u8, cwd: []const u8, available: bool };
 pub const Callbacks = struct {
     context: *anyopaque,
+    overlay_owner: ?*ui.Node = null,
     ensure: *const fn (*anyopaque, Source) anyerror!files.Bindings,
     live: *const fn (*anyopaque, scope_mod.Owner) ?scope_mod.Scope,
     stage: *const fn (*anyopaque, scope_mod.Owner, *attachments.ContentRef) anyerror!void,
@@ -82,11 +83,14 @@ pub const View = struct {
         const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .host = host, .callbacks = callbacks, .path = try scope.createText("", .{}), .filter = try scope.createText("", .{}), .count = try scope.createSignal(usize, 0), .version = try scope.createSignal(u64, 0) });
         self.root = try ui.box(cx, .{ .width = .{ .px = 0 }, .height = .{ .px = 0 } }, .{});
         self.modal_open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = self.modal_open, .width = 760, .max_height = 438, .background = S.theme.current().overlay, .on_open_change = cx.on(View, self, modalChanged) }).mount(scope, cx);
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        const modal = try ui.widgets.Modal(.{ .managed_focus = self.callbacks.overlay_owner == null, .open = self.modal_open, .width = 760, .max_height = 438, .background = S.theme.current().overlay, .on_open_change = cx.on(View, self, modalChanged) }).mount(scope, cx);
+        if (self.callbacks.overlay_owner) |owner| {
+            _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .node = owner } });
+        } else if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         modal.dialog.meta.ownership.meta.test_id = "ai.remote.picker";
         self.surface = modal.body;
-        self.surface.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 8, .padding = ui.Padding.all(20) });
+        const scoped = self.callbacks.overlay_owner != null;
+        self.surface.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = if (scoped) 6 else 8, .padding = ui.Padding.all(if (scoped) 16 else 20) });
         const heading = try ui.boxStyled(cx, S.row, .{});
         heading.setStyleInline(cx.allocator, .{ .gap = 8 });
         const title_icon = try S.theme.icon(cx, ui.icons.file_search, "accent_ink", .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
@@ -106,7 +110,7 @@ pub const View = struct {
         const source_picker = try ui.widgets.Select(.{ .options = self.source_options, .value = self.source_value, .width = 180, .dropdown_width = 320, .size = .md, .on_change = cx.on(View, self, sourceChanged) }).mount(scope, cx);
         source_picker.trigger.meta.ownership.meta.test_id = "ai.remote.source";
         source_picker.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
-        source_picker.wrapper.setStyleInline(cx.allocator, .{ .width = .{ .px = 180 }, .min_width = 0, .flex_shrink = 0 });
+        source_picker.wrapper.setStyleInline(cx.allocator, .{ .width = .{ .px = 180 }, .min_width = 0, .flex_shrink = 1 });
         const source_hint = try @import("control_hint.zig").mount(cx, scope, source_picker.wrapper, "远程来源", .{ .id = "ai.remote.source.tooltip", .visible = self.modal_open, .focus_target = source_picker.trigger.parent.?, .width = 320 });
         self.source_hint_label = source_hint.content.children.items[0];
         var source_hint_text = self.source_hint_label.getText().?;
@@ -124,6 +128,7 @@ pub const View = struct {
         input.input_container.setStyleInline(cx.allocator, S.input());
         @import("ai_composer_controls_styles.zig").tuneInput(&input);
         input.node.meta.ownership.meta.test_id = "ai.remote.path";
+        input.node.setStyleInline(cx.allocator, .{ .min_width = 0, .flex = 1, .flex_shrink = 1 });
         self.input_state = input.state;
         try path_row.appendChild(cx.allocator, input.node);
         const go_button = try self.button("打开目录", "ai.remote.go", ui.icons.get("arrow-right").?, go);

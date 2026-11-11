@@ -1,8 +1,9 @@
 //! V3 transfer confirmation: 480x398, explicit title/body/footer hierarchy.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
+pub const dialog_height: f32 = 398;
 pub fn root() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 398 }, .direction = .column, .gap = 0, .padding = .ZERO, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 0, .padding = .ZERO, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .min_height = 0 };
 }
 pub fn row(height: f32, gap: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .align_items = .center, .gap = gap, .min_width = 0, .flex_shrink = 0 };

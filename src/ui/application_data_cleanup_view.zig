@@ -3,7 +3,11 @@ const std = @import("std");
 const ui = @import("ui");
 const S = @import("application_data_cleanup_styles.zig");
 pub const Action = enum { confirm, retry, dismiss };
-pub const Hooks = struct { context: *anyopaque, action: *const fn (*anyopaque, Action) void };
+pub const Hooks = struct {
+    context: *anyopaque,
+    action: *const fn (*anyopaque, Action) void,
+    overlay_owner: ?*ui.Node = null,
+};
 pub const Mode = enum { confirm, working, failed };
 pub const scope_text = "删除本应用的配置、主机、会话记录、缓存与诊断日志。\n同时删除此应用范围的钥匙串凭据，以及旧 ~/.zerowork\n中的迁移残余。";
 pub const preserved_text = "保留共享 ~/.ssh/known_hosts、外部私钥，\n以及用户下载或导出的文件。";
@@ -39,8 +43,8 @@ pub const View = struct {
         const open = try scope.createSignal(bool, false);
         const disabled = try scope.createSignal(bool, false);
         const busy = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = ui.split(open, cx.on(View, self, openChanged)), .width = S.width, .max_height = S.max_height, .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        const modal = try ui.widgets.Modal(.{ .managed_focus = hooks.overlay_owner == null, .open = ui.split(open, cx.on(View, self, openChanged)), .width = S.width, .max_height = S.max_height, .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
+
         modal.dialog.setStyleInline(cx.allocator, S.dialog(cx.viewport.width));
         modal.dialog.meta.ownership.meta.test_id = "data.cleanup.modal";
         if (modal.dialog.behavior.interaction.a11y) |*a| a.label = "清除全部应用数据";
@@ -73,10 +77,17 @@ pub const View = struct {
         try actions.appendChild(cx.allocator, primary);
         try modal.body.appendChild(cx.allocator, actions);
         self.* = .{ .cx = cx, .hooks = hooks, .open = open, .disabled = disabled, .busy = busy, .dialog = modal.dialog, .title = title, .title_icon = title_icon, .headline = headline, .detail = detail, .preserved = preserved, .outcome = outcome, .message = message, .cancel = cancel, .cancel_label = cancel_label, .primary = primary, .primary_label = primary_label, .colors = S.theme.current() };
+        if (hooks.overlay_owner != null) {
+            _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = self, .get = resolveOwner } } });
+        } else if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         try scope.onCleanup(View, self, cleanup);
         try cx.addAfterLayoutHook(self, afterLayout);
         self.retheme();
         return self;
+    }
+    fn resolveOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *View = @ptrCast(@alignCast(raw));
+        return if (self.mode == .confirm) self.hooks.overlay_owner else self.cx.root;
     }
     pub fn showConfirmation(self: *View) !void {
         self.mode = .confirm;

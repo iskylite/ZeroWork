@@ -438,23 +438,10 @@ pub const Host = struct {
                 if (!descriptor.can_export) return error.RecordingUnavailable;
                 const Export = @import("session_export.zig");
                 const format: Export.Format = if (descriptor.replayability == .baseline_unavailable) .cast else try Export.Format.parse(workspace.app_config.log.export_format);
-                const sdk = self.cx.system_sdk orelse return error.NativeDialogUnavailable;
-                const captured = try @import("session_export_jobs.zig").ArchiveRecord.capture(std.heap.c_allocator, self.archive, descriptor.archive_key, descriptor.manifest_revision);
-                var owned = captured;
-                var path_buffer: [4096]u8 = undefined;
-                const target = sdk.runDialog(.{ .kind = .save_file, .title = format.defaultFilename() }, &path_buffer) catch |err| {
-                    owned.deinit();
-                    return err;
-                };
-                const destination = target orelse {
-                    owned.deinit();
-                    return;
-                };
-                const manager = @import("session_export_jobs.zig").Manager.forCx(self.cx) orelse {
-                    owned.deinit();
-                    return error.WorkspaceUnavailable;
-                };
-                try manager.start(.{ .archive_record = captured }, format, destination);
+                const Jobs = @import("session_export_jobs.zig");
+                const manager = Jobs.Manager.forCx(self.cx) orelse return error.WorkspaceUnavailable;
+                const source: Jobs.Source = .{ .archive_record = try Jobs.ArchiveRecord.capture(std.heap.c_allocator, self.archive, descriptor.archive_key, descriptor.manifest_revision) };
+                try manager.selectDestination(source, format, format.defaultFilename());
             },
         }
     }

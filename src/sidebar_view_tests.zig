@@ -20,7 +20,7 @@ test "sidebar informational hover does not consume Escape before an open command
             @as(*usize, @ptrCast(@alignCast(raw))).* += 1;
         }
     };
-    const menu = try @import("ui/session_menu.zig").View.mount(h.cx, h.scope, .{ .context = &callbacks, .quick = Callback.run, .new_profile = Callback.run });
+    const menu = try @import("ui/session_menu.zig").View.mount(h.cx, h.scope, .{ .context = &callbacks, .quick = Callback.run, .new_profile = Callback.run, .new_web = Callback.run });
     try h.root.appendChild(h.cx.allocator, menu.root);
     try menu.show(anchor);
     h.frames();

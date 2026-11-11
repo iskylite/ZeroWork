@@ -66,6 +66,8 @@ pub const FocusManager = struct {
     /// Node registry (for resolving current focus via handle across frames)
     registry: ?*NodeRegistry = null,
 
+    focus_filter: ?struct { context: *anyopaque, accepts: *const fn (*anyopaque, *const Node) bool } = null,
+
     /// Called after blur/focus handlers and the focus handle update have all
     /// settled. Cx uses this hook to reconcile the window-level native
     /// text-input session; widgets must not toggle that session themselves.
@@ -271,6 +273,7 @@ pub const FocusManager = struct {
     }
 
     pub fn setFocusWithVisibility(self: *FocusManager, node: ?*Node, reason: FocusReason, visibility: FocusVisibility) void {
+        if (node) |target| if (!self.acceptsFocus(target)) return;
         // Capture the inherited policy before callbacks can change it.
         switch (reason) {
             .click => self.input_modality = .pointer,
@@ -492,11 +495,16 @@ pub const FocusManager = struct {
         var i = start;
         for (0..order.len) |_| {
             i = if (dir == .forward) (i + 1) % order.len else (if (i == 0) order.len - 1 else i - 1);
-            if (order[i].isDisplayedInTree()) {
+            if (order[i].isDisplayedInTree() and self.acceptsFocus(order[i])) {
                 self.setFocusWithReason(order[i], .tab);
                 return;
             }
         }
+    }
+
+    fn acceptsFocus(self: *const FocusManager, node: *const Node) bool {
+        const filter = self.focus_filter orelse return true;
+        return filter.accepts(filter.context, node);
     }
 
     /// Get current focused node

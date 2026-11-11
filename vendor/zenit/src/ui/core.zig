@@ -1054,6 +1054,12 @@ pub const Cx = struct {
         cx.action_dispatcher.setRegistry(&cx.node_registry);
         cx.action_dispatcher.active_use_depth = &cx.active_use_depth;
         cx.overlay_stack.setRegistry(&cx.node_registry);
+        cx.focus_manager.focus_filter = .{ .context = &cx.overlay_stack, .accepts = struct {
+            fn accepts(raw: *anyopaque, node: *const Node) bool {
+                const stack: *OverlayStack = @ptrCast(@alignCast(raw));
+                return stack.allowsScopedFocus(node);
+            }
+        }.accepts };
 
         // Enable layout intrinsic cache (currently global static; v0.2-P3 dismantles Node, migrates
         // to LayoutTable per-node field). allocator = Cx.allocator, persists cross-frame.

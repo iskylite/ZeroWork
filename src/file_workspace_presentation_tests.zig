@@ -227,6 +227,7 @@ test "file workspace presentation close waits for real local release then destro
     const other_source = try f.source(132, false);
     const other_attachment = try f.install(other_source);
     const other_root = f.presentation.contentFor(other_source.owner).?;
+    const other_tab_root = f.workspace.tabs.items[f.workspace.tabIndexById(other_attachment.tab_id).?].root;
     const hook = f.presentation.hooks();
     var foreign = attachment;
     foreign.tab_id = @fromBackingInt(@backingInt(foreign.tab_id) + 99);
@@ -242,7 +243,8 @@ test "file workspace presentation close waits for real local release then destro
     }
     try std.testing.expectEqual(@as(usize, 1), f.workspace.tabs.items.len);
     try std.testing.expectEqual(other_attachment.tab_id, f.workspace.tabs.items[0].tab_id);
-    try std.testing.expect(f.workspace.tabs.items[0].root == other_root);
+    try std.testing.expectEqual(other_tab_root, f.workspace.tabs.items[0].root);
+    try std.testing.expect(other_root.isDescendantOf(other_tab_root));
     try std.testing.expect(f.presentation.modelFor(other_source.owner) != null);
     try std.testing.expect(f.presentation.modelFor(source.owner) == null and f.presentation.contentFor(source.owner) == null);
     try std.testing.expectEqual(domain.CloseReceipt.released, hook.release(hook.context, source.owner, attachment, source.create_key));
@@ -490,7 +492,8 @@ test "file workspace presentation floating copy freezes target and waits explici
     for (0..12) |_| try f.frame();
     try std.testing.expect(copy.root.parent != copy.pane.root);
     try std.testing.expect(copy.open_value.peek());
-    try std.testing.expect(copy.pane.view.confirmation_open.peek());
+    try std.testing.expect(copy.pane.confirmation_open.peek());
+    try std.testing.expect(!entry.view.?.panes[0].confirmation_open.peek());
     try std.testing.expect(copy.overlay.globalRect().w > copy.root.globalRect().w);
     try std.testing.expectApproxEqAbs(@as(f32, 398), copy.root.globalRect().h, 1);
     try std.testing.expectEqual(@as(usize, 0), captured.count);

@@ -11,6 +11,7 @@ const transfer = @import("../transfer/manager.zig");
 
 const T = @import("app_theme.zig");
 const S = @import("transfer_styles.zig");
+const scoped_modal = @import("scoped_modal.zig");
 const identity = @import("../host/identity.zig");
 fn alpha(color: ui.Color, value: u8) ui.Color {
     return color.withAlpha(value);
@@ -230,6 +231,8 @@ const SourceControl = struct {
     }
 };
 pub const Panel = struct {
+    const OverlayOwner = struct { context: *anyopaque, get: *const fn (*anyopaque) ?*ui.Node };
+
     cx: *ui.Cx = undefined,
     scope: *ui.Scope = undefined,
     root: *ui.Node = undefined,
@@ -238,6 +241,7 @@ pub const Panel = struct {
     header: *ui.Node = undefined,
     viewport: ?ui.widgets.ScrollAreaResult = null,
     pane_anchor_id: ?u32 = null,
+    scoped: bool = false,
     open: *ui.Signal(bool) = undefined,
     disabled: *ui.Signal(bool) = undefined,
     sources_sig: *ui.Signal([]const u8) = undefined,
@@ -310,7 +314,15 @@ pub const Panel = struct {
     /// Returns an attachment node for legacy callers. Modal owns its portal;
     /// when portaled this is an inert anchor, never the already-mounted overlay.
     pub fn mount(self: *Panel, cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-        self.* = .{ .cx = cx, .scope = scope, .paint_colors = T.current() };
+        return self.mountImpl(cx, scope, null);
+    }
+
+    pub fn mountScoped(self: *Panel, cx: *ui.Cx, scope: *ui.Scope, context: *anyopaque, owner: *const fn (*anyopaque) ?*ui.Node) !*ui.Node {
+        return self.mountImpl(cx, scope, .{ .context = context, .get = owner });
+    }
+
+    fn mountImpl(self: *Panel, cx: *ui.Cx, scope: *ui.Scope, owner: ?OverlayOwner) !*ui.Node {
+        self.* = .{ .cx = cx, .scope = scope, .paint_colors = T.current(), .scoped = owner != null };
         self.open = try scope.createSignal(bool, false);
         self.disabled = try scope.createSignal(bool, true);
         self.sources_sig = try scope.createText("", .{});
@@ -329,13 +341,14 @@ pub const Panel = struct {
         self.resume_label = try scope.createText("", .{});
         self.md5_label = try scope.createText("", .{});
         self.notify_label = try scope.createText("", .{});
-        const modal = try ui.widgets.Modal(.{ .open = self.open, .width = @as(f32, 520), .max_height = @as(f32, 10000), .close_on_overlay = false, .on_open_change = cx.on(Panel, self, openChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = self.open, .width = @as(f32, 520), .max_height = @as(f32, 10000), .managed_focus = owner == null, .close_on_overlay = false, .on_open_change = cx.on(Panel, self, openChanged) }).mount(scope, cx);
         self.root = modal.overlay;
         self.card = modal.dialog;
         self.body = modal.body;
         self.root.meta.ownership.meta.test_id = "transfer.confirmation.overlay";
         self.card.meta.ownership.meta.test_id = "transfer.confirmation";
         self.card.setStyleInline(cx.allocator, S.confirmation(460));
+        if (owner) |value| _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = value.context, .get = value.get } } });
         modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = ui.Padding.all(0), .min_height = 0 });
         self.header = try ui.box(cx, S.confirmationHeader(), .{});
         try modal.body.appendChild(cx.allocator, self.header);
@@ -849,7 +862,7 @@ pub const Panel = struct {
     }
     pub fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const p: *Panel = @ptrCast(@alignCast(raw));
-        if (!p.isVisible()) return .done;
+        if (!p.isVisible() or (p.scoped and !p.root.isDisplayedInTree())) return .done;
         // ModalPanel's default body has 16px padding. Reassert the explicit
         // component override after native mounting/styles have settled; otherwise
         // this second padding clips the last options row by 32px.
@@ -863,7 +876,7 @@ pub const Panel = struct {
             return .needs_layout;
         }
         const parent = p.root.parent orelse return .done;
-        const bounds = parent.globalRect();
+        const bounds = if (p.scoped) p.root.globalRect() else parent.globalRect();
         if (bounds.w <= 0 or bounds.h <= 0) return .done;
         var area = bounds;
         var anchored = false;

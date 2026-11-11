@@ -1,6 +1,8 @@
 // In-process native input/AX regression. No global key events, clipboard
 // changes, application data, or user input-source changes.
 #import "../vendor/zenit/native/macos/window_bridge.m"
+#import "../src/platform/macos_web_surface.m"
+#import "../src/platform/macos_file_sheet.m"
 #include "../vendor/zenit/native/macos/tests/no_render_copy.inc"
 #define zenit_a11y_root_count empty_root_count
 #define zenit_a11y_root_at empty_root_at
@@ -75,7 +77,8 @@ int main(void) {
         void *ptr = macos_create_window(400, 260, "embedded host regression");
         CHECK(ptr);
         WindowWrapper *window = (__bridge WindowWrapper *)ptr;
-        NSView *clip = [[NSView alloc] initWithFrame:NSMakeRect(40, 40, 240, 160)];
+        ZWWebClipView *clip = [[ZWWebClipView alloc] initWithFrame:NSMakeRect(40, 40, 240, 160)];
+        clip.wantsLayer = YES;
         EmbeddedProbe *page = [[EmbeddedProbe alloc] initWithFrame:clip.bounds];
         [clip addSubview:page];
         [window.metalView addSubview:clip];
@@ -125,6 +128,18 @@ int main(void) {
         CHECK(window.metalView.accessibilityFocusedUIElement == page);
         NSPoint point = [window.window convertPointToScreen:[page convertPoint:NSMakePoint(20, 20) toView:nil]];
         CHECK([window.metalView accessibilityHitTest:point] == page);
+        NSArray<NSValue *> *covers = @[[NSValue valueWithRect:NSMakeRect(10, 10, 40, 60)],
+                                      [NSValue valueWithRect:NSMakeRect(15, 15, 100, 40)]];
+        CHECK([clip applyOcclusions:covers]);
+        CAShapeLayer *mask = (CAShapeLayer *)clip.layer.mask;
+        CHECK(!CGPathContainsPoint(mask.path, NULL, CGPointMake(20, 20), false));
+        CHECK(CGPathContainsPoint(mask.path, NULL, CGPointMake(200, 20), false));
+        CHECK([window.metalView accessibilityHitTest:point] != page);
+        CHECK([clip hitTest:[clip convertPoint:NSMakePoint(200, 20) toView:clip.superview]] == page);
+        CHECK(![clip applyOcclusions:@[[NSValue valueWithRect:clip.bounds]]]);
+        CHECK([clip hitTest:[clip convertPoint:NSMakePoint(200, 20) toView:clip.superview]] == nil);
+        CHECK([clip applyOcclusions:@[]] && clip.layer.mask == nil);
+        CHECK([window.metalView accessibilityHitTest:point] == page);
         NSView *overlay = [[NSView alloc] initWithFrame:clip.frame];
         [window.metalView addSubview:overlay positioned:NSWindowAbove relativeTo:clip];
         CHECK([window.metalView accessibilityHitTest:point] != page);
@@ -146,8 +161,21 @@ int main(void) {
         CHECK(window.metalView.accessibilityChildren.count == 0);
         [clip removeFromSuperview];
         CHECK(window.metalView.accessibilityChildren.count == 0);
+        void *other = macos_create_window(400, 260, "file sheet owner regression");
+        CHECK(other);
+        WindowWrapper *sibling = (__bridge WindowWrapper *)other;
+        void *sheet = zw_file_sheet_begin((uint32_t)window.window.windowNumber, 0, "Select fixture", NULL, NULL, NULL);
+        CHECK(sheet && zw_file_sheet_count(sheet) == -1);
+        CHECK(window.window.attachedSheet && !sibling.window.attachedSheet);
+        CHECK(!zw_file_sheet_begin((uint32_t)window.window.windowNumber, 0, NULL, NULL, NULL, NULL));
+        void *siblingSheet = zw_file_sheet_begin((uint32_t)sibling.window.windowNumber, 1, "Select directory", NULL, NULL, NULL);
+        CHECK(siblingSheet && sibling.window.attachedSheet && window.window.attachedSheet != sibling.window.attachedSheet);
+        zw_file_sheet_destroy(sheet);
+        CHECK(sibling.window.attachedSheet);
+        zw_file_sheet_destroy(siblingSheet);
+        macos_destroy_window(other);
         macos_destroy_window(ptr);
-        fprintf(stderr, "PASS: host context/key routing, page edit/modifier delivery, merged AX tree, focus/hit, overlay, recursion and hide/unbind cleanup\n");
+        fprintf(stderr, "PASS: host/native key and AX routing, overlapping clipping and hit testing, unbind cleanup, file sheets scoped to each window\n");
     }
     return 0;
 }

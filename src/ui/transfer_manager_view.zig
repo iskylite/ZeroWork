@@ -11,6 +11,7 @@ pub const Action = enum { pause, resume_transfer, cancel, retry, promote, reveal
 pub const Callbacks = struct {
     context: *anyopaque,
     action: *const fn (*anyopaque, backend.JobId, Action) void,
+    resolve_conflict: ?*const fn (*anyopaque, backend.JobId, *ui.Node) void = null,
     can_reveal: ?*const fn (*anyopaque, backend.JobId) bool = null,
     open_sftp: ?*const fn (*anyopaque) void = null,
     open_manager: ?*const fn (*anyopaque, Scope) void = null,
@@ -1272,7 +1273,15 @@ pub const Panel = struct {
                 .new_draft => return error.ActionUnavailable,
                 .resolve_conflict => .resolve_conflict,
             };
-            self.callbacks.?.action(self.callbacks.?.context, target.job, action_);
+            const callbacks = self.callbacks.?;
+            if (action_ == .resolve_conflict and callbacks.resolve_conflict != null) {
+                // A tray is a short footer inside its file column. Keep its
+                // dialog in that column so the complete form remains usable.
+                const owner = if (self.options.presentation == .session_tray) self.root.parent orelse self.root else self.root;
+                callbacks.resolve_conflict.?(callbacks.context, target.job, owner);
+            } else {
+                callbacks.action(callbacks.context, target.job, action_);
+            }
         } else {
             if (target.owner == null) return error.UnknownOwner;
             const call = self.hooks.action orelse return error.ActionUnavailable;

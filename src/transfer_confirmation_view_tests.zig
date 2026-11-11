@@ -20,11 +20,48 @@ test "transfer confirmation first chooser accepts result drop keeps directory an
     h.panel.setPaneAnchor(other);
     try std.testing.expectEqual(@as(?u32, pane.id), h.panel.pane_anchor_id);
 }
+
+test "scoped transfer confirmation leaves the other pane interactive and follows the frozen owner" {
+    var c: Capture = .{};
+    var route: OverlayRoute = .{};
+    const h = try H.initImpl(&c, 1000, 800, &route);
+    defer h.deinit();
+    const owner = try ui.box(h.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 310 }, .top = .{ .px = 75 } }, .width = .{ .px = 600 }, .height = .{ .px = 600 } }, .{});
+    try h.root.appendChild(h.cx.allocator, owner);
+    route.node = owner;
+    const sibling = try ui.widgets.Button(.{ .label = "另一分栏" }).mount(h.scope, h.cx);
+    sibling.setStyleInline(h.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 20 }, .top = .{ .px = 120 } } });
+    try h.root.appendChild(h.cx.allocator, sibling);
+    h.panel.show(.{ .mode = .upload, .owner = testOwner(), .remote_dir = "/srv" });
+    h.frames();
+    const rect = h.panel.root.globalRect();
+    try std.testing.expectApproxEqAbs(@as(f32, 310), rect.x, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 600), rect.w, 1);
+    h.click(sibling);
+    try std.testing.expectEqual(sibling, h.cx.focus_manager.getFocused().?);
+
+    owner.setDisplay(.none);
+    h.frames();
+    try std.testing.expect(!h.panel.root.isDisplayedInTree());
+    owner.setDisplay(.flex);
+    h.frames();
+    try std.testing.expect(h.panel.root.isDisplayedInTree());
+    try std.testing.expect(h.panel.capturedOwner().?.eql(testOwner()));
+}
+
 const ui = @import("ui");
 const P = @import("ui/transfer_panel.zig");
 const theme = @import("ui/app_theme.zig");
 const identity = @import("host/identity.zig");
 const transfer = @import("transfer/manager.zig");
+const OverlayRoute = struct {
+    node: ?*ui.Node = null,
+
+    fn get(raw: *anyopaque) ?*ui.Node {
+        const self: *OverlayRoute = @ptrCast(@alignCast(raw));
+        return self.node;
+    }
+};
 const Capture = struct {
     calls: usize = 0,
     notify_complete: ?bool = null,
@@ -74,6 +111,9 @@ const H = struct {
     root: *ui.Node,
     panel: *P.Panel,
     fn init(c: *Capture, width: f32, height: f32) !H {
+        return initImpl(c, width, height, null);
+    }
+    fn initImpl(c: *Capture, width: f32, height: f32, route: ?*OverlayRoute) !H {
         const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
         errdefer cx.deinit();
         cx.setViewport(width, height);
@@ -86,7 +126,7 @@ const H = struct {
         // Native mountUI holds an outer mount transaction. Modal YSS effects
         // settle only when it ends, after the component's mount returned.
         cx.owner.enterMount();
-        const anchor = panel.mount(cx, scope) catch |err| {
+        const anchor = (if (route) |owner| panel.mountScoped(cx, scope, owner, OverlayRoute.get) else panel.mount(cx, scope)) catch |err| {
             cx.owner.exitMount();
             return err;
         };

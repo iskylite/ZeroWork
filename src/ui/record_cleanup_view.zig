@@ -4,7 +4,11 @@ const styles = @import("record_cleanup_styles.zig");
 const theme = @import("app_theme.zig");
 const Progress = @import("../host/record_cleanup.zig").Progress;
 pub const Action = enum { confirm, retry, dismiss };
-pub const Hooks = struct { context: *anyopaque, action: *const fn (*anyopaque, Action) void };
+pub const Hooks = struct {
+    context: *anyopaque,
+    action: *const fn (*anyopaque, Action) void,
+    overlay_owner: ?*ui.Node = null,
+};
 pub const Mode = enum { confirm, running, failed, cleared };
 
 pub const View = struct {
@@ -38,8 +42,10 @@ pub const View = struct {
         const close_style = try scope.createSignal(ui.BoxStyle, styles.close());
         const cancel_style = try scope.createSignal(ui.BoxStyle, styles.button(false, false));
         const primary_style = try scope.createSignal(ui.BoxStyle, styles.button(true, true));
-        const modal = try ui.widgets.Modal(.{ .open = open, .width = 440, .max_height = 208, .background = theme.current().overlay, .close_on_overlay = false, .on_open_change = cx.on(View, self, changed) }).mount(scope, cx);
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        const modal = try ui.widgets.Modal(.{ .managed_focus = hooks.overlay_owner == null, .open = open, .width = 440, .max_height = 208, .background = theme.current().overlay, .close_on_overlay = false, .on_open_change = cx.on(View, self, changed) }).mount(scope, cx);
+        if (hooks.overlay_owner) |owner| {
+            _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .node = owner } });
+        } else if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         modal.dialog.setStyleInline(cx.allocator, styles.dialog(false));
         modal.dialog.meta.ownership.meta.test_id = "settings.record-cleanup";
         if (modal.dialog.behavior.interaction.a11y) |*a11y| a11y.label = "会话记录清理";

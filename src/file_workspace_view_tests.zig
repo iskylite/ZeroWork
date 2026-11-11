@@ -771,6 +771,17 @@ test "retained file copy confirmation repaints all builtins and keeps frozen pat
         .paths = &.{"/original/source/captured.txt"},
     };
     try view.open(intent, .{});
+    for (0..5) |_| f.settle();
+    const destination = f.view.panes[0].root.globalRect();
+    const backdrop = view.overlay.globalRect();
+    try std.testing.expectApproxEqAbs(destination.x, backdrop.x, 1);
+    try std.testing.expectApproxEqAbs(destination.y, backdrop.y, 1);
+    try std.testing.expectApproxEqAbs(destination.w, backdrop.w, 1);
+    try std.testing.expectApproxEqAbs(destination.h, backdrop.h, 1);
+    const sibling = f.view.panes[1].context_button;
+    const sibling_rect = sibling.globalRect();
+    const hit = f.cx.hitTest(sibling_rect.x + sibling_rect.w / 2, sibling_rect.y + sibling_rect.h / 2) orelse return error.MissingSiblingHit;
+    try std.testing.expect(hit.isDescendantOf(sibling));
     view.md5_value.set(true);
     view.resume_value.set(false);
     const identity = view.source;
@@ -789,6 +800,13 @@ test "retained file copy confirmation repaints all builtins and keeps frozen pat
         try std.testing.expectEqual(theme.popupInset(), view.source.parent.?.getBackground());
         try std.testing.expectEqual(theme.current().action_accent, view.confirm.getBackground());
     }
+    f.cx.setViewport(1000, 360);
+    for (0..8) |_| f.settle();
+    const compact_backdrop = view.overlay.globalRect();
+    const confirm = view.confirm.globalRect();
+    try std.testing.expect(confirm.h > 0 and confirm.y + confirm.h <= compact_backdrop.y + compact_backdrop.h);
+    const confirm_hit = f.cx.hitTest(confirm.x + confirm.w / 2, confirm.y + confirm.h / 2) orelse return error.MissingCopyConfirmationHit;
+    try std.testing.expect(confirm_hit.isDescendantOf(view.confirm));
     view.dismiss();
 }
 

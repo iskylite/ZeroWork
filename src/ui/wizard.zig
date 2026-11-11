@@ -29,6 +29,11 @@ pub const test_detail_max = remote_types.test_detail_max;
 pub const ValidationError = remote_types.ValidationError;
 var next_editor_id: std.atomic.Value(u64) = .init(1);
 
+pub const OverlayOwner = struct {
+    context: *anyopaque,
+    get: *const fn (*anyopaque, identity.SessionHandle) ?*ui.Node,
+};
+
 pub const Wizard = struct {
     plugin_registry: plugins.Registry = .{},
     connection_configs: ?@import("../host/connection_config_resolver.zig").Resolver = null,
@@ -59,6 +64,9 @@ pub const Wizard = struct {
     draft_id: u64 = 0,
     draft_revision: u64 = 1,
     saving: bool = false,
+    presenting: bool = false,
+    overlay_owner: ?OverlayOwner = null,
+    overlay_session: ?identity.SessionHandle = null,
     cx: *ui.Cx = undefined,
     scope: *ui.Scope = undefined,
     alloc: std.mem.Allocator = undefined,
@@ -122,7 +130,8 @@ pub const Wizard = struct {
         self.open = try scope.createSignal(bool, false);
         self.locked = try scope.createSignal(bool, false);
         self.sig_protocol = try scope.createSignal(?[]const u8, null);
-        const modal = try ui.widgets.Modal(.{ .open = ui.split(self.open.?, cx.on(Wizard, self, openChanged)), .width = S.width, .max_height = S.max_height, .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = ui.split(self.open.?, cx.on(Wizard, self, openChanged)), .width = S.width, .max_height = S.max_height, .background = S.theme.current().overlay, .managed_focus = self.overlay_owner == null, .close_on_overlay = false }).mount(scope, cx);
+        if (self.overlay_owner != null) _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = self, .get = modalOwner } } });
         self.root = modal.overlay;
         self.modal = modal.dialog;
         self.modal_body = modal.body;
@@ -192,7 +201,7 @@ pub const Wizard = struct {
         try cx.addAfterLayoutHook(self, viewportHook);
         try scope.onCleanup(Wizard, self, cleanup);
         _ = self.updateViewport();
-        return if (modal.portaled) try ui.box(cx, .{ .width = .{ .px = 0 }, .height = .{ .px = 0 }, .display = .none }, .{}) else self.root.?;
+        return if (modal.portaled or modal.overlay.parent != null) try ui.box(cx, .{ .width = .{ .px = 0 }, .height = .{ .px = 0 }, .display = .none }, .{}) else self.root.?;
     }
     fn slotGone(raw: *anyopaque) void {
         const self: *Wizard = @ptrCast(@alignCast(raw));
@@ -252,7 +261,7 @@ pub const Wizard = struct {
         if (self.probes == null) if (self.probe_host) |host| {
             self.probes = try host.bindParent(self.draft_id, self.draft_revision);
         };
-        self.plugin_editor = try mount_editor(connection.editor_factory.context, .{ .cx = self.cx, .scope = scope, .slot = self.plugin_slot.?, .protocol_id = manifest.id, .initial = initial, .draft_revision = self.draft_revision, .events = .{ .context = self, .changed = editorChanged, .submit = editorSubmit, .submit_with_secret = editorSubmitWithSecret, .dismiss = editorDismiss, .cancelled = editorCancelled }, .editor_host = self.editor_host, .editor_id = self.draft_id, .credentials = self.credentials, .probes = self.probes, .connection_configs = self.connection_configs });
+        self.plugin_editor = try mount_editor(connection.editor_factory.context, .{ .cx = self.cx, .scope = scope, .slot = self.plugin_slot.?, .parent_dialog = self.modal, .protocol_id = manifest.id, .initial = initial, .draft_revision = self.draft_revision, .events = .{ .context = self, .changed = editorChanged, .submit = editorSubmit, .submit_with_secret = editorSubmitWithSecret, .dismiss = editorDismiss, .cancelled = editorCancelled }, .editor_host = self.editor_host, .editor_id = self.draft_id, .credentials = self.credentials, .probes = self.probes, .connection_configs = self.connection_configs });
         try scope.onCleanup(Wizard, self, releasePluginScope);
         if (self.on_editor_mounted) |hook| try hook(self.editor_mounted_context orelse return error.EditorHookUnavailable, self.plugin_editor.?);
         if (self.plugin_error) |node| node.setDisplay(.none);
@@ -391,6 +400,7 @@ pub const Wizard = struct {
     pub fn show(self: *Wizard) void {
         self.refreshAppearance();
         const root = self.root orelse return;
+        self.presenting = true;
         if (self.plugin_editor) |editor| if (editor.vtable.visibility_changed) |changed| changed(editor.context, true);
         self.open.?.set(true);
         root.setDisplay(.flex);
@@ -399,6 +409,8 @@ pub const Wizard = struct {
     }
     pub fn hide(self: *Wizard) void {
         const root = self.root orelse return;
+        self.presenting = false;
+        self.overlay_session = null;
         if (self.plugin_editor) |editor| {
             editor.vtable.clear_secrets(editor.context);
             if (editor.vtable.visibility_changed) |changed| changed(editor.context, false);
@@ -418,7 +430,13 @@ pub const Wizard = struct {
         if (self.on_cancel) |callback| callback(self.cancel_context orelse return);
     }
     pub fn isVisible(self: *const Wizard) bool {
-        return if (self.root) |root| root.style.display != .none else false;
+        return self.presenting;
+    }
+    fn modalOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *Wizard = @ptrCast(@alignCast(raw));
+        const session = self.overlay_session orelse return self.cx.root;
+        const owner = self.overlay_owner orelse return null;
+        return owner.get(owner.context, session);
     }
     fn openChanged(self: *Wizard, visible: bool) void {
         if (!visible and self.isVisible()) self.cancel();
@@ -460,12 +478,17 @@ pub const Wizard = struct {
                 body_changed = true;
             }
         };
-        const width = @min(desired_width, S.availableModalWidth(self.cx.viewport.width));
+        const bounds: ui.ComputedRect = if (self.overlay_session != null) blk: {
+            const owner = modalOwner(self) orelse return body_changed;
+            if (!owner.isDisplayedInTree()) return body_changed;
+            break :blk owner.globalRect();
+        } else .{ .x = 0, .y = 0, .w = self.cx.viewport.width, .h = self.cx.viewport.height };
+        const width = @min(desired_width, S.availableModalWidth(bounds.w));
         var preferred = S.max_height;
         if (self.plugin_editor) |editor| if (editor.vtable.preferred_modal_height) |get| if (get(editor.context)) |value| {
             if (std.math.isFinite(value) and value > 0) preferred = @min(value, S.max_height);
         };
-        const compact = S.compactWindow(self.cx.viewport.width, self.cx.viewport.height);
+        const compact = S.compactWindow(bounds.w, bounds.h);
         if (self.header) |header| {
             const desired_h: f32 = if (compact and !self.presentation_warning) 48 else 52;
             if (header.style.height != .px or header.style.height.px != desired_h) {
@@ -473,7 +496,7 @@ pub const Wizard = struct {
                 body_changed = true;
             }
         }
-        const height = @min(preferred, S.availableModalHeight(self.cx.viewport.height, compact));
+        const height = @min(preferred, S.availableModalHeight(bounds.h, compact));
         const changed = node.style.width != .px or node.style.width.px != width or node.style.height != .px or node.style.height.px != height;
         if (changed) node.setStyleInline(self.alloc, .{ .width = .{ .px = width }, .height = .{ .px = height } });
         return changed or body_changed;

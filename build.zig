@@ -142,14 +142,11 @@ pub fn build(b: *std.Build) void {
 
     zenit.attach(zenit_dep, exe);
     addWebNative(b, exe.root_module, false, test_mode);
-    addNotesClipboard(b, exe.root_module);
+    addNativeFilePanels(b, exe.root_module);
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_notifications.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.linkFramework("UserNotifications", .{});
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_data_alert.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_password_reveal.m"), .flags = &.{"-fobjc-arc"} });
-    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_transfer_picker.m"), .flags = &.{"-fobjc-arc"} });
-    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_background_picker.m"), .flags = &.{"-fobjc-arc"} });
-    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_skill_picker.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/app_icon.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_app_menu.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_menu_bar.m"), .flags = if (test_mode) &.{ "-fobjc-arc", "-DZW_MENU_BAR_TEST=1" } else &.{"-fobjc-arc"} });
@@ -394,7 +391,7 @@ pub fn build(b: *std.Build) void {
     addUrlFetchFrameworks(tests.root_module);
 
     addCoreTextBridgeForTest(zenit_dep, tests);
-    addNotesClipboard(b, tests.root_module);
+    addNativeFilePanels(b, tests.root_module);
     addBmcNative(b, tests.root_module);
     addWebNative(b, tests.root_module, true, false);
     tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
@@ -426,7 +423,7 @@ pub fn build(b: *std.Build) void {
     bmc_tests.root_module.linkSystemLibrary("curl", .{});
     bmc_tests.root_module.linkFramework("JavaScriptCore", .{});
     addCoreTextBridgeForTest(zenit_dep, bmc_tests);
-    addNotesClipboard(b, bmc_tests.root_module);
+    addNativeFilePanels(b, bmc_tests.root_module);
     addBmcNative(b, bmc_tests.root_module);
     addWebNative(b, bmc_tests.root_module, true, false);
     bmc_tests.step.dependOn(&verify_ssh.step);
@@ -540,7 +537,7 @@ pub fn build(b: *std.Build) void {
             local_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
             local_tests.root_module.linkSystemLibrary("z", .{});
             addCoreTextBridgeForTest(zenit_dep, local_tests);
-            addNotesClipboard(b, local_tests.root_module);
+            addNativeFilePanels(b, local_tests.root_module);
             addBmcNative(b, local_tests.root_module);
             addWebNative(b, local_tests.root_module, true, false);
             local_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
@@ -680,7 +677,7 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.linkSystemLibrary("z", .{});
 
     addCoreTextBridgeForTest(zenit_dep, appearance_tests);
-    addNotesClipboard(b, appearance_tests.root_module);
+    addNativeFilePanels(b, appearance_tests.root_module);
     addBmcNative(b, appearance_tests.root_module);
     addWebNative(b, appearance_tests.root_module, true, false);
     appearance_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
@@ -737,7 +734,7 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.linkSystemLibrary("z", .{});
 
     addCoreTextBridgeForTest(zenit_dep, ui_tests);
-    addNotesClipboard(b, ui_tests.root_module);
+    addNativeFilePanels(b, ui_tests.root_module);
     addBmcNative(b, ui_tests.root_module);
     addWebNative(b, ui_tests.root_module, true, false);
     ui_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
@@ -954,7 +951,8 @@ pub fn build(b: *std.Build) void {
     b.step("test-app-environment", "Verify formal defaults ignore process environment overrides").dependOn(&b.addRunArtifact(environment_probe).step);
 }
 
-fn addNotesClipboard(b: *std.Build, module: *std.Build.Module) void {
+fn addNativeFilePanels(b: *std.Build, module: *std.Build.Module) void {
+    module.addCSourceFile(.{ .file = b.path("src/platform/macos_file_sheet.m"), .flags = &.{"-fobjc-arc"} });
     module.addCSourceFile(.{ .file = b.path("src/platform/macos_notes_clipboard.m"), .flags = &.{"-fobjc-arc"} });
     module.linkFramework("AppKit", .{});
 }

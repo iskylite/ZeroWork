@@ -51,7 +51,7 @@ extern fn zw_web_surface_create() ?*NativeSurface;
 extern fn zw_web_surface_create_proxied(u16, [*]const u8, usize, [*]const u8, usize) ?*NativeSurface;
 extern fn zw_web_surface_destroy(*NativeSurface) void;
 extern fn zw_web_surface_set_change_callback(*NativeSurface, ?ChangeCallback) void;
-extern fn zw_web_surface_sync(*NativeSurface, *anyopaque, Rect, Rect, c_int, ?HostKey, ?FocusCallback, ?*anyopaque) c_int;
+extern fn zw_web_surface_sync(*NativeSurface, *anyopaque, Rect, Rect, [*]const Rect, usize, c_int, ?HostKey, ?FocusCallback, ?*anyopaque) c_int;
 extern fn zw_web_surface_detach(*NativeSurface) void;
 extern fn zw_web_surface_release_focus(*NativeSurface) void;
 extern fn zw_web_surface_navigate(*NativeSurface, [*]const u8, usize) c_int;
@@ -111,14 +111,17 @@ pub const Mount = struct {
 };
 
 pub const Layout = struct {
-    /// Both rectangles use Zenit's top-left logical coordinate space. AppKit
+    /// All rectangles use Zenit's top-left logical coordinate space. AppKit
     /// owns backing scale and intersects with the actual native window bounds.
     slot: ui.ComputedRect,
     clip: ui.ComputedRect,
+    occlusions: []const Rect = &.{},
     visible: bool,
     host_key: ?HostKey = null,
     focus_entered: ?FocusEntered = null,
 };
+
+pub const Occlusion = Rect;
 
 pub const Surface = struct {
     native: ?*NativeSurface,
@@ -176,6 +179,8 @@ pub const Surface = struct {
             app.win.window_ptr,
             try Rect.from(layout.slot),
             try Rect.from(layout.clip),
+            layout.occlusions.ptr,
+            layout.occlusions.len,
             @intFromBool(layout.visible),
             layout.host_key,
             if (layout.focus_entered) |focus| focus.callback else null,

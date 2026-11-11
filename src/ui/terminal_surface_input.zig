@@ -30,7 +30,7 @@ pub fn localDateTimestamp(out: *[19]u8, wall_ms: i64) ![]const u8 {
 pub fn onKey(self: *Surface, key: ui.events.KeyCode, modifiers: ui.events.Modifiers) ui.events.EventResult {
     if (self.preedit.len != 0) return .stop;
     if (self.pending_paste != null or self.paste_requested != null) {
-        if (key == .escape) cancelPaste(self) else if (key == .@"return") approvePaste(self);
+        if (key == .escape) cancelPaste(self);
         return .stop;
     }
     if (modifiers.super) {
@@ -568,7 +568,10 @@ fn showPasteModal(self: *Surface) !void {
         const scope = try ui.Scope.init(self.cx.allocator, null, self.cx.owner);
         errdefer scope.dispose();
         const open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = open, .width = 480, .max_height = 520, .close_on_overlay = false, .on_open_change = self.cx.on(Surface, self, modalChanged) }).mount(scope, self.cx);
+        const modal = try ui.widgets.Modal(.{ .open = open, .width = 480, .max_height = 520, .managed_focus = false, .close_on_overlay = false, .on_open_change = self.cx.on(Surface, self, modalChanged) }).mount(scope, self.cx);
+        modal.overlay.meta.ownership.meta.test_id = "terminal.paste.overlay";
+        if (!modal.portaled) try self.host.appendChild(self.cx.allocator, modal.overlay);
+        _ = try @import("scoped_modal.zig").bind(self.cx, scope, modal, .{ .owner = .{ .node = self.host } });
         const heading = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
         heading.meta.ownership.meta.test_id = "terminal.paste.heading";
         try heading.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.clipboard_paste, @import("app_theme.zig").current().warn_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
@@ -585,7 +588,6 @@ fn showPasteModal(self: *Surface) !void {
         try @import("app_theme.zig").stylePrimary(self.cx, scope, approve, null);
         try buttons.appendChild(self.cx.allocator, approve);
         try modal.body.appendChild(self.cx.allocator, buttons);
-        if (!modal.portaled) try self.host.appendChild(self.cx.allocator, modal.overlay);
         self.modal_scope = scope;
         self.modal_open = open;
         self.modal = modal;

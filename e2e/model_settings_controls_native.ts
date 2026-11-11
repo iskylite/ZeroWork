@@ -38,7 +38,8 @@ async function source(kind:string,index:number,label:string){
 const report:any={theme,status:'running',checks:[],limits:['Isolated temporary configuration and local HTTP fixture.','Harness keyboard input and Metal screenshots; no physical IME or VoiceOver verification.']};
 try{
  await h.waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,900);await click('toolbar.settings');await click('settings.nav.ai');await click('settings.ai.provider.0.model.1.edit_model');
+ await h.resizeWindow(1440,900);await click('toolbar.settings');await click('settings.nav.ai');await click('settings.ai.provider.0.header');await click('settings.ai.provider.0.model.1.edit_model');
+ const mask=await node('settings.ai.model.overlay'),settings=await node('settings.panel');for(const side of ['x','y','w','h'])assert(Math.abs(mask.rect[side]-settings.rect[side])<.5);
  const ranks=await Promise.all(['none','low','medium','high','xhigh','max','ultra'].map(e=>node('settings.ai.model.effort.'+e)));
  for(const n of ranks){assert.equal(n.rect.h,30);assert(Math.abs(n.rect.w-ranks[0].rect.w)<1);}
  assert.equal(ranks[0].rect.y,ranks[3].rect.y);assert.equal(ranks[4].rect.y-ranks[0].rect.y,36);

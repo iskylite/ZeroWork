@@ -6,6 +6,11 @@ const challenge = @import("../host/challenge_host.zig");
 const identity = @import("../host/identity.zig");
 const S = @import("auth_challenge_styles.zig");
 const Certificate = @import("certificate_trust_view.zig");
+const scoped_modal = @import("scoped_modal.zig");
+pub const OwnerResolver = struct {
+    context: *anyopaque,
+    get: *const fn (*anyopaque, challenge.Owner) ?*ui.Node,
+};
 pub const PrefillGuard = struct {
     context: *anyopaque,
     valid: *const fn (*anyopaque, u64, ?i128) bool,
@@ -66,16 +71,23 @@ pub const Presenter = struct {
     certificate: *Certificate.View = undefined,
     certificate_mode: bool = false,
     current: ?Current = null,
+    owner_resolver: ?OwnerResolver = null,
+    projection_revision: u64 = 0,
     pub fn isVisible(self: *const Presenter) bool {
-        return self.open.peek();
+        const current = self.current orelse return false;
+        return self.open.peek() and self.ownerVisible(current.owner);
     }
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, host: *challenge.Host) !*Presenter {
+        return mountWithOwner(cx, scope, host, null);
+    }
+    pub fn mountWithOwner(cx: *ui.Cx, scope: *ui.Scope, host: *challenge.Host, owner: ?OwnerResolver) !*Presenter {
         const open = try scope.createSignal(bool, false);
-        const self = try cx.bindState(Presenter, .{ .cx = cx, .host = host, .open = open });
-        self.modal = try ui.widgets.Modal(.{ .open = ui.split(open, cx.on(Presenter, self, openChanged)), .width = S.width(.password), .max_height = @max(160, cx.viewport.height - 16), .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
+        const self = try cx.bindState(Presenter, .{ .cx = cx, .host = host, .open = open, .owner_resolver = owner });
+        self.modal = try ui.widgets.Modal(.{ .open = ui.split(open, cx.on(Presenter, self, openChanged)), .width = S.width(.password), .max_height = @max(160, cx.viewport.height - 16), .background = S.theme.current().overlay, .close_on_overlay = false, .managed_focus = owner == null }).mount(scope, cx);
+        if (owner != null) _ = try scoped_modal.bind(cx, scope, self.modal, .{ .owner = .{ .resolve = .{ .context = self, .get = resolveCurrentOwner } } });
         self.modal.dialog.meta.ownership.meta.test_id = "plugin.challenge.modal";
         self.modal.body.setStyleInline(cx.allocator, .{ .direction = .column, .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(S.padding), .gap = S.gap });
-        if (!self.modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, self.modal.overlay);
+        if (!self.modal.portaled and self.modal.overlay.parent == null) if (cx.root) |root| try root.appendChild(cx.allocator, self.modal.overlay);
         const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
         self.title_icon = try ui.iconTint(cx, ui.icons.shield_question, S.theme.current().warn_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
         self.title_icon.meta.ownership.meta.test_id = "plugin.challenge.title_icon";
@@ -172,17 +184,18 @@ pub const Presenter = struct {
     pub fn update(self: *Presenter, active_owner: ?identity.SessionHandle) !void {
         if (self.current) |current| {
             const state = self.host.stateFor(current.owner, current.request_id, current.generation);
-            if (state == .pending) return;
-            self.hide();
+            if (state == .pending and self.ownerVisible(current.owner)) return;
+            if (state != .pending) self.hide();
         }
         var chosen: ?challenge.View = null;
         var index: usize = 0;
         while (self.host.snapshot(index, active_owner)) |view| : (index += 1) {
-            if (view.state != .pending) continue;
+            if (view.state != .pending or !self.ownerVisible(view.owner)) continue;
             if (chosen == null or !view.background) chosen = view;
             if (!view.background) break;
         }
         const view = chosen orelse return;
+        if (self.current != null) self.hide();
         self.clearInput();
         self.save_password.set(false);
         self.current = .{ .owner = view.owner, .request_id = view.request_id, .generation = view.generation, .kind = view.kind, .field_count = view.payload.fields.len, .choice_count = view.payload.choices.len };
@@ -194,8 +207,7 @@ pub const Presenter = struct {
             self.modal.body.setStyleInline(self.cx.allocator, Certificate.S.root());
             self.modal.dialog.setStyleInline(self.cx.allocator, S.panel(@min(Certificate.S.width, @max(160, self.cx.viewport.width - 16)), @min(Certificate.S.height, @max(160, self.cx.viewport.height - 16))));
             self.modal.dialog.behavior.interaction.a11y = .{ .role = .dialog, .label = self.certificate.title.getText().?.content };
-            self.open.set(true);
-            self.cx.requestRedraw();
+            self.showProjection();
             return;
         }
         if (self.certificate_mode) {
@@ -262,8 +274,29 @@ pub const Presenter = struct {
             button.meta.ownership.meta.test_id = if (trust_actions) (if (i == 0) "plugin.challenge.choice.0" else "plugin.challenge.choice.1") else null;
         }
         self.refreshSubmit();
+        self.showProjection();
+    }
+
+    fn showProjection(self: *Presenter) void {
+        self.projection_revision +%= 1;
+        // The presenter reuses one fit-sized dialog for choice, credential
+        // and trust forms. Hidden slots have no measured layout until shown.
+        self.modal.body.markSizingDirty();
+        self.modal.dialog.markSizingDirty();
         self.open.set(true);
         self.cx.requestRedraw();
+    }
+
+    fn ownerVisible(self: *const Presenter, owner: challenge.Owner) bool {
+        const resolver = self.owner_resolver orelse return true;
+        return resolver.get(resolver.context, owner) != null;
+    }
+
+    fn resolveCurrentOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *Presenter = @ptrCast(@alignCast(raw));
+        const current = self.current orelse return null;
+        const resolver = self.owner_resolver orelse return null;
+        return resolver.get(resolver.context, current.owner);
     }
     fn primaryChanged(self: *Presenter, _: []const u8) void {
         self.refreshSubmit();
@@ -356,6 +389,7 @@ pub const Presenter = struct {
         };
     }
     fn send(self: *Presenter, current: Current, reply: challenge.Reply) void {
+        if (!self.ownerVisible(current.owner)) return;
         const ns = @import("../platform/realtime.zig").monotonicNs();
         self.host.submitPasswordAnswer(current.owner, current.request_id, current.generation, reply, @intCast(@max(0, ns) / std.time.ns_per_ms), self.remember.style.display != .none and self.save_password.peek()) catch |err| {
             self.clearInput();
@@ -366,6 +400,7 @@ pub const Presenter = struct {
     }
     fn cancel(self: *Presenter) void {
         const current = self.current orelse return;
+        if (!self.ownerVisible(current.owner)) return;
         _ = self.host.withdraw(current.owner, current.request_id, current.generation) catch {};
         self.hide();
     }
@@ -378,6 +413,7 @@ pub const Presenter = struct {
         }
     }
     fn hide(self: *Presenter) void {
+        self.projection_revision +%= 1;
         self.clearInput();
         self.current = null;
         self.submit_disabled.set(true);
@@ -465,6 +501,37 @@ fn styleActionText(button: *ui.Node, primary: bool) void {
         value.line_height = 1.5;
         node.setText(value);
     };
+}
+
+test "scoped challenge replaces a choice with a measurable input form" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 600);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    const services = try @import("challenge_window_host.zig").Services.mount(cx, scope);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(92) };
+    services.active_owner = owner;
+    try services.host.offer(owner, 1, 1, .choice, .{ .title = "Confirm", .detail = "First form", .choices = &.{.{ .label = "Continue", .value = "continue" }} }, std.math.maxInt(u64));
+    for (0..4) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    const view = services.view;
+    try std.testing.expect(view.choices[0].root.globalRect().h > 0);
+    view.cancel();
+    try services.host.offer(owner, 2, 1, .secret_input, .{ .title = "Prompt", .detail = "Second form", .fields = &.{.{ .label = "Value", .secret = false, .initial_value = "default" }} }, std.math.maxInt(u64));
+    for (0..4) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expect(view.fields[0].input.input_container.globalRect().h > 0);
+    try std.testing.expect(view.submit_button.globalRect().w > 0);
+    try std.testing.expectEqualStrings("default", view.fields[0].input.state.getText());
 }
 
 test "challenge presenter public defaults preserve edits and cancel or reopen cannot restore old text" {

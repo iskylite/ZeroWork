@@ -14,6 +14,7 @@ const DeleteDialog = @import("provider_delete_dialog.zig");
 
 pub const Hooks = struct {
     context: ?*anyopaque = null,
+    overlay_owner: ?*ui.Node = null,
     changed: ?*const fn (*anyopaque) void = null,
     saving: ?*ui.Signal(bool) = null,
 };
@@ -149,9 +150,9 @@ pub const ProviderView = struct {
             const ai = self.controller.model.value.ai;
             if (target.provider < ai.provider_count) {
                 const p = ai.providers[target.provider];
-                const dialog = DeleteDialog.Dialog.mount(self.cx, self.scope, .{ .provider = target.provider, .model = target.model, .provider_name = draft.providerName(p), .model_id = if (target.model) |j| if (j < p.model_count) p.models[j].id else "" else "" }, .{ .context = self, .accept = acceptDelete }) catch return .done;
+                const dialog = DeleteDialog.Dialog.mount(self.cx, self.scope, .{ .provider = target.provider, .model = target.model, .provider_name = draft.providerName(p), .model_id = if (target.model) |j| if (j < p.model_count) p.models[j].id else "" else "" }, .{ .context = self, .overlay_owner = self.hooks.overlay_owner, .accept = acceptDelete }) catch return .done;
                 self.delete_dialog = dialog;
-                if (!dialog.modal.portaled) self.root.appendChild(self.cx.allocator, dialog.modal.overlay) catch {};
+                if (!dialog.modal.portaled and dialog.modal.overlay.parent == null) self.root.appendChild(self.cx.allocator, dialog.modal.overlay) catch {};
                 return .needs_layout;
             }
         }
@@ -171,13 +172,13 @@ pub const ProviderView = struct {
             self.edit_request = null;
             const p = self.controller.model.value.ai.providers[request.provider];
             const model: config.AiModel = if (request.model) |j| p.models[j] else .{ .default = p.model_count == 0, .context_window = 0, .efforts = @splat(false) };
-            const editor = ModelEditor.mount(self.cx, self.scope, request.provider, request.model, draft.providerName(p), model, self.catalogFor(request.provider), .{ .context = self, .commit = commitModel, .metadata = candidateMetadata, .fetch_models = fetchEditorModels, .test_model = testEditorModel }) catch |err| {
+            const editor = ModelEditor.mount(self.cx, self.scope, request.provider, request.model, draft.providerName(p), model, self.catalogFor(request.provider), .{ .context = self, .overlay_owner = self.hooks.overlay_owner, .commit = commitModel, .metadata = candidateMetadata, .fetch_models = fetchEditorModels, .test_model = testEditorModel }) catch |err| {
                 self.error_text = @errorName(err);
                 self.refresh();
                 return .done;
             };
             self.model_editor = editor;
-            if (!editor.modal.portaled) self.root.appendChild(self.cx.allocator, editor.modal.overlay) catch {};
+            if (!editor.modal.portaled and editor.modal.overlay.parent == null) self.root.appendChild(self.cx.allocator, editor.modal.overlay) catch {};
             return .needs_layout;
         }
         if (self.pending) {

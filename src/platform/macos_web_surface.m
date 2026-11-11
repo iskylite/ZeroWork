@@ -70,8 +70,73 @@ extern int macos_set_embedded_input_view(void *view, int enabled, ZWWebHostKey h
     ZWWebFocusEntered focus_entered, void *focus_context);
 #endif
 
+@interface ZWWebClipView : NSView
+@property (nonatomic, copy) NSArray<NSValue *> *occlusions;
+@property (nonatomic) NSRect maskedBounds;
+- (BOOL)applyOcclusions:(NSArray<NSValue *> *)occlusions;
+@end
+
+static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) {
+    if (!NSIsEmptyRect(rect)) [rects addObject:[NSValue valueWithRect:rect]];
+}
+
+@implementation ZWWebClipView {
+    BOOL _hasVisibleArea;
+}
+- (BOOL)applyOcclusions:(NSArray<NSValue *> *)occlusions {
+    if ([self.occlusions isEqualToArray:occlusions] && NSEqualRects(self.maskedBounds, self.bounds)) {
+        return _hasVisibleArea;
+    }
+    self.occlusions = occlusions;
+    self.maskedBounds = self.bounds;
+    if (occlusions.count == 0) {
+        self.layer.mask = nil;
+        _hasVisibleArea = YES;
+        return YES;
+    }
+
+    // Subtract each cover from disjoint visible rectangles. Intersecting
+    // overlays must remain covered where their rectangles overlap.
+    NSMutableArray<NSValue *> *visible = [NSMutableArray arrayWithObject:[NSValue valueWithRect:self.bounds]];
+    for (NSValue *cover in occlusions) {
+        NSMutableArray<NSValue *> *remaining = [NSMutableArray array];
+        for (NSValue *value in visible) {
+            NSRect rect = value.rectValue;
+            NSRect cut = NSIntersectionRect(rect, cover.rectValue);
+            if (NSIsEmptyRect(cut)) {
+                [remaining addObject:value];
+                continue;
+            }
+            zw_add_nonempty_rect(remaining, NSMakeRect(NSMinX(rect), NSMinY(rect), NSWidth(rect), NSMinY(cut) - NSMinY(rect)));
+            zw_add_nonempty_rect(remaining, NSMakeRect(NSMinX(rect), NSMaxY(cut), NSWidth(rect), NSMaxY(rect) - NSMaxY(cut)));
+            zw_add_nonempty_rect(remaining, NSMakeRect(NSMinX(rect), NSMinY(cut), NSMinX(cut) - NSMinX(rect), NSHeight(cut)));
+            zw_add_nonempty_rect(remaining, NSMakeRect(NSMaxX(cut), NSMinY(cut), NSMaxX(rect) - NSMaxX(cut), NSHeight(cut)));
+        }
+        visible = remaining;
+        if (visible.count == 0) break;
+    }
+    CGMutablePathRef path = CGPathCreateMutable();
+    for (NSValue *value in visible) CGPathAddRect(path, NULL, NSRectToCGRect(value.rectValue));
+    CAShapeLayer *mask = [CAShapeLayer layer];
+    mask.frame = self.layer.bounds;
+    mask.path = path;
+    CGPathRelease(path);
+    self.layer.mask = mask;
+    _hasVisibleArea = visible.count != 0;
+    return _hasVisibleArea;
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+    NSPoint local = [self convertPoint:point fromView:self.superview];
+    for (NSValue *cover in self.occlusions) {
+        if (NSPointInRect(local, cover.rectValue)) return nil;
+    }
+    return [super hitTest:point];
+}
+@end
+
 @interface ZWWebSurfaceOwner : NSObject <WKNavigationDelegate, WKUIDelegate>
-@property (nonatomic, strong) NSView *clipView;
+@property (nonatomic, strong) ZWWebClipView *clipView;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) WKNavigation *activeNavigation;
 @property (nonatomic, strong) WKNavigation *cancelledAuthNavigation;
@@ -389,7 +454,7 @@ static ZWWebSurfaceOwner *zw_surface_owner(void) {
 #endif
     owner.retiredNavigations = [NSHashTable weakObjectsHashTable];
     owner.requests = [NSMutableArray array];
-    owner.clipView = [[NSView alloc] initWithFrame:NSZeroRect];
+    owner.clipView = [[ZWWebClipView alloc] initWithFrame:NSZeroRect];
     owner.clipView.wantsLayer = YES;
     owner.clipView.layer.masksToBounds = YES;
     owner.clipView.hidden = YES;
@@ -453,12 +518,12 @@ static NSRect zw_view_rect(NSView *view, ZWWebRect logical) {
 }
 
 int zw_web_surface_sync(ZWWebSurface *surface, void *zenit_window, ZWWebRect slot,
-    ZWWebRect clip, int visible, ZWWebHostKey host_key,
+    ZWWebRect clip, const ZWWebRect *occlusions, size_t occlusion_count, int visible, ZWWebHostKey host_key,
     ZWWebFocusEntered focus_entered, void *focus_context) {
     if (!NSThread.isMainThread || !surface || !zenit_window) return 0;
     @autoreleasepool {
         ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
-        NSView *container = owner.clipView;
+        ZWWebClipView *container = owner.clipView;
         NSView *parent = (__bridge NSView *)macos_get_metal_view(zenit_window);
         if (!parent.window || (container.superview && container.superview != parent)) return 0;
 
@@ -471,11 +536,17 @@ int zw_web_surface_sync(ZWWebSurface *surface, void *zenit_window, ZWWebRect slo
         }
 
         if (!container.superview) [parent addSubview:container positioned:NSWindowAbove relativeTo:nil];
-        if (!macos_set_embedded_input_view((__bridge void *)container, 1, host_key, focus_entered, focus_context)) return 0;
         if (!NSEqualRects(container.frame, clipped)) container.frame = clipped;
         NSRect webFrame = [container convertRect:document fromView:parent];
         if (!NSEqualRects(owner.webView.frame, webFrame)) owner.webView.frame = webFrame;
-        container.hidden = NO;
+        NSMutableArray<NSValue *> *covers = [NSMutableArray array];
+        for (size_t i = 0; i < occlusion_count; ++i) {
+            NSRect cover = NSIntersectionRect(clipped, zw_view_rect(parent, occlusions[i]));
+            zw_add_nonempty_rect(covers, [container convertRect:cover fromView:parent]);
+        }
+        BOOL exposed = [container applyOcclusions:covers];
+        if (!macos_set_embedded_input_view((__bridge void *)container, exposed, host_key, focus_entered, focus_context)) return 0;
+        container.hidden = !exposed;
         return 1;
     }
 }

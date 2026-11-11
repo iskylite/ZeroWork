@@ -20,15 +20,15 @@ const hidden=async(id:string)=>{await waitFor(async()=>!(await query(id)).some(s
 const report:any={status:'running',checks:[],screenshots:[],iso};
 try{
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await resizeWindow(1440,900);await click('toolbar.settings');await click('settings.nav.ssh');await click('settings.field.keepalive_sec');await key('a',{cmd:true});await key('backspace');await type_('44');
- await click('settings.nav.plugins');
+ await resizeWindow(1440,900);await click('toolbar.settings');await click('settings.nav.ssh');await click('settings.ssh.connection.header');await click('settings.field.keepalive_sec');await key('a',{cmd:true});await key('backspace');await type_('44');
+ await click('settings.nav.plugins');await click('已内置');
  for(const [id,desc] of [['local','本机 Shell 与终端会话'],['ssh','远程终端、认证与端口转发'],['sftp','目录浏览、文件读写与文件传输']]){
   const row=await node(`settings.plugin.${id}.row`);assert.equal(row.rect.h,66);assert.equal(text(await node(`settings.plugin.${id}.description`)),desc);
   assert((await query(`settings.plugin.${id}.version`)).filter(shown).length===1);
  }
  report.geometry={row:(await node('settings.plugin.local.row')).rect,footer:(await node('settings.footer')).rect};
  report.screenshots.push(await shot('plugins-standard'));
- await click('settings.plugin.ssh.version');await node('settings.plugin.ssh.version.dialog');assert.equal(text(await node('settings.plugin.ssh.version.message')),'静态链接插件随应用管理');report.screenshots.push(await shot('ssh-version'));
+ await click('settings.plugin.ssh.version');await node('settings.plugin.ssh.version.dialog');const mask=await node('settings.plugin.ssh.version.overlay'),settings=await node('settings.panel');for(const side of ['x','y','w','h'])assert(Math.abs(mask.rect[side]-settings.rect[side])<.5);assert.equal(text(await node('settings.plugin.ssh.version.message')),'插件随应用更新');report.screenshots.push(await shot('ssh-version'));
  await key('escape');await hidden('settings.plugin.ssh.version.dialog');await sleep(240);await node('settings.plugin.ssh.row');await node('settings.close');
  await click('settings.plugin.local.permissions');await node('settings.plugin.local.permissions.dialog');report.screenshots.push(await shot('local-permissions'));await click('settings.plugin.local.permissions.close');await hidden('settings.plugin.local.permissions.dialog');
  await click('settings.plugin.sftp.permissions');const d=await node('settings.plugin.sftp.permissions.dialog');assert((await clickAt(d.rect.x-15,d.rect.y+10)).ok);await hidden('settings.plugin.sftp.permissions.dialog');await sleep(250);await node('settings.plugin.sftp.row');

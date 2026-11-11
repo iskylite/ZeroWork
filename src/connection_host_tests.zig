@@ -364,7 +364,8 @@ test "connection host cancellation during retry delay prevents another TCP conne
     try std.testing.expect(job.cancelled.load(.acquire));
     while (clock.monotonicNs() < after_delay) try f.tick();
     try std.testing.expect(job.automatic_retry_deadline_ns == null);
-    try std.testing.expectEqualStrings("连接已取消", f.host.progress.summary_title.getText().?.content);
+    try std.testing.expect(job.progress_dismissed);
+    try std.testing.expectEqualStrings("连接已取消", f.workspace.tabs.items[0].remote_notice.?.title_node.getText().?.content);
     try std.testing.expectEqual(@as(u8, 1), peer.accepted.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), job.operation_key.?.attempt_id.?);
 }
@@ -432,11 +433,10 @@ test "connection host mounts and disposes the actual Workspace ApplicationHost a
     defer f.deinit();
     try f.tick();
     try std.testing.expect(f.workspace.authentication_ui_ready);
-    try std.testing.expect(!f.host.blocksGlobalActions());
     try std.testing.expect(f.host.last_error == null);
 }
 
-test "connection host keeps a failed original owner while a foreign challenge waits and transfers only after explicit close" {
+test "connection host keeps released failure and authentication in their respective tabs" {
     var peer: DroppingPeer = .{ .listener = try Socket.init(true) };
     defer peer.listener.deinit();
     const server = try std.Thread.spawn(.{}, DroppingPeer.run, .{&peer});
@@ -456,6 +456,7 @@ test "connection host keeps a failed original owner while a foreign challenge wa
     const first = f.workspace.connect_jobs.items[0].operation_key.?;
     try std.testing.expect(f.host.progress.matches(first));
     try std.testing.expect(!f.host.progress.close_disabled.peek());
+    const first_index = f.workspace.active_tab.?;
     const second = try f.application.create(.{ .name = "Queued", .host = "127.0.0.1", .port = pending.port, .user = "fixture", .auth_mode = .password, .password = "fixture-password" }, 2, 0, "");
     // This test supplies only a typed UI challenge. The second real TCP
     // connection deliberately has no SSH peer and is cancelled at teardown.
@@ -466,16 +467,18 @@ test "connection host keeps a failed original owner while a foreign challenge wa
         break;
     };
     try std.testing.expect(offered);
-    try f.tick();
-    try std.testing.expect(f.host.last_error == null);
-    try std.testing.expect(f.host.progress.matches(first));
-    try std.testing.expect(!f.host.authentication.isVisible());
-    f.cx.setFocus(f.host.progress.close_button.?);
-    f.cx.handleKeyDown(.@"return", .{});
+    const second_index = f.workspace.active_tab.?;
     for (0..4) |_| try f.tick();
     try std.testing.expect(f.host.last_error == null);
-    // Protected authentication owns the modal; progress must stay hidden so
-    // its focus trap cannot make the password form inert.
+    try std.testing.expect(!f.host.progress.isVisible());
+    try std.testing.expect(f.host.authentication.isVisible());
+    try std.testing.expect(f.host.bridge.current.?.identity.key.eql(second.operation));
+    f.workspace.selectTab(first_index);
+    for (0..4) |_| try f.tick();
+    try std.testing.expect(f.host.progress.matches(first));
+    try std.testing.expect(!f.host.authentication.isVisible());
+    f.workspace.selectTab(second_index);
+    for (0..4) |_| try f.tick();
     try std.testing.expect(!f.host.progress.isVisible());
     try std.testing.expect(f.host.bridge.current.?.identity.key.eql(second.operation));
     try std.testing.expect(f.host.authentication.isVisible());
@@ -569,10 +572,12 @@ test "connection host external protected authentication uses real modal without 
     defer f.workspace.external_auth = null;
     const original = try external.bridge.offerChallenge(.{ .key = key, .hop_index = 0, .kind = .keyboard_interactive, .endpoint_identity = .{ .host = "original-file.example", .port = 2222, .user = "file-user" }, .prompts = &.{ .{ .text = "Account:", .echo = true }, .{ .text = "Recovery response:", .echo = false } }, .presentation = .protected_form, .presentation_config_revision = 19 });
     try std.testing.expect(f.workspace.connectionProgress(key) == null);
+    try f.tick();
+    try std.testing.expect(!f.host.authentication.isVisible());
+    f.workspace.selectTab(first_index);
     try f.waitAuthentication(original);
     const view = f.host.authentication;
     try std.testing.expect(f.host.last_error == null);
-    try std.testing.expect(f.host.blocksGlobalActions());
     try std.testing.expect(!f.host.progress.isVisible());
     try std.testing.expect(f.host.progress.source == null);
     try std.testing.expect(view.isVisible());
@@ -586,7 +591,7 @@ test "connection host external protected authentication uses real modal without 
     try std.testing.expectEqual(ui.widgets.input.InputType.password, view.fields[1].input.state.input_type);
     try std.testing.expect(f.host.bridge.current.?.identity.eql(original));
     try std.testing.expectEqual(ExternalAuthentication.auth.Kind.keyboard_interactive, f.host.bridge.current.?.kind);
-    try std.testing.expectEqual(ExternalAuthentication.auth.Presentation.otp_modal, f.host.bridge.current.?.presentation);
+    try std.testing.expectEqual(ExternalAuthentication.auth.Presentation.protected_form, f.host.bridge.current.?.presentation);
     try std.testing.expectEqual(ExternalAuthentication.auth.Presentation.protected_form, external.bridge.snapshot().?.presentation);
     try std.testing.expectEqualStrings("Original file authentication", f.workspace.authenticationHostFor(original).?.name);
     try std.testing.expect(std.mem.indexOf(u8, view.source.getText().?.content, "file-user@original-file.example:2222") != null);
@@ -604,10 +609,12 @@ test "connection host external protected authentication uses real modal without 
     f.cx.handleTextInput("file-user");
     f.cx.setFocus(view.fields[1].input.input_container);
     f.cx.handleTextInput("generic recovery phrase");
-    f.workspace.selectTab(first_index);
-    try f.tick();
     f.workspace.selectTab(second_index);
     try f.tick();
+    try std.testing.expect(!view.isVisible());
+    try std.testing.expectEqual(@as(usize, 0), external.submitted);
+    f.workspace.selectTab(first_index);
+    try f.waitAuthentication(original);
     try std.testing.expect(f.host.bridge.current.?.identity.eql(original));
     try std.testing.expectEqualStrings("file-user", view.fields[0].input.state.getText());
     try std.testing.expectEqualStrings("generic recovery phrase", view.fields[1].input.state.getText());
@@ -618,7 +625,7 @@ test "connection host external protected authentication uses real modal without 
     try f.tick();
     try std.testing.expectEqual(@as(usize, 1), external.submitted);
     try std.testing.expect(external.submitted_identity.?.eql(original));
-    try std.testing.expectEqual(second_index, f.workspace.active_tab.?);
+    try std.testing.expectEqual(first_index, f.workspace.active_tab.?);
     var response = try external.bridge.waitResponse(original, 50);
     defer response.deinit();
     try std.testing.expectEqualStrings("file-user", response.answerAt(0));
@@ -636,14 +643,13 @@ test "connection host external protected authentication uses real modal without 
     try f.tick();
     try std.testing.expectEqual(@as(usize, 1), external.cancelled);
     try std.testing.expect(external.cancelled_identity.?.eql(next));
-    try std.testing.expectEqual(second_index, f.workspace.active_tab.?);
+    try std.testing.expectEqual(first_index, f.workspace.active_tab.?);
     try std.testing.expectEqual(@as(usize, 2), f.workspace.tabs.items.len);
     try std.testing.expectEqual(@import("host/session_host.zig").Lifecycle.attached, f.application.sessions.queryState(first.handle).?.lifecycle);
     try std.testing.expectEqual(@import("host/session_host.zig").Lifecycle.attached, f.application.sessions.queryState(second.handle).?.lifecycle);
     try std.testing.expect(external.bridge.snapshot().?.state == .cancelled);
     for (0..2) |_| try f.tick();
     try std.testing.expect(!view.isVisible());
-    try std.testing.expect(!f.host.blocksGlobalActions());
     _ = try f.application.sessions.journal.publish(key, .cancelled, "external auth fixture complete", null);
     _ = try f.application.sessions.journal.publish(key, .cleanup_released, "no native fixture resource", null);
     try f.application.sessions.journal.retire(key, .resources_released);
@@ -720,7 +726,7 @@ test "connection host shared OTP prefill waits for confirmation preserves manual
     const shared = @import("host/challenge_host.zig");
     const owner: OperationKey = .{ .owner = .app, .operation_id = 35, .attempt_id = 2 };
     const service = f.host.challenges;
-    const view = service.view;
+    const view = try @import("ui/plugin_challenge_presenter.zig").Presenter.mount(f.cx, f.scope, &service.host);
     const now = @import("proto/ssh/totp_prefill.zig").Clock{};
     const window = now.now().unix_seconds / 30;
     const Validity = struct {
@@ -730,6 +736,7 @@ test "connection host shared OTP prefill waits for confirmation preserves manual
     };
     const validity: @import("ui/plugin_challenge_presenter.zig").PrefillGuard = .{ .context = &f, .valid = Validity.valid };
     try service.host.offer(owner, 1, 2, .secret_input, .{ .title = "One-time verification", .submit_label = "验证并继续", .fields = &.{.{ .label = "OTP", .max_bytes = 256 }} }, std.math.maxInt(u64));
+    try view.update(null);
     for (0..2) |_| try f.tick();
     try std.testing.expect(try view.prefill(shared.Owner.from(owner), 1, 2, "123456", window, null, validity));
     try std.testing.expect(service.host.takeAnswer(owner, 1, 2) == null);
@@ -746,6 +753,7 @@ test "connection host shared OTP prefill waits for confirmation preserves manual
     defer first.deinit();
     try std.testing.expectEqualStrings(manual, first.value.fields[0]);
     try service.host.offer(owner, 2, 2, .secret_input, .{ .title = "One-time verification", .fields = &.{.{ .label = "OTP", .max_bytes = 256 }} }, std.math.maxInt(u64));
+    try view.update(null);
     for (0..2) |_| try f.tick();
     try std.testing.expect(try view.prefill(shared.Owner.from(owner), 2, 2, "123456", window, 1, validity));
     f.cx.setFocus(view.fields[0].input.input_container);
@@ -761,8 +769,9 @@ test "password challenge fits its visible fields without empty error rows" {
     defer f.deinit();
     const key: OperationKey = .{ .owner = .app, .operation_id = 101, .attempt_id = 1 };
     const service = f.host.challenges;
-    const view = service.view;
+    const view = try @import("ui/plugin_challenge_presenter.zig").Presenter.mount(f.cx, f.scope, &service.host);
     try service.host.offer(key, 1, 1, .secret_input, .{ .title = "SSH 密码认证", .allow_save_password = true, .fields = &.{.{ .label = "Password:" }} }, std.math.maxInt(u64));
+    try view.update(null);
     for (0..3) |_| try f.tick();
     const row = view.fields[0].root.globalRect();
     const field_area = view.fields_scroll.globalRect();
@@ -774,6 +783,7 @@ test "password challenge fits its visible fields without empty error rows" {
     const prompts: [8]@import("host/challenge_host.zig").Field = @splat(.{ .label = "Additional authentication field" });
     f.cx.setViewport(700, 440);
     try service.host.offer(key, 2, 1, .secret_input, .{ .title = "Additional authentication", .fields = &prompts }, std.math.maxInt(u64));
+    try view.update(null);
     for (0..3) |_| try f.tick();
     try std.testing.expect(view.fields_scroll.globalRect().h <= 120.5);
     try std.testing.expect(view.fields[7].root.globalRect().y > view.fields_scroll.globalRect().y + view.fields_scroll.globalRect().h);

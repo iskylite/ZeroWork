@@ -8,6 +8,7 @@ const S = @import("ai_attachments_styles.zig");
 const I = @import("ai_image_attachments_styles.zig");
 pub const Callbacks = struct {
     context: *anyopaque,
+    overlay_owner: ?*ui.Node = null,
     preview_sent: ?*const fn (*anyopaque, images.ContentRef) anyerror!void = null,
     remove: ?*const fn (*anyopaque, images.Ticket) anyerror!void = null,
     retry: ?*const fn (*anyopaque, images.Ticket) anyerror!void = null,
@@ -103,8 +104,10 @@ pub const View = struct {
         }
         _ = preview_parent;
         self.modal_open = try scope.createSignal(bool, false);
-        self.modal = try ui.widgets.Modal(.{ .open = self.modal_open, .background = S.theme.current().overlay, .width = 800, .max_height = cx.viewport.height, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
-        if (!self.modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, self.modal.overlay);
+        self.modal = try ui.widgets.Modal(.{ .managed_focus = self.callbacks.overlay_owner == null, .open = self.modal_open, .background = S.theme.current().overlay, .width = 800, .max_height = cx.viewport.height, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        if (self.callbacks.overlay_owner) |owner| {
+            _ = try @import("scoped_modal.zig").bind(cx, scope, self.modal, .{ .owner = .{ .node = owner } });
+        } else if (!self.modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, self.modal.overlay);
         self.panel = self.modal.dialog;
         self.modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .padding = ui.Padding.all(18), .gap = 12, .direction = .column, .min_height = 0 });
         try cx.addAfterLayoutHook(self, afterLayout);
@@ -272,8 +275,10 @@ pub const View = struct {
         if (!visible) self.dismiss();
     }
     fn layoutPreview(self: *View) void {
-        const rect = @import("ai_preview_geometry.zig").bounds(self.cx, self.preview_content);
-        self.panel.setStyleInline(self.cx.allocator, @import("ai_preview_geometry.zig").panel(rect, true));
+        const geometry = @import("ai_preview_geometry.zig");
+        const owner = self.callbacks.overlay_owner;
+        const rect = geometry.bounds(self.cx, owner orelse self.preview_content);
+        self.panel.setStyleInline(self.cx.allocator, geometry.panel(rect, owner != null));
         const content = self.preview_reference.content() orelse return;
         const viewport = self.preview_image.globalRect();
         const w = @max(1, if (viewport.w > 0) @min(viewport.w, rect.w - 36) else rect.w - 36);

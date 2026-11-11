@@ -6,6 +6,7 @@ const Export = @import("session_export.zig");
 const Timeline = @import("../vt/timeline.zig").Timeline;
 const RecordLease = @import("../vt/session_archive.zig").RecordLease;
 const wake = @import("../platform/presentation_wakeup.zig");
+const FileSheet = @import("../platform/file_sheet.zig").Sheet;
 
 /// A small immutable export request. Actual catalogue/manifest/checksum reads
 /// happen in Job.execute after the native destination dialog has returned.
@@ -35,6 +36,7 @@ pub const Source = union(enum) {
     archive: RecordLease,
     archive_group: @import("../vt/session_archive.zig").RecordGroupLease,
     archive_record: ArchiveRecord,
+    text: []u8,
     none,
     pub fn deinit(self: *Source) void {
         switch (self.*) {
@@ -43,6 +45,7 @@ pub const Source = union(enum) {
             .archive => |*lease| lease.deinit(),
             .archive_group => |*lease| lease.deinit(),
             .archive_record => |*record| record.deinit(),
+            .text => |text| std.heap.c_allocator.free(text),
             .none => {},
         }
         self.* = .none;
@@ -59,6 +62,7 @@ pub const Job = struct {
     done: std.atomic.Value(bool) = .init(false),
     cancel: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
+    success_notice: []const u8,
 
     /// Always consumes source, including on allocation/spawn failure.
     pub fn start(allocator: std.mem.Allocator, io: std.Io, source: Source, format: Export.Format, path: []const u8) !*Job {
@@ -68,7 +72,7 @@ pub const Job = struct {
         errdefer allocator.free(copy);
         const self = try allocator.create(Job);
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .io = io, .source = owned, .format = format, .path = copy };
+        self.* = .{ .allocator = allocator, .io = io, .source = owned, .format = format, .path = copy, .success_notice = if (source == .text) "已导出选中内容" else "已导出会话日志" };
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
     }
@@ -108,6 +112,7 @@ pub const Job = struct {
                 defer lease.deinit();
                 try self.writeArchive(lease.cast());
             },
+            .text => |text| try @import("terminal_export.zig").writeSnapshot(self.io, .cwd(), self.path, text),
             .none => return error.RecordingUnavailable,
         }
     }
@@ -157,6 +162,7 @@ var managers: [16]?*Manager = @splat(null);
 pub const Manager = struct {
     cx: *ui.Cx,
     job: ?*Job = null,
+    picker: ?struct { sheet: FileSheet, source: Source, format: Export.Format } = null,
     completed: u64 = 0,
     last_failure: ?anyerror = null,
     notice: struct { context: *anyopaque, publish: *const fn (*anyopaque, []const u8) void },
@@ -182,7 +188,7 @@ pub const Manager = struct {
     /// Always consumes source. One export/window bounds memory and prevents
     /// duplicate writers racing to replace the same destination.
     pub fn start(self: *Manager, source: Source, format: Export.Format, path: []const u8) !void {
-        if (self.job != null) {
+        if (self.job != null or self.picker != null) {
             var rejected = source;
             rejected.deinit();
             return error.ExportInProgress;
@@ -191,15 +197,45 @@ pub const Manager = struct {
         self.job = try Job.start(std.heap.c_allocator, self.cx.io, source, format, path);
         self.notice.publish(self.notice.context, "正在导出会话日志…");
     }
+
+    /// Hold an owned export request until the destination sheet closes.
+    pub fn selectDestination(self: *Manager, source: Source, format: Export.Format, filename: [:0]const u8) !void {
+        var owned = source;
+        errdefer owned.deinit();
+        if (self.job != null or self.picker != null) return error.ExportInProgress;
+        const sheet = try FileSheet.begin(self.cx, .{ .kind = .save, .title = filename, .initial = filename });
+        self.picker = .{ .sheet = sheet, .source = owned, .format = format };
+        self.cx.requestRedraw();
+    }
+
+    fn pollDestination(self: *Manager) !void {
+        var picker = self.picker orelse return;
+        const count = picker.sheet.count() orelse {
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+            return;
+        };
+        self.picker = null;
+        defer picker.sheet.deinit();
+        defer picker.source.deinit();
+        if (count == 0) return;
+        var buffer: [4096]u8 = undefined;
+        const path = try picker.sheet.path(0, &buffer);
+        const source = picker.source;
+        picker.source = .none;
+        try self.start(source, picker.format, path);
+    }
+
     fn poll(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Manager = @ptrCast(@alignCast(raw));
+        self.pollDestination() catch |err| self.notice.publish(self.notice.context, @errorName(err));
         if (self.job) |job| {
             if (job.done.load(.acquire)) {
                 self.last_failure = job.failure;
                 self.completed += 1;
                 self.job = null;
+                const success = job.success_notice;
                 job.deinit();
-                self.notice.publish(self.notice.context, if (self.last_failure) |err| @errorName(err) else "已导出会话日志");
+                self.notice.publish(self.notice.context, if (self.last_failure) |err| @errorName(err) else success);
             } else self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
         }
         return .done;
@@ -212,6 +248,10 @@ pub const Manager = struct {
         if (self.job) |job| {
             job.cancel.store(true, .release);
             job.deinit();
+        }
+        if (self.picker) |*picker| {
+            picker.sheet.deinit();
+            picker.source.deinit();
         }
         self.cx.allocator.destroy(self);
     }

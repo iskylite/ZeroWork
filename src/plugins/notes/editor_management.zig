@@ -1,5 +1,6 @@
 const std = @import("std");
 const ui = @import("ui");
+const scoped_modal = @import("../../ui/scoped_modal.zig");
 const model = @import("model.zig");
 const Store = @import("store.zig").Store;
 const S = @import("styles.zig");
@@ -141,6 +142,7 @@ pub const Manager = struct {
         const modal = try ui.widgets.Modal(.{
             .open = self.open,
             .width = @as(f32, 420),
+            .managed_focus = false,
             .background = colors.overlay,
             .overlay_color = ui.Color.rgba(colors.fg_1.r, colors.fg_1.g, colors.fg_1.b, 26),
             .close_on_overlay = false,
@@ -153,6 +155,7 @@ pub const Manager = struct {
         const a = cx.allocator;
         modal.dialog.setStyleInline(a, .{ .border = .{ .radius = 14 } });
         modal.body.setStyleInline(a, .{ .padding = ui.Padding.all(24) });
+        _ = try scoped_modal.bind(cx, scope, modal, .{ .owner = .{ .node = root } });
         const content = try ui.box(cx, S.stack(12), .{});
         try modal.body.appendChild(a, content);
         self.heading = try ui.text(cx, "", S.text(18, 650, colors.fg_1));

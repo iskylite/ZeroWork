@@ -4,7 +4,11 @@ const ui = @import("ui");
 const S = @import("settings_styles.zig");
 const controls = @import("settings_parts/settings_controls.zig");
 pub const Target = struct { provider: usize, model: ?usize = null, provider_name: []const u8, model_id: []const u8 = "" };
-pub const Hooks = struct { context: *anyopaque, accept: *const fn (*anyopaque, *Dialog) bool };
+pub const Hooks = struct {
+    context: *anyopaque,
+    accept: *const fn (*anyopaque, *Dialog) bool,
+    overlay_owner: ?*ui.Node = null,
+};
 pub const Dialog = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -21,7 +25,8 @@ pub const Dialog = struct {
         const self = try scope.allocator.create(Dialog);
         self.* = .{ .cx = cx, .scope = scope, .target = .{ .provider = target.provider, .model = target.model, .provider_name = try controls.owned(scope, target.provider_name), .model_id = try controls.owned(scope, target.model_id) }, .hooks = hooks, .open = try scope.createSignal(bool, true), .modal = undefined, .content = undefined, .problem = undefined };
         try scope.onCleanup(Dialog, self, release);
-        self.modal = try ui.widgets.Modal(.{ .open = ui.split(self.open, cx.on(Dialog, self, opened)), .width = @as(f32, 390), .max_height = @as(f32, 640), .background = S.theme.current().overlay, .close_on_overlay = true, .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
+        self.modal = try ui.widgets.Modal(.{ .managed_focus = hooks.overlay_owner == null, .open = ui.split(self.open, cx.on(Dialog, self, opened)), .width = @as(f32, 390), .max_height = @as(f32, 640), .background = S.theme.current().overlay, .close_on_overlay = true, .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
+        if (hooks.overlay_owner) |owner| _ = try @import("../ui/scoped_modal.zig").bind(cx, scope, self.modal, .{ .owner = .{ .node = owner } });
         self.modal.overlay.meta.ownership.meta.test_id = "settings.ai.delete.overlay";
         self.modal.dialog.meta.ownership.meta.test_id = "settings.ai.delete.dialog";
         self.modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 390 }, .height = .{ .px = 206 }, .direction = .column, .padding = .{}, .gap = 0, .background = S.theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true });
@@ -67,10 +72,8 @@ pub const Dialog = struct {
         const cx = self.cx;
         const scope = self.scope;
         const overlay = self.modal.overlay;
-        cx.invalidateReferencesTo(overlay);
-        if (overlay.parent) |parent| cx.detachChild(parent, overlay);
+        if (!self.modal.portaled) if (overlay.parent) |parent| cx.detachChild(parent, overlay);
         scope.dispose();
-        cx.destroyDetached(overlay);
     }
     pub fn resize(self: *Dialog) void {
         const width = @min(390, @max(1, self.cx.viewport.width - 32));

@@ -85,6 +85,16 @@ try{
         assert(!(await h.query('bmc.fps')).some(shown));await click('bmc.display');await click('bmc.display.fps');
         if(!(await h.request('GET','/app/bmc-fixture/menus')).open[2])await click('bmc.display');
         await click('bmc.display.connection_log');const p=await capture('connection-log',['bmc.connection_log.modal','bmc.connection_log.route','bmc.connection_log.footer']);alpha('bmc.connection_log.route',p['bmc.connection_log.route'],2);alpha('bmc.connection_log.footer',p['bmc.connection_log.footer'],2);
+        const card = (await visible('bmc.connection_log.modal')).rect;
+        const dismiss = (await visible('bmc.connection_log.dismiss')).rect;
+        assert(dismiss.y >= card.y && dismiss.y + dismiss.h <= card.y + card.h + 0.1, 'log footer stays within its scoped card');
+        if (name === 'dark' && width >= 1200) {
+          const video = (await visible('bmc.frame')).rect;
+          assert(card.x - video.x > 10, 'KVM fixture has exposed video alongside the details card');
+          assert((await h.clickAt((card.x + video.x) / 2, video.y + video.h / 2)).ok);
+          await h.waitFor(async () => (await h.request('GET', '/app/bmc-fixture/input-stats')).captured || null, 5000);
+          assert((await h.query('bmc.connection_log.modal')).some(shown), 'clicking exposed video leaves nonmodal details open');
+        }
         await click('bmc.connection_log.close');
         await click('bmc.display');
       }

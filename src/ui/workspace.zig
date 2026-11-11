@@ -30,6 +30,7 @@ const local_styles = @import("local_session_styles.zig");
 const RemoteNotice = @import("remote_session_notice.zig");
 const session_icon = @import("session_icon.zig");
 const group_view = @import("group_workspace_model.zig");
+const scoped_modal = @import("scoped_modal.zig");
 const group_close = @import("group_close_controller.zig");
 const group_close_view = @import("group_close_view.zig");
 const group_styles = @import("group_workspace_styles.zig");
@@ -343,6 +344,7 @@ pub const WindowCloseBridge = struct {
 pub const ExternalAuthentication = struct {
     context: *anyopaque,
     pending: *const fn (*anyopaque) ?auth_challenge.Snapshot,
+    pending_for: ?*const fn (*anyopaque, identity.SessionHandle) ?auth_challenge.Snapshot = null,
     submit: *const fn (*anyopaque, auth_challenge.RequestIdentity, auth_challenge.Reply) anyerror!void,
     cancel: *const fn (*anyopaque, auth_challenge.RequestIdentity) bool,
     host: *const fn (*anyopaque, auth_challenge.RequestIdentity) ?hosts_mod.HostConfig,
@@ -536,6 +538,7 @@ pub const Workspace = struct {
     /// Full-cover scrim over terminal_area: absolute, centered content,
     /// high z-index, translucent background.
     confirm_root: ?*ui.Node = null,
+    confirm_open: ?*ui.Signal(bool) = null,
     /// The white card node; keyboard focus target while the card is up.
     confirm_card: ?*ui.Node = null,
     /// Title text node, rewritten with the pending tab's name on show.
@@ -551,6 +554,7 @@ pub const Workspace = struct {
     host_key_job: ?*ConnectJob = null,
     host_key_generation: u64 = 0,
     host_key_root: ?*ui.Node = null,
+    host_key_open: ?*ui.Signal(bool) = null,
     host_key_card: ?*ui.Node = null,
     host_key_detail: ?*ui.Node = null,
     host_key_changed_button: ?*ui.Node = null,
@@ -869,6 +873,34 @@ pub const Workspace = struct {
 
     pub fn sessionTab(self: *const Workspace, id: SessionId) ?*SessionTab {
         return if (self.tabIndex(id)) |index| self.tabs.items[index] else null;
+    }
+
+    /// Resolve the exact presentation of a live session in this window.
+    pub fn overlayOwner(self: *Workspace, owner: identity.SessionHandle) ?*ui.Node {
+        for (self.tabs.items) |tab| {
+            if (!tab.content_owner.eql(.{ .session = owner })) continue;
+            return self.tabOverlayOwner(tab);
+        }
+        return null;
+    }
+
+    pub fn hasSessionOwner(self: *const Workspace, owner: identity.SessionHandle) bool {
+        for (self.tabs.items) |tab| if (tab.content_owner.eql(.{ .session = owner }) and !tab.closing) return true;
+        return false;
+    }
+
+    pub fn sessionOverlayOwner(raw: *anyopaque, owner: identity.SessionHandle) ?*ui.Node {
+        const self: *Workspace = @ptrCast(@alignCast(raw));
+        return self.overlayOwner(owner);
+    }
+
+    fn tabOverlayOwner(self: *Workspace, tab: *const SessionTab) ?*ui.Node {
+        if (self.active_group_view) |id| if (self.groupView(id)) |view| {
+            for (view.panes.items) |pane| if (pane.session == tab.id and pane.node.isDisplayedInTree()) return pane.node;
+        };
+        const node = tab.plugin_floating_root orelse tab.root;
+        const root = self.cx.root orelse self.terminal_area;
+        return if (node.isDisplayedInTree() and node.isDescendantOf(root)) node else null;
     }
 
     pub fn bindSessionOwner(self: *Workspace, id: SessionId, handle: identity.SessionHandle) !void {
@@ -1876,7 +1908,7 @@ pub const Workspace = struct {
         if (tab.terminal) |terminal| if (terminal.tombstone.state == .reconnecting) return .connecting;
         if (tab.remote_notice) |notice| if (notice.snapshot) |snapshot| switch (snapshot.state) {
             .reconnecting => return .connecting,
-            .disconnected, .retry_failed => return .failed,
+            .failed, .disconnected, .retry_failed => return .failed,
             .cancelled, .exited => return .normal,
             .connected => {},
         };
@@ -1913,7 +1945,7 @@ pub const Workspace = struct {
         if (tab.remote_notice) |notice| if (notice.snapshot) |snapshot| return switch (snapshot.state) {
             .connected => c.ok,
             .reconnecting => c.warn,
-            .disconnected, .retry_failed => c.danger,
+            .failed, .disconnected, .retry_failed => c.danger,
             .cancelled, .exited => c.fg_3,
         };
         if (tab.terminal) |surface| if (surface.tombstone.state != .active) return c.fg_3;
@@ -2097,7 +2129,6 @@ pub const Workspace = struct {
         }
         const chord = host_actions.descriptor(.recent_tab).default_chord.?;
         if (keybindings.fromKey(key) != chord.key or modifiers.ctrl != chord.control or modifiers.super != chord.command or modifiers.alt != chord.option) return .ignored;
-        if (self.confirming_id != null or self.host_key_job != null or self.auth_job != null) return .ignored;
         if (self.active_tab) |index| if (index < self.tabs.items.len) {
             const terminal = if (self.tabs.items[index].terminal) |*value| value else null;
             if (terminal != null and (terminal.?.preedit != null or terminal.?.local_editor.active)) return .ignored;
@@ -2510,6 +2541,12 @@ pub const Workspace = struct {
             if (!tab.content_owner.eql(self.owner) or tab.content_owner != .session or tab.closing or tab.archived or tab.owned_pending) return error.StaleSession;
             return tab;
         }
+        fn overlayOwner(raw: *anyopaque) ?*ui.Node {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            _ = self.current() catch return null;
+            for (self.workspace.tab_nodes.items) |cell| if (cell.tab_id == self.tab_id) return cell.node;
+            return null;
+        }
         fn join(raw: *anyopaque, name: []const u8) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             const tab = try self.current();
@@ -2551,7 +2588,7 @@ pub const Workspace = struct {
         }
         const scope = try self.scope.childScope();
         const target = try scope.createState(GroupJoinTarget, .{ .workspace = self, .tab_id = tab.tab_id, .owner = tab.content_owner });
-        self.group_join = try @import("group_join_view.zig").View.mount(self.cx, scope, self.terminal_area, roster, .{ .context = target, .join = GroupJoinTarget.join, .leave = GroupJoinTarget.leave });
+        self.group_join = try @import("group_join_view.zig").View.mount(self.cx, scope, self.terminal_area, roster, .{ .context = target, .join = GroupJoinTarget.join, .leave = GroupJoinTarget.leave, .overlay_owner = GroupJoinTarget.overlayOwner });
     }
 
     fn loadGroupLayout(self: *Workspace, view: *group_view.View) void {
@@ -3497,6 +3534,7 @@ pub const Workspace = struct {
         const group = roster.findById(id) orelse return;
         const view = self.groupView(id) orelse return;
         if (self.groupClosing(id)) return;
+        if (self.active_group_view != id) if (self.groupTabId(id)) |tab_id| self.activateTabId(tab_id);
         // Never replace the ledger of an unfinished original cleanup request.
         if (view.close) |*plan| {
             if (plan.phase == .partial) {
@@ -3614,12 +3652,14 @@ pub const Workspace = struct {
         const scope = try self.scope.childScope();
         const open = try scope.createSignal(bool, false);
         view.dialog_open = open;
-        const modal = try ui.widgets.Modal(.{ .open = open, .width = 480, .max_height = @as(f32, if (partial) 248 else 294), .background = app_theme.current().overlay }).mount(scope, self.cx);
+        const modal = try ui.widgets.Modal(.{ .open = open, .managed_focus = false, .close_on_overlay = false, .close_on_escape = false, .width = 480, .max_height = @as(f32, if (partial) 248 else 294), .background = app_theme.current().overlay }).mount(scope, self.cx);
         if (!modal.portaled) try self.terminal_area.appendChild(self.allocator, modal.overlay);
         view.dialog = modal.overlay;
+        modal.overlay.meta.ownership.meta.test_id = "groups.close.overlay";
         view.dialog_scope = scope;
         modal.dialog.meta.ownership.meta.test_id = if (partial) "groups.close.partial" else "groups.close.confirm";
         const cell = try self.groupCell(scope, view.id, 0, .pin);
+        _ = try scoped_modal.bind(self.cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = cell, .get = groupCloseOverlayOwner } } });
         cell.close_dialog_open = open;
         modal.dialog.behavior.events.capture_context = cell;
         modal.dialog.behavior.events.on_event_capture = GroupCell.event;
@@ -3629,6 +3669,13 @@ pub const Workspace = struct {
         const cancel = try group_close_view.render(self.cx, scope, modal.dialog, modal.body, .{ .group_name = group.name, .plan = plan, .partial = partial, .cancel = self.cx.on(GroupCell, cell, GroupCell.cancel), .approve = self.cx.on(GroupCell, cell, GroupCell.approve) });
         open.set(true);
         self.cx.setFocus(cancel);
+    }
+
+    fn groupCloseOverlayOwner(raw: *anyopaque) ?*ui.Node {
+        const cell: *GroupCell = @ptrCast(@alignCast(raw));
+        if (cell.workspace.active_group_view != cell.group) return null;
+        const view = cell.workspace.groupView(cell.group) orelse return null;
+        return view.root;
     }
 
     fn pollGroupClose(self: *Workspace) void {
@@ -3822,6 +3869,7 @@ pub const Workspace = struct {
 
     fn confirmClose(self: *Workspace, index: usize) void {
         const tab = self.tabs.items[index];
+        if (self.tabOverlayOwner(tab) == null) self.activateTabId(tab.tab_id);
         if (tab.local) if (self.close_bridge.confirm) |confirm| {
             self.confirming_tab = index;
             self.confirming_id = tab.tab_id;
@@ -4093,18 +4141,22 @@ pub const Workspace = struct {
         if (self.host_key_root != null) return;
         const cx = self.cx;
         const p = self.palette;
-        const scrim = try ui.box(cx, .{
-            .position = .absolute,
-            .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } },
-            .width = .fill(),
-            .height = .fill(),
-            .z_index = 350,
-            .align_items = .center,
-            .justify = .center,
-            .background = app_theme.modal_barrier,
-        }, .{});
+        const open = try self.scope.createSignal(bool, false);
+        const modal = try ui.widgets.Modal(.{
+            .open = open,
+            .managed_focus = false,
+            .close_on_overlay = false,
+            .close_on_escape = false,
+            .width = 430,
+            .overlay_color = app_theme.modal_barrier,
+            .background = app_theme.current().overlay,
+        }).mount(self.scope, cx);
+        if (!modal.portaled) try self.terminal_area.appendChild(cx.allocator, modal.overlay);
+        _ = try scoped_modal.bind(cx, self.scope, modal, .{ .owner = .{ .resolve = .{ .context = self, .get = hostKeyOverlayOwner } } });
+        self.host_key_open = open;
+        modal.dialog.style.padding = .{};
         const card = try ui.box(cx, .{
-            .width = .{ .px = 430 },
+            .width = .fill(),
             .direction = .column,
             .gap = 10,
             .background = app_theme.current().overlay,
@@ -4156,22 +4208,25 @@ pub const Workspace = struct {
             }
         }.onKey;
         card.behavior.events.key_context = @ptrCast(self);
-        try scrim.appendChild(cx.allocator, card);
-        scrim.setDisplay(.none);
-        try self.terminal_area.appendChild(cx.allocator, scrim);
-        self.host_key_root = scrim;
+        try modal.body.appendChild(cx.allocator, card);
+        self.host_key_root = modal.overlay;
         self.host_key_card = card;
-        @import("floating_input.zig").protect(cx, scrim);
         @import("floating_input.zig").protect(cx, card);
         try app_theme.bindMaterial(cx, self.scope, card, "overlay");
         self.host_key_detail = detail;
         self.host_key_changed_button = changed_button;
     }
 
+    fn hostKeyOverlayOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *Workspace = @ptrCast(@alignCast(raw));
+        const job = self.host_key_job orelse return null;
+        const tab = self.findTicket(job.ticket) orelse return null;
+        return self.tabOverlayOwner(tab);
+    }
+
     fn hideHostKeyConfirm(self: *Workspace) void {
-        if (self.host_key_root) |root| root.setDisplay(.none);
+        if (self.host_key_open) |open| open.set(false);
         self.host_key_job = null;
-        if (self.active_tab) |index| if (index < self.tabs.items.len) self.cx.setFocus(if (self.tabs.items[index].terminal) |*value| value.root else self.tabs.items[index].root);
     }
 
     fn rejectHostKey(self: *Workspace) void {
@@ -4254,9 +4309,18 @@ pub const Workspace = struct {
     };
 
     pub fn nextConnectionPresentationKey(self: *Workspace) ?OperationKey {
+        return self.findConnectionPresentationKey(null);
+    }
+
+    pub fn nextConnectionPresentationKeyFor(self: *Workspace, owner: identity.SessionHandle) ?OperationKey {
+        return self.findConnectionPresentationKey(owner);
+    }
+
+    fn findConnectionPresentationKey(self: *Workspace, owner: ?identity.SessionHandle) ?OperationKey {
         for (self.connect_jobs.items) |job| {
             if (job.progress_dismissed) continue;
             const key = job.operation_key orelse continue;
+            if (owner) |expected| if (key.owner != .session or !key.owner.session.eql(expected)) continue;
             const tab = self.findTicket(job.ticket) orelse continue;
             if (job.ready.load(.acquire) and !tab.failed) if (tab.runtime) |runtime| {
                 if (runtime.isAttached()) continue;
@@ -4340,10 +4404,19 @@ pub const Workspace = struct {
     /// Authentication belongs to the frozen operation, independent of the
     /// selected tab. Snapshots contain no answer secrets or worker pointers.
     pub fn pendingAuthentication(self: *Workspace) ?auth_challenge.Snapshot {
-        self.auth_job = null;
+        return self.findPendingAuthentication(null);
+    }
+
+    pub fn pendingAuthenticationFor(self: *Workspace, owner: identity.SessionHandle) ?auth_challenge.Snapshot {
+        return self.findPendingAuthentication(owner);
+    }
+
+    fn findPendingAuthentication(self: *Workspace, owner: ?identity.SessionHandle) ?auth_challenge.Snapshot {
+        if (owner == null) self.auth_job = null;
         for (self.connect_jobs.items) |job| {
             if (job.cancelled.load(.acquire) or job.ready.load(.acquire) or self.findTicket(job.ticket) == null) continue;
             const key = job.operation_key orelse continue;
+            if (owner) |expected| if (key.owner != .session or !key.owner.session.eql(expected)) continue;
             if (job.host_key_bridge.snapshot()) |request| {
                 if (request.operation_key == null or !request.operation_key.?.eql(key)) continue;
                 const host = authenticationHost(job, request.hop_index) orelse {
@@ -4383,7 +4456,13 @@ pub const Workspace = struct {
             self.auth_job = job;
             return challenge;
         }
-        if (self.external_auth) |external| return external.pending(external.context);
+        if (self.external_auth) |external| {
+            if (owner) |expected| if (external.pending_for) |pending| return pending(external.context, expected);
+            if (external.pending(external.context)) |challenge| {
+                const key_owner = challenge.identity.key.owner;
+                if (owner == null or (key_owner == .session and key_owner.session.eql(owner.?))) return challenge;
+            }
+        }
         return null;
     }
 
@@ -4549,8 +4628,7 @@ pub const Workspace = struct {
             self.host_key_job = job;
             self.host_key_generation = request.generation;
             self.cx.dispatcher.cancelScrollGesture();
-            self.host_key_root.?.setDisplay(.flex);
-            self.cx.setFocus(self.host_key_card.?);
+            self.host_key_open.?.set(true);
             self.cx.scheduleRedrawAfterNs(0);
             return;
         }
@@ -4558,30 +4636,28 @@ pub const Workspace = struct {
 
     // ── Close confirmation card ──────────────────────────────────────
 
-    /// One-shot mount of the close-confirmation overlay onto terminal_area:
-    /// an absolute, centered, high-z scrim with the shared barrier paint
-    /// plus the themed overlay card. Hidden right away; showing it later only
-    /// rewrites the dynamic texts and flips display.
     fn mountCloseConfirm(self: *Workspace) !void {
         if (self.confirm_root != null) return;
         const p = self.palette;
         const cx = self.cx;
         const allocator = cx.allocator;
 
-        const scrim = try ui.box(cx, .{
-            .position = .absolute,
-            .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } },
-            .width = .fill(),
-            .height = .fill(),
-            .z_index = 300,
-            .direction = .column,
-            .align_items = .center,
-            .justify = .center,
-            .background = app_theme.modal_barrier,
-        }, .{});
-
+        const open = try self.scope.createSignal(bool, false);
+        const modal = try ui.widgets.Modal(.{
+            .open = open,
+            .managed_focus = false,
+            .close_on_overlay = false,
+            .close_on_escape = false,
+            .width = 420,
+            .overlay_color = app_theme.modal_barrier,
+            .background = app_theme.current().overlay,
+        }).mount(self.scope, cx);
+        if (!modal.portaled) try self.terminal_area.appendChild(cx.allocator, modal.overlay);
+        _ = try scoped_modal.bind(cx, self.scope, modal, .{ .owner = .{ .resolve = .{ .context = self, .get = closeOverlayOwner } } });
+        self.confirm_open = open;
+        modal.dialog.style.padding = .{};
         const card = try ui.box(cx, .{
-            .width = .{ .px = 420 },
+            .width = .fill(),
             .direction = .column,
             .background = app_theme.current().overlay,
             .glass = app_theme.overlayGlass(),
@@ -4693,15 +4769,19 @@ pub const Workspace = struct {
         card.behavior.events.on_key_down = onCloseConfirmKeyDown;
         card.behavior.events.key_context = @ptrCast(self);
 
-        try scrim.appendChild(allocator, card);
-        scrim.setDisplay(.none);
-        try self.terminal_area.appendChild(allocator, scrim);
-        self.confirm_root = scrim;
+        try modal.body.appendChild(allocator, card);
+        self.confirm_root = modal.overlay;
         self.confirm_card = card;
-        @import("floating_input.zig").protect(cx, scrim);
         @import("floating_input.zig").protect(cx, card);
         try app_theme.bindMaterial(cx, self.scope, card, "overlay");
         self.confirm_title = title;
+    }
+
+    fn closeOverlayOwner(raw: *anyopaque) ?*ui.Node {
+        const self: *Workspace = @ptrCast(@alignCast(raw));
+        const id = self.confirming_id orelse return null;
+        const index = self.tabIndexById(id) orelse return null;
+        return self.tabOverlayOwner(self.tabs.items[index]);
     }
 
     /// Puts the confirmation card up for `index` (live session): records the
@@ -4710,7 +4790,7 @@ pub const Workspace = struct {
     fn showCloseConfirm(self: *Workspace, index: usize) void {
         self.cx.dispatcher.cancelScrollGesture();
         if (index >= self.tabs.items.len) return;
-        const root = self.confirm_root orelse return;
+        const open = self.confirm_open orelse return;
         const tab = self.tabs.items[index];
         // A repeated requestCloseTab while the card is up simply overwrites
         // the pending index; the texts re-render for the new tab.
@@ -4743,8 +4823,7 @@ pub const Workspace = struct {
         if (risk.transfer) self.setRiskDetail("传输", "尚有未完成任务，关闭将暂停并保留续传数据");
         if (risk.ai_write) self.setRiskDetail("AI", "写命令执行中，关闭将中止并清理远端进程");
         if (risk.socks) self.setRiskDetail("SOCKS5", "正在监听，关闭将释放代理连接与端口");
-        root.setDisplay(.flex);
-        if (self.confirm_card) |card| self.cx.setFocus(card);
+        open.set(true);
         self.cx.requestRedraw();
     }
 
@@ -4753,7 +4832,7 @@ pub const Workspace = struct {
     fn hideCloseConfirm(self: *Workspace) void {
         self.confirming_tab = null;
         self.confirming_id = null;
-        if (self.confirm_root) |root| root.setDisplay(.none);
+        if (self.confirm_open) |open| open.set(false);
         self.cx.requestRedraw();
     }
 
@@ -5136,6 +5215,10 @@ pub const Workspace = struct {
     /// Attach a real file workspace without constructing VT, PTY or a shell.
     /// Ownership of content/scope transfers only after this method succeeds.
     pub fn createFileSessionDirect(self: *Workspace, handle: identity.SessionHandle, host: hosts_mod.HostConfig, host_id: HostId, source_index: usize, content: *ui.Node, content_scope: *ui.Scope) !SessionId {
+        return self.createFileSession(handle, host, host_id, source_index, content, content_scope, false);
+    }
+
+    fn createFileSession(self: *Workspace, handle: identity.SessionHandle, host: hosts_mod.HostConfig, host_id: HostId, source_index: usize, content: *ui.Node, content_scope: *ui.Scope, pending: bool) !SessionId {
         if (self.shutting_down) return error.WorkspaceClosed;
         if (host.protocol != .sftp) return error.WrongPlugin;
         if (content.parent != null) return error.ContentAlreadyAttached;
@@ -5146,6 +5229,11 @@ pub const Workspace = struct {
         errdefer snapshot.deinit();
         const ticket = self.identities.newTicket();
         tab.* = .{ .id = ticket.session_id, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = handle }, .generation = handle.generation, .host_id = host_id, .host_index = source_index, .host_snapshot = snapshot, .root = content, .file_scope = content_scope };
+        errdefer if (tab.remote_notice_scope) |scope| scope.dispose();
+        if (pending) {
+            tab.remote_notice_scope = try self.scope.childScope();
+            tab.remote_notice = try RemoteNotice.View.mount(self.cx, tab.remote_notice_scope.?, content, .{ .context = self, .session_id = tab.id, .reconnect = reconnectRemoteNotice, .close = closeRemoteNotice });
+        }
         tab.setTitle(host.name);
         try self.installTabModel(tab);
         errdefer self.model.completeClose(tab.tab_id, tab.content_owner) catch {};
@@ -5155,6 +5243,28 @@ pub const Workspace = struct {
         self.rebuildTabBar() catch {};
         self.selectTab(self.tabs.items.len - 1);
         return tab.id;
+    }
+
+    pub fn createPendingFileSession(self: *Workspace, handle: identity.SessionHandle, host: hosts_mod.HostConfig, host_id: HostId, source_index: usize) !SessionId {
+        const scope = try self.scope.childScope();
+        errdefer scope.dispose();
+        const pane = try ui.box(self.cx, local_styles.pane(), .{});
+        errdefer self.cx.destroyDetached(pane);
+        pane.meta.ownership.meta.test_id = "workspace.file.content";
+        return self.createFileSession(handle, host, host_id, source_index, pane, scope, true);
+    }
+
+    pub fn attachPendingFileSession(self: *Workspace, id: SessionId, owner: identity.SessionHandle, content: *ui.Node, scope: *ui.Scope) !void {
+        const tab = self.sessionTab(id) orelse return error.StaleSession;
+        if (tab.closing or tab.file_ready or !tab.content_owner.eql(.{ .session = owner })) return error.StaleFileCreate;
+        if (content.parent != null) return error.ContentAlreadyAttached;
+        const placeholder_scope = tab.file_scope orelse return error.StaleFileCreate;
+        try tab.root.appendChild(self.allocator, content);
+        tab.file_scope = scope;
+        tab.file_ready = true;
+        if (tab.remote_notice) |notice| notice.update(.{});
+        placeholder_scope.dispose();
+        self.cx.requestRedraw();
     }
 
     fn mountLocalBanner(self: *Workspace, tab: *SessionTab) !void {
@@ -6028,7 +6138,7 @@ pub const Workspace = struct {
                 // Keep input and contextual actions in step with the same facts,
                 // including a failed successor after the first transport loss.
                 if (tab.terminal) |*terminal| switch (state.state) {
-                    .cancelled, .exited, .disconnected, .retry_failed => {
+                    .cancelled, .failed, .exited, .disconnected, .retry_failed => {
                         if (terminal.tombstone.state != .ended) {
                             terminal.tombstone.end(state.title());
                             terminal.refreshTombstone();
@@ -6232,7 +6342,7 @@ test "recent tab input leaves plain Tab and higher priority input untouched" {
     try std.testing.expectEqual(ui.events.EventResult.ignored, workspace.handleTabKey(.tab, control));
     workspace.picker.open = false;
     workspace.confirming_id = @fromBackingInt(1);
-    try std.testing.expectEqual(ui.events.EventResult.ignored, workspace.handleTabKey(.tab, control));
+    try std.testing.expectEqual(ui.events.EventResult.stop, workspace.handleTabKey(.tab, control));
     workspace.confirming_id = null;
     var tab: SessionTab = undefined;
     tab.terminal = @as(TerminalViewNode, undefined);

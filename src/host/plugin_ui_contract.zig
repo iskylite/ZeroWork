@@ -29,6 +29,7 @@ pub const EditorMount = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
     slot: *ui.Node,
+    parent_dialog: ?*ui.Node = null,
     protocol_id: []const u8,
     save_password_by_default: bool = default_save_password,
     /// Shared host component, instantiated in the editor scope.

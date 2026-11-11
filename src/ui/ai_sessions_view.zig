@@ -11,6 +11,7 @@ pub const View = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
     hooks: Hooks,
+    overlay_owner: ?*ui.Node,
     open: *ui.Signal(bool),
     confirmation: *ui.Signal(bool),
     highlighted: *ui.Signal(u64),
@@ -45,6 +46,14 @@ pub const View = struct {
     history_entry: ?u64 = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, anchor: *ui.Node, hooks: Hooks) !*View {
+        return mountAt(cx, scope, anchor, null, hooks);
+    }
+
+    pub fn mountOwned(cx: *ui.Cx, scope: *ui.Scope, anchor: *ui.Node, owner: *ui.Node, hooks: Hooks) !*View {
+        return mountAt(cx, scope, anchor, owner, hooks);
+    }
+
+    fn mountAt(cx: *ui.Cx, scope: *ui.Scope, anchor: *ui.Node, overlay_owner: ?*ui.Node, hooks: Hooks) !*View {
         const open = try scope.createSignal(bool, false);
         const confirmation = try scope.createSignal(bool, false);
         const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = anchor }, .position = .bottom_start, .offset = .{ .static = 6 }, .width = 440, .max_height = 240, .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8 }).mount(scope, cx);
@@ -56,9 +65,11 @@ pub const View = struct {
         scroll.container.meta.ownership.meta.test_id = "ai.sessions.menu";
         try popup.content.appendChild(cx.allocator, scroll.container);
         const badge = try Header.mountCountBadge(cx, anchor, "ai.sessions.count");
-        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = popup.wrapper, .surface = scroll.container, .chrome = popup.chrome, .painted_colors = T.current(), .button = anchor, .badge = badge, .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
-        const modal = try ui.widgets.Modal(.{ .open = confirmation, .width = 320, .max_height = 220, .background = T.current().overlay }).mount(scope, cx);
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .overlay_owner = overlay_owner, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = popup.wrapper, .surface = scroll.container, .chrome = popup.chrome, .painted_colors = T.current(), .button = anchor, .badge = badge, .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
+        const modal = try ui.widgets.Modal(.{ .managed_focus = overlay_owner == null, .open = confirmation, .width = 320, .max_height = 220, .background = T.current().overlay }).mount(scope, cx);
+        if (overlay_owner) |owner| {
+            _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .node = owner } });
+        } else if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.dialog = modal.dialog;
         modal.dialog.setStyleInline(cx.allocator, S.dialog());
         modal.dialog.meta.ownership.meta.test_id = "ai.session.close.confirmation";
@@ -84,8 +95,10 @@ pub const View = struct {
         try actions.appendChild(cx.allocator, accept);
         try modal.body.appendChild(cx.allocator, actions);
         self.history_open = try scope.createSignal(bool, false);
-        const history_modal = try ui.widgets.Modal(.{ .open = self.history_open, .width = 600, .max_height = 480, .background = T.current().overlay }).mount(scope, cx);
-        if (!history_modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, history_modal.overlay);
+        const history_modal = try ui.widgets.Modal(.{ .managed_focus = overlay_owner == null, .open = self.history_open, .width = 600, .max_height = 480, .background = T.current().overlay }).mount(scope, cx);
+        if (overlay_owner) |owner| {
+            _ = try @import("scoped_modal.zig").bind(cx, scope, history_modal, .{ .owner = .{ .node = owner } });
+        } else if (!history_modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, history_modal.overlay);
         self.history_dialog = history_modal.dialog;
         history_modal.dialog.meta.ownership.meta.test_id = "ai.history";
         history_modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 600 }, .max_width = 600, .background = T.current().overlay, .border = .{ .radius = 12 } });
@@ -134,11 +147,13 @@ pub const View = struct {
     /// Native Modal is fixed-width by default; constrain our surfaces and give
     /// the scrollable body only the space left by the real footer and heading.
     pub fn reflow(self: *View) void {
-        const width = @max(0, self.cx.viewport.width - 32);
+        const owner = if (self.overlay_owner) |node| node.globalRect() else ui.ComputedRect.init(0, 0, 0, 0);
+        const width = @max(0, (if (owner.w > 0) owner.w else self.cx.viewport.width) - 32);
+        const height = if (owner.h > 0) owner.h else self.cx.viewport.height;
         self.setPixels(self.dialog, true, @min(320, width));
         self.setPixels(self.history_dialog, true, @min(600, width));
         const fixed = 32 + 36 + 28 + @max(16, self.history_status.globalRect().h) + @max(28, self.history_actions.globalRect().h);
-        const body_height = @min(220, @max(0, self.cx.viewport.height - 32 - fixed));
+        const body_height = @min(220, @max(0, height - 32 - fixed));
         self.setPixels(self.history_scroll, false, body_height);
         self.setPixels(self.history_dialog, false, fixed + body_height);
     }

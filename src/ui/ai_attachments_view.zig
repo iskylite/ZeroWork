@@ -6,6 +6,7 @@ const S = @import("ai_attachments_styles.zig");
 const file_icons = @import("file_workspace_icons.zig");
 pub const Callbacks = struct {
     context: *anyopaque,
+    overlay_owner: ?*ui.Node = null,
     remove: ?*const fn (*anyopaque, attachments.Ticket) anyerror!void = null,
     attach: ?*const fn (*anyopaque, attachments.Ticket) anyerror!void = null,
     reselect: ?*const fn (*anyopaque, attachments.Ticket) anyerror!void = null,
@@ -221,9 +222,11 @@ pub const View = struct {
         const scope = try self.scope.childScope();
         self.preview_scope = scope;
         self.modal_open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = self.modal_open.?, .width = 480, .max_height = @max(200, cx.viewport.height - 32), .background = S.theme.current().overlay, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .managed_focus = self.callbacks.overlay_owner == null, .open = self.modal_open.?, .width = 480, .max_height = @max(200, cx.viewport.height - 32), .background = S.theme.current().overlay, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.modal = modal;
-        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        if (self.callbacks.overlay_owner) |owner| {
+            _ = try @import("scoped_modal.zig").bind(cx, scope, modal, .{ .owner = .{ .node = owner } });
+        } else if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.preview_panel = modal.dialog;
         modal.dialog.meta.ownership.meta.test_id = "ai.attachment.preview";
         modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 480 }, .height = .{ .fit = .{} }, .padding = ui.Padding.all(1), .background = S.theme.current().overlay, .border = .{ .width = 0, .radius = 14 } });
@@ -600,8 +603,10 @@ pub const View = struct {
         if (asset.icon_id) |id| if (asset.pickRep(18)) |rep| self.preview_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = if (terminal) S.theme.current().accent else file_icons.color(content.path) });
     }
     fn layoutPreview(self: *View) void {
-        const rect = @import("ai_preview_geometry.zig").bounds(self.cx, self.preview_content);
-        self.preview_panel.setStyleInline(self.cx.allocator, @import("ai_preview_geometry.zig").panel(rect, false));
+        const geometry = @import("ai_preview_geometry.zig");
+        const owner = self.callbacks.overlay_owner;
+        const rect = geometry.bounds(self.cx, owner orelse self.preview_content);
+        self.preview_panel.setStyleInline(self.cx.allocator, geometry.panel(rect, owner != null));
         if (self.modal) |modal| modal.body.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .fill(), .padding = .{}, .gap = 0, .direction = .column, .min_height = 0 });
         const body_h = @max(1, rect.h - 79.1484375 - 63.5);
         if (self.modal_body) |body| body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = body_h }, .min_height = 0 });

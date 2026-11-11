@@ -20,6 +20,7 @@ const trust = @import("../proto/ssh/host_key_store.zig");
 const operation = @import("../host/operation.zig");
 const contract = @import("../host/plugin_ui_contract.zig");
 const web_surface = @import("../host/web_surface.zig");
+const overlay_bounds = @import("overlay_bounds.zig");
 const web_config = @import("../plugins/web/config.zig");
 const bookmark_store = @import("../plugins/web/bookmark_store.zig");
 const Workspace = @import("workspace.zig").Workspace;
@@ -116,6 +117,7 @@ pub const Host = struct {
             }
         }
         const shared_challenges = try @import("challenge_window_host.zig").Services.mount(cx, app_host.workspace.scope);
+        shared_challenges.bindSessionOwner(app_host.workspace);
         self.challenge_host = &shared_challenges.host;
         self.challenge_presenter = shared_challenges.view;
         try app_host.domain.probe_hosts.ensureUnusedCapacity(app_host.domain.allocator, 1);
@@ -583,21 +585,18 @@ pub const Host = struct {
         }
         const app: *NativeApp = @ptrCast(@alignCast(self.native_context));
         const rect = slot.globalRect();
-        const show = visible and slot.isDisplayedInTree() and rect.w > 0 and rect.h > 0 and self.cx.overlay_stack.topmost() == null;
+        const show = visible and slot.isDisplayedInTree() and rect.w > 0 and rect.h > 0;
         if (!show and binding.* == null) return;
         if (binding.* == null) binding.* = try surface.bind(owner, app.windowId());
-        var clip = workspace.terminal_area.globalRect();
-        if (workspace.notes_float_surface) |notes| if (notes.isDisplayedInTree()) {
-            const notes_rect = notes.globalRect();
-            // Crop the AppKit container while keeping the WebKit page's size.
-            if (notes_rect.w > 0) clip.w = std.math.clamp(notes_rect.x - clip.x, 0, clip.w);
-            if (self.cx.focus_manager.getFocused()) |focused| {
-                if (focused.isDescendantOf(notes)) try surface.releaseFocus(binding.*.?);
-            }
-        };
+        var covers: [self.cx.overlay_stack.layers.len * 2 + 1]web_surface.Occlusion = undefined;
+        const cover_count = if (show) collectWebOcclusions(self.cx, workspace.notes_float_surface, rect, &covers) else 0;
+        // Entering native focus clears Zenit focus. A subsequent explicit
+        // focus change to Zenit must also move the AppKit first responder.
+        if (self.cx.focus_manager.getFocused() != null) try surface.releaseFocus(binding.*.?);
         try surface.sync(binding.*.?, app, .{
             .slot = rect,
-            .clip = clip,
+            .clip = workspace.terminal_area.globalRect(),
+            .occlusions = covers[0..cover_count],
             .visible = show,
             .host_key = webHostKey,
             .focus_entered = .{ .callback = webFocusEntered, .context = self },
@@ -689,10 +688,10 @@ pub const Host = struct {
         if (workspace.active_tab) |index| if (index < workspace.tabs.items.len) {
             const tab = workspace.tabs.items[index];
             if (tab.content_owner == .session and !tab.closing) active = tab.content_owner.session;
-            if (self.cx.focus_manager.getFocused()) |focused| content_focused = focused == tab.root or focused.isDescendantOf(tab.root);
+            if (self.cx.focus_manager.getFocused()) |focused| {
+                content_focused = (focused == tab.root or focused.isDescendantOf(tab.root)) and !overlay_bounds.blocks(self.cx, focused);
+            }
         };
-        // A top layer owns keyboard focus before content routing.
-        if (self.cx.overlay_stack.topmost() != null) content_focused = false;
         return .{ .owner = active, .content_focused = content_focused };
     }
     pub fn tick(self: *Host, now_ms: u64) !void {
@@ -756,6 +755,26 @@ pub const Host = struct {
         }
     }
 };
+
+fn collectWebOcclusions(cx: *const ui.Cx, notes: ?*ui.Node, slot: ui.ComputedRect, covers: []web_surface.Occlusion) usize {
+    var count: usize = 0;
+    if (notes) |node| appendWebOcclusion(node, slot, covers, &count);
+    for (&cx.overlay_stack.layers) |*maybe| if (maybe.*) |*layer| {
+        if (layer.suspended) continue;
+        if (layer.barrier_node) |barrier| if (layer.config.barrier != .none and (!layer.config.scoped_dialog or layer.config.scoped_mask)) {
+            appendWebOcclusion(barrier, slot, covers, &count);
+        };
+        if (layer.content_node) |node| appendWebOcclusion(node, slot, covers, &count);
+    };
+    return count;
+}
+
+fn appendWebOcclusion(node: *const ui.Node, slot: ui.ComputedRect, covers: []web_surface.Occlusion, count: *usize) void {
+    const rect = overlay_bounds.visibleRect(node) orelse return;
+    if (!overlay_bounds.intersects(slot, rect)) return;
+    covers[count.*] = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    count.* += 1;
+}
 // Explicit host-owned floating surfaces only; ordinary workspace panels and
 // notification descendants must never become their own avoidance obstacles.
 fn collectNotificationObstacles(cx: *ui.Cx, node: *ui.Node, avoid: []ui.ComputedRect, count: *usize) void {
@@ -984,11 +1003,22 @@ test "automation acquisition synchronizes current activation and owner before th
     const accepted = try window.open(plugin, 1191);
     const input = window.host.inputFor(accepted.handle).?;
     window.workspace.active_tab = 0;
-    const overlay = try window.cx.overlay_stack.push(.{ .kind = .non_modal });
-    defer window.cx.overlay_stack.removePermanently(overlay);
+    const focused = window.cx.focus_manager.getFocused() orelse return error.MissingFixtureFocus;
+    focused.setLayoutW(200);
+    focused.setLayoutH(100);
+    const overlay = try ui.widgets.Modal(.{ .open = true, .managed_focus = false, .enter_transition = .none }).mount(window.scope, window.cx);
+    const barrier = overlay.overlay;
+    const layer = @constCast(window.cx.overlay_stack.findLayerForNode(barrier).?);
+    layer.config.scoped_mask = true;
+    barrier.setDisplay(.flex);
+    const origin = if (barrier.parent) |parent| parent.globalRect() else ui.ComputedRect.init(0, 0, 0, 0);
+    const rect = focused.globalRect();
+    barrier.setLayoutRect(ui.ComputedRect.init(rect.x + rect.w - origin.x, rect.y - origin.y, 40, 40));
+    try std.testing.expect(window.host.currentInputFocus().content_focused);
+    barrier.setLayoutX(rect.x - origin.x);
 
     // Activation and approval can precede PluginWindowHost's after-layout hook.
-    // The AI overlay owns content focus but the native window is now active.
+    // The focused content is now under its scoped mask.
     input.setFocus(false, false);
     window.cx.window_active = true;
     const grant = try Host.acquireAutomation(window.app, accepted.handle, 1, null, null, std.math.maxInt(u64));

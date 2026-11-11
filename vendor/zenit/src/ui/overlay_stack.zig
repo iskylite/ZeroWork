@@ -177,6 +177,10 @@ pub const HoverConfig = struct {
 /// Layer config (pass to push)
 pub const LayerConfig = struct {
     kind: LayerKind,
+    /// Scoped dialogs dismiss only on their own backdrop or from their own focus.
+    scoped_dialog: bool = false,
+    /// A scoped backdrop blocks semantic input in the subtree of the live trigger.
+    scoped_mask: bool = false,
     dismiss: DismissConfig = .{},
     enter_transition: Transition = .scale_fade,
     exit_transition: Transition = .scale_fade,
@@ -661,6 +665,10 @@ pub const OverlayStack = struct {
     /// Unified Escape handling: find topmost layer with escape=true and not exiting, close it.
     /// Stop at modal (modal blocks Escape downward). Return true if consumed.
     pub fn handleEscape(self: *OverlayStack) bool {
+        return self.handleEscapeFrom(null);
+    }
+
+    pub fn handleEscapeFrom(self: *OverlayStack, focused: ?*const Node) bool {
         self.bumpAnimGen();
         if (self.layer_count == 0) return false;
 
@@ -671,6 +679,11 @@ pub const OverlayStack = struct {
         while (i > 0) {
             i -= 1;
             if (self.layers[ordered[i]]) |*layer| {
+                if (layer.config.scoped_dialog) {
+                    const node = focused orelse continue;
+                    if (!self.layerContainsOwnedNode(layer, node)) continue;
+                    if (!layer.config.dismiss.escape) return false;
+                }
                 if (layer.config.dismiss.escape) {
                     self.requestDismiss(layer);
                     return true;
@@ -789,6 +802,7 @@ pub const OverlayStack = struct {
                     }
                 }
 
+                if (layer.config.scoped_dialog) continue;
                 // Click outside all known areas -> dismiss
                 switch (layer.config.dismiss.outside_click) {
                     .none => {},
@@ -1053,6 +1067,7 @@ pub const OverlayStack = struct {
             const layer = if (slot.*) |*l| l else continue;
             const inside = layerContains(layer, node);
             if (inside and (layer.suspended or layer.state == .exiting)) return false;
+            if (!inside and self.scopedMaskCovers(layer, node)) return false;
             if (layer.suspended or layer.state == .exiting or layer.config.kind != .modal) continue;
             if (modal == null or layer.activation_order > modal.?.activation_order) modal = layer;
         }
@@ -1080,6 +1095,26 @@ pub const OverlayStack = struct {
         return false;
     }
 
+    pub fn allowsScopedFocus(self: *const OverlayStack, node: *const Node) bool {
+        for (&self.layers) |*slot| {
+            const layer = if (slot.*) |*value| value else continue;
+            if (self.scopedMaskCovers(layer, node)) return false;
+        }
+        return true;
+    }
+
+    fn scopedMaskCovers(self: *const OverlayStack, layer: *const OverlayLayer, node: *const Node) bool {
+        if (!layer.config.scoped_mask or layer.suspended or layer.state == .exiting) return false;
+        const owner = self.resolveTrigger(layer) orelse return false;
+        if (!isSemanticDescendant(node, owner) or self.layerContainsOwnedNode(layer, node)) return false;
+        for (&self.layers) |*slot| {
+            const other = if (slot.*) |*value| value else continue;
+            if (other.suspended or other.state == .exiting or other.activation_order <= layer.activation_order) continue;
+            if (layerContains(other, node)) return false;
+        }
+        return true;
+    }
+
     fn isSemanticDescendant(node: *const Node, ancestor: *const Node) bool {
         var current: ?*const Node = node;
         while (current) |n| : (current = n.parent) {
@@ -1092,6 +1127,25 @@ pub const OverlayStack = struct {
         if (layer.content_node) |content| if (isSemanticDescendant(node, content)) return true;
         if (layer.barrier_node) |barrier| if (isSemanticDescendant(node, barrier)) return true;
         return false;
+    }
+
+    fn layerContainsOwnedNode(self: *const OverlayStack, boundary: *const OverlayLayer, node: *const Node) bool {
+        var current = node;
+        var before: ?u64 = null;
+        while (true) {
+            if (layerContains(boundary, current)) return true;
+            var parent: ?*const OverlayLayer = null;
+            for (&self.layers) |*slot| {
+                const layer = if (slot.*) |*value| value else continue;
+                if (layer.suspended or layer.state == .exiting or layer.activation_order <= boundary.activation_order) continue;
+                if (before) |order| if (layer.activation_order >= order) continue;
+                if (!layerContains(layer, current)) continue;
+                if (parent == null or layer.activation_order > parent.?.activation_order) parent = layer;
+            }
+            const layer = parent orelse return false;
+            current = self.resolveTrigger(layer) orelse return false;
+            before = layer.activation_order;
+        }
     }
 
     /// Whether node in **suspended** (closed not destroyed) layer content/barrier subtree. Differs
@@ -1172,6 +1226,14 @@ pub const OverlayStack = struct {
 
     fn resolveTrigger(self: *const OverlayStack, layer: *const OverlayLayer) ?*Node {
         return self.resolveTrackedNode(layer.trigger_handle, layer.trigger_node);
+    }
+
+    pub fn setScopedOwner(self: *OverlayStack, handle: LayerHandle, owner: ?*Node, mask: bool) void {
+        const layer = self.findLayer(handle) orelse return;
+        layer.trigger_handle = self.trackNode(owner);
+        layer.trigger_node = owner;
+        layer.config.scoped_mask = mask;
+        self.syncAllLayerVisualOrder();
     }
 
     pub fn setAnchor(self: *OverlayStack, handle: LayerHandle, anchor: ?AnchorConfig) void {

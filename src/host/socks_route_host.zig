@@ -256,6 +256,14 @@ pub const Host = struct {
         for (self.entries.items) |entry| if (self.current(entry.runtime)) if (entry.runtime.pendingAuthentication()) |value| return value;
         return null;
     }
+    pub fn pendingAuthenticationFor(self: *Host, context: *const anyopaque, accepts: *const fn (*const anyopaque, identity.SessionHandle) bool) ?auth.Snapshot {
+        for (self.entries.items) |entry| {
+            const runtime = entry.runtime;
+            if (!accepts(context, runtime.source.value.owner) or !self.current(runtime)) continue;
+            if (runtime.pendingAuthentication()) |value| return value;
+        }
+        return null;
+    }
     pub fn submitAuthentication(self: *Host, request: auth.RequestIdentity, reply: auth.Reply) !void {
         const runtime = self.authRuntime(request) orelse return error.StaleAuthentication;
         const value = runtime.pendingAuthentication().?;
