@@ -355,7 +355,6 @@ pub const HostRow = struct {
     node: *ui.Node,
     name: *ui.Node,
     trailing: *ui.Node,
-    tail: *ui.Node,
     has_jumps: bool,
     route: *ui.Node,
     route_label: ?*ui.Node = null,
@@ -381,7 +380,7 @@ pub const HostRow = struct {
         const base = try scope.createSignal(ui.BoxStyle, S.host(data.selected, false));
         const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = T.states().hover });
         const connect_tint = try scope.createSignal(?ui.Color, T.current().accent_ink);
-        const self = try scope.createState(HostRow, .{ .cx = cx, .node = undefined, .name = undefined, .trailing = undefined, .tail = undefined, .has_jumps = data.hops > 0, .route = undefined, .actions = undefined, .dot = undefined, .online = data.online, .forward = undefined, .forward_label = undefined, .selected = selected, .menu_open = menu_open, .base = base, .hover = hover, .callbacks = callbacks, .colors = T.current() });
+        const self = try scope.createState(HostRow, .{ .cx = cx, .node = undefined, .name = undefined, .trailing = undefined, .has_jumps = data.hops > 0, .route = undefined, .actions = undefined, .dot = undefined, .online = data.online, .forward = undefined, .forward_label = undefined, .selected = selected, .menu_open = menu_open, .base = base, .hover = hover, .callbacks = callbacks, .colors = T.current() });
         const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(data.name, .{}), .base_style = base, .hover_style = ui.BoxStyle{}, .on_click = cx.on(HostRow, self, HostRow.select), .on_event = onEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx);
         node.meta.ownership.meta.test_id = "sidebar.host";
         node.behavior.events.on_event_capture = captureStatusClick;
@@ -410,18 +409,15 @@ pub const HostRow = struct {
         identity_hint.wrapper.setStyleInline(cx.allocator, metadata_viewport);
         identity_hint.trigger.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .height = .fill(), .min_width = 0, .flex_shrink = 1, .overflow = .hidden });
         try content.appendChild(cx.allocator, identity_hint.wrapper);
-        const trailing = try ui.box(cx, .{ .width = .{ .px = S.tail_width + S.host_action_gap + S.host_connect_size }, .height = .{ .px = S.host_connect_size }, .direction = .row, .align_items = .center, .gap = S.host_action_gap, .flex_shrink = 0 }, .{});
+        const trailing = try ui.box(cx, S.hostTrailing(), .{});
         self.trailing = trailing;
         trailing.meta.ownership.meta.test_id = "sidebar.host.trailing";
         try content.appendChild(cx.allocator, trailing);
-        const tail = try ui.box(cx, S.tail(), .{});
-        self.tail = tail;
-        tail.meta.ownership.meta.test_id = "sidebar.host.tail";
-        try trailing.appendChild(cx.allocator, tail);
         const route = if (data.supports_route)
             try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "连接链路", .base_style = S.route(), .hover_style = hover, .on_event = chainEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx)
         else
             try ui.box(cx, S.route(), .{});
+        self.route = route;
         route.meta.ownership.meta.test_id = "sidebar.host.route";
         var chain_hint_text: []const u8 = "";
         if (data.supports_route) {
@@ -444,25 +440,24 @@ pub const HostRow = struct {
             // a 24x24 transparent box; only the hit target and hint are added.
             route.behavior.interaction.a11y = .{ .role = .button, .label = "连接链路", .description = chain_hint_text };
         }
-        self.route = route;
-        self.forward = try ui.box(cx, .{ .width = .{ .px = S.tail_width }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .flex_shrink = 0, .display = .none }, .{});
+        self.forward = try ui.box(cx, .{ .width = .{ .px = S.forward_badge_width }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .flex_shrink = 0, .display = .none }, .{});
         self.forward.meta.ownership.meta.test_id = "sidebar.host.background";
         self.forward_label = try ui.text(cx, "", S.text(9, 500, true));
         self.forward_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try self.forward.appendChild(cx.allocator, self.forward_label);
-        try tail.appendChild(cx.allocator, self.forward);
-        if (data.supports_route) {
-            const chain_hint = try mountHostChainHint(cx, scope, route, chain_hint_text, node);
-            self.chain_hint = chain_hint;
-            try tail.appendChild(cx.allocator, chain_hint.wrapper);
-        } else {
-            try tail.appendChild(cx.allocator, route);
-        }
+        try trailing.appendChild(cx.allocator, self.forward);
         const actions = try ui.box(cx, S.hostConnect(), .{});
         self.actions = actions;
         const connect_button = try iconButton(cx, scope, "play", "新标签连接", "sidebar.host.connect", S.action(S.host_connect_size), connect_tint, hover, cx.on(HostRow, self, HostRow.connect), swallowDoubleClick);
         try actions.appendChild(cx.allocator, try hint(cx, scope, connect_button, "新标签连接", .right));
         try trailing.appendChild(cx.allocator, actions);
+        if (data.supports_route) {
+            const chain_hint = try mountHostChainHint(cx, scope, route, chain_hint_text, node);
+            self.chain_hint = chain_hint;
+            try trailing.appendChild(cx.allocator, chain_hint.wrapper);
+        } else {
+            try trailing.appendChild(cx.allocator, route);
+        }
         const hovered = try ui.hooks.useHover(scope, node);
         const name_hover = try ui.hooks.useHover(scope, identity_hint.trigger);
         const connect_hover = try ui.hooks.useHover(scope, connect_button);
@@ -519,9 +514,6 @@ pub const HostRow = struct {
     pub fn setForwardBadge(self: *HostRow, badge: ?ForwardBadge) void {
         if (std.meta.eql(self.forward_badge, badge)) return;
         self.forward_badge = badge;
-        const tail_width = if (badge != null) S.tail_width * 2 else S.tail_width;
-        self.trailing.setStyle(self.cx.allocator, .width, .{ .px = tail_width + S.host_action_gap + S.host_connect_size });
-        self.tail.setStyle(self.cx.allocator, .width, .{ .px = tail_width });
         var buffer: [64]u8 = undefined;
         const label = if (badge) |value| if (value.port) |port| std.fmt.bufPrint(&buffer, ":{d}后台", .{port}) catch "后台" else @import("socks_background_model.zig").phaseLabel(value.phase) else "";
         self.forward_label.setTextContent(self.cx.allocator, label) catch return;
@@ -531,10 +523,12 @@ pub const HostRow = struct {
     }
     fn updateTrailing(self: *HostRow) void {
         const show_route = self.chain_hint != null and (self.has_jumps or self.hot);
+        const show_forward = self.forward_badge != null and !self.hot;
         self.route.setDisplay(if (show_route) .flex else .none);
         if (self.chain_hint) |popup| popup.wrapper.setDisplay(if (show_route) .flex else .none);
-        self.forward.setDisplay(if (self.forward_badge != null and !self.hot) .flex else .none);
+        self.forward.setDisplay(if (show_forward) .flex else .none);
         self.actions.setDisplay(if (self.hot) .flex else .none);
+        self.trailing.setDisplay(if (show_route or show_forward or self.hot) .flex else .none);
     }
     pub fn setOnline(self: *HostRow, online: bool) void {
         if (self.online == online) return;
@@ -615,7 +609,7 @@ pub const HostRow = struct {
                     if (focused.isDescendantOf(self.actions)) return .handled;
                 }
                 const actions = self.actions.globalRect();
-                if (click.x >= actions.x and click.x < actions.x + actions.w and click.y >= actions.y and click.y < actions.y + actions.h) return .handled;
+                if (self.actions.isDisplayedInTree() and click.x >= actions.x and click.x < actions.x + actions.w and click.y >= actions.y and click.y < actions.y + actions.h) return .handled;
             },
             .double_click => return .handled,
             .key_down => |key| {
@@ -678,9 +672,7 @@ pub const GroupRow = struct {
         count_label.setStyleInline(cx.allocator, S.badgeLabel());
         count_label.meta.ownership.meta.test_id = "sidebar.group.count";
         try badge.appendChild(cx.allocator, count_label);
-        var group_tail = S.tail();
-        group_tail.width = .{ .fit = .{} };
-        const trailing = try ui.box(cx, group_tail, .{});
+        const trailing = try ui.box(cx, S.groupTrailing(), .{});
         try content.appendChild(cx.allocator, trailing);
         try trailing.appendChild(cx.allocator, badge);
         const actions = try ui.box(cx, .{ .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 }, .{});

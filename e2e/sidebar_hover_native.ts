@@ -14,7 +14,7 @@ const out=resolve(process.argv[2]??'/tmp/zerowork-followup-sidebar/native'),bina
 const base=await realpath(await mkdtemp('/private/tmp/zerowork-sidebar-hover-'));let data=join(base,'data');await mkdir(data);
 const mode=process.argv[4]??'full';assert(['full','minimum','actions','double','status'].includes(mode));
 const themes=process.env.ZW_SIDEBAR_THEMES?.split(',')??['dark','light','sauber'];
-const names=['X40-AI01','production-data-platform-primary-区域-01','files'];
+const names=['ScaleX40-Compute-01','production-data-platform-primary-区域-01','files'];
 let hosts='[registry]\nschema_version=2\nrevision=1\nnext_connection_id=4\nnext_group_id=1\n';
 for(let i=0;i<3;i++)hosts+=`[[hosts]]\nconnection_id=${i+1}\nrevision=1\nprotocol="${i===2?'sftp':'ssh'}"\nauth_mode="password"\nname="${names[i]}"\nhost="127.0.0.1"\nport=1\nuser="fixture"\nroute=${i===1?'[1]':i===2?'[1,2]':'[]'}\n`;
 await writeFile(join(data,'hosts.toml'),hosts);
@@ -39,6 +39,10 @@ const near=(a:number,b:number,s:string)=>assert(Math.abs(a-b)<.25,`${s}: ${a} vs
 async function resting() {
  const rows = await Promise.all(names.map((_, i) => row(i)));
  assert.deepEqual(rows.map(r => part(r, 'sidebar.host.hops')?.text), [undefined, '1', '2']);
+ for (const [i, r] of rows.entries()) {
+  const last = i === 0 ? identity(r) : part(r, 'sidebar.host.route').rect;
+  near(last.x + last.w, r.rect.x + r.rect.w - 5, 'idle content reaches the right inset');
+ }
  return rows.map(identity);
 }
 async function stable(before: any[], state: string) {
@@ -49,7 +53,6 @@ async function stable(before: any[], state: string) {
   near(r.rect.h, 36, state+' row height');
   const n = identity(r);
   near(n.x, before[i].x, state+' name x');
-  near(n.w, before[i].w, state+' name width');
   assert(n.w > 0, 'identity retains visible space');
   const route = badges[i];
   const connect = part(r, 'sidebar.host.connect');
@@ -57,11 +60,14 @@ async function stable(before: any[], state: string) {
   if (route) near(route.rect.x, badgeX, state+' route column');
   assert(!flat(r).some(node => ['sidebar.host.copy','sidebar.host.edit'].includes(node.test_id)), 'copy and edit shortcuts are absent');
   if (connect) {
+   assert(n.w < before[i].w, 'the connection action only takes space while visible');
    near(connect.rect.w, 28, 'connect hit width');
    assert(connect.rect.x >= n.x+n.w, 'connect never overlaps identity');
    assert(connect.rect.x+28 <= r.rect.x+r.rect.w-4.9, 'connect remains within row');
-   assert(route.rect.x+route.rect.w <= connect.rect.x, 'route remains beside connect');
-  }
+   const marker = part(r, 'sidebar.host.route').rect;
+   assert(connect.rect.x + connect.rect.w <= marker.x, 'connect stays left of the pinned route');
+   near(marker.x + marker.w, r.rect.x + r.rect.w - 5, state+' route stays right aligned');
+  } else near(n.w, before[i].w, state+' idle name width');
  }
 }
 async function launch(theme:string){data=join(base,'data-'+theme);await mkdir(data);await writeFile(join(data,'hosts.toml'),hosts);const rpc=join(base,'rpc-'+theme);await mkdir(rpc);process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="${theme}"\nfont_family="Menlo"\nfont_size=14\n`);log=await open(join(out,theme+'.log'),'w');child=spawn(binary,[],{env:{...process.env,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});ended=new Promise(r=>child.once('close',r));await h.waitForServerReady(20000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),child.pid);await h.resizeWindow(1280,720);await node('sidebar.host');}
@@ -76,7 +82,7 @@ try{
    for(const area of ['icon','count','gap']){
     const r=await row(0),route=part(r,'sidebar.host.route'),count=part(r,'sidebar.host.hops'),connect=part(r,'sidebar.host.connect');
     assert(route&&count&&connect);
-    const x=area==='icon'?route.rect.x+4:area==='count'?count.rect.x+count.rect.w/2:(route.rect.x+route.rect.w+connect.rect.x)/2;
+    const x=area==='icon'?route.rect.x+4:area==='count'?count.rect.x+count.rect.w/2:(connect.rect.x+connect.rect.w+route.rect.x)/2;
     await h.clickAt(x,route.rect.y+route.rect.h/2);await h.sleep(120);
     assert.equal(await sessionCount(),sessions,area+' status click must not create a session');
     await clean();
@@ -101,6 +107,6 @@ try{
   }
   report.themes.push({theme,nameWidths:before.map(r=>r.w),states:['idle','short-hover','long-hover','identity-tooltip','compact-hover']});await stop();console.log('PASS sidebar',theme);
  }
- report.status='passed';if(mode!=='status')report.checks.push('Direct badges appear on demand, multi-hop badges stay aligned, and the host name keeps the same width on hover.');
+ report.status='passed';if(mode!=='status')report.checks.push('Multi-hop badges stay right aligned, and idle names use the width available without hover controls.');
 }catch(error){report.status='failed';report.error=String(error);console.error(error);await h.screenshot(join(out,'failure.png')).catch(()=>{});}finally{await stop().catch(()=>{});await rm(base,{recursive:true,force:true});report.cleanup={isolated_removed:true};await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));}
 if(report.status!=='passed')process.exitCode=1;

@@ -9,7 +9,7 @@ pub const expanded_width: f32 = @import("sidebar_model.zig").default_width;
 pub const collapsed_width: f32 = 48;
 pub const host_height: f32 = 36;
 pub const group_height: f32 = 28;
-pub const tail_width: f32 = 36;
+pub const forward_badge_width: f32 = 36;
 pub const action_size: f32 = 24;
 pub const host_connect_size: f32 = 28;
 pub const host_action_gap: f32 = 4;
@@ -104,8 +104,11 @@ pub fn content() ui.BoxStyle {
 pub fn titleViewport() ui.BoxStyle {
     return .{ .height = .{ .px = 18 }, .width = .{ .grow = .{ .min = 0 } }, .flex = 1, .flex_shrink = 1, .min_width = 0, .overflow = .hidden, .align_items = .center };
 }
-pub fn tail() ui.BoxStyle {
-    return .{ .width = .{ .px = tail_width }, .height = .{ .px = action_size }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
+pub fn hostTrailing() ui.BoxStyle {
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = host_connect_size }, .direction = .row, .align_items = .center, .gap = host_action_gap, .flex_shrink = 0 };
+}
+pub fn groupTrailing() ui.BoxStyle {
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = action_size }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
 }
 pub fn hostConnect() ui.BoxStyle {
     var value = action(host_connect_size);

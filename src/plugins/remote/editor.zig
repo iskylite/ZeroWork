@@ -76,6 +76,7 @@ pub const Draft = struct {
     save_password: bool = @import("../../host/plugin_ui_contract.zig").default_save_password,
     key_path: ?[]const u8 = null,
     key_passphrase: ?[]const u8 = null,
+    save_key_passphrase: bool = false,
     keepalive: bool = true,
     compression: bool = false,
     compression_explicit: bool = true,
@@ -131,6 +132,7 @@ pub const Draft = struct {
             .save_password = true,
             .key_path = host.identity_file,
             .key_passphrase = host.key_passphrase,
+            .save_key_passphrase = host.key_passphrase != null,
             .keepalive = host.keepalive,
             .compression = host.compression,
             .compression_explicit = host.compression_explicit,
@@ -204,11 +206,11 @@ pub const Draft = struct {
 
     /// Persistence projection keeps transient login credentials out of the host
     /// transaction unless explicitly selected. store.zig stages the selected
-    /// password into Keychain and serializes only its opaque reference.
+    /// credentials into Keychain and serializes only their opaque references.
     pub fn toPersistentHostConfig(self: Draft) !hosts_mod.HostConfig {
         var host = try self.toHostConfig();
         if (!self.save_password) host.password = null;
-        if (self.copy_source_owner == null) host.key_passphrase = null;
+        if (!self.save_key_passphrase) host.key_passphrase = null;
         host.totp_secret = null;
         return host;
     }
@@ -432,6 +434,7 @@ pub const RemoteEditor = struct {
     strict_checkbox: ?*ui.Node = null,
     compression_checkbox: ?*ui.Node = null,
     remember_checkbox: ?*ui.Node = null,
+    remember_passphrase_checkbox: ?*ui.Node = null,
     auth_group: ?*ui.Node = null,
     identity_body: ?*ui.Node = null,
     auth_body: ?*ui.Node = null,
@@ -676,6 +679,7 @@ pub const RemoteEditor = struct {
     sig_save_password: ?*ui.Signal(bool) = null,
     sig_key_path: ?*ui.Signal([]const u8) = null,
     sig_key_passphrase: ?*ui.Signal([]const u8) = null,
+    sig_save_key_passphrase: ?*ui.Signal(bool) = null,
     sig_encoding: ?*ui.Signal([]const u8) = null,
     loaded_scrollback_explicit: bool = false,
     scrollback_default: u32 = 25000,
@@ -752,6 +756,7 @@ pub const RemoteEditor = struct {
         self.sig_save_password = try scope.createSignal(bool, true);
         self.sig_key_path = try scope.createText("", .{});
         self.sig_key_passphrase = try scope.createText("", .{});
+        self.sig_save_key_passphrase = try scope.createSignal(bool, false);
         self.sig_encoding = try scope.createText("UTF-8", .{});
         self.sig_startup = try scope.createText("", .{});
         self.startup_error = try scope.createText("", .{});
@@ -934,6 +939,7 @@ pub const RemoteEditor = struct {
         if (self.startup_textarea) |area| paintSelectTypography(area.input);
         for (self.inputs.items) |input| if (input.state.text_display_node) |text| paintInputTypography(text);
         if (self.remember_checkbox) |checkbox| paintCheckboxLabels(checkbox);
+        if (self.remember_passphrase_checkbox) |checkbox| paintCheckboxLabels(checkbox);
         if (self.compression_checkbox) |group| paintAuthLabels(group);
         if (self.auth_group) |group| paintAuthLabels(group);
         if (!self.embedded) {
@@ -1322,6 +1328,7 @@ pub const RemoteEditor = struct {
         self.sig_save_password.?.set(draft.save_password);
         self.sig_key_path.?.set(draft.key_path orelse "");
         self.sig_key_passphrase.?.set(draft.key_passphrase orelse "");
+        self.sig_save_key_passphrase.?.set(draft.save_key_passphrase);
         self.sig_encoding.?.set(draft.encoding);
         self.sig_terminal.?.set(draft.terminal_type);
         self.terminal_type_explicit = draft.terminal_type_explicit;
@@ -1384,6 +1391,7 @@ pub const RemoteEditor = struct {
                 return;
             };
             self.sig_save_password.?.set(asset.save_password);
+            self.sig_save_key_passphrase.?.set(false);
             const copy_name = std.fmt.allocPrint(self.alloc, "{s}-副本", .{asset.name}) catch return;
             defer self.alloc.free(copy_name);
             self.sig_name.?.set(copy_name);
@@ -1865,6 +1873,7 @@ pub const RemoteEditor = struct {
             .save_password = self.sig_save_password.?.get(),
             .key_path = if (key_path.len > 0) key_path else null,
             .key_passphrase = if (key_passphrase.len > 0) key_passphrase else null,
+            .save_key_passphrase = self.sig_save_key_passphrase.?.get(),
             .keepalive = self.keepalive,
             .compression = self.compression,
             .compression_explicit = self.compression_explicit,
@@ -2241,7 +2250,7 @@ pub const RemoteEditor = struct {
             endpoint,
             draft.user,
             switch (draft.auth) {
-                .key => "私钥文件",
+                .key => if (draft.key_passphrase == null) "私钥文件" else if (draft.save_key_passphrase) "私钥文件 · 保存口令" else "私钥文件 · 口令仅本次使用",
                 .agent => "SSH Agent",
                 .password => if (draft.password == null) "密码 · 连接时输入" else if (draft.save_password) "密码 · 保存后自动使用" else "密码 · 仅本次使用",
             },
@@ -2465,6 +2474,7 @@ pub const RemoteEditor = struct {
         self.sig_password.?.set("");
         self.sig_save_password.?.set(true);
         self.sig_key_passphrase.?.set("");
+        self.sig_save_key_passphrase.?.set(false);
         self.protocol_id = value;
         self.protocol = protocol;
         self.onFieldChange("");
@@ -2541,6 +2551,11 @@ pub const RemoteEditor = struct {
     fn onSavePasswordChanged(self: *RemoteEditor, checked: bool) void {
         if (self.isLocked()) return;
         self.sig_save_password.?.set(checked);
+        self.onFieldChange("");
+    }
+    fn onSaveKeyPassphraseChanged(self: *RemoteEditor, checked: bool) void {
+        if (self.isLocked()) return;
+        self.sig_save_key_passphrase.?.set(checked);
         self.onFieldChange("");
     }
     fn onStrictPolicyChanged(self: *RemoteEditor, value: ?[]const u8) void {
@@ -2949,6 +2964,7 @@ pub const RemoteEditor = struct {
             }
         }
         if (self.remember_checkbox) |checkbox| paintCheckboxLabels(checkbox);
+        if (self.remember_passphrase_checkbox) |checkbox| paintCheckboxLabels(checkbox);
         if (self.compression_checkbox) |group| paintAuthLabels(group);
         if (self.startup_textarea) |area| {
             area.state.tokens = self.cx.tokens;
@@ -3393,7 +3409,15 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     _ = try action(w, key_row, "选择私钥文件", "wizard.key_path.pick", 28, 28, false, w.locked, RemoteEditor.onPickKey, ui.icons.folder_open);
     try key_group.appendChild(w.alloc, key_row);
     try key.appendChild(w.alloc, key_group);
-    _ = try field(w, key, "私钥口令 · 仅本次使用", w.sig_key_passphrase.?, "可留空，连接时再输入", "wizard.key_passphrase", null, true);
+    const passphrase_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .end, .gap = 16 }, .{});
+    _ = try field(w, passphrase_row, "私钥口令", w.sig_key_passphrase.?, "可留空，连接时再输入", "wizard.key_passphrase", null, true);
+    const remember_passphrase = try ui.widgets.Checkbox(.{ .checked = w.sig_save_key_passphrase.?, .label = "保存口令", .box_size = @as(f32, 14), .label_font_size = @as(f32, 11), .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onSaveKeyPassphraseChanged) }).mount(w.scope, cx);
+    remember_passphrase.setStyleInline(w.alloc, .{ .width = .{ .fit = .{} }, .height = .{ .px = 34 }, .gap = 8, .flex_shrink = 0 });
+    remember_passphrase.meta.ownership.meta.test_id = "wizard.key_passphrase.remember";
+    w.remember_passphrase_checkbox = remember_passphrase;
+    paintCheckboxLabels(remember_passphrase);
+    try passphrase_row.appendChild(w.alloc, remember_passphrase);
+    try key.appendChild(w.alloc, passphrase_row);
     try auth_body.appendChild(w.alloc, key);
     const pw = try ui.boxStyled(cx, S.stack, .{});
     w.cred_pw_row = pw;

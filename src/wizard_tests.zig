@@ -85,8 +85,6 @@ const SaveFixture = struct {
         var value = try draft.toHostConfig();
         self.transient_secret_received = value.key_passphrase != null;
         value = try draft.toPersistentHostConfig();
-        value.key_passphrase = null;
-        value.totp_secret = null;
         var transaction = try store.HostsTransaction.init(a, &self.registry);
         defer transaction.deinit();
         if (self.captured_group) |reference| {
@@ -98,6 +96,42 @@ const SaveFixture = struct {
         return .{ .owner = owner, .open_failure = self.open_failure };
     }
 };
+
+test "wizard private key passphrase is persisted only when selected and can be removed on edit" {
+    for ([_]mod.Protocol{ .ssh, .sftp }) |protocol| {
+        var f: SaveFixture = undefined;
+        try f.init(protocol);
+        defer f.deinit();
+        f.wizard.loadDraft(.{ .name = "key target", .host = "192.0.2.10", .user = "ops", .protocol = protocol, .auth = .key, .key_path = "/tmp/id_ed25519", .key_passphrase = "only current draft" });
+        try std.testing.expect(!f.wizard.currentDraft().save_key_passphrase);
+        SaveFixture.activate(findId(f.wizard.root.?, "wizard.key_passphrase.remember").?);
+        try std.testing.expect(f.wizard.currentDraft().save_key_passphrase);
+        SaveFixture.activate(f.wizard.next1_btn.?);
+        SaveFixture.activate(f.wizard.next2_btn.?);
+        SaveFixture.activate(f.wizard.save_only_btn.?);
+
+        var saved = try store.loadHosts(std.testing.io, f.tmp.dir, a, f.path);
+        defer saved.deinit();
+        const host = try saved.get(f.wizard.source_owner.?);
+        try std.testing.expect(host.key_passphrase_ref != null);
+        try std.testing.expectEqualStrings("only current draft", host.key_passphrase.?);
+        const encoded = try f.tmp.dir.readFileAlloc(std.testing.io, f.path, a, .limited(store.max_config_bytes));
+        defer a.free(encoded);
+        try std.testing.expect(std.mem.indexOf(u8, encoded, "only current draft") == null);
+
+        f.wizard.loadDraft(mod.Draft.fromHost(host));
+        f.wizard.show();
+        try std.testing.expect(f.wizard.currentDraft().save_key_passphrase);
+        SaveFixture.activate(findId(f.wizard.root.?, "wizard.key_passphrase.remember").?);
+        SaveFixture.activate(f.wizard.next1_btn.?);
+        SaveFixture.activate(f.wizard.next2_btn.?);
+        SaveFixture.activate(f.wizard.save_only_btn.?);
+        var edited = try store.loadHosts(std.testing.io, f.tmp.dir, a, f.path);
+        defer edited.deinit();
+        const current = try edited.get(f.wizard.source_owner.?);
+        try std.testing.expect(current.key_passphrase == null and current.key_passphrase_ref == null);
+    }
+}
 
 test "wizard saves host and optional password after captured group presentation changes" {
     const groups = @import("config/asset_group_actions.zig");

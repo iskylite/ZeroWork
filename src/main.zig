@@ -12478,6 +12478,26 @@ const AppNavHost = struct {
         if (self.status_previews) |previews| previews.dismissOnOutsidePress(target);
     }
 
+    fn zoomFromTitlebar(self: *AppNavHost, click: ui.events.ClickEvent) ui.events.EventResult {
+        const shell = self.shell_root orelse return .ignored;
+        if (self.cx.dispatcher.mouseDownNode() != shell) return .ignored;
+        if (click.x < 5 or click.x >= self.cx.viewport.width - 5 or click.y < 0 or click.y >= shell_styles.outer + shell_styles.title_height) return .ignored;
+        if (self.mist) |chrome| {
+            for ([_]*ui.Node{ chrome.tabs, chrome.tools, chrome.more }) |node| {
+                if (node.isDisplayedInTree() and node.globalRect().contains(click.x, click.y)) return .ignored;
+            }
+        }
+        const state = (self.cx.windowChrome() catch return .ignored).peek();
+        if (state.fullscreen or state.fullscreen_transitioning) return .ignored;
+        for (state.native_controls[0..state.native_controls_count]) |button| {
+            if (click.x >= button.x and click.x < button.x + button.w and click.y >= button.y and click.y < button.y + button.h) return .ignored;
+        }
+        // Shell margins participate in pointer dispatch for outside presses.
+        // Double-clicks delivered here still use AppKit's zoom/restore action.
+        self.cx.performWindowAction(.toggle_maximize) catch return .ignored;
+        return .stop;
+    }
+
     fn onEvent(event: ui.events.Event, context: ?*anyopaque) ui.events.EventResult {
         const self: *AppNavHost = @ptrCast(@alignCast(context orelse return .ignored));
         if (process_windows) |process| if (process.data_cleanup_owner) |owner| {
@@ -12514,6 +12534,7 @@ const AppNavHost = struct {
             else => {},
         };
         switch (event) {
+            .double_click => |click| return self.zoomFromTitlebar(click),
             .mouse_down => |mouse| {
                 if (mouse.button == .left) if (self.cx.dispatcher.mouseDownNode()) |target| {
                     self.dismissTransientSurfaces(target);
@@ -15590,9 +15611,8 @@ const WizardHost = struct {
                 if (std.mem.eql(u8, persistent.group orelse "", group.name)) persistent.asset_group_id = group.group_id;
             }
         }
-        // Login-password persistence is explicitly selected by the editor.
-        // The host transaction stores it in Keychain and writes only a ref.
-        persistent.key_passphrase = null;
+        // The editor selects persistent credentials. The host transaction
+        // writes their Keychain references to the configuration.
         persistent.totp_secret = null;
         const owner = if (expected) |baseline| blk: {
             const previous = try candidate.get(baseline);

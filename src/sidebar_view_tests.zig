@@ -50,7 +50,7 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     try column.appendChild(h.cx.allocator, row.node);
     h.frames();
     try std.testing.expectEqual(@as(f32, 36), row.node.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 72), find(row.node, "sidebar.host.tail").?.globalRect().w);
+    try std.testing.expectApproxEqAbs(V.styles.forward_badge_width + V.styles.host_action_gap + row.route.globalRect().w, row.trailing.globalRect().w, 0.1);
     try std.testing.expectEqualStrings(":65535后台", row.forward_label.getText().?.content);
     try std.testing.expect(row.forward.style.display == .flex and row.route.style.display == .flex);
     const route_with_forward = row.route.globalRect();
@@ -62,7 +62,7 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     h.frames();
     try std.testing.expect(row.forward.style.display == .none and row.actions.style.display == .flex);
     try std.testing.expectApproxEqAbs(route_with_forward.x, row.route.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(name_with_forward.w, row.name.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(name_with_forward.w + V.styles.forward_badge_width - V.styles.host_connect_size, row.name.globalRect().w, 0.1);
     row.setMenuOpen(false);
     h.frames();
     try std.testing.expect(row.forward.style.display == .flex and row.actions.style.display == .none);
@@ -80,7 +80,7 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     h.frames();
     try std.testing.expect(row.forward.style.display == .none and row.route.style.display == .flex);
     try std.testing.expectApproxEqAbs(route_with_forward.x, row.route.globalRect().x, 0.1);
-    try std.testing.expectEqual(V.styles.tail_width, find(row.node, "sidebar.host.tail").?.globalRect().w);
+    try std.testing.expectApproxEqAbs(row.route.globalRect().w, row.trailing.globalRect().w, 0.1);
 }
 const Capture = struct {
     selected: usize = 0,
@@ -198,7 +198,7 @@ fn firstText(node: *ui.Node) ?*ui.Node {
     for (node.children.items) |child| if (firstText(child)) |result| return result;
     return null;
 }
-test "sidebar native chrome keeps long host names and route badges stable on hover" {
+test "sidebar native chrome gives host names the unused width and keeps route badges right aligned" {
     var c: Capture = .{};
     const h = try H.init();
     defer h.deinit();
@@ -218,12 +218,13 @@ test "sidebar native chrome keeps long host names and route badges stable on hov
     const route_x = row.route.globalRect().x;
     try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
     const rect = row.node.globalRect();
+    try std.testing.expectApproxEqAbs(rect.x + rect.w - V.styles.content().padding.?.right, route_x + row.route.globalRect().w, 0.1);
     h.cx.handleMouseMove(rect.x + 20, rect.y + 12);
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(row.route.style.display), .flex), row.route.style.display);
     try std.testing.expectEqual(T.current().overlay, row.actions.getBackground());
     try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
-    try std.testing.expectApproxEqAbs(before, row.name.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(before - V.styles.host_connect_size - V.styles.host_action_gap, row.name.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(route_x, row.route.globalRect().x, 0.1);
     h.click(find(row.node, "sidebar.host.connect").?);
     try std.testing.expectEqual(@as(usize, 1), c.connected);
@@ -251,15 +252,15 @@ test "sidebar host route status never activates the row connection" {
     try std.testing.expect(!row.actions.isDisplayedInTree());
     const name_width = row.name.globalRect().w;
     const r = row.node.globalRect();
+    try std.testing.expectApproxEqAbs(r.x + r.w - V.styles.content().padding.?.right, row.name.globalRect().x + name_width, 0.1);
     h.cx.handleMouseMove(r.x + 20, r.y + r.h / 2);
     h.frames();
     try std.testing.expect(row.route.style.display == .flex);
-    try std.testing.expectApproxEqAbs(name_width, row.name.globalRect().w, 0.1);
+    try std.testing.expect(name_width > row.name.globalRect().w);
     const route = row.route.globalRect();
     const count = find(row.node, "sidebar.host.hops").?.globalRect();
-    const trailing = row.trailing.globalRect();
     const action = row.actions.globalRect();
-    for ([_]f32{ route.x + 4, count.x + count.w / 2, (route.x + route.w + action.x) / 2, trailing.x }) |x| {
+    for ([_]f32{ route.x + 4, count.x + count.w / 2, (action.x + action.w + route.x) / 2 }) |x| {
         h.cx.handleMouseDown(x, route.y + route.h / 2, .{});
         h.cx.handleMouseUp(x, route.y + route.h / 2);
         h.frames();
@@ -777,7 +778,7 @@ test "main workspace sidebar follows V4 measured group search and footer geometr
         try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
         try std.testing.expectEqualStrings("0", find(row.node, "sidebar.host.hops").?.getText().?.content);
         try std.testing.expectEqual(T.current().fg_3, find(group.header, "sidebar.group.count").?.getText().?.color);
-        try std.testing.expect(row.trailing.style.display == .flex);
+        try std.testing.expect(row.trailing.style.display == .none);
         try std.testing.expect(!row.route.isDisplayedInTree());
 
         const width = row.name.globalRect().w;
@@ -785,8 +786,8 @@ test "main workspace sidebar follows V4 measured group search and footer geometr
         h.frames();
         try std.testing.expect(row.actions.style.display == .flex);
         try std.testing.expect(row.route.style.display == .flex);
-        try std.testing.expectApproxEqAbs(width, row.name.globalRect().w, 0.1);
-        try std.testing.expectEqual(V.styles.tail_width + V.styles.host_action_gap + V.styles.host_connect_size, row.trailing.globalRect().w);
+        try std.testing.expect(width > row.name.globalRect().w);
+        try std.testing.expectApproxEqAbs(row.route.globalRect().w + V.styles.host_action_gap + V.styles.host_connect_size, row.trailing.globalRect().w, 0.1);
         const footer = find(view.root, "sidebar.footer.new").?;
         try std.testing.expect(find(footer.parent.?, "sidebar.footer.frame") == null);
         try std.testing.expectApproxEqAbs(@as(f32, 218), footer.globalRect().w, 0.1);
@@ -1105,12 +1106,12 @@ test "reported input typography and narrow host hover geometry" {
         h.frames();
         const actions = row.actions.globalRect();
         const route = row.route.globalRect();
-        try std.testing.expect(route.x + route.w + 3.9 <= actions.x);
+        try std.testing.expect(actions.x + actions.w + 3.9 <= route.x);
         try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
         try std.testing.expect(row.route.style.display == .flex);
         try std.testing.expect(row.name.globalRect().w > 0);
-        try std.testing.expect(row.name.globalRect().x + row.name.globalRect().w <= route.x + 0.1);
-        try std.testing.expectApproxEqAbs(rect.x + rect.w - V.styles.content().padding.?.right, actions.x + actions.w, 0.1);
+        try std.testing.expect(row.name.globalRect().x + row.name.globalRect().w <= actions.x + 0.1);
+        try std.testing.expectApproxEqAbs(rect.x + rect.w - V.styles.content().padding.?.right, route.x + route.w, 0.1);
         h.cx.handleMouseMove(800, 700);
         h.frames();
     }
