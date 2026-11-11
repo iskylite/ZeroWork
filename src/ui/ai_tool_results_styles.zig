@@ -88,3 +88,27 @@ pub fn commandViewport(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn resultImage(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 112 }, .flex_shrink = 0 };
 }
+
+pub fn changeBody() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .direction = .column, .gap = 4, .flex_shrink = 0 };
+}
+pub fn changeLine(change: @import("../host/local_file_changes.zig").Kind) ui.BoxStyle {
+    const color = if (change == .add) theme.current().ok else theme.current().danger;
+    return .{ .width = .fill(), .min_width = 0, .direction = .row, .align_items = .start, .gap = 5, .padding = .{ .left = 2, .right = 2 }, .background = color.withAlpha(22), .border = .{ .radius = 2 }, .flex_shrink = 0 };
+}
+pub fn changePath(tokens: *const ui.ThemeTokens) ui.TextStyle {
+    var style = text(tokens);
+    style.use_monospace_font = true;
+    style.wrap = .char;
+    return style;
+}
+pub fn changeNumber(tokens: *const ui.ThemeTokens) ui.TextStyle {
+    var style = changePath(tokens);
+    style.text_align = .end;
+    return style;
+}
+pub fn changeCode(tokens: *const ui.ThemeTokens, change: @import("../host/local_file_changes.zig").Kind) ui.TextStyle {
+    var style = changePath(tokens);
+    style.color = if (change == .add) theme.current().ok else theme.current().danger;
+    return style;
+}

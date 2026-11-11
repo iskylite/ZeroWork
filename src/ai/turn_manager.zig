@@ -257,8 +257,18 @@ pub const Manager = struct {
         while (true) {
             try budget.check();
             if (self.input) |inbox| inbox.setWorkPhase(self.turn_id, .continuing);
-            const input_revision = if (self.input != null) try self.consumeInputs() else 0;
-            var current = if (self.tool_run) |loop| try loop.nextRequest() else request;
+            if (self.tool_run) |loop| if (self.tool_host) |host| {
+                if (loop.request.workspace_revision != null) loop.refreshAuthority(host, cancel) catch |err| {
+                    if (err == error.AuthorityRefreshStale) continue;
+                    return err;
+                };
+            };
+            if (self.tool_run) |loop| try loop.prepareNextRequest();
+            const input_revision = if (self.input != null) (try self.consumeInputs() orelse {
+                // A newer accepted input or workspace won before request freeze.
+                continue;
+            }) else 0;
+            var current = if (self.tool_run) |loop| loop.frozenNextRequest() else request;
             if (self.input) |inbox| self.tool_run.?.dispatch_gate = .{ .context = inbox, .revision = input_revision, .current = inputPlanCurrent };
             // Keep only the caller's token in the retained snapshot. This
             // bounded token borrows the active run and must never escape it.
@@ -289,7 +299,7 @@ pub const Manager = struct {
                     continue;
                 };
 
-                if (self.input) |inbox| if (!inbox.tryClose()) {
+                if (self.input) |inbox| if (!inbox.tryCloseAtWorkspace(self.tool_run.?.request.workspace_revision)) {
                     const loop = self.tool_run.?;
                     if (self.round_text.items.len != 0) loop.appendPrepared(try loop.prepareMessage(.{ .role = .assistant, .content = self.round_text.items }));
                     continue;
@@ -303,7 +313,7 @@ pub const Manager = struct {
             try self.completeTools(current.cancel, self.permissionEngine(), frozen_policy_revision);
             try budget.check();
             if (self.tool_run.?.uncertain and !self.tool_run.?.host_observation_only) return error.ToolOutcomeUnknown;
-            if (self.tool_host) |host| try self.tool_run.?.refreshAuthority(host, current.cancel);
+            if (self.tool_host) |host| if (self.tool_run.?.request.workspace_revision == null) try self.tool_run.?.refreshAuthority(host, current.cancel);
             try budget.check();
         }
     }
@@ -315,37 +325,40 @@ pub const Manager = struct {
     fn hasSteeringInput(self: *Manager) bool {
         return if (self.input) |inbox| inbox.hasPending() else false;
     }
-    fn consumeInputs(self: *Manager) !u64 {
+    fn consumeInputs(self: *Manager) !?u64 {
+        const input = @import("session_input.zig");
         const inbox = self.input.?;
         const loop = self.tool_run.?;
-        inbox.lock();
-        if (!inbox.admission) {
-            inbox.unlock();
-            return error.Cancelled;
-        }
-        const count = inbox.entries.items.len;
-        const revision = inbox.revision;
-        inbox.unlock();
-        for (0..count) |index| {
-            const entry = pending: {
-                inbox.lock();
-                defer inbox.unlock();
-                const entry = inbox.entries.items[index];
-                if (entry.receipt.delivery != .accepted or entry.receipt.pause != null or entry.receipt.turn != inbox.active_turn or !entry.receipt.fence.eql(inbox.fence)) break :pending null;
-                break :pending entry;
-            } orelse continue;
-            // Accepted payloads are owned and immutable until this worker joins.
-            // Compaction may call the provider; never hold the inbox lock here.
-            const prepared = try loop.prepareMessage(entry.payload.messages[0]);
+        var entries: std.ArrayList(*input.Entry) = .empty;
+        defer entries.deinit(self.allocator);
+        const revision = snapshot: {
             inbox.lock();
             defer inbox.unlock();
             if (!inbox.admission) return error.Cancelled;
-            if (entry.receipt.delivery != .accepted or entry.receipt.pause != null or entry.receipt.turn != inbox.active_turn or !entry.receipt.fence.eql(inbox.fence)) continue;
-            try inbox.consumedLocked(entry, loop.round_index +| 1, loop.preparedTranscript(prepared));
-            loop.appendPrepared(prepared);
-            if (entry.receipt.route == .steer) if (self.observer) |observer| if (observer.input_consumed) |notify| try notify(observer.context, entry.receipt.id, entry.payload.messages[0].content);
-        }
-        // Inputs admitted after the snapshot invalidate the old dispatch plan.
+            if (inbox.workspace_changing or (loop.request.workspace_revision != null and loop.request.workspace_revision.? != inbox.workspace_revision)) {
+                if (self.tool_host == null) return error.WorkspaceChanged;
+                return null;
+            }
+            for (inbox.entries.items) |entry| if (inbox.eligibleLocked(entry)) try entries.append(self.allocator, entry);
+            break :snapshot inbox.revision;
+        };
+        if (loop.request.workspace_revision != null and loop.round_index == 0 and entries.items.len == 0) return error.WorkspaceChanged;
+        const payloads = try self.allocator.alloc(provider.Message, entries.items.len);
+        defer self.allocator.free(payloads);
+        for (entries.items, payloads) |entry, *payload| payload.* = entry.payload.messages[0];
+        const prepared = try loop.prepareInputBatch(payloads);
+        const rows = try self.allocator.alloc(input.Consumption, entries.items.len);
+        defer self.allocator.free(rows);
+        if (!try inbox.reserveConsumption(loop.request.workspace_revision, revision, entries.items, rows, loop.round_index +| 1)) return null;
+        inbox.persistConsumption(rows, loop.preparedInputTranscript(prepared)) catch |err| {
+            inbox.publishConsumption(entries.items, rows, false);
+            return err;
+        };
+        inbox.publishConsumption(entries.items, rows, true);
+        for (prepared) |message| loop.appendPrepared(message);
+        for (rows) |row| if (row.receipt.route == .steer) if (self.observer) |observer| if (observer.input_consumed) |notify| {
+            try notify(observer.context, row.receipt.id, row.payload[0].content);
+        };
         return revision;
     }
 
@@ -509,7 +522,7 @@ pub const Manager = struct {
                 return reported;
             } else |err| {
                 self.audit_log.truncate(audit_start);
-                if (!retry.isRetryable(err)) {
+                if (!retry.isRetryable(err) or (request.workspace_revision != null and err != error.RequestRejected and err != error.RateLimited)) {
                     self.turn.abort();
                     try self.recordFailure(request.model);
                     return err;
@@ -528,6 +541,9 @@ pub const Manager = struct {
                         self.turn.abort();
                         try self.recordFailure(request.model);
                         return wait_err;
+                    };
+                    if (self.input) |inbox| if (request.workspace_revision) |revision| {
+                        if (inbox.workspaceRevision() != revision) return error.WorkspaceChanged;
                     };
                     attempt += 1;
                     if (self.observer) |observer| observer.reset(observer.context);
@@ -1810,4 +1826,273 @@ test "approval explicit Stop interrupts a valid paused budget" {
     stop.cancel();
     try std.testing.expectEqual(error.Cancelled, budget.reason().?);
     try std.testing.expect(token.isCancelled());
+}
+
+test "v0.4.3 a no-tool response refreshes workspace without sending paused steering" {
+    const input = @import("session_input.zig");
+    const identity = @import("../host/identity.zig");
+    const dynamic = @import("plugin_tools.zig");
+    const a = std.testing.allocator;
+    const fence: input.Fence = .{ .agent = identity.AgentId.generate(), .conversation = identity.ConversationId.generate(), .binding = 1, .environment = 1 };
+    var inbox = input.Inbox.init(a, fence);
+    defer inbox.deinit();
+    const first = try inbox.admit(fence, identity.SubmissionId.generate(), .{ .content = "initial task" }, .queue);
+    _ = try inbox.claim(first.id, first.revision, null, 31, .start);
+    const current: tool_scope.Scope = .{ .owner = .{ .group = 8 }, .members = .{} };
+    const context: dynamic.host.Context = .{ .conversation_id = fence.conversation, .task_id = identity.TaskId.generate(), .binding = current.owner, .binding_revision = 1, .grant_revision = 1 };
+    var table = try dynamic.RequestTable.initWithHost(a, current, &.{}, &.{}, context, &.{});
+    defer table.deinit();
+    const Fixture = struct {
+        inbox: *input.Inbox,
+        steer: ?identity.SubmissionId = null,
+        rounds: u32 = 0,
+        notices_acked: u32 = 0,
+        refreshed: bool = false,
+
+        fn chat(raw: *anyopaque, req: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, receiver: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.rounds += 1;
+            switch (self.rounds) {
+                1 => {
+                    try std.testing.expectEqual(@as(?u64, 1), req.workspace_revision);
+                    try std.testing.expectEqualStrings("workspace A", req.system);
+                    try std.testing.expectEqualStrings("initial task", req.messages[0].content);
+                    const receipt = try self.inbox.admit(self.inbox.fence, identity.SubmissionId.generate(), .{ .content = "stale steer" }, .steer);
+                    try std.testing.expectEqual(input.Delivery.accepted, receipt.delivery);
+                    self.steer = receipt.id;
+                    try self.inbox.beginWorkspaceChange();
+                    self.inbox.setWorkspaceRevision(2);
+                    self.inbox.endWorkspaceChange();
+                },
+                2 => {
+                    try std.testing.expectEqual(@as(?u64, 2), req.workspace_revision);
+                    try std.testing.expectEqualStrings("workspace B", req.system);
+                    try std.testing.expectEqual(@as(u32, 0), self.notices_acked);
+                    try std.testing.expectEqual(@as(usize, 2), req.messages.len);
+                    try std.testing.expect(req.messages[1].origin == .host_context_notice);
+                    try std.testing.expectEqualStrings("B replaced A", req.messages[1].content);
+                },
+                else => return error.UnexpectedProviderRequest,
+            }
+            sink(receiver, .done);
+            return .{ .request_count = 1 };
+        }
+        fn refresh(raw: *anyopaque, previous: *const dynamic.RequestTable, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !?tool_loop.AuthorityRefresh {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.refreshed or self.inbox.workspaceRevision() == 1) return null;
+            var next = try dynamic.cloneTable(previous, allocator);
+            errdefer next.deinit();
+            const system = try allocator.dupe(u8, "workspace B");
+            errdefer allocator.free(system);
+            const notice = try allocator.dupe(u8, "B replaced A");
+            self.refreshed = true;
+            return .{ .table = next, .system = system, .notice = notice, .notice_revision = 3, .workspace_revision = 2 };
+        }
+        fn ack(raw: *anyopaque, revision: u64, _: ?*provider.CancelToken) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(@as(u64, 3), revision);
+            try std.testing.expectEqual(@as(u32, 2), self.rounds);
+            self.notices_acked += 1;
+        }
+        fn execute(_: *anyopaque, _: tool_loop.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tool_loop.Outcome {
+            return error.UnexpectedTool;
+        }
+    };
+    var fixture: Fixture = .{ .inbox = &inbox };
+    var manager = Manager.init(a);
+    defer manager.deinit();
+    manager.input = &inbox;
+    manager.scope = current;
+    manager.turn_id = 31;
+    manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute, .refresh_authority = Fixture.refresh, .acknowledge_notice = Fixture.ack };
+    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = TestRetryProvider.models }, .{
+        .model = "fixture",
+        .system = "workspace A",
+        .messages = &.{},
+        .tool_table = &table,
+        .workspace_revision = 1,
+    });
+    try std.testing.expectEqual(@as(u32, 2), fixture.rounds);
+    try std.testing.expectEqual(@as(u32, 1), fixture.notices_acked);
+    try std.testing.expectEqual(input.Pause.workspace_changed, inbox.receipt(fixture.steer.?).?.pause.?);
+    try std.testing.expectEqual(input.Delivery.consumed, inbox.receipt(first.id).?.delivery);
+}
+
+test "v0.4.3 workspace refresh compacts completed history before publishing and acknowledging the notice" {
+    const input = @import("session_input.zig");
+    const identity = @import("../host/identity.zig");
+    const dynamic = @import("plugin_tools.zig");
+    const budget = @import("local_text_request.zig");
+    const a = std.testing.allocator;
+    const current: tool_scope.Scope = .{ .owner = .{ .group = 8 }, .members = .{} };
+    const Scenario = enum { completed, summary_failure, new_steer };
+    const Fixture = struct {
+        const old = "old workspace";
+        const next = "new workspace " ++ @as([3_000]u8, @splat('s'));
+        const notice = "B replaced A " ++ @as([3_000]u8, @splat('n'));
+        const result = "large observation " ++ @as([8_000]u8, @splat('r'));
+        const steer = "new steering input " ++ @as([16_000]u8, @splat('u'));
+
+        inbox: *input.Inbox,
+        tool_name: []const u8,
+        scenario: Scenario,
+        rounds: u32 = 0,
+        summaries: u32 = 0,
+        published_revision: u64 = 1,
+        acknowledgements: u32 = 0,
+        disposed: u32 = 0,
+
+        fn chat(raw: *anyopaque, req: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, receiver: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (req.workspace_revision == null) {
+                self.summaries += 1;
+                try std.testing.expectEqual(@as(u64, if (self.summaries == 1) 1 else 2), self.published_revision);
+                try std.testing.expectEqual(@as(u32, 0), self.acknowledgements);
+                try std.testing.expect(std.mem.indexOf(u8, req.system, next) == null);
+                for (req.messages) |message| try std.testing.expect(std.mem.indexOf(u8, message.content, notice) == null);
+                if (self.scenario == .summary_failure) return error.SummaryUnavailable;
+                sink(receiver, .{ .text = "Earlier workspace investigation." });
+            } else {
+                self.rounds += 1;
+                switch (self.rounds) {
+                    1 => {
+                        try std.testing.expectEqual(@as(?u64, 1), req.workspace_revision);
+                        try std.testing.expectEqualStrings(old, req.system);
+                        sink(receiver, .{ .tool_plan = .{ .call_id = "large-observation", .name = self.tool_name, .arguments = "{}" } });
+                    },
+                    2 => {
+                        try std.testing.expectEqual(@as(?u64, 2), req.workspace_revision);
+                        try std.testing.expectEqual(@as(u64, 2), self.published_revision);
+                        try std.testing.expectEqual(@as(u32, 0), self.acknowledgements);
+                        try std.testing.expectEqualStrings(next, req.system);
+                        try std.testing.expect(std.mem.indexOf(u8, req.messages[0].content, "Earlier workspace investigation.") != null);
+                        const notice_index = req.messages.len - @as(usize, if (self.scenario == .new_steer) 2 else 1);
+                        if (self.scenario == .new_steer) {
+                            try std.testing.expectEqualStrings(steer, req.messages[notice_index + 1].content);
+                        } else {
+                            const observation = req.messages[notice_index - 1];
+                            try std.testing.expectEqualStrings("large-observation", observation.tool_call_id.?);
+                            try std.testing.expect(std.mem.indexOf(u8, observation.content, result) != null);
+                        }
+                        const latest = req.messages[notice_index];
+                        try std.testing.expectEqual(.host_context_notice, latest.origin);
+                        try std.testing.expectEqualStrings(notice, latest.content);
+                        try @import("provider_http.zig").validateToolMessages(req);
+                        try budget.checkContext(req, 8192);
+                        sink(receiver, .{ .text = "Completed in workspace B." });
+                    },
+                    else => return error.UnexpectedProviderRequest,
+                }
+            }
+            sink(receiver, .done);
+            return .{ .request_count = 1 };
+        }
+        fn refresh(raw: *anyopaque, previous: *const dynamic.RequestTable, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !?tool_loop.AuthorityRefresh {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.inbox.workspaceRevision() == 1 or self.published_revision == 2) return null;
+            var table = try dynamic.cloneTable(previous, allocator);
+            errdefer table.deinit();
+            const system = try allocator.dupe(u8, next);
+            errdefer allocator.free(system);
+            return .{
+                .table = table,
+                .notice = try allocator.dupe(u8, notice),
+                .notice_revision = 3,
+                .system = system,
+                .workspace_revision = 2,
+                .publication = .{ .context = raw, .publish = publish, .destroy = destroy },
+            };
+        }
+        fn publish(raw: *anyopaque, _: ?*provider.CancelToken) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(@as(u32, 1), self.summaries);
+            try std.testing.expectEqual(@as(u64, 1), self.published_revision);
+            if (self.scenario == .new_steer) {
+                const receipt = try self.inbox.admit(self.inbox.fence, identity.SubmissionId.generate(), .{ .content = steer }, .steer);
+                try std.testing.expectEqual(input.Delivery.accepted, receipt.delivery);
+            }
+            self.published_revision = 2;
+        }
+        fn destroy(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.disposed += 1;
+        }
+        fn ack(raw: *anyopaque, revision: u64, _: ?*provider.CancelToken) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(@as(u64, 3), revision);
+            try std.testing.expectEqual(@as(u32, 2), self.rounds);
+            self.acknowledgements += 1;
+        }
+        fn execute(_: *anyopaque, _: tool_loop.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tool_loop.Outcome {
+            return error.UnexpectedLegacyTool;
+        }
+        fn invoke(raw: *anyopaque, invocation: dynamic.host.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !dynamic.host.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(@as(?u64, 1), invocation.workspace_revision);
+            try self.inbox.beginWorkspaceChange();
+            self.inbox.setWorkspaceRevision(2);
+            self.inbox.endWorkspaceChange();
+            const blocks = try allocator.alloc(dynamic.host.Block, 1);
+            errdefer allocator.free(blocks);
+            blocks[0] = .{ .text = try allocator.dupe(u8, result) };
+            return .{ .status = .succeeded, .blocks = blocks, .receipt = .{
+                .conversation_id = invocation.context.conversation_id,
+                .task_id = invocation.context.task_id,
+                .operation_id = invocation.operation_id,
+                .binding_revision = invocation.context.binding_revision,
+            } };
+        }
+    };
+    for ([_]Scenario{ .completed, .summary_failure, .new_steer }) |scenario| {
+        const fence: input.Fence = .{ .agent = identity.AgentId.generate(), .conversation = identity.ConversationId.generate(), .binding = 1, .environment = 1 };
+        var inbox = input.Inbox.init(a, fence);
+        defer inbox.deinit();
+        const first = try inbox.admit(fence, identity.SubmissionId.generate(), .{ .content = "current task" }, .queue);
+        _ = try inbox.claim(first.id, first.revision, null, 31, .start);
+        const context: dynamic.host.Context = .{ .conversation_id = fence.conversation, .task_id = identity.TaskId.generate(), .binding = current.owner, .binding_revision = 1, .grant_revision = 1 };
+        var table = try dynamic.RequestTable.initWithHost(a, current, &.{}, &.{}, context, &.{.{ .authority = .conversation_context, .definition = .{ .id = "host.get_current_context", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}" } }});
+        defer table.deinit();
+        const definitions = try dynamic.providerDefinitions(&table, table.arena.allocator());
+        var fixture: Fixture = .{ .inbox = &inbox, .tool_name = definitions[0].name(), .scenario = scenario };
+        var manager = Manager.init(a);
+        defer manager.deinit();
+        manager.input = &inbox;
+        manager.scope = current;
+        manager.turn_id = 31;
+        manager.compaction_config = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:1", .model = "fixture", .auth = .none, .context_window = 8192 };
+        manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute, .execute_host = Fixture.invoke, .refresh_authority = Fixture.refresh, .acknowledge_notice = Fixture.ack };
+        const result = manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = TestRetryProvider.models }, .{
+            .model = "fixture",
+            .system = Fixture.old,
+            .messages = &.{
+                .{ .content = "old user turn " ++ @as([18_000]u8, @splat('h')) },
+                .{ .role = .assistant, .content = "old assistant response" },
+                .{ .content = "recent user turn" },
+                .{ .role = .assistant, .content = "recent assistant response" },
+            },
+            .tools = definitions,
+            .tool_table = &table,
+            .workspace_revision = 1,
+            .max_output = 1024,
+        });
+        const run = manager.tool_run.?;
+        try std.testing.expectEqual(@as(u32, if (scenario == .new_steer) 2 else 1), fixture.summaries);
+        try std.testing.expectEqual(@as(u32, 1), fixture.disposed);
+        if (scenario == .summary_failure) {
+            try std.testing.expectError(error.ContextCompactionFailed, result);
+            try std.testing.expectEqual(error.SummaryUnavailable, run.compaction_failure.?);
+            try std.testing.expectEqual(@as(u32, 1), fixture.rounds);
+            try std.testing.expectEqual(@as(u32, 0), fixture.acknowledgements);
+            try std.testing.expectEqual(@as(u64, 1), fixture.published_revision);
+            try std.testing.expectEqual(@as(?u64, 1), run.request.workspace_revision);
+            try std.testing.expectEqual(@as(u64, 0), run.notice_revision);
+            try std.testing.expectEqualStrings(Fixture.old, run.request.system);
+            try std.testing.expectEqualStrings("large-observation", run.messages.items[run.messages.items.len - 1].tool_call_id.?);
+        } else {
+            _ = try result;
+            try std.testing.expectEqual(@as(u32, 2), fixture.rounds);
+            try std.testing.expectEqual(@as(u32, 1), fixture.acknowledgements);
+            try std.testing.expectEqual(@as(u64, 3), run.wire_notice_revision);
+        }
+    }
 }

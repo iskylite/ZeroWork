@@ -108,6 +108,29 @@ pub const ProcessJournal = struct {
         defer self.mutex.unlock();
         return (try self.openLocked()).snapshot(a, handle);
     }
+    pub fn findLocalFile(self: *ProcessJournal, a: std.mem.Allocator, context: host.Context, selector: journal.LocalFileSelector) !?journal.Record {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return (try self.openLocked()).findLocalFile(a, context, selector);
+    }
+    pub fn findScopedLocalFile(self: *ProcessJournal, a: std.mem.Allocator, scopes: []const journal.LocalFileScope, operation: identity.HostOperationId) !?journal.Record {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return (try self.openLocked()).findScopedLocalFile(a, scopes, operation);
+    }
+
+    pub fn listLocalFiles(self: *ProcessJournal, a: std.mem.Allocator, scopes: []const journal.LocalFileScope, offset: usize, limit: usize) !journal.LocalFilePage {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return (try self.openLocked()).listLocalFiles(a, scopes, offset, limit);
+    }
+
+    pub fn expireLocalFiles(self: *ProcessJournal, conversation: identity.ConversationId) !journal.LocalFileExpiry {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return (try self.openLocked()).expireLocalFiles(conversation);
+    }
+
     pub fn update(self: *ProcessJournal, handle: journal.Handle, revision: u64, change: journal.Update) !void {
         lock(&self.mutex);
         defer self.mutex.unlock();

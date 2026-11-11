@@ -41,7 +41,7 @@ fn fileCall(f: *Fixture, bridge: *@import("ui/ai_tools.zig").Bridge, name: []con
     defer parsed.deinit();
     const call_id = try std.fmt.allocPrint(a, "file-call-{d}", .{id});
     defer a.free(call_id);
-    var worker: FileWorker = .{ .host = bridge.interface(), .invocation = .{ .table = table, .parsed = parsed, .operation_id = id, .turn_id = 1, .call_id = call_id, .arguments = arguments } };
+    var worker: FileWorker = .{ .host = bridge.interface(), .invocation = .{ .table = table, .parsed = parsed, .operation_id = id, .turn_id = 1, .call_id = call_id, .arguments = arguments, .workspace_revision = 7 } };
     const thread = try std.Thread.spawn(.{}, FileWorker.run, .{&worker});
     defer thread.join();
     defer if (worker.results) |results| {
@@ -49,23 +49,22 @@ fn fileCall(f: *Fixture, bridge: *@import("ui/ai_tools.zig").Bridge, name: []con
         a.free(results);
     };
     const deadline = clock.monotonicNs() + 6 * std.time.ns_per_s;
-    var approved = false;
+    var saw_approval = false;
     while (!worker.done.load(.acquire) and clock.monotonicNs() < deadline) {
         try f.tick(null);
         bridge.pump(f.app);
         if (bridge.pendingApproval()) |approval| {
-            try std.testing.expect(confirm);
-            try std.testing.expect(!approved);
-            try std.testing.expectEqualStrings(name, approval.tool_id.?);
-            try bridge.decide(approval.sequence, approval.arguments_hash, true);
-            approved = true;
+            const expected = confirm and !saw_approval and std.mem.eql(u8, name, approval.tool_id.?);
+            try bridge.decide(approval.sequence, approval.arguments_hash, expected);
+            saw_approval = true;
+            try std.testing.expect(expected);
         }
     }
     if (!worker.done.load(.acquire)) {
         bridge.shutdown(f.app);
         return error.FileToolTimedOut;
     }
-    try std.testing.expectEqual(confirm, approved);
+    try std.testing.expectEqual(confirm, saw_approval);
     if (worker.failure) |err| return err;
     const result = worker.results.?[0];
     return a.dupe(u8, result.blocks[0].structured);
@@ -129,6 +128,105 @@ test "terminal files registered Local tools create read edit and reject stale co
     defer large_json.deinit();
     try std.testing.expect(large_json.value.object.get("committed").?.bool and large_json.value.object.get("verified").?.bool);
     try std.testing.expectEqual(@as(i64, 65536), large_json.value.object.get("size").?.integer);
+}
+
+test "terminal files managed Local gateway preserves the exact service and carries semantic arguments without a second approval" {
+    const host_tools = @import("ai/host_tools.zig");
+    const ToolBridge = @import("ui/ai_tools.zig").Bridge;
+    const TestHost = struct {
+        owner: @import("host/identity.zig").SessionHandle,
+        calls: usize = 0,
+
+        fn controller(_: *anyopaque, _: host_tools.Invocation, _: std.mem.Allocator) !host_tools.Result {
+            return error.UnexpectedControllerRoute;
+        }
+        fn worker(raw: *anyopaque, bridge: *ToolBridge, request: host_tools.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !host_tools.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            try bridge.validateManagedTerminal(self.owner);
+            var wrong = self.owner;
+            wrong.generation += 1;
+            try std.testing.expectError(error.StaleToolAuthority, bridge.validateManagedTerminal(wrong));
+            try std.testing.expect(request.terminal_target.?.eql(self.owner));
+            try std.testing.expectEqual(@as(?u64, 7), request.workspace_revision);
+            try std.testing.expectEqual(provider.ToolAuthority.local_files, request.authority);
+            if (self.calls == 1) {
+                try std.testing.expectEqualStrings("host.local_edit_text", request.tool_id);
+                try std.testing.expectEqualStrings("file-call-10100", request.call_id);
+            } else {
+                try std.testing.expectEqualStrings("host.local_write_text", request.tool_id);
+                try std.testing.expectEqualStrings("file-call-10101", request.call_id);
+                try std.testing.expectEqualStrings("create", request.arguments.object.get("mode").?.string);
+            }
+            try std.testing.expect(!request.arguments.object.contains("session_ids"));
+            try std.testing.expectEqualStrings("shared-operation", request.arguments.object.get("request_key").?.string);
+            try std.testing.expectEqualStrings("probe.txt", request.arguments.object.get("path").?.string);
+            const canonical_hash = try @import("ai/canonical_arguments.zig").digest(allocator, request.arguments);
+            try std.testing.expectEqualSlices(u8, &canonical_hash, &request.canonical_arguments_hash);
+            var wire_hash: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(request.arguments_json, &wire_hash, .{});
+            try std.testing.expectEqualSlices(u8, &wire_hash, &request.arguments_hash);
+            const body = try allocator.dupe(u8, "{\"committed\":true,\"verified\":true}");
+            errdefer allocator.free(body);
+            const blocks = try allocator.alloc(host_tools.Block, 1);
+            blocks[0] = .{ .structured = body };
+            return .{ .status = .succeeded, .blocks = blocks, .receipt = .{
+                .conversation_id = request.context.conversation_id,
+                .task_id = request.context.task_id,
+                .binding_revision = request.context.binding_revision,
+                .operation_id = request.operation_id,
+                .side_effect_started = true,
+            } };
+        }
+    };
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var probe = LocalTools.Bridge.init(a);
+    defer probe.deinit();
+    const owner = try f.prepare(&probe);
+    var host: TestHost = .{ .owner = owner };
+    var bridge = ToolBridge.init(a);
+    defer bridge.deinit();
+    try bridge.configureHost(.{
+        .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = @backingInt(owner.session_id) }, .binding_revision = 1, .grant_revision = 1 },
+        .handler_context = &host,
+        .invoke = TestHost.controller,
+        .invoke_worker = TestHost.worker,
+        .contributions = &(@import("ai/host_local_files.zig").contributions ++ @import("ai/host_local_file_mutation.zig").contributions),
+        .managed_local_files = true,
+    });
+    try bridge.prepare(f.app, owner);
+    const args = try std.json.Stringify.valueAlloc(a, .{
+        .session_ids = [_]u64{@backingInt(owner.session_id)},
+        .path = "probe.txt",
+        .request_key = "shared-operation",
+        .expected_version = "zw1:1111111111111111111111111111111111111111111111111111111111111111",
+        .edits = [_]@import("host/terminal_files.zig").Edit{.{ .old_text = "old", .new_text = "new" }},
+    }, .{});
+    defer a.free(args);
+    const result = try fileCall(&f, &bridge, "file.edit_text", args, 10100, false);
+    defer a.free(result);
+    try std.testing.expectEqualStrings("{\"committed\":true,\"verified\":true}", result);
+    try std.testing.expectEqual(@as(usize, 1), host.calls);
+    const create = try std.json.Stringify.valueAlloc(a, .{
+        .session_ids = [_]u64{@backingInt(owner.session_id)},
+        .path = "probe.txt",
+        .request_key = "shared-operation",
+        .text = "a new file",
+    }, .{});
+    defer a.free(create);
+    const created = try fileCall(&f, &bridge, "file.write_text", create, 10101, false);
+    defer a.free(created);
+    try std.testing.expectEqualStrings("{\"committed\":true,\"verified\":true}", created);
+    bridge.policy.allow_write = false;
+    const rejected = try fileCall(&f, &bridge, "file.edit_text", args, 10102, false);
+    defer a.free(rejected);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, rejected, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("ToolExecutionDenied", parsed.value.object.get("error_code").?.string);
+    try std.testing.expect(!parsed.value.object.get("side_effect_started").?.bool);
+    try std.testing.expectEqual(@as(usize, 2), host.calls);
 }
 
 test "transcript image native read cache and rendering never change the provider request" {

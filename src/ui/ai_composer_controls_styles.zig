@@ -13,6 +13,8 @@ pub fn width(kind: Kind) f32 {
         .execution => 296,
     };
 }
+pub const workspace_menu_extra_height: f32 = 45;
+
 pub fn height(kind: Kind) f32 {
     return switch (kind) {
         .attachment => 128,
@@ -65,6 +67,15 @@ fn slot(x: f32, y: f32, slot_width: f32, slot_height: f32) ui.BoxStyle {
 }
 pub fn hover() ui.BoxStyle {
     return .{ .background = theme.states().hover };
+}
+pub fn hoverOptional() ?ui.BoxStyle {
+    return hover();
+}
+pub fn workspaceRowHover() ?ui.BoxStyle {
+    return .{ .background = theme.popupSelection(), .border = .{ .radius = 7 } };
+}
+pub fn attachmentDivider() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 1 }, .flex_shrink = 0, .background = theme.current().fg_3.withAlpha(50) };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };

@@ -22,7 +22,7 @@ pub const WorkPhase = enum {
         };
     }
 };
-pub const Pause = enum { stop, end, environment, failure, budget, unknown };
+pub const Pause = enum { stop, end, environment, failure, budget, unknown, workspace_changed };
 pub const Fence = struct {
     agent: identity.AgentId,
     conversation: identity.ConversationId,
@@ -45,6 +45,8 @@ pub const Receipt = struct {
     delivery: Delivery = .queued,
     pause: ?Pause = null,
     request_sequence: ?u64 = null,
+    /// Null is a legacy unclassified input, never silently rebound to a workspace.
+    workspace_revision: ?u64 = null,
     archived: bool = false,
     original: ?identity.SubmissionId = null,
 };
@@ -57,6 +59,7 @@ pub const Entry = struct {
         a.destroy(self);
     }
 };
+pub const Consumption = struct { receipt: Receipt, payload: []const provider.Message };
 pub const Persist = struct {
     context: *anyopaque,
     /// Must durably commit before returning if durable admission is promised.
@@ -64,6 +67,7 @@ pub const Persist = struct {
     write: *const fn (*anyopaque, Receipt, []const provider.Message) anyerror!void,
     consumed: ?*const fn (*anyopaque, Receipt, []const provider.Message, []const provider.Message) anyerror!void = null,
     order: ?*const fn (*anyopaque, Fence, []const identity.SubmissionId) anyerror!void = null,
+    consume_batch: ?*const fn (*anyopaque, []const Consumption, []const provider.Message) anyerror!void = null,
 };
 pub const Budget = struct {
     mutex: std.atomic.Mutex = .unlocked,
@@ -92,6 +96,8 @@ pub const Inbox = struct {
     work_phase: WorkPhase = .continuing,
     revision: u64 = 1,
     queue_revision: u64 = 1,
+    workspace_revision: u64 = 1,
+    workspace_changing: bool = false,
     next_sequence: u64 = 1,
     entries: std.ArrayList(*Entry) = .empty,
     persist: ?Persist = null,
@@ -107,6 +113,47 @@ pub const Inbox = struct {
     }
     pub fn unlock(self: *Inbox) void {
         self.mutex.unlock();
+    }
+    pub fn beginWorkspaceChange(self: *Inbox) !void {
+        self.lock();
+        defer self.unlock();
+        if (self.workspace_changing) return error.WorkspaceChangePending;
+        self.workspace_changing = true;
+    }
+    pub fn endWorkspaceChange(self: *Inbox) void {
+        self.lock();
+        defer self.unlock();
+        self.workspace_changing = false;
+    }
+    pub fn setWorkspaceRevision(self: *Inbox, revision: u64) void {
+        self.lock();
+        defer self.unlock();
+        if (self.workspace_revision == revision) return;
+        self.workspace_revision = revision;
+        self.queue_revision +|= 1;
+        for (self.entries.items) |entry| {
+            if ((entry.receipt.delivery == .queued or entry.receipt.delivery == .accepted) and !self.workspaceMatches(entry.receipt)) entry.receipt.pause = .workspace_changed;
+        }
+    }
+    pub fn workspaceRevision(self: *Inbox) u64 {
+        self.lock();
+        defer self.unlock();
+        return self.workspace_revision;
+    }
+    pub fn workspaceMatches(self: *const Inbox, value: Receipt) bool {
+        return if (value.workspace_revision) |revision| self.workspace_revision == revision else false;
+    }
+    fn pauseReason(self: *const Inbox, value: Receipt, fallback: Pause) Pause {
+        if (value.delivery == .outcome_unknown) return .unknown;
+        if ((value.delivery == .queued or value.delivery == .accepted) and !self.workspaceMatches(value)) return .workspace_changed;
+        return fallback;
+    }
+    pub fn pauseLegacyInputs(self: *Inbox) void {
+        self.lock();
+        defer self.unlock();
+        for (self.entries.items) |entry| if ((entry.receipt.delivery == .queued or entry.receipt.delivery == .accepted) and !self.workspaceMatches(entry.receipt)) {
+            entry.receipt.pause = .workspace_changed;
+        };
     }
     fn save(self: *Inbox, value: Receipt, messages: []const provider.Message) !void {
         if (self.persist) |p| try p.write(p.context, value, messages);
@@ -155,7 +202,7 @@ pub const Inbox = struct {
         self.unlock();
         if (id.eql(original) or receipt_value.revision != revision) return error.SubmissionConflict;
         if (receipt_value.delivery == .outcome_unknown or receipt_value.delivery == .submitting) return error.SubmissionUnconfirmed;
-        if ((terminal(receipt_value.delivery) and receipt_value.delivery != .failed) or (receipt_value.delivery == .accepted and active != null) or (receipt_value.delivery == .queued and receipt_value.fence.eql(fence) and !receipt_value.archived)) return error.SubmissionNotReady;
+        if ((terminal(receipt_value.delivery) and receipt_value.delivery != .failed) or (receipt_value.delivery == .accepted and active != null and receipt_value.pause != .workspace_changed) or (receipt_value.delivery == .queued and receipt_value.fence.eql(fence) and !receipt_value.archived and receipt_value.pause != .workspace_changed)) return error.SubmissionNotReady;
         // New payload has already been rebuilt for the current environment by
         // the sender; old resource references are never silently transplanted.
         return self.admitWithOrigin(fence, id, message, mode, original);
@@ -169,6 +216,7 @@ pub const Inbox = struct {
         defer self.unlock();
         if (!self.fence.eql(fence)) return error.BindingChanged;
         if (!self.admission) return error.ConversationEnding;
+        if (self.workspace_changing) return error.WorkspaceChangePending;
         if (self.findLocked(id)) |prior| {
             if (!prior.receipt.fence.eql(fence)) return error.BindingChanged;
             if (!std.meta.eql(prior.receipt.original, original)) return error.SubmissionConflict;
@@ -188,7 +236,7 @@ pub const Inbox = struct {
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
         const entry = try self.allocator.create(Entry);
         errdefer self.allocator.destroy(entry);
-        const value: Receipt = .{ .id = id, .fence = fence, .sequence = self.next_sequence, .mode = mode, .route = if (is_steer) .steer else .queue, .expected_turn = if (is_steer) self.active_turn else null, .turn = if (is_steer) self.active_turn else null, .delivery = if (is_steer) .accepted else .queued, .original = original };
+        const value: Receipt = .{ .id = id, .fence = fence, .sequence = self.next_sequence, .mode = mode, .route = if (is_steer) .steer else .queue, .expected_turn = if (is_steer) self.active_turn else null, .turn = if (is_steer) self.active_turn else null, .delivery = if (is_steer) .accepted else .queued, .original = original, .workspace_revision = self.workspace_revision };
         try self.save(value, payload.messages);
         entry.* = .{ .receipt = value, .payload = payload, .text_bytes = message.content.len };
         self.entries.appendAssumeCapacity(entry);
@@ -204,6 +252,7 @@ pub const Inbox = struct {
         if (expected_queue) |expected| if (expected != self.queue_revision) return error.QueueChanged;
         const entry = self.findLocked(id) orelse return error.SubmissionNotFound;
         if (!entry.receipt.fence.eql(self.fence) or entry.receipt.revision != revision) return error.BindingChanged;
+        if (self.workspace_changing or !self.workspaceMatches(entry.receipt)) return error.WorkspaceChanged;
         if (entry.receipt.delivery != .queued or entry.receipt.pause != null) return error.SubmissionNotReady;
         for (self.entries.items) |other| if (other.receipt.delivery == .outcome_unknown and !other.receipt.archived) return error.SubmissionUnconfirmed;
         if (target_route == .steer) {
@@ -233,7 +282,7 @@ pub const Inbox = struct {
     pub fn next(self: *Inbox) ?Receipt {
         self.lock();
         defer self.unlock();
-        if (!self.admission or self.active_turn != null) return null;
+        if (!self.admission or self.active_turn != null or self.workspace_changing) return null;
         for (self.entries.items) |entry| if (entry.receipt.delivery == .outcome_unknown and !entry.receipt.archived) return null;
         for (self.entries.items) |entry| if (entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(self.fence)) return entry.receipt;
         return null;
@@ -326,7 +375,7 @@ pub const Inbox = struct {
         self.lock();
         defer self.unlock();
         for (self.entries.items) |entry| if (!terminal(entry.receipt.delivery)) {
-            entry.receipt.pause = reason;
+            entry.receipt.pause = self.pauseReason(entry.receipt, reason);
         };
         if (self.active_turn != null) self.closing = true;
         if (reason == .end) self.admission = false;
@@ -337,14 +386,14 @@ pub const Inbox = struct {
         if (!self.admission or !self.fence.eql(fence) or self.active_turn != null) return error.BindingChanged;
         for (self.entries.items) |entry| if (entry.receipt.delivery == .outcome_unknown and !entry.receipt.archived) return error.SubmissionUnconfirmed;
         for (self.entries.items) |entry| if (entry.receipt.delivery == .queued and entry.receipt.fence.eql(fence)) {
-            entry.receipt.pause = null;
+            entry.receipt.pause = if (self.workspaceMatches(entry.receipt)) null else .workspace_changed;
         };
     }
     pub fn changeFence(self: *Inbox, fence: Fence) void {
         self.lock();
         defer self.unlock();
         for (self.entries.items) |entry| if (!terminal(entry.receipt.delivery)) {
-            entry.receipt.pause = .environment;
+            entry.receipt.pause = self.pauseReason(entry.receipt, .environment);
         };
         self.fence = fence;
         self.revision = std.math.add(u64, self.revision, 1) catch {
@@ -385,7 +434,7 @@ pub const Inbox = struct {
         defer self.unlock();
         if (self.active_turn != turn) return;
         if (reason) |why| for (self.entries.items) |entry| if (!terminal(entry.receipt.delivery)) {
-            entry.receipt.pause = why;
+            entry.receipt.pause = self.pauseReason(entry.receipt, why);
         };
         self.active_turn = null;
         self.closing = false;
@@ -400,6 +449,57 @@ pub const Inbox = struct {
         }
         entry.receipt = value;
         self.releaseBudget(entry);
+    }
+    pub fn eligibleLocked(self: *const Inbox, entry: *const Entry) bool {
+        return entry.receipt.delivery == .accepted and entry.receipt.pause == null and entry.receipt.turn == self.active_turn and entry.receipt.fence.eql(self.fence) and self.workspaceMatches(entry.receipt);
+    }
+    /// Freeze a whole request attempt against the same coordinator used by
+    /// workspace publication and input admission. Disk IO follows outside it.
+    pub fn reserveConsumption(self: *Inbox, workspace: ?u64, revision: u64, entries: []const *Entry, output: []Consumption, request_sequence: u64) !bool {
+        self.lock();
+        defer self.unlock();
+        if (!self.admission or (self.closing and entries.len != 0)) return error.Cancelled;
+        if (self.workspace_changing or (workspace != null and workspace.? != self.workspace_revision) or self.revision != revision) return false;
+        for (entries) |entry| if (!self.eligibleLocked(entry)) return false;
+        if (entries.len > 1) if (self.persist) |p| if (p.consume_batch == null) return error.DurableRequestBatchUnavailable;
+        for (entries, output) |entry, *row| {
+            var receipt_value = entry.receipt;
+            receipt_value.delivery = .consumed;
+            receipt_value.request_sequence = request_sequence;
+            row.* = .{ .receipt = receipt_value, .payload = entry.payload.messages };
+            entry.receipt.delivery = .submitting;
+        }
+        return true;
+    }
+    pub fn persistConsumption(self: *Inbox, rows: []const Consumption, transcript: []const provider.Message) !void {
+        if (rows.len == 0) return;
+        if (self.persist) |p| {
+            if (p.consume_batch) |commit| return commit(p.context, rows, transcript);
+            if (rows.len != 1) return error.DurableRequestBatchUnavailable;
+            const row = rows[0];
+            if (p.consumed) |commit| return commit(p.context, row.receipt, row.payload, transcript);
+            return p.write(p.context, row.receipt, row.payload);
+        }
+    }
+    pub fn publishConsumption(self: *Inbox, entries: []const *Entry, rows: []const Consumption, persisted: bool) void {
+        self.lock();
+        defer self.unlock();
+        for (entries, rows) |entry, row| {
+            if (persisted) {
+                entry.receipt = row.receipt;
+                self.releaseBudget(entry);
+            } else {
+                entry.receipt.delivery = .outcome_unknown;
+                entry.receipt.pause = .unknown;
+            }
+        }
+    }
+    pub fn tryCloseAtWorkspace(self: *Inbox, workspace: ?u64) bool {
+        self.lock();
+        defer self.unlock();
+        if (self.workspace_changing or (workspace != null and workspace.? != self.workspace_revision) or self.pendingLocked()) return false;
+        self.closing = true;
+        return true;
     }
     fn releaseBudget(self: *Inbox, entry: *Entry) void {
         if (self.budget) |b| b.release(1, entry.text_bytes);
@@ -426,7 +526,7 @@ pub fn terminal(value: Delivery) bool {
     return value == .consumed or value == .cancelled or value == .failed;
 }
 fn validateMessage(message: provider.Message) !void {
-    if (message.role != .user or message.tool_calls.len != 0 or message.tool_call_id != null or !std.unicode.utf8ValidateSlice(message.content) or message.images.len +| message.offloaded_images.len > @import("image_attachments.zig").max_count) return error.InvalidSubmission;
+    if (message.role != .user or message.origin != .user_or_tool or message.tool_calls.len != 0 or message.tool_call_id != null or !std.unicode.utf8ValidateSlice(message.content) or message.images.len +| message.offloaded_images.len > @import("image_attachments.zig").max_count) return error.InvalidSubmission;
 }
 fn sameImage(left: @import("image_attachments.zig").ContentRef, right: @import("image_attachments.zig").ContentRef) bool {
     if (left.snapshot == right.snapshot) return true;

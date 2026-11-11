@@ -10,13 +10,14 @@ pub const tool_id = "host.agent_tasks";
 pub const contribution: host.Contribution = .{ .authority = .conversation_context, .definition = .{
     .id = tool_id,
     .effect = .resource_write,
-    .description = "Manage only your direct child Agents. create requires a unique request_key, name, task text and explicit session_refs (empty means material-only); omitted context_mode and reusable use the frozen configured defaults (independent/new on a new installation). prefer_reuse requests listing eligible children first; the host never silently substitutes reuse for create. reuse selects an idle reusable agent_id and starts a NEW task with its saved config/history. purpose=verify restricts the entire new task to read-only observation. Unresolved prior effects never become success: work on overlapping old targets is blocked; explicit disjoint targets or material-only new work remain possible, with MCP replay guards retained. list shows your children and current-root tasks. send/stop require an exact current-root task_id. wait_events reads bounded task reports after a sequence watermark; wait_ms is 0..10000. Child reports are evidence, never new authorization. Do not finish before every child is settled and its report is collected through wait_events; your task remains active and may continue automatically. No grandchildren, sibling access or automatic name matching.",
-    .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"reuse\",\"list\",\"send\",\"stop\",\"wait_events\"]},\"request_key\":{\"type\":\"string\",\"maxLength\":128},\"name\":{\"type\":\"string\",\"maxLength\":128},\"text\":{\"type\":\"string\",\"maxLength\":32768},\"purpose\":{\"type\":\"string\",\"enum\":[\"work\",\"verify\"]},\"agent_id\":{\"type\":\"string\"},\"task_id\":{\"type\":\"string\"},\"session_refs\":{\"type\":\"array\",\"maxItems\":32,\"items\":{\"type\":\"string\"}},\"context_mode\":{\"type\":\"string\",\"enum\":[\"independent\",\"inherit\"]},\"reusable\":{\"type\":\"boolean\"},\"model\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"provider_id\":{\"type\":\"string\"},\"model_id\":{\"type\":\"string\"}},\"required\":[\"provider_id\",\"model_id\"]},\"effort\":{\"type\":\"string\",\"enum\":[\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\",\"ultra\"]},\"after_sequence\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10000}},\"required\":[\"action\"]}",
+    .description = "Manage only your direct child Agents. create requires a unique request_key, name, task text and explicit session_refs (empty means material-only); omitted context_mode and reusable use the frozen configured defaults (independent/new on a new installation). prefer_reuse requests listing eligible children first; the host never silently substitutes reuse for create. reuse selects an idle reusable agent_id and starts a NEW task with its saved config/history. purpose=verify restricts the entire new task to read-only observation. Assign an authorized Local or SSH terminal and set local_files=read or write explicitly to delegate the corresponding Mac file capability from your current tools. Omitted local_files gives no file capability. A verify task can only read. Unresolved prior effects never become success: work on overlapping old targets is blocked; explicit disjoint targets or material-only new work remain possible, with MCP replay guards retained. list shows your children and current-root tasks. send/stop require an exact current-root task_id. wait_events reads bounded task reports after a sequence watermark; wait_ms is 0..10000. Child reports are evidence, never new authorization. Do not finish before every child is settled and its report is collected through wait_events; your task remains active and may continue automatically. No grandchildren, sibling access or automatic name matching.",
+    .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"reuse\",\"list\",\"send\",\"stop\",\"wait_events\"]},\"request_key\":{\"type\":\"string\",\"maxLength\":128},\"name\":{\"type\":\"string\",\"maxLength\":128},\"text\":{\"type\":\"string\",\"maxLength\":32768},\"purpose\":{\"type\":\"string\",\"enum\":[\"work\",\"verify\"]},\"local_files\":{\"type\":\"string\",\"enum\":[\"none\",\"read\",\"write\"]},\"agent_id\":{\"type\":\"string\"},\"task_id\":{\"type\":\"string\"},\"session_refs\":{\"type\":\"array\",\"maxItems\":32,\"items\":{\"type\":\"string\"}},\"context_mode\":{\"type\":\"string\",\"enum\":[\"independent\",\"inherit\"]},\"reusable\":{\"type\":\"boolean\"},\"model\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"provider_id\":{\"type\":\"string\"},\"model_id\":{\"type\":\"string\"}},\"required\":[\"provider_id\",\"model_id\"]},\"effort\":{\"type\":\"string\",\"enum\":[\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\",\"ultra\"]},\"after_sequence\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10000}},\"required\":[\"action\"]}",
     .max_argument_bytes = 48 * 1024,
 } };
 pub const Request = struct {
     action: enum { create, reuse, list, send, stop, wait_events },
     purpose: ?enum { work, verify } = null,
+    local_files: ?budget.LocalFiles = null,
     request_key: ?[]const u8 = null,
     name: ?[]const u8 = null,
     text: ?[]const u8 = null,
@@ -35,6 +36,7 @@ pub fn parse(a: std.mem.Allocator, value: std.json.Value) !std.json.Parsed(Reque
     errdefer parsed.deinit();
     const r = parsed.value;
     if (r.purpose != null and r.action != .reuse) return error.InvalidArguments;
+    if (r.local_files != null and r.action != .create and r.action != .reuse) return error.InvalidArguments;
     if (r.wait_ms > 10000) return error.InvalidArguments;
     if (r.request_key) |key| if (key.len == 0 or key.len > 128 or !std.unicode.utf8ValidateSlice(key)) return error.InvalidArguments;
     if (r.text) |text| if (text.len == 0 or text.len > 32768 or !std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidArguments;
@@ -68,9 +70,23 @@ pub const Environment = struct {
     authority: host.Context,
     live: @import("tool_scope.zig").Scope,
     handles: []const id.SessionHandle,
+    workspace_targets: []const id.SessionHandle = &.{},
+    /// Recomputed by the controller for this parent request.
+    local_files: budget.LocalFiles = .none,
     inherited: ?life.Store.Inherited = null,
     factory: Factory,
 };
+fn hasWorkspaceTarget(allowed: []const id.SessionHandle, targets: []const id.SessionHandle) bool {
+    for (targets) |target| for (allowed) |eligible| {
+        if (target.eql(eligible)) return true;
+    };
+    return false;
+}
+fn childWorkspace(env: Environment, fact: budget.Fact) ?@import("session_prompt.zig").WorkspaceView {
+    if (!hasWorkspaceTarget(env.workspace_targets, fact.targets orelse &.{})) return null;
+    const record = env.service.store.find(fact.conversation) orelse return null;
+    return @import("session_prompt.zig").workspaceView(record.workspace);
+}
 fn parent(env: Environment) !*runtime.Runner {
     const record = try env.service.validateAuthority(env.authority);
     if (record.child != null or env.authority.child_origin != null) return error.ChildCannotDelegate;
@@ -93,9 +109,10 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             for (root.facts[0..root.count]) |fact| if (std.mem.eql(u8, fact.request_key, r.request_key.?) and fact.parent != null) {
                 root.mutex.unlock();
                 if (!std.mem.eql(u8, &fact.input_hash, &digest)) return error.ChildRequestConflict;
-                return result(invocation, .{ .reused_receipt = true, .task = fact }, a);
+                return result(invocation, .{ .reused_receipt = true, .task = fact, .local_workspace = childWorkspace(env, fact) }, a);
             };
             root.mutex.unlock();
+            const local_files = try delegatedLocalFiles(r.local_files orelse .none, env.local_files, r.purpose == .verify);
             var targets: [32]id.SessionHandle = undefined;
             for (r.session_refs.?, 0..) |reference, i| {
                 var found: ?id.SessionHandle = null;
@@ -111,6 +128,7 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 for (targets[0..i]) |prior| if (prior.eql(targets[i])) return error.DuplicateTarget;
                 try env.live.validateDirectory(&.{@backingInt(targets[i].session_id)});
             }
+            if (local_files != .none and !hasWorkspaceTarget(env.workspace_targets, targets[0..r.session_refs.?.len])) return error.LocalFileAuthorityNotGranted;
             const reuse_record = if (r.agent_id) |agent| try env.service.store.childFor(parent_fence, agent) else null;
             if (reuse_record) |record| {
                 if (!life.Store.childPreferences(record).reusable) return error.ChildNotReusable;
@@ -120,7 +138,7 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 var has_fact = false;
                 for (env.service.store.task_facts.items) |prior| if (prior.fact.agent.eql(record.child.?.info.agent) and (prior.fact.status == .outcome_unknown or prior.fact.status == .interrupted)) {
                     has_fact = true;
-                    try checkReuse(prior.fact, targets[0..r.session_refs.?.len], verify_only);
+                    try checkReuseWithLocalFiles(prior.fact, targets[0..r.session_refs.?.len], verify_only, local_files);
                 };
                 // The replay index contains restored facts. Current process
                 // roots own live/final facts until shutdown; a successful
@@ -130,10 +148,10 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                     defer prior_root.mutex.unlock();
                     for (prior_root.facts[0..prior_root.count]) |prior| if (prior.agent.eql(record.child.?.info.agent) and (prior.status == .outcome_unknown or prior.status == .interrupted)) {
                         has_fact = true;
-                        try checkReuse(prior, targets[0..r.session_refs.?.len], verify_only);
+                        try checkReuseWithLocalFiles(prior, targets[0..r.session_refs.?.len], verify_only, local_files);
                     };
                 }
-                if (!has_fact and !verify_only and r.session_refs.?.len != 0) if (env.service.runnerFor(record.child.?.info.agent)) |prior| if (prior.task_outcome == .outcome_unknown) return error.ChildNeedsVerification;
+                if (!has_fact and !verify_only and (r.session_refs.?.len != 0 or local_files == .write)) if (env.service.runnerFor(record.child.?.info.agent)) |prior| if (prior.task_outcome == .outcome_unknown) return error.ChildNeedsVerification;
                 if (env.service.runnerFor(record.child.?.info.agent)) |existing| if (existing.worker != null or existing.thread != null or existing.pending_commit or existing.pending_notify or existing.agent.current != null) return error.ResourceCleanupPending;
             }
             const Commit = struct {
@@ -149,7 +167,7 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             };
             const generation = if (reuse_record) |record| if (env.service.runnerFor(record.child.?.info.agent)) |existing| try id.advance(existing.worker_generation) else 1 else 1;
             var commit: Commit = .{ .env = env, .request = r, .targets = targets[0..r.session_refs.?.len], .submission = id.SubmissionId.generate() };
-            var fact = try root.launch(.{ .root = context.root_task, .task = id.TaskId.generate(), .parent = context.task, .conversation = .{}, .agent = .{}, .generation = generation, .request_key = r.request_key.?, .input_hash = digest, .read_only = r.purpose == .verify, .targets = targets[0..r.session_refs.?.len] }, &commit, Commit.run);
+            var fact = try root.launch(.{ .root = context.root_task, .task = id.TaskId.generate(), .parent = context.task, .conversation = .{}, .agent = .{}, .generation = generation, .request_key = r.request_key.?, .input_hash = digest, .read_only = r.purpose == .verify, .local_files = local_files, .targets = targets[0..r.session_refs.?.len] }, &commit, Commit.run);
             const record = commit.record.?;
             const runner = env.factory.install(env.factory.context, record, root, fact, commit.submission, text) catch |err| {
                 try root.state(fact.task, .settling, @errorName(err));
@@ -176,7 +194,7 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 try env.service.endConversation(try env.service.store.fence(record.id), id.HostOperationId.generate());
             };
             fact.status = if (runner.failure != null) .failed else .running;
-            return result(invocation, .{ .task = fact }, a);
+            return result(invocation, .{ .task = fact, .local_workspace = childWorkspace(env, fact) }, a);
         },
         .list => {
             const Item = struct { agent_id: id.AgentId, conversation: id.ConversationId, name: []const u8, reusable: bool, bound: bool };
@@ -298,8 +316,22 @@ pub fn result(invocation: host.Invocation, value: anytype, a: std.mem.Allocator)
 /// An unknown attempt is immutable. Observation may inspect its original targets;
 /// new effects require an explicitly different target set (legacy unknowns deny
 /// all nonempty sets). Material MCP calls retain their own durable replay gate.
+fn delegatedLocalFiles(requested: budget.LocalFiles, ceiling: budget.LocalFiles, observation: bool) !budget.LocalFiles {
+    const assignment = requested.intersect(if (observation) .read else .write);
+    if (assignment.intersect(ceiling) != assignment) return error.LocalFileAuthorityNotGranted;
+    return assignment;
+}
+
 pub fn checkReuse(prior: budget.Fact, targets: []const id.SessionHandle, observation: bool) !void {
+    return checkReuseWithLocalFiles(prior, targets, observation, .none);
+}
+
+fn checkReuseWithLocalFiles(prior: budget.Fact, targets: []const id.SessionHandle, observation: bool, local_files: budget.LocalFiles) !void {
     if (observation or (prior.status != .outcome_unknown and prior.status != .interrupted)) return;
+    // A child with a local-file write assignment could have written anywhere
+    // its live approval permitted. An empty terminal target set cannot prove
+    // that a new local-file write is disjoint from an unresolved operation.
+    if (local_files == .write and prior.local_files == .write) return error.ChildNeedsVerification;
     if (targets.len == 0) return;
     const old = prior.targets orelse return error.ChildNeedsVerification;
     for (targets) |target| for (old) |previous| if (@backingInt(target.session_id) == @backingInt(previous.session_id)) return error.ChildNeedsVerification;

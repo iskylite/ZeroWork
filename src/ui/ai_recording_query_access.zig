@@ -64,9 +64,15 @@ pub const Access = struct {
     /// binding/grant revisions cancel old cursors before rebinding this Task's
     /// already captured recording authority. A new Task/CID requires new init.
     pub fn beginQuiescentCapture(self: *Access, context: host.Context) !void {
+        try self.validateCaptureContext(context);
+        self.rebindCapture(context);
+    }
+    fn validateCaptureContext(self: *const Access, context: host.Context) !void {
         try context.validate();
         if (self.cancelled.load(.acquire)) return error.Cancelled;
         if (!self.context.conversation_id.eql(context.conversation_id) or !self.context.task_id.eql(context.task_id)) return error.ScopeChanged;
+    }
+    fn rebindCapture(self: *Access, context: host.Context) void {
         if (!self.context.eql(context)) {
             self.backend.cancel(self.context);
             self.backend.grants = &.{};
@@ -74,6 +80,36 @@ pub const Access = struct {
             self.context = context;
         }
         self.worker_started = false;
+    }
+    pub const Capture = struct {
+        context: host.Context,
+        candidates: [max_candidates]Candidate = undefined,
+        len: usize = 0,
+        limit_reached: bool,
+    };
+    /// Prepare while the worker is blocked. Keep current candidates and reader
+    /// cursors until the corresponding tool catalog is published.
+    pub fn prepareCapture(self: *Access, context: host.Context, app: anytype, roster: ?*@import("group_model.zig").Roster, bridge: anytype) !Capture {
+        try self.validateCaptureContext(context);
+        var capture: Capture = .{ .context = context, .len = self.candidates.items.len, .limit_reached = self.candidate_limit_reached };
+        @memcpy(capture.candidates[0..capture.len], self.candidates.items);
+        var preview = try Access.init(self.arena.child_allocator, self.backend.archive, context);
+        defer preview.arena.deinit();
+        preview.candidates = .fromOwnedSlice(&capture.candidates);
+        preview.candidates.items.len = capture.len;
+        preview.candidate_limit_reached = capture.limit_reached;
+        try preview.captureUi(app, roster, bridge);
+        try preview.captureClosedReceipts(app);
+        capture.len = preview.candidates.items.len;
+        capture.limit_reached = preview.candidate_limit_reached;
+        try self.candidates.ensureTotalCapacity(self.arena.allocator(), capture.len);
+        return capture;
+    }
+    pub fn installCapture(self: *Access, capture: *const Capture) void {
+        self.rebindCapture(capture.context);
+        self.candidates.items.len = capture.len;
+        @memcpy(self.candidates.items, capture.candidates[0..capture.len]);
+        self.candidate_limit_reached = capture.limit_reached;
     }
     fn captureReady(self: *const Access) !void {
         try self.validateContext(self.context);

@@ -5,7 +5,9 @@ const std = @import("std");
 pub const Owner = @import("tool_scope.zig").Owner;
 pub const max_bytes: usize = 64 * 1024;
 pub const Id = u64;
-pub const SessionHandle = @import("../host/identity.zig").SessionHandle;
+const identity = @import("../host/identity.zig");
+const paths = @import("../host/local_path.zig");
+pub const SessionHandle = identity.SessionHandle;
 pub const TerminalSource = struct {
     owner: SessionHandle,
     source_name: []const u8,
@@ -50,6 +52,15 @@ pub fn validateText(bytes: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidLocalTextEncoding;
 }
 
+pub const PinnedLocal = struct {
+    absolute: []const u8,
+    identity: paths.Identity,
+
+    pub fn fromResolved(target: paths.Resolved) PinnedLocal {
+        return .{ .absolute = target.absolute, .identity = target.target_identity.? };
+    }
+};
+
 pub const Content = struct {
     path: []const u8,
     bytes: []const u8,
@@ -58,6 +69,13 @@ pub const Content = struct {
     /// UTF-8 BOM bytes are preserved, never silently normalized.
     bom_preserved: bool,
     source: Source = .local_file,
+    pinned_local: ?PinnedLocal = null,
+
+    pub fn fileReference(self: Content, conversation: identity.ConversationId) ?paths.Reference {
+        if (!conversation.valid()) return null;
+        const pin = self.pinned_local orelse return null;
+        return .{ .conversation = conversation, .requested = self.path, .absolute = pin.absolute, .identity = pin.identity };
+    }
 };
 const Snapshot = struct {
     allocator: std.mem.Allocator,
@@ -69,11 +87,18 @@ pub const ContentRef = struct {
 
     pub fn create(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8, captured_at_ms: i64) !ContentRef {
         try validateText(bytes);
-        return createSnapshot(allocator, path, bytes, captured_at_ms, .local_file);
+        return createSnapshot(allocator, path, bytes, captured_at_ms, .local_file, null);
     }
     pub fn createLocalReference(allocator: std.mem.Allocator, path: []const u8, reason: LocalReference) !ContentRef {
         if (!std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) return error.InvalidAttachmentPath;
-        return createSnapshot(allocator, path, "", 0, .{ .local_reference = reason });
+        return createSnapshot(allocator, path, "", 0, .{ .local_reference = reason }, null);
+    }
+    pub fn createPinnedLocal(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8, captured_at_ms: i64, pin: PinnedLocal) !ContentRef {
+        try validateText(bytes);
+        return createSnapshot(allocator, path, bytes, captured_at_ms, .local_file, pin);
+    }
+    pub fn createPinnedLocalReference(allocator: std.mem.Allocator, path: []const u8, reason: LocalReference, pin: PinnedLocal) !ContentRef {
+        return createSnapshot(allocator, path, "", 0, .{ .local_reference = reason }, pin);
     }
     /// Already captured plain VT bytes only. This reads no terminal or file.
     pub fn createTerminal(allocator: std.mem.Allocator, source: TerminalSource, bytes: []const u8, captured_at_ms: i64) !ContentRef {
@@ -94,7 +119,7 @@ pub const ContentRef = struct {
         return createSnapshot(allocator, switch (source.origin) {
             .selection => "终端选区.txt",
             .command => "命令上下文.txt",
-        }, bytes, captured_at_ms, .{ .terminal = source });
+        }, bytes, captured_at_ms, .{ .terminal = source }, null);
     }
     pub fn createRemote(allocator: std.mem.Allocator, reference: @import("../host/ai_remote_file_snapshot.zig").ResultRef, source_name: []const u8) !ContentRef {
         const value = reference.value() orelse return error.EmptyAttachmentResult;
@@ -109,7 +134,7 @@ pub const ContentRef = struct {
             .read_bytes = value.body.text.read_bytes,
             .read_limit = value.body.text.read_limit,
             .truncated = value.body.text.truncated,
-        } });
+        } }, null);
     }
     pub fn createRemoteReference(allocator: std.mem.Allocator, owner: SessionHandle, source_name: []const u8, path: []const u8) !ContentRef {
         if (@backingInt(owner.session_id) == 0 or owner.generation == 0) return error.InvalidAttachmentOwner;
@@ -126,20 +151,23 @@ pub const ContentRef = struct {
             .read_limit = 0,
             .truncated = false,
             .reference_only = true,
-        } });
+        } }, null);
     }
     /// Rehydrate already captured bytes; never reread a local/remote source.
     pub fn restore(allocator: std.mem.Allocator, value: Content) !ContentRef {
-        if (value.source == .local_reference) return createLocalReference(allocator, value.path, value.source.local_reference);
+        if (value.source == .local_reference) {
+            if (value.pinned_local) |pin| return createPinnedLocalReference(allocator, value.path, value.source.local_reference, pin);
+            return createLocalReference(allocator, value.path, value.source.local_reference);
+        }
         if (!std.unicode.utf8ValidateSlice(value.bytes)) return error.InvalidLocalTextEncoding;
         if (value.source == .remote_file) {
             const remote = value.source.remote_file;
             if (remote.reference_only) return createRemoteReference(allocator, remote.owner, remote.source_name, value.path);
             if (remote.operation == null) return error.InvalidRemoteSource;
         }
-        return createSnapshot(allocator, value.path, value.bytes, value.captured_at_ms, value.source);
+        return createSnapshot(allocator, value.path, value.bytes, value.captured_at_ms, value.source, value.pinned_local);
     }
-    fn createSnapshot(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8, captured_at_ms: i64, source: Source) !ContentRef {
+    fn createSnapshot(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8, captured_at_ms: i64, source: Source, pin: ?PinnedLocal) !ContentRef {
         if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAttachmentPath;
         var owned_source = source;
         switch (source) {
@@ -160,6 +188,15 @@ pub const ContentRef = struct {
         errdefer allocator.free(owned_path);
         const owned_bytes = try allocator.dupe(u8, bytes);
         errdefer allocator.free(owned_bytes);
+        const owned_pin: ?PinnedLocal = if (pin) |value| blk: {
+            if ((source != .local_file and source != .local_reference) or !std.fs.path.isAbsolute(path) or
+                !std.fs.path.isAbsolute(value.absolute) or value.identity.inode == 0 or
+                !std.unicode.utf8ValidateSlice(path) or !std.unicode.utf8ValidateSlice(value.absolute) or
+                std.mem.indexOfScalar(u8, value.absolute, 0) != null)
+                return error.InvalidAttachmentPath;
+            break :blk .{ .absolute = try allocator.dupe(u8, value.absolute), .identity = value.identity };
+        } else null;
+        errdefer if (owned_pin) |value| allocator.free(value.absolute);
         const snapshot = try allocator.create(Snapshot);
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(owned_bytes, &digest, .{});
@@ -170,6 +207,7 @@ pub const ContentRef = struct {
             .sha256 = digest,
             .bom_preserved = std.mem.startsWith(u8, owned_bytes, "\xef\xbb\xbf"),
             .source = owned_source,
+            .pinned_local = owned_pin,
         } };
         return .{ .snapshot = snapshot };
     }
@@ -190,6 +228,7 @@ pub const ContentRef = struct {
         const allocator = snapshot.allocator;
         allocator.free(snapshot.value.path);
         allocator.free(snapshot.value.bytes);
+        if (snapshot.value.pinned_local) |pin| allocator.free(pin.absolute);
         freeSource(allocator, snapshot.value.source);
         allocator.destroy(snapshot);
     }

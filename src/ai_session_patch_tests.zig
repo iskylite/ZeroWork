@@ -1048,3 +1048,169 @@ test "AI session PATCH async journal checkpoint survives concurrent binding hand
     try std.testing.expectEqualStrings("durable async result", restored.find(original.conversation).?.history.messages[0].content);
     try std.testing.expectEqual(latest.binding, restored.find(original.conversation).?.revision);
 }
+
+test "AI workspace lifecycle selection is fenced, durable and keeps the draft" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "project", .default_dir);
+    try tmp.dir.symLink(io, "project", "alias", .{ .is_directory = true });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const project = try std.fs.path.join(a, &.{ root, "project" });
+    defer a.free(project);
+    const alias = try std.fs.path.join(a, &.{ root, "alias" });
+    defer a.free(alias);
+
+    const Failure = struct {
+        fn write(_: *anyopaque, event: lifecycle.Event) !void {
+            if (event.kind == .workspace_update) return error.StorageUnavailable;
+        }
+    };
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    const owner = try store.attach(.{ .session = 1 });
+    const ticket = try store.create(owner.id);
+    const record = store.find(ticket.conversation).?;
+    _ = try store.setDraft(ticket, record.draft_revision, "草稿");
+    const queued = try record.inbox.admit(ticket, .generate(), .{ .content = "read config" }, .queue);
+
+    var selection = try @import("host/local_workspace.zig").inspect(a, io, alias);
+    defer selection.deinit(a);
+    var sentinel: u8 = 0;
+    store.persist = .{ .context = &sentinel, .write = Failure.write };
+    try std.testing.expectError(error.StorageUnavailable, store.setInspectedWorkspace(io, ticket, 1, &selection));
+    try std.testing.expectEqualStrings(alias, selection.directory.?);
+    try std.testing.expectEqual(@as(u64, 1), record.workspace.revision);
+    try std.testing.expectEqual(@as(u64, 1), record.inbox.workspaceRevision());
+    try std.testing.expectEqual(@as(?input.Pause, null), record.inbox.receipt(queued.id).?.pause);
+    store.persist = null;
+    try std.testing.expect(try store.setInspectedWorkspace(io, ticket, 1, &selection));
+    try std.testing.expect(selection.directory == null);
+    try std.testing.expect(!try store.setWorkspace(io, ticket, 2, project));
+    try std.testing.expectError(error.WorkspaceChanged, store.setWorkspace(io, ticket, 1, project));
+    try std.testing.expectEqualStrings(alias, record.workspace.directory.?);
+    try std.testing.expectEqualStrings(project, record.workspace.resolved_directory.?);
+    try std.testing.expectEqualStrings("草稿", record.draft.?);
+    try std.testing.expectEqual(@as(?input.Pause, .workspace_changed), record.inbox.receipt(queued.id).?.pause);
+
+    try tmp.dir.deleteFile(io, "alias");
+    try std.testing.expect(try store.setWorkspace(io, ticket, 2, project));
+    try std.testing.expect(try store.ackWorkspace(ticket, 2));
+    try std.testing.expectEqual(@as(u64, 2), record.workspace_ack_revision);
+    try std.testing.expectEqual(@as(u64, 3), record.workspace.revision);
+    try std.testing.expect(!try store.ackWorkspace(ticket, 2));
+    try std.testing.expectError(error.WorkspaceChanged, store.ackWorkspace(ticket, 4));
+    try std.testing.expect(try store.setWorkspace(io, ticket, 3, null));
+    try std.testing.expectEqualStrings("草稿", record.draft.?);
+    try std.testing.expectEqual(@as(u64, 4), record.inbox.workspaceRevision());
+    try std.testing.expectEqual(@FieldType(lifecycle.WorkspaceChange, "reason").removed, record.workspace_change.?.reason);
+    const other = try store.attach(.{ .session = 2 });
+    const other_ticket = try store.create(other.id);
+    try std.testing.expectEqual(@as(u64, 1), store.find(other_ticket.conversation).?.workspace.revision);
+}
+
+test "AI workspace lifecycle replay and child reuse do not adopt replacement directories" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "project", .default_dir);
+    try tmp.dir.createDir(io, "new", .default_dir);
+    const project = try tmp.dir.realPathFileAlloc(io, "project", a);
+    defer a.free(project);
+    const other_dir = try tmp.dir.realPathFileAlloc(io, "new", a);
+    defer a.free(other_dir);
+    var journal = try Journal.open(a, io, tmp.dir, "workspace.jsonl");
+    defer journal.deinit();
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    try journal.bind(&store);
+    const agent = try store.attach(.{ .session = 1 });
+    const parent = try store.create(agent.id);
+    try std.testing.expect(try store.setWorkspace(io, parent, 1, project));
+    const parent_record = store.find(parent.conversation).?;
+    try store.checkpoint(parent, 1, &.{.{ .content = "pin directory" }}, true);
+    var pin = try store.pinFork(parent.conversation);
+    defer pin.deinit();
+    const child = try store.registerChild(parent, .{ .name = "Inspect", .request_key = "inspect", .reusable = true }, null);
+    const original = child.workspace.directory_identity.?;
+    try std.testing.expectEqual(@as(u64, 2), child.workspace_source.?.snapshot.revision);
+    try std.testing.expect(try store.setWorkspace(io, parent, 2, other_dir));
+    try std.testing.expect(try store.ackWorkspace(parent, 2));
+    const copy_agent = try store.attach(.{ .session = 2 });
+    const copy = store.find(try store.publishFork(&pin, copy_agent.id)).?;
+    try std.testing.expectEqualStrings(project, copy.workspace.directory.?);
+    try std.testing.expectEqual(@as(u64, 1), copy.workspace.revision);
+
+    try std.Io.Dir.rename(tmp.dir, "project", tmp.dir, "original", io);
+    try tmp.dir.createDir(io, "project", .default_dir);
+    _ = try store.bindChild(parent, child.child.?.info.agent, child.revision, .{ .owner = agent.owner, .members = .{}, .inventory = &.{} }, &.{});
+    try std.testing.expectEqual(.unavailable, child.workspace.availability);
+    try std.testing.expectEqualStrings("DirectoryIdentityChanged", child.workspace.reason.?);
+    try std.testing.expectEqual(original, child.workspace.directory_identity.?);
+    try std.testing.expectEqualStrings(other_dir, parent_record.workspace.directory.?);
+    try std.testing.expectEqual(@as(u64, 2), child.inbox.workspaceRevision());
+
+    var replayed = lifecycle.Store.init(a);
+    defer replayed.deinit();
+    try journal.bind(&replayed);
+    const restored = replayed.find(parent.conversation).?;
+    const restored_copy = replayed.find(copy.id).?;
+    const restored_child = replayed.find(child.id).?;
+    try std.testing.expectEqual(@as(u64, 2), restored.workspace_ack_revision);
+    try std.testing.expectEqual(@as(u64, 3), restored.workspace.revision);
+    try std.testing.expectEqualStrings(other_dir, restored.workspace.directory.?);
+    try std.testing.expectEqual(.unavailable, restored_copy.workspace.availability);
+    try std.testing.expectEqual(@as(u64, 2), restored_copy.workspace.revision);
+    try std.testing.expectEqual(@as(u64, 2), restored_child.workspace.revision);
+    try std.testing.expectEqualStrings(project, restored_child.workspace_source.?.snapshot.directory.?);
+    try std.testing.expectEqual(original, restored_child.workspace.directory_identity.?);
+}
+
+test "AI workspace lifecycle journals a frozen input batch and host notice in one row" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    var journal = try Journal.open(a, io, tmp.dir, "batch.jsonl");
+    defer journal.deinit();
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    try journal.bind(&store);
+    const agent = try store.attach(.{ .session = 1 });
+    const ticket = try store.create(agent.id);
+    const record = store.find(ticket.conversation).?;
+    const first = try record.inbox.admit(ticket, .generate(), .{ .content = "first" }, .queue);
+    _ = try record.inbox.claim(first.id, first.revision, null, 1, .start);
+    record.inbox.setWorkPhase(1, .response);
+    const second = try record.inbox.admit(ticket, .generate(), .{ .content = "second" }, .steer);
+    const entries = [_]*input.Entry{ record.inbox.findLocked(first.id).?, record.inbox.findLocked(second.id).? };
+    var rows: [2]input.Consumption = undefined;
+    try std.testing.expect(try record.inbox.reserveConsumption(1, record.inbox.inputRevision(), &entries, &rows, 12));
+    try std.testing.expect(try store.setWorkspace(io, ticket, 1, root));
+    const prior = journal.bytes.items.len;
+    try record.inbox.persistConsumption(&rows, &.{
+        .{ .content = "first" },
+        .{ .content = "directory notification", .origin = .host_context_notice },
+        .{ .content = "second" },
+    });
+    record.inbox.publishConsumption(&entries, &rows, true);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, journal.bytes.items[prior..], "\n"));
+    var replayed = lifecycle.Store.init(a);
+    defer replayed.deinit();
+    try journal.bind(&replayed);
+    const recovered = replayed.find(ticket.conversation).?;
+    try std.testing.expectEqual(@as(u64, 2), recovered.workspace.revision);
+    for ([_]identity.SubmissionId{ first.id, second.id }) |id| {
+        const receipt = recovered.inbox.receipt(id).?;
+        try std.testing.expectEqual(input.Delivery.consumed, receipt.delivery);
+        try std.testing.expectEqual(@as(?u64, 1), receipt.workspace_revision);
+        try std.testing.expectEqual(@as(?u64, 12), receipt.request_sequence);
+    }
+    try std.testing.expectEqual(@as(usize, 3), recovered.recovery_history.messages.len);
+    try std.testing.expectEqual(@FieldType(provider.Message, "origin").host_context_notice, recovered.recovery_history.messages[1].origin);
+}

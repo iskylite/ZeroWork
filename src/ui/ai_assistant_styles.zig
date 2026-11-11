@@ -12,7 +12,7 @@ pub fn grip(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = 36 }, .height = .{ .px = 4 }, .background = theme.current().fg_3, .border = .{ .radius = 2 } };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 14, .right = 14, .bottom = 8, .top = 0 } };
+    return .{ .width = .fill(), .height = .{ .px = 34 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = header_gap, .padding = .{ .left = header_padding_x, .right = header_padding_x, .bottom = 8, .top = 0 } };
 }
 pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 13, .font_weight = 700, .line_height = 18.5 / 13.0, .color = theme.current().fg_1 };
@@ -177,4 +177,29 @@ pub fn markdownQuoteBar() ui.BoxStyle {
 }
 pub fn markdownListMarker() ui.TextStyle {
     return .{ .font_size = body_font_size, .line_height = body_line_height, .color = theme.current().fg_1 };
+}
+
+pub const workspace_min_width: f32 = 40;
+pub const workspace_max_width: f32 = 144;
+pub const workspace_chrome_width: f32 = 8 * 2 + 5 * 2 + 13 + 10;
+pub const header_padding_x: f32 = 14;
+pub const header_gap: f32 = 6;
+
+pub fn workspaceSlot(width: f32) ui.BoxStyle {
+    return .{ .width = .{ .px = width }, .height = .{ .px = 20 }, .flex_shrink = 0 };
+}
+pub fn workspaceButton() ButtonStyle {
+    return .{ .width = .fill(), .height = .{ .px = 20 }, .min_width = 0, .flex_shrink = 0, .padding = .{ .left = 8, .right = 8 }, .gap = 5, .corner_radius = 8, .background = theme.popupInset() };
+}
+pub fn workspaceHover() ?ButtonStyle {
+    return .{ .background = theme.states().hover };
+}
+pub fn workspaceName(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .text_overflow = .ellipsis };
+}
+pub fn workspaceDetails(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .wrap = .char };
+}
+pub fn workspacePopup(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
 }

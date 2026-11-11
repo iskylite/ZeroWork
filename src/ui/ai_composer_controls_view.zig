@@ -7,6 +7,7 @@ const provider = @import("../ai/provider.zig");
 const identity = @import("../host/identity.zig");
 pub const Owner = @import("../ai/tool_scope.zig").Owner;
 const S = @import("ai_composer_controls_styles.zig");
+const WorkspaceTicket = @import("ai_workspace_view.zig").Ticket;
 pub const Effort = provider.Effort;
 pub const PermissionMode = config.PermissionMode;
 pub const ExecutionMode = config.ExecutionMode;
@@ -56,6 +57,7 @@ pub const Snapshot = struct {
     effort: ?Effort = null,
     thinking: ?bool = null,
     attachments: AttachmentState = .{},
+    workspace: ?WorkspaceTicket = null,
     usage: ?Usage = null,
     editable: bool = true,
     inventory_authorized: bool = false,
@@ -72,6 +74,7 @@ pub const Action = union(enum) {
     effort: struct { model: ModelKey, value: Effort },
     thinking: struct { model: ModelKey, enabled: bool },
     attachment: Attachment,
+    choose_workspace: WorkspaceTicket,
 };
 pub const Envelope = struct { owner: Owner, revision: u64, action: Action };
 pub const Callbacks = struct { context: *anyopaque, action: *const fn (*anyopaque, Envelope) anyerror!void, open_settings: ?*const fn (*anyopaque) void = null, models_opened: ?*const fn (*anyopaque) void = null };
@@ -93,7 +96,7 @@ pub fn effortLabel(value: Effort) []const u8 {
     };
 }
 const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
-const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
+const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
 // Discovery provenance changes authority/configuration, but does not change a
 // model row when all resolved capabilities and displayed values are identical.
 fn modelRowsEql(a: Projection, b: Projection) bool {
@@ -134,7 +137,7 @@ const Owned = struct {
             value.parts = parts;
         }
         const current = if (snapshot.current) |key| try cloneKey(a, key) else null;
-        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
+        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
     }
     fn appendModel(a: std.mem.Allocator, models: *std.ArrayList(Model), hash: *std.hash.Wyhash, id: []const u8, kind: config.ProviderKind, endpoint: []const u8, enabled: bool, value: config.AiModel) !void {
         const key: ModelKey = .{ .provider_id = id, .model_id = value.id };
@@ -158,7 +161,7 @@ fn cloneKey(a: std.mem.Allocator, key: ModelKey) !ModelKey {
     return .{ .provider_id = try a.dupe(u8, key.provider_id), .model_id = try a.dupe(u8, key.model_id) };
 }
 const ReasoningChoice = union(enum) { off, on, effort: Effort };
-const Capture = struct { owner: Owner, revision: u64, inventory_conversation_id: ?identity.ConversationId };
+const Capture = struct { owner: Owner, revision: u64, inventory_conversation_id: ?identity.ConversationId, workspace: ?WorkspaceTicket };
 const Popup = struct { widget: ui.widgets.popover.PopoverResult, body: *ui.Node, title: ?*ui.Node = null, capture: ?Capture = null, anchor_width: ?f32 = null };
 const Choice = struct {
     view: *View,
@@ -258,6 +261,9 @@ pub const View = struct {
     effort_ticks: [8]*ui.Node = undefined,
     attachment_rows: [attachment_kinds.len]*ui.Node = undefined,
     attachment_disabled: [attachment_kinds.len]*ui.Signal(bool) = undefined,
+    workspace_disabled: *ui.Signal(bool) = undefined,
+    workspace_divider: *ui.Node = undefined,
+    workspace_row: *ui.Node = undefined,
     usage_body: *ui.Node = undefined,
     usage_scope: ?*ui.Scope = null,
     ring: *ui.Node = undefined,
@@ -383,7 +389,7 @@ pub const View = struct {
     fn mountPopup(self: *View, kind: S.Kind) !Popup {
         const anchor = try self.scope.createState(Anchor, .{ .view = self, .kind = kind });
         const open = try self.scope.createSignal(bool, false);
-        const result = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .position = .top_start, .anchor = .{ .virtual = .{ .ctx = anchor, .getRect = Anchor.get } }, .offset = .{ .static = 6 }, .width = if (kind == .model) null else S.width(kind), .max_height = if (kind == .usage) 600 else if (kind == .permission) S.height(kind) + 38 else S.height(kind), .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8, .on_open_change = self.cx.on(Anchor, anchor, Anchor.openChanged) }).mount(self.scope, self.cx);
+        const result = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .position = .top_start, .anchor = .{ .virtual = .{ .ctx = anchor, .getRect = Anchor.get } }, .offset = .{ .static = 6 }, .width = if (kind == .model) null else S.width(kind), .max_height = if (kind == .usage) 600 else if (kind == .permission) S.height(kind) + 38 else if (kind == .attachment) S.height(kind) + S.workspace_menu_extra_height else S.height(kind), .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8, .on_open_change = self.cx.on(Anchor, anchor, Anchor.openChanged) }).mount(self.scope, self.cx);
         result.wrapper.setStyleInline(self.cx.allocator, S.wrapper());
         try self.root.appendChild(self.cx.allocator, result.wrapper);
         result.chrome.setStyleInline(self.cx.allocator, S.panel(kind, self.cx.viewport));
@@ -431,14 +437,46 @@ pub const View = struct {
             };
             self.attachment_disabled[index] = try self.scope.createSignal(bool, true);
             const choice = try self.scope.createState(Choice, .{ .view = self, .kind = .attachment, .action = .{ .attachment = kind } });
-            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = row.label, .disabled = self.attachment_disabled[index], .base_style = S.attachmentRow(), .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
-            prepareCustomButton(button, .start, self.cx.allocator);
-            self.attachment_rows[index] = button;
-            button.meta.ownership.meta.test_id = row.id;
-            try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(row.icon).?, S.theme.current().fg_2, S.icon(16)));
-            _ = try self.label(button, row.label, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
-            try parent.appendChild(self.cx.allocator, button);
+            self.attachment_rows[index] = try self.mountAttachmentRow(parent, row.label, row.icon, row.id, self.attachment_disabled[index], self.hover_style, self.cx.on(Choice, choice, Choice.choose));
         }
+        self.workspace_divider = try ui.box(self.cx, S.attachmentDivider(), .{});
+        self.workspace_divider.setDisplay(.none);
+        try parent.appendChild(self.cx.allocator, self.workspace_divider);
+        self.workspace_disabled = try self.scope.createSignal(bool, true);
+        const workspace_hover = try S.theme.paintSignal(?ui.BoxStyle, self.cx, self.scope, S.workspaceRowHover, .{});
+        self.workspace_row = try self.mountAttachmentRow(parent, "设置本地工作区…", "folder", "ai.attachment.workspace", self.workspace_disabled, workspace_hover, self.cx.on(View, self, chooseWorkspace));
+        self.workspace_row.setDisplay(.none);
+        try self.scope.createEffect(.{
+            .row = self.workspace_row,
+            .hovered = try ui.hooks.useHover(self.scope, self.workspace_row),
+            .disabled = self.workspace_disabled,
+            .palette = try self.cx.themeSignal(self.scope),
+        }, struct {
+            fn paint(state: anytype) void {
+                _ = state.palette.get();
+                const hovered = state.hovered.get();
+                const disabled = state.disabled.get();
+                const colors = S.theme.current();
+                for (state.row.children.items) |child| {
+                    if (child.getText() != null) child.setTextColor(if (disabled) colors.fg_3 else if (hovered) colors.accent else colors.fg_1);
+                    _ = child.setTint(if (disabled) colors.fg_3 else if (hovered) colors.accent else colors.fg_2);
+                }
+            }
+        }.paint);
+    }
+    fn mountAttachmentRow(self: *View, parent: *ui.Node, label_text: []const u8, icon: []const u8, id: []const u8, disabled: *ui.Signal(bool), hover: *ui.Signal(?ui.BoxStyle), on_click: ui.Handler(void)) !*ui.Node {
+        const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = label_text, .disabled = disabled, .base_style = S.attachmentRow(), .hover_style = hover, .on_click = on_click }).mount(self.scope, self.cx);
+        prepareCustomButton(button, .start, self.cx.allocator);
+        button.meta.ownership.meta.test_id = id;
+        try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(icon).?, S.theme.current().fg_2, S.icon(16)));
+        _ = try self.label(button, label_text, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
+        try parent.appendChild(self.cx.allocator, button);
+        return button;
+    }
+    fn chooseWorkspace(self: *View) void {
+        const captured = self.capture(.attachment) orelse return;
+        const ticket = captured.workspace orelse return;
+        self.emit(.attachment, .{ .choose_workspace = ticket });
     }
     fn mountPermissions(self: *View) !void {
         const parent = self.popups[@backingInt(S.Kind.permission)].body;
@@ -800,9 +838,12 @@ pub const View = struct {
                     if (keep_model) {
                         const popup = &self.popups[@backingInt(S.Kind.model)];
                         popup.widget.open.?.set(true);
-                        popup.capture = .{ .owner = next.value.owner, .revision = next.value.revision, .inventory_conversation_id = next.value.inventory_conversation_id };
+                        popup.capture = .{ .owner = next.value.owner, .revision = next.value.revision, .inventory_conversation_id = next.value.inventory_conversation_id, .workspace = next.value.workspace };
                     }
-                } else if (!optionalKeyEql(old.value.current, next.value.current)) self.close(.effort, false);
+                } else {
+                    if (!optionalKeyEql(old.value.current, next.value.current)) self.close(.effort, false);
+                    if (!WorkspaceTicket.same(old.value.workspace, next.value.workspace)) self.close(.attachment, false);
+                }
                 old.deinit();
             }
             self.source = next;
@@ -833,6 +874,12 @@ pub const View = struct {
             for (0..6) |index| {
                 const kind: S.Kind = @fromBackingInt(@intCast(index));
                 var style = S.panel(kind, self.cx.viewport);
+                if (kind == .attachment and self.source != null and self.source.?.value.workspace != null) {
+                    const panel_height = @min(S.height(.attachment) + S.workspace_menu_extra_height, @max(0, self.cx.viewport.height - 16));
+                    style.height = .{ .px = panel_height };
+                    style.min_height = panel_height;
+                    style.max_height = panel_height;
+                }
                 if (kind == .permission) {
                     const authorized = if (self.source) |source| source.value.inventory_authorized and source.value.inventory_conversation_id != null else false;
                     const panel_height = @min(S.height(.permission) + @as(f32, if (authorized) 38 else 0), @max(0, self.cx.viewport.height - 16));
@@ -883,7 +930,7 @@ pub const View = struct {
         self.dismiss();
         const source = &self.source.?.value;
         self.last_error = null;
-        self.popups[index].capture = .{ .owner = source.owner, .revision = source.revision, .inventory_conversation_id = source.inventory_conversation_id };
+        self.popups[index].capture = .{ .owner = source.owner, .revision = source.revision, .inventory_conversation_id = source.inventory_conversation_id, .workspace = source.workspace };
         if (kind == .model) self.popups[index].anchor_width = self.buttons[index].globalRect().w;
         self.popups[index].widget.open.?.set(true);
         if (kind == .model) if (self.callbacks.models_opened) |opened| opened(self.callbacks.context);
@@ -966,6 +1013,12 @@ pub const View = struct {
                 if (!selected.enabled or !selected.key.eql(value.model) or !selected.reasoning or !selected.toggle) return;
             },
             .attachment => |attachment| if (!self.attachmentAvailable(attachment)) return,
+            .choose_workspace => |ticket| {
+                if (!WorkspaceTicket.same(ticket, source.workspace)) return;
+                if (self.pending) |*pending| {
+                    if (!pending.value.editable or !WorkspaceTicket.same(ticket, pending.value.workspace)) return;
+                }
+            },
         }
         self.callbacks.action(self.callbacks.context, .{ .owner = captured.owner, .revision = captured.revision, .action = action }) catch |err| {
             self.last_error = err;
@@ -1093,7 +1146,12 @@ pub const View = struct {
         if (source) |value| for (value.models) |item| {
             any_model = any_model or item.enabled;
         };
-        var any_attachment = false;
+        const has_workspace = source != null and source.?.workspace != null;
+        self.workspace_row.setDisplay(if (has_workspace) .flex else .none);
+        self.workspace_divider.setDisplay(if (has_workspace) .flex else .none);
+        self.workspace_divider.setBackground(S.attachmentDivider().background.?);
+        self.workspace_disabled.set(!has_workspace or !editable);
+        var any_attachment = has_workspace and editable;
         for (attachment_kinds, 0..) |kind, index| {
             const enabled = self.attachmentAvailable(kind);
             self.attachment_disabled[index].set(!enabled);
@@ -1377,7 +1435,7 @@ pub const View = struct {
                 .model => self.model_close,
                 .permission => if (self.source != null and !self.source.?.value.editable and self.source.?.value.inventory_authorized and self.source.?.value.inventory_conversation_id != null) self.inventory_revoke else self.permission_rows[if (self.source) |source| @backingInt(source.value.permission) else 0],
                 .effort => self.slider.wrapper,
-                .attachment => self.attachment_rows[firstEnabled(self.attachment_disabled) orelse 0],
+                .attachment => if (firstEnabled(self.attachment_disabled)) |index| self.attachment_rows[index] else self.workspace_row,
                 .usage => self.buttons[4],
                 .execution => self.execution_rows[if (self.source) |source| @as(usize, @intCast(@backingInt(source.value.execution_mode_override orelse source.value.global_execution_mode))) else 0],
             };
@@ -1469,7 +1527,7 @@ fn controlsEql(first: Projection, second: Projection) bool {
     return projectionEql(one, two);
 }
 fn projectionEql(first: Projection, second: Projection) bool {
-    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
+    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and WorkspaceTicket.same(first.workspace, second.workspace) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
 }
 fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;

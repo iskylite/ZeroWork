@@ -470,3 +470,31 @@ test "automatic permission follows valid URL redirects while retaining transport
     broker.stop();
     try std.testing.expectEqual(Decision.scope_changed, broker.authorize(permit, call, "https://other.example.test/final", 9));
 }
+
+test "v0.4.3 local file approval requires the resolved target and exact evidence" {
+    const a = std.testing.allocator;
+    const Decision = @import("fetch_url.zig").Decision;
+    var broker: approval.Broker = .{};
+    const ctx = context();
+    try broker.configure(ctx, 9);
+    const json = "{\"path\":\"note.txt\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer parsed.deinit();
+    var call = try invocation(ctx, parsed.value, json);
+    call.tool_id = "host.local_edit_text";
+    call.authority = .local_files;
+    var subject: approval.Subject = .{ .kind = .local_file, .target = "/tmp/one/note.txt", .detail = "+new text" };
+    try std.testing.expectError(error.InvalidHostApproval, broker.beginSubject(call, subject, 9, a));
+    subject.evidence_hash = @splat(1);
+    const permit = try broker.beginSubject(call, subject, 9, a);
+    defer broker.finish(permit);
+    try std.testing.expectEqual(Decision.approval_required, broker.authorizeSubject(permit, call, subject, 9));
+    broker.updatePermissionPolicy(.{ .mode = .auto });
+    try std.testing.expectEqual(Decision.allow, broker.authorizeSubject(permit, call, subject, 9));
+    var changed = subject;
+    changed.target = "/tmp/two/note.txt";
+    changed.evidence_hash = @splat(2);
+    try std.testing.expectEqual(Decision.scope_changed, broker.authorizeSubject(permit, call, changed, 9));
+    broker.updatePermissionPolicy(.{ .mode = .confirm });
+    try std.testing.expectEqual(Decision.approval_required, broker.authorizeSubject(permit, call, subject, 9));
+}

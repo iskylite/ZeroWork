@@ -50,6 +50,7 @@ pub const Status = enum { succeeded, failed, rejected, cancelled_unsent, outcome
 pub const ContentBlock = union(enum) { text: []const u8, structured: []const u8, image_ref: images.ContentRef };
 pub const Receipt = struct { operation_id: u64, owner: identity.SessionHandle, local_released: bool = true, remote_effect_unknown: bool = false };
 pub const ToolResult = struct {
+    managed_local_file: bool = false,
     verification: ?@import("readonly_verification.zig").Anchor = null,
     status: Status,
     blocks: []const ContentBlock = &.{},
@@ -701,6 +702,7 @@ pub fn cloneTable(input: *const RequestTable, allocator: std.mem.Allocator) !Req
 }
 
 pub const DynamicInvocation = struct {
+    workspace_revision: ?u64 = null,
     dispatch_fence: ?@import("provider.zig").DispatchFence = null,
     table: *const RequestTable,
     parsed: ParsedCall,

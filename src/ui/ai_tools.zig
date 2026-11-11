@@ -14,12 +14,14 @@ const operations = @import("../host/operation_store.zig");
 const approvals = @import("../ai/host_approval.zig");
 const routing = approvals.routing;
 const host_tools = @import("../ai/host_tools.zig");
+const terminal_files = @import("../ai/terminal_file_tools.zig");
 pub const HostBinding = struct {
     context: host_tools.Context,
     handler_context: *anyopaque,
     invoke: *const fn (*anyopaque, host_tools.Invocation, std.mem.Allocator) anyerror!host_tools.Result,
     invoke_worker: ?*const fn (*anyopaque, *Bridge, host_tools.Invocation, std.mem.Allocator, ?*provider.CancelToken) anyerror!host_tools.Result = null,
     contributions: []const host_tools.Contribution,
+    managed_local_files: bool = false,
     refresh: ?*const fn (*anyopaque, *Bridge, *const tools.RequestTable, std.mem.Allocator, ?*provider.CancelToken) anyerror!?loop.AuthorityRefresh = null,
     acknowledge_notice: ?*const fn (*anyopaque, u64, ?*provider.CancelToken) anyerror!void = null,
     accepted_result: ?*const fn (*anyopaque, host_tools.Context, []const u8, *const host_tools.Result, ?*provider.CancelToken) anyerror!void = null,
@@ -35,6 +37,7 @@ const Child = struct {
     automation_started_ms: u64 = 0,
     automation_steps: u8 = 0,
     automation_interrupted: bool = false,
+    managed_file_revoked: bool = false,
 };
 const ApprovalExchange = struct { invocation: tools.DynamicInvocation, ticket: *tools.ApprovalTicket, sequence: u64, decision: enum { pending, approved, rejected } = .pending };
 const ControllerExchange = struct {
@@ -383,6 +386,17 @@ pub const Bridge = struct {
                 child.invocation_context = .{ .host = adapter.vtable.interface(adapter.context), .captured_scope = captured, .policy_revision = self.policy_revision, .output_context = if (self.output_store != null and self.host_binding != null) .{ .store = self.output_store.?, .conversation_id = self.host_binding.?.context.conversation_id, .owner = owner } else null };
                 child.member.context = &child.invocation_context;
             }
+            if (self.host_binding) |binding| {
+                if (binding.managed_local_files and std.mem.eql(u8, manifest.id, "local")) {
+                    var allowed: std.ArrayList(tools.ToolBinding) = .empty;
+                    for (child.member.bindings) |tool_binding| {
+                        const tool_id = tool_binding.definition_id;
+                        if (terminal_files.managedHostId(tool_id) != null and terminal_files.managedContribution(binding.contributions, tool_id) == null) continue;
+                        try allowed.append(capture_allocator, tool_binding);
+                    }
+                    child.member.bindings = try allowed.toOwnedSlice(capture_allocator);
+                }
+            }
             for (manifest.tool_definitions) |definition| {
                 var found = false;
                 for (definitions.items) |existing| if (std.mem.eql(u8, existing.id, definition.id)) {
@@ -419,6 +433,24 @@ pub const Bridge = struct {
                 try contributions.append(a, contribution);
             }
             binding.contributions = try contributions.toOwnedSlice(a);
+        }
+        if (self.host_binding) |binding| {
+            if (binding.managed_local_files) {
+                for (definitions.items) |*definition| {
+                    const contribution = terminal_files.managedContribution(binding.contributions, definition.id) orelse continue;
+                    var local = false;
+                    var ssh = false;
+                    for (members.items) |member| {
+                        for (member.bindings) |tool_binding| {
+                            if (!std.mem.eql(u8, tool_binding.definition_id, definition.id)) continue;
+                            if (std.mem.eql(u8, member.plugin_id, "local")) local = true;
+                            if (std.mem.eql(u8, member.plugin_id, "ssh")) ssh = true;
+                            break;
+                        }
+                    }
+                    if (local) definition.* = try terminal_files.managedDefinition(capture_allocator, definition.*, contribution.definition, ssh);
+                }
+            }
         }
         self.table = if (self.host_binding) |binding| try tools.RequestTable.initWithHost(self.allocator, captured, definitions.items, members.items, binding.context, binding.contributions) else try tools.RequestTable.init(self.allocator, captured, definitions.items, members.items);
         self.wire = try tools.providerDefinitions(&self.table.?, self.table.?.arena.allocator());
@@ -495,12 +527,29 @@ pub const Bridge = struct {
     /// The participant worker is parked at a round boundary. Replace only
     /// prepared resources; retain its mutex, mailboxes and controller exchange.
     pub fn replacePrepared(self: *Bridge, next: *Bridge) !void {
+        return self.replacePreparedImpl(next, false);
+    }
+    pub fn refreshQueriesOnly(self: *const Bridge) bool {
+        if (self.queries_only or self.retired.items.len != 0) return true;
+        for (self.children.items) |child| if (child.adapter) |adapter| {
+            if (adapter.vtable.impact(adapter.context, child.owner).ai != 0) return true;
+        };
+        return false;
+    }
+    /// The worker already admitted this exact catalog. Refuse a replacement
+    /// that would silently remove tools from the request it prepared.
+    pub fn replacePreparedExact(self: *Bridge, next: *Bridge) !void {
+        return self.replacePreparedImpl(next, true);
+    }
+    fn replacePreparedImpl(self: *Bridge, next: *Bridge, exact: bool) !void {
         if (self.pending != null or self.controller != null or self.host_exchange != null or self.running != null) return error.ToolCleanupPending;
         const preserve_queries_only = self.queries_only;
+        if (exact and !next.queries_only and (preserve_queries_only or self.retired.items.len != 0)) return error.ToolCleanupPending;
         self.clearPrepared() catch |err| {
             if (err != error.ToolCleanupPending) return err;
+            if (exact and !next.queries_only) return err;
             try self.retainPrepared();
-            try next.restrictToHostQueries();
+            if (!exact) try next.restrictToHostQueries();
         };
         if ((preserve_queries_only or self.retired.items.len != 0) and !next.queries_only) try next.restrictToHostQueries();
         self.children.deinit(self.allocator);
@@ -665,6 +714,15 @@ pub const Bridge = struct {
         self.mutex.unlock();
     }
     pub fn hostExecutionStarted(self: *Bridge, invocation: host_tools.Invocation) void {
+        if (invocation.terminal_target != null) {
+            self.lock();
+            const running = self.running;
+            self.mutex.unlock();
+            if (running) |current| {
+                self.emitStep(current, .running, "");
+                return;
+            }
+        }
         self.emitHostStep(invocation, .running, "");
     }
     fn emitHostStep(self: *Bridge, invocation: host_tools.Invocation, phase: @import("../ai/step_events.zig").Phase, detail: []const u8) void {
@@ -765,6 +823,25 @@ pub const Bridge = struct {
             child.invocation_context.cancel = null;
         };
         self.emitStep(invocation, .assembling, "");
+        if (self.host_binding) |binding| {
+            if (binding.managed_local_files) {
+                if (terminal_files.managedHostId(invocation.parsed.entry.definition.id)) |host_id| {
+                    const target = try terminalTarget(invocation);
+                    if (std.mem.eql(u8, target.binding.plugin_id, "local")) {
+                        const results = try self.executeManagedTerminal(binding, invocation, target.owner, host_id, allocator, cancel);
+                        self.emitDynamicResults(invocation, results, allocator);
+                        return results;
+                    }
+                    // A mixed request advertises Local fields for Local IDs.
+                    // SSH continues to enforce its original schema and token.
+                    terminal_files.validateLegacyArguments(allocator, invocation.parsed.entry.definition.id, invocation.parsed.json.value, invocation.arguments.len) catch |err| {
+                        const results = try rejectedTerminal(allocator, invocation, target.owner, err);
+                        self.emitDynamicResults(invocation, results, allocator);
+                        return results;
+                    };
+                }
+            }
+        }
         var route_subject: approvals.Subject = undefined;
         var route_label: [128]u8 = undefined;
         var route_invocation: host_tools.Invocation = undefined;
@@ -806,6 +883,126 @@ pub const Bridge = struct {
             self.consumeHostRoute(route_invocation, target, route_subject.detail);
         }
         const results = try runtime.execute(invocation, allocator, cancel);
+        self.emitDynamicResults(invocation, results, allocator);
+        return results;
+    }
+
+    fn terminalTarget(invocation: tools.DynamicInvocation) !tools.TargetBinding {
+        if (invocation.parsed.targets.len != 1) return error.InvalidTargetCount;
+        const id = invocation.parsed.targets.slice()[0];
+        for (invocation.parsed.entry.targets) |target| {
+            if (@backingInt(target.owner.session_id) == id) return target;
+        }
+        return error.ToolCapabilityUnavailable;
+    }
+
+    /// Recheck the exact session target and service generation while the
+    /// shared host service prepares the operation and again before dispatch.
+    pub fn validateManagedTerminal(self: *Bridge, owner: identity.SessionHandle) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        if (self.stopped.load(.acquire) or self.queries_only) return error.CancelledBeforeDispatch;
+        const binding = self.host_binding orelse return error.ScopeChanged;
+        if (!binding.managed_local_files or binding.invoke_worker == null) return error.ToolNotAvailable;
+        const running = self.running orelse return error.ScopeChanged;
+        const context = running.table.host_context orelse return error.ScopeChanged;
+        if (!context.eql(binding.context)) return error.ScopeChanged;
+        const target = try terminalTarget(running);
+        if (!target.owner.eql(owner) or !std.mem.eql(u8, target.binding.plugin_id, "local")) return error.StaleToolAuthority;
+        if (terminal_files.managedContribution(binding.contributions, running.parsed.entry.definition.id) == null) return error.ToolNotAvailable;
+        if (running.dispatch_fence) |fence| try fence.check();
+        var current_scope = self.captured_scope orelse return error.ScopeChanged;
+        if (self.pending_binding) |pending| current_scope.owner = pending;
+        const member = for (self.children.items) |child| {
+            if (!child.owner.eql(owner)) continue;
+            if (child.managed_file_revoked) return error.ToolExecutionDenied;
+            break child.member;
+        } else return error.StaleToolAuthority;
+        try tools.preflight(running.table, running.parsed, current_scope, &.{member});
+        // The host broker owns confirmation against prepared file evidence.
+        // The terminal's independent permission check still gates access.
+        _ = try tools.callNeedsApproval(running.parsed, self.permissionPolicy(), current_scope.owner == .group);
+    }
+
+    fn executeManagedTerminal(self: *Bridge, binding: HostBinding, invocation: tools.DynamicInvocation, owner: identity.SessionHandle, host_id: []const u8, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) ![]tools.ToolResult {
+        self.validateManagedTerminal(owner) catch |err| return rejectedTerminal(allocator, invocation, owner, err);
+        if (cancel) |token| if (token.isCancelled()) return rejectedTerminal(allocator, invocation, owner, error.CancelledBeforeDispatch);
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var arguments: std.json.Value = .{ .object = .empty };
+        var fields = invocation.parsed.json.value.object.iterator();
+        while (fields.next()) |field| {
+            if (!std.mem.eql(u8, field.key_ptr.*, "session_ids")) try arguments.object.put(a, field.key_ptr.*, field.value_ptr.*);
+        }
+        if (std.mem.eql(u8, host_id, "host.local_write_text") and !arguments.object.contains("mode")) {
+            try arguments.object.put(a, "mode", .{ .string = "create" });
+        }
+        const contribution = terminal_files.managedContribution(binding.contributions, invocation.parsed.entry.definition.id) orelse return rejectedTerminal(allocator, invocation, owner, error.ToolNotAvailable);
+        const encoded = try std.json.Stringify.valueAlloc(a, arguments, .{});
+        if (encoded.len > contribution.definition.max_argument_bytes) return rejectedTerminal(allocator, invocation, owner, error.InvalidToolArguments);
+        const schema = try std.json.parseFromSliceLeaky(std.json.Value, a, contribution.definition.schema, .{});
+        tools.validateArguments(schema, arguments) catch |err| return rejectedTerminal(allocator, invocation, owner, err);
+        if (contribution.definition.validate) |validate| validate(arguments) catch |err| return rejectedTerminal(allocator, invocation, owner, err);
+        var raw_hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(encoded, &raw_hash, .{});
+        const request: host_tools.Invocation = .{
+            .dispatch_fence = invocation.dispatch_fence,
+            .workspace_revision = invocation.workspace_revision,
+            .terminal_target = owner,
+            .context = binding.context,
+            .authority = .local_files,
+            .operation_id = invocation.operation_id,
+            .turn_id = invocation.turn_id,
+            .call_id = invocation.call_id,
+            .tool_id = host_id,
+            .arguments = arguments,
+            .arguments_json = encoded,
+            .arguments_hash = raw_hash,
+            .canonical_arguments_hash = try @import("../ai/canonical_arguments.zig").digest(a, arguments),
+        };
+        var result = self.dispatchHost(request, allocator, cancel) catch |err| switch (err) {
+            error.ScopeChanged, error.CancelledBeforeDispatch, error.ToolNotAvailable, error.ToolExecutionDenied, error.PermissionDenied, error.StaleToolAuthority, error.WorkspaceChanged, error.ToolApprovalRejected => return rejectedTerminal(allocator, invocation, owner, err),
+            else => return err,
+        };
+        defer result.deinit(allocator);
+        try result.validate(request.context, request.operation_id);
+        if (result.images.len != 0) return error.InvalidHostToolResult;
+        const results = try allocator.alloc(tools.ToolResult, 1);
+        errdefer allocator.free(results);
+        const blocks = try allocator.alloc(tools.ContentBlock, result.blocks.len);
+        for (result.blocks, blocks) |block, *out| out.* = switch (block) {
+            .text => |value| .{ .text = value },
+            .structured => |value| .{ .structured = value },
+        };
+        allocator.free(result.blocks);
+        result.blocks = &.{};
+        results[0] = .{ .status = result.status, .blocks = blocks, .managed_local_file = true, .receipt = .{
+            .owner = owner,
+            .operation_id = request.operation_id,
+            .local_released = result.receipt.local_released,
+            .remote_effect_unknown = result.receipt.remote_effect_unknown,
+        } };
+        @import("../ai/tool_trace.zig").emit(.{ .event = "dynamic_result", .call_id = invocation.call_id, .tool_id = invocation.parsed.entry.definition.id, .owner = owner, .operation_id = request.operation_id, .status = result.status, .local_released = result.receipt.local_released, .remote_effect_unknown = result.receipt.remote_effect_unknown });
+        return results;
+    }
+
+    fn rejectedTerminal(allocator: std.mem.Allocator, invocation: tools.DynamicInvocation, owner: identity.SessionHandle, reason: anyerror) ![]tools.ToolResult {
+        const results = try allocator.alloc(tools.ToolResult, 1);
+        errdefer allocator.free(results);
+        const blocks = try allocator.alloc(tools.ContentBlock, 1);
+        errdefer allocator.free(blocks);
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = @errorName(reason), .side_effect_started = false, .committed = false }, .{});
+        blocks[0] = .{ .structured = body };
+        results[0] = .{
+            .status = if (reason == error.CancelledBeforeDispatch) .cancelled_unsent else .rejected,
+            .blocks = blocks,
+            .receipt = .{ .owner = owner, .operation_id = invocation.operation_id },
+        };
+        return results;
+    }
+
+    fn emitDynamicResults(self: *Bridge, invocation: tools.DynamicInvocation, results: []const tools.ToolResult, allocator: std.mem.Allocator) void {
         var detail: std.ArrayList(u8) = .empty;
         defer detail.deinit(allocator);
         var phase: @import("../ai/step_events.zig").Phase = .succeeded;
@@ -823,7 +1020,6 @@ pub const Bridge = struct {
             };
         }
         self.emitStep(invocation, phase, detail.items);
-        return results;
     }
     fn dynamicRouteResult(self: *Bridge, invocation: tools.DynamicInvocation, target: identity.SessionHandle, changed: host_tools.Result, allocator: std.mem.Allocator) ![]tools.ToolResult {
         var owned = changed;
@@ -1135,7 +1331,18 @@ pub const Bridge = struct {
         self.lock();
         defer self.mutex.unlock();
         if (self.pending) |pending| for (pending.invocation.parsed.targets.slice()) |id| if (id == @backingInt(owner.session_id)) return true;
-        return false;
+        const running = self.managedTerminalRunning(owner) orelse return false;
+        return running.parsed.entry.definition.effect == .resource_write;
+    }
+    /// Called under the bridge mutex.
+    fn managedTerminalRunning(self: *Bridge, owner: identity.SessionHandle) ?tools.DynamicInvocation {
+        const binding = self.host_binding orelse return null;
+        if (!binding.managed_local_files) return null;
+        const running = self.running orelse return null;
+        if (terminal_files.managedHostId(running.parsed.entry.definition.id) == null) return null;
+        const target = terminalTarget(running) catch return null;
+        if (!target.owner.eql(owner) or !std.mem.eql(u8, target.binding.plugin_id, "local")) return null;
+        return running;
     }
     pub fn closeImpact(self: *Bridge, owner: identity.SessionHandle) @import("group_close_controller.zig").Impact {
         var result: @import("group_close_controller.zig").Impact = .{};
@@ -1162,9 +1369,16 @@ pub const Bridge = struct {
             // Closing one member releases that member's authority. The group
             // conversation and unrelated tools keep their original Task.
             if (self.captured_scope) |captured| if (captured.owner == .session and captured.owner.session == @backingInt(owner.session_id)) self.stopped.store(true, .release);
+            self.lock();
             child.member.authorized = false;
+            const managed_running = self.managedTerminalRunning(owner) != null;
+            if (self.host_binding) |binding| {
+                if (binding.managed_local_files and std.mem.eql(u8, child.member.plugin_id, "local")) child.managed_file_revoked = true;
+            }
+            self.mutex.unlock();
             self.cancelOwnHistory(owner);
             if (child.adapter) |adapter| receipt = adapter.vtable.stop(adapter.context, owner);
+            if (managed_running and receipt == .released) receipt = .awaiting;
         };
         for (self.retired.items) |retained| {
             const current = retained.stopOwner(owner);

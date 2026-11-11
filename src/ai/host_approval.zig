@@ -14,7 +14,7 @@ pub const RouteSelection = struct {
     selectable: bool = false,
     reason: []const u8 = "按本次任务选择运行方式；只覆盖此命令。",
 };
-pub const SubjectKind = enum { network_url, lifecycle, terminal_command, mcp };
+pub const SubjectKind = enum { network_url, lifecycle, terminal_command, mcp, local_file };
 /// Display data comes from a trusted preflight, never an authorization decision.
 /// The owner still checks lifecycle grants, execution modes and live targets.
 pub const Subject = struct {
@@ -119,7 +119,7 @@ pub const Broker = struct {
         const saved = &entry.snapshot;
         const route_decided = if (saved.route) |route| !route.selectable and route.choice.route == route.proposed else true;
         const automatic = policy.mode == .auto and route_decided and !saved.requires_user_input and switch (saved.kind) {
-            .network_url, .lifecycle, .mcp => true,
+            .network_url, .lifecycle, .mcp, .local_file => true,
             .terminal_command => blk: {
                 const tool = saved.tool.text();
                 if (!std.mem.eql(u8, tool, "host.run_in_terminal") and !std.mem.eql(u8, tool, "run_command") and !std.mem.eql(u8, tool, "host.send_execution_input") and !std.mem.eql(u8, tool, "host.attach_shell")) break :blk false;
@@ -160,6 +160,8 @@ pub const Broker = struct {
             .mcp => if (invocation.authority != .conversation_context or (!std.mem.eql(u8, invocation.tool_id, "host.mcp_catalog") and !std.mem.eql(u8, invocation.tool_id, "host.mcp_call") and !std.mem.eql(u8, invocation.tool_id, "host.mcp_request"))) return error.InvalidHostApproval,
             .lifecycle => if (invocation.authority != .lifecycle) return error.InvalidHostApproval,
             .terminal_command => if (invocation.authority != .execution_control) return error.InvalidHostApproval,
+            .local_file => if (invocation.authority != .local_files or subject.evidence_hash == null or !std.fs.path.isAbsolute(subject.target) or std.mem.indexOfScalar(u8, subject.target, 0) != null or
+                (!std.mem.eql(u8, invocation.tool_id, "host.local_write_text") and !std.mem.eql(u8, invocation.tool_id, "host.local_edit_text"))) return error.InvalidHostApproval,
         }
         if (subject.route != null and subject.kind != .terminal_command) return error.InvalidHostApproval;
         const args = invocation.arguments;

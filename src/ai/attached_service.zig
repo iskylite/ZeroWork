@@ -28,9 +28,27 @@ pub const Host = struct {
     journal_io: ?*std.Io.Threaded = null,
     journal_dir: ?std.Io.Dir = null,
     data_root: ?[]u8 = null,
+    local_file_reference_key: ?@import("../host/local_file_reference.zig").Key = null,
     persistence_failure: ?anyerror = null,
     pub fn init(a: std.mem.Allocator) Host {
         return .{ .allocator = a, .service = runtime.Service.init(a), .presentations = legacy.Store.init(a) };
+    }
+    pub fn referenceProjection(self: *Host, conversation: identity.ConversationId) ?@import("../host/local_file_reference.zig").Projection {
+        const key = self.local_file_reference_key orelse return null;
+        var projection: @import("../host/local_file_reference.zig").Projection = .{ .key = key, .conversation = conversation };
+        var current = conversation;
+        while (projection.count < projection.ancestors.len) {
+            const record = self.service.store.find(current) orelse break;
+            const inherited = record.parent orelse if (record.child) |child|
+                if (child.info.context_source) |source| source.conversation else break
+            else
+                break;
+            if (inherited.eql(conversation) or projection.contains(inherited)) break;
+            projection.ancestors[projection.count] = inherited;
+            projection.count += 1;
+            current = inherited;
+        }
+        return projection;
     }
     pub fn bridgeFor(self: *Host, agent: identity.AgentId) ?*Bridge {
         for (self.bridges.items) |*bridge| if (bridge.agent.eql(agent) and !bridge.disposed) return bridge;
@@ -93,6 +111,10 @@ pub const Host = struct {
             const presentation = @import("conversation_presentation.zig");
             state.history = try presentation.restoreHistory(self.allocator, record.presentation, record.last_turn, record.history.messages);
         }
+        self.local_file_reference_key = @import("../host/local_file_reference.zig").loadOrCreate(io.io(), dir) catch |err| blk: {
+            std.log.warn("AI local file reference key unavailable: {s}", .{@errorName(err)});
+            break :blk null;
+        };
         self.journal_io = io;
         self.journal_dir = dir;
         self.data_root = root;

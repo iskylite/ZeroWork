@@ -19,6 +19,7 @@ pub const Options = struct {
     execution_policy: config.ExecutionPolicy,
     permission_mode: config.PermissionMode,
     host_contributions: []const host.Contribution,
+    local_workspace: ?@import("../ai/session_prompt.zig").WorkspaceView = null,
     /// Legacy compatibility only; captureSnapshot ignores inventory grants.
     inventory_grant: ?inventory.Grant = null,
 };
@@ -141,7 +142,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(revision_source, &digest, .{});
     const revision = std.mem.readInt(u64, digest[0..8], .little);
-    return .{ .context = context, .initial_binding = initial, .execution_policy = options.execution_policy, .permission_mode = options.permission_mode, .lifecycle_management = lifecycle_management, .observed_at = now, .source_revision = if (revision == 0) 1 else revision, .cursor_key = cursor_key, .sessions = sessions.items, .groups = groups.items, .inventory_grant = null };
+    return .{ .context = context, .initial_binding = initial, .execution_policy = options.execution_policy, .permission_mode = options.permission_mode, .lifecycle_management = lifecycle_management, .local_workspace = options.local_workspace, .observed_at = now, .source_revision = if (revision == 0) 1 else revision, .cursor_key = cursor_key, .sessions = sessions.items, .groups = groups.items, .inventory_grant = null };
 }
 
 fn appendClosed(a: std.mem.Allocator, sessions: *std.ArrayList(queries.Session), app: *Application, context: host.Context, handle: identity.SessionHandle, metadata: *const @import("../host/lifecycle_supervisor.zig").SessionMetadata, ownership: @import("../host/lifecycle_supervisor.zig").Ownership, ownership_revision: u64, retention: ?config.SessionRetention, owned_by_task: bool) !void {

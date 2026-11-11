@@ -31,6 +31,7 @@ pub const Context = struct {
 };
 pub const Prepared = struct {
     reasoning: ?*const @import("live_reasoning.zig").State = null,
+    file_references: ?@import("../host/local_file_reference.zig").Projection = null,
     provider: provider.Provider,
     request: provider.ChatRequest,
     scope: scope.Scope,
@@ -171,6 +172,7 @@ pub const Runner = struct {
     capture_final: bool = false,
     answer_only: bool = false,
     observation_only: bool = false,
+    local_files: task_budget.LocalFiles = .none,
 
     pub fn persistenceRetryDelayNs(self: *const Runner) u64 {
         return @intCast(@max(0, self.persistence_retry_at_ns - @import("../platform/realtime.zig").monotonicNs()));
@@ -239,7 +241,7 @@ pub const Runner = struct {
         var task_control: TaskControl = .{ .runner = self };
         var task_cancel: provider.CancelToken = .{ .source = .{ .context = &task_control, .poll = TaskControl.cancelled, .user_wait = TaskControl.userWait, .resource_wait = TaskControl.resourceWait } };
         request.cancel = &task_cancel;
-        var projection: Projection = .{ .allocator = self.allocator, .original = prepared.provider, .context = self.context.?, .historical_messages = self.historical_messages, .root = self.task_root.?, .slots = self.slots.?, .read_only = self.observation_only, .reasoning = prepared.reasoning };
+        var projection: Projection = .{ .allocator = self.allocator, .original = prepared.provider, .context = self.context.?, .historical_messages = self.historical_messages, .root = self.task_root.?, .slots = self.slots.?, .read_only = self.observation_only, .reasoning = prepared.reasoning, .file_references = prepared.file_references };
         const adapter: provider.Provider = .{ .ctx = &projection, .chat = Projection.chat, .models = Projection.models };
         if (self.answer_only) {
             if (self.worker.?.manager.tool_run) |loop| loop.request.cancel = &task_cancel;
@@ -299,6 +301,7 @@ pub const Runner = struct {
         slots: *task_budget.Slots,
         read_only: bool = false,
         reasoning: ?*const @import("live_reasoning.zig").State = null,
+        file_references: ?@import("../host/local_file_reference.zig").Projection = null,
         fn models(raw: *anyopaque, a: std.mem.Allocator) ![]provider.ModelInfo {
             const self: *@This() = @ptrCast(@alignCast(raw));
             return self.original.models(self.original.ctx, a);
@@ -311,6 +314,10 @@ pub const Runner = struct {
             var projected = request;
             projected.system = try std.fmt.allocPrint(a, "{s}\n本轮起始绑定版本 {d}，环境版本 {d}；当前范围以最新宿主上下文通知和工具表为准。历史环境的连接、目录、执行和审批标识不提供当前操作权；仅当前工具表及本轮查询可确定目标。", .{ request.system, self.context.fence.binding, self.context.fence.environment });
             const messages = try a.dupe(provider.Message, request.messages);
+            for (messages) |*message| {
+                if (self.file_references) |*projection| message.content = try projection.project(a, message.content, message.file_reference_spans);
+                message.file_reference_spans = &.{};
+            }
             for (messages[0..@min(self.historical_messages, messages.len)]) |*message| {
                 message.content = try std.fmt.allocPrint(a, "[历史环境，仅作记录]\n{s}", .{message.content});
                 message.image_owner = null;
@@ -448,6 +455,7 @@ pub const Service = struct {
         runner.parent_task = null;
         runner.root_task = null;
         runner.observation_only = false;
+        runner.local_files = .none;
         runner.auto_end = false;
         runner.end_when_idle = false;
         runner.pending_task = null;
@@ -470,6 +478,7 @@ pub const Service = struct {
         };
         runner.backend = backend;
         runner.observation_only = fact.read_only;
+        runner.local_files = fact.local_files;
         runner.context = null;
         runner.record = record;
         runner.commit_fence = try self.store.fence(record.id);
@@ -495,6 +504,33 @@ pub const Service = struct {
         if (runner.worker == null or runner.worker_released or !context.fence.conversation.eql(authority.conversation_id) or !context.task.eql(authority.task_id) or !runner.agent.owner.eql(authority.binding) or current_fence.binding != authority.binding_revision or !std.meta.eql(context.child_origin, authority.child_origin)) return error.ScopeChanged;
         return record;
     }
+    /// Controller-only capability check for both catalog publication and
+    /// dispatch. The caller supplies current application and parent policy.
+    pub fn localFiles(self: *Service, authority: @import("host_tools.zig").Context, host_ceiling: task_budget.LocalFiles, parent_ceiling: task_budget.LocalFiles) !task_budget.LocalFiles {
+        const record = try self.validateAuthority(authority);
+        const runner = self.runnerFor(record.binding.?.agent) orelse return error.ScopeChanged;
+        if (runner.answer_only or runner.worker.?.cancel.isCancelled()) return .none;
+        const available = host_ceiling.intersect(if (runner.observation_only) .read else .write);
+        if (record.child == null) return available;
+        if (runner.local_files == .none or !self.activeFileParent(runner)) return .none;
+        return available.intersect(parent_ceiling).intersect(runner.local_files);
+    }
+
+    fn activeFileParent(self: *Service, child: *Runner) bool {
+        const delegated_by = child.parent_task orelse return false;
+        const parent = child.agent.parent_binding orelse return false;
+        const parent_runner = self.runnerFor(parent.agent) orelse return false;
+        const context = parent_runner.context orelse return false;
+        const parent_fence = parent_runner.commit_fence orelse context.fence;
+        const worker = parent_runner.worker orelse return false;
+        if (!context.task.eql(delegated_by) or !parent_fence.eql(parent) or
+            parent_runner.worker_released or parent_runner.thread == null or
+            parent_runner.state.load(.acquire) != .running or worker.cancel.isCancelled())
+            return false;
+        _ = self.store.validateExecution(parent) catch return false;
+        return child.task_root == parent_runner.task_root;
+    }
+
     pub fn runnerFor(self: *Service, agent: identity.AgentId) ?*Runner {
         for (self.runners.items) |runner| if (runner.agent.id.eql(agent)) return runner;
         return null;
@@ -580,7 +616,7 @@ pub const Service = struct {
             runner.task_root = root;
         }
         runner.slots = &self.slots;
-        if (runner.pending_task == null) try runner.task_root.?.add(.{ .root = context.root_task, .task = context.task, .parent = context.parent_task, .conversation = record.id, .agent = runner.agent.id, .generation = runner.worker_generation, .read_only = runner.observation_only, .targets = if (runner.agent.role == .child) runner.agent.targets else null });
+        if (runner.pending_task == null) try runner.task_root.?.add(.{ .root = context.root_task, .task = context.task, .parent = context.parent_task, .conversation = record.id, .agent = runner.agent.id, .generation = runner.worker_generation, .read_only = runner.observation_only, .local_files = runner.local_files, .targets = if (runner.agent.role == .child) runner.agent.targets else null });
         record.task_pending = true;
         try runner.worker.?.approvals.configure(context.authority(), ticket.environment);
         runner.worker.?.questions.configure(context.authority());
@@ -760,11 +796,18 @@ pub const Service = struct {
         const root = runner.task_root.?;
         if (context.parent_task != null) {
             const next_task = identity.TaskId.generate();
-            try root.rollover(context.task, runner.task_outcome, .{ .root = context.root_task, .task = next_task, .parent = context.parent_task, .conversation = context.fence.conversation, .agent = runner.agent.id, .generation = try identity.advance(runner.worker_generation), .read_only = runner.observation_only, .targets = runner.agent.targets });
+            const ceiling: task_budget.LocalFiles = if (!self.activeFileParent(runner))
+                .none
+            else if (runner.observation_only or runner.task_outcome == .outcome_unknown)
+                .read
+            else
+                .write;
+            const local_files = runner.local_files.intersect(ceiling);
+            try root.rollover(context.task, runner.task_outcome, .{ .root = context.root_task, .task = next_task, .parent = context.parent_task, .conversation = context.fence.conversation, .agent = runner.agent.id, .generation = try identity.advance(runner.worker_generation), .read_only = runner.observation_only, .local_files = local_files, .targets = runner.agent.targets });
+            runner.local_files = local_files;
             runner.pending_task = next_task;
         } else try root.state(context.task, runner.task_outcome, "");
         runner.record.?.task_pending = false;
-        _ = self;
     }
     fn finishEnd(self: *Service, runner: *Runner, ending: lifecycle.End) !void {
         if (runner.controller_busy or runner.thread != null or runner.pending_commit or runner.pending_notify or !runner.saved or self.store.hasBoundChildren(ending.fence.conversation)) return;
@@ -789,6 +832,7 @@ pub const Service = struct {
         runner.context = null;
         runner.commit_fence = null;
         runner.has_tools = false;
+        runner.local_files = .none;
     }
     pub fn stop(self: *Service, ticket: input.Fence) !void {
         const record = try self.store.validate(ticket);

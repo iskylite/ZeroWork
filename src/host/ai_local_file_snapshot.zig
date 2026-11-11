@@ -1,6 +1,8 @@
 //! Selected host-local files: bounded type detection, text/image snapshots or a locator.
 const std = @import("std");
 const attachments = @import("../ai/local_text_attachments.zig");
+const paths = @import("local_path.zig");
+const text_snapshot = @import("ai_local_text_snapshot.zig");
 const images = @import("../ai/image_attachments.zig");
 const CancelToken = @import("../ai/provider.zig").CancelToken;
 pub const Result = union(enum) {
@@ -110,13 +112,12 @@ pub const probe_limit = 4096;
 pub fn capture(allocator: std.mem.Allocator, io: std.Io, path: []const u8, cancel: *const CancelToken) !Result {
     if (cancel.isCancelled()) return error.Cancelled;
     if (!std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAttachmentPath;
-    const before = try std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false });
-    if (before.kind != .file) return error.NotRegularLocalFile;
-    if (before.size > images.max_bytes) return .{ .file = try attachments.ContentRef.createLocalReference(allocator, path, .{ .reason = .size_limit, .size_bytes = before.size }) };
-    const file = try std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false, .follow_symlinks = false });
+    const target = try resolve(allocator, io, path);
+    defer target.deinit(allocator, io);
+    const file = try open(target, io);
     defer file.close(io);
     const opened = try file.stat(io);
-    if (changed(before, opened)) return error.LocalTextSourceChanged;
+    if (opened.size > images.max_bytes) return .{ .file = try pinnedReference(allocator, target, .{ .reason = .size_limit, .size_bytes = opened.size }) };
     var buffer: [probe_limit]u8 = undefined;
     var used: usize = 0;
     while (used < buffer.len) {
@@ -126,15 +127,20 @@ pub fn capture(allocator: std.mem.Allocator, io: std.Io, path: []const u8, cance
         used += count;
     }
     const after = try file.stat(io);
-    const path_after = try std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false });
-    if (changed(opened, after) or changed(before, path_after)) return error.LocalTextSourceChanged;
+    if (changed(opened, after)) return error.LocalTextSourceChanged;
+    try revalidate(target, io);
     if (cancel.isCancelled()) return error.Cancelled;
     const bytes = buffer[0..used];
     if (images.sniff(bytes)) |_| {
-        const image = @import("ai_image_snapshot.zig").capture(allocator, io, path, cancel, .{}) catch |err| switch (err) {
-            error.ImageTooLarge => return .{ .file = try attachments.ContentRef.createLocalReference(allocator, path, .{ .reason = .image_limit, .size_bytes = before.size }) },
+        var image = @import("ai_image_snapshot.zig").capture(allocator, io, target.absolute, cancel, .{}) catch |err| switch (err) {
+            error.ImageTooLarge => {
+                try revalidate(target, io);
+                return .{ .file = try pinnedReference(allocator, target, .{ .reason = .image_limit, .size_bytes = opened.size }) };
+            },
             else => return err,
         };
+        errdefer image.release();
+        try revalidate(target, io);
         return .{ .image = image };
     } else |_| {}
     // Containers and executables may begin with valid ASCII/UTF-8.
@@ -142,10 +148,10 @@ pub fn capture(allocator: std.mem.Allocator, io: std.Io, path: []const u8, cance
         std.mem.startsWith(u8, bytes, "PK\x03\x04") or std.mem.startsWith(u8, bytes, "PK\x05\x06") or
         std.mem.startsWith(u8, bytes, "PK\x07\x08") or std.mem.startsWith(u8, bytes, "%PDF-") or
         std.mem.startsWith(u8, bytes, "\x7fELF") or std.mem.startsWith(u8, bytes, "MZ");
-    if (binary) return .{ .file = try attachments.ContentRef.createLocalReference(allocator, path, .{ .size_bytes = before.size }) };
+    if (binary) return .{ .file = try pinnedReference(allocator, target, .{ .size_bytes = opened.size }) };
     var valid_utf8 = std.unicode.utf8ValidateSlice(bytes);
     // A bounded probe can split the final UTF-8 codepoint; EOF cannot.
-    if (!valid_utf8 and before.size > used) {
+    if (!valid_utf8 and opened.size > used) {
         for (1..@min(used + 1, 4)) |trim| {
             if (std.unicode.utf8ValidateSlice(bytes[0 .. used - trim])) {
                 valid_utf8 = true;
@@ -153,14 +159,50 @@ pub fn capture(allocator: std.mem.Allocator, io: std.Io, path: []const u8, cance
             }
         }
     }
-    if (!valid_utf8) return .{ .file = try attachments.ContentRef.createLocalReference(allocator, path, .{ .reason = .encoding, .size_bytes = before.size }) };
-    const text = @import("ai_local_text_snapshot.zig").capture(allocator, io, path, cancel) catch |err| switch (err) {
-        error.LocalTextTooLarge => return .{ .file = try attachments.ContentRef.createLocalReference(allocator, path, .{ .reason = .text_limit, .size_bytes = before.size }) },
-        error.BinaryLocalText => return .{ .file = try attachments.ContentRef.createLocalReference(allocator, path, .{ .size_bytes = before.size }) },
-        error.InvalidLocalTextEncoding => return .{ .file = try attachments.ContentRef.createLocalReference(allocator, path, .{ .reason = .encoding, .size_bytes = before.size }) },
+    if (!valid_utf8) return .{ .file = try pinnedReference(allocator, target, .{ .reason = .encoding, .size_bytes = opened.size }) };
+    const text = text_snapshot.captureOpen(allocator, io, target, file, opened, cancel) catch |err| switch (err) {
+        error.LocalTextTooLarge => return .{ .file = try pinnedReference(allocator, target, .{ .reason = .text_limit, .size_bytes = opened.size }) },
+        error.BinaryLocalText => return .{ .file = try pinnedReference(allocator, target, .{ .size_bytes = opened.size }) },
+        error.InvalidLocalTextEncoding => return .{ .file = try pinnedReference(allocator, target, .{ .reason = .encoding, .size_bytes = opened.size }) },
         else => return err,
     };
     return .{ .file = text };
+}
+/// Capture a locator after an explicitly selected image exceeds its limits.
+/// The picker callback only observes the file identity and size here.
+pub fn captureLocator(allocator: std.mem.Allocator, io: std.Io, path: []const u8, reason: attachments.LocalReference) !attachments.ContentRef {
+    const target = try resolve(allocator, io, path);
+    defer target.deinit(allocator, io);
+    const file = try open(target, io);
+    defer file.close(io);
+    var metadata = reason;
+    if (metadata.size_bytes == null) metadata.size_bytes = (try file.stat(io)).size;
+    try revalidate(target, io);
+    return pinnedReference(allocator, target, metadata);
+}
+
+fn pinnedReference(allocator: std.mem.Allocator, target: paths.Resolved, reason: attachments.LocalReference) !attachments.ContentRef {
+    return attachments.ContentRef.createPinnedLocalReference(allocator, target.requested, reason, .fromResolved(target));
+}
+
+fn resolve(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !paths.Resolved {
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidAttachmentPath;
+    return paths.resolve(allocator, io, .{ .path = path }, .file) catch |err| switch (err) {
+        error.NotRegularFile => error.NotRegularLocalFile,
+        else => err,
+    };
+}
+fn open(target: paths.Resolved, io: std.Io) !std.Io.File {
+    return target.openFile(io) catch |err| switch (err) {
+        error.SourceChanged => error.LocalTextSourceChanged,
+        else => err,
+    };
+}
+fn revalidate(target: paths.Resolved, io: std.Io) !void {
+    target.revalidate(io) catch |err| switch (err) {
+        error.SourceChanged => return error.LocalTextSourceChanged,
+        else => return err,
+    };
 }
 fn changed(before: std.Io.File.Stat, after: std.Io.File.Stat) bool {
     return before.kind != after.kind or before.inode != after.inode or before.size != after.size or !std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime);

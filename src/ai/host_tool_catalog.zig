@@ -3,6 +3,9 @@
 const host = @import("host_tools.zig");
 pub const all = [_]host.Contribution{@import("user_interaction.zig").contribution} ++
     @import("host_queries.zig").contributions ++
+    @import("host_local_files.zig").contributions ++
+    @import("host_local_file_mutation.zig").contributions ++
+    [_]host.Contribution{@import("local_file_change_query.zig").contribution} ++
     @import("host_catalog.zig").contributions ++
     @import("host_transfer.zig").contributions ++
     [_]host.Contribution{@import("child_gateway.zig").contribution} ++

@@ -411,17 +411,17 @@ test "AI approval long target stays readable in body with fixed header and decis
 
 fn hostSnapshot(kind: @import("ai/host_approval.zig").SubjectKind, detail: []const u8) @import("ai/host_approval.zig").Snapshot {
     var source: @import("ai/host_approval.zig").Snapshot = .{ .kind = kind, .target = .{}, .detail = .{}, .impact = .{}, .context = undefined, .authority = .local_network_read, .sequence = 1, .operation_id = 2, .turn_id = 1, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0), .tool = .{}, .call = .{}, .requested_url = .{}, .canonical_url = .{}, .network_policy_revision = 1, .created_at_ms = 0, .expires_at_ms = 1 };
-    if (kind == .mcp) {
-        const tool = "host.mcp_call";
+    if (kind == .mcp or kind == .local_file) {
+        const tool = if (kind == .mcp) "host.mcp_call" else "host.local_edit_text";
         @memcpy(source.tool.bytes[0..tool.len], tool);
         source.tool.len = tool.len;
-        source.authority = .conversation_context;
+        source.authority = if (kind == .mcp) .conversation_context else .local_files;
     }
     source.kind = kind;
     source.sequence = 1;
     source.operation_id = 2;
     source.context = .{ .conversation_id = @import("host/identity.zig").ConversationId.generate(), .task_id = @import("host/identity.zig").TaskId.generate(), .binding = .{ .session = 101 }, .binding_revision = 1, .grant_revision = 1 };
-    const target = "original@long-production-target.example.net";
+    const target = if (kind == .local_file) "/tmp/approval-fixture/note.txt" else "original@long-production-target.example.net";
     @memcpy(source.target.bytes[0..target.len], target);
     source.target.len = target.len;
     @memcpy(source.detail.bytes[0..detail.len], detail);
@@ -448,7 +448,7 @@ test "host approval all subjects keep icons titles and fixed decisions aligned a
     inline for (.{ .dark, .light, .sauber }) |name| {
         theme.select(name);
         for ([_]f32{ 600, 360 }) |width| {
-            inline for (.{ .network_url, .lifecycle, .terminal_command, .mcp }) |kind| {
+            inline for (.{ .network_url, .lifecycle, .terminal_command, .mcp, .local_file }) |kind| {
                 const cx = try ui.Cx.init(a, std.testing.io);
                 defer cx.deinit();
                 cx.setTheme(theme.widgetTheme(name));
@@ -476,17 +476,19 @@ test "host approval all subjects keep icons titles and fixed decisions aligned a
                     .lifecycle => "批准这次会话管理操作",
                     .terminal_command => "批准这次终端命令",
                     .mcp => "批准这次 MCP 调用",
+                    .local_file => "批准这次文件修改",
                 }, view.accept.behavior.interaction.a11y.?.label.?);
                 try std.testing.expectEqualStrings(switch (@as(@import("ai/host_approval.zig").SubjectKind, kind)) {
                     .network_url => "拒绝这次本机网络读取",
                     .lifecycle => "拒绝这次会话管理操作",
                     .terminal_command => "拒绝这次终端命令",
                     .mcp => "拒绝这次 MCP 调用",
+                    .local_file => "拒绝这次文件修改",
                 }, view.reject.behavior.interaction.a11y.?.label.?);
                 const title = view.title.globalRect();
                 const icon = (switch (@as(@import("ai/host_approval.zig").SubjectKind, kind)) {
                     .network_url => view.network_icon,
-                    .lifecycle => view.lifecycle_icon,
+                    .lifecycle, .local_file => view.lifecycle_icon,
                     .terminal_command => view.terminal_icon,
                     .mcp => view.network_icon,
                 }).globalRect();

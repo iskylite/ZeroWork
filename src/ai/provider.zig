@@ -25,7 +25,7 @@ pub const max_tool_arguments_bytes = 512 * 1024;
 
 /// Internal admission metadata. This never becomes a model-supplied parameter
 /// and does not by itself authorize dispatch; the captured host table does that.
-pub const ToolAuthority = enum { session_targets, conversation_context, lifecycle, execution_control, local_network_read };
+pub const ToolAuthority = enum { session_targets, conversation_context, lifecycle, execution_control, local_network_read, local_files };
 
 /// The host supplies a separate allowed target set for each real capability.
 /// Parameter schemas are fixed by Tool; callers cannot inject arbitrary JSON.
@@ -95,7 +95,11 @@ pub const ToolCall = struct {
 };
 pub const Message = struct {
     role: Role = .user,
+    /// Internal provenance; provider transports still encode the wire role.
+    origin: enum { user_or_tool, host_context_notice } = .user_or_tool,
     content: []const u8,
+    /// Offsets of host-issued locators only, never part of provider JSON.
+    file_reference_spans: []const @import("../host/local_file_reference.zig").Span = &.{},
     images: []const @import("image_attachments.zig").ContentRef = &.{},
     /// Retained evidence, never serialized as image input. Offload decisions
     /// belong to this occurrence and survive history copies/model changes.
@@ -169,6 +173,8 @@ pub const ChatRequest = struct {
     messages: []const Message,
     tools: []const ToolDefinition = &.{},
     tool_table: ?*const @import("plugin_tools.zig").RequestTable = null,
+    /// Controller snapshot associated with this request, never serialized on its own.
+    workspace_revision: ?u64 = null,
     /// Tool image results are an explicit model capability, separate from text tools.
     tool_images: bool = false,
     /// Explicit conservative admission reservation for image-capable custom

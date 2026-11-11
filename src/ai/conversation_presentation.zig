@@ -212,7 +212,7 @@ pub fn restoreHistory(a: std.mem.Allocator, bytes: ?[]const u8, through: u64, hi
     }
     if (result.items.len != 0) return result;
     for (history) |message| {
-        if (message.role == .tool or message.content.len == 0) continue;
+        if (message.origin == .host_context_notice or message.role == .tool or message.content.len == 0) continue;
         try result.ensureUnusedCapacity(a, 1);
         result.appendAssumeCapacity(.{ .user = message.role == .user, .text = try a.dupe(u8, message.content) });
     }

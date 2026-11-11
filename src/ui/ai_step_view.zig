@@ -12,6 +12,7 @@ pub const Props = struct {
     tool_arguments: ?[]const u8 = null,
     decision: ?bool = null,
     detail: []const u8,
+    detail_content: ?*ui.Node = null,
     copy_detail: bool = true,
     phase: events.Phase,
     elapsed_ms: u64,
@@ -54,7 +55,7 @@ const State = struct {
     follow: ?@import("ai_tail_follow.zig").Follow = null,
     restore_scroll: bool = true,
     fn update(self: *State, props: Props) !void {
-        if (self.props.scroll_position != props.scroll_position) return error.StepIdentityChanged;
+        if (self.props.scroll_position != props.scroll_position or self.props.detail_content != props.detail_content) return error.StepIdentityChanged;
         self.detail_value.set(props.detail);
         self.props = props;
         self.props.detail = self.detail_value.peek();
@@ -195,7 +196,7 @@ pub fn mountRetained(cx: *ui.Cx, scope: *ui.Scope, props: Props) !Result {
     scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{ .max = 150 } }, .flex_shrink = 0 });
     scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
     if (props.tool_name) |name| {
-        if (!std.mem.startsWith(u8, props.detail, "工具：")) {
+        if (props.detail_content == null and !std.mem.startsWith(u8, props.detail, "工具：")) {
             const tool_detail = try @import("ai_tool_titles.zig").detail(cx.allocator, name);
             defer cx.allocator.free(tool_detail);
             const tool = try ui.textStyled(cx, S.text, tool_detail);
@@ -206,6 +207,10 @@ pub fn mountRetained(cx: *ui.Cx, scope: *ui.Scope, props: Props) !Result {
     const detail_value = try scope.createText(props.detail, .{});
     const text = try ui.text(cx, if (props.expanded.* or props.copy_detail) props.detail else "", .{ .font_size = 11, .wrap = .word, .line_height = 16.0 / 11.0, .color = palette.fg_2 });
     try scroll.content.appendChild(cx.allocator, text);
+    if (props.detail_content) |body| {
+        text.setDisplay(.none);
+        try scroll.content.appendChild(cx.allocator, body);
+    }
     scroll.container.meta.ownership.meta.test_id = "ai.step.details";
     text.meta.ownership.meta.test_id = "ai.step.detail";
     if (props.copy_detail and props.detail.len > 0) {

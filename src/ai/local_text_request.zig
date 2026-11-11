@@ -2,7 +2,27 @@
 const std = @import("std");
 const attachments = @import("local_text_attachments.zig");
 const provider = @import("provider.zig");
+const references = @import("../host/local_file_reference.zig");
 pub fn compose(allocator: std.mem.Allocator, prompt: []const u8, bundle: *const attachments.Bundle, max_bytes: usize) ![]u8 {
+    return composeWithFileReferences(allocator, prompt, bundle, max_bytes, null);
+}
+
+pub const Projected = struct {
+    wire: []u8,
+    file_reference_spans: []const references.Span,
+
+    pub fn deinit(self: Projected, allocator: std.mem.Allocator) void {
+        allocator.free(self.wire);
+        allocator.free(self.file_reference_spans);
+    }
+};
+
+pub fn composeWithFileReferences(allocator: std.mem.Allocator, prompt: []const u8, bundle: *const attachments.Bundle, max_bytes: usize, key: ?references.Key) ![]u8 {
+    const projected = try composeProjected(allocator, prompt, bundle, max_bytes, key);
+    allocator.free(projected.file_reference_spans);
+    return projected.wire;
+}
+pub fn composeProjected(allocator: std.mem.Allocator, prompt: []const u8, bundle: *const attachments.Bundle, max_bytes: usize, key: ?references.Key) !Projected {
     var size = prompt.len;
     const headers = try allocator.alloc([]u8, bundle.items.len);
     var header_count: usize = 0;
@@ -10,10 +30,20 @@ pub fn compose(allocator: std.mem.Allocator, prompt: []const u8, bundle: *const 
         for (headers[0..header_count]) |header| allocator.free(header);
         allocator.free(headers);
     }
+    var spans: std.ArrayList(references.Span) = .empty;
+    defer spans.deinit(allocator);
     for (bundle.items, headers) |item, *header| {
         const content = item.reference.content() orelse return error.EmptyAttachmentResult;
-        header.* = try attachmentHeader(allocator, content);
+        const ref = if (bundle.conversation_id) |conversation| content.fileReference(conversation) else null;
+        const token = if (key != null and ref != null) try references.seal(allocator, key.?, ref.?) else null;
+        defer if (token) |value| allocator.free(value);
+        header.* = try attachmentHeader(allocator, content, token);
         header_count += 1;
+        if (token) |value| {
+            const offset = std.mem.lastIndexOf(u8, header.*, value).?;
+            const start = std.math.cast(u32, size +| offset) orelse return error.RequestTooLarge;
+            try spans.append(allocator, .{ .start = start, .len = @intCast(value.len) });
+        }
         size = std.math.add(usize, size, header.len + attachmentEnd(content).len) catch return error.RequestTooLarge;
         size = std.math.add(usize, size, content.bytes.len) catch return error.RequestTooLarge;
         if (size > max_bytes) return error.RequestTooLarge;
@@ -29,13 +59,14 @@ pub fn compose(allocator: std.mem.Allocator, prompt: []const u8, bundle: *const 
         try writer.writeAll(content.bytes);
         try writer.writeAll(attachmentEnd(content));
     }
-    return bytes;
+    try references.validateSpans(bytes, spans.items);
+    return .{ .wire = bytes, .file_reference_spans = try spans.toOwnedSlice(allocator) };
 }
 
-fn attachmentHeader(allocator: std.mem.Allocator, content: attachments.Content) ![]u8 {
+fn attachmentHeader(allocator: std.mem.Allocator, content: attachments.Content, token: ?[]const u8) ![]u8 {
     return switch (content.source) {
-        .local_file => std.fmt.allocPrint(allocator, "\n\n<local_text_attachment path=\"{s}\">\n", .{content.path}),
-        .local_reference => localReferenceHeader(allocator, content),
+        .local_file => localTextHeader(allocator, content, token),
+        .local_reference => localReferenceHeader(allocator, content, token),
         .remote_file => |source| if (source.reference_only)
             std.fmt.allocPrint(allocator, "\n\n<remote_file_reference>\nsource_session={d}\nsource_generation={d}\nsource_name={s}\npath={s}\nFile contents are not included. If needed, read with an available file tool for this source session. This is a remote path, not a local file.\n", .{ @backingInt(source.owner.session_id), source.owner.generation, source.source_name, content.path })
         else
@@ -46,7 +77,16 @@ fn attachmentHeader(allocator: std.mem.Allocator, content: attachments.Content) 
         },
     };
 }
-fn localReferenceHeader(allocator: std.mem.Allocator, content: attachments.Content) ![]u8 {
+fn localFileLocator(allocator: std.mem.Allocator, content: attachments.Content, token: ?[]const u8) ![]u8 {
+    const absolute = if (content.pinned_local) |pin| pin.absolute else if (std.fs.path.isAbsolute(content.path)) content.path else null;
+    return std.json.Stringify.valueAlloc(allocator, .{ .selected_path = content.path, .absolute_path = absolute, .file_ref = token }, .{ .emit_null_optional_fields = false });
+}
+fn localTextHeader(allocator: std.mem.Allocator, content: attachments.Content, token: ?[]const u8) ![]u8 {
+    const locator = try localFileLocator(allocator, content, token);
+    defer allocator.free(locator);
+    return std.fmt.allocPrint(allocator, "\n\n<local_text_attachment>\nlocator={s}\ntext:\n", .{locator});
+}
+fn localReferenceHeader(allocator: std.mem.Allocator, content: attachments.Content, token: ?[]const u8) ![]u8 {
     const reference = content.source.local_reference;
     const image_limits = @import("image_attachments.zig").Limits{};
     const byte_limit: ?usize = switch (reference.reason) {
@@ -54,8 +94,10 @@ fn localReferenceHeader(allocator: std.mem.Allocator, content: attachments.Conte
         .size_limit, .image_limit => image_limits.bytes,
         else => null,
     };
-    return std.fmt.allocPrint(allocator, "\n\n<local_file_reference>\nsource_kind=host_local\nsource_name=本机\nabsolute_path={s}\nreference_only=true\ncontent_included=false\nreason={s}\nfile_size_bytes={?d}\ncontent_limit_bytes={?d}\nimage_max_dimension={?d}\nimage_max_pixels={?d}\nsuggested_max_read_bytes=4096\nFile contents are not included. The reason and limits above explain why only a path was attached. Do not automatically read, load, upload or decode the entire file. If the user's task requires inspection, first inspect metadata and use bounded reads of at most 4096 bytes per call; do not automatically paginate through the entire file. Use an authorized tool explicitly targeting this host's local filesystem. Never pass this path to SSH, SFTP or another remote session's file tools. If no host-local tool is available, explain that you cannot read this file; do not substitute a remote path.\n", .{
-        content.path,                                                                        @tagName(reference.reason),                                                       reference.size_bytes, byte_limit,
+    const locator = try localFileLocator(allocator, content, token);
+    defer allocator.free(locator);
+    return std.fmt.allocPrint(allocator, "\n\n<local_file_reference>\nsource_kind=host_local\nsource_name=本机\nlocator={s}\nreference_only=true\ncontent_included=false\nreason={s}\nfile_size_bytes={?d}\ncontent_limit_bytes={?d}\nimage_max_dimension={?d}\nimage_max_pixels={?d}\nsuggested_max_read_bytes=4096\nFile contents are not included. The reason and limits above explain why only a path was attached. Do not automatically read, load, upload or decode the entire file. If the user's task requires inspection, first inspect metadata and use bounded reads of at most 4096 bytes per call; do not automatically paginate through the entire file. Use an authorized tool explicitly targeting this host's local filesystem. Never pass this path to SSH, SFTP or another remote session's file tools. If no host-local tool is available, explain that you cannot read this file; do not substitute a remote path.\n", .{
+        locator,                                                                             @tagName(reference.reason),                                                       reference.size_bytes, byte_limit,
         if (reference.reason == .image_limit) @as(?usize, image_limits.dimension) else null, if (reference.reason == .image_limit) @as(?usize, image_limits.pixels) else null,
     });
 }

@@ -3,6 +3,7 @@
 const std = @import("std");
 const attachments = @import("../ai/local_text_attachments.zig");
 const CancelToken = @import("../ai/provider.zig").CancelToken;
+const paths = @import("local_path.zig");
 const clock = @import("../platform/realtime.zig");
 
 /// One explicitly selected file, owned independently of the current AI pane.
@@ -106,15 +107,24 @@ pub const Reader = struct {
 pub fn capture(allocator: std.mem.Allocator, io: std.Io, selected_absolute_path: []const u8, cancel: *const CancelToken) !attachments.ContentRef {
     try check(cancel);
     if (!std.fs.path.isAbsolute(selected_absolute_path) or std.mem.indexOfScalar(u8, selected_absolute_path, 0) != null) return error.InvalidAttachmentPath;
-    const directory = std.Io.Dir.cwd();
-    const before = try directory.statFile(io, selected_absolute_path, .{ .follow_symlinks = false });
-    if (before.kind != .file) return error.NotRegularLocalText;
-    if (before.size > attachments.max_bytes) return error.LocalTextTooLarge;
-    try check(cancel);
-    const file = try std.Io.Dir.openFileAbsolute(io, selected_absolute_path, .{ .allow_directory = false, .follow_symlinks = false });
+    const target = paths.resolve(allocator, io, .{ .path = selected_absolute_path }, .file) catch |err| switch (err) {
+        error.NotRegularFile => return error.NotRegularLocalText,
+        else => return err,
+    };
+    defer target.deinit(allocator, io);
+    const file = target.openFile(io) catch |err| switch (err) {
+        error.SourceChanged => return error.LocalTextSourceChanged,
+        else => return err,
+    };
     defer file.close(io);
-    const opened = try file.stat(io);
-    if (changed(before, opened)) return error.LocalTextSourceChanged;
+    return captureOpen(allocator, io, target, file, try file.stat(io), cancel);
+}
+
+/// Reuse the selected descriptor after type detection. The path supplied by
+/// the picker is display metadata while the captured identity is authoritative.
+pub fn captureOpen(allocator: std.mem.Allocator, io: std.Io, target: paths.Resolved, file: std.Io.File, opened: std.Io.File.Stat, cancel: *const CancelToken) !attachments.ContentRef {
+    if (opened.kind != .file) return error.NotRegularLocalText;
+    if (opened.size > attachments.max_bytes) return error.LocalTextTooLarge;
     // One extra byte proves growth/oversize without unbounded reads.
     const buffer = try allocator.alloc(u8, attachments.max_bytes + 1);
     defer allocator.free(buffer);
@@ -128,13 +138,13 @@ pub fn capture(allocator: std.mem.Allocator, io: std.Io, selected_absolute_path:
     }
     if (used > attachments.max_bytes) return error.LocalTextTooLarge;
     const after = try file.stat(io);
-    const path_after = directory.statFile(io, selected_absolute_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return error.LocalTextSourceChanged,
+    if (changed(opened, after) or used != after.size) return error.LocalTextSourceChanged;
+    target.revalidate(io) catch |err| switch (err) {
+        error.SourceChanged => return error.LocalTextSourceChanged,
         else => return err,
     };
-    if (changed(opened, after) or changed(before, path_after) or used != after.size) return error.LocalTextSourceChanged;
     try check(cancel);
-    return attachments.ContentRef.create(allocator, selected_absolute_path, buffer[0..used], clock.milliseconds(undefined));
+    return attachments.ContentRef.createPinnedLocal(allocator, target.requested, buffer[0..used], clock.milliseconds(undefined), .fromResolved(target));
 }
 
 fn check(cancel: *const CancelToken) !void {

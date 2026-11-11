@@ -4,7 +4,7 @@ const ui = @import("ui");
 const std = @import("std");
 const S = @import("ai_assistant_styles.zig");
 const theme = @import("app_theme.zig");
-pub const View = struct { grip: *ui.Node, bar: *ui.Node, owner: *ui.Node, owner_pill: *ui.Node };
+pub const View = struct { grip: *ui.Node, bar: *ui.Node, owner: *ui.Node, owner_pill: *ui.Node, spacer: *ui.Node };
 pub fn mountCountBadge(cx: *ui.Cx, button: *ui.Node, test_id: []const u8) !*ui.Node {
     button.setStyleInline(cx.allocator, .{ .position = .relative });
     const badge = try ui.textStyled(cx, S.countBadgeText, "");
@@ -38,7 +38,8 @@ pub fn mount(cx: *ui.Cx, panel: *ui.Node, owner: []const u8) !View {
     pill.meta.ownership.meta.test_id = "ai.owner";
     try pill.appendChild(cx.allocator, label);
     try bar.appendChild(cx.allocator, pill);
-    try bar.appendChild(cx.allocator, try ui.spacer(cx));
+    const spacer = try ui.spacer(cx);
+    try bar.appendChild(cx.allocator, spacer);
     try panel.appendChild(cx.allocator, bar);
-    return .{ .grip = grip, .bar = bar, .owner = label, .owner_pill = pill };
+    return .{ .grip = grip, .bar = bar, .owner = label, .owner_pill = pill, .spacer = spacer };
 }

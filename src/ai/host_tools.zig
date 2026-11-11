@@ -54,6 +54,8 @@ pub const Contribution = struct {
 };
 pub const Invocation = struct {
     dispatch_fence: ?provider.DispatchFence = null,
+    workspace_revision: ?u64 = null,
+    terminal_target: ?identity.SessionHandle = null,
     context: Context,
     authority: provider.ToolAuthority,
     operation_id: u64,

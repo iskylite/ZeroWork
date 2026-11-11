@@ -32,10 +32,15 @@ pub const History = struct {
     /// An inline text edit keeps tool roles/results intact. A snapshot that
     /// predates the submission or has already compacted it is left untouched.
     pub fn editedUser(self: *const History, allocator: std.mem.Allocator, index: usize, original: []const u8, edited: []const u8) !?History {
+        return self.editedUserWithFileReferences(allocator, index, original, edited, &.{});
+    }
+
+    pub fn editedUserWithFileReferences(self: *const History, allocator: std.mem.Allocator, index: usize, original: []const u8, edited: []const u8, spans: @FieldType(provider.Message, "file_reference_spans")) !?History {
         if (index >= self.messages.len or self.messages[index].role != .user or !std.mem.eql(u8, self.messages[index].content, original)) return null;
         const messages = try allocator.dupe(provider.Message, self.messages);
         defer allocator.free(messages);
         messages[index].content = edited;
+        messages[index].file_reference_spans = spans;
         return try History.copy(allocator, messages, "");
     }
 
@@ -49,6 +54,7 @@ pub const History = struct {
         // Per-image decoding and per-request transport/context checks bound
         // external input. Retaining owned references is not a lifetime quota.
         for (source) |message| {
+            try @import("../host/local_file_reference.zig").validateSpans(message.content, message.file_reference_spans);
             for (message.images) |reference| if (reference.content() == null) return error.EmptyAttachmentResult;
             for (message.offloaded_images) |entry| if (entry.reference.content() == null) return error.EmptyAttachmentResult;
         }
@@ -59,6 +65,7 @@ pub const History = struct {
         for (source, 0..) |message, index| {
             var owned = message;
             owned.content = try a.dupe(u8, message.content);
+            owned.file_reference_spans = try a.dupe(@import("../host/local_file_reference.zig").Span, message.file_reference_spans);
             if (message.tool_call_id) |id| owned.tool_call_id = try a.dupe(u8, id);
             const calls = try a.alloc(provider.ToolCall, message.tool_calls.len);
             for (message.tool_calls, calls) |call, *clone| clone.* = .{ .id = try a.dupe(u8, call.id), .name = try a.dupe(u8, call.name), .arguments = try a.dupe(u8, call.arguments) };

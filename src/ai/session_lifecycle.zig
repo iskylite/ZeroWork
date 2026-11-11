@@ -6,14 +6,23 @@ const scope = @import("tool_scope.zig");
 const wire = @import("wire_history.zig");
 const provider = @import("provider.zig");
 const context_usage = @import("context_usage.zig");
+const local_workspace = @import("../host/local_workspace.zig");
 pub const input = @import("session_input.zig");
 pub const child = @import("child_agent.zig");
 pub const Role = enum { attached, child };
 pub const Binding = struct { agent: identity.AgentId, owner: scope.Owner };
 pub const End = struct { operation: identity.HostOperationId, fence: input.Fence, failed: bool = false };
 pub const Released = struct { worker_joined: bool, dispatch_closed: bool, local_released: bool, transcript_saved: bool };
+pub const WorkspaceChange = struct {
+    before_revision: u64,
+    reason: enum { set, changed, removed, unavailable, available },
+};
+pub const WorkspaceSource = struct {
+    conversation: identity.ConversationId,
+    snapshot: local_workspace.Snapshot,
+};
 pub const Event = struct {
-    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config },
+    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config, workspace_update, workspace_ack },
     conversation: identity.ConversationId,
     agent: ?identity.AgentId = null,
     owner: ?scope.Owner = null,
@@ -37,6 +46,10 @@ pub const Event = struct {
     children: ?[]const identity.ConversationId = null,
     task_fact: ?@import("task_budget.zig").Fact = null,
     initial_text: ?[]const u8 = null,
+    workspace: ?local_workspace.Snapshot = null,
+    workspace_source: ?WorkspaceSource = null,
+    workspace_change: ?WorkspaceChange = null,
+    workspace_ack_revision: ?u64 = null,
 };
 pub const Persistence = struct {
     context: *anyopaque,
@@ -58,6 +71,10 @@ pub const Record = struct {
     closed_revision: ?u64 = null,
     content_revision: u64 = 1,
     draft_revision: u64 = 1,
+    workspace: local_workspace.Snapshot = .{},
+    workspace_source: ?WorkspaceSource = null,
+    workspace_change: ?WorkspaceChange = null,
+    workspace_ack_revision: u64 = 1,
     history: wire.History = .{},
     presentation: ?[]u8 = null,
     recovery_history: wire.History = .{},
@@ -82,6 +99,8 @@ pub const Record = struct {
     child_settings_revision: u64 = 1,
     inbox: input.Inbox,
     fn deinit(self: *Record, a: std.mem.Allocator) void {
+        self.workspace.deinit(a);
+        if (self.workspace_source) |*source| source.snapshot.deinit(a);
         if (self.child_settings) |*settings| settings.deinit();
         if (self.child) |*owned| owned.deinit();
         self.history.deinit();
@@ -109,6 +128,7 @@ pub const Store = struct {
     records: std.ArrayList(*Record) = .empty,
     persist: ?Persistence = null,
     input_persist: ?input.Persist = null,
+    workspace_io: ?std.Io = null,
     budget: input.Budget = .{},
     task_facts: std.ArrayList(@import("task_budget.zig").Owned) = .empty,
 
@@ -197,6 +217,108 @@ pub const Store = struct {
         const record = self.find(expected.conversation).?;
         if (record.needs_recovery) return error.RecoveryRequired;
         return record;
+    }
+    pub fn setWorkspace(self: *Store, io: std.Io, expected: input.Fence, expected_revision: u64, directory: ?[]const u8) !bool {
+        const record = try self.validateExecution(expected);
+        if (record.workspace.revision != expected_revision) return error.WorkspaceChanged;
+        var next = if (directory) |path| try local_workspace.inspect(self.allocator, io, path) else local_workspace.Snapshot{};
+        defer next.deinit(self.allocator);
+        return self.applyWorkspaceSelection(io, record, expected, &next);
+    }
+    /// Accept a directory inspected by the host before first-conversation
+    /// migration. A saved selection takes ownership from the caller.
+    pub fn setInspectedWorkspace(self: *Store, io: std.Io, expected: input.Fence, expected_revision: u64, next: *local_workspace.Snapshot) !bool {
+        const record = try self.validateExecution(expected);
+        if (record.workspace.revision != expected_revision) return error.WorkspaceChanged;
+        try next.validate();
+        if (next.availability == .unavailable) return error.InvalidWorkspaceSnapshot;
+        return self.applyWorkspaceSelection(io, record, expected, next);
+    }
+    fn applyWorkspaceSelection(self: *Store, io: std.Io, record: *Record, expected: input.Fence, next: *local_workspace.Snapshot) !bool {
+        self.workspace_io = io;
+        if (record.workspace.sameTarget(next.*)) {
+            if (record.workspace.sameState(next.*)) return false;
+            var current = try local_workspace.recheck(self.allocator, io, record.workspace);
+            defer current.deinit(self.allocator);
+            // A different spelling can be equivalent, provided the original
+            // choice still resolves to the same usable directory.
+            if (record.workspace.sameState(current)) return false;
+        }
+        const before_revision = record.workspace.revision;
+        next.revision = try identity.advance(before_revision);
+        const reason: @FieldType(WorkspaceChange, "reason") = if (next.directory == null) .removed else if (record.workspace.directory == null) .set else .changed;
+        try self.saveWorkspace(record, expected, next, .{ .before_revision = before_revision, .reason = reason });
+        return true;
+    }
+    pub fn revalidateWorkspace(self: *Store, io: std.Io, expected: input.Fence) !bool {
+        const record = try self.validateExecution(expected);
+        self.workspace_io = io;
+        return self.revalidateBoundWorkspace(record, expected);
+    }
+    fn revalidateBoundWorkspace(self: *Store, record: *Record, expected: input.Fence) !bool {
+        var update = (try self.prepareWorkspaceRecheck(record.workspace)) orelse return false;
+        defer update.snapshot.deinit(self.allocator);
+        try self.saveWorkspace(record, expected, &update.snapshot, update.change);
+        return true;
+    }
+    /// Replay only rechecks bound conversations. Closed history continues to
+    /// display its saved preference until a user binds it again.
+    pub fn revalidateRecoveredWorkspaces(self: *Store, io: std.Io) !void {
+        self.workspace_io = io;
+        for (self.records.items) |record| {
+            if (!record.needs_recovery or record.binding == null) continue;
+            _ = try self.revalidateBoundWorkspace(record, try self.fence(record.id));
+        }
+    }
+    const WorkspaceUpdate = struct { snapshot: local_workspace.Snapshot, change: WorkspaceChange };
+    fn prepareWorkspaceRecheck(self: *Store, prior: local_workspace.Snapshot) !?WorkspaceUpdate {
+        if (prior.directory == null) return null;
+        const io = self.workspace_io orelse return error.WorkspaceIoUnavailable;
+        var checked = try local_workspace.recheck(self.allocator, io, prior);
+        errdefer checked.deinit(self.allocator);
+        if (prior.sameState(checked)) {
+            checked.deinit(self.allocator);
+            return null;
+        }
+        checked.revision = try identity.advance(prior.revision);
+        const reason: @FieldType(WorkspaceChange, "reason") = if (checked.availability == .unavailable) .unavailable else if (prior.availability == .unavailable) .available else .changed;
+        return .{ .snapshot = checked, .change = .{ .before_revision = prior.revision, .reason = reason } };
+    }
+    fn saveWorkspace(self: *Store, record: *Record, fence_value: input.Fence, next: *local_workspace.Snapshot, change: WorkspaceChange) !void {
+        try record.inbox.beginWorkspaceChange();
+        defer record.inbox.endWorkspaceChange();
+        try self.save(.{
+            .kind = .workspace_update,
+            .conversation = record.id,
+            .agent = fence_value.agent,
+            .revision = fence_value.binding,
+            .environment = fence_value.environment,
+            .workspace = next.*,
+            .workspace_change = change,
+        });
+        self.publishWorkspace(record, next, change);
+    }
+    fn publishWorkspace(self: *Store, record: *Record, next: *local_workspace.Snapshot, change: ?WorkspaceChange) void {
+        record.workspace.deinit(self.allocator);
+        record.workspace = next.*;
+        next.* = .{};
+        record.workspace_change = change;
+        record.inbox.setWorkspaceRevision(record.workspace.revision);
+    }
+    pub fn ackWorkspace(self: *Store, expected: input.Fence, revision: u64) !bool {
+        const record = try self.validate(expected);
+        if (revision > record.workspace.revision or revision == 0) return error.WorkspaceChanged;
+        if (revision <= record.workspace_ack_revision) return false;
+        try self.save(.{ .kind = .workspace_ack, .conversation = record.id, .agent = expected.agent, .revision = expected.binding, .environment = expected.environment, .workspace_ack_revision = revision });
+        record.workspace_ack_revision = revision;
+        return true;
+    }
+    fn inheritWorkspace(self: *Store, record: *Record, origin: WorkspaceSource) !void {
+        var checked = if (origin.snapshot.directory == null) local_workspace.Snapshot{} else try local_workspace.recheck(self.allocator, self.workspace_io orelse return error.WorkspaceIoUnavailable, origin.snapshot);
+        errdefer checked.deinit(self.allocator);
+        checked.revision = 1;
+        record.workspace_source = .{ .conversation = origin.conversation, .snapshot = try origin.snapshot.clone(self.allocator) };
+        self.publishWorkspace(record, &checked, null);
     }
     fn allocateRecord(self: *Store) !*Record {
         try self.records.ensureUnusedCapacity(self.allocator, 1);
@@ -329,7 +451,10 @@ pub const Store = struct {
         // A fresh never-used fork is also eligible for first binding.
         if (record.closed_revision == null and record.parent == null) return error.MissingEndReceipt;
         const revision = try identity.advance(record.revision);
-        try self.save(.{ .kind = .bind, .conversation = id, .agent = target.id, .owner = target.owner, .revision = revision, .environment = target.environment });
+        var update = try self.prepareWorkspaceRecheck(record.workspace);
+        defer if (update) |*pending| pending.snapshot.deinit(self.allocator);
+        try self.save(.{ .kind = .bind, .conversation = id, .agent = target.id, .owner = target.owner, .revision = revision, .environment = target.environment, .workspace = if (update) |pending| pending.snapshot else null, .workspace_change = if (update) |pending| pending.change else null });
+        if (update) |*pending| self.publishWorkspace(record, &pending.snapshot, pending.change);
         record.binding = .{ .agent = target.id, .owner = target.owner };
         record.revision = revision;
         target.current = id;
@@ -410,7 +535,11 @@ pub const Store = struct {
         origin: ?scope.Owner,
         history: wire.History,
         presentation: ?[]const u8 = null,
+        workspace: local_workspace.Snapshot,
+        workspace_allocator: std.mem.Allocator,
+
         pub fn deinit(self: *ForkSnapshot) void {
+            self.workspace.deinit(self.workspace_allocator);
             self.history.deinit();
         }
     };
@@ -423,7 +552,8 @@ pub const Store = struct {
         var history = try wire.History.copy(self.allocator, record.history.messages, "");
         errdefer history.deinit();
         const presentation = if (record.presentation) |bytes| try history.arena.?.allocator().dupe(u8, bytes) else null;
-        return .{ .source = source, .revision = record.content_revision, .turn = record.last_turn, .origin = record.initial_origin, .history = history, .presentation = presentation };
+        const workspace = try record.workspace.clone(self.allocator);
+        return .{ .source = source, .revision = record.content_revision, .turn = record.last_turn, .origin = record.initial_origin, .history = history, .presentation = presentation, .workspace = workspace, .workspace_allocator = self.allocator };
     }
     pub fn publishFork(self: *Store, pinned: *const ForkSnapshot, agent_id: ?identity.AgentId) !identity.ConversationId {
         const target = if (agent_id) |id| self.agent(id) orelse return error.AgentNotFound else null;
@@ -435,9 +565,12 @@ pub const Store = struct {
         errdefer snapshot.deinit();
         const record = try self.allocateRecord();
         errdefer record.deinit(self.allocator);
-        if (target != null) record.revision = try identity.advance(record.revision);
+        if (target != null) {
+            record.revision = try identity.advance(record.revision);
+            try self.inheritWorkspace(record, .{ .conversation = pinned.source, .snapshot = pinned.workspace });
+        }
         if (pinned.presentation) |bytes| record.presentation = try self.allocator.dupe(u8, bytes);
-        try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = pinned.source, .source_revision = pinned.revision, .turn = pinned.turn, .messages = snapshot.messages, .presentation = record.presentation, .agent = if (target) |agent_value| agent_value.id else null, .owner = if (target) |agent_value| agent_value.owner else null, .environment = if (target) |agent_value| agent_value.environment else 1, .initial_origin = pinned.origin });
+        try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = pinned.source, .source_revision = pinned.revision, .turn = pinned.turn, .messages = snapshot.messages, .presentation = record.presentation, .agent = if (target) |agent_value| agent_value.id else null, .owner = if (target) |agent_value| agent_value.owner else null, .environment = if (target) |agent_value| agent_value.environment else 1, .initial_origin = pinned.origin, .workspace = if (record.workspace_source != null) record.workspace else null, .workspace_source = record.workspace_source });
         record.history = snapshot;
         record.initial_origin = pinned.origin;
         record.parent = pinned.source;
@@ -483,9 +616,12 @@ pub const Store = struct {
         errdefer snapshot.deinit();
         const record = try self.allocateRecord();
         errdefer record.deinit(self.allocator);
-        if (target != null) record.revision = try identity.advance(record.revision);
+        if (target != null) {
+            record.revision = try identity.advance(record.revision);
+            try self.inheritWorkspace(record, .{ .conversation = parent.id, .snapshot = parent.workspace });
+        }
         if (parent.presentation) |bytes| record.presentation = try self.allocator.dupe(u8, bytes);
-        try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = parent.id, .source_revision = parent.content_revision, .turn = selected_checkpoint.turn, .messages = snapshot.messages, .presentation = record.presentation, .agent = if (target) |value| value.id else null, .owner = if (target) |value| value.owner else null, .environment = if (target) |value| value.environment else 1, .initial_origin = parent.initial_origin });
+        try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = parent.id, .source_revision = parent.content_revision, .turn = selected_checkpoint.turn, .messages = snapshot.messages, .presentation = record.presentation, .agent = if (target) |value| value.id else null, .owner = if (target) |value| value.owner else null, .environment = if (target) |value| value.environment else 1, .initial_origin = parent.initial_origin, .workspace = if (record.workspace_source != null) record.workspace else null, .workspace_source = record.workspace_source });
         record.history = snapshot;
         record.initial_origin = parent.initial_origin;
         record.parent = parent.id;
@@ -564,11 +700,12 @@ pub const Store = struct {
         errdefer self.allocator.destroy(agent_value);
         const info: child.Info = .{ .agent = identity.AgentId.generate(), .owning_parent_conversation = parent.conversation, .created_by_agent = parent.agent, .request_key = draft.request_key, .name = draft.name, .context_mode = draft.context_mode, .reusable = draft.reusable, .model = draft.model, .effort = draft.effort, .context_source = if (inherited) |snapshot| snapshot.source else null, .initial_context_hash = context_hash, .skill_ids = draft.skill_ids, .mcp_ids = draft.mcp_ids };
         record.child = try child.Owned.init(self.allocator, info);
+        try self.inheritWorkspace(record, .{ .conversation = parent_record.id, .snapshot = parent_record.workspace });
         if (inherited) |snapshot| record.history = try wire.History.copy(self.allocator, snapshot.messages, "");
         record.initial_origin = parent_record.initial_origin;
         record.historical_messages = record.history.messages.len;
         agent_value.* = .{ .id = info.agent, .owner = parent_record.binding.?.owner, .role = .child };
-        try self.save(.{ .kind = .child_create, .conversation = record.id, .revision = record.revision, .child_info = record.child.?.info, .parent_binding = parent, .messages = record.history.messages, .initial_origin = record.initial_origin });
+        try self.save(.{ .kind = .child_create, .conversation = record.id, .revision = record.revision, .child_info = record.child.?.info, .parent_binding = parent, .messages = record.history.messages, .initial_origin = record.initial_origin, .workspace = if (record.workspace_source != null) record.workspace else null, .workspace_source = record.workspace_source });
         self.agents.appendAssumeCapacity(agent_value);
         self.records.appendAssumeCapacity(record);
         return record;
@@ -613,7 +750,9 @@ pub const Store = struct {
         const old_closing = agent_value.closing;
         // Queued old inputs require an explicit disposition before model reuse.
         for (record.inbox.entries.items) |entry| if (!input.terminal(entry.receipt.delivery)) return error.SubmissionUnconfirmed;
-        const ticket = try self.bindChild(parent, agent_value.id, revision, live, targets);
+        var update = if (created) null else try self.prepareWorkspaceRecheck(record.workspace);
+        defer if (update) |*pending| pending.snapshot.deinit(self.allocator);
+        const ticket = try self.bindChildImpl(parent, agent_value.id, revision, live, targets, false);
         errdefer {
             record.binding = null;
             record.revision = revision;
@@ -633,14 +772,17 @@ pub const Store = struct {
         staged.budget = &self.budget;
         staged.next_sequence = record.inbox.next_sequence;
         staged.revision = record.inbox.revision;
+        staged.setWorkspaceRevision(record.workspace.revision);
         staged.queue_revision = record.inbox.queue_revision;
+        if (update) |pending| staged.setWorkspaceRevision(pending.snapshot.revision);
         defer staged.deinit();
         const receipt = try staged.admit(ticket, submission, .{ .content = text }, .queue);
         try record.inbox.entries.ensureUnusedCapacity(self.allocator, 1);
         fact.conversation = record.id;
         fact.agent = agent_value.id;
         try fact.validate();
-        if (original_persist) |persist| try persist.write(persist.context, .{ .kind = .child_launch, .conversation = record.id, .agent = agent_value.id, .owner = live.owner, .revision = record.revision, .environment = agent_value.environment, .child_info = if (created) record.child.?.info else null, .parent_binding = parent, .targets = agent_value.targets, .messages = if (created) record.history.messages else &.{}, .initial_origin = record.initial_origin, .initial_input = receipt, .initial_text = text, .task_fact = fact.* });
+        if (original_persist) |persist| try persist.write(persist.context, .{ .kind = .child_launch, .conversation = record.id, .agent = agent_value.id, .owner = live.owner, .revision = record.revision, .environment = agent_value.environment, .child_info = if (created) record.child.?.info else null, .parent_binding = parent, .targets = agent_value.targets, .messages = if (created) record.history.messages else &.{}, .initial_origin = record.initial_origin, .initial_input = receipt, .initial_text = text, .task_fact = fact.*, .workspace = if (update) |pending| pending.snapshot else if (created and record.workspace_source != null) record.workspace else null, .workspace_source = if (created) record.workspace_source else null, .workspace_change = if (update) |pending| pending.change else null });
+        if (update) |*pending| self.publishWorkspace(record, &pending.snapshot, pending.change);
         record.inbox.entries.appendAssumeCapacity(staged.entries.items[0]);
         record.inbox.revision = staged.revision;
         record.inbox.next_sequence = staged.next_sequence;
@@ -719,6 +861,9 @@ pub const Store = struct {
     /// Bind saved child data to the parent's CURRENT fence, never its creation
     /// AgentId. Exact handles are supplied/validated by the live host adapter.
     pub fn bindChild(self: *Store, parent: input.Fence, agent_id: identity.AgentId, revision: u64, live: scope.Scope, targets: []const identity.SessionHandle) !input.Fence {
+        return self.bindChildImpl(parent, agent_id, revision, live, targets, true);
+    }
+    fn bindChildImpl(self: *Store, parent: input.Fence, agent_id: identity.AgentId, revision: u64, live: scope.Scope, targets: []const identity.SessionHandle, revalidate: bool) !input.Fence {
         const record = try self.childFor(parent, agent_id);
         if (self.find(parent.conversation).?.transition != null) return error.TransitionPending;
         if (record.revision != revision) return error.BindingChanged;
@@ -738,7 +883,10 @@ pub const Store = struct {
         errdefer self.allocator.free(owned);
         const next = try identity.advance(record.revision);
         const environment = try identity.advance(agent_value.environment);
-        try self.save(.{ .kind = .child_bind, .conversation = record.id, .agent = agent_id, .owner = live.owner, .revision = next, .environment = environment, .parent_binding = parent, .targets = owned });
+        var update = if (revalidate) try self.prepareWorkspaceRecheck(record.workspace) else null;
+        defer if (update) |*pending| pending.snapshot.deinit(self.allocator);
+        try self.save(.{ .kind = .child_bind, .conversation = record.id, .agent = agent_id, .owner = live.owner, .revision = next, .environment = environment, .parent_binding = parent, .targets = owned, .workspace = if (update) |pending| pending.snapshot else null, .workspace_change = if (update) |pending| pending.change else null });
+        if (update) |*pending| self.publishWorkspace(record, &pending.snapshot, pending.change);
         self.allocator.free(agent_value.targets);
         agent_value.targets = owned;
         agent_value.parent_binding = parent;
@@ -845,6 +993,7 @@ pub const Store = struct {
             fresh.initial_origin = event.initial_origin;
             fresh.child = try child.Owned.init(self.allocator, info);
             fresh.history = try wire.History.copy(self.allocator, event.messages, "");
+            try self.replayWorkspace(fresh, event, parent.conversation);
             fresh.historical_messages = fresh.history.messages.len;
             agent_value.* = .{ .id = info.agent, .role = .child, .owner = parent_record.binding.?.owner, .closing = true };
             self.agents.appendAssumeCapacity(agent_value);
@@ -866,6 +1015,8 @@ pub const Store = struct {
         for (targets, 0..) |handle, i| ids[i] = @backingInt(handle.session_id);
         try validateTargets(.{ .owner = owner, .members = .{}, .inventory = ids[0..targets.len] }, targets);
         const owned_targets = try self.allocator.dupe(identity.SessionHandle, targets);
+        errdefer self.allocator.free(owned_targets);
+        try self.replayWorkspace(record, event, null);
         self.allocator.free(agent_value.targets);
         agent_value.targets = owned_targets;
         agent_value.current = record.id;
@@ -894,9 +1045,54 @@ pub const Store = struct {
         };
         return error.ConversationNotFound;
     }
+    fn replayWorkspace(self: *Store, record: *Record, event: Event, initial_source: ?identity.ConversationId) !void {
+        const value = event.workspace orelse {
+            if (event.workspace_change != null or event.workspace_source != null) return error.InvalidSessionJournal;
+            return;
+        };
+        value.validate() catch return error.InvalidSessionJournal;
+        if (initial_source) |source_id| {
+            const source = event.workspace_source orelse return error.InvalidSessionJournal;
+            if (event.workspace_change != null or value.revision != 1 or !source.conversation.eql(source_id) or !source.conversation.valid()) return error.InvalidSessionJournal;
+            source.snapshot.validate() catch return error.InvalidSessionJournal;
+            if (!std.meta.eql(source.snapshot.directory_identity, value.directory_identity)) return error.InvalidSessionJournal;
+            record.workspace_source = .{ .conversation = source.conversation, .snapshot = try source.snapshot.clone(self.allocator) };
+        } else {
+            const change = event.workspace_change orelse return error.InvalidSessionJournal;
+            if (event.workspace_source != null or change.before_revision != record.workspace.revision or value.revision != try identity.advance(change.before_revision)) return error.InvalidSessionJournal;
+            switch (change.reason) {
+                .set => if (record.workspace.availability != .none or value.availability != .ready) return error.InvalidSessionJournal,
+                .changed => if (record.workspace.availability == .none or value.availability != .ready) return error.InvalidSessionJournal,
+                .removed => if (record.workspace.availability == .none or value.availability != .none) return error.InvalidSessionJournal,
+                .unavailable => if (record.workspace.availability == .none or value.availability != .unavailable) return error.InvalidSessionJournal,
+                .available => if (record.workspace.availability != .unavailable or value.availability != .ready) return error.InvalidSessionJournal,
+            }
+        }
+        var owned = try value.clone(self.allocator);
+        self.publishWorkspace(record, &owned, event.workspace_change);
+    }
     /// Replay under the journal's exclusive writer lock, before attaching any
     /// worker. A saved binding is metadata, never recovered execution power.
     pub fn replay(self: *Store, event: Event) !void {
+        if (event.workspace_ack_revision != null and event.kind != .workspace_ack) return error.InvalidSessionJournal;
+        if (event.workspace != null or event.workspace_source != null or event.workspace_change != null) switch (event.kind) {
+            .workspace_update, .bind, .fork_bound, .child_create, .child_bind, .child_launch => {},
+            else => return error.InvalidSessionJournal,
+        };
+        if (event.kind == .workspace_update or event.kind == .workspace_ack) {
+            const record = self.find(event.conversation) orelse return error.InvalidSessionJournal;
+            const fence_value = self.fence(record.id) catch return error.InvalidSessionJournal;
+            if (!fence_value.agent.eql(event.agent orelse return error.InvalidSessionJournal) or fence_value.binding != event.revision or fence_value.environment != event.environment or event.messages.len != 0) return error.InvalidSessionJournal;
+            if (event.kind == .workspace_ack) {
+                const ack = event.workspace_ack_revision orelse return error.InvalidSessionJournal;
+                if (ack <= record.workspace_ack_revision or ack > record.workspace.revision) return error.InvalidSessionJournal;
+                record.workspace_ack_revision = ack;
+            } else {
+                if (event.workspace == null) return error.InvalidSessionJournal;
+                try self.replayWorkspace(record, event, null);
+            }
+            return;
+        }
         if (event.kind == .child_config) {
             const record = self.find(event.conversation) orelse return error.InvalidSessionJournal;
             const info = (record.child orelse return error.InvalidSessionJournal).info;
@@ -916,8 +1112,11 @@ pub const Store = struct {
             const receipt = event.initial_input orelse return error.InvalidSessionJournal;
             const text = event.initial_text orelse return error.InvalidSessionJournal;
             if (!fact.conversation.eql(event.conversation) or !fact.agent.eql(event.agent orelse return error.InvalidSessionJournal) or fact.parent == null or fact.generation == 0 or receipt.delivery != .queued or !receipt.fence.conversation.eql(event.conversation) or receipt.fence.binding != event.revision) return error.InvalidSessionJournal;
-            if (event.child_info != null) try self.replayChild(.{ .kind = .child_create, .conversation = event.conversation, .revision = 1, .child_info = event.child_info, .parent_binding = event.parent_binding, .messages = event.messages, .initial_origin = event.initial_origin });
-            try self.replayChild(.{ .kind = .child_bind, .conversation = event.conversation, .revision = event.revision, .agent = event.agent, .owner = event.owner, .environment = event.environment, .parent_binding = event.parent_binding, .targets = event.targets });
+            const created = event.child_info != null;
+            if (created) {
+                try self.replayChild(.{ .kind = .child_create, .conversation = event.conversation, .revision = 1, .child_info = event.child_info, .parent_binding = event.parent_binding, .messages = event.messages, .initial_origin = event.initial_origin, .workspace = event.workspace, .workspace_source = event.workspace_source, .workspace_change = event.workspace_change });
+            } else if (event.workspace_source != null) return error.InvalidSessionJournal;
+            try self.replayChild(.{ .kind = .child_bind, .conversation = event.conversation, .revision = event.revision, .agent = event.agent, .owner = event.owner, .environment = event.environment, .parent_binding = event.parent_binding, .targets = event.targets, .workspace = if (created) null else event.workspace, .workspace_change = if (created) null else event.workspace_change });
             try self.replayInput(receipt, &.{.{ .content = text }});
             try self.replay(.{ .kind = .task_fact, .conversation = fact.conversation, .revision = fact.sequence, .task_fact = fact });
             return;
@@ -933,7 +1132,7 @@ pub const Store = struct {
                     if (prior.fact.sequence >= fact.sequence or prior.fact.counters.requests > fact.counters.requests or prior.fact.counters.calls > fact.counters.calls or prior.fact.counters.elapsed_ns > fact.counters.elapsed_ns) return error.InvalidSessionJournal;
                 }
                 if (prior.fact.task.eql(fact.task)) {
-                    if (!prior.fact.root.eql(fact.root) or !prior.fact.agent.eql(fact.agent) or !prior.fact.conversation.eql(fact.conversation) or prior.fact.generation != fact.generation or !std.meta.eql(prior.fact.parent, fact.parent) or !std.mem.eql(u8, prior.fact.request_key, fact.request_key) or !std.mem.eql(u8, &prior.fact.input_hash, &fact.input_hash) or prior.fact.read_only != fact.read_only or !@import("../config/settings_schema.zig").same(prior.fact.targets, fact.targets)) return error.InvalidSessionJournal;
+                    if (!prior.fact.root.eql(fact.root) or !prior.fact.agent.eql(fact.agent) or !prior.fact.conversation.eql(fact.conversation) or prior.fact.generation != fact.generation or !std.meta.eql(prior.fact.parent, fact.parent) or !std.mem.eql(u8, prior.fact.request_key, fact.request_key) or !std.mem.eql(u8, &prior.fact.input_hash, &fact.input_hash) or prior.fact.read_only != fact.read_only or prior.fact.local_files != fact.local_files or !@import("../config/settings_schema.zig").same(prior.fact.targets, fact.targets)) return error.InvalidSessionJournal;
                     if (@import("task_budget.zig").terminal(prior.fact.status) and !@import("task_budget.zig").terminal(fact.status) and !(fact.status == .running and (prior.fact.status == .failed or prior.fact.status == .outcome_unknown) and fact.attempt == prior.fact.attempt + 1)) return error.InvalidSessionJournal;
                     existing = i;
                 }
@@ -973,12 +1172,14 @@ pub const Store = struct {
             if (event.draft) |text| fresh.draft = try self.allocator.dupe(u8, text);
             if (event.presentation) |bytes| fresh.presentation = try self.allocator.dupe(u8, bytes);
             fresh.history = try wire.History.copy(self.allocator, if (event.initial_input != null) &.{} else event.messages, "");
+            if (event.kind == .fork_bound) try self.replayWorkspace(fresh, event, event.parent orelse return error.InvalidSessionJournal);
             self.records.appendAssumeCapacity(fresh);
             record = fresh;
         }
         const value = record orelse return error.InvalidSessionJournal;
         switch (event.kind) {
             .create, .bind, .handoff, .fork_bound, .migrate_bound => {
+                if (event.kind == .bind) try self.replayWorkspace(value, event, null);
                 const aid = event.agent orelse return error.InvalidSessionJournal;
                 const owner = event.owner orelse return error.InvalidSessionJournal;
                 var target = self.agent(aid);
@@ -1072,7 +1273,7 @@ pub const Store = struct {
                 self.eraseRecord(value.id);
                 return;
             },
-            .task_fact, .child_launch, .child_config => unreachable,
+            .task_fact, .child_launch, .child_config, .workspace_update, .workspace_ack => unreachable,
             .remove => {
                 if (value.child != null or self.childCount(value.id) != 0) return error.InvalidSessionJournal;
                 if (value.binding != null) return error.InvalidSessionJournal;
@@ -1091,12 +1292,15 @@ pub const Store = struct {
     }
     pub fn replayInput(self: *Store, receipt: input.Receipt, messages: []const provider.Message) !void {
         const record = self.find(receipt.fence.conversation) orelse return error.InvalidSessionJournal;
-        if (messages.len != 1 or messages[0].role != .user or !receipt.id.valid() or !receipt.fence.agent.valid() or receipt.sequence == 0 or receipt.revision == 0 or receipt.fence.binding == 0 or receipt.fence.environment == 0) return error.InvalidSessionJournal;
+        if (messages.len != 1 or messages[0].role != .user or messages[0].origin != .user_or_tool or !receipt.id.valid() or !receipt.fence.agent.valid() or receipt.sequence == 0 or receipt.revision == 0 or receipt.fence.binding == 0 or receipt.fence.environment == 0) return error.InvalidSessionJournal;
+        if (receipt.workspace_revision) |revision| {
+            if (revision == 0 or revision > record.workspace.revision) return error.InvalidSessionJournal;
+        }
         var payload = try wire.History.copy(self.allocator, messages, "");
         errdefer payload.deinit();
         var entry = record.inbox.findLocked(receipt.id);
         if (entry) |prior| {
-            if (!prior.receipt.fence.eql(receipt.fence) or prior.receipt.sequence != receipt.sequence or prior.receipt.mode != receipt.mode or prior.receipt.revision > receipt.revision or prior.receipt.attempt > receipt.attempt or (input.terminal(prior.receipt.delivery) and prior.receipt.delivery != receipt.delivery)) return error.InvalidSessionJournal;
+            if (!prior.receipt.fence.eql(receipt.fence) or prior.receipt.sequence != receipt.sequence or prior.receipt.mode != receipt.mode or prior.receipt.workspace_revision != receipt.workspace_revision or prior.receipt.revision > receipt.revision or prior.receipt.attempt > receipt.attempt or (input.terminal(prior.receipt.delivery) and prior.receipt.delivery != receipt.delivery)) return error.InvalidSessionJournal;
         }
         if (entry == null) {
             try record.inbox.entries.ensureUnusedCapacity(self.allocator, 1);
@@ -1109,7 +1313,7 @@ pub const Store = struct {
         entry.?.payload = payload;
         entry.?.receipt = receipt;
         entry.?.receipt.archived = true;
-        entry.?.receipt.pause = .stop;
+        entry.?.receipt.pause = if ((receipt.delivery == .queued or receipt.delivery == .accepted) and (receipt.workspace_revision == null or receipt.workspace_revision.? != record.workspace.revision)) .workspace_changed else .stop;
         record.inbox.next_sequence = @max(record.inbox.next_sequence, try identity.advance(receipt.sequence));
         record.inbox.admission = false;
     }

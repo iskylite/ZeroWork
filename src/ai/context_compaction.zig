@@ -308,6 +308,7 @@ const Job = struct {
             if (source.len == 1) {
                 pieces = .{ source[0], source[0] };
                 pieces[1].content = "";
+                pieces[1].file_reference_spans = &.{};
                 pieces[1].tool_calls = &.{};
                 if (source[0].images.len > 1) {
                     const mid = source[0].images.len / 2;
@@ -319,6 +320,8 @@ const Job = struct {
                     if (mid == 0) return err;
                     pieces[0].content = source[0].content[0..mid];
                     pieces[1].content = source[0].content[mid..];
+                    // These snippets are no longer the original message span layout.
+                    pieces[0].file_reference_spans = &.{};
                     pieces[1].images = &.{};
                 }
                 split_source = &pieces;

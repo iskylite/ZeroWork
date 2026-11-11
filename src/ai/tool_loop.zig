@@ -5,6 +5,7 @@ const dynamic = @import("plugin_tools.zig");
 const provider = @import("provider.zig");
 const scope_mod = @import("tool_scope.zig");
 const permission = @import("permission.zig");
+const file_references = @import("../host/local_file_reference.zig");
 
 pub const Limits = struct {
     context_window: u32 = 8192,
@@ -124,7 +125,22 @@ pub const Host = struct {
     acknowledge_notice: ?*const fn (*anyopaque, u64, ?*provider.CancelToken) anyerror!void = null,
     accepted_host_result: ?*const fn (*anyopaque, dynamic.host.Context, []const u8, *const dynamic.host.Result, ?*provider.CancelToken) anyerror!void = null,
 };
-pub const AuthorityRefresh = struct { table: dynamic.RequestTable, notice: []const u8 = "", notice_revision: u64 = 0, system: ?[]const u8 = null };
+pub const AuthorityRefresh = struct {
+    table: dynamic.RequestTable,
+    notice: []const u8 = "",
+    notice_revision: u64 = 0,
+    system: ?[]const u8 = null,
+    workspace_revision: ?u64 = null,
+    publication: ?Publication = null,
+
+    /// The host prepares an owned candidate without advancing live authority.
+    /// publish adopts exactly that candidate or leaves live authority intact.
+    pub const Publication = struct {
+        context: *anyopaque,
+        publish: *const fn (*anyopaque, ?*provider.CancelToken) anyerror!void,
+        destroy: *const fn (*anyopaque) void,
+    };
+};
 
 pub const Record = struct {
     key: Key,
@@ -136,6 +152,7 @@ pub const Record = struct {
     generic_results: ?[]dynamic.ToolResult = null,
     host_result: ?dynamic.host.Result = null,
     result_body: ?[]const u8 = null,
+    file_reference_spans: []const file_references.Span = &.{},
 };
 pub const DispatchGate = provider.DispatchFence;
 pub const Loop = struct {
@@ -164,6 +181,8 @@ pub const Loop = struct {
     compaction_provider: ?provider.Provider = null,
     notice_revision: u64 = 0,
     wire_notice_revision: u64 = 0,
+    /// Keep undelivered notices in the transcript through further compaction.
+    pending_notice_start: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator, scope: scope_mod.Scope, turn_id: u64, limits: Limits) Loop {
         return .{ .allocator = allocator, .arena = .init(allocator), .scope = scope, .turn_id = turn_id, .limits = limits, .request = undefined };
@@ -222,6 +241,7 @@ pub const Loop = struct {
         for (input.messages) |message| {
             var owned = message;
             owned.content = try a.dupe(u8, message.content);
+            owned.file_reference_spans = try a.dupe(file_references.Span, message.file_reference_spans);
             if (message.tool_call_id) |id| owned.tool_call_id = try a.dupe(u8, id);
             owned.tool_calls = try self.copyCalls(message.tool_calls);
             owned.images = try a.dupe(@import("image_attachments.zig").ContentRef, message.images);
@@ -234,6 +254,10 @@ pub const Loop = struct {
         try self.checkBudget();
     }
     pub fn nextRequest(self: *Loop) !provider.ChatRequest {
+        try self.prepareNextRequest();
+        return self.frozenNextRequest();
+    }
+    pub fn prepareNextRequest(self: *Loop) !void {
         if (self.uncertain and !self.host_observation_only) return error.ToolOutcomeUnknown;
         if (self.host_observation_only or self.read_only) {
             var visible: std.ArrayList(provider.ToolDefinition) = .empty;
@@ -249,17 +273,22 @@ pub const Loop = struct {
             self.request.tools = try visible.toOwnedSlice(self.arena.allocator());
         }
         try self.checkBudget();
+    }
+    /// After the dispatch boundary, the request cannot compact, allocate, or
+    /// replace its workspace snapshot.
+    pub fn frozenNextRequest(self: *Loop) provider.ChatRequest {
         self.request.messages = self.messages.items;
         self.round_index +|= 1;
         return self.request;
     }
-    /// Called only after every call/result pair in the old provider batch is
-    /// complete. Historical keys keep their original owner and call IDs.
+    /// Called between provider requests, with every previous tool pair closed.
+    /// Historical keys keep their original owner and call IDs.
     pub fn refreshAuthority(self: *Loop, host: Host, cancel: ?*provider.CancelToken) !void {
         if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
         const refresh = host.refresh_authority orelse return;
         const previous = if (self.tool_table) |*table| table else return;
         var next = (try refresh(host.context, previous, self.allocator, cancel)) orelse return;
+        defer if (next.publication) |publication| publication.destroy(publication.context);
         var accepted = false;
         defer if (!accepted) next.table.deinit();
         defer self.allocator.free(next.notice);
@@ -280,15 +309,41 @@ pub const Loop = struct {
         candidate.tools = definitions;
         candidate.tool_table = &next.table;
         if (next.system) |system| candidate.system = try a.dupe(u8, system);
-        const notice = if (next.notice.len != 0) try a.dupe(u8, next.notice) else null;
-        if (notice) |text| {
-            try self.messages.ensureUnusedCapacity(a, 1);
-            const messages = try a.alloc(provider.Message, self.messages.items.len + 1);
-            @memcpy(messages[0..self.messages.items.len], self.messages.items);
-            messages[self.messages.items.len] = .{ .role = .user, .content = text };
-            candidate.messages = messages;
-        } else candidate.messages = self.messages.items;
+        if (next.workspace_revision) |revision| candidate.workspace_revision = revision;
+        const notice: ?provider.Message = if (next.notice.len != 0) .{ .role = .user, .content = try a.dupe(u8, next.notice), .origin = .host_context_notice } else null;
+        const with_notice = if (notice) |message| try self.transcriptWithTail(self.compactableMessages(), message) else null;
+        candidate.messages = with_notice orelse self.messages.items;
         try @import("provider_http.zig").validateToolMessages(candidate);
+
+        var compacted: @import("wire_history.zig").History = .{};
+        defer compacted.deinit();
+        var compacted_messages: ?[]provider.Message = null;
+        const budget = @import("local_text_request.zig");
+        budget.checkContext(candidate, self.limits.context_window) catch |err| {
+            if (err != error.ContextBudgetExceeded or self.compaction_config == null) return err;
+            var reserve = try budget.fixedTokens(candidate);
+            if (notice) |message| reserve += budget.draftTokens(message.content);
+            const output = budget.outputTokens(candidate.max_output, self.limits.context_window);
+            try budget.checkFixedBudget(reserve, output, self.limits.context_window);
+            // The new prompt, catalog and notice must fit alongside the summary.
+            // The summary itself receives only the previous transcript.
+            compacted = try self.generateCompaction(reserve + output, cancel);
+            const messages = try self.transcriptWithTail(compacted.messages, notice);
+            candidate.messages = messages;
+            budget.checkContext(candidate, self.limits.context_window) catch |reason| {
+                self.compaction_failure = reason;
+                return error.ContextCompactionFailed;
+            };
+            compacted_messages = messages;
+        };
+        if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
+        if (next.publication) |publication| try publication.publish(publication.context, cancel);
+        // No fallible work remains after the host adopts this authority.
+        if (compacted_messages) |messages| {
+            self.installCompaction(&compacted, messages);
+        } else if (with_notice) |messages| {
+            self.messages = .fromOwnedSlice(messages);
+        }
         self.tool_table.?.deinit();
         self.tool_table = next.table;
         accepted = true;
@@ -296,12 +351,12 @@ pub const Loop = struct {
         self.request.tools = definitions;
         self.request.tool_table = &self.tool_table.?;
         self.request.system = candidate.system;
-        if (notice) |text| {
-            self.messages.appendAssumeCapacity(.{ .role = .user, .content = text });
+        self.request.workspace_revision = candidate.workspace_revision;
+        if (notice != null) {
             self.notice_revision = next.notice_revision;
+            if (self.pending_notice_start == null) self.pending_notice_start = self.messages.items.len - 1;
         }
         self.request.messages = self.messages.items;
-        try self.checkBudget();
     }
     pub fn acknowledgeNotice(self: *Loop, host: Host, cancel: ?*provider.CancelToken) !void {
         if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
@@ -309,6 +364,7 @@ pub const Loop = struct {
         if (host.acknowledge_notice) |acknowledge| try acknowledge(host.context, self.notice_revision, cancel);
         if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
         self.wire_notice_revision = self.notice_revision;
+        self.pending_notice_start = null;
     }
     /// Called by the execution-side child gateway while its own call is still
     /// open. Excludes that ENTIRE assistant batch, including results of earlier
@@ -358,6 +414,7 @@ pub const Loop = struct {
         try self.messages.ensureUnusedCapacity(a, 1);
         var owned = message;
         owned.content = try a.dupe(u8, message.content);
+        owned.file_reference_spans = try a.dupe(file_references.Span, message.file_reference_spans);
         owned.images = try a.dupe(@import("image_attachments.zig").ContentRef, message.images);
         owned.offloaded_images = try a.dupe(provider.OffloadedImage, message.offloaded_images);
         var candidate = self.request;
@@ -372,6 +429,35 @@ pub const Loop = struct {
             try budget.checkContext(candidate, self.limits.context_window);
         };
         return owned;
+    }
+    pub fn prepareInputBatch(self: *Loop, values: []const provider.Message) ![]provider.Message {
+        const a = self.arena.allocator();
+        const owned = try a.alloc(provider.Message, values.len);
+        for (owned, values) |*out, value| {
+            out.* = value;
+            out.content = try a.dupe(u8, value.content);
+            out.file_reference_spans = try a.dupe(file_references.Span, value.file_reference_spans);
+            out.images = try a.dupe(@import("image_attachments.zig").ContentRef, value.images);
+            out.offloaded_images = try a.dupe(provider.OffloadedImage, value.offloaded_images);
+        }
+        if (owned.len == 0) return owned;
+        const budget = @import("local_text_request.zig");
+        try self.messages.ensureUnusedCapacity(a, owned.len);
+        var candidate = self.request;
+        candidate.messages = self.preparedInputTranscript(owned);
+        budget.checkContext(candidate, self.limits.context_window) catch |err| {
+            if (err != error.ContextBudgetExceeded or self.compaction_config == null) return err;
+            const extra = try budget.inputTokens(.{ .model = self.request.model, .system = "", .messages = owned, .max_output = self.request.max_output });
+            try self.compact((try budget.fixedTokens(self.request)) + extra);
+            try self.messages.ensureUnusedCapacity(a, owned.len);
+            candidate.messages = self.preparedInputTranscript(owned);
+            try budget.checkContext(candidate, self.limits.context_window);
+        };
+        return owned;
+    }
+    pub fn preparedInputTranscript(self: *Loop, values: []const provider.Message) []const provider.Message {
+        @memcpy(self.messages.unusedCapacitySlice()[0..values.len], values);
+        return self.messages.items.ptr[0 .. self.messages.items.len + values.len];
     }
     pub fn appendPrepared(self: *Loop, message: provider.Message) void {
         for (message.images) |reference| _ = reference.retain();
@@ -435,7 +521,9 @@ pub const Loop = struct {
             var refs: std.ArrayList(@import("image_attachments.zig").ContentRef) = .empty;
             var image_owner: ?@import("../host/identity.zig").SessionHandle = null;
             var image_transform: u64 = 0;
+            var reference_spans: []const file_references.Span = &.{};
             for (self.records.items) |resolved| if (std.mem.eql(u8, resolved.key.call_id, call.id)) {
+                reference_spans = resolved.file_reference_spans;
                 if (self.request.vision and self.request.tool_images) if (resolved.host_result) |result| for (result.images) |ref| try refs.append(a, ref);
                 if (resolved.generic_results) |results| for (results) |result| for (result.blocks) |block| if (block == .image_ref) {
                     try refs.append(a, block.image_ref);
@@ -453,7 +541,7 @@ pub const Loop = struct {
                 break;
             };
             const captured_images = try refs.toOwnedSlice(a);
-            try self.messages.append(a, .{ .role = .tool, .content = body, .tool_call_id = call.id, .images = captured_images, .image_owner = image_owner, .image_transform = image_transform });
+            try self.messages.append(a, .{ .role = .tool, .content = body, .tool_call_id = call.id, .images = captured_images, .image_owner = image_owner, .image_transform = image_transform, .file_reference_spans = reference_spans });
             for (captured_images) |reference| _ = reference.retain();
         }
         self.request.messages = self.messages.items;
@@ -581,8 +669,8 @@ pub const Loop = struct {
             return record.result_body.?;
         }
         record.dispatched = true;
-        const result = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
-            const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ExecutionDeadlineBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
+        const result = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .workspace_revision = self.request.workspace_revision, .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
+            const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.WorkspaceChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ExecutionDeadlineBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
             record.dispatched = !preflight;
             if (!preflight and affecting) self.uncertain = true;
             record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else if (!affecting) dynamic.Status.failed else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .side_effect_started = !preflight and affecting, .request_sent = if (parsed.entry.authority == .local_network_read and preflight) @as(?bool, false) else null, .local_released = preflight or !affecting, .remote_effect_unknown = !preflight and affecting }, .{});
@@ -615,8 +703,15 @@ pub const Loop = struct {
             .text => |text| .{ .type = "text", .text = text },
             .structured => |text| .{ .type = "structured", .text = try @import("execution_result_projection.zig").modelContent(self.arena.allocator(), parsed.entry.definition.id, text) },
         };
-        record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = result.status, .content = blocks, .receipt = result.receipt }, .{ .emit_null_optional_fields = false });
-        return record.result_body.?;
+        const a = self.arena.allocator();
+        const body = try std.json.Stringify.valueAlloc(a, .{ .status = result.status, .content = blocks, .receipt = result.receipt }, .{ .emit_null_optional_fields = false });
+        record.result_body = body;
+        if (result.status == .succeeded and std.mem.eql(u8, parsed.entry.definition.id, "host.local_read_text")) {
+            var located: file_references.ReceiptSpans = .{};
+            for (blocks) |block| try located.observe(a, body, block.text, std.mem.eql(u8, block.type, "structured"));
+            record.file_reference_spans = located.spans.items;
+        }
+        return body;
     }
     fn resolveDynamic(self: *Loop, record: *Record, table: *const dynamic.RequestTable, call: provider.ToolCall, host: Host, cancel: ?*provider.CancelToken) ![]const u8 {
         @import("tool_trace.zig").emit(.{ .event = "dynamic_invocation", .call_id = call.id, .tool_id = call.name, .owner = self.scope.owner, .arguments_hash = std.fmt.bytesToHex(record.arguments_hash, .lower) });
@@ -655,7 +750,7 @@ pub const Loop = struct {
         // call IDs remain correlation strings and never become network handles.
         const operation_id = next_dynamic_operation.fetchAdd(1, .monotonic);
         if (operation_id == 0 or operation_id == std.math.maxInt(u64)) return error.IdentityExhausted;
-        const results = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .table = table, .parsed = parsed, .turn_id = self.turn_id, .call_id = call.id, .arguments = call.arguments, .operation_id = operation_id }, self.allocator, cancel) catch |err| {
+        const results = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .workspace_revision = self.request.workspace_revision, .table = table, .parsed = parsed, .turn_id = self.turn_id, .call_id = call.id, .arguments = call.arguments, .operation_id = operation_id }, self.allocator, cancel) catch |err| {
             // Policy and approval rejection happen before any dispatch. Other
             // failures are conservatively unknown and never automatically replay.
             const preflight = err == error.ScopeChanged or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded or err == error.OperationHistoryFull or err == error.ModeConflict;
@@ -694,11 +789,28 @@ pub const Loop = struct {
                     break :blk .{ .type = "image_ref", .image_mime = image.mime.name(), .width = image.width, .height = image.height };
                 },
             };
-            if (result.status == .outcome_unknown or result.receipt.remote_effect_unknown or !result.receipt.local_released) self.uncertain = true;
+            if (result.status == .outcome_unknown or result.receipt.remote_effect_unknown or !result.receipt.local_released) {
+                if (!self.uncertain and result.managed_local_file) self.host_observation_only = true;
+                if (!result.managed_local_file) self.host_observation_only = false;
+                self.uncertain = true;
+            }
             target.* = .{ .session_id = id, .status = result.status, .content = blocks, .operation_id = result.receipt.operation_id, .local_released = result.receipt.local_released, .remote_effect_unknown = result.receipt.remote_effect_unknown };
         }
-        record.result_body = try std.json.Stringify.valueAlloc(a, .{ .targets = encoded }, .{ .emit_null_optional_fields = false });
-        return record.result_body.?;
+        const body = try std.json.Stringify.valueAlloc(a, .{ .targets = encoded }, .{ .emit_null_optional_fields = false });
+        record.result_body = body;
+        if (std.mem.eql(u8, parsed.entry.definition.id, "file.read_text")) {
+            const has_managed = for (results) |result| {
+                if (result.managed_local_file) break true;
+            } else false;
+            if (has_managed) {
+                var located: file_references.ReceiptSpans = .{};
+                for (results, encoded) |result, target| for (target.content) |block| {
+                    if (block.text) |value| try located.observe(a, body, value, result.managed_local_file and result.status == .succeeded and std.mem.eql(u8, block.type, "structured"));
+                };
+                record.file_reference_spans = located.spans.items;
+            }
+        }
+        return body;
     }
     var next_dynamic_operation: std.atomic.Value(u64) = .init(1);
     fn checkBudget(self: *Loop) !void {
@@ -714,9 +826,9 @@ pub const Loop = struct {
         const estimated = try budget.inputTokens(self.request);
         const output = budget.outputTokens(self.request.max_output, self.limits.context_window);
         if (self.compaction_failure != null) return error.ContextCompactionFailed;
-        if (self.compaction_config != null) {
+        if (self.compaction_config != null and (self.pending_notice_start == null or estimated + output > self.limits.context_window)) {
             const compaction = @import("context_compaction.zig");
-            if (compaction.reachesThreshold(estimated, output, self.limits.context_window) and compaction.cutoff(self.messages.items) != null) {
+            if (compaction.reachesThreshold(estimated, output, self.limits.context_window) and compaction.cutoff(self.compactableMessages()) != null) {
                 try self.compact(try budget.fixedTokens(self.request));
                 return;
             }
@@ -725,34 +837,64 @@ pub const Loop = struct {
     }
     /// Completed history can be compacted before admitting new user input.
     fn compact(self: *Loop, reserve: usize) !void {
-        var next = @import("context_compaction.zig").compactNowWithProvider(self.compaction_config.?, self.messages.items, reserve, self.request.cancel, self.compaction_provider) catch |err| {
+        const budget = @import("local_text_request.zig");
+        const output = if (self.pending_notice_start != null) budget.outputTokens(self.request.max_output, self.limits.context_window) else 0;
+        var next = try self.generateCompaction(reserve +| output, self.request.cancel);
+        defer next.deinit();
+        const owned = try self.transcriptWithTail(next.messages, null);
+        var next_request = self.request;
+        next_request.messages = owned;
+        budget.checkContext(next_request, self.limits.context_window) catch |err| {
+            self.compaction_failure = err;
+            return error.ContextCompactionFailed;
+        };
+        self.installCompaction(&next, owned);
+    }
+    fn compactableMessages(self: *const Loop) []const provider.Message {
+        return self.messages.items[0 .. self.pending_notice_start orelse self.messages.items.len];
+    }
+    fn transcriptWithTail(self: *Loop, prefix: []const provider.Message, extra: ?provider.Message) ![]provider.Message {
+        const tail = self.messages.items[self.compactableMessages().len..];
+        const messages = try self.arena.allocator().alloc(provider.Message, prefix.len + tail.len + @intFromBool(extra != null));
+        @memcpy(messages[0..prefix.len], prefix);
+        @memcpy(messages[prefix.len..][0..tail.len], tail);
+        if (extra) |message| messages[messages.len - 1] = message;
+        return messages;
+    }
+    fn generateCompaction(self: *Loop, reserve: usize, cancel: ?*provider.CancelToken) !@import("wire_history.zig").History {
+        const prefix = self.compactableMessages();
+        var tail = self.request;
+        tail.messages = self.messages.items[prefix.len..];
+        tail.system = "";
+        tail.tools = &.{};
+        const retained = try @import("local_text_request.zig").inputTokens(tail);
+        return @import("context_compaction.zig").compactNowWithProvider(self.compaction_config.?, prefix, reserve +| retained, cancel, self.compaction_provider) catch |err| {
             if (err == error.ContextFixedOverhead) return err;
             self.compaction_failure = err;
             return error.ContextCompactionFailed;
         };
-        errdefer next.deinit();
-        var next_request = self.request;
-        next_request.messages = next.messages;
-        @import("local_text_request.zig").checkContext(next_request, self.limits.context_window) catch |err| {
-            self.compaction_failure = err;
-            return error.ContextCompactionFailed;
-        };
-        const owned = try self.arena.allocator().dupe(provider.Message, next.messages);
-        for (self.messages.items) |message| for (message.images) |reference| {
+    }
+    fn installCompaction(self: *Loop, next: *@import("wire_history.zig").History, owned: []provider.Message) void {
+        // Pending notices and following input already own their references.
+        // Only the summarized prefix is replaced here.
+        const previous = self.compactableMessages();
+        for (previous) |message| for (message.images) |reference| {
             var ref = reference;
             ref.release();
         };
-        for (self.messages.items) |message| for (message.offloaded_images) |image| {
+        for (previous) |message| for (message.offloaded_images) |image| {
             var ref = image.reference;
             ref.release();
         };
         self.compacted.deinit();
-        self.compacted = next;
+        self.compacted = next.*;
+        next.* = .{};
         self.messages = .fromOwnedSlice(owned);
-        for (owned) |message| for (message.images) |reference| {
+        if (self.pending_notice_start != null) self.pending_notice_start = self.compacted.messages.len;
+        for (self.compacted.messages) |message| for (message.images) |reference| {
             _ = reference.retain();
         };
-        for (owned) |message| {
+        for (self.compacted.messages) |message| {
             for (message.offloaded_images) |image| _ = image.reference.retain();
         }
         self.request.messages = self.messages.items;

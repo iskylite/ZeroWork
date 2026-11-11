@@ -557,3 +557,86 @@ test "AI local text message snapshot cloning frees every failed allocation witho
     };
     try std.testing.checkAllAllocationFailures(a, Scenario.run, .{});
 }
+
+test "AI local text restored attachment pins its selected target and only host spans are rebound" {
+    const refs = @import("host/local_file_reference.zig");
+    const paths = @import("host/local_path.zig");
+    const request = @import("ai/local_text_request.zig");
+    const identity = @import("host/identity.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original snapshot" });
+    try tmp.dir.symLink(io, "original.txt", "selected\nname.txt", .{});
+    const selected = try pathIn(tmp.dir, "selected\nname.txt");
+    defer a.free(selected);
+    const absolute = try pathIn(tmp.dir, "original.txt");
+    defer a.free(absolute);
+    var token: CancelToken = .{};
+    var snapshot = try host.capture(a, io, selected, &token);
+    defer snapshot.release();
+    const content = snapshot.content().?;
+    try std.testing.expectEqualStrings(selected, content.path);
+    try std.testing.expectEqualStrings(absolute, content.pinned_local.?.absolute);
+
+    const saved = try std.json.Stringify.valueAlloc(a, content, .{});
+    defer a.free(saved);
+    try tmp.dir.rename("original.txt", tmp.dir, "previous.txt", io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "replacement on disk" });
+    const parsed = try std.json.parseFromSlice(attachments.Content, a, saved, .{});
+    defer parsed.deinit();
+    var restored = try attachments.ContentRef.restore(a, parsed.value);
+    defer restored.release();
+    try std.testing.expectEqualStrings("original snapshot", restored.content().?.bytes);
+
+    const original: identity.ConversationId = .{ .bytes = @splat(1) };
+    const copy: identity.ConversationId = .{ .bytes = @splat(2) };
+    const key = try refs.loadOrCreate(io, tmp.dir);
+    const old_ref = try refs.seal(a, key, restored.content().?.fileReference(original).?);
+    defer a.free(old_ref);
+    const prompt = try std.fmt.allocPrint(a, "Quoted user text {s}", .{old_ref});
+    defer a.free(prompt);
+    var items = [_]attachments.Item{.{ .id = 1, .reference = restored }};
+    const bundle: attachments.Bundle = .{ .allocator = a, .owner = .{ .session = 1 }, .conversation_id = original, .draft_epoch = 1, .items = &items };
+    const composed = try request.composeProjected(a, prompt, &bundle, 4096, key);
+    defer composed.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), composed.file_reference_spans.len);
+    const span = composed.file_reference_spans[0];
+    try std.testing.expect(span.start > prompt.len);
+    try std.testing.expect(std.mem.indexOf(u8, composed.wire, "selected\\nname.txt") != null);
+    try std.testing.expectEqualStrings(old_ref, composed.wire[span.start..][0..span.len]);
+
+    const unrelated: refs.Projection = .{ .key = key, .conversation = copy };
+    try std.testing.expectEqualStrings(composed.wire, try unrelated.project(a, composed.wire, composed.file_reference_spans));
+    var projection: refs.Projection = .{ .key = key, .conversation = copy, .count = 1 };
+    projection.ancestors[0] = original;
+    const outbound = try projection.project(a, composed.wire, composed.file_reference_spans);
+    defer a.free(outbound);
+    try std.testing.expect(std.mem.startsWith(u8, outbound, prompt));
+    try std.testing.expectEqualStrings(composed.wire[span.start + span.len ..], outbound[span.start + span.len ..]);
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const scoped = try refs.open(arena.allocator(), key, copy, outbound[span.start..][0..span.len]);
+    try std.testing.expectEqualStrings(absolute, scoped.absolute);
+    try std.testing.expectEqualStrings(selected, scoped.requested);
+    try std.testing.expectError(error.SourceChanged, paths.resolve(arena.allocator(), io, .{ .file_ref = scoped, .conversation = copy }, .file));
+}
+
+test "AI local text old attachments expose absolute paths without inventing identity" {
+    const request = @import("ai/local_text_request.zig");
+    var absolute = try attachments.ContentRef.create(a, "/original/location/readme.txt", "old bytes", 0);
+    defer absolute.release();
+    var relative = try attachments.ContentRef.create(a, "relative/readme.txt", "older bytes", 0);
+    defer relative.release();
+    var items = [_]attachments.Item{
+        .{ .id = 1, .reference = absolute },
+        .{ .id = 2, .reference = relative },
+    };
+    const bundle: attachments.Bundle = .{ .allocator = a, .owner = .{ .session = 1 }, .conversation_id = .{ .bytes = @splat(1) }, .draft_epoch = 1, .items = &items };
+    const composed = try request.composeProjected(a, "Read these", &bundle, 4096, @splat(8));
+    defer composed.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), composed.file_reference_spans.len);
+    try std.testing.expect(std.mem.indexOf(u8, composed.wire, "\"absolute_path\":\"/original/location/readme.txt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, composed.wire, "\"selected_path\":\"relative/readme.txt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, composed.wire, "\"absolute_path\":\"relative/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, composed.wire, "\"file_ref\"") == null);
+}

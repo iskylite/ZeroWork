@@ -848,3 +848,62 @@ test "AI reasoning controller edits apply to the next provider round of a runnin
     try std.testing.expectEqual(@as(usize, 2), fixture.controller_calls);
     try std.testing.expectEqual(@as(usize, 1), fixture.capture_count);
 }
+
+test "AI local file reference durable journal reopens a fork with its original bytes and authorized lineage" {
+    const refs = @import("host/local_file_reference.zig");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(path);
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    var key: refs.Key = undefined;
+    var original: identity.ConversationId = undefined;
+    var fork: identity.ConversationId = undefined;
+    var token: []const u8 = undefined;
+    var body: []const u8 = undefined;
+    var spans: [1]refs.Span = undefined;
+    const arguments = "{\"path\":\"relative.txt\"}";
+    {
+        var first = attached.Host.init(a);
+        defer first.deinit() catch unreachable;
+        try first.ensurePersistence(path);
+        key = first.local_file_reference_key orelse return error.ReferenceKeyUnavailable;
+        const agent = try first.service.store.attach(.{ .session = 7 });
+        const ticket = try first.service.store.create(agent.id);
+        original = ticket.conversation;
+        token = try refs.seal(temp, key, .{
+            .conversation = original,
+            .absolute = "/sample/relative.txt",
+            .requested = "relative.txt",
+            .identity = .{ .device = 1, .inode = 2 },
+        });
+        body = try std.fmt.allocPrint(temp, "receipt {s}", .{token});
+        spans = .{.{ .start = "receipt ".len, .len = @intCast(token.len) }};
+        try first.service.store.checkpoint(ticket, 1, &.{
+            .{ .content = "legacy prompt" },
+            .{ .role = .assistant, .content = "", .tool_calls = &.{.{ .id = "call", .name = "host__local_uread_utext", .arguments = arguments }} },
+            .{ .role = .tool, .content = body, .tool_call_id = "call", .file_reference_spans = &spans },
+        }, true);
+        fork = try first.service.store.fork(original, first.service.store.find(original).?.content_revision);
+    }
+    var reopened = attached.Host.init(a);
+    defer reopened.deinit() catch unreachable;
+    try reopened.ensurePersistence(path);
+    try std.testing.expectEqualSlices(u8, &key, &reopened.local_file_reference_key.?);
+    const stored = reopened.service.store.find(fork).?.history.messages;
+    try std.testing.expectEqualStrings("legacy prompt", stored[0].content);
+    try std.testing.expectEqual(@as(usize, 0), stored[0].file_reference_spans.len);
+    try std.testing.expectEqualStrings(arguments, stored[1].tool_calls[0].arguments);
+    try std.testing.expectEqualStrings(body, stored[2].content);
+    try std.testing.expectEqualSlices(refs.Span, &spans, stored[2].file_reference_spans);
+    const projection = reopened.referenceProjection(fork).?;
+    try std.testing.expect(projection.contains(original));
+    const projected = try projection.project(temp, stored[2].content, stored[2].file_reference_spans);
+    try std.testing.expectEqualStrings("receipt ", projected[0..spans[0].start]);
+    const locator = try refs.open(temp, key, fork, projected[spans[0].start..]);
+    try std.testing.expectEqualStrings("relative.txt", locator.requested);
+    try std.testing.expectError(error.InvalidFileReference, refs.open(temp, key, fork, token));
+}

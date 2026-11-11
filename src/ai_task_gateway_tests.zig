@@ -244,6 +244,115 @@ test "v0.4 task gateway atomic launch idempotency report delivery and worker set
     try std.testing.expectEqual(budget.Status.failed, parent.task_root.?.facts[3].status);
     try std.testing.expect(service.store.records.items[1].binding == null and !service.store.records.items[1].task_pending);
 }
+test "v0.4.3 child receives the current workspace and only explicitly delegated file capability" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "project", .default_dir);
+    try tmp.dir.createDir(io, "next", .default_dir);
+    const project = try tmp.dir.realPathFileAlloc(io, "project", a);
+    defer a.free(project);
+    const next = try tmp.dir.realPathFileAlloc(io, "next", a);
+    defer a.free(next);
+
+    var main: Fake = .{};
+    var child: Fake = .{};
+    var service = Runtime.Service.init(a);
+    defer service.deinit();
+    const parent = try service.attach(.{ .session = 11 }, main.backend());
+    const fence = try service.store.create(parent.agent.id);
+    try std.testing.expect(try service.store.setWorkspace(io, fence, 1, project));
+    _ = try service.submit(fence, .generate(), .{ .content = "parent" }, null);
+    try started(&main);
+    var factory: Factory = .{ .service = &service, .fake = &child };
+    const terminal: id.SessionHandle = .{ .session_id = @fromBackingInt(11) };
+    var env: gateway.Environment = .{
+        .service = &service,
+        .authority = parent.context.?.authority(),
+        .live = .{ .owner = parent.agent.owner, .members = .{}, .inventory = &.{11} },
+        .handles = &.{terminal},
+        .local_files = .read,
+        .factory = .{ .context = &factory, .install = Factory.install },
+    };
+    const reference = try @import("ai/host_queries.zig").sessionRef(a, env.authority, terminal);
+    defer a.free(reference);
+    const assign = try std.fmt.allocPrint(a, "{{\"action\":\"create\",\"request_key\":\"one\",\"name\":\"child\",\"text\":\"inspect the working directory\",\"session_refs\":[\"{s}\"],\"reusable\":true,\"local_files\":\"write\"}}", .{reference});
+    defer a.free(assign);
+    try std.testing.expectError(error.LocalFileAuthorityNotGranted, invoke(env, assign));
+    try std.testing.expectError(error.InvalidArguments, invoke(env, "{\"action\":\"list\",\"local_files\":\"read\"}"));
+    try std.testing.expectEqual(@as(usize, 1), service.store.records.items.len);
+
+    env.local_files = .write;
+    try std.testing.expectError(error.LocalFileAuthorityNotGranted, invoke(env, assign));
+    env.workspace_targets = &.{terminal};
+    try std.testing.expectError(error.LocalFileAuthorityNotGranted, invoke(env, "{\"action\":\"create\",\"request_key\":\"material\",\"name\":\"child\",\"text\":\"read files\",\"session_refs\":[],\"local_files\":\"read\"}"));
+    var response = try invoke(env, assign);
+    defer response.deinit(a);
+    try started(&child);
+    const receipt = try std.json.parseFromSlice(std.json.Value, a, response.blocks[0].structured, .{});
+    defer receipt.deinit();
+    const view = receipt.value.object.get("local_workspace").?.object;
+    try std.testing.expectEqualStrings(project, view.get("directory").?.string);
+    try std.testing.expectEqualStrings("ready", view.get("state").?.string);
+    const runner = service.runners.items[1];
+    const authority = runner.context.?.authority();
+    try std.testing.expectEqual(.write, try service.localFiles(authority, .write, .write));
+    try std.testing.expectEqual(.read, try service.localFiles(authority, .write, .read));
+    try std.testing.expectEqual(.none, try service.localFiles(authority, .write, .none));
+    try std.testing.expectEqual(.none, try service.localFiles(authority, .none, .write));
+    const scopes = try parent.task_root.?.childFileTasks(a, env.authority);
+    defer a.free(scopes);
+    try std.testing.expectEqual(@as(usize, 1), scopes.len);
+    try std.testing.expect(scopes[0].matches(authority));
+    try std.testing.expectError(error.ChildCannotDelegate, parent.task_root.?.childFileTasks(a, authority));
+
+    try std.testing.expect(try service.store.setWorkspace(io, fence, 2, next));
+    child.release.store(true, .release);
+    const start = (Clock{}).now();
+    while (parent.task_root.?.childrenRunning(parent.context.?.task)) {
+        try service.poll();
+        if ((Clock{}).now() - start > 3 * std.time.ns_per_s) return error.TestWorkerTimeout;
+        (Clock{}).sleep(std.time.ns_per_ms);
+    }
+    child.release.store(false, .release);
+    const reuse = try std.fmt.allocPrint(a, "{{\"action\":\"reuse\",\"request_key\":\"verify\",\"agent_id\":\"{s}\",\"text\":\"verify without writing\",\"session_refs\":[\"{s}\"],\"purpose\":\"verify\",\"local_files\":\"write\"}}", .{ std.fmt.bytesToHex(runner.agent.id.bytes, .lower), reference });
+    defer a.free(reuse);
+    var reused = try invoke(env, reuse);
+    defer reused.deinit(a);
+    const reread = try std.json.parseFromSlice(std.json.Value, a, reused.blocks[0].structured, .{});
+    defer reread.deinit();
+    try std.testing.expectEqualStrings(project, reread.value.object.get("local_workspace").?.object.get("directory").?.string);
+    try std.testing.expectEqualStrings("read", reread.value.object.get("task").?.object.get("local_files").?.string);
+    const verify_authority = runner.context.?.authority();
+    try std.testing.expectEqual(.read, try service.localFiles(verify_authority, .write, .write));
+    try std.testing.expectError(error.ScopeChanged, service.localFiles(authority, .write, .write));
+    try service.stop(fence);
+    try std.testing.expectEqual(.none, try service.localFiles(verify_authority, .write, .write));
+}
+
+test "v0.4.3 child task rollover cannot restore file writes after downgrade or an unknown result" {
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent = fact(.generate());
+    try root.add(parent);
+    var child = fact(parent.root);
+    child.task = .generate();
+    child.parent = parent.task;
+    child.local_files = .write;
+    try root.add(child);
+    var next = child;
+    next.task = .generate();
+    next.generation = 2;
+    try std.testing.expectError(error.InvalidTaskFact, root.rollover(child.task, .outcome_unknown, next));
+    next.local_files = .read;
+    try root.rollover(child.task, .outcome_unknown, next);
+    var later = next;
+    later.task = .generate();
+    later.generation = 3;
+    later.local_files = .write;
+    try std.testing.expectError(error.InvalidTaskFact, root.rollover(next.task, .succeeded, later));
+}
+
 test "v0.4 task gateway storage failure rolls back identity binding first input and root reservation" {
     const Failure = struct {
         fn write(_: *anyopaque, event: @import("ai/session_lifecycle.zig").Event) !void {
@@ -290,7 +399,7 @@ test "v0.4 task atomic child launch replays input and counters but never revives
     const task = id.TaskId.generate();
     var parent_fact: budget.Fact = .{ .root = task, .task = task, .conversation = fence.conversation, .agent = parent.id, .generation = 1 };
     try Life.Store.persistTask(&store, parent_fact);
-    var child_fact: budget.Fact = .{ .root = task, .task = .generate(), .parent = task, .conversation = .{}, .agent = .{}, .generation = 1, .sequence = 2, .request_key = "atomic", .read_only = true, .targets = &.{.{ .session_id = @fromBackingInt(11), .generation = 2 }} };
+    var child_fact: budget.Fact = .{ .root = task, .task = .generate(), .parent = task, .conversation = .{}, .agent = .{}, .generation = 1, .sequence = 2, .request_key = "atomic", .read_only = true, .local_files = .read, .targets = &.{.{ .session_id = @fromBackingInt(11), .generation = 2 }} };
     const child = try store.launchChild(fence, .{ .request_key = "atomic", .name = "child" }, null, null, .{ .owner = parent.owner, .members = .{}, .inventory = &.{11} }, child_fact.targets.?, .generate(), "must not auto run", &child_fact);
     parent_fact.sequence = 3;
     parent_fact.counters.requests = 2;
@@ -307,6 +416,7 @@ test "v0.4 task atomic child launch replays input and counters but never revives
     try std.testing.expectEqualStrings("must not auto run", recovered.inbox.entries.items[0].payload.messages[0].content);
     try std.testing.expectEqual(@as(usize, 2), restored.task_facts.items.len);
     try std.testing.expect(restored.task_facts.items[1].fact.read_only);
+    try std.testing.expectEqual(.read, restored.task_facts.items[1].fact.local_files);
     try std.testing.expectEqual(@as(u64, 2), restored.task_facts.items[1].fact.targets.?[0].generation);
     try restored.recoverTasks();
     for (restored.task_facts.items) |saved| {
@@ -324,6 +434,9 @@ test "v0.4 task atomic child launch replays input and counters but never revives
     forged.read_only = false;
     try std.testing.expectError(error.InvalidSessionJournal, second.replay(.{ .kind = .task_fact, .conversation = forged.conversation, .revision = forged.sequence, .task_fact = forged }));
     forged.read_only = true;
+    forged.local_files = .none;
+    try std.testing.expectError(error.InvalidSessionJournal, second.replay(.{ .kind = .task_fact, .conversation = forged.conversation, .revision = forged.sequence, .task_fact = forged }));
+    forged.local_files = .read;
     forged.targets = &.{.{ .session_id = @fromBackingInt(11), .generation = 3 }};
     try std.testing.expectError(error.InvalidSessionJournal, second.replay(.{ .kind = .task_fact, .conversation = forged.conversation, .revision = forged.sequence, .task_fact = forged }));
     var stale = parent_fact;

@@ -566,18 +566,18 @@ test "v0.4 child attachment drafts are keyed by conversation even under the same
     const fence = try store.create(parent.id);
     const one = try store.registerChild(fence, .{ .name = "one", .request_key = "one" }, null);
     const two = try store.registerChild(fence, .{ .name = "two", .request_key = "two" }, null);
-    const first = try presentations.createChildPresentation(one, live.owner);
-    const second = try presentations.createChildPresentation(two, live.owner);
+    const first_id = (try presentations.createChildPresentation(one, live.owner)).id;
+    const second_id = (try presentations.createChildPresentation(two, live.owner)).id;
     const parent_state = try presentations.get(live.owner);
-    const first_text = try presentations.attachmentDraftForState(first.id);
-    const second_text = try presentations.attachmentDraftForState(second.id);
+    const first_text = try presentations.attachmentDraftForState(first_id);
+    const second_text = try presentations.attachmentDraftForState(second_id);
     const parent_text = try presentations.attachmentDraft(live.owner);
     try std.testing.expect(first_text != second_text and first_text != parent_text);
     try std.testing.expect(first_text.conversation_id.?.eql(one.id) and second_text.conversation_id.?.eql(two.id));
-    const first_images = try presentations.imageDraftForState(first.id);
-    const second_images = try presentations.imageDraftForState(second.id);
+    const first_images = try presentations.imageDraftForState(first_id);
+    const second_images = try presentations.imageDraftForState(second_id);
     try std.testing.expect(first_images != second_images);
-    try std.testing.expect(parent_state.id != first.id and parent_state.id != second.id);
+    try std.testing.expect(parent_state.id != first_id and parent_state.id != second_id);
 }
 
 test "v0.4 child projection counts real workers, excludes human waits and retains unresolved attention" {

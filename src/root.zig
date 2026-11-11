@@ -409,6 +409,11 @@ comptime {
 
 test {
     _ = @import("host/terminal_files.zig");
+    _ = @import("host/local_file_commit.zig");
+    _ = @import("ai/local_file_operation.zig");
+    _ = @import("host/local_file_search.zig");
+    _ = @import("host/local_file_reads.zig");
+    _ = @import("ai/host_local_files.zig");
 }
 
 test {

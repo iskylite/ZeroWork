@@ -1,5 +1,7 @@
 /** Production Local file tools + native transcript images, with an owned HTTP
  * model fixture. No external model, user configuration, credentials or SFTP.
+ * node e2e/terminal_files_native.ts OUTPUT_DIR zig-out/bin/zerowork local --files-only
+ * Replace local with ssh and use a Python interpreter with Paramiko to test SSH.
  */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -11,7 +13,8 @@ import * as h from '../zig-out/share/zenit/harness/client.ts';
 const out=resolve(process.argv[2]??'/tmp/zerowork-terminal-files-verification/native');
 const binary=resolve(process.argv[3]??'zig-out/bin/zerowork');
 const ssh=process.argv[4]==='ssh';
-const fault=process.argv[5]??'none';assert(fault==='none'||ssh);
+const filesOnly=process.argv.includes('--files-only');
+const fault=process.argv[5]?.startsWith('--')?'none':process.argv[5]??'none';assert(fault==='none'||ssh);
 await mkdir(out,{recursive:true});
 const isolated=await realpath(await mkdtemp('/tmp/zw-terminal-files-native-'));
 const data=join(isolated,'data'),rpc=join(isolated,'rpc');await mkdir(data);await mkdir(rpc);
@@ -31,7 +34,7 @@ const frame=(delta:any,finish:any=null)=>'data: '+JSON.stringify({choices:[{inde
 function findVersion(value:any):string|null {
  if(typeof value==='string'){try{return findVersion(JSON.parse(value))}catch{return null}}
  if(!value||typeof value!=='object')return null;
- if(typeof value.version==='string'&&value.version.length===64&&value.text==='port=8080\n')return value.version;
+ if(typeof value.version==='string'&&(ssh?/^[0-9a-f]{64}$/:/^zw1:[0-9a-f]{64}$/).test(value.version)&&value.text==='port=8080\n')return value.version;
  for(const child of Object.values(value)){const found=findVersion(child);if(found)return found}return null;
 }
 const server=createServer(async(req,res)=>{
@@ -52,6 +55,7 @@ const server=createServer(async(req,res)=>{
    const tool=functions.find((f:any)=>f.name===name);assert(tool,`Missing ${name}`);
    const ids=tool.parameters.properties.session_ids.items.enum;assert(ids?.length===1);
    const args:any={session_ids:ids,path:target};
+   if(!ssh&&step!==1)args.request_key='terminal-file-fixture-'+step;
    if(step===0)args.text='port=8080\n';
    if(step===3){args.path=largeTarget;args.text='"'.repeat(65536);assert(JSON.stringify(args).length>65536)}
    if(step===2){args.expected_version=findVersion(body.messages.filter((m:any)=>m.role==='tool').at(-1));assert(args.expected_version);args.edits=[{old_text:'8080',new_text:'9090'}]}
@@ -72,13 +76,15 @@ const shown=(n:any)=>n&&n.hidden!==true&&n.visible!==false&&(n.effective_opacity
 const visible=async(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,20000);
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok,id)};
 const capture=async(name:string)=>{assert((await h.screenshot(join(out,name+'.png'))).ok);await writeFile(join(out,name+'.json'),JSON.stringify(await h.query('ai.panel'),null,2))};
+const approval='ai.interaction.panel';
+const approve='ai.interaction.approve';
 const submit=async(text:string)=>{await click('ai.prompt');await h.type_(text);await click('ai.send')};
 const report:any={status:'running',binary,isolated,transport:ssh?'ssh-exec':'local',fault,vision:process.env.ZW_TEST_VISION==='1',checks:[],input:'synthetic public Harness; screenshots are actual native Metal pixels'};
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
  await h.resizeWindow(1200,1000);await click(ssh?'sidebar.host':'workspace.empty.local');if(ssh)await click('sidebar.host.connect');await visible('terminal.surface');await h.sleep(1500);await click('toolbar.ai');
  await submit('执行文件与图片展示验收');
- await visible('ai.approval');await assert.rejects(readFile(target));await capture('01-create-approval');await click('ai.approval.accept');
+ await visible(approval);await assert.rejects(readFile(target));await capture('01-create-approval');await click(approve);
  if(fault!=='none'){
   if(fault.startsWith('cancel-')){
    await h.waitFor(async()=>{try{return JSON.parse(await readFile(join(peerDir!,'audit.json'),'utf8')).write_waiting>0||null}catch{return null}},15000);
@@ -90,25 +96,34 @@ try{
   const audit=JSON.parse(await readFile(join(peerDir!,'audit.json'),'utf8'));assert.equal(audit.exec_writes,1,'uncertain writes must never be retried');assert.equal(audit.shell_input_bytes,0);assert.equal(audit.sftp_requests,0);assert.deepEqual(audit.errors,[]);
   report.facts=facts;report.ssh_audit=audit;report.checks.push('Actual SSH fault preserves commit evidence/unknown outcome, performs no automatic retry, and injects no PTY input');await capture('02-fault-result');
  }else{
- await h.waitFor(async()=>step===3||null,15000);await visible('ai.approval');
+ await h.waitFor(async()=>step===3||null,15000);await visible(approval);
  assert.equal(await readFile(target,'utf8'),'port=8080\n');
- const diff=await visible('ai.approval.command');assert(diff.text.includes('− 8080')&&diff.text.includes('+ 9090'));
- const diffViewport=await visible('ai.approval.command_scroll');assert(diff.rect.h<=diffViewport.rect.h,'short edit must show both old and new text without scrolling');
- await capture('02-edit-approval');await click('ai.approval.accept');
- await h.waitFor(async()=>step===4||null,15000);await visible('ai.approval');await assert.rejects(readFile(largeTarget));await click('ai.approval.accept');
- await visible('ai.transcript.image.raster');assert.equal(await readFile(target,'utf8'),'port=9090\n');
+ const diff=await visible('ai.interaction.command');
+ assert(diff.text.includes('8080')&&diff.text.includes('9090'));
+ assert(diff.rect.h<=(await visible(approval)).rect.h,'short edit must show both old and new text without scrolling');
+ if(!ssh)assert.equal((await visible('ai.interaction.target')).text,target);
+ await capture('02-edit-approval');await click(approve);
+ await h.waitFor(async()=>step===4||null,15000);await visible(approval);await assert.rejects(readFile(largeTarget));await click(approve);
+ await visible('ai.turn.complete');
+ assert.equal(await readFile(target,'utf8'),'port=9090\n');
  assert.equal((await readFile(largeTarget)).length,65536,'full file passes streaming and subsequent provider serialization limits');
  assert.equal(await readFile(largeTarget,'utf8'),'"'.repeat(65536),'JSON escaping preserves every file byte');
- const fileTargets=await h.query('ai.tool.result.command');assert(fileTargets.length>=4);assert(fileTargets.every((n:any)=>n.text===target||n.text===largeTarget),'file history renders target paths while retaining original arguments');
+ report.checks.push(`Create/read/edit and a full 65536-byte file use actual approved ${ssh?'SSH exec':'Local'} tools`);
+ if(!filesOnly){
+ await visible('ai.transcript.image.raster');
+ if(ssh){
+  const fileTargets=await h.query('ai.tool.result.command');assert(fileTargets.length>=4);assert(fileTargets.every((n:any)=>n.text===target||n.text===largeTarget),'file history renders target paths while retaining original arguments');
+ }
  assert.equal((await h.query('ai.transcript.image')).length,1,'fenced Markdown does not load an image');
  const raster=await visible('ai.transcript.image.raster');assert(Math.abs(raster.rect.w-raster.rect.h)<1);assert(raster.rect.h<=240.5);
- await click('ai.maximize');await h.sleep(250);await capture('03-image-ready');report.checks.push(`Create/read/edit and a full 65536-byte file use actual approved ${ssh?'SSH exec':'Local'} tools; PNG renders with preserved aspect ratio in a text-only model conversation`);
+ await click('ai.maximize');await h.sleep(250);await capture('03-image-ready');report.checks.push('PNG renders with preserved aspect ratio in a text-only model conversation');
  const before=requests.length;await click('ai.transcript.image.open');await visible('ai.image.preview.panel');await capture('04-image-preview');await h.key('escape');assert.equal(requests.length,before);
  await writeFile(picture,'invalid image');await click('ai.transcript.image.reload');
  await h.waitFor(async()=>{const n=(await h.query('ai.transcript.image.status')).find(shown);return n?.text==='不支持此图片格式或动画'?n:null},15000);await capture('05-image-failure');
  await copyFile('assets/macos/AiAssistant.png',picture);await click('ai.transcript.image.reload');await visible('ai.transcript.image.raster');assert.equal(requests.length,before);report.checks.push('Open/reload/error/retry perform no model requests');
  await submit('继续验证上下文');await h.waitFor(async()=>turn===2&&!(await h.query('ai.stop')).some(shown)||null,15000);
  assert(requests.length>before);assert(JSON.stringify(requests.at(-1).messages).includes(picture));await capture('06-text-only-followup');report.checks.push('Subsequent provider request contains the path and no image payload');
+ }
  if(ssh){const audit=JSON.parse(await readFile(join(peerDir!,'audit.json'),'utf8'));assert(audit.exec_reads>=7&&audit.exec_writes===3);assert(audit.stdin_bytes>=65536);assert.equal(audit.sftp_requests,0);assert.equal(audit.shell_input_bytes,0);assert.deepEqual(audit.errors,[]);report.ssh_audit=audit}
  }
  report.status='passed';

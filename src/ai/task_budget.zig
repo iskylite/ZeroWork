@@ -47,6 +47,18 @@ pub const Counters = struct {
         return fromStored(try std.json.innerParseFromValue(Stored, allocator, value, options));
     }
 };
+/// A child assignment is an upper bound. The controller checks the live
+/// host and parent policy again before publishing or dispatching a file call.
+pub const LocalFiles = enum(u8) {
+    none,
+    read,
+    write,
+
+    pub fn intersect(self: LocalFiles, other: LocalFiles) LocalFiles {
+        return @fromBackingInt(@intCast(@min(@backingInt(self), @backingInt(other))));
+    }
+};
+
 pub const Fact = struct {
     root: id.TaskId,
     task: id.TaskId,
@@ -68,9 +80,21 @@ pub const Fact = struct {
     created_at_ms: i64 = 0,
     changed_at_ms: i64 = 0,
     read_only: bool = false,
+    local_files: LocalFiles = .none,
     targets: ?[]const id.SessionHandle = null,
+    pub fn jsonStringify(self: Fact, writer: *std.json.Stringify) !void {
+        try writer.beginObject();
+        inline for (@typeInfo(Fact).@"struct".field_names) |name| {
+            if (!(comptime std.mem.eql(u8, name, "local_files")) or self.local_files != .none) {
+                try writer.objectField(name);
+                try writer.write(@field(self, name));
+            }
+        }
+        try writer.endObject();
+    }
     pub fn validate(self: Fact) !void {
         if (!self.root.valid() or !self.task.valid() or !self.conversation.valid() or !self.agent.valid() or self.generation == 0 or self.sequence == 0 or self.attempt == 0 or self.summary.len > 4096 or self.request_key.len > 128 or !std.unicode.utf8ValidateSlice(self.summary) or !std.unicode.utf8ValidateSlice(self.request_key)) return error.InvalidTaskFact;
+        if ((self.parent == null and self.local_files != .none) or (self.read_only and self.local_files == .write)) return error.InvalidTaskFact;
         if (self.targets) |targets| {
             if (targets.len > 32) return error.InvalidTaskFact;
             for (targets, 0..) |target, i| {
@@ -226,6 +250,10 @@ pub const Root = struct {
         const index_ = try self.index(previous);
         const prior = self.facts[index_];
         if (prior.parent == null or !std.meta.eql(prior.parent, original.parent) or !prior.agent.eql(original.agent) or !prior.conversation.eql(original.conversation) or !prior.root.eql(original.root) or !terminal(outcome) or original.task.eql(previous)) return error.InvalidTaskFact;
+        if (original.local_files.intersect(prior.local_files) != original.local_files or
+            (prior.read_only and !original.read_only) or
+            (outcome == .outcome_unknown and original.local_files == .write))
+            return error.InvalidTaskFact;
         var next = original;
         next.request_key = try self.arena.allocator().dupe(u8, original.request_key);
         next.summary = try self.arena.allocator().dupe(u8, original.summary);
@@ -339,6 +367,28 @@ pub const Root = struct {
         } else self.counters.usage_complete = false;
         self.facts[i] = try self.write(self.facts[i]);
     }
+    /// Historical changes are visible only for tasks delegated by this
+    /// exact parent task. Reusing an Agent under a different task does not
+    /// make the old root's file operations visible.
+    pub fn childFileTasks(self: *Root, a: std.mem.Allocator, authority: @import("host_tools.zig").Context) ![]@import("lifecycle_journal.zig").LocalFileScope {
+        try authority.validate();
+        if (authority.child_origin != null) return error.ChildCannotDelegate;
+        self.lock();
+        defer self.mutex.unlock();
+        const parent = self.facts[try self.index(authority.task_id)];
+        if (parent.parent != null or !parent.conversation.eql(authority.conversation_id)) return error.ScopeChanged;
+
+        const Scope = @import("lifecycle_journal.zig").LocalFileScope;
+        var scopes: std.ArrayList(Scope) = .empty;
+        errdefer scopes.deinit(a);
+        for (self.facts[0..self.count]) |fact| {
+            const owner = fact.parent orelse continue;
+            if (!owner.eql(parent.task) or fact.local_files == .none) continue;
+            try scopes.append(a, .{ .conversation_id = fact.conversation, .task_id = fact.task });
+        }
+        return scopes.toOwnedSlice(a);
+    }
+
     pub fn needsChildren(self: *Root, parent: id.TaskId) bool {
         self.lock();
         defer self.mutex.unlock();

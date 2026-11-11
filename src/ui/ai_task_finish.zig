@@ -205,16 +205,31 @@ pub const Controller = struct {
         for (self.tasks.items) |*task| if (task.context.task_id.eql(id)) return task;
         return null;
     }
+    pub const Refresh = struct {
+        task: *Task,
+        context: host.Context,
+
+        pub fn apply(self: Refresh) void {
+            self.task.context = self.context;
+            publish(self.task);
+        }
+    };
+    pub fn prepareRefresh(self: *Controller, context: host.Context) !Refresh {
+        try context.validate();
+        return validateRefresh(self.find(context.task_id) orelse return error.ScopeChanged, context);
+    }
+    fn validateRefresh(task: *Task, context: host.Context) !Refresh {
+        if (!task.context.conversation_id.eql(context.conversation_id)) return error.ScopeChanged;
+        if (context.grant_revision != task.context.grant_revision or context.binding_revision < task.context.binding_revision) return error.ScopeChanged;
+        if (!std.meta.eql(context.binding, task.context.binding)) {
+            if (context.binding_revision == task.context.binding_revision or task.context.binding != .session or context.binding != .group) return error.ScopeChanged;
+        }
+        return .{ .task = task, .context = context };
+    }
     pub fn registerTask(self: *Controller, context: host.Context) !void {
         try context.validate();
         if (self.find(context.task_id)) |task| {
-            if (!task.context.conversation_id.eql(context.conversation_id)) return error.ScopeChanged;
-            if (context.grant_revision != task.context.grant_revision or context.binding_revision < task.context.binding_revision) return error.ScopeChanged;
-            if (!std.meta.eql(context.binding, task.context.binding)) {
-                if (context.binding_revision == task.context.binding_revision or task.context.binding != .session or context.binding != .group) return error.ScopeChanged;
-            }
-            task.context = context;
-            publish(task);
+            (try validateRefresh(task, context)).apply();
             return;
         }
         const order = self.next_order;

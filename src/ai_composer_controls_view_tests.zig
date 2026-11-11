@@ -2,6 +2,7 @@ const std = @import("std");
 const ui = @import("ui");
 const Controls = @import("ui/ai_composer_controls_view.zig");
 const Styles = @import("ui/ai_composer_controls_styles.zig");
+const Workspace = @import("ui/ai_workspace_view.zig");
 const config = @import("config/config.zig");
 const a = std.testing.allocator;
 const Fixture = struct {
@@ -17,6 +18,12 @@ const Fixture = struct {
     calls: usize = 0,
     last: ?Controls.Envelope = null,
     reject: bool = false,
+    workspace_action: ?struct { ticket: Workspace.Ticket, kind: Workspace.Action } = null,
+
+    fn workspaceAction(raw: *anyopaque, ticket: Workspace.Ticket, kind: Workspace.Action) !void {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.workspace_action = .{ .ticket = ticket, .kind = kind };
+    }
     fn init(self: *Fixture) !void {
         self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .view = undefined, .panel = undefined, .send = undefined, .models = .{ .{ .id = "alpha", .context_window = 200000, .reasoning = true, .vision = true, .efforts = .{ true, false, true, false, false, false, false } }, .{ .id = "quiet", .context_window = 32000, .efforts = @splat(false) } }, .disabled_models = .{.{ .id = "ghost", .efforts = @splat(false) }}, .providers = undefined, .owned = .init(a) };
         self.providers = .{ .{ .name = "lab", .enabled = true, .endpoint = "https://fixture.invalid/v1", .api_key = "fixture", .model_count = 2, .models = &self.models }, .{ .name = "offline", .enabled = false, .models = &self.disabled_models, .model_count = 1 } };
@@ -1286,4 +1293,156 @@ test "AI composer live context usage updates the open menu without rebuilding mo
         try std.testing.expectEqual(version, f.view.model_version.peek());
         try std.testing.expectEqualStrings("alpha", f.view.labels[2].?.getText().?.content);
     }
+}
+
+test "AI workspace composer menu captures the displayed conversation and revision" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var source = f.snapshot();
+    source.attachments = .{};
+    source.workspace = .{ .conversation = @import("host/identity.zig").ConversationId.generate(), .revision = 1 };
+    try f.view.update(source);
+    f.settle();
+    f.click(f.view.buttons[0]);
+    const menu = find(f.cx.root.?, "ai.attachment.menu").?;
+    const choice = find(menu, "ai.attachment.workspace").?;
+    try std.testing.expectApproxEqAbs(@as(f32, 173), menu.globalRect().h, 0.5);
+    try std.testing.expect(choice.globalRect().y + choice.globalRect().h <= menu.globalRect().y + menu.globalRect().h);
+    try std.testing.expect(f.cx.focus_manager.current_focus == choice);
+
+    source.workspace.?.revision += 1;
+    try f.view.update(source);
+    f.cx.handleKeyDown(.@"return", .{});
+    f.settle();
+    try std.testing.expectEqual(@as(usize, 0), f.calls);
+    f.click(f.view.buttons[0]);
+    source.workspace.?.scope_revision += 1;
+    try f.view.update(source);
+    f.cx.handleKeyDown(.@"return", .{});
+    f.settle();
+    try std.testing.expectEqual(@as(usize, 0), f.calls);
+    f.click(f.view.buttons[0]);
+    f.enter(choice);
+    try std.testing.expect(f.last.?.action.choose_workspace.eql(source.workspace.?));
+}
+
+test "AI workspace header stays within 520 points and exposes only current actions" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const styles = @import("ui/ai_assistant_styles.zig");
+    f.panel.setStyleInline(a, .{ .width = .{ .px = 520 } });
+    const header = try @import("ui/ai_assistant_header.zig").mount(f.cx, f.panel, "a long connection label with a large owner pill");
+    const view = try Workspace.View.mount(f.cx, f.scope, header, .{ .context = &f, .action = Fixture.workspaceAction });
+    var actions: [6]*ui.Node = undefined;
+    for (&actions) |*button| {
+        button.* = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.plus, .base_style = styles.windowControl() }).mount(f.scope, f.cx);
+        try header.bar.appendChild(a, button.*);
+    }
+    const ticket: Workspace.Ticket = .{ .conversation = @import("host/identity.zig").ConversationId.generate(), .revision = 2 };
+    const directory = "/tmp/Directory with a very long name that must not crowd any assistant header actions";
+    try view.update(.{ .ticket = ticket, .directory = directory });
+    f.settle();
+    const rightmost = actions[5].globalRect();
+    const bar = header.bar.globalRect();
+    try std.testing.expect(rightmost.x + rightmost.w <= bar.x + bar.w - 13.5);
+    for (actions) |button| try std.testing.expectApproxEqAbs(@as(f32, 22), button.globalRect().w, 0.5);
+    try std.testing.expect(view.trigger.globalRect().w <= 144.5);
+    try std.testing.expect(view.trigger.globalRect().x > header.owner_pill.globalRect().x);
+    try std.testing.expectEqualStrings(directory, view.hint_text.peek());
+
+    f.click(view.trigger);
+    try std.testing.expect(view.open.peek());
+    try std.testing.expect(f.cx.focus_manager.current_focus == view.choose);
+    try std.testing.expectEqualStrings(directory, view.path.getText().?.content);
+    f.enter(view.remove);
+    try std.testing.expectEqual(Workspace.Action.remove, f.workspace_action.?.kind);
+    try std.testing.expect(ticket.eql(f.workspace_action.?.ticket));
+
+    var removed = ticket;
+    removed.revision += 1;
+    try view.update(.{ .ticket = removed, .pending = true });
+    f.settle();
+    try std.testing.expectEqualStrings("已移除", view.name.getText().?.content);
+    f.click(view.trigger);
+    try std.testing.expect(!view.remove.isDisplayedInTree());
+    try view.update(.{ .ticket = removed });
+    f.settle();
+    try std.testing.expect(!view.trigger.isDisplayedInTree());
+    try std.testing.expect(!view.open.peek());
+}
+
+test "AI workspace change card presents verified lines and conflict recovery separately" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const Change = @import("ui/ai_workspace_change_view.zig");
+    const identity = @import("host/identity.zig");
+    const content = try std.json.Stringify.valueAlloc(a, Change.Receipt{
+        .target = "/tmp/old-workspace/src/main.zig",
+        .status = .verified,
+        .committed = true,
+        .verified = true,
+        .conflict = false,
+        .diff = .{ .added = 1, .removed = 1, .lines = &.{
+            .{ .kind = .remove, .number = 4, .text = "    old();\n" },
+            .{ .kind = .add, .number = 4, .text = "    new();\n" },
+        } },
+    }, .{});
+    defer a.free(content);
+    var record: @import("ai/tool_results.zig").Record = .{
+        .arena = .init(a),
+        .owner = .{ .session = 101 },
+        .turn_id = 2,
+        .call_id = "workspace-receipt",
+        .name = "host.local_read_text",
+        .arguments = "{}",
+        .command = "",
+        .arguments_hash = @splat(0),
+        .targets = &.{},
+        .dispatched = true,
+        .total_elapsed_ms = 24,
+        .host = .{
+            .status = .succeeded,
+            .receipt = .{
+                .conversation_id = identity.ConversationId.generate(),
+                .task_id = identity.TaskId.generate(),
+                .operation_id = 7,
+                .binding_revision = 1,
+            },
+            .content = content,
+        },
+    };
+    defer record.deinit();
+    try std.testing.expect((try Change.mountRecord(f.cx, f.scope, &record, null)) == null);
+    record.name = "host__local_uedit_utext";
+    const verified = (try Change.mountRecord(f.cx, f.scope, &record, null)).?;
+    try f.panel.appendChild(a, verified);
+    f.settle();
+    try std.testing.expectApproxEqAbs(@as(f32, 32), verified.globalRect().h, 0.5);
+    try std.testing.expect(hasText(verified, "main.zig · +1 −1"));
+    f.enter(find(verified, "ai.step.header").?);
+    try std.testing.expect(record.expanded);
+    try std.testing.expect(find(verified, "ai.workspace.change.path").?.isDisplayedInTree());
+    try std.testing.expect(hasText(verified, "/tmp/old-workspace/src/main.zig"));
+    try std.testing.expect(hasText(find(verified, "ai.workspace.change.add").?, "    new();"));
+    try std.testing.expect(hasText(find(verified, "ai.workspace.change.remove").?, "    old();"));
+
+    var conflict_expanded = true;
+    const conflict = try Change.mount(f.cx, f.scope, .{
+        .target = "/tmp/old-workspace/src/main.zig",
+        .status = .committed_unverified,
+        .committed = true,
+        .verified = false,
+        .conflict = true,
+        .recovery_ref = "operation-7",
+        .original_retained = true,
+        .diff_expired = true,
+    }, .{ .expanded = &conflict_expanded });
+    try f.panel.appendChild(a, conflict);
+    f.settle();
+    try std.testing.expect(hasText(conflict, "main.zig · 文件已写入，检测到并发修改"));
+    try std.testing.expect(hasText(conflict, "差异内容已过期"));
+    try std.testing.expect(hasText(conflict, "原内容已保留 · 恢复引用 operation-7"));
 }
