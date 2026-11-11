@@ -472,6 +472,7 @@ pub const ApplicationHost = struct {
         publish: *const fn (*anyopaque, identity.SessionHandle, []const u8) void,
     } = null,
     plugin_attempts: std.ArrayList(session.Accepted) = .empty,
+    detached_quick_content: ?session.Accepted = null,
     pending_editor_handoff: ?@import("../host/editor_credentials.zig").Handoff = null,
     window_auxiliary: ?struct {
         context: *anyopaque,
@@ -1515,6 +1516,7 @@ pub const ApplicationHost = struct {
 
     pub fn requestWindowClose(self: *ApplicationHost) !OperationKey {
         if (self.windowClosePending()) return self.window_close.?.key;
+        try self.workspace.preparePluginWindowClose();
         if (self.domain.ai) |ai| _ = try ai.closeWindow(self.window_id);
         if (self.window_auxiliary) |tasks| tasks.cancel(tasks.context);
         const revision = @max(self.workspace.model.order_revision, 1);
@@ -1596,6 +1598,77 @@ pub const ApplicationHost = struct {
             self.plugin_attempts.appendAssumeCapacity(accepted);
         }
         return accepted;
+    }
+
+    pub fn openSingletonQuickContent(self: *ApplicationHost, protocol_id: []const u8, payload: []const u8) !void {
+        if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
+        for (self.workspace.tabs.items) |tab| {
+            if (!std.mem.eql(u8, tab.plugin_protocol_id, protocol_id)) continue;
+            if (tab.closing) return error.SessionClosing;
+            self.workspace.activateTabId(tab.tab_id);
+            return;
+        }
+        const manifest = self.sessions.registry.find(protocol_id) orelse return error.UnknownPlugin;
+        const renderer = self.sessions.registry.renderer(manifest.content_renderer) orelse return error.ContentRendererUnavailable;
+        if (renderer.mount == null) return error.ContentRendererUnavailable;
+        for (self.plugin_attempts.items) |attempt| {
+            const state = self.sessions.queryState(attempt.handle) orelse continue;
+            if (state.lifecycle != .creating and state.lifecycle != .ready) continue;
+            const value = self.sessions.connectionEnvelope(attempt.handle) orelse continue;
+            if (std.mem.eql(u8, value.protocol_id, protocol_id)) return;
+        }
+        try self.plugin_attempts.ensureUnusedCapacity(self.allocator, 1);
+        const accepted = try self.sessions.openQuick(protocol_id, payload, .{ .request_key = try self.dispatcher.issue(), .target = self.target() });
+        self.plugin_attempts.appendAssumeCapacity(accepted);
+    }
+
+    /// A content-only presentation can reserve its ordinary session identity
+    /// before it has a tab. Generic ready-session attachment skips that owner.
+    pub fn openDetachedQuickContent(self: *ApplicationHost, protocol_id: []const u8, payload: []const u8) !void {
+        if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
+        if (self.detached_quick_content != null) return;
+        for (self.plugin_attempts.items) |attempt| {
+            const state = self.sessions.queryState(attempt.handle) orelse continue;
+            if (state.lifecycle != .creating and state.lifecycle != .ready) continue;
+            const protocol = self.sessions.protocolId(attempt.handle) orelse continue;
+            if (std.mem.eql(u8, protocol_id, protocol)) return error.ContentOpening;
+        }
+        self.detached_quick_content = try self.sessions.openQuick(protocol_id, payload, .{ .request_key = try self.dispatcher.issue(), .target = self.target() });
+    }
+
+    pub fn mountDetachedQuickContent(self: *ApplicationHost) !?workspace_mod.Workspace.MountedPlugin {
+        const accepted = self.detached_quick_content orelse return null;
+        const state = self.sessions.queryState(accepted.handle) orelse return error.StaleSession;
+        if (state.lifecycle == .creating) return null;
+        if (state.lifecycle != .ready) return error.ContentUnavailable;
+        const value = self.sessions.connectionEnvelope(accepted.handle) orelse return error.ConnectionEnvelopeUnavailable;
+        const manifest = self.sessions.manifestFor(accepted.handle) orelse return error.UnknownPlugin;
+        const renderer = self.sessions.registry.renderer(manifest.content_renderer) orelse return error.ContentRendererUnavailable;
+        return try self.workspace.mountPluginContent(accepted.handle, value, renderer.*);
+    }
+
+    pub fn promoteDetachedQuickContent(self: *ApplicationHost, mounted: workspace_mod.Workspace.MountedPlugin) !void {
+        const accepted = self.detached_quick_content orelse return error.StaleSession;
+        const state = self.sessions.queryState(accepted.handle) orelse return error.StaleSession;
+        if (state.lifecycle != .ready or self.windowClosePending()) return error.ContentUnavailable;
+        const value = self.sessions.connectionEnvelope(accepted.handle) orelse return error.ConnectionEnvelopeUnavailable;
+        try self.mappings.ensureUnusedCapacity(self.allocator, 1);
+        const id = try self.workspace.attachPluginContent(accepted.handle, value, mounted);
+        self.detached_quick_content = null;
+        const tab = self.workspace.sessionTab(id).?;
+        self.mappings.appendAssumeCapacity(.{ .handle = accepted.handle, .create_operation = accepted.operation, .legacy_id = id, .legacy_generation = tab.generation, .tab_id = tab.tab_id, .owner = tab.content_owner, .source = null, .ready_published = true, .attached_published = true });
+        _ = self.sessions.attached(accepted.handle, .{ .target = self.target(), .tab_id = tab.tab_id }) catch |err| blk: {
+            std.log.warn("attaching promoted content: {s}", .{@errorName(err)});
+            break :blk false;
+        };
+    }
+
+    pub fn closeDetachedQuickContent(self: *ApplicationHost) !void {
+        const accepted = self.detached_quick_content orelse return;
+        _ = try self.sessions.requestClose(accepted.handle, .{});
+        const state = self.sessions.queryState(accepted.handle) orelse return error.StaleSession;
+        if (state.lifecycle != .closed) return error.ContentClosing;
+        self.detached_quick_content = null;
     }
 
     /// Capture at command acceptance; later registry edits cannot retarget the
@@ -1726,6 +1799,9 @@ pub const ApplicationHost = struct {
     /// Domain API used by the command handler; no second journal is created.
     pub fn requestCloseLegacy(self: *ApplicationHost, id: LegacySessionId) !OperationKey {
         const handle = self.ownerForLegacy(id) orelse return error.UnknownSession;
+        if (self.sessions.queryState(handle)) |state| {
+            if (state.close_operation == null) try self.workspace.preparePluginClose(id);
+        }
         if (self.lifecycle_supervisor.resource(handle)) |entry| {
             if (entry.retained_metadata == null) entry.retained_metadata = self.captureSessionMetadata(handle);
         }
@@ -1959,6 +2035,7 @@ pub const ApplicationHost = struct {
         // A provider may retry its released generation from its safe poll.
         // Discover new ready owners through the registry, preserving the tab.
         for (self.sessions.sessions.items) |entry| {
+            if (self.detached_quick_content) |detached| if (entry.handle.eql(detached.handle)) continue;
             const state = self.sessions.queryState(entry.handle) orelse continue;
             if (state.lifecycle != .ready or state.target.window_id != self.window_id or state.target.workspace_id != self.workspace_id or self.findHandle(entry.handle) != null) continue;
             const manifest = self.sessions.manifestFor(entry.handle) orelse continue;
@@ -2599,8 +2676,9 @@ pub const ApplicationHost = struct {
             return;
         }
         const manifest = self.sessions.manifestFor(mapping.handle) orelse return error.UnknownPlugin;
-        const request_key = try self.dispatcher.issue();
         const value = self.sessions.connectionEnvelope(mapping.handle) orelse return error.ConnectionEnvelopeUnavailable;
+        if (std.mem.eql(u8, manifest.id, @import("../plugins/notes/plugin.zig").id)) return self.openSingletonQuickContent(manifest.id, value.payload);
+        const request_key = try self.dispatcher.issue();
         if (manifest.quick_create) |quick| {
             const payload = if (quick.new_session_payload) |prepare| try prepare(self.allocator, value.payload) else try self.allocator.dupe(u8, value.payload);
             defer self.allocator.free(payload);

@@ -577,6 +577,9 @@ alert('frame message'); parent.postMessage('frame-ok', '*');
         result = load("interactions", "/redirect-get", expectedTitle="linked-get")
         check("GET redirect remains replayable GET", result["status"] == "loaded" and result.get("get") == 1
               and result.get("url") == origin + "/linked-get", result)
+        result = probe.call("script", "interactions", script="history.replaceState(null, '', '/history-address')")
+        check("same-document history change is not a confirmed GET", result["status"] == "loaded"
+              and result.get("get") == 0 and result.get("url") == origin + "/history-address", result)
         for action, expected_title, expected_get in (("/posted", "posted", 0), ("/post-preserved", "posted", 0), ("/post-to-get", "linked-get", 1)):
             load("interactions", "/form", expectedTitle="form")
             result = probe.call("script", "interactions", script=f"document.forms[0].action = '{action}'; document.forms[0].submit()",

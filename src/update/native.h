@@ -16,6 +16,7 @@ extern uint64_t ZWBirth(pid_t pid);
 extern NSString *ZWCanonical(NSString *path);
 extern NSString *ZWRoot(NSString *target, NSString *data);
 extern void ZWPrivateDirectory(NSString *path);
+extern int ZWLockInstaller(NSString *root);
 extern BOOL ZWValidHTTPS(NSURL *url, BOOL redirects);
 extern NSString *const ZWFeed;
 extern NSString *const ZWReleases;

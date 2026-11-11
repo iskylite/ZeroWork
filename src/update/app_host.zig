@@ -163,6 +163,11 @@ pub fn Host(comptime Process: type) type {
                 admission.set(false);
                 return;
             };
+            self.process.prepareNotesForUpdate() catch {
+                self.note("请返回笔记处理未完成的保存或导入，再重试更新。");
+                admission.set(false);
+                return;
+            };
             // Revalidate under the admission gate before issuing ANY close.
             const revision = self.process.updateRevision();
             try self.inventory();
@@ -256,6 +261,7 @@ pub fn Host(comptime Process: type) type {
                     if (self.process.domain.ownerForHandle(handle)) |host| {
                         if (host.legacyForHandle(handle)) |legacy| return (try host.requestCloseLegacy(legacy)).operation_id;
                     }
+                    if (try self.process.updateCloseDetachedNotes(handle)) |operation| return operation;
                     return (try self.process.domain.stopBackgroundOwner(handle)).operation_id;
                 },
             }

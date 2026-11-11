@@ -17,6 +17,7 @@ pub const Request = struct {
     /// Host-only service identity; never a model argument.
     version_scope: u64 = 0,
     version_stamp: []const u8 = "",
+    app_data_root: ?[]const u8 = null,
 };
 pub const Result = struct {
     bytes: []const u8 = "",
@@ -186,6 +187,7 @@ pub fn local(a: std.mem.Allocator, io: std.Io, owner: identity.SessionHandle, re
     defer dir.close(io);
     const base = std.fs.path.basename(path);
     if (cancel.isCancelled()) return error.Cancelled;
+    if (request.app_data_root) |data_root| try guardNotesDirectory(io, data_root, dir, base);
     const create = request.kind == .write_text and request.mode == .create;
     const old = readLocal(a, io, dir, base, if (request.kind == .read_image) @import("../ai/image_attachments.zig").max_bytes else text_limit) catch |err| blk: {
         if (create and err == error.FileNotFound) break :blk null;
@@ -256,6 +258,29 @@ pub fn local(a: std.mem.Allocator, io: std.Io, owner: identity.SessionHandle, re
     version_request.version_stamp = try localStamp(a, confirmed.stat);
     result.version = requestVersion(version_request, owner, path, after);
     result.verified = true;
+}
+
+fn guardNotesDirectory(io: std.Io, data_root: []const u8, parent: std.Io.Dir, base: []const u8) !void {
+    const boundary = try @import("local_path.zig").NotesBoundary.open(io, data_root) orelse return;
+    try boundary.check(io, parent, base);
+}
+
+test "notes data guard rejects both direct and symlinked directory access" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "app/notes/libraries");
+    try tmp.dir.symLink(io, "app/notes/libraries", "linked", .{ .is_directory = true });
+    const root = try tmp.dir.realPathFileAlloc(io, "app", a);
+    defer a.free(root);
+    const direct = try tmp.dir.openDir(io, "app/notes/libraries", .{});
+    defer direct.close(io);
+    const alias = try tmp.dir.openDir(io, "linked", .{});
+    defer alias.close(io);
+    try std.testing.expectError(error.NotesStoreProtected, guardNotesDirectory(io, root, direct, "note.json"));
+    try std.testing.expectError(error.NotesStoreProtected, guardNotesDirectory(io, root, alias, "note.json"));
+    try guardNotesDirectory(io, root, tmp.dir, "unrelated.txt");
 }
 fn localStamp(a: std.mem.Allocator, stat: std.Io.File.Stat) ![]const u8 {
     return std.fmt.allocPrint(a, "{d}:{d}:{d}:{d}:{any}:{any}", .{ stat.inode, stat.nlink, stat.size, @backingInt(stat.permissions), stat.mtime, stat.ctime });

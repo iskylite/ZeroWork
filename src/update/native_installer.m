@@ -1,9 +1,7 @@
 #import "native.h"
 #import <AppKit/AppKit.h>
 #import <libproc.h>
-#import <sys/file.h>
 #import <sys/stat.h>
-#import <fcntl.h>
 #import <unistd.h>
 
 static NSString *directory,*recordFile;
@@ -104,17 +102,22 @@ static void Install(void){
 }
 static void Run(void){
     int lock=-1;
+    record=nil;
     @try{
         NSArray *args=NSProcessInfo.processInfo.arguments;
         if(args.count==1){NSString *executable=ZWCanonical(args[0]);NSString *candidate=executable.stringByDeletingLastPathComponent;if(Exists([candidate stringByAppendingPathComponent:@"record.json"]))args=@[executable,candidate];}
         if(args.count!=2)ZWFail(@"请从 ZeroWork 更新入口启动安装，或打开保留的事务目录内的安装程序");directory=ZWCanonical(args[1]);
         ZWVerifyCode(ZWCanonical(args[0]),@"com.zerowork.updater");
-        recordFile=[directory stringByAppendingPathComponent:@"record.json"];record=[ZWRead(recordFile) mutableCopy];if(!record)ZWFail(@"事务记录无效");
-        NSString *root=ZWRoot(record[@"target"],record[@"data"]);ZWPrivateDirectory(root);ZWPrivateDirectory(directory);
+        recordFile=[directory stringByAppendingPathComponent:@"record.json"];
+        NSDictionary *initial=ZWRead(recordFile);if(!initial)ZWFail(@"事务记录无效");
+        NSString *root=ZWRoot(initial[@"target"],initial[@"data"]);ZWPrivateDirectory(root);ZWPrivateDirectory(directory);
         if(![directory.stringByDeletingLastPathComponent isEqual:root] || ![directory.lastPathComponent hasPrefix:@"txn-"] || ![ZWCanonical(args[0]) isEqual:[directory stringByAppendingPathComponent:@"ZeroWorkUpdater"]])ZWFail([NSString stringWithFormat:@"事务路径验证失败：目录 %@；预期根目录 %@；执行路径 %@",directory,root,args[0]]);
+        // Only the lock owner may load a record for mutation, including failure recovery.
+        lock=ZWLockInstaller(root);
         NSDictionary *active=ZWRead([root stringByAppendingPathComponent:@"active.json"]);if(![active[@"transaction"] isEqual:directory])ZWFail(@"事务不是当前活动安装");
-        lock=open([root stringByAppendingPathComponent:@"installer.lock"].fileSystemRepresentation,O_RDWR|O_CREAT|O_NOFOLLOW,0600);
-        if(lock<0 || flock(lock,LOCK_EX|LOCK_NB))ZWFail(@"另一个安装程序正在处理此应用");
+        NSDictionary *current=ZWRead(recordFile);
+        if(![current[@"target"] isEqual:initial[@"target"]] || ![current[@"data"] isEqual:initial[@"data"]])ZWFail(@"事务记录无效");
+        record=[current mutableCopy];
         record[@"helper_pid"]=@(getpid());record[@"helper_birth"]=@(ZWBirth(getpid()));ZWWrite(recordFile,record);
         if([@[@"healthy",@"old_restored_verified",@"cancelled",@"aborted_before_replace"] containsObject:record[@"stage"]]){Surface(@"此安装事务已结束",@"历史事务不会重新获得安装授权。可关闭此窗口；重新更新时会创建新的事务。");return;}
         if([record[@"decision"] isEqual:@"committed"] && ![record[@"stage"] isEqual:@"waiting_parent"]){
@@ -161,7 +164,7 @@ static void Run(void){
             if([record[@"decision"] isEqual:@"committed"] && record[@"backup"])Restore(e.reason);
             else{if(record){record[@"decision"]=@"cancelled";Stage(@"cancelled");}Surface(@"安装准备失败，应用未替换",e.reason);}
         }@catch(NSException *writeError){Surface(@"更新恢复信息需要保留",[NSString stringWithFormat:@"%@\n%@",e.reason,writeError.reason]);}
-    }@finally{if(lock>=0){flock(lock,LOCK_UN);close(lock);}terminal=YES;
+    }@finally{if(lock>=0)close(lock);terminal=YES;
 #if ZW_UPDATE_TESTING
         if(getenv("ZW_UPDATE_HEADLESS"))return;
 #endif

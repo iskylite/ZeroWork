@@ -83,6 +83,7 @@ extern int macos_set_embedded_input_view(void *view, int enabled, ZWWebHostKey h
 @property (nonatomic) BOOL failed;
 @property (nonatomic) BOOL committed;
 @property (nonatomic) BOOL committedGet;
+@property (nonatomic, copy) NSURL *committedURL;
 @property (nonatomic) BOOL activeGet;
 @property (nonatomic) BOOL pendingGet;
 @property (nonatomic) BOOL closing;
@@ -243,6 +244,7 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
     self.pendingGet = NO;
     self.committed = NO;
     self.committedGet = NO;
+    self.committedURL = nil;
     self.failed = NO;
     [self notifyChanged];
 }
@@ -304,6 +306,7 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
     self.displayed = YES;
     self.committed = YES;
     self.committedGet = self.activeGet;
+    self.committedURL = view.URL;
     self.pendingGet = NO;
     [self notifyChanged];
 }
@@ -580,6 +583,11 @@ void zw_web_request_dispose(ZWWebRequest *request) {
     *request = (ZWWebRequest){0};
 }
 
+static char *zw_copy_request_text(NSString *text) {
+    const char *utf8 = text.UTF8String;
+    return strdup(utf8 ?: "");
+}
+
 int zw_web_surface_copy_request(ZWWebSurface *surface, ZWWebRequest *result) {
     if (!NSThread.isMainThread || !surface || !result) return 0;
     *result = (ZWWebRequest){0};
@@ -590,10 +598,10 @@ int zw_web_surface_copy_request(ZWWebSurface *surface, ZWWebRequest *result) {
             .token = request.token,
             .navigation_id = request.navigationId,
             .kind = request.kind,
-            .origin = strdup(request.origin.UTF8String),
-            .message = strdup(request.message.UTF8String),
-            .default_text = strdup(request.defaultText.UTF8String),
-            .realm = strdup(request.realm.UTF8String),
+            .origin = zw_copy_request_text(request.origin),
+            .message = zw_copy_request_text(request.message),
+            .default_text = zw_copy_request_text(request.defaultText),
+            .realm = zw_copy_request_text(request.realm),
         };
         if (!result->origin || !result->message || !result->default_text || !result->realm) {
             zw_web_request_dispose(result);
@@ -644,7 +652,7 @@ ZWWebSurfaceState zw_web_surface_state(ZWWebSurface *surface) {
             .failed = owner.failed,
             .ready = view != nil,
             .committed = owner.committed,
-            .committed_get = owner.committedGet,
+            .committed_get = owner.committedGet && [owner.committedURL isEqual:view.URL],
         };
     }
 }

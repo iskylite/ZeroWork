@@ -13,6 +13,7 @@ pub const all = [_]host.Contribution{@import("user_interaction.zig").contributio
     [_]host.Contribution{@import("builtin_tools.zig").contribution} ++
     @import("host_queries.zig").terminal_contributions ++
     @import("fetch_url.zig").contributions ++
+    @import("../plugins/notes/ai_tools.zig").contributions ++
     [_]host.Contribution{@import("batch_output.zig").contribution} ++
     @import("host_execution.zig").contributions ++
     @import("host_lifecycle.zig").contributions;

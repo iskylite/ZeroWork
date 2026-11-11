@@ -129,6 +129,16 @@ try {
     await openWebWizard('Web interaction fixture');
     await click('web.editor.mode.manual');
     await click('web.editor.temporary');
+    stage = 'same-document address changes during loading reach the address bar';
+    await fill('web.address', new URL('/history-loading', ready.direct).href);
+    await h.key('return');
+    await received('/history-loading-image');
+    await received('/history-rewritten');
+    const historyAddress = new URL('/history-address', ready.direct).href;
+    await find('web.address', node => content(node).includes(historyAddress));
+    assert(!(await traffic()).some(event => event.path === '/history-address'));
+
+    stage = 'website dialogs retain user choices and distinguish empty input from cancel';
     await fill('web.address', new URL('/interaction-fixture', ready.direct).href);
     await h.key('return');
     const prompt = async (title: string, message: string) => {

@@ -42,6 +42,16 @@ void ZWPrivateDirectory(NSString *path) {
     if (![[NSFileManager defaultManager] createDirectoryAtPath:path withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:&error]) ZWFail(@"无法创建私有更新目录");
     struct stat st; if (lstat(path.fileSystemRepresentation, &st) || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 0077)) ZWFail(@"更新目录权限不安全");
 }
+int ZWLockInstaller(NSString *root) {
+    NSString *path=[root stringByAppendingPathComponent:@"installer.lock"];
+    int fd=open(path.fileSystemRepresentation,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(fd<0)ZWFail(@"无法打开安装事务锁");
+    if(flock(fd,LOCK_EX|LOCK_NB)){
+        close(fd);
+        ZWFail(@"另一个安装程序正在处理此应用");
+    }
+    return fd;
+}
 NSString *ZWCanonical(NSString *path) {
     if(!path.length || !path.isAbsolutePath)ZWFail(@"更新路径必须是绝对路径");
     char *value=realpath(path.fileSystemRepresentation,NULL);

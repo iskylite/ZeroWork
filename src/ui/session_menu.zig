@@ -12,11 +12,13 @@ pub const Callbacks = struct {
     local: ?*const fn (*anyopaque) void = null,
     new_sftp: ?*const fn (*anyopaque) void = null,
     new_kvm: ?*const fn (*anyopaque) void = null,
+    notes: ?*const fn (*anyopaque) void = null,
+    notes_float: ?*const fn (*anyopaque) void = null,
     saved: ?*const fn (*anyopaque, identity.AssetOwner) void = null,
 };
-const Action = enum(usize) { local, new_profile, new_sftp, new_kvm };
-const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM" };
-const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp", "session.menu.new_kvm" };
+const Action = enum(usize) { local, new_profile, new_sftp, new_kvm, notes, notes_float };
+const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM", "笔记", "笔记浮窗" };
+const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp", "session.menu.new_kvm", "session.menu.notes", "session.menu.notes_float" };
 
 pub const View = struct {
     cx: *ui.Cx,
@@ -72,7 +74,7 @@ pub const View = struct {
         self.chrome.behavior.interaction.a11y = .{ .role = .menu, .label = "新建会话" };
         self.chrome.behavior.events.capture_context = self;
         self.chrome.behavior.events.on_event_capture = onEvent;
-        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder, ui.icons.monitor };
+        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder, ui.icons.monitor, ui.icons.notebook, ui.icons.panel_right };
         for (labels, 0..) |label, index| {
             if (index == 1) {
                 const area = try ui.widgets.ScrollArea(.{}).mount(self.scope, cx);
@@ -93,6 +95,7 @@ pub const View = struct {
             const action = try self.scope.createState(Row, .{ .view = self, .action = @fromBackingInt(@intCast(index)) });
             const node = try ui.widgets.Button(.{ .a11y_label = label, .variant = .ghost, .disabled = index == 0 and callbacks.local == null, .base_style = S.row(), .hover_style = self.hover_style, .on_click = cx.on(Row, action, Row.choose) }).mount(self.scope, cx);
             node.setStyleInline(cx.allocator, S.row());
+            if ((action.action == .notes and callbacks.notes == null) or (action.action == .notes_float and !self.hasNotesFloat())) node.setDisplay(.none);
             @import("sidebar_view.zig").setFocusRing(node);
             node.meta.ownership.meta.test_id = ids[index];
             if (node.behavior.interaction.a11y) |*a| a.role = .menuitem;
@@ -168,23 +171,19 @@ pub const View = struct {
         switch (key) {
             .escape => self.hide(),
             .up, .down => {
-                const total = self.saved_rows.items.len + 5;
-                const current = if (self.selected_saved) |i| i + 1 else if (self.selected_more_trigger) total - 4 else switch (self.selected) {
-                    .local => @as(usize, 0),
-                    .new_profile => total - 3,
-                    .new_sftp => total - 2,
-                    .new_kvm => total - 1,
-                };
+                const more_index = self.saved_rows.items.len + 1;
+                const total = more_index + labels.len - @as(usize, @intFromBool(self.callbacks.notes == null)) - @as(usize, @intFromBool(!self.hasNotesFloat()));
+                const current = if (self.selected_saved) |i| i + 1 else if (self.selected_more_trigger) more_index else if (self.selected == .local) 0 else more_index + @backingInt(self.selected);
                 var next = if (key == .down) (current + 1) % total else (current + total - 1) % total;
                 if (next == 0 and self.callbacks.local == null) next = if (key == .down) 1 else total - 1;
                 self.selected_saved = if (next > 0 and next <= self.saved_rows.items.len) next - 1 else null;
-                self.selected_more_trigger = next == total - 4;
+                self.selected_more_trigger = next == more_index;
                 if (self.selected_saved) |i| {
                     self.cx.setFocus(self.saved_rows.items[i].button);
                 } else if (self.selected_more_trigger) {
                     self.cx.setFocus(self.more_button);
                 } else {
-                    self.selected = if (next == 0) .local else if (next == total - 3) .new_profile else if (next == total - 2) .new_sftp else .new_kvm;
+                    self.selected = if (next == 0) .local else @fromBackingInt(next - more_index);
                     self.cx.setFocus(self.buttons[@backingInt(self.selected)]);
                 }
                 self.paintSelection();
@@ -195,7 +194,7 @@ pub const View = struct {
         return .stop;
     }
     fn activate(self: *View, action: Action) void {
-        if (!self.isOpen() or self.chosen or (action == .local and self.callbacks.local == null)) return;
+        if (!self.isOpen() or self.chosen or (action == .local and self.callbacks.local == null) or (action == .notes and self.callbacks.notes == null) or (action == .notes_float and !self.hasNotesFloat())) return;
         self.chosen = true;
         self.hide();
         switch (action) {
@@ -203,7 +202,12 @@ pub const View = struct {
             .new_profile => self.callbacks.new_profile(self.callbacks.context),
             .new_sftp => if (self.callbacks.new_sftp) |create| create(self.callbacks.context),
             .new_kvm => if (self.callbacks.new_kvm) |create| create(self.callbacks.context),
+            .notes => self.callbacks.notes.?(self.callbacks.context),
+            .notes_float => self.callbacks.notes_float.?(self.callbacks.context),
         }
+    }
+    fn hasNotesFloat(self: *const View) bool {
+        return self.callbacks.notes != null and self.callbacks.notes_float != null;
     }
     fn paintSelection(self: *View) void {
         for (self.saved_rows.items, 0..) |row, index| row.button.setBackground(if (self.selected_saved == index) S.theme.popupSelection() else ui.Color.TRANSPARENT);
@@ -439,6 +443,11 @@ const Probe = struct {
     quick: usize = 0,
     saved: usize = 0,
     kvm: usize = 0,
+    notes: usize = 0,
+    fn onNotes(raw: *anyopaque) void {
+        const self: *Probe = @ptrCast(@alignCast(raw));
+        self.notes += 1;
+    }
     fn onKvm(raw: *anyopaque) void {
         const self: *Probe = @ptrCast(@alignCast(raw));
         self.kvm += 1;
@@ -515,6 +524,14 @@ test "new session menu maps each creation command once and restores focus" {
         try std.testing.expectEqual(S.theme.states().hover, view.hover_style.get().?.background.?);
     }
     view.hide();
+    view.callbacks.notes = Probe.onNotes;
+    view.buttons[@backingInt(Action.notes)].setDisplay(.flex);
+    try view.show(anchor);
+    _ = view.handleKey(.up);
+    try std.testing.expectEqual(Action.notes, view.selected);
+    _ = view.handleKey(.@"return");
+    try std.testing.expectEqual(@as(usize, 1), probe.notes);
+    try std.testing.expect(cx.focused_node == anchor);
 }
 test "new session menu skips unavailable local command and clamps compact menu" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);

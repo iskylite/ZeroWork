@@ -100,7 +100,23 @@ class Page(BaseHTTPRequestHandler):
         if self.path == "/resource-stream":
             self.stream()
             return
+        if self.path == "/history-loading-image":
+            time.sleep(2)
+            self.send_response(204)
+            self.end_headers()
+            return
+        if self.path == "/history-loading-script":
+            time.sleep(0.5)
+            script = b"history.replaceState(null, '', '/history-address'); fetch('/history-rewritten');"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(script)))
+            self.end_headers()
+            self.wfile.write(script)
+            return
         body = b"<!doctype html><title>ZeroWork Web Fixture</title><main><h1>ZeroWork Web Fixture</h1><p>Page loaded.</p></main>"
+        if self.path == "/history-loading":
+            body += b'<img src="/history-loading-image" alt=""><script src="/history-loading-script"></script>'
         if self.path == "/interaction-fixture":
             body += b"""<script>
 window.addEventListener('load', () => {

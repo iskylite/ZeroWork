@@ -24,8 +24,11 @@ pub const RecordingId = StableId(.recording);
 pub const ArchiveKey = StableId(.archive);
 pub const AgentId = StableId(.agent);
 pub const SubmissionId = StableId(.submission);
+pub const NoteLibraryId = StableId(.note_library);
+pub const NoteFolderId = StableId(.note_folder);
+pub const NoteId = StableId(.note);
 
-fn StableId(comptime kind: enum { conversation, task, execution, host_operation, recording, archive, agent, submission }) type {
+fn StableId(comptime kind: enum { conversation, task, execution, host_operation, recording, archive, agent, submission, note_library, note_folder, note }) type {
     _ = kind;
     return struct {
         bytes: [16]u8 = @splat(0),

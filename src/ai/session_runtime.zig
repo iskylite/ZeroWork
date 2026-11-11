@@ -241,7 +241,7 @@ pub const Runner = struct {
         var task_control: TaskControl = .{ .runner = self };
         var task_cancel: provider.CancelToken = .{ .source = .{ .context = &task_control, .poll = TaskControl.cancelled, .user_wait = TaskControl.userWait, .resource_wait = TaskControl.resourceWait } };
         request.cancel = &task_cancel;
-        var projection: Projection = .{ .allocator = self.allocator, .original = prepared.provider, .context = self.context.?, .historical_messages = self.historical_messages, .root = self.task_root.?, .slots = self.slots.?, .read_only = self.observation_only, .reasoning = prepared.reasoning, .file_references = prepared.file_references };
+        var projection: Projection = .{ .allocator = self.allocator, .original = prepared.provider, .manager = &self.worker.?.manager, .context = self.context.?, .historical_messages = self.historical_messages, .root = self.task_root.?, .slots = self.slots.?, .read_only = self.observation_only, .reasoning = prepared.reasoning, .file_references = prepared.file_references };
         const adapter: provider.Provider = .{ .ctx = &projection, .chat = Projection.chat, .models = Projection.models };
         if (self.answer_only) {
             if (self.worker.?.manager.tool_run) |loop| loop.request.cancel = &task_cancel;
@@ -264,6 +264,7 @@ pub const Runner = struct {
         self.capture_failed = true;
         if (self.worker.?.manager.tool_run) |loop| {
             try loop.sealInterrupted();
+            _ = loop.discardRevokedResults();
             const snapshot = try wire.History.copy(self.allocator, loop.messages.items, if (self.capture_final and self.worker.?.manager.saw_done and !loop.uncertain) self.worker.?.manager.round_text.items else "");
             self.worker.?.result.deinit();
             self.worker.?.result = snapshot;
@@ -295,6 +296,7 @@ pub const Runner = struct {
     const Projection = struct {
         allocator: std.mem.Allocator,
         original: provider.Provider,
+        manager: *Manager,
         context: Context,
         historical_messages: usize,
         root: *task_budget.Root,
@@ -313,22 +315,8 @@ pub const Runner = struct {
             const a = arena.allocator();
             var projected = request;
             projected.system = try std.fmt.allocPrint(a, "{s}\n本轮起始绑定版本 {d}，环境版本 {d}；当前范围以最新宿主上下文通知和工具表为准。历史环境的连接、目录、执行和审批标识不提供当前操作权；仅当前工具表及本轮查询可确定目标。", .{ request.system, self.context.fence.binding, self.context.fence.environment });
-            const messages = try a.dupe(provider.Message, request.messages);
-            for (messages) |*message| {
-                if (self.file_references) |*projection| message.content = try projection.project(a, message.content, message.file_reference_spans);
-                message.file_reference_spans = &.{};
-            }
-            for (messages[0..@min(self.historical_messages, messages.len)]) |*message| {
-                message.content = try std.fmt.allocPrint(a, "[历史环境，仅作记录]\n{s}", .{message.content});
-                message.image_owner = null;
-                message.image_transform = 0;
-                const offloaded = try a.dupe(provider.OffloadedImage, message.offloaded_images);
-                for (offloaded) |*value| value.owner = null;
-                message.offloaded_images = offloaded;
-            }
             if (self.context.child_origin != null) projected.system = try std.fmt.allocPrint(a, "{s}\n你是当前父对话分配的子智能体，只处理本次分配的范围。你不能再派生子智能体、修改父级绑定或管理兄弟任务。继承的历史、技能和用户补充不扩大本次目标或操作授权；当前工具目录和宿主复验决定真实能力。", .{projected.system});
             if (self.read_only) projected.system = try std.fmt.allocPrint(a, "{s}\n本任务仅允许只读核验。此前结果未知的操作仍是未知，禁止重放、修复或任何写入；只报告本次实际观察及其局限。", .{projected.system});
-            projected.messages = messages;
             const slot_wait = provider.CancelToken.beginResourceWait(request.cancel);
             var waiting = true;
             defer if (waiting) slot_wait.end();
@@ -344,8 +332,34 @@ pub const Runner = struct {
             slot_wait.end();
             waiting = false;
             if (request.cancel) |cancel| if (cancel.isCancelled()) return error.Cancelled;
+            if (self.manager.tool_run) |loop| {
+                if (request.messages.ptr != loop.messages.items.ptr and loop.discardRevokedResults()) return error.ToolResultRevoked;
+            }
+            const messages = try a.dupe(provider.Message, request.messages);
+            for (messages) |*message| {
+                if (self.file_references) |*projection| message.content = try projection.project(a, message.content, message.file_reference_spans);
+                message.file_reference_spans = &.{};
+            }
+            for (messages[0..@min(self.historical_messages, messages.len)]) |*message| {
+                message.content = try std.fmt.allocPrint(a, "[历史环境，仅作记录]\n{s}", .{message.content});
+                message.image_owner = null;
+                message.image_transform = 0;
+                const offloaded = try a.dupe(provider.OffloadedImage, message.offloaded_images);
+                for (offloaded) |*value| value.owner = null;
+                message.offloaded_images = offloaded;
+            }
+            projected.messages = messages;
             try self.root.take(self.context.task, 1, 0);
             if (self.reasoning) |live| projected = live.apply(projected);
+            if (self.manager.tool_run) |loop| if (loop.discardRevokedResults()) {
+                if (request.messages.ptr != loop.messages.items.ptr) {
+                    try self.root.usage(self.context.task, null);
+                    return error.ToolResultRevoked;
+                }
+                for (messages, request.messages) |*message, current| {
+                    if (current.role == .tool and std.mem.eql(u8, current.content, tools.Loop.revoked_result_body)) message.* = current;
+                }
+            };
             const result = self.original.chat(self.original.ctx, projected, sink, ctx);
             try self.root.usage(self.context.task, if (result) |stats| stats else |_| null);
             return result;
@@ -1009,3 +1023,92 @@ pub const Service = struct {
         return !self.store.hasBoundChildren(parent.conversation);
     }
 };
+
+test "notes result delivery rechecks after waiting for model capacity and before transport" {
+    const a = std.testing.allocator;
+    const Fixture = struct {
+        revoked: bool = false,
+        revoke_during_accounting: bool,
+        calls: usize = 0,
+
+        fn wait(raw: *const anyopaque, entering: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+            if (!entering and !self.revoke_during_accounting) self.revoked = true;
+        }
+        fn persist(raw: *anyopaque, fact: task_budget.Fact) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.revoke_during_accounting and fact.counters.pending_requests != 0) self.revoked = true;
+        }
+        fn poll(_: *const anyopaque) bool {
+            return false;
+        }
+        fn verify(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.revoked) return error.Unavailable;
+        }
+        fn release(_: *anyopaque, _: std.mem.Allocator) void {}
+        fn sink(_: *anyopaque, _: provider.Delta) void {}
+        fn chat(raw: *anyopaque, request: provider.ChatRequest, _: *const fn (*anyopaque, provider.Delta) void, _: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            try std.testing.expectEqualStrings(tools.Loop.revoked_result_body, request.messages[1].content);
+            return .{};
+        }
+        fn models(_: *anyopaque, alloc: std.mem.Allocator) ![]provider.ModelInfo {
+            return alloc.alloc(provider.ModelInfo, 0);
+        }
+    };
+    const Case = struct { detached: bool, revoke_during_accounting: bool };
+    for ([_]Case{
+        .{ .detached = false, .revoke_during_accounting = false },
+        .{ .detached = true, .revoke_during_accounting = false },
+        .{ .detached = false, .revoke_during_accounting = true },
+        .{ .detached = true, .revoke_during_accounting = true },
+    }) |case| {
+        var fixture: Fixture = .{ .revoke_during_accounting = case.revoke_during_accounting };
+        const task = identity.TaskId.generate();
+        const agent = identity.AgentId.generate();
+        const conversation = identity.ConversationId.generate();
+        const owner: scope.Owner = .{ .session = 1 };
+        const context: Context = .{ .fence = .{ .agent = agent, .conversation = conversation, .binding = 1, .environment = 1 }, .task = task, .root_task = task, .turn = 1, .owner = owner };
+        var root = task_budget.Root.init(a);
+        defer root.deinit();
+        root.persist = .{ .context = &fixture, .write = Fixture.persist };
+        try root.add(.{ .root = task, .task = task, .agent = agent, .conversation = conversation, .generation = 1 });
+        var slots: task_budget.Slots = .{};
+        var manager = Manager.init(a);
+        defer manager.deinit();
+        const loop = try a.create(tools.Loop);
+        loop.* = tools.Loop.init(a, .{ .owner = owner, .members = .{} }, 1, .{ .context_window = 8192 });
+        manager.tool_run = loop;
+        var cancel: provider.CancelToken = .{ .source = .{ .context = &fixture, .poll = Fixture.poll, .resource_wait = Fixture.wait } };
+        const prior = [_]provider.Message{
+            .{ .role = .assistant, .content = "", .tool_calls = &.{.{ .id = "read", .name = "host__notes_uread", .arguments = "{}" }} },
+            .{ .role = .tool, .content = "authorized at read time", .tool_call_id = "read" },
+        };
+        try loop.start(.{ .model = "fixture", .system = "", .messages = &prior, .cancel = &cancel });
+        try loop.records.append(loop.arena.allocator(), .{
+            .key = .{ .owner = owner, .turn_id = 1, .call_id = "read" },
+            .name = "host__notes_uread",
+            .arguments = "{}",
+            .arguments_hash = @splat(0),
+            .host_result = .{
+                .status = .succeeded,
+                .receipt = .{ .conversation_id = conversation, .task_id = task, .operation_id = 1, .binding_revision = 1 },
+                .delivery_check = .{ .context = &fixture, .verify = Fixture.verify, .release = Fixture.release },
+            },
+        });
+        var request = loop.frozenNextRequest();
+        if (case.detached) request.messages = &prior;
+        var projection: Runner.Projection = .{ .allocator = a, .original = .{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .manager = &manager, .context = context, .historical_messages = 0, .root = &root, .slots = &slots };
+        if (case.detached) {
+            try std.testing.expectError(error.ToolResultRevoked, Runner.Projection.chat(&projection, request, Fixture.sink, &fixture));
+            try std.testing.expectEqual(@as(usize, 0), fixture.calls);
+        } else {
+            _ = try Runner.Projection.chat(&projection, request, Fixture.sink, &fixture);
+            try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+        }
+        try std.testing.expect(loop.records.items[0].host_result == null);
+        try std.testing.expectEqual(@as(u64, 0), root.counters.pending_requests);
+    }
+}

@@ -27,6 +27,16 @@ comptime {
     _ = @import("ui/ai_recording_query_access.zig");
 }
 test {
+    _ = @import("notes_store_tests.zig");
+    _ = @import("notes_document_sessions_tests.zig");
+    _ = @import("notes_assets_tests.zig");
+    _ = @import("notes_query_tests.zig");
+    _ = @import("plugins/notes/ai_tools.zig");
+    _ = @import("plugins/notes/view.zig");
+    _ = @import("plugins/notes/editor.zig");
+    _ = @import("plugins/notes/floating.zig");
+    _ = @import("ui/ai_notes_citations.zig");
+    _ = @import("notes_plugin_tests.zig");
     _ = @import("ai_transfer_tests.zig");
     _ = @import("ai_child_agent_tests.zig");
     _ = @import("ai_task_gateway_tests.zig");

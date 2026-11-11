@@ -10,7 +10,7 @@ ZeroWork 是面向 Apple Silicon Mac 的 SSH 终端，架构定义见 [总体架
 
 ## 当前基线
 
-当前版本为 **0.4.3（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[界面设计说明](docs/UI_V4/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
+当前版本为 **0.6.0（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[界面设计说明](docs/UI_V4/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
 
 AI 助手等待用户确认、选择运行方式或授权范围时持续等待，直到用户决定或取消；等待期间暂停自动执行时间预算。原生敏感输入不设用户填写期限。网络、命令执行及提交后的传输超时保持独立。
 
@@ -29,7 +29,7 @@ ZeroWork 链接 GPL Zenit 核心，因此按 GPL-3.0-only 分发；参见 [LICEN
 
 ## 源码验证门禁
 
-提交前运行 `./scripts/verify_source_gate.sh`。它会校验已跟踪的 Zenit vendor 源码、重建本地 SSH 静态依赖，并使用 Zig 0.17 执行完整单元测试与契约测试；成功后自动清理 SSH 依赖生成物和 `zig-pkg/`。脚本不会发起真实 SSH 或 AI 服务商网络请求。
+提交前运行 `./scripts/verify_source_gate.sh`。它会校验已跟踪的 Zenit vendor 源码、重建本地 SSH 静态依赖，并使用 Zig 0.17 在隔离数据目录中执行完整单元测试与契约测试。
 
 ## 构建
 
@@ -37,7 +37,7 @@ ZeroWork 链接 GPL Zenit 核心，因此按 GPL-3.0-only 分发；参见 [LICEN
 
 ### 本地构建与直接运行
 
-首次构建，或执行源码验证脚本清理依赖之后，先构建仓库内的 SSH 静态依赖：
+首次构建前先生成仓库内的 SSH 静态依赖。
 
 ```sh
 ./scripts/build_ssh_deps.sh

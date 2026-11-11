@@ -10,7 +10,7 @@ ZeroWork is an Apple Silicon macOS SSH terminal specified in [docs/SPEC/OVERALL_
 
 ## Current baseline
 
-The current version is **0.4.3 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [UI design guide](docs/UI_V4/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
+The current version is **0.6.0 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [UI design guide](docs/UI_V4/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
 
 AI approval, execution-mode and scope decisions wait until the user decides or cancels, pausing the automatic-run time budget. Native secret entry has no user-entry deadline. Network, command execution and post-submission transfer timeouts remain separate.
 
@@ -29,7 +29,7 @@ ZeroWork is distributed under GPL-3.0-only while it links the GPL Zenit core; se
 
 ## Source verification gate
 
-Before committing, run `./scripts/verify_source_gate.sh`. It verifies the tracked Zenit vendor sources, rebuilds the local SSH static dependencies, and runs the full unit and contract tests with Zig 0.17. On success, it removes generated SSH dependency artifacts and `zig-pkg/`. The script does not make live SSH or AI provider requests.
+Before committing, run `./scripts/verify_source_gate.sh`. It verifies the tracked Zenit vendor sources, rebuilds the local SSH static dependencies, and runs the full unit and contract tests with Zig 0.17 in an isolated data directory.
 
 ## Build
 
@@ -37,7 +37,7 @@ The target platform is **Apple Silicon running macOS 13 or later**, using **Zig 
 
 ### Local build and direct execution
 
-Before the first build, or after the source verification script has cleaned the dependencies, build the vendored SSH static dependencies:
+Before the first build, build the vendored SSH static dependencies:
 
 ```sh
 ./scripts/build_ssh_deps.sh

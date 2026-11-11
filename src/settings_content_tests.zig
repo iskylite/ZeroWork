@@ -1130,7 +1130,7 @@ test "native settings save operation locks controls already mounted" {
     try std.testing.expect(byId(mounted.root, "settings.ssh.reconnect.header").?.behavior.interaction.a11y.?.expanded.?);
 }
 
-test "native settings shortcut chips show all 27 actions and request a single editable action" {
+test "native settings shortcut chips show every action and request a single editable action" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
@@ -1138,12 +1138,11 @@ test "native settings shortcut chips show all 27 actions and request a single ed
     var probe: SettingsProbe = .{};
     const mounted = try probe.mount(&f, 1);
     const keys = @import("config/keybindings.zig");
-    var count: usize = 0;
-    for (std.enums.values(keys.Action)) |action_id| {
+    const actions = std.enums.values(keys.Action);
+    for (actions) |action_id| {
         var buffer: [96]u8 = undefined;
         const id = try std.fmt.bufPrint(&buffer, "settings.key.{s}", .{@tagName(action_id)});
         const node = byId(mounted.root, id).?;
-        count += 1;
         const before = probe.request_count;
         clickButton(node);
         if (action_id == .recent_tab or action_id == .accept_completion) {
@@ -1154,8 +1153,9 @@ test "native settings shortcut chips show all 27 actions and request a single ed
             try std.testing.expectEqualStrings("keys", probe.requested_key.?.section);
         }
     }
-    try std.testing.expectEqual(@as(usize, 27), count);
-    try std.testing.expectEqual(@as(usize, 25), probe.request_count);
+    try std.testing.expectEqual(actions.len - 2, probe.request_count);
+    try std.testing.expect(byId(mounted.root, "settings.key.notes_float") != null);
+    try std.testing.expect(byId(mounted.root, "settings.key.notes_directory") != null);
     try std.testing.expectApproxEqAbs(@as(f32, 110), byId(mounted.root, "settings.key.tab_9").?.globalRect().w, 0.1);
     try std.testing.expect(!f.controller.model.dirty);
 }

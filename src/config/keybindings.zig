@@ -80,7 +80,10 @@ pub fn fromKey(key: anytype) KeyCode {
     return std.meta.stringToEnum(KeyCode, @tagName(key)) orelse .unknown;
 }
 
-pub const Action = enum { new_tab, close_tab, tab_1, tab_2, tab_3, tab_4, tab_5, tab_6, tab_7, tab_8, tab_9, previous_tab, next_tab, recent_tab, split_vertical, split_horizontal, copy, paste, search, completion, accept_completion, quick_connect, reconnect, sidebar, ai, upload, broadcast };
+pub const Action = enum { new_tab, close_tab, tab_1, tab_2, tab_3, tab_4, tab_5, tab_6, tab_7, tab_8, tab_9, previous_tab, next_tab, recent_tab, split_vertical, split_horizontal, copy, paste, search, completion, accept_completion, quick_connect, reconnect, sidebar, ai, upload, broadcast, notes_float, notes_directory };
+const action_count = @typeInfo(Action).@"enum".field_names.len;
+const notes_actions = [_]Action{ .notes_float, .notes_directory };
+const unbound: Chord = .{ .key = .unknown, .command = false };
 pub const Chord = struct {
     key: KeyCode,
     command: bool = true,
@@ -91,6 +94,25 @@ pub const Chord = struct {
         return a.key == b.key and a.command == b.command and a.shift == b.shift and a.control == b.control and a.option == b.option;
     }
 };
+
+fn isNotesAction(action: Action) bool {
+    return action == .notes_float or action == .notes_directory;
+}
+
+fn builtInChord(chord: Chord) bool {
+    // Match the AppKit menu and native event pump, plus the workspace's
+    // fixed actions and the notes editor's own save, search and undo keys.
+    if (chord.key == .q or chord.key == .grave or (chord.key == .w and chord.shift)) return true;
+    if (chord.option) return chord.key == .h and !chord.shift;
+    if (chord.shift) return switch (chord.key) {
+        .b, .n, .r, .s, .z => true,
+        else => false,
+    };
+    return switch (chord.key) {
+        .a, .c, .f, .h, .l, .m, .n, .o, .s, .v, .w, .x, .z, .comma => true,
+        else => false,
+    };
+}
 pub const Row = struct { label: []const u8, actions: []const Action };
 pub const rows = [_]Row{
     .{ .label = "新建 / 关闭", .actions = &.{ .new_tab, .close_tab } },
@@ -104,9 +126,10 @@ pub const rows = [_]Row{
     .{ .label = "快速连接 / 立即重连", .actions = &.{ .quick_connect, .reconnect } },
     .{ .label = "侧栏 / AI 浮窗", .actions = &.{ .sidebar, .ai } },
     .{ .label = "上传面板 / 广播", .actions = &.{ .upload, .broadcast } },
+    .{ .label = "笔记浮窗 / 笔记目录", .actions = &notes_actions },
 };
 pub const Map = struct {
-    chords: [27]Chord = defaults(),
+    chords: [action_count]Chord = defaults(),
     pub fn reset(self: *Map) void {
         self.* = .{};
     }
@@ -114,8 +137,9 @@ pub const Map = struct {
         return self.chords[@backingInt(action)];
     }
     pub fn match(self: Map, key: anytype, mods: anytype) ?Action {
-        if (mods.ctrl or fromKey(key) == .tab) return null;
-        const chord = Chord{ .key = fromKey(key), .command = mods.super, .shift = mods.shift, .control = mods.ctrl, .option = mods.alt };
+        const code = fromKey(key);
+        if (mods.ctrl or code == .tab or code == .unknown) return null;
+        const chord = Chord{ .key = code, .command = mods.super, .shift = mods.shift, .control = mods.ctrl, .option = mods.alt };
         for (self.chords, 0..) |candidate, i| if (candidate.eql(chord)) return @fromBackingInt(@intCast(i));
         return null;
     }
@@ -129,6 +153,7 @@ pub const Map = struct {
             if (!chord.eql(defaults()[@backingInt(action)])) return error.RemoteKeyReserved;
         } else if (!chord.command or chord.control or chord.key == .tab) return error.RemoteKeyReserved;
         if (self.conflict(action, chord) != null) return error.Conflict;
+        if (isNotesAction(action) and builtInChord(chord)) return error.BuiltInKeyReserved;
         self.chords[@backingInt(action)] = chord;
     }
     pub fn cloneOwned(self: Map, allocator: std.mem.Allocator) !*Map {
@@ -140,13 +165,20 @@ pub const Map = struct {
     pub fn format(self: Map, buffer: []u8) std.Io.Writer.Error![]const u8 {
         var writer = std.Io.Writer.fixed(buffer);
         try writer.writeAll("[keys]\n");
-        for (self.chords, 0..) |chord, i| try writer.print("{s} = \"{s}{s}{s}{s}{s}\"\n", .{ @tagName(@as(Action, @fromBackingInt(@intCast(i)))), if (chord.command) "cmd+" else "", if (chord.control) "ctrl+" else "", if (chord.shift) "shift+" else "", if (chord.option) "alt+" else "", @tagName(chord.key) });
+        for (self.chords, 0..) |chord, i| {
+            const action: Action = @fromBackingInt(@intCast(i));
+            if (chord.key == .unknown and isNotesAction(action)) {
+                try writer.print("{s} = \"unbound\"\n", .{@tagName(action)});
+                continue;
+            }
+            try writer.print("{s} = \"{s}{s}{s}{s}{s}\"\n", .{ @tagName(action), if (chord.command) "cmd+" else "", if (chord.control) "ctrl+" else "", if (chord.shift) "shift+" else "", if (chord.option) "alt+" else "", @tagName(chord.key) });
+        }
         return writer.buffered();
     }
     pub fn parse(source: []const u8) !Map {
         var map: Map = .{};
         var active = false;
-        var seen: [27]bool = .{ false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false };
+        var seen: [action_count]bool = @splat(false);
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
@@ -164,15 +196,30 @@ pub const Map = struct {
             const quoted = std.mem.trim(u8, line[split + 1 ..], " ");
             if (quoted.len < 2 or quoted[0] != '"' or quoted[quoted.len - 1] != '"') return error.InvalidFormat;
             const val = quoted[1 .. quoted.len - 1];
+            if (isNotesAction(action) and std.mem.eql(u8, val, "unbound")) {
+                map.chords[@backingInt(action)] = unbound;
+                continue;
+            }
             var parts = std.mem.splitScalar(u8, val, '+');
             var chord = Chord{ .key = .unknown, .command = false };
             while (parts.next()) |part| {
                 if (std.mem.eql(u8, part, "cmd")) chord.command = true else if (std.mem.eql(u8, part, "ctrl")) chord.control = true else if (std.mem.eql(u8, part, "shift")) chord.shift = true else if (std.mem.eql(u8, part, "alt")) chord.option = true else chord.key = std.meta.stringToEnum(KeyCode, part) orelse return error.InvalidKey;
             }
+            if (chord.key == .unknown) return error.ReservedKey;
             map.chords[@backingInt(action)] = chord;
         }
+        // Existing custom chords take precedence over newly introduced defaults.
+        for (notes_actions) |action| {
+            const index = @backingInt(action);
+            if (!seen[index] and map.conflict(action, map.chords[index]) != null) {
+                map.chords[index] = unbound;
+            }
+        }
         // Validate final map, so a valid reassignment is independent of file ordering.
-        for (map.chords, 0..) |chord, i| try map.set(@fromBackingInt(@intCast(i)), chord);
+        for (map.chords, 0..) |chord, i| {
+            if (chord.key == .unknown) continue;
+            try map.set(@fromBackingInt(@intCast(i)), chord);
+        }
         return map;
     }
     pub fn rowText(self: Map, label: []const u8, buffer: []u8) ![]const u8 {
@@ -182,6 +229,10 @@ pub const Map = struct {
                 if (row.actions.len == 9 and i != 0 and i != 8) continue;
                 if (i > 0) try writer.writeAll(if (row.actions.len == 9) " – " else " / ");
                 const chord = self.get(action);
+                if (chord.key == .unknown) {
+                    try writer.writeAll("未设置");
+                    continue;
+                }
                 try writer.print("{s}{s}{s}{s}{s}", .{ if (chord.command) "⌘" else "", if (chord.control) "⌃" else "", if (chord.shift) "⇧" else "", if (chord.option) "⌥" else "", symbol(chord.key) });
             }
             return writer.buffered();
@@ -225,8 +276,44 @@ fn symbol(key: KeyCode) []const u8 {
         else => @tagName(key),
     };
 }
-fn defaults() [27]Chord {
-    return .{ .{ .key = .t }, .{ .key = .w }, .{ .key = .@"1" }, .{ .key = .@"2" }, .{ .key = .@"3" }, .{ .key = .@"4" }, .{ .key = .@"5" }, .{ .key = .@"6" }, .{ .key = .@"7" }, .{ .key = .@"8" }, .{ .key = .@"9" }, .{ .key = .left_bracket, .shift = true }, .{ .key = .right_bracket, .shift = true }, .{ .key = .tab, .command = false, .control = true }, .{ .key = .d }, .{ .key = .d, .shift = true }, .{ .key = .c }, .{ .key = .v }, .{ .key = .f }, .{ .key = .semicolon }, .{ .key = .right, .command = false }, .{ .key = .k }, .{ .key = .r }, .{ .key = .b }, .{ .key = .j }, .{ .key = .u }, .{ .key = .i, .shift = true } };
+fn defaults() [action_count]Chord {
+    return .{ .{ .key = .t }, .{ .key = .w }, .{ .key = .@"1" }, .{ .key = .@"2" }, .{ .key = .@"3" }, .{ .key = .@"4" }, .{ .key = .@"5" }, .{ .key = .@"6" }, .{ .key = .@"7" }, .{ .key = .@"8" }, .{ .key = .@"9" }, .{ .key = .left_bracket, .shift = true }, .{ .key = .right_bracket, .shift = true }, .{ .key = .tab, .command = false, .control = true }, .{ .key = .d }, .{ .key = .d, .shift = true }, .{ .key = .c }, .{ .key = .v }, .{ .key = .f }, .{ .key = .semicolon }, .{ .key = .right, .command = false }, .{ .key = .k }, .{ .key = .r }, .{ .key = .b }, .{ .key = .j }, .{ .key = .u }, .{ .key = .i, .shift = true }, .{ .key = .n, .option = true }, .{ .key = .b, .option = true } };
+}
+
+test "notes shortcuts preserve existing custom chords when reading legacy maps" {
+    const mods = struct { super: bool = true, shift: bool = false, ctrl: bool = false, alt: bool = false };
+    const defaults_map: Map = .{};
+    try std.testing.expectEqual(Action.notes_float, defaults_map.match(KeyCode.n, mods{ .alt = true }).?);
+    try std.testing.expectEqual(Action.notes_directory, defaults_map.match(KeyCode.b, mods{ .alt = true }).?);
+    try std.testing.expectEqual(Action.sidebar, defaults_map.match(KeyCode.b, mods{}).?);
+    try std.testing.expect(defaults_map.match(KeyCode.n, mods{}) == null);
+
+    var map = try Map.parse("[keys]\nai = \"cmd+alt+n\"\nsearch = \"cmd+alt+b\"\n");
+    try std.testing.expectEqual(Action.ai, map.match(KeyCode.n, mods{ .alt = true }).?);
+    try std.testing.expectEqual(Action.search, map.match(KeyCode.b, mods{ .alt = true }).?);
+    try std.testing.expectEqual(KeyCode.unknown, map.get(.notes_float).key);
+    try std.testing.expectEqual(KeyCode.unknown, map.get(.notes_directory).key);
+    try std.testing.expectError(error.Conflict, map.set(.notes_float, .{ .key = .n, .option = true }));
+    try map.set(.notes_float, .{ .key = .p, .option = true });
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectEqualDeep(map, try Map.parse(try map.format(&buffer)));
+    try map.set(.search, .{ .key = .f });
+    try std.testing.expectEqualDeep(map, try Map.parse(try map.format(&buffer)));
+}
+
+test "notes shortcuts reject native and fixed commands while accepting unused chords" {
+    var map: Map = .{};
+    for ([_]Chord{
+        .{ .key = .n },                 .{ .key = .s },                                .{ .key = .z, .shift = true },
+        .{ .key = .q, .option = true }, .{ .key = .w, .shift = true, .option = true }, .{ .key = .grave, .option = true },
+        .{ .key = .h, .option = true }, .{ .key = .b, .shift = true },
+    }) |chord| {
+        try std.testing.expectError(error.BuiltInKeyReserved, map.set(.notes_float, chord));
+        try std.testing.expectError(error.BuiltInKeyReserved, map.set(.notes_directory, chord));
+    }
+    try map.set(.notes_float, .{ .key = .z, .option = true });
+    try std.testing.expectError(error.BuiltInKeyReserved, Map.parse("[keys]\nnotes_directory = \"cmd+s\"\n"));
+    try std.testing.expectError(error.InvalidKey, Map.parse("[keys]\nai = \"unbound\"\n"));
 }
 
 test "pure shortcut map parses entire config and routes foreign enum by tag" {

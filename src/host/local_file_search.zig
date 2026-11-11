@@ -233,6 +233,7 @@ fn loadRules(
     directory: std.Io.Dir,
     absolute: []const u8,
     cancel: *const CancelToken,
+    notes_boundary: ?paths.NotesBoundary,
 ) ![]const Rule {
     const stat = directory.statFile(io, ".gitignore", .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return &.{},
@@ -241,7 +242,7 @@ fn loadRules(
     if (stat.kind == .sym_link) return &.{}; // Git also ignores symlinked ignore files.
     if (stat.kind != .file or stat.size > max_ignore_bytes) return error.IgnoreRulesUnavailable;
     const path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{std.mem.trimEnd(u8, absolute, "/")});
-    const target = try paths.resolve(allocator, io, .{ .path = path }, .file);
+    const target = try paths.resolveWithNotesBoundary(allocator, io, .{ .path = path }, .file, notes_boundary);
     defer target.deinit(allocator, io);
     if (!std.meta.eql(target.parent_identity, try paths.Identity.of(directory))) return error.SourceChanged;
     const page = try reads.readText(allocator, io, &target, .{
@@ -296,6 +297,7 @@ const Walker = struct {
     pattern: ?[]const u8,
     follow_links: bool,
     context_lines: u8,
+    notes_boundary: ?paths.NotesBoundary,
     entries: std.ArrayList(Entry) = .empty,
     matches: std.ArrayList(Match) = .empty,
     visited: std.AutoHashMapUnmanaged(paths.Identity, void) = .empty,
@@ -329,7 +331,7 @@ const Walker = struct {
             .parent = parent_rules,
             .prefix_len = if (prefix.len == 0) 0 else prefix.len + 1,
             .rules = if (self.respect_ignores)
-                loadRules(a, self.io, directory, absolute, self.cancel) catch |err| switch (err) {
+                loadRules(a, self.io, directory, absolute, self.cancel, self.notes_boundary) catch |err| switch (err) {
                     error.OutOfMemory, error.Cancelled => return err,
                     error.Canceled => return error.Cancelled,
                     else => {
@@ -340,6 +342,13 @@ const Walker = struct {
             else
                 &.{},
         };
+        const directory_identity = if (self.notes_boundary) |boundary| blk: {
+            boundary.check(self.io, directory, ".") catch |err| switch (err) {
+                error.NotesStoreProtected => return,
+                else => return err,
+            };
+            break :blk try paths.Identity.of(directory);
+        } else null;
         var iterator = directory.iterateAssumeFirstIteration();
         while (!self.stopped) {
             if (self.cancel.isCancelled()) return error.Cancelled;
@@ -362,6 +371,9 @@ const Walker = struct {
                 continue;
             }
             if (paths.isRecoveryName(entry.name)) continue;
+            if (self.notes_boundary) |boundary| {
+                if (boundary.protectsChild(directory_identity.?, entry.name)) continue;
+            }
             var name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             if (entry.name.len >= name_buf.len) {
                 self.skip(.unsupported_path_encoding);
@@ -449,8 +461,8 @@ const Walker = struct {
         var temporary: std.heap.ArenaAllocator = .init(self.allocator);
         defer temporary.deinit();
         const a = temporary.allocator();
-        const target = paths.resolve(a, self.io, .{ .path = child }, .directory) catch |err| switch (err) {
-            error.NotDir, error.ManagedRecoveryMaterial => return,
+        const target = paths.resolveWithNotesBoundary(a, self.io, .{ .path = child }, .directory, self.notes_boundary) catch |err| switch (err) {
+            error.NotDir, error.ManagedRecoveryMaterial, error.NotesStoreProtected => return,
             error.OutOfMemory, error.Cancelled => return err,
             error.Canceled => return error.Cancelled,
             else => {
@@ -486,7 +498,8 @@ const Walker = struct {
         var temporary: std.heap.ArenaAllocator = .init(self.allocator);
         defer temporary.deinit();
         const a = temporary.allocator();
-        const target = paths.resolve(a, self.io, .{ .path = path }, .file) catch |err| switch (err) {
+        const target = paths.resolveWithNotesBoundary(a, self.io, .{ .path = path }, .file, self.notes_boundary) catch |err| switch (err) {
+            error.NotesStoreProtected => return,
             error.OutOfMemory, error.Cancelled => return err,
             error.Canceled => return error.Cancelled,
             else => {
@@ -614,6 +627,7 @@ fn scan(
         .pattern = pattern,
         .follow_links = follow_links,
         .context_lines = context_lines,
+        .notes_boundary = root.notes_boundary,
     };
     defer walker.visited.deinit(a);
     try walker.visited.put(a, root.target_identity.?, {});
@@ -679,6 +693,36 @@ pub fn search(
         .next_cursor = summary.next_cursor,
         .skipped = summary.walker.skipped,
     };
+}
+
+test "local scan skips the managed notes subtree and keeps ordinary notes directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "app/notes/library");
+    try tmp.dir.createDirPath(io, "project/notes");
+    try tmp.dir.writeFile(io, .{ .sub_path = "app/notes/library/fake.txt", .data = "needle" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/notes/example.txt", .data = "needle" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "app/config.txt", .data = "ordinary data" });
+    try tmp.dir.symLink(io, "app/notes/library", "alias", .{ .is_directory = true });
+    const root_path = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const app_path = try tmp.dir.realPathFileAlloc(io, "app", a);
+    const conversation = @import("identity.zig").ConversationId.generate();
+    const root = try paths.resolve(a, io, .{ .path = root_path, .app_data_root = app_path, .conversation = conversation }, .directory);
+    defer root.deinit(a, io);
+    const app_root = try paths.resolve(a, io, .{ .path = app_path, .app_data_root = app_path, .conversation = conversation }, .directory);
+    defer app_root.deinit(a, io);
+    const cancel: CancelToken = .{};
+    const key: [32]u8 = @splat(0);
+    const listing = try list(a, io, &app_root, .{ .respect_ignores = false }, key, &cancel);
+    try std.testing.expectEqual(@as(usize, 1), listing.entries.len);
+    try std.testing.expectEqualStrings("config.txt", listing.entries[0].name);
+    const matches = try search(a, io, &root, .{ .pattern = "needle", .respect_ignores = false, .follow_directory_symlinks = true }, key, &cancel);
+    try std.testing.expectEqual(@as(usize, 1), matches.matches.len);
+    try std.testing.expect(std.mem.endsWith(u8, matches.matches[0].path, "/project/notes/example.txt"));
 }
 
 test "local scan cursor binds the root revision, conversation and query" {

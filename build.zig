@@ -1,5 +1,6 @@
 const std = @import("std");
 const zenit = @import("zenit");
+const package = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     // ZeroWork is intentionally macOS 13+ on Apple Silicon only (SPEC baseline).
@@ -141,6 +142,7 @@ pub fn build(b: *std.Build) void {
 
     zenit.attach(zenit_dep, exe);
     addWebNative(b, exe.root_module, false, test_mode);
+    addNotesClipboard(b, exe.root_module);
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_notifications.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.linkFramework("UserNotifications", .{});
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_data_alert.m"), .flags = &.{"-fobjc-arc"} });
@@ -163,7 +165,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     exe.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
 
-    exe.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_runtime.m" }, .flags = if (test_mode) &.{ "-fobjc-arc", "-Wno-deprecated-declarations", "-DZW_UPDATE_TESTING=1" } else &.{ "-fobjc-arc", "-Wno-deprecated-declarations" } });
+    const release_version_flag = b.fmt("-DZW_RELEASE_VERSION=\"{s}\"", .{package.version});
+    exe.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_runtime.m" }, .flags = if (test_mode) &.{ "-fobjc-arc", "-Wno-deprecated-declarations", release_version_flag, "-DZW_UPDATE_TESTING=1" } else &.{ "-fobjc-arc", "-Wno-deprecated-declarations", release_version_flag } });
     exe.root_module.linkFramework("Security", .{});
     exe.root_module.linkFramework("LocalAuthentication", .{});
     exe.root_module.linkSystemLibrary("archive", .{});
@@ -188,7 +191,7 @@ pub fn build(b: *std.Build) void {
     update_tools.dependOn(&b.addInstallArtifact(updater, .{}).step);
     if (test_mode) {
         const fixture = b.addExecutable(.{ .name = "update-fixture", .root_module = b.createModule(.{ .root_source_file = b.path("src/update/fixture_main.zig"), .target = target, .optimize = optimize }) });
-        fixture.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_runtime.m", "src/update/native_fixture.m" }, .flags = &.{ "-fobjc-arc", "-Wno-deprecated-declarations", "-DZW_UPDATE_TESTING=1" } });
+        fixture.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_runtime.m", "src/update/native_fixture.m" }, .flags = &.{ "-fobjc-arc", "-Wno-deprecated-declarations", release_version_flag, "-DZW_UPDATE_TESTING=1" } });
         fixture.root_module.link_libc = true;
         fixture.root_module.linkFramework("AppKit", .{});
         fixture.root_module.linkFramework("Foundation", .{});
@@ -391,6 +394,7 @@ pub fn build(b: *std.Build) void {
     addUrlFetchFrameworks(tests.root_module);
 
     addCoreTextBridgeForTest(zenit_dep, tests);
+    addNotesClipboard(b, tests.root_module);
     addBmcNative(b, tests.root_module);
     addWebNative(b, tests.root_module, true, false);
     tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
@@ -422,6 +426,7 @@ pub fn build(b: *std.Build) void {
     bmc_tests.root_module.linkSystemLibrary("curl", .{});
     bmc_tests.root_module.linkFramework("JavaScriptCore", .{});
     addCoreTextBridgeForTest(zenit_dep, bmc_tests);
+    addNotesClipboard(b, bmc_tests.root_module);
     addBmcNative(b, bmc_tests.root_module);
     addWebNative(b, bmc_tests.root_module, true, false);
     bmc_tests.step.dependOn(&verify_ssh.step);
@@ -535,7 +540,9 @@ pub fn build(b: *std.Build) void {
             local_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
             local_tests.root_module.linkSystemLibrary("z", .{});
             addCoreTextBridgeForTest(zenit_dep, local_tests);
+            addNotesClipboard(b, local_tests.root_module);
             addBmcNative(b, local_tests.root_module);
+            addWebNative(b, local_tests.root_module, true, false);
             local_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
             local_tests.root_module.linkFramework("Metal", .{});
             local_tests.root_module.linkFramework("QuartzCore", .{});
@@ -673,7 +680,9 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.linkSystemLibrary("z", .{});
 
     addCoreTextBridgeForTest(zenit_dep, appearance_tests);
+    addNotesClipboard(b, appearance_tests.root_module);
     addBmcNative(b, appearance_tests.root_module);
+    addWebNative(b, appearance_tests.root_module, true, false);
     appearance_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     appearance_tests.root_module.linkFramework("Metal", .{});
     appearance_tests.root_module.linkFramework("QuartzCore", .{});
@@ -728,6 +737,7 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.linkSystemLibrary("z", .{});
 
     addCoreTextBridgeForTest(zenit_dep, ui_tests);
+    addNotesClipboard(b, ui_tests.root_module);
     addBmcNative(b, ui_tests.root_module);
     addWebNative(b, ui_tests.root_module, true, false);
     ui_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
@@ -942,6 +952,11 @@ pub fn build(b: *std.Build) void {
     formal_environment.addOptions("automation_options", formal_environment_options);
     environment_probe.root_module.addImport("formal_environment", formal_environment);
     b.step("test-app-environment", "Verify formal defaults ignore process environment overrides").dependOn(&b.addRunArtifact(environment_probe).step);
+}
+
+fn addNotesClipboard(b: *std.Build, module: *std.Build.Module) void {
+    module.addCSourceFile(.{ .file = b.path("src/platform/macos_notes_clipboard.m"), .flags = &.{"-fobjc-arc"} });
+    module.linkFramework("AppKit", .{});
 }
 
 fn addCoreTextBridgeForTest(zenit_dep: *std.Build.Dependency, exe: *std.Build.Step.Compile) void {

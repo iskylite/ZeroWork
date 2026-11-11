@@ -5,6 +5,9 @@ const keys = @import("keybindings.zig");
 
 pub fn isHostKey(map: keys.Map, key: anytype, mods: anytype) bool {
     const code = keys.fromKey(key);
+    const configured_action = map.match(key, mods);
+    if (configured_action == .notes_float) return true;
+    if (configured_action == .notes_directory) return false;
     // These chords keep their native editor meaning even when a terminal
     // shortcut was assigned to the same physical key.
     if (mods.super and !mods.ctrl) switch (code) {
@@ -17,7 +20,7 @@ pub fn isHostKey(map: keys.Map, key: anytype, mods: anytype) bool {
     const recent = map.get(.recent_tab);
     if (code == recent.key and mods.super == recent.command and
         mods.ctrl == recent.control and mods.alt == recent.option) return true;
-    if (map.match(key, mods)) |action| return switch (action) {
+    if (configured_action) |action| return switch (action) {
         .copy, .paste, .search, .completion, .accept_completion => false,
         else => true,
     };
@@ -62,4 +65,15 @@ test "focused web page preserves editing selection navigation and composition ke
     var customized = map;
     try customized.set(.new_tab, .{ .key = .a });
     try std.testing.expect(!isHostKey(customized, keys.KeyCode.a, Mods{ .super = true }));
+}
+
+test "focused web page hands off the exact configured notes float shortcut" {
+    var map: keys.Map = .{};
+    const with_option: Mods = .{ .super = true, .alt = true };
+    try std.testing.expect(isHostKey(map, keys.KeyCode.n, with_option));
+    try std.testing.expect(!isHostKey(map, keys.KeyCode.b, with_option));
+    try map.set(.notes_float, .{ .key = .z, .option = true });
+    try std.testing.expect(isHostKey(map, keys.KeyCode.z, with_option));
+    try std.testing.expect(!isHostKey(map, keys.KeyCode.z, Mods{ .super = true }));
+    try std.testing.expect(!isHostKey(map, keys.KeyCode.n, with_option));
 }

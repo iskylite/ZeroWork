@@ -15,6 +15,7 @@ pub const Row = struct {
     body_fingerprint: ?u64 = null,
     details: ?*View = null,
     prose: ?*@import("ai_message_view.zig").Retained = null,
+    notes_citations_mounted: bool = false,
     step: ?@import("ai_step_view.zig").Result = null,
     source_key: u64 = 0,
 };
@@ -88,6 +89,7 @@ pub const View = struct {
         row_value.body_scope = null;
         row_value.details = null;
         row_value.prose = null;
+        row_value.notes_citations_mounted = false;
         row_value.step = null;
         row_value.body_fingerprint = null;
         if (scope) |value| value.dispose();

@@ -142,6 +142,8 @@ pub const SessionTab = struct {
     file_scope: ?*ui.Scope = null,
     transfer_trays: [2]?*@import("transfer_manager_view.zig").Panel = .{ null, null },
     plugin_renderer: ?plugin_ui.RendererInstance = null,
+    plugin_presentation: plugin_ui.ContentPresentation = .hidden,
+    plugin_floating_root: ?*ui.Node = null,
     plugin_protocol_id: []const u8 = "",
     local_bound: bool = false,
     local_state: LocalState = .starting,
@@ -155,6 +157,21 @@ pub const SessionTab = struct {
     local_close: ?*ui.Node = null,
     local_retry: ?*ui.Node = null,
     local_reconnect: ?*ui.Node = null,
+
+    fn setPluginPresentation(self: *SessionTab, state: plugin_ui.ContentPresentation) void {
+        const renderer = self.plugin_renderer orelse return;
+        const notify = renderer.vtable.presentation_changed orelse return;
+        if (self.plugin_presentation == state) return;
+        self.plugin_presentation = state;
+        notify(renderer.context, state);
+    }
+
+    fn unmountPluginRenderer(self: *SessionTab) void {
+        const renderer = self.plugin_renderer orelse return;
+        self.setPluginPresentation(.hidden);
+        renderer.vtable.unmount(renderer.context);
+        self.plugin_renderer = null;
+    }
 
     pub fn ticket(self: *const SessionTab) lifecycle.Ticket {
         return .{ .session_id = self.id, .generation = self.generation };
@@ -366,6 +383,10 @@ pub const Workspace = struct {
     recent_connections: @import("quick_connect.zig").RecentList = .{},
     plugins: plugin_registry.Registry = .{},
     content_services: ?plugin_ui.ContentServicesFactory = null,
+    content_focus: ?plugin_ui.ContentFocus = null,
+    notes_window_visible: bool = true,
+    notes_float_surface: ?*ui.Node = null,
+    notes_float_key: ?ui.events.KeyCode = null,
 
     font_family_resolver: ?*const fn ([]const u8) u16 = null,
     terminal_typography_resolver: ?*const fn (*TerminalViewNode, TerminalTypographyConfig) anyerror!void = null,
@@ -476,7 +497,11 @@ pub const Workspace = struct {
     history_card_host: ?*ui.Node = null,
     empty_state: *ui.Node,
     status_node: ?*ui.Node = null,
-    status_feedback: ?struct { context: *anyopaque, publish: *const fn (*anyopaque, ?identity.ContentOwner, []const u8, StatusKind) void } = null,
+    status_feedback: ?struct {
+        context: *anyopaque,
+        publish: *const fn (*anyopaque, ?identity.ContentOwner, []const u8, StatusKind) void,
+        notes_save: ?*const fn (*anyopaque, identity.SessionHandle, ?[]const u8) void = null,
+    } = null,
     command_output: ?*TerminalViewNode = null,
     creation_group: ?u32 = null,
     owned_creation_pending: bool = false,
@@ -1044,6 +1069,22 @@ pub const Workspace = struct {
     }
     pub fn reportFailure(self: *Workspace, owner: identity.ContentOwner, text: []const u8) void {
         if (self.status_feedback) |feedback| feedback.publish(feedback.context, owner, text, .failure);
+    }
+
+    const ContentSaveFeedback = struct {
+        workspace: *Workspace,
+        owner: identity.SessionHandle,
+
+        fn report(self: *ContentSaveFeedback, text: ?[]const u8) void {
+            const feedback = self.workspace.status_feedback orelse return;
+            if (feedback.notes_save) |publish| publish(feedback.context, self.owner, text);
+        }
+    };
+
+    fn contentSaveHandler(self: *Workspace, scope: *ui.Scope, owner: identity.SessionHandle, protocol_id: []const u8) !?ui.Handler(?[]const u8) {
+        if (!std.mem.eql(u8, protocol_id, @import("../plugins/notes/plugin.zig").id)) return null;
+        const report = try scope.createState(ContentSaveFeedback, .{ .workspace = self, .owner = owner });
+        return self.cx.on(ContentSaveFeedback, report, ContentSaveFeedback.report);
     }
     fn statusWithKind(self: *Workspace, text: []const u8, kind: StatusKind) void {
         if (self.command_output) |terminal| {
@@ -2913,7 +2954,7 @@ pub const Workspace = struct {
         if (self.active_group_view) |id| if (self.groupClosing(id)) return error.GroupClosing;
         const active = self.active_tab orelse return error.NoActiveTab;
         const source = self.tabs.items[active];
-        if (source.content_owner != .session or source.archived or source.closing) return error.UnsupportedService;
+        if (source.content_owner != .session or source.archived or source.closing or std.mem.eql(u8, source.plugin_protocol_id, @import("../plugins/notes/plugin.zig").id)) return error.UnsupportedService;
         var id = self.active_group_view;
         if (id == null) {
             const name = try std.fmt.allocPrint(self.allocator, "{s} 终端组 #{d}", .{ source.titleSlice(), source.id });
@@ -3110,6 +3151,7 @@ pub const Workspace = struct {
                 false
         else
             false;
+        errdefer self.syncPluginPresentation();
         self.restoreGroupRoots();
         view.resizing = false;
         view.drop_marker = null;
@@ -3293,6 +3335,7 @@ pub const Workspace = struct {
         try root.appendChild(self.allocator, marker);
         try self.terminal_area.appendChild(self.allocator, root);
         self.empty_state.setDisplay(.none);
+        self.syncPluginPresentation();
         for (self.tabs.items) |tab| if (tab.plugin_renderer) |renderer| renderer.vtable.focus_changed(renderer.context, view.focused == tab.id);
         if (view.focused) |id| if (self.tabIndex(id)) |index| {
             self.active_tab = index;
@@ -3718,10 +3761,9 @@ pub const Workspace = struct {
         self.active_tab = index;
         self.restoreGroupRoots();
         self.active_group_view = null;
-        for (self.tabs.items, 0..) |tab, i| {
-            tab.root.setDisplay(if (i == index) .flex else .none);
-            if (tab.plugin_renderer) |renderer| renderer.vtable.focus_changed(renderer.context, i == index);
-        }
+        for (self.tabs.items, 0..) |tab, i| tab.root.setDisplay(if (i == index) .flex else .none);
+        self.syncPluginPresentation();
+        for (self.tabs.items, 0..) |tab, i| if (tab.plugin_renderer) |renderer| renderer.vtable.focus_changed(renderer.context, i == index);
         self.empty_state.setDisplay(.none);
         // The status-bar grid label mirrors the ACTIVE tab only: other tabs'
         // frame hooks keep running, so they must not write the shared node.
@@ -3738,6 +3780,25 @@ pub const Workspace = struct {
         // The terminal pane is the tab's primary input surface: route
         // keystrokes there immediately instead of waiting for a click.
         self.cx.setFocus(if (self.tabs.items[index].terminal) |*value| value.root else self.tabs.items[index].root);
+    }
+
+    pub fn setNotesWindowVisible(self: *Workspace, visible: bool) bool {
+        if (self.notes_window_visible == visible) return false;
+        self.notes_window_visible = visible;
+        self.syncPluginPresentation();
+        return true;
+    }
+
+    fn syncPluginPresentation(self: *Workspace) void {
+        for (self.tabs.items) |tab| {
+            const renderer = tab.plugin_renderer orelse continue;
+            if (renderer.vtable.presentation_changed == null) continue;
+            const presentation_root = tab.plugin_floating_root orelse tab.root;
+            const parent = if (tab.plugin_floating_root != null) self.cx.root orelse self.terminal_area else self.terminal_area;
+            const visible = presentation_root.isDescendantOf(parent) and presentation_root.isDisplayedInTree();
+            const occluded = !self.notes_window_visible and std.mem.eql(u8, tab.plugin_protocol_id, @import("../plugins/notes/plugin.zig").id);
+            tab.setPluginPresentation(if (!visible) .hidden else if (occluded) .occluded else .active);
+        }
     }
 
     /// Entry point for every tab-close request. A live session (runtime
@@ -3898,6 +3959,10 @@ pub const Workspace = struct {
     pub fn forceCloseTab(self: *Workspace, index: usize) void {
         if (index >= self.tabs.items.len) return;
         const tab = self.tabs.items[index];
+        if (!tab.closing) self.preparePluginClose(tab.id) catch {
+            self.abortCloseBatch();
+            return;
+        };
         if (self.close_bridge.request_close) |request| {
             tab.closing = true;
             switch (request(self.close_bridge.context, tab.tab_id, tab.content_owner)) {
@@ -3913,6 +3978,16 @@ pub const Workspace = struct {
             return;
         }
         self.removeClosedTab(index);
+    }
+
+    pub fn preparePluginClose(self: *Workspace, id: SessionId) !void {
+        const tab = self.sessionTab(id) orelse return;
+        const renderer = tab.plugin_renderer orelse return;
+        if (renderer.vtable.prepare_close) |prepare| try prepare(renderer.context);
+    }
+
+    pub fn preparePluginWindowClose(self: *Workspace) !void {
+        for (self.tabs.items) |tab| if (!tab.closing) try self.preparePluginClose(tab.id);
     }
 
     /// Resource owners call this from their controller thread. Actual node
@@ -3944,6 +4019,7 @@ pub const Workspace = struct {
             if (self.group_roster) |roster| _ = roster.leavePane(tab.id);
         }
         if (self.rename_session == tab.id) _ = self.cancelRenameTab();
+        self.dockPluginContent(tab);
         for (self.connect_jobs.items) |job| {
             if (job.ticket.matches(tab.ticket())) {
                 job.cancelled.store(true, .release);
@@ -3980,8 +4056,7 @@ pub const Workspace = struct {
         if (tab.remote_notice_scope) |scope| scope.dispose();
         tab.remote_notice_scope = null;
         tab.remote_notice = null;
-        if (tab.plugin_renderer) |renderer| renderer.vtable.unmount(renderer.context);
-        tab.plugin_renderer = null;
+        tab.unmountPluginRenderer();
         tab.transfer_trays = .{ null, null };
         if (tab.file_scope) |scope| scope.dispose();
         tab.file_scope = null;
@@ -4895,8 +4970,7 @@ pub const Workspace = struct {
         self.model.completeClose(tab.tab_id, tab.content_owner) catch unreachable;
         if (self.rename_session == tab.id) _ = self.cancelRenameTab();
         if (tab.root.parent) |parent| self.cx.detachChild(parent, tab.root);
-        tab.plugin_renderer.?.vtable.unmount(tab.plugin_renderer.?.context);
-        tab.plugin_renderer = null;
+        tab.unmountPluginRenderer();
         tab.transfer_trays = .{ null, null };
         if (tab.file_scope) |scope| scope.dispose();
         tab.file_scope = null;
@@ -4927,7 +5001,7 @@ pub const Workspace = struct {
         errdefer self.cx.destroyDetached(pane);
         pane.meta.ownership.meta.test_id = "workspace.plugin.content";
         const services = if (self.content_services) |factory| try factory.create(factory.context, owner) else plugin_ui.ContentServices{};
-        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access, .web_surface = services.web_surface, .web_bookmarks = services.web_bookmarks });
+        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access, .web_surface = services.web_surface, .web_bookmarks = services.web_bookmarks, .save_feedback = try self.contentSaveHandler(scope, owner, value.protocol_id), .focus_content = self.content_focus });
         errdefer instance.vtable.unmount(instance.context);
         try self.terminal_area.appendChild(self.allocator, pane);
         errdefer self.cx.detachChild(self.terminal_area, pane);
@@ -4935,6 +5009,7 @@ pub const Workspace = struct {
         const old_root = tab.root;
         const old_scope = tab.file_scope;
         const old_renderer = tab.plugin_renderer.?;
+        tab.setPluginPresentation(.hidden);
         tab.root = pane;
         tab.file_scope = scope;
         tab.plugin_renderer = instance;
@@ -4980,31 +5055,82 @@ pub const Workspace = struct {
     }
 
     pub fn createPluginSession(self: *Workspace, owner: identity.SessionHandle, value: envelopes.Envelope, renderer: plugin_ui.RendererDefinition) !SessionId {
+        const mounted = try self.mountPluginContent(owner, value, renderer);
+        errdefer mounted.destroy(self.cx);
+        return self.attachPluginContent(owner, value, mounted);
+    }
+
+    pub const MountedPlugin = struct {
+        root: *ui.Node,
+        scope: *ui.Scope,
+        instance: plugin_ui.RendererInstance,
+
+        pub fn destroy(self: MountedPlugin, cx: *ui.Cx) void {
+            if (self.root.parent) |parent| cx.detachChild(parent, self.root);
+            self.instance.vtable.unmount(self.instance.context);
+            self.scope.dispose();
+            cx.destroyDetached(self.root);
+        }
+    };
+
+    pub fn mountPluginContent(self: *Workspace, owner: identity.SessionHandle, value: envelopes.Envelope, renderer: plugin_ui.RendererDefinition) !MountedPlugin {
         if (self.shutting_down) return error.WorkspaceClosed;
         const mount_renderer = renderer.mount orelse return error.ContentRendererUnavailable;
-        try self.tabs.ensureUnusedCapacity(self.allocator, 1);
-        const tab = try self.allocator.create(SessionTab);
-        errdefer self.allocator.destroy(tab);
         const scope = try self.scope.childScope();
         errdefer scope.dispose();
         const pane = try ui.box(self.cx, local_styles.pane(), .{});
         errdefer self.cx.destroyDetached(pane);
         pane.meta.ownership.meta.test_id = "workspace.plugin.content";
+        const services = if (self.content_services) |factory| try factory.create(factory.context, owner) else plugin_ui.ContentServices{};
+        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access, .web_surface = services.web_surface, .web_bookmarks = services.web_bookmarks, .save_feedback = try self.contentSaveHandler(scope, owner, value.protocol_id), .focus_content = self.content_focus });
+        return .{ .root = pane, .scope = scope, .instance = instance };
+    }
+
+    /// Transfer a mounted renderer into the tab model after all fallible
+    /// preparation. The caller retains it if attachment fails.
+    pub fn attachPluginContent(self: *Workspace, owner: identity.SessionHandle, value: envelopes.Envelope, mounted: MountedPlugin) !SessionId {
+        if (self.shutting_down) return error.WorkspaceClosed;
+        try self.tabs.ensureUnusedCapacity(self.allocator, 1);
+        try self.terminal_area.children.ensureUnusedCapacity(self.allocator, 1);
+        const tab = try self.allocator.create(SessionTab);
+        errdefer self.allocator.destroy(tab);
         const protocol_id = try self.allocator.dupe(u8, value.protocol_id);
         errdefer self.allocator.free(protocol_id);
-        const services = if (self.content_services) |factory| try factory.create(factory.context, owner) else plugin_ui.ContentServices{};
-        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access, .web_surface = services.web_surface, .web_bookmarks = services.web_bookmarks });
-        errdefer instance.vtable.unmount(instance.context);
         const ticket = self.identities.newTicket();
-        tab.* = .{ .id = ticket.session_id, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = owner }, .generation = owner.generation, .host_id = @backingInt(value.id), .host_index = self.registry.indexOf(value.id) orelse removed_host_index, .host_snapshot = null, .root = pane, .file_scope = scope, .plugin_renderer = instance, .plugin_protocol_id = protocol_id, .content_ready = true };
+        tab.* = .{ .id = ticket.session_id, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = owner }, .generation = owner.generation, .host_id = @backingInt(value.id), .host_index = self.registry.indexOf(value.id) orelse removed_host_index, .host_snapshot = null, .root = mounted.root, .file_scope = mounted.scope, .plugin_renderer = mounted.instance, .plugin_protocol_id = protocol_id, .content_ready = true };
         tab.setTitle(value.name);
         try self.installTabModel(tab);
         errdefer self.model.completeClose(tab.tab_id, tab.content_owner) catch {};
-        try self.terminal_area.appendChild(self.allocator, pane);
+        const previous = mounted.root.parent;
+        if (previous) |parent| self.cx.detachChildRetained(parent, mounted.root);
+        self.terminal_area.appendChild(self.allocator, mounted.root) catch |err| {
+            if (previous) |parent| parent.appendChild(self.allocator, mounted.root) catch unreachable;
+            return err;
+        };
         self.tabs.appendAssumeCapacity(tab);
         self.rebuildTabBar() catch {};
         self.selectTab(self.tabs.items.len - 1);
         return tab.id;
+    }
+
+    pub fn floatPluginContent(self: *Workspace, tab: *SessionTab, content: *ui.Node, slot: *ui.Node) !void {
+        if (content.parent != tab.root or tab.plugin_floating_root != null) return error.ContentAlreadyAttached;
+        try slot.children.ensureUnusedCapacity(self.allocator, 1);
+        self.cx.detachChildRetained(tab.root, content);
+        slot.appendChild(self.allocator, content) catch |err| {
+            tab.root.appendChild(self.allocator, content) catch unreachable;
+            return err;
+        };
+        tab.plugin_floating_root = content;
+        self.syncPluginPresentation();
+    }
+
+    pub fn dockPluginContent(self: *Workspace, tab: *SessionTab) void {
+        const content = tab.plugin_floating_root orelse return;
+        tab.plugin_floating_root = null;
+        if (content.parent) |parent| self.cx.detachChildRetained(parent, content);
+        tab.root.appendChild(self.allocator, content) catch unreachable;
+        self.syncPluginPresentation();
     }
 
     /// Attach a real file workspace without constructing VT, PTY or a shell.
@@ -8017,18 +8143,34 @@ test "mixed tab group identity unifies drag cursor rollback ordinals picker and 
     try std.testing.expectEqual(group_tab, workspace.model.tabs.items[workspace.model.indexOf(last_id).?].container.?);
 }
 
-test "registered nonterminal renderer mounts into the existing tab without a legacy host snapshot" {
+test "registered nonterminal renderer mounts and receives tab presentation changes" {
     const Driver = struct {
         mounts: usize = 0,
+        presentations: [4]plugin_ui.ContentPresentation = undefined,
+        changes: usize = 0,
+        unmounted_after: ?usize = null,
+        can_close: bool = true,
         fn mount(raw: ?*anyopaque, request: plugin_ui.ContentMount) !plugin_ui.RendererInstance {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.mounts += 1;
             try request.slot.appendChild(request.cx.allocator, try ui.text(request.cx, "native nonterminal content", .{}));
-            return .{ .context = self, .vtable = &.{ .update = update, .focus_changed = focus, .unmount = unmount } };
+            return .{ .context = self, .vtable = &.{ .update = update, .focus_changed = focus, .unmount = unmount, .presentation_changed = presentation, .prepare_close = prepareClose } };
         }
         fn update(_: *anyopaque, _: plugin_ui.ContentUpdate) !void {}
         fn focus(_: *anyopaque, _: bool) void {}
-        fn unmount(_: *anyopaque) void {}
+        fn prepareClose(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.can_close) return error.SaveFailed;
+        }
+        fn unmount(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.unmounted_after = self.changes;
+        }
+        fn presentation(raw: *anyopaque, state: plugin_ui.ContentPresentation) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.presentations[self.changes] = state;
+            self.changes += 1;
+        }
     };
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -8066,8 +8208,25 @@ test "registered nonterminal renderer mounts into the existing tab without a leg
     tab.host_id = 0;
     try std.testing.expect(workspace.savedConnectionForTab(0) == null);
     try std.testing.expect(workspace.savedConnectionForTab(99) == null);
+    var other: Driver = .{};
+    const other_owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(782), .generation = 1 };
+    _ = try workspace.createPluginSession(other_owner, .{ .id = @fromBackingInt(0), .revision = 1, .protocol_id = "example.canvas", .name = "Other canvas", .payload_version = 1, .payload = "{}" }, .{ .kind = "example.canvas", .context = &other, .mount = Driver.mount });
+    workspace.selectTab(0);
+    workspace.selectTab(0);
     _ = cx.render();
+    driver.can_close = false;
+    try std.testing.expectError(error.SaveFailed, workspace.preparePluginWindowClose());
     workspace.forceCloseTab(0);
+    try std.testing.expect(workspace.sessionTab(id) == tab and !tab.closing);
+    try std.testing.expectEqual(@as(?usize, null), driver.unmounted_after);
+    try std.testing.expectEqual(plugin_ui.ContentPresentation.active, tab.plugin_presentation);
+    driver.can_close = true;
+    workspace.forceCloseTab(0);
+    try std.testing.expectEqual(@as(?usize, 4), driver.unmounted_after);
+    try std.testing.expectEqualSlices(plugin_ui.ContentPresentation, &.{ .active, .hidden, .active, .hidden }, driver.presentations[0..driver.changes]);
+    workspace.forceCloseTab(0);
+    try std.testing.expectEqual(@as(?usize, 4), other.unmounted_after);
+    try std.testing.expectEqualSlices(plugin_ui.ContentPresentation, &.{ .active, .hidden, .active, .hidden }, other.presentations[0..other.changes]);
     try std.testing.expectEqual(@as(usize, 0), workspace.model.tabs.items.len);
 }
 
@@ -8408,17 +8567,26 @@ test "mixed session group mounts terminal file KVM and future content and retain
     defer roster.deinit();
     var workspace: Workspace = .{ .allocator = a, .cx = cx, .scope = scope, .io = std.testing.io, .app_config = &config, .palette = Palette.fromTheme(), .registry = .{ .arena = std.heap.ArenaAllocator.init(a), .hosts = &.{} }, .hosts_path = "", .sidebar_list = root, .tab_bar = strip, .terminal_area = area, .empty_state = empty, .model = .{ .allocator = a, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) }, .group_roster = &roster };
     const Renderer = struct {
+        focused: bool = false,
+        presented: bool = false,
+        presentation_changes: usize = 0,
+
         fn update(_: *anyopaque, _: plugin_ui.ContentUpdate) !void {}
         fn focus(raw: *anyopaque, focused: bool) void {
-            const flag: *bool = @ptrCast(@alignCast(raw));
-            flag.* = focused;
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.focused = focused;
+        }
+        fn presentation(raw: *anyopaque, state: plugin_ui.ContentPresentation) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.presented = state == .active;
+            self.presentation_changes += 1;
         }
         fn unmount(_: *anyopaque) void {}
         fn status(_: *anyopaque) plugin_ui.ConnectionStatus {
             return .{ .state = .online, .label = "视频在线" };
         }
     };
-    var kvm_focused = false;
+    var kvm: Renderer = .{};
     var tabs: [5]SessionTab = undefined;
     var count: usize = 0;
     defer {
@@ -8449,7 +8617,7 @@ test "mixed session group mounts terminal file KVM and future content and retain
         const content = if (terminal) |view| view.root else try ui.box(cx, .{ .width = .fill(), .height = .fill(), .hit_behavior = .@"opaque" }, .{});
         try area.appendChild(a, content);
         tab.* = .{ .id = 101 + i, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = .{ .session_id = @fromBackingInt(101 + i) } }, .host_id = 0, .host_index = 0, .host_snapshot = null, .root = content, .terminal = terminal, .local = i == 0, .plugin_protocol_id = if (i >= 2) kind else "", .content_ready = true, .file_ready = i == 2 };
-        if (i == 3) tab.plugin_renderer = .{ .context = &kvm_focused, .vtable = &.{ .update = Renderer.update, .focus_changed = Renderer.focus, .unmount = Renderer.unmount, .connection_status = Renderer.status } };
+        if (i == 3) tab.plugin_renderer = .{ .context = &kvm, .vtable = &.{ .update = Renderer.update, .focus_changed = Renderer.focus, .unmount = Renderer.unmount, .presentation_changed = Renderer.presentation, .connection_status = Renderer.status } };
         count += 1;
         tab.setTitle(kind);
         try workspace.tabs.append(a, tab);
@@ -8463,6 +8631,8 @@ test "mixed session group mounts terminal file KVM and future content and retain
     cx.layout();
     try std.testing.expectEqual(@as(usize, 5), view.panes.items.len);
     for (tabs, view.panes.items) |tab, pane| try std.testing.expect(tab.root.parent == pane.node);
+    try std.testing.expect(kvm.presented);
+    const presentation_changes = kvm.presentation_changes;
     // Selecting a member through its header must hand keyboard input to the
     // same member; the visual active-member marker alone is insufficient.
     for (0..3) |_| {
@@ -8482,6 +8652,7 @@ test "mixed session group mounts terminal file KVM and future content and retain
     cx.handleMouseUp(title_x, title_y);
     try std.testing.expectEqual(tabs[1].id, view.focused.?);
     try std.testing.expect(cx.focus_manager.getFocused() == tabs[1].terminal.?.root);
+    try std.testing.expect(!kvm.focused and kvm.presented);
     cx.handleMouseDown(title_x, title_y, .{});
     cx.handleMouseMove(title_x + 8, title_y);
     try std.testing.expectEqual(ui.CursorShape.grabbing, cx.current_cursor);
@@ -8497,6 +8668,7 @@ test "mixed session group mounts terminal file KVM and future content and retain
     cx.advanceFrameClock();
     _ = cx.render();
     try std.testing.expect(cx.focus_manager.getFocused() == outside_editor.input_container);
+    try std.testing.expectEqual(presentation_changes, kvm.presentation_changes);
     cx.setFocus(tabs[1].terminal.?.root);
     try roster.leave("Mixed", tabs[4].id);
     try workspace.dockGroupMember(group.id, tabs[0].id, tabs[1].id, .top);
@@ -8556,11 +8728,11 @@ test "mixed session group mounts terminal file KVM and future content and retain
     const kvm_rect = view.panes.items[3].node.globalRect();
     cx.handleMouseDown(kvm_rect.x + 20, kvm_rect.y + 50, .{});
     cx.handleMouseUp(kvm_rect.x + 20, kvm_rect.y + 50);
-    try std.testing.expect(kvm_focused);
+    try std.testing.expect(kvm.focused);
     const local_rect = view.panes.items[0].node.globalRect();
     cx.handleMouseDown(local_rect.x + 20, local_rect.y + 50, .{});
     cx.handleMouseUp(local_rect.x + 20, local_rect.y + 50);
-    try std.testing.expect(!kvm_focused);
+    try std.testing.expect(!kvm.focused and kvm.presented);
     workspace.setGroupMemberBroadcast(tabs[3].id, true);
     try std.testing.expect(!tabs[3].group_broadcast_enabled);
     // A stale picker cannot move a replacement generation into the group.

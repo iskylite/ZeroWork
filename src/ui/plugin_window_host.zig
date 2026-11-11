@@ -586,9 +586,18 @@ pub const Host = struct {
         const show = visible and slot.isDisplayedInTree() and rect.w > 0 and rect.h > 0 and self.cx.overlay_stack.topmost() == null;
         if (!show and binding.* == null) return;
         if (binding.* == null) binding.* = try surface.bind(owner, app.windowId());
+        var clip = workspace.terminal_area.globalRect();
+        if (workspace.notes_float_surface) |notes| if (notes.isDisplayedInTree()) {
+            const notes_rect = notes.globalRect();
+            // Crop the AppKit container while keeping the WebKit page's size.
+            if (notes_rect.w > 0) clip.w = std.math.clamp(notes_rect.x - clip.x, 0, clip.w);
+            if (self.cx.focus_manager.getFocused()) |focused| {
+                if (focused.isDescendantOf(notes)) try surface.releaseFocus(binding.*.?);
+            }
+        };
         try surface.sync(binding.*.?, app, .{
             .slot = rect,
-            .clip = workspace.terminal_area.globalRect(),
+            .clip = clip,
             .visible = show,
             .host_key = webHostKey,
             .focus_entered = .{ .callback = webFocusEntered, .context = self },
@@ -605,6 +614,10 @@ pub const Host = struct {
     fn webHostKey(context: ?*anyopaque, key: u16, modifiers: u32) callconv(.c) c_int {
         const self: *Host = @ptrCast(@alignCast(context orelse return 0));
         if (self.closed or self.shutdown_prepared) return 0;
+        const workspace = self.application.workspace;
+        const code = ui.events.KeyCode.fromRawKeycode(key);
+        // AppKit can still be focused in WebKit when the notes key is released.
+        if (workspace.notes_float_key == code) return 1;
         const mods = ui.events.Modifiers{
             .shift = modifiers & (1 << 17) != 0,
             .ctrl = modifiers & (1 << 18) != 0,
@@ -612,8 +625,8 @@ pub const Host = struct {
             .super = modifiers & (1 << 20) != 0,
         };
         return @intFromBool(@import("../config/web_host_keys.zig").isHostKey(
-            self.application.workspace.app_config.keys,
-            ui.events.KeyCode.fromRawKeycode(key),
+            workspace.app_config.keys,
+            code,
             mods,
         ));
     }

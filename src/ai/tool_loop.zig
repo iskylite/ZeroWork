@@ -156,6 +156,8 @@ pub const Record = struct {
 };
 pub const DispatchGate = provider.DispatchFence;
 pub const Loop = struct {
+    pub const revoked_result_body = "{\"status\":\"rejected\",\"error_code\":\"Unavailable\"}";
+
     read_only: bool = false,
     dispatch_gate: ?DispatchGate = null,
     allocator: std.mem.Allocator,
@@ -274,9 +276,11 @@ pub const Loop = struct {
         }
         try self.checkBudget();
     }
-    /// After the dispatch boundary, the request cannot compact, allocate, or
-    /// replace its workspace snapshot.
+    /// After the dispatch boundary, the request cannot compact, grow its
+    /// transcript, or replace its workspace snapshot. Recheck volatile
+    /// results after input consumption; this can only redact existing data.
     pub fn frozenNextRequest(self: *Loop) provider.ChatRequest {
+        _ = self.discardRevokedResults();
         self.request.messages = self.messages.items;
         self.round_index +|= 1;
         return self.request;
@@ -369,7 +373,8 @@ pub const Loop = struct {
     /// Called by the execution-side child gateway while its own call is still
     /// open. Excludes that ENTIRE assistant batch, including results of earlier
     /// siblings, so the child sees consumed input and only closed tool pairs.
-    pub fn snapshotForChild(self: *const Loop, allocator: std.mem.Allocator, call_id: []const u8, child_scope: scope_mod.Scope, targets: []const @import("../host/identity.zig").SessionHandle) !@import("wire_history.zig").History {
+    pub fn snapshotForChild(self: *Loop, allocator: std.mem.Allocator, call_id: []const u8, child_scope: scope_mod.Scope, targets: []const @import("../host/identity.zig").SessionHandle) !@import("wire_history.zig").History {
+        _ = self.discardRevokedResults();
         if (!self.scope.owner.eql(child_scope.owner) or self.scope.memberIds().len != child_scope.memberIds().len) return error.InheritanceScopeProjectionRequired;
         for (self.scope.memberIds()) |id| child_scope.validateDirectory(&.{id}) catch return error.InheritanceScopeProjectionRequired;
         var offset = self.messages.items.len;
@@ -398,7 +403,7 @@ pub const Loop = struct {
                     if (!permitted) return error.InheritanceScopeProjectionRequired;
                 };
             }
-            return @import("wire_history.zig").History.copy(allocator, self.messages.items[0..offset], "");
+            return @import("wire_history.zig").History.copyForChild(allocator, self.messages.items[0..offset]);
         }
         return error.InvalidInheritanceSnapshot;
     }
@@ -456,6 +461,7 @@ pub const Loop = struct {
         return owned;
     }
     pub fn preparedInputTranscript(self: *Loop, values: []const provider.Message) []const provider.Message {
+        _ = self.discardRevokedResults();
         @memcpy(self.messages.unusedCapacitySlice()[0..values.len], values);
         return self.messages.items.ptr[0 .. self.messages.items.len + values.len];
     }
@@ -669,20 +675,21 @@ pub const Loop = struct {
             return record.result_body.?;
         }
         record.dispatched = true;
-        const result = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .workspace_revision = self.request.workspace_revision, .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
+        var result = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .workspace_revision = self.request.workspace_revision, .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
             const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.WorkspaceChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ExecutionDeadlineBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
             record.dispatched = !preflight;
             if (!preflight and affecting) self.uncertain = true;
             record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else if (!affecting) dynamic.Status.failed else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .side_effect_started = !preflight and affecting, .request_sent = if (parsed.entry.authority == .local_network_read and preflight) @as(?bool, false) else null, .local_released = preflight or !affecting, .remote_effect_unknown = !preflight and affecting }, .{});
             return record.result_body.?;
         };
-        record.host_result = result;
         result.validate(context, operation_id) catch {
+            result.deinit(self.allocator);
             self.uncertain = true;
             self.host_observation_only = false;
             record.result_body = try self.errorBody("InvalidHostToolResult", null);
             return record.result_body.?;
         };
+        record.host_result = result;
         for (result.blocks) |block| self.retained_output_bytes += switch (block) {
             .text, .structured => |text| text.len,
         };
@@ -814,6 +821,7 @@ pub const Loop = struct {
     }
     var next_dynamic_operation: std.atomic.Value(u64) = .init(1);
     fn checkBudget(self: *Loop) !void {
+        _ = self.discardRevokedResults();
         self.request.messages = self.messages.items;
         const budget = @import("local_text_request.zig");
         try budget.checkFixedContext(self.request, self.limits.context_window);
@@ -834,6 +842,42 @@ pub const Loop = struct {
             }
         }
         if (estimated + output > self.limits.context_window) return error.ToolContextBudget;
+    }
+
+    /// Fail closed at wire preparation, including before context compaction
+    /// can transmit tool results to its own provider.
+    pub fn discardRevokedResults(self: *Loop) bool {
+        var discarded = false;
+        for (self.records.items) |*record| {
+            const result = if (record.host_result) |*value| value else continue;
+            const check = result.delivery_check orelse continue;
+            check.verify(check.context) catch {
+                discarded = true;
+                for (self.messages.items) |*message| {
+                    const call_id = message.tool_call_id orelse continue;
+                    if (!std.mem.eql(u8, call_id, record.key.call_id)) continue;
+                    for (message.images) |reference| {
+                        var owned = reference;
+                        owned.release();
+                    }
+                    for (message.offloaded_images) |image| {
+                        var owned = image.reference;
+                        owned.release();
+                    }
+                    message.content = revoked_result_body;
+                    message.images = &.{};
+                    message.offloaded_images = &.{};
+                    message.image_owner = null;
+                    message.image_transform = 0;
+                    message.file_reference_spans = &.{};
+                }
+                record.result_body = revoked_result_body;
+                record.file_reference_spans = &.{};
+                result.deinit(self.allocator);
+                record.host_result = null;
+            };
+        }
+        return discarded;
     }
     /// Completed history can be compacted before admitting new user input.
     fn compact(self: *Loop, reserve: usize) !void {
@@ -862,17 +906,25 @@ pub const Loop = struct {
         return messages;
     }
     fn generateCompaction(self: *Loop, reserve: usize, cancel: ?*provider.CancelToken) !@import("wire_history.zig").History {
-        const prefix = self.compactableMessages();
-        var tail = self.request;
-        tail.messages = self.messages.items[prefix.len..];
-        tail.system = "";
-        tail.tools = &.{};
-        const retained = try @import("local_text_request.zig").inputTokens(tail);
-        return @import("context_compaction.zig").compactNowWithProvider(self.compaction_config.?, prefix, reserve +| retained, cancel, self.compaction_provider) catch |err| {
-            if (err == error.ContextFixedOverhead) return err;
-            self.compaction_failure = err;
-            return error.ContextCompactionFailed;
-        };
+        while (true) {
+            _ = self.discardRevokedResults();
+            const prefix = self.compactableMessages();
+            var tail = self.request;
+            tail.messages = self.messages.items[prefix.len..];
+            tail.system = "";
+            tail.tools = &.{};
+            const retained = try @import("local_text_request.zig").inputTokens(tail);
+            return @import("context_compaction.zig").compactNowWithProvider(self.compaction_config.?, prefix, reserve +| retained, cancel, self.compaction_provider) catch |err| switch (err) {
+                // A queued compaction request owns a detached transcript. Its
+                // adapter redacted the live copy, so build a fresh snapshot.
+                error.ToolResultRevoked => continue,
+                error.ContextFixedOverhead => return err,
+                else => {
+                    self.compaction_failure = err;
+                    return error.ContextCompactionFailed;
+                },
+            };
+        }
     }
     fn installCompaction(self: *Loop, next: *@import("wire_history.zig").History, owned: []provider.Message) void {
         // Pending notices and following input already own their references.

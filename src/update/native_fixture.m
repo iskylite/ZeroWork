@@ -5,6 +5,8 @@ extern int zw_update_startup_gate(const char *);
 extern void zw_update_healthy(void);
 #if ZW_UPDATE_TESTING
 extern void zw_update_test_fetch_contracts(void);
+extern void zw_update_test_transaction_contracts(void);
+extern const char *zw_update_current_version(void);
 extern int zw_update_test_seed_verified(const char *,const char *);
 extern void zw_update_start(int);
 extern void zw_update_prepare(const char *,const float *);
@@ -43,6 +45,8 @@ void zw_update_fixture_main(void){@autoreleasepool{
     @try{
 #if ZW_UPDATE_TESTING
         if(args.count>1 && [args[1] isEqual:@"--fetch-contracts"]){zw_update_test_fetch_contracts();return;}
+        if(args.count>1 && [args[1] isEqual:@"--transaction-contracts"]){zw_update_test_transaction_contracts();return;}
+        if(args.count>1 && [args[1] isEqual:@"--version"]){puts(zw_update_current_version());return;}
         if(args.count>1 && [args[1] isEqual:@"--runtime"]){Runtime(args);return;}
 #endif
         if(args.count>2 && [args[1] isEqual:@"--birth"]){printf("%llu\n",ZWBirth([args[2] intValue]));return;}

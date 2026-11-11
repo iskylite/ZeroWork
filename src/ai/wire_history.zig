@@ -44,6 +44,28 @@ pub const History = struct {
         return try History.copy(allocator, messages, "");
     }
 
+    /// A child must query notes under current authorization. The parent keeps
+    /// its conversation, including its actual answer and the original result.
+    pub fn copyForChild(allocator: std.mem.Allocator, source: []const provider.Message) !History {
+        var projected: ?[]provider.Message = null;
+        defer if (projected) |messages| allocator.free(messages);
+        var calls: []const provider.ToolCall = &.{};
+        for (source, 0..) |message, i| {
+            if (message.role == .assistant) calls = message.tool_calls;
+            const id = message.tool_call_id orelse continue;
+            for (calls) |call| {
+                if (!std.mem.eql(u8, call.id, id)) continue;
+                var name_buffer: [64]u8 = undefined;
+                const name = @import("plugin_tools.zig").decodeName(&name_buffer, call.name) catch break;
+                if (!@import("../plugins/notes/ai_tools.zig").supports(name)) break;
+                if (projected == null) projected = try allocator.dupe(provider.Message, source);
+                projected.?[i] = .{ .role = .tool, .tool_call_id = id, .content = "{\"status\":\"rejected\",\"error_code\":\"NotesResultNotInherited\"}" };
+                break;
+            }
+        }
+        return copy(allocator, projected orelse source, "");
+    }
+
     /// Atomic replacement: failure retains the prior owned transcript. Callers
     /// must surface capture failures instead of silently dropping a tool turn.
     pub fn copy(allocator: std.mem.Allocator, source: []const provider.Message, final_text: []const u8) !History {
@@ -82,6 +104,25 @@ pub const History = struct {
         return result;
     }
 };
+
+test "notes tool results are queried independently by an inheriting child" {
+    const source = [_]provider.Message{
+        .{ .content = "Use the saved procedure" },
+        .{ .role = .assistant, .content = "", .tool_calls = &.{
+            .{ .id = "note", .name = "host__notes_uread", .arguments = "{}" },
+            .{ .id = "other", .name = "read_terminal", .arguments = "{}" },
+        } },
+        .{ .role = .tool, .content = "original note", .tool_call_id = "note" },
+        .{ .role = .tool, .content = "other result", .tool_call_id = "other" },
+        .{ .role = .assistant, .content = "parent answer" },
+    };
+    var child = try History.copyForChild(std.testing.allocator, &source);
+    defer child.deinit();
+    try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"error_code\":\"NotesResultNotInherited\"}", child.messages[2].content);
+    try std.testing.expectEqualStrings("other result", child.messages[3].content);
+    try std.testing.expectEqualStrings("parent answer", child.messages[4].content);
+    try std.testing.expectEqualStrings("original note", source[2].content);
+}
 
 test "wire history keeps actual tool identities and final answer after source release" {
     const a = std.testing.allocator;

@@ -22,7 +22,7 @@ fn pluginFor(bundle: anytype) *bmc.Plugin {
     return @ptrCast(@alignCast(bundle.manifests()[0].session_factory.?.context));
 }
 
-test "BMC composition includes Web, and acceptance adds its fixture" {
+test "BMC composition includes Web and notes, and acceptance adds its fixture" {
     var tmp = T.tmpDir(.{});
     defer tmp.cleanup();
     const path = try tmp.dir.realPathFileAlloc(T.io, ".", a);
@@ -31,10 +31,16 @@ test "BMC composition includes Web, and acceptance adds its fixture" {
     defer production.deinit() catch unreachable;
     var normal = try linked.initRegistry(a, &.{}, production.manifests(), production.renderers());
     defer normal.deinit();
-    try T.expectEqual(@as(usize, 2), normal.manifests().len);
+    try T.expectEqual(@as(usize, 3), normal.manifests().len);
     const manifest = normal.find("bmc_ikvm").?;
     try T.expect(normal.find("fixture_probe") == null);
-    try T.expect(normal.find("web") != null);
+    const web = normal.find("web").?;
+    try T.expect(web.connection != null and web.session_factory != null);
+    try T.expect(normal.renderer(web.content_renderer).?.mount != null);
+    const notes = normal.find("notes").?;
+    try T.expect(notes.quick_create != null and notes.connection == null and notes.session_factory != null);
+    try T.expectEqual(@as(usize, 0), notes.services.len);
+    try T.expect(normal.renderer(notes.content_renderer).?.mount != null);
     try T.expectEqual(budgets.Limits.kvm, manifest.frame_limits.?);
     try T.expectEqual(budgets.application_bytes, production.frameBudget().limit);
 
@@ -42,9 +48,11 @@ test "BMC composition includes Web, and acceptance adds its fixture" {
     defer acceptance.deinit() catch unreachable;
     var combined = try linked.initRegistry(a, &.{}, acceptance.manifests(), acceptance.renderers());
     defer combined.deinit();
-    try T.expectEqual(@as(usize, 3), combined.manifests().len);
+    try T.expectEqual(@as(usize, 4), combined.manifests().len);
     try T.expect(combined.find("bmc_ikvm") != null);
     try T.expect(combined.find("fixture_probe") != null);
+    try T.expect(combined.find("web") != null);
+    try T.expect(combined.find("notes") != null);
     try T.expect(combined.find("fixture_probe").?.frame_limits == null);
 }
 

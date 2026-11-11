@@ -87,6 +87,53 @@ pub const Options = struct {
     local_cwd: ?[]const u8 = null,
     conversation: ConversationId = .{},
     create_parents: bool = false,
+    app_data_root: ?[]const u8 = null,
+};
+
+/// General file tools must use the notes service for the private store. Match
+/// opened directory identities so aliases cannot change that boundary.
+pub const NotesBoundary = struct {
+    app: Identity,
+    notes: ?Identity,
+
+    pub fn open(io: std.Io, data_root: []const u8) !?NotesBoundary {
+        const app = std.Io.Dir.openDirAbsolute(io, data_root, .{}) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        defer app.close(io);
+        const app_identity = try Identity.of(app);
+        const notes = app.openDir(io, "notes", .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.SymLinkLoop => return .{ .app = app_identity, .notes = null },
+            else => return err,
+        };
+        defer notes.close(io);
+        return .{ .app = app_identity, .notes = try Identity.of(notes) };
+    }
+
+    pub fn protectsChild(self: NotesBoundary, parent: Identity, name: []const u8) bool {
+        return std.meta.eql(parent, self.app) and std.ascii.eqlIgnoreCase(name, "notes");
+    }
+
+    pub fn check(self: NotesBoundary, io: std.Io, parent: std.Io.Dir, name: []const u8) !void {
+        var current_id = try Identity.of(parent);
+        if (self.protectsChild(current_id, name)) return error.NotesStoreProtected;
+        const protected = self.notes orelse return;
+        var current = try parent.openDir(io, ".", .{});
+        defer current.close(io);
+        while (true) {
+            if (std.meta.eql(current_id, protected)) return error.NotesStoreProtected;
+            const ancestor = try current.openDir(io, "..", .{});
+            const ancestor_id = Identity.of(ancestor) catch |err| {
+                ancestor.close(io);
+                return err;
+            };
+            current.close(io);
+            current = ancestor;
+            if (std.meta.eql(current_id, ancestor_id)) return;
+            current_id = ancestor_id;
+        }
+    }
 };
 
 /// The deterministic attempted location, available even when a file is absent.
@@ -121,6 +168,7 @@ pub const Resolved = struct {
     mode: Mode,
     workspace_anchor: ?WorkspaceAnchor = null,
     parent_plan: ?ParentPlan = null,
+    notes_boundary: ?NotesBoundary = null,
 
     pub fn deinit(self: Resolved, allocator: std.mem.Allocator, io: std.Io) void {
         self.parent.close(io);
@@ -157,6 +205,13 @@ pub const Resolved = struct {
         if (!std.meta.eql(try Identity.of(current), self.parent_identity) or
             !std.meta.eql(try Identity.of(self.parent), self.parent_identity))
             return error.SourceChanged;
+        if (self.notes_boundary) |boundary| {
+            const name = if (self.parent_plan) |plan| blk: {
+                try plan.validate(self.absolute);
+                break :blk plan.component(self.absolute, 0);
+            } else self.basename;
+            try boundary.check(io, self.parent, name);
+        }
     }
 
     pub fn revalidate(self: Resolved, io: std.Io) !void {
@@ -419,6 +474,11 @@ fn appendComponent(buffer: *[std.Io.Dir.max_path_bytes]u8, used: *usize, compone
 }
 
 pub fn resolve(allocator: std.mem.Allocator, io: std.Io, options: Options, mode: Mode) !Resolved {
+    const boundary = if (options.app_data_root) |root| try NotesBoundary.open(io, root) else null;
+    return resolveWithNotesBoundary(allocator, io, options, mode, boundary);
+}
+
+pub fn resolveWithNotesBoundary(allocator: std.mem.Allocator, io: std.Io, options: Options, mode: Mode, boundary: ?NotesBoundary) !Resolved {
     if (mode != .directory and options.path == null and options.file_ref == null)
         return error.InvalidFilePath;
     if (options.file_ref != null and mode != .file) return error.PathArgumentConflict;
@@ -500,6 +560,7 @@ pub fn resolve(allocator: std.mem.Allocator, io: std.Io, options: Options, mode:
         .mode = mode,
         .workspace_anchor = anchor,
         .parent_plan = parent_plan,
+        .notes_boundary = boundary,
     };
     if (options.file_ref) |ref| {
         if (!std.mem.eql(u8, ref.absolute, absolute) or !std.meta.eql(ref.identity, result.target_identity.?))
@@ -517,6 +578,47 @@ pub fn resolve(allocator: std.mem.Allocator, io: std.Io, options: Options, mode:
         if (!std.meta.eql(try Identity.of(original_parent), result.parent_identity)) return error.SourceChanged;
     }
     return result;
+}
+
+test "local path notes boundary preserves manual access and rejects managed private targets" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "app/notes/library");
+    try tmp.dir.createDirPath(io, "project/notes");
+    try tmp.dir.writeFile(io, .{ .sub_path = "app/notes/library/fake.txt", .data = "test fixture" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/notes/example.txt", .data = "test fixture" });
+    try tmp.dir.symLink(io, "app/notes/library", "alias", .{ .is_directory = true });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const app_root = try tmp.dir.realPathFileAlloc(io, "app", a);
+
+    var options: Options = .{ .base_directory = root, .app_data_root = app_root };
+    for ([_][]const u8{ "app/notes/library/fake.txt", "alias/fake.txt" }) |path| {
+        options.path = path;
+        try std.testing.expectError(error.NotesStoreProtected, resolve(a, io, options, .file));
+    }
+    options.path = "app/notes";
+    try std.testing.expectError(error.NotesStoreProtected, resolve(a, io, options, .directory));
+    options.path = "app/notes/new/example.txt";
+    options.create_parents = true;
+    try std.testing.expectError(error.NotesStoreProtected, resolve(a, io, options, .create));
+    options.create_parents = false;
+    options.path = "project/notes/example.txt";
+    const ordinary = try resolve(a, io, options, .file);
+    defer ordinary.deinit(a, io);
+    options.app_data_root = null;
+    options.path = "app/notes/library/fake.txt";
+    const manual = try resolve(a, io, options, .file);
+    defer manual.deinit(a, io);
+
+    try tmp.dir.createDirPath(io, "fresh-app");
+    options.app_data_root = try tmp.dir.realPathFileAlloc(io, "fresh-app", a);
+    options.path = "fresh-app/notes/library/created.txt";
+    options.create_parents = true;
+    try std.testing.expectError(error.NotesStoreProtected, resolve(a, io, options, .create));
 }
 
 test "local path priority uses real symlink ordering and never falls back from workspace" {

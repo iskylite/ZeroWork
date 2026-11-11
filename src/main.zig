@@ -26,7 +26,31 @@ const ProcessWindows = struct {
 
     pub fn navFor(app: *App) ?*AppNavHost {
         const root = app.cx.root orelse return null;
+        if (root.behavior.events.on_event_capture != AppNavHost.onEvent) return null;
         return @ptrCast(@alignCast(root.behavior.events.capture_context orelse return null));
+    }
+
+    fn syncNotesWindowVisibility(app: *App) void {
+        if (app.native_close_pending or app.should_quit) return;
+        const nav = navFor(app) orelse return;
+        const notes = nav.notes_float orelse return;
+        const host = nav.application_host orelse return;
+        const visible = app.win.shouldRender();
+        notes.setWindowVisible(host, visible);
+        if (!visible) notes.advanceBackgroundWork();
+    }
+
+    fn notesWindowEvent(runtime: *MultiWindowApp, event: @import("zenit_app").NativeEvent) void {
+        // The focus event is delivered before this tick's rendering. Use it to
+        // sample AppKit visibility, since a visible non-key window stays live.
+        if (event == .window_focused) {
+            if (runtime.window(event.window_focused.window_id)) |app| {
+                if (!event.window_focused.focused) if (navFor(app)) |nav| {
+                    if (nav.workspace) |workspace| workspace.notes_float_key = null;
+                };
+                syncNotesWindowVisibility(app);
+            }
+        }
     }
 
     fn queue(self: *ProcessWindows, source: *application_host_mod.ApplicationHost, host_id: ws.HostId) !void {
@@ -229,6 +253,30 @@ const ProcessWindows = struct {
         if (progress.job_cleanup == .unknown) return .unknown;
         if ((progress.state == .succeeded or progress.state == .failed or progress.state == .cancelled) and progress.job_cleanup == .released) return .released;
         return .awaiting;
+    }
+    pub fn prepareNotesForUpdate(self: *ProcessWindows) !void {
+        for (self.runtime.windows.items) |managed| {
+            const nav = navFor(managed.app) orelse continue;
+            const notes = nav.notes_float orelse continue;
+            if (notes.detached) |mounted| {
+                if (mounted.instance.vtable.prepare_close) |prepare| try prepare(mounted.instance.context);
+            }
+            if (notes.tab()) |tab| try notes.workspace.preparePluginClose(tab.id);
+        }
+    }
+    pub fn updateCloseDetachedNotes(self: *ProcessWindows, owner: @import("host/identity.zig").SessionHandle) !?u64 {
+        for (self.runtime.windows.items) |managed| {
+            const nav = navFor(managed.app) orelse continue;
+            const host = nav.application_host orelse continue;
+            const detached = host.detached_quick_content orelse continue;
+            if (!detached.handle.eql(owner)) continue;
+            const notes = nav.notes_float orelse return error.ContentUnavailable;
+            try notes.prepareQuit(host);
+            const state = host.sessions.queryState(owner) orelse return error.StaleSession;
+            const operation = state.close_operation orelse return error.MissingCloseOperation;
+            return operation.operation_id;
+        }
+        return null;
     }
     pub fn updateCancelAux(self: *ProcessWindows, id: @import("host/identity.zig").WindowId) void {
         if (self.domain.ai) |ai| _ = ai.closeWindow(id) catch false;
@@ -2575,7 +2623,20 @@ const AiHost = struct {
 
     fn markdownIn(self: *AiHost, scope: *ui.Scope, value: []const u8, turn: ?*const @import("ai/conversation_turn.zig").Turn) !*ui.Node {
         const width = if (self.card_box) |box| @max(160, box.globalRect().w - 30) else 540;
-        return @import("ui/ai_message_view.zig").mountWithImages(self.cx, scope, value, width, try self.markdownImages(turn));
+        const node = try @import("ui/ai_message_view.zig").mountWithImages(self.cx, scope, value, width, try self.markdownImages(turn));
+        try self.appendNotesCitations(scope, node, value);
+        return node;
+    }
+    fn appendNotesCitations(self: *AiHost, scope: *ui.Scope, node: *ui.Node, value: []const u8) !void {
+        try @import("ui/ai_notes_citations.zig").append(self.cx, scope, node, value, .{ .context = self, .open = openNotesCitation });
+    }
+    fn openNotesCitation(raw: *anyopaque, source: @import("plugins/notes/queries.zig").SourceRef) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const root = self.cx.root orelse return;
+        if (root.behavior.events.on_event_capture != AppNavHost.onEvent) return;
+        const nav: *AppNavHost = @ptrCast(@alignCast(root.behavior.events.capture_context orelse return));
+        const host = nav.application_host orelse return;
+        if (nav.notes_float) |notes| notes.openSource(host, source) catch |err| host.workspace.statusFailure(@errorName(err));
     }
     fn markdownImages(self: *AiHost, turn: ?*const @import("ai/conversation_turn.zig").Turn) !?@import("ui/ai_transcript_images.zig").Context {
         const module = @import("ui/ai_transcript_images.zig");
@@ -2933,6 +2994,10 @@ const AiHost = struct {
                             }
                             const width = if (self.card_box) |box| @max(160, box.globalRect().w - 30) else 540;
                             try row.prose.?.update(item.message.text.items, width, try self.markdownImages(self.image_render_turn));
+                            if (item.message.ended_ms != null and !row.notes_citations_mounted) {
+                                try self.appendNotesCitations(row.body_scope.?, body, item.message.text.items);
+                                row.notes_citations_mounted = true;
+                            }
                         } else {
                             retained.clearBody(row);
                             row.body_scope = try row.scope.childScope();
@@ -6443,6 +6508,16 @@ const AiHost = struct {
         self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
         self.execution().host_catalog_len += 1;
     }
+
+    fn notesQueries(self: *AiHost) !@import("plugins/notes/queries.zig").Queries {
+        const notes = @import("plugins/notes/plugin.zig");
+        const app = self.application_host orelse return error.ToolNotAvailable;
+        const manifest = app.sessions.registry.find(notes.id) orelse return error.ToolNotAvailable;
+        const factory = manifest.session_factory orelse return error.ToolNotAvailable;
+        const plugin: *notes.Plugin = @ptrCast(@alignCast(factory.context));
+        return .{ .store = try plugin.openStore() };
+    }
+
     fn prepareHostCatalog(self: *AiHost, authority: @import("ai/host_tools.zig").Context) void {
         self.execution().host_catalog_len = 0;
         self.execution().host_catalog[self.execution().host_catalog_len] = @import("ai/user_interaction.zig").contribution;
@@ -6461,6 +6536,14 @@ const AiHost = struct {
                 for (@import("ai/host_local_file_mutation.zig").contributions) |contribution| self.appendLocalContribution(contribution);
             }
         }
+        if (self.notesQueries()) |queries| {
+            const notes_tools = @import("plugins/notes/ai_tools.zig");
+            const contributions = notes_tools.available(queries, self.allocator, self.execution().request_vision) catch &.{};
+            for (contributions) |contribution| {
+                self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
+                self.execution().host_catalog_len += 1;
+            }
+        } else |_| {}
         for (@import("ai/host_catalog.zig").contributions) |contribution| {
             if (self.execution().tool_bridge.queries_only and @import("ai/host_catalog.zig").isMutation(contribution.definition.id)) continue;
             self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
@@ -7355,6 +7438,7 @@ const AiHost = struct {
                 .workspace = try snapshot.clone(a),
                 .cwd = if (local) |tab| if (tab.runtime) |runtime| runtime.copyCwd(a) catch null else null else null,
                 .home = if (std.c.getenv("HOME")) |home| try a.dupe(u8, std.mem.span(home)) else null,
+                .app_data_root = if (host.data_root.len == 0) null else try a.dupe(u8, host.data_root),
                 .key = host.host_cursor_key,
                 .reference_key = host.shared_service.?.local_file_reference_key,
             };
@@ -7411,6 +7495,30 @@ const AiHost = struct {
             @import("ai/host_local_file_mutation.zig").lookup(invocation.tool_id) != null or
             std.mem.eql(u8, invocation.tool_id, @import("ai/local_file_change_query.zig").contribution.definition.id))
             return self.dispatchLocalFiles(bridge, invocation, allocator, cancel);
+        const notes_tools = @import("plugins/notes/ai_tools.zig");
+        if (notes_tools.supports(invocation.tool_id)) {
+            const Gate = struct {
+                host: *AiHost,
+                context: @import("ai/host_tools.zig").Context,
+                bridge: *@import("ui/ai_tools.zig").Bridge,
+                cancel: ?*ai_provider.CancelToken,
+                queries: ?@import("plugins/notes/queries.zig").Queries = null,
+
+                fn validate(raw_gate: *anyopaque) !void {
+                    const gate: *@This() = @ptrCast(@alignCast(raw_gate));
+                    try gate.host.validateHostContext(gate.context);
+                    if (gate.queries == null) gate.queries = try gate.host.notesQueries();
+                }
+
+                fn check(raw_gate: *anyopaque) !void {
+                    const gate: *@This() = @ptrCast(@alignCast(raw_gate));
+                    try gate.bridge.callController(gate, validate, gate.cancel);
+                }
+            };
+            var gate: Gate = .{ .host = self, .context = invocation.context, .bridge = bridge, .cancel = cancel };
+            Gate.check(&gate) catch |err| return rejectedHostInvocation(invocation, allocator, err);
+            return notes_tools.execute(gate.queries.?, invocation, allocator, cancel, .{ .context = &gate, .run = Gate.check }) catch |err| rejectedHostInvocation(invocation, allocator, if (err == error.Cancelled) error.CancelledBeforeDispatch else err);
+        }
         if (@import("ai/host_transfer.zig").supports(invocation.tool_id)) {
             const transfer_host = self.ai_transfer_host orelse return error.ToolNotAvailable;
             const runtime = if (self.execution().lifecycle_runtime) |*value| value else return error.ToolNotAvailable;
@@ -12391,6 +12499,7 @@ const AppNavHost = struct {
     connection_host: ?*@import("ui/connection_host.zig").Host = null,
     probe_connection_host: ?*@import("ui/probe_connection_host.zig").Host = null,
     session_menu: ?*session_menu_mod.View = null,
+    notes_float: ?*@import("plugins/notes/floating.zig").View = null,
     session_menu_anchor: ?*ui.Node = null,
     builtin_new_group: ?u32 = null,
     local_close_view: ?*@import("ui/local_close_view.zig").View = null,
@@ -12438,7 +12547,9 @@ const AppNavHost = struct {
         const app = self.app_runtime orelse return;
         if (window_id != app.windowId() or self.native_close_pending) return;
         if (reason == .window) {
+            if (self.notes_float) |notes| notes.hide();
             app.win.hide();
+            ProcessWindows.syncNotesWindowVisibility(app);
             return;
         }
         if (@import("update/admission.zig").blocked()) {
@@ -12567,6 +12678,47 @@ const AppNavHost = struct {
     fn newLocalSessionClick(self: *AppNavHost) void {
         self.builtin_new_group = null;
         newLocalSession(self);
+    }
+
+    fn openNotes(raw: *anyopaque) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        const host = self.application_host orelse return;
+        const notes = self.notes_float orelse return;
+        self.builtin_new_group = null;
+        notes.openTab(host) catch |err| host.workspace.statusFailure(@errorName(err));
+        self.cx.requestRedraw();
+    }
+
+    fn toggleNotesFloat(raw: *anyopaque) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        const host = self.application_host orelse return;
+        const notes = self.notes_float orelse return;
+        self.builtin_new_group = null;
+        notes.toggle(host) catch |err| host.workspace.statusFailure(@errorName(err));
+    }
+
+    fn focusContentOwner(_: *anyopaque, owner: @import("host/identity.zig").SessionHandle) bool {
+        const process = process_windows orelse return false;
+        for (process.runtime.windows.items) |managed| {
+            const nav = ProcessWindows.navFor(managed.app) orelse continue;
+            const notes = nav.notes_float orelse continue;
+            const host = nav.application_host orelse continue;
+            if (nav.native_close_pending or !notes.focusOwner(host, owner)) continue;
+            _ = process.runtime.activateWindow(managed.app.windowId());
+            return true;
+        }
+        return false;
+    }
+
+    fn focusedNotes(self: *AppNavHost) ?@import("host/plugin_ui_contract.zig").RendererInstance {
+        if (self.notes_float) |notes| if (notes.focused()) |instance| return instance;
+        const workspace = self.workspace orelse return null;
+        const index = workspace.active_tab orelse return null;
+        const tab = workspace.tabs.items[index];
+        if (tab.closing or !std.mem.eql(u8, tab.plugin_protocol_id, @import("plugins/notes/plugin.zig").id)) return null;
+        const focused = self.cx.focus_manager.getFocused() orelse return null;
+        if (!@import("ui/floating_input.zig").containsPress(self.cx, tab.root, focused)) return null;
+        return tab.plugin_renderer;
     }
 
     fn toggleSidebar(self: *AppNavHost) void {
@@ -12769,10 +12921,16 @@ const AppNavHost = struct {
             if (self.title_bar) |bar| shell_styles.syncWorkspaceChrome(self.allocator, bar, app.chromeState(), self.quick.sidebar.collapsed) else false
         else
             false;
+        var notes_layout_changed = false;
         if (self.application_host) |host| {
             _ = host.safeTick() catch |err| {
                 applog.warn(.workspace, "host receipt: {s}", .{@errorName(err)});
                 return .done;
+            };
+            if (self.notes_float) |notes| notes_layout_changed = notes.tick(host) catch |err| blk: {
+                notes.failRequest(host);
+                host.workspace.statusFailure(@errorName(err));
+                break :blk true;
             };
         }
         self.pollCommandCreations();
@@ -12791,13 +12949,17 @@ const AppNavHost = struct {
             }
             const settings_open = if (self.settings) |settings| settings.open else false;
             if (!settings_open) if (self.application_host) |host| {
-                if (self.wizard_host) |wizard_host| wizard_host.probe_controller.cancelAll();
                 if (self.native_close_started and !host.windowClosePending()) {
                     self.native_close_pending = false;
                     self.native_close_started = false;
                     return .done;
                 }
                 if (!self.native_close_started) {
+                    if (self.notes_float) |notes| notes.prepareQuit(host) catch |err| {
+                        self.native_close_pending = false;
+                        host.workspace.statusFailure(@errorName(err));
+                        return .done;
+                    };
                     _ = host.requestWindowClose() catch |err| {
                         self.native_close_pending = false;
                         applog.warn(.workspace, "window close request: {s}", .{@errorName(err)});
@@ -12805,6 +12967,7 @@ const AppNavHost = struct {
                     };
                     self.native_close_started = true;
                 }
+                if (self.wizard_host) |wizard_host| wizard_host.probe_controller.cancelAll();
                 // Keep the original file host alive while cancelled picker
                 // reads deliver their terminal response and retire their key.
                 const remote_released = if (self.ai) |ai| if (ai.remote_picker) |picker| picker.shutdown() else true else true;
@@ -12983,14 +13146,18 @@ const AppNavHost = struct {
             }
         }
 
-        return if (before != self.quick.sidebar.collapsed or resize or title_chrome_changed or sidebar_width_changed) .needs_layout else .done;
+        return if (before != self.quick.sidebar.collapsed or resize or title_chrome_changed or sidebar_width_changed or notes_layout_changed) .needs_layout else .done;
+    }
+
+    fn modalOwnsInput(self: *const AppNavHost) bool {
+        for (&self.cx.overlay_stack.layers) |*slot| if (slot.*) |*layer| {
+            if (layer.config.kind == .modal and !layer.suspended and layer.state != .exiting) return true;
+        };
+        return false;
     }
 
     fn dismissTransientSurfaces(self: *AppNavHost, target: *ui.Node) void {
-        // Modal dialogs and their portaled controls own input until dismissed.
-        for (&self.cx.overlay_stack.layers) |*slot| if (slot.*) |*layer| {
-            if (layer.config.kind == .modal and !layer.suspended and layer.state != .exiting) return;
-        };
+        if (self.modalOwnsInput()) return;
         if (self.ai) |ai| ai.dismissOnOutsidePress(target);
         if (self.status_previews) |previews| previews.dismissOnOutsidePress(target);
     }
@@ -13060,7 +13227,10 @@ const AppNavHost = struct {
             },
             .drag => |drag| return self.localDrag(drag),
             .key_down => |key| {
-                if (self.workspace) |workspace| workspace.setCommandHeld(key.modifiers.super);
+                if (self.workspace) |workspace| {
+                    workspace.setCommandHeld(key.modifiers.super);
+                    if (workspace.notes_float_key == key.key) workspace.notes_float_key = null;
+                }
                 if (self.ime_composing) return .ignored;
                 const configured_action = if (self.workspace) |workspace| workspace.app_config.keys.match(key.key, key.modifiers) else null;
                 if (configured_action == null and key.key == .b and key.modifiers.super and key.modifiers.shift and !key.modifiers.alt and !key.modifiers.ctrl) {
@@ -13106,6 +13276,13 @@ const AppNavHost = struct {
                     }
                     if (!(key.modifiers.super and key.key == .comma)) return .ignored;
                 };
+                if (key.key == .escape) {
+                    if (self.focusedNotes()) |instance| {
+                        const handled = @import("plugins/notes/view.zig").handleKey(instance, key.key, key.modifiers);
+                        if (handled != .ignored) return handled;
+                        if (self.notes_float) |notes| if (notes.escape()) return .stop;
+                    }
+                }
                 if (((key.key == .tab and key.modifiers.ctrl) or (configured_action == null and key.key == .r and key.modifiers.super and key.modifiers.shift)) and self.recentTabBlocked()) return .ignored;
                 if (self.workspace) |workspace| {
                     if (configured_action == null and key.key == .l and key.modifiers.super and !key.modifiers.shift and !key.modifiers.ctrl and !key.modifiers.alt and workspace.focusActiveAddress()) return .stop;
@@ -13196,7 +13373,20 @@ const AppNavHost = struct {
                             if (self.ai) |ai| ai.toggle();
                             return .handled;
                         },
+                        .notes_float, .notes_directory => {
+                            if (self.modalOwnsInput()) return .ignored;
+                            if (action == .notes_float) {
+                                workspace.notes_float_key = key.key;
+                                toggleNotesFloat(self);
+                                // The old connection can still have focus until the float mounts.
+                                return .stop;
+                            }
+                            const instance = self.focusedNotes() orelse return .ignored;
+                            if (@import("plugins/notes/view.zig").toggleDirectory(instance)) return .handled;
+                            return .ignored;
+                        },
                         .search => {
+                            if (self.focusedNotes() != null) return .ignored;
                             if (self.menu_host) |menu| if (menu.activeTerminal()) |terminal| terminal.openSearch();
                             return .handled;
                         },
@@ -13221,9 +13411,8 @@ const AppNavHost = struct {
                             return .handled;
                         },
                         .copy => {
-                            // Inputs and read-only message selections own their
-                            // clipboard keys before terminal shortcuts.
-                            if (self.focusedTextEditor() or @import("ui/ai_text_selection.zig").ownsFocus(self.cx)) return .ignored;
+                            // Let the focused notes surface, editor, or message selection handle copy.
+                            if (self.focusedNotes() != null or self.focusedTextEditor() or @import("ui/ai_text_selection.zig").ownsFocus(self.cx)) return .ignored;
                             if (self.menu_host) |menu| {
                                 if (menu.activeTerminal()) |terminal| {
                                     if (!terminal.hasSelection()) _ = terminal.pushText("\x03") else menu.runAction(.copy);
@@ -13232,10 +13421,7 @@ const AppNavHost = struct {
                             return .stop;
                         },
                         .paste => {
-                            // Same focus rule for Cmd-V: the AI Input owns the
-                            // paste event while its floating panel is open;
-                            // never inject clipboard text into the SSH PTY.
-                            if (self.focusedTextEditor() or @import("ui/ai_text_selection.zig").ownsFocus(self.cx)) return .ignored;
+                            if (self.focusedNotes() != null or self.focusedTextEditor() or @import("ui/ai_text_selection.zig").ownsFocus(self.cx)) return .ignored;
                             if (self.menu_host) |menu| menu.runAction(.paste);
                             return .stop;
                         },
@@ -13251,7 +13437,7 @@ const AppNavHost = struct {
                         else => {},
                     };
                 }
-                if (key.key == .n) {
+                if (configured_action == null and key.key == .n and !key.modifiers.alt and !key.modifiers.shift and !key.modifiers.ctrl) {
                     if (self.wizard) |wizard| wizard.show();
                     return .handled;
                 }
@@ -13265,6 +13451,10 @@ const AppNavHost = struct {
                 if (self.workspace) |workspace| {
                     workspace.setCommandHeld(key.modifiers.super);
                     if (!key.modifiers.ctrl) workspace.finishRecentTabSwitch();
+                    if (workspace.notes_float_key == key.key) {
+                        workspace.notes_float_key = null;
+                        return .stop;
+                    }
                 }
                 return .ignored;
             },
@@ -13381,6 +13571,12 @@ const AppNavHost = struct {
             return .ignored;
         }
         const workspace = self.workspace orelse return .ignored;
+        if (workspace.notes_float_surface) |notes| {
+            if (notes.isDisplayedInTree() and notes.globalRect().contains(drag.x, drag.y)) {
+                self.local_drop = null;
+                return .ignored;
+            }
+        }
         if (drag.kind == .entered or drag.kind == .updated) {
             if (self.local_drop != null) return .ignored;
             const index = workspace.active_tab orelse return .ignored;
@@ -15475,7 +15671,9 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     if (cx.root) |window_root| try window_root.insertChildBefore(cx.allocator, background_view.root, if (window_root.children.items.len != 0) window_root.children.items[0] else null);
 
     settings_host.native_close_waiter = &nav_host.native_close_pending;
-    const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .new_sftp = AppNavHost.newSftpProfile, .new_kvm = AppNavHost.newKvmProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .saved = AppNavHost.savedSession });
+    nav_host.notes_float = try @import("plugins/notes/floating.zig").View.mount(workspace, scope, root);
+    workspace.content_focus = .{ .context = nav_host, .focus = AppNavHost.focusContentOwner };
+    const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .new_sftp = AppNavHost.newSftpProfile, .new_kvm = AppNavHost.newKvmProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .notes = AppNavHost.openNotes, .notes_float = AppNavHost.toggleNotesFloat, .saved = AppNavHost.savedSession });
     session_menu.root.style.position = .absolute;
     session_menu.root.style.width = .{ .px = 0 };
     session_menu.root.style.height = .{ .px = 0 };
@@ -16171,7 +16369,7 @@ const NotificationWindowHook = struct {
     fn mount(cx: *ui.Cx, scope: *ui.Scope, host: *NotificationHost, workspace: *ws.Workspace, settings: *SettingsHost, nav: *AppNavHost, transfer: *TransferHost) !*NotificationWindowHook {
         const self = try cx.allocator.create(NotificationWindowHook);
         self.* = .{ .host = host, .cx = cx, .workspace = workspace, .settings = settings, .nav = nav, .transfer = transfer, .id = undefined };
-        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .prepare_activity = prepareActivity, .tab_presentation = tabPresentation, .feedback = feedback, .operation_action = operationAction, .owner_name = ownerName, .result_presented = resultPresented, .transfer_presented = transferPresented, .maintenance = maintain }) catch |err| {
+        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .prepare_activity = prepareActivity, .tab_presentation = tabPresentation, .feedback = feedback, .operation_action = operationAction, .open_content = openNotesContent, .owner_name = ownerName, .result_presented = resultPresented, .transfer_presented = transferPresented, .maintenance = maintain }) catch |err| {
             cx.allocator.destroy(self);
             return err;
         };
@@ -16184,7 +16382,7 @@ const NotificationWindowHook = struct {
             const notifications_view = try @import("ui/notification_history.zig").View.mount(cx, scope, host, trigger);
             if (nav.mist) |chrome| chrome.own(notifications_view.open);
         }
-        workspace.status_feedback = .{ .context = self, .publish = publishStatus };
+        workspace.status_feedback = .{ .context = self, .publish = publishStatus, .notes_save = notesSaveFeedback };
         if (nav.application_host) |application| application.file_failure = .{ .context = self, .publish = publishFileFailure };
         try cx.addAfterLayoutHook(self, run);
         return self;
@@ -16247,6 +16445,22 @@ const NotificationWindowHook = struct {
         var buffer: [2048]u8 = undefined;
         self.host.publishOperationError(self.id, owner, "工作区", "操作未完成", @import("ui/feedback_message.zig").message(message, &buffer), null) catch |err| applog.warn(.ui, "failure feedback: {s}", .{@errorName(err)});
         self.cx.requestRedraw();
+    }
+    fn notesSaveFeedback(raw: *anyopaque, owner: @import("host/identity.zig").SessionHandle, message: ?[]const u8) void {
+        const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
+        const target: @import("host/identity.zig").ContentOwner = .{ .session = owner };
+        if (message) |detail| {
+            self.host.publishOperationError(self.id, target, "笔记", "笔记保存失败", detail, .open_content) catch |err| applog.warn(.ui, "notes save feedback: {s}", .{@errorName(err)});
+        } else {
+            self.host.resolveOwnerOperationErrors(self.id, target, "笔记");
+        }
+        self.cx.requestRedraw();
+    }
+
+    fn openNotesContent(raw: *anyopaque, owner: @import("host/identity.zig").ContentOwner) bool {
+        const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
+        if (owner != .session) return false;
+        return AppNavHost.focusContentOwner(self.nav, owner.session);
     }
     fn operationAction(raw: *anyopaque, action: u64) void {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
@@ -18333,7 +18547,7 @@ pub fn main() !void {
     domain.frame_budget = contributions.frameBudget();
     domain.editor_credentials = @import("host/editor_credentials.zig").Host.init(std.heap.c_allocator, io_threaded.io(), &domain.plugin_security.secret_store);
     for (domain.sessions.registry.manifests()) |manifest| for (manifest.notifications) |definition| try notifications.registerDefinition(definition);
-    var windows = MultiWindowApp.init(std.heap.c_allocator, .{ .shared_gpu = true });
+    var windows = MultiWindowApp.init(std.heap.c_allocator, .{ .shared_gpu = true, .on_event = ProcessWindows.notesWindowEvent });
     var process: ProcessWindows = .{ .runtime = &windows, .domain = domain, .io = io_threaded.io(), .data_paths = &data_paths };
     defer {
         domain.deinit();
@@ -18407,6 +18621,9 @@ pub fn main() !void {
         const global_changed = presentation.take();
         var changed = global_changed;
         for (windows.windows.items) |managed| {
+            // A non-key window can be covered or revealed without a focus
+            // event or a layout pass. Observe at the application loop boundary.
+            ProcessWindows.syncNotesWindowVisibility(managed.app);
             const window_changed = presentation.takeWindow(@intFromPtr(managed.app.cx));
             if (global_changed or window_changed) {
                 managed.app.cx.requestRedraw();
@@ -18462,8 +18679,7 @@ pub fn main() !void {
         @import("update/client.zig").zw_update_set_automatic(@intFromBool(process.runtime_config.?.value.updates.auto_check));
         updater.tick() catch |err| {
             applog.warn(.app, "updater: {s}", .{@errorName(err)});
-            updater.coordinator.cancel();
-            @import("update/admission.zig").set(false);
+            updater.failed(err);
         };
         if (!update_healthy_sent) {
             @import("update/client.zig").zw_update_healthy();

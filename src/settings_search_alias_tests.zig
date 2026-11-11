@@ -109,6 +109,21 @@ test "settings search aliases preserve invalid raw draft and original category o
     try std.testing.expectEqualStrings("97", f.controller.raw_fields[schema.find("ui", "font_size").?].input.?);
 }
 
+test "settings search finds notes shortcuts by label, action id and chord" {
+    for ([_]struct { query: []const u8, control: []const u8 }{
+        .{ .query = "笔记浮窗", .control = "settings.key.notes_float" },
+        .{ .query = "notes_directory", .control = "settings.key.notes_directory" },
+        .{ .query = "⌘⌥N", .control = "settings.key.notes_float" },
+    }) |case| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        try f.controller.setSearch(case.query);
+        const mounted = try f.mount();
+        const button = byId(mounted.root, case.control) orelse return error.MissingNotesShortcut;
+        try std.testing.expect(button.globalRect().h > 0);
+    }
+}
+
 test "settings search every scalar schema key keeps its own category and mounts its control" {
     const pages = @import("config/settings_pages.zig").pages;
     for (schema.fields) |entry| {

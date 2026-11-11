@@ -492,6 +492,7 @@ pub const Manager = struct {
             attempt_request.timeout_ms = @intCast(@divTrunc(remaining_ns + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             attempt_request.retry_after_ms = &retry_after_ms;
             self.retry_attempt = attempt;
+            if (self.tool_run) |loop| _ = loop.discardRevokedResults();
             self.publishContextUsage(attempt_request, null, 0);
             const result = p.chat(p.ctx, attempt_request, receive, self);
             if (retry_after_ms) |delay| self.cooldown_deadline_ms = monotonicMs() +| delay;

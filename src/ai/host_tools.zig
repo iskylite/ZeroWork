@@ -82,12 +82,20 @@ pub const Receipt = struct {
     remote_effect_unknown: bool = false,
 };
 pub const Block = union(enum) { text: []const u8, structured: []const u8 };
+pub const DeliveryCheck = struct {
+    context: *anyopaque,
+    verify: *const fn (*anyopaque) anyerror!void,
+    release: *const fn (*anyopaque, std.mem.Allocator) void,
+};
 pub const Result = struct {
     verification: ?@import("readonly_verification.zig").Anchor = null,
     status: @import("plugin_tools.zig").Status,
     blocks: []const Block = &.{},
     images: []@import("image_attachments.zig").ContentRef = &.{},
     receipt: Receipt,
+    /// Volatile local authorization for the transcript delivery boundary.
+    /// This metadata is owned with the result and never enters the model wire.
+    delivery_check: ?DeliveryCheck = null,
 
     pub fn validate(self: Result, context: Context, operation_id: u64) !void {
         if (!self.receipt.conversation_id.eql(context.conversation_id) or !self.receipt.task_id.eql(context.task_id) or self.receipt.operation_id != operation_id or self.receipt.binding_revision != context.binding_revision or self.blocks.len > 32) return error.InvalidHostToolResult;
@@ -109,6 +117,7 @@ pub const Result = struct {
         if (self.status == .succeeded and (!self.receipt.local_released or self.receipt.remote_effect_unknown)) return error.InvalidHostToolResult;
     }
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
+        if (self.delivery_check) |check| check.release(check.context, allocator);
         for (self.blocks) |block| switch (block) {
             .text, .structured => |text| allocator.free(text),
         };

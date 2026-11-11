@@ -122,6 +122,12 @@ pub const ContentMount = struct {
     service_access: ?@import("session_service_access.zig").SessionServiceAccess = null,
     web_surface: ?WebSurface = null,
     web_bookmarks: ?WebBookmarks = null,
+    save_feedback: ?ui.Handler(?[]const u8) = null,
+    focus_content: ?ContentFocus = null,
+};
+pub const ContentFocus = struct {
+    context: *anyopaque,
+    focus: *const fn (*anyopaque, identity.SessionHandle) bool,
 };
 pub const ContentUpdate = struct {
     owner: identity.SessionHandle,
@@ -129,6 +135,8 @@ pub const ContentUpdate = struct {
     title: []const u8,
     status: []const u8,
 };
+pub const ContentPresentation = enum { active, hidden, occluded };
+
 pub const RendererInstance = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -137,6 +145,12 @@ pub const RendererInstance = struct {
         focus_changed: *const fn (*anyopaque, bool) void,
         unmount: *const fn (*anyopaque) void,
         focus_address: ?*const fn (*anyopaque) void = null,
+        /// A renderer mounts hidden. The presentation host reports changes
+        /// on the UI thread, independently of which content owns focus.
+        presentation_changed: ?*const fn (*anyopaque, ContentPresentation) void = null,
+        /// Called before a close request revokes the session or releases its
+        /// content. An error leaves the live renderer and its input intact.
+        prepare_close: ?*const fn (*anyopaque) anyerror!void = null,
         /// Presentation readiness does not imply an online remote service.
         /// Labels are borrowed for the synchronous host projection only.
         connection_status: ?*const fn (*anyopaque) ConnectionStatus = null,

@@ -25,6 +25,7 @@ static void Publish(int state,NSString *message) {
     if(message)strlcpy(status.message,message.UTF8String,sizeof(status.message));
     pthread_mutex_unlock(&statusLock);
 }
+static int CurrentState(void){pthread_mutex_lock(&statusLock);int state=status.state;pthread_mutex_unlock(&statusLock);return state;}
 static uint64_t Generation(void){pthread_mutex_lock(&statusLock);uint64_t g=status.generation;pthread_mutex_unlock(&statusLock);return g;}
 static BOOL Current(uint64_t g){return Generation()==g;}
 static void PublishGeneration(uint64_t generation,int state,NSString *message){pthread_mutex_lock(&statusLock);if(status.generation==generation){SetState(state);if(message)strlcpy(status.message,message.UTF8String,sizeof(status.message));}pthread_mutex_unlock(&statusLock);}
@@ -32,7 +33,7 @@ static dispatch_queue_t InstallationQueue(void){static dispatch_queue_t queue;st
 static NSString *Transaction(void){pthread_mutex_lock(&statusLock);NSString *value=transactionPath;pthread_mutex_unlock(&statusLock);return value;}
 static void SetTransaction(NSString *value){pthread_mutex_lock(&statusLock);transactionPath=value;pthread_mutex_unlock(&statusLock);}
 
-static NSString *Version(void){return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ZeroWorkReleaseVersion"]?:@"0.3.0";}
+static NSString *Version(void){return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ZeroWorkReleaseVersion"]?:@ZW_RELEASE_VERSION;}
 static NSString *ArchivePath(void){return [rootPath stringByAppendingPathComponent:@"verified.zip"];}
 static NSString *EnvelopePath(void){return [rootPath stringByAppendingPathComponent:@"envelope.json"];}
 static NSString *CurrentBundle(void){return ZWCanonical(NSBundle.mainBundle.bundlePath);}
@@ -234,11 +235,11 @@ static void Fetch(BOOL package){
 void zw_update_start(int autoCheck){automatic=autoCheck!=0;lastCheck=[ZWRead([rootPath stringByAppendingPathComponent:@"check.json"])[@"time"] doubleValue];}
 void zw_update_status(ZWUpdateStatus *out){pthread_mutex_lock(&statusLock);*out=status;pthread_mutex_unlock(&statusLock);}
 int zw_update_take_present(void){BOOL value=presented;presented=NO;return value;}
-void zw_update_open(void){presented=YES;if(status.state==0 || status.state==10 || status.state==12)Fetch(NO);}
+void zw_update_open(void){presented=YES;int state=CurrentState();if(state==0 || state==10 || state==12)Fetch(NO);}
 void zw_update_set_automatic(int enabled){automatic=enabled!=0;}
 void zw_update_command(int command){
     @try{
-        if(command==1){presented=YES;if(status.state>=6 && status.state<=8)return;Fetch(NO);}
+        if(command==1){presented=YES;int state=CurrentState();if(state>=6 && state<=8)return;Fetch(NO);}
         if(command==2)Fetch(YES);
         if(command==3){[fetch.task cancel];pthread_mutex_lock(&statusLock);status.generation++;pthread_mutex_unlock(&statusLock);Publish(manifest?2:0,@"已取消下载或校验");}
         if(command==4 || command==5){
@@ -255,8 +256,9 @@ void zw_update_command(int command){
     }@catch(NSException *e){Publish(10,e.reason);}
 }
 void zw_update_tick(void){
-    if(Transaction() && status.state>=6){
-        NSDictionary *r=ZWRead([Transaction() stringByAppendingPathComponent:@"record.json"]);NSString *stage=r[@"stage"],*decision=r[@"decision"];
+    NSString *transaction=Transaction();
+    if(transaction && CurrentState()>=6){
+        NSDictionary *r=ZWRead([transaction stringByAppendingPathComponent:@"record.json"]);NSString *stage=r[@"stage"],*decision=r[@"decision"];
         if([stage isEqual:@"aborted_before_replace"])Publish(11,@"应用退出超时，尚未替换应用；旧的退出授权已撤销");
         else if([decision isEqual:@"cancelled"])Publish(9,@"安装程序已确认取消；不会在应用退出后安装");
         else if([decision isEqual:@"committed"])Publish(8,@"已确认开始安装，正在退出应用…");
@@ -276,7 +278,31 @@ int zw_update_can_install(char *reason,size_t length){
     else if(access(targetPath.stringByDeletingLastPathComponent.fileSystemRepresentation,W_OK))failure=@"应用目录不可写，请使用官方安装包手动更新";
     if(failure){strlcpy(reason,failure.UTF8String,length);return 0;}return 1;
 }
+// The caller holds the installer lock through publication of the new transaction.
+static void RetirePreviousTransaction(void){
+    NSString *index=[rootPath stringByAppendingPathComponent:@"active.json"];
+    if(![NSFileManager.defaultManager fileExistsAtPath:index])return;
+    NSString *path=ZWRead(index)[@"transaction"];
+    if(![path isKindOfClass:NSString.class] || !ValidTransaction(path))ZWFail(@"更新事务索引损坏，请先完成恢复");
+    NSString *recordFile=[path stringByAppendingPathComponent:@"record.json"];
+    NSDictionary *old=ZWRead(recordFile);
+    if(old && Terminal(old[@"stage"]))return;
+    pid_t parent=[old[@"parent_pid"] intValue];
+    BOOL liveParent=parent!=getpid() && ZWAlive(parent,[old[@"parent_birth"] unsignedLongLongValue]);
+    BOOL liveHelper=ZWAlive([old[@"helper_pid"] intValue],[old[@"helper_birth"] unsignedLongLongValue]);
+    BOOL precommit=[old[@"decision"] isEqual:@"undecided"] &&
+        ([old[@"stage"] isEqual:@"preparing"] || [old[@"stage"] isEqual:@"prepared"]) &&
+        [old[@"data_state"] isEqual:@"unchanged"] &&
+        ![NSFileManager.defaultManager fileExistsAtPath:[path stringByAppendingPathComponent:@"data-may-change.json"]];
+    if(!precommit || liveParent || liveHelper)ZWFail(@"上一安装事务尚未解决，请先完成恢复");
+    ZWPrivateDirectory(path);
+    NSMutableDictionary *cancelled=[old mutableCopy];
+    cancelled[@"decision"]=@"cancelled";
+    cancelled[@"stage"]=@"cancelled";
+    ZWWrite(recordFile,cancelled);
+}
 static void Prepare(NSString *snapshotString,NSArray *themeSnapshot){
+    int lock=-1;
     @try{
 #if ZW_UPDATE_TESTING
         // Deterministic fixture barrier: exercise cancellation while copying and
@@ -285,8 +311,8 @@ static void Prepare(NSString *snapshotString,NSArray *themeSnapshot){
         if(holdPath){NSString *hold=[NSString stringWithUTF8String:holdPath];ZWWrite([hold stringByAppendingString:@".entered"],@{});double end=NSDate.date.timeIntervalSince1970+10;while(access(hold.fileSystemRepresentation,F_OK)){if(NSDate.date.timeIntervalSince1970>end)ZWFail(@"测试准备屏障超时");usleep(10000);}}
 #endif
         char reason[512];if(!zw_update_can_install(reason,sizeof(reason)))ZWFail([NSString stringWithUTF8String:reason]);
-        NSDictionary *active=ZWRead([rootPath stringByAppendingPathComponent:@"active.json"]);
-        if(active){NSDictionary *old=ZWRead([active[@"transaction"] stringByAppendingPathComponent:@"record.json"]);if(!old || !Terminal(old[@"stage"]))ZWFail(@"上一安装事务尚未解决，请先完成恢复");}
+        lock=ZWLockInstaller(rootPath);
+        RetirePreviousTransaction();
         if(!manifest || ![NSFileManager.defaultManager fileExistsAtPath:ArchivePath()])ZWFail(@"已校验的更新包不存在");
         NSString *path=[rootPath stringByAppendingFormat:@"/txn-%@",NSUUID.UUID.UUIDString];ZWPrivateDirectory(path);
         NSString *source=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Contents/Helpers/ZeroWorkUpdater"];
@@ -298,10 +324,12 @@ static void Prepare(NSString *snapshotString,NSArray *themeSnapshot){
         NSArray *theme=themeSnapshot;
         NSDictionary *record=@{@"stage":@"preparing",@"decision":@"undecided",@"target":targetPath,@"data":dataPath,@"version":manifest[@"version"],@"old_version":Version(),@"parent_pid":@(getpid()),@"parent_birth":@(ZWBirth(getpid())),@"nonce":NSUUID.UUID.UUIDString,@"helper_pid":@0,@"helper_birth":@0,@"theme":theme,@"data_state":@"unchanged"};
         ZWWrite([path stringByAppendingPathComponent:@"record.json"],record);ZWWrite([rootPath stringByAppendingPathComponent:@"active.json"],@{@"transaction":path});
+        close(lock);lock=-1;
         NSTask *task=[NSTask new];task.executableURL=[NSURL fileURLWithPath:helper];task.arguments=@[path];
-        if(![task launchAndReturnError:&error]){NSMutableDictionary *r=[record mutableCopy];r[@"decision"]=@"cancelled";r[@"stage"]=@"cancelled";ZWWrite([path stringByAppendingPathComponent:@"record.json"],r);ZWFail(@"独立安装程序启动失败，应用尚未退出");}
+        if(![task launchAndReturnError:&error])ZWFail(@"独立安装程序启动失败，应用尚未退出");
         SetTransaction(path);prepareStarted=NSDate.date.timeIntervalSince1970;Publish(6,@"正在准备独立安装程序…");
     }@catch(NSException *e){Publish(10,e.reason);}
+    @finally{if(lock>=0)close(lock);}
 }
 void zw_update_prepare(const char *snapshotJSON,const float *colors){
     NSString *snapshot=[NSString stringWithUTF8String:snapshotJSON];NSMutableArray *theme=[NSMutableArray array];for(int i=0;i<16;i++)[theme addObject:@(colors[i])];
@@ -314,6 +342,46 @@ int zw_update_save_snapshot(const char *json){
     @catch(NSException *e){Publish(10,e.reason);return 0;}
 }
 #if ZW_UPDATE_TESTING
+void zw_update_test_transaction_contracts(void){
+    NSString *temporary=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"zw-transaction-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    NSString *savedRoot=rootPath;rootPath=temporary;
+    int lock=-1;
+    @try{
+        ZWPrivateDirectory(rootPath);
+        NSString *path=[rootPath stringByAppendingPathComponent:@"txn-test"];
+        ZWPrivateDirectory(path);
+        NSString *file=[path stringByAppendingPathComponent:@"record.json"];
+        ZWWrite([rootPath stringByAppendingPathComponent:@"active.json"],@{@"transaction":path});
+        lock=ZWLockInstaller(rootPath);
+        BOOL blocked=NO;
+        @try{close(ZWLockInstaller(rootPath));}@catch(NSException *e){blocked=YES;}
+        if(!blocked)ZWFail(@"另一个进程可同时取得安装事务锁");
+
+        NSMutableDictionary *old=[@{@"decision":@"undecided",@"stage":@"prepared",@"data_state":@"unchanged"} mutableCopy];
+        old[@"helper_pid"]=@(getpid());old[@"helper_birth"]=@(ZWBirth(getpid()));
+        ZWWrite(file,old);blocked=NO;
+        @try{RetirePreviousTransaction();}@catch(NSException *e){blocked=YES;}
+        if(!blocked || ![ZWRead(file) isEqual:old])ZWFail(@"仍在运行的安装事务被取消");
+
+        [old removeObjectForKey:@"helper_pid"];[old removeObjectForKey:@"helper_birth"];
+        old[@"decision"]=@"committed";old[@"stage"]=@"waiting_parent";
+        ZWWrite(file,old);blocked=NO;
+        @try{RetirePreviousTransaction();}@catch(NSException *e){blocked=YES;}
+        if(!blocked || ![ZWRead(file) isEqual:old])ZWFail(@"已提交的安装事务被取消");
+
+        old[@"decision"]=@"undecided";old[@"stage"]=@"prepared";
+        ZWWrite(file,old);RetirePreviousTransaction();
+        NSDictionary *retired=ZWRead(file);
+        if(![retired[@"stage"] isEqual:@"cancelled"] || ![retired[@"decision"] isEqual:@"cancelled"])ZWFail(@"中断的未提交事务仍阻止更新");
+        RetirePreviousTransaction();
+        puts("installer lock, live and committed transaction retention, and interrupted prepare retry passed");
+    }@finally{
+        if(lock>=0)close(lock);
+        rootPath=savedRoot;
+        [NSFileManager.defaultManager removeItemAtPath:temporary error:nil];
+    }
+}
+
 // Only the disposable signed runtime fixture calls this. It uses the real
 // trust, archive and app verifiers; it never fabricates an installed version.
 int zw_update_test_seed_verified(const char *envelopeFile,const char *archiveFile){

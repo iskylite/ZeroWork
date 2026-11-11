@@ -16,6 +16,7 @@ pub const Window = struct {
     tab_presentation: ?*const fn (*anyopaque, ContentOwner) ?@import("tab_presentation.zig").Presentation = null,
     feedback: *const fn (*anyopaque, []const u8) void,
     operation_action: ?*const fn (*anyopaque, u64) void = null,
+    open_content: ?*const fn (*anyopaque, ContentOwner) bool = null,
     owner_name: ?*const fn (*anyopaque, ContentOwner) []const u8 = null,
     result_presented: ?*const fn (*anyopaque, notifications.Kind, ContentOwner) bool = null,
     transfer_presented: ?*const fn (*anyopaque, u64) bool = null,
@@ -599,7 +600,7 @@ pub const Host = struct {
         try self.publishOperationError(window_id, owner, "工作区", "操作未完成", summary, null);
     }
 
-    pub const OperationAction = enum(u64) { settings_problem = 1, ai_settings = 2 };
+    pub const OperationAction = enum(u64) { settings_problem = 1, ai_settings = 2, open_content = 3 };
     pub fn publishOperationError(self: *Host, window_id: WindowId, owner: ?ContentOwner, topic: []const u8, title: []const u8, detail: []const u8, action: ?OperationAction) !void {
         const window = self.windowFor(window_id) orelse return error.NotificationWindowClosed;
         const source: notifications.NotificationOwner = if (owner) |content| .{ .window_id = @backingInt(window_id), .content = content } else .{ .window_id = @backingInt(window_id), .window_only = true };
@@ -616,7 +617,11 @@ pub const Host = struct {
         if (self.next_feedback == std.math.maxInt(u64)) return error.NotificationOperationIdentityExhausted;
         const operation = self.next_feedback;
         self.next_feedback += 1;
-        const actions: [1]notifications.NotificationAction = .{.{ .kind = .view_result, .label = if (action == .settings_problem) "定位问题" else "AI 设置", .action_id = if (action) |value| @backingInt(value) else 0 }};
+        const actions: [1]notifications.NotificationAction = .{.{ .kind = .view_result, .label = switch (action orelse .settings_problem) {
+            .settings_problem => "定位问题",
+            .ai_settings => "AI 设置",
+            .open_content => "打开笔记",
+        }, .action_id = if (action) |value| @backingInt(value) else 0 }};
         var focused = false;
         for (self.windows.items) |registration| if (registration.id == window_id) {
             focused = registration.focused;
@@ -627,7 +632,12 @@ pub const Host = struct {
     }
 
     pub fn resolveOperationErrors(self: *Host, window_id: WindowId, topic: []const u8) void {
+        self.resolveOwnerOperationErrors(window_id, null, topic);
+    }
+
+    pub fn resolveOwnerOperationErrors(self: *Host, window_id: WindowId, owner: ?ContentOwner, topic: []const u8) void {
         for (self.coordinator.notification_records.items) |*record| if (record.event.owner.window_id == @backingInt(window_id) and std.mem.eql(u8, record.event.definition_id, "host.operation_error") and std.mem.eql(u8, record.event.object_name, topic) and !record.event.attention.resolved) {
+            if (owner) |content| if (record.event.owner.window_only or !record.event.owner.content.eql(content)) continue;
             record.event.attention.resolved = true;
             self.coordinator.dismissNotification(record.fact_id);
             self.coordinator.history_revision +|= 1;
@@ -654,6 +664,12 @@ pub const Host = struct {
         if (std.mem.eql(u8, record.event.definition_id, "host.operation_error")) {
             if (record.owner_ended) return error.NotificationOwnerEnded;
             const window = self.windowFor(@fromBackingInt(record.event.owner.window_id)) orelse return error.NotificationWindowClosed;
+            if (action.action_id == @backingInt(OperationAction.open_content)) {
+                if (record.event.owner.window_only or record.event.attention.resolved) return error.NotificationOwnerEnded;
+                const open = window.open_content orelse return error.UnregisteredNotificationAction;
+                if (!open(window.context, record.event.owner.content)) return error.NotificationOwnerEnded;
+                return;
+            }
             const invoke = window.operation_action orelse return error.UnregisteredNotificationAction;
             invoke(window.context, action.action_id);
             return;

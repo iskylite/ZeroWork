@@ -60,8 +60,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, _: *ui.Node, map: *keys.
     footer.meta.ownership.meta.test_id = "settings.keybinding.footer";
     try footer.appendChild(cx.allocator, try self.button(scope, "取消", "settings.keybinding.cancel", Recorder.cancel, false, false));
     try footer.appendChild(cx.allocator, try self.button(scope, "恢复默认", "settings.keybinding.reset", Recorder.reset, false, false));
-    // Runtime Map currently has no unbound value; keep this unavailable honestly.
-    const unavailable = try ui.widgets.Tooltip(.{ .text = "当前运行时不支持解除绑定", .open_delay_ms = 450 }).mount(scope, cx);
+    const unavailable = try ui.widgets.Tooltip(.{ .text = "请录制新组合或恢复默认", .open_delay_ms = 450 }).mount(scope, cx);
     try unavailable.trigger.appendChild(cx.allocator, try self.button(scope, "解除绑定", "settings.keybinding.unbind", Recorder.cancel, false, true));
     try footer.appendChild(cx.allocator, unavailable.wrapper);
     try footer.appendChild(cx.allocator, try self.button(scope, "使用快捷键", "settings.keybinding.confirm", Recorder.confirm, true, false));
@@ -138,7 +137,11 @@ pub const Recorder = struct {
             self.invalid.set(true);
             self.status.setDisplay(.flex);
             var error_buffer: [160]u8 = undefined;
-            const message = if (err == error.Conflict) std.fmt.bufPrint(&error_buffer, "已用于“{s}”，请重新录制。", .{actionName(self.draft.conflict(self.action, chord).?)}) catch "键位冲突，请重新录制。" else "请使用 Command 组合，Control 与 Tab 保留给远端。";
+            const message = switch (err) {
+                error.Conflict => std.fmt.bufPrint(&error_buffer, "已用于“{s}”，请重新录制。", .{actionName(self.draft.conflict(self.action, chord).?)}) catch "键位冲突，请重新录制。",
+                error.BuiltInKeyReserved => "此组合已有内置操作，请重新录制。",
+                else => "请使用 Command 组合，Control 与 Tab 保留给远端。",
+            };
             self.status.setTextContent(self.cx.allocator, message) catch {};
             self.cx.requestRedraw();
             return;
@@ -215,6 +218,8 @@ fn actionName(action: keys.Action) []const u8 {
         .ai => "显示或隐藏 AI 辅助",
         .upload => "上传面板",
         .broadcast => "广播输入",
+        .notes_float => "显示或隐藏笔记浮窗",
+        .notes_directory => "显示或隐藏笔记目录",
         else => "此快捷键不可修改",
     };
 }

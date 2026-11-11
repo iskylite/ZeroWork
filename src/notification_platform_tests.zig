@@ -935,3 +935,41 @@ test "notification window operation errors deduplicate route actions and resolve
     try std.testing.expectEqual(@as(usize, 0), fake.sends);
     try std.testing.expectEqual(@as(usize, 0), fake.requests);
 }
+
+test "notification notes save recovery opens and resolves only the original content owner" {
+    const Owner = @import("host/identity.zig").ContentOwner;
+    const Probe = struct {
+        opened: ?Owner = null,
+        allowed: Owner,
+        fn owns(_: *anyopaque, _: notifications.Target) bool {
+            return false;
+        }
+        fn activate(_: *anyopaque, _: notifications.Target) bool {
+            return false;
+        }
+        fn feedback(_: *anyopaque, _: []const u8) void {}
+        fn open(raw: *anyopaque, owner: Owner) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.allowed.eql(owner)) return false;
+            self.opened = owner;
+            return true;
+        }
+    };
+    const first: Owner = .{ .session = .{ .session_id = @fromBackingInt(20), .generation = 2 } };
+    const stale: Owner = .{ .session = .{ .session_id = @fromBackingInt(20), .generation = 1 } };
+    var probe: Probe = .{ .allowed = first };
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{}, fake.api());
+    defer host.destroy();
+    const window = try host.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .open_content = Probe.open });
+    for ([_]Owner{ first, stale }) |owner| try host.publishOperationError(window, owner, "笔记", "笔记保存失败", "磁盘空间不足", .open_content);
+    const live_notice = host.coordinator.notification_records.items[0].fact_id;
+    const stale_notice = host.coordinator.notification_records.items[1].fact_id;
+    try host.dispatchAction(live_notice, 0);
+    try std.testing.expect(first.eql(probe.opened.?));
+    try std.testing.expectError(error.NotificationOwnerEnded, host.dispatchAction(stale_notice, 0));
+    host.resolveOwnerOperationErrors(window, first, "笔记");
+    try std.testing.expect(host.coordinator.recordFor(live_notice).?.event.attention.resolved);
+    try std.testing.expect(!host.coordinator.recordFor(stale_notice).?.event.attention.resolved);
+    try std.testing.expectError(error.NotificationOwnerEnded, host.dispatchAction(live_notice, 0));
+}

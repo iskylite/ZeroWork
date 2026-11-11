@@ -14,8 +14,10 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             try shortcutRow(cx, bound, section.body, actionLabel(action), &.{action});
         };
     }
-    if (binding.matches(query, "终端 应用 复制 粘贴 搜索 补全 采纳 快速连接 立即重连 侧栏 AI 上传 广播 terminal")) {
-        const section = try page.section("终端与应用", "11 个动作 · Control 与 Tab 保留给远端", ui.icons.terminal, 5, "settings.keys.terminal", null);
+    if (binding.matches(query, "终端 应用 复制 粘贴 搜索 补全 采纳 快速连接 立即重连 侧栏 AI 上传 广播 terminal") or
+        try actionMatches(bound, query, .notes_float) or try actionMatches(bound, query, .notes_directory))
+    {
+        const section = try page.section("终端与应用", "13 个动作 · Control 与 Tab 保留给远端", ui.icons.terminal, 5, "settings.keys.terminal", null);
         for (keys.rows[5..]) |row| for (row.actions) |action| {
             try shortcutRow(cx, bound, section.body, actionLabel(action), &.{action});
         };
@@ -28,10 +30,9 @@ fn shortcutRow(cx: *ui.Cx, bound: *binding.Binding, parent: *ui.Node, label: []c
     const section_id = if (parent.parent) |item| item.meta.ownership.meta.test_id orelse "" else "";
     const section_title = if (std.mem.eql(u8, section_id, "settings.keys.tabs")) "页签与分栏" else "终端与应用";
     var matched = binding.matches(query, label) or binding.matches(query, section_title) or binding.matches(query, "快捷键");
-    for (actions) |action| {
-        var buffer: [96]u8 = undefined;
-        if (binding.matches(query, @tagName(action)) or binding.matches(query, try chordText(bound.controller.model.value.keys.get(action), &buffer))) matched = true;
-    }
+    for (actions) |action| if (try actionMatches(bound, query, action)) {
+        matched = true;
+    };
     if (!matched) return;
     const row = try ui.boxStyled(cx, S.fieldRow, .{});
     row.meta.ownership.meta.test_id = try controls.stableId(bound.scope, "settings.key.row.", @tagName(actions[0]));
@@ -58,6 +59,12 @@ fn shortcutRow(cx: *ui.Cx, bound: *binding.Binding, parent: *ui.Node, label: []c
     }
     try row.appendChild(cx.allocator, group);
     try parent.appendChild(cx.allocator, row);
+}
+
+fn actionMatches(bound: *binding.Binding, query: []const u8, action: keys.Action) !bool {
+    var buffer: [96]u8 = undefined;
+    return binding.matches(query, actionLabel(action)) or binding.matches(query, @tagName(action)) or
+        binding.matches(query, try chordText(bound.controller.model.value.keys.get(action), &buffer));
 }
 
 fn shortcutStyle() S.ButtonStyle {
@@ -99,6 +106,8 @@ fn actionLabel(action: keys.Action) []const u8 {
         .ai => "AI 运维助手",
         .upload => "上传面板",
         .broadcast => "广播输入",
+        .notes_float => "显示或隐藏笔记浮窗",
+        .notes_directory => "显示或隐藏笔记目录",
     };
 }
 
@@ -141,7 +150,7 @@ fn chordText(chord: keys.Chord, buffer: []u8) ![]const u8 {
         .grave => "`",
         .page_up => "PageUp",
         .page_down => "PageDown",
-        .unknown => "?",
+        .unknown => "未设置",
         else => blk: {
             const raw = @tagName(chord.key);
             for (raw, 0..) |char, index| name_buffer[index] = std.ascii.toUpper(char);

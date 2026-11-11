@@ -60,7 +60,11 @@ pub const Job = struct {
         std.hash.autoHash(&scope_hash, binding.binding_generation);
         self.request.version_scope = scope_hash.final();
         self.request.path = try files.pathFor(storage, request.path, cwd);
-        if (self.local) self.thread = try std.Thread.spawn(.{}, run, .{self});
+        if (self.local) {
+            const paths = try @import("../config/paths.zig").Paths.forApplication(storage);
+            self.request.app_data_root = paths.directory;
+            self.thread = try std.Thread.spawn(.{}, run, .{self});
+        }
         return self;
     }
     fn run(self: *Job) void {

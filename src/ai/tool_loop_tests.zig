@@ -349,6 +349,263 @@ const Script = struct {
     }
 };
 
+test "notes new conversation retrieves committed context and old citations keep local access" {
+    const tools = @import("plugin_tools.zig");
+    const notes = @import("../plugins/notes/ai_tools.zig");
+    const queries = @import("../plugins/notes/queries.zig");
+    const notes_view = @import("../plugins/notes/view.zig");
+    const identity = @import("../host/identity.zig");
+    const ui = @import("ui");
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try @import("../plugins/notes/store.zig").Store.init(a, io, temporary.dir);
+    defer store.deinit();
+    var documents = @import("../plugins/notes/document_sessions.zig").Sessions.init(a, &store);
+    defer documents.deinit();
+    var evidence = std.heap.ArenaAllocator.init(a);
+    defer evidence.deinit();
+    const scratch = evidence.allocator();
+
+    const library = try store.createLibrary("运维");
+    const private_library = try store.createLibrary("私密目录");
+    const note = try store.createNote(library, null, "部署约定");
+    const private_note = try store.createNote(private_library, null, "证书");
+    const committed = "证书提前 30 天续期。";
+    const draft = "未提交的续期修改。";
+    const revision = try store.changeNote(note, 1, .{ .save = .{ .title = "部署约定", .body_md = committed } });
+    const local_owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 1 };
+    const lease = (try documents.open(note, local_owner)).lease;
+    try documents.edit((try documents.snapshot(lease)).stamp, .{ .title = "部署约定", .body_md = draft });
+    const query: queries.Queries = .{ .store = &store };
+    try std.testing.expectEqual(@as(usize, 0), (try notes.available(query, a, false)).len);
+    _ = try store.changeLibrary(library, 1, .{ .ai_readable = true });
+
+    const authority: tools.host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = scope.owner, .binding_revision = 1, .grant_revision = 1 };
+    var table = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, authority, try notes.available(query, a, false));
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    try std.testing.expectEqual(@as(usize, 3), wire.len);
+    try std.testing.expect(table.lookup("host__notes_uread_uimage") == null);
+    const search_name = table.lookup("host__notes_usearch").?.provider_name;
+    const read_name = table.lookup("host__notes_uread").?.provider_name;
+    const prompt = try @import("session_prompt.zig").build(scratch, .auto, wire);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, search_name) != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, read_name) != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "exact source_ref") != null);
+
+    const Gateway = struct {
+        context: tools.host.Context,
+        query: queries.Queries,
+        calls: usize = 0,
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn invoke(raw: *anyopaque, call: tools.host.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !tools.host.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.context.eql(call.context)) return error.StaleToolAuthority;
+            self.calls += 1;
+            return notes.execute(self.query, call, allocator, cancel, null);
+        }
+    };
+    var gateway: Gateway = .{ .context = authority, .query = query };
+    const callbacks: loop_mod.Host = .{ .context = &gateway, .execute = Gateway.legacy, .execute_host = Gateway.invoke };
+    const read_call: provider.ToolCall = .{ .id = "notes-read", .name = read_name, .arguments = try std.json.Stringify.valueAlloc(scratch, .{ .note_id = note.note_id, .expected_revision = revision }, .{}) };
+    const private_args = try std.json.Stringify.valueAlloc(scratch, .{ .note_id = private_note.note_id }, .{});
+    const stale_args = try std.json.Stringify.valueAlloc(scratch, .{ .note_id = note.note_id, .expected_revision = revision + 1 }, .{});
+    const expected: queries.SourceRef = .{ .key = note, .revision = revision, .range = .{ .start_byte = 0, .end_byte = committed.len } };
+    const answer = try std.fmt.allocPrint(scratch, "{s}[部署约定]({s})", .{ committed, try expected.format(scratch) });
+    var script: Script = .{ .rounds = &.{
+        .{ .calls = &.{.{ .id = "notes-search", .name = search_name, .arguments = "{\"query\":\"证书\",\"limit\":1}" }} },
+        .{ .calls = &.{
+            read_call,
+            .{ .id = "notes-empty", .name = search_name, .arguments = "{\"query\":\"不存在的搜索词\"}" },
+            .{ .id = "notes-denied", .name = read_name, .arguments = private_args },
+            .{ .id = "notes-stale", .name = read_name, .arguments = stale_args },
+        } },
+        .{ .text = answer },
+    } };
+    defer script.deinit();
+    var manager = manager_mod.Manager.init(a);
+    defer manager.deinit();
+    manager.scope = scope;
+    manager.turn_id = 1;
+    manager.tool_host = callbacks;
+    manager.tool_limits.context_window = 100_000;
+    const request: provider.ChatRequest = .{ .model = "fixture", .system = prompt, .messages = &.{.{ .content = "按照之前约定，证书应提前多久续期？" }}, .tools = wire, .tool_table = &table };
+    _ = try manager.run(script.interface(), request);
+    try std.testing.expectEqual(@as(usize, 3), script.requests.items.len);
+    try std.testing.expectEqual(@as(usize, 5), gateway.calls);
+    const search = try notesWireResult(scratch, script.requests.items[1], "notes-search");
+    const hits = (try notesWireContent(scratch, search)).object.get("entries").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+    try std.testing.expectEqualStrings("部署约定", hits[0].object.get("title").?.string);
+    const read = try notesWireContent(scratch, try notesWireResult(scratch, script.requests.items[2], read_call.id));
+    try std.testing.expectEqualStrings(committed, read.object.get("body_md").?.string);
+    const source = try queries.SourceRef.parse(read.object.get("source_ref").?.string);
+    try std.testing.expectEqualDeep(expected, source);
+    const empty = try notesWireContent(scratch, try notesWireResult(scratch, script.requests.items[2], "notes-empty"));
+    try std.testing.expectEqual(@as(usize, 0), empty.object.get("entries").?.array.items.len);
+    const denied = try notesWireResult(scratch, script.requests.items[2], "notes-denied");
+    try std.testing.expectEqualStrings("Unavailable", denied.object.get("error_code").?.string);
+    try std.testing.expect(denied.object.get("content") == null);
+    const stale = try notesWireResult(scratch, script.requests.items[2], "notes-stale");
+    try std.testing.expectEqualStrings("RevisionChanged", stale.object.get("error_code").?.string);
+    try std.testing.expect(stale.object.get("content") == null);
+    try std.testing.expectEqualStrings(answer, manager.round_text.items);
+
+    var pending = loop_mod.Loop.init(a, scope, 2, .{ .context_window = 100_000 });
+    defer pending.deinit();
+    try pending.start(request);
+    try pending.complete("", &.{read_call}, callbacks, .{}, 1, null);
+    try std.testing.expect(pending.records.items[0].host_result != null);
+
+    // Exercise the real vision tool and provider encoder on both sides of the
+    // authorization fence. A denied text result alone cannot prove bytes were removed.
+    const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" ++
+        "\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
+        "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d" ++
+        "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+    const assets = @import("../plugins/notes/assets.zig");
+    var image_cancel: assets.CancelToken = .{};
+    const image = try assets.importBytes(a, &store, library, png, &image_cancel, .{});
+    const image_note = try store.createNote(library, null, "拓扑");
+    const image_body = try std.fmt.allocPrint(scratch, "![测试拓扑]({s})", .{image.relativePath()});
+    const image_revision = try store.changeNote(image_note, 1, .{ .save = .{ .title = "拓扑", .body_md = image_body } });
+    var vision_table = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, authority, try notes.available(query, a, true));
+    defer vision_table.deinit();
+    const vision_wire = try tools.providerDefinitions(&vision_table, vision_table.arena.allocator());
+    const image_call: provider.ToolCall = .{
+        .id = "notes-image",
+        .name = vision_table.lookup("host__notes_uread_uimage").?.provider_name,
+        .arguments = try std.json.Stringify.valueAlloc(scratch, .{ .note_id = image_note.note_id, .expected_revision = image_revision, .asset_ref = image.relativePath() }, .{}),
+    };
+    var image_loop = loop_mod.Loop.init(a, scope, 3, .{ .context_window = 100_000 });
+    defer image_loop.deinit();
+    var vision_request = request;
+    vision_request.tool_table = &vision_table;
+    vision_request.tools = vision_wire;
+    vision_request.vision = true;
+    vision_request.tool_images = true;
+    vision_request.image_token_reservation = 1024;
+    try image_loop.start(vision_request);
+    try image_loop.complete("", &.{image_call}, callbacks, .{}, 1, null);
+    const allowed_image_request = try image_loop.nextRequest();
+    try http.validateToolMessages(allowed_image_request);
+    try std.testing.expectEqual(@as(usize, 1), allowed_image_request.messages[2].images.len);
+    const base64 = std.base64.standard.Encoder;
+    const encoded_png = base64.encode(try scratch.alloc(u8, base64.calcSize(png.len)), png);
+    const image_url = try std.fmt.allocPrint(scratch, "data:image/png;base64,{s}", .{encoded_png});
+    const allowed_image_wire = try http.requestBody(scratch, .openai_compat, allowed_image_request, 100_000);
+    try std.testing.expect(std.mem.indexOf(u8, allowed_image_wire, image_url) != null);
+
+    _ = try store.changeLibrary(library, 2, .{ .ai_readable = false });
+    const denied_image_request = try image_loop.nextRequest();
+    try http.validateToolMessages(denied_image_request);
+    try std.testing.expectEqual(@as(usize, 0), denied_image_request.messages[2].images.len);
+    try std.testing.expectEqual(@as(usize, 0), denied_image_request.messages[2].offloaded_images.len);
+    try std.testing.expect(image_loop.records.items[0].host_result == null);
+    const denied_image_wire = try http.requestBody(scratch, .openai_compat, denied_image_request, 100_000);
+    try std.testing.expect(std.mem.indexOf(u8, denied_image_wire, "data:image/") == null);
+    const denied_image = try notesWireResult(scratch, denied_image_wire, image_call.id);
+    try std.testing.expectEqualStrings("Unavailable", denied_image.object.get("error_code").?.string);
+    const after_revoke = try pending.nextRequest();
+    try http.validateToolMessages(after_revoke);
+    try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"error_code\":\"Unavailable\"}", after_revoke.messages[2].content);
+    try std.testing.expectEqualStrings(read_call.id, after_revoke.messages[2].tool_call_id.?);
+    try std.testing.expectEqual(@as(usize, 0), (try notes.available(query, a, true)).len);
+    try std.testing.expectEqual(.current, (try query.resolveSource(a, source, null)).state);
+
+    const cx = try ui.Cx.init(a, io);
+    defer cx.deinit();
+    const ui_scope = try ui.Scope.init(a, null, cx.owner);
+    defer ui_scope.dispose();
+    cx.setViewport(1154, 828);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const instance = try notes_view.mount(.{
+        .cx = cx,
+        .scope = ui_scope,
+        .slot = cx.root.?,
+        .owner = local_owner,
+        .connection = .{ .protocol_id = "notes", .name = "笔记", .payload_version = 1, .payload = "{}" },
+    }, &store, &documents);
+    defer instance.vtable.unmount(instance.context);
+    instance.vtable.presentation_changed.?(instance.context, .active);
+    try std.testing.expect(notes_view.openNote(instance, note));
+    notesFrames(cx);
+    const Citation = struct {
+        renderer: @import("../host/plugin_ui_contract.zig").RendererInstance,
+        clicked: ?queries.SourceRef = null,
+        fn open(raw: *anyopaque, selected: queries.SourceRef) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (notes_view.openSource(self.renderer, selected)) self.clicked = selected;
+        }
+    };
+    var citation: Citation = .{ .renderer = instance };
+    const answer_ui = try ui.box(cx, .{}, .{});
+    try cx.root.?.appendChild(a, answer_ui);
+    try @import("../ui/ai_notes_citations.zig").append(cx, ui_scope, answer_ui, manager.round_text.items, .{ .context = &citation, .open = Citation.open });
+    try std.testing.expectEqual(@as(usize, 1), answer_ui.children.items.len);
+    const source_button = answer_ui.children.items[0];
+    try std.testing.expectEqualStrings("ai.notes.source", source_button.meta.ownership.meta.test_id.?);
+    source_button.behavior.events.on_click.?.invoke();
+    notesFrames(cx);
+    try std.testing.expectEqualDeep(source, citation.clicked.?);
+    try std.testing.expectEqualStrings(draft, (try documents.snapshot(lease)).body_md);
+    try std.testing.expect((try documents.snapshot(lease)).dirty);
+    const status = findNotesNode(cx.root.?, "notes.save.error").?;
+    try std.testing.expectEqualStrings("内容已更新", status.getText().?.content);
+
+    try documents.flush(lease);
+    const changed = try query.resolveSource(a, source, null);
+    try std.testing.expectEqual(.updated, changed.state);
+    try std.testing.expect(changed.range == null);
+    try std.testing.expect(notes_view.openNote(instance, private_note));
+    notesFrames(cx);
+    source_button.behavior.events.on_click.?.invoke();
+    notesFrames(cx);
+    try std.testing.expectEqualStrings("内容已更新", status.getText().?.content);
+    const current_lease = (try documents.open(note, local_owner)).lease;
+    const current_draft = try documents.snapshot(current_lease);
+    try std.testing.expect(!current_draft.dirty);
+    try std.testing.expectEqualStrings(draft, current_draft.body_md);
+    _ = try store.changeNote(note, changed.revision.?, .delete);
+    source_button.behavior.events.on_click.?.invoke();
+    notesFrames(cx);
+    try std.testing.expectEqualStrings("笔记已删除", status.getText().?.content);
+    try std.testing.expect(findNotesNode(cx.root.?, "notes.recent.restore").?.isDisplayedInTree());
+}
+
+fn notesWireResult(allocator: std.mem.Allocator, request: []const u8, call_id: []const u8) !std.json.Value {
+    const wire = try std.json.parseFromSliceLeaky(std.json.Value, allocator, request, .{});
+    for (wire.object.get("messages").?.array.items) |message| {
+        const id = message.object.get("tool_call_id") orelse continue;
+        if (std.mem.eql(u8, id.string, call_id)) return std.json.parseFromSliceLeaky(std.json.Value, allocator, message.object.get("content").?.string, .{});
+    }
+    return error.MissingNotesResult;
+}
+
+fn notesWireContent(allocator: std.mem.Allocator, result: std.json.Value) !std.json.Value {
+    try std.testing.expectEqualStrings("succeeded", result.object.get("status").?.string);
+    const content = result.object.get("content").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), content.len);
+    return std.json.parseFromSliceLeaky(std.json.Value, allocator, content[0].object.get("text").?.string, .{});
+}
+
+fn notesFrames(cx: *@import("ui").Cx) void {
+    for (0..6) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+}
+
+fn findNotesNode(node: *@import("ui").Node, id: []const u8) ?*@import("ui").Node {
+    if (node.meta.ownership.meta.test_id) |test_id| if (std.mem.eql(u8, test_id, id)) return node;
+    for (node.children.items) |child| if (findNotesNode(child, id)) |match| return match;
+    return null;
+}
+
 const ControlledHost = struct {
     count: usize = 0,
     script: ?*Script = null,

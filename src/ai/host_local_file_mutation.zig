@@ -164,6 +164,7 @@ fn runNew(a: std.mem.Allocator, io: std.Io, state: local.State, invocation: host
         .workspace = state.workspace,
         .local_cwd = state.cwd,
         .home = state.home,
+        .app_data_root = state.app_data_root,
         .conversation = invocation.context.conversation_id,
         .create_parents = request.create_parents,
     };

@@ -43,6 +43,7 @@ pub const State = struct {
     workspace: workspace.Snapshot,
     cwd: ?[]const u8 = null,
     home: ?[]const u8 = null,
+    app_data_root: ?[]const u8 = null,
     key: [32]u8,
     reference_key: ?[32]u8 = null,
 };
@@ -87,6 +88,7 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, state: State, invocatio
         .workspace = state.workspace,
         .local_cwd = state.cwd,
         .home = state.home,
+        .app_data_root = state.app_data_root,
         .conversation = invocation.context.conversation_id,
     };
     const target = paths.resolve(a, io, options, if (kind == .read) .file else .directory) catch |err| {

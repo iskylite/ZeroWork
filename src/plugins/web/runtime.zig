@@ -37,6 +37,7 @@ pub const Runtime = struct {
     surface: ?web.Surface = null,
     page_prompts: ?page_requests.Bridge = null,
     surface_state: ?web.Snapshot = null,
+    displayed_url_revision: u64 = 0,
     native_mount: ?web.Mount = null,
     presentation: ?u64 = null,
     next_presentation: u64 = 1,
@@ -280,6 +281,7 @@ pub const Runtime = struct {
         if (self.surface) |*surface| surface.deinit();
         self.surface = null;
         self.surface_state = null;
+        self.displayed_url_revision = 0;
         self.native_navigation_id = 0;
         self.awaiting_navigation = false;
     }
@@ -296,7 +298,6 @@ pub const Runtime = struct {
     fn pollSurface(self: *Runtime, surface: *web.Surface) !bool {
         if (self.controller.path == .disconnected) return false;
         const state = try surface.snapshot();
-        const location_changed = if (self.surface_state) |previous| previous.url_revision != state.url_revision else false;
         var changed = !std.meta.eql(self.surface_state, @as(?web.Snapshot, state));
         if (self.page_prompts) |*prompts| {
             changed = (try prompts.poll(surface)) or changed;
@@ -343,7 +344,9 @@ pub const Runtime = struct {
             } else if (state.displayed and !state.loading) {
                 changed = self.controller.didFinish(request) or changed;
             }
-        } else if (location_changed and state.displayed and state.committed and !state.loading and !state.failed) {
+        }
+        // A history change may arrive after commit but before the page finishes loading.
+        if (self.displayed_url_revision != state.url_revision and self.controller.page == .displayed and state.committed and !state.loading and !state.failed) {
             if (try surface.copyUrl(self.allocator)) |url| {
                 defer self.allocator.free(url);
                 changed = (self.controller.observeDisplayedUrl(url) catch |err| switch (err) {
@@ -351,6 +354,7 @@ pub const Runtime = struct {
                     else => false,
                 }) or changed;
             }
+            self.displayed_url_revision = state.url_revision;
         }
         if (state.failed and self.controller.page != .failed) {
             self.controller.page = .failed;
