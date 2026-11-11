@@ -5,6 +5,7 @@ const registry = @import("../host/plugin_registry.zig");
 const presentation = @import("../host/plugin_ui_contract.zig");
 const frames = @import("../host/frame_budget.zig");
 const bmc = @import("bmc_ikvm/plugin.zig");
+const web = @import("web/plugin.zig");
 const ledger = @import("bmc_ikvm/management_journal.zig");
 
 pub fn Bundle(comptime acceptance_plugins: bool) type {
@@ -17,14 +18,15 @@ pub fn Bundle(comptime acceptance_plugins: bool) type {
             frame_budget: frames.Budget = frames.Budget.init(frames.application_bytes),
             journal_backend: ledger.FileBackend,
             plugin: ?*bmc.Plugin = null,
+            web_plugin: ?*web.Plugin = null,
             fixture: if (acceptance_plugins) ?*@import("fixture_probe/plugin.zig").Plugin else void = if (acceptance_plugins) null else {},
         };
 
         // Backend contexts and reservations borrow Resources, never this
         // return-by-value Bundle. Moving the Bundle cannot invalidate them.
         resources: ?*Resources,
-        manifest_entries: [if (acceptance_plugins) 2 else 1]registry.PluginManifest,
-        renderer_entries: [if (acceptance_plugins) 2 else 1]presentation.RendererDefinition,
+        manifest_entries: [if (acceptance_plugins) 3 else 2]registry.PluginManifest,
+        renderer_entries: [if (acceptance_plugins) 3 else 2]presentation.RendererDefinition,
 
         pub fn init(allocator: std.mem.Allocator, io: std.Io, data_directory: []const u8) !Self {
             const resources = try allocator.create(Resources);
@@ -41,12 +43,15 @@ pub fn Bundle(comptime acceptance_plugins: bool) type {
             // init has not exposed a factory or started a worker yet.
             errdefer plugin.deinit() catch unreachable;
             resources.plugin = plugin;
+            const web_plugin = try web.Plugin.init(allocator);
+            errdefer web_plugin.deinit() catch unreachable;
+            resources.web_plugin = web_plugin;
             if (comptime acceptance_plugins) {
                 const fixture = try @import("fixture_probe/plugin.zig").Plugin.init(allocator);
                 resources.fixture = fixture;
-                return .{ .resources = resources, .manifest_entries = .{ plugin.manifest(), fixture.manifest() }, .renderer_entries = .{ plugin.renderer(), fixture.renderer() } };
+                return .{ .resources = resources, .manifest_entries = .{ plugin.manifest(), web_plugin.manifest(), fixture.manifest() }, .renderer_entries = .{ plugin.renderer(), web_plugin.renderer(), fixture.renderer() } };
             }
-            return .{ .resources = resources, .manifest_entries = .{plugin.manifest()}, .renderer_entries = .{plugin.renderer()} };
+            return .{ .resources = resources, .manifest_entries = .{ plugin.manifest(), web_plugin.manifest() }, .renderer_entries = .{ plugin.renderer(), web_plugin.renderer() } };
         }
         pub fn manifests(self: *const Self) []const registry.PluginManifest {
             return if (self.resources != null) &self.manifest_entries else &.{};
@@ -61,6 +66,10 @@ pub fn Bundle(comptime acceptance_plugins: bool) type {
         /// the plugin and its borrowed journal/budget, for a later drain/retry.
         pub fn deinit(self: *Self) !void {
             const resources = self.resources orelse return;
+            if (resources.web_plugin) |plugin| {
+                try plugin.deinit();
+                resources.web_plugin = null;
+            }
             if (resources.plugin) |plugin| {
                 try plugin.deinit();
                 resources.plugin = null;

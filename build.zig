@@ -140,6 +140,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
 
     zenit.attach(zenit_dep, exe);
+    addWebNative(b, exe.root_module, false, test_mode);
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_notifications.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.linkFramework("UserNotifications", .{});
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_data_alert.m"), .flags = &.{"-fobjc-arc"} });
@@ -391,6 +392,7 @@ pub fn build(b: *std.Build) void {
 
     addCoreTextBridgeForTest(zenit_dep, tests);
     addBmcNative(b, tests.root_module);
+    addWebNative(b, tests.root_module, true, false);
     tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     tests.root_module.linkFramework("Metal", .{});
     tests.root_module.linkFramework("QuartzCore", .{});
@@ -421,8 +423,20 @@ pub fn build(b: *std.Build) void {
     bmc_tests.root_module.linkFramework("JavaScriptCore", .{});
     addCoreTextBridgeForTest(zenit_dep, bmc_tests);
     addBmcNative(b, bmc_tests.root_module);
+    addWebNative(b, bmc_tests.root_module, true, false);
     bmc_tests.step.dependOn(&verify_ssh.step);
     b.step("test-bmc", "Run isolated V0.3 public seams, protocol and UI contract tests").dependOn(&b.addRunArtifact(bmc_tests).step);
+
+    const web_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/web_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    web_tests.root_module.link_libc = true;
+    web_tests.root_module.linkSystemLibrary("icucore", .{});
+    web_tests.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+    const web_test_run = b.addRunArtifact(web_tests);
+    b.step("test-web", "Run isolated web connection contracts").dependOn(&web_test_run.step);
 
     const root_test_step = b.step("test", "Run unit and contract tests");
     const root_test_files = b.addWriteFiles();
@@ -559,6 +573,18 @@ pub fn build(b: *std.Build) void {
     notification_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     notification_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     b.step("test-notification-preview", "Build isolated native notification acceptance fixture").dependOn(&b.addInstallArtifact(notification_preview, .{}).step);
+    const web_surface_preview = b.addExecutable(.{ .name = "web-surface-preview", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/web_surface_preview_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    zenit.attach(zenit_dep, web_surface_preview);
+    addWebNative(b, web_surface_preview.root_module, false, false);
+    web_surface_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    web_surface_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+    web_surface_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+    b.step("web-surface-preview", "Build the isolated Zenit and WKWebView surface fixture").dependOn(&b.addInstallArtifact(web_surface_preview, .{}).step);
+
     const bmc_preview = b.addExecutable(.{ .name = "bmc-kvm-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/bmc_kvm_preview_runner.zig"), .target = target, .optimize = optimize }) });
     zenit.attach(zenit_dep, bmc_preview);
     bmc_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
@@ -703,6 +729,7 @@ pub fn build(b: *std.Build) void {
 
     addCoreTextBridgeForTest(zenit_dep, ui_tests);
     addBmcNative(b, ui_tests.root_module);
+    addWebNative(b, ui_tests.root_module, true, false);
     ui_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     ui_tests.root_module.linkFramework("Metal", .{});
     ui_tests.root_module.linkFramework("QuartzCore", .{});
@@ -965,4 +992,19 @@ fn addBmcNative(b: *std.Build, module: *std.Build.Module) void {
     for ([_][]const u8{ "mbedtls", "mbedx509", "mbedcrypto", "z" }) |library| module.linkSystemLibrary(library, .{});
     for ([_][]const u8{ "Security", "CoreFoundation", "CoreGraphics", "ImageIO", "LocalAuthentication", "Foundation" }) |framework| module.linkFramework(framework, .{});
     module.link_libc = true;
+}
+
+fn addWebNative(b: *std.Build, module: *std.Build.Module, headless: bool, acceptance: bool) void {
+    const flags: []const []const u8 = if (headless)
+        &.{ "-fobjc-arc", "-DZW_WEB_SURFACE_HEADLESS=1" }
+    else if (acceptance)
+        &.{ "-fobjc-arc", "-DZW_WEB_SURFACE_ACCEPTANCE=1" }
+    else
+        &.{"-fobjc-arc"};
+    module.addCSourceFile(.{
+        .file = b.path("src/platform/macos_web_surface.m"),
+        .flags = flags,
+    });
+    for ([_][]const u8{ "AppKit", "WebKit", "Network", "QuartzCore" }) |framework| module.linkFramework(framework, .{});
+    module.linkSystemLibrary("icucore", .{});
 }

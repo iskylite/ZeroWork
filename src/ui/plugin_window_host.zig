@@ -18,6 +18,13 @@ const transports = @import("../host/transport_factory.zig");
 const ssh = @import("../proto/ssh/session.zig");
 const trust = @import("../proto/ssh/host_key_store.zig");
 const operation = @import("../host/operation.zig");
+const contract = @import("../host/plugin_ui_contract.zig");
+const web_surface = @import("../host/web_surface.zig");
+const web_config = @import("../plugins/web/config.zig");
+const bookmark_store = @import("../plugins/web/bookmark_store.zig");
+const Workspace = @import("workspace.zig").Workspace;
+const WebMutation = @import("../plugins/web/bookmarks.zig").Mutation;
+const NativeApp = @import("zenit_app").App;
 const Entry = struct { owner: identity.SessionHandle, cancel: std.atomic.Value(bool) = .init(false), ended: bool = false, released: bool = false, donor: *Retainer, probe_only: bool = false };
 var windows: [32]?*Host = @splat(null);
 pub const TransferReceipt = struct {
@@ -39,6 +46,8 @@ pub const TransferReceipt = struct {
 pub var transfer_receipts: [64]TransferReceipt = undefined;
 pub var transfer_receipt_count: usize = 0;
 
+pub const CleanupCounts = struct { reservations: usize = 0, retained: usize = 0, pending_owners: usize = 0 };
+
 pub const Host = struct {
     cx: *ui.Cx,
     application: *application.ApplicationHost,
@@ -51,6 +60,7 @@ pub const Host = struct {
     challenge_host: *challenges.Host = undefined,
     pending_transfers: std.ArrayList(struct { owner: identity.SessionHandle, destination: identity.WindowId }) = .empty,
     native_context: *anyopaque = undefined,
+    native_web_surface: bool = false,
     native_fullscreen: *const fn (*anyopaque, bool) anyerror!void = undefined,
     native_fullscreen_state: *const fn (*anyopaque) bool = undefined,
     entries: std.ArrayList(*Entry) = .empty,
@@ -87,6 +97,10 @@ pub const Host = struct {
         self.native_fullscreen_state = Adapter.state;
         self.content_host = try contents.Host.init(cx, app_host.window_id, .{ .context = self, .request_fullscreen = requestFullscreen, .fullscreen_state = fullscreenState, .transfer = enqueueTransfer, .destinations = destinations }, frame.backendFor(store));
         self.content_host.setSessionHost(app_host.sessions);
+        if (Native == NativeApp) {
+            self.native_web_surface = true;
+            self.content_host.web_services = .{ .context = self, .create = webContent };
+        }
         if (app_host.domain.frame_budget) |budget| self.content_host.setFrameBudget(budget);
         var data_paths = try @import("../config/paths.zig").Paths.forApplication(cx.allocator);
         defer data_paths.deinit();
@@ -494,6 +508,22 @@ pub const Host = struct {
         for (windows) |maybe| if (maybe) |self| if (self.application == app_host and !self.closed) return self;
         return null;
     }
+    pub fn acceptanceCleanupCounts(self: *const Host) CleanupCounts {
+        const retainer = self.retainer orelse return .{};
+        retainer.lock();
+        defer retainer.unlock();
+        var counts: CleanupCounts = .{ .reservations = retainer.reserved, .retained = retainer.retained_count };
+        for (self.entries.items) |entry| if (entry.ended and !entry.released) {
+            counts.pending_owners += 1;
+        };
+        return counts;
+    }
+    pub fn limitAcceptanceCleanupCapacity(self: *Host) void {
+        const retainer = self.retainer orelse return;
+        retainer.lock();
+        defer retainer.unlock();
+        retainer.acceptance_cleanup_capacity = 1;
+    }
     pub fn inputFor(self: *Host, owner: identity.SessionHandle) ?*content.Context {
         for (self.content_host.entries.items) |entry| if (!entry.retired and entry.input.owner.eql(owner)) return &entry.input;
         return null;
@@ -529,6 +559,108 @@ pub const Host = struct {
             .private_key => .{ .private_key = .{ .path = try allocator.dupeSentinel(u8, saved.identity_file orelse return error.MissingIdentityFile, 0), .passphrase = if (saved.key_passphrase) |passphrase| try allocator.dupeSentinel(u8, passphrase, 0) else null } },
         };
     }
+    fn webContent(raw: *anyopaque, owner: identity.SessionHandle) !contract.ContentServices {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.closed or self.shutdown_prepared or !self.native_web_surface) return .{};
+        const value = self.application.sessions.connectionEnvelope(owner) orelse return .{};
+        if (!std.mem.eql(u8, value.protocol_id, web_config.protocol_id)) return .{};
+        return .{
+            .web_surface = .{ .context = self, .owner = owner, .sync_slot = syncWebSurface },
+            .web_bookmarks = if (@backingInt(value.id) == 0) null else .{ .context = self, .owner = owner, .read = readWebBookmarks, .write = writeWebBookmarks },
+        };
+    }
+
+    fn syncWebSurface(raw: *anyopaque, owner: identity.SessionHandle, surface: *web_surface.Surface, binding: *?web_surface.Mount, slot: *ui.Node, visible: bool) !void {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        if (!surface.owner.eql(owner)) return error.StaleWebSurfaceMount;
+        const workspace = self.application.workspace;
+        const tab = if (workspace.active_tab) |index| if (index < workspace.tabs.items.len) workspace.tabs.items[index] else null else null;
+        const admitted = if (tab) |active| !active.closing and active.content_owner.eql(.{ .session = owner }) and slot.isDescendantOf(active.root) else false;
+        if (!admitted or self.closed or self.shutdown_prepared or !self.application.sessions.allowsContent(owner)) {
+            if (binding.*) |token| try surface.unbind(token);
+            binding.* = null;
+            return;
+        }
+        const app: *NativeApp = @ptrCast(@alignCast(self.native_context));
+        const rect = slot.globalRect();
+        const show = visible and slot.isDisplayedInTree() and rect.w > 0 and rect.h > 0 and self.cx.overlay_stack.topmost() == null;
+        if (!show and binding.* == null) return;
+        if (binding.* == null) binding.* = try surface.bind(owner, app.windowId());
+        try surface.sync(binding.*.?, app, .{
+            .slot = rect,
+            .clip = workspace.terminal_area.globalRect(),
+            .visible = show,
+            .host_key = webHostKey,
+            .focus_entered = .{ .callback = webFocusEntered, .context = self },
+        });
+    }
+
+    fn webFocusEntered(context: ?*anyopaque) callconv(.c) void {
+        const self: *Host = @ptrCast(@alignCast(context orelse return));
+        if (self.closed or self.shutdown_prepared) return;
+        self.cx.clearFocus();
+        self.cx.requestRedraw();
+    }
+
+    fn webHostKey(context: ?*anyopaque, key: u16, modifiers: u32) callconv(.c) c_int {
+        const self: *Host = @ptrCast(@alignCast(context orelse return 0));
+        if (self.closed or self.shutdown_prepared) return 0;
+        const mods = ui.events.Modifiers{
+            .shift = modifiers & (1 << 17) != 0,
+            .ctrl = modifiers & (1 << 18) != 0,
+            .alt = modifiers & (1 << 19) != 0,
+            .super = modifiers & (1 << 20) != 0,
+        };
+        return @intFromBool(@import("../config/web_host_keys.zig").isHostKey(
+            self.application.workspace.app_config.keys,
+            ui.events.KeyCode.fromRawKeycode(key),
+            mods,
+        ));
+    }
+
+    fn webBookmarkAsset(self: *Host, owner: identity.SessionHandle) !identity.ConnectionId {
+        if (self.closed or self.shutdown_prepared or !self.application.sessions.allowsContent(owner)) return error.StaleWebBookmarkOwner;
+        const source = self.application.sessions.connectionEnvelope(owner) orelse return error.StaleWebBookmarkOwner;
+        if (@backingInt(source.id) == 0 or !std.mem.eql(u8, source.protocol_id, web_config.protocol_id)) return error.StaleWebBookmarkOwner;
+        return source.id;
+    }
+
+    fn webBookmarkWorkspace(self: *Host) *Workspace {
+        var newest = self.application.workspace;
+        for (windows) |maybe| if (maybe) |window| {
+            if (window.closed or window.shutdown_prepared or window.application.domain != self.application.domain) continue;
+            const candidate = window.application.workspace;
+            if (candidate.registry.revision > newest.registry.revision and std.mem.eql(u8, candidate.hosts_path, newest.hosts_path)) newest = candidate;
+        };
+        return newest;
+    }
+
+    fn readWebBookmarks(raw: *anyopaque, owner: identity.SessionHandle, arena: std.mem.Allocator) !@import("../config/connection_envelope.zig").Envelope {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        const asset = try self.webBookmarkAsset(owner);
+        const workspace = self.webBookmarkWorkspace();
+        const index = workspace.registry.indexOf(asset) orelse return error.ConnectionNotFound;
+        const host = workspace.registry.hosts[index];
+        if (!std.mem.eql(u8, host.protocolId(), web_config.protocol_id)) return error.UnsupportedProtocol;
+        return @import("../config/connection_envelope.zig").fromLegacy(arena, host);
+    }
+
+    fn writeWebBookmarks(raw: *anyopaque, owner: identity.SessionHandle, mutation: WebMutation) !void {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        const asset = try self.webBookmarkAsset(owner);
+        const workspace = self.webBookmarkWorkspace();
+        const baseline = workspace.registry.source_hash;
+        const result = try bookmark_store.apply(workspace.allocator, workspace.io, .cwd(), workspace.hosts_path, &workspace.registry, .{ .provider = workspace.credential_provider }, asset, mutation);
+        if (!result.changed) return;
+        for (windows) |maybe| if (maybe) |window| {
+            if (window.closed or window.shutdown_prepared or window.application.domain != self.application.domain) continue;
+            const other = window.application.workspace;
+            if (!std.mem.eql(u8, other.hosts_path, workspace.hosts_path)) continue;
+            if (other != workspace) other.adoptBookmarkRegistry(baseline, &workspace.registry);
+            other.cx.requestRedraw();
+        };
+    }
+
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Host = @ptrCast(@alignCast(raw));
         const ns = @import("../platform/realtime.zig").monotonicNs();
@@ -644,6 +776,7 @@ const Retainer = struct {
     host_keys: ?trust.HostKeyStore = null,
     held: std.atomic.Value(bool) = .init(false),
     reserved: usize = 0,
+    acceptance_cleanup_capacity: ?usize = null,
     retained_count: usize = 0,
     retained: [128]?*transports.OwnedTransport = @splat(null),
     tokens: [128]?*Entry = @splat(null),
@@ -675,7 +808,8 @@ const Retainer = struct {
         const self: *Retainer = @ptrCast(@alignCast(raw));
         self.lock();
         defer self.unlock();
-        if (self.reserved + self.retained_count >= self.retained.len) return error.PluginCleanupQueueFull;
+        const capacity = self.acceptance_cleanup_capacity orelse self.retained.len;
+        if (self.reserved + self.retained_count >= capacity) return error.PluginCleanupQueueFull;
         self.reserved += 1;
     }
     fn release(raw: *anyopaque) void {

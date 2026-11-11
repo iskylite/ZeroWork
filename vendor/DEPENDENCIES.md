@@ -5,15 +5,17 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-11-11-traffic-lights-idle-transaction` (upstream revision and license unchanged)
+- Local patch revision: `2026-11-11-embedded-view-input-accessibility` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3507` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `ddc993fff48a652d785bb8547e83b32ea1d84b30849c42f18161e02dc6cbc415`
+- Canonical tracked-tree SHA-256: `b9ea5c135b2e7049c69b6aa407102d6797b1edfdbd133727c5d5803169c8f11e`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
+
+The embedded-view input and accessibility patch lets a main-thread host register a direct native child of the owning Metal view. AppKit receives pointer events inside that child and keyboard events while its responder owns focus. After a pointer press transfers focus to the child, the host can clear its own logical focus. The host-key callback receives the registered window context, allowing the application to classify its configured shortcuts; modifier releases still reach the host, and the default Edit menu forwards native editing actions to the embedded responder. With no logical focus, Tab first reaches the application root's existing handlers, so handled Control-Tab shortcuts do not fall into ordinary focus traversal; unhandled Tab retains that traversal. The live registered native accessibility children join the virtual tree, with native focus and clipped hit testing, recursion protection and native overlay hit precedence. Detaching or hiding the child removes its accessibility subtree, restores Metal focus and prevents old pointer sequences from entering another surface. The upstream revision, license and toolchain are unchanged.
 
 The traffic lights patch opens a Core Animation transaction only when the native titlebar or a window button needs a frame change. AppKit frame observers still correct geometry synchronously. The upstream revision, public API, license and toolchain are unchanged.
 

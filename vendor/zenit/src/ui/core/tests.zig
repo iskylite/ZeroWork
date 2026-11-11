@@ -13920,6 +13920,62 @@ test "unfocused keys reach the application root under the App wrapper" {
     try std.testing.expectEqualSlices(u8, "AA", trace.seq.items);
 }
 
+test "unfocused Tab reaches application capture before default focus traversal" {
+    const cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(400, 300);
+
+    const Capture = struct {
+        control_tabs: usize = 0,
+        plain_tabs: usize = 0,
+        fn onEvent(event: Event, raw: ?*anyopaque) EventResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            switch (event) {
+                .key_down => |key| if (key.key == .tab) {
+                    if (key.modifiers.ctrl) {
+                        self.control_tabs += 1;
+                        return .stop;
+                    }
+                    self.plain_tabs += 1;
+                },
+                else => {},
+            }
+            return .ignored;
+        }
+    };
+    var capture: Capture = .{};
+    const wrapper = try box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const content = try box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const portal = try box(cx, .{}, .{});
+    content.behavior.events.on_event_capture = Capture.onEvent;
+    content.behavior.events.event_context = &capture;
+    const first = try box(cx, .{}, .{});
+    const second = try box(cx, .{}, .{});
+    try content.appendChild(cx.allocator, first);
+    try content.appendChild(cx.allocator, second);
+    try wrapper.appendChild(cx.allocator, content);
+    try wrapper.appendChild(cx.allocator, portal);
+    cx.root = wrapper;
+    cx.content_root = content;
+    cx.layout();
+    try cx.focus_manager.registerFocusable(first);
+    try cx.focus_manager.registerFocusable(second);
+
+    // Entering a native web page leaves the application without logical focus.
+    cx.handleKeyDown(.tab, .{ .ctrl = true });
+    cx.handleKeyDown(.tab, .{ .ctrl = true, .shift = true });
+    try std.testing.expectEqual(@as(usize, 2), capture.control_tabs);
+    try std.testing.expect(cx.focus_manager.getFocused() == null);
+
+    // Unhandled Tab / Shift-Tab still perform ordinary forward/back traversal.
+    cx.handleKeyDown(.tab, .{});
+    try std.testing.expect(cx.focus_manager.getFocused() == first);
+    cx.clearFocus();
+    cx.handleKeyDown(.tab, .{ .shift = true });
+    try std.testing.expect(cx.focus_manager.getFocused() == second);
+    try std.testing.expectEqual(@as(usize, 2), capture.plain_tabs);
+}
+
 test "capture stop halts propagation (no bubble)" {
     var cx = try Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();

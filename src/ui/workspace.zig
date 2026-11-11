@@ -2002,6 +2002,29 @@ pub const Workspace = struct {
         }
         self.cx.requestRedraw();
     }
+    pub fn focusActiveAddress(self: *Workspace) bool {
+        if (self.cx.overlay_stack.topmost() != null) return false;
+        const index = self.active_tab orelse return false;
+        if (index >= self.tabs.items.len) return false;
+        const tab = self.tabs.items[index];
+        if (tab.closing) return false;
+        const renderer = tab.plugin_renderer orelse return false;
+        const focus = renderer.vtable.focus_address orelse return false;
+        focus(renderer.context);
+        return true;
+    }
+
+    /// An already committed bookmark write changes only the asset's payload.
+    /// Synchronize other windows that still hold that exact disk revision.
+    pub fn adoptBookmarkRegistry(self: *Workspace, previous: ?hosts_mod.Digest, updated: *const hosts_mod.Registry) void {
+        if (!std.meta.eql(self.registry.source_hash, previous)) return;
+        const copy = updated.clone(self.allocator) catch return;
+        self.registry.deinit();
+        self.registry = copy;
+        self.refreshSavedHosts();
+        self.cx.requestRedraw();
+    }
+
     pub fn handleTabKey(self: *Workspace, key: ui.events.KeyCode, modifiers: ui.events.Modifiers) ui.events.EventResult {
         if (self.rename_editor) |editor| if (editor.isVisible()) return editor.handleKey(key);
         if (self.rename_request != null) return .ignored;
@@ -4904,7 +4927,7 @@ pub const Workspace = struct {
         errdefer self.cx.destroyDetached(pane);
         pane.meta.ownership.meta.test_id = "workspace.plugin.content";
         const services = if (self.content_services) |factory| try factory.create(factory.context, owner) else plugin_ui.ContentServices{};
-        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access });
+        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access, .web_surface = services.web_surface, .web_bookmarks = services.web_bookmarks });
         errdefer instance.vtable.unmount(instance.context);
         try self.terminal_area.appendChild(self.allocator, pane);
         errdefer self.cx.detachChild(self.terminal_area, pane);
@@ -4970,7 +4993,7 @@ pub const Workspace = struct {
         const protocol_id = try self.allocator.dupe(u8, value.protocol_id);
         errdefer self.allocator.free(protocol_id);
         const services = if (self.content_services) |factory| try factory.create(factory.context, owner) else plugin_ui.ContentServices{};
-        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access });
+        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access, .web_surface = services.web_surface, .web_bookmarks = services.web_bookmarks });
         errdefer instance.vtable.unmount(instance.context);
         const ticket = self.identities.newTicket();
         tab.* = .{ .id = ticket.session_id, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = owner }, .generation = owner.generation, .host_id = @backingInt(value.id), .host_index = self.registry.indexOf(value.id) orelse removed_host_index, .host_snapshot = null, .root = pane, .file_scope = scope, .plugin_renderer = instance, .plugin_protocol_id = protocol_id, .content_ready = true };

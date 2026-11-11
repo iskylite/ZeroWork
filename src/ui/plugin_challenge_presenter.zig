@@ -211,7 +211,10 @@ pub const Presenter = struct {
         }
         self.remember.setDisplay(if (view.payload.allow_save_password) .flex else .none);
         try self.title.setTextContent(self.cx.allocator, view.payload.title);
-        self.title_icon.setDisplay(if (view.kind == .trust_material or view.kind == .secret_input) .flex else .none);
+        const secret_fields = for (view.payload.fields) |field| {
+            if (field.secret) break true;
+        } else false;
+        self.title_icon.setDisplay(if (view.kind == .trust_material or (view.kind == .secret_input and (view.payload.fields.len == 0 or secret_fields))) .flex else .none);
         const changed_key = std.mem.eql(u8, view.payload.title, "主机密钥已变更");
         const icon = if (changed_key) ui.icons.shield_alert else if (view.kind == .trust_material) ui.icons.shield_question else if (std.mem.eql(u8, view.payload.title, "解锁 SSH 私钥")) ui.icons.key_round else ui.icons.lock_keyhole;
         const tint = if (changed_key) S.theme.current().danger_ink else if (view.kind == .trust_material) S.theme.current().warn_ink else S.theme.current().accent;
@@ -235,6 +238,8 @@ pub const Presenter = struct {
             const specification = view.payload.fields[i];
             try field.label.setTextContent(self.cx.allocator, specification.label);
             field.input.state.input_type = if (specification.secret) .password else .text;
+            field.input.state.growable = !specification.secret;
+            try field.input.state.applyExternalText(specification.initial_value);
             field.input.state.dirty = true;
             field.root.setDisplay(.flex);
         }
@@ -295,7 +300,7 @@ pub const Presenter = struct {
             while (self.host.snapshot(index, null)) |view| : (index += 1) if (view.owner.eql(current.owner) and view.request_id == current.request_id and view.generation == current.generation) {
                 for (view.payload.fields, self.fields[0..view.payload.fields.len]) |specification, field| {
                     const value = field.input.state.getText();
-                    if (value.len == 0 or value.len > specification.max_bytes) allowed = false;
+                    if ((!specification.allow_empty and value.len == 0) or value.len > specification.max_bytes or std.mem.indexOfScalar(u8, value, 0) != null) allowed = false;
                     if (specification.confirmation) |confirmation| if (!std.mem.eql(u8, value, confirmation)) {
                         allowed = false;
                     };
@@ -420,6 +425,7 @@ pub const Presenter = struct {
         // Prevent undo or retained widget buffers restoring an earlier secret.
         for (&input.state.undo_stack) |*snapshot| if (snapshot.text) |bytes| std.crypto.secureZero(u8, @constCast(bytes));
         for (&input.state.redo_stack) |*snapshot| if (snapshot.text) |bytes| std.crypto.secureZero(u8, @constCast(bytes));
+        if (input.state.input_overflow) |bytes| std.crypto.secureZero(u8, bytes);
         std.crypto.secureZero(u8, &input.state.buffer);
     }
     fn fail(self: *Presenter, message: []const u8) void {
@@ -459,6 +465,117 @@ fn styleActionText(button: *ui.Node, primary: bool) void {
         value.line_height = 1.5;
         node.setText(value);
     };
+}
+
+test "challenge presenter public defaults preserve edits and cancel or reopen cannot restore old text" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 600);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    var host = challenge.Host.init(allocator);
+    defer host.deinit();
+    const presenter = try Presenter.mount(cx, scope, &host);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(96) };
+    // The public default must survive the native Input's usual 2 KB capacity.
+    const initial_value: [3072]u8 = @splat('d');
+    try host.offer(owner, 1, 1, .secret_input, .{ .title = "Prompt", .fields = &.{.{ .label = "Value", .secret = false, .initial_value = &initial_value, .allow_empty = true }} }, std.math.maxInt(u64));
+    try presenter.update(owner);
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    const input = &presenter.fields[0].input;
+    try std.testing.expectEqualStrings(&initial_value, input.state.getText());
+    try std.testing.expectEqual(.text, input.state.input_type);
+    try std.testing.expectEqual(.none, presenter.title_icon.style.display);
+    try std.testing.expect(!presenter.submit_disabled.peek());
+    cx.setFocus(input.input_container);
+    cx.handleKeyDown(.a, .{ .super = true });
+    cx.handleTextInput("edited");
+    try presenter.update(owner);
+    cx.layout();
+    _ = cx.render();
+    try std.testing.expectEqualStrings("edited", input.state.getText());
+    try std.testing.expect(presenter.prefill_edited);
+    presenter.cancel();
+    try std.testing.expectEqual(challenge.State.withdrawn, host.stateFor(owner, 1, 1).?);
+    try std.testing.expect(host.takeAnswer(owner, 1, 1) == null);
+    try std.testing.expectEqualStrings("", input.state.getText());
+    try std.testing.expectEqual(@as(u8, 0), input.state.undo_count);
+    try std.testing.expectEqual(@as(u8, 0), input.state.redo_count);
+    for (input.state.input_overflow.?) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+
+    try host.offer(owner, 2, 1, .secret_input, .{ .title = "Prompt", .fields = &.{.{ .label = "Value", .secret = false, .initial_value = "next", .allow_empty = true }} }, std.math.maxInt(u64));
+    try presenter.update(owner);
+    cx.layout();
+    cx.setFocus(input.input_container);
+    cx.handleKeyDown(.z, .{ .super = true });
+    try std.testing.expectEqualStrings("next", input.state.getText());
+    cx.handleKeyDown(.a, .{ .super = true });
+    cx.handleKeyDown(.delete, .{});
+    try std.testing.expectEqualStrings("", input.state.getText());
+    try std.testing.expect(!presenter.submit_disabled.peek());
+    cx.handleKeyDown(.@"return", .{});
+    var answer = host.takeAnswer(owner, 2, 1).?;
+    defer answer.deinit();
+    try std.testing.expectEqualStrings("", answer.value.fields[0]);
+    try std.testing.expect(host.takeAnswer(owner, 2, 1) == null);
+    try std.testing.expect(!presenter.isVisible());
+}
+
+test "challenge presenter field validation preserves authentication defaults and explicit empty credentials" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 600);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    var host = challenge.Host.init(allocator);
+    defer host.deinit();
+    const presenter = try Presenter.mount(cx, scope, &host);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(97) };
+    try host.offer(owner, 1, 1, .secret_input, .{ .title = "Authentication", .fields = &.{.{ .label = "Response", .max_bytes = 3, .confirmation = "yes" }} }, std.math.maxInt(u64));
+    try presenter.update(owner);
+    try std.testing.expectEqual(.flex, presenter.title_icon.style.display);
+    try std.testing.expectEqual(.password, presenter.fields[0].input.state.input_type);
+    for ([_][]const u8{ "", "long", "a\x00b", "no" }) |invalid| {
+        try presenter.fields[0].input.state.applyExternalText(invalid);
+        presenter.refreshSubmit();
+        try std.testing.expect(presenter.submit_disabled.peek());
+    }
+    try presenter.fields[0].input.state.applyExternalText("yes");
+    presenter.refreshSubmit();
+    try std.testing.expect(!presenter.submit_disabled.peek());
+    presenter.submit();
+    var answer = host.takeAnswer(owner, 1, 1).?;
+    defer answer.deinit();
+    try std.testing.expectEqualStrings("yes", answer.value.fields[0]);
+    try std.testing.expectEqualStrings("", presenter.fields[0].input.state.getText());
+
+    try host.offer(owner, 2, 1, .secret_input, .{ .title = "Password" }, std.math.maxInt(u64));
+    try presenter.update(owner);
+    try std.testing.expectEqual(.flex, presenter.title_icon.style.display);
+    try std.testing.expect(presenter.submit_disabled.peek());
+    presenter.cancel();
+    try host.offer(owner, 3, 1, .secret_input, .{ .title = "HTTP authentication", .fields = &.{
+        .{ .label = "Username", .secret = false, .allow_empty = true },
+        .{ .label = "Password", .allow_empty = true },
+    } }, std.math.maxInt(u64));
+    try presenter.update(owner);
+    try std.testing.expectEqual(.flex, presenter.title_icon.style.display);
+    try std.testing.expectEqual(.text, presenter.fields[0].input.state.input_type);
+    try std.testing.expectEqual(.password, presenter.fields[1].input.state.input_type);
+    try std.testing.expect(!presenter.submit_disabled.peek());
+    presenter.submit();
+    var credentials = host.takeAnswer(owner, 3, 1).?;
+    defer credentials.deinit();
+    try std.testing.expectEqualStrings("", credentials.value.fields[0]);
+    try std.testing.expectEqualStrings("", credentials.value.fields[1]);
 }
 
 test "certificate trust presenter keeps complete material scrollable and all three exact decisions accessible" {
