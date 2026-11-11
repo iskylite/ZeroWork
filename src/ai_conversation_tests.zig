@@ -587,8 +587,6 @@ test "AI conversation lifecycle row formats elapsed time and actual token usage 
     turn.input_tokens = 2400;
     turn.output_tokens = 160;
     turn.request_count = 2;
-    var detail_buffer: [320]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, try Status.usageDetails(&detail_buffer, &turn), "请求次数 2") != null);
     try std.testing.expectEqual(@as(u64, 1820000), Status.elapsedMs(&turn, 9999999, 9999999));
     try std.testing.expectEqualStrings("本回合用量 2.6K", try Status.usageLabel(&buffer, &turn));
     const cx = try ui.Cx.init(a, std.testing.io);

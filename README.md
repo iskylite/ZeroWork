@@ -10,7 +10,7 @@ ZeroWork is an Apple Silicon macOS SSH terminal specified in [docs/SPEC/OVERALL_
 
 ## Current baseline
 
-The current version is **0.6.1 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [UI design guide](docs/UI_V4/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
+The current version is **0.6.2 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [UI design guide](docs/UI_V4/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
 
 AI approval, execution-mode and scope decisions wait until the user decides or cancels, pausing the automatic-run time budget. Native secret entry has no user-entry deadline. Network, command execution and post-submission transfer timeouts remain separate.
 

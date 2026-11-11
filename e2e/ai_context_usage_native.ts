@@ -83,6 +83,7 @@ try {
     const noBaseline = async () => { const menu = await usageMenu(); assert(!text(menu).includes('基准输入（实测）'), text(menu)); assert(text(menu).includes('终端上下文')); await h.key('escape'); };
     await send('第一轮：检查上下文实测值');
     let menu = await usageMenu();
+    assert((await summary()).includes('当前占用'));
     assert(text(menu).includes('基准输入（实测）'));
     assert(text(menu).includes('新增内容（估算）'));
     let values = (await h.query('ai.usage.part.value')).filter(shown).map(text);

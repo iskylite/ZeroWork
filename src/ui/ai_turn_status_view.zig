@@ -31,11 +31,68 @@ pub fn usageLabel(buffer: []u8, turn: *const Turn) ![]const u8 {
     var count_buffer: [32]u8 = undefined;
     return std.fmt.bufPrint(buffer, "本回合用量 {s}", .{try @import("ai_token_count.zig").format(&count_buffer, input +| output)});
 }
-pub fn usageDetails(buffer: []u8, turn: *const Turn) ![]const u8 {
-    const input = turn.input_tokens orelse return "服务商未返回完整用量，无法显示输入和输出明细。";
-    const output = turn.output_tokens orelse return "服务商未返回完整用量，无法显示输入和输出明细。";
-    if (turn.request_count) |count| if (count > 0) return std.fmt.bufPrint(buffer, "输入 {d} Token\n输出 {d} Token\n请求次数 {d}\n\n本回合各次请求的累计用量。", .{ input, output, count });
-    return std.fmt.bufPrint(buffer, "输入 {d} Token\n输出 {d} Token\n请求次数未记录\n\n本回合各次请求的累计用量。", .{ input, output });
+fn exactCount(buffer: *[26]u8, value: u64) ![]const u8 {
+    var digits_buffer: [20]u8 = undefined;
+    const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{value});
+    var end: usize = 0;
+    for (digits, 0..) |digit, index| {
+        if (index != 0 and (digits.len - index) % 3 == 0) {
+            buffer[end] = ',';
+            end += 1;
+        }
+        buffer[end] = digit;
+        end += 1;
+    }
+    return buffer[0..end];
+}
+fn usageText(cx: *ui.Cx, text: []const u8, style: ui.TextStyle, comptime ink: []const u8) !*ui.Node {
+    var painted = style;
+    painted.color = @field(theme.current(), ink);
+    const node = try ui.text(cx, text, painted);
+    theme.bindInk(node, ink);
+    return node;
+}
+fn usageRow(cx: *ui.Cx, parent: *ui.Node, label: []const u8, value: ?[]const u8, id: []const u8, title: bool) !void {
+    const row = try ui.box(cx, .{ .width = .fill(), .min_height = 20, .direction = .row, .align_items = .center, .justify = .space_between, .gap = 8, .flex_shrink = 0 }, .{});
+    row.meta.ownership.meta.test_id = id;
+    const name = if (title)
+        try usageText(cx, label, .{ .font_size = 12, .font_weight = 600, .wrap = .word }, "fg_1")
+    else
+        try usageText(cx, label, .{ .font_size = 11, .wrap = .word }, "fg_2");
+    try row.appendChild(cx.allocator, name);
+    if (value) |amount| {
+        const node = try usageText(cx, amount, .{ .font_size = 11, .font_weight = 500, .text_align = .end, .wrap = .word }, "fg_1");
+        try row.appendChild(cx.allocator, node);
+    }
+    try parent.appendChild(cx.allocator, row);
+}
+fn mountUsageDetails(cx: *ui.Cx, parent: *ui.Node, turn: *const Turn) !void {
+    const card = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .direction = .column, .gap = 7 }, .{});
+    card.meta.ownership.meta.test_id = "ai.turn.usage.details";
+    try parent.appendChild(cx.allocator, card);
+    const reported = turn.input_tokens != null and turn.output_tokens != null;
+    var count_buffer: [32]u8 = undefined;
+    var buffer: [48]u8 = undefined;
+    const total = if (reported) try std.fmt.bufPrint(&buffer, "{s} Token", .{try @import("ai_token_count.zig").format(&count_buffer, turn.input_tokens.? +| turn.output_tokens.?)}) else null;
+    try usageRow(cx, card, "本回合累计用量", total, "ai.turn.usage.total", true);
+    const metrics = try ui.box(cx, .{ .width = .fill(), .direction = .column }, .{});
+    try card.appendChild(cx.allocator, metrics);
+    var exact_buffer: [26]u8 = undefined;
+    if (reported) {
+        try usageRow(cx, metrics, "累计输入", try exactCount(&exact_buffer, turn.input_tokens.?), "ai.turn.usage.input", false);
+        try usageRow(cx, metrics, "累计输出", try exactCount(&exact_buffer, turn.output_tokens.?), "ai.turn.usage.output", false);
+    } else {
+        try metrics.appendChild(cx.allocator, try usageText(cx, "服务商未返回完整用量。", .{ .font_size = 11, .wrap = .word }, "fg_2"));
+    }
+    const requests = turn.request_count orelse 0;
+    if (reported or requests != 0) {
+        const value = if (requests == 0) "未记录" else try std.fmt.bufPrint(&buffer, "{s} 次", .{try exactCount(&exact_buffer, requests)});
+        try usageRow(cx, metrics, "模型请求", value, "ai.turn.usage.requests", false);
+    }
+    if (reported) {
+        try card.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 1 }, .background = theme.current().fg_2.withAlpha(56), .flex_shrink = 0 }, .{}));
+        try card.appendChild(cx.allocator, try usageText(cx, "共享的上下文会在每次请求中重复计入。", .{ .font_size = 10.5, .line_height = 14.0 / 10.5, .wrap = .word }, "fg_2"));
+    }
 }
 pub fn waveOffset(time_ms: f64, index: usize, reduced_motion: bool) f32 {
     if (reduced_motion) return 0;
@@ -138,8 +195,9 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, turn: *const Turn, texture: ?u32) !*u
         try scope.onCleanup(Clock, clock, Clock.release);
     } else {
         try row.appendChild(cx.allocator, try dot(cx));
-        const popup = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top_start, .width = @as(f32, 250), .constrain_width_to_viewport = true }).mount(scope, cx);
-        popup.chrome.setStyleInline(cx.allocator, .{ .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 }, .background = theme.popupAction() });
+        const popup = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top_start, .width = @as(f32, 248), .constrain_width_to_viewport = true, .shift_main_axis = true, .offset = .{ .static = 6 } }).mount(scope, cx);
+        popup.chrome.setStyleInline(cx.allocator, .{ .padding = ui.Padding.all(12), .border = .{ .width = 0, .radius = 12 } });
+        try theme.bindMaterial(cx, scope, popup.chrome, "overlay");
         const usage = try ui.widgets.Button(.{
             .label = try usageLabel(&buffer, turn),
             .a11y_label = "查看本回合用量明细",
@@ -149,10 +207,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, turn: *const Turn, texture: ?u32) !*u
         }).mount(scope, cx);
         usage.meta.ownership.meta.test_id = "ai.turn.tokens";
         try popup.trigger.appendChild(cx.allocator, usage);
-        var detail_buffer: [320]u8 = undefined;
-        const details = try ui.text(cx, try usageDetails(&detail_buffer, turn), .{ .font_size = 11, .line_height = 1.6, .color = theme.current().fg_2, .wrap = .word });
-        details.meta.ownership.meta.test_id = "ai.turn.usage.details";
-        try popup.content.appendChild(cx.allocator, details);
+        try mountUsageDetails(cx, popup.content, turn);
         try row.appendChild(cx.allocator, popup.wrapper);
     }
     return row;

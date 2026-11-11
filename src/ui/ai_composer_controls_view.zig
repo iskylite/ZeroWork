@@ -1305,7 +1305,7 @@ pub const View = struct {
         var buffer: [192]u8 = undefined;
         const summary = try ui.box(self.cx, S.usageRow(), .{});
         summary.meta.ownership.meta.test_id = "ai.usage.summary";
-        _ = try self.label(summary, "上下文已用", S.text(11, 400, 18, true), S.label(64, 18));
+        _ = try self.label(summary, "当前占用", S.text(11, 400, 18, true), S.label(64, 18));
         var percent_buffer: [24]u8 = undefined;
         _ = try self.label(summary, try percentText(&percent_buffer, usage), S.text(11.5, 500, 18, false), S.label(34, 18));
         try summary.appendChild(self.cx.allocator, try ui.spacer(self.cx));
