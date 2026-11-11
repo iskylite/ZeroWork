@@ -9,13 +9,19 @@ pub const Entry = struct {
     digit: *ui.Node,
     check: *ui.Node,
     title: *ui.Node,
+    connector_before: ?*ui.Node = null,
+    segmented: bool = false,
 };
 
-pub fn row(cx: *ui.Cx) !*ui.Node {
+pub fn rowStyle() ui.BoxStyle {
     var style = S.row(60);
     style.padding = ui.Padding.all(4);
     style.gap = 0;
-    const root = try ui.box(cx, style, .{});
+    return style;
+}
+
+pub fn row(cx: *ui.Cx) !*ui.Node {
+    const root = try ui.box(cx, rowStyle(), .{});
     root.meta.ownership.meta.test_id = "wizard.steps";
     return root;
 }
@@ -26,11 +32,12 @@ fn connector(_: *const ui.ThemeTokens) ui.BoxStyle {
 
 pub fn append(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node, index: usize, id: []const u8, disabled: *ui.Signal(bool), style: *ui.Signal(ui.BoxStyle), clicked: ui.Handler(void)) !Entry {
     const labels = [_][]const u8{ "连接与认证", "连接路径", "核对与测试" };
-    if (index != 0) {
+    const preceding = if (index != 0) blk: {
         const line = try ui.boxStyled(cx, connector, .{});
         line.meta.ownership.meta.test_id = if (index == 1) "wizard.steps.connector.0" else "wizard.steps.connector.1";
         try root.appendChild(cx.allocator, line);
-    }
+        break :blk line;
+    } else null;
     const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = labels[index], .base_style = style, .disabled = disabled, .on_click = clicked }).mount(scope, cx);
     for (button.children.items) |child| child.setDisplay(.none);
     button.meta.ownership.meta.test_id = id;
@@ -45,13 +52,13 @@ pub fn append(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node, index: usize, id: []
     const title = try ui.text(cx, labels[index], S.stepTitle(index == 0));
     try button.appendChild(cx.allocator, title);
     try root.appendChild(cx.allocator, button);
-    return .{ .button = button, .badge = badge, .digit = digit, .check = check, .title = title };
+    return .{ .button = button, .badge = badge, .digit = digit, .check = check, .title = title, .connector_before = preceding };
 }
 
 pub fn paint(cx: *ui.Cx, entry: Entry, current: bool, completed: bool, invalid: bool) void {
-    entry.button.setStyleInline(cx.allocator, S.step(current));
+    entry.button.setStyleInline(cx.allocator, if (entry.segmented) S.reviewStep(current) else S.step(current));
     entry.button.setOpacity(1);
-    entry.badge.setStyleInline(cx.allocator, S.number(current));
+    entry.badge.setStyleInline(cx.allocator, if (entry.segmented) S.remoteStepNumber(current) else S.number(current));
     if (completed) entry.badge.setBackground(S.theme.popupSelection());
     const icon = if (invalid) ui.icons.circle_alert else ui.icons.check;
     const color = if (invalid) S.theme.current().danger_ink else S.theme.current().accent_ink;

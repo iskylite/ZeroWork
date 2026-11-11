@@ -68,8 +68,8 @@ async function checkCounts() {
   for (const fixture of fixtures) {
     const host = await row(fixture.name);
     const count = visibleFlat(host).find(node => node.test_id === 'sidebar.host.hops');
-    if (fixture.hops === null) {
-      assert(!count, `${fixture.name}: unavailable route must not claim zero hops`);
+    if (fixture.hops === null || fixture.hops === 0) {
+      assert(!count, `${fixture.name}: only multi-hop routes are marked at rest`);
       continue;
     }
     assert.equal(count?.text, String(fixture.hops), `${fixture.name}: hop count`);
@@ -152,7 +152,6 @@ try {
   assert((await h.clickTestId('sidebar.restore')).ok);
   await h.waitFor(async () => (await h.query('sidebar.host')).filter(shown).length === fixtures.length || null);
   await h.mouseMove(900, 700);
-  await h.waitFor(async () => visibleFlat(await row('Jump-A')).some(node => node.test_id === 'sidebar.host.hops') || null);
   await checkCounts();
   report.status = 'passed';
 } catch (error) {

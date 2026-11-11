@@ -1,4 +1,15 @@
 const std = @import("std");
+
+test "conversation interrupted restored turn never resumes its clock or reports completion" {
+    const status = @import("ui/ai_turn_status_view.zig");
+    var turn: turns.Turn = .{ .sent_at_ms = 1000, .started_mono_ms = 100, .elapsed_ms = 24000, .restored_interrupted = true };
+    defer turn.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("已中断", status.turnLabel(&turn).text);
+    try std.testing.expect(!status.turnLabel(&turn).animated);
+    try std.testing.expectEqual(@as(u64, 24000), status.elapsedMs(&turn, 100000000, 100000000));
+    try std.testing.expectEqual(@as(u64, 24000), status.elapsedMs(&turn, 200000000, 200000000));
+    try std.testing.expect(turn.ended_at_ms == null);
+}
 const ui = @import("ui");
 const a = std.testing.allocator;
 const turns = @import("ai/conversation_turn.zig");

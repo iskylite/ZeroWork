@@ -51,6 +51,14 @@ fn mountContent(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, ima
             start = @min(end + 1, lines.items.len);
             continue;
         }
+        if (blocks.isRule(lines.items[i])) {
+            try appendMarkdown(cx, scope, root, lines.items[start..i]);
+            const gap = try ui.boxStyled(cx, S.markdownSectionGap, .{});
+            gap.meta.ownership.meta.test_id = "ai.message.section_gap";
+            try root.appendChild(cx.allocator, gap);
+            start = i + 1;
+            continue;
+        }
         if (images) |context| if (@import("ai_transcript_images.zig").reference(lines.items[i])) |first| {
             try appendMarkdown(cx, scope, root, lines.items[start..i]);
             var remaining = lines.items[i];

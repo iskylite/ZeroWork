@@ -1,0 +1,434 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="480" viewBox="0 0 860 480" fill="none">
+  <title>ZeroWork 笔记</title>
+  <desc>笔记、文档工具和目录。</desc>
+  <metadata id="notes.design.contract">{"theme": "reference-light", "units": "logical-px", "native-verified": false, "state": "compact-open", "canvas": [860, 480], "document_x": 280, "document_width": 544, "navigation": true, "navigation_overlay": true}</metadata>
+  <defs>
+    <symbol id="sidebar" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="16" rx="3" />
+        <path d="M9 4v16" />
+      </g>
+    </symbol>
+    <symbol id="plus" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5v14M5 12h14" />
+      </g>
+    </symbol>
+    <symbol id="close" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m7 7 10 10M17 7 7 17" />
+      </g>
+    </symbol>
+    <symbol id="down" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m6 9 6 6 6-6" />
+      </g>
+    </symbol>
+    <symbol id="chevron" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m9 5 7 7-7 7" />
+      </g>
+    </symbol>
+    <symbol id="search" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="10.5" cy="10.5" r="6.5" />
+        <path d="m16 16 4 4" />
+      </g>
+    </symbol>
+    <symbol id="server" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="3" width="16" height="7" rx="2" />
+        <rect x="4" y="14" width="16" height="7" rx="2" />
+        <path d="M8 6.5h.01M8 17.5h.01M12 6.5h5M12 17.5h5" />
+      </g>
+    </symbol>
+    <symbol id="folder" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_common/folder.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+      </g>
+    </symbol>
+    <symbol id="terminal" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="16" rx="3" />
+        <path d="m7 9 3 3-3 3m6 0h4" />
+      </g>
+    </symbol>
+    <symbol id="palette" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1.4-3.4 1.5 1.5 0 0 1 1.1-2.6H18a3 3 0 0 0 3-3 9 9 0 0 0-9-9Z" />
+        <path d="M7 11h.01M9 7h.01M14 6h.01M18 10h.01" />
+      </g>
+    </symbol>
+    <symbol id="sparkles" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7L12 3ZM20 2v4m-2-2h4" />
+      </g>
+    </symbol>
+    <symbol id="settings" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m10 3-.7 2.3-2 .9L5 5.7 3 9l1.7 1.7v2.6L3 15l2 3.3 2.3-.5 2 .9L10 21h4l.7-2.3 2-.9 2.3.5 2-3.3-1.7-1.7v-2.6L21 9l-2-3.3-2.3.5-2-.9L14 3h-4Z" />
+        <circle cx="12" cy="12" r="3" />
+      </g>
+    </symbol>
+    <symbol id="history" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 11a9 9 0 1 1 2.3 7M3 4v7h7m2-4v5l3 2" />
+      </g>
+    </symbol>
+    <symbol id="list" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 6h12M9 12h12M9 18h12M3 6h.01M3 12h.01M3 18h.01" />
+      </g>
+    </symbol>
+    <symbol id="check" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m5 12 4 4L19 6" />
+      </g>
+    </symbol>
+    <symbol id="layers" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m12 3 10 5-10 5L2 8l10-5ZM2 12l10 5 10-5M2 16l10 5 10-5" />
+      </g>
+    </symbol>
+    <symbol id="file-markdown" viewBox="0 0 32 32" data-source="assets/file-icons/markdown.svg">
+      <path fill="#42a5f5" d="m14 10-4 3.5L6 10H4v12h4v-6l2 2 2-2v6h4V10zm12 6v-6h-4v6h-4l6 8 6-8z" />
+    </symbol>
+    <symbol id="notebook" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4" />
+        <path d="M2 6h4" />
+        <path d="M2 10h4" />
+        <path d="M2 14h4" />
+        <path d="M2 18h4" />
+        <path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z" />
+      </g>
+    </symbol>
+    <symbol id="image" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+        <circle cx="9" cy="9" r="2" />
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </g>
+    </symbol>
+    <symbol id="more" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="1" />
+        <circle cx="19" cy="12" r="1" />
+        <circle cx="5" cy="12" r="1" />
+      </g>
+    </symbol>
+    <symbol id="code" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m16 18 6-6-6-6" />
+        <path d="m8 6-6 6 6 6" />
+      </g>
+    </symbol>
+    <symbol id="arrow" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 12h14" />
+        <path d="m12 5 7 7-7 7" />
+      </g>
+    </symbol>
+    <symbol id="shield" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+        <path d="m9 12 2 2 4-4" />
+      </g>
+    </symbol>
+    <symbol id="trash" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 11v6" />
+        <path d="M14 11v6" />
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+        <path d="M3 6h18" />
+        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      </g>
+    </symbol>
+    <filter id="raised" x="-50%" y="-60%" width="200%" height="240%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#18181B" flood-opacity=".07" />
+    </filter>
+    <filter id="float" x="-20%" y="-25%" width="150%" height="170%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#18181B" flood-opacity=".12" />
+    </filter>
+    <linearGradient id="strip" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".8" />
+      <stop offset="1" stop-color="#EAE6F2" stop-opacity=".25" />
+    </linearGradient>
+    <clipPath id="window.clip">
+      <rect width="860" height="480" rx="18" />
+    </clipPath>
+    <symbol id="panel-right" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="18" x="3" y="3" rx="2" />
+        <path d="M15 3v18" />
+      </g>
+    </symbol>
+    <symbol id="panel-right-open" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="18" x="3" y="3" rx="2" />
+        <path d="M15 3v18" />
+        <path d="m10 15-3-3 3-3" />
+      </g>
+    </symbol>
+    <symbol id="panel-right-close" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="18" x="3" y="3" rx="2" />
+        <path d="M15 3v18" />
+        <path d="m8 9 3 3-3 3" />
+      </g>
+    </symbol>
+    <style>text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;text-rendering:geometricPrecision}.notes-code{font-family:Menlo,"SFMono-Regular",monospace}.notes-text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif}</style>
+    <symbol id="lock" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/lock.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+      </g>
+    </symbol>
+    <symbol id="lock-open" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/lock-open.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+        <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+      </g>
+    </symbol>
+    <symbol id="arrow-left" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/arrow-left.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m12 19-7-7 7-7" />
+        <path d="M19 12H5" />
+      </g>
+    </symbol>
+    <symbol id="external-link" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/external-link.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M15 3h6v6" />
+        <path d="M10 14 21 3" />
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      </g>
+    </symbol>
+    <symbol id="circle-alert" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/circle-alert.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" x2="12" y1="8" y2="12" />
+        <line x1="12" x2="12.01" y1="16" y2="16" />
+      </g>
+    </symbol>
+    <symbol id="refresh-cw" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/refresh-cw.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+        <path d="M21 3v5h-5" />
+        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+        <path d="M8 16H3v5" />
+      </g>
+    </symbol>
+    <symbol id="file-plus-2" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/file-plus-2.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M11.35 22H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v5.35" />
+        <path d="M14 2v5a1 1 0 0 0 1 1h5" />
+        <path d="M14 19h6" />
+        <path d="M17 16v6" />
+      </g>
+    </symbol>
+    <symbol id="folder-plus" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/folder-plus.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 10v6" />
+        <path d="M9 13h6" />
+        <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+      </g>
+    </symbol>
+    <symbol id="archive-restore" viewBox="0 0 24 24" data-source="vendor/zenit/src/ui/icons_oss/archive-restore.svg">
+      <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="20" height="5" x="2" y="3" rx="1" />
+        <path d="M4 8v11a2 2 0 0 0 2 2h2" />
+        <path d="M20 8v11a2 2 0 0 1-2 2h-2" />
+        <path d="m9 15 3-3 3 3" />
+        <path d="M12 12v9" />
+      </g>
+    </symbol>
+    <symbol id="notes.topology.asset" viewBox="0 0 760 154">
+      <g transform="translate(-322 -320)">
+        <rect x="594" y="354" width="760" height="154" rx="10" fill="#F3F5F8" transform="translate(-272 -34)" />
+        <rect x="618.0" y="411" width="124" height="90" rx="9" fill="#FFFFFF" transform="translate(-272 -65)" />
+        <use href="#terminal" x="632.0" y="424" width="19" height="19" color="#4F5ED9" transform="translate(-272 -65)" />
+        <text x="632.0" y="464" font-size="13" fill="#18181B" font-weight="550" transform="translate(-272 -65)">运维终端</text>
+        <text x="632.0" y="484" font-size="11.5" fill="#676771" font-weight="400" transform="translate(-272 -65)">MacBook</text>
+        <path d="M750.0 456H902.0" stroke="#B6BECE" stroke-width="1.4" transform="translate(-272 -65)" />
+        <use href="#arrow" x="890.0" y="448" width="16" height="16" color="#9BA6BB" transform="translate(-272 -65)" />
+        <rect x="912.0" y="411" width="124" height="90" rx="9" fill="#FFFFFF" transform="translate(-272 -65)" />
+        <use href="#server" x="926.0" y="424" width="19" height="19" color="#4F5ED9" transform="translate(-272 -65)" />
+        <text x="926.0" y="464" font-size="13" fill="#18181B" font-weight="550" transform="translate(-272 -65)">跳板机</text>
+        <text x="926.0" y="484" font-size="11.5" fill="#676771" font-weight="400" transform="translate(-272 -65)">prod-bastion</text>
+        <path d="M1044.0 456H1196.0" stroke="#B6BECE" stroke-width="1.4" transform="translate(-272 -65)" />
+        <use href="#arrow" x="1184.0" y="448" width="16" height="16" color="#9BA6BB" transform="translate(-272 -65)" />
+        <rect x="1206.0" y="411" width="124" height="90" rx="9" fill="#FFFFFF" transform="translate(-272 -65)" />
+        <use href="#server" x="1220.0" y="424" width="19" height="19" color="#4F5ED9" transform="translate(-272 -65)" />
+        <text x="1220.0" y="464" font-size="13" fill="#18181B" font-weight="550" transform="translate(-272 -65)">业务服务器</text>
+        <text x="1220.0" y="484" font-size="11.5" fill="#676771" font-weight="400" transform="translate(-272 -65)">prod-web-01</text>
+      </g>
+    </symbol>
+    <filter id="notes.panel.shadow" x="-10%" y="-5%" width="120%" height="110%">
+      <feDropShadow dx="-3" dy="0" stdDeviation="8" flood-color="#18181B" flood-opacity=".10" />
+    </filter>
+    <clipPath id="notes.document.clip">
+      <rect x="268" y="126" width="568" height="342" rx="0" fill="none" />
+    </clipPath>
+    <clipPath id="notes.tree.clip">
+      <rect x="606" y="126" width="232" height="330" rx="0" fill="none" />
+    </clipPath>
+  </defs>
+  <g id="notes.canvas" clip-path="url(#window.clip)">
+    <rect id="window.background" x="0" y="0" width="860" height="480" rx="0" fill="#FFFFFF" />
+    <g id="workspace.sidebar">
+      <rect id="sidebar.surface" x="12" y="12" width="220" height="456" rx="16" fill="#F6F6F7" />
+      <circle cx="40" cy="30" r="6" fill="#FF5F57" />
+      <circle cx="60" cy="30" r="6" fill="#FEBC2E" />
+      <circle cx="80" cy="30" r="6" fill="#28C840" />
+      <g id="sidebar.collapse">
+        <title>隐藏侧栏</title>
+        <rect id="sidebar.collapse.hit" x="198" y="18" width="24" height="24" rx="12.0" fill="transparent" />
+        <use href="#sidebar" x="202.0" y="22.0" width="16" height="16" color="#5B5B65" />
+      </g>
+      <use href="#server" x="22" y="82" width="17" height="17" color="#4F5ED9" />
+      <text x="45" y="95" font-size="13" fill="#18181B" font-weight="650">主机与连接</text>
+      <g id="sidebar.search">
+        <title>搜索主机</title>
+        <rect id="sidebar.search.hit" x="168" y="78" width="24" height="24" rx="12.0" fill="transparent" />
+        <use href="#search" x="172.0" y="82.0" width="16" height="16" color="#5B5B65" />
+      </g>
+      <g id="sidebar.new">
+        <title>新建</title>
+        <rect id="sidebar.new.hit" x="198" y="78" width="24" height="24" rx="12.0" fill="transparent" />
+        <use href="#plus" x="202.0" y="82.0" width="16" height="16" color="#5B5B65" />
+      </g>
+      <use href="#down" x="22" y="122" width="12" height="12" color="#5B5B65" />
+      <circle cx="43" cy="128" r="2.3" fill="#9381B5" />
+      <text x="52" y="132" font-size="12" fill="#5B5B65" font-weight="550">生产环境</text>
+      <use href="#server" x="44" y="158" width="16" height="16" color="#5B5B65" />
+      <text x="70" y="171" font-size="12" fill="#18181B" font-weight="400">prod-web-01</text>
+      <use href="#server" x="44" y="195" width="16" height="16" color="#5B5B65" />
+      <text x="70" y="208" font-size="12" fill="#18181B" font-weight="400">prod-web-02</text>
+      <use href="#server" x="44" y="232" width="16" height="16" color="#5B5B65" />
+      <text x="70" y="245" font-size="12" fill="#18181B" font-weight="400">prod-db-01</text>
+      <use href="#server" x="44" y="269" width="16" height="16" color="#5B5B65" />
+      <text x="70" y="282" font-size="12" fill="#18181B" font-weight="400">prod-bastion</text>
+      <use href="#plus" x="85.0" y="434" width="14" height="14" color="#5B5B65" />
+      <text x="105.0" y="446" font-size="12" fill="#5B5B65" font-weight="400">新建连接</text>
+    </g>
+    <g id="workspace.tabs">
+      <rect id="tabs.surface" x="256" y="12" width="280" height="36" rx="18" fill="#FFFFFF" filter="url(#raised)" />
+      <use href="#terminal" x="270" y="22" width="16" height="16" color="#5B5B65" />
+      <text x="292" y="34" font-size="12.5" fill="#5B5B65" font-weight="400">prod-web-01</text>
+      <use href="#close" x="389" y="24" width="12" height="12" color="#5B5B65" />
+      <rect id="tab.notes" x="411" y="16" width="88" height="28" rx="7" fill="#EAEDFD" />
+      <use href="#notebook" x="421" y="22" width="16" height="16" color="#4F5ED9" />
+      <text x="444" y="34" font-size="12.5" fill="#18181B" font-weight="600">笔记</text>
+      <use href="#close" x="484" y="24" width="12" height="12" color="#5B5B65" />
+      <g id="tabs.new">
+        <title>新建页签</title>
+        <rect id="tabs.new.hit" x="504" y="16" width="28" height="28" rx="14.0" fill="transparent" />
+        <use href="#plus" x="510.0" y="22.0" width="16" height="16" color="#5B5B65" />
+      </g>
+    </g>
+    <g id="toolbar.global">
+      <rect id="toolbar.surface" x="812" y="12" width="36" height="36" rx="18" fill="#FFFFFF" filter="url(#raised)" />
+      <g id="toolbar.more">
+        <title>更多工具</title>
+        <rect id="toolbar.more.hit" x="816" y="16" width="28" height="28" rx="14.0" fill="transparent" />
+        <use href="#more" x="822.0" y="22.0" width="16" height="16" color="#5B5B65" />
+      </g>
+    </g>
+    <g id="ai.strip">
+      <rect id="ai.strip.surface" x="492.0" y="59" width="120" height="6" rx="3" fill="url(#strip)" />
+      <circle cx="545.0" cy="62" r="1.5" fill="#7B7488" />
+      <circle cx="552.0" cy="62" r="1.5" fill="#7B7488" />
+      <circle cx="559.0" cy="62" r="1.5" fill="#7B7488" />
+    </g>
+    <g id="notes.presentation">
+      <g id="notes.document.toolbar">
+        <text x="280" y="97" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">工作笔记</text>
+        <use href="#chevron" x="338" y="85" width="12" height="12" color="#5B5B65" />
+        <text x="358" y="97" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">服务器运维</text>
+        <use href="#chevron" x="426" y="85" width="12" height="12" color="#5B5B65" />
+        <text x="446" y="97" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">Nginx</text>
+      </g>
+      <g id="notes.document.scroll" clip-path="url(#notes.document.clip)">
+        <text x="280" y="154" font-size="24" fill="#18181B" font-weight="650" id="notes.title" class="notes-text">生产环境证书更新</text>
+        <text x="280" y="219" font-size="17" fill="#18181B" font-weight="600" class="notes-text">更新前检查</text>
+        <circle cx="284" cy="250" r="2" fill="#5B5B65" />
+        <text x="298" y="255" font-size="14" fill="#18181B" font-weight="400" class="notes-text">确认域名、证书有效期与完整证书链。</text>
+        <circle cx="284" cy="282" r="2" fill="#5B5B65" />
+        <text x="298" y="287" font-size="14" fill="#18181B" font-weight="400" class="notes-text">备份现有证书与配置，记录回滚位置。</text>
+        <g id="notes.document.image">
+          <rect x="280" y="319" width="544" height="110.231579" rx="10" fill="transparent" id="notes.image.bounds" />
+          <use href="#notes.topology.asset" x="280" y="319" width="544" height="110.231579" />
+        </g>
+        <text x="280" y="471.231579" font-size="17" fill="#18181B" font-weight="600" class="notes-text">验证与回滚</text>
+        <text x="280" y="507.231579" font-size="14" fill="#18181B" font-weight="400" class="notes-text">先检查配置，再重新加载服务。</text>
+        <rect x="280" y="532.231579" width="544" height="80" rx="8" fill="#F5F5F7" id="notes.document.code" />
+        <text x="300" y="561.231579" font-size="13.5" fill="#18181B" font-weight="400" class="notes-code">nginx -t</text>
+        <text x="300" y="589.231579" font-size="13.5" fill="#18181B" font-weight="400" class="notes-code">systemctl reload nginx</text>
+        <text x="280" y="652.231579" font-size="14" fill="#5B5B65" font-weight="400" class="notes-text">如验证失败，恢复备份文件并重新检查配置。</text>
+      </g>
+      <g id="notes.navigation">
+        <rect x="596" y="60" width="252" height="408" rx="12" fill="#F6F6F7" id="notes.navigation.surface" />
+        <text x="612" y="97" font-size="14" fill="#18181B" font-weight="650" class="notes-text">目录</text>
+        <g id="notes.new" data-role="button" data-disabled="false">
+          <title>新建</title>
+          <rect x="780" y="78" width="28" height="28" rx="14" fill="transparent" id="notes.new.hit" />
+          <use href="#plus" x="786" y="84" width="16" height="16" color="#5B5B65" />
+        </g>
+        <g id="notes.navigation.scroll" clip-path="url(#notes.tree.clip)">
+          <g id="notes.tree.row.0">
+            <use href="#down" x="608" y="138" width="12" height="12" color="#5B5B65" />
+            <use href="#folder" x="624" y="136" width="16" height="16" color="#4F5ED9" />
+            <text x="647" y="149" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">工作笔记</text>
+            <g id="notes.library.settings" data-role="button" data-disabled="false">
+              <title>工作笔记 · 目录设置</title>
+              <rect x="812" y="132" width="24" height="28" rx="14" fill="transparent" id="notes.library.settings.hit" />
+              <use href="#more" x="818" y="138" width="16" height="16" color="#5B5B65" />
+            </g>
+          </g>
+          <g id="notes.tree.row.1">
+            <use href="#file-markdown" x="636" y="170" width="16" height="16" color="#42A5F5" />
+            <text x="659" y="183" font-size="12.5" fill="#18181B" font-weight="400" class="notes-text">环境约定</text>
+          </g>
+          <g id="notes.tree.row.2">
+            <use href="#down" x="620" y="206" width="12" height="12" color="#5B5B65" />
+            <use href="#folder" x="636" y="204" width="16" height="16" color="#4F5ED9" />
+            <text x="659" y="217" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">服务器运维</text>
+          </g>
+          <g id="notes.tree.row.3">
+            <use href="#down" x="632" y="240" width="12" height="12" color="#5B5B65" />
+            <use href="#folder" x="648" y="238" width="16" height="16" color="#4F5ED9" />
+            <text x="671" y="251" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">Nginx</text>
+          </g>
+          <g id="notes.tree.row.4">
+            <rect x="606" y="264" width="232" height="32" rx="7" fill="#EAEDFD" id="notes.document.selected" />
+            <use href="#file-markdown" x="660" y="272" width="16" height="16" color="#42A5F5" />
+            <text x="683" y="285" font-size="12.5" fill="#4F5ED9" font-weight="400" class="notes-text">生产环境证书更新</text>
+          </g>
+          <g id="notes.tree.row.5">
+            <use href="#file-markdown" x="648" y="306" width="16" height="16" color="#42A5F5" />
+            <text x="671" y="319" font-size="12.5" fill="#18181B" font-weight="400" class="notes-text">数据库备份</text>
+          </g>
+          <g id="notes.tree.row.6">
+            <use href="#chevron" x="620" y="342" width="12" height="12" color="#5B5B65" />
+            <use href="#folder" x="636" y="340" width="16" height="16" color="#4F5ED9" />
+            <text x="659" y="353" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">项目记录</text>
+          </g>
+          <g id="notes.tree.row.7">
+            <use href="#down" x="608" y="390" width="12" height="12" color="#5B5B65" />
+            <use href="#folder" x="624" y="388" width="16" height="16" color="#4F5ED9" />
+            <text x="647" y="401" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">个人笔记</text>
+          </g>
+          <g id="notes.tree.row.8">
+            <use href="#file-markdown" x="636" y="422" width="16" height="16" color="#42A5F5" />
+            <text x="659" y="435" font-size="12.5" fill="#18181B" font-weight="400" class="notes-text">工作备忘</text>
+          </g>
+        </g>
+      </g>
+      <g id="notes.navigation.toggle" data-role="button" data-disabled="false">
+        <title>收起目录 ⌥⌘B</title>
+        <rect x="812" y="78" width="28" height="28" rx="14" fill="transparent" id="notes.navigation.toggle.hit" />
+        <use href="#panel-right-close" x="818" y="84" width="16" height="16" color="#5B5B65" />
+      </g>
+    </g>
+  </g>
+</svg>

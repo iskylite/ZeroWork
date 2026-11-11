@@ -11,6 +11,8 @@ pub const host_height: f32 = 36;
 pub const group_height: f32 = 28;
 pub const tail_width: f32 = 36;
 pub const action_size: f32 = 24;
+pub const host_connect_size: f32 = 28;
+pub const host_action_gap: f32 = 4;
 pub const host_icon_size: f32 = 14;
 pub const group_member_indent: f32 = 12;
 
@@ -104,6 +106,12 @@ pub fn titleViewport() ui.BoxStyle {
 }
 pub fn tail() ui.BoxStyle {
     return .{ .width = .{ .px = tail_width }, .height = .{ .px = action_size }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
+}
+pub fn hostConnect() ui.BoxStyle {
+    var value = action(host_connect_size);
+    value.background = theme.current().overlay;
+    value.border = .{ .radius = host_connect_size / 2 };
+    return value;
 }
 pub fn route() ui.BoxStyle {
     return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0 };

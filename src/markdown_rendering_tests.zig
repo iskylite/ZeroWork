@@ -55,6 +55,27 @@ test "Markdown rendering keeps escaped pipes and following table columns" {
     const table = idNode(node, "ai.message.table").?;
     try std.testing.expectEqual(@as(usize, 2), table.children.items[0].children.items[0].children.items.len);
 }
+
+test "Markdown rendering separates topics with space while preserving rules in code and table separators" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const source = "第一段\n\n---\n\n## 第二节\n\n```text\n---\n```\n\n| A | B |\n| --- | --- |\n| 一 | 二 |";
+    const node = try f.mount(source);
+    const gap = idNode(node, "ai.message.section_gap").?;
+    try std.testing.expectApproxEqAbs(@as(f32, 8), gap.globalRect().h, 0.1);
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, gap.getBackground());
+    try std.testing.expect(textNode(node, "第二节").?.globalRect().y > textNode(node, "第一段").?.globalRect().y);
+    try std.testing.expect(textNode(node, "---") != null);
+    try std.testing.expect(idNode(node, "ai.message.table") != null);
+    const streamed = try M.Retained.mount(f.cx, f.scope);
+    try f.cx.root.?.appendChild(a, streamed.root);
+    try streamed.update("第一段\n\n---\n\n", 540, null);
+    try streamed.update(source, 540, null);
+    f.settle();
+    try std.testing.expect(idNode(streamed.root, "ai.message.section_gap") != null);
+    try std.testing.expect(textNode(streamed.root, "---") != null);
+    try std.testing.expect(idNode(streamed.root, "ai.message.table") != null);
+}
 test "Markdown rendering nests list quote code and table containers" {
     const f = try Fixture.init();
     defer f.deinit();

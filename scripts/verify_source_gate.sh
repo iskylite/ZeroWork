@@ -11,5 +11,3 @@ printf '%s\n' "[gate] rebuilding pinned SSH dependencies"
 printf '%s\n' "[gate] running Zig 0.17 unit and contract tests"
 ./scripts/test_isolated.sh test
 printf '%s\n' "[gate] all source gates passed"
-# Keep generated dependency outputs out of the working tree after verification.
-git clean -fd vendor/libssh2 zig-pkg

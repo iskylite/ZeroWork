@@ -113,7 +113,7 @@ pub const Plugin = struct {
             .dependencies = &dependencies,
             .icons = .{ .settings = "monitor", .protocol = "monitor", .tab = "monitor" },
             .integration = .{ .ai = true, .transport_loss = true, .retry_after_end = true },
-            .connection = .{ .create_kind = .saved_or_temporary, .payload_version = 1, .validate_payload = model.validatePayload, .editor_factory = .{ .context = self, .mount = @import("editor.zig").mountEditor }, .encode = codec.encode, .decode = codec.decode, .migrate = codec.migrate, .credential_references = codec.credentialReferences, .probe_factory = .{ .context = self, .begin = beginProbe, .poll = pollProbe, .cancel = cancelProbe } },
+            .connection = .{ .create_kind = .saved_or_temporary, .payload_version = 1, .validate_payload = model.validatePayload, .editor_factory = .{ .context = self, .mount = @import("editor.zig").mountEditor }, .encode = codec.encode, .decode = codec.decode, .migrate = codec.migrate, .credential_references = codec.credentialReferences, .remap_import = codec.remapImport, .probe_factory = .{ .context = self, .begin = beginProbe, .poll = pollProbe, .cancel = cancelProbe } },
             .workspace_kind = model.workspace_kind,
             .content_renderer = model.workspace_kind,
             .services = &declared_services,

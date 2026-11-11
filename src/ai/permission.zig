@@ -25,7 +25,11 @@ pub const LiveMode = struct {
 };
 const readonly = [_][]const u8{ "ps", "df", "free", "ls", "cat", "grep", "kubectl get", "kubectl describe", "kubectl logs", "systemctl status" };
 pub fn classify(engine: Engine, command: []const u8, _: bool) Verdict {
-    if (isBlocked(command)) return .deny_exec_copy_only;
+    switch (@import("shell_policy.zig").inspect(command)) {
+        .blocked => return .deny_exec_copy_only,
+        .uncertain => return .need_confirm,
+        .ordinary => {},
+    }
     // Automatic execution covers every validated command in the captured
     // scope, independently of shell syntax, templates or group membership.
     if (engine.mode == .auto) return .allow_auto;
@@ -35,62 +39,6 @@ pub fn classify(engine: Engine, command: []const u8, _: bool) Verdict {
 }
 fn isWhitelisted(list: []const []const u8, command: []const u8) bool {
     for (list) |prefix| if (std.mem.startsWith(u8, command, prefix) and (command.len == prefix.len or (command.len > prefix.len and command[prefix.len] == ' '))) return true;
-    return false;
-}
-fn isBlocked(command: []const u8) bool {
-    return blockedScript(command, 0);
-}
-fn blockedScript(command: []const u8, depth: u8) bool {
-    if (depth >= 8) return true;
-    var segments = std.mem.tokenizeAny(u8, command, ";|&\n\r()`");
-    while (segments.next()) |segment| {
-        var words = std.mem.tokenizeAny(u8, std.mem.trim(u8, segment, " \t{}"), " \t");
-        while (words.next()) |raw_word| {
-            const word = std.mem.trim(u8, raw_word, "\"'");
-            const name = std.fs.path.basename(word);
-            // Control words, environment assignments and common executable
-            // wrappers do not conceal the command from the deny rules.
-            var prefix = std.mem.indexOfScalar(u8, word, '=') != null;
-            for ([_][]const u8{ "if", "then", "elif", "else", "while", "until", "do", "!", "sudo", "doas", "command", "exec", "env", "nohup" }) |keyword| {
-                if (std.mem.eql(u8, name, keyword)) prefix = true;
-            }
-            if (prefix) continue;
-            if (word.len > 0 and word[0] == '-') {
-                for ([_][]const u8{ "-u", "-g", "--user", "--group" }) |option| {
-                    if (std.mem.eql(u8, word, option)) _ = words.next();
-                }
-                continue;
-            }
-            if (std.mem.startsWith(u8, name, "mkfs") or std.mem.startsWith(u8, name, "shutdown")) return true;
-            if (std.mem.eql(u8, name, "rm")) {
-                var recursive = false;
-                var force = false;
-                var absolute = false;
-                while (words.next()) |raw_argument| {
-                    const argument = std.mem.trim(u8, raw_argument, "\"'");
-                    if (std.mem.eql(u8, argument, "--recursive")) recursive = true else if (std.mem.eql(u8, argument, "--force")) force = true else if (argument.len > 1 and argument[0] == '-' and argument[1] != '-') {
-                        recursive = recursive or std.mem.indexOfAny(u8, argument[1..], "rR") != null;
-                        force = force or std.mem.indexOfScalar(u8, argument[1..], 'f') != null;
-                    } else if (std.fs.path.isAbsolute(argument)) absolute = true;
-                }
-                if (recursive and force and absolute) return true;
-            } else if (std.mem.eql(u8, name, "eval")) {
-                if (blockedScript(std.mem.trim(u8, words.rest(), " \t\"'"), depth + 1)) return true;
-            } else {
-                for ([_][]const u8{ "sh", "bash", "zsh", "dash", "ksh" }) |shell| {
-                    if (!std.mem.eql(u8, name, shell)) continue;
-                    while (words.next()) |option| {
-                        if (option.len < 2 or option[0] != '-') break;
-                        if (std.mem.indexOfScalar(u8, option[1..], 'c') != null) {
-                            if (blockedScript(std.mem.trim(u8, words.rest(), " \t\"'"), depth + 1)) return true;
-                            break;
-                        }
-                    }
-                }
-            }
-            break;
-        }
-    }
     return false;
 }
 /// PTY and batch execution share automatic permission and dangerous-command
@@ -184,5 +132,36 @@ test "automatic permission denies dangerous commands behind wrappers and shell c
             try std.testing.expectEqual(Verdict.deny_exec_copy_only, classify(.{ .mode = .auto }, command, grouped));
             try std.testing.expectEqual(Verdict.deny_exec_copy_only, classifyTerminal(.{ .mode = .auto }, command, grouped));
         }
+    }
+}
+
+test "review repair shell quote and escape equivalents cannot bypass dangerous command denial" {
+    for ([_][]const u8{
+        "r\"\"m -rf /tmp/policy-fixture",
+        "r\\m -rf /tmp/policy-fixture",
+        "r\\\nm -rf /tmp/policy-fixture",
+        "rm -'r'f /tmp/policy-fixture",
+        "rm -rf ~/policy-fixture",
+        "shut\"\"down now",
+        "sudo -u root r\\m -rf /tmp/policy-fixture",
+        "sh -c 'r\"\"m -rf /tmp/policy-fixture'",
+        "sh -c \"shut\\\"\\\"down now\"",
+        "bash --rcfile /tmp/policy-rc -o errexit -c 'r\"\"m -rf /tmp/policy-fixture'",
+        "2>/dev/null r\"\"m -rf /tmp/policy-fixture",
+        "eval 'r'\"m -rf /tmp/policy-fixture\"",
+        "printf '%s' \"$(r\\m -rf /tmp/policy-fixture)\"",
+    }) |command| {
+        try std.testing.expectEqual(Verdict.deny_exec_copy_only, classify(.{ .mode = .auto }, command, false));
+        try std.testing.expectEqual(Verdict.deny_exec_copy_only, classifyTerminal(.{}, command, true));
+    }
+}
+
+test "review repair uncertain executable expansions require exact approval without blocking literal data" {
+    for ([_][]const u8{ "$COMMAND /tmp/policy-fixture", "r${EMPTY}m -rf /tmp/policy-fixture", "sh -c \"$SCRIPT\"", "rm -rf \"$HOME/policy-fixture\"", "sudo --host remote rm -rf /tmp/policy-fixture", "sudo -p prompt rm -rf /tmp/policy-fixture", "printf 'unterminated" }) |command| {
+        try std.testing.expectEqual(Verdict.need_confirm, classify(.{ .mode = .auto }, command, false));
+        try std.testing.expectEqual(Verdict.need_confirm, classifyTerminal(.{ .mode = .auto }, command, false));
+    }
+    for ([_][]const u8{ "printf '%s' 'rm -rf /tmp/policy-fixture'", "printf '%s' 'shutdown now; mkfs.ext4 /dev/test'", "echo \"$HOME\"", "printf '%s' $(printf a)", "printf safe # shutdown now", "rm -- -rf /tmp/policy-fixture" }) |command| {
+        try std.testing.expectEqual(Verdict.allow_auto, classify(.{ .mode = .auto }, command, false));
     }
 }

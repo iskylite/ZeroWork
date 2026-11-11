@@ -66,7 +66,7 @@ pub const Snapshot = struct {
             const failed = self.journal.failure;
             return if (failed) |entry| std.fmt.bufPrint(buffer, "{s} {s}失败 · {s}{s}", .{ self.hops[entry.hop].name, shortPhase(entry.phase), presentation.failureText(failure), if (self.cleanup == .released) @as([]const u8, " · 已释放") else "" }) catch "验证失败" else std.fmt.bufPrint(buffer, "{s}{s}", .{ presentation.failureText(failure), if (self.cleanup == .released) @as([]const u8, " · 已释放") else "" }) catch "验证失败";
         }
-        if (self.finished and self.cleanup == .released) return if (self.protocol == .sftp) "SFTP 可用 · 目录只读验证通过 · 已释放" else "验证通过 · 测试资源已释放";
+        if (self.finished and self.cleanup == .released) return if (self.protocol == .sftp) "SFTP 可用 · 目录只读验证通过 · 已释放" else "SSH 预检通过";
         if (self.protocol == .sftp and self.journal.completed) return "SSH 已认证 · 正在验证 SFTP 目录";
         if (self.journal.count != 0) {
             const entry = self.journal.entries[self.journal.count - 1];

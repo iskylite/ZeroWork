@@ -2145,6 +2145,7 @@ const AiHost = struct {
         if (state.compaction_activity) |*activity| {
             if (activity.status == self.compaction.status) return;
             activity.status = self.compaction.status;
+            activity.saving_since_frame = null;
             activity.before_tokens = self.compaction.before_tokens;
             activity.after_tokens = self.compaction.after_tokens;
             if (self.display_conversation == id) self.conversation_dirty = true;
@@ -2163,7 +2164,7 @@ const AiHost = struct {
     }
 
     fn refreshComposer(self: *AiHost) !void {
-        if (self.compaction.job != null and self.compaction.pollWithCommit(self.allocator, self.compactionIdentity(), &self.wire_history, self.execution().thread_state.load(.acquire) != 0, .{ .context = self, .apply = commitCompactedHistory })) {
+        if (self.compaction.job != null and self.compaction.pollWithCommit(self.allocator, self.compactionIdentity(), &self.wire_history, self.execution().thread_state.load(.acquire) != 0, .{ .context = self, .apply = commitCompactedHistory, .ready = showCompactionSaving })) {
             self.composer_hash = null;
             self.conversation_dirty = true;
             if (self.compaction_agent) |agent| {
@@ -2660,7 +2661,7 @@ const AiHost = struct {
             const turn = context.turn;
             const previous_scope = self.conversation_scope;
             defer self.conversation_scope = previous_scope;
-            const now: u64 = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
+            const now = turn.displayClock(@intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)));
             var slot: usize = 0;
             for (turn.timeline.items[context.first..context.end], context.first..) |entry, index| {
                 if (entry != .thinking and entry != .tool) continue;
@@ -2735,7 +2736,7 @@ const AiHost = struct {
             defer self.image_render_turn = previous_turn;
             self.image_render_turn = turn;
             try groups.sync(self.allocator, turn, self.effectiveAi().step_display == .expanded);
-            const now: u64 = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
+            const now = turn.displayClock(@intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)));
             var first: usize = 0;
             var slot: usize = 0;
             const limit = @min(turn.timeline.items.len, context.limit orelse turn.timeline.items.len);
@@ -2844,7 +2845,8 @@ const AiHost = struct {
         turn: *@import("ai/conversation_turn.zig").Turn,
         fn proseEnd(turn: *const @import("ai/conversation_turn.zig").Turn) usize {
             const prose = turn.prose.items;
-            return if (std.mem.endsWith(u8, prose, turn.answer)) prose.len - turn.answer.len else prose.len;
+            const response = turn.displayResponse();
+            return if (std.mem.endsWith(u8, prose, response)) prose.len - response.len else prose.len;
         }
         fn hasContent(turn: *const @import("ai/conversation_turn.zig").Turn) bool {
             if (turn.timeline.items.len > 0) return turn.finalResponseStart() > 0;
@@ -2862,14 +2864,14 @@ const AiHost = struct {
         const previous_image_turn = self.image_render_turn;
         self.image_render_turn = turn;
         defer self.image_render_turn = previous_image_turn;
-        if (turn.ended_at_ms != null and turn.answer.len > 0) {
+        if (turn.displayFinished() and turn.displayResponse().len > 0) {
             if (TurnProcess.hasContent(turn)) {
                 const context = try self.conversation_scope.?.createState(TurnProcess, .{ .host = self, .turn = turn });
                 try self.bindTurnPointer(self.conversation_scope.?, turn, &context.turn);
                 const process = try @import("ui/ai_turn_summary_view.zig").View.mount(self.cx, self.conversation_scope.?, parent, turn, context, TurnProcess.render, self.cx.on(AiHost, self, pauseConversationFollow));
                 try self.bindTurnPointer(self.conversation_scope.?, turn, &process.turn);
             }
-            try self.appendProse(parent, turn.answer);
+            try self.appendProse(parent, turn.displayResponse());
             return;
         }
         try self.appendTurnProcess(parent, turn, turn.timeline.items.len, turn.prose.items.len);
@@ -2879,10 +2881,10 @@ const AiHost = struct {
         self.image_render_turn = turn;
         defer self.image_render_turn = previous_image_turn;
         const view = @import("ui/ai_step_view.zig");
-        const now: u64 = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
+        const now = turn.displayClock(@intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)));
         if (turn.timeline.items.len > 0) {
             const timeline = @import("ui/ai_timeline_view.zig");
-            const context = try self.conversation_scope.?.createState(TimelineContext, .{ .host = self, .turn = turn, .limit = if (turn.ended_at_ms != null) limit else null });
+            const context = try self.conversation_scope.?.createState(TimelineContext, .{ .host = self, .turn = turn, .limit = if (turn.displayFinished()) limit else null });
             try self.bindTurnPointer(self.conversation_scope.?, turn, &context.turn);
             const retained = try timeline.View.mount(self.cx, self.conversation_scope.?, parent, context, TimelineContext.sync, self.cx.on(AiHost, self, pauseConversationFollow));
             if (turn == &self.current_turn) self.live_timeline = retained;
@@ -2978,6 +2980,19 @@ const AiHost = struct {
         try parent.appendChild(self.allocator, row);
     }
 
+    fn showCompactionSaving(raw: *anyopaque) bool {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const id = self.manual_compaction_conversation orelse return true;
+        if (self.display_conversation != id or !self.panel.isDisplayedInTree()) return true;
+        const state = self.assistant_states.?.find(id) orelse return true;
+        const activity = if (state.compaction_activity) |*value| value else return true;
+        // Paint the saving stage before the synchronous checkpoint write.
+        // Several layout passes can run within a single frame.
+        if (activity.saving_since_frame) |frame| return self.cx.frame_count != frame;
+        activity.saving_since_frame = self.cx.frame_count;
+        self.conversation_dirty = true;
+        return false;
+    }
     fn commitCompactedHistory(raw: *anyopaque, messages: []const ai_provider.Message) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         try self.commitHistorySnapshot(messages);
@@ -3491,6 +3506,7 @@ const AiHost = struct {
             turn.id,
             turn.sent_at_ms,
             turn.ended_at_ms,
+            turn.restored_interrupted,
             turn.elapsed_ms,
             turn.thinking_started_ms,
             turn.thinking_ended_ms,
@@ -4100,6 +4116,14 @@ const AiHost = struct {
         self.controller.model.visible = false;
         self.refresh("AI 助手");
         self.restoreTerminalFocus();
+    }
+
+    fn dismissOnOutsidePress(self: *AiHost, target: *ui.Node) void {
+        if (!self.controller.model.visible) return;
+        if (self.toolbar_trigger) |trigger| if (target.isDescendantOf(trigger)) return;
+        if (self.strip) |strip| if (target.isDescendantOf(strip.root)) return;
+        if (@import("ui/floating_input.zig").containsPress(self.cx, self.panel, target)) return;
+        self.collapse();
     }
 
     fn closeAssistant(self: *AiHost) void {
@@ -4953,6 +4977,7 @@ const AiHost = struct {
         };
         self.execution().recovery_failed = false;
         self.current_turn.ended_at_ms = null;
+        self.current_turn.restored_interrupted = false;
         self.refresh("AI 助手");
     }
 
@@ -9907,6 +9932,7 @@ const SettingsHost = struct {
         self.resource_worker.?.background_preflight = .{ .context = self, .prepare = prepareDraftTexture, .complete = completeDraftTexture };
         try self.resource_worker.?.loadLibrary(&self.registry);
         self.appearance_initialized = true;
+        self.persistBackgroundProgress();
     }
 
     /// Includes the shared registry lease and deferred Save/Discard. Native
@@ -10119,6 +10145,8 @@ const SettingsHost = struct {
         };
     }
     fn updateBackgroundIdentity(self: *SettingsHost) void {
+        // Only committed background changes reach here. Appearance rendering
+        // reads the published path without saving the playlist again.
         self.persistBackgroundProgress();
         self.appearance_context.runtime_image_path = if (self.appearance_state.asset) |*current| current.selectedPath() else "";
     }
@@ -10459,6 +10487,7 @@ const SettingsHost = struct {
         var asset: ?@import("config/background_asset.zig").Prepared = null;
         defer if (asset) |*image| image.deinit(self.allocator);
         const background = request.prepared.owned.?.value.ui.materials.background;
+        const previous_background = self.runtime.value.ui.materials.background;
         if (background.enabled and (self.appearance_state.asset == null or !self.appearance_state.asset.?.matches(background) or if (self.controller.background.last_good) |draft_asset| draft_asset.asset_revision != self.appearance_state.asset.?.asset_revision else false)) {
             const good = self.controller.background.last_good orelse {
                 _ = self.controller.failSave(&request, error.BackgroundNotPrepared);
@@ -10481,6 +10510,10 @@ const SettingsHost = struct {
         };
         asset = null; // AppearanceApply owns the copy from here.
         defer prepared.deinit();
+        const background_progress_changed = prepared.asset != null or
+            background.source != previous_background.source or
+            background.order != previous_background.order or
+            !std.mem.eql(u8, background.path, previous_background.path);
         defer {
             if (self.pending_texture) |*texture| texture.deinit();
             self.pending_texture = null;
@@ -10494,7 +10527,7 @@ const SettingsHost = struct {
         };
         if (!completed) return;
         if (process_notifications) |notifications| if (self.notification_window) |window| notifications.resolveOperationErrors(window, "偏好设置");
-        self.updateBackgroundIdentity();
+        if (background_progress_changed) self.updateBackgroundIdentity();
         if (self.installation) |*receipt| receipt.deinit();
         self.installation = null;
         if (self.pending_texture) |texture| {
@@ -11806,6 +11839,7 @@ const AppNavHost = struct {
     collapsed_sidebar: ?*CollapsedSidebar = null,
     settings: ?*SettingsHost = null,
     ai: ?*AiHost = null,
+    status_previews: ?*@import("ui/status_hover_preview.zig").Group = null,
     command_history: ?*@import("ui/command_history_view.zig").View = null,
     quick_backdrop: ?*ui.Node = null,
     session_details: ?*ui.Node = null,
@@ -11968,19 +12002,16 @@ const AppNavHost = struct {
 
     fn newSessionProfile(raw: *anyopaque) void {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
-        if (self.wizard_host) |host| {
-            host.selected_group = null;
-            host.refreshAssets() catch return;
-            remote_editor.loadDraft(host.wizard, .{}) catch return;
-            host.wizard.show();
-        }
+        if (self.wizard_host) |host| WizardHost.openInAssetGroup(host, null) catch |err| host.workspace.statusFailure(@errorName(err));
     }
 
     fn newSftpProfile(raw: *anyopaque) void {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
         const host = self.wizard_host orelse return;
-        host.selected_group = null;
+        if (host.wizard.isVisible()) return;
         host.refreshAssets() catch return;
+        if (host.resumeFailedDraft(.sftp, null) catch return) return;
+        host.selected_group = null;
         remote_editor.loadDraft(host.wizard, .{ .protocol = .sftp, .port = 22 }) catch return;
         host.wizard.show();
     }
@@ -12438,6 +12469,15 @@ const AppNavHost = struct {
         return if (before != self.quick.sidebar.collapsed or resize or title_chrome_changed or sidebar_width_changed) .needs_layout else .done;
     }
 
+    fn dismissTransientSurfaces(self: *AppNavHost, target: *ui.Node) void {
+        // Modal dialogs and their portaled controls own input until dismissed.
+        for (&self.cx.overlay_stack.layers) |*slot| if (slot.*) |*layer| {
+            if (layer.config.kind == .modal and !layer.suspended and layer.state != .exiting) return;
+        };
+        if (self.ai) |ai| ai.dismissOnOutsidePress(target);
+        if (self.status_previews) |previews| previews.dismissOnOutsidePress(target);
+    }
+
     fn onEvent(event: ui.events.Event, context: ?*anyopaque) ui.events.EventResult {
         const self: *AppNavHost = @ptrCast(@alignCast(context orelse return .ignored));
         if (process_windows) |process| if (process.data_cleanup_owner) |owner| {
@@ -12474,6 +12514,12 @@ const AppNavHost = struct {
             else => {},
         };
         switch (event) {
+            .mouse_down => |mouse| {
+                if (mouse.button == .left) if (self.cx.dispatcher.mouseDownNode()) |target| {
+                    self.dismissTransientSurfaces(target);
+                };
+                return .ignored;
+            },
             .drag => |drag| return self.localDrag(drag),
             .key_down => |key| {
                 if (self.workspace) |workspace| workspace.setCommandHeld(key.modifiers.super);
@@ -12726,7 +12772,7 @@ const AppNavHost = struct {
 
     fn importHosts(self: *AppNavHost) void {
         self.importHostsFile() catch |err| {
-            if (self.workspace) |workspace| workspace.statusFailure(@errorName(err));
+            if (self.workspace) |workspace| workspace.statusFailure(if (err == error.DuplicateConnectionName) "存在同名连接。请修改导入文件中的连接名称。" else @errorName(err));
         };
     }
 
@@ -12737,13 +12783,7 @@ const AppNavHost = struct {
         const path = (try sdk.runDialog(.{ .kind = .open_file, .title = "导入 hosts.toml" }, &buffer)) orelse return;
         var imported = try @import("config/store.zig").loadHostsForImport(self.cx.io, std.Io.Dir.cwd(), self.allocator, path);
         defer imported.deinit();
-        // Parse and validate the complete file before changing live assets.
-        for (imported.hosts) |host| try host.validate();
-        const previous = workspace.registry.hosts;
-        errdefer workspace.registry.hosts = previous;
-        for (imported.hosts) |host| _ = try workspace.appendHost(host);
-        try workspace.saveRegistry();
-        try workspace.rebuildSidebar();
+        try workspace.importHosts(&imported);
         workspace.status("已导入主机配置");
     }
 
@@ -12892,7 +12932,6 @@ const AppNavHost = struct {
     fn refreshAppearance(self: *AppNavHost) !void {
         const settings = self.settings orelse return;
         if (!settings.appearance_initialized) return;
-        settings.updateBackgroundIdentity();
         const runtime = settings.runtime.value;
         const record = settings.registry.get(runtime.ui.theme) orelse return;
         if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
@@ -14738,6 +14777,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     // ── Root shell ──────────────────────────────────────────────────
     const root = try ui.boxStyled(cx, shell_styles.root, .{});
     root.meta.ownership.meta.test_id = "workspace.shell";
+    // Empty shell margins also receive outside presses.
+    root.setStyleInline(cx.allocator, .{ .hit_roles = .{ .pointer = true } });
     // App.runWith already provides cx.root and its popover portal. Keep that
     // runtime-owned root: replacing it bypasses viewport layout constraints.
 
@@ -15189,6 +15230,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try background_view.isolate(details_host.ssh_status.detail.scope, details_host.ssh_status.detail.chrome);
     const StatusPreview = @import("ui/status_hover_preview.zig").Preview;
     const status_previews = try scope.createState(@import("ui/status_hover_preview.zig").Group, .{});
+    nav_host.status_previews = status_previews;
     try StatusPreview.mount(cx, scope, status_previews, status_bar.controls.identity_button, details_host.ssh_status.info.chrome, details_host.ssh_status.info.open, cx.on(@import("ui/status_connection_view.zig").View, details_host.ssh_status.info, @import("ui/status_connection_view.zig").View.dismiss));
     try StatusPreview.mountClick(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.dismiss));
     try StatusPreview.mountClick(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
@@ -15241,6 +15283,11 @@ const WizardHost = struct {
     assets: []wizard_mod.Draft = &.{},
     edit_host_index: ?usize = null,
     selected_group: ?@import("config/asset_actions.zig").GroupRef = null,
+    failed_draft: ?struct {
+        draft: wizard_mod.Draft,
+        group: ?@import("config/asset_actions.zig").GroupRef,
+        group_edited: bool,
+    } = null,
 
     probe_library: ?ssh_session.Library = null,
     probe_controller: @import("ui/wizard_probe.zig").Controller,
@@ -15253,6 +15300,7 @@ const WizardHost = struct {
         state.result_context = self;
         state.editor.on_test = startProbe;
         state.editor.test_ctx = self;
+        state.editor.suspend_draft = .{ .context = self, .save = suspendFailedDraft };
         state.editor.setSshDefaults(self.workspace.app_config.ssh.connect_timeout_sec, self.workspace.app_config.ssh.keepalive_sec);
         state.editor.setScrollbackDefault(self.workspace.app_config.ui.scrollback_limit);
         try state.editor.setAssets(self.assets);
@@ -15323,10 +15371,38 @@ const WizardHost = struct {
             group_name = current.name;
         }
         try self.refreshAssets();
+        if (try self.resumeFailedDraft(if (reference != null) .ssh else null, reference)) return;
         self.edit_host_index = null;
         self.selected_group = reference;
         try remote_editor.loadDraft(self.wizard, .{ .group = group_name });
         self.wizard.show();
+    }
+
+    fn suspendFailedDraft(raw: *anyopaque, draft: wizard_mod.Draft, group_edited: bool) !void {
+        const self: *WizardHost = @ptrCast(@alignCast(raw));
+        const owned = try draft.dupe(self.allocator);
+        self.clearFailedDraft();
+        self.failed_draft = .{ .draft = owned, .group = self.selected_group, .group_edited = group_edited };
+    }
+
+    fn resumeFailedDraft(self: *WizardHost, protocol: ?wizard_mod.Protocol, group: ?@import("config/asset_actions.zig").GroupRef) !bool {
+        const saved = self.failed_draft orelse return false;
+        if (protocol) |value| if (value != saved.draft.protocol) return false;
+        if (group) |value| if (saved.group == null or value.id != saved.group.?.id) return false;
+        try remote_editor.loadDraft(self.wizard, saved.draft);
+        const editor = remote_editor.editor(self.wizard) orelse return error.RemoteEditorUnavailable;
+        editor.group_edited = saved.group_edited;
+        editor.resume_on_close = true;
+        self.edit_host_index = null;
+        self.selected_group = saved.group;
+        self.clearFailedDraft();
+        self.wizard.show();
+        return true;
+    }
+
+    fn clearFailedDraft(self: *WizardHost) void {
+        if (self.failed_draft) |*saved| saved.draft.deinit(self.allocator);
+        self.failed_draft = null;
     }
 
     fn openCapturedAsset(raw: *anyopaque, owner: @import("host/identity.zig").AssetOwner) !void {
@@ -15453,6 +15529,7 @@ const WizardHost = struct {
         self.probe_controller.deinit();
         if (self.probe_library) |*library| library.deinit();
         if (remote_editor.editor(self.wizard)) |editor| editor.assets = &.{};
+        self.clearFailedDraft();
         self.releaseAssets(self.assets);
         self.allocator.destroy(self);
     }

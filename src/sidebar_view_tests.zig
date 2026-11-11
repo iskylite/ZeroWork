@@ -54,12 +54,15 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     try std.testing.expectEqualStrings(":65535后台", row.forward_label.getText().?.content);
     try std.testing.expect(row.forward.style.display == .flex and row.route.style.display == .flex);
     const route_with_forward = row.route.globalRect();
+    const name_with_forward = row.name.globalRect();
     try std.testing.expect(row.forward.globalRect().x + row.forward.globalRect().w <= route_with_forward.x);
     try std.testing.expect(ui.Color.eql(T.current().fg_2, row.dot.getIcon().?.tint));
     try std.testing.expect(ui.Color.eql(T.current().ok_ink, row.forward_label.getText().?.color));
     row.setMenuOpen(true);
     h.frames();
     try std.testing.expect(row.forward.style.display == .none and row.actions.style.display == .flex);
+    try std.testing.expectApproxEqAbs(route_with_forward.x, row.route.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(name_with_forward.w, row.name.globalRect().w, 0.1);
     row.setMenuOpen(false);
     h.frames();
     try std.testing.expect(row.forward.style.display == .flex and row.actions.style.display == .none);
@@ -195,7 +198,7 @@ fn firstText(node: *ui.Node) ?*ui.Node {
     for (node.children.items) |child| if (firstText(child)) |result| return result;
     return null;
 }
-test "sidebar native chrome gives unused action space back to host names" {
+test "sidebar native chrome keeps long host names and route badges stable on hover" {
     var c: Capture = .{};
     const h = try H.init();
     defer h.deinit();
@@ -212,13 +215,16 @@ test "sidebar native chrome gives unused action space back to host names" {
     try std.testing.expectApproxEqAbs(@as(f32, 66), v.search_box.globalRect().y, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
     const before = row.name.globalRect().w;
+    const route_x = row.route.globalRect().x;
     try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
     const rect = row.node.globalRect();
     h.cx.handleMouseMove(rect.x + 20, rect.y + 12);
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(row.route.style.display), .flex), row.route.style.display);
+    try std.testing.expectEqual(T.current().overlay, row.actions.getBackground());
     try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
-    try std.testing.expectApproxEqAbs(before - (V.styles.action_size + 4), row.name.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(before, row.name.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(route_x, row.route.globalRect().x, 0.1);
     h.click(find(row.node, "sidebar.host.connect").?);
     try std.testing.expectEqual(@as(usize, 1), c.connected);
     try std.testing.expect(find(row.node, "sidebar.host.edit") == null);
@@ -241,12 +247,14 @@ test "sidebar host route status never activates the row connection" {
     const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "ScaleX40-AI01", .detail = "root@127.0.0.1:1", .route = "本机 → 主机", .hops = 0, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu });
     try column.appendChild(h.cx.allocator, row.node);
     h.frames();
-    try std.testing.expect(row.route.style.display == .flex);
-    try std.testing.expect(row.name.globalRect().w > 120);
+    try std.testing.expect(!row.route.isDisplayedInTree());
+    try std.testing.expect(!row.actions.isDisplayedInTree());
+    const name_width = row.name.globalRect().w;
     const r = row.node.globalRect();
     h.cx.handleMouseMove(r.x + 20, r.y + r.h / 2);
     h.frames();
     try std.testing.expect(row.route.style.display == .flex);
+    try std.testing.expectApproxEqAbs(name_width, row.name.globalRect().w, 0.1);
     const route = row.route.globalRect();
     const count = find(row.node, "sidebar.host.hops").?.globalRect();
     const trailing = row.trailing.globalRect();
@@ -267,13 +275,13 @@ test "sidebar host route status never activates the row connection" {
     h.cx.setFocus(null);
     h.cx.handleMouseMove(800, 700);
     h.frames();
-    try std.testing.expect(row.route.style.display == .flex);
+    try std.testing.expect(!row.route.isDisplayedInTree());
     row.setForwardBadge(.{ .port = 8080, .phase = .listening });
     h.frames();
-    try std.testing.expect(row.forward.style.display == .flex and row.route.style.display == .flex);
+    try std.testing.expect(row.forward.isDisplayedInTree() and !row.route.isDisplayedInTree());
     row.setForwardBadge(null);
     h.frames();
-    try std.testing.expect(row.forward.style.display == .none and row.route.style.display == .flex);
+    try std.testing.expect(!row.forward.isDisplayedInTree() and !row.route.isDisplayedInTree());
 }
 
 test "sidebar host route marker names the chain and its hop count" {
@@ -768,20 +776,17 @@ test "main workspace sidebar follows V4 measured group search and footer geometr
         try std.testing.expectApproxEqAbs(row.node.globalRect().y + 18, guide.y + guide.h, 0.1);
         try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
         try std.testing.expectEqualStrings("0", find(row.node, "sidebar.host.hops").?.getText().?.content);
-        const group_count = find(group.header, "sidebar.group.count").?.globalRect();
-        const route_icon = find(row.node, "sidebar.host.route-icon").?.globalRect();
-        try std.testing.expectApproxEqAbs(route_icon.x + route_icon.w / 2, group_count.x + group_count.w / 2, 0.1);
         try std.testing.expectEqual(T.current().fg_3, find(group.header, "sidebar.group.count").?.getText().?.color);
         try std.testing.expect(row.trailing.style.display == .flex);
-        try std.testing.expect(row.route.style.display == .flex);
+        try std.testing.expect(!row.route.isDisplayedInTree());
 
         const width = row.name.globalRect().w;
         row.setMenuOpen(true);
         h.frames();
         try std.testing.expect(row.actions.style.display == .flex);
         try std.testing.expect(row.route.style.display == .flex);
-        try std.testing.expect(row.name.globalRect().w <= width);
-        try std.testing.expectEqual(V.styles.tail_width + 4 + V.styles.action_size, row.trailing.globalRect().w);
+        try std.testing.expectApproxEqAbs(width, row.name.globalRect().w, 0.1);
+        try std.testing.expectEqual(V.styles.tail_width + V.styles.host_action_gap + V.styles.host_connect_size, row.trailing.globalRect().w);
         const footer = find(view.root, "sidebar.footer.new").?;
         try std.testing.expect(find(footer.parent.?, "sidebar.footer.frame") == null);
         try std.testing.expectApproxEqAbs(@as(f32, 218), footer.globalRect().w, 0.1);
@@ -1172,7 +1177,7 @@ test "sidebar theme state selection acquired after focus survives focused paint 
         const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "主机", .detail = "fixture@192.0.2.1", .route = "本机", .hops = 0, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
         try h.root.appendChild(h.cx.allocator, row.node);
         h.frames();
-        try std.testing.expect(row.route.style.display == .flex);
+        try std.testing.expect(!row.route.isDisplayedInTree());
         h.cx.setFocus(row.node);
         h.frames();
         try std.testing.expect(row.route.style.display == .flex);
@@ -1182,9 +1187,12 @@ test "sidebar theme state selection acquired after focus survives focused paint 
         try std.testing.expectEqual(T.states().selected_hover, row.node.getBackground());
         try std.testing.expect(row.node.behavior.interaction.a11y.?.selected);
         try std.testing.expect(!ui.Color.eql(focused, row.node.getBackground()));
+        h.cx.setFocus(row.route);
+        h.frames();
+        try std.testing.expect(row.route.isDisplayedInTree() and row.actions.isDisplayedInTree());
         h.cx.clearFocus();
         h.frames();
-        try std.testing.expect(row.route.style.display == .flex);
+        try std.testing.expect(!row.route.isDisplayedInTree() and !row.actions.isDisplayedInTree());
         try std.testing.expectEqual(V.styles.hostSelection(), row.node.getBackground());
         const selection = V.styles.hostSelection();
         const opacity = @as(f32, @floatFromInt(selection.a)) / 255;

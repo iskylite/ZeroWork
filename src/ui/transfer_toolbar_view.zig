@@ -13,7 +13,15 @@ pub const View = struct {
     fraction: ?f32 = null,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, button: *ui.Node) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .root = button, .idle = undefined, .ring = undefined, .label = undefined });
-        self.idle = try theme.icon(cx, ui.icons.arrow_down_up, "fg_2", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } });
+        self.idle = try theme.icon(cx, ui.icons.arrow_down_up, "fg_2", .{
+            .width = .{ .px = 16 },
+            .height = .{ .px = 16 },
+        });
+        // Center the arrow independently of the button's content slot.
+        self.idle.setStyleInline(cx.allocator, .{
+            .position = .absolute,
+            .inset = .{ .left = .{ .px = 6 }, .top = .{ .px = 6 } },
+        });
         try button.appendChild(cx.allocator, self.idle);
         self.ring = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 2 }, .top = .{ .px = 2 } }, .width = .{ .px = 24 }, .height = .{ .px = 24 }, .hit_behavior = .pass_through }, .{});
         self.ring.meta.ownership.meta.test_id = "toolbar.transfers.progress";

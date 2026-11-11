@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="548" height="212" viewBox="0 0 548 212" xml:lang="zh-CN">
+<title>主机多跳角标</title>
+<style>
+  text { dominant-baseline: central; }
+  .ui { font-family: Inter, system-ui, "PingFang SC", sans-serif; }
+  .mono { font-family: Menlo, monospace; }
+</style>
+<!-- Route icon from lucide-static v1.31.0, ISC. -->
+<rect x="0" y="0" width="548" height="212" rx="0" fill="#fff"/>
+<g id="light">
+<rect x="24" y="24" width="238" height="164" rx="16" fill="rgb(246, 246, 247)"/>
+<g id="light.row-1">
+<rect x="43" y="43" width="18" height="18" rx="4" fill="rgb(91, 91, 101)" opacity=".35"/>
+<text x="70" y="52" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">直接连接</text>
+<svg x="223" y="44" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(91, 91, 101)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3" />
+  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+  <circle cx="18" cy="5" r="3" /></svg>
+<text x="238.438" y="45.75" class="mono" font-size="8.5px" font-weight="600" fill="rgb(91, 91, 101)">0</text>
+</g>
+<g id="light.row-2">
+<rect x="34" y="70" width="218" height="36" rx="9" fill="rgb(234, 237, 253)"/>
+<rect x="43" y="79" width="18" height="18" rx="4" fill="rgb(91, 91, 101)" opacity=".35"/>
+<text x="70" y="88" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">经跳板机连接</text>
+<svg x="223" y="80" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(91, 91, 101)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3" />
+  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+  <circle cx="18" cy="5" r="3" /></svg>
+<text x="238.438" y="81.75" class="mono" font-size="8.5px" font-weight="600" fill="rgb(91, 91, 101)">2</text>
+</g>
+<g id="light.row-3">
+<rect x="43" y="115" width="18" height="18" rx="4" fill="rgb(91, 91, 101)" opacity=".35"/>
+<text x="70" y="124" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">后台转发</text>
+<text x="183" y="124" class="ui" font-size="9px" font-weight="400" fill="rgb(91, 91, 101)">:8080</text>
+<svg x="223" y="116" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(91, 91, 101)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3" />
+  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+  <circle cx="18" cy="5" r="3" /></svg>
+<text x="238.438" y="117.75" class="mono" font-size="8.5px" font-weight="600" fill="rgb(91, 91, 101)">1</text>
+</g>
+<g id="light.row-4">
+<rect x="43" y="151" width="18" height="18" rx="4" fill="rgb(91, 91, 101)" opacity=".35"/>
+<text x="70" y="160" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">悬停连接</text>
+<svg x="190" y="152" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(91, 91, 101)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3" />
+  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+  <circle cx="18" cy="5" r="3" /></svg>
+<text x="205.438" y="153.75" class="mono" font-size="8.5px" font-weight="600" fill="rgb(91, 91, 101)">0</text>
+<text x="227.688" y="160" class="ui" font-size="16px" font-weight="400" fill="rgb(91, 91, 101)">▶</text>
+</g>
+</g>
+<g id="dark">
+<rect x="286" y="24" width="238" height="164" rx="16" fill="rgb(36, 36, 43)"/>
+<g id="dark.row-1">
+<rect x="305" y="43" width="18" height="18" rx="4" fill="rgb(184, 184, 194)" opacity=".35"/>
+<text x="332" y="52" class="ui" font-size="12px" font-weight="500" fill="rgb(241, 241, 244)">直接连接</text>
+<svg x="485" y="44" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(184, 184, 194)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3" />
+  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+  <circle cx="18" cy="5" r="3" /></svg>
+<text x="500.438" y="45.75" class="mono" font-size="8.5px" font-weight="600" fill="rgb(184, 184, 194)">0</text>
+</g>
+<g id="dark.row-2">
+<rect x="296" y="70" width="218" height="36" rx="9" fill="rgb(56, 57, 88)"/>
+<rect x="305" y="79" width="18" height="18" rx="4" fill="rgb(184, 184, 194)" opacity=".35"/>
+<text x="332" y="88" class="ui" font-size="12px" font-weight="500" fill="rgb(241, 241, 244)">经跳板机连接</text>
+<svg x="485" y="80" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(184, 184, 194)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3" />
+  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+  <circle cx="18" cy="5" r="3" /></svg>
+<text x="500.438" y="81.75" class="mono" font-size="8.5px" font-weight="600" fill="rgb(184, 184, 194)">2</text>
+</g>
+</g>
+</svg>

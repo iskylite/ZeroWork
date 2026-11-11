@@ -57,12 +57,13 @@ pub fn thinkingProjection(text: []const u8) []const u8 {
     return if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |offset| trimmed[offset + 1 ..] else trimmed;
 }
 pub fn summarize(turn: *const turns.Turn, first: usize, end: usize, now: u64) Summary {
+    const clock = turn.displayClock(now);
     var result: Summary = .{};
     for (turn.timeline.items[first..end]) |item| {
         var phase: events.Phase = .succeeded;
         switch (item) {
             .thinking => |segment| {
-                result.elapsed_ms +|= (segment.ended_ms orelse now) -| segment.started_ms;
+                result.elapsed_ms +|= (segment.ended_ms orelse clock) -| segment.started_ms;
                 if (segment.ended_ms == null) {
                     phase = .running;
                     const projection = thinkingProjection(segment.text.items);
@@ -73,7 +74,7 @@ pub fn summarize(turn: *const turns.Turn, first: usize, end: usize, now: u64) Su
                 const step = turn.steps.items[index];
                 if (!toolVisible(step)) continue;
                 phase = step.phase;
-                result.elapsed_ms +|= step.elapsedAt(now);
+                result.elapsed_ms +|= step.elapsedAt(clock);
             },
             else => continue,
         }
@@ -84,6 +85,7 @@ pub fn summarize(turn: *const turns.Turn, first: usize, end: usize, now: u64) Su
         if (phase == .failed or (phase == .rejected and result.phase != .failed) or (phase == .cancelled and result.phase != .failed and result.phase != .rejected)) result.phase = phase;
     }
     if (result.phase == .succeeded and result.live) result.phase = .running;
+    if (turn.restored_interrupted) result.live = false;
     return result;
 }
 pub fn find(turn: *const turns.Turn, first: usize) ?*State {

@@ -211,8 +211,8 @@ fn writeHostsEncoded(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, encoded:
     defer atomic.deinit(io);
 
     var file_writer = atomic.file.writer(io, &atomic_buffer);
-    try file_writer.interface.writeAll(encoded);
-    try file_writer.flush();
+    file_writer.interface.writeAll(encoded) catch |err| return file_writer.err orelse err;
+    file_writer.flush() catch |err| return file_writer.err orelse err;
     try atomic.file.sync(io);
     if (expected) |baseline| try checkHostsBaseline(io, dir, sub_path, baseline);
     try atomic.replace(io);

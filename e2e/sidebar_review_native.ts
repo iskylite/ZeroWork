@@ -43,7 +43,7 @@ for(const theme of ['dark','light','empty']){
   report.checks.push(`${theme}: home action opens ${theme==='empty'?'new connection':'original quick connection'}`);
   if(theme==='empty')continue;
   const side=await visible('workspace.sidebar');assert.equal(side.rect.w,300);assert.equal((await query('sidebar.host')).filter(shown).length,5);
-  const row=(await query('sidebar.host')).filter(shown)[1];await mouseMove(row.rect.x+40,row.rect.y+18);await sleep(100);await visible('sidebar.host.connect');assert.equal((await query('sidebar.host.copy')).length,0);assert.equal((await query('sidebar.host.edit')).length,0);assert.deepEqual((await query('sidebar.host.hops')).filter(shown).map(n=>n.text),['0','1','2','0','0']);await capture(`${theme}-hover`);
+  const row=(await query('sidebar.host')).filter(shown)[1];await mouseMove(row.rect.x+40,row.rect.y+18);await sleep(100);await visible('sidebar.host.connect');assert.equal((await query('sidebar.host.copy')).length,0);assert.equal((await query('sidebar.host.edit')).length,0);assert.deepEqual((await query('sidebar.host.hops')).filter(shown).map(n=>n.text),['1','2']);await capture(`${theme}-hover`);
   await clickTestId('sidebar.group');await sleep(200);assert.equal((await query('sidebar.host')).filter(shown).length,2);await clickTestId('sidebar.group');
   await clickTestId('workspace.empty.local');await sleep(600);await visible('workspace.sidebar');await capture(`${theme}-local`);
   await clickTestId('sidebar.collapse');await sleep(150);assert(!(await query('workspace.sidebar')).some(shown));await clickTestId('sidebar.restore');await sleep(150);await visible('workspace.sidebar');

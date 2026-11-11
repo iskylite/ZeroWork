@@ -323,6 +323,9 @@ pub fn overlayPaint() ui.BoxStyle {
 pub fn styleInput(input: ui.widgets.input.InputResult) void {
     input.input_container.addBeforeRender(paintInputChrome);
 }
+pub fn stylePanelInput(input: ui.widgets.input.InputResult) void {
+    input.input_container.addBeforeRender(paintPanelInputChrome);
+}
 /// Settings forms own validation labels but share focus/disabled/error fills.
 pub fn paintInputValidation(input: ui.widgets.input.InputResult, invalid: bool) void {
     if (input.state.has_error != invalid) {
@@ -343,6 +346,12 @@ fn inputSelectionBackground(c: Colors) ui.Color {
     return actionForeground(focused_bg);
 }
 fn paintInputChrome(node: *ui.Node) void {
+    paintInputChromeWithFill(node, popupInset());
+}
+fn paintPanelInputChrome(node: *ui.Node) void {
+    paintInputChromeWithFill(node, current().overlay);
+}
+fn paintInputChromeWithFill(node: *ui.Node, fill: ui.Color) void {
     const state: *ui.widgets.input.TextInputState = @ptrCast(@alignCast(node.behavior.events.event_context orelse return));
     if (state.cx_ref) |cx| if (state.tokens != cx.tokens) {
         state.tokens = cx.tokens;
@@ -360,7 +369,7 @@ fn paintInputChrome(node: *ui.Node) void {
         state.selection_fg_override = selection_fg;
         state.dirty = true;
     }
-    const background = if (state.embedded_chrome) ui.Color.TRANSPARENT else if (state.disabled) states().disabled else if (state.has_error) (if (state.focused) states().error_focus else states().tag_danger) else if (state.focused) states().focus else popupInset();
+    const background = if (state.embedded_chrome) ui.Color.TRANSPARENT else if (state.disabled) states().disabled else if (state.has_error) (if (state.focused) states().error_focus else states().tag_danger) else if (state.focused) states().focus else fill;
     if (!ui.Color.eql(node.getBackground(), background)) node.setBackground(background);
     node.setBorderColor(ui.Color.TRANSPARENT);
     const outline = node.style.outline();

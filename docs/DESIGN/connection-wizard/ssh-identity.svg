@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="824" height="508" viewBox="0 0 824 508" fill="none" role="img" aria-labelledby="title">
+  <title id="title">编辑 SSH 连接 · 连接与认证</title>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #e9eee4; }
+      .title { font-size: 15px; font-weight: 600; }
+      .section { font-size: 14px; font-weight: 600; }
+      .label { font-size: 12px; fill: #aeb9aa; }
+      .control { font-size: 13px; font-weight: 550; }
+      .mono { font-family: "SF Mono", Menlo, Consolas, monospace; }
+      .strong-ink { fill: #222c1a; }
+      .accent-ink { fill: #d3e3b8; }
+      .muted-ink { fill: #bdc8b9; }
+      .card { fill: #202721; }
+      .input { fill: #303b30; }
+    </style>
+    <filter id="dialog-shadow" x="-12%" y="-12%" width="124%" height="134%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0d100d" flood-opacity=".56"/>
+    </filter>
+    <clipPath id="dialog-corners">
+      <rect x="32" y="24" width="760" height="460" rx="14"/>
+    </clipPath>
+    <!-- Icon geometry from the repository's vendored lucide-static assets (ISC). -->
+    <symbol id="plug" viewBox="0 0 24 24">
+      <path d="M12 22v-5M15 8V2M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1zM9 8V2"/>
+    </symbol>
+    <symbol id="terminal" viewBox="0 0 24 24">
+      <path d="M12 19h8M4 17l6-6-6-6"/>
+    </symbol>
+    <symbol id="close" viewBox="0 0 24 24">
+      <path d="M18 6 6 18M6 6l12 12"/>
+    </symbol>
+    <symbol id="chevron-down" viewBox="0 0 24 24">
+      <path d="m6 9 6 6 6-6"/>
+    </symbol>
+    <symbol id="chevron-right" viewBox="0 0 24 24">
+      <path d="m9 18 6-6-6-6"/>
+    </symbol>
+    <symbol id="eye" viewBox="0 0 24 24">
+      <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
+      <circle cx="12" cy="12" r="3"/>
+    </symbol>
+    <symbol id="check" viewBox="0 0 24 24">
+      <path d="M20 6 9 17l-5-5"/>
+    </symbol>
+    <symbol id="arrow-right" viewBox="0 0 24 24">
+      <path d="M5 12h14m-7-7 7 7-7 7"/>
+    </symbol>
+  </defs>
+
+  <rect id="backdrop" width="824" height="508" fill="#181d19"/>
+  <rect x="32" y="24" width="760" height="460" rx="14" fill="#272f27" filter="url(#dialog-shadow)"/>
+  <g id="connection-dialog" clip-path="url(#dialog-corners)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <g id="dialog-header">
+      <use href="#plug" x="55" y="42" width="16" height="16" stroke="#bdd19d"/>
+      <text class="title" x="80" y="55">编辑连接</text>
+      <g id="protocol-selector">
+        <rect x="157" y="35" width="90" height="30" rx="7" fill="#202721"/>
+        <use href="#terminal" x="168" y="43" width="14" height="14" stroke="#b3bfaf"/>
+        <text class="control" x="188" y="55">SSH</text>
+        <use href="#chevron-down" x="224" y="44" width="12" height="12" stroke="#b3bfaf"/>
+      </g>
+      <use id="close-dialog" href="#close" x="752" y="42" width="16" height="16" stroke="#bbc5b8"/>
+    </g>
+
+    <g id="wizard-steps">
+      <rect x="56" y="84" width="712" height="36" rx="9" fill="#222a23"/>
+      <g id="current-step">
+        <rect x="59" y="87" width="233" height="30" rx="7" fill="#3b4b34"/>
+        <circle cx="136" cy="102" r="9" fill="#bed19e"/>
+        <text class="control strong-ink" x="136" y="106.5" text-anchor="middle">1</text>
+        <text class="control accent-ink" x="153" y="106.5">连接与认证</text>
+      </g>
+      <g id="route-step">
+        <circle cx="384" cy="102" r="9" fill="#344233"/>
+        <text class="label" x="384" y="106.5" text-anchor="middle">2</text>
+        <text class="label" x="401" y="106.5">连接路径</text>
+      </g>
+      <g id="review-step">
+        <circle cx="613" cy="102" r="9" fill="#344233"/>
+        <text class="label" x="613" y="106.5" text-anchor="middle">3</text>
+        <text class="label" x="630" y="106.5">核对与测试</text>
+      </g>
+    </g>
+
+    <g id="connection-info">
+      <rect class="card" x="56" y="132" width="348" height="238" rx="10"/>
+      <text class="section" x="72" y="162">连接信息</text>
+      <g id="copy-from-host">
+        <rect x="272" y="144" width="116" height="26" rx="7" fill="#303b30"/>
+        <text class="label accent-ink" x="330" y="161.5" text-anchor="middle">从已有主机复制</text>
+      </g>
+      <g id="connection-name">
+        <text class="label" x="72" y="192">连接名称</text>
+        <rect class="input" x="72" y="199" width="316" height="34" rx="8"/>
+        <text class="control" x="84" y="221">Demo-ScaleOS</text>
+      </g>
+      <g id="host-address">
+        <text class="label" x="72" y="252">主机地址</text>
+        <rect class="input" x="72" y="259" width="228" height="34" rx="8"/>
+        <text class="control mono" x="84" y="281">192.0.2.33</text>
+      </g>
+      <g id="host-port">
+        <text class="label" x="312" y="252">端口</text>
+        <rect class="input" x="312" y="259" width="76" height="34" rx="8"/>
+        <text class="control mono" x="324" y="281">22</text>
+      </g>
+      <g id="asset-group">
+        <text class="label" x="72" y="312">资产分组</text>
+        <rect class="input" x="72" y="319" width="316" height="34" rx="8"/>
+        <text class="label" x="84" y="341">未分组，可输入新分组</text>
+        <use href="#chevron-down" x="362" y="329" width="14" height="14" stroke="#b3bfaf"/>
+      </g>
+    </g>
+
+    <g id="authentication">
+      <rect class="card" x="420" y="132" width="348" height="238" rx="10"/>
+      <text class="section" x="436" y="162">认证</text>
+      <g id="username">
+        <text class="label" x="436" y="192">用户名</text>
+        <rect class="input" x="436" y="199" width="316" height="34" rx="8"/>
+        <text class="control mono" x="448" y="221">root</text>
+      </g>
+      <g id="auth-method">
+        <text class="label" x="436" y="252">认证方式</text>
+        <g id="password-method">
+          <rect x="436" y="259" width="76" height="34" rx="8" fill="#3b4b34"/>
+          <circle cx="453" cy="276" r="6" fill="#bed19e"/>
+          <circle cx="453" cy="276" r="2.5" fill="#3b4b34"/>
+          <text class="control accent-ink" x="466" y="281">密码</text>
+        </g>
+        <g id="key-method">
+          <circle cx="538" cy="276" r="5.5" stroke="#aeb9aa" stroke-width="1.25"/>
+          <text class="control muted-ink" x="551" y="281">私钥文件</text>
+        </g>
+        <g id="agent-method">
+          <circle cx="637" cy="276" r="5.5" stroke="#aeb9aa" stroke-width="1.25"/>
+          <text class="control muted-ink" x="650" y="281">SSH Agent</text>
+        </g>
+      </g>
+      <g id="password">
+        <text class="label" x="436" y="312">密码</text>
+        <rect class="input" x="436" y="319" width="224" height="34" rx="8"/>
+        <text class="control mono" x="448" y="341">••••••••</text>
+        <use id="reveal-password" href="#eye" x="632" y="328" width="16" height="16" stroke="#b3bfaf" aria-label="查看密码"/>
+      </g>
+      <g id="remember-password">
+        <rect x="676" y="329" width="14" height="14" rx="4" fill="#bed19e"/>
+        <use href="#check" x="677" y="330" width="12" height="12" stroke="#222c1a" stroke-width="2.5"/>
+        <text class="label muted-ink" x="698" y="341">保存密码</text>
+      </g>
+    </g>
+
+    <g id="advanced-options">
+      <use href="#chevron-right" x="56" y="390" width="14" height="14" stroke="#b3bfaf"/>
+      <text class="control muted-ink" x="78" y="402">高级选项</text>
+    </g>
+
+    <g id="dialog-footer">
+      <rect x="32" y="424" width="760" height="60" fill="#303a2f"/>
+      <text id="cancel" class="control muted-ink" x="69" y="459">取消</text>
+      <g id="next-step">
+        <rect x="674" y="437" width="94" height="34" rx="8" fill="#bed19e"/>
+        <text class="control strong-ink" x="690" y="459">下一步</text>
+        <use href="#arrow-right" x="738" y="447" width="14" height="14" stroke="#222c1a"/>
+      </g>
+    </g>
+  </g>
+</svg>

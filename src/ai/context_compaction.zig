@@ -119,6 +119,8 @@ fn budgetCutoff(config: pc.ProviderConfig, messages: []const p.Message, reserve:
 pub const Commit = struct {
     context: *anyopaque,
     apply: *const fn (*anyopaque, []const p.Message) anyerror!void,
+    /// A successful, current result can wait for the caller before publishing.
+    ready: ?*const fn (*anyopaque) bool = null,
 };
 pub const Service = struct {
     job: ?*Job = null,
@@ -173,6 +175,13 @@ pub const Service = struct {
             if (self.status == .running) self.cancel();
         }
         if (!job.done.load(.acquire)) return false;
+        if (self.status == .running and job.generation == self.generation and job.failure == null) {
+            if (commit) |publisher| {
+                if (publisher.ready) |ready| {
+                    if (!ready(publisher.context)) return false;
+                }
+            }
+        }
         job.thread.?.join();
         defer job.destroy();
         self.job = null;
@@ -404,15 +413,29 @@ test "AiHost integration compaction persistence failure preserves the visible ch
     job.done.store(true, .release);
     var service: Service = .{ .job = job, .status = .running };
     defer service.deinit();
-    var called = false;
     const CommitFailure = struct {
+        can_save: bool = false,
+        called: bool = false,
+
+        fn ready(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.can_save;
+        }
+
         fn apply(raw: *anyopaque, _: []const p.Message) !void {
-            @as(*bool, @ptrCast(@alignCast(raw))).* = true;
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.called = true;
             return error.StorageUnavailable;
         }
     };
-    try std.testing.expect(service.pollWithCommit(a, identity_value, &h, false, .{ .context = &called, .apply = CommitFailure.apply }));
-    try std.testing.expect(called and service.status == .failed);
+    var publisher: CommitFailure = .{};
+    const commit: Commit = .{ .context = &publisher, .apply = CommitFailure.apply, .ready = CommitFailure.ready };
+    try std.testing.expect(!service.pollWithCommit(a, identity_value, &h, false, commit));
+    try std.testing.expect(!publisher.called and service.status == .running);
+    try std.testing.expectEqual(original, fingerprint(h.messages));
+    publisher.can_save = true;
+    try std.testing.expect(service.pollWithCommit(a, identity_value, &h, false, commit));
+    try std.testing.expect(publisher.called and service.status == .failed);
     try std.testing.expectEqual(error.StorageUnavailable, service.failure.?);
     try std.testing.expectEqual(original, fingerprint(h.messages));
 }

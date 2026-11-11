@@ -3,6 +3,19 @@ const model = @import("model.zig");
 const envelope = @import("../../config/connection_envelope.zig");
 pub const validatePayload = model.validatePayload;
 
+pub fn remapImport(a: std.mem.Allocator, payload: []const u8, ids: []const @import("../../config/host_import.zig").Mapping) ![]u8 {
+    var parsed = try model.parse(a, payload);
+    defer parsed.deinit();
+    var value = parsed.value();
+    var hops: [8]model.Hop = undefined;
+    if (value.access == .ssh_route) {
+        const source = value.access.ssh_route.hops;
+        for (source, 0..) |hop, i| hops[i] = .{ .asset_id = @backingInt(try @import("../../config/host_import.zig").mapped(ids, @fromBackingInt(hop.asset_id))) };
+        value.access = .{ .ssh_route = .{ .hops = hops[0..source.len] } };
+    }
+    return std.json.Stringify.valueAlloc(a, value, .{});
+}
+
 pub fn encode(a: std.mem.Allocator, original: envelope.Envelope) !envelope.Envelope {
     try original.validate();
     if (!std.mem.eql(u8, original.protocol_id, model.protocol_id)) return error.ProtocolMismatch;

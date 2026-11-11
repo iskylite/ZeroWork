@@ -16,11 +16,12 @@ pub fn elapsedLabel(buffer: []u8, elapsed_ms: u64) ![]const u8 {
     return if (seconds < 60) std.fmt.bufPrint(buffer, "处理用时{d}秒", .{seconds}) else std.fmt.bufPrint(buffer, "处理用时{d}分钟{d:0>2}秒", .{ seconds / 60, seconds % 60 });
 }
 pub fn elapsedMs(turn: *const Turn, now_wall: u64, now_mono: u64) u64 {
-    const elapsed = if (turn.ended_at_ms) |ended| (if (turn.started_mono_ms > 0) turn.elapsed_ms else ended -| turn.sent_at_ms) else (if (turn.started_mono_ms > 0) now_mono -| turn.started_mono_ms else now_wall -| turn.sent_at_ms);
+    const clock = turn.displayClock(now_mono);
+    const elapsed = if (turn.restored_interrupted) (if (turn.started_mono_ms > 0) clock -| turn.started_mono_ms else turn.elapsed_ms) else if (turn.ended_at_ms) |ended| (if (turn.started_mono_ms > 0) turn.elapsed_ms else ended -| turn.sent_at_ms) else (if (turn.started_mono_ms > 0) now_mono -| turn.started_mono_ms else now_wall -| turn.sent_at_ms);
     var waiting: u64 = 0;
     for (turn.steps.items) |step| {
         waiting +|= step.approval_elapsed_ms;
-        if (step.approval_started_ms) |start| waiting +|= (step.ended_ms orelse now_mono) -| start;
+        if (step.approval_started_ms) |start| waiting +|= (step.ended_ms orelse clock) -| start;
     }
     return elapsed -| waiting;
 }
@@ -45,6 +46,7 @@ pub const Label = struct {
     animated: bool = true,
 };
 pub fn turnLabel(turn: *const Turn) Label {
+    if (turn.restored_interrupted) return .{ .text = "已中断", .animated = false };
     if (turn.ended_at_ms != null) return .{ .text = "～回合结束～", .animated = false };
     // A decision that needs the user takes precedence over other active tools.
     for (turn.steps.items) |step| if (step.phase == .approval) return .{ .text = "等待确认 · 流程暂停", .animated = false };
@@ -114,8 +116,8 @@ const Clock = struct {
 };
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, turn: *const Turn, texture: ?u32) !*ui.Node {
     const row = try ui.box(cx, rowStyle(), .{});
-    const completed = turn.ended_at_ms != null;
-    row.meta.ownership.meta.test_id = if (completed) "ai.turn.complete" else "ai.turn.running";
+    const completed = turn.displayFinished();
+    row.meta.ownership.meta.test_id = if (turn.restored_interrupted) "ai.turn.interrupted" else if (completed) "ai.turn.complete" else "ai.turn.running";
     const logo = try ui.image(cx, texture orelse 0, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
     logo.meta.ownership.meta.test_id = "ai.turn.logo";
     try row.appendChild(cx.allocator, logo);

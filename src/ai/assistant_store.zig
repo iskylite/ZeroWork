@@ -84,6 +84,7 @@ pub const Phase = enum { idle, running, approval, done, failed, stopped };
 pub const CompactionActivity = struct {
     after_message: ?usize,
     status: @import("context_compaction.zig").Status = .running,
+    saving_since_frame: ?u64 = null,
     before_tokens: usize = 0,
     after_tokens: usize = 0,
 };

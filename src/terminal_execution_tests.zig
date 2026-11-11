@@ -6,6 +6,7 @@ const native = @import("local/native.zig");
 const host = @import("host/session_host.zig");
 const terminal = @import("host/terminal_service.zig");
 const execution = @import("host/terminal_execution.zig");
+const identity = @import("host/identity.zig");
 const protocol = @import("local/execution.zig");
 const a = std.testing.allocator;
 test {
@@ -191,6 +192,19 @@ const Fixture = struct {
             return self.service.?.executionSnapshot() catch |err| {
                 if (err == error.WorkerBusy) {
                     try self.tick();
+                    pause();
+                    continue;
+                }
+                return err;
+            };
+        }
+        return error.MailboxTimeout;
+    }
+    fn awaitExecutionOutput(self: *Fixture, id: identity.ExecutionId, max_bytes: usize) !execution.Output {
+        const until = native.zw_local_monotonic_ms() + 3000;
+        while (native.zw_local_monotonic_ms() < until) {
+            return self.service.?.executionOutput(id, a, 0, max_bytes) catch |err| {
+                if (err == error.WorkerBusy) {
                     pause();
                     continue;
                 }
@@ -821,7 +835,7 @@ test "production Local precise user input handoff keeps builtin foreground and a
     try std.testing.expect(written);
     const ended = try f.wait(.interval_recorded);
     try std.testing.expect(ended.input_handed_off and ended.process.?.foreground_finished and ended.process.?.exit_code == 0 and !ended.remote_effect_unknown);
-    var output = try f.service.?.executionOutput(grant.execution_id, a, 0, 65536);
+    var output = try f.awaitExecutionOutput(grant.execution_id, 65536);
     defer output.deinit(a);
     try std.testing.expect(std.mem.indexOf(u8, output.bytes, "USER_HANDOFF_human-value\r\n") != null);
     try f.run("true");
@@ -1045,7 +1059,7 @@ test "production Local native secret consumer uses private bytes and reports onl
     try std.testing.expect(finished.input_wait == null and finished.input_receipt.?.kind == .host_secret and finished.input_receipt.?.stage == .consumed and finished.input_receipt.?.accepted_bytes == 0);
     try std.testing.expectEqual(@as(?u8, 0), finished.process.?.exit_code);
     try std.testing.expect(std.mem.indexOf(u8, f.output.items, "TEST-PRIVATE-SECRET-946c") == null);
-    var observed = try f.service.?.executionOutput(finished.execution_id.?, a, 0, 8192);
+    var observed = try f.awaitExecutionOutput(finished.execution_id.?, 8192);
     defer observed.deinit(a);
     try std.testing.expect(std.mem.indexOf(u8, observed.bytes, "TEST-PRIVATE-SECRET-946c") == null);
     try std.testing.expect(std.mem.indexOf(u8, observed.bytes, "OLD-FD-READ:") == null);

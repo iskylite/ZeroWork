@@ -3,7 +3,21 @@ const std = @import("std");
 const ui = @import("ui");
 const clock = @import("../platform/realtime.zig");
 
-pub const Group = struct { pinned: ?*Preview = null };
+pub const Group = struct {
+    pinned: ?*Preview = null,
+
+    pub fn dismissOnOutsidePress(self: *Group, target: *ui.Node) void {
+        const pinned = self.pinned orelse return;
+        if (!pinned.open.peek() or target.isDescendantOf(pinned.trigger) or
+            @import("floating_input.zig").containsPress(pinned.cx, pinned.panel, target)) return;
+        pinned.close.invoke();
+        pinned.preview = false;
+        pinned.pinned = false;
+        pinned.leave_ns = null;
+        self.pinned = null;
+        pinned.cx.requestRedraw();
+    }
+};
 
 pub const Preview = struct {
     group: *Group,

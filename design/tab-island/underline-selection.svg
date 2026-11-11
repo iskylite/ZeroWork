@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="946" height="118" viewBox="0 0 946 118" xml:lang="zh-CN">
+  <title>会话标签栏</title>
+  <style>
+    .tab-label { font-family: "Inter Variable", Inter, system-ui, sans-serif; font-size: 25px; font-weight: 600; }
+    .kylin-0 { opacity: .08; }
+    .kylin-1 { opacity: .10; }
+    .kylin-2 { opacity: .20; }
+    .kylin-3 { fill: #b2def0; }
+    .kylin-4 { fill: none; stroke: #231815; stroke-width: .88; }
+    .kylin-5 { fill: #009fe8; }
+    .kylin-6 { fill: #0091da; }
+    .kylin-7 { fill: #0062b0; }
+    .kylin-8 { fill: #004380; }
+  </style>
+  <defs>
+    <linearGradient id="workspace-backdrop">
+      <stop stop-color="#191c17"/>
+      <stop offset=".57" stop-color="#171c1e"/>
+      <stop offset="1" stop-color="#161815"/>
+    </linearGradient>
+    <path id="close-icon" d="M-6-6 6 6M6-6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    <symbol id="kylin" viewBox="0 0 64 64">
+<g id="kylin-shadow">
+	<path class="kylin-0" d="M36.5,64c-1.1,0-2-0.9-2-2c0-0.4,0.1-0.8,0.4-1.1l0.7-1c-0.3,0.2-0.6,0.3-1,0.3l-8-0.2c-1.1,0-2-0.9-2-2
+		c0-0.5,0.2-1.1,0.6-1.4l5-4.8l3.5-4.1l-1.4-0.9l-3.2,1.7l-0.2,0.1l-5.8,2.2c-0.2,0.1-0.5,0.1-0.7,0.1h-0.3l-3.9-0.7L16,53.6
+		l-0.9,6.5c-0.1,1-1,1.7-2,1.7H5.4c-1.1,0-2-0.9-2-2c0-0.5,0.2-0.9,0.5-1.3l2.8-3.4l2-2.3L7.5,50c-0.1-0.1-0.1-0.3-0.1-0.5L6.2,42
+		l-3.9-9.8c-0.2-0.6-0.2-1.2,0.1-1.8l4.3-7.2l2.9-6.3c0.2-0.4,0.4-0.7,0.8-0.9l6.3-3.9l0.4-0.2l6.8-7c0.4-0.4,0.9-0.6,1.4-0.6
+		C26,4.6,26.7,5.2,27,6l3.4-3.4c0.8-0.8,2-0.8,2.8,0c0.5,0.5,0.7,1.3,0.5,2l-3,9l1.6,6.6c0.2,0.6,0.1,1.2-0.3,1.7l-3.8,5.3l5.6,4.2
+		l9.3,3.7l2.3-1.2l3.8-2.1l4-6c0.3-0.4,0.6-0.7,1.1-0.8l7.1-2.1c0.2-0.1,0.4-0.1,0.6-0.1c1.1,0,2,0.9,2,2c0,0.1,0,0.2,0,0.3
+		l-1.4,9.3c-0.1,0.8-0.6,1.4-1.3,1.7l-4.5,1.5c-0.2,0.1-0.4,0.1-0.7,0.1h-0.3l-2.6-0.5l-4.3,2.5l0.3,5.7l2.8,5.7
+		c0.4,0.8,0.2,1.7-0.5,2.3l-5.2,4.8l0.3,3.7c0.1,1.1-0.7,2.1-1.8,2.2c-0.1,0-0.1,0-0.2,0L36.5,64z M36.5,58.1c0,0.1,0,0.2,0,0.3
+		l3.9-5.6l-0.1-0.1l-3.8,3L36.5,58.1z"/>
+	<path class="kylin-1" d="M36.5,63c-0.6,0-1-0.4-1-1c0-0.2,0.1-0.4,0.2-0.6l5.9-8.6l-1.1-1.5l-5,4v2.8c0,0.6-0.4,1-1,1L26.6,59
+		c-0.6,0-1-0.5-1-1c0-0.3,0.1-0.5,0.3-0.7l5-4.8l4.2-5l-2.7-1.8l-3.8,2h-0.1l-5.8,2.2c-0.1,0-0.2,0.1-0.4,0.1h-0.2l-4.5-0.8L15,53.3
+		L14.1,60c-0.1,0.5-0.5,0.9-1,0.9H5.4c-0.6,0-1-0.4-1-1c0-0.2,0.1-0.5,0.2-0.6l2.8-3.4l2.3-2.7l-1.4-3.4c0-0.1,0-0.1-0.1-0.2L7,41.9
+		L3.1,32c-0.1-0.3-0.1-0.6,0-0.9l4.3-7.2l2.9-6.3c0.1-0.2,0.2-0.3,0.4-0.4l6.3-3.8l0.5-0.3L24.4,6c0.4-0.4,1-0.4,1.4,0
+		c0.2,0.2,0.3,0.5,0.3,0.7s0,0.3-0.1,0.5l-0.9,2.2l6-6c0.4-0.4,1-0.4,1.4,0c0.3,0.3,0.4,0.6,0.2,1l-3,9.3l1.7,6.9
+		c0.1,0.3,0,0.6-0.2,0.8l-4.4,6.1l6.5,4.8l9.8,3.9l2.7-1.4l4-2.2l4.1-6.2c0.1-0.2,0.3-0.3,0.5-0.4l7.1-2.1c0.5-0.2,1.1,0.1,1.3,0.6
+		c0.1,0.2,0.1,0.3,0,0.5l-1.4,9.3c-0.1,0.4-0.3,0.7-0.6,0.8l-4.5,1.5c-0.1,0-0.2,0.1-0.3,0l0,0l-3-0.5l-5.2,3l0.3,6.5l2.9,5.9
+		c0.2,0.4,0.1,0.9-0.2,1.2l-5.5,5.1l0.3,4.2c0,0.6-0.4,1-0.9,1.1h-0.1L36.5,63z"/>
+	<path class="kylin-2" d="M35.5,62c-0.6,0-1-0.4-1-1c0-0.2,0.1-0.4,0.2-0.6l5.9-8.6l-1.1-1.5l-5,4v2.8c0,0.6-0.4,1-1,1L25.6,58
+		c-0.6,0-1-0.5-1-1c0-0.3,0.1-0.5,0.3-0.7l5-4.8l4.2-5l-2.7-1.8l-3.8,2h-0.1l-5.8,2.2c-0.1,0-0.2,0.1-0.4,0.1h-0.2l-4.5-0.8L14,52.3
+		L13.1,59c-0.1,0.5-0.5,0.9-1,0.9H4.4c-0.6,0-1-0.4-1-1c0-0.2,0.1-0.5,0.2-0.6l2.8-3.4l2.3-2.7l-1.4-3.4c0-0.1,0-0.1-0.1-0.2L6,40.9
+		L2.1,31c-0.1-0.3-0.1-0.6,0-0.9l4.3-7.2l2.9-6.3c0.1-0.2,0.2-0.3,0.4-0.4l6.3-3.9l0.5-0.3l6.9-7.1c0.4-0.4,1-0.4,1.4,0
+		c0.2,0.2,0.3,0.5,0.3,0.7s0,0.3-0.1,0.5l-0.9,2.2l6-6c0.4-0.4,1-0.4,1.4,0c0.3,0.3,0.4,0.6,0.2,1l-3,9.3l1.7,6.9
+		c0.1,0.3,0,0.6-0.2,0.8l-4.4,6.1l6.5,4.8l9.8,3.9l2.7-1.4l4-2.2l4.1-6.2c0.1-0.2,0.3-0.3,0.5-0.4l7.1-2.1c0.5-0.2,1.1,0.1,1.3,0.6
+		c0.1,0.2,0.1,0.3,0,0.5l-1.4,9.3c-0.1,0.4-0.3,0.7-0.6,0.8l-4.5,1.5c-0.1,0-0.2,0.1-0.3,0h0L52,35l-5.2,3l0.3,6.5l2.9,5.9
+		c0.2,0.4,0.1,0.9-0.2,1.2l-5.5,5.1l0.3,4.2c0,0.6-0.4,1-0.9,1.1h-0.1L35.5,62z"/>
+	<g id="kylin-mark">
+		<polygon class="kylin-3" points="21,34.7 18,26.3 10,32.4 15.2,33.2 		"/>
+		<polygon class="kylin-4" points="32,38.4 32.2,38.5 32.2,38.4 		"/>
+		<polygon class="kylin-5" points="32.2,38.5 40,41.8 42.2,36.3 32,38.4 		"/>
+		<polygon class="kylin-3" points="19.7,41.1 32,38.4 21,34.7 		"/>
+		<polygon class="kylin-5" points="10,32.4 11.5,42.9 15.2,33.2 		"/>
+		<polygon class="kylin-6" points="15.2,33.2 11.5,42.9 21,34.7 		"/>
+		<polygon class="kylin-5" points="11.5,42.9 19.7,41.1 21,34.7 		"/>
+		<polygon class="kylin-4" points="19.7,16.5 19.8,16.6 19.8,16.6 		"/>
+		<polygon class="kylin-7" points="18,26.3 24.4,26.6 24.6,22.1 		"/>
+		<polygon class="kylin-6" points="31.9,32.1 24.4,26.6 21,34.7 		"/>
+		<polygon class="kylin-4" points="19.8,16.5 19.7,16.5 19.8,16.6 		"/>
+		<polygon class="kylin-5" points="21,34.7 24.4,26.6 18,26.3 		"/>
+		<polygon class="kylin-7" points="33.5,57.1 33.5,53.9 33.5,53.9 30.7,52.2 		"/>
+		<polygon class="kylin-8" points="25.6,57 33.5,57.1 30.7,52.2 		"/>
+		<polygon class="kylin-8" points="30.7,52.2 33.5,53.9 33.5,53.8 35.7,46.3 		"/>
+		<polygon class="kylin-7" points="43.2,56.4 49.1,51 41.8,51.8 		"/>
+		<polygon class="kylin-8" points="35.5,61 43.6,61 43.2,56.4 38.1,57.6 43.4,60.6 38.1,57.6 43.2,56.4 41.8,51.8 		"/>
+		<polygon class="kylin-7" points="33.5,53.8 39.6,49 35.7,46.3 		"/>
+		<polygon class="kylin-8" points="49.1,51 46.1,44.9 41.8,51.8 		"/>
+		<polygon class="kylin-8" points="4.4,58.9 12.1,58.9 7.2,55.5 		"/>
+		<polygon class="kylin-6" points="30.8,3 23.1,10.7 27.1,9.3 		"/>
+		<polygon class="kylin-6" points="24.1,5.6 16.5,13.4 21.4,10.4 		"/>
+		<polygon class="kylin-6" points="39.7,49 41.8,51.8 46.1,44.9 35.7,46.3 		"/>
+		<polygon class="kylin-5" points="27.1,9.3 23.1,10.7 27.6,12.6 		"/>
+		<polygon class="kylin-3" points="22.1,10.6 24.1,5.7 21.4,10.4 		"/>
+		<polygon class="kylin-3" points="27.6,12.6 30.8,3 27.1,9.3 		"/>
+		<polygon class="kylin-6" points="9.9,52.3 7.2,55.5 13.1,51.9 8.3,48.3 		"/>
+		<polygon class="kylin-5" points="10.1,24.9 10,32.4 18,26.3 		"/>
+		<polygon class="kylin-7" points="12.1,58.9 13.1,51.9 7.2,55.5 		"/>
+		<polygon class="kylin-7" points="46.1,44.9 45.7,37.5 40,41.8 		"/>
+		<polygon class="kylin-5" points="35.7,46.3 46.1,44.9 40,41.8 		"/>
+		<polygon class="kylin-6" points="40,41.8 45.7,37.5 42.2,36.3 		"/>
+		<polygon class="kylin-6" points="45.7,37.5 51.8,34 49.6,32.3 		"/>
+		<polygon class="kylin-7" points="31.5,43.5 35.7,46.3 40,41.8 		"/>
+		<polygon class="kylin-5" points="45.3,34.6 42.2,36.3 45.7,37.5 49.6,32.3 		"/>
+		<polygon class="kylin-8" points="27.2,45.7 31.5,43.5 19.7,41.1 		"/>
+		<polygon class="kylin-6" points="32,38.4 31.5,43.5 40,41.8 		"/>
+		<polygon class="kylin-7" points="32,38.4 19.7,41.1 31.5,43.5 		"/>
+		<polygon class="kylin-3" points="56.7,29.2 61,23.8 53.9,25.9 56.6,29.3 		"/>
+		<polygon class="kylin-6" points="55.1,34.6 59.6,33.1 56.6,29.3 		"/>
+		<polygon class="kylin-7" points="56.6,29.3 51.7,34 55.1,34.6 		"/>
+		<polygon class="kylin-5" points="49.6,32.3 51.8,34 53.9,25.9 		"/>
+		<polygon class="kylin-5" points="56.6,29.3 56.6,29.3 59.6,33.1 61,23.8 		"/>
+		<polygon class="kylin-6" points="53.9,25.9 51.7,34 56.6,29.3 		"/>
+		<polygon class="kylin-6" points="21.4,48 27.2,45.7 19.7,41.1 		"/>
+		<polygon class="kylin-6" points="18,26.3 10.2,17 10.1,24.9 		"/>
+		<polygon class="kylin-6" points="16.5,13.1 10.2,17 17.2,18.8 		"/>
+		<polygon class="kylin-5" points="17.2,18.8 10.2,17 18,26.3 		"/>
+		<polygon class="kylin-5" points="10.1,24.9 10.2,17 7.3,23.4 		"/>
+		<polygon class="kylin-7" points="18,26.3 19.8,16.6 19.7,16.5 16.5,13.1 17.2,18.8 		"/>
+		<polygon class="kylin-5" points="19.8,16.6 21.4,10.4 16.5,13.1 19.7,16.5 		"/>
+		<polygon class="kylin-7" points="7.3,23.4 3,30.6 10.1,24.9 		"/>
+		<polygon class="kylin-6" points="10.1,24.9 10.1,24.9 3,30.6 10,32.4 		"/>
+		<polygon class="kylin-8" points="13.1,51.9 16.2,47.1 11.5,42.9 		"/>
+		<polygon class="kylin-5" points="16.2,47.1 21.4,48 19.7,41.1 		"/>
+		<polygon class="kylin-7" points="8.3,48.3 13.1,51.9 11.5,42.9 		"/>
+		<polygon class="kylin-7" points="11.5,42.9 16.2,47.1 19.7,41.1 		"/>
+		<polygon class="kylin-7" points="3,30.6 7,40.6 10,32.4 		"/>
+		<polygon class="kylin-5" points="7,40.6 8.3,48.3 11.5,42.9 		"/>
+		<polygon class="kylin-6" points="10,32.4 7,40.6 11.5,42.9 		"/>
+		<polygon class="kylin-3" points="42.2,36.3 31.9,32.1 32,38.4 		"/>
+		<polygon class="kylin-5" points="32,38.4 32,38.4 31.9,32.1 21,34.7 		"/>
+		<polygon class="kylin-6" points="19.8,16.6 18,26.3 24.6,22.1 		"/>
+		<polygon class="kylin-5" points="19.8,16.6 24.6,22.1 29.4,19.7 		"/>
+		<polygon class="kylin-3" points="24.4,26.6 29.4,19.7 24.6,22.1 		"/>
+		<polygon class="kylin-3" points="19.8,16.6 29.4,19.7 27.6,12.6 		"/>
+		<polygon class="kylin-6" points="27.6,12.6 23.1,10.7 21.4,10.4 19.8,16.6 		"/>
+	</g>
+</g>
+    </symbol>
+    <symbol id="sugon" viewBox="0 0 72 72">
+      <image width="72" height="72" href="data:image/png;base64,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"/>
+    </symbol>
+  </defs>
+  <rect width="946" height="118" fill="url(#workspace-backdrop)"/>
+  <g id="workspace-tabs">
+    <rect id="tab-island" x="71" y="13" width="804" height="72" rx="36" fill="#313730"/>
+    <g id="tab-ai01">
+      <rect x="95" y="31" width="5" height="36" rx="2" fill="#b2bf8f"/>
+      <use href="#kylin" x="117" y="35" width="28" height="28"/>
+      <circle cx="143" cy="37" r="5" fill="#8db6a3" stroke="#313730" stroke-width="1.5"/>
+      <text class="tab-label" x="164" y="59" fill="#ced1c1">Demo-Compute01</text>
+      <g transform="translate(377 49)" color="#bbc1b2">
+        <title>关闭页签</title>
+        <use href="#close-icon"/>
+      </g>
+    </g>
+    <g id="tab-admin02" data-state="selected">
+      <rect id="tab-selection" x="582" y="73" width="56" height="4" rx="2" fill="#b2bf8f"/>
+      <rect x="433" y="31" width="5" height="36" rx="2" fill="#b2bf8f"/>
+      <use href="#sugon" x="455" y="35" width="28" height="28"/>
+      <circle cx="481" cy="37" r="5" fill="#bbc1b2" stroke="#313730" stroke-width="1.5"/>
+      <text class="tab-label" x="502" y="59" fill="#e6e8dd">Demo-Admin02</text>
+      <g transform="translate(771 49)" color="#bbc1b2">
+        <title>关闭页签</title>
+        <use href="#close-icon"/>
+      </g>
+    </g>
+    <g id="add-tab" transform="translate(839 49)">
+      <title>新建页签</title>
+      <path d="M-9 0H9M0-9V9" fill="none" stroke="#ced1c1" stroke-width="3" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>

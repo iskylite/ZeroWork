@@ -5,9 +5,9 @@ import {createHash} from 'node:crypto';
 import {mkdir,mkdtemp,realpath,open,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
-import {waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,screenPos,sleep,scrollAt} from '../zig-out/share/zenit/harness/client.ts';
+import {waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,screenPos,sleep,scrollAt,mouseMove} from '../zig-out/share/zenit/harness/client.ts';
 const binary=resolve(process.argv[2]),out=resolve(process.argv[3]),theme=process.argv[4]??'dark';
-assert(['dark','light','sauber'].includes(theme));
+assert(['dark','light','sauber','forest'].includes(theme));
 await mkdir(out,{recursive:true});
 const isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-wizard-advanced-'))),data=join(isolated,'data'),rpc=join(isolated,'rpc');
 await mkdir(data);await mkdir(rpc);
@@ -58,6 +58,15 @@ async function closed(){await waitFor(async()=>!(await query('wizard.close')).so
 async function capture(name:string){await sleep(500);const dialog=await visible('wizard.dialog');await writeFile(join(out,name+'.json'),JSON.stringify(dialog,null,2));assert((await screenshot(join(out,name+'.png'))).ok);report.stages.push({name,rect:dialog.rect});}
 async function scrollBottom(){const area=await visible('wizard.scroll.identity');await scrollAt(area.rect.x+area.rect.w-20,area.rect.y+area.rect.h/2,0,-1800);await sleep(300);}
 async function scrollTop(){const area=await visible('wizard.scroll.identity');await scrollAt(area.rect.x+area.rect.w-20,area.rect.y+area.rect.h/2,0,2200);await sleep(300);}
+async function pickJump(trigger:string,name:string){
+ await click(trigger);await visible('wizard.route.search');
+ await type_(name);await key('return');
+ await waitFor(async()=>!(await current('wizard.route.search'))||null);
+}
+async function routeBottom(){
+ const area=await visible('wizard.route.chain');
+ await scrollAt(area.rect.x+area.rect.w-20,area.rect.y+area.rect.h/2,0,-1200);await sleep(250);
+}
 async function editStartup(value:string){await scrollBottom();await click('wizard.startup');await key('a',{cmd:true});await type_(value);await sleep(200);}
 try{
  await waitForServerReady(30000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),child.pid);
@@ -71,10 +80,25 @@ try{
  assert(flatten(advanced).some(n=>n.test_id==='wizard.strict_host_key'),'Host key policy belongs to advanced subtree');
  await click('wizard.compression');await editStartup('echo first');await key('return');await type_('echo second');
  await resizeWindow(860,480);await scrollBottom();await capture('03-advanced-compact');const foot=(await visible('wizard.footer')).rect;assert(foot.y+foot.h<=480);
- await click('wizard.next.identity');await click('wizard.access.jump');await click('wizard.route.hop.0');await key('home');await key('return');
- await click('wizard.route.add');await click('wizard.route.hop.1');await key('end');await key('return');await capture('04-route-compact');
+ await click('wizard.next.identity');await click('wizard.access.jump');
+ await pickJump('wizard.route.hop.0','Jump B');
+ await resizeWindow(1440,900);await mouseMove(12,90);await capture('04a-route-horizontal');
+ const horizontalChain=(await visible('wizard.route.chain')).rect,horizontalTarget=(await visible('wizard.route.target')).rect;
+ assert(horizontalTarget.x+horizontalTarget.w<=horizontalChain.x+horizontalChain.w+1,'Horizontal target stays inside the chain');
+ assert.equal((await visible('wizard.dialog')).rect.h,352);
+ await click('wizard.route.insert.0');await visible('wizard.route.search');await capture('04b-route-picker');await key('escape');
+ await resizeWindow(860,480);
+ assert.match(text(await visible('wizard.route.hop.0')),/Jump B/);
+ await pickJump('wizard.route.insert.0','Jump A');await capture('04-route-compact');
+ assert.equal((await visible('wizard.dialog')).rect.h,432);
  assert.match(text(await visible('wizard.route.hop.0')),/Jump A/);assert.match(text(await visible('wizard.route.hop.1')),/Jump B/);
- const row=(await visible('wizard.route.hop.0')).rect;assert.equal(row.h,34);
+ const routeFooter=(await visible('wizard.footer')).rect;
+ await routeBottom();
+ const target=(await visible('wizard.route.target')).rect, chain=(await visible('wizard.route.chain')).rect;
+ assert(target.y+target.h<=chain.y+chain.h+1,'Last route node is inside the scroller');
+ assert.deepEqual((await visible('wizard.footer')).rect,routeFooter);
+ await mouseMove(12,90);await capture('04c-route-compact-bottom');
+ await scrollAt(chain.x+chain.w-20,chain.y+chain.h/2,0,1200);await sleep(250);
  await click('wizard.access.direct');
  assert(!(await current('wizard.route.hop.0')),'Direct access hides jump selectors');
  await click('wizard.next.route');await capture('05-direct-review-compact');
@@ -86,7 +110,7 @@ try{
  await click('wizard.next.route');await capture('08-restored-review-standard');
  assert.match(text(await visible('wizard.review.route')),/Jump A/);assert.match(text(await visible('wizard.review.route')),/Jump B/);
  await click('wizard.cancel');await closed();
- report.checks=['Fresh production wizard opens at 1440×900 and 860×480','14px checkbox and advanced host-key policy retained','Two independent jump selections and compact 34px selectors','Direct access hides the route and excludes it from review','Switching back restores both hops and their order','Restored route review and fixed footer remain usable at both sizes'];report.status='passed';
+ report.checks=['Fresh production wizard opens at 1440×900 and 860×480','14px checkbox and advanced host-key policy retained','Positioned jump insertion and independent compact route scrolling','Direct access hides the route and excludes it from review','Switching back restores both hops and their order','Restored route review and fixed footer remain usable at both sizes'];report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await screenshot(join(out,'failure.png')).catch(()=>{});throw e;}
 finally{await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));child.kill('SIGTERM');await ended;await log.close();await rm(isolated,{recursive:true,force:true});}
 console.log(JSON.stringify(report));

@@ -1,0 +1,233 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="480" viewBox="0 0 860 480" fill="none">
+  <title>新建 SSH 连接 · 配置文件写入失败</title>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #e9eee4; }
+      .title { font-size: 15px; font-weight: 600; }
+      .host { font-size: 22px; font-weight: 650; letter-spacing: -.35px; }
+      .section { font-size: 14px; font-weight: 600; }
+      .value { font-size: 13px; font-weight: 550; }
+      .label { font-size: 12px; fill: #aeb9aa; }
+      .action { font-size: 12px; font-weight: 550; fill: #c0d2a1; }
+      .control { font-size: 13px; font-weight: 550; }
+      .mono { font-family: "SF Mono", Menlo, Consolas, monospace; }
+      .strong-ink { fill: #222c1a; }
+      .accent-ink { fill: #d3e3b8; }
+      .muted-ink { fill: #bdc8b9; }
+      .error { font-size: 13px; font-weight: 600; fill: #f2ada7; }
+      .error-action { font-size: 12px; font-weight: 600; fill: #f4c6c0; }
+    </style>
+    <filter id="dialog-shadow" x="-12%" y="-12%" width="124%" height="134%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0d100d" flood-opacity=".56"/>
+    </filter>
+    <clipPath id="dialog-corners">
+      <rect x="32" y="24" width="760" height="432" rx="14"/>
+    </clipPath>
+    <clipPath id="route-viewport">
+      <rect x="436" y="222" width="316" height="96"/>
+    </clipPath>
+    <!-- Icon geometry from the repository's vendored lucide-static assets (ISC). -->
+    <symbol id="plug" viewBox="0 0 24 24">
+      <path d="M12 22v-5M15 8V2M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1zM9 8V2"/>
+    </symbol>
+    <symbol id="terminal" viewBox="0 0 24 24">
+      <path d="M12 19h8M4 17l6-6-6-6"/>
+    </symbol>
+    <symbol id="pencil" viewBox="0 0 24 24">
+      <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497zM15 5l4 4"/>
+    </symbol>
+    <symbol id="check" viewBox="0 0 24 24">
+      <path d="M20 6 9 17l-5-5"/>
+    </symbol>
+    <symbol id="chevron-down" viewBox="0 0 24 24">
+      <path d="m6 9 6 6 6-6"/>
+    </symbol>
+    <symbol id="close" viewBox="0 0 24 24">
+      <path d="M18 6 6 18M6 6l12 12"/>
+    </symbol>
+    <symbol id="monitor" viewBox="0 0 24 24">
+      <rect x="2" y="3" width="20" height="14" rx="2"/>
+      <path d="M8 21h8M12 17v4"/>
+    </symbol>
+    <symbol id="route" viewBox="0 0 24 24">
+      <circle cx="6" cy="19" r="3"/>
+      <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/>
+      <circle cx="18" cy="5" r="3"/>
+    </symbol>
+    <symbol id="server" viewBox="0 0 24 24">
+      <rect x="2" y="2" width="20" height="8" rx="2"/>
+      <rect x="2" y="14" width="20" height="8" rx="2"/>
+      <path d="M6 6h.01M6 18h.01"/>
+    </symbol>
+    <symbol id="circle-alert" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10"/>
+      <path d="M12 8v4m0 4h.01"/>
+    </symbol>
+    <symbol id="arrow-left" viewBox="0 0 24 24">
+      <path d="m12 19-7-7 7-7M19 12H5"/>
+    </symbol>
+  </defs>
+
+  <rect id="backdrop" width="860" height="480" fill="#181d19"/>
+  <g transform="translate(18 0)">
+    <rect x="32" y="24" width="760" height="432" rx="14" fill="#272f27" filter="url(#dialog-shadow)"/>
+    <g id="connection-dialog" clip-path="url(#dialog-corners)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <g id="dialog-header">
+        <use href="#plug" x="55" y="42" width="16" height="16" stroke="#bdd19d"/>
+        <text class="title" x="80" y="55">新建连接</text>
+        <g id="protocol-selector">
+          <rect x="157" y="35" width="90" height="30" rx="7" fill="#202721"/>
+          <use href="#terminal" x="168" y="43" width="14" height="14" stroke="#b3bfaf"/>
+          <text class="control" x="188" y="55">SSH</text>
+          <use href="#chevron-down" x="224" y="44" width="12" height="12" stroke="#b3bfaf"/>
+        </g>
+        <use id="close-dialog" href="#close" x="752" y="42" width="16" height="16" stroke="#bbc5b8"/>
+      </g>
+
+      <g id="wizard-steps" transform="translate(0 -8)">
+        <rect x="56" y="84" width="712" height="36" rx="9" fill="#222a23"/>
+        <circle cx="136" cy="102" r="9" fill="#344233"/>
+        <use href="#check" x="130" y="96" width="12" height="12" stroke="#bdd19d" stroke-width="2"/>
+        <text class="label" x="153" y="106.5">连接与认证</text>
+        <circle cx="384" cy="102" r="9" fill="#344233"/>
+        <use href="#check" x="378" y="96" width="12" height="12" stroke="#bdd19d" stroke-width="2"/>
+        <text class="label" x="401" y="106.5">连接路径</text>
+        <g id="current-step">
+          <rect x="532" y="87" width="233" height="30" rx="7" fill="#3b4b34"/>
+          <circle cx="613" cy="102" r="9" fill="#bed19e"/>
+          <text class="control strong-ink" x="613" y="106.5" text-anchor="middle">3</text>
+          <text class="control accent-ink" x="630" y="106.5">核对与测试</text>
+        </g>
+      </g>
+
+      <g id="connection-target">
+        <rect x="56" y="122" width="712" height="58" rx="10" fill="#333f2f"/>
+        <rect x="72" y="129" width="44" height="44" rx="9" fill="#3e4d35"/>
+        <use href="#terminal" x="82" y="139" width="24" height="24" stroke="#c6d9a6"/>
+        <text class="host" x="130" y="148">Demo-ScaleOS 备用</text>
+        <text class="label" x="131" y="167">独立连接会话 · 未分组</text>
+        <text class="label" x="752" y="143" text-anchor="end">目标地址</text>
+        <text class="mono" x="752" y="164" font-size="18" font-weight="600" text-anchor="end">192.0.2.33:22</text>
+      </g>
+
+      <g id="authentication">
+        <rect x="56" y="192" width="348" height="134" rx="10" fill="#202721"/>
+        <text class="section" x="72" y="214">认证与验证</text>
+        <g id="edit-identity">
+          <use href="#pencil" x="298" y="202" width="13" height="13" stroke="#b4c694"/>
+          <text class="action" x="388" y="213" text-anchor="end">编辑连接信息</text>
+        </g>
+        <text class="label" x="72" y="241.5">认证账户</text>
+        <text class="value mono" x="160" y="241.5">root</text>
+        <text class="label" x="72" y="273.5">认证方式</text>
+        <text class="value" x="160" y="273.5">密码 · 连接时输入</text>
+        <text class="label" x="72" y="305.5">目标验证</text>
+        <text class="value" x="160" y="305.5">严格验证主机密钥</text>
+      </g>
+
+      <g id="connection-route">
+        <rect x="420" y="192" width="348" height="134" rx="10" fill="#202721"/>
+        <text class="section" x="436" y="214">连接路径</text>
+        <g id="edit-route">
+          <use href="#pencil" x="686" y="202" width="13" height="13" stroke="#b4c694"/>
+          <text class="action" x="752" y="213" text-anchor="end">编辑路径</text>
+        </g>
+        <g clip-path="url(#route-viewport)">
+          <g id="route-list">
+            <g id="route-client">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#monitor" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">本机</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">客户端</text>
+            </g>
+            <g id="route-hop-1" transform="translate(0 32)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#route" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">TJ-SIMS-V3-JUMP</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 第 1 跳</text>
+            </g>
+            <g id="route-hop-2" transform="translate(0 64)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#route" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">TJ-SIMS-JUMP</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 第 2 跳</text>
+            </g>
+            <g id="route-hop-3" transform="translate(0 96)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#route" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">JUMP-03</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 第 3 跳</text>
+            </g>
+            <g id="route-hop-4" transform="translate(0 128)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#route" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">JUMP-04</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 第 4 跳</text>
+            </g>
+            <g id="route-hop-5" transform="translate(0 160)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#route" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">JUMP-05</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 第 5 跳</text>
+            </g>
+            <g id="route-hop-6" transform="translate(0 192)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#route" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">JUMP-06</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 第 6 跳</text>
+            </g>
+            <g id="route-hop-7" transform="translate(0 224)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#route" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">JUMP-07</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 第 7 跳</text>
+            </g>
+            <g id="route-hop-8" transform="translate(0 256)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#303b30"/>
+              <use href="#route" x="441" y="229" width="16" height="16" stroke="#c1cdbc"/>
+              <text class="value" x="473" y="241.5">JUMP-08</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 第 8 跳</text>
+            </g>
+            <g id="route-target" transform="translate(0 288)">
+              <rect x="436" y="224" width="26" height="26" rx="6" fill="#3a4a33"/>
+              <use href="#server" x="441" y="229" width="16" height="16" stroke="#c7d9ad"/>
+              <text class="value mono accent-ink" x="473" y="241.5">192.0.2.33</text>
+              <text class="label" x="734" y="241.5" text-anchor="end">SSH · 目标</text>
+            </g>
+          </g>
+        </g>
+        <rect id="route-scroll-thumb" x="746" y="222" width="6" height="29" rx="3" fill="#6c7a69"/>
+      </g>
+
+      <g id="save-feedback">
+        <g id="save-error">
+          <rect x="56" y="336" width="712" height="52" rx="8" fill="#3c2d2c"/>
+          <use href="#circle-alert" x="72" y="353" width="18" height="18" stroke="#f2ada7"/>
+          <text class="error" x="100" y="357">无法写入连接配置文件，请检查应用数据目录。</text>
+          <text class="label" x="100" y="375">关闭向导后可从「新建连接」继续。</text>
+          <g id="copy-save-error">
+            <rect x="642" y="347" width="110" height="30" rx="7" fill="#523634"/>
+            <text class="error-action" x="697" y="366.5" text-anchor="middle">复制错误详情</text>
+          </g>
+        </g>
+        <g id="dialog-footer">
+          <rect x="32" y="396" width="760" height="60" fill="#303a2f"/>
+          <g id="previous-step">
+            <rect x="56" y="409" width="84" height="34" rx="8" fill="#3c483a"/>
+            <use href="#arrow-left" x="67" y="419" width="14" height="14" stroke="#c8d3c4"/>
+            <text class="control" x="88" y="431">上一步</text>
+          </g>
+          <text id="discard-draft" class="control muted-ink" x="184" y="431" text-anchor="middle">放弃草稿</text>
+          <g id="save-only">
+            <rect x="565" y="409" width="80" height="34" rx="8" fill="#3c483a"/>
+            <text class="control" x="605" y="431" text-anchor="middle">仅保存</text>
+          </g>
+          <g id="save-and-connect">
+            <rect x="653" y="409" width="115" height="34" rx="8" fill="#bed19e"/>
+            <text class="control strong-ink" x="710.5" y="431" text-anchor="middle">保存并连接</text>
+          </g>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

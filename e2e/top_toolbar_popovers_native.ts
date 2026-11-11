@@ -77,7 +77,10 @@ try{
   }
   // Clicking the same trigger closes; moving away leaves a clicked panel open.
   await click('status.connection.theme');await hidden('status.theme');await expand();await click('status.connection.forward');await visible('socks.info');await h.mouseMove(500,300);await h.sleep(300);await visible('socks.info');await click('socks.info.close');await hidden('socks.info');
-  report.checks.push(`${width}×${height}: chain → forwarding → theme are exclusive, below triggers and bounded; forwarding body retained; repeat click and X close.`);
+  for(const [triggerId,panelId]of [['status.connection.chain','connection.details'],['status.connection.forward','socks.info'],['status.connection.theme','status.theme']]){
+   await expand();await click(triggerId);await visible(panelId);await h.clickAt(3,height-50);await hidden(panelId);
+  }
+  report.checks.push(`${width}×${height}: chain → forwarding → theme are exclusive, below triggers and bounded; repeat click, X and outside press close.`);
  }
  }
  for(const [width,height]of [[1440,900],[860,480]]){

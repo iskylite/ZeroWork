@@ -9,7 +9,7 @@ const Activity = @import("../ai/assistant_store.zig").CompactionActivity;
 pub fn append(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, activity: Activity, on_cancel: ui.HandlerRef) !void {
     const label: []const u8 = switch (activity.status) {
         .idle => return,
-        .running => "正在压缩上下文…",
+        .running => if (activity.saving_since_frame != null) "正在保存摘要…" else "正在生成摘要…",
         .succeeded => "上下文已压缩",
         .failed => "上下文压缩失败",
         .cancelled => "已取消上下文压缩",
@@ -38,7 +38,9 @@ pub fn append(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, activity: Activity
         try row.appendChild(cx.allocator, cancel);
     } else if (activity.status == .succeeded) {
         var buffer: [128]u8 = undefined;
-        const detail = try std.fmt.bufPrint(&buffer, "历史输入约 {d} → {d} tokens", .{ activity.before_tokens, activity.after_tokens });
+        const before: u128 = activity.before_tokens;
+        const percent = ((before - activity.after_tokens) * 100 + before / 2) / before;
+        const detail = try std.fmt.bufPrint(&buffer, "历史输入约 {d} → {d} tokens · 减少 {d}%", .{ activity.before_tokens, activity.after_tokens, percent });
         try row.appendChild(cx.allocator, try ui.textStyled(cx, Recovery.summary, detail));
     }
 }

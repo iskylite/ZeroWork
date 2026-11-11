@@ -122,11 +122,14 @@ test "wizard hidden logs cannot intercept a subsequent file authentication point
     activate(f.wizard.next2_btn.?);
     f.settle();
     const test_button = f.wizard.test_btn.?;
-    try std.testing.expectEqual(@as(f32, 76), test_button.globalRect().w);
+    const button_rect = test_button.globalRect();
+    try std.testing.expectEqual(@as(f32, 76), button_rect.w);
     for (test_button.children.items) |child| if (child.getText()) |label| {
+        const label_rect = child.globalRect();
         try std.testing.expectEqualStrings("检测 SFTP", label.content);
-        try std.testing.expectEqual(@as(f32, 76), child.globalRect().w);
-        try std.testing.expectEqual(@as(f32, 18), child.globalRect().h);
+        try std.testing.expect(label_rect.w > 0 and label_rect.w <= button_rect.w);
+        try std.testing.expectApproxEqAbs(button_rect.x + button_rect.w / 2, label_rect.x + label_rect.w / 2, 0.5);
+        try std.testing.expectEqual(@as(f32, 18), label_rect.h);
         try std.testing.expectEqual(@as(f32, 12), label.font_size);
         try std.testing.expectEqual(@as(u16, 500), label.font_weight);
         try std.testing.expect(label.text_align == .center and label.text_overflow == .clip);
@@ -189,15 +192,15 @@ test "wizard typed probe exact Cx geometry and direct success return to editable
     try std.testing.expect(try f.wizard.setTestSnapshot(try f.snapshot(&direct)));
     f.settle();
     try std.testing.expectEqual(@as(f32, 760), f.wizard.modal.?.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 66), f.wizard.summary_card.?.globalRect().h);
-    try std.testing.expectApproxEqAbs(@as(f32, 132.6), f.wizard.review_test_card.?.globalRect().h, 0.1);
+    try std.testing.expectEqual(@as(f32, 78), f.wizard.summary_card.?.globalRect().h);
+    try std.testing.expectApproxEqAbs(@as(f32, 90.6), f.wizard.review_test_card.?.globalRect().h, 0.1);
     try std.testing.expectEqual(@as(@TypeOf(f.wizard.review_body.?.style.display), .none), f.wizard.review_body.?.style.display);
     try std.testing.expectApproxEqAbs(@as(f32, 54.6), f.wizard.test_stages[0].node.globalRect().h, 0.1);
     try std.testing.expect(contains(f.wizard.test_stages[0].title, "第 1 跳 · DB"));
     try std.testing.expect(contains(f.wizard.test_stages[0].detail, "TCP 连接中"));
     f.click("wizard.test.toggle");
     try std.testing.expectEqual(@as(@TypeOf(f.wizard.review_body.?.style.display), .flex), f.wizard.review_body.?.style.display);
-    try std.testing.expectEqual(@as(f32, 684), f.wizard.test_logs_area.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 680), f.wizard.test_logs_area.globalRect().w);
     try std.testing.expectEqual(@as(f32, 142), f.wizard.test_logs_area.globalRect().h);
     try std.testing.expectEqual(@as(f32, 80), f.wizard.logs_scroll.?.globalRect().h);
     const card = findId(f.wizard.root.?, "wizard.test.hop.9").?;
@@ -217,12 +220,12 @@ test "wizard typed probe exact Cx geometry and direct success return to editable
     try std.testing.expect(!f.wizard.locked.?.get());
     try std.testing.expect(f.wizard.canSave());
     try std.testing.expectEqualStrings("验证通过 · 已释放", f.wizard.route_previews[1].users[9].?.getText().?.content);
-    try std.testing.expectEqualStrings("验证通过 · 测试资源已释放", f.wizard.res_text.?.getText().?.content);
+    try std.testing.expectEqualStrings("SSH 预检通过", f.wizard.res_text.?.getText().?.content);
     try std.testing.expectEqualStrings("查看记录", f.wizard.test_follow_label.?.getText().?.content);
     try std.testing.expect(f.wizard.isVisible());
     f.cx.setViewport(860, 480);
     f.settle();
-    try std.testing.expect(f.wizard.modal.?.globalRect().h <= 448);
+    try std.testing.expectEqual(@as(f32, 432), f.wizard.modal.?.globalRect().h);
     const footer = f.wizard.footer.?.globalRect();
     try std.testing.expect(footer.y + footer.h <= f.wizard.modal.?.globalRect().y + f.wizard.modal.?.globalRect().h + 0.5);
 }
@@ -540,7 +543,7 @@ test "wizard typed probe optional real VM authenticates releases and unlocks rev
             try std.testing.expect(f.wizard.test_source.?.value.key.eql(original_key));
             try std.testing.expect(!f.wizard.locked.?.get());
             try std.testing.expect(f.wizard.canSave());
-            try std.testing.expectEqualStrings("验证通过 · 测试资源已释放", f.wizard.res_text.?.getText().?.content);
+            try std.testing.expectEqualStrings("SSH 预检通过", f.wizard.res_text.?.getText().?.content);
             try controller.retire(job);
             completed = true;
             break;

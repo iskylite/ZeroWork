@@ -1,6 +1,6 @@
-/** Real loopback SFTP: ticker rotation, read badges and shared top-right list.
- * --live-transfers enqueues actual uploads; --foreground also checks passive
- * ticker acknowledgement in an activated, disposable application window.
+/** Real loopback SFTP: global progress ring and the top-right transfer list.
+ * Always uploads real files; --live-transfers remains accepted for existing commands.
+ * --foreground verifies the same controls in an activated disposable window.
  */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto';
 import {mkdir,mkdtemp,open,readFile,writeFile,realpath} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {waitForServerReady,waitFor,query,clickAt,mouseMove,dragAt,key,type_,resizeWindow,screenshot,sleep,request} from '../zig-out/share/zenit/harness/client.ts';
-const live=process.argv.includes('--live-transfers'),foreground=process.argv.includes('--foreground');assert(!foreground||live);
+const live=true,foreground=process.argv.includes('--foreground');
 const binary=resolve(process.argv[2]),out=resolve(process.argv[3]);await mkdir(out,{recursive:true});
 const iso=await realpath(await mkdtemp('/tmp/zw-transfer-entrypoints-')),rpc=join(iso,'rpc'),data=join(iso,'data');await mkdir(rpc);await mkdir(data);process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const log=await open(join(out,'app.log'),'w'),peerLog=await open(join(out,'peer.log'),'w'),peerOut=join(out,'peer');
@@ -19,10 +19,13 @@ const flat=(n:any):any[]=>n?[n,...(n.children??[]).flatMap(flat)]:[];
 const text=(n:any)=>flat(n).map(n=>n.text??'').join(' ').trim();
 const visible=(id:string)=>waitFor(async()=>{assert(!app||app.exitCode===null&&app.signalCode===null,'Owned application remains alive');return(await query(id)).find(shown)??null},15000);
 const hidden=(id:string)=>waitFor(async()=>!(await query(id)).some(shown)||null,5000);
-const badgeCount=async()=>{const badge=(await query('toolbar.transfers.badge')).find(shown);return badge?Number(text(badge)):0};
-async function expectBadge(count:number){await waitFor(async()=>await badgeCount()===count||null,6000)}
+const progressText=async()=>text((await query('toolbar.transfers.percent')).find(shown));
+async function progressGeometry(){
+ const button=await visible('toolbar.transfers');
+ for(const id of ['toolbar.transfers.progress','toolbar.transfers.percent']){const n=await visible(id);assert(n.rect.x>=button.rect.x&&n.rect.y>=button.rect.y&&n.rect.x+n.rect.w<=button.rect.x+button.rect.w+.5&&n.rect.y+n.rect.h<=button.rect.y+button.rect.h+.5,id+' stays inside its trigger')}
+}
 async function click(id:string){const n=await visible(id);assert((await clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok)}
-async function capture(name:string){assert((await screenshot(join(out,name+'.png'))).ok);await writeFile(join(out,name+'.json'),JSON.stringify(Object.fromEntries(await Promise.all(['toolbar.transfers','toolbar.transfers.badge','status.transfer','transfer.manager','transfer.session','connection.progress'].map(async id=>[id,await query(id)]))),null,2))}
+async function capture(name:string){assert((await screenshot(join(out,name+'.png'))).ok);await writeFile(join(out,name+'.json'),JSON.stringify(Object.fromEntries(await Promise.all(['toolbar.transfers','toolbar.transfers.progress','toolbar.transfers.percent','toolbar.transfers.badge','transfer.manager','connection.progress'].map(async id=>[id,await query(id)]))),null,2))}
 const payloads=new Map<string,Buffer>();
 async function enqueue(name:string,size=1024*1024){
  const path=join(iso,name),payload=Buffer.alloc(size,37+payloads.size);payloads.set(name,payload);await writeFile(path,payload);
@@ -35,7 +38,9 @@ try{
  if(ready.known_host)await writeFile(join(data,'known_hosts'),ready.known_host);
  await writeFile(join(data,'config.toml'),'[ui]\ntheme="dark"\n[transfer]\ndedicated_connection=true\nwindow_chunks=1\nchunk_kb=32\nmax_tasks=1\nresume=true\nverify_md5=false\n');
  app=spawn(binary,[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:foreground?'0':'1',ZENIT_E2E_REAL_ACTIVATION:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});appEnd=new Promise(r=>app.once('close',r));report.pid=app.pid;
- await waitForServerReady();await resizeWindow(1440,900);const host=await visible('sidebar.host');await clickAt(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2);await click('sidebar.host.connect');
+ await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
+ if(foreground){const windows=await request('GET','/zerowork/windows');assert.equal(windows.windows.length,1);assert((await request('POST','/zerowork/windows',{action:'select',window:windows.windows[0].window})).ok);await waitFor(async()=>(await request('GET','/zerowork/menu-bar')).foreground||null,10000)}
+ await resizeWindow(1440,900);const host=await visible('sidebar.host');await clickAt(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2);await click('sidebar.host.connect');
  await waitFor(async()=>{
   assert(app.exitCode===null&&app.signalCode===null,'SFTP connection progress must not crash');
   if((await query(live?'files.workspace':'terminal.surface')).some(shown))return true;
@@ -51,43 +56,42 @@ try{
   const field=flat(await visible('files.local')).find(n=>n.test_id==='files.path'&&shown(n));assert(field);await clickAt(field.rect.x+10,field.rect.y+field.rect.h/2);await key('a',{cmd:true});await type_(iso);await key('return');
  }
 
- await hidden('toolbar.transfers.badge');
- if(live){await enqueue('first.bin');await enqueue('second.bin');if(!foreground)await expectBadge(2)}
- const ticker=await visible('status.transfer');await mouseMove(ticker.rect.x+ticker.rect.w/2,ticker.rect.y+ticker.rect.h/2);await sleep(650);
- await hidden('transfer.manager');assert.equal((await query('transfer.session')).length,0);report.checks.push('Hover keeps lists closed; old bottom popover is absent');
- if(live){
-  const changes:any[]=[];for(let i=0;i<24;i++){
-   const ids=['status.transfer.name','status.transfer.percent','status.transfer.speed','status.transfer.counts'];const values=Object.fromEntries(await Promise.all(ids.map(async id=>[id,text((await query(id)).find(shown))])));
-   const sample={at:Date.now(),name:values[ids[0]],percent:values[ids[1]],speed:values[ids[2]],count:values[ids[3]],badge:await badgeCount()};report.samples.push(sample);
-   assert.equal(sample.count,'2');assert(['first.bin','second.bin'].includes(sample.name));
-   if(sample.name!==changes.at(-1)?.name)changes.push(sample);
-   await sleep(300);
-  }
-  assert(new Set(changes.map(s=>s.name)).size===2,'Both actual tasks rotate');
-  const intervals=changes.slice(2).map((s,i)=>s.at-changes[i+1].at);assert(intervals.length>0);for(const interval of intervals)assert(interval>=2300&&interval<=3800,'Three-second rotation cadence: '+interval);report.rotation_intervals_ms=intervals;
-  assert(report.samples.some(s=>/[1-9]/.test(s.percent)),'Real upload progress is visible');
-  assert(report.samples.some(s=>/[1-9].*[KM]?i?B\/s/.test(s.speed)),'Real upload speed is visible');
-  if(foreground){await expectBadge(0);report.native_activation=await request('GET','/zerowork/menu-bar');assert.equal(report.native_activation.foreground,true,'Native app actually gained foreground');report.checks.push('Foreground ticker shows both actual tasks and clears their badges without opening any list')}
-  else {await expectBadge(2);report.checks.push('Background rotation leaves both unseen tasks badged until the list is viewed')}
-  report.checks.push('Two real transfers rotate at three-second intervals with current progress, speed and task count');
+
+ await hidden('toolbar.transfers.badge');await hidden('toolbar.transfers.progress');
+ await enqueue('first.bin');
+ const firstPercent=await waitFor(async()=>{const value=await progressText();return /^\d+%$/.test(value)&&Number(value.slice(0,-1))>0?value:null},15000);
+ await progressGeometry();await capture('known-progress');
+ await enqueue('second.bin');
+ await waitFor(async()=>await progressText()==='·'||null,15000);
+ await progressGeometry();await hidden('toolbar.transfers.badge');
+ const trigger=await visible('toolbar.transfers');await mouseMove(trigger.rect.x+trigger.rect.w/2,trigger.rect.y+trigger.rect.h/2);await sleep(650);
+ await hidden('transfer.manager');assert.equal((await query('transfer.session')).length,0);
+ for(let i=0;i<8;i++){
+  const value=await progressText();assert(value==='·'||/^\d+%$/.test(value));
+  report.samples.push({at:Date.now(),progress:value});await hidden('toolbar.transfers.badge');await sleep(250);
  }
- await capture('ticker');
- const bottom=await visible('status.transfer');await clickAt(bottom.rect.x+2,bottom.rect.y+bottom.rect.h/2);const fromBottom=await visible('transfer.manager');await expectBadge(0);await capture('bottom-open');
- assert.equal((await query('transfer.manager')).filter(shown).length,1);const toolbar=await visible('toolbar.transfers');assert(fromBottom.rect.y>toolbar.rect.y&&fromBottom.rect.y<toolbar.rect.y+toolbar.rect.h+40,'List anchors below the top-right toolbar');
- await key('escape');await hidden('transfer.manager');await sleep(1000);await expectBadge(0);
- await click('toolbar.transfers');const fromTop=await visible('transfer.manager');assert.deepEqual(fromTop.rect,fromBottom.rect);await click('toolbar.transfers');await hidden('transfer.manager');
- report.checks.push('Whole bottom control and toolbar open the same top-right global list; Escape and either trigger close it');
- if(live&&!foreground){
-  await enqueue('third.bin',65536);await expectBadge(1);await capture('new-task-badge');await click('toolbar.transfers');await expectBadge(0);await click('transfer.window.close');await hidden('transfer.manager');await sleep(1000);await expectBadge(0);
-  report.checks.push('Viewing via bottom clears badge 2; a subsequent new task restores badge 1; viewing via toolbar clears it again and closing never restores it');
- }
- await resizeWindow(860,480);await click('status.transfer');await visible('transfer.manager');await capture('compact');await click('transfer.window.close');await hidden('transfer.manager');report.checks.push('Compact window opens and closes the same populated list');
- if(live){
-  const state=await waitFor(async()=>{try{const state=JSON.parse(await readFile(join(peerOut,'state.json'),'utf8'));return [...payloads].every(([name,payload])=>state.files['/fixture/'+name]?.bytes===payload.length&&state.files['/fixture/'+name]?.sha256===createHash('sha256').update(payload).digest('hex'))?state:null}catch{return null}},90000);
-  report.files=[...payloads].map(([name,payload])=>({name,bytes:payload.length,sha256:state.files['/fixture/'+name].sha256}));
-  await click('toolbar.transfers');await waitFor(async()=>{const states=flat(await visible('transfer.manager')).filter(n=>n.test_id==='transfer.task.status'&&shown(n));return states.filter(s=>text(s).includes('已完成')).length===payloads.size||null},10000);await capture('completed');await click('transfer.window.close');await hidden('transfer.manager');await sleep(1000);await expectBadge(0);
-  report.checks.push('Every real upload completed with matching peer SHA-256; completed tasks do not restore cleared badges');
- }
+ report.first_percent=firstPercent;
+ report.checks.push('A single known-size upload shows percent; a queued unknown-size task uses an indeterminate ring; both fit the trigger without a numeric badge');
+ report.checks.push('Hover keeps the global transfer list closed');
+ if(foreground){report.native_activation=await request('GET','/zerowork/menu-bar');assert.equal(report.native_activation.foreground,true,'Native app actually gained foreground')}
+ await capture('queued-progress');
+ await click('toolbar.transfers');const fromTop=await visible('transfer.manager');await capture('toolbar-open');
+ assert.equal((await query('transfer.manager')).filter(shown).length,1);
+ assert(fromTop.rect.y>=trigger.rect.y+trigger.rect.h-1&&fromTop.rect.x>=0&&fromTop.rect.x+fromTop.rect.w<=1440.5,'List anchors below the toolbar and remains in the window');
+ await key('escape');await hidden('transfer.manager');
+ await click('toolbar.transfers');await visible('transfer.manager');await click('toolbar.transfers');await hidden('transfer.manager');
+ await enqueue('third.bin',65536);await hidden('toolbar.transfers.badge');
+ await click('toolbar.transfers');await visible('transfer.manager');
+ await resizeWindow(860,480);const compact=await visible('transfer.manager');
+ assert(compact.rect.x>=0&&compact.rect.y>=0&&compact.rect.x+compact.rect.w<=860.5&&compact.rect.y+compact.rect.h<=480.5,'Compact transfer list remains within the content area');
+ await capture('compact');await click('transfer.window.close');await hidden('transfer.manager');
+ report.checks.push('Toolbar toggle, Escape and close button work; the populated list remains bounded at 860x480');
+ await resizeWindow(1440,900);
+ const state=await waitFor(async()=>{try{const state=JSON.parse(await readFile(join(peerOut,'state.json'),'utf8'));return [...payloads].every(([name,payload])=>state.files['/fixture/'+name]?.bytes===payload.length&&state.files['/fixture/'+name]?.sha256===createHash('sha256').update(payload).digest('hex'))?state:null}catch{return null}},90000);
+ report.files=[...payloads].map(([name,payload])=>({name,bytes:payload.length,sha256:state.files['/fixture/'+name].sha256}));
+ await click('toolbar.transfers');await waitFor(async()=>{const states=flat(await visible('transfer.manager')).filter(n=>n.test_id==='transfer.task.status'&&shown(n));return states.filter(s=>text(s).includes('已完成')).length===payloads.size||null},10000);
+ await capture('completed');await click('transfer.window.close');await hidden('transfer.manager');await hidden('toolbar.transfers.progress');await hidden('toolbar.transfers.percent');await hidden('toolbar.transfers.badge');
+ report.checks.push('Every upload completed with matching peer SHA-256; viewed completion returns the toolbar to its idle icon');
  assert((await request('POST','/zerowork/windows',{action:'quit'})).ok);await Promise.race([appEnd,sleep(10000)]);assert.equal(app.exitCode,0,'Normal Quit exits cleanly');report.checks.push('Normal application Quit returned exit code 0');report.status='passed';
-}catch(e){report.status='failed';report.error=String(e);process.exitCode=1;if(app&&app.exitCode===null&&app.signalCode===null)await capture('failure').catch(()=>{})}
+}catch(e){report.status='failed';report.error=e instanceof Error?e.stack:String(e);process.exitCode=1;if(app&&app.exitCode===null&&app.signalCode===null)await capture('failure').catch(()=>{})}
 finally{if(app&&app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await appEnd!}if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGTERM');await peerEnd}await log.close();await peerLog.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,foreground,checks:report.checks,error:report.error,out}))}

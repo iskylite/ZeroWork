@@ -8,6 +8,18 @@ pub const max_height: f32 = 710;
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub const chrome_height: f32 = 168;
 
+pub fn compactWindow(window_width: f32, window_height: f32) bool {
+    return window_width <= 860 or window_height <= 480;
+}
+
+pub fn availableModalWidth(window_width: f32) f32 {
+    return @max(1, window_width - 32);
+}
+
+pub fn availableModalHeight(window_height: f32, compact: bool) f32 {
+    return @max(1, window_height - @as(f32, if (compact) 48 else 32));
+}
+
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = max_height }, .max_height = max_height, .padding = .{}, .gap = 0, .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow_hidden = true, .flex_shrink = 0 };
 }
@@ -22,16 +34,29 @@ pub fn formSection(_: *const ui.ThemeTokens) ui.BoxStyle {
     style.gap = 14;
     return style;
 }
-// Measured HTML identity fields start at y230.5 (1280×720), with
-// 55.5px field rows separated by 12px.
+pub fn identityPanelColor() ui.Color {
+    const colors = theme.current();
+    return ui.Color.lerp(colors.overlay, colors.app.withAlpha(colors.overlay.a), 0.45);
+}
 pub fn identitySection(tokens: *const ui.ThemeTokens) ui.BoxStyle {
-    var style = formSection(tokens);
-    style.gap = 17.5;
+    var style = identityPanel(tokens);
+    style.width = .fill();
+    style.min_width = 0;
+    style.min_height = 238;
+    style.flex = 1;
+    style.gap = 8;
+    return style;
+}
+pub fn identityPanel(tokens: *const ui.ThemeTokens) ui.BoxStyle {
+    var style = stack(tokens);
+    style.padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 16 };
+    style.background = identityPanelColor();
+    style.border = .{ .radius = 10 };
     return style;
 }
 pub fn identityFields(tokens: *const ui.ThemeTokens) ui.BoxStyle {
-    var style = formSection(tokens);
-    style.gap = 12;
+    var style = stack(tokens);
+    style.gap = 4.5;
     return style;
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
@@ -59,6 +84,26 @@ pub fn footer() ui.BoxStyle {
     style.background = theme.popupAction();
     return style;
 }
+pub fn saveError() ui.BoxStyle {
+    return .{
+        .width = .fill(),
+        .height = .{ .fit = .{} },
+        .min_height = 52,
+        .direction = .row,
+        .align_items = .center,
+        .flex_shrink = 0,
+        .gap = 10,
+        .margin = .{ .left = 24, .right = 24, .bottom = 8 },
+        .padding = .{ .left = 16, .right = 16, .top = 8, .bottom = 8 },
+        .background = saveErrorBackground(),
+        .border = .{ .radius = 8 },
+    };
+}
+pub fn saveErrorBackground() ui.Color {
+    const colors = theme.current();
+    const surface = theme.states().feedback_danger;
+    return ui.Color.lerp(surface, colors.action_danger.withAlpha(surface.a), 0.22);
+}
 pub fn scroll() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 };
 }
@@ -71,6 +116,7 @@ pub fn input() ui.BoxStyle {
 }
 pub fn groupControl() ui.BoxStyle {
     var style = input();
+    style.background = theme.current().overlay;
     style.padding = .{};
     style.direction = .row;
     style.gap = 0;
@@ -101,6 +147,11 @@ pub fn disclosure() ui.BoxStyle {
     style.justify = .start;
     style.gap = 0;
     style.background = ui.Color.TRANSPARENT;
+    return style;
+}
+pub fn advancedToggle() ui.BoxStyle {
+    var style = disclosure();
+    style.height = .{ .px = 30 };
     return style;
 }
 pub fn step(_: bool) ui.BoxStyle {
@@ -137,6 +188,9 @@ pub fn number(selected: bool) ui.BoxStyle {
 }
 pub fn accessChoice(selected: bool) ButtonStyle {
     return .{ .width = .fill(), .height = .{ .px = 61 }, .flex = 1, .min_width = 0, .flex_shrink = 0, .background = if (selected) theme.popupSelection() else theme.popupInset(), .corner_radius = 8, .border_width = 0, .padding = .{} };
+}
+pub fn routeEndpointFill() ui.Color {
+    return theme.current().fg_2.withAlpha(14);
 }
 pub fn routeHop() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 51 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 8, .background = ui.Color.TRANSPARENT, .border_bottom_width = 0, .border_bottom_color = ui.Color.TRANSPARENT, .flex_shrink = 0 };
@@ -211,7 +265,7 @@ pub fn testActionText() ui.TextStyle {
     return style;
 }
 pub fn testActionLabel() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 18 }, .flex_shrink = 0 };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 18 }, .flex_shrink = 0 };
 }
 
 pub fn readonlyValue(_: *const ui.ThemeTokens) ui.TextStyle {
@@ -230,8 +284,8 @@ pub fn grip(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 
 pub fn summaryName() ui.TextStyle {
-    var value = text(12, 500, false);
-    value.line_height = 16.0 / 12.0;
+    var value = text(22, 650, false);
+    value.line_height = 26.0 / 22.0;
     return value;
 }
 pub fn summaryField(w: f32) ui.BoxStyle {
@@ -262,51 +316,88 @@ pub fn errorLabel() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex_shrink = 0 };
 }
 
-// Frozen V3 connection review: identity header, two-column values and plain route.
+pub const remote_max_height: f32 = 596;
+pub const review_height: f32 = 492;
+pub const review_compact_height: f32 = 432;
+
+pub fn reviewRouteRowHeight(compact: bool) f32 {
+    return if (compact) 32 else 40;
+}
+
+pub fn reviewStepTrack(compact: bool) ui.BoxStyle {
+    var style = row(36);
+    style.padding = ui.Padding.all(3);
+    style.margin = .{ .top = if (compact) 4 else 8 };
+    style.gap = 0;
+    style.background = theme.popupInset();
+    style.border = .{ .radius = 9 };
+    return style;
+}
+
+pub fn reviewStep(current: bool) ui.BoxStyle {
+    var style = step(current);
+    style.width = .fill();
+    style.height = .{ .px = 30 };
+    style.flex = 1;
+    style.justify = .center;
+    style.gap = 8;
+    style.background = if (current) theme.popupSelection() else ui.Color.TRANSPARENT;
+    return style;
+}
+
+pub fn remoteStepNumber(current: bool) ui.BoxStyle {
+    var style = number(current);
+    style.width = .{ .px = 18 };
+    style.height = .{ .px = 18 };
+    style.border = .{ .radius = 9 };
+    if (!current) style.background = theme.popupAction();
+    return style;
+}
+
 pub fn reviewStack(_: *const ui.ThemeTokens) ui.BoxStyle {
     var value = stack(undefined);
     value.gap = 16;
-    value.padding = .{ .left = 4, .right = 4 };
     return value;
 }
 pub fn reviewIdentity() ui.BoxStyle {
-    var value = row(66);
-    value.gap = 12;
-    value.padding = ui.Padding.all(14);
-    value.background = theme.popupInset();
+    var value = row(78);
+    value.gap = 14;
+    value.padding = .{ .left = 16, .right = 16 };
+    value.background = theme.popupSelection();
     value.border = .{ .radius = 10 };
     return value;
 }
-pub fn reviewFields(_: *const ui.ThemeTokens) ui.BoxStyle {
+pub fn reviewColumns() ui.BoxStyle {
     var value = stack(undefined);
-    value.gap = 12;
-    value.padding = .{ .left = 2, .right = 2 };
+    value.direction = .row;
+    value.gap = 16;
     return value;
-}
-pub fn reviewFieldRow() ui.BoxStyle {
-    var value = row(39);
-    value.gap = 18;
-    value.align_items = .start;
-    return value;
-}
-pub fn reviewField() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 39 }, .min_width = 0, .flex = 1, .direction = .column, .gap = 4, .flex_shrink = 0 };
 }
 pub fn reviewRoute() ui.BoxStyle {
     var value = stack(undefined);
-    value.gap = 10;
-    value.padding = ui.Padding.all(14);
+    value.height = .{ .px = 178 };
+    value.min_width = 0;
+    value.flex = 1;
+    value.gap = 4;
+    value.padding = .{ .left = 16, .right = 16, .top = 12 };
     value.background = theme.popupInset();
     value.border = .{ .radius = 10 };
     return value;
 }
 
-// Frozen V3 details: plain disclosure, 18px preceding margin and 12px body gap.
-pub fn advancedSection(_: *const ui.ThemeTokens) ui.BoxStyle {
-    var value = stack(undefined);
-    value.gap = 12;
-    value.margin = .{ .top = 4 };
+pub fn reviewIconTile(size: f32, highlighted: bool) ui.BoxStyle {
+    var value = iconBox(size);
+    value.justify = .center;
+    value.align_items = .center;
+    value.background = if (highlighted) theme.popupSelection() else theme.popupAction();
+    value.border = .{ .radius = if (size == 44) 9 else 6 };
     return value;
+}
+
+pub fn advancedSection(_: *const ui.ThemeTokens) ui.BoxStyle {
+    var style = stack(undefined);
+    style.gap = 0;
+    return style;
 }
 
 pub fn disclosureHover() ButtonStyle {
@@ -335,7 +426,7 @@ pub fn commandField(_: *const ui.ThemeTokens) ui.BoxStyle {
 // Frozen HTML connectionTest: compact header and per-hop stage list. Rich
 // diagnostics stay in the existing disclosure beneath this summary.
 pub fn testResult(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(14), .gap = 0, .background = theme.popupInset(), .border = .{ .radius = 10 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 16, .right = 16 }, .gap = 0, .background = theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn testStage() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 54.6 }, .direction = .row, .align_items = .start, .padding = .{ .top = 8, .bottom = 8 }, .gap = 10, .flex_shrink = 0 };

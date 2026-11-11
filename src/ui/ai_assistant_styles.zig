@@ -70,6 +70,12 @@ pub fn messageRow(user: bool) ui.BoxStyle {
 pub fn conversation(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .direction = .column, .gap = 6, .padding = .{ .left = 14, .right = 14 }, .height = .{ .fit = .{} }, .flex_shrink = 0 };
 }
+pub fn turnProcessButton() ui.BoxStyle {
+    return .{ .height = .{ .px = 24 }, .padding = .{}, .gap = 4, .font_size = 14, .font_weight = 500, .text_color = theme.current().fg_1 };
+}
+pub fn markdownSectionGap(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 8 }, .flex_shrink = 0 };
+}
 // Feedback belongs to the scrollable transcript, never the composer flex stack.
 pub fn noticeHolder(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .min_width = 0, .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 12 }, .flex_shrink = 0 };

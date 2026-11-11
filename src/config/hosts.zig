@@ -533,7 +533,7 @@ pub const Registry = struct {
         var host = try cloneConfig(allocator, value);
         host.connection_id = try self.connection_ids.allocate();
         host.revision = 1;
-        try self.checkName(host, null);
+        try self.requireUniqueName(host.name, null);
         try host.validate();
         const next = try allocator.alloc(HostConfig, self.hosts.len + 1);
         @memcpy(next[0..self.hosts.len], self.hosts);
@@ -558,7 +558,7 @@ pub const Registry = struct {
         var host = try cloneConfig(self.arena.allocator(), value);
         host.connection_id = expected.id;
         host.revision = try identity.advance(expected.revision);
-        try self.checkName(host, expected.id);
+        try self.requireUniqueName(host.name, expected.id);
         try host.validate();
         if (self.hosts[self.indexOf(expected.id).?].asset_group_id != host.asset_group_id) self.removeFromGroupOrders(expected.id);
         self.hosts[self.indexOf(expected.id).?] = host;
@@ -566,6 +566,24 @@ pub const Registry = struct {
         try self.validate();
         try self.validateSaveReferences(self.hosts[self.indexOf(host.connection_id).?]);
         return host.owner();
+    }
+    /// Persist only forwarding fields from a session snapshot. All other fields
+    /// come from the current asset; a selected exit follows its stable hop ID.
+    pub fn updateSocks(self: *Registry, source: HostConfig) !identity.AssetOwner {
+        const index = self.indexOf(source.connection_id) orelse return error.ConnectionNotFound;
+        var current = self.hosts[index];
+        if (!current.isLegacy() or !eq(current.protocolId(), source.protocolId())) return error.RevisionConflict;
+        current.socks_enabled = source.socks_enabled;
+        current.socks_port = source.socks_port;
+        current.socks_bind = source.socks_bind;
+        current.socks_auto_start = source.socks_auto_start;
+        current.socks_max_connections = source.socks_max_connections;
+        current.socks_exit = null;
+        if (source.socks_exit) |exit| {
+            if (exit >= source.route.len) return error.InvalidSocksExit;
+            current.socks_exit = std.mem.indexOfScalar(identity.ConnectionId, current.route, source.route[exit]) orelse return error.RevisionConflict;
+        }
+        return self.update(current.owner(), current);
     }
     pub fn duplicate(self: *Registry, expected: identity.AssetOwner, name: []const u8) !identity.AssetOwner {
         var source = try self.get(expected);
@@ -668,8 +686,8 @@ pub const Registry = struct {
             if (host.isLegacy() and host.port == hop.port and std.ascii.eqlIgnoreCase(std.mem.trimEnd(u8, host.host, "."), std.mem.trimEnd(u8, hop.host, "."))) return error.RouteCycle;
         }
     }
-    fn checkName(self: *const Registry, host: HostConfig, except: ?identity.ConnectionId) !void {
-        for (self.hosts) |other| if (other.connection_id != except and eq(other.protocolId(), host.protocolId()) and other.asset_group_id == host.asset_group_id and eq(other.name, host.name)) return error.DuplicateConnectionName;
+    pub fn requireUniqueName(self: *const Registry, name: []const u8, except: ?identity.ConnectionId) error{DuplicateConnectionName}!void {
+        for (self.hosts) |other| if (other.connection_id != except and eq(other.name, name)) return error.DuplicateConnectionName;
     }
 };
 

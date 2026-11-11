@@ -113,6 +113,7 @@ fn decodeTurn(a: std.mem.Allocator, source: Turn, refs: *std.ArrayList(images.Co
     var result: turns.Turn = .{};
     errdefer result.deinit(a);
     inline for (scalar_fields) |field| @field(result, field) = @field(source, field);
+    result.restored_interrupted = source.ended_at_ms == null;
     result.file_source = if (source.file_source) |value| try value.clone(a) else null;
     result.before = try decodeHistory(a, source.before, refs);
     result.after = try decodeHistory(a, source.after, refs);
@@ -238,6 +239,37 @@ test "conversation presentation legacy history restores missing and empty snapsh
         try std.testing.expectEqualStrings("旧答案 ✅", restored.items[1].text);
         try std.testing.expect(restored.items[0].turn == null);
     }
+}
+
+test "conversation presentation interrupted replay freezes time and separates partial response without completing the turn" {
+    const a = std.testing.allocator;
+    var turn: turns.Turn = .{ .id = 4, .sent_at_ms = 1000, .started_mono_ms = 100, .elapsed_ms = 20 };
+    defer turn.deinit(a);
+    try turn.applyEvent(a, .{ .kind = .thinking, .detail = "检查过程", .phase = .assembling, .at_ms = 110 });
+    try turn.applyEvent(a, .{ .kind = .step, .call_id = "read", .name = "host.read_terminal", .phase = .succeeded, .at_ms = 120 });
+    try turn.applyEvent(a, .{ .kind = .text, .detail = "已收到的答复，尚未完成", .phase = .assembling, .at_ms = 140 });
+    const bytes = try capture(a, &.{}, .{ .user = true, .text = @constCast("问题"), .turn = turn }, &.{});
+    defer a.free(bytes);
+    var restored = try restore(a, bytes, 4);
+    defer {
+        for (restored.items) |*message| message.deinit(a);
+        restored.deinit(a);
+    }
+    const recovered = &restored.items[0].turn.?;
+    try std.testing.expect(recovered.restored_interrupted and recovered.displayFinished());
+    try std.testing.expect(recovered.ended_at_ms == null and recovered.answer.len == 0);
+    try std.testing.expectEqualStrings("已收到的答复，尚未完成", recovered.displayResponse());
+    try std.testing.expectEqual(@as(usize, 2), recovered.finalResponseStart());
+    try std.testing.expectEqual(@as(u64, 140), recovered.displayClock(100000000));
+    try std.testing.expect(!recovered.process_expanded);
+    var copy = try recovered.clone(a);
+    defer copy.deinit(a);
+    try std.testing.expect(copy.restored_interrupted);
+    // An earlier message followed by a tool is process text, not a final reply.
+    try recovered.applyEvent(a, .{ .kind = .step, .call_id = "late", .name = "host.read_terminal", .phase = .running, .at_ms = 160 });
+    try std.testing.expectEqualStrings("", recovered.displayResponse());
+    try std.testing.expect(recovered.answer.len == 0 and recovered.ended_at_ms == null);
+    try std.testing.expect(!@import("step_groups.zig").summarize(recovered, 3, 4, 100000000).live);
 }
 
 test "conversation presentation roundtrip keeps questions steps reasoning attachments and exact turn summary" {

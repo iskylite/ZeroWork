@@ -69,10 +69,14 @@ try{
   await click('ai.composer.execution');assert(text(await visible('ai.execution.retention')).includes('空闲后关闭'));await click('ai.execution.close');await closed('ai.execution.menu');
   await click('ai.composer.usage');await cap('01-ready');
   mode='failure';await startCompaction();await status('压缩失败');await cap('02-failed');assert.deepEqual(await history(),before);
-  mode='cancel';const beforeCancel=summaryCount;await click('ai.composer.usage');await startCompaction();await status('正在压缩');await waitFor(async()=>summaryCount>beforeCancel||null,10000);await cap('03-running');await click('ai.transcript.compaction.cancel');await status('已取消');await cap('04-cancelled');assert.deepEqual(await history(),before);
+  mode='cancel';const beforeCancel=summaryCount;await click('ai.composer.usage');await startCompaction();await status('正在生成摘要');await waitFor(async()=>summaryCount>beforeCancel||null,10000);await cap('03-running');await click('ai.transcript.compaction.cancel');await status('已取消');await cap('04-cancelled');assert.deepEqual(await history(),before);
   mode='success';await click('ai.composer.usage');await waitFor(async()=>{const buttons=await query('ai.usage.compaction.start');return buttons.some(n=>shown(n)&&!n.disabled)||null;},20000);
-  await startCompaction();await status('正在压缩');const success=await status('已压缩');await cap('05-success');
-  const reduction=text(success).match(/历史输入约 (\d+) → (\d+) tokens/);assert(reduction);assert(Number(reduction[1])>Number(reduction[2]));
+  await startCompaction();await status('正在生成摘要');const success=await status('已压缩');await cap('05-success');
+  const reduction=text(success).match(/历史输入约 (\d+) → (\d+) tokens · 减少 (\d+)%/);
+  assert(reduction);
+  const [,beforeTokens,afterTokens,percentage]=reduction.map(Number);
+  assert(beforeTokens>afterTokens);
+  assert.equal(percentage,Math.round(100*(beforeTokens-afterTokens)/beforeTokens));
   const viewport=await visible('ai.conversation.viewport');assert(success.rect.y>=viewport.rect.y&&success.rect.y+success.rect.h<=viewport.rect.y+viewport.rect.h+1);
   await click('ai.composer.usage');await settled('ai.usage.menu');
   assert((await query('ai.usage.part.value')).filter(shown).length >= 3);

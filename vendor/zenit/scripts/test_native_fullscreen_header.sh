@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_DIR="$(mktemp -d -t zenit-fs-header)"
 trap 'rm -rf "$TEST_DIR"' EXIT
-xcrun clang -fobjc-arc -Wno-deprecated-declarations \
+xcrun clang -fobjc-arc -DZENIT_AUTOMATION_ENVIRONMENT=1 -Wno-deprecated-declarations \
   -Wno-incomplete-implementation -Wno-objc-protocol-method-implementation \
   "$ROOT/native/macos/tests/fullscreen_header_lifecycle_test.m" \
   -framework Cocoa -framework Metal -framework IOSurface -framework QuartzCore -framework CoreVideo \

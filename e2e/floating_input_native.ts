@@ -16,6 +16,7 @@ const app=spawn(process.argv[2],[],{env:{...process.env,ZEROWORK_DATA_DIR:data,Z
 const ended=new Promise(r=>app.once('close',r));const report={status:'running',cases:[]};
 const shown=n=>n.visible!==false&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0;
 const vis=id=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,10000);
+const hidden=id=>h.waitFor(async()=>!(await h.query(id)).some(shown)||null,10000);
 async function click(id){const n=await vis(id);await h.clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2);await h.sleep(130);}
 async function trace(name,id,dx=5,dy=8){
  const n=await vis(id),point={x:n.rect.x+dx,y:n.rect.y+dy};
@@ -39,9 +40,16 @@ try{
  await click('toolbar.transfers');await trace('transfer-header','transfer.manager',240,8);await trace('transfer-footer','transfer.manager',240,(await vis('transfer.manager')).rect.h-8);await click('transfer.window.close');
  await h.key('k',{cmd:true});await trace('quick-connect-padding','quick.connect',4,80);await h.key('escape');await h.sleep(200);
  await click('toolbar.ai');await trace('ai-side-padding','ai.panel',4,150);
- await click('ai.composer.permission');await trace('ai-permission-header','ai.permission.menu',8,6);await h.key('escape');await click('ai.collapse');
- await click('toolbar.history');await trace('global-history-header','history.panel',130,8);await click('history.close');await h.sleep(200);
- await click('toolbar.settings');await trace('settings-card-padding','settings.panel',150,8);await click('settings.close');
+ await click('ai.composer.permission');await trace('ai-permission-header','ai.permission.menu',8,6);await vis('ai.panel');
+ await click('ai.permission.close');await hidden('ai.permission.menu');await click('ai.prompt');await h.type_('outside press draft');
+ assert.equal((await h.inputState('ai.prompt')).buffer,'outside press draft');
+ await click('ai.composer.permission');await vis('ai.permission.menu');
+ await h.clickAt(3,450);await hidden('ai.permission.menu');await hidden('ai.panel');
+ await click('toolbar.ai');await vis('ai.panel');assert.equal((await h.inputState('ai.prompt')).buffer,'outside press draft');
+ await click('toolbar.ai');await hidden('ai.panel');
+ await click('toolbar.history');await trace('global-history-header','history.panel',130,8);await h.clickAt(3,450);await hidden('history.panel');
+ await click('toolbar.ai');await vis('ai.panel');await click('toolbar.settings');await hidden('ai.panel');
+ await trace('settings-card-padding','settings.panel',150,8);await h.clickAt(3,450);await vis('settings.panel');await h.key('escape');await hidden('settings.panel');
  await click('toolbar.notifications');await trace('notifications-header','notifications.history',120,8);await click('notifications.history.close');
  await click('terminal.surface');await h.type_('@');await h.sleep(250);await trace('command-catalogue-header','terminal.commands',100,10);await h.key('escape');await h.key('backspace');
  await h.request('POST','/quit',{});await trace('local-close-header','local.close.confirmation',180,8);

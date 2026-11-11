@@ -97,12 +97,14 @@ try {
   const toggle = await visible('ai.turn.process.toggle');
   const answer = (await h.query('ai.response')).find((n: any) => shown(n) && text(n).includes('STEER_FINISHED'));
   const footer = await visible('ai.turn.complete');
-  assert(answer && toggle.rect.y + toggle.rect.h <= answer.rect.y && answer.rect.y + answer.rect.h <= footer.rect.y, 'process toggle precedes the answer and the original summary follows it');
+  assert.equal((await h.query('ai.turn.divider')).length, 0, 'process and final answer are separated by whitespace');
+  assert(answer && toggle.rect.y + toggle.rect.h + 8 <= answer.rect.y && answer.rect.y + answer.rect.h <= footer.rect.y, 'process toggle precedes the answer with spacing and the original summary follows it');
   const footerIds = new Set(flat(footer).map((n: any) => n.test_id));
   assert(['ai.turn.logo', 'ai.turn.tokens', 'ai.turn.copy', 'ai.turn.fork'].every(id => footerIds.has(id)), 'original summary controls stay together');
   assert.equal(text(footer).includes('～回合结束～'), true);
-  assert.equal(text(toggle).trim(), '回合完成');
+  assert.match(text(toggle).trim(), /^用时 (?:\d+分钟 )?\d+秒$/);
   assert.equal((await h.query('ai.followup.consumed')).length, 0, 'completed process starts collapsed');
+  await capture('03-collapsed');
   await click('ai.turn.process.toggle');
   await visible('ai.followup.consumed');
   assert.equal((await visible('ai.turn.complete')).id, footer.id, 'expanding process leaves the summary intact');

@@ -71,6 +71,9 @@ pub const Turn = struct {
     task_id: ?identity.TaskId = null,
     sent_at_ms: u64 = 0,
     ended_at_ms: ?u64 = null,
+    /// Replay-only display state. A saved partial response is not a live worker
+    /// or evidence that the original turn completed.
+    restored_interrupted: bool = false,
     started_mono_ms: u64 = 0,
     elapsed_ms: u64 = 0,
     input_tokens: ?u64 = null,
@@ -308,11 +311,35 @@ pub const Turn = struct {
         result.request_count = null;
         return result;
     }
-    /// Locate the retained final response, including split text segments. The
-    /// process view stops here; the authoritative final answer renders once.
+    pub fn displayFinished(self: *const Turn) bool {
+        return self.ended_at_ms != null or self.restored_interrupted;
+    }
+    pub fn displayResponse(self: *const Turn) []const u8 {
+        if (self.answer.len != 0) return self.answer;
+        if (self.restored_interrupted and self.timeline.items.len != 0) {
+            const last = self.timeline.items[self.timeline.items.len - 1];
+            if (last == .message) return last.message.text.items;
+        }
+        return "";
+    }
+    /// Historical monotonic timestamps are only comparable with each other.
+    /// Freeze interrupted displays at their last recorded observation.
+    pub fn displayClock(self: *const Turn, now: u64) u64 {
+        if (!self.restored_interrupted) return now;
+        var observed = self.started_mono_ms +| self.elapsed_ms;
+        for (self.timeline.items) |item| switch (item) {
+            .message, .thinking, .input => |segment| observed = @max(observed, segment.ended_ms orelse segment.started_ms),
+            else => {},
+        };
+        for (self.steps.items) |step| observed = @max(observed, step.ended_ms orelse step.started_ms);
+        return observed;
+    }
+    /// Locate the response shown outside the process disclosure, including
+    /// split final text or an explicitly interrupted, saved partial response.
     pub fn finalResponseStart(self: *const Turn) usize {
-        if (self.answer.len == 0) return self.timeline.items.len;
-        var remaining = self.answer.len;
+        const response = self.displayResponse();
+        if (response.len == 0) return self.timeline.items.len;
+        var remaining = response.len;
         var i = self.timeline.items.len;
         while (i > 0) {
             i -= 1;
@@ -320,7 +347,7 @@ pub const Turn = struct {
                 .thinking => {},
                 .message => |segment| {
                     const text = segment.text.items;
-                    if (text.len > remaining or !std.mem.endsWith(u8, self.answer[0..remaining], text)) break;
+                    if (text.len > remaining or !std.mem.endsWith(u8, response[0..remaining], text)) break;
                     remaining -= text.len;
                     if (remaining == 0) return i;
                 },
@@ -331,6 +358,7 @@ pub const Turn = struct {
     }
     pub fn clone(self: *const Turn, a: std.mem.Allocator) !Turn {
         var result: Turn = .{ .id = self.id, .task_id = self.task_id, .sent_at_ms = self.sent_at_ms, .ended_at_ms = self.ended_at_ms, .started_mono_ms = self.started_mono_ms, .elapsed_ms = self.elapsed_ms, .input_tokens = self.input_tokens, .output_tokens = self.output_tokens, .request_count = self.request_count, .thinking_started_ms = self.thinking_started_ms, .thinking_ended_ms = self.thinking_ended_ms, .thinking_expanded = self.thinking_expanded, .process_expanded = self.process_expanded };
+        result.restored_interrupted = self.restored_interrupted;
         errdefer result.deinit(a);
         result.file_source = if (self.file_source) |source| try source.clone(a) else null;
         result.before = try wire.History.copy(a, self.before.messages, "");

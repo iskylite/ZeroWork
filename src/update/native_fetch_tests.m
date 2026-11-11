@@ -71,6 +71,17 @@ void zw_update_test_fetch_contracts(void){
         [checks addObject:@"download-error-stage-and-scheduling"];
         fetchScenario=@"verify";manifest=@{@"bytes":@4,@"url":ZWFeed,@"sha256":@"incorrect"};Fetch(YES);s=FetchTestWait();
         FetchTestAssert(s.state==10 && s.failure_stage==4,@"verification failure stage");[checks addObject:@"verification-error-stage"];
+        // A prior process can leave any numbered .part file behind. Reusing
+        // its generation must neither block a new download nor overwrite it.
+        NSString *leftover=[rootPath stringByAppendingFormat:@"/download-%llu.part",Generation()+1];
+        NSData *sentinel=[@"interrupted-download" dataUsingEncoding:NSUTF8StringEncoding];
+        FetchTestAssert([sentinel writeToFile:leftover atomically:NO],@"seed interrupted download");
+        Fetch(YES);NSString *firstTemporary=fetch.temporary;s=FetchTestWait();
+        FetchTestAssert(s.state==10 && s.failure_stage==4,@"interrupted download permits a new network/verification attempt");
+        FetchTestAssert(![firstTemporary isEqual:leftover] && [[NSData dataWithContentsOfFile:leftover] isEqual:sentinel],@"old partial remains untouched");
+        Fetch(YES);NSString *secondTemporary=fetch.temporary;s=FetchTestWait();
+        FetchTestAssert(s.state==10 && s.failure_stage==4 && ![firstTemporary isEqual:secondTemporary],@"each attempt owns a fresh temporary path");
+        [checks addObject:@"interrupted-download-isolation"];
         // A superseded probe must not overwrite a newer result.
         fetchScenario=@"no-stable";Fetch(NO);Fetch(NO);s=FetchTestWait();FetchTestAssert(s.state==12,@"superseded request");[checks addObject:@"superseded-check"];
         puts([[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:@{@"status":@"passed",@"checks":checks} options:NSJSONWritingPrettyPrinted error:nil] encoding:NSUTF8StringEncoding].UTF8String);

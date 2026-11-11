@@ -420,6 +420,20 @@ static void assertWindowedInset(WindowWrapper *w) {
     }
     assert(!w.applyingTrafficLightsInset);
 }
+static unsigned insetTransactionCount;
+static IMP originalTransactionBegin;
+static void countTransactionBegin(id receiver, SEL selector) {
+    insetTransactionCount++;
+    ((void (*)(id, SEL))originalTransactionBegin)(receiver, selector);
+}
+static void assertStableInsetSkipsTransaction(WindowWrapper *w) {
+    Method begin=class_getClassMethod(CATransaction.class,@selector(begin));
+    insetTransactionCount=0;
+    originalTransactionBegin=method_setImplementation(begin,(IMP)countTransactionBegin);
+    [w applyTrafficLightsInset];
+    method_setImplementation(begin,originalTransactionBegin);
+    assert(insetTransactionCount==0);
+}
 static void overwriteButtonsWhileIdle(WindowWrapper *w) {
     [CATransaction begin];[CATransaction setDisableActions:YES];
     for(NSWindowButton kind=NSWindowCloseButton;kind<=NSWindowZoomButton;kind++) {
@@ -599,7 +613,7 @@ static void detachedHeaderCallbacks(void) {
 static void idleWindowEvents(WindowWrapper *w) {
     unsigned frames=0;RenderCallback saved=w.metalView.renderCallback;void *savedContext=w.metalView.renderContext;
     w.metalView.renderCallback=countRender;w.metalView.renderContext=&frames;
-    assertWindowedInset(w);overwriteButtonsWhileIdle(w);
+    assertWindowedInset(w);assertStableInsetSkipsTransaction(w);overwriteButtonsWhileIdle(w);
     // Deliver key delegate notifications only: never order/activate a window
     // or change the user's real key window in this unattended fixture.
     [w windowDidBecomeKey:[NSNotification notificationWithName:NSWindowDidBecomeKeyNotification object:w.window]];
@@ -624,6 +638,15 @@ int main(int argc,char **argv) { @autoreleasepool {
     @autoreleasepool {
     setenv("ZENIT_E2E_BACKGROUND","1",1);
     [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+    if(argc>1 && !strcmp(argv[1],"--traffic-lights")) {
+        void *raw=macos_create_window(980,600,"Hidden traffic lights");
+        assert(macos_chrome_configure(raw,1,1,38));
+        assert(macos_fullscreen_header_configure(raw,2,38));
+        idleWindowEvents((__bridge WindowWrapper *)raw);
+        macos_destroy_window(raw);
+        fprintf(stderr,"PASS idle traffic lights skip transactions and still correct AppKit frame changes\n");
+        return 0;
+    }
     installFixtureDispatch();
     actualAppKitCaptureHook();closeDuringEntry();detachedHeaderCallbacks();
     void *raw=macos_create_window(980,600,"Hidden header lifecycle");

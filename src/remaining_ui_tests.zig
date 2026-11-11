@@ -101,7 +101,7 @@ test "remaining UI virtual history remeasures a collapsed row instead of reservi
 test "remaining UI completed turn lazily folds only process content and keeps its final reply" {
     const Summary = @import("ui/ai_turn_summary_view.zig").View;
     const turns = @import("ai/conversation_turn.zig");
-    var turn: turns.Turn = .{ .sent_at_ms = 1, .started_mono_ms = 1, .ended_at_ms = 56001, .elapsed_ms = 56000 };
+    var turn: turns.Turn = .{ .sent_at_ms = 1, .started_mono_ms = 1, .ended_at_ms = 748001, .elapsed_ms = 748000 };
     defer turn.deinit(a);
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
@@ -130,8 +130,9 @@ test "remaining UI completed turn lazily folds only process content and keeps it
     _ = cx.render();
     try std.testing.expectEqual(@as(usize, 0), renderer.renders);
     try std.testing.expect(view.process.style.display == .none);
-    try std.testing.expectApproxEqAbs(@as(f32, 1), view.divider.globalRect().h, 0.01);
-    try std.testing.expectApproxEqAbs(view.root.globalRect().w, view.divider.globalRect().w, 0.1);
+    try std.testing.expectEqualStrings("用时 12分钟 28秒", view.button.behavior.interaction.a11y.?.label.?);
+    const toggle_rect = view.button.globalRect();
+    try std.testing.expect(answer.globalRect().y - (toggle_rect.y + toggle_rect.h) >= 8);
     const final_id = answer.id;
     for (0..4) |i| {
         const rect = view.button.globalRect();

@@ -1,7 +1,7 @@
 /** Persist committed directory progress through real timed rotation and restarts. */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdir, mkdtemp, open, readFile, realpath, rm, writeFile} from 'node:fs/promises';
+import {mkdir, mkdtemp, open, readFile, realpath, rm, stat, writeFile} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 import * as h from '../vendor/zenit/e2e/client.ts';
 
@@ -70,6 +70,14 @@ try {
     await launch(1, async () => {
         await openSettings(); await expectImage('1.png');
         const config = await readFile(join(data, 'config.toml'), 'utf8');
+        const initialProgress = await stat(statePath, {bigint:true});
+        assert((await h.resizeWindow(1240, 800)).ok);
+        assert((await h.resizeWindow(1440, 900)).ok);
+        await expectImage('1.png');
+        const afterRedraw = await stat(statePath, {bigint:true});
+        assert.equal(afterRedraw.ino, initialProgress.ino, 'redraw replaced unchanged background progress');
+        assert.equal(afterRedraw.mtimeNs, initialProgress.mtimeNs, 'redraw wrote unchanged background progress');
+        report.checks.push('native resize and redraw preserve the unchanged progress file');
         await click('settings.close');
         console.log('Waiting for the real one-minute switch');
         await h.sleep(31000); await h.health(); await h.sleep(31000);
@@ -77,7 +85,7 @@ try {
         const state = await readProgress();
         assert.equal(state.paths[state.index], join(images,'2.png'));
         assert.equal(await readFile(join(data,'config.toml'),'utf8'), config);
-        assert.equal((await visible('settings.footer.state')).text, '已保存');
+        assert.equal((await visible('settings.footer.state')).text ?? '', '');
         assert((await h.screenshot(join(out,'sequential-before-restart.png'))).ok);
         report.checks.push('real one-minute rotation persists current image without changing config or dirtying settings');
     });
@@ -87,8 +95,9 @@ try {
         assert((await h.screenshot(join(out,'sequential-after-restart.png'))).ok);
         report.checks.push('restart restores the displayed sequential image and starts a fresh interval');
         await reveal('settings.field.order'); await click('settings.field.order'); await click('settings.option.order.random');
+        assert.equal((await visible('settings.footer.state')).text, '未保存');
         await click('settings.save');
-        await h.waitFor(async () => (await visible('settings.footer.state')).text==='已保存' || null, 15000);
+        await h.waitFor(async () => ((await visible('settings.footer.state')).text ?? '') === '' || null, 15000);
         await expectImage('2.png');
         randomProgress = await readProgress();
         assert.equal(randomProgress.random, true);

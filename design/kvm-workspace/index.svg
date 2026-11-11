@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="480" viewBox="0 0 860 480" xml:lang="zh-CN">
+<title>KVM 工作区</title>
+<style>
+  text { dominant-baseline: central; }
+  .ui { font-family: Inter, system-ui, "PingFang SC", sans-serif; }
+  .mono { font-family: Menlo, monospace; }
+</style>
+<defs>
+<symbol id="check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></symbol>
+<symbol id="pointer" viewBox="0 0 24 24"><path d="m4 3 16 8-7 1-3 7z"/></symbol>
+<symbol id="keyboard" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 15h8"/></symbol>
+<symbol id="screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1"/><path d="M8 21h8m-4-4v4"/></symbol>
+<symbol id="power" viewBox="0 0 24 24"><path d="M12 2v10M6.4 5.7a8 8 0 1 0 11.2 0"/></symbol>
+<symbol id="launch" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></symbol>
+<clipPath id="keyboard-menu-clip"><rect x="552" y="58" width="296" height="164" rx="12" fill="#fff"/></clipPath>
+<filter id="menu-blur" x="-15%" y="-20%" width="130%" height="140%"><feGaussianBlur stdDeviation="24"/></filter>
+</defs>
+<g id="workspace-surfaces">
+<rect x="0" y="0" width="860" height="480" rx="0" fill="#f6f6f7"/>
+<rect x="12" y="12" width="836" height="44" rx="18" fill="#fff"/>
+<rect x="12" y="72" width="836" height="396" rx="16" fill="#000"/>
+<rect x="20" y="80" width="820" height="380" rx="0" fill="#000"/>
+</g>
+<g id="toolbar">
+<svg x="28" y="25" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgb(91, 91, 101)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#screen"/></svg>
+<text x="54" y="34" class="ui" font-size="13px" font-weight="700" fill="rgb(24, 24, 27)">P3C9-KVM</text>
+<text x="452" y="34" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">已连接</text>
+<svg x="434" y="27" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgb(21, 184, 166)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#check"/></svg>
+<text x="536" y="34" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">控制</text>
+<svg x="516" y="26" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(24, 24, 27)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#pointer"/></svg>
+<text x="604" y="34" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">按键</text>
+<svg x="584" y="26" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(24, 24, 27)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#keyboard"/></svg>
+<text x="672" y="34" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">显示</text>
+<svg x="652" y="26" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(24, 24, 27)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#screen"/></svg>
+<text x="740" y="34" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">电源</text>
+<svg x="720" y="26" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(24, 24, 27)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#power"/></svg>
+<text x="808" y="34" class="ui" font-size="12px" font-weight="500" fill="rgb(24, 24, 27)">启动</text>
+<svg x="788" y="26" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(24, 24, 27)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#launch"/></svg>
+</g>
+<g id="keyboard-menu" clip-path="url(#keyboard-menu-clip)">
+<use href="#workspace-surfaces" filter="url(#menu-blur)"/>
+<rect x="552" y="58" width="296" height="164" rx="12" fill="#fff" fill-opacity=".83137"/>
+<text x="564" y="79" class="ui" font-size="13px" font-weight="700" fill="rgb(24, 24, 27)">按键</text>
+<text x="564" y="120" class="ui" font-size="11px" font-weight="500" fill="rgb(91, 91, 101)">需要已获控制权；不会自动抢占。</text>
+<rect x="564" y="140" width="272" height="32" rx="7" fill="rgb(239, 239, 239)"/>
+<text x="648.938" y="156" class="ui" font-size="12px" font-weight="500" fill="rgb(91, 91, 101)">Ctrl + Alt + Delete</text>
+<rect x="564" y="178" width="272" height="32" rx="7" fill="rgb(239, 239, 239)"/>
+<text x="661.297" y="194" class="ui" font-size="12px" font-weight="500" fill="rgb(91, 91, 101)">Ctrl + Alt + F1</text>
+</g>
+</svg>

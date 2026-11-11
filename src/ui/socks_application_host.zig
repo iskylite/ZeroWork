@@ -252,14 +252,12 @@ pub const Host = struct {
             view.setError("目标地址或端口无效");
             return;
         };
-        var desired_found = false;
-        for (self.desired_forwards.items) |*entry| if (entry.legacy == legacy) {
-            entry.mode = draft.mode;
-            entry.target = fixed_target;
-            desired_found = true;
+        var desired_index: ?usize = null;
+        for (self.desired_forwards.items, 0..) |entry, index| if (entry.legacy == legacy) {
+            desired_index = index;
             break;
         };
-        if (!desired_found) self.desired_forwards.append(self.allocator, .{ .legacy = legacy, .mode = draft.mode, .target = fixed_target }) catch {
+        if (desired_index == null) self.desired_forwards.ensureUnusedCapacity(self.allocator, 1) catch {
             view.setError("内存不足");
             return;
         };
@@ -283,12 +281,19 @@ pub const Host = struct {
                 view.setError("主机配置已移除");
                 return;
             };
-            self.workspace.replaceHost(index, host) catch |err| {
+            if (self.workspace.registry.hosts[index].connection_id != host.connection_id) {
+                next.deinit();
+                view.setError("主机配置已变更，请重新打开转发设置");
+                return;
+            }
+            self.workspace.saveSocksConfiguration(host) catch |err| {
                 next.deinit();
                 view.setError(@errorName(err));
                 return;
             };
         }
+        const desired: Desired = .{ .legacy = legacy, .mode = draft.mode, .target = fixed_target };
+        if (desired_index) |index| self.desired_forwards.items[index] = desired else self.desired_forwards.appendAssumeCapacity(desired);
         if (tab.host_snapshot) |*previous| previous.deinit();
         tab.host_snapshot = next;
         if (self.hasLive(legacy)) {

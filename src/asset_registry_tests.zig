@@ -262,3 +262,115 @@ test "registry rejects malformed TOTP seeds before accepting an asset" {
         try std.testing.expectError(error.InvalidTotpSeed, hosts.Registry.parse(std.testing.allocator, source));
     }
 }
+
+test "review repair import remaps identities groups routes and plugin payloads before atomic publication" {
+    const imports = @import("config/host_import.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "hosts.toml", .data = "[[hosts]] name=\"existing\";host=\"existing.test\";user=\"u\";group=\"Production\"" });
+    var live = try store.loadHosts(io, tmp.dir, a, "hosts.toml");
+    defer live.deinit();
+    const original = live.hosts[0].owner();
+    const source_text = "[[hosts]] name=\"import jump\";host=\"jump.test\";user=\"u\";group=\"Staging\"\n" ++
+        "[[hosts]] name=\"import target\";host=\"target.test\";user=\"u\";protocol=\"sftp\";group=\"Staging\";jump_chain=[\"import jump\"];socks_exit=0\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "import.toml", .data = source_text });
+    var source = try store.loadHostsForImport(io, tmp.dir, a, "import.toml");
+    defer source.deinit();
+    _ = try source.add(.{ .name = "import KVM", .host = "", .user = "", .protocol_id = "bmc_ikvm", .plugin_payload = "{\"endpoint\":{\"host\":\"bmc.test\"},\"username\":\"u\",\"access\":{\"ssh_route\":{\"hops\":[{\"asset_id\":1}]}}}" });
+    const Resolver = struct {
+        fn resolve(_: *const anyopaque, protocol: []const u8, version: u32) ?imports.RemapPayload {
+            return if (version == 1 and std.mem.eql(u8, protocol, "bmc_ikvm")) @import("plugins/bmc_ikvm/codec.zig").remapImport else null;
+        }
+    };
+    var tx = try store.HostsTransaction.init(a, &live);
+    defer tx.deinit();
+    const merged = try imports.merge(a, &live, &source, .{ .context = &source, .resolve = Resolver.resolve });
+    tx.candidate.?.deinit();
+    tx.candidate = merged;
+    try tx.commit(io, tmp.dir, "hosts.toml", &live);
+    try std.testing.expectEqual(original, live.hosts[0].owner());
+    try std.testing.expectEqual(@as(usize, 4), live.hosts.len);
+    try std.testing.expectEqualStrings("Staging", live.hosts[1].group.?);
+    try std.testing.expect(live.hosts[1].asset_group_id != live.hosts[0].asset_group_id);
+    try std.testing.expect(live.hosts[1].connection_id != source.hosts[0].connection_id);
+    try std.testing.expectEqual(live.hosts[1].connection_id, live.hosts[2].route[0]);
+    try std.testing.expectEqual(@as(?usize, 0), live.hosts[2].socks_exit);
+    var payload = try @import("plugins/bmc_ikvm/model.zig").parse(a, live.hosts[3].plugin_payload.?);
+    defer payload.deinit();
+    try std.testing.expectEqual(@backingInt(live.hosts[1].connection_id), payload.value().access.ssh_route.hops[0].asset_id);
+    var edit = try store.HostsTransaction.init(a, &live);
+    defer edit.deinit();
+    _ = try edit.candidate.?.setPinned(live.hosts[2].owner(), true);
+    try edit.commit(io, tmp.dir, "hosts.toml", &live);
+    var disk = try store.loadHosts(io, tmp.dir, a, "hosts.toml");
+    defer disk.deinit();
+    try std.testing.expect(disk.hosts[2].pinned);
+    try std.testing.expectEqual(live.source_hash, disk.source_hash);
+    const untouched = try tmp.dir.readFileAlloc(io, "import.toml", a, .limited(store.max_config_bytes));
+    defer a.free(untouched);
+    try std.testing.expectEqualStrings(source_text, untouched);
+}
+
+test "review repair import rejects orphan collisions and preserves same-name group presentation" {
+    const imports = @import("config/host_import.zig");
+    var live = try hosts.Registry.parse(a, "[[hosts]] name=\"existing\";host=\"existing.test\";user=\"u\";group=\"Production\"");
+    defer live.deinit();
+    live.groups[0].collapsed = true;
+    var source = try hosts.Registry.parse(a, "[[hosts]] name=\"imported\";host=\"imported.test\";user=\"u\";group=\"Production\"");
+    defer source.deinit();
+    var merged = try imports.merge(a, &live, &source, null);
+    defer merged.deinit();
+    try std.testing.expectEqual(@as(usize, 1), merged.groups.len);
+    try std.testing.expect(merged.groups[0].collapsed);
+    try std.testing.expectEqual(@as(usize, 2), merged.groups[0].ordered_connection_ids.len);
+    const before = try live.encode(a);
+    defer a.free(before);
+    // This ID is absent in the imported namespace, even if it exists locally.
+    source.hosts[0].connection_id = @fromBackingInt(2);
+    source.hosts[0].route = try source.arena.allocator().dupe(hosts.identity.ConnectionId, &.{@fromBackingInt(1)});
+    try std.testing.expectError(error.MissingRouteReference, imports.merge(a, &live, &source, null));
+    const after = try live.encode(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+test "review repair forwarding save preserves newer connection fields and updates the commit baseline" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "hosts.toml", .data = legacy });
+    var live = try store.loadHosts(io, tmp.dir, a, "hosts.toml");
+    defer live.deinit();
+    var snapshot = try live.clone(a);
+    defer snapshot.deinit();
+    var session = snapshot.hosts[1];
+    session.socks_enabled = true;
+    session.socks_port = 1088;
+    session.socks_exit = 0;
+    var edit = try store.HostsTransaction.init(a, &live);
+    defer edit.deinit();
+    var changed = edit.candidate.?.hosts[1];
+    changed.name = "new name";
+    changed.host = "new.test";
+    const revised = try edit.candidate.?.update(changed.owner(), changed);
+    try edit.commit(io, tmp.dir, "hosts.toml", &live);
+    var forwarding = try store.HostsTransaction.init(a, &live);
+    defer forwarding.deinit();
+    const saved = try forwarding.candidate.?.updateSocks(session);
+    try forwarding.commit(io, tmp.dir, "hosts.toml", &live);
+    try std.testing.expectEqual(revised.revision + 1, saved.revision);
+    try std.testing.expectEqualStrings("new name", live.hosts[1].name);
+    try std.testing.expectEqualStrings("new.test", live.hosts[1].host);
+    try std.testing.expectEqualStrings("test-secret", live.hosts[1].password.?);
+    try std.testing.expectEqual(@as(u16, 1088), live.hosts[1].socks_port);
+    var next = try store.HostsTransaction.init(a, &live);
+    defer next.deinit();
+    _ = try next.candidate.?.setPinned(saved, true);
+    try next.commit(io, tmp.dir, "hosts.toml", &live);
+    try std.testing.expect(live.hosts[1].pinned);
+    var disk = try store.loadHosts(io, tmp.dir, a, "hosts.toml");
+    defer disk.deinit();
+    try std.testing.expectEqual(live.source_hash, disk.source_hash);
+    try std.testing.expectEqualStrings("new.test", disk.hosts[1].host);
+    try live.remove(live.hosts[0].owner());
+    try std.testing.expectError(error.MissingRouteReference, live.updateSocks(session));
+}

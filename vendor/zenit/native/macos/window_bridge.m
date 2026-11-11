@@ -3225,7 +3225,9 @@ static void zenitInstallFullscreenTrace(void) {
     if (!titlebarView) return;
 
     self.applyingTrafficLightsInset=YES;
-    [CATransaction begin];[CATransaction setDisableActions:YES];
+    // The layout poll can run even when no frame is needed. Defer opening a
+    // transaction until a view actually needs a geometry change.
+    BOOL transactionStarted=NO;
     @try {
         [self observeTrafficLights];
         CGFloat button_size = self.trafficLightsDiameter > 0
@@ -3244,6 +3246,8 @@ static void zenitInstallFullscreenTrace(void) {
         if (containerView && [containerView isKindOfClass:NSClassFromString(@"NSTitlebarContainerView")]) {
             NSRect cf = containerView.frame;
             if (needed_h > cf.size.height) {
+                [CATransaction begin];[CATransaction setDisableActions:YES];
+                transactionStarted=YES;
                 // Container in NSThemeFrame top-aligned (higher origin.y higher),
                 // growing height must shift origin down or whole thing tops outside
                 // window.
@@ -3270,10 +3274,16 @@ static void zenitInstallFullscreenTrace(void) {
             if (self.trafficLightsDiameter > 0) f.size = NSMakeSize(button_size, button_size);
             f.origin.x = inset_x + i * 20;
             f.origin.y = button_y;
-            if (!NSEqualRects(buttons[i].frame, f)) buttons[i].frame = f;
+            if (NSEqualRects(buttons[i].frame, f)) continue;
+            if (!transactionStarted) {
+                [CATransaction begin];[CATransaction setDisableActions:YES];
+                transactionStarted=YES;
+            }
+            buttons[i].frame = f;
         }
     } @finally {
-        [CATransaction commit];self.applyingTrafficLightsInset=NO;
+        if (transactionStarted) [CATransaction commit];
+        self.applyingTrafficLightsInset=NO;
     }
 }
 

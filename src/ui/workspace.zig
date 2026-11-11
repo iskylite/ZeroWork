@@ -940,16 +940,7 @@ pub const Workspace = struct {
 
     pub fn removeHost(self: *Workspace, index: usize) !void {
         if (index >= self.registry.hosts.len) return error.InvalidHost;
-        try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
-        const selected = if (self.selected_host) |position| self.hostId(position) else null;
-        const next = try self.registry.arena.allocator().alloc(hosts_mod.HostConfig, self.registry.hosts.len - 1);
-        @memcpy(next[0..index], self.registry.hosts[0..index]);
-        @memcpy(next[index..], self.registry.hosts[index + 1 ..]);
-        try self.saveHostSlice(next);
-        _ = try self.identities.removeHost(index);
-        self.registry.hosts = next;
-        self.refreshAssetPositions(selected);
-        try self.rebuildSidebar();
+        _ = try self.applyAssetAction(.{ .delete = .{ .owner = self.registry.hosts[index].owner() } });
     }
 
     /// The asset moves to the first position of its own group, as shown by
@@ -968,27 +959,37 @@ pub const Workspace = struct {
         next[target] = picked;
         try self.saveHostSlice(next);
         try self.identities.moveHost(index, target);
-        self.registry.hosts = next;
         self.refreshAssetPositions(selected);
         try self.rebuildSidebar();
     }
 
     pub fn replaceHost(self: *Workspace, index: usize, host: hosts_mod.HostConfig) !void {
         if (index >= self.registry.hosts.len) return error.InvalidHost;
-        try host.validate();
+        if (self.registry.hosts[index].connection_id != host.connection_id) return error.RevisionConflict;
         try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
-        const arena = self.registry.arena.allocator();
-        const next = try arena.dupe(hosts_mod.HostConfig, self.registry.hosts);
-        next[index] = try lifecycle.cloneValue(hosts_mod.HostConfig, arena, host);
-        try self.saveHostSlice(next);
-        self.registry.hosts = next;
-        try self.rebuildSidebar();
+        var transaction = try store.HostsTransaction.init(self.allocator, &self.registry);
+        defer transaction.deinit();
+        _ = try transaction.candidate.?.update(host.owner(), host);
+        _ = try transaction.commitWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry, .{ .provider = self.credential_provider });
+        self.refreshSavedHosts();
+    }
+
+    pub fn saveSocksConfiguration(self: *Workspace, source: hosts_mod.HostConfig) !void {
+        var transaction = try store.HostsTransaction.init(self.allocator, &self.registry);
+        defer transaction.deinit();
+        _ = try transaction.candidate.?.updateSocks(source);
+        _ = try transaction.commitWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry, .{ .provider = self.credential_provider });
+        self.refreshSavedHosts();
     }
 
     fn saveHostSlice(self: *Workspace, hosts: []hosts_mod.HostConfig) !void {
-        var candidate = self.registry;
-        candidate.hosts = hosts;
-        _ = try store.saveHostsWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, candidate, .{ .provider = self.credential_provider });
+        var transaction = try store.HostsTransaction.init(self.allocator, &self.registry);
+        defer transaction.deinit();
+        const candidate = &transaction.candidate.?;
+        const next = try candidate.arena.allocator().alloc(hosts_mod.HostConfig, hosts.len);
+        for (hosts, next) |host, *target| target.* = try hosts_mod.cloneConfig(candidate.arena.allocator(), host);
+        candidate.hosts = next;
+        _ = try transaction.commitWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry, .{ .provider = self.credential_provider });
     }
 
     fn refreshAssetPositions(self: *Workspace, selected: ?HostId) void {
@@ -998,7 +999,39 @@ pub const Workspace = struct {
 
     /// 把当前注册表原子写回 hosts.toml（菜单 clone/pin/delete 持久化共用）。
     pub fn saveRegistry(self: *Workspace) !void {
-        _ = try store.saveHostsWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, self.registry, .{ .provider = self.credential_provider });
+        var transaction = try store.HostsTransaction.init(self.allocator, &self.registry);
+        defer transaction.deinit();
+        _ = try transaction.commitWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry, .{ .provider = self.credential_provider });
+    }
+
+    pub fn importHosts(self: *Workspace, imported: *const hosts_mod.Registry) !void {
+        const imports = @import("../config/host_import.zig");
+        const Resolve = struct {
+            fn payload(raw: *const anyopaque, protocol: []const u8, version: u32) ?imports.RemapPayload {
+                const workspace: *const Workspace = @ptrCast(@alignCast(raw));
+                const plugin = workspace.plugins.find(protocol) orelse return null;
+                const connection = plugin.connection orelse return null;
+                if (connection.payload_version != version) return null;
+                return connection.remap_import;
+            }
+        };
+        try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
+        try self.identities.hosts.ensureTotalCapacity(self.allocator, self.registry.hosts.len + imported.hosts.len);
+        var transaction = try store.HostsTransaction.init(self.allocator, &self.registry);
+        defer transaction.deinit();
+        const candidate = try imports.merge(self.allocator, &self.registry, imported, .{ .context = self, .resolve = Resolve.payload });
+        transaction.candidate.?.deinit();
+        transaction.candidate = candidate;
+        _ = try transaction.commitWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry, .{ .provider = self.credential_provider });
+        self.identities.appendHosts(self.allocator, self.registry.hosts.len) catch unreachable;
+        self.refreshSavedHosts();
+    }
+
+    fn refreshSavedHosts(self: *Workspace) void {
+        self.rebuildSidebar() catch |err| {
+            applog.warn(.ui, "hosts saved; sidebar refresh failed: {s}", .{@errorName(err)});
+            self.statusFailure("配置已保存，列表刷新失败");
+        };
     }
 
     pub const StatusKind = enum { info, failure };
@@ -8517,4 +8550,71 @@ test "reconnect configuration reads current host commands global policy and host
     resolved = workspace.reconnectConfiguration(original);
     try std.testing.expectEqualStrings("old command", resolved.startup_commands[0]);
     try std.testing.expect(!resolved.auto_shell_integration);
+}
+
+test "review repair workspace saved-host entrypoints retain current fields and rollback failed imports" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "hosts.toml", .data = "[[hosts]] name=\"before\";host=\"before.test\";user=\"u\"" });
+    const path = try tmp.dir.realPathFileAlloc(io, "hosts.toml", a);
+    defer a.free(path);
+    const cx = try ui.Cx.init(a, io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(1100, 720);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    var nodes: [4]*ui.Node = undefined;
+    for (&nodes) |*node| {
+        node.* = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+        try cx.root.?.appendChild(a, node.*);
+    }
+    const settings: config_mod.Config = .{};
+    const workspace = try Workspace.init(a, cx, scope, io, &settings, path, nodes[0], nodes[1], nodes[2], nodes[3]);
+    var snapshot = try workspace.registry.clone(a);
+    defer snapshot.deinit();
+    var edited = workspace.registry.hosts[0];
+    edited.name = "after";
+    edited.host = "after.test";
+    try workspace.replaceHost(0, edited);
+    var forwarding = snapshot.hosts[0];
+    forwarding.socks_enabled = true;
+    forwarding.socks_port = 1099;
+    try workspace.saveSocksConfiguration(forwarding);
+    try std.testing.expectEqualStrings("after.test", workspace.registry.hosts[0].host);
+    try std.testing.expectEqual(@as(u16, 1099), workspace.registry.hosts[0].socks_port);
+    try std.testing.expectError(error.RevisionConflict, workspace.replaceHost(0, snapshot.hosts[0]));
+    try workspace.saveRegistry();
+    edited = workspace.registry.hosts[0];
+    edited.name = "after another save";
+    try workspace.replaceHost(0, edited);
+    var imported = try hosts_mod.Registry.parse(a, "[[hosts]] name=\"imported\";host=\"import.test\";user=\"u\";group=\"Staging\"");
+    defer imported.deinit();
+    try tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "not a directory" });
+    const blocked = try std.fmt.allocPrint(a, "{s}/blocked/hosts.toml", .{std.fs.path.dirname(path).?});
+    defer a.free(blocked);
+    workspace.hosts_path = blocked;
+    const revision = workspace.registry.revision;
+    const hash = workspace.registry.source_hash;
+    const watermark = workspace.registry.connection_ids.next_value;
+    const identity_count = workspace.identities.hosts.items.len;
+    try std.testing.expectError(error.NotDir, workspace.importHosts(&imported));
+    try std.testing.expectEqual(@as(usize, 1), workspace.registry.hosts.len);
+    try std.testing.expectEqual(identity_count, workspace.identities.hosts.items.len);
+    try std.testing.expectEqual(revision, workspace.registry.revision);
+    try std.testing.expectEqual(hash, workspace.registry.source_hash);
+    try std.testing.expectEqual(watermark, workspace.registry.connection_ids.next_value);
+    workspace.hosts_path = path;
+    try workspace.importHosts(&imported);
+    try std.testing.expectEqual(@as(usize, 2), workspace.identities.hosts.items.len);
+    edited = workspace.registry.hosts[1];
+    edited.name = "imported edited";
+    try workspace.replaceHost(1, edited);
+    var disk = try store.loadHosts(io, tmp.dir, a, "hosts.toml");
+    defer disk.deinit();
+    try std.testing.expectEqual(workspace.registry.source_hash, disk.source_hash);
+    try std.testing.expectEqualStrings("after.test", disk.hosts[0].host);
+    try std.testing.expectEqualStrings("imported edited", disk.hosts[1].name);
 }

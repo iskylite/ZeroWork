@@ -2,6 +2,11 @@
 const std = @import("std");
 const ui = @import("ui");
 const Turn = @import("../ai/conversation_turn.zig").Turn;
+const theme = @import("app_theme.zig");
+const styles = @import("ai_assistant_styles.zig");
+const status = @import("ai_turn_status_view.zig");
+const chevron_size = 16;
+
 pub const View = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -10,26 +15,33 @@ pub const View = struct {
     button: *ui.Node = undefined,
     icon: *ui.Node = undefined,
     process: *ui.Node = undefined,
-    divider: *ui.Node = undefined,
     context: *anyopaque,
     render: *const fn (*anyopaque, *ui.Node, *ui.Scope) anyerror!void,
     on_toggle: ui.Handler(void),
+    label_buffer: [64]u8 = undefined,
     rendered: bool = false,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, turn: *Turn, context: *anyopaque, render: @FieldType(View, "render"), on_toggle: ui.Handler(void)) !*View {
-        const root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .min_width = 0, .flex_shrink = 0 }, .{});
+        const root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .padding = .{ .bottom = 8 }, .min_width = 0, .flex_shrink = 0 }, .{});
         root.meta.ownership.meta.test_id = "ai.turn.process.section";
         const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .turn = turn, .root = root, .context = context, .render = render, .on_toggle = on_toggle });
-        const color = @import("app_theme.zig").current().fg_2;
-        self.button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "展开或收起本回合过程消息", .base_style = ui.BoxStyle{ .height = .{ .px = 22 }, .align_self = .start, .padding = .{}, .gap = 4, .text_color = color }, .on_click = cx.on(View, self, toggle) }).mount(scope, cx);
+        const now: u64 = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
+        const seconds = status.elapsedMs(turn, 0, now) / std.time.ms_per_s;
+        const label = if (seconds < 60)
+            try std.fmt.bufPrint(&self.label_buffer, "用时 {d}秒", .{seconds})
+        else
+            try std.fmt.bufPrint(&self.label_buffer, "用时 {d}分钟 {d}秒", .{ seconds / 60, seconds % 60 });
+        self.button = try ui.widgets.Button(.{
+            .variant = .ghost,
+            .size = .sm,
+            .label = label,
+            .base_style = styles.turnProcessButton(),
+            .on_click = cx.on(View, self, toggle),
+        }).mount(scope, cx);
         self.button.meta.ownership.meta.test_id = "ai.turn.process.toggle";
         if (self.button.behavior.interaction.a11y) |*attrs| attrs.expanded = turn.process_expanded;
-        self.icon = try ui.iconTint(cx, if (turn.process_expanded) ui.icons.chevron_down else ui.icons.chevron_right, color, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 });
+        self.icon = try ui.iconTint(cx, if (turn.process_expanded) ui.icons.chevron_down else ui.icons.chevron_right, theme.current().fg_1, .{ .width = .{ .px = chevron_size }, .height = .{ .px = chevron_size }, .flex_shrink = 0 });
         try self.button.appendChild(cx.allocator, self.icon);
-        try self.button.appendChild(cx.allocator, try ui.text(cx, "回合完成", .{ .font_size = 11.5, .line_height = 16.0 / 11.5, .color = color }));
         try root.appendChild(cx.allocator, self.button);
-        self.divider = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 1 }, .flex_shrink = 0, .background = @import("app_theme.zig").current().fg_2.withAlpha(64) }, .{});
-        self.divider.meta.ownership.meta.test_id = "ai.turn.divider";
-        try root.appendChild(cx.allocator, self.divider);
         self.process = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .flex_shrink = 0, .min_width = 0 }, .{});
         self.process.meta.ownership.meta.test_id = "ai.turn.process";
         try root.appendChild(cx.allocator, self.process);
@@ -62,7 +74,7 @@ pub const View = struct {
         self.process.setDisplay(if (expanded) .flex else .none);
         if (self.button.behavior.interaction.a11y) |*attrs| attrs.expanded = expanded;
         const asset = if (expanded) ui.icons.chevron_down else ui.icons.chevron_right;
-        if (asset.icon_id) |id| if (asset.pickRep(12)) |rep| self.icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = @import("app_theme.zig").current().fg_2 });
+        if (asset.icon_id) |id| if (asset.pickRep(chevron_size)) |rep| self.icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = theme.current().fg_1 });
         self.on_toggle.invoke();
         self.cx.requestRedraw();
     }

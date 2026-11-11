@@ -2,6 +2,16 @@
 //! keep their explicit pass-through or tooltip semantics.
 const ui = @import("ui");
 
+/// Portaled popovers belong to the surface containing their trigger.
+pub fn containsPress(cx: *ui.Cx, surface: *ui.Node, target: *ui.Node) bool {
+    var node = target;
+    while (!node.isDescendantOf(surface)) {
+        const layer = cx.overlay_stack.findLayerForNode(node) orelse return false;
+        node = cx.node_registry.resolve(layer.trigger_handle, null) orelse return false;
+    }
+    return true;
+}
+
 pub fn protect(cx: *ui.Cx, node: *ui.Node) void {
     if (node.style.hit_behavior() == .pass_through) return;
     if (node.behavior.interaction.a11y) |a11y| if (a11y.role == .tooltip) return;

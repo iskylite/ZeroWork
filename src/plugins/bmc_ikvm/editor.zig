@@ -362,6 +362,7 @@ pub const EditorView = struct {
     fn reportError(self: *EditorView, err: anyerror) void {
         const message: []const u8 = switch (err) {
             error.MissingName => "请输入连接名称",
+            error.DuplicateConnectionName => "已有同名连接，请修改连接名称。",
             error.InvalidEndpoint => if (self.draft != null and self.draft.?.https_port == 0) "HTTPS 端口应为 1–65535" else "请输入有效的 BMC 地址，不包含协议或路径",
             error.InvalidUsername => "请输入有效的 BMC 用户名",
             error.MissingSshReference => "请选择至少一个 SSH 跳板，或切换为直连",
@@ -378,7 +379,7 @@ pub const EditorView = struct {
             else => "操作未完成，配置草稿已保留",
         };
         const field_index: ?usize = switch (err) {
-            error.MissingName => 0,
+            error.MissingName, error.DuplicateConnectionName => 0,
             error.InvalidEndpoint => if (self.draft != null and self.draft.?.https_port == 0) 2 else 1,
             error.InvalidUsername => 3,
             else => null,

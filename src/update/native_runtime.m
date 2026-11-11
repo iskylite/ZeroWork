@@ -222,7 +222,9 @@ static void Fetch(BOOL package){
         if(!rootPath)ZWFail(@"更新服务尚未就绪");
         [fetch.task cancel];pthread_mutex_lock(&statusLock);status.generation++;status.received=0;status.expected=0;pthread_mutex_unlock(&statusLock);
         ZWUpdateFetch *f=[ZWUpdateFetch new];f.generation=Generation();f.package=package;f.fd=-1;f.metadata=[NSMutableData data];f.releaseInfo=manifest;f.envelope=manifestEnvelope;
-        if(package){if(!manifest)ZWFail(@"请先检查新版本");f.temporary=[rootPath stringByAppendingFormat:@"/download-%llu.part",f.generation];f.fd=open(f.temporary.fileSystemRepresentation,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(f.fd<0)ZWFail(@"无法创建下载文件");}
+        // Generation fences callbacks within this process, not filenames across
+        // launches. A crashed download must not occupy the next process's slot.
+        if(package){if(!manifest)ZWFail(@"请先检查新版本");f.temporary=[rootPath stringByAppendingFormat:@"/download-%@.part",NSUUID.UUID.UUIDString];f.fd=open(f.temporary.fileSystemRepresentation,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(f.fd<0)ZWFail(@"无法创建下载文件");}
         if(!package){manifest=nil;manifestEnvelope=nil;pthread_mutex_lock(&statusLock);status.version[0]=0;status.notes[0]=0;pthread_mutex_unlock(&statusLock);}
         Publish(package?3:1,package?@"正在下载已签名的更新包…":@"正在检查 GitHub Release…");
         StartFetch(f,package?f.releaseInfo[@"url"]:ZWFeed);

@@ -418,6 +418,7 @@ pub fn build(b: *std.Build) void {
     bmc_tests.root_module.linkSystemLibrary("ssh2", .{});
     bmc_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     bmc_tests.root_module.linkSystemLibrary("curl", .{});
+    bmc_tests.root_module.linkFramework("JavaScriptCore", .{});
     addCoreTextBridgeForTest(zenit_dep, bmc_tests);
     addBmcNative(b, bmc_tests.root_module);
     bmc_tests.step.dependOn(&verify_ssh.step);

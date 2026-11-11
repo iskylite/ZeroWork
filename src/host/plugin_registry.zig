@@ -98,6 +98,8 @@ pub const ConnectionContribution = struct {
     /// The caller owns both the returned slice and every reference string.
     /// This enumerates opaque plugin payloads without host protocol branches.
     credential_references: ?*const fn (std.mem.Allocator, []const u8) anyerror![]const []const u8 = null,
+    /// Import must remap any asset references hidden in a plugin payload.
+    remap_import: ?@import("../config/host_import.zig").RemapPayload = null,
 };
 /// A non-persistent creation entry (for example a native process). It has no
 /// remote asset/editor and uses the same session factory and owner lifecycle.

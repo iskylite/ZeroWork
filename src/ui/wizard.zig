@@ -459,12 +459,12 @@ pub const Wizard = struct {
                 body_changed = true;
             }
         };
-        const width = @min(desired_width, @max(1, self.cx.viewport.width - 32));
+        const width = @min(desired_width, S.availableModalWidth(self.cx.viewport.width));
         var preferred = S.max_height;
         if (self.plugin_editor) |editor| if (editor.vtable.preferred_modal_height) |get| if (get(editor.context)) |value| {
             if (std.math.isFinite(value) and value > 0) preferred = @min(value, S.max_height);
         };
-        const compact = self.cx.viewport.width <= 860 or self.cx.viewport.height <= 480;
+        const compact = S.compactWindow(self.cx.viewport.width, self.cx.viewport.height);
         if (self.header) |header| {
             const desired_h: f32 = if (compact and !self.presentation_warning) 48 else 52;
             if (header.style.height != .px or header.style.height.px != desired_h) {
@@ -472,7 +472,7 @@ pub const Wizard = struct {
                 body_changed = true;
             }
         }
-        const height = @min(preferred, @max(1, self.cx.viewport.height - @as(f32, if (compact) 48 else 32)));
+        const height = @min(preferred, S.availableModalHeight(self.cx.viewport.height, compact));
         const changed = node.style.width != .px or node.style.width.px != width or node.style.height != .px or node.style.height.px != height;
         if (changed) node.setStyleInline(self.alloc, .{ .width = .{ .px = width }, .height = .{ .px = height } });
         return changed or body_changed;

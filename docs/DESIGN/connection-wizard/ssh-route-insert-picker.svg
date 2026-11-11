@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="386" viewBox="0 0 760 386" fill="none" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title">
+  <title id="title">编辑连接 · SSH · 连接路径</title>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif; fill: #e5e9df; }
+      .title { font-size: 15px; font-weight: 650; }
+      .label { font-size: 13px; font-weight: 600; }
+      .secondary { font-size: 12px; fill: #b7c0b2; }
+      .role { font-size: 10px; font-weight: 500; fill: #a8b39f; }
+      .host-name { font-size: 13px; font-weight: 600; }
+      .accent { fill: #c5d5a4; }
+      .address { font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace; font-size: 10.5px; fill: #b6bfae; }
+      .step-label { font-size: 12px; fill: #aeb9aa; }
+      .step-current { font-size: 13px; font-weight: 550; fill: #d3e3b8; }
+      .icon { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .route-arrow { fill: none; stroke: #9ba991; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+    <!-- Icons from the project's Lucide assets (ISC). -->
+    <filter id="picker-shadow" x="-20%" y="-35%" width="140%" height="185%">
+      <feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#131911" flood-opacity=".46"/>
+    </filter>
+    <symbol id="search" viewBox="0 0 24 24"><g class="icon"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></g></symbol>
+    <symbol id="plug" viewBox="0 0 24 24"><path class="icon" d="M12 22v-5M15 8V2M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1zM9 8V2"/></symbol>
+    <symbol id="terminal" viewBox="0 0 24 24"><path class="icon" d="M12 19h8M4 17l6-6-6-6"/></symbol>
+    <symbol id="close" viewBox="0 0 24 24"><path class="icon" d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="check" viewBox="0 0 24 24"><path class="icon" d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="down" viewBox="0 0 24 24"><path class="icon" d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="plus" viewBox="0 0 24 24"><path class="icon" d="M5 12h14M12 5v14"/></symbol>
+    <symbol id="ellipsis" viewBox="0 0 24 24"><g class="icon"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></g></symbol>
+    <symbol id="laptop" viewBox="0 0 24 24"><path class="icon" d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L3.788 16.423A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2zM20.054 15.987H3.946"/></symbol>
+    <symbol id="server" viewBox="0 0 24 24"><g class="icon"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/></g></symbol>
+  </defs>
+
+  <g id="dialog">
+    <rect width="760" height="352" rx="14" fill="#2b322a"/>
+  </g>
+
+  <g id="header">
+    <use href="#plug" x="24" y="18" width="16" height="16" color="#c5d5a4"/>
+    <text x="48" y="31" class="title">编辑连接</text>
+    <g id="protocol">
+      <rect x="128" y="11" width="104" height="30" rx="8" fill="#242b23"/>
+      <use href="#terminal" x="138" y="19" width="14" height="14" color="#b7c0b2"/>
+      <text x="158" y="31" class="label">SSH</text>
+      <use href="#down" x="209" y="19" width="14" height="14" color="#b7c0b2"/>
+    </g>
+    <use href="#close" x="712" y="18" width="16" height="16" color="#b7c0b2"/>
+  </g>
+
+  <g id="wizard-steps">
+    <rect x="24" y="60" width="712" height="36" rx="9" fill="#222a23"/>
+    <g id="completed-step">
+      <circle cx="104" cy="78" r="9" fill="#344233"/>
+      <use href="#check" x="98" y="72" width="12" height="12" color="#bdd19d"/>
+      <text x="121" y="82.5" class="step-label">连接与认证</text>
+    </g>
+    <g id="current-step">
+      <rect x="263" y="63" width="233" height="30" rx="7" fill="#3b4b34"/>
+      <circle cx="352" cy="78" r="9" fill="#bed19e"/>
+      <text x="352" y="82.5" class="step-current" text-anchor="middle" style="fill:#222c1a">2</text>
+      <text x="369" y="82.5" class="step-current">连接路径</text>
+    </g>
+    <g id="upcoming-step">
+      <circle cx="581" cy="78" r="9" fill="#2d372e"/>
+      <text x="581" y="82.5" class="step-label" text-anchor="middle">3</text>
+      <text x="598" y="82.5" class="step-label">核对与测试</text>
+    </g>
+  </g>
+
+  <g id="connection-method">
+    <g id="direct">
+      <circle cx="47" cy="132" r="6.5" stroke="#8a9785"/>
+      <text x="64" y="137" class="label">从本机直接连接</text>
+    </g>
+
+    <g id="ssh-jump">
+      <rect x="24" y="160" width="712" height="127" rx="12" fill="#364131"/>
+      <circle cx="47" cy="182" r="6.5" stroke="#c5d5a4"/>
+      <circle cx="47" cy="182" r="3.5" fill="#c5d5a4"/>
+      <text x="64" y="187" class="label accent">经 SSH 跳板连接</text>
+
+      <g id="route-chain">
+        <rect x="40" y="203" width="680" height="68" rx="8" fill="#293326"/>
+        <g id="local-node">
+          <rect x="48" y="209" width="108" height="56" rx="7" fill="#b7c0b2" fill-opacity=".055"/>
+          <use href="#laptop" x="54" y="225" width="24" height="24" color="#b7c0b2"/>
+          <text x="87" y="234" class="host-name">本机</text>
+          <text x="87" y="251" class="address">127.0.0.1</text>
+        </g>
+        <g id="link-to-jump">
+          <path class="route-arrow" d="M160 237h64m-5-5 5 5-5 5"/>
+          <g id="insert-before-jump" aria-label="在本机和 TJ-SIMS-V3-JUMP 之间添加跳板">
+            <circle cx="192" cy="223" r="8" fill="#46573b"/>
+            <use href="#plus" x="186" y="217" width="12" height="12" color="#d2e2b3"/>
+          </g>
+        </g>
+        <g id="jump-node">
+          <rect x="230" y="209" width="216" height="56" rx="7" fill="#3b4934"/>
+          <use href="#server" x="241" y="225" width="24" height="24" color="#c5d5a4"/>
+          <text x="274" y="225" class="role">跳板 1</text>
+          <text x="274" y="241" class="host-name">TJ-SIMS-V3-JUMP</text>
+          <text x="274" y="256" class="address">simsadmin@198.51.100.21</text>
+          <g id="jump-actions" aria-label="跳板操作">
+            <use href="#ellipsis" x="420" y="229" width="16" height="16" color="#c5d5a4"/>
+          </g>
+        </g>
+        <g id="link-to-target">
+          <path class="route-arrow" d="M452 237h44m-5-5 5 5-5 5"/>
+          <g id="insert-after-jump" aria-label="在 TJ-SIMS-V3-JUMP 和 Demo-ScaleOS 之间添加跳板">
+            <circle cx="474" cy="223" r="8" fill="#c5d5a4"/>
+            <use href="#plus" x="468" y="217" width="12" height="12" color="#273024"/>
+          </g>
+        </g>
+        <g id="target-node">
+          <rect x="500" y="209" width="212" height="56" rx="7" fill="#b7c0b2" fill-opacity=".055"/>
+          <use href="#server" x="506" y="225" width="24" height="24" color="#b7c0b2"/>
+          <text x="539" y="225" class="role">目标主机</text>
+          <text x="539" y="241" class="host-name">Demo-ScaleOS</text>
+          <text x="539" y="256" class="address">root@192.0.2.33:22</text>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <g id="footer">
+    <rect x="24" y="308" width="68" height="32" rx="7" fill="#394436"/>
+    <text x="58" y="329" class="label" text-anchor="middle">上一步</text>
+    <text x="123" y="329" class="label" text-anchor="middle" style="fill:#b7c0b2">取消</text>
+    <rect x="660" y="308" width="76" height="32" rx="7" fill="#617345"/>
+    <text x="698" y="329" class="label" text-anchor="middle" style="fill:#f6faee">下一步</text>
+  </g>
+  <g id="ssh-host-picker" aria-label="选择 SSH 主机" transform="translate(-5 0)">
+    <rect x="371" y="258" width="216" height="112" rx="10" fill="#434e3e" filter="url(#picker-shadow)"/>
+    <rect x="379" y="266" width="200" height="28" rx="6" fill="#30392d"/>
+    <use href="#search" x="389" y="273" width="14" height="14" color="#b7c0b2"/>
+    <text x="411" y="284" class="secondary">搜索 SSH 主机</text>
+    <rect x="379" y="300" width="200" height="28" rx="6" fill="#536447"/>
+    <use href="#server" x="389" y="307" width="14" height="14" color="#c5d5a4"/>
+    <text x="411" y="319" class="label">TJ-SIMS-JUMP</text>
+    <use href="#server" x="389" y="339" width="14" height="14" color="#b7c0b2"/>
+    <text x="411" y="351" class="label">Demo-Compute01</text>
+  </g>
+</svg>
