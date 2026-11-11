@@ -41,7 +41,15 @@ pub const Owner = union(enum) {
 };
 pub const Kind = enum { secret_input, trust_material, choice };
 pub const Option = struct { value: []const u8, label: []const u8 };
-pub const Field = struct { label: []const u8, secret: bool = true, max_bytes: usize = 8192, confirmation: ?[]const u8 = null };
+pub const Field = struct {
+    label: []const u8,
+    secret: bool = true,
+    max_bytes: usize = 8192,
+    confirmation: ?[]const u8 = null,
+    /// Public presentation text; secret fields cannot carry a nonempty default.
+    initial_value: []const u8 = "",
+    allow_empty: bool = false,
+};
 /// Public presentation metadata only. Decisions still use the original owned
 /// challenge and its choice values; this never grants a TLS exception.
 pub const CertificateTrust = struct {
@@ -138,7 +146,15 @@ pub const Host = struct {
         const fields = try alloc.alloc(Field, payload.fields.len);
         for (payload.fields, fields) |field, *destination| {
             if (field.label.len == 0 or field.label.len > 4096 or field.max_bytes == 0 or field.max_bytes > 8192) return error.InvalidChallengeField;
-            destination.* = .{ .label = try alloc.dupe(u8, field.label), .secret = field.secret, .max_bytes = field.max_bytes, .confirmation = if (field.confirmation) |value| try alloc.dupe(u8, value) else null };
+            if (field.initial_value.len > field.max_bytes or std.mem.indexOfScalar(u8, field.initial_value, 0) != null or (field.secret and field.initial_value.len != 0)) return error.InvalidChallengeField;
+            destination.* = .{
+                .label = try alloc.dupe(u8, field.label),
+                .secret = field.secret,
+                .max_bytes = field.max_bytes,
+                .confirmation = if (field.confirmation) |value| try alloc.dupe(u8, value) else null,
+                .initial_value = try alloc.dupe(u8, field.initial_value),
+                .allow_empty = field.allow_empty,
+            };
         }
         copy.fields = fields;
         try self.records.append(self.allocator, .{ .arena = arena, .view = .{ .owner = owner, .request_id = request_id, .generation = generation, .kind = kind, .payload = copy, .deadline = deadline } });
@@ -182,7 +198,7 @@ pub const Host = struct {
             .fields => |fields| {
                 if (fields.len != record.view.payload.fields.len) return error.InvalidChallengeResponse;
                 for (fields, record.view.payload.fields) |bytes, field| {
-                    if (bytes.len == 0 or bytes.len > field.max_bytes or std.mem.indexOfScalar(u8, bytes, 0) != null) return error.InvalidChallengeResponse;
+                    if ((!field.allow_empty and bytes.len == 0) or bytes.len > field.max_bytes or std.mem.indexOfScalar(u8, bytes, 0) != null) return error.InvalidChallengeResponse;
                     if (field.confirmation) |confirmation| if (!std.mem.eql(u8, bytes, confirmation)) return error.InvalidChallengeConfirmation;
                 }
                 const copies = try self.allocator.alloc([]const u8, fields.len);
@@ -399,6 +415,64 @@ test "password persistence requires an explicit eligible challenge" {
     try host.offer(owner, 2, 1, .secret_input, .{ .title = "OTP", .fields = &.{.{ .label = "OTP" }} }, 100);
     try std.testing.expectError(error.InvalidChallengeResponse, host.submitPasswordAnswer(owner, 2, 1, .{ .fields = &.{"123456"} }, 1, true));
     try std.testing.expectEqual(State.pending, host.stateFor(owner, 2, 1).?);
+}
+
+test "challenge field empty replies require explicit permission and remain distinct from cancellation" {
+    var host = Host.init(std.testing.allocator);
+    defer host.deinit();
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(94) };
+    try host.offer(owner, 1, 1, .secret_input, .{ .title = "Password", .fields = &.{.{ .label = "Password" }} }, 100);
+    try std.testing.expectError(error.InvalidChallengeResponse, host.submitAnswer(owner, 1, 1, .{ .fields = &.{""} }, 1));
+    try std.testing.expectEqual(State.pending, host.stateFor(owner, 1, 1).?);
+
+    const prompt: Payload = .{ .title = "Prompt", .fields = &.{.{ .label = "Value", .secret = false, .allow_empty = true }} };
+    try host.offer(owner, 2, 1, .secret_input, prompt, 100);
+    try host.submitAnswer(owner, 2, 1, .{ .fields = &.{""} }, 1);
+    var answer = host.takeAnswer(owner, 2, 1).?;
+    defer answer.deinit();
+    try std.testing.expectEqual(@as(usize, 1), answer.value.fields.len);
+    try std.testing.expectEqualStrings("", answer.value.fields[0]);
+    try std.testing.expect(host.takeAnswer(owner, 2, 1) == null);
+    try host.offer(owner, 3, 1, .secret_input, prompt, 100);
+    try std.testing.expect(try host.withdraw(owner, 3, 1));
+    try std.testing.expectEqual(State.withdrawn, host.stateFor(owner, 3, 1).?);
+    try std.testing.expect(host.takeAnswer(owner, 3, 1) == null);
+
+    // HTTP authentication can opt both fields into empty values without
+    // weakening size or embedded-NUL validation for either field.
+    try host.offer(owner, 4, 1, .secret_input, .{ .title = "HTTP authentication", .fields = &.{
+        .{ .label = "Username", .secret = false, .max_bytes = 3, .allow_empty = true },
+        .{ .label = "Password", .max_bytes = 3, .allow_empty = true },
+    } }, 100);
+    for ([_][]const u8{ "long", "a\x00b" }) |invalid| {
+        try std.testing.expectError(error.InvalidChallengeResponse, host.submitAnswer(owner, 4, 1, .{ .fields = &.{ invalid, "" } }, 1));
+        try std.testing.expectError(error.InvalidChallengeResponse, host.submitAnswer(owner, 4, 1, .{ .fields = &.{ "", invalid } }, 1));
+    }
+    try host.submitAnswer(owner, 4, 1, .{ .fields = &.{ "", "" } }, 1);
+    var credentials = host.takeAnswer(owner, 4, 1).?;
+    defer credentials.deinit();
+    try std.testing.expectEqualStrings("", credentials.value.fields[0]);
+    try std.testing.expectEqualStrings("", credentials.value.fields[1]);
+}
+
+test "challenge field initial values are copied public metadata and reject unsafe defaults" {
+    var host = Host.init(std.testing.allocator);
+    defer host.deinit();
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(95) };
+    var initial_value = [_]u8{ 'd', 'e', 'f', 'a', 'u', 'l', 't' };
+    try host.offer(owner, 1, 1, .secret_input, .{ .title = "Prompt", .fields = &.{.{ .label = "Value", .secret = false, .initial_value = &initial_value, .allow_empty = true }} }, 100);
+    @memset(&initial_value, 'x');
+    const field = host.snapshot(0, owner).?.payload.fields[0];
+    try std.testing.expectEqualStrings("default", field.initial_value);
+    try std.testing.expect(field.allow_empty);
+    for ([_]Field{
+        .{ .label = "Secret", .initial_value = "private" },
+        .{ .label = "Value", .secret = false, .max_bytes = 3, .initial_value = "long" },
+        .{ .label = "Value", .secret = false, .initial_value = "a\x00b" },
+    }) |invalid| {
+        try std.testing.expectError(error.InvalidChallengeField, host.offer(owner, 2, 1, .secret_input, .{ .title = "Invalid", .fields = &.{invalid} }, 100));
+        try std.testing.expectEqual(@as(usize, 1), host.records.items.len);
+    }
 }
 
 test "certificate trust presentation owns all metadata and preserves scoped choice replies" {

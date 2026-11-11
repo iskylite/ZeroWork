@@ -22,7 +22,7 @@ fn pluginFor(bundle: anytype) *bmc.Plugin {
     return @ptrCast(@alignCast(bundle.manifests()[0].session_factory.?.context));
 }
 
-test "BMC composition production includes BMC and acceptance additionally includes only its fixture" {
+test "BMC composition includes Web, and acceptance adds its fixture" {
     var tmp = T.tmpDir(.{});
     defer tmp.cleanup();
     const path = try tmp.dir.realPathFileAlloc(T.io, ".", a);
@@ -31,9 +31,10 @@ test "BMC composition production includes BMC and acceptance additionally includ
     defer production.deinit() catch unreachable;
     var normal = try linked.initRegistry(a, &.{}, production.manifests(), production.renderers());
     defer normal.deinit();
-    try T.expectEqual(@as(usize, 1), normal.manifests().len);
+    try T.expectEqual(@as(usize, 2), normal.manifests().len);
     const manifest = normal.find("bmc_ikvm").?;
     try T.expect(normal.find("fixture_probe") == null);
+    try T.expect(normal.find("web") != null);
     try T.expectEqual(budgets.Limits.kvm, manifest.frame_limits.?);
     try T.expectEqual(budgets.application_bytes, production.frameBudget().limit);
 
@@ -41,14 +42,14 @@ test "BMC composition production includes BMC and acceptance additionally includ
     defer acceptance.deinit() catch unreachable;
     var combined = try linked.initRegistry(a, &.{}, acceptance.manifests(), acceptance.renderers());
     defer combined.deinit();
-    try T.expectEqual(@as(usize, 2), combined.manifests().len);
+    try T.expectEqual(@as(usize, 3), combined.manifests().len);
     try T.expect(combined.find("bmc_ikvm") != null);
     try T.expect(combined.find("fixture_probe") != null);
     try T.expect(combined.find("fixture_probe").?.frame_limits == null);
 }
 
 test "BMC composition publishes exactly injectable APIs and rejects missing or incompatible capabilities" {
-    const expected = [_][]const u8{ "host", "host.session_service_access", "host.probes", "host.tls_trust", "host.secrets", "host.resource_actions", "host.frame_budget" };
+    const expected = [_][]const u8{ "host", "host.session_service_access", "host.probes", "host.tls_trust", "host.secrets", "host.resource_actions", "host.web_surface", "host.frame_budget" };
     try T.expectEqual(expected.len, linked.supported_apis.len);
     for (expected, linked.supported_apis, 0..) |id, api, i| {
         try T.expectEqualStrings(id, api.id);

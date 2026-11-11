@@ -7,6 +7,7 @@ const std = @import("std");
 const ui = @import("ui");
 const S = @import("../../ui/wizard_styles.zig");
 const Stepper = @import("../../ui/connection_stepper.zig");
+const route_view = @import("route_view.zig");
 const hosts_mod = @import("../../config/hosts.zig");
 const identity = @import("../../host/identity.zig");
 pub const TestProgress = @import("../../ui/wizard_test_progress.zig");
@@ -453,11 +454,7 @@ pub const RemoteEditor = struct {
     step_disabled: [3]?*ui.Signal(bool) = @splat(null),
     step_styles: [3]?*ui.Signal(ui.BoxStyle) = @splat(null),
     scrolls: [3]?ui.widgets.ScrollAreaResult = @splat(null),
-    route_chain_scroll: ?ui.widgets.ScrollAreaResult = null,
-    route_vertical: ?bool = null,
-    route_edges: [9]?RouteEdge = @splat(null),
-    route_hop_controls: [8]?*RouteHopControl = @splat(null),
-    route_picker: ?*RoutePicker = null,
+    route_path: ?*route_view.View = null,
     route_reveal: ?usize = null,
     route_hint: ?*ui.Node = null,
     summary_identity: ?*ui.Node = null,
@@ -492,10 +489,8 @@ pub const RemoteEditor = struct {
     jump_add_disabled: ?*ui.Signal(bool) = null,
     owned_ids: std.ArrayList([]u8) = .empty,
     agent_notice: ?*ui.Node = null,
-    route_choices: [2]?RouteChoice = @splat(null),
+    route_choices: [2]?route_view.Choice = @splat(null),
     route_empty_hint: ?*ui.Node = null,
-    route_card: ?*ui.Node = null,
-    route_body: ?*ui.Node = null,
     route_expanded: bool = true,
     copy_expanded: bool = false,
     copy_open: ?*ui.Signal(bool) = null,
@@ -858,9 +853,9 @@ pub const RemoteEditor = struct {
         self.step1_scroll = self.scrolls[0].?.container;
         self.step2_scroll = self.scrolls[1].?.container;
         self.step1_scroll_state = self.scrolls[0].?.state;
-        self.step2_scroll_state = self.route_chain_scroll.?.state;
+        self.step2_scroll_state = self.route_path.?.scroll.state;
         self.step1_scroll_content = self.scrolls[0].?.content;
-        self.step2_scroll_content = self.route_chain_scroll.?.content;
+        self.step2_scroll_content = self.route_path.?.scroll.content;
         try modal.body.appendChild(self.alloc, body);
         try modal.body.appendChild(self.alloc, try mountSaveError(self));
         const footer = try ui.box(cx, S.footer(), .{});
@@ -983,13 +978,10 @@ pub const RemoteEditor = struct {
         self.updateTestScroll();
         if (self.updateViewport()) return .needs_layout;
         if (self.resizeRoutePreview(&self.route_previews[1])) return .needs_layout;
-        if (self.route_picker) |picker| if (picker.update()) return .needs_layout;
+        if (self.route_path) |view| if (view.picker.update()) return .needs_layout;
         if (self.route_reveal) |index| {
             self.route_reveal = null;
-            const area = self.route_chain_scroll.?;
-            area.state.content_height = area.content.globalRect().h;
-            area.state.viewport_height = area.container.globalRect().h;
-            ui.widgets.scrollIntoView(area.state, area.content, self.route_previews[0].nodes[index + 1].?, .nearest);
+            self.route_path.?.reveal(index);
         }
         if (self.strict_focus_pending and self.step == .protocol and self.advanced_expanded) {
             self.strict_focus_pending = false;
@@ -1077,7 +1069,7 @@ pub const RemoteEditor = struct {
     }
 
     fn routeIsVertical(self: *const RemoteEditor) bool {
-        return self.jump_count > 1 or @min(S.width, S.availableModalWidth(self.cx.viewport.width)) < 728;
+        return route_view.isVertical(self.jump_count, self.cx.viewport.width);
     }
 
     fn routeChromeHeight(self: *const RemoteEditor, compact: bool) f32 {
@@ -1089,47 +1081,16 @@ pub const RemoteEditor = struct {
         return height;
     }
 
-    const route_endpoint_height: f32 = 46;
-
     fn routeNaturalHeight(self: *const RemoteEditor) f32 {
-        if (self.jump_count == 0) return 0;
-        if (!self.routeIsVertical()) return 68;
-        const jumps: f32 = @floatFromInt(self.jump_count);
-        return 12 + 2 * route_endpoint_height + jumps * 52 + (jumps + 1) * 38;
+        return route_view.naturalHeight(self.jump_count, self.routeIsVertical());
     }
 
     fn layoutRoute(self: *RemoteEditor) bool {
-        const area = self.route_chain_scroll orelse return false;
+        const view = self.route_path orelse return false;
         const compact = S.compactWindow(self.cx.viewport.width, self.cx.viewport.height);
         const limit = @min(S.remote_max_height, S.availableModalHeight(self.cx.viewport.height, compact));
         const height = @min(self.routeNaturalHeight(), @max(52, limit - self.routeChromeHeight(compact)));
-        var changed = false;
-        if (area.container.style.height != .px or area.container.style.height.px != height) {
-            area.container.setStyleInline(self.alloc, .{ .height = .{ .px = height } });
-            if (self.routeNaturalHeight() > height) area.state.onScrollActivity();
-            changed = true;
-        }
-        const vertical = self.routeIsVertical();
-        if (self.route_vertical != vertical) {
-            self.route_vertical = vertical;
-            area.content.setStyleInline(self.alloc, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = if (vertical) .column else .row, .align_items = .center, .gap = 0, .padding = .{ .left = 12, .right = if (vertical) 16 else 12, .top = 6, .bottom = 6 } });
-            for (self.route_previews[0].nodes, 0..) |entry, index| if (entry) |node| {
-                const hop = index != 0 and index != 9;
-                var style = S.row(if (!vertical) 56 else if (hop) 52 else route_endpoint_height);
-                style.padding = .{ .left = 10, .right = 8 };
-                style.gap = 9;
-                if (!vertical and index == 0) style.width = .{ .px = 110 };
-                if (!vertical and hop) style.width = .{ .px = 216 };
-                if (!vertical and index == 9) style.flex = 1;
-                style.min_width = 0;
-                style.border = .{ .radius = 7 };
-                node.setStyleInline(self.alloc, style);
-            };
-            for (self.route_edges) |entry| if (entry) |edge| edge.layout(self, vertical);
-            ui.widgets.setScrollY(area.state, area.content, 0);
-            changed = true;
-        }
-        return changed;
+        return view.layout(self.routeIsVertical(), height);
     }
 
     fn contentModalHeight(self: *const RemoteEditor, compact: bool) f32 {
@@ -1402,7 +1363,7 @@ pub const RemoteEditor = struct {
 
     fn refreshEditorRows(self: *RemoteEditor) void {
         const has_jumps = self.jump_count > 0;
-        self.refreshAccessChoices();
+        if (self.route_path) |view| view.setRoute(has_jumps, self.jump_count);
         self.refreshEditorActions();
         const route_error = self.routeError();
         if (self.route_empty_hint) |node| {
@@ -1482,13 +1443,10 @@ pub const RemoteEditor = struct {
         self.paintAdvancedToggle();
         if (self.identity_body) |node| node.setDisplay(if (self.identity_expanded) .flex else .none);
         if (self.auth_body) |node| node.setDisplay(if (self.auth_expanded) .flex else .none);
-        if (self.route_body) |node| node.setDisplay(if (self.route_expanded) .flex else .none);
-        if (self.route_chain_scroll) |area| area.container.setDisplay(if (has_jumps) .flex else .none);
+        if (self.route_path) |view| view.root.setDisplay(if (self.route_expanded) .flex else .none);
         if (self.route_hint) |node| node.setDisplay(if (self.sftpRouteUnavailable()) .flex else .none);
         self.refreshRoutePreview(&self.route_previews[0]);
         self.refreshRoutePreview(&self.route_previews[1]);
-        for (self.route_hop_controls) |slot| if (slot) |control| control.refresh();
-        if (self.route_picker) |picker| picker.dirty = true;
         self.refreshTestProjection() catch {};
     }
     fn advancedInk(self: *const RemoteEditor) ui.Color {
@@ -1502,15 +1460,6 @@ pub const RemoteEditor = struct {
         }
     }
 
-    fn refreshAccessChoices(self: *RemoteEditor) void {
-        if (self.route_card) |card| card.setBackground(if (self.jump_count > 0) S.theme.popupSelection() else ui.Color.TRANSPARENT);
-        for (self.route_choices, 0..) |entry, index| if (entry) |choice| {
-            const selected = (self.jump_count > 0) == (index == 1);
-            paintIcon(choice.mark, if (selected) ui.icons.circle_dot else ui.icons.circle, 14, if (selected) S.theme.current().accent else S.theme.current().fg_2);
-            choice.title.setTextColor(if (selected) S.theme.current().accent_ink else S.theme.current().fg_1);
-            if (choice.root.behavior.interaction.a11y) |*access| access.pressed = selected;
-        };
-    }
     fn routeAssetAllowed(self: *const RemoteEditor, value: []const u8) bool {
         const id = parseAssetValue(value) catch return false;
         if (self.source_owner) |owner| if (owner.id == id) return false;
@@ -1545,7 +1494,7 @@ pub const RemoteEditor = struct {
     }
     fn onAccessDirect(self: *RemoteEditor) void {
         if (self.isLocked() or self.jump_count == 0) return;
-        if (self.route_picker) |picker| picker.close();
+        if (self.route_path) |view| view.picker.close();
         self.dormant_jump_count = self.jump_count;
         self.dormant_socks_exit = if (self.sig_socks_exit.?.get()) |value| std.fmt.parseInt(usize, value, 10) catch null else null;
         self.jump_count = 0;
@@ -1640,8 +1589,7 @@ pub const RemoteEditor = struct {
 
     /// 关闭向导（不触发回调；保存/取消路径已自带 hide + on_result）。
     pub fn hide(self: *RemoteEditor) void {
-        if (self.route_picker) |picker| picker.close();
-        for (self.route_hop_controls) |entry| if (entry) |control| control.menu_open.?.set(false);
+        if (self.route_path) |view| view.close();
         self.resetPasswordVisibility();
         self.closeCopy();
         _ = self.advanceTestGeneration();
@@ -1936,8 +1884,7 @@ pub const RemoteEditor = struct {
     fn applyStep(self: *RemoteEditor) void {
         if (self.step != .form) {
             self.route_reveal = null;
-            if (self.route_picker) |picker| picker.close();
-            for (self.route_hop_controls) |entry| if (entry) |control| control.menu_open.?.set(false);
+            if (self.route_path) |view| view.close();
         }
         if (self.step != .protocol) self.resetPasswordVisibility();
         const review = self.step == .confirm;
@@ -2759,7 +2706,7 @@ pub const RemoteEditor = struct {
             row.mark.setTextColor(if (failed) S.theme.current().danger_ink else if (done) S.theme.current().ok else if (checking) S.theme.current().accent_ink else S.theme.current().fg_2);
         }
         var preview = &self.route_previews[1];
-        if (preview != &self.route_previews[0]) _ = self.resizeRoutePreview(preview);
+        _ = self.resizeRoutePreview(preview);
         for (preview.nodes, 0..) |optional, index| {
             const node = optional orelse continue;
             const hop: ?usize = if (index == 0) null else if (index == 9) source.?.hops.len - 1 else if (index < source.?.hops.len) index - 1 else null;
@@ -2850,35 +2797,34 @@ pub const RemoteEditor = struct {
 
     fn refreshRoutePreview(self: *RemoteEditor, preview: *RoutePreview) void {
         if (preview.row == null) return;
-        _ = self.resizeRoutePreview(preview);
-        for (preview.nodes, 0..) |node, i| {
-            const visible = i == 0 or i == 9 or (i >= 1 and i <= self.jump_count);
-            node.?.setDisplay(if (visible) .flex else .none);
-            if (i >= 1 and i <= self.jump_count) {
-                const id = parseAssetValue(self.jump_values[i - 1].?.get() orelse "") catch @as(identity.ConnectionId, @fromBackingInt(0));
-                var selected: ?Draft = null;
-                for (self.assets) |asset| if (asset.source_owner.?.id == id) {
-                    selected = asset;
-                    break;
-                };
-                var buffer: [256]u8 = undefined;
-                preview.names[i].?.setTextContent(self.alloc, if (selected) |a| a.name else "选择跳板") catch {};
-                const address = if (selected) |a|
-                    if (preview == &self.route_previews[0] and a.port == 22)
-                        std.fmt.bufPrint(&buffer, "{s}@{s}", .{ a.user, a.host }) catch a.host
-                    else
-                        std.fmt.bufPrint(&buffer, "{s}@{s}:{d}", .{ a.user, a.host, a.port }) catch a.host
-                else
-                    "";
-                preview.addresses[i].?.setTextContent(self.alloc, address) catch {};
-                if (preview != &self.route_previews[0]) preview.users[i].?.setTextContent(self.alloc, if (selected != null) "待连接" else "") catch {};
-            }
+        const editing = preview == &self.route_previews[0];
+        if (!editing) {
+            _ = self.resizeRoutePreview(preview);
+            preview.setCount(self.jump_count);
         }
-        for (preview.arrows, 0..) |node, i| node.?.setDisplay(if (i <= self.jump_count) .flex else .none);
+        for (1..self.jump_count + 1) |i| {
+            const id = parseAssetValue(self.jump_values[i - 1].?.get() orelse "") catch @as(identity.ConnectionId, @fromBackingInt(0));
+            var selected: ?Draft = null;
+            for (self.assets) |asset| if (asset.source_owner.?.id == id) {
+                selected = asset;
+                break;
+            };
+            var buffer: [256]u8 = undefined;
+            preview.names[i].?.setTextContent(self.alloc, if (selected) |a| a.name else "选择跳板") catch {};
+            const address = if (selected) |a|
+                if (editing and a.port == 22)
+                    std.fmt.bufPrint(&buffer, "{s}@{s}", .{ a.user, a.host }) catch a.host
+                else
+                    std.fmt.bufPrint(&buffer, "{s}@{s}:{d}", .{ a.user, a.host, a.port }) catch a.host
+            else
+                "";
+            preview.addresses[i].?.setTextContent(self.alloc, address) catch {};
+            if (!editing) preview.users[i].?.setTextContent(self.alloc, if (selected != null) "待连接" else "") catch {};
+        }
         var buffer: [256]u8 = undefined;
         preview.names[9].?.setTextContent(self.alloc, if (self.sig_name.?.get().len != 0) self.sig_name.?.get() else "目标主机") catch {};
         preview.addresses[9].?.setTextContent(self.alloc, std.fmt.bufPrint(&buffer, "{s}@{s}:{s}", .{ self.sig_user.?.get(), self.sig_host.?.get(), self.sig_port.?.get() }) catch self.sig_host.?.get()) catch {};
-        if (preview != &self.route_previews[0]) preview.users[9].?.setTextContent(self.alloc, "待连接") catch {};
+        if (!editing) preview.users[9].?.setTextContent(self.alloc, "待连接") catch {};
     }
 
     fn paintButtons(self: *RemoteEditor) void {
@@ -2907,7 +2853,7 @@ pub const RemoteEditor = struct {
             }
         }
         self.refreshAuth();
-        self.refreshAccessChoices();
+        if (self.route_path) |view| view.paintChoices(self.jump_count > 0);
         self.refreshEditorActions();
         for (self.field_feedback.items) |feedback| feedback.repaint();
     }
@@ -2935,13 +2881,7 @@ pub const RemoteEditor = struct {
         if (self.footer) |footer| footer.setBackground(if (self.step == .form) ui.Color.TRANSPARENT else S.footer().background.?);
         self.modal.?.setBackground(if (self.embedded) ui.Color.TRANSPARENT else colors.overlay);
         if (self.route_empty_hint) |node| node.setTextColor(S.theme.current().danger_ink);
-        self.refreshAccessChoices();
-        if (self.route_chain_scroll) |area| area.container.setBackground(S.theme.popupInset());
-        const endpoint_fill = S.routeEndpointFill();
-        if (self.route_previews[0].nodes[0]) |local| local.setBackground(endpoint_fill);
-        if (self.route_previews[0].nodes[9]) |target| target.setBackground(endpoint_fill);
-        for (self.route_edges) |slot| if (slot) |edge| edge.paint();
-        if (self.route_picker) |picker| picker.paint();
+        if (self.route_path) |view| view.paint(self.jump_count > 0);
         for (self.editor_actions.items) |action_| if (action_.icon) |icon| {
             _ = icon.setTint(S.theme.current().fg_3);
         };
@@ -3025,14 +2965,7 @@ pub const RemoteEditor = struct {
 // View nodes are retained for all three steps. Changing a step never replaces
 // an editor or a draft signal; SDK slots/results are the only widget access.
 const ButtonPaint = struct { node: *ui.Node, label: ?*ui.Node, icon: ?*ui.Node, style: *ui.Signal(ui.BoxStyle), width: f32, height: f32, primary: bool, disabled: ?*ui.Signal(bool) = null, quiet: bool = false };
-const RoutePreview = struct {
-    row: ?*ui.Node = null,
-    nodes: [10]?*ui.Node = @splat(null),
-    names: [10]?*ui.Node = @splat(null),
-    addresses: [10]?*ui.Node = @splat(null),
-    users: [10]?*ui.Node = @splat(null),
-    arrows: [9]?*ui.Node = @splat(null),
-};
+const RoutePreview = route_view.Preview;
 const TestLogRow = struct { node: *ui.Node, text: [4]*ui.Node };
 const TestStageRow = struct { node: *ui.Node, mark: *ui.Node, title: *ui.Node, detail: *ui.Node };
 const TestHopAction = struct {
@@ -3578,518 +3511,91 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     return root;
 }
 
-const RouteChoice = struct { root: *ui.Node, title: *ui.Node, mark: *ui.Node };
-
-fn mountAccessChoice(w: *RemoteEditor, parent: *ui.Node, index: usize, title: []const u8, id: []const u8, comptime callback: *const fn (*RemoteEditor) void) !void {
-    const height: f32 = if (index == 0) 40 else 43;
-    var style = S.row(height);
-    style.padding = .{ .left = 16 };
-    style.gap = 10;
-    style.justify = .start;
-    style.background = ui.Color.TRANSPARENT;
-    const root = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = title, .disabled = w.locked.?, .base_style = style, .on_click = w.cx.on(RemoteEditor, w, callback) }).mount(w.scope, w.cx);
-    root.meta.ownership.meta.test_id = id;
-    for (root.children.items) |child| child.setDisplay(.none);
-    root.setStyleInline(w.alloc, style);
-    const mark = try ui.iconTint(w.cx, ui.icons.circle, S.theme.current().fg_2, S.icon(14));
-    try root.appendChild(w.alloc, mark);
-    const heading = try ui.text(w.cx, title, S.text(13, 600, false));
-    heading.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .flex = 1 });
-    try root.appendChild(w.alloc, heading);
-    try parent.appendChild(w.alloc, root);
-    w.route_choices[index] = .{ .root = root, .title = heading, .mark = mark };
-}
-
 fn mountRoute(w: *RemoteEditor) !*ui.Node {
-    const root = try ui.box(w.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .flex_shrink = 0 }, .{});
-    w.route_body = root;
-    try mountAccessChoice(w, root, 0, "从本机直接连接", "wizard.access.direct", RemoteEditor.onAccessDirect);
-    const card = try ui.box(w.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .border = .{ .radius = 12 }, .flex_shrink = 0 }, .{});
-    w.route_card = card;
-    card.meta.ownership.meta.test_id = "wizard.route.card";
-    try root.appendChild(w.alloc, card);
-    try mountAccessChoice(w, card, 1, "经 SSH 跳板连接", "wizard.access.jump", RemoteEditor.onAccessJump);
+    const view = try route_view.mount(w.cx, w.scope, .{
+        .locked = w.locked.?,
+        .insert_disabled = w.jump_add_disabled.?,
+        .direct = w.cx.on(RemoteEditor, w, RemoteEditor.onAccessDirect),
+        .ssh = w.cx.on(RemoteEditor, w, RemoteEditor.onAccessJump),
+        .hop_actions = .{ .context = w, .replace = replaceRouteHop, .reorder = reorderRouteHop },
+        .picker_actions = .{ .context = w, .options = pickerOptions, .available = pickerAvailable, .choose = pickerChoose },
+    });
+    w.route_path = view;
+    w.route_choices = view.choices;
+    w.route_previews[0] = view.preview;
+    w.topo_name = view.preview.names[9];
+    w.topo_addr = view.preview.addresses[9];
 
-    const area = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(w.scope, w.cx);
-    area.container.meta.ownership.meta.test_id = "wizard.route.chain";
-    area.container.setStyleInline(w.alloc, .{ .width = .{ .grow = .{} }, .height = .{ .px = 68 }, .margin = .{ .left = 16, .right = 16, .bottom = 16 }, .background = S.theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 });
-    try card.appendChild(w.alloc, area.container);
-    w.route_chain_scroll = area;
-    const preview = &w.route_previews[0];
-    preview.row = area.content;
-
-    const endpoint_fill = S.routeEndpointFill();
-    for (0..10) |i| {
-        if (i > 0) {
-            const edge = try RouteEdge.mount(w, i - 1);
-            w.route_edges[i - 1] = edge;
-            preview.arrows[i - 1] = edge.root;
-            try area.content.appendChild(w.alloc, edge.root);
-        }
-        const hop = i > 0 and i < 9;
-        var style = S.row(52);
-        if (!hop) style.background = endpoint_fill;
-        const node = try ui.box(w.cx, style, .{});
-        preview.nodes[i] = node;
-        if (i == 9) node.meta.ownership.meta.test_id = "wizard.route.target";
-        try area.content.appendChild(w.alloc, node);
-        const main = if (hop) try RouteHopControl.mount(w, node, i - 1) else node;
-        const asset = if (i == 0) ui.icons.laptop else ui.icons.server;
-        const icon = if (hop) try S.theme.icon(w.cx, asset, "accent", S.icon(24)) else try S.theme.icon(w.cx, asset, "fg_2", S.icon(24));
-        try main.appendChild(w.alloc, icon);
-        const labels = try ui.box(w.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .flex = 1, .min_width = 0, .gap = 1 }, .{});
-        try main.appendChild(w.alloc, labels);
-        if (i != 0) {
-            var buffer: [24]u8 = undefined;
-            const role = if (hop) try std.fmt.bufPrint(&buffer, "跳板 {d}", .{i}) else "目标主机";
-            var role_style = S.text(10, 500, false);
-            role_style.line_height = 12.0 / 10.0;
-            role_style.color = S.theme.current().fg_3;
-            const label = try ui.text(w.cx, role, role_style);
-            try labels.appendChild(w.alloc, label);
-        }
-        var name_style = S.text(13, 600, false);
-        name_style.line_height = 17.0 / 13.0;
-        var address_style = S.text(10.5, 400, true);
-        address_style.line_height = 13.0 / 10.5;
-        preview.names[i] = try ui.text(w.cx, if (i == 0) "本机" else "", name_style);
-        preview.addresses[i] = try ui.text(w.cx, if (i == 0) "127.0.0.1" else "", address_style);
-        for ([_]*ui.Node{ preview.names[i].?, preview.addresses[i].? }) |label| {
-            label.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
-            try labels.appendChild(w.alloc, label);
-        }
-    }
-    w.topo_name = preview.names[9];
-    w.topo_addr = preview.addresses[9];
     w.route_empty_hint = try ui.textStyled(w.cx, S.paragraph, "");
     w.route_empty_hint.?.meta.ownership.meta.test_id = "wizard.route.error";
     w.route_empty_hint.?.setTextColor(S.theme.current().danger_ink);
-    try root.appendChild(w.alloc, w.route_empty_hint.?);
+    try view.root.appendChild(w.alloc, w.route_empty_hint.?);
     w.route_hint = try ui.textStyled(w.cx, S.paragraph, "SFTP 暂不支持跳板。可仅保存配置，或改为直连后浏览。");
-    try root.appendChild(w.alloc, w.route_hint.?);
-    w.route_picker = try RoutePicker.mount(w, root);
-    return root;
+    try view.root.appendChild(w.alloc, w.route_hint.?);
+    return view.root;
 }
 
-const RouteEdge = struct {
-    root: *ui.Node,
-    width: f32,
-    line: *ui.Node,
-    arrow: *ui.Node,
-    button: *ui.Node,
-    badge: *ui.Node,
-    icon: *ui.Node,
+const route_hop = @import("route_hop_control.zig");
 
-    fn mount(w: *RemoteEditor, index: usize) !RouteEdge {
-        const context = try w.alloc.create(RouteInsert);
-        context.* = .{ .wizard = w, .index = index };
-        try w.scope.onCleanup(RouteInsert, context, RouteInsert.cleanup);
-        const root = try ui.box(w.cx, .{}, .{});
-        const line = try ui.box(w.cx, .{ .hit_behavior = .pass_through }, .{});
-        const arrow = try ui.iconTint(w.cx, ui.icons.chevron_right, S.theme.current().fg_2, S.icon(14));
-        try root.appendChild(w.alloc, line);
-        try root.appendChild(w.alloc, arrow);
-        var style = S.button(24, 24, false);
-        style.background = ui.Color.TRANSPARENT;
-        const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "在此处添加跳板", .disabled = w.jump_add_disabled.?, .base_style = style, .on_click = w.cx.on(RouteInsert, context, RouteInsert.click) }).mount(w.scope, w.cx);
-        for (button.children.items) |child| child.setDisplay(.none);
-        button.setStyleInline(w.alloc, style);
-        context.anchor = button;
-        var id: [40]u8 = undefined;
-        button.meta.ownership.meta.test_id = try ownedId(w, &id, "wizard.route.insert.{d}", index);
-        const badge = try ui.box(w.cx, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .border = .{ .radius = 8 }, .align_items = .center, .justify = .center, .background = S.theme.popupSelection(), .hit_behavior = .pass_through }, .{});
-        const icon = try ui.iconTint(w.cx, ui.icons.plus, S.theme.current().accent, S.icon(12));
-        try badge.appendChild(w.alloc, icon);
-        try button.appendChild(w.alloc, badge);
-        try root.appendChild(w.alloc, button);
-        return .{ .root = root, .width = if (index == 0) 74 else 54, .line = line, .arrow = arrow, .button = button, .badge = badge, .icon = icon };
-    }
+fn replaceRouteHop(raw: *anyopaque, index: usize, trigger: *ui.Node) void {
+    const w: *RemoteEditor = @ptrCast(@alignCast(raw));
+    if (w.isLocked() or index >= w.jump_count) return;
+    w.route_path.?.picker.show(trigger, .{ .replace = index });
+}
 
-    fn layout(self: RouteEdge, w: *RemoteEditor, vertical: bool) void {
-        self.root.setStyleInline(w.alloc, .{ .width = if (vertical) .fill() else .{ .px = self.width }, .height = .{ .px = if (vertical) 38 else 56 }, .flex_shrink = 0 });
-        self.line.setStyleInline(w.alloc, .{
-            .position = .absolute,
-            .inset = if (vertical) .{ .left = .{ .px = 21 }, .top = .{ .px = 3 } } else .{ .left = .{ .px = 3 }, .top = .{ .px = 28 } },
-            .width = .{ .px = if (vertical) 1.35 else self.width - 10 },
-            .height = .{ .px = if (vertical) 29 else 1.35 },
-        });
-        self.arrow.setStyleInline(w.alloc, .{
-            .position = .absolute,
-            .inset = if (vertical) .{ .left = .{ .px = 15 }, .top = .{ .px = 24 } } else .{ .left = .{ .px = self.width - 15 }, .top = .{ .px = 22 } },
-            .width = .{ .px = 14 },
-            .height = .{ .px = 14 },
-        });
-        paintIcon(self.arrow, if (vertical) ui.icons.chevron_down else ui.icons.chevron_right, 14, S.theme.current().fg_2);
-        self.button.setStyleInline(w.alloc, .{ .position = .absolute, .inset = .{ .left = .{ .px = if (vertical) 23 else self.width / 2 - 12 }, .top = .{ .px = if (vertical) 7 else 2 } } });
-        self.paint();
-    }
+fn reorderRouteHop(raw: *anyopaque, index: usize, move: route_hop.Action) void {
+    const w: *RemoteEditor = @ptrCast(@alignCast(raw));
+    EditorAction.apply(w, index, switch (move) {
+        .up => .jump_up,
+        .down => .jump_down,
+        .remove => .jump_remove,
+    });
+}
 
-    fn paint(self: RouteEdge) void {
-        const colors = S.theme.current();
-        const surface = S.theme.popupInset();
-        const line = ui.Color.lerp(colors.fg_2, surface, 0.22);
-        self.line.setBackground(line);
-        _ = self.arrow.setTint(line);
-        self.badge.setBackground(ui.Color.lerp(surface, colors.accent, 0.24));
-        _ = self.icon.setTint(colors.fg_1);
-    }
-};
+const RoutePicker = @import("route_picker.zig").RoutePicker;
 
-const RouteInsert = struct {
-    wizard: *RemoteEditor,
-    index: usize,
-    anchor: *ui.Node = undefined,
-
-    fn cleanup(self: *RouteInsert) void {
-        self.wizard.alloc.destroy(self);
-    }
-
-    fn click(self: *RouteInsert) void {
-        const w = self.wizard;
-        if (w.isLocked() or w.jump_add_disabled.?.peek() or self.index > w.jump_count) return;
-        w.route_picker.?.show(self.anchor, .{ .insert = self.index });
-    }
-};
-
-const RouteHopControl = struct {
-    wizard: *RemoteEditor,
-    index: usize,
-    trigger: *ui.Node = undefined,
-    items: *ui.Signal([]const ui.widgets.MenuItem),
-    menu_open: ?*ui.Signal(bool) = null,
-
-    fn cleanup(self: *RouteHopControl) void {
-        self.wizard.alloc.destroy(self);
-    }
-
-    fn mount(w: *RemoteEditor, row: *ui.Node, index: usize) !*ui.Node {
-        const self = try w.alloc.create(RouteHopControl);
-        self.* = .{ .wizard = w, .index = index, .items = undefined };
-        w.scope.onCleanup(RouteHopControl, self, cleanup) catch |err| {
-            w.alloc.destroy(self);
-            return err;
-        };
-        self.items = try w.scope.createList(ui.widgets.MenuItem, &.{});
-        w.route_hop_controls[index] = self;
-
-        var content_style = S.row(52);
-        content_style.flex = 1;
-        content_style.min_width = 0;
-        content_style.justify = .start;
-        content_style.gap = 9;
-        content_style.padding = .{};
-        content_style.background = ui.Color.TRANSPARENT;
-        content_style.cursor = .pointer;
-        const shell = try ui.widgets.control_shell.ControlShell(.{
-            .tag = .button,
-            .style = content_style,
-            .interactive = false,
-            .focus_ring = false,
-        }, .{}).mount(w.scope, w.cx);
-        self.trigger = shell.node;
-        self.trigger.setStyleInline(w.alloc, content_style);
-        self.trigger.behavior.interaction.a11y = .{ .role = .button, .label = "选择 SSH 跳板主机" };
-        self.trigger.behavior.events.on_click = ui.Cx.handlerFrom(RouteHopControl, self, replace);
-        var id: [48]u8 = undefined;
-        self.trigger.meta.ownership.meta.test_id = try ownedId(w, &id, "wizard.route.hop.{d}", index);
-        try row.appendChild(w.alloc, self.trigger);
-
-        const focus = try ui.hooks.useFocusState(w.scope, w.cx, self.trigger);
-        try w.scope.createEffect(.{ .visible = focus.visible, .locked = w.locked.?, .trigger = self.trigger, .row = row, .theme = try w.cx.themeSignal(w.scope) }, struct {
-            fn paint(ctx: anytype) void {
-                _ = ctx.theme.get();
-                const locked = ctx.locked.get();
-                ctx.trigger.setCursor(if (locked) .not_allowed else .pointer);
-                ctx.trigger.setFocusable(!locked);
-                ctx.trigger.behavior.interaction.a11y.?.disabled = locked;
-                const keyboard_focus = ctx.visible.get() and !locked;
-                const colors = S.theme.states();
-                ctx.row.setBackground(if (keyboard_focus) colors.selected_hover else colors.selected);
-            }
-        }.paint);
-
-        const menu = try ui.widgets.Menu(.{ .items = self.items, .width = 154, .position = .bottom_end, .on_select = w.cx.on(RouteHopControl, self, select) }).mount(w.scope, w.cx);
-        self.menu_open = menu.open;
-        var style = S.button(26, 26, false);
-        style.background = ui.Color.TRANSPARENT;
-        const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.ellipsis, .icon_size = @as(f32, 15), .a11y_label = "跳板操作", .disabled = w.locked.?, .base_style = style }).mount(w.scope, w.cx);
-        button.meta.ownership.meta.test_id = try ownedId(w, &id, "wizard.route.menu.{d}", index);
-        menu.wrapper.setStyleInline(w.alloc, .{ .width = .{ .px = 26 }, .height = .{ .px = 26 }, .flex_shrink = 0 });
-        try menu.trigger.appendChild(w.alloc, button);
-        try row.appendChild(w.alloc, menu.wrapper);
-        return self.trigger;
-    }
-
-    fn refresh(self: *RouteHopControl) void {
-        self.items.set(&.{
-            .{ .id = "replace", .label = "更换主机" },
-            .{ .id = "previous", .label = "前移", .disabled = self.index == 0 },
-            .{ .id = "next", .label = "后移", .disabled = self.index + 1 >= self.wizard.jump_count },
-            .{ .id = "remove", .label = "移除跳板", .danger = true },
-        });
-    }
-
-    fn replace(self: *RouteHopControl) void {
-        if (self.wizard.isLocked() or self.index >= self.wizard.jump_count) return;
-        self.wizard.route_picker.?.show(self.trigger, .{ .replace = self.index });
-    }
-
-    fn select(self: *RouteHopControl, command: []const u8) void {
-        if (std.mem.eql(u8, command, "replace")) return self.replace();
-        const kind: EditorKind = if (std.mem.eql(u8, command, "previous")) .jump_up else if (std.mem.eql(u8, command, "next")) .jump_down else if (std.mem.eql(u8, command, "remove")) .jump_remove else return;
-        EditorAction.apply(self.wizard, self.index, kind);
-    }
-};
-
-const RoutePicker = struct {
-    const Target = union(enum) { insert: usize, replace: usize };
-    const Option = struct {
-        picker: *RoutePicker,
-        value: []const u8,
-
-        fn cleanup(self: *Option) void {
-            self.picker.wizard.alloc.destroy(self);
-        }
-
-        fn choose(self: *Option) void {
-            self.picker.choose(self.value);
-        }
+fn pickerOptions(raw: *anyopaque, target: RoutePicker.Target) []const ui.widgets.SelectOption {
+    const w: *RemoteEditor = @ptrCast(@alignCast(raw));
+    return switch (target) {
+        .insert => w.asset_options.?.peek(),
+        .replace => |index| w.jump_options[index].?.peek(),
     };
+}
 
-    wizard: *RemoteEditor,
-    popup: ui.widgets.popover.PopoverResult = undefined,
-    input: ui.widgets.input.InputResult = undefined,
-    query: *ui.Signal([]const u8) = undefined,
-    list: ui.widgets.ScrollAreaResult = undefined,
-    row_scope: ?*ui.Scope = null,
-    source: ?*ui.Node = null,
-    target: Target = .{ .insert = 0 },
-    dirty: bool = false,
-    focus_pending: bool = false,
+fn pickerAvailable(raw: *anyopaque, target: RoutePicker.Target, value: []const u8) bool {
+    const w: *RemoteEditor = @ptrCast(@alignCast(raw));
+    return w.routeAssetAllowed(value) and (target == .replace or w.routeAssetUnused(value));
+}
 
-    fn cleanup(self: *RoutePicker) void {
-        self.wizard.alloc.destroy(self);
-    }
-
-    fn mount(w: *RemoteEditor, parent: *ui.Node) !*RoutePicker {
-        const self = try w.alloc.create(RoutePicker);
-        self.* = .{ .wizard = w };
-        w.scope.onCleanup(RoutePicker, self, cleanup) catch |err| {
-            w.alloc.destroy(self);
-            return err;
-        };
-        self.popup = try ui.widgets.Popover(.{
-            .trigger = .manual,
-            .position = .bottom,
-            .width = 216,
-            .max_height = 202,
-            .offset = .{ .static = 10 },
-            .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } },
-            .on_open_change = w.cx.on(RoutePicker, self, openChanged),
-            .constrain_width_to_viewport = true,
-            .shift_main_axis = true,
-            .close_on_escape = true,
-            .size_policy = .fit_content,
-            .a11y_role = .dialog,
-        }).mount(w.scope, w.cx);
-        const popup = self.popup;
-        popup.wrapper.setStyleInline(w.alloc, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } });
-        try parent.appendChild(w.alloc, popup.wrapper);
-        popup.content.meta.ownership.meta.test_id = "wizard.route.picker";
-        popup.content.setStyleInline(w.alloc, .{ .padding = ui.Padding.all(8), .direction = .column, .gap = 6 });
-        self.query = try popup.scope.createText("", .{});
-        self.input = try ui.widgets.Input(.{
-            .value = self.query,
-            .placeholder = "搜索 SSH 主机",
-            .size = .sm,
-            .leading_icon_asset = ui.icons.search,
-            .on_change = w.cx.on(RoutePicker, self, queryChanged),
-            .on_submit = w.cx.on(RoutePicker, self, submit),
-        }).mountResult(popup.scope, w.cx);
-        self.input.input_container.meta.ownership.meta.test_id = "wizard.route.search";
-        try popup.content.appendChild(w.alloc, self.input.node);
-        self.list = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(popup.scope, w.cx);
-        self.list.content.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 2 });
-        try popup.content.appendChild(w.alloc, self.list.container);
-        self.paint();
-        return self;
-    }
-
-    fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
-        const self: *RoutePicker = @ptrCast(@alignCast(raw));
-        const rect = (self.source orelse return .{ .x = 0, .y = 0, .w = 0, .h = 0 }).globalRect();
-        const gap: f32 = if (self.target == .insert and !self.wizard.routeIsVertical()) 12 else 0;
-        return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h + gap };
-    }
-
-    fn show(self: *RoutePicker, source: *ui.Node, target: Target) void {
-        self.source = source;
-        self.target = target;
-        self.query.set("");
-        self.dirty = true;
-        self.focus_pending = true;
-        self.popup.show.invoke();
-        self.paintAnchor(true);
-        self.wizard.cx.requestRedraw();
-    }
-
-    fn paintAnchor(self: *RoutePicker, active: bool) void {
-        const index = switch (self.target) {
-            .insert => |index| index,
-            .replace => return,
-        };
-        const edge = self.wizard.route_edges[index].?;
-        if (active) {
-            const colors = S.theme.current();
-            edge.badge.setBackground(colors.accent);
-            _ = edge.icon.setTint(S.theme.patchInk(colors.overlay, &.{colors.accent}));
-        } else edge.paint();
-    }
-
-    fn close(self: *RoutePicker) void {
-        if (self.popup.open.?.peek()) self.popup.close.invoke();
-    }
-
-    fn openChanged(self: *RoutePicker, open: bool) void {
-        if (open) return;
-        self.paintAnchor(false);
-        self.focus_pending = false;
-        if (self.source) |source| self.wizard.cx.setFocus(source);
-    }
-
-    fn paint(self: *RoutePicker) void {
-        self.popup.chrome.setBackground(S.theme.popupAction());
-        self.input.input_container.setBackground(S.theme.popupInset());
-        self.input.state.tokens = self.wizard.cx.tokens;
-        self.input.state.dirty = true;
-        if (self.popup.open.?.peek()) self.paintAnchor(true);
-        self.dirty = true;
-    }
-
-    fn queryChanged(self: *RoutePicker, _: []const u8) void {
-        self.dirty = true;
-        self.wizard.cx.requestRedraw();
-    }
-
-    fn options(self: *RoutePicker) []const ui.widgets.SelectOption {
-        const w = self.wizard;
-        return switch (self.target) {
-            .insert => w.asset_options.?.peek(),
-            .replace => |index| w.jump_options[index].?.peek(),
-        };
-    }
-
-    fn available(self: *RoutePicker, option: ui.widgets.SelectOption) bool {
-        const w = self.wizard;
-        return !option.disabled and w.routeAssetAllowed(option.value) and (self.target == .replace or w.routeAssetUnused(option.value));
-    }
-
-    fn matches(self: *RoutePicker, option: ui.widgets.SelectOption) bool {
-        return self.available(option) and std.ascii.findIgnoreCase(option.label, trim(self.query.peek())) != null;
-    }
-
-    fn submit(self: *RoutePicker, _: []const u8) void {
-        for (self.options()) |option| if (self.matches(option)) {
-            self.choose(option.value);
-            return;
-        };
-    }
-
-    fn choose(self: *RoutePicker, value: []const u8) void {
-        const w = self.wizard;
-        if (w.isLocked() or w.step != .form or !self.popup.open.?.peek()) return;
-        for (self.options()) |option| {
-            if (std.mem.eql(u8, option.value, value) and self.available(option)) break;
-        } else return;
-        const index = switch (self.target) {
-            .replace => |index| blk: {
-                if (index >= w.jump_count) return;
-                break :blk index;
-            },
-            .insert => |index| blk: {
-                if (w.jump_add_disabled.?.peek() or index > w.jump_count) return;
-                var end = w.jump_count;
-                while (end > index) : (end -= 1) w.setJump(end, w.jump_values[end - 1].?.peek());
-                w.jump_count += 1;
-                if (w.sig_socks_exit.?.peek()) |text| {
-                    const exit_index = std.fmt.parseInt(usize, text, 10) catch w.jump_count;
-                    if (exit_index >= index and exit_index < w.jump_count - 1) {
-                        var buffer: [4]u8 = undefined;
-                        w.socks_exit_text.?.set(std.fmt.bufPrint(&buffer, "{d}", .{exit_index + 1}) catch "");
-                        w.sig_socks_exit.?.set(w.socks_exit_text.?.peek());
-                    }
+fn pickerChoose(raw: *anyopaque, target: RoutePicker.Target, value: []const u8) void {
+    const w: *RemoteEditor = @ptrCast(@alignCast(raw));
+    if (w.isLocked() or w.step != .form) return;
+    const index = switch (target) {
+        .replace => |index| blk: {
+            if (index >= w.jump_count) return;
+            break :blk index;
+        },
+        .insert => |index| blk: {
+            if (w.jump_add_disabled.?.peek() or index > w.jump_count) return;
+            var end = w.jump_count;
+            while (end > index) : (end -= 1) w.setJump(end, w.jump_values[end - 1].?.peek());
+            w.jump_count += 1;
+            if (w.sig_socks_exit.?.peek()) |text| {
+                const exit_index = std.fmt.parseInt(usize, text, 10) catch w.jump_count;
+                if (exit_index >= index and exit_index < w.jump_count - 1) {
+                    var buffer: [4]u8 = undefined;
+                    w.socks_exit_text.?.set(std.fmt.bufPrint(&buffer, "{d}", .{exit_index + 1}) catch "");
+                    w.sig_socks_exit.?.set(w.socks_exit_text.?.peek());
                 }
-                break :blk index;
-            },
-        };
-        self.close();
-        w.setJump(index, value);
-        w.route_reveal = index;
-        w.onSelection(null);
-    }
-
-    fn update(self: *RoutePicker) bool {
-        if (!self.popup.open.?.peek()) return false;
-        if (self.dirty) {
-            self.dirty = false;
-            self.rebuild() catch return false;
-            return true;
-        }
-        if (self.focus_pending) {
-            self.focus_pending = false;
-            self.wizard.cx.setFocus(self.input.input_container);
-        }
-        return false;
-    }
-
-    fn rebuild(self: *RoutePicker) !void {
-        const w = self.wizard;
-        const list = self.list.content;
-        for (list.children.items) |node| w.cx.invalidateReferencesTo(node);
-        if (self.row_scope) |scope| scope.dispose();
-        self.row_scope = null;
-        while (list.children.items.len != 0) {
-            const node = list.children.items[list.children.items.len - 1];
-            w.cx.detachChild(list, node);
-            w.cx.destroyDetached(node);
-        }
-        const scope = try self.popup.scope.childScope();
-        self.row_scope = scope;
-        var count: usize = 0;
-        for (self.options()) |option| {
-            if (!self.matches(option)) continue;
-            const ctx = try w.alloc.create(Option);
-            ctx.* = .{ .picker = self, .value = option.value };
-            scope.onCleanup(Option, ctx, Option.cleanup) catch |err| {
-                w.alloc.destroy(ctx);
-                return err;
-            };
-            var style = S.row(30);
-            style.padding = .{ .left = 8 };
-            style.background = if (count == 0) S.theme.popupSelection() else ui.Color.TRANSPARENT;
-            style.border = .{ .radius = 6 };
-            style.justify = .start;
-            const row = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = option.label, .base_style = style, .on_click = w.cx.on(Option, ctx, Option.choose) }).mount(scope, w.cx);
-            for (row.children.items) |child| child.setDisplay(.none);
-            row.setStyleInline(w.alloc, style);
-            row.meta.ownership.meta.test_id = "wizard.route.option";
-            try row.appendChild(w.alloc, try ui.iconTint(w.cx, ui.icons.server, S.theme.current().fg_2, S.icon(14)));
-            const name = try ui.text(w.cx, option.label, S.text(12, 600, false));
-            name.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .flex = 1 });
-            try row.appendChild(w.alloc, name);
-            try list.appendChild(w.alloc, row);
-            count += 1;
-        }
-        if (count == 0) {
-            const empty = try ui.text(w.cx, "没有可选的 SSH 主机", S.text(12, 400, false));
-            empty.setStyleInline(w.alloc, S.row(30));
-            try list.appendChild(w.alloc, empty);
-        }
-        const visible: usize = @min(@max(count, 1), 4);
-        self.list.container.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .px = @floatFromInt(visible * 32 - 2) }, .flex_shrink = 0 });
-        ui.widgets.setScrollY(self.list.state, list, 0);
-    }
-};
+            }
+            break :blk index;
+        },
+    };
+    w.route_path.?.picker.close();
+    w.setJump(index, value);
+    w.route_reveal = index;
+    w.onSelection(null);
+}
 
 fn mountTestRoutePreview(w: *RemoteEditor) !*ui.Node {
     const scroll = try ui.widgets.ScrollArea(.{ .height = 76, .direction = .horizontal }).mount(w.scope, w.cx);

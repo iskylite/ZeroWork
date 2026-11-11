@@ -457,9 +457,12 @@ fn routeKeyDown(self: *Cx, key: KeyCode, modifiers: Modifiers) bool {
     if (key == .escape and self.overlay_stack.handleEscape()) return true;
 
     if (key == .tab) {
-        // Dispatch to focused node first (editors need to intercept Tab for indent)
-        if (self.focus_manager.getFocused()) |focused| {
-            const result = self.dispatcher.dispatchKeyDown(focused, .{
+        // Editors intercept Tab for indent. With a native editor owning focus,
+        // the application root must still see shortcuts such as Control-Tab
+        // before default traversal, just as it does for other unfocused keys.
+        const target = self.focus_manager.getFocused() orelse unfocusedKeyTarget(self);
+        if (target) |node| {
+            const result = self.dispatcher.dispatchKeyDown(node, .{
                 .key = key,
                 .modifiers = modifiers,
             });

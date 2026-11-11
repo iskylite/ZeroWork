@@ -57,6 +57,8 @@ if match is None or (match[2] is not None and int(match[2])>255):
 short_version=match[1]
 build_version=short_version+('fc'+match[2] if match[2] is not None else '')
 info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleDisplayName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'13.0','LSArchitecturePriority':['arm64']}
+# The browser can open user-configured HTTP services. Native app requests keep ATS.
+info['NSAppTransportSecurity']={'NSAllowsArbitraryLoadsInWebContent':True}
 with (app/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
 binary=(app/'Contents/MacOS/ZeroWork').read_bytes()
 commit=subprocess.check_output(['git','rev-parse','--short=12','HEAD'],text=True).strip()

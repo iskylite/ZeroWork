@@ -33,6 +33,8 @@ pub const Factory = struct {
     host_key_observer: ?ssh.HostKeyObserver = null,
     auth_interaction: ?ssh.AuthInteraction = null,
     timeout_ms: u32 = 15_000,
+    /// Passive socket hangup observation for consumers with an idle listener.
+    detect_socket_disconnect: bool = false,
     /// Explicit protocol owners may retain existing streams after operation
     /// cancellation for bounded remote cleanup. Cancellation still prevents
     /// ordinary connects/stream opens; close() remains mandatory.
@@ -43,6 +45,8 @@ pub const Factory = struct {
     cleanup_destination: ?Destination = null,
     operation_key: ?@import("operation.zig").OperationKey = null,
     failed_open_owner: ?FailedOpenOwner = null,
+    /// App acceptance fixtures can hold native resources across cleanup retries.
+    acceptance_hold_native_cleanup: ?*const std.atomic.Value(bool) = null,
 
     pub fn prepareOwned(self: Factory, owner: identity.ResourceOwner, route: *const resolution.FrozenRoute, purpose: Purpose, cancel: ?*const std.atomic.Value(bool)) !*OwnedTransport {
         if (route.hops.len > resolution.max_jumps) return error.TooManyJumps;
@@ -122,9 +126,14 @@ pub const OwnedStream = struct {
     transport: *OwnedTransport,
     index: usize,
     generation: u64,
-    /// Borrowed until close or transport close. IO never calls libssh2.
+    /// Borrowed until close unless requested via openTcpStreamWithOwnedFd.
+    /// The stream handle must be closed before its transport is destroyed.
     fd: c_int,
+    owns_fd: bool = false,
+
     pub fn close(self: *OwnedStream) void {
+        if (self.fd < 0) return;
+        if (self.owns_fd) _ = std.c.close(self.fd);
         self.transport.mutex.lock();
         defer self.transport.mutex.unlock();
         const slot = &self.transport.slots[self.index];
@@ -198,15 +207,23 @@ pub const OwnedTransport = struct {
         retainer.release(retainer.context);
     }
     pub fn openTcpStream(self: *OwnedTransport, destination: Destination) !OwnedStream {
-        return self.openStream(destination, false);
+        return self.openStream(destination, false, false);
+    }
+    /// A separate CLOEXEC descriptor remains valid if the transport worker
+    /// reclaims its slot. The consumer owns it until OwnedStream.close().
+    pub fn openTcpStreamWithOwnedFd(self: *OwnedTransport, destination: Destination) !OwnedStream {
+        return self.openStream(destination, false, true);
+    }
+    pub fn isStopping(self: *const OwnedTransport) bool {
+        return self.cancelled() or self.done.load(.acquire);
     }
     /// No destination argument and no native-session start/reconnect. The
     /// caller may use the returned fd only for its already-owned remote cleanup.
     pub fn openCleanupTcpStream(self: *OwnedTransport) !OwnedStream {
         if (self.cleanup_host_len == 0) return error.CleanupStreamForbidden;
-        return self.openStream(.{ .host = self.cleanup_host[0..self.cleanup_host_len], .port = self.cleanup_port }, true);
+        return self.openStream(.{ .host = self.cleanup_host[0..self.cleanup_host_len], .port = self.cleanup_port }, true, false);
     }
-    fn openStream(self: *OwnedTransport, destination: Destination, cleanup_only: bool) !OwnedStream {
+    fn openStream(self: *OwnedTransport, destination: Destination, cleanup_only: bool, own_fd: bool) !OwnedStream {
         try validateTcpDestination(destination);
         self.mutex.lock();
         if (!cleanup_only and self.externalCancelled()) {
@@ -247,17 +264,26 @@ pub const OwnedTransport = struct {
             if (self.closing.load(.acquire) or (!cleanup_only and self.externalCancelled())) {
                 // A just-opened stream must not escape a cancelled request.
                 // Its worker retains sole ownership of native release.
-                if (slot.state == .pending or slot.state == .active) slot.state = .closing;
+                if (slot.generation == generation and (slot.state == .pending or slot.state == .active)) slot.state = .closing;
                 self.mutex.unlock();
                 return if (self.closing.load(.acquire)) error.TransportClosed else error.Cancelled;
             }
+            if (slot.generation != generation or slot.state == .ended) {
+                self.mutex.unlock();
+                return error.StreamClosedDuringOpen;
+            }
             const state = slot.state;
-            const fd = slot.fd;
+            const fd = if (state == .active and own_fd) std.c.fcntl(slot.fd, std.c.F.DUPFD_CLOEXEC, @as(c_int, 0)) else slot.fd;
+            if (state == .active and own_fd and fd < 0) {
+                slot.state = .closing;
+                self.mutex.unlock();
+                return error.StreamDescriptorUnavailable;
+            }
             const failure = slot.failure;
             if (state == .failed) slot.state = .free;
             if (state == .active and !cleanup_only and destination.port == self.cleanup_port and std.mem.eql(u8, destination.host, self.cleanup_host[0..self.cleanup_host_len])) self.cleanup_admitted = true;
             self.mutex.unlock();
-            if (state == .active) return .{ .transport = self, .index = index, .generation = generation, .fd = fd };
+            if (state == .active) return .{ .transport = self, .index = index, .generation = generation, .fd = fd, .owns_fd = own_fd };
             if (state == .failed) return failure orelse error.StreamOpenFailed;
             if (self.done.load(.acquire)) return error.TransportClosed;
             pause();
@@ -310,6 +336,10 @@ pub const OwnedTransport = struct {
         self.ready.store(true, .release);
         var productive_rounds: usize = 0;
         while (!self.closing.load(.acquire) and (self.factory.keep_established_until_close or !self.externalCancelled())) {
+            if (self.factory.detect_socket_disconnect and self.socketDisconnected()) {
+                self.closing.store(true, .release);
+                break;
+            }
             self.mutex.lock();
             self.step();
             var relays: [max_streams]?*c.ZW_SSH_RELAY = undefined;
@@ -334,6 +364,16 @@ pub const OwnedTransport = struct {
         }
         self.releaseNative();
     }
+    fn socketDisconnected(self: *OwnedTransport) bool {
+        const session = self.nativeSession() orelse return false;
+        var poll: std.c.pollfd = .{ .fd = session.socket_fd, .events = std.c.POLL.IN, .revents = 0 };
+        if (std.c.poll(@ptrCast(&poll), 1, 0) <= 0) return false;
+        if (poll.revents & (std.c.POLL.HUP | std.c.POLL.ERR | std.c.POLL.NVAL) != 0) return true;
+        if (poll.revents & std.c.POLL.IN == 0) return false;
+        var byte: u8 = undefined;
+        return std.c.recv(session.socket_fd, @ptrCast(&byte), 1, std.c.MSG.PEEK | std.c.MSG.DONTWAIT) == 0;
+    }
+
     fn connect(self: *OwnedTransport) !void {
         if (self.cancelled()) return error.Cancelled;
         if (self.options.len == 0) return;
@@ -448,6 +488,13 @@ pub const OwnedTransport = struct {
             index -= 1;
             const slot = &self.slots[index];
             if (slot.state != .free) self.releaseSlot(slot);
+        }
+        if (self.factory.acceptance_hold_native_cleanup) |hold| {
+            if (hold.load(.acquire) and (self.route != null or self.session != null)) {
+                self.receipt = .unknown;
+                self.done.store(true, .release);
+                return;
+            }
         }
         self.receipt = if (self.route) |route| route.closeReceipt() else if (self.session) |*session| session.closeReceipt() else .released;
         if (self.receipt == .released) for (&self.slots) |*slot| {
@@ -661,4 +708,26 @@ test "BMC transport cleanup freezes its admitted endpoint permits two cancelled 
     try std.testing.expectError(error.CleanupStreamLimit, owned.openCleanupTcpStream());
     try std.testing.expectEqual(ReleaseReceipt.released, owned.close());
     try std.testing.expectError(error.TransportClosed, owned.openCleanupTcpStream());
+}
+
+test "web SOCKS owned stream fd remains valid after the transport releases its fd" {
+    const testing = std.testing;
+    const listener = try CleanupLoopback.init();
+    defer listener.deinit();
+    var library: ssh.Library = .{ .active = false };
+    var route: resolution.FrozenRoute = .{ .arena = .init(testing.allocator), .store_revision = 1, .hops = &.{} };
+    defer route.deinit();
+    const factory: Factory = .{ .allocator = testing.allocator, .library = &library, .timeout_ms = 1000 };
+    const owner: identity.ResourceOwner = .{ .session = .{ .session_id = @fromBackingInt(909) } };
+    const transport = try factory.prepareOwned(owner, &route, .connection, null);
+    defer transport.deinit() catch unreachable;
+    try transport.start();
+    var stream = try transport.openTcpStreamWithOwnedFd(listener.destination());
+    defer stream.close();
+    try listener.acceptAndClose();
+    const fd = stream.fd;
+    try testing.expectEqual(.released, transport.close());
+    try testing.expectEqual(@as(c_int, std.c.FD_CLOEXEC), std.c.fcntl(fd, std.c.F.GETFD));
+    stream.close();
+    try testing.expectEqual(@as(c_int, -1), std.c.fcntl(fd, std.c.F.GETFD));
 }

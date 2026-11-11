@@ -16,6 +16,7 @@ pub const Host = struct {
     entries: std.ArrayList(*Entry) = .empty,
     closed: bool = false,
     sessions: ?*sessions.SessionHost = null,
+    web_services: ?contract.ContentServicesFactory = null,
     frame_budget: ?*frames.Budget = null,
     /// Construct on the window main thread. Supply backendFor(app.sharedImageStore())
     /// and callbacks bound to the native window; plugins never receive either.
@@ -45,7 +46,13 @@ pub const Host = struct {
         if (self.closed) return error.ContentHostClosed;
         if (self.sessions) |host| if (!host.allowsContent(owner)) return error.ContentPresentationForbidden;
         const service_access = if (self.sessions) |host| try host.serviceAccess(owner) else null;
-        for (self.entries.items) |entry| if (!entry.retired and entry.input.owner.eql(owner)) return .{ .content_context = &entry.input, .frame_sink = &entry.frames, .service_access = service_access };
+        var result = if (self.web_services) |provider| try provider.create(provider.context, owner) else contract.ContentServices{};
+        result.service_access = service_access;
+        for (self.entries.items) |entry| if (!entry.retired and entry.input.owner.eql(owner)) {
+            result.content_context = &entry.input;
+            result.frame_sink = &entry.frames;
+            return result;
+        };
         if (self.entries.items.len == 128) return error.ContentOwnerLimit;
         const limits = if (self.sessions) |host| if (host.manifestFor(owner)) |manifest| manifest.frame_limits else null else null;
         const sink = if (limits) |declared|
@@ -57,7 +64,9 @@ pub const Host = struct {
         entry.* = .{ .input = .{ .owner = owner, .window_id = self.window_id, .window = self.window, .consumer = .{ .context = self, .consume = unavailable } }, .frames = sink };
         try entry.input.ensureIdentity();
         try self.entries.append(self.cx.allocator, entry);
-        return .{ .content_context = &entry.input, .frame_sink = &entry.frames, .service_access = service_access };
+        result.content_context = &entry.input;
+        result.frame_sink = &entry.frames;
+        return result;
     }
     fn unavailable(_: *anyopaque, _: content.Input) !void {
         return error.InputConsumerUnavailable;

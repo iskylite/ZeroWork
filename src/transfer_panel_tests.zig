@@ -22,6 +22,7 @@ comptime {
     _ = @import("transfer/sftp_engine.zig");
     _ = @import("ui/wizard.zig");
     _ = @import("plugins/remote/editor.zig");
+    _ = @import("plugins/web/editor.zig");
     _ = @import("ui/workspace.zig");
     _ = @import("ui/session_os_cache.zig");
     _ = @import("ui/session_icon.zig");

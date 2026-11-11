@@ -27,6 +27,7 @@ fn route(path: []const u8, body: []const u8, _: []u8) ?[]const u8 {
     if (std.mem.eql(u8, path, "/zerowork/menu-bar")) return @import("../platform/menu_bar.zig").testSnapshot(&response_buffer);
     if (std.mem.eql(u8, path, "/zerowork/tab-icons")) return tabIconsSnapshot();
     if (std.mem.eql(u8, path, "/zerowork/terminal")) return terminalRoute(body);
+    if (std.mem.eql(u8, path, "/zerowork/web-resources")) return webResources(body);
     if (!std.mem.eql(u8, path, "/zerowork/windows")) return null;
     const app_domain = domain orelse return "{\"ok\":false}";
     const windows = runtime orelse return "{\"ok\":false}";
@@ -188,6 +189,63 @@ fn treeNodeCount(node: *const @import("ui").Node) usize {
 fn closeReleased(app_domain: *application.Domain, key: @import("../host/operation.zig").OperationKey) bool {
     for (app_domain.sessions.journal.records.items) |record| if (record.key.eql(key)) return record.cleanup_released;
     return false;
+}
+
+extern fn zw_web_surface_acceptance_counts(*u64, *u64, *u64) void;
+
+fn webResources(body: []const u8) []const u8 {
+    const app_domain = domain orelse return "{\"ok\":false}";
+    const manifest = app_domain.sessions.registry.find("web") orelse return "{\"ok\":false}";
+    const factory = manifest.session_factory orelse return "{\"ok\":false}";
+    const plugin: *const @import("../plugins/web/plugin.zig").Plugin = @ptrCast(@alignCast(factory.context));
+    if (body.len != 0) {
+        const Input = struct { action: enum { hold_cleanup, release_cleanup } };
+        const parsed = std.json.parseFromSlice(Input, app_domain.allocator, body, .{}) catch return "{\"ok\":false}";
+        defer parsed.deinit();
+        const hold = parsed.value.action == .hold_cleanup;
+        @import("../host/web_proxy.zig").acceptance_hold_native_cleanup.store(hold, .release);
+        if (hold) for (app_domain.attachments.items) |app_host| {
+            if (plugin_window.Host.forApplication(app_host)) |host| host.limitAcceptanceCleanupCapacity();
+        };
+    }
+    var cleanup: plugin_window.CleanupCounts = .{};
+    for (app_domain.attachments.items) |app_host| if (plugin_window.Host.forApplication(app_host)) |host| {
+        const state = host.acceptanceCleanupCounts();
+        cleanup.reservations += state.reservations;
+        cleanup.retained += state.retained;
+        cleanup.pending_owners += state.pending_owners;
+    };
+    var native: struct { owners: u64, pending: u64, completed: u64 } = undefined;
+    zw_web_surface_acceptance_counts(&native.owners, &native.pending, &native.completed);
+    var writer = std.Io.Writer.fixed(&response_buffer);
+    writer.writeAll("{\"ok\":true,\"cleanup\":") catch return "{\"ok\":false}";
+    std.json.Stringify.value(cleanup, .{}, &writer) catch return "{\"ok\":false}";
+    writer.writeAll(",\"native\":") catch return "{\"ok\":false}";
+    std.json.Stringify.value(native, .{}, &writer) catch return "{\"ok\":false}";
+    writer.writeAll(",\"sessions\":[") catch return "{\"ok\":false}";
+    for (plugin.runtimes.items, 0..) |web, index| {
+        if (index != 0) writer.writeByte(',') catch return "{\"ok\":false}";
+        const proxy = web.proxy;
+        const state = if (proxy) |value| value.snapshot() else null;
+        std.json.Stringify.value(.{
+            .session = @backingInt(web.owner.session_id),
+            .generation = web.controller.view_generation,
+            .path = @tagName(web.controller.path),
+            .page = @tagName(web.controller.page),
+            .surface = web.surface != null,
+            .mounted = web.native_mount != null,
+            .path_error = web.path_error,
+            .proxy = if (state) |value| .{
+                .phase = @tagName(value.phase),
+                .cleanup = @tagName(value.cleanup),
+                .port = proxy.?.pump.port.load(.acquire),
+                .counts = value.counts,
+                .workers = proxy.?.acceptanceWorkers(),
+            } else null,
+        }, .{}, &writer) catch return "{\"ok\":false}";
+    }
+    writer.writeAll("]}") catch return "{\"ok\":false}";
+    return writer.buffered();
 }
 
 fn nextInputSequence(previous: u64) error{InputSequenceExhausted}!u64 {

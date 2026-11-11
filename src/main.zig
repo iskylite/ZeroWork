@@ -12590,6 +12590,7 @@ const AppNavHost = struct {
                 };
                 if (((key.key == .tab and key.modifiers.ctrl) or (configured_action == null and key.key == .r and key.modifiers.super and key.modifiers.shift)) and self.recentTabBlocked()) return .ignored;
                 if (self.workspace) |workspace| {
+                    if (configured_action == null and key.key == .l and key.modifiers.super and !key.modifiers.shift and !key.modifiers.ctrl and !key.modifiers.alt and workspace.focusActiveAddress()) return .stop;
                     const handled = workspace.handleTabKey(key.key, key.modifiers);
                     if (handled != .ignored) return handled;
                 }

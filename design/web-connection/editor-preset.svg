@@ -727,89 +727,122 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
   </g>
   <rect id="window.frame" x="0.5" y="0.5" width="1439" height="899" rx="17.5" fill="none" stroke="#D4D4D8" stroke-width="1" />
   <g id="web.editor" data-mode="preset">
-    <rect x="0" y="0" width="1440" height="900" fill="#202233" rx="0" opacity=".22" />
-    <rect x="406" y="178" width="628" height="544" fill="#FFFFFF" rx="18" stroke="#EBEBEF" filter="url(#web.modal.shadow)" />
-    <text x="430" y="217" font-size="19" fill="#18181B" font-weight="680">编辑连接</text>
-    <use href="#close" x="995" y="202" width="16" height="16" color="#5B5B65" />
-    <path d="M407 238h626" fill="none" stroke="#ECECF0" stroke-linecap="round" stroke-linejoin="round" />
-    <g id="web.editor.fields">
-      <text x="430" y="268" font-size="12" fill="#5B5B65" font-weight="620">协议</text>
+    <defs>
+      <style>
+        .web-edit-label { font-size: 12px; fill: #5B5B65; font-weight: 620; }
+        .web-edit-value { font-size: 13px; fill: #18181B; font-weight: 600; }
+        .web-edit-role { font-size: 10px; fill: #5B5B65; font-weight: 500; }
+        .web-edit-address { font-size: 11px; fill: #5B5B65; font-family: JetBrains, Menlo, monospace; }
+      </style>
+      <symbol id="laptop" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L3.788 16.423A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2zM20.054 15.987H3.946"/></symbol>
+      <clipPath id="web.editor.route.clip"><rect x="40" y="104" width="680" height="228" rx="8"/></clipPath>
+    </defs>
+    <rect width="1440" height="900" fill="#202233" opacity=".22"/>
+    <g transform="translate(340 95)">
+      <rect width="760" height="710" rx="12" fill="#FFFFFF" filter="url(#web.modal.shadow)"/>
+      <use href="#plug" x="24" y="18" width="16" height="16" color="#4F5ED9"/>
+      <text x="44" y="31" font-size="15" fill="#18181B" font-weight="650">编辑连接</text>
       <g id="web.editor.protocol">
-        <rect x="430" y="278" width="168" height="34" fill="#F6F6F8" rx="8" stroke="#EBEBF0" />
-        <text x="441" y="300" font-size="13" fill="#18181B" font-weight="500">网页</text>
-        <use href="#down" x="574" y="288" width="14" height="14" color="#5B5B65" />
+        <rect x="116" y="11" width="152" height="30" rx="8" fill="#F6F6F8"/>
+        <use href="#web-globe" x="128" y="19" width="14" height="14" color="#5B5B65"/>
+        <text x="150" y="31" class="web-edit-value">网页</text>
+        <use href="#down" x="242" y="19" width="14" height="14" color="#5B5B65"/>
       </g>
-      <text x="614" y="268" font-size="12" fill="#5B5B65" font-weight="620">名称</text>
+      <use href="#close" x="720" y="18" width="14" height="14" color="#5B5B65"/>
+      <text x="24" y="79" class="web-edit-label">名称</text>
       <g id="web.editor.name">
-        <rect x="614" y="278" width="396" height="34" fill="#F6F6F8" rx="8" stroke="#EBEBF0" />
-        <text x="625" y="300" font-size="13" fill="#18181B" font-weight="500">生产监控</text>
+        <rect x="24" y="89" width="712" height="34" rx="8" fill="#F6F6F8"/>
+        <text x="46" y="111" class="web-edit-value">生产监控</text>
       </g>
-      <text x="430" y="338" font-size="12" fill="#5B5B65" font-weight="620">打开方式</text>
+      <text x="24" y="145" class="web-edit-label">打开方式</text>
       <g id="web.editor.mode">
-        <rect x="430" y="348" width="580" height="34" fill="#F1F1F4" rx="8" />
-        <rect x="433.0" y="351" width="284.0" height="28" fill="#FFFFFF" rx="6" stroke="#E3E4EA" />
-        <text x="575.0" y="370" font-size="12" fill="#4F5ED9" font-weight="640" text-anchor="middle">预设网址</text>
-        <text x="865.0" y="370" font-size="12" fill="#5B5B65" font-weight="500" text-anchor="middle">手动输入</text>
+        <rect x="24" y="155" width="712" height="34" rx="8" fill="#F6F6F8"/>
+        <rect x="27" y="158" width="353" height="28" rx="7" fill="#FFFFFF"/>
+        <text x="202" y="177" text-anchor="middle" font-size="12" fill="#4F5ED9" font-weight="620">预设网址</text>
+        <text x="558" y="177" text-anchor="middle" font-size="12" fill="#5B5B65" font-weight="620">手动输入</text>
       </g>
-      <text x="430" y="402" font-size="12" fill="#5B5B65" font-weight="620">起始网址</text>
+      <text x="24" y="207" class="web-edit-label">起始网址</text>
       <g id="web.editor.url">
-        <rect x="430" y="412" width="580" height="34" fill="#F6F6F8" rx="8" stroke="#EBEBF0" />
-        <text x="441" y="434" font-size="13" fill="#18181B" font-weight="500">https://monitor.ops.example.com/overview</text>
+        <rect x="24" y="217" width="712" height="34" rx="8" fill="#F6F6F8"/>
+        <text x="46" y="239" class="web-edit-value">https://monitor.ops.example.com/overview</text>
       </g>
-      <text x="430" y="466" font-size="12" fill="#5B5B65" font-weight="620">连接路径</text>
-      <g id="web.editor.route">
-        <rect x="430" y="476" width="580" height="34" fill="#F1F1F4" rx="8" />
-        <rect x="723.0" y="479" width="284.0" height="28" fill="#FFFFFF" rx="6" stroke="#E3E4EA" />
-        <text x="575.0" y="498" font-size="12" fill="#5B5B65" font-weight="500" text-anchor="middle">直接连接</text>
-        <text x="865.0" y="498" font-size="12" fill="#4F5ED9" font-weight="640" text-anchor="middle">经 SSH 跳板</text>
-      </g>
-      <g id="web.editor.hop.1">
-        <rect x="430" y="522" width="24" height="24" fill="#EAEDFD" rx="7" />
-        <text x="442" y="538" font-size="11" fill="#4F5ED9" font-weight="650" text-anchor="middle">1</text>
-        <g id="web.editor.hop.1.asset">
-          <rect x="464" y="517" width="444" height="34" fill="#F6F6F8" rx="8" stroke="#EBEBF0" />
-          <text x="475" y="539" font-size="13" fill="#18181B" font-weight="500">edge-gateway</text>
-          <use href="#down" x="884" y="527" width="14" height="14" color="#5B5B65" />
+      <g id="web.editor.route" transform="translate(0 264)">
+        <text x="24" y="5" class="web-edit-label">连接路径</text>
+        <g id="wizard.access.direct">
+          <circle cx="47" cy="33" r="6" stroke="#6B6B76" stroke-width="1.3"/>
+          <text x="64" y="38" class="web-edit-value">从本机直接连接</text>
         </g>
-        <rect x="918" y="521" width="28" height="28" fill="transparent" rx="14" />
-        <use href="#web-back" x="924" y="527" width="16" height="16" color="#A9A9B3" transform="rotate(90 932 535)" />
-        <rect x="950" y="521" width="28" height="28" fill="transparent" rx="14" />
-        <use href="#web-next" x="956" y="527" width="16" height="16" color="#5B5B65" transform="rotate(90 964 535)" />
-        <rect x="982" y="521" width="28" height="28" fill="transparent" rx="14" />
-        <use href="#close" x="988" y="527" width="16" height="16" color="#5B5B65" />
-      </g>
-      <g id="web.editor.hop.2">
-        <rect x="430" y="565" width="24" height="24" fill="#EAEDFD" rx="7" />
-        <text x="442" y="581" font-size="11" fill="#4F5ED9" font-weight="650" text-anchor="middle">2</text>
-        <g id="web.editor.hop.2.asset">
-          <rect x="464" y="560" width="444" height="34" fill="#F6F6F8" rx="8" stroke="#EBEBF0" />
-          <text x="475" y="582" font-size="13" fill="#18181B" font-weight="500">prod-bastion</text>
-          <use href="#down" x="884" y="570" width="14" height="14" color="#5B5B65" />
+        <g id="wizard.access.jump">
+          <rect x="24" y="61" width="712" height="287" rx="12" fill="#F6F6FB"/>
+          <rect x="24" y="61" width="712" height="43" rx="9" fill="#EEEFF8"/>
+          <circle cx="47" cy="82" r="6" stroke="#4F5ED9" stroke-width="1.3"/>
+          <circle cx="47" cy="82" r="2.3" fill="#4F5ED9"/>
+          <text x="64" y="87" font-size="13" fill="#4F5ED9" font-weight="620">经 SSH 跳板连接</text>
         </g>
-        <rect x="918" y="564" width="28" height="28" fill="transparent" rx="14" />
-        <use href="#web-back" x="924" y="570" width="16" height="16" color="#5B5B65" transform="rotate(90 932 578)" />
-        <rect x="950" y="564" width="28" height="28" fill="transparent" rx="14" />
-        <use href="#web-next" x="956" y="570" width="16" height="16" color="#A9A9B3" transform="rotate(90 964 578)" />
-        <rect x="982" y="564" width="28" height="28" fill="transparent" rx="14" />
-        <use href="#close" x="988" y="570" width="16" height="16" color="#5B5B65" />
+        <rect id="wizard.route.chain" x="40" y="104" width="680" height="228" rx="8" fill="#F4F5F8"/>
+        <g clip-path="url(#web.editor.route.clip)">
+        <g transform="translate(52 16)">
+          <g id="wizard.route.local">
+            <rect width="652" height="46" rx="7" fill="#E9EAF0"/>
+            <use href="#laptop" x="10" y="11" width="24" height="24" color="#5B5B65"/>
+            <text x="43" y="21" class="web-edit-value">本机</text>
+            <text x="43" y="36" class="web-edit-address">127.0.0.1</text>
+          </g>
+          <g id="wizard.route.insert.0" aria-label="在本机与 edge-gateway 之间添加跳板">
+            <path d="M22 49v29m-3-4 3 4 3-4" stroke="#85858F" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="36" cy="65" r="8" fill="#E0E3F2"/>
+            <use href="#plus" x="30" y="59" width="12" height="12" color="#6A6A75"/>
+          </g>
+          <g id="wizard.route.hop.0">
+            <rect x="0" y="84" width="652" height="52" rx="7" fill="#F0F1FA"/>
+            <use href="#server" x="10" y="98" width="24" height="24" color="#4F5ED9"/>
+            <text x="43" y="97" class="web-edit-role">跳板 1</text>
+            <text x="43" y="113" class="web-edit-value">edge-gateway</text>
+            <text x="43" y="128" class="web-edit-address">ops@198.51.100.21:22</text>
+            <use href="#web-more" x="620" y="102" width="16" height="16" color="#5B5B65"/>
+          </g>
+          <g id="wizard.route.insert.1" aria-label="在 edge-gateway 与 prod-bastion 之间添加跳板">
+            <path d="M22 139v29m-3-4 3 4 3-4" stroke="#85858F" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="36" cy="155" r="8" fill="#E0E3F2"/>
+            <use href="#plus" x="30" y="149" width="12" height="12" color="#6A6A75"/>
+          </g>
+          <g id="wizard.route.hop.1">
+            <rect x="0" y="174" width="652" height="52" rx="7" fill="#F0F1FA"/>
+            <use href="#server" x="10" y="188" width="24" height="24" color="#4F5ED9"/>
+            <text x="43" y="187" class="web-edit-role">跳板 2</text>
+            <text x="43" y="203" class="web-edit-value">prod-bastion</text>
+            <text x="43" y="218" class="web-edit-address">ops@192.0.2.24:22</text>
+            <use href="#web-more" x="620" y="192" width="16" height="16" color="#5B5B65"/>
+          </g>
+          <g id="wizard.route.insert.2" aria-label="在 prod-bastion 与生产监控之间添加跳板">
+            <path d="M22 229v29m-3-4 3 4 3-4" stroke="#85858F" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="36" cy="245" r="8" fill="#E0E3F2"/>
+            <use href="#plus" x="30" y="239" width="12" height="12" color="#6A6A75"/>
+          </g>
+          <g id="wizard.route.target" transform="translate(0 264)">
+            <rect width="652" height="46" rx="7" fill="#E9EAF0"/>
+            <use href="#web-globe" x="10" y="11" width="24" height="24" color="#5B5B65"/>
+            <text x="43" y="12" class="web-edit-role">目标网页</text>
+            <text x="43" y="26" class="web-edit-value">生产监控</text>
+            <text x="43" y="40" class="web-edit-address">https://monitor.ops.example.com/overview</text>
+          </g>
+        </g>
+        </g>
+        <rect x="711" y="168" width="5" height="161" rx="2.5" fill="#616168"/>
       </g>
-      <g id="web.editor.hop.add">
-        <use href="#plus" x="430" y="611" width="15" height="15" color="#4F5ED9" />
-        <text x="450" y="623" font-size="12" fill="#4F5ED9" font-weight="620">添加跳板</text>
+      <rect x="0" y="648" width="760" height="62" rx="12" fill="#F7F7F8"/>
+      <g id="web.editor.cancel">
+        <rect x="24" y="662" width="52" height="34" rx="8" fill="#F4F4F6"/>
+        <text x="50" y="684" font-size="12" fill="#18181B" font-weight="600" text-anchor="middle">取消</text>
       </g>
-    </g>
-    <path d="M407 660h626" fill="none" stroke="#ECECF0" stroke-linecap="round" stroke-linejoin="round" />
-    <g id="web.editor.cancel">
-      <rect x="430" y="674" width="68" height="34" fill="#F4F4F6" rx="8" />
-      <text x="464.0" y="696" font-size="12" fill="#18181B" font-weight="600" text-anchor="middle">取消</text>
-    </g>
-    <g id="web.editor.save">
-      <rect x="818" y="674" width="78" height="34" fill="#F4F4F6" rx="8" />
-      <text x="857.0" y="696" font-size="12" fill="#18181B" font-weight="600" text-anchor="middle">仅保存</text>
-    </g>
-    <g id="web.editor.open">
-      <rect x="904" y="674" width="106" height="34" fill="#4F5ED9" rx="8" />
-      <text x="957.0" y="696" font-size="12" fill="#FFFFFF" font-weight="600" text-anchor="middle">保存并连接</text>
+      <g id="web.editor.save">
+        <rect x="568" y="662" width="74" height="34" rx="8" fill="#F4F4F6"/>
+        <text x="605" y="684" font-size="12" fill="#18181B" font-weight="600" text-anchor="middle">仅保存</text>
+      </g>
+      <g id="web.editor.open">
+        <rect x="650" y="662" width="86" height="34" rx="8" fill="#4F5ED9"/>
+        <text x="693" y="684" font-size="12" fill="#FFFFFF" font-weight="600" text-anchor="middle">保存并连接</text>
+      </g>
     </g>
   </g>
 </svg>

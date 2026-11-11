@@ -14,6 +14,7 @@ pub const supported_apis = [_]plugins.ApiDefinition{
     .{ .id = "host.tls_trust" },
     .{ .id = "host.secrets" },
     .{ .id = "host.resource_actions" },
+    .{ .id = "host.web_surface" },
     .{ .id = "host.frame_budget" },
 };
 pub const shared_renderers = [_]plugins.RendererDefinition{

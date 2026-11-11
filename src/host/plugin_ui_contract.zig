@@ -75,6 +75,42 @@ pub const EditorFactory = struct {
     mount: ?*const fn (?*anyopaque, EditorMount) anyerror!EditorInstance = null,
     shared_editor: ?[]const u8 = null,
 };
+const web = @import("web_surface.zig");
+const bookmarks = @import("../plugins/web/bookmarks.zig");
+
+pub const WebSurface = struct {
+    context: *anyopaque,
+    owner: identity.SessionHandle,
+    sync_slot: *const fn (*anyopaque, identity.SessionHandle, *web.Surface, *?web.Mount, *ui.Node, bool) anyerror!void,
+
+    pub fn sync(self: WebSurface, surface: *web.Surface, binding: *?web.Mount, slot: *ui.Node, visible: bool) !void {
+        return self.sync_slot(self.context, self.owner, surface, binding, slot, visible);
+    }
+
+    pub fn detach(self: WebSurface, surface: *web.Surface, binding: *?web.Mount) void {
+        if (binding.*) |mount| {
+            if (mount.owner.eql(self.owner)) surface.unbind(mount) catch {};
+            binding.* = null;
+        }
+    }
+};
+
+pub const WebBookmarks = struct {
+    context: *anyopaque,
+    owner: identity.SessionHandle,
+    read: *const fn (*anyopaque, identity.SessionHandle, std.mem.Allocator) anyerror!envelope.Envelope,
+    write: *const fn (*anyopaque, identity.SessionHandle, bookmarks.Mutation) anyerror!void,
+
+    /// Copies the current saved envelope into the caller's arena.
+    pub fn snapshot(self: WebBookmarks, arena: std.mem.Allocator) !envelope.Envelope {
+        return self.read(self.context, self.owner, arena);
+    }
+
+    pub fn apply(self: WebBookmarks, mutation: bookmarks.Mutation) !void {
+        return self.write(self.context, self.owner, mutation);
+    }
+};
+
 pub const ContentMount = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -84,6 +120,8 @@ pub const ContentMount = struct {
     content_context: ?*@import("content_context.zig").Context = null,
     frame_sink: ?*@import("frame_texture_sink.zig").Sink = null,
     service_access: ?@import("session_service_access.zig").SessionServiceAccess = null,
+    web_surface: ?WebSurface = null,
+    web_bookmarks: ?WebBookmarks = null,
 };
 pub const ContentUpdate = struct {
     owner: identity.SessionHandle,
@@ -98,6 +136,7 @@ pub const RendererInstance = struct {
         update: *const fn (*anyopaque, ContentUpdate) anyerror!void,
         focus_changed: *const fn (*anyopaque, bool) void,
         unmount: *const fn (*anyopaque) void,
+        focus_address: ?*const fn (*anyopaque) void = null,
         /// Presentation readiness does not imply an online remote service.
         /// Labels are borrowed for the synchronous host projection only.
         connection_status: ?*const fn (*anyopaque) ConnectionStatus = null,
@@ -128,6 +167,8 @@ pub const ContentServices = struct {
     content_context: ?*@import("content_context.zig").Context = null,
     frame_sink: ?*@import("frame_texture_sink.zig").Sink = null,
     service_access: ?@import("session_service_access.zig").SessionServiceAccess = null,
+    web_surface: ?WebSurface = null,
+    web_bookmarks: ?WebBookmarks = null,
 };
 pub const ContentServicesFactory = struct {
     context: *anyopaque,

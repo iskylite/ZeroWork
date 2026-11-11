@@ -148,3 +148,32 @@ Runner 使用未修改的官方 Everything 2.2.1 和 SDK 1.32.2 两个 HTTP 示�
 输出包含报告、原生截图和日志。报告记录实际服务版本与执行步骤，最后必须正常退出原生应用并结束自建服务。生产应用不依赖这些 Node 包。`ZW_MCP_START_PHASE=1` 或 `2` 仅用于定向调试后半段；完整验收不设置此变量。
 
 Everything 的 stdio／HTTP 必须实际协商为 2026-07-28；旧版 SDK 示例继续覆盖 2025-11-25 兼容。`ZW_MCP_UI_ONLY=1 ZW_MCP_THEME=reference-light` 可只运行 V4 服务列表的浅色／860×480 几何与原生操作验收，完整运行同时覆盖深色界面。
+
+## 网页连接的原生验收
+
+在当前目标 Mac 上运行 `zig build -Dtest-mode=true -j2 --prefix /tmp/zw-web-build`。在其登录会话中，从仓库根目录运行下列命令。运行时需要支持 TypeScript 的 Node.js 和带 Paramiko 的 Python。
+
+```sh
+sw_vers
+ZW_WEB_TEST_PYTHON=/path/to/venv/bin/python node e2e/web_workspace_native.ts /tmp/zw-web-build /tmp/zw-web-native-evidence
+```
+
+脚本在当前目标系统验证连接向导、直连预设、书签编辑、手动模式、网页对话框的确定／取消、prompt 默认值和空字符串、HTTP 认证、真实双跳 SSH、目标 IP、窗口缩放、普通 GET 刷新后的断线重连与正常退出；实际 OS 和可用 SDK 写入 `environment.json`。在同一系统运行 `python3 scripts/test_web_proxy.py` 检查代理认证、旧凭据、端口复用、数据仓隔离及真实 WebKit 交互，并记录实际 OS/SDK。代理 API 从 macOS 14 起可用，探针源码构建需要包含该 API 的 SDK；本轮不安排旧系统兼容性专项验收。
+
+`python3 scripts/test_web_requests.py` 定向验证原生回调队列上限、超时、空值／取消、认证、导航失效、停止、销毁和迟到答复。`bash scripts/test_web_embedded_host.sh` 验证宿主键分流、原生 Edit 菜单、AX 子树和焦点；检查失败以非零状态退出。完整窗口验收还需在真实网页输入框聚焦时验证 ⌘1／⌘2、Ctrl+Tab、⌘L 和文本编辑，并核对网页标题、表单、链接出现在窗口 AX 树中。
+
+## 网页连接的系统拼音验收
+
+在 macOS 登录会话中使用系统「简体拼音」。在现有连接向导选择「网页」，聚焦名称，输入 `zhongwen` 并按空格，确认组字下划线消失且名称为「中文」。以手动输入模式打开临时直连，访问含普通文本输入框的测试页。点击该输入框，确认地址栏的焦点环和光标消失，再用同样的按键输入「中文」。网页应收到 `compositionstart`、`compositionupdate` 和含「中文」的 `compositionend`。
+
+网页输入框仍聚焦时按 ⌘L，确认网页失焦、文字保留，地址栏获得焦点并选中原网址。重新切到简体拼音，在地址栏组字后按 Esc，确认组字取消、网页内容保持不变。使用窗口截图核对焦点和组字状态。
+
+## 网页连接的资源回收验收
+
+```sh
+zig build -Dtest-mode=true -j2 --prefix /tmp/zw-web-resource-build
+xcrun clang -O2 e2e/web_resource_process_probe.c -o /tmp/zw-web-resource-probe
+ZW_WEB_TEST_PYTHON=/path/to/venv/bin/python node e2e/web_workspace_resources.ts /tmp/zw-web-resource-build /tmp/zw-web-resource-probe /tmp/zw-web-resource-evidence
+```
+
+脚本先用直连预热 WebKit，再执行 20 轮打开／关闭和 20 轮断线／重连。每轮显式答复网页 alert／confirm／prompt，再检查旧代监听端口、套接字、工作线程、原生回调和回收记录。最后模拟 SSH 底层回收持续失败，验证保留未知回执、阻止超出回收预算的新建请求，以及故障解除后恢复。详细结果写入输出目录的 `resources.json`。

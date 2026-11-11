@@ -225,6 +225,11 @@ test {
     _ = connection_envelope;
     _ = connection_config_resolver;
     _ = transport_factory;
+    _ = @import("host/web_proxy.zig");
+    _ = @import("plugins/web/bookmark_store.zig");
+    _ = @import("plugins/web/plugin.zig");
+    _ = @import("plugins/web/ssh_challenges.zig");
+    _ = @import("plugins/web/request_bridge.zig");
     _ = plugin_ui_contract;
     _ = plugin_tools;
     _ = plugin_content_context;

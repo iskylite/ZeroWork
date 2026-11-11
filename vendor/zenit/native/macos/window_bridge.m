@@ -164,6 +164,9 @@ static void zenitPresentWindow(NSWindow *window) {
 - (void)encodeTexture:(id<MTLTexture>)source commandBuffer:(id<MTLCommandBuffer>)buffer revision:(uint64_t)revision;
 @end
 static WindowWrapper* wrapperForWindow(NSWindow *window);
+static NSView *zenitEmbeddedAccessibilityView(NSView *host);
+static id zenitEmbeddedAccessibilityFocus(NSView *host);
+static id zenitEmbeddedAccessibilityHitTest(NSView *host, NSPoint point);
 static BOOL zenitPrepareFullscreen(NSWindow *window);
 static BOOL zenitDeferFullscreenUntilDeminiaturized(NSWindow *window,id sender);
 static void zenitPrepareFullscreenExit(NSWindow *window);
@@ -2744,15 +2747,18 @@ static NSString *const kZenitAXScrollToVisible = @"AXScrollToVisible";
         }
     }
     int n = zenit_a11y_root_count(wid);
-    if (n <= 0) {
-        // No registered a11y_tree (test mode or cx unhooked), fall to super.
-        return [super accessibilityChildren];
-    }
-    NSMutableArray *kids = [NSMutableArray arrayWithCapacity:(NSUInteger)n];
+    NSMutableArray *kids = [NSMutableArray arrayWithCapacity:(NSUInteger)MAX(n, 0) + 1];
     for (int i = 0; i < n; i++) {
         ZenitAXHandle h = zenit_a11y_root_at(wid, i);
         if (h == ZENIT_A11Y_INVALID_HANDLE) continue;
         [kids addObject:[self zenitA11yElementForHandle:h accessibilityParent:[self zenitA11yRootParent]]];
+    }
+    // Metal's virtual tree replaces NSView's default child enumeration. Merge
+    // only the registered live native subtree; detached/hidden pages must not
+    // survive through AppKit's fallback children or our virtual-element cache.
+    NSView *embedded = zenitEmbeddedAccessibilityView(self);
+    if (embedded) for (id child in NSAccessibilityUnignoredChildren(@[embedded])) {
+        if (child != self && ![kids containsObject:child]) [kids addObject:child];
     }
     return kids;
 }
@@ -2770,12 +2776,16 @@ static NSString *const kZenitAXScrollToVisible = @"AXScrollToVisible";
 }
 
 - (id)accessibilityFocusedUIElement {
+    id embedded = zenitEmbeddedAccessibilityFocus(self);
+    if (embedded) return embedded;
     ZenitAXHandle focused = zenit_a11y_focused(zenitA11yWindowIdForView(self));
     return focused == ZENIT_A11Y_INVALID_HANDLE ? nil : [self zenitA11yElementForHandle:focused];
 }
 
 - (id)accessibilityHitTest:(NSPoint)point {
     if (!self.window) return [self zenitA11yRootParent];
+    id embedded = zenitEmbeddedAccessibilityHitTest(self, point);
+    if (embedded) return embedded;
     NSPoint local = zenitLogicalScreenPoint(wrapperForWindow(self.window),point);
     ZenitAXHandle handle = zenit_a11y_hit_test(
         zenitA11yWindowIdForView(self),
@@ -2914,6 +2924,9 @@ typedef struct {
 }
 @end
 
+typedef int (*ZenitEmbeddedHostKey)(void *context, uint16_t keycode, uint32_t modifiers);
+typedef void (*ZenitEmbeddedFocusEntered)(void *context);
+
 @interface WindowWrapper : NSObject <NSWindowDelegate> {
 @public
     // One CVDisplayLink writer, main-thread cadence/timing snapshots.
@@ -2923,6 +2936,12 @@ typedef struct {
 }
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) MetalView *metalView;
+@property (nonatomic, weak) NSView *embeddedInputView;
+@property (nonatomic) ZenitEmbeddedHostKey embeddedHostKey;
+@property (nonatomic) ZenitEmbeddedFocusEntered embeddedFocusEntered;
+@property (nonatomic) void *embeddedFocusContext;
+@property (nonatomic) NSUInteger embeddedMouseButtons;
+@property (nonatomic, weak) NSView *embeddedMouseGestureView;
 @property (nonatomic, strong) ZenitFullscreenHeaderHost *fullscreenHeader;
 @property (nonatomic) BOOL shouldClose;
 @property (nonatomic) BOOL hiddenByApplication;
@@ -4012,6 +4031,143 @@ void* macos_get_metal_view(void* window_ptr) {
         WindowWrapper *wrapper = (__bridge WindowWrapper*)window_ptr;
         return (__bridge void*)wrapper.metalView;
     }
+}
+
+static BOOL zenitEmbeddedHasFocus(WindowWrapper *wrapper) {
+    NSView *view = wrapper.embeddedInputView;
+    NSResponder *responder = wrapper.window.firstResponder;
+    return view && [responder isKindOfClass:[NSView class]] &&
+        [(NSView *)responder isDescendantOf:view];
+}
+
+static NSView *zenitEmbeddedAccessibilityView(NSView *host) {
+    WindowWrapper *wrapper = wrapperForWindow(host.window);
+    NSView *view = wrapper.embeddedInputView;
+    if (host != wrapper.metalView || !view || view.superview != host ||
+        view.window != host.window || view.hiddenOrHasHiddenAncestor ||
+        NSIsEmptyRect(NSIntersectionRect(view.bounds, view.visibleRect))) return nil;
+    return view;
+}
+
+// A native view's default implementation can ask its ignored parent for focus
+// or hit testing. Bound that callback to this query instead of re-entering the
+// host's virtual accessibility tree through MetalView.
+static _Thread_local BOOL zenitEmbeddedAXQuery;
+static id zenitEmbeddedAccessibilityFocus(NSView *host) {
+    if (zenitEmbeddedAXQuery) return nil;
+    NSView *view = zenitEmbeddedAccessibilityView(host);
+    NSResponder *responder = host.window.firstResponder;
+    if (!view || ![responder isKindOfClass:NSView.class] ||
+        ![(NSView *)responder isDescendantOf:view]) return nil;
+    zenitEmbeddedAXQuery = YES;
+    id focused = [(NSView *)responder accessibilityFocusedUIElement];
+    zenitEmbeddedAXQuery = NO;
+    return focused != host && focused != host.window &&
+        ![focused isKindOfClass:ZenitA11yElement.class] ? focused : nil;
+}
+
+static id zenitEmbeddedAccessibilityHitTest(NSView *host, NSPoint point) {
+    if (zenitEmbeddedAXQuery) return nil;
+    NSView *view = zenitEmbeddedAccessibilityView(host);
+    if (!view) return nil;
+    NSPoint windowPoint = [host.window convertPointFromScreen:point];
+    NSPoint local = [view convertPoint:windowPoint fromView:nil];
+    if (!NSPointInRect(local, NSIntersectionRect(view.bounds, view.visibleRect))) return nil;
+    // Respect native siblings above the surface (including native overlays).
+    NSPoint parentPoint = host.superview ? [host.superview convertPoint:windowPoint fromView:nil] : windowPoint;
+    NSView *hitView = [host hitTest:parentPoint];
+    if (![hitView isDescendantOf:view]) return nil;
+    zenitEmbeddedAXQuery = YES;
+    // The registered clipping view is ignored by AX and its default method
+    // returns the window. Query the actual native hit descendant instead.
+    id hit = [hitView accessibilityHitTest:point];
+    zenitEmbeddedAXQuery = NO;
+    return hit != host && hit != host.window &&
+        ![hit isKindOfClass:ZenitA11yElement.class] ? hit : nil;
+}
+
+// The explicit view must be attached directly to the registered window's Metal
+// content view. Unregistering an old view cannot revoke its replacement.
+int macos_set_embedded_input_view(void *view_ptr, int enabled, ZenitEmbeddedHostKey hostKey,
+                                 ZenitEmbeddedFocusEntered focusEntered, void *focusContext) {
+    if (!NSThread.isMainThread || !view_ptr) return 0;
+    NSView *view = (__bridge NSView *)view_ptr;
+    WindowWrapper *wrapper = wrapperForWindow(view.window);
+    if (!wrapper || view.superview != wrapper.metalView) return 0;
+    BOOL changed = NO;
+    if (enabled) {
+        if (wrapper.embeddedInputView && wrapper.embeddedInputView != view) return 0;
+        changed = wrapper.embeddedInputView != view;
+        wrapper.embeddedInputView = view;
+        wrapper.embeddedHostKey = hostKey;
+        wrapper.embeddedFocusEntered = focusEntered;
+        wrapper.embeddedFocusContext = focusContext;
+    } else if (wrapper.embeddedInputView == view) {
+        changed = YES;
+        if (zenitEmbeddedHasFocus(wrapper)) [wrapper.window makeFirstResponder:wrapper.metalView];
+        wrapper.embeddedInputView = nil;
+        wrapper.embeddedHostKey = NULL;
+        wrapper.embeddedFocusEntered = NULL;
+        wrapper.embeddedFocusContext = NULL;
+        if (wrapper.embeddedMouseGestureView == view) wrapper.embeddedMouseGestureView = nil;
+    }
+    if (changed) NSAccessibilityPostNotification(wrapper.window, NSAccessibilityLayoutChangedNotification);
+    return 1;
+}
+
+static BOOL zenitDispatchEmbeddedPointer(WindowWrapper *wrapper, NSEvent *event) {
+    BOOL down = NO, up = NO, drag = NO;
+    switch (event.type) {
+        case NSEventTypeLeftMouseDown:
+        case NSEventTypeRightMouseDown:
+        case NSEventTypeOtherMouseDown: down = YES; break;
+        case NSEventTypeLeftMouseUp:
+        case NSEventTypeRightMouseUp:
+        case NSEventTypeOtherMouseUp: up = YES; break;
+        case NSEventTypeLeftMouseDragged:
+        case NSEventTypeRightMouseDragged:
+        case NSEventTypeOtherMouseDragged: drag = YES; break;
+        case NSEventTypeMouseMoved:
+        case NSEventTypeScrollWheel:
+        case NSEventTypeMagnify: break;
+        default: return NO;
+    }
+    NSView *view = wrapper.embeddedInputView;
+    if (!view && !wrapper.embeddedMouseButtons) return NO;
+
+    NSUInteger button = 0;
+    if ((down || up || drag) && event.buttonNumber >= 0 && event.buttonNumber < sizeof(NSUInteger) * 8) {
+        button = (NSUInteger)1 << event.buttonNumber;
+    }
+    BOOL captured = (wrapper.embeddedMouseButtons & button) != 0;
+    if (up) wrapper.embeddedMouseButtons &= ~button;
+    if (up || drag) {
+        if (!captured) return NO;
+        // Consume the remainder of an old gesture if its surface was hidden
+        // before the mouse-up, so Zig never sees an unmatched button event.
+        if (view && view == wrapper.embeddedMouseGestureView) [NSApp sendEvent:event];
+        if (!wrapper.embeddedMouseButtons) wrapper.embeddedMouseGestureView = nil;
+        return YES;
+    }
+    if (view && event.window == wrapper.window &&
+        [view hitTest:[view.superview convertPoint:event.locationInWindow fromView:nil]]) {
+        if (down) {
+            if (wrapper.embeddedMouseButtons && wrapper.embeddedMouseGestureView != view) return YES;
+            wrapper.embeddedMouseButtons |= button;
+            wrapper.embeddedMouseGestureView = view;
+        }
+        const BOOL mayTransferFocus = down && !zenitEmbeddedHasFocus(wrapper);
+        [NSApp sendEvent:event];
+        if (mayTransferFocus && wrapper.embeddedInputView == view &&
+            zenitEmbeddedHasFocus(wrapper) && wrapper.embeddedFocusEntered) {
+            wrapper.embeddedFocusEntered(wrapper.embeddedFocusContext);
+        }
+        return YES;
+    }
+    if (down && zenitEmbeddedHasFocus(wrapper)) {
+        [wrapper.window makeFirstResponder:wrapper.metalView];
+    }
+    return NO;
 }
 
 // set live resize render callback
@@ -6154,6 +6310,14 @@ static void pumpAppEventsWithTimeout(uint32_t timeout_ms) {
             // keyboard event handling. FlagsChanged separate branch: no
             // characters, skip menu keyEquivalent/firstResponder keyDown logic.
             if (event.type == NSEventTypeFlagsChanged) {
+                if (zenitEmbeddedHasFocus(target)) {
+                    // The page still owns AppKit's modifier/IME handling. The
+                    // host also needs Control-up to finish a recent-tab cycle.
+                    enqueueKeyEvent(target, event);
+                    [NSApp sendEvent:event];
+                    [NSApp updateWindows];
+                    break;
+                }
                 enqueueKeyEvent(target, event);
                 BOOL imeHandled = NO;
                 if (zenitTextInputIsActive(target)) {
@@ -6223,6 +6387,16 @@ static void pumpAppEventsWithTimeout(uint32_t timeout_ms) {
                     }
                 }
 
+                if (zenitEmbeddedHasFocus(target)) {
+                    if (target.embeddedHostKey && target.embeddedHostKey(target.embeddedFocusContext, event.keyCode, (uint32_t)event.modifierFlags)) {
+                        enqueueKeyEvent(target, event);
+                    } else {
+                        [NSApp sendEvent:event];
+                    }
+                    [NSApp updateWindows];
+                    break;
+                }
+
                 // Ownership is decided before AppKit can commit/cancel the
                 // marked text. The same Return/Escape must not subsequently
                 // submit or dismiss the editor after its composition ends.
@@ -6250,6 +6424,11 @@ static void pumpAppEventsWithTimeout(uint32_t timeout_ms) {
                         [ic handleEvent:event];
                     }
                 }
+                [NSApp updateWindows];
+                break;
+            }
+
+            if (zenitDispatchEmbeddedPointer(target, event)) {
                 [NSApp updateWindows];
                 break;
             }
@@ -6827,6 +7006,16 @@ static NSMutableDictionary<NSNumber *, NSMenu *> *zenitMenuById;
 // MetalView menu action method - forward Edit menu to key events
 @implementation MetalView (MenuActions)
 
+- (BOOL)zenitForwardEmbeddedEdit:(SEL)action sender:(id)sender {
+    WindowWrapper *wrapper = wrapperForWindow(self.window);
+    if (!zenitEmbeddedHasFocus(wrapper)) return NO;
+    // The default Edit menu uses zenit* selectors, so its key equivalent can
+    // reach Metal through a native child's responder chain. Keep the actual
+    // operation in that native editor even when no selection/action exists.
+    [wrapper.window.firstResponder tryToPerform:action with:sender];
+    return YES;
+}
+
 - (void)_simulateKeyEventWithCode:(uint16_t)keyCode character:(char)ch modifiers:(uint32_t)mods {
     WindowWrapper *wrapper = wrapperForWindow(self.window);
     if (!wrapper) return;
@@ -6844,31 +7033,37 @@ static NSMutableDictionary<NSNumber *, NSMenu *> *zenitMenuById;
 
 // Cmd+Z → Undo (keycode 6 = 'z')
 - (void)zenitUndo:(id)sender {
+    if ([self zenitForwardEmbeddedEdit:@selector(undo:) sender:sender]) return;
     [self _simulateKeyEventWithCode:6 character:'z' modifiers:NSEventModifierFlagCommand];
 }
 
 // Cmd+Shift+Z → Redo
 - (void)zenitRedo:(id)sender {
+    if ([self zenitForwardEmbeddedEdit:@selector(redo:) sender:sender]) return;
     [self _simulateKeyEventWithCode:6 character:'z' modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagShift)];
 }
 
 // Cmd+X → Cut (keycode 7 = 'x')
 - (void)zenitCut:(id)sender {
+    if ([self zenitForwardEmbeddedEdit:@selector(cut:) sender:sender]) return;
     [self _simulateKeyEventWithCode:7 character:'x' modifiers:NSEventModifierFlagCommand];
 }
 
 // Cmd+C → Copy (keycode 8 = 'c')
 - (void)zenitCopy:(id)sender {
+    if ([self zenitForwardEmbeddedEdit:@selector(copy:) sender:sender]) return;
     [self _simulateKeyEventWithCode:8 character:'c' modifiers:NSEventModifierFlagCommand];
 }
 
 // Cmd+V → Paste (keycode 9 = 'v')
 - (void)zenitPaste:(id)sender {
+    if ([self zenitForwardEmbeddedEdit:@selector(paste:) sender:sender]) return;
     [self _simulateKeyEventWithCode:9 character:'v' modifiers:NSEventModifierFlagCommand];
 }
 
 // Cmd+A → Select All (keycode 0 = 'a')
 - (void)zenitSelectAll:(id)sender {
+    if ([self zenitForwardEmbeddedEdit:@selector(selectAll:) sender:sender]) return;
     [self _simulateKeyEventWithCode:0 character:'a' modifiers:NSEventModifierFlagCommand];
 }
 

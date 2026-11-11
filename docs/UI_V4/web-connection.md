@@ -9,8 +9,8 @@
 | [预设网址 · 已打开](../../design/web-connection/preset-ready.svg) | 自动打开保存的网址，工具栏显示实际到达的地址，实心星表示该页已收藏 |
 | [手动输入 · 待打开](../../design/web-connection/manual-entry.svg) | 地址栏已聚焦，也可点击已存书签，尚未启动 SSH |
 | [书签 · 横向滚动](../../design/web-connection/bookmark-overflow.svg) | 书签滚到中间，长标题省略，当前未收藏页面显示空心星 |
-| [编辑连接 · 预设网址](../../design/web-connection/editor-preset.svg) | 编辑起始网址和两级 SSH 跳板 |
-| [编辑连接 · 手动输入](../../design/web-connection/editor-manual.svg) | 隐藏起始网址，保留路径配置 |
+| [编辑连接 · 预设网址](../../design/web-connection/editor-preset.svg) | 显示起始网址，共享拓扑已滚动到目标网页 |
+| [编辑连接 · 手动输入](../../design/web-connection/editor-manual.svg) | 隐藏起始网址，共享拓扑从本机节点开始显示 |
 | [书签右键菜单](../../design/web-connection/bookmark-context-menu.svg) | 右键选择编辑或移除；左键仍直接打开 |
 | [编辑书签浮层](../../design/web-connection/bookmark-edit.svg) | 仅在选择编辑或点击实心星后出现的小浮层 |
 | [修复书签](../../design/web-connection/bookmark-repair.svg) | 仅损坏／超限数据触发，正常书签不进入此页 |
@@ -61,11 +61,12 @@
 | --- | --- |
 | 插件注册 | 参考 [BMC 注册方式](../../src/plugins/bmc_ikvm/plugin.zig)，贡献连接编辑器、版本化 payload、session factory、content renderer 与连接状态和详情。以 ContentMount.owner 标识归属。首版与 BMC 一样不开启跨窗口拖拽，直至原生视图迁移验证通过。 |
 | Zenit / AppKit | Zenit 绘制外壳、工具栏、输入和错误视图。宿主提供受限的原生视图挂载接口，按内容槽实际窗口、矩形、裁剪、可见性与焦点，在 AppKit 主线程挂载 WKWebView。使用真实 NSView，不把网页转成 Metal 纹理。先验证网页与宿主弹窗、AI 浮层的层级和命中；若当前渲染路径无法在正文上方显示浮层，首版可在覆盖期间隐藏网页视图并保留实例。SVG 用暗化正文表达理想层级。 |
-| 路线所有权 | 网页经多跳时，WKWebView → 会话自己的本地 SOCKS5 → SSH 出口 → 网站。复用 [freezeRoute](../../src/host/connection_config_resolver.zig)、SSH 认证和 direct-tcpip 能力，参考 BMC 以网页会话 owner 申请独立 transport。现有 [socks_route_host](../../src/host/socks_route_host.zig) 面向已有 SSH owner，且同一 owner 已有活动转发时会拒绝第二个；不能直接借用用户的终端监听。需要把网页自己的 transport 接到现有 SOCKS 监听和转发引擎，并验证并发和资源释放。 |
-| 代理绑定 | 只监听 127.0.0.1，使用临时端口和每代独立的随机认证凭证；本代数据仓绑定本代代理，禁止直连回退。SOCKS5 拒绝无认证／旧凭证，认证后开流前复验 owner/generation；旧数据仓不绑定新代理。凭证不进入配置、UI 或日志。WebKit 认证及强制复用旧端口隔离必须在阶段 A 验证，不通过则不交付 SSH 网页能力；不退回无认证。 |
+| 路线所有权 | 网页经多跳访问非回环目标时，WKWebView → 会话自己的本地 SOCKS5 → SSH 出口 → 网站。复用 [freezeRoute](../../src/host/connection_config_resolver.zig)、SSH 认证和 direct-tcpip 能力，参考 BMC 以网页会话 owner 申请独立 transport。现有 [socks_route_host](../../src/host/socks_route_host.zig) 面向已有 SSH owner，且同一 owner 已有活动转发时会拒绝第二个；不能直接借用用户的终端监听。需要把网页自己的 transport 接到现有 SOCKS 监听和转发引擎，并验证并发和资源释放。 |
+| 回环目标 | localhost、127.0.0.1、::1 等保留本机语义，顶层导航、重定向与页面子资源访问运行 ZeroWork 的本机属于预期行为，不作为代理故障或交付阻塞。出口与断链回退验证使用非回环目标，见 [§5](../DESIGN/V0.6_WEB_CONNECTION.md#5-网络与平台)。 |
+| 代理绑定 | 只监听 127.0.0.1，使用临时端口和每代独立的随机认证凭证；本代数据仓绑定本代代理，对需要代理的非回环目标禁止直连回退。SOCKS5 拒绝无认证／旧凭证，认证后开流前复验 owner/generation；旧数据仓不绑定新代理。凭证不进入配置、UI 或日志。WebKit 认证及强制复用旧端口隔离必须在阶段 A 验证，不通过则不交付 SSH 网页能力；不退回无认证。 |
 | 回收终态 | 输入及代次撤销、pending 回调／桥接任务结清、surface／原生强引用释放、监听及 worker 退出、握手／排队／活动流归零、transport 返回 released 后，本代自有资源即可发布 released。WebKit 内部引用与共享网络进程的退出不可作为正常回收前提；新代认证阻断端口复用后的旧请求。只有真实未释放资源保留有界回收记录，不永久保留旧监听。见 [§6.4](../DESIGN/V0.6_WEB_CONNECTION.md#64-关闭前检查与回收)。 |
 | 原始网址 | 保留原域名、端口、HTTP Host、TLS SNI 与正常证书校验，让重定向、Cookie 和跨域资源按原始站点规则工作。证书不受信任时显示错误。只在出口可解析的域名、跨域资源、WebSocket 和目标站点登录流程均需实测；SOCKS TCP 路线不等同于系统 VPN，不承诺 UDP/WebRTC。 |
-| 版本与包体 | [WebView 专用代理 API](https://developer.apple.com/documentation/webkit/wkwebsitedatastore/proxyconfigurations-6g21z) 从 macOS 14 起可用；[当前最低版本](../../scripts/package_macos.sh) 是 macOS 13。保留全应用最低版本：13 可直连，SSH 配置可离线保存，但连接前明确提示需 macOS 14；不悄悄直连，也不把 HTTPS 域名换成 localhost。使用系统 WebKit 与 Network.framework，无浏览器引擎随 DMG 分发。插件和桥接代码的增量以 ReleaseFast 同条件打包结果为准。 |
+| 平台与包体 | [WebView 专用代理 API](https://developer.apple.com/documentation/webkit/wkwebsitedatastore/proxyconfigurations-6g21z) 从 macOS 14 起可用；本轮网页连接在当前目标系统验收，记录实际 OS/SDK。使用系统 WebKit 与 Network.framework，无浏览器引擎随 DMG 分发。插件和桥接代码的增量以 ReleaseFast 同条件打包结果为准。 |
 
 [Apple：SOCKS5 与直连回退](https://developer.apple.com/documentation/network/proxyconfiguration) · [非持久网站数据](https://developer.apple.com/documentation/webkit/wkwebsitedatastore/nonpersistent%28%29) · [网页弹窗行为](https://developer.apple.com/documentation/webkit/wkuidelegate)
 
@@ -73,7 +74,7 @@
 
 - SVG 和浏览器导出均为 1440 × 900，viewBox 为 0 0 1440 900，1× 导出。沿用晴霜配色、工作区胶囊、侧栏和页签；界面用系统字体与 PingFang SC 回退。产品文案和网页示例保留可编辑文字。
 - 展开侧栏宽 238，左边距 12，工作区从 x=274 起。web.toolbar 位于 (274, 70)，1154 × 44，导航按钮命中区 28 × 28，地址栏高 32。若 AI 三点条显示，沿用 y=59–65 的悬浮位置，不挤占工具栏。web.document / web.state 从 (274, 126) 开始，到右、下边距 12 为止。工具栏固定高度，正文填满并由 WebKit 滚动。
-- 工具栏和网页随工作区缩放布局，不整体等比缩小。先按书签的窄窗规则让出空间；若内容区仍不足以容纳 132 点地址栏和全部操作，前进、后退依次收进「更多」，保留地址和加载控制。长路径节点名在选择器内省略，展开可看全名。编辑器首选宽 628，由宿主限制尺寸，表单正文滚动，标题和操作栏固定。
+- 工具栏和网页随工作区缩放布局，不整体等比缩小。先按书签的窄窗规则让出空间；若内容区仍不足以容纳 132 点地址栏和全部操作，前进、后退依次收进「更多」，保留地址和加载控制。长路径节点名在选择器内省略，展开可看全名。网页使用现有连接向导的协议选择和 760 点宽外壳。连接路径采用同一个直连／跳板卡片、拓扑和滚动布局，以 [SSH 向导路径](../DESIGN/connection-wizard/ssh-route.svg) 和 [纵向路径](../DESIGN/connection-wizard/ssh-route-vertical.svg) 为准。网页编辑稿用于参考专属表单字段。表单正文滚动，标题和操作栏固定。
 - 书签右键菜单在本画布为 (1162, 112)、160 × 80；编辑浮层为 (1036, 116)、380 × 230，锚定所选书签或星标，在窗口边界内避让，不加全屏遮罩。窄窗限制为内容区可用宽度，字段填充，保存／取消保留。浮层关闭后焦点回到原书签／星标，移除后落到相邻项。
 - 异常修复视图为 (406, 128)、628 × 644，标题与底部固定，容量反馈为 (430, 200)、580 × 38，列表视口为 (418, 250)、604 × 444；首行展示无效网址，其余 16 项在同一滚动列表中，不因裁切移除屏外条目。只在异常时替换连接编辑器内容，保留父草稿，不叠加两个遮罩。断线页只保留真实操作后果提示，技术回收状态不写进产品画面。
 - 使用 web.bookmark.context、web.bookmark.edit、web.bookmark.edit.*、web.bookmark.repair、web.bookmark.row.*、web.bookmark.apply 和 web.reconnect.notice 等稳定标识。书签获得焦点后 Enter 导航，上下文键打开右键菜单；编辑浮层 Tab 遍历字段／按钮，Enter 保存合法编辑，Esc 取消。
@@ -81,8 +82,8 @@
 
 ## 实施与验收顺序
 
-1. **原生容器**：把 WKWebView 挂进当前 Zenit 内容槽，实测窗口尺寸、缩放、前后台切换、浮层覆盖、鼠标、选择和中文 IME。用 macOS 13 验证最低版本仍能启动和直连。
+1. **原生容器**：把 WKWebView 挂进当前 Zenit 内容槽，实测窗口尺寸、缩放、前后台切换、浮层覆盖、鼠标、选择和中文 IME。
 2. **代理**：用两个 SSH 跳板和一个仅出口可解析的 HTTPS 测试站，验证并发资源、原域名与证书、重定向、Cookie、WebSocket、代理认证、断链无直连。强制复用旧端口，验证旧 WebView／旧凭证不能打开新代流，两数据仓不串用凭证。固定夹具连续 20 轮打开／关闭及 20 轮断线／重连，检查每轮旧代 FD、监听、worker、流、pending 回调和回收记录回到基线；真实清理失败只占用有界预算，完成后恢复。并开 SSH 终端与多个网页页签，关闭其中一个不影响其他会话。
-3. **插件**：覆盖预设/手动 × 直连/跳板四种组合，检查离线保存、临时连接、取消逐跳认证、页面错误与路径错误分离、macOS 13 的跳板提示。已登录且有表单草稿／历史时验证所有重连入口先告知重置、新仓无旧登录及页面状态、书签配置保留，普通刷新／切页签不误重置；不重放 POST 或未知请求。检查 0/1/15/16/17 项边界、并发新增与写入失败、重定向／失效书签的独立编辑移除、修复草稿与取消／冲突、长标题省略、首尾滚动、键盘、窄窗和书签建链。保存原生截图与 SVG 对照，再用相同签名和流程实测 DMG、更新 ZIP 与运行内存。
+3. **插件**：覆盖预设/手动 × 直连/跳板四种组合，检查离线保存、临时连接、取消逐跳认证、页面错误与路径错误分离。已登录且有表单草稿／历史时验证所有重连入口先告知重置、新仓无旧登录及页面状态、书签配置保留，普通刷新／切页签不误重置；不重放 POST 或未知请求。检查 0/1/15/16/17 项边界、并发新增与写入失败、重定向／失效书签的独立编辑移除、修复草稿与取消／冲突、长标题省略、首尾滚动、键盘、窄窗和书签建链。保存原生截图与 SVG 对照，再用相同签名和流程实测 DMG、更新 ZIP 与运行内存。
 
-本次交付仅包含设计与渲染稿；上述原生、网络、版本和包体测试是实现验收项。
+本次交付仅包含设计与渲染稿；上述原生、网络和包体测试是当前目标系统上的实现验收项。
