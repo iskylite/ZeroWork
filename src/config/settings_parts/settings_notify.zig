@@ -42,9 +42,9 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try permission_panel.appendChild(cx.allocator, row);
         try section.body.appendChild(cx.allocator, permission_panel);
     }
-    if (binding.matches(query, "注意标记 勿扰 非活跃 标签 圆点 时段 tab_dot quiet_hours")) {
-        const section = try page.section("注意标记与勿扰", "标签圆点与勿扰时段", ui.icons.moon, 49, "settings.notifications.attention", null);
-        try section.toggle(.{ .section = "notify", .key = "tab_dot" }, "非活跃标签圆点", "", null);
+    if (binding.matches(query, "注意标记 勿扰 非活跃 后台 标签 图标 跳动 圆点 时段 tab_dot quiet_hours")) {
+        const section = try page.section("注意标记与勿扰", "标签跳动与勿扰时段", ui.icons.moon, 49, "settings.notifications.attention", null);
+        try section.toggle(.{ .section = "notify", .key = "tab_dot" }, "后台标签图标跳动", "", null);
         try section.input(.{ .section = "notify", .key = "quiet_hours" }, "勿扰时段", "24 小时制，如 22:00-08:00；留空关闭勿扰，不影响后台任务。", null);
     }
     return page.finish();

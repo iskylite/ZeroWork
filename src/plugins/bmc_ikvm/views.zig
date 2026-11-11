@@ -1730,6 +1730,13 @@ const ProgressStepAction = struct {
     }
 };
 
+/// UI-thread-safe scalar for the host's tab attention bridge. The snapshot is
+/// refreshed by `refresh()`; no service call, frame copy or pixel work here.
+fn activitySequence(raw: *anyopaque) u64 {
+    const self: *View = @ptrCast(@alignCast(raw));
+    return if (self.snapshot) |*value| value.value.frame_sequence else 0;
+}
+
 pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererInstance {
     if (request.service_access == null) return error.ServiceUnavailable;
     const cx = request.cx;
@@ -1938,7 +1945,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     state.after_layout_registered = true;
     try state.refresh(cx.frame_time_ms);
     cx.requestRedraw();
-    return .{ .context = state, .vtable = &.{ .update = View.update, .focus_changed = View.focus, .unmount = View.unmount, .connection_status = View.connectionStatus, .show_connection_details = View.showConnectionDetails } };
+    return .{ .context = state, .vtable = &.{ .update = View.update, .focus_changed = View.focus, .unmount = View.unmount, .connection_status = View.connectionStatus, .show_connection_details = View.showConnectionDetails, .frame_sequence = activitySequence } };
 }
 
 fn mountDisconnectConfirmation(state: *View) !void {

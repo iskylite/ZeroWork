@@ -91,6 +91,8 @@ fn route(path: []const u8, body: []const u8, _: []u8) ?[]const u8 {
             .closing = host.windowClosePending(),
             .frame_count = host.workspace.cx.frame_count,
             .tree_nodes = if (host.workspace.cx.root) |root| treeNodeCount(root) else 0,
+            .selected_connection = if (host.workspace.selected_host) |selected| (if (selected < host.workspace.registry.hosts.len) @backingInt(host.workspace.registry.hosts[selected].connection_id) else 0) else 0,
+            .active_tab = if (host.workspace.active_tab) |active| (if (active < host.workspace.tabs.items.len) @backingInt(host.workspace.tabs.items[active].tab_id) else 0) else 0,
         }, .{}, &writer) catch return "{\"ok\":false,\"error\":\"SnapshotCapacityExceeded\"}";
     }
     writer.writeAll("],\"sessions\":[") catch return "{\"ok\":false,\"error\":\"SnapshotCapacityExceeded\"}";

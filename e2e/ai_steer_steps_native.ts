@@ -29,6 +29,10 @@ const server = createServer(async (req, res) => {
       res.write(frame({ tool_calls: [call('old-plan', 0)] }));
       held = res; return;
     }
+    if (requests.length > 20) {
+      res.end(frame({ content: 'FOLLOWUP_ACTIONS_COMPLETE' }) + done);
+      return;
+    }
     assert(String(body.messages.findLast((m: any) => m.role === 'user')?.content).includes('STEER_INPUT'));
     assert(body.messages.some((m: any) => m.role === 'tool' && m.tool_call_id === 'old-plan' && m.content.includes('not_dispatched_due_to_new_input')));
     if (requests.length <= 19) {
@@ -90,12 +94,68 @@ try {
   last.end(frame({ content: 'STEER_FINISHED 所有检查已完成。' }) + done); last = null;
   await h.waitFor(async () => text(await h.query('ai.response')).includes('STEER_FINISHED') || null, 15000);
   await h.waitFor(async () => !(await h.query('ai.stop')).some(shown) || null, 10000);
+  const toggle = await visible('ai.turn.process.toggle');
+  const answer = (await h.query('ai.response')).find((n: any) => shown(n) && text(n).includes('STEER_FINISHED'));
+  const footer = await visible('ai.turn.complete');
+  assert(answer && toggle.rect.y + toggle.rect.h <= answer.rect.y && answer.rect.y + answer.rect.h <= footer.rect.y, 'process toggle precedes the answer and the original summary follows it');
+  const footerIds = new Set(flat(footer).map((n: any) => n.test_id));
+  assert(['ai.turn.logo', 'ai.turn.tokens', 'ai.turn.copy', 'ai.turn.fork'].every(id => footerIds.has(id)), 'original summary controls stay together');
+  assert.equal(text(footer).includes('～回合结束～'), true);
+  assert.equal(text(toggle).trim(), '回合完成');
+  assert.equal((await h.query('ai.followup.consumed')).length, 0, 'completed process starts collapsed');
+  await click('ai.turn.process.toggle');
+  await visible('ai.followup.consumed');
+  assert.equal((await visible('ai.turn.complete')).id, footer.id, 'expanding process leaves the summary intact');
+  report.checks.push('The process toggle is separate; the original summary remains below the final answer');
   assert.equal((await h.query('ai.followup.consumed')).length, 1);
   const journal = (await readFile(join(data, 'ai-sessions.jsonl'), 'utf8')).trim().split('\n').map(s => JSON.parse(s));
   const consumed = journal.filter((e: any) => e.receipt?.delivery === 'consumed').map((e: any) => e.receipt);
   assert.equal(consumed.length, 2); assert.equal(consumed[0].turn, consumed[1].turn);
-  await capture('03-completed'); report.status = 'passed';
-} catch (error) { report.status = 'failed'; report.error = String(error); process.exitCode = 1; await capture('failure').catch(() => {}); }
+  await capture('03-completed');
+  // Consumed inputs use the production user-message actions and exact identity.
+  const original = 'STEER_INPUT 按补充信息继续检查';
+  const edited = 'STEER_INPUT 已修改的补充信息';
+  await visible('ai.followup.copy'); await visible('ai.followup.edit'); await visible('ai.followup.rewind');
+  await click('ai.followup.copy'); await click('ai.prompt'); await h.key('v', { cmd: true });
+  assert.equal((await h.inputState('ai.prompt')).buffer, original);
+  await h.key('a', { cmd: true }); await h.key('backspace');
+  await click('ai.followup.edit'); await visible('ai.message.edit.input');
+  await click('ai.message.edit.input'); await h.key('a', { cmd: true }); await h.type_('CANCELLED_EDIT');
+  await click('ai.followup.edit.cancel');
+  assert(text(await h.query('ai.followup.consumed')).includes(original));
+  await click('ai.followup.edit'); await click('ai.message.edit.input');
+  assert.equal((await h.inputState('ai.message.edit.input')).buffer, original);
+  await h.key('a', { cmd: true }); await h.type_(edited); await click('ai.followup.edit.save');
+  await h.waitFor(async () => text(await h.query('ai.followup.consumed')).includes(edited) || null, 10000);
+  assert.equal(requests.length, 20, 'editing does not send a request');
+  await capture('04-edited-input');
+  await send('CONTINUE_AFTER_EDIT');
+  await h.waitFor(async () => text(await h.query('ai.response')).includes('FOLLOWUP_ACTIONS_COMPLETE') || null, 15000);
+  await h.waitFor(async () => !(await h.query('ai.stop')).some(shown) || null, 10000);
+  assert(requests[20].messages.some((m: any) => m.role === 'user' && m.content === edited));
+  assert(!requests[20].messages.some((m: any) => m.role === 'user' && m.content === original));
+  await h.resizeWindow(860, 480); await capture('05-compact-actions');
+  await click('ai.followup.rewind');
+  await h.waitFor(async () => (await h.inputState('ai.prompt')).buffer === edited || null, 10000);
+  assert.equal((await h.query('ai.followup.consumed')).length, 0, 'discarded receipt does not resurrect the input');
+  assert(!text(await h.query('ai.conversation')).includes('FOLLOWUP_ACTIONS_COMPLETE'));
+  assert.equal((await h.query('ai.step_group.header')).length, 1, 'pre-input group remains');
+  assert(text(await h.query('ai.message.user.text')).includes('FIRST_TASK'));
+  assert.equal(requests.length, 21, 'rewind does not send a request');
+  await capture('06-rewound-prefix');
+  await click('ai.prompt'); await h.key('a', { cmd: true }); await h.type_('REPLACEMENT_AFTER_REWIND'); await click('ai.send');
+  await h.waitFor(async () => requests.length === 22 || null, 15000);
+  await h.waitFor(async () => !(await h.query('ai.stop')).some(shown) || null, 10000);
+  const replacement = requests[21].messages;
+  assert(replacement.some((m: any) => m.role === 'user' && String(m.content).includes('FIRST_TASK')));
+  assert(!JSON.stringify(replacement).includes(edited));
+  assert(!JSON.stringify(replacement).includes('CONTINUE_AFTER_EDIT'));
+  assert(!replacement.some((m: any) => String(m.tool_call_id).startsWith('new-')));
+  assert(replacement.some((m: any) => m.tool_call_id === 'old-plan'), 'earlier result remains in context');
+  report.checks.push('Consumed steering input supports exact copy, cancel/save edits without sending, and edited text reaches the next model request');
+  report.checks.push('Rewind restores edited input, removes later turns/tool context, preserves the earlier group/context, and never resurrects the consumed receipt');
+  await capture('07-replacement-complete'); report.status = 'passed';
+} catch (error) { report.status = 'failed'; report.error = error instanceof Error ? error.stack ?? error.message : String(error); process.exitCode = 1; await capture('failure').catch(() => {}); }
 finally {
   if (held) held.destroy(); if (last) last.destroy();
   try { if (alive()) { await h.request('POST', '/zerowork/windows', { action: 'quit' }); await Promise.race([ended, h.sleep(15000)]); } } catch (error) { report.quit_error = String(error); }

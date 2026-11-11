@@ -40,7 +40,7 @@ port = listener.getsockname()[1]
 (out / "ready.json").write_text(json.dumps(dict(port=port, user="records-fixture", password="records-secret", known_host=f"[127.0.0.1]:{port} {key.get_name()} {key.get_base64()}\n")))
 
 class Server(paramiko.ServerInterface):
-    def __init__(self): self.shell = threading.Event(); self.size = (100, 30); self.master = None; self.term = ""; self.rejected = False
+    def __init__(self, index=0): self.shell = threading.Event(); self.size = (100, 30); self.master = None; self.term = ""; self.rejected = False; self.index = index; self.channels = 0
     def get_allowed_auths(self, _): return "" if self.rejected else "password"
     def check_auth_password(self, user, password):
         if args.reject_password:
@@ -48,7 +48,14 @@ class Server(paramiko.ServerInterface):
             (out / "auth-rejected.json").write_text(json.dumps(dict(rejected=True)))
             return paramiko.AUTH_FAILED
         return paramiko.AUTH_SUCCESSFUL if (user,password)==("records-fixture","records-secret") else paramiko.AUTH_FAILED
-    def check_channel_request(self, kind, _): return paramiko.OPEN_SUCCEEDED if kind=="session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+    def check_channel_request(self, kind, _):
+        if os.environ.get("ZW_TEST_CHANNEL_AUDIT") == "1":
+            self.channels += 1
+            target = out / f"channels-{self.index}.json"
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps(dict(transport=self.index, channels=self.channels, kind=kind)))
+            temporary.replace(target)
+        return paramiko.OPEN_SUCCEEDED if kind=="session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
     def check_channel_pty_request(self, channel, term, width, height, *rest):
         self.size=(width,height); self.term=term.decode("ascii")
         (out / "pty-request.json").write_text(json.dumps(dict(term=self.term,cols=width,rows=height)))
@@ -140,7 +147,7 @@ class Files(paramiko.SFTPServerInterface):
 connections = []
 def serve(connection, index):
     transport = paramiko.Transport(connection); transport.add_server_key(key)
-    server=Server(); process=None; master=None
+    server=Server(index); process=None; master=None
     try:
         if root: transport.set_subsystem_handler("sftp", paramiko.SFTPServer, Files)
         transport.start_server(server=server); channel=transport.accept(10)

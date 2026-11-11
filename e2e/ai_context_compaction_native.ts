@@ -48,9 +48,12 @@ const report:any={status:'running',isolated:iso,source,binary_sha256:createHash(
 function shown(n:any):boolean{return n?.rect&&n.hidden!==true&&n.visible!==false&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0;}
 function text(n:any):string{return (n.text??'')+(n.children??[]).map(text).join('');}
 async function visible(id:string){return waitFor(async()=>(await query(id)).find(shown)??null,20000);}
+async function settled(id:string){return waitFor(async()=>(await query(id)).find(n=>shown(n)&&(n.effective_opacity??1)>=.999)??null,5000);}
+async function closed(id:string){await waitFor(async()=>!(await query(id)).some(shown)||null,5000);}
 async function click(id:string){await visible(id);assert((await clickTestId(id)).ok,id);}
-async function cap(name:string){const path=join(output,name+'.png');assert((await screenshot(path)).ok);const usage=await query('ai.usage.menu');await writeFile(join(output,name+'.usage.json'),JSON.stringify(usage,null,2));assert(!JSON.stringify(usage).includes('清空上下文'));assert(!JSON.stringify(usage).includes('clear_context'));report.stages.push({name,screenshot:path,usage_rect:usage.find(shown)?.rect});}
-async function status(fragment:string){return waitFor(async()=>{const n=(await query('ai.usage.compaction.status')).find(shown);return n&&text(n).includes(fragment)?n:null;},20000);}
+async function cap(name:string){const path=join(output,name+'.png');assert((await screenshot(path)).ok);const usage=await query('ai.usage.menu');await writeFile(join(output,name+'.usage.json'),JSON.stringify(usage,null,2));assert(!JSON.stringify(usage).includes('清空上下文'));assert(!JSON.stringify(usage).includes('clear_context'));report.stages.push({name,screenshot:path,usage_rect:usage.find(shown)?.rect,activity_rect:(await query('ai.transcript.compaction')).find(shown)?.rect});}
+async function status(fragment:string){return waitFor(async()=>{const n=(await query('ai.transcript.compaction')).find(shown);return n&&text(n).includes(fragment)?n:null;},20000);}
+async function startCompaction(){await click('ai.usage.compaction.start');await closed('ai.usage.menu');}
 async function send(prompt:string,answer:number){await click('ai.prompt');assert((await key('a',{cmd:true})).ok);assert((await type_(prompt)).ok);await click('ai.send');await waitFor(async()=>{const responses=await query('ai.response');return responses.some(n=>text(n).includes('VISIBLE_NATIVE_ANSWER_'+answer))&&!(await query('ai.stop')).some(shown)||null;},20000);}
 async function history(){return (await query('ai.message.user.bubble')).map(text);}
 try{
@@ -59,17 +62,27 @@ try{
   await send('OLD_NATIVE_MARKER '+('Historical source data. '.repeat(65))+' Goal backup. No deployment. Tests passed. Pending review.',1);
   await send('RECENT_NATIVE_SECOND',2);await send('RECENT_NATIVE_LAST',3);
   const before=await history();assert.equal(before.length,3);
+  await click('ai.composer.permission');const permission=await settled('ai.permission.menu');assert.equal(permission.rect.h,128);assert(!text(permission).includes('当前助手范围'));report.permission_rect=permission.rect;await cap('permission');await click('ai.permission.close');await closed('ai.permission.menu');
+  await click('ai.composer.execution');const execution=await settled('ai.execution.menu');assert.equal(execution.rect.h,251);assert(text(await visible('ai.execution.retention')).includes('空闲后关闭'));assert(!text(execution).includes('跟随全局'));report.execution_rect=execution.rect;await cap('execution');
+  await click('ai.execution.retention');await click('ai.retention.keep');await closed('ai.execution.menu');
+  await click('ai.composer.execution');assert(text(await visible('ai.execution.retention')).includes('保留任务会话'));await click('ai.execution.retention');await click('ai.retention.inherit');await closed('ai.execution.menu');
+  await click('ai.composer.execution');assert(text(await visible('ai.execution.retention')).includes('空闲后关闭'));await click('ai.execution.close');await closed('ai.execution.menu');
   await click('ai.composer.usage');await cap('01-ready');
-  mode='failure';await click('ai.usage.compaction.start');await status('压缩失败');await cap('02-failed');assert.deepEqual(await history(),before);
-  mode='cancel';const beforeCancel=summaryCount;await click('ai.usage.compaction.start');await status('正在整理');await waitFor(async()=>summaryCount>beforeCancel||null,10000);await cap('03-running');await click('ai.usage.compaction.cancel');await status('已取消');await cap('04-cancelled');assert.deepEqual(await history(),before);
-  mode='success';await waitFor(async()=>{const buttons=await query('ai.usage.compaction.start');return buttons.some(n=>shown(n)&&!n.disabled)||null;},20000);await sleep(200);
-  await click('ai.usage.compaction.start');await status('正在整理');await status('已压缩');await cap('05-success');const success=await status('已压缩');assert(/历史输入：\d+ → \d+ tokens（估算）/.test(text(success)));assert(text(success).includes('历史与附件保留'));const values=(await query('ai.usage.part.value')).filter(shown);assert.equal(values.length,3);assert(values.every(n=>n.rect.w>=64));assert.equal(success.rect.w,314);assert.equal(success.rect.h,84);const parseTokens=(s:string)=>{const m=s.match(/~?([0-9.]+)([KM]?)/i);assert(m,s);return Number(m[1])*(m[2].toUpperCase()==='K'?1000:m[2].toUpperCase()==='M'?1000000:1);};const summaryText=text((await query('ai.usage.summary')).find(shown));const totalText=summaryText.match(/~[0-9.]+[KM]?\s*\//i)?.[0];assert(totalText,summaryText);assert.equal(values.reduce((sum,n)=>sum+parseTokens(text(n)),0),parseTokens(totalText));report.success_status=text(success);report.status_rect=success.rect;report.usage_total_text=totalText;report.usage_parts=values.map(n=>({text:text(n),rect:n.rect}));assert.deepEqual(await history(),before);
-  await key('Escape');await send('NEXT_NATIVE_REQUEST',4);
+  mode='failure';await startCompaction();await status('压缩失败');await cap('02-failed');assert.deepEqual(await history(),before);
+  mode='cancel';const beforeCancel=summaryCount;await click('ai.composer.usage');await startCompaction();await status('正在压缩');await waitFor(async()=>summaryCount>beforeCancel||null,10000);await cap('03-running');await click('ai.transcript.compaction.cancel');await status('已取消');await cap('04-cancelled');assert.deepEqual(await history(),before);
+  mode='success';await click('ai.composer.usage');await waitFor(async()=>{const buttons=await query('ai.usage.compaction.start');return buttons.some(n=>shown(n)&&!n.disabled)||null;},20000);
+  await startCompaction();await status('正在压缩');const success=await status('已压缩');await cap('05-success');
+  const reduction=text(success).match(/历史输入约 (\d+) → (\d+) tokens/);assert(reduction);assert(Number(reduction[1])>Number(reduction[2]));
+  const viewport=await visible('ai.conversation.viewport');assert(success.rect.y>=viewport.rect.y&&success.rect.y+success.rect.h<=viewport.rect.y+viewport.rect.h+1);
+  await click('ai.composer.usage');await settled('ai.usage.menu');
+  assert((await query('ai.usage.part.value')).filter(shown).length >= 3);
+  report.success_status=text(success);report.status_rect=success.rect;assert.deepEqual(await history(),before);
+  await click('ai.usage.close');await closed('ai.usage.menu');await send('NEXT_NATIVE_REQUEST',4);
   const next=requests.filter(r=>!r.summary).at(-1).body;
   const wire=JSON.stringify(next.messages);assert(wire.includes('MEMORY_NATIVE_BACKUP_TESTS_PASSED'));assert(!wire.includes('OLD_NATIVE_MARKER'));assert(wire.includes('RECENT_NATIVE_SECOND')&&wire.includes('RECENT_NATIVE_LAST'));
-  assert.equal((await history()).length,4);await cap('06-next-request');
+  assert.equal((await history()).length,4);const priorActivity=await status('已压缩');const nextBubble=(await query('ai.message.user.bubble')).find(n=>text(n).includes('NEXT_NATIVE_REQUEST'));assert(nextBubble);assert(priorActivity.rect.y+priorActivity.rect.h<=nextBubble.rect.y+.5);await cap('06-next-request');
   report.status='passed';report.visible_history_count_before=before.length;report.visible_history_count_after=(await history()).length;report.next_request_uses_summary=true;report.summary_requests=summaryCount;report.ordinary_requests=ordinaryCount;
-}catch(e){report.status='failed';report.error=String(e);try{await cap('failure');}catch{}}
+}catch(e){report.status='failed';report.error=e instanceof Error ? e.stack : String(e);try{await cap('failure');}catch{}}
 finally{
   report.requests=requests;report.finished_at=new Date().toISOString();if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await Promise.race([ended,sleep(2000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended;}server.close();await log.close();await writeFile(join(output,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,report:join(output,'report.json')}));
 }

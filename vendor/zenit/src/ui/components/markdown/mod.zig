@@ -427,118 +427,187 @@ const InlineBuilder = struct {
         span.end = end;
         try self.spans.append(self.allocator, span);
     }
+
+    /// Inherited formatting is flattened into ordered, disjoint spans. Only
+    /// merge text runs: separate inline boxes must keep their own padding.
+    fn appendStyled(self: *InlineBuilder, s: []const u8, style: TextSpan) !void {
+        if (s.len == 0) return;
+        if (std.meta.eql(style, plain_inline_style)) return self.appendPlain(s);
+        if (self.spans.items.len > 0 and style.bg_color == null) {
+            const last = &self.spans.items[self.spans.items.len - 1];
+            var previous_style = last.*;
+            previous_style.start = 0;
+            previous_style.end = 0;
+            if (last.end == self.text.items.len and std.meta.eql(previous_style, style)) {
+                try self.text.appendSlice(self.allocator, s);
+                last.end = @intCast(self.text.items.len);
+                return;
+            }
+        }
+        try self.appendSpan(s, style);
+    }
 };
 
-fn expandInline(builder: *InlineBuilder, raw: []const u8, opts: MarkdownOptions) !void {
-    // Normalize truncation sentinels: upstream often uses U+2026 or '...' at end.
-    const normalised = raw;
-    // (Future: allocate new buffer here for replacement; now direct passthrough.)
-    var i: usize = 0;
-    while (i < normalised.len) {
-        const c = normalised[i];
+const plain_inline_style: TextSpan = .{ .start = 0, .end = 0 };
+const max_inline_depth = 32;
 
-        // A line ending inside a Markdown paragraph is a soft break, not a
-        // forced text-layout newline. Keeping the raw `\n` here made LSP docs
-        // preserve source-comment wrapping; the text layout then also emitted
-        // an empty visual line before continuing, so prose such as
-        // "If the\nrequested number ..." looked as if wrapping were broken.
-        // Blank lines have already been split into separate blocks by
-        // BlockScanner, so flatten only the remaining paragraph-local break.
+/// Merge semantic inline styles, not ranges. Code supplies its foreground and
+/// box metrics while inheriting emphasis and link decoration.
+fn inheritInlineStyle(parent: TextSpan, child: TextSpan) TextSpan {
+    var result = parent;
+    result.color = child.color orelse parent.color;
+    result.font_weight = child.font_weight orelse parent.font_weight;
+    result.use_italic_font = parent.use_italic_font or child.use_italic_font;
+    result.use_monospace_font = parent.use_monospace_font or child.use_monospace_font;
+    result.underline = parent.underline or child.underline;
+    if (child.bg_color != null) {
+        result.bg_color = child.bg_color;
+        result.inline_box_padding_left = child.inline_box_padding_left;
+        result.inline_box_padding_right = child.inline_box_padding_right;
+        result.inline_box_inset_top = child.inline_box_inset_top;
+        result.inline_box_inset_bottom = child.inline_box_inset_bottom;
+        result.inline_box_corner_radius = child.inline_box_corner_radius;
+    }
+    return result;
+}
+
+fn expandInline(builder: *InlineBuilder, raw: []const u8, opts: MarkdownOptions) !void {
+    try expandInlineStyled(builder, raw, opts, plain_inline_style, 0);
+}
+
+fn expandInlineStyled(builder: *InlineBuilder, raw: []const u8, opts: MarkdownOptions, inherited: TextSpan, depth: usize) error{OutOfMemory}!void {
+    if (depth >= max_inline_depth) return builder.appendStyled(raw, inherited);
+    var i: usize = 0;
+    while (i < raw.len) {
+        const c = raw[i];
+        // Paragraph-local soft breaks flatten to spaces, including in styled runs.
         if (c == '\n' or c == '\r') {
             var next = i + 1;
-            if (c == '\r' and next < normalised.len and normalised[next] == '\n') {
-                next += 1;
-            }
+            if (c == '\r' and next < raw.len and raw[next] == '\n') next += 1;
             const has_previous_text = builder.text.items.len > 0;
-            const has_following_text = next < normalised.len;
+            const has_following_text = next < raw.len;
             const previous_is_space = has_previous_text and
                 (builder.text.items[builder.text.items.len - 1] == ' ' or builder.text.items[builder.text.items.len - 1] == '\t');
-            const following_is_space = has_following_text and
-                (normalised[next] == ' ' or normalised[next] == '\t');
+            const following_is_space = has_following_text and (raw[next] == ' ' or raw[next] == '\t');
             if (has_previous_text and has_following_text and !previous_is_space and !following_is_space) {
-                try builder.text.append(builder.allocator, ' ');
+                try builder.appendStyled(" ", inherited);
             }
             i = next;
             continue;
         }
 
-        // `code`
+        // Code is opaque: its contents never become emphasis or links.
         if (c == '`') {
-            if (findMatching(normalised, i + 1, '`')) |end| {
-                try builder.appendSpan(normalised[i + 1 .. end], mdCodeSpanStyle(opts));
+            if (findMatching(raw, i + 1, '`')) |end| {
+                if (end > i + 1) try builder.appendSpan(raw[i + 1 .. end], inheritInlineStyle(inherited, mdCodeSpanStyle(opts)));
                 i = end + 1;
                 continue;
             }
         }
 
-        // **bold**
-        if (c == '*' and i + 1 < normalised.len and normalised[i + 1] == '*') {
-            if (findDoubleStar(normalised, i + 2)) |end| {
-                try builder.appendSpan(normalised[i + 2 .. end], mdBoldSpanStyle());
-                i = end + 2;
-                continue;
-            }
-        }
-
-        // *italic* (must not be ** before/after; simple: not * before, find standalone * after).
-        if (c == '*' and (i + 1 >= normalised.len or normalised[i + 1] != '*')) {
-            if (findMatching(normalised, i + 1, '*')) |end| {
-                if (end < normalised.len and (end == normalised.len - 1 or normalised[end + 1] != '*')) {
-                    try builder.appendSpan(normalised[i + 1 .. end], mdItalicSpanStyle());
-                    i = end + 1;
+        if (c == '*' or c == '_') {
+            const width: usize = if (c == '*' and i + 1 < raw.len and raw[i + 1] == '*') 2 else 1;
+            const word_underscore = c == '_' and i > 0 and isWordByte(raw[i - 1]);
+            if (!word_underscore and canOpenEmphasis(raw, i, width)) {
+                if (findEmphasisEnd(raw, i + width, c, width, depth)) |end| {
+                    const style = if (width == 2) mdBoldSpanStyle() else mdItalicSpanStyle();
+                    try expandInlineStyled(builder, raw[i + width .. end], opts, inheritInlineStyle(inherited, style), depth + 1);
+                    i = end + width;
                     continue;
                 }
             }
+            // An unmatched ** opener must not restart as * at its second byte.
+            try builder.appendStyled(raw[i .. i + width], inherited);
+            i += width;
+            continue;
         }
 
-        // _italic_, underscore italic (CommonMark allows). Avoid snake_case: no trigger if
-        // letter/digit before; _ after must follow non-alphanumeric.
-        if (c == '_') {
-            const prev_is_word = i > 0 and isWordByte(normalised[i - 1]);
-            if (!prev_is_word) {
-                if (findMatchingUnderscore(normalised, i + 1)) |end| {
-                    if (end > i + 1) {
-                        try builder.appendSpan(normalised[i + 1 .. end], mdItalicSpanStyle());
-                        i = end + 1;
-                        continue;
-                    }
+        // Images retain the existing chip / literal-alt fallback behavior.
+        if (c == '!' and i + 1 < raw.len and raw[i + 1] == '[') {
+            if (parseLink(raw, i + 1)) |link| {
+                if (link.text.len > 0 and !isDataUri(link.url)) {
+                    try builder.appendStyled("[", inherited);
+                    try builder.appendStyled(link.text, inherited);
+                    try builder.appendStyled("]", inherited);
+                } else if (link.text.len > 0) {
+                    try builder.appendSpan(link.text, inheritInlineStyle(inherited, mdImageChipSpanStyle(opts)));
                 }
-            }
-        }
-
-        // ![alt](url) image
-        if (c == '!' and i + 1 < normalised.len and normalised[i + 1] == '[') {
-            if (parseLink(normalised, i + 1)) |link| {
-                // data:image/* downgrade to [alt] chip.
-                const show_alt = link.text;
-                if (show_alt.len > 0 and !isDataUri(link.url)) {
-                    try builder.appendPlain("[");
-                    try builder.appendPlain(show_alt);
-                    try builder.appendPlain("]");
-                } else if (show_alt.len > 0) {
-                    try builder.appendSpan(show_alt, mdImageChipSpanStyle(opts));
-                }
-                // data:url: output small [alt] badge (branch above), don't embed URL.
                 i = link.next;
                 continue;
             }
         }
 
-        // [text](url) link
         if (c == '[') {
-            if (parseLink(normalised, i)) |link| {
-                if (link.text.len > 0) {
-                    try builder.appendSpan(link.text, mdLinkSpanStyle(opts));
-                }
+            if (parseLink(raw, i)) |link| {
+                try expandInlineStyled(builder, link.text, opts, inheritInlineStyle(inherited, mdLinkSpanStyle(opts)), depth + 1);
                 i = link.next;
                 continue;
             }
         }
 
-        // Plain byte (multibyte UTF-8 keeps original byte sequence).
-        try builder.text.append(builder.allocator, c);
+        // Byte offsets remain relative to the final UTF-8 text, after markers
+        // have been removed. appendStyled coalesces adjacent inherited text.
+        try builder.appendStyled(raw[i .. i + 1], inherited);
         i += 1;
     }
+}
+
+fn canOpenEmphasis(src: []const u8, start: usize, width: usize) bool {
+    return start + width < src.len and !std.ascii.isWhitespace(src[start + width]);
+}
+
+/// Match this delimiter while skipping opaque code/links and differently sized
+/// nested emphasis. A *** closer can close inner * followed by outer ** (or the
+/// reverse); consuming only the nested delimiter leaves the outer closer intact.
+fn findEmphasisEnd(src: []const u8, start: usize, marker: u8, width: usize, depth: usize) ?usize {
+    // Bound backtracking on malformed alternating * / ** openers as well as
+    // stack depth. Exhaustion falls back to literal input, just like no match.
+    var budget = src.len *| max_inline_depth;
+    return findEmphasisEndBounded(src, start, marker, width, depth, &budget);
+}
+
+fn findEmphasisEndBounded(src: []const u8, start: usize, marker: u8, width: usize, depth: usize, budget: *usize) ?usize {
+    if (depth >= max_inline_depth) return null;
+    var i = start;
+    while (i < src.len) {
+        if (budget.* == 0) return null;
+        budget.* -= 1;
+        const c = src[i];
+        if (c == '\n' or c == '\r') return null;
+        if (c == '`') {
+            if (findMatching(src, i + 1, '`')) |end| {
+                i = end + 1;
+                continue;
+            }
+        }
+        if (c == '[') {
+            if (parseLink(src, i)) |link| {
+                i = link.next;
+                continue;
+            }
+        }
+        if (c == '*' or c == '_') {
+            var run_end = i + 1;
+            while (run_end < src.len and src[run_end] == c) : (run_end += 1) {}
+            const run_width = run_end - i;
+            const closes = i > start and !std.ascii.isWhitespace(src[i - 1]) and
+                (c != '_' or run_end == src.len or !isWordByte(src[run_end]));
+            if (c == marker and run_width >= width and (width == 2 or run_width != 2) and closes) return i;
+
+            const nested_width: usize = if (c == '*' and run_width >= 2) 2 else 1;
+            const word_underscore = c == '_' and i > 0 and isWordByte(src[i - 1]);
+            if ((c != marker or nested_width != width) and !word_underscore and canOpenEmphasis(src, i, nested_width)) {
+                if (findEmphasisEndBounded(src, i + nested_width, c, nested_width, depth + 1, budget)) |end| {
+                    i = end + nested_width;
+                    continue;
+                }
+            }
+            i = run_end;
+            continue;
+        }
+        i += 1;
+    }
+    return null;
 }
 
 const ParsedLink = struct {
@@ -550,9 +619,38 @@ const ParsedLink = struct {
 /// Parse `[text](url)`. Enter with src[start] == '['. Return null on failure (no consume).
 fn parseLink(src: []const u8, start: usize) ?ParsedLink {
     if (start >= src.len or src[start] != '[') return null;
-    const bracket_end = findMatching(src, start + 1, ']') orelse return null;
+    // Brackets inside code are literal; ordinary brackets in labels and
+    // parentheses in destinations must balance before closing the link.
+    var cursor = start + 1;
+    var brackets: usize = 1;
+    while (cursor < src.len) : (cursor += 1) {
+        if (src[cursor] == '\n' or src[cursor] == '\r') return null;
+        if (src[cursor] == '`') {
+            if (findMatching(src, cursor + 1, '`')) |end| {
+                cursor = end;
+                continue;
+            }
+        }
+        if (src[cursor] == '[') brackets += 1;
+        if (src[cursor] == ']') {
+            brackets -= 1;
+            if (brackets == 0) break;
+        }
+    }
+    const bracket_end = cursor;
     if (bracket_end + 1 >= src.len or src[bracket_end + 1] != '(') return null;
-    const paren_end = findMatching(src, bracket_end + 2, ')') orelse return null;
+    cursor = bracket_end + 2;
+    var parentheses: usize = 1;
+    while (cursor < src.len) : (cursor += 1) {
+        if (src[cursor] == '\n' or src[cursor] == '\r') return null;
+        if (src[cursor] == '(') parentheses += 1;
+        if (src[cursor] == ')') {
+            parentheses -= 1;
+            if (parentheses == 0) break;
+        }
+    }
+    if (cursor == src.len) return null;
+    const paren_end = cursor;
     return .{
         .text = src[start + 1 .. bracket_end],
         .url = src[bracket_end + 2 .. paren_end],
@@ -569,30 +667,8 @@ fn findMatching(src: []const u8, start: usize, ch: u8) ?usize {
     return null;
 }
 
-fn findDoubleStar(src: []const u8, start: usize) ?usize {
-    var i = start;
-    while (i + 1 < src.len) : (i += 1) {
-        if (src[i] == '*' and src[i + 1] == '*') return i;
-        if (src[i] == '\n') return null;
-    }
-    return null;
-}
-
 fn isWordByte(b: u8) bool {
     return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or (b >= '0' and b <= '9') or b == '_';
-}
-
-/// Find next `_` not adjacent to letter/digit (avoid snake_case italic).
-fn findMatchingUnderscore(src: []const u8, start: usize) ?usize {
-    var i = start;
-    while (i < src.len) : (i += 1) {
-        if (src[i] == '\n') return null;
-        if (src[i] == '_') {
-            const next_is_word = i + 1 < src.len and isWordByte(src[i + 1]);
-            if (!next_is_word) return i;
-        }
-    }
-    return null;
 }
 
 fn isDataUri(url: []const u8) bool {
@@ -748,6 +824,160 @@ test "markdown inline: bold and italic spans" {
     try std.testing.expect(builder.spans.items[1].use_italic_font);
 }
 
+fn expectInlineSpan(builder: *const InlineBuilder, text: []const u8) !TextSpan {
+    for (builder.spans.items) |span| {
+        if (std.mem.eql(u8, builder.text.items[span.start..span.end], text)) return span;
+    }
+    return error.ExpectedInlineSpan;
+}
+
+fn expectOrderedInlineSpans(builder: *const InlineBuilder) !void {
+    var previous_end: u32 = 0;
+    for (builder.spans.items) |span| {
+        try std.testing.expect(span.start >= previous_end);
+        try std.testing.expect(span.end > span.start);
+        try std.testing.expect(span.end <= builder.text.items.len);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(builder.text.items[span.start..span.end]));
+        previous_end = span.end;
+    }
+}
+
+test "markdown inline: bold code inherits emphasis and preserves UTF-8 byte ranges" {
+    var builder = InlineBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    const opts: MarkdownOptions = .{ .code_color = Color.hex(0x123456), .code_bg = Color.hex(0xABCDEF) };
+    try expandInline(&builder, "**1. `tuned` 已改为 `hpc-compute`**", opts);
+    try std.testing.expectEqualStrings("1. tuned 已改为 hpc-compute", builder.text.items);
+    try std.testing.expectEqual(@as(usize, 4), builder.spans.items.len);
+    try expectOrderedInlineSpans(&builder);
+    for (builder.spans.items) |span| try std.testing.expectEqual(@as(?u16, 700), span.font_weight);
+    for ([_][]const u8{ "tuned", "hpc-compute" }) |code| {
+        const span = try expectInlineSpan(&builder, code);
+        try std.testing.expect(span.use_monospace_font);
+        try std.testing.expectEqualDeep(opts.code_color, span.color.?);
+        try std.testing.expectEqualDeep(opts.code_bg, span.bg_color.?);
+        try std.testing.expectEqual(@as(f32, 2), span.inline_box_padding_left);
+        try std.testing.expectEqual(@as(f32, 2), span.inline_box_padding_right);
+        try std.testing.expectEqual(@as(f32, 3), span.inline_box_corner_radius);
+    }
+}
+
+test "markdown inline: nested emphasis works in both directions and adjacent triple closers" {
+    const cases = [_]struct { raw: []const u8, text: []const u8, nested: []const u8 }{
+        .{ .raw = "**粗体 *斜体* 文字**", .text = "粗体 斜体 文字", .nested = "斜体" },
+        .{ .raw = "*斜体 **粗体** 文字*", .text = "斜体 粗体 文字", .nested = "粗体" },
+        .{ .raw = "**粗体 _斜体_ 文字**", .text = "粗体 斜体 文字", .nested = "斜体" },
+        .{ .raw = "_斜体 **粗体** 文字_", .text = "斜体 粗体 文字", .nested = "粗体" },
+        .{ .raw = "**外层 *内层***", .text = "外层 内层", .nested = "内层" },
+        .{ .raw = "*外层 **内层***", .text = "外层 内层", .nested = "内层" },
+        .{ .raw = "***全部***", .text = "全部", .nested = "全部" },
+    };
+    for (cases) |case| {
+        var builder = InlineBuilder.init(std.testing.allocator);
+        defer builder.deinit();
+        try expandInline(&builder, case.raw, .{});
+        try std.testing.expectEqualStrings(case.text, builder.text.items);
+        try expectOrderedInlineSpans(&builder);
+        const span = try expectInlineSpan(&builder, case.nested);
+        try std.testing.expectEqual(@as(?u16, 700), span.font_weight);
+        try std.testing.expect(span.use_italic_font);
+    }
+}
+
+test "markdown inline: code is opaque to emphasis and outer delimiter matching" {
+    const cases = [_]struct { raw: []const u8, text: []const u8, code: []const u8, bold: bool, italic: bool }{
+        .{ .raw = "**表达式 `a**b` 的说明**", .text = "表达式 a**b 的说明", .code = "a**b", .bold = true, .italic = false },
+        .{ .raw = "*说明 `a*b` 结束*", .text = "说明 a*b 结束", .code = "a*b", .bold = false, .italic = true },
+        .{ .raw = "_说明 `a_b` 结束_", .text = "说明 a_b 结束", .code = "a_b", .bold = false, .italic = true },
+        .{ .raw = "`**bold** *italic* [x](url)`", .text = "**bold** *italic* [x](url)", .code = "**bold** *italic* [x](url)", .bold = false, .italic = false },
+        .{ .raw = "**普通 `a` `b`**", .text = "普通 a b", .code = "a", .bold = true, .italic = false },
+    };
+    for (cases) |case| {
+        var builder = InlineBuilder.init(std.testing.allocator);
+        defer builder.deinit();
+        try expandInline(&builder, case.raw, .{});
+        try std.testing.expectEqualStrings(case.text, builder.text.items);
+        try expectOrderedInlineSpans(&builder);
+        const span = try expectInlineSpan(&builder, case.code);
+        try std.testing.expect(span.use_monospace_font);
+        try std.testing.expectEqual(case.bold, span.font_weight == 700);
+        try std.testing.expectEqual(case.italic, span.use_italic_font);
+    }
+}
+
+test "markdown inline: links inherit emphasis and code overrides link color only" {
+    const cases = [_][]const u8{
+        "**[前 `arr[0]` 后](https://example.com/a_(b))**",
+        "[**前 `arr[0]` 后**](https://example.com/a_(b))",
+    };
+    const opts: MarkdownOptions = .{ .link_color = Color.hex(0x123456), .code_color = Color.hex(0x654321) };
+    for (cases) |raw| {
+        var builder = InlineBuilder.init(std.testing.allocator);
+        defer builder.deinit();
+        try expandInline(&builder, raw, opts);
+        try std.testing.expectEqualStrings("前 arr[0] 后", builder.text.items);
+        try expectOrderedInlineSpans(&builder);
+        for (builder.spans.items) |span| {
+            try std.testing.expectEqual(@as(?u16, 700), span.font_weight);
+            try std.testing.expect(span.underline);
+            try std.testing.expectEqualDeep(if (span.use_monospace_font) opts.code_color else opts.link_color, span.color.?);
+        }
+        const code = try expectInlineSpan(&builder, "arr[0]");
+        try std.testing.expect(code.use_monospace_font and code.bg_color != null);
+    }
+    var builder = InlineBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try expandInline(&builder, "**[link](https://example.com/a**b) tail**", .{});
+    try std.testing.expectEqualStrings("link tail", builder.text.items);
+    try std.testing.expectEqual(@as(?u16, 700), (try expectInlineSpan(&builder, " tail")).font_weight);
+}
+
+test "markdown inline: incomplete streaming input recovers when completed" {
+    const cases = [_][]const u8{ "**前 `tuned`", "*前 `tuned`", "_前 `tuned`", "[**前 `tuned`**](https://example.com" };
+    for (cases) |raw| {
+        var builder = InlineBuilder.init(std.testing.allocator);
+        defer builder.deinit();
+        try expandInline(&builder, raw, .{});
+        try expectOrderedInlineSpans(&builder);
+        try std.testing.expect(builder.text.items.len > 0);
+    }
+    var builder = InlineBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try expandInline(&builder, "**前 `tuned`**", .{});
+    try std.testing.expectEqualStrings("前 tuned", builder.text.items);
+    try std.testing.expectEqual(@as(?u16, 700), (try expectInlineSpan(&builder, "tuned")).font_weight);
+    var plain = InlineBuilder.init(std.testing.allocator);
+    defer plain.deinit();
+    try expandInline(&plain, "snake_case **unclosed", .{});
+    try std.testing.expectEqualStrings("snake_case **unclosed", plain.text.items);
+    try std.testing.expectEqual(@as(usize, 0), plain.spans.items.len);
+}
+
+test "markdown inline: malformed alternating emphasis stays bounded and retains text" {
+    var raw: std.ArrayListUnmanaged(u8) = .empty;
+    defer raw.deinit(std.testing.allocator);
+    for (0..64) |_| try raw.appendSlice(std.testing.allocator, "*a **a ");
+    try raw.appendSlice(std.testing.allocator, "tail");
+    var builder = InlineBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try expandInline(&builder, raw.items, .{});
+    try std.testing.expectEqualStrings(raw.items, builder.text.items);
+}
+
+test "markdown inline: nested links have a bounded literal fallback" {
+    var raw: std.ArrayListUnmanaged(u8) = .empty;
+    defer raw.deinit(std.testing.allocator);
+    for (0..max_inline_depth + 4) |_| try raw.appendSlice(std.testing.allocator, "[");
+    try raw.appendSlice(std.testing.allocator, "value");
+    for (0..max_inline_depth + 4) |_| try raw.appendSlice(std.testing.allocator, "](url)");
+    var builder = InlineBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try expandInline(&builder, raw.items, .{});
+    try expectOrderedInlineSpans(&builder);
+    try std.testing.expect(std.mem.indexOf(u8, builder.text.items, "value") != null);
+    try std.testing.expect(std.mem.indexOf(u8, builder.text.items, "](url)") != null);
+}
+
 test "markdown inline: ellipsis and plain link" {
     var builder = InlineBuilder.init(std.testing.allocator);
     defer builder.deinit();
@@ -800,7 +1030,7 @@ test {
 }
 
 // Remaining unsweep components (markdown render / form_field / select_headless).
-const sweep_md = "# Title\n\nA **bold** and *italic* with `code` and [link](https://x.y) ![alt](a.png)\n\n- one\n- two\n1. first\n\n```\nlet x = 1;\nlet y = 2;\n```\n\n---\n\n> quoted **text**\n";
+const sweep_md = "# Title\n\nA **bold *italic* with `code`** and [**link `code`**](https://x.y) ![alt](a.png)\n\n- one\n- two\n1. first\n\n```\nlet x = 1;\nlet y = 2;\n```\n\n---\n\n> quoted **text**\n";
 test "markdown: mount 在任意分配点失败时不泄漏（sweep）" {
     const sw = @import("../oom_sweep.zig");
     try sw.sweepMount("markdown", struct {

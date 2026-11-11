@@ -4,6 +4,7 @@ const std = @import("std");
 const ui = @import("ui");
 const drag = ui.interaction.drag;
 const S = @import("ai_assistant_styles.zig");
+const links = @import("ai_markdown_links.zig");
 const Position = struct { index: usize, byte: usize };
 const Entry = struct {
     owner: *Selection,
@@ -53,6 +54,7 @@ pub const Selection = struct {
     anchor: ?Position = null,
     head: ?Position = null,
     geometry: u64 = 0,
+    dragged: bool = false,
 
     /// New bindings belong to the chunk scope, while the selection owner stays stable.
     pub fn append(self: *Selection, scope: *ui.Scope, root: *ui.Node) !void {
@@ -117,12 +119,21 @@ pub const Selection = struct {
         const self = entry.owner;
         if (e.phase == .cancel) return;
         if (e.phase == .start) {
+            self.dragged = false;
             for (self.entries.items) |item| item.content_hash = std.hash.Wyhash.hash(0, item.node.getText().?.content);
             self.cx.setFocus(self.root);
             self.anchor = .{ .index = entry.index, .byte = self.hit(entry.node, e.origin_window) };
         }
         const target = self.nearest(e.position_window);
         self.head = .{ .index = target.index, .byte = self.hit(target.node, e.position_window) };
+        self.dragged = self.dragged or @abs(e.raw_delta.x) >= 3 or @abs(e.raw_delta.y) >= 3;
+        if (e.phase == .end and !self.dragged) {
+            if (self.anchor) |anchor| if (anchor.index == self.head.?.index and anchor.byte == self.head.?.byte) {
+                const rect = target.node.globalRect();
+                if (e.position_window.y >= rect.y and e.position_window.y < rect.y + rect.h)
+                    links.activate(target.node, self.hitText(target.node, e.position_window, true));
+            };
+        }
         self.paint() catch {};
         self.cx.requestRedraw();
     }
@@ -144,9 +155,12 @@ pub const Selection = struct {
         return best;
     }
     fn hit(self: *Selection, node: *ui.Node, point: drag.Point) usize {
+        return self.hitText(node, point, false);
+    }
+    fn hitText(self: *Selection, node: *ui.Node, point: drag.Point, glyph_hit: bool) usize {
         const text = node.getText() orelse return 0;
         const layout = node.getLayoutOutput().artifacts.text_layout orelse {
-            return self.walk(node, .{ .byte_start = 0, .byte_end = @intCast(text.content.len), .width = node.globalRect().w }, 0, point.x - node.globalRect().x, null, 0, 0) catch 0;
+            return self.walk(node, .{ .byte_start = 0, .byte_end = @intCast(text.content.len), .width = node.globalRect().w }, 0, point.x - node.globalRect().x, null, 0, 0, glyph_hit) catch 0;
         };
         if (layout.line_count == 0) return 0;
         const rect = node.globalRect();
@@ -154,11 +168,11 @@ pub const Selection = struct {
         const row: usize = @intFromFloat(std.math.clamp(@floor((point.y - rect.y) / height), 0, @as(f32, @floatFromInt(layout.line_count - 1))));
         const line = layout.lines[row];
         const x = point.x - rect.x;
-        return self.walk(node, line, row, x, null, 0, 0) catch line.byte_start;
+        return self.walk(node, line, row, x, null, 0, 0, glyph_hit) catch line.byte_start;
     }
     // Shape each original rich-text run without splitting at selection edges.
     // This preserves ligatures, grapheme clusters, inline padding and font weight.
-    fn walk(self: *Selection, node: *ui.Node, line: ui.LineInfo, row: usize, hit_x: ?f32, entry: ?*Entry, lo: usize, hi: usize) !usize {
+    fn walk(self: *Selection, node: *ui.Node, line: ui.LineInfo, row: usize, hit_x: ?f32, entry: ?*Entry, lo: usize, hi: usize, glyph_hit: bool) !usize {
         const text = node.getText().?;
         var pos: usize = line.byte_start;
         var x: f32 = ui.textAlignLineOffset(text.text_align, node.globalRect().w, line.width);
@@ -184,7 +198,14 @@ pub const Selection = struct {
             x += left;
             const visual = try self.cx.text.visualLine(.{ .text = text.content[pos..end], .font_family = "system", .font_family_id = text.font_family, .font_size = text.font_size, .font_weight = weight, .use_monospace = mono, .use_italic = italic, .use_symbols = text.use_symbols_font });
             if (hit_x) |target| {
-                if (target <= x + visual.width + right or end == line.byte_end) return pos + visual.xToPosition(.{ .value = target - x }).byte.value;
+                if (target <= x + visual.width + right or end == line.byte_end) {
+                    if (glyph_hit) {
+                        var segments = visual.selectionSegments();
+                        while (segments.next()) |segment| if (target >= x + segment.rect.x and target < x + segment.rect.x + segment.rect.width) return pos + segment.start.value;
+                        return std.math.maxInt(usize);
+                    }
+                    return pos + visual.xToPosition(.{ .value = target - x }).byte.value;
+                }
             } else if (entry) |item| {
                 var segments = visual.selectionSegments();
                 var start_x: ?f32 = null;
@@ -235,10 +256,10 @@ pub const Selection = struct {
                 const hi = if (entry.index == range.hi.index) range.hi.byte else text.content.len;
                 if (entry.node.getLayoutOutput().artifacts.text_layout) |layout| {
                     for (layout.lines[0..layout.line_count], 0..) |line, row| {
-                        if (line.byte_end > lo and line.byte_start < hi) _ = try self.walk(entry.node, line, row, null, entry, lo, hi);
+                        if (line.byte_end > lo and line.byte_start < hi) _ = try self.walk(entry.node, line, row, null, entry, lo, hi, false);
                     }
                 } else if (hi > lo) {
-                    _ = try self.walk(entry.node, .{ .byte_start = 0, .byte_end = @intCast(text.content.len), .width = entry.node.globalRect().w }, 0, null, entry, lo, hi);
+                    _ = try self.walk(entry.node, .{ .byte_start = 0, .byte_end = @intCast(text.content.len), .width = entry.node.globalRect().w }, 0, null, entry, lo, hi, false);
                 }
             };
             for (entry.highlights.items[entry.used..]) |node| node.setDisplay(.none);

@@ -1,7 +1,8 @@
-//! AI message Markdown: compact headings, copyable code and text selection.
+//! AI message Markdown: six-level compact headings, copyable code and text selection.
 const ui = @import("ui");
 const std = @import("std");
 const S = @import("ai_assistant_styles.zig");
+const blocks = @import("ai_markdown_blocks.zig");
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, value: []const u8) !*ui.Node {
     return mountWithWidth(cx, scope, value, 540);
 }
@@ -9,9 +10,9 @@ pub fn mountWithWidth(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f3
     return mountWithImages(cx, scope, value, width, null);
 }
 pub fn mountWithImages(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context) !*ui.Node {
-    return mountContent(cx, scope, value, width, images, true, null);
+    return mountContent(cx, scope, value, width, images, true, null, 0);
 }
-fn mountContent(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context, selection: bool, retained_code: ?*?*CodeState) !*ui.Node {
+fn mountContent(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context, selection: bool, retained_code: ?*?*CodeState, depth: usize) anyerror!*ui.Node {
     const root = try ui.box(cx, S.assistantMessage(), .{});
     var lines: std.ArrayList([]const u8) = .empty;
     defer lines.deinit(cx.allocator);
@@ -21,6 +22,14 @@ fn mountContent(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, ima
     var i: usize = 0;
     while (i < lines.items.len) : (i += 1) {
         const trimmed = std.mem.trim(u8, lines.items[i], " \t\r");
+        const container_end = if (depth < 32) blocks.containerEnd(lines.items, i) else i;
+        if (container_end > i) {
+            try appendMarkdown(cx, scope, root, lines.items[start..i]);
+            try appendContainer(cx, scope, root, lines.items[i..container_end], width, images, depth);
+            i = container_end - 1;
+            start = container_end;
+            continue;
+        }
         if (std.mem.startsWith(u8, trimmed, "```") or std.mem.startsWith(u8, trimmed, "~~~")) {
             try appendMarkdown(cx, scope, root, lines.items[start..i]);
             var fence_len: usize = 0;
@@ -68,6 +77,65 @@ fn mountContent(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, ima
     if (selection) try @import("ai_text_selection.zig").attach(cx, scope, root);
     return root;
 }
+fn appendContainer(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []const u8, width: f32, images: ?@import("ai_transcript_images.zig").Context, depth: usize) !void {
+    const quoted = blocks.quoteContent(lines[0]) != null;
+    const row = try ui.box(cx, S.markdownContainer(quoted), .{});
+    row.meta.ownership.meta.test_id = if (quoted) "ai.message.quote" else "ai.message.list.item";
+    if (quoted) {
+        try row.appendChild(cx.allocator, try ui.box(cx, S.markdownQuoteBar(), .{}));
+    } else {
+        const marker = blocks.listMarker(lines[0]).?;
+        const label = if (marker.label.len == 1) "•" else marker.label;
+        const marker_node = try ui.text(cx, "", S.markdownListMarker());
+        try marker_node.setTextContent(cx.allocator, label);
+        marker_node.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
+        try row.appendChild(cx.allocator, marker_node);
+        row.behavior.interaction.a11y = .{ .role = .listitem };
+    }
+    const source = try blocks.containerSource(cx.allocator, lines);
+    defer cx.allocator.free(source);
+    const owned = try scope.createText(source, .{});
+    const content = try mountContent(cx, scope, owned.peek(), @max(1, width - 20), images, false, null, depth + 1);
+    content.setStyleInline(cx.allocator, .{ .flex = 1 });
+    try row.appendChild(cx.allocator, content);
+    try parent.appendChild(cx.allocator, row);
+}
+
+/// Escaped pipes belong to cells. Keep escapes intact for the inline renderer.
+fn tableCells(allocator: std.mem.Allocator, source: []const u8) ![][]const u8 {
+    const line = std.mem.trim(u8, source, " \t\r");
+    var cells: std.ArrayList([]const u8) = .empty;
+    errdefer cells.deinit(allocator);
+    var start: usize = if (line.len > 0 and line[0] == '|') 1 else 0;
+    var i = start;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == '\\') {
+            if (i + 1 < line.len) i += 1;
+            continue;
+        }
+        if (line[i] == '|') {
+            try cells.append(allocator, line[start..i]);
+            start = i + 1;
+        }
+    }
+    if (start < line.len or cells.items.len == 0) try cells.append(allocator, line[start..]);
+    return cells.toOwnedSlice(allocator);
+}
+
+fn unescapeTablePipes(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+    var i: usize = 0;
+    while (i < source.len) : (i += 1) {
+        if (source[i] == '\\' and i + 1 < source.len) {
+            if (source[i + 1] != '|') try result.append(allocator, source[i]);
+            i += 1;
+        }
+        try result.append(allocator, source[i]);
+    }
+    return result.toOwnedSlice(allocator);
+}
+
 pub fn mountCode(cx: *ui.Cx, scope: *ui.Scope, code: []const u8, language: []const u8) !*ui.Node {
     const root = try ui.box(cx, S.assistantMessage(), .{});
     _ = try appendCode(cx, scope, root, code, code, language);
@@ -99,6 +167,7 @@ fn appendMarkdown(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const
     defer cx.allocator.free(joined);
     const node = try ui.widgets.Markdown(.{ .text = try scope.createText(joined, .{}), .options = S.markdownOptions() }).mount(scope, cx);
     try compact(cx, scope, node);
+    try @import("ai_markdown_links.zig").bind(cx, scope, node, joined);
     try parent.appendChild(cx.allocator, node);
 }
 pub fn tableSeparator(line: []const u8) bool {
@@ -225,11 +294,9 @@ fn tableContentWidth(cx: *ui.Cx, node: *ui.Node) f32 {
 }
 
 fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []const u8, width: f32) !void {
-    var columns: usize = 1;
-    for (std.mem.trim(u8, lines[0], " \t\r|")) |byte| if (byte == '|') {
-        columns += 1;
-    };
-    columns = @min(columns, 16);
+    const header_cells = try tableCells(cx.allocator, lines[0]);
+    defer cx.allocator.free(header_cells);
+    const columns = @min(header_cells.len, 16);
     const column_width = @max(120, width / @as(f32, @floatFromInt(columns)));
     // Markdown spans wrap using their rendered fonts and word boundaries.
     // Let layout measure that content instead of estimating lines from width.
@@ -240,12 +307,17 @@ fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []
     for (lines, 0..) |line, index| {
         if (index == 1) continue;
         const row = try ui.box(cx, .{ .width = .fill(), .min_height = 34, .direction = .row, .flex_shrink = 0 }, .{});
-        var cells = std.mem.splitScalar(u8, std.mem.trim(u8, line, " \t\r|"), '|');
+        const cells = try tableCells(cx.allocator, line);
+        defer cx.allocator.free(cells);
         for (0..columns) |column| {
             const cell = try ui.box(cx, S.tableCell(column_width, index == 0, column == 0), .{});
-            const value = std.mem.trim(u8, cells.next() orelse "", " \t\r");
-            const text = try ui.widgets.Markdown(.{ .text = try scope.createText(value, .{}), .options = S.markdownOptions() }).mount(scope, cx);
+            const value = std.mem.trim(u8, if (column < cells.len) cells[column] else "", " \t\r");
+            const cell_source = try unescapeTablePipes(cx.allocator, value);
+            defer cx.allocator.free(cell_source);
+            const owned_cell = try scope.createText(cell_source, .{});
+            const text = try ui.widgets.Markdown(.{ .text = owned_cell, .options = S.markdownOptions() }).mount(scope, cx);
             try compact(cx, scope, text);
+            try @import("ai_markdown_links.zig").bind(cx, scope, text, owned_cell.peek());
             try cell.appendChild(cx.allocator, text);
             try row.appendChild(cx.allocator, cell);
         }
@@ -259,11 +331,18 @@ fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []
     try parent.appendChild(cx.allocator, scroll.container);
 }
 
+/// Zenit already emits h1..h6 at `base_font_size * mdHeadingSizeMul(level)`
+/// (1.0×..1.4×) with weight 600. Fit that hierarchy into the compact bubble by
+/// remapping the ratio range onto `heading_font_size..heading_max_font_size`;
+/// collapsing every heading to one size loses the outline.
 fn compact(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node) !void {
-    if (node.getText()) |text| if (text.font_size > S.heading_font_size) {
+    if (node.getText()) |text| if (text.font_weight == 600) {
+        const ratio = @min(S.heading_scale_max, @max(@as(f32, 1.0), text.font_size / S.body_font_size));
+        const scale = (ratio - 1.0) / (S.heading_scale_max - 1.0);
         var style = text;
-        style.font_size = S.heading_font_size;
-        style.line_height = 18.0 / S.heading_font_size;
+        style.font_size = S.heading_font_size + scale * (S.heading_max_font_size - S.heading_font_size);
+        // Keep an 18px per-line rhythm; wrapping still determines total height.
+        style.line_height = 18.0 / style.font_size;
         node.setText(style);
     };
     for (node.children.items) |child| try compact(cx, scope, child);
@@ -452,12 +531,14 @@ pub const Retained = struct {
         var slot: usize = 0;
         var fence: u8 = 0;
         var fence_len: usize = 0;
+        var container_end: usize = 0;
         while (offset < source.len) {
             const end = if (std.mem.indexOfScalarPos(u8, source, offset, '\n')) |pos| pos + 1 else source.len;
             const complete = source[end - 1] == '\n';
             const line = std.mem.trim(u8, source[offset..end], " \t\r\n");
+            if (fence == 0 and offset >= container_end) container_end = blocks.sourceEnd(source, offset);
             var closed = false;
-            if (std.mem.startsWith(u8, line, "```") or std.mem.startsWith(u8, line, "~~~")) {
+            if (offset >= container_end and (std.mem.startsWith(u8, line, "```") or std.mem.startsWith(u8, line, "~~~"))) {
                 var count: usize = 0;
                 while (count < line.len and line[count] == line[0]) : (count += 1) {}
                 if (fence == 0) {
@@ -468,7 +549,7 @@ pub const Retained = struct {
                     closed = true;
                 }
             }
-            if (complete and fence == 0 and (line.len == 0 or closed)) {
+            if (complete and fence == 0 and end >= container_end and (line.len == 0 or closed)) {
                 try self.chunk(&slot, source[start..end], width, images);
                 start = end;
             }
@@ -507,7 +588,7 @@ pub const Retained = struct {
         errdefer scope.dispose();
         const owned = try scope.createText(text, .{});
         var code_state: ?*CodeState = null;
-        const root = try mountContent(self.cx, scope, owned.peek(), width, images, false, &code_state);
+        const root = try mountContent(self.cx, scope, owned.peek(), width, images, false, &code_state, 0);
         errdefer self.cx.destroyDetached(root);
         try self.chunks.ensureUnusedCapacity(self.cx.allocator, 1);
         try self.root.appendChild(self.cx.allocator, root);

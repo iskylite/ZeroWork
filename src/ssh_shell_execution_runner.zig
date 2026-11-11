@@ -105,6 +105,16 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("SHELL_EXECUTION_PASS mode=disconnect unknown=true no_replay=true\n", .{});
         return;
     }
+    if (std.mem.eql(u8, mode, "stop")) {
+        _ = try run(worker, task, "sleep 30", .{ .stop = true, .exit_code = 130 });
+        // macOS Bash 3.2 reports interrupted builtin read as 1; Zsh uses 130.
+        _ = try run(worker, task, "read -r answer", .{ .stop = true, .exit_code = 130, .alternate_exit_code = 1 });
+        _ = try run(worker, task, "printf 'AFTER_STOP_%s\\n' ready", .{ .expected = "AFTER_STOP_ready", .exit_code = 0 });
+        if (worker.vt.terminal != original_vt or worker.session.socket_fd != original_fd) return error.SessionWasReplaced;
+        try release(worker, &ledger);
+        std.debug.print("SHELL_EXECUTION_PASS mode=stop external_and_builtin_interrupted=true same_session=true\n", .{});
+        return;
+    }
     _ = try run(worker, task, "cd /tmp; ZW_PERSIST=kept; zw_fixture_fn() { printf 'FN_%s\\n' preserved; }; printf 'PID_%s\\n' \"$$\"", .{ .expected = "PID_", .exit_code = 0 });
     _ = try run(worker, task, "printf 'STATE_%s:%s\\n' \"$PWD\" \"$ZW_PERSIST\"; zw_fixture_fn; false", .{ .expected = "STATE_/tmp:kept", .extra = "FN_preserved", .exit_code = 1 });
     _ = try run(worker, task, "true", .{ .exit_code = 0 });
@@ -483,7 +493,7 @@ fn waitReady(worker: *Worker) !void {
     std.debug.print("READINESS state={s} failure={?s}\n", .{ @tagName(snapshot.state), snapshot.failure });
     return error.ShellNeverReady;
 }
-const Checks = struct { expected: []const u8 = "", extra: []const u8 = "", exit_code: u8, stream: bool = false, input: bool = false, handoff: bool = false };
+const Checks = struct { expected: []const u8 = "", extra: []const u8 = "", exit_code: u8, alternate_exit_code: ?u8 = null, stream: bool = false, input: bool = false, handoff: bool = false, stop: bool = false };
 fn run(worker: *Worker, task: identity.TaskId, command: []const u8, checks: Checks) !execution.Snapshot {
     try waitReady(worker);
     const id = identity.ExecutionId.generate();
@@ -546,10 +556,16 @@ fn run(worker: *Worker, task: identity.TaskId, command: []const u8, checks: Chec
                 input_stage = 2;
             }
         }
+        if (checks.stop and input_stage == 0 and snapshot.state == .running) {
+            try worker.executionRevoke(snapshot.grant.?, false);
+            input_stage = 1;
+        }
         if (snapshot.state == .interval_recorded) {
-            if (snapshot.completion_source != .shell_reported or snapshot.process == null or snapshot.process.?.exit_code != checks.exit_code or !snapshot.interval_saved or snapshot.output_scope != .session_interval) return error.FalseCompletionReceipt;
+            const expected_exit = snapshot.process != null and (snapshot.process.?.exit_code == checks.exit_code or (checks.alternate_exit_code != null and snapshot.process.?.exit_code == checks.alternate_exit_code));
+            if (snapshot.completion_source != .shell_reported or !expected_exit or !snapshot.interval_saved or snapshot.output_scope != .session_interval) return error.FalseCompletionReceipt;
             if (snapshot.start == null or snapshot.end == null or snapshot.start.?.event_sequence >= snapshot.end.?.event_sequence) return error.MissingOrderedBoundaries;
             if (checks.stream and !streamed) return error.StreamWasNotVisibleBeforeFinish;
+            if (checks.stop and input_stage != 1) return error.StopWasNotRequested;
             if (checks.input and (input_stage != 2 or snapshot.input_receipt == null or snapshot.input_receipt.?.stage != .written)) return error.MissingNativeWriteReceipt;
             var output = try worker.readExecutionOutput(id, a, 0, 65536);
             defer output.deinit(a);

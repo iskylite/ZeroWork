@@ -372,9 +372,17 @@ test "host execution catalog and journal controller instantiate without a sessio
 }
 
 test "production Local explicit stop requests a real foreground interrupt and keeps outcome unknown" {
+    try expectExplicitStop("/bin/sleep 30");
+}
+
+test "production Local explicit stop interrupts a builtin read in the shell process group" {
+    try expectExplicitStop("builtin read -r ZW_STOP_ANSWER");
+}
+
+fn expectExplicitStop(command: []const u8) !void {
     var f = try Fixture.init();
     defer f.deinit();
-    try f.run("/bin/sleep 30");
+    try f.run(command);
     const running = try f.wait(.running);
     const until = native.zw_local_monotonic_ms() + 3000;
     while (true) {

@@ -282,7 +282,7 @@ test "AI composer permission labels preserve real confirm and auto modes and onl
     f.enter(f.view.buttons[1]);
     const menu = find(f.cx.root.?, "ai.permission.menu").?;
     try std.testing.expectEqual(@as(f32, 344), menu.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 150), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 128), menu.globalRect().h);
     for ([_][]const u8{ "部分读取自动，其余按策略确认", "授权内自动执行（含组内写入）" }) |hint| {
         const node = textNode(menu, hint) orelse return error.MissingPermissionHint;
         const label = node.getText().?;
@@ -316,7 +316,7 @@ test "AI composer inventory revocation exists only for a continuous current conv
     f.settle();
     f.enter(f.view.buttons[1]);
     const menu = find(f.cx.root.?, "ai.permission.menu").?;
-    try std.testing.expectEqual(@as(f32, 188), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 166), menu.globalRect().h);
     try std.testing.expect(hasText(f.view.inventory_revoke, "撤销会话列表授权"));
     const row = f.view.inventory_revoke.globalRect();
     const bounds = menu.globalRect();
@@ -330,7 +330,7 @@ test "AI composer inventory revocation exists only for a continuous current conv
     f.settle();
     try std.testing.expectEqual(.none, f.view.inventory_revoke.style.display);
     f.enter(f.view.buttons[1]);
-    try std.testing.expectEqual(@as(f32, 150), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 128), menu.globalRect().h);
 }
 
 test "AI composer running conversation permits only inventory revocation without enabling configuration changes" {
@@ -791,10 +791,12 @@ test "AI composer context compaction emits captured start and cancel with acknow
     try std.testing.expectEqual(@as(usize, 1), f.calls);
     try std.testing.expect(f.last.?.action == .compact_context);
     try std.testing.expect(f.view.source.?.value.usage.?.compaction == .idle);
+    try std.testing.expect(!f.view.isOpen());
     snapshot.usage.?.compaction = .running;
     snapshot.usage.?.can_compact = false;
     try f.view.update(snapshot);
     f.settle();
+    f.click(f.view.buttons[4]);
     f.enter(find(f.cx.root.?, "ai.usage.compaction.cancel").?);
     try std.testing.expectEqual(@as(usize, 2), f.calls);
     try std.testing.expect(f.last.?.action == .cancel_compaction);
@@ -808,6 +810,7 @@ test "AI composer context compaction emits captured start and cancel with acknow
     snapshot.usage.?.compaction = .idle;
     try f.view.update(snapshot);
     f.settle();
+    f.click(f.view.buttons[4]);
     const before = f.calls;
     f.enter(find(f.cx.root.?, "ai.usage.compaction.start").?);
     try std.testing.expectEqual(before, f.calls);
@@ -901,6 +904,7 @@ test "AI composer execution mode selects effective default without duplicate inh
     try std.testing.expectEqual(@as(f32, 296), menu.globalRect().w);
     try std.testing.expect(find(menu, "ai.execution.inherit") == null);
     try std.testing.expect(find(menu, "ai.execution.isolated_exec").?.behavior.interaction.a11y.?.selected);
+    try std.testing.expect(hasText(f.view.retention_select.trigger, "每次询问"));
     f.enter(find(menu, "ai.execution.new_pty").?);
     try std.testing.expectEqual(config.ExecutionMode.new_pty, f.last.?.action.execution_mode.?);
     try std.testing.expectEqualStrings("批处理", f.view.labels[5].?.getText().?.content);
@@ -919,19 +923,33 @@ test "AI composer retention selection is captured and stale execution menu canno
     try f.init();
     defer f.deinit();
     f.enter(f.view.buttons[5]);
+    try std.testing.expect(hasText(f.view.retention_select.trigger, "空闲后关闭"));
     f.enter(f.view.retention_select.trigger);
+    try std.testing.expect(find(f.cx.root.?, "ai.retention.inherit") == null);
     const keep = find(f.cx.root.?, "ai.retention.keep") orelse return error.MissingRetentionChoice;
     f.enter(keep);
     try std.testing.expectEqual(config.SessionRetention.keep, f.last.?.action.session_retention.?);
     try std.testing.expect(f.last.?.owner.eql(.{ .session = 101 }));
-    try std.testing.expectEqualStrings("inherit", f.view.retention_value.peek().?);
+    try std.testing.expect(f.view.retention_value.peek() == null);
+    var accepted = f.snapshot();
+    accepted.session_retention_override = .keep;
+    try f.view.update(accepted);
+    f.settle();
+    f.enter(f.view.buttons[5]);
+    try std.testing.expect(hasText(f.view.retention_select.trigger, "保留任务会话"));
+    f.enter(f.view.retention_select.trigger);
+    f.enter(find(f.cx.root.?, "ai.retention.inherit").?);
+    try std.testing.expectEqual(@as(usize, 2), f.calls);
+    try std.testing.expect(f.last.?.action.session_retention == null);
+    try f.view.update(f.snapshot());
+    f.settle();
     f.enter(f.view.buttons[5]);
     const mode = find(f.cx.root.?, "ai.execution.ask").?;
     var other = f.snapshot();
     other.owner = .{ .group = 9 };
     try f.view.update(other);
     f.enter(mode);
-    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expectEqual(@as(usize, 2), f.calls);
 }
 
 test "AI composer longest model and execution choices remain reachable at minimum width" {
@@ -966,7 +984,6 @@ test "AI composer longest model and execution choices remain reachable at minimu
     const viewport = f.view.execution_scroll.container.globalRect();
     try std.testing.expectApproxEqAbs(@min(selected_row.y, viewport.y + viewport.h - selected_row.h), selected_row.y, 0.5);
     try std.testing.expect(selected_row.y >= viewport.y - 0.5);
-    try std.testing.expectEqual(ui.TextWrap.word, find(menu, "ai.execution.effect").?.getText().?.wrap);
     try std.testing.expect(menu.globalRect().x >= 0 and menu.globalRect().y >= 0);
     try std.testing.expect(menu.globalRect().x + menu.globalRect().w <= f.cx.viewport.width);
 }

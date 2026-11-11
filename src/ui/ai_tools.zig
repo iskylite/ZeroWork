@@ -315,6 +315,7 @@ pub const Bridge = struct {
         defer members.deinit(self.allocator);
         var has_terminal_source = false;
         var has_batch_source = false;
+        var has_transfer_source = false;
         var terminal_sources: std.ArrayList(identity.SessionHandle) = .empty;
         var execution_sources: std.ArrayList(identity.SessionHandle) = .empty;
         var attachment_sources: std.ArrayList(identity.SessionHandle) = .empty;
@@ -326,6 +327,9 @@ pub const Bridge = struct {
             } else return error.StaleSession;
             const manifest = app.sessions.manifestFor(owner) orelse return error.AdapterNotConnected;
             if (!manifest.integration.ai) continue;
+            if (@import("ai_transfer_source.zig").resolve(app, owner, false)) |_| {
+                has_transfer_source = true;
+            } else |_| {}
             for (manifest.tools) |binding| if (std.mem.eql(u8, binding.definition_id, "read_terminal")) {
                 has_terminal_source = true;
                 try terminal_sources.append(self.capture_arena.allocator(), owner);
@@ -398,6 +402,7 @@ pub const Bridge = struct {
             for (binding.contributions) |original| {
                 var contribution = original;
                 const id = contribution.definition.id;
+                if (!has_transfer_source and @import("../ai/host_transfer.zig").supports(id)) continue;
                 if (!has_terminal_source and @import("../ai/host_terminal_queries.zig").supports(id)) continue;
                 if (!has_terminal_source and std.mem.eql(u8, id, @import("../ai/builtin_tools.zig").id)) continue;
                 if (!has_batch_source and @import("../ai/batch_output.zig").supports(id)) continue;
@@ -2179,4 +2184,10 @@ test "session capabilities BMC native catalog keeps image input tools without te
     defer a.free(system);
     try std.testing.expect(std.mem.indexOf(u8, system, "KVM pixels") != null);
     try std.testing.expect(std.mem.indexOf(u8, system, "host.run_in_terminal") == null);
+}
+
+test "AI transfer worker controller dispatch and durable replay use the real approval bridge" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+    try @import("../ai_transfer_tests.zig").exerciseWorker(&bridge, Bridge.pumpControllerTask);
 }

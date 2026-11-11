@@ -11,6 +11,12 @@ pub const Effort = provider.Effort;
 pub const PermissionMode = config.PermissionMode;
 pub const ExecutionMode = config.ExecutionMode;
 pub const SessionRetention = config.SessionRetention;
+const retention_choices = [_]ui.widgets.SelectOption{
+    .{ .value = "auto_idle", .label = config.sessionRetentionLabel(.auto_idle), .test_id = "ai.retention.auto_idle" },
+    .{ .value = "ask", .label = config.sessionRetentionLabel(.ask), .test_id = "ai.retention.ask" },
+    .{ .value = "keep", .label = config.sessionRetentionLabel(.keep), .test_id = "ai.retention.keep" },
+    .{ .value = "inherit", .label = "恢复默认", .test_id = "ai.retention.inherit" },
+};
 pub const Attachment = enum { image, local_text, remote_file, paste_image };
 pub const AttachmentState = struct { image: bool = false, local_text: bool = false, remote_file: bool = false, paste_image: bool = false, count: usize = 0 };
 pub const ModelKey = struct {
@@ -236,8 +242,8 @@ pub const View = struct {
     execution_checks: [5]*ui.Node = undefined,
     retention_select: ui.widgets.SelectResult = undefined,
     retention_value: *ui.Signal(?[]const u8),
-    retention_global_label: *ui.Node = undefined,
-    retention_options: [4]ui.widgets.SelectOption = undefined,
+    retention_default: *ui.Signal([]const u8),
+    retention_options: *ui.Signal([]const ui.widgets.SelectOption),
     slider_value: *ui.Signal(f32),
     reasoning_choices: [8]ReasoningChoice = undefined,
     reasoning_count: usize = 0,
@@ -268,7 +274,7 @@ pub const View = struct {
     viewport: ui.Size = .ZERO,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks, .hover_style = try scope.createSignal(?ui.BoxStyle, S.hover()), .model_count = try scope.createSignal(usize, 0), .model_version = try scope.createSignal(u64, 0), .slider_value = try scope.createSignal(f32, 0), .retention_value = try scope.createSignal(?[]const u8, "inherit"), .permission_disabled = try scope.createSignal(bool, true), .permission_auto_disabled = try scope.createSignal(bool, true), .inventory_revoke_disabled = try scope.createSignal(bool, true), .colors = S.theme.current() });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks, .hover_style = try scope.createSignal(?ui.BoxStyle, S.hover()), .model_count = try scope.createSignal(usize, 0), .model_version = try scope.createSignal(u64, 0), .slider_value = try scope.createSignal(f32, 0), .retention_value = try scope.createSignal(?[]const u8, null), .retention_default = try scope.createSignal([]const u8, config.sessionRetentionLabel(.auto_idle)), .retention_options = try scope.createSignal([]const ui.widgets.SelectOption, retention_choices[0..3]), .permission_disabled = try scope.createSignal(bool, true), .permission_auto_disabled = try scope.createSignal(bool, true), .inventory_revoke_disabled = try scope.createSignal(bool, true), .colors = S.theme.current() });
         try scope.onCleanup(View, self, release);
         self.root = try ui.box(cx, S.row(), .{});
         self.root.meta.ownership.meta.test_id = "ai.composer.controls";
@@ -453,7 +459,6 @@ pub const View = struct {
             _ = try self.label(button, if (mode == .confirm) "部分读取自动，其余按策略确认" else "授权内自动执行（含组内写入）", S.text(10.5, 400, 16, true), S.flexibleLabel(16));
             try parent.appendChild(self.cx.allocator, button);
         }
-        _ = try self.label(parent, "当前助手范围 · 禁止项不可执行", S.text(10.5, 400, 16, true), S.flexibleLabel(16));
         self.inventory_revoke = try ui.widgets.Button(.{ .variant = .ghost, .label = "撤销会话列表授权", .a11y_label = "撤销当前对话的会话列表授权", .disabled = self.inventory_revoke_disabled, .base_style = S.option(32, false), .hover_style = self.hover_style, .on_click = self.cx.on(View, self, revokeInventory) }).mount(self.scope, self.cx);
         self.inventory_revoke.meta.ownership.meta.test_id = "ai.permission.revoke_inventory";
         self.inventory_revoke.setDisplay(.none);
@@ -489,23 +494,14 @@ pub const View = struct {
             try scroll.content.appendChild(self.cx.allocator, button);
         }
         const policy = try ui.box(self.cx, S.policySection(), .{});
-        self.retention_global_label = try self.label(policy, "任务会话处理", S.text(10.5, 400, 16, true), S.flexibleLabel(16));
-        self.retention_options = .{
-            .{ .value = "inherit", .label = "跟随全局", .test_id = "ai.retention.inherit" },
-            .{ .value = "auto_idle", .label = "空闲后关闭", .test_id = "ai.retention.auto_idle" },
-            .{ .value = "ask", .label = "每次询问", .test_id = "ai.retention.ask" },
-            .{ .value = "keep", .label = "保留任务会话", .test_id = "ai.retention.keep" },
-        };
-        self.retention_select = try ui.widgets.Select(.{ .options = &self.retention_options, .value = ui.Model(?[]const u8){ .controlled = .{ .signal = self.retention_value } }, .width = 260, .disabled = self.disabled[5], .on_change = self.cx.on(View, self, View.retentionChanged) }).mount(self.scope, self.cx);
-        self.retention_select.wrapper.setStyleInline(self.cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
+        _ = try self.label(policy, "任务会话处理", S.text(11.5, 400, 18, false), S.flexibleLabel(18));
+        self.retention_select = try ui.widgets.Select(.{ .options = self.retention_options, .placeholder = self.retention_default, .value = ui.Model(?[]const u8){ .controlled = .{ .signal = self.retention_value } }, .width = 136, .disabled = self.disabled[5], .on_change = self.cx.on(View, self, View.retentionChanged) }).mount(self.scope, self.cx);
         self.retention_select.trigger.meta.ownership.meta.test_id = "ai.execution.retention";
         self.retention_select.chrome.meta.ownership.meta.test_id = "ai.retention.menu";
         self.retention_select.trigger.setStyleInline(self.cx.allocator, S.policyControl());
         self.retention_select.content_slot.setStyleInline(self.cx.allocator, .{ .font_size = 11.5, .font_weight = 400 });
         try policy.appendChild(self.cx.allocator, self.retention_select.wrapper);
         try scroll.content.appendChild(self.cx.allocator, policy);
-        const note = try self.label(scroll.content, "用于后续执行和新建任务会话。\n当前执行与已有终端保留原策略。", policyEffectText(), S.flexibleLabel(32));
-        note.meta.ownership.meta.test_id = "ai.execution.effect";
     }
     fn retentionChanged(self: *View, value: ?[]const u8) void {
         const text = value orelse return;
@@ -516,7 +512,6 @@ pub const View = struct {
         const colors = S.theme.current();
         const selected = if (source) |value| value.execution_mode_override else null;
         const global = if (source) |value| value.global_execution_mode else .auto;
-        var buffer: [128]u8 = undefined;
         try self.labels[5].?.setTextContent(self.cx.allocator, config.executionModeLabel(selected orelse global));
         if (self.buttons[5].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[5].?.getText().?.content;
         self.button_styles[5].set(if (self.execution_compact) S.iconButton(8) else S.executionChip());
@@ -527,8 +522,9 @@ pub const View = struct {
             if (self.execution_rows[index].behavior.interaction.a11y) |*attrs| attrs.selected = active;
         }
         const retention = if (source) |value| value.session_retention_override else null;
-        self.retention_value.set(if (retention) |value| @tagName(value) else "inherit");
-        try self.retention_global_label.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "任务会话处理 · 全局{s}", .{config.sessionRetentionLabel(if (source) |value| value.global_session_retention else .auto_idle)}));
+        self.retention_default.set(config.sessionRetentionLabel(if (source) |value| value.global_session_retention else .auto_idle));
+        self.retention_value.set(if (retention) |value| @tagName(value) else null);
+        self.retention_options.set(if (retention == null) retention_choices[0..3] else &retention_choices);
     }
     fn modelContextWidth(self: *const View) f32 {
         var width: f32 = 0;
@@ -985,7 +981,7 @@ pub const View = struct {
             .thinking => |value| self.proposed_reasoning = if (value.enabled) .on else .off,
             else => {},
         }
-        if (kind != .effort and kind != .model and kind != .usage) self.close(kind, true);
+        if (action == .compact_context or (kind != .effort and kind != .model and kind != .usage)) self.close(kind, true);
     }
     fn chooseReasoning(self: *View, index: usize) void {
         if (index >= self.reasoning_count) return;
@@ -1453,12 +1449,6 @@ pub const View = struct {
         };
     }
 };
-fn policyEffectText() ui.TextStyle {
-    var value = S.text(10.5, 400, 16, true);
-    value.wrap = .word;
-    value.text_overflow = .clip;
-    return value;
-}
 fn firstEnabled(disabled: [4]*ui.Signal(bool)) ?usize {
     for (disabled, 0..) |signal, index| if (!signal.peek()) return index;
     return null;

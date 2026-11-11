@@ -378,6 +378,7 @@ pub const Panel = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
     root: *ui.Node,
+    floating: ?*@import("floating_surface.zig").Surface = null,
     options: Options,
     hooks: Hooks,
     manager: ?*backend.Manager = null,
@@ -450,7 +451,10 @@ pub const Panel = struct {
         p.root = try ui.box(cx, if (tray) S.sessionTray() else S.panel(true), .{});
         @import("floating_input.zig").protect(cx, p.root);
         p.root.meta.ownership.meta.test_id = "transfer.manager";
-        if (!native_window and !tray) p.root.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 46 }, .right = .{ .px = 14 } }, .z_index = 50 });
+        if (!native_window and !tray) {
+            p.root.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 46 }, .right = .{ .px = 14 } } });
+            p.floating = try @import("floating_surface.zig").Surface.mount(cx, scope, p.root);
+        }
         p.root.setDisplay(.none);
         p.head = try ui.box(cx, S.row(if (tray) 28 else 30, 6), .{});
         p.head.meta.ownership.meta.test_id = "transfer.header";
@@ -1337,6 +1341,7 @@ pub const Panel = struct {
         if (self.root.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
         self.tray_requested_show = true;
         self.root.setDisplay(if (self.options.presentation == .session_tray and self.visible.items.len == 0) .none else .flex);
+        if (self.floating) |surface| surface.activate();
         self.cx.requestRedraw();
     }
     /// Context switches must not return focus to the previous session's trigger.

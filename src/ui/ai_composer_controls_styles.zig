@@ -16,11 +16,11 @@ pub fn width(kind: Kind) f32 {
 pub fn height(kind: Kind) f32 {
     return switch (kind) {
         .attachment => 166,
-        .permission => 150,
+        .permission => 128,
         .model => 321.5,
         .effort => 86,
         .usage => 156,
-        .execution => 350,
+        .execution => 251,
     };
 }
 pub fn row() ui.BoxStyle {
@@ -106,7 +106,7 @@ pub fn close() ui.BoxStyle {
     return result;
 }
 pub fn body(kind: Kind) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .gap = if (kind == .model) 6 else if (kind == .effort) 2 else 6, .padding = .{ .right = if (kind == .usage or kind == .model or kind == .permission) 0 else 12 }, .flex = 1 };
+    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .gap = if (kind == .effort) 2 else 6, .padding = .{ .right = if (kind == .effort) 12 else 0 }, .flex = 1 };
 }
 pub fn option(h: f32, selected: bool) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = h }, .direction = .row, .align_items = .center, .justify = .start, .padding = ui.Padding.all(6), .gap = 6, .background = if (selected) theme.popupSelection() else theme.popupAction(), .border = .{ .width = 0, .radius = 7 }, .flex_shrink = 0, .min_width = 0 };
@@ -273,7 +273,7 @@ pub fn executionLabel() ui.BoxStyle {
     return .{ .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .min_width = 0, .flex_shrink = 0 };
 }
 pub fn policySection() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 2, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 8 }, .flex_shrink = 0 };
 }
 pub fn policyControl() ui.BoxStyle {
     var value = option(28, false);

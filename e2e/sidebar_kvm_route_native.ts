@@ -27,8 +27,9 @@ const fixtures = [
   {name: 'KVM-missing', hops: 1, route: '本机 → 缺失的跳板 → KVM-missing'},
   {name: 'KVM-invalid', hops: null, route: '路径不可用'},
   {name: 'SFTP-single', hops: 1, route: '本机 → Jump-A → SFTP-single'},
+  {name: '长路径验收主机名称用于检查完整中文提示内容'.repeat(2) + '最终节点', hops: 0, route: '本机 → ' + '长路径验收主机名称用于检查完整中文提示内容'.repeat(2) + '最终节点'},
 ];
-let hosts = '[registry]\nschema_version=2\nrevision=1\nnext_connection_id=10\nnext_group_id=1\n';
+let hosts = '[registry]\nschema_version=2\nrevision=1\nnext_connection_id=11\nnext_group_id=1\n';
 for (const [index, fixture] of fixtures.entries()) {
   const kvm = fixture.name.startsWith('KVM-');
   hosts += `[[hosts]]\nconnection_id=${index + 1}\nrevision=1\nprotocol="${kvm ? 'bmc_ikvm' : index === 8 ? 'sftp' : 'ssh'}"\nname="${fixture.name}"\n`;
@@ -91,7 +92,8 @@ try {
     const host = await row(fixture.name);
     const name = flat(host).find(node => node.test_id === 'sidebar.host.name');
     await h.mouseMove(name.rect.x + Math.min(10, name.rect.w / 2), name.rect.y + name.rect.h / 2);
-    const hint = await h.waitFor(async () => (await h.query('sidebar.host.info')).find((node: any) => shown(node) && text(node).includes(fixture.route)) ?? null);
+    const identityExpected = fixture.name.startsWith('长路径') ? fixture.name : fixture.route;
+    const hint = await h.waitFor(async () => (await h.query('sidebar.host.info')).find((node: any) => shown(node) && text(node).includes(identityExpected)) ?? null);
     const count = visibleFlat(await row(fixture.name)).find(node => node.test_id === 'sidebar.host.hops');
     if (fixture.hops === null) assert(!count, `${fixture.name}: invalid payload must not claim zero hops`);
     else assert.equal(count?.text, String(fixture.hops), `${fixture.name}: hovered hop count`);
@@ -99,9 +101,52 @@ try {
     if (fixture.name === 'KVM-multi' || fixture.name === 'KVM-missing') {
       assert((await h.screenshot(join(out, `${fixture.name}.png`))).ok);
     }
+    // The row-tail marker is its own entry: it must explain itself and the
+    // click target must never fall back to row selection. An unusable route
+    // hides the marker entirely, so it has nothing to hover.
+    if (fixture.hops !== null) {
+      const route_icon = visibleFlat(await row(fixture.name)).find(node => node.test_id === 'sidebar.host.route-icon');
+      assert(route_icon, `${fixture.name}: route marker visible for hover`);
+      await h.mouseMove(route_icon.rect.x + route_icon.rect.w / 2, route_icon.rect.y + route_icon.rect.h / 2);
+      const action = fixture.name.startsWith('KVM-') ? '点击查看连接详情' : fixture.name === 'SFTP-single' ? 'SFTP 暂不支持查看实时连接链路' : '点击查看连接链路';
+      const expected = fixture.hops === 0 ? '连接链路 · 直连' : `连接链路 · 经 ${fixture.hops} 台跳板`;
+      const chain_hint = await h.waitFor(async () => (await h.query('sidebar.host.chain-hint')).find((node: any) => shown(node) && text(node).includes(expected)) ?? null);
+      assert(text(chain_hint).includes(action));
+      if (fixture.name.startsWith('长路径')) assert(Buffer.byteLength(text(chain_hint)) > 192, 'Long hint exceeds the former buffer size');
+      assert(text(chain_hint).includes(expected), `${fixture.name}: chain hint "${expected}" in "${text(chain_hint)}"`);
+      assert(text(chain_hint).includes(fixture.route), 'Full ordered path survives in the marker hint');
+      assert(!(await h.query('sidebar.host.info')).some(shown), 'Identity and marker hints are mutually exclusive');
+      if (fixture.name === 'KVM-multi') assert((await h.screenshot(join(out, 'chain-hint.png'))).ok);
+      if (fixture.name.startsWith('长路径')) assert((await h.screenshot(join(out, 'long-chain-hint.png'))).ok);
+      report.checks.push({name: fixture.name, chainHint: text(chain_hint)});
+    }
     await h.mouseMove(900, 700);
+    await h.waitFor(async () => !(await h.query('sidebar.host.chain-hint')).some(shown) || null);
     await h.waitFor(async () => !(await h.query('sidebar.host.info')).some(shown) || null);
   }
+  // No session exists in this fixture set: the marker must report that instead
+  // of opening an invented chain. Hover first so the row's action group has
+  // already claimed its width; the marker never moves under the pointer.
+  const jump_name = flat(await row('Jump-A')).find(node => node.test_id === 'sidebar.host.name');
+  await h.mouseMove(jump_name.rect.x + Math.min(10, jump_name.rect.w / 2), jump_name.rect.y + jump_name.rect.h / 2);
+  await h.waitFor(async () => visibleFlat(await row('Jump-A')).some(node => node.test_id === 'sidebar.host.connect') || null);
+  const marker = visibleFlat(await row('Jump-A')).find(node => node.test_id === 'sidebar.host.route-icon');
+  assert(marker, 'Jump-A: route marker visible');
+  await h.mouseMove(marker.rect.x + marker.rect.w / 2, marker.rect.y + marker.rect.h / 2);
+  await h.waitFor(async () => (await h.query('sidebar.host.chain-hint')).some(shown) || null);
+  const stable = visibleFlat(await row('Jump-A')).find(node => node.test_id === 'sidebar.host.route-icon');
+  const before = await h.request('POST', '/zerowork/windows', {action: 'snapshot'});
+  assert((await h.clickAt(stable.rect.x + stable.rect.w / 2, stable.rect.y + stable.rect.h / 2)).ok);
+  // The marker consumes its own click: the hint it owns closes and the row is
+  // not connected by the pass-through status area.
+  await h.waitFor(async () => !(await h.query('sidebar.host.chain-hint')).some(shown) || null);
+  await h.waitFor(async () => (await h.query('sidebar.chain.feedback')).some((node: any) => shown(node) && text(node).includes('当前没有可查看连接链路的会话')) || null);
+  const after = await h.request('POST', '/zerowork/windows', {action: 'snapshot'});
+  assert.equal(after.sessions.length, before.sessions.length, 'Marker click does not create a session');
+  assert.equal(after.windows[0].selected_connection, before.windows[0].selected_connection, 'Marker click does not select the row');
+  assert(!(await h.query('connection.details')).some(shown), 'No invented chain without a session');
+  report.checks.push({name: 'no-session', feedback: 'visible', selection: 'unchanged', sessions: after.sessions.length});
+  assert((await h.screenshot(join(out, 'chain-click.png'))).ok);
   assert((await h.clickTestId('sidebar.collapse')).ok);
   await h.waitFor(async () => (await h.query('sidebar.restore')).some(shown) || null);
   assert((await h.clickTestId('sidebar.restore')).ok);

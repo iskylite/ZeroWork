@@ -333,6 +333,9 @@ pub const Host = struct {
             try self.publishOperationError(window.id, owner, "文件传输", "文件传输失败", if (completion.details.detail.len > 0) completion.details.detail else "传输未完成，请在传输任务中查看原因后重试。", null);
             break;
         };
+        // A completed transfer is a real session event. Tab attention must not
+        // depend on the system notification switches (transfer_done/ai_ready).
+        self.activity.observeTabActivity(owner) catch |err| std.log.warn("tab transfer activity: {s}", .{@errorName(err)});
     }
     pub const TransferBatchState = enum { active, blocked, ended };
     /// The transfer controller supplies the frozen source count and a real

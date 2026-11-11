@@ -92,6 +92,11 @@ const Capture = struct {
     group_action: ?V.GroupAction = null,
     rail_owner: ?@import("host/identity.zig").AssetOwner = null,
     rail_action: ?@import("ui/sidebar_collapsed_view.zig").HostAction = null,
+    chains: usize = 0,
+    fn chain(raw: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.chains += 1;
+    }
     fn hostAction(raw: *anyopaque, value: V.HostAction) void {
         const self: *Capture = @ptrCast(@alignCast(raw));
         if (value == .copy) self.copied += 1 else self.edited += 1;
@@ -269,6 +274,74 @@ test "sidebar host route status never activates the row connection" {
     row.setForwardBadge(null);
     h.frames();
     try std.testing.expect(row.forward.style.display == .none and row.route.style.display == .flex);
+}
+
+test "sidebar host route marker names the chain and its hop count" {
+    const h = try H.init();
+    defer h.deinit();
+    const column = try ui.box(h.cx, .{ .width = .{ .px = 212 }, .height = .fill(), .direction = .column }, .{});
+    try h.root.appendChild(h.cx.allocator, column);
+    var capture: Capture = .{};
+    const callbacks: V.HostCallbacks = .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction, .chain = Capture.chain };
+    const routed = try V.HostRow.mount(h.cx, h.scope, .{ .name = "ScaleX40-AI01", .detail = "root@192.0.2.1:22", .route = "本机 → 跳板 → ScaleX40-AI01", .hops = 1, .online = true }, callbacks);
+    try column.appendChild(h.cx.allocator, routed.node);
+    const direct = try V.HostRow.mount(h.cx, h.scope, .{ .name = "直连主机", .detail = "root@192.0.2.2:22", .route = "本机 → 直连主机", .hops = 0, .online = false }, callbacks);
+    try column.appendChild(h.cx.allocator, direct.node);
+    h.frames();
+    try std.testing.expectEqualStrings("连接链路 · 经 1 台跳板\n本机 → 跳板 → ScaleX40-AI01\n点击查看连接链路", routed.route.behavior.interaction.a11y.?.description.?);
+    try std.testing.expectEqualStrings("连接链路 · 直连\n本机 → 直连主机\n点击查看连接链路", direct.route.behavior.interaction.a11y.?.description.?);
+    try std.testing.expect(routed.route.behavior.interaction.a11y.?.role == .button);
+}
+
+test "sidebar host route marker hints on hover and opens the chain without selecting" {
+    const h = try H.init();
+    defer h.deinit();
+    const column = try ui.box(h.cx, .{ .width = .{ .px = 212 }, .height = .fill(), .direction = .column }, .{});
+    try h.root.appendChild(h.cx.allocator, column);
+    var capture: Capture = .{};
+    const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "ScaleX40-AI01", .detail = "root@192.0.2.1:22", .route = "本机 → 跳板 → ScaleX40-AI01", .hops = 1, .online = true }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction, .chain = Capture.chain });
+    try column.appendChild(h.cx.allocator, row.node);
+    h.frames();
+    const route = row.route.globalRect();
+    h.cx.handleMouseMove(route.x + route.w / 2, route.y + route.h / 2);
+    for (0..40) |_| h.frames();
+    var tooltip_visible = false;
+    for (h.cx.overlay_stack.layers) |entry| if (entry) |layer| {
+        if (!layer.suspended and layer.state == .visible and layer.config.tier == .tooltip) tooltip_visible = true;
+    };
+    try std.testing.expect(tooltip_visible);
+    const label = firstText(row.chain_hint.?.content) orelse return error.MissingChainHint;
+    try std.testing.expect(std.mem.indexOf(u8, label.getText().?.content, "点击查看连接链路") != null);
+    h.click(row.route);
+    try std.testing.expectEqual(@as(usize, 1), capture.chains);
+    try std.testing.expectEqual(@as(usize, 0), capture.selected);
+    try std.testing.expectEqual(@as(usize, 0), capture.connected);
+    try std.testing.expect(row.route.behavior.interaction.focusable);
+    h.cx.setFocus(row.route);
+    h.cx.handleKeyDown(.@"return", .{});
+    h.cx.handleKeyDown(.space, .{});
+    h.frames();
+    try std.testing.expectEqual(@as(usize, 3), capture.chains);
+    try std.testing.expectEqual(@as(usize, 0), capture.selected);
+    try std.testing.expectEqual(@as(usize, 0), capture.connected);
+}
+
+test "sidebar chain retains long UTF8 paths and describes SFTP capability" {
+    const h = try H.init();
+    defer h.deinit();
+    const route = "本机 → 第一台生产环境入口跳板服务器 → 第二台生产环境网络隔离跳板服务器 → 第三台生产环境数据库入口跳板服务器 → 第四台数据库安全隔离跳板服务器 → 最终数据库服务器";
+    try std.testing.expect(route.len > 192);
+    var capture: Capture = .{};
+    const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "数据库", .detail = "ops@db", .route = route, .hops = 3, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu });
+    try h.root.appendChild(h.cx.allocator, row.node);
+    h.frames();
+    const description = row.route.behavior.interaction.a11y.?.description.?;
+    try std.testing.expect(std.mem.indexOf(u8, description, route) != null);
+    try std.testing.expect(std.mem.endsWith(u8, description, "点击查看连接链路"));
+    const file = try V.HostRow.mount(h.cx, h.scope, .{ .protocol = "sftp", .name = "文件", .detail = "ops@files", .route = "本机 → 文件", .hops = 0, .online = true }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu });
+    try h.root.appendChild(h.cx.allocator, file.node);
+    h.frames();
+    try std.testing.expect(std.mem.endsWith(u8, file.route.behavior.interaction.a11y.?.description.?, "SFTP 暂不支持查看实时连接链路"));
 }
 
 test "sidebar host hover exposes only connect without activating the row" {

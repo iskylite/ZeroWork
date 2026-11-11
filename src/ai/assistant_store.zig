@@ -81,6 +81,12 @@ pub const Message = struct {
     }
 };
 pub const Phase = enum { idle, running, approval, done, failed, stopped };
+pub const CompactionActivity = struct {
+    after_message: ?usize,
+    status: @import("context_compaction.zig").Status = .running,
+    before_tokens: usize = 0,
+    after_tokens: usize = 0,
+};
 pub const State = struct {
     title: @import("conversation_title.zig").Title = .{},
     phase: Phase = .idle,
@@ -100,6 +106,7 @@ pub const State = struct {
     owner: scope.Owner,
     history: std.ArrayList(Message) = .empty,
     wire_history: @import("wire_history.zig").History = .{},
+    compaction_activity: ?CompactionActivity = null,
     stream: cards.Stream,
     current_turn: @import("conversation_turn.zig").Turn = .{},
     last_user_text: ?[]u8 = null,

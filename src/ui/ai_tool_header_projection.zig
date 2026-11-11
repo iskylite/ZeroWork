@@ -62,7 +62,7 @@ pub fn project(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]u8 {
     }
     // These are actual human-readable fields in the tool schemas, ordered by
     // their usefulness as a compact target. Never enumerate arbitrary JSON.
-    for ([_][]const u8{ "command", "path", "url", "name", "host", "query" }) |key| {
+    for ([_][]const u8{ "command", "path", "local_path", "remote_path", "source", "url", "name", "host", "query" }) |key| {
         if (parsed.value.object.get(key)) |value| {
             if (value == .string and value.string.len > 0) return singleLine(a, value.string);
         }

@@ -31,6 +31,9 @@ pub const Host = struct {
     status_bar: *ui.Node,
     key: ?OperationKey = null,
     colors: ?theme.Colors = null,
+    feedback: ui.widgets.popover.PopoverResult = undefined,
+    feedback_label: *ui.Node = undefined,
+    feedback_until_ms: ?f64 = null,
     editor: ?struct { context: *anyopaque, open: *const fn (*anyopaque, AssetOwner) anyerror!void } = null,
 
     pub fn bindEditor(self: *Host, context: *anyopaque, open: *const fn (*anyopaque, AssetOwner) anyerror!void) void {
@@ -50,6 +53,14 @@ pub const Host = struct {
         // callback context until that cleanup has run.
         try scope.onCleanup(Host, self, cleanup);
         registered = true;
+        self.feedback = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top, .anchor = .{ .virtual = .{ .ctx = self, .getRect = feedbackAnchor } }, .tier = .toast, .close_on_escape = false, .close_on_outside_click = false, .max_width = @as(f32, 360), .size_policy = .fit_content, .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
+        self.feedback.content.meta.ownership.meta.test_id = "sidebar.chain.feedback";
+        self.feedback.content.setStyleInline(cx.allocator, @import("sidebar_styles.zig").hint());
+        self.feedback.content.behavior.interaction.a11y = .{ .role = .status, .live = "polite" };
+        self.feedback_label = try ui.text(cx, "", .{ .font_size = 12, .color = theme.current().fg_1, .wrap = .word });
+        self.feedback_label.setStyleInline(cx.allocator, .{ .max_width = 340 });
+        try self.feedback.content.appendChild(cx.allocator, self.feedback_label);
+        try cx.root.?.appendChild(cx.allocator, self.feedback.wrapper);
         self.logs = try Logs.View.mount(cx, scope, .{ .context = self, .copy_logs = copy });
         self.view = try View.mount(cx, scope, .{ .context = self, .request_sample = requestSample, .cancel_sample = cancelSample, .copy = copy, .logs = openLogs });
         try cx.root.?.appendChild(cx.allocator, self.view.root);
@@ -113,7 +124,6 @@ pub const Host = struct {
             return;
         }
         if (tab.plugin_renderer) |renderer| if (renderer.vtable.connection_status) |project| {
-            self.view.dismiss();
             try self.ssh_status.updateGraphical(project(renderer.context));
             return;
         };
@@ -124,7 +134,6 @@ pub const Host = struct {
                 return;
             };
             const file = try SSH.FileActive.fromSession(owner, tab.tab_id, tab.file_ready and !tab.failed and !tab.closing, self.application.sessions.queryState(owner), if (source.value.name.len != 0) source.value.name else source.value.host);
-            if (self.view.isVisible()) self.view.dismiss();
             try self.ssh_status.updateFile(file);
             return;
         }
@@ -193,7 +202,17 @@ pub const Host = struct {
             show(renderer.context);
             return;
         };
-        if (tab.content_owner != .session or tab.local or tab.file_scope != null) return;
+        if (tab.file_scope != null) {
+            self.showFeedback("SFTP 暂不支持查看实时连接链路");
+            return;
+        }
+        if (tab.plugin_renderer != null) {
+            self.showFeedback("该连接类型暂不支持查看连接详情");
+            return;
+        }
+        if (tab.content_owner != .session or tab.local or tab.archived or tab.closing) return;
+        self.feedback.close.invoke();
+        self.feedback_until_ms = null;
         const snapshot = self.application.sshConnectionDetails(tab.content_owner.session) catch |err| {
             self.workspace.statusFailure(@errorName(err));
             return;
@@ -205,9 +224,28 @@ pub const Host = struct {
         self.capture(snapshot);
         self.view.show(snapshot, self.trigger, self.status_bar.globalRect().y) catch |err| self.workspace.statusFailure(@errorName(err));
     }
+    pub fn showFeedback(self: *Host, message: []const u8) void {
+        self.view.dismiss();
+        self.logs.hide();
+        self.feedback_label.setTextContent(self.cx.allocator, message) catch return;
+        self.feedback_until_ms = self.cx.frame_time_ms + 3000;
+        self.feedback.show.invoke();
+        self.cx.scheduleRedrawAfterNs(3000 * std.time.ns_per_ms);
+        self.cx.requestRedraw();
+    }
+    fn feedbackAnchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        return .{ .x = self.cx.viewport.width / 2, .y = self.cx.viewport.height - 40, .w = 0, .h = 0 };
+    }
 
     fn hook(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.feedback_until_ms) |deadline| {
+            if (self.cx.frame_time_ms >= deadline) {
+                self.feedback_until_ms = null;
+                self.feedback.close.invoke();
+            } else self.cx.scheduleRedrawAfterNs(@intFromFloat((deadline - self.cx.frame_time_ms) * std.time.ns_per_ms));
+        }
         self.refreshStatus() catch {};
         const colors = theme.current();
         if (self.colors == null or !std.meta.eql(self.colors.?, colors)) {
@@ -215,6 +253,8 @@ pub const Host = struct {
             // The SSH status host owns the trigger's live state tint.
             self.view.retheme() catch {};
             self.logs.retheme() catch {};
+            self.feedback.content.setStyleInline(self.cx.allocator, @import("sidebar_styles.zig").hint());
+            self.feedback_label.setTextColor(theme.current().fg_1);
             self.colors = colors;
         }
         if (!self.view.isVisible() and !self.logs.isVisible() and !self.ssh_status.info.isVisible()) return .done;

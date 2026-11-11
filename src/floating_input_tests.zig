@@ -195,3 +195,130 @@ test "floating input display only Tooltip drag ghosts and FPS remain pass throug
         try std.testing.expect(node.behavior.events.on_event == null);
     }
 }
+
+const Surface = @import("ui/floating_surface.zig").Surface;
+const FloatingCounters = struct {
+    clicks: usize = 0,
+    captures: usize = 0,
+    buttons: usize = 0,
+    fn capture(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        if (event == .mouse_down) self.captures += 1;
+        return .ignored;
+    }
+    fn clicked(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        if (event == .click) self.clicks += 1;
+        return .stop;
+    }
+    fn button(self: *@This()) void {
+        self.buttons += 1;
+    }
+};
+fn floatingCard(f: *Fixture, left: f32, top: f32, counter: *FloatingCounters) !*ui.Node {
+    const card = try ui.box(f.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = left }, .top = .{ .px = top } }, .width = .{ .px = 320 }, .height = .{ .px = 260 }, .hit_behavior = .@"opaque" }, .{});
+    card.behavior.events.on_event_capture = FloatingCounters.capture;
+    card.behavior.events.capture_context = counter;
+    card.behavior.events.on_event = FloatingCounters.clicked;
+    card.behavior.events.event_context = counter;
+    input.protect(f.cx, card);
+    const button = try ui.widgets.Button(.{ .label = "Child", .on_click = f.cx.on(FloatingCounters, counter, FloatingCounters.button), .base_style = ui.BoxStyle{ .width = .{ .px = 80 }, .height = .{ .px = 30 } } }).mount(f.scope, f.cx);
+    try card.appendChild(f.cx.allocator, button);
+    try f.background.appendChild(f.cx.allocator, card);
+    return card;
+}
+
+test "floating surfaces activate on open and child press with matching paint and hit order" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    var first: FloatingCounters = .{};
+    var second: FloatingCounters = .{};
+    const one = try floatingCard(f, 80, 80, &first);
+    _ = try Surface.mount(f.cx, f.scope, one);
+    const two = try floatingCard(f, 220, 130, &second);
+    const second_surface = try Surface.mount(f.cx, f.scope, two);
+    two.setDisplay(.none);
+    f.frames();
+    two.setDisplay(.flex);
+    f.frames();
+    try std.testing.expect(two.style.z_index() > one.style.z_index());
+    f.click(300, 230);
+    try std.testing.expectEqual(@as(usize, 1), second.clicks);
+    // The child consumes its own click. The surface must still activate before it.
+    f.click(100, 95);
+    f.frames();
+    try std.testing.expectEqual(@as(usize, 1), first.buttons);
+    try std.testing.expectEqual(@as(usize, 1), first.captures);
+    try std.testing.expect(one.style.z_index() > two.style.z_index());
+    const first_before = first.clicks;
+    const second_before = second.clicks;
+    f.click(300, 230);
+    try std.testing.expectEqual(first_before + 1, first.clicks);
+    try std.testing.expectEqual(second_before, second.clicks);
+    // Clicking the toolbar for an already visible surface uses the same activation.
+    second_surface.activate();
+    f.frames();
+    f.click(300, 230);
+    try std.testing.expectEqual(second_before + 1, second.clicks);
+    try std.testing.expectEqual(@as(usize, 0), f.clicks);
+}
+
+test "floating surfaces preserve reopen ordering bounded priority and modal shielding" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    var counters: FloatingCounters = .{};
+    const one = try floatingCard(f, 80, 80, &counters);
+    const first = try Surface.mount(f.cx, f.scope, one);
+    const two = try floatingCard(f, 220, 130, &counters);
+    const second = try Surface.mount(f.cx, f.scope, two);
+    f.frames();
+    for (0..1000) |_| {
+        first.activate();
+        second.activate();
+    }
+    try std.testing.expectEqual(@as(i16, 200), one.style.z_index());
+    try std.testing.expectEqual(@as(i16, 201), two.style.z_index());
+    two.setDisplay(.none);
+    f.frames();
+    first.activate();
+    two.setDisplay(.flex);
+    f.frames();
+    try std.testing.expect(two.style.z_index() > one.style.z_index());
+    const open = try f.scope.createSignal(bool, true);
+    const modal = try ui.widgets.Modal(.{ .open = open, .width = @as(f32, 420), .enter_transition = .none, .exit_transition = .none }).mount(f.scope, f.cx);
+    if (!modal.portaled) try f.cx.root.?.appendChild(f.cx.allocator, modal.overlay);
+    f.frames();
+    first.activate();
+    f.frames();
+    const before = counters.clicks;
+    const rect = modal.dialog.globalRect();
+    f.click(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    try std.testing.expectEqual(before, counters.clicks);
+    try std.testing.expectEqual(@as(usize, 0), f.clicks);
+}
+
+test "floating surface wrapper keeps empty space pass through and popovers above its content" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const wrapper = try ui.box(f.cx, .{ .position = .absolute, .inset = .{ .top = .{ .px = 80 } }, .width = .fill(), .direction = .row, .justify = .center, .hit_roles = .{ .pointer = false, .scroll = false } }, .{});
+    try f.background.appendChild(f.cx.allocator, wrapper);
+    _ = try Surface.mount(f.cx, f.scope, wrapper);
+    const card = try ui.box(f.cx, .{ .width = .{ .px = 320 }, .height = .{ .px = 260 }, .hit_behavior = .@"opaque" }, .{});
+    input.protect(f.cx, card);
+    try wrapper.appendChild(f.cx.allocator, card);
+    const open = try f.scope.createSignal(bool, false);
+    const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .width = @as(f32, 260), .position = .bottom_start, .enter_transition = .none, .exit_transition = .none }).mount(f.scope, f.cx);
+    try card.appendChild(f.cx.allocator, popup.wrapper);
+    popup.trigger.setStyleInline(f.cx.allocator, .{ .width = .{ .px = 80 }, .height = .{ .px = 30 } });
+    try popup.content.appendChild(f.cx.allocator, try ui.text(f.cx, "Owned bubble", .{}));
+    f.frames();
+    f.click(30, 100);
+    try std.testing.expectEqual(@as(usize, 1), f.clicks);
+    open.set(true);
+    f.frames();
+    const rect = popup.chrome.globalRect();
+    const before = f.clicks;
+    f.click(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    try std.testing.expect(open.peek());
+    try std.testing.expectEqual(before, f.clicks);
+}

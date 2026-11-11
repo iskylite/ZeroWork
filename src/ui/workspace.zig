@@ -280,6 +280,13 @@ pub const MenuBridge = struct {
     }
 };
 
+pub const ChainBridge = struct {
+    context: ?*anyopaque = null,
+    /// Opens the connection-chain card for an already resolved session tab.
+    open: ?*const fn (?*anyopaque, usize) void = null,
+    feedback: ?*const fn (?*anyopaque, []const u8) void = null,
+};
+
 pub const CloseRisk = struct {
     transfer: bool = false,
     ai_write: bool = false,
@@ -481,6 +488,10 @@ pub const Workspace = struct {
     /// Context-menu trigger seam (sidebar host rows, tab strip); owned by
     /// main.zig's MenuHost. Null keeps the legacy direct-connect behavior.
     menu_bridge: MenuBridge = .{},
+    /// Sidebar route marker seam: resolves the host's session tab, then asks
+    /// main.zig to open the shared connection-chain card. Null keeps the
+    /// marker informational.
+    chain_bridge: ChainBridge = .{},
     command_bridge: TerminalViewNode.PaletteObserver = .{ .on_command = ignoreCommand },
     input_bridge: ?TerminalViewNode.InputObserver = null,
     terminal_takeover_handler: ?@import("terminal_view.zig").TakeoverHandler = null,
@@ -1139,7 +1150,7 @@ pub const Workspace = struct {
                     .online = self.hostOnline(index),
                     .selected = self.selected_host == index,
                     .forward = self.backgroundForwardBadge(host.owner()),
-                }, .{ .context = context, .select = onSidebarSelect, .connect = onSidebarConnect, .menu = onSidebarMenu, .action = onSidebarAction });
+                }, .{ .context = context, .select = onSidebarSelect, .connect = onSidebarConnect, .menu = onSidebarMenu, .action = onSidebarAction, .chain = onSidebarChain });
                 context.node = row.node;
                 // Buttons already own their capture handler (status/actions).
                 // A parent drag binding preserves those handlers and normal clicks.
@@ -1314,6 +1325,47 @@ pub const Workspace = struct {
         cell.workspace.refreshSelection();
         cell.workspace.menu_bridge.fireHost(.host_right_click, index, node.globalRect());
     }
+    fn onSidebarChain(raw: *anyopaque) void {
+        const cell: *ClickCtx = @ptrCast(@alignCast(raw));
+        const index = sidebarIndex(cell) orelse return;
+        cell.workspace.openHostChain(index);
+    }
+    /// Sidebar route marker: open the shared chain card for this host's most
+    /// relevant live session. The card is a session view, so a host without an
+    /// open session reports that instead of inventing a chain.
+    pub fn openHostChain(self: *Workspace, host_index: usize) void {
+        const index = self.hostChainTab(host_index) orelse {
+            const message = "当前没有可查看连接链路的会话";
+            if (self.chain_bridge.feedback) |feedback| feedback(self.chain_bridge.context, message) else self.status(message);
+            return;
+        };
+        const open = self.chain_bridge.open orelse return;
+        open(self.chain_bridge.context, index);
+    }
+    fn hostChainTab(self: *const Workspace, host_index: usize) ?usize {
+        if (host_index >= self.registry.hosts.len) return null;
+        const host_id = self.identities.hostAt(host_index) orelse return null;
+        if (self.active_tab) |active| {
+            if (active < self.tabs.items.len and chainTabMatches(self.tabs.items[active], host_id)) return active;
+        }
+        for (self.model.recent.items) |id| {
+            const index = self.tabIndexById(id) orelse continue;
+            if (chainTabMatches(self.tabs.items[index], host_id)) return index;
+        }
+        // Retained panes in a group may not have their own top-level MRU entry.
+        var cursor = self.tabs.items.len;
+        while (cursor > 0) {
+            cursor -= 1;
+            if (chainTabMatches(self.tabs.items[cursor], host_id)) return cursor;
+        }
+        return null;
+    }
+    fn chainTabMatches(tab: *const SessionTab, host_id: HostId) bool {
+        if (tab.host_id != host_id) return false;
+        if (tab.local or tab.archived or tab.closing) return false;
+        if (tab.plugin_renderer != null) return true;
+        return tab.content_owner == .session;
+    }
     fn sidebarGroupColor(value: []const u8) ?ui.Color {
         if (value.len == 7 and value[0] == '#') return ui.Color.hex(std.fmt.parseInt(u24, value[1..], 16) catch return null);
         if (std.mem.eql(u8, value, "blue") or std.mem.eql(u8, value, "purple")) return app_theme.current().accent;
@@ -1411,14 +1463,26 @@ pub const Workspace = struct {
             if (tab.attention_started_ms == null) tab.attention_started_ms = self.cx.frame_time_ms;
             const elapsed = @max(0, self.cx.frame_time_ms - tab.attention_started_ms.?);
             node.type_icon.setStyle(self.allocator, .translate_y, tab_styles.attentionOffset(elapsed));
-            if (elapsed < tab_styles.attention_duration_ms) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            // Keep presenting the same real unread fact until a read receipt
+            // clears it. This clock publishes no new activity or notification.
+            // Inside a burst 60fps is needed; between bursts one coarse wake-up
+            // to the next burst is enough, so an idle unread tab does not keep
+            // the whole window rendering at 60fps.
+            const phase = @mod(elapsed, tab_styles.attention_period_ms);
+            if (phase < tab_styles.attention_duration_ms) {
+                self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            } else {
+                const until_next_ms = tab_styles.attention_period_ms - phase;
+                self.cx.scheduleRedrawAfterNs(@as(u64, @intFromFloat(until_next_ms * 1_000_000.0)));
+            }
         }
     }
     fn tabIsBouncing(self: *Workspace, id: identity.TabId) bool {
-        if (!self.tabHasActivity(id) or (self.cx.window_active and self.model.active == id)) return false;
-        const at = self.model.indexOf(id) orelse return false;
-        const started = self.model.tabs.items[at].attention_started_ms orelse return true;
-        return @max(0, self.cx.frame_time_ms - started) < tab_styles.attention_duration_ms;
+        // Stable presentation state: the menu bar rebuilds its rows from this
+        // value, so it must not flicker with each 480ms bounce phase. The
+        // translate_y animation is driven independently by the frame clock.
+        if (!self.tabHasActivity(id) or self.command_held) return false;
+        return !(self.cx.window_active and self.model.active == id);
     }
 
     fn tabHasActivity(self: *Workspace, id: identity.TabId) bool {
@@ -7204,7 +7268,7 @@ test "SSH middle menu bridge preserves the clicked handle across active changes 
     try std.testing.expectEqual(@as(usize, 1), sink.calls);
 }
 
-test "notification output keeps marker colors and stops old unread animation across rebuilds" {
+test "notification output keeps marker colors and keeps bouncing across rebuilds until read" {
     const allocator = std.testing.allocator;
     const cx = try ui.Cx.init(allocator, std.testing.io);
     defer cx.deinit();
@@ -7326,17 +7390,24 @@ test "notification output keeps marker colors and stops old unread animation acr
     try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[1].type_icon.style.translate_y);
     try std.testing.expect(workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
     try std.testing.expect(!workspace.tabPresentation(.{ .session = second_owner }).?.icon_bouncing);
+    // One real unread fact is presented continuously. Repeat boundaries and
+    // strip rebuilds must not stop it, and must not re-arm its clock (which
+    // would publish the old fact as a brand new activity episode).
+    const started = workspace.model.tabs.items[workspace.model.indexOf(first_tab_id).?].attention_started_ms.?;
     cx.frame_time_ms = 2000;
     workspace.refreshNotificationAttention();
-    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
-    try std.testing.expect(!workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
+    try std.testing.expect(workspace.tab_nodes.items[0].type_icon.style.translate_y != 0);
+    try std.testing.expect(workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
     try workspace.renderTabBar();
     workspace.refreshNotificationAttention();
-    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
-    try std.testing.expect(!workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
+    try std.testing.expect(workspace.tab_nodes.items[0].type_icon.style.translate_y != 0);
+    try std.testing.expect(workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
+    try std.testing.expectEqual(started, workspace.model.tabs.items[workspace.model.indexOf(first_tab_id).?].attention_started_ms.?);
+    // A real read receipt is the only thing that stops the animation.
     try std.testing.expect(coordinator.markRead(.{ .session = first_owner }, 7, true));
     workspace.refreshNotificationAttention();
     try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    try std.testing.expect(!workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
     _ = try coordinator.observeOutput(.{ .session = first_owner }, 8);
     workspace.model.active = first_tab_id;
     workspace.refreshNotificationAttention();
@@ -7349,7 +7420,7 @@ test "notification output keeps marker colors and stops old unread animation acr
     try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
 }
 
-test "notification standalone Local tab settles without new activity and does not restart old unread output" {
+test "unread Local tab keeps bouncing until read; rebuilds and foreground switches never re-arm old output" {
     const allocator = std.testing.allocator;
     const cx = try ui.Cx.init(allocator, std.testing.io);
     defer cx.deinit();
@@ -7412,31 +7483,128 @@ test "notification standalone Local tab settles without new activity and does no
     workspace.refreshNotificationAttention();
     try std.testing.expectApproxEqAbs(@as(f32, -3), workspace.tab_nodes.items[0].type_icon.style.translate_y, 0.01);
     try std.testing.expect(workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
-    // Exactly one burst, including the former 1600ms repeat boundary.
+    const started = workspace.model.tabs.items[0].attention_started_ms.?;
+    // The same unread fact keeps bouncing past every 1600ms repeat boundary.
+    // Timers, rebuilds and foreground switches never re-arm its clock.
     for ([_]f64{ 580, 1720, 3320 }) |now| {
         cx.frame_time_ms = now;
         workspace.refreshNotificationAttention();
-        try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
-        try std.testing.expect(!workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
+        try std.testing.expect(workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
+        try std.testing.expectEqual(started, workspace.model.tabs.items[0].attention_started_ms.?);
     }
+    cx.frame_time_ms = 1720;
+    workspace.refreshNotificationAttention();
+    try std.testing.expect(workspace.tab_nodes.items[0].type_icon.style.translate_y != 0);
     try workspace.renderTabBar();
     workspace.refreshNotificationAttention();
+    try std.testing.expect(workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
+    try std.testing.expectEqual(started, workspace.model.tabs.items[0].attention_started_ms.?);
     cx.window_active = true;
     workspace.refreshNotificationAttention();
     cx.window_active = false;
     _ = try coordinator.observeOutput(.{ .session = owner }, 8);
     workspace.refreshNotificationAttention();
     try std.testing.expect(coordinator.hasDot(.{ .session = owner }));
-    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
-    try std.testing.expect(!workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
-    // A real read receipt permits a later unread episode to animate again.
+    try std.testing.expect(workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
+    try std.testing.expectEqual(started, workspace.model.tabs.items[0].attention_started_ms.?);
+    // A real read receipt stops the animation; a later episode starts fresh.
     try std.testing.expect(coordinator.markRead(.{ .session = owner }, 8, true));
     workspace.refreshNotificationAttention();
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    try std.testing.expect(!workspace.tabPresentation(.{ .session = owner }).?.icon_bouncing);
     _ = try coordinator.observeOutput(.{ .session = owner }, 9);
     workspace.refreshNotificationAttention();
     cx.frame_time_ms += 120;
     workspace.refreshNotificationAttention();
     try std.testing.expectApproxEqAbs(@as(f32, -3), workspace.tab_nodes.items[0].type_icon.style.translate_y, 0.01);
+}
+
+test "session-level tab activity bounces until read and respects the tab_dot gate" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const strip = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 46 }, .flex_shrink = 0 }, .{});
+    try root.appendChild(allocator, strip);
+    const area = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .flex = 1, .direction = .column }, .{});
+    try root.appendChild(allocator, area);
+    const empty = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .position = .absolute }, .{});
+    try area.appendChild(allocator, empty);
+    const sidebar = try ui.box(cx, .{ .display = .none }, .{});
+    try root.appendChild(allocator, sidebar);
+    const config: config_mod.Config = .{};
+    const workspace = try allocator.create(Workspace);
+    workspace.* = .{
+        .allocator = allocator,
+        .cx = cx,
+        .scope = scope,
+        .io = std.testing.io,
+        .app_config = &config,
+        .palette = Palette.fromTheme(),
+        .registry = .{ .arena = std.heap.ArenaAllocator.init(allocator), .hosts = &.{} },
+        .hosts_path = "",
+        .sidebar_list = sidebar,
+        .tab_bar = strip,
+        .model = .{ .allocator = allocator, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) },
+        .terminal_area = area,
+        .empty_state = empty,
+    };
+    try scope.onCleanup(Workspace, workspace, Workspace.cleanup);
+    cx.setViewport(1194, 800);
+    const handle: identity.SessionHandle = .{ .session_id = @fromBackingInt(77) };
+    const owner: identity.ContentOwner = .{ .session = handle };
+    const session = try workspace.createLocalSessionDirect(handle);
+    workspace.updateLocalState(session, .running, "");
+    try workspace.renderTabBar();
+    const notifications = @import("../host/notification_coordinator.zig");
+    const activity = @import("../host/activity_badge.zig");
+    var coordinator = try notifications.Coordinator.init(allocator, .{}, .{});
+    defer coordinator.deinit();
+    var tracker: activity.Tracker = .{ .allocator = allocator };
+    defer tracker.deinit();
+    const Attention = struct {
+        coordinator: *notifications.Coordinator,
+        tracker: *activity.Tracker,
+        enabled: bool = true,
+        fn hasDot(raw: ?*anyopaque, value: identity.ContentOwner) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (!self.enabled) return false;
+            return self.coordinator.hasDot(value) or self.tracker.hasTabActivity(value);
+        }
+    };
+    var attention = Attention{ .coordinator = &coordinator, .tracker = &tracker };
+    cx.window_active = false;
+    cx.frame_time_ms = 100;
+    workspace.setNotificationAttentionBridge(.{ .context = &attention, .has_dot = Attention.hasDot });
+    try std.testing.expect(!workspace.tabPresentation(owner).?.icon_bouncing);
+    // A host-confirmed session event (transfer/AI completion) drives the tab
+    // without going through the system notification switches.
+    try tracker.observeTabActivity(owner);
+    workspace.refreshNotificationAttention();
+    cx.frame_time_ms = 220;
+    workspace.refreshNotificationAttention();
+    try std.testing.expectApproxEqAbs(@as(f32, -3), workspace.tab_nodes.items[0].type_icon.style.translate_y, 0.01);
+    try std.testing.expect(workspace.tabPresentation(owner).?.icon_bouncing);
+    // tab_dot gates every attention source, not just the coordinator path.
+    attention.enabled = false;
+    workspace.refreshNotificationAttention();
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    try std.testing.expect(!workspace.tabPresentation(owner).?.icon_bouncing);
+    attention.enabled = true;
+    workspace.refreshNotificationAttention();
+    try std.testing.expect(workspace.tabPresentation(owner).?.icon_bouncing);
+    // The same unread fact is still presented past a repeat boundary.
+    cx.frame_time_ms = 1940;
+    workspace.refreshNotificationAttention();
+    try std.testing.expect(workspace.tab_nodes.items[0].type_icon.style.translate_y != 0);
+    // Only a real read receipt stops it.
+    try std.testing.expect(tracker.markTabRead(owner));
+    workspace.refreshNotificationAttention();
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    try std.testing.expect(!workspace.tabPresentation(owner).?.icon_bouncing);
 }
 
 test "Local rename survives same title startup but rejects real title or owner changes" {
@@ -8082,6 +8250,80 @@ test "repeated close on retained closing tab reaches the same owner bridge" {
     workspace.requestCloseTab(0);
     try std.testing.expectEqual(@as(usize, 2), retry.calls);
     try std.testing.expect(tab.closing);
+}
+
+test "sidebar chain resolves the host tab and reports a host without a session" {
+    const Capture = struct {
+        index: ?usize = null,
+        message: ?[]const u8 = null,
+        fn open(raw: ?*anyopaque, index: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.index = index;
+        }
+        fn feedback(raw: ?*anyopaque, message: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.message = message;
+        }
+    };
+    var capture: Capture = .{};
+    var tab_first: SessionTab = undefined;
+    tab_first.host_id = 7;
+    tab_first.tab_id = @fromBackingInt(11);
+    tab_first.local = false;
+    tab_first.archived = false;
+    tab_first.closing = false;
+    tab_first.plugin_renderer = null;
+    tab_first.file_scope = null;
+    tab_first.content_owner = .{ .session = .{ .session_id = @fromBackingInt(21) } };
+    var tab_second: SessionTab = undefined;
+    tab_second.host_id = 7;
+    tab_second.tab_id = @fromBackingInt(12);
+    tab_second.local = false;
+    tab_second.archived = false;
+    tab_second.closing = false;
+    tab_second.plugin_renderer = null;
+    tab_second.file_scope = null;
+    tab_second.content_owner = .{ .session = .{ .session_id = @fromBackingInt(22) } };
+    var tabs = [_]*SessionTab{ &tab_first, &tab_second };
+    var identity_hosts = [_]HostId{ 7, 8 };
+    var host_configs: [2]hosts_mod.HostConfig = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var workspace: Workspace = undefined;
+    workspace.tabs = .empty;
+    workspace.tabs.items = &tabs;
+    workspace.tabs.capacity = tabs.len;
+    workspace.identities = .{ .hosts = .empty };
+    workspace.identities.hosts.items = &identity_hosts;
+    workspace.identities.hosts.capacity = identity_hosts.len;
+    workspace.registry = .{ .arena = arena, .hosts = &host_configs };
+    workspace.chain_bridge = .{ .context = &capture, .open = Capture.open, .feedback = Capture.feedback };
+    workspace.model = .{ .allocator = std.testing.allocator, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) };
+    defer workspace.model.deinit();
+    try workspace.model.recent.appendSlice(std.testing.allocator, &.{ tab_first.tab_id, tab_second.tab_id });
+    workspace.active_tab = null;
+    workspace.status_feedback = null;
+    workspace.status_node = null;
+    workspace.command_output = null;
+    // No session for this host: never invent a chain, just report it.
+    workspace.openHostChain(1);
+    try std.testing.expectEqual(@as(?usize, null), capture.index);
+    try std.testing.expectEqualStrings("当前没有可查看连接链路的会话", capture.message.?);
+    // Recently used wins even when another tab was created later.
+    workspace.openHostChain(0);
+    try std.testing.expectEqual(@as(?usize, 0), capture.index);
+    // The active tab of the same host takes precedence.
+    workspace.active_tab = 1;
+    workspace.openHostChain(0);
+    try std.testing.expectEqual(@as(?usize, 1), capture.index);
+    // A closing/archived tab is never used; file sessions reach the presenter
+    // so unsupported capability is not misreported as "not connected".
+    tab_second.closing = true;
+    tab_first.file_scope = @ptrFromInt(@alignOf(ui.Scope));
+    workspace.openHostChain(0);
+    try std.testing.expectEqual(@as(?usize, 0), capture.index);
+    tab_first.archived = true;
+    try std.testing.expectEqual(@as(?usize, null), workspace.hostChainTab(0));
 }
 
 test "mixed session group mounts terminal file KVM and future content and retains split proportions and resize cursor" {

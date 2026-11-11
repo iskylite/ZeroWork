@@ -43,6 +43,7 @@ pub const Bridge = struct {
     queued_length: usize = 0,
     start_deadline: i64 = 0,
     input_end: ?usize = null,
+    interrupt_end: ?usize = null,
     input_start: usize = 0,
     input_bytes: usize = 0,
     last_input_sequence: u64 = 0,
@@ -129,6 +130,7 @@ pub const Bridge = struct {
         self.queued_end = null;
         self.start_deadline = 0;
         self.input_end = null;
+        self.interrupt_end = null;
         self.last_input_sequence = 0;
         self.start_pending = false;
         self.end_pending = false;
@@ -184,6 +186,11 @@ pub const Bridge = struct {
             self.lease.draining = false;
             self.changed();
         };
+        if (self.interrupt_end) |end| if (read == end) {
+            self.interrupt_end = null;
+            self.lease.draining = false;
+            self.changed();
+        };
         if (self.active and self.snapshot.start == null and self.start_deadline != 0 and now >= self.start_deadline) self.fail("ShellStartMissing");
         if (self.lease.holder != null and now >= self.lease.expires_at) self.handoff(queue, false);
         if (self.snapshot.started_at != 0 and self.snapshot.process == null) self.snapshot.elapsed_ms = @intCast(@max(0, now - self.snapshot.started_at));
@@ -194,7 +201,9 @@ pub const Bridge = struct {
     }
     pub fn revoke(self: *Bridge, grant: execution.Grant, takeover: bool, queue: *Queue, write_inflight: bool, now: i64) !void {
         try self.lease.check(grant, now);
-        if (!takeover and self.snapshot.submit_sent) return error.UnsupportedInteraction;
+        // Preserve an in-flight native write's exact buffer. The controller
+        // retries Stop against this same grant once that write has drained.
+        if (!takeover and (write_inflight or (self.queued_end != null and self.snapshot.submit_native_bytes != 0))) return error.WorkerBusy;
         // Only untouched, not-yet-native bytes can be cancelled. Once a native
         // call started, finish its exact buffer before admitting user keys.
         if (self.queued_end != null and self.snapshot.submit_native_bytes == 0 and !write_inflight) {
@@ -207,7 +216,18 @@ pub const Bridge = struct {
             self.input_end = null;
             if (self.snapshot.input_receipt) |*receipt| receipt.stage = .cancelled_unsent;
         }
-        self.handoff(queue, write_inflight);
+        if (!takeover and self.snapshot.submit_sent) {
+            if (queue.pending() != 0) return error.WorkerBusy;
+            if (self.active and self.snapshot.process == null) {
+                // Match a human Ctrl+C on this PTY. This is only an input
+                // write; retain shell observation until a real END arrives.
+                try queue.push("\x03");
+                self.interrupt_end = queue.write_index.load(.acquire);
+            }
+            self.snapshot.input_wait = null;
+            self.lease.revoke(self.interrupt_end != null);
+            self.changed();
+        } else self.handoff(queue, write_inflight);
     }
     fn handoff(self: *Bridge, queue: *const Queue, write_inflight: bool) void {
         self.snapshot.input_handed_off = true;
@@ -268,7 +288,7 @@ pub const Bridge = struct {
             receipt.stage = .outcome_unknown;
         };
         self.active = false;
-        self.lease.revoke(self.queued_end != null or self.input_end != null);
+        self.lease.revoke(self.queued_end != null or self.input_end != null or self.interrupt_end != null);
         self.changed();
     }
     pub fn settled(self: *Bridge, revision: u64, failed: bool) void {
@@ -403,7 +423,7 @@ pub const Bridge = struct {
     // Swap only shell activity. OSC parsing, initialization and the one PTY
     // input lease remain owned by this root bridge.
     fn swapActivity(self: *Bridge, other: *Bridge) void {
-        inline for (.{ "switch_input", "switch_tracking", "snapshot", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "prompt_offset", "debug_start", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
+        inline for (.{ "switch_input", "switch_tracking", "snapshot", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "prompt_offset", "debug_start", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "interrupt_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
             std.mem.swap(@FieldType(Bridge, name), &@field(self, name), &@field(other, name));
         }
     }
@@ -607,7 +627,7 @@ pub const Bridge = struct {
                 self.snapshot.state = .process_finished;
                 self.snapshot.input_wait = null;
                 self.active = false;
-                self.lease.revoke(self.queued_end != null or self.input_end != null);
+                self.lease.revoke(self.queued_end != null or self.input_end != null or self.interrupt_end != null);
                 self.changed();
             },
             else => {},
@@ -730,6 +750,64 @@ test "SSH pending input takeover cancels only untouched bytes" {
     try std.testing.expectEqual(@as(usize, 0), queue.pending());
     try std.testing.expectEqual(.cancelled_unsent, bridge.snapshot.input_receipt.?.stage);
     try std.testing.expect(bridge.active);
+}
+
+test "SSH shell Stop sends one Ctrl+C and waits for native drain and real completion" {
+    var bridge = Bridge.init(std.testing.allocator, .{ .session_id = @fromBackingInt(1) });
+    defer bridge.deinit();
+    var harness = Harness{ .bridge = &bridge };
+    var queue = try Queue.init(std.testing.allocator, 8192);
+    defer queue.deinit(std.testing.allocator);
+    bridge.output("\x1b]133;A\x07\x1b]133;B\x07", harness.sink(), 1);
+    try bridge.begin(Harness.request("read answer"), 2);
+    bridge.prepared(@splat('a'), 1, 1);
+    try bridge.enqueue(&queue);
+    const grant = bridge.lease.holder.?;
+    // An unacknowledged libssh2 write must retain the original command.
+    try std.testing.expectError(error.WorkerBusy, bridge.revoke(grant, false, &queue, true, 3));
+    try queue.consume(2);
+    bridge.written(&queue, 3);
+    try std.testing.expectError(error.WorkerBusy, bridge.revoke(grant, false, &queue, false, 3));
+    try queue.consume(queue.pending());
+    bridge.written(&queue, 4);
+    bridge.output("\x1b]133;C\x07", harness.sink(), 5);
+    _ = try bridge.sendInput(.{ .grant = grant, .wait_sequence = bridge.snapshot.input_wait.?.sequence, .input_sequence = 1, .kind = .text, .text = "unsent answer" }, &queue, 6);
+    try bridge.revoke(grant, false, &queue, false, 7);
+    var bytes: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("\x03", queue.peek(&bytes));
+    try std.testing.expectEqual(.cancelled_unsent, bridge.snapshot.input_receipt.?.stage);
+    try std.testing.expect(bridge.active and !bridge.snapshot.local_released and !bridge.snapshot.input_handed_off);
+    try std.testing.expect(bridge.snapshot.process == null and bridge.snapshot.input_wait == null);
+    try std.testing.expectError(error.TerminalControlled, bridge.ordinaryInput());
+    try std.testing.expectError(error.StaleFence, bridge.revoke(grant, false, &queue, false, 8));
+    try std.testing.expectEqualStrings("\x03", queue.drain(&bytes));
+    bridge.written(&queue, 9);
+    try std.testing.expect(bridge.snapshot.local_released and bridge.snapshot.process == null);
+    bridge.output("\x1b]133;D;130\x07\x1b]133;A\x07\x1b]133;B\x07", harness.sink(), 10);
+    try std.testing.expectEqual(@as(?u8, 130), bridge.snapshot.process.?.exit_code);
+    bridge.recorded(2);
+    var successor = Harness.request("sleep 30");
+    successor.execution_id = .generate();
+    successor.expected_input_epoch = bridge.snapshot.input_epoch;
+    try bridge.begin(successor, 11);
+    try std.testing.expectError(error.StaleFence, bridge.revoke(grant, false, &queue, false, 12));
+    try std.testing.expectEqual(@as(usize, 0), queue.pending());
+}
+
+test "SSH shell Stop cancels an untouched command without sending Ctrl+C" {
+    var bridge = Bridge.init(std.testing.allocator, .{ .session_id = @fromBackingInt(1) });
+    defer bridge.deinit();
+    var harness = Harness{ .bridge = &bridge };
+    var queue = try Queue.init(std.testing.allocator, 8192);
+    defer queue.deinit(std.testing.allocator);
+    bridge.output("\x1b]133;A\x07\x1b]133;B\x07", harness.sink(), 1);
+    try bridge.begin(Harness.request("sleep 30"), 2);
+    bridge.prepared(@splat('a'), 1, 1);
+    try bridge.enqueue(&queue);
+    try bridge.revoke(bridge.lease.holder.?, false, &queue, false, 3);
+    try std.testing.expectEqual(@as(usize, 0), queue.pending());
+    try std.testing.expectEqual(.cancelled_unsent, bridge.snapshot.state);
+    try std.testing.expect(bridge.snapshot.local_released and bridge.snapshot.input_ready and !bridge.snapshot.submit_sent);
 }
 
 test "SSH initialization ACK checks nonce sequence size and split frames" {

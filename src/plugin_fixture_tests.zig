@@ -260,7 +260,7 @@ fn execute(table: *tools.RequestTable, parsed: tools.ParsedCall, live: scope.Sco
     const target_binding = parsed.entry.targets[0];
     return target_binding.binding.handler(target_binding.context, .{ .owner = target_binding.owner, .operation_id = id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = arguments, .arguments_hash = parsed.arguments_hash }, a);
 }
-test "fixture observe is immutable PNG input changes canvas always_confirm refuses zero dispatch approves once" {
+test "fixture observe is immutable PNG input changes canvas confirm mode approves one write" {
     var controller_context: ContextDriver = .{ .challenge = challenges.Host.init(a) };
     defer controller_context.challenge.deinit();
     const plugin = try fixture.Plugin.init(a);
@@ -326,20 +326,21 @@ test "fixture observe is immutable PNG input changes canvas always_confirm refus
     const write_args = "{\"session_ids\":[1],\"powered\":false}";
     var write = try table.parse(a, "fixture_uprobe__write", write_args);
     defer write.deinit();
-    try std.testing.expectError(error.ToolApprovalRequired, execute(&table, write, captured, &members, .{ .full_control = true }, null, 0, 4, write_args));
+    const confirm_policy: tools.Policy = .{ .engine = .{ .mode = .confirm } };
+    try std.testing.expectError(error.ToolApprovalRequired, execute(&table, write, captured, &members, confirm_policy, null, 0, 4, write_args));
     var approval = try tools.ApprovalTicket.create(&table, write, 0, 1000);
-    try std.testing.expectError(error.ToolApprovalRequired, execute(&table, write, captured, &members, .{ .full_control = true }, &approval, 0, 4, write_args));
+    try std.testing.expectError(error.ToolApprovalRequired, execute(&table, write, captured, &members, confirm_policy, &approval, 0, 4, write_args));
     approval.approve();
-    try std.testing.expectError(error.ToolApprovalExpired, execute(&table, write, captured, &members, .{ .full_control = true }, &approval, 1000, 4, write_args));
+    try std.testing.expectError(error.ToolApprovalExpired, execute(&table, write, captured, &members, confirm_policy, &approval, 1000, 4, write_args));
     try std.testing.expectEqual(@as(usize, 0), runtime.write_events);
     const changed_args = "{\"session_ids\":[1],\"powered\":true}";
     var changed_write = try table.parse(a, "fixture_uprobe__write", changed_args);
     defer changed_write.deinit();
-    try std.testing.expectError(error.ToolApprovalChanged, execute(&table, changed_write, captured, &members, .{ .full_control = true }, &approval, 1, 4, changed_args));
+    try std.testing.expectError(error.ToolApprovalChanged, execute(&table, changed_write, captured, &members, confirm_policy, &approval, 1, 4, changed_args));
     try std.testing.expectEqual(@as(usize, 0), runtime.write_events);
-    var result = try execute(&table, write, captured, &members, .{ .full_control = true }, &approval, 1, 4, write_args);
+    var result = try execute(&table, write, captured, &members, confirm_policy, &approval, 1, 4, write_args);
     defer result.deinit(a);
-    try std.testing.expectError(error.ToolApprovalAlreadyUsed, execute(&table, write, captured, &members, .{ .full_control = true }, &approval, 1, 4, write_args));
+    try std.testing.expectError(error.ToolApprovalAlreadyUsed, execute(&table, write, captured, &members, confirm_policy, &approval, 1, 4, write_args));
     try std.testing.expectEqual(@as(usize, 1), runtime.write_events);
     const lease = input.automation.?;
     input.setFocus(true, true);

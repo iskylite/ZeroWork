@@ -6,9 +6,14 @@ pub const gap: f32 = 4;
 pub const title_font: f32 = 12.5;
 pub const title_weight: u16 = 500;
 pub const attention_border_width: f32 = 0;
+/// One bounce burst is 480ms; an unread background tab repeats the burst every
+/// 1600ms until its content is actually read. Repeating the *presentation* of
+/// one real unread fact must never publish a second activity event, system
+/// notification, or menu-bar count.
 pub const attention_duration_ms: f64 = 480;
+pub const attention_period_ms: f64 = 1600;
 pub fn attentionOffset(elapsed_ms: f64) f32 {
-    const phase = @max(0, elapsed_ms);
+    const phase = @mod(@max(0, elapsed_ms), attention_period_ms);
     if (phase >= attention_duration_ms) return 0;
     const amplitude: f64 = if (phase < 240) 3 else 1.5;
     return @floatCast(-amplitude * @sin(@mod(phase, 240) / 240 * @import("std").math.pi));

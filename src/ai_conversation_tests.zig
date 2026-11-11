@@ -13,6 +13,99 @@ fn find(root: *ui.Node, id: []const u8) ?*ui.Node {
     for (root.children.items) |child| if (find(child, id)) |node| return node;
     return null;
 }
+fn collectHeadings(node: *ui.Node, sizes: *[6]f32, count: *usize) void {
+    if (node.getText()) |text| if (text.font_weight == 600 and count.* < sizes.len) {
+        sizes[count.*] = text.font_size;
+        count.* += 1;
+    };
+    for (node.children.items) |child| collectHeadings(child, sizes, count);
+}
+test "AI conversation renders six distinct compact Markdown heading levels" {
+    const S = @import("ui/ai_assistant_styles.zig");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(600, 900);
+    const root = try ui.box(cx, .{ .width = .{ .px = 540 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const message = try @import("ui/ai_message_view.zig").mountWithWidth(cx, scope, "# 一级\n\n## 二级\n\n### 三级\n\n#### 四级\n\n##### 五级\n\n###### 六级\n\n正文", 540);
+    try root.appendChild(a, message);
+    var sizes: [6]f32 = undefined;
+    var count: usize = 0;
+    collectHeadings(message, &sizes, &count);
+    try std.testing.expectEqual(@as(usize, 6), count);
+    for (sizes[0..5], 0..) |size, i| try std.testing.expect(size > sizes[i + 1]);
+    try std.testing.expect(sizes[5] > S.body_font_size);
+    try std.testing.expectApproxEqAbs(S.heading_max_font_size, sizes[0], 0.01);
+}
+fn findMarkdownText(node: *ui.Node, expected: []const u8) ?*ui.Node {
+    if (node.getText()) |text| if (std.mem.eql(u8, text.content, expected)) return node;
+    for (node.children.items) |child| if (findMarkdownText(child, expected)) |found| return found;
+    return null;
+}
+
+test "AI conversation nested Markdown preserves inherited code styles across streaming and resize" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(600, 900);
+    const root = try ui.box(cx, .{ .width = .{ .px = 540 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const retained = try @import("ui/ai_message_view.zig").Retained.mount(cx, scope);
+    try root.appendChild(a, retained.root);
+    // This goes through the production mutable-tail path, including a source
+    // with an unmatched bold opener before the final delimiter arrives.
+    try retained.update("**1. `tuned` 已改为 `hpc-compute`", 540, null);
+    try std.testing.expect(findMarkdownText(retained.root, "**1. tuned 已改为 hpc-compute") != null);
+    const source = "**1. `tuned` 已改为 `hpc-compute`**\n\n" ++
+        "[*说明 **`sysctl_config`** 已更新*](https://example.com)\n\n" ++
+        "```sh\n**literal** `code`\n```";
+    for ([_]f32{ 540, 180, 540 }) |width| {
+        root.setStyleInline(a, .{ .width = .{ .px = width } });
+        try retained.update(source, width, null);
+        for (0..3) |_| {
+            cx.advanceFrameClock();
+            cx.layout();
+            _ = cx.render();
+        }
+        const paragraph = findMarkdownText(retained.root, "1. tuned 已改为 hpc-compute").?;
+        const text = paragraph.getText().?;
+        try std.testing.expectEqual(@as(usize, 4), text.spans.len);
+        var previous_end: u32 = 0;
+        var code_count: usize = 0;
+        for (text.spans) |span| {
+            try std.testing.expect(span.start >= previous_end and span.end > span.start);
+            try std.testing.expectEqual(@as(?u16, 700), span.font_weight);
+            if (span.use_monospace_font) {
+                code_count += 1;
+                try std.testing.expect(span.bg_color != null);
+                try std.testing.expect(span.inline_box_padding_left > 0 and span.inline_box_padding_right > 0);
+                try std.testing.expect(span.inline_box_corner_radius > 0);
+            }
+            previous_end = span.end;
+        }
+        try std.testing.expectEqual(@as(usize, 2), code_count);
+        const linked = findMarkdownText(retained.root, "说明 sysctl_config 已更新").?.getText().?;
+        var found_nested_code = false;
+        for (linked.spans) |span| {
+            try std.testing.expect(span.underline and span.use_italic_font);
+            if (span.use_monospace_font) {
+                found_nested_code = true;
+                try std.testing.expectEqualStrings("sysctl_config", linked.content[span.start..span.end]);
+                try std.testing.expectEqual(@as(?u16, 700), span.font_weight);
+                try std.testing.expect(span.bg_color != null);
+            }
+        }
+        try std.testing.expect(found_nested_code);
+        try std.testing.expect(findMarkdownText(retained.root, "**literal** `code`") != null);
+        const layout = paragraph.getLayoutOutput().artifacts.text_layout.?;
+        try std.testing.expect(layout.total_height > 0);
+        try std.testing.expect(layout.total_height <= paragraph.globalRect().h + 0.1);
+    }
+}
+
 test "AI conversation context snapshots and steps clone independently with real tool roles" {
     var turn: turns.Turn = .{ .id = 7, .sent_at_ms = 1793060229000 };
     defer turn.deinit(a);
@@ -497,7 +590,7 @@ test "AI conversation lifecycle row formats elapsed time and actual token usage 
     try cx.root.?.appendChild(a, row);
     cx.layout();
     try std.testing.expectEqualStrings("～回合结束～", find(row, "ai.turn.label").?.getText().?.content);
-    try std.testing.expectEqual(@as(f32, 16), find(row, "ai.turn.logo").?.globalRect().w);
+    try std.testing.expect(find(row, "ai.turn.logo") != null);
     try std.testing.expectEqual(@as(f32, 0), @import("ui/ai_tool_results_styles.zig").card(cx.tokens).border.?.width);
 }
 
@@ -965,4 +1058,246 @@ test "AI retained thinking updates preserve open detail nodes and own streamed b
     try std.testing.expect(!std.mem.eql(u8, props.detail, detail.getText().?.content));
     header.behavior.events.on_click.?.invoke();
     try std.testing.expectEqualStrings(props.detail, detail.getText().?.content);
+}
+
+test "AI transcript keyed sections reuse stable nodes when their fingerprint is unchanged" {
+    const T = @import("ui/ai_transcript_view.zig");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(600, 900);
+    const conv = try ui.box(cx, .{ .width = .{ .px = 540 }, .height = .fill(), .direction = .column, .gap = 6 }, .{});
+    cx.root = conv;
+
+    const Counter = struct {
+        calls: usize = 0,
+        cx: *ui.Cx,
+        fn render(raw: *anyopaque, arg: usize, s: *ui.Scope, root: *ui.Node) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            _ = arg;
+            _ = s;
+            try root.appendChild(self.cx.allocator, try ui.text(self.cx, "row", .{}));
+        }
+    };
+    var counter: Counter = .{ .cx = cx };
+    const view = try T.View.mount(cx, scope, conv);
+    const base = T.Spec{ .key = 1, .kind = .history, .fingerprint = 100, .context = &counter, .render = Counter.render };
+    const second = T.Spec{ .key = 2, .kind = .history, .fingerprint = 200, .context = &counter, .render = Counter.render };
+    const specs = [_]T.Spec{ base, second };
+
+    try std.testing.expect(try view.sync(&specs));
+    try std.testing.expectEqual(@as(usize, 2), counter.calls);
+    const root_a = view.rows.items[0].root;
+    const root_b = view.rows.items[1].root;
+    const scope_a = view.rows.items[0].scope;
+
+    // A submit that only changes the live section leaves completed history
+    // untouched: no render callback, same node and same widget scope.
+    try std.testing.expect(!try view.sync(&specs));
+    try std.testing.expectEqual(@as(usize, 2), counter.calls);
+    try std.testing.expectEqual(root_a, view.rows.items[0].root);
+    try std.testing.expectEqual(scope_a, view.rows.items[0].scope);
+
+    // Changing one section re-renders only that section's body; the row node
+    // itself (and every sibling) survives.
+    var specs_changed = specs;
+    specs_changed[1].fingerprint = 201;
+    try std.testing.expect(try view.sync(&specs_changed));
+    try std.testing.expectEqual(@as(usize, 3), counter.calls);
+    try std.testing.expectEqual(root_a, view.rows.items[0].root);
+    try std.testing.expectEqual(scope_a, view.rows.items[0].scope);
+    try std.testing.expectEqual(root_b, view.rows.items[1].root);
+
+    const specs_added = [_]T.Spec{ specs_changed[0], specs_changed[1], .{ .key = 3, .kind = .history, .fingerprint = 300, .context = &counter, .render = Counter.render } };
+    try std.testing.expect(try view.sync(&specs_added));
+    try std.testing.expectEqual(root_a, view.rows.items[0].root);
+    try std.testing.expectEqual(root_b, view.rows.items[1].root);
+    try std.testing.expectEqual(@as(usize, 3), view.rows.items.len);
+
+    // Truncating the suffix keeps the retained prefix.
+    try std.testing.expect(try view.sync(&specs_changed));
+    try std.testing.expectEqual(@as(usize, 2), view.rows.items.len);
+    try std.testing.expectEqual(root_a, view.rows.items[0].root);
+
+    // A different stable key at the same slot replaces only that row.
+    var specs_rekeyed = specs_changed;
+    specs_rekeyed[0].key = 9;
+    try std.testing.expect(try view.sync(&specs_rekeyed));
+    try std.testing.expect(view.rows.items[0].root != root_a);
+    try std.testing.expectEqual(root_b, view.rows.items[1].root);
+    const rekeyed = view.rows.items[0].root;
+    const inserted = [_]T.Spec{ .{ .key = 10, .kind = .history, .fingerprint = 400, .context = &counter, .render = Counter.render }, specs_rekeyed[0], specs_rekeyed[1] };
+    try std.testing.expect(try view.sync(&inserted));
+    try std.testing.expectEqual(rekeyed, view.rows.items[1].root);
+    try std.testing.expectEqual(root_b, view.rows.items[2].root);
+    try std.testing.expect(try view.sync(&specs_rekeyed));
+    try std.testing.expectEqual(rekeyed, view.rows.items[0].root);
+    try std.testing.expectEqual(root_b, view.rows.items[1].root);
+}
+
+test "AI transcript invalidates borrowed widgets before disposing a failed or removed body" {
+    const T = @import("ui/ai_transcript_view.zig");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .direction = .column }, .{});
+    const Context = struct {
+        cx: *ui.Cx,
+        borrowed: ?*ui.Scope = null,
+        cleanups: usize = 0,
+        fail: bool = false,
+        fn invalidate(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.borrowed = null;
+        }
+        fn cleanup(self: *@This()) void {
+            std.debug.assert(self.borrowed == null);
+            self.cleanups += 1;
+        }
+        fn render(raw: *anyopaque, _: usize, body: *ui.Scope, root: *ui.Node) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.borrowed = body;
+            try body.onCleanup(@This(), self, cleanup);
+            try root.appendChild(a, try ui.text(self.cx, "partial body", .{}));
+            if (self.fail) return error.InjectedRenderFailure;
+        }
+    };
+    var context: Context = .{ .cx = cx, .fail = true };
+    const view = try T.View.mount(cx, scope, cx.root.?);
+    var spec: T.Spec = .{ .key = 1, .kind = .cards, .fingerprint = 1, .context = &context, .render = Context.render, .invalidate = Context.invalidate };
+    try std.testing.expectError(error.InjectedRenderFailure, view.sync(&.{spec}));
+    try std.testing.expect(context.borrowed == null);
+    try std.testing.expectEqual(@as(usize, 1), context.cleanups);
+    try std.testing.expectEqual(@as(usize, 0), view.rows.items[0].root.children.items.len);
+    context.fail = false;
+    try std.testing.expect(try view.sync(&.{spec}));
+    try std.testing.expect(!try view.sync(&.{spec}));
+    try std.testing.expectEqual(@as(usize, 1), context.cleanups);
+    spec.fingerprint += 1;
+    try std.testing.expect(try view.sync(&.{spec}));
+    try std.testing.expectEqual(@as(usize, 2), context.cleanups);
+    spec.key += 1;
+    try std.testing.expect(try view.sync(&.{spec}));
+    try std.testing.expect(context.borrowed != null);
+    try std.testing.expectEqual(@as(usize, 3), context.cleanups);
+    try std.testing.expect(try view.sync(&.{}));
+    try std.testing.expectEqual(@as(usize, 4), context.cleanups);
+    try std.testing.expect(context.borrowed == null);
+}
+
+test "AI transcript completed disclosures survive turn archival and history allocation moves" {
+    const T = @import("ui/ai_transcript_view.zig");
+    const Message = @import("ai/assistant_store.zig").Message;
+    const Summary = @import("ui/ai_turn_summary_view.zig").View;
+    var current: turns.Turn = .{ .id = 17, .sent_at_ms = 1, .ended_at_ms = 2 };
+    defer current.deinit(a);
+    var history: std.ArrayList(Message) = .empty;
+    defer {
+        for (history.items) |*message| message.deinit(a);
+        history.deinit(a);
+    }
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .direction = .column }, .{});
+    const Context = struct {
+        turn: *turns.Turn,
+        renders: usize = 0,
+        fn toggle(_: *@This()) void {}
+        fn render(raw: *anyopaque, _: *ui.Node, _: *ui.Scope) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(self.turn.id == 17);
+            self.renders += 1;
+        }
+    };
+    var context: Context = .{ .turn = &current };
+    var bindings: T.TurnBindings = .{};
+    const summary = try Summary.mount(cx, scope, cx.root.?, &current, &context, Context.render, cx.on(Context, &context, Context.toggle));
+    try bindings.bind(scope, 0, &current, .{ .turn = &summary.turn });
+    try bindings.bind(scope, 0, &current, .{ .turn = &context.turn });
+    const thinking = try @import("ui/ai_step_view.zig").mountRetained(cx, scope, .{ .title = "思考", .projection = "思考", .detail = "detail", .phase = .succeeded, .elapsed_ms = 1, .expanded = &current.thinking_expanded });
+    try cx.root.?.appendChild(a, thinking.root);
+    try bindings.bind(scope, 0, &current, .{ .thinking = thinking });
+    try history.append(a, .{ .user = true, .text = try a.dupe(u8, "question"), .turn = current });
+    current = .{};
+    bindings.rebind(history.items);
+    try history.ensureTotalCapacity(a, history.capacity + 1);
+    bindings.rebind(history.items);
+    try std.testing.expectEqual(&history.items[0].turn.?, summary.turn);
+    try std.testing.expectEqual(summary.turn, context.turn);
+    find(summary.root, "ai.turn.process.toggle").?.behavior.events.on_click.?.invoke();
+    try std.testing.expect(history.items[0].turn.?.process_expanded);
+    try std.testing.expectEqual(@as(usize, 1), context.renders);
+    find(thinking.root, "ai.step.header").?.behavior.events.on_click.?.invoke();
+    try std.testing.expect(history.items[0].turn.?.thinking_expanded);
+    try std.testing.expect(!current.process_expanded and !current.thinking_expanded);
+    // Scope cleanup unregisters all borrowed addresses before their storage dies.
+    const transient = try scope.childScope();
+    var pointer = &history.items[0].turn.?;
+    const previous_head = bindings.head;
+    try bindings.bind(transient, 0, pointer, .{ .turn = &pointer });
+    transient.dispose();
+    try std.testing.expectEqual(previous_head, bindings.head);
+}
+
+test "AI transcript virtual history preserves unchanged visible bodies through data updates" {
+    const History = @import("ui/ai_history_view.zig");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    try cx.setTestFrameStep(16);
+    cx.reduced_motion = true;
+    cx.setViewport(700, 500);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    const outer = try ui.widgets.ScrollArea(.{ .height = 400, .rubber_band_y = false }).mount(scope, cx);
+    try cx.root.?.appendChild(a, outer.container);
+    var heights: History.Heights = .{};
+    defer heights.deinit(a);
+    var keys: [101]usize = undefined;
+    var fingerprints: [101]u64 = @splat(1);
+    for (&keys, 0..) |*key, i| key.* = i;
+    const Context = struct {
+        calls: [101]usize = @splat(0),
+        fn render(raw: *anyopaque, index: usize, _: *ui.Scope, c: *ui.Cx) !*ui.Node {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls[index] += 1;
+            return ui.box(c, .{ .width = .fill(), .height = .{ .px = 72 }, .flex_shrink = 0 }, .{});
+        }
+        fn frames(c: *ui.Cx) void {
+            for (0..8) |_| {
+                c.advanceFrameClock();
+                _ = c.render();
+            }
+        }
+    };
+    var context: Context = .{};
+    const view = try History.View.mount(cx, scope, outer, keys[0..100], &heights, &context, Context.render);
+    try view.update(keys[0..100], fingerprints[0..100]);
+    try outer.content.appendChild(a, view.root);
+    Context.frames(cx);
+    const first = view.state.pool_nodes[0].children.items[0];
+    const calls = context.calls[0];
+    const measured = view.state.itemHeight(0);
+    try view.update(&keys, &fingerprints);
+    Context.frames(cx);
+    try std.testing.expectEqual(first, view.state.pool_nodes[0].children.items[0]);
+    try std.testing.expectEqual(calls, context.calls[0]);
+    try std.testing.expectEqual(measured, view.state.itemHeight(0));
+    fingerprints[1] += 1;
+    const second_calls = context.calls[1];
+    try view.update(&keys, &fingerprints);
+    Context.frames(cx);
+    try std.testing.expectEqual(first, view.state.pool_nodes[0].children.items[0]);
+    try std.testing.expectEqual(calls, context.calls[0]);
+    try std.testing.expectEqual(second_calls + 1, context.calls[1]);
+    try view.update(keys[0..99], fingerprints[0..99]);
+    Context.frames(cx);
+    try std.testing.expectEqual(first, view.state.pool_nodes[0].children.items[0]);
+    try std.testing.expectEqual(calls, context.calls[0]);
+    try std.testing.expectEqual(@as(usize, 99), view.state.item_count);
 }

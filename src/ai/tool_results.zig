@@ -170,6 +170,19 @@ pub const Store = struct {
         }
         self.recount();
     }
+    pub fn keepTurnPrefix(self: *Store, turn: *const @import("conversation_turn.zig").Turn) void {
+        var i = self.records.items.len;
+        while (i > 0) {
+            i -= 1;
+            const record = self.records.items[i];
+            if (record.turn_id != turn.id) continue;
+            const keep = for (turn.timeline.items) |item| {
+                if (item == .tool and std.mem.eql(u8, turn.steps.items[item.tool].call_id, record.call_id)) break true;
+            } else false;
+            if (!keep) self.releaseRecord(self.records.orderedRemove(i));
+        }
+        self.recount();
+    }
     pub fn cloneTurns(self: *Store, messages: []const @import("assistant_store.zig").Message) !Store {
         var result = Store.init(self.allocator);
         errdefer result.deinit();

@@ -1288,7 +1288,7 @@ fn run(entry: *Entry) void {
         if (entry.execution_interrupt_requested) {
             // A private preexec event can precede the external process's
             // foreground-group installation. Retry only a known-unsent local
-            // signal request, never an acknowledged signal or PTY bytes.
+            // interrupt request, never an acknowledged signal or Ctrl+C write.
             const interrupted = if (entry.process) |*process| if (process.process) |native_process| native.zw_local_interrupt_foreground(native_process) == 1 else false else false;
             if (interrupted) entry.execution_interrupt_requested = false else if (nowMs() >= entry.execution_interrupt_deadline) {
                 entry.execution_interrupt_requested = false;

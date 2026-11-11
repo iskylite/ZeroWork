@@ -447,6 +447,15 @@ int zw_local_foreground(ZW_LOCAL_PROCESS *p, ZW_LOCAL_FOREGROUND *out) {
     return found;
 }
 int zw_local_interrupt_foreground(ZW_LOCAL_PROCESS *p) {
+    /* Builtins such as read run in the persistent shell's own group. Deliver
+     * the terminal's Ctrl+C there instead of excluding that foreground or
+     * sending a process signal that could terminate the persistent shell. */
+    if (!p || p->closed || p->fd < 0 || !still_owned(p, &p->leader)) return 0;
+    if (tcgetpgrp(p->fd) == p->pid) {
+        const unsigned char interrupt = 3;
+        ssize_t count = write(p->fd, &interrupt, 1);
+        return count == 1 ? 1 : (count < 0 && errno != EAGAIN && errno != EINTR ? -1 : 0);
+    }
     ZW_LOCAL_FOREGROUND foreground;
     if (!zw_local_foreground(p, &foreground) || foreground.process_group == p->pid ||
         foreground.session_id != p->sid || tcgetpgrp(p->fd) != foreground.process_group ||

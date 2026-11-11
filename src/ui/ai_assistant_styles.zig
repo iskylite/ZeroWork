@@ -103,7 +103,7 @@ pub fn assistantMessage() ui.BoxStyle {
     return .{ .width = .fill(), .min_width = 0, .direction = .column, .gap = 4, .flex_shrink = 0 };
 }
 pub fn markdownOptions() ui.widgets.MarkdownOptions {
-    return .{ .base_font_size = 12.5, .code_font_size = 11, .text_color = theme.current().fg_1, .code_color = theme.current().fg_1, .code_bg = theme.popupInset(), .link_color = theme.current().accent_ink, .rule_color = theme.current().border, .heading_color = theme.current().fg_1, .paragraph_gap = 4, .line_height = 1.65, .code_line_height = 16.0 / 11.0 };
+    return .{ .base_font_size = body_font_size, .code_font_size = 11, .text_color = theme.current().fg_1, .code_color = theme.current().fg_1, .code_bg = theme.popupInset(), .link_color = theme.current().accent_ink, .rule_color = theme.current().border, .heading_color = theme.current().fg_1, .paragraph_gap = 4, .line_height = body_line_height, .code_line_height = 16.0 / 11.0 };
 }
 
 pub const table_min_column_width: f32 = 40;
@@ -128,7 +128,12 @@ pub fn tableCell(width: f32, is_header: bool, first_column: bool) ui.BoxStyle {
 
 pub const body_font_size: f32 = 12.5;
 pub const body_line_height: f32 = 1.65;
+/// Zenit's Markdown renderer emits h1..h6 at `base_font_size * mdHeadingSizeMul(level)`,
+/// spanning 1.0×..1.4×. AI bubbles remap that whole range onto these two sizes so
+/// all six levels stay visually ordered with a compact per-line rhythm.
+pub const heading_scale_max: f32 = 1.4;
 pub const heading_font_size: f32 = 13;
+pub const heading_max_font_size: f32 = 15.5;
 
 /// Match the floating shell's lower corners without rounding the divider edge.
 pub fn finishComposer(cx: *ui.Cx, node: *ui.Node) void {
@@ -155,4 +160,15 @@ pub fn codeWrapButton(wrapped: bool) ButtonStyle {
     var style = windowControl();
     if (wrapped) style.background = theme.current().accent_ink.withAlpha(40);
     return style;
+}
+
+// Same compact body rhythm inside nested lists and blockquotes.
+pub fn markdownContainer(quoted: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .direction = .row, .align_items = .start, .gap = if (quoted) 8 else 6, .padding = if (quoted) .{ .left = 8, .top = 2, .bottom = 2 } else .{}, .flex_shrink = 0 };
+}
+pub fn markdownQuoteBar() ui.BoxStyle {
+    return .{ .width = .{ .px = 3 }, .height = .fill(), .align_self = .stretch, .background = theme.current().border, .flex_shrink = 0 };
+}
+pub fn markdownListMarker() ui.TextStyle {
+    return .{ .font_size = body_font_size, .line_height = body_line_height, .color = theme.current().fg_1 };
 }

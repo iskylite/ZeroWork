@@ -79,6 +79,7 @@ pub const Turn = struct {
     before: wire.History = .{},
     after: wire.History = .{},
     answer: []u8 = &.{},
+    process_expanded: bool = false,
     timeline: std.ArrayList(TimelineItem) = .empty,
     step_groups: std.ArrayList(*@import("step_groups.zig").State) = .empty,
     open_segment: ?usize = null,
@@ -237,8 +238,99 @@ pub const Turn = struct {
         self.host_notices.appendAssumeCapacity(notice);
         self.timeline.appendAssumeCapacity(.{ .notice = self.host_notices.items.len - 1 });
     }
+    pub fn inputSegment(self: *const Turn, id: identity.SubmissionId) ?*Segment {
+        for (self.timeline.items) |item| if (item == .input) {
+            if (item.input.submission) |submission| if (submission.eql(id)) return item.input;
+        };
+        return null;
+    }
+    /// Match inputs in order, including repeated text. Refuse a compacted or
+    /// incomplete checkpoint rather than patching an unrelated user message.
+    pub fn inputLocation(self: *const Turn, id: identity.SubmissionId) !struct { timeline: usize, wire: usize } {
+        if (self.after.messages.len <= self.before.messages.len) return error.NoStableCheckpoint;
+        for (self.before.messages, self.after.messages[0..self.before.messages.len]) |before, after| {
+            if (before.role != after.role or !std.mem.eql(u8, before.content, after.content)) return error.NoStableCheckpoint;
+        }
+        if (self.after.messages[self.before.messages.len].role != .user) return error.NoStableCheckpoint;
+        var offset = self.before.messages.len + 1;
+        for (self.timeline.items, 0..) |item, index| if (item == .input) {
+            while (offset < self.after.messages.len and self.after.messages[offset].role != .user) : (offset += 1) {}
+            if (offset == self.after.messages.len or !std.mem.eql(u8, self.after.messages[offset].content, item.input.text.items)) return error.NoStableCheckpoint;
+            if (item.input.submission) |submission| if (submission.eql(id)) return .{ .timeline = index, .wire = offset };
+            offset += 1;
+        };
+        return error.StaleTurn;
+    }
+    pub fn prefixBeforeInput(self: *const Turn, a: std.mem.Allocator, id: identity.SubmissionId) !Turn {
+        const location = try self.inputLocation(id);
+        var result = try self.clone(a);
+        errdefer result.deinit(a);
+        var after = try wire.History.copy(a, self.after.messages[0..location.wire], "");
+        errdefer after.deinit();
+        result.after.deinit();
+        result.after = after;
+        after = .{};
+        for (result.timeline.items[location.timeline..]) |item| item.deinit(a);
+        result.timeline.shrinkRetainingCapacity(location.timeline);
+        result.open_segment = null;
+        result.prose.clearRetainingCapacity();
+        result.thinking.clearRetainingCapacity();
+        var steps: usize = 0;
+        var notices: usize = 0;
+        for (result.timeline.items) |item| switch (item) {
+            .message => |segment| try result.prose.appendSlice(a, segment.text.items),
+            .thinking => |segment| try result.thinking.appendSlice(a, segment.text.items),
+            .tool => |index| steps = @max(steps, index + 1),
+            .notice => |index| notices = @max(notices, index + 1),
+            .input => {},
+        };
+        for (result.steps.items[steps..]) |*step| step.deinit(a);
+        result.steps.shrinkRetainingCapacity(steps);
+        for (result.host_notices.items[notices..]) |notice| a.free(notice.text);
+        result.host_notices.shrinkRetainingCapacity(notices);
+        var kept: usize = 0;
+        for (result.step_groups.items) |group| {
+            if (group.first < location.timeline) {
+                result.step_groups.items[kept] = group;
+                kept += 1;
+            } else group.release();
+        }
+        result.step_groups.shrinkRetainingCapacity(kept);
+        const answer = try a.dupe(u8, result.prose.items);
+        a.free(result.answer);
+        result.answer = answer;
+        result.round_timeline_len = result.timeline.items.len;
+        result.round_steps_len = steps;
+        result.round_text_offset = result.prose.items.len;
+        result.round_thinking_offset = result.thinking.items.len;
+        result.input_tokens = null;
+        result.output_tokens = null;
+        result.request_count = null;
+        return result;
+    }
+    /// Locate the retained final response, including split text segments. The
+    /// process view stops here; the authoritative final answer renders once.
+    pub fn finalResponseStart(self: *const Turn) usize {
+        if (self.answer.len == 0) return self.timeline.items.len;
+        var remaining = self.answer.len;
+        var i = self.timeline.items.len;
+        while (i > 0) {
+            i -= 1;
+            switch (self.timeline.items[i]) {
+                .thinking => {},
+                .message => |segment| {
+                    const text = segment.text.items;
+                    if (text.len > remaining or !std.mem.endsWith(u8, self.answer[0..remaining], text)) break;
+                    remaining -= text.len;
+                    if (remaining == 0) return i;
+                },
+                else => break,
+            }
+        }
+        return self.timeline.items.len;
+    }
     pub fn clone(self: *const Turn, a: std.mem.Allocator) !Turn {
-        var result: Turn = .{ .id = self.id, .task_id = self.task_id, .sent_at_ms = self.sent_at_ms, .ended_at_ms = self.ended_at_ms, .started_mono_ms = self.started_mono_ms, .elapsed_ms = self.elapsed_ms, .input_tokens = self.input_tokens, .output_tokens = self.output_tokens, .request_count = self.request_count, .thinking_started_ms = self.thinking_started_ms, .thinking_ended_ms = self.thinking_ended_ms, .thinking_expanded = self.thinking_expanded };
+        var result: Turn = .{ .id = self.id, .task_id = self.task_id, .sent_at_ms = self.sent_at_ms, .ended_at_ms = self.ended_at_ms, .started_mono_ms = self.started_mono_ms, .elapsed_ms = self.elapsed_ms, .input_tokens = self.input_tokens, .output_tokens = self.output_tokens, .request_count = self.request_count, .thinking_started_ms = self.thinking_started_ms, .thinking_ended_ms = self.thinking_ended_ms, .thinking_expanded = self.thinking_expanded, .process_expanded = self.process_expanded };
         errdefer result.deinit(a);
         result.file_source = if (self.file_source) |source| try source.clone(a) else null;
         result.before = try wire.History.copy(a, self.before.messages, "");
@@ -473,4 +565,73 @@ test "steering timeline splits groups and survives retries cloning and presentat
     // Reconciliation/retry must not insert an already consumed message twice.
     try recovered.applyEvent(a, .{ .kind = .input, .submission = id, .detail = "补充消息", .phase = .succeeded, .at_ms = 9 });
     try std.testing.expectEqual(@as(usize, 4), recovered.timeline.items.len);
+}
+
+test "steering message actions locate repeated inputs and preserve the exact rollback prefix" {
+    const a = std.testing.allocator;
+    var turn: Turn = .{ .id = 5, .ended_at_ms = 100 };
+    defer turn.deinit(a);
+    const first = identity.SubmissionId.generate();
+    const second = identity.SubmissionId.generate();
+    turn.before = try wire.History.copy(a, &.{.{ .content = "older turn" }}, "");
+    turn.after = try wire.History.copy(a, &.{
+        .{ .content = "older turn" },                  .{ .content = "initial" },
+        .{ .role = .assistant, .content = "before" },  .{ .content = "same text" },
+        .{ .role = .assistant, .content = "between" }, .{ .content = "same text" },
+        .{ .role = .assistant, .content = "after" },
+    }, "");
+    try turn.applyEvent(a, .{ .kind = .text, .phase = .succeeded, .detail = "before", .at_ms = 1 });
+    try turn.applyEvent(a, .{ .call_id = "prior", .phase = .succeeded, .at_ms = 2 });
+    try turn.applyEvent(a, .{ .kind = .input, .phase = .succeeded, .submission = first, .detail = "same text", .at_ms = 3 });
+    try turn.applyEvent(a, .{ .kind = .text, .phase = .succeeded, .detail = "between", .at_ms = 4 });
+    try turn.applyEvent(a, .{ .kind = .input, .phase = .succeeded, .submission = second, .detail = "same text", .at_ms = 5 });
+    try turn.applyEvent(a, .{ .call_id = "later", .phase = .succeeded, .at_ms = 6 });
+    try turn.applyEvent(a, .{ .kind = .text, .phase = .succeeded, .detail = "after", .at_ms = 7 });
+    try @import("step_groups.zig").sync(a, &turn, false);
+    try std.testing.expectEqual(@as(usize, 3), (try turn.inputLocation(first)).wire);
+    try std.testing.expectEqual(@as(usize, 5), (try turn.inputLocation(second)).wire);
+    var edited = (try turn.after.editedUser(a, (try turn.inputLocation(second)).wire, "same text", "edited second")).?;
+    defer edited.deinit();
+    try std.testing.expectEqualStrings("same text", edited.messages[3].content);
+    try std.testing.expectEqualStrings("edited second", edited.messages[5].content);
+    var prefix = try turn.prefixBeforeInput(a, second);
+    defer prefix.deinit(a);
+    try std.testing.expect(prefix.hasInput(first) and !prefix.hasInput(second));
+    try std.testing.expectEqual(@as(usize, 5), prefix.after.messages.len);
+    try std.testing.expectEqual(@as(usize, 1), prefix.steps.items.len);
+    try std.testing.expectEqualStrings("prior", prefix.steps.items[0].call_id);
+    try std.testing.expectEqualStrings("beforebetween", prefix.answer);
+    try std.testing.expectEqual(@as(usize, 4), prefix.timeline.items.len);
+    try std.testing.expectEqual(@as(usize, 1), prefix.step_groups.items.len);
+    try std.testing.expect(turn.hasInput(second));
+    var immediate: Turn = .{ .ended_at_ms = 100 };
+    defer immediate.deinit(a);
+    immediate.after = try wire.History.copy(a, &.{ .{ .content = "initial" }, .{ .content = "same text" } }, "");
+    try immediate.applyEvent(a, .{ .kind = .input, .phase = .succeeded, .submission = first, .detail = "same text", .at_ms = 1 });
+    var empty_prefix = try immediate.prefixBeforeInput(a, first);
+    defer empty_prefix.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), empty_prefix.timeline.items.len);
+    try std.testing.expectEqual(@as(usize, 1), empty_prefix.after.messages.len);
+    // The original survives a compacted/mismatched context; never guess by text.
+    turn.before.deinit();
+    turn.before = try wire.History.copy(a, &.{.{ .content = "compacted" }}, "");
+    try std.testing.expectError(error.NoStableCheckpoint, turn.inputLocation(second));
+}
+
+test "steering message rollback prefix allocation failures preserve the original" {
+    const Scenario = struct {
+        fn run(a: std.mem.Allocator) !void {
+            var turn: Turn = .{ .ended_at_ms = 20 };
+            defer turn.deinit(a);
+            const id = identity.SubmissionId.generate();
+            turn.after = try wire.History.copy(a, &.{ .{ .content = "first" }, .{ .role = .assistant, .content = "before" }, .{ .content = "steer" } }, "");
+            try turn.applyEvent(a, .{ .kind = .text, .phase = .succeeded, .detail = "before", .at_ms = 1 });
+            try turn.applyEvent(a, .{ .kind = .input, .phase = .succeeded, .submission = id, .detail = "steer", .at_ms = 2 });
+            var prefix = try turn.prefixBeforeInput(a, id);
+            defer prefix.deinit(a);
+            try std.testing.expect(turn.hasInput(id));
+            try std.testing.expectEqualStrings("before", prefix.answer);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
 }

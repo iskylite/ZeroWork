@@ -5,15 +5,17 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-11-06-ime-source-context-preservation+floating-shadow-clip` (upstream revision and license unchanged)
+- Local patch revision: `2026-11-11-markdown-inline-inheritance` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3507` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `7e1b424a3c544a3c981066e7cc22eacf22628aede7d43025cf5b3cec5679ee10`
+- Canonical tracked-tree SHA-256: `0aefcbfae15bdfaeb77be4d12e55d10bcdcedb41ea31617adc06335acf94b093`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
+
+The Markdown inline patch recursively parses bold, italic and link labels with inherited styles, emitting ordered non-overlapping text spans. Inline code remains literal and retains emphasis plus its monospace font, foreground, background, padding and corner radius. Delimiter matching skips code and link destinations, and malformed nesting has bounded depth and search. Parser, allocation-failure and ZeroWork streaming/resize regressions cover these combinations. Upstream revision, public API, license and toolchain are unchanged.
 
 The floating-shadow patch keeps glass surfaces’ outer shadows outside their own overflow clip, while clipping descendants at the rounded panel boundary. It covers plain and composited glass panels, including retained rendering. The public API, upstream revision, license and toolchain are unchanged.
 

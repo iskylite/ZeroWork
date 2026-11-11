@@ -237,20 +237,20 @@ pub const View = struct {
             self.accept_label.set(switch (pending.kind) {
                 .mcp => "批准这次 MCP 调用",
                 .network_url => "批准这次本机网络读取",
-                .lifecycle => if (saving_host) "批准保存这台主机" else "批准这次会话管理操作",
+                .lifecycle => if (saving_host) "批准保存这台主机" else if (@import("../ai/host_transfer.zig").supports(pending.tool.text())) "批准这次文件传输操作" else "批准这次会话管理操作",
                 .terminal_command => if (interaction) "批准这次受控输入" else "批准这次终端命令",
             });
             self.reject_label.set(switch (pending.kind) {
                 .mcp => "拒绝这次 MCP 调用",
                 .network_url => "拒绝这次本机网络读取",
-                .lifecycle => if (saving_host) "拒绝保存这台主机" else "拒绝这次会话管理操作",
+                .lifecycle => if (saving_host) "拒绝保存这台主机" else if (@import("../ai/host_transfer.zig").supports(pending.tool.text())) "拒绝这次文件传输操作" else "拒绝这次会话管理操作",
                 .terminal_command => if (interaction) "拒绝这次受控输入" else "拒绝这次终端命令",
             });
             self.copy_label.set(if (pending.kind == .network_url) "复制完整请求 URL" else "复制完整操作详情");
             try self.source.setTextContent(self.cx.allocator, switch (pending.kind) {
                 .mcp => "来源 · 当前任务 · 外部 MCP 服务",
                 .network_url => "来源 · 本机网络 · HTTP/HTTPS GET",
-                .lifecycle => "来源 · 当前对话 · 会话管理",
+                .lifecycle => if (@import("../ai/host_transfer.zig").supports(pending.tool.text())) "来源 · 当前对话 · 文件传输" else "来源 · 当前对话 · 会话管理",
                 .terminal_command => if (interaction) "来源 · 已授权执行 · 受控交互输入" else "来源 · 当前对话 · 交互式终端命令",
             });
             try self.feedback.setTextContent(self.cx.allocator, if (pending.impact.len != 0) pending.impact.text() else switch (pending.kind) {
@@ -271,7 +271,7 @@ pub const View = struct {
         self.accept_label.set(switch (pending.kind) {
             .mcp => "批准这次 MCP 调用",
             .network_url => "批准这次本机网络读取",
-            .lifecycle => if (std.mem.eql(u8, pending.tool.text(), "host.create_host")) "批准保存这台主机" else "批准这次会话管理操作",
+            .lifecycle => if (std.mem.eql(u8, pending.tool.text(), "host.create_host")) "批准保存这台主机" else if (@import("../ai/host_transfer.zig").supports(pending.tool.text())) "批准这次文件传输操作" else "批准这次会话管理操作",
             .terminal_command => if (std.mem.eql(u8, pending.tool.text(), "host.send_execution_input")) "批准这次受控输入" else "批准这次终端命令",
         });
         try self.state_label.setTextContent(self.cx.allocator, "待确认");

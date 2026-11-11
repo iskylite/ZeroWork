@@ -253,6 +253,9 @@ def execute(args, shell, mode, output):
             checks["initializer_echo_absent_from_vt_and_recording"] = all(
                 marker in result.stderr for marker in
                 ("INITIALIZER_ECHO_PASS vt=true", "INITIALIZER_ECHO_PASS recording=true"))
+        if mode == "stop":
+            checks["external_and_builtin_interrupted"] = "external_and_builtin_interrupted=true same_session=true" in result.stderr
+            checks["one_ctrl_c_per_command"] = fixture.inputs.count(b"\x03") == 2
         if mode == "attach-timeout":
             checks["abort_barrier_and_retry"] = "nonce_barrier=true retry_same_pty=true no_payload_echo=true" in result.stderr
             checks["abort_payload_not_echoed"] = b"_zwP+=" not in fixture.outputs
@@ -303,7 +306,7 @@ def main():
     parser.add_argument("--runner", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--shell", action="append", choices=["/bin/bash", "/bin/zsh"])
-    parser.add_argument("--mode", choices=["nominal", "disconnect", "recording-unavailable", "disabled", "existing", "disabled-existing", "history-reopen", "init-retry-success", "init-retry-fail", "reconnect-startup", "nested", "attach-timeout"])
+    parser.add_argument("--mode", choices=["nominal", "stop", "disconnect", "recording-unavailable", "disabled", "existing", "disabled-existing", "history-reopen", "init-retry-success", "init-retry-fail", "reconnect-startup", "nested", "attach-timeout"])
     args = parser.parse_args()
     reports = []
     for shell in args.shell or ["/bin/bash", "/bin/zsh"]:

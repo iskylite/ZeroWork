@@ -344,6 +344,9 @@ pub const HostCallbacks = struct {
     select: *const fn (*anyopaque) void,
     connect: *const fn (*anyopaque) void,
     menu: *const fn (*anyopaque, *ui.Node) void,
+    /// Opens the live connection chain for this host. Null keeps the route
+    /// marker read-only (tests and hosts without a session owner).
+    chain: ?*const fn (*anyopaque) void = null,
 };
 pub const ForwardBadge = struct { port: ?u16, phase: @import("socks_background_model.zig").Phase };
 pub const HostData = struct { protocol: []const u8 = "SSH", supports_route: bool = true, icon: ?ui.SvgAsset = null, kind: @import("session_icon.zig").Kind = .terminal, name: []const u8, detail: []const u8, route: []const u8, hops: usize, online: bool, selected: bool = false, forward: ?ForwardBadge = null };
@@ -356,6 +359,7 @@ pub const HostRow = struct {
     supports_route: bool,
     route: *ui.Node,
     route_label: ?*ui.Node = null,
+    chain_hint: ?ui.widgets.popover.PopoverResult = null,
     actions: *ui.Node,
     dot: *ui.Node,
     online: bool,
@@ -415,8 +419,12 @@ pub const HostRow = struct {
         self.tail = tail;
         tail.meta.ownership.meta.test_id = "sidebar.host.tail";
         try trailing.appendChild(cx.allocator, tail);
-        const route = try ui.box(cx, S.route(), .{});
+        const route = if (data.supports_route)
+            try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "连接链路", .base_style = S.route(), .hover_style = hover, .on_event = chainEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx)
+        else
+            try ui.box(cx, S.route(), .{});
         route.meta.ownership.meta.test_id = "sidebar.host.route";
+        var chain_hint_text: []const u8 = "";
         if (data.supports_route) {
             const icon = try ui.iconTintStyled(cx, ui.icons.get("route").?, T.current().fg_2, S.routeIcon());
             icon.meta.ownership.meta.test_id = "sidebar.host.route-icon";
@@ -430,6 +438,12 @@ pub const HostRow = struct {
             try badge.appendChild(cx.allocator, hops);
             try route.appendChild(cx.allocator, badge);
             self.route_label = hops;
+            const description = try chainHintText(cx.allocator, data);
+            defer cx.allocator.free(description);
+            chain_hint_text = (try scope.createText(description, .{})).peek();
+            // The marker is the per-host entry to the live chain card. It stays
+            // a 24x24 transparent box; only the hit target and hint are added.
+            route.behavior.interaction.a11y = .{ .role = .button, .label = "连接链路", .description = chain_hint_text };
         }
         self.route = route;
         self.forward = try ui.box(cx, .{ .width = .{ .px = S.tail_width }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .flex_shrink = 0, .display = .none }, .{});
@@ -438,7 +452,13 @@ pub const HostRow = struct {
         self.forward_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try self.forward.appendChild(cx.allocator, self.forward_label);
         try tail.appendChild(cx.allocator, self.forward);
-        try tail.appendChild(cx.allocator, route);
+        if (data.supports_route) {
+            const chain_hint = try mountHostChainHint(cx, scope, route, chain_hint_text, node);
+            self.chain_hint = chain_hint;
+            try tail.appendChild(cx.allocator, chain_hint.wrapper);
+        } else {
+            try tail.appendChild(cx.allocator, route);
+        }
         const actions = try ui.box(cx, .{ .width = .{ .px = S.action_size }, .height = .{ .px = S.action_size }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
         self.actions = actions;
         const connect_button = try iconButtonWithSize(cx, scope, "play", "新标签连接", "sidebar.host.connect", S.action(S.action_size), S.host_icon_size, tint, hover, cx.on(HostRow, self, HostRow.connect), swallowDoubleClick);
@@ -449,6 +469,16 @@ pub const HostRow = struct {
         const connect_hover = try ui.hooks.useHover(scope, connect_button);
         const focus = try ui.hooks.useFocusState(scope, cx, node);
         const connect_focus = try ui.hooks.useFocusState(scope, cx, connect_button);
+        if (self.chain_hint) |popup| try scope.createEffect(.{ .identity = identity_hint.open.?, .chain = popup.open.?, .was_chain = try scope.createState(bool, false) }, struct {
+            fn run(ctx: anytype) void {
+                const chain = ctx.chain.get();
+                const identity_open = ctx.identity.get();
+                if (chain and !ctx.was_chain.*) {
+                    ctx.identity.set(false);
+                } else if (identity_open) ctx.chain.set(false);
+                ctx.was_chain.* = chain;
+            }
+        }.run);
         try scope.createEffect(.{ .self = self, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.theme.get();
@@ -533,9 +563,37 @@ pub const HostRow = struct {
         if (click.x < trailing.x or click.x >= trailing.x + trailing.w or click.y < trailing.y or click.y >= trailing.y + trailing.h) return .ignored;
         const actions = self.actions.globalRect();
         if (self.actions.style.display != .none and click.x >= actions.x and click.x < actions.x + actions.w and click.y >= actions.y and click.y < actions.y + actions.h) return .ignored;
+        // The chain marker owns its own click. Let the event reach it instead
+        // of swallowing it here as a generic pass-through status hit.
+        const route = self.route.globalRect();
+        if (self.route.style.display != .none and click.x >= route.x and click.x < route.x + route.w and click.y >= route.y and click.y < route.y + route.h) return .ignored;
         // A pass-through status node may hit the row itself. Capture must run
         // before Button's target on_click; a bubble handler would be too late.
         return .handled;
+    }
+    fn chainEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *HostRow = @ptrCast(@alignCast(raw orelse return .ignored));
+        switch (event) {
+            // Keep the row's Button press/select state out of the marker. The
+            // dispatcher only halts bubble on .stop; .handled would still reach
+            // the row Button and select the host.
+            .mouse_down => return .stop,
+            .click => |click| {
+                if (click.button == .left) self.openChain();
+                return .stop;
+            },
+            .key_down => |key| if (key.key == .@"return" or key.key == .space) {
+                self.openChain();
+                return .stop;
+            },
+            .double_click => return .stop,
+            else => return .ignored,
+        }
+        return .ignored;
+    }
+    fn openChain(self: *HostRow) void {
+        if (self.chain_hint) |*popup| popup.close.invoke();
+        if (self.callbacks.chain) |open| open(self.callbacks.context);
     }
     fn onEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *HostRow = @ptrCast(@alignCast(raw orelse return .ignored));
@@ -826,13 +884,14 @@ fn mountHint(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, value: []const u8, po
     return mountHintAnchored(cx, scope, node, value, position, null);
 }
 fn mountHintAnchored(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, value: []const u8, position: ui.widgets.PopoverPosition, anchor: ?*HostHintAnchor) !ui.widgets.popover.PopoverResult {
-    const popup = try ui.widgets.Popover(.{ .trigger = .hover, .position = position, .anchor = if (anchor) |host| @as(ui.widgets.popover.Anchor, .{ .virtual = .{ .ctx = host, .getRect = HostHintAnchor.rect } }) else null, .offset = .{ .static = 8 }, .tier = .tooltip, .open_delay_ms = @as(f32, 450), .close_on_escape = false, .close_on_outside_click = false, .max_width = @as(f32, 320), .max_height = @as(f32, 120), .size_policy = .fit_content }).mount(scope, cx);
+    const popup = try ui.widgets.Popover(.{ .trigger = .hover, .position = position, .anchor = if (anchor) |host| @as(ui.widgets.popover.Anchor, .{ .virtual = .{ .ctx = host, .getRect = HostHintAnchor.rect } }) else null, .offset = .{ .static = 8 }, .tier = .tooltip, .open_delay_ms = @as(f32, 450), .close_on_escape = false, .close_on_outside_click = false, .max_width = @as(f32, 320), .max_height = @as(?f32, if (anchor != null) null else 120), .size_policy = .fit_content }).mount(scope, cx);
     popup.content.setStyleInline(cx.allocator, S.hint());
     popup.content.behavior.interaction.a11y = .{ .role = .tooltip };
     const label = try text(cx, popup.content, value, 11, 400, true);
     if (label.getText()) |old| {
         var next = old;
         next.wrap = .word;
+        next.text_overflow = .clip;
         label.setText(next);
     }
     label.setStyleInline(cx.allocator, .{ .max_width = 300 });
@@ -873,5 +932,19 @@ fn mountHostHint(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, value: []const u8
     const anchor = try scope.createState(HostHintAnchor, .{ .row = row });
     const popup = try mountHintAnchored(cx, scope, node, value, .right, anchor);
     popup.content.meta.ownership.meta.test_id = "sidebar.host.info";
+    return popup;
+}
+/// Marker hint for the row-tail route badge. The row body keeps its full
+/// identity hint; this one names the icon itself and states that it opens the
+/// live chain card.
+fn chainHintText(allocator: std.mem.Allocator, data: HostData) ![]u8 {
+    const action = if (std.ascii.eqlIgnoreCase(data.protocol, "sftp")) "SFTP 暂不支持查看实时连接链路" else if (std.ascii.eqlIgnoreCase(data.protocol, "bmc_ikvm")) "点击查看连接详情" else "点击查看连接链路";
+    if (data.hops == 0) return std.fmt.allocPrint(allocator, "连接链路 · 直连\n{s}\n{s}", .{ data.route, action });
+    return std.fmt.allocPrint(allocator, "连接链路 · 经 {d} 台跳板\n{s}\n{s}", .{ data.hops, data.route, action });
+}
+fn mountHostChainHint(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, value: []const u8, row: *ui.Node) !ui.widgets.popover.PopoverResult {
+    const anchor = try scope.createState(HostHintAnchor, .{ .row = row });
+    const popup = try mountHintAnchored(cx, scope, node, value, .right, anchor);
+    popup.content.meta.ownership.meta.test_id = "sidebar.host.chain-hint";
     return popup;
 }

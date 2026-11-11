@@ -633,6 +633,7 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     appearance_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     appearance_tests.root_module.linkSystemLibrary("curl", .{});
+    appearance_tests.root_module.linkFramework("JavaScriptCore", .{});
     appearance_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     appearance_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     appearance_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
@@ -732,6 +733,7 @@ pub fn build(b: *std.Build) void {
     plugin_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     plugin_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     plugin_tests.root_module.linkSystemLibrary("curl", .{});
+    plugin_tests.root_module.linkFramework("JavaScriptCore", .{});
     plugin_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     plugin_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     plugin_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
@@ -846,6 +848,7 @@ pub fn build(b: *std.Build) void {
         addBmcNative(b, fixed_forward_runner.root_module);
         if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner") or std.mem.eql(u8, runner.name, "ssh-bootstrap-runner") or std.mem.eql(u8, runner.name, "ssh-shell-execution-runner") or std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner") or std.mem.eql(u8, runner.name, "socks-worker-host-runner") or std.mem.eql(u8, runner.name, "forward-load-runner")) {
             fixed_forward_runner.root_module.linkSystemLibrary("curl", .{});
+            fixed_forward_runner.root_module.linkFramework("JavaScriptCore", .{});
             fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/local/darwin_process.c", "src/ai/mcp_native.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
             fixed_forward_runner.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = &.{} });
             fixed_forward_runner.root_module.linkFramework("Security", .{});
@@ -854,7 +857,10 @@ pub fn build(b: *std.Build) void {
         forward_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner")) disconnect_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-bootstrap-runner")) bootstrap_acceptance.dependOn(&runner_install.step);
-        if (std.mem.eql(u8, runner.name, "ssh-shell-execution-runner")) shell_execution_acceptance.dependOn(&runner_install.step);
+        if (std.mem.eql(u8, runner.name, "ssh-shell-execution-runner")) {
+            fixed_forward_runner.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_password_reveal.m"), .flags = &.{"-fobjc-arc"} });
+            shell_execution_acceptance.dependOn(&runner_install.step);
+        }
         if (std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) shared_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner")) reconnect_acceptance.dependOn(&runner_install.step);
     }

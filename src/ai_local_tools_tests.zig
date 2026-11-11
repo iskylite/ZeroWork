@@ -835,10 +835,17 @@ test "SFTP AI registration prepares only file tools and rejects terminal or revo
             return error.UnexpectedDispatch;
         }
     };
-    const host_contributions = @import("ai/host_queries.zig").contributions ++ @import("ai/host_terminal_queries.zig").contributions ++ @import("ai/host_execution.zig").contributions ++ .{@import("ai/batch_output.zig").contribution};
+    const host_contributions = @import("ai/host_queries.zig").contributions ++ @import("ai/host_terminal_queries.zig").contributions ++ @import("ai/host_execution.zig").contributions ++ .{@import("ai/batch_output.zig").contribution} ++ @import("ai/host_transfer.zig").contributions;
     try bridge.configureHost(.{ .context = .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = .{ .session = @backingInt(accepted.handle.session_id) }, .binding_revision = 1, .grant_revision = 1 }, .handler_context = &adapter, .invoke = Query.invoke, .contributions = &host_contributions });
     try bridge.prepare(f.app, accepted.handle);
-    try std.testing.expectEqual(@as(usize, 8), bridge.requestTable().?.entries.len);
+    try std.testing.expectEqual(@as(usize, 13), bridge.requestTable().?.entries.len);
+    const transfer_source = try @import("ui/ai_transfer_source.zig").resolve(f.app, accepted.handle, true);
+    try std.testing.expect(!transfer_source.auxiliary and transfer_source.binding != null);
+    try std.testing.expect(f.workspace.sessionTab(f.app.legacyForHandle(accepted.handle).?).?.runtime == null);
+    for (@import("ai/host_transfer.zig").contributions) |contribution| {
+        var name: [64]u8 = undefined;
+        try std.testing.expect(bridge.requestTable().?.lookup(try @import("ai/plugin_tools.zig").encodeName(&name, contribution.definition.id)) != null);
+    }
     const prompt = try @import("ai/session_prompt.zig").build(a, .auto, bridge.wire);
     defer a.free(prompt);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "File paths") != null);
@@ -1108,4 +1115,29 @@ test "session capabilities Local native catalog excludes shell attachment and ke
     try bridge.prepare(f.app, owner);
     try std.testing.expect(prompt.has(bridge.wire, "host.read_terminal"));
     for (@import("ai/host_execution.zig").contributions) |contribution| try std.testing.expect(!prompt.has(bridge.wire, contribution.definition.id));
+}
+
+test "AI transfer catalog hides remote transfer tools from a real local terminal" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var local = LocalTools.Bridge.init(a);
+    defer local.deinit();
+    const owner = try f.prepare(&local);
+    var bridge = @import("ui/ai_tools.zig").Bridge.init(a);
+    defer bridge.deinit();
+    const host_tools = @import("ai/host_tools.zig");
+    const Query = struct {
+        fn invoke(_: *anyopaque, _: host_tools.Invocation, _: std.mem.Allocator) !host_tools.Result {
+            return error.UnexpectedDispatch;
+        }
+    };
+    try bridge.configureHost(.{ .context = .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = .{ .session = @backingInt(owner.session_id) }, .binding_revision = 1, .grant_revision = 1 }, .handler_context = &f, .invoke = Query.invoke, .contributions = &@import("ai/host_transfer.zig").contributions });
+    try bridge.prepare(f.app, owner);
+    const source = @import("ui/ai_transfer_source.zig").resolve(f.app, owner, true);
+    if (source) |_| return error.LocalMustNotTransfer else |_| {}
+    for (@import("ai/host_transfer.zig").contributions) |contribution| {
+        var name: [64]u8 = undefined;
+        try std.testing.expect(bridge.requestTable().?.lookup(try @import("ai/plugin_tools.zig").encodeName(&name, contribution.definition.id)) == null);
+    }
 }

@@ -481,6 +481,7 @@ const AiHost = struct {
     preflight_image_refs: std.ArrayList([]ai_images.ContentRef) = .empty,
     remote_picker: ?*@import("ui/ai_remote_picker.zig").View = null,
     file_application: ?*file_application_mod.Host = null,
+    ai_transfer_host: ?*TransferHost = null,
     request_attachments: ?ai_attachments.Bundle = null,
     attachment_preview_holder: ?*ui.Node = null,
     attachment_preview_scroll_y: ?f32 = null,
@@ -504,6 +505,7 @@ const AiHost = struct {
     recall_draft: ?[]u8 = null,
     message_action: ?MessageAction = null,
     editing_index: ?usize = null,
+    editing_submission: ?@import("host/identity.zig").SubmissionId = null,
     edit_text: ?*ui.Signal([]const u8) = null,
     edit_seed: ?usize = null,
 
@@ -611,6 +613,7 @@ const AiHost = struct {
     request_history: @import("ai/wire_history.zig").History = .{},
     wire_history: @import("ai/wire_history.zig").History = .{},
     compaction: @import("ai/context_compaction.zig").Service = .{},
+    manual_compaction_conversation: ?u64 = null,
     conversation_titles: @import("ai/conversation_title.zig").Service = .{},
     auto_compaction_attempts: std.AutoHashMapUnmanaged(u64, u64) = .empty,
 
@@ -621,6 +624,19 @@ const AiHost = struct {
     history_heights_conversation: ?u64 = null,
     history_heights_width: f32 = 0,
     conversation_dirty: bool = false,
+    /// Retained, keyed transcript sections. `conversation_scope` is now the
+    /// long-lived parent scope; each section owns a private child scope.
+    transcript: ?*@import("ui/ai_transcript_view.zig").View = null,
+    transcript_width: f32 = 0,
+    transcript_card_count: usize = 0,
+    transcript_frame: u64 = 0,
+    transcript_epoch: u64 = 0,
+    transcript_force: bool = false,
+    turn_bindings: @import("ui/ai_transcript_view.zig").TurnBindings = .{},
+    message_actions_disabled: ?*ui.Signal(bool) = null,
+    live_card_owner: ?*ui.Scope = null,
+    footer_fingerprint: ?u64 = null,
+    footer_scope: ?*ui.Scope = null,
     live_timeline: ?*@import("ui/ai_timeline_view.zig").View = null,
     conversation_bubble_width: ?f32 = null,
     /// 最后一轮提交的用户输入（渲染用户气泡；submit 拷贝所有权）。
@@ -655,7 +671,7 @@ const AiHost = struct {
             return self.text[0..self.len];
         }
     };
-    const MessageAction = struct { kind: enum { rewind, edit, save, cancel, fork }, index: usize, conversation: ?u64 = null };
+    const MessageAction = struct { kind: enum { rewind, edit, save, cancel, fork }, index: usize, conversation: ?u64 = null, submission: ?@import("host/identity.zig").SubmissionId = null };
     const ExecutionAction = struct { action: @import("ui/ai_execution_result_view.zig").Action, target: @import("ai/tool_results.zig").ExecutionActionTarget };
     const HistoryMessage = @import("ai/assistant_store.zig").Message;
 
@@ -1075,6 +1091,7 @@ const AiHost = struct {
             const historical_environment = saved.historical_environment;
             const controls = saved.controls;
             const title = saved.title;
+            const compaction_activity = saved.compaction_activity;
             var presentation = self.controller.model;
             // A hover preview is temporary; only an explicitly opened panel
             // should be restored when returning to this session/group.
@@ -1082,6 +1099,7 @@ const AiHost = struct {
             saved.controls = .{};
             saved.deinit(self.allocator);
             saved.* = .{ .title = title, .id = saved_id, .conversation_id = saved_conversation_id, .initial_owner = initial_owner, .binding_revision = binding_revision, .selected = selected, .listed = listed, .phase = phase, .closed = closed, .ended = ended, .historical_environment = historical_environment, .tool_results = self.tool_results, .controls = controls, .owner = saved_owner, .current_turn = self.current_turn, .history = self.history, .wire_history = self.wire_history, .stream = self.controller.stream, .last_user_text = self.last_user_text, .last_user_wire = self.last_user_wire, .last_user_attachments = self.last_user_attachments, .last_user_images = self.last_user_images, .draft = draft, .model = presentation };
+            saved.compaction_activity = compaction_activity;
             self.tool_results = @import("ai/tool_results.zig").Store.init(self.allocator);
             self.current_turn = .{};
             self.history = .empty;
@@ -1142,6 +1160,7 @@ const AiHost = struct {
         self.image_gate = null;
         self.recall_index = null;
         self.editing_index = null;
+        self.editing_submission = null;
         self.edit_seed = null;
         self.edit_text = null;
         if (self.recall_draft) |value| self.allocator.free(value);
@@ -1976,21 +1995,44 @@ const AiHost = struct {
         };
         switch (envelope.action) {
             .compact_context => {
-                if (self.execution().thread_state.load(.acquire) != 0) return error.AssistantBusy;
+                if (self.execution().thread_state.load(.acquire) != 0 or self.compaction.job != null) return error.AssistantBusy;
                 const selected = try ai_provider_config.fromSettingsSelection(self.effectiveAi(), controls.model);
                 const reserve = try self.composerReserve();
-                try self.auto_compaction_attempts.put(self.allocator, self.display_conversation orelse return error.MissingAssistantOwner, self.compactionAttemptKey(selected.model));
-                try self.compaction.startReserved(selected, self.compactionIdentity() orelse return error.MissingAssistantOwner, &self.wire_history, reserve);
+                const identity = self.compactionIdentity() orelse return error.MissingAssistantOwner;
+                const state = self.assistant_states.?.find(identity.conversation) orelse return error.MissingAssistantOwner;
+                try self.auto_compaction_attempts.put(self.allocator, identity.conversation, self.compactionAttemptKey(selected.model));
+                const after_message: ?usize = if (self.last_user_text != null) self.history.items.len else blk: {
+                    var index = self.history.items.len;
+                    while (index > 0) {
+                        index -= 1;
+                        if (self.history.items[index].user) break :blk index;
+                    }
+                    break :blk null;
+                };
+                state.compaction_activity = .{ .after_message = after_message };
+                self.conversation_dirty = true;
+                if (self.tail_follow) |*follow| follow.reset();
+                self.compaction.startReserved(selected, identity, &self.wire_history, reserve) catch |err| {
+                    applog.warn(.ai, "start context compaction: {s}", .{@errorName(err)});
+                    state.compaction_activity.?.status = .failed;
+                    self.cx.requestRedraw();
+                    return;
+                };
+                self.manual_compaction_conversation = identity.conversation;
                 if (self.execution().attached_runner) |runner| {
                     runner.controller_busy = true;
                     self.compaction_agent = runner.agent.id;
                 }
-                self.conversation_dirty = true;
                 self.cx.scheduleRedrawAfterNs(33 * 1000000);
+                self.cx.requestRedraw();
+                return;
             },
             .cancel_compaction => {
                 self.compaction.cancel();
+                self.syncCompactionActivity();
                 self.conversation_dirty = true;
+                self.cx.requestRedraw();
+                return;
             },
             .model => |key| {
                 const selection: ai_provider_config.ModelSelection = .{ .provider_id = key.provider_id, .model_id = key.model_id };
@@ -2096,6 +2138,30 @@ const AiHost = struct {
         return hash.final();
     }
 
+    fn syncCompactionActivity(self: *AiHost) void {
+        const id = self.manual_compaction_conversation orelse return;
+        if (self.compaction.job == null) self.manual_compaction_conversation = null;
+        const state = self.assistant_states.?.find(id) orelse return;
+        if (state.compaction_activity) |*activity| {
+            if (activity.status == self.compaction.status) return;
+            activity.status = self.compaction.status;
+            activity.before_tokens = self.compaction.before_tokens;
+            activity.after_tokens = self.compaction.after_tokens;
+            if (self.display_conversation == id) self.conversation_dirty = true;
+        }
+    }
+
+    fn cancelCompactionActivity(self: *AiHost) void {
+        const id = self.manual_compaction_conversation orelse return;
+        if (self.display_conversation != id or self.compaction.status != .running) return;
+        const owner = self.currentBinding() orelse return;
+        const identity = self.compaction.status_identity orelse return;
+        if (identity.conversation != id or !owner.eql(identity.owner)) return;
+        self.compaction.cancel();
+        self.syncCompactionActivity();
+        self.cx.requestRedraw();
+    }
+
     fn refreshComposer(self: *AiHost) !void {
         if (self.compaction.job != null and self.compaction.pollWithCommit(self.allocator, self.compactionIdentity(), &self.wire_history, self.execution().thread_state.load(.acquire) != 0, .{ .context = self, .apply = commitCompactedHistory })) {
             self.composer_hash = null;
@@ -2105,6 +2171,7 @@ const AiHost = struct {
             }
             self.compaction_agent = null;
         }
+        self.syncCompactionActivity();
         if (self.compaction.job != null) self.cx.scheduleRedrawAfterNs(33 * 1000000);
         const view = self.composer_controls orelse return;
         const runtime = self.runtime_config orelse return;
@@ -2228,7 +2295,7 @@ const AiHost = struct {
         defer additions.deinit(self.allocator);
         errdefer for (additions.items) |*message| message.deinit(self.allocator);
         if (self.last_user_text) |text| {
-            var message = try (HistoryMessage{ .user = true, .turn = self.current_turn, .text = text, .wire_text = self.last_user_wire, .attachments = self.last_user_attachments, .images = self.last_user_images }).clone(self.allocator);
+            var message = try (HistoryMessage{ .user = true, .text = text, .wire_text = self.last_user_wire, .attachments = self.last_user_attachments, .images = self.last_user_images }).clone(self.allocator);
             additions.append(self.allocator, message) catch |err| {
                 message.deinit(self.allocator);
                 return err;
@@ -2254,9 +2321,18 @@ const AiHost = struct {
             };
         }
         try self.history.ensureUnusedCapacity(self.allocator, additions.items.len);
+        // Move the completed turn instead of cloning it: retained disclosures
+        // borrow its segments, steps and scroll state. Preserve those allocations.
+        if (self.last_user_text != null) {
+            additions.items[0].turn = self.current_turn;
+            self.current_turn = .{};
+        } else self.current_turn.deinit(self.allocator);
         self.history.appendSliceAssumeCapacity(additions.items);
+        self.turn_bindings.rebind(self.history.items);
+        self.live_timeline = null;
+        self.streaming_label = null;
+        self.live_dirty = false;
         self.controller.stream.clearRetainingCapacity();
-        self.current_turn.deinit(self.allocator);
     }
 
     fn setFeedback(self: *AiHost, label: []const u8) void {
@@ -2373,23 +2449,43 @@ const AiHost = struct {
         if (index < self.history.items.len) return if (self.history.items[index].turn) |*turn| turn else null;
         return if (index == self.history.items.len and self.last_user_text != null) &self.current_turn else null;
     }
+    fn sameSubmission(left: ?@import("host/identity.zig").SubmissionId, right: ?@import("host/identity.zig").SubmissionId) bool {
+        if (left) |id| return if (right) |other| id.eql(other) else false;
+        return right == null;
+    }
+    fn turnIndex(self: *AiHost, turn: *const @import("ai/conversation_turn.zig").Turn) ?usize {
+        if (turn == &self.current_turn) return self.history.items.len;
+        for (self.history.items, 0..) |*message, index| if (message.turn) |*stored| if (stored == turn) return index;
+        return null;
+    }
+    fn actionMessage(self: *AiHost, index: usize, submission: ?@import("host/identity.zig").SubmissionId) ?HistoryMessage {
+        if (submission) |id| {
+            const turn = self.turnAt(index) orelse return null;
+            const segment = turn.inputSegment(id) orelse return null;
+            return .{ .user = true, .text = segment.text.items };
+        }
+        return self.userMessage(index);
+    }
     const MessageCell = struct {
         host: *AiHost,
         index: usize,
         kind: @FieldType(MessageAction, "kind"),
+        submission: ?@import("host/identity.zig").SubmissionId = null,
         copy_button: *@import("ui/copy_button.zig").Button = undefined,
         fn run(self: *MessageCell) void {
-            self.host.message_action = .{ .kind = self.kind, .index = self.index, .conversation = self.host.display_conversation };
+            self.host.message_action = .{ .kind = self.kind, .index = self.index, .conversation = self.host.display_conversation, .submission = self.submission };
             self.host.cx.requestRedraw();
         }
         fn copy(self: *MessageCell) void {
-            const value = if (self.kind == .fork) (self.host.turnAt(self.index) orelse return).answer else (self.host.userMessage(self.index) orelse return).text;
+            const value = if (self.kind == .fork) (self.host.turnAt(self.index) orelse return).answer else (self.host.actionMessage(self.index, self.submission) orelse return).text;
             self.copy_button.copy(value);
         }
     };
-    fn messageButton(self: *AiHost, parent: *ui.Node, index: usize, kind: @FieldType(MessageAction, "kind"), asset: ui.SvgAsset, label: []const u8, id: []const u8, copy: bool) !void {
-        const cell = try self.conversation_scope.?.createState(MessageCell, .{ .host = self, .index = index, .kind = kind });
-        const props = .{ .variant = .ghost, .icon_only = true, .icon_asset = asset, .icon_size = @as(f32, 13), .a11y_label = label, .base_style = @import("ui/ai_tool_results_styles.zig").button(22), .disabled = !copy and self.execution().thread_state.load(.acquire) != 0, .on_click = if (copy) self.cx.on(MessageCell, cell, MessageCell.copy) else self.cx.on(MessageCell, cell, MessageCell.run) };
+    fn messageButton(self: *AiHost, parent: *ui.Node, index: usize, kind: @FieldType(MessageAction, "kind"), asset: ui.SvgAsset, label: []const u8, id: []const u8, copy: bool, submission: ?@import("host/identity.zig").SubmissionId) !void {
+        const cell = try self.conversation_scope.?.createState(MessageCell, .{ .host = self, .index = index, .kind = kind, .submission = submission });
+        if (self.message_actions_disabled == null) self.message_actions_disabled = try self.scope.?.createSignal(bool, self.execution().thread_state.load(.acquire) != 0);
+        const disabled: ui.Source(bool) = if (copy) .{ .value = false } else .{ .signal = self.message_actions_disabled.? };
+        const props = .{ .variant = .ghost, .icon_only = true, .icon_asset = asset, .icon_size = @as(f32, 13), .a11y_label = label, .base_style = @import("ui/ai_tool_results_styles.zig").button(22), .disabled = disabled, .on_click = if (copy) self.cx.on(MessageCell, cell, MessageCell.copy) else self.cx.on(MessageCell, cell, MessageCell.run) };
         const button = if (copy) blk: {
             cell.copy_button = try @import("ui/copy_button.zig").Button.mount(self.cx, self.conversation_scope.?, props);
             break :blk cell.copy_button.node;
@@ -2397,13 +2493,14 @@ const AiHost = struct {
         button.meta.ownership.meta.test_id = id;
         try parent.appendChild(self.allocator, button);
     }
-    fn appendUserMessage(self: *AiHost, parent: *ui.Node, message: HistoryMessage, index: usize, width: f32) !void {
+    fn appendUserMessage(self: *AiHost, parent: *ui.Node, message: HistoryMessage, index: usize, width: f32, submission: ?@import("host/identity.zig").SubmissionId) !void {
         const cx = self.cx;
+        const editing = self.editing_index == index and sameSubmission(self.editing_submission, submission);
         const row = try ui.box(cx, @import("ui/ai_assistant_styles.zig").messageRow(true), .{});
         row.meta.ownership.meta.test_id = "ai.message.user.row";
         const bubble = try ui.box(cx, @import("ui/ai_assistant_styles.zig").userBubble(width), .{});
         @import("ui/layer_materials.zig").card(bubble, .custom);
-        bubble.meta.ownership.meta.test_id = "ai.message.user.bubble";
+        bubble.meta.ownership.meta.test_id = if (submission != null) "ai.followup.consumed" else "ai.message.user.bubble";
         bubble.setStyleInline(self.allocator, .{ .direction = .column, .gap = 6, .min_width = 0, .flex_shrink = 0 });
         setBubbleCorners(bubble);
         row.setStyleInline(self.allocator, .{ .gap = 4 });
@@ -2414,7 +2511,7 @@ const AiHost = struct {
             if (message.images) |*bundle| try self.appendSentImages(sent, bundle);
             try row.appendChild(self.allocator, sent);
         }
-        if (self.editing_index == index) {
+        if (editing) {
             if (self.edit_text == null) self.edit_text = try self.scope.?.createText("", .{});
             if (self.edit_seed != index) {
                 self.edit_text.?.set(message.text);
@@ -2442,10 +2539,10 @@ const AiHost = struct {
         const timestamp = try ui.text(cx, time, .{ .font_size = 10.5, .color = app_theme.current().fg_3 });
         timestamp.meta.ownership.meta.test_id = "ai.message.timestamp";
         try actions.appendChild(self.allocator, timestamp);
-        try self.messageButton(actions, index, .rewind, ui.icons.copy, "复制用户消息", "ai.message.copy", true);
-        try self.messageButton(actions, index, .rewind, ui.icons.get("undo-2").?, "回退并立即清除本回合及后续记录和上下文", "ai.message.rewind", false);
-        try self.messageButton(actions, index, if (self.editing_index == index) .save else .edit, if (self.editing_index == index) ui.icons.check else ui.icons.get("pencil").?, if (self.editing_index == index) "保存编辑" else "编辑用户消息", if (self.editing_index == index) "ai.message.edit.save" else "ai.message.edit", false);
-        if (self.editing_index == index) try self.messageButton(actions, index, .cancel, ui.icons.x, "取消编辑", "ai.message.edit.cancel", false);
+        try self.messageButton(actions, index, .rewind, ui.icons.copy, "复制用户消息", if (submission != null) "ai.followup.copy" else "ai.message.copy", true, submission);
+        try self.messageButton(actions, index, .rewind, ui.icons.get("undo-2").?, if (submission != null) "回退到此消息，清除此消息及后续记录和上下文" else "回退并立即清除本回合及后续记录和上下文", if (submission != null) "ai.followup.rewind" else "ai.message.rewind", false, submission);
+        try self.messageButton(actions, index, if (editing) .save else .edit, if (editing) ui.icons.check else ui.icons.get("pencil").?, if (editing) "保存编辑" else "编辑用户消息", if (submission != null) (if (editing) "ai.followup.edit.save" else "ai.followup.edit") else (if (editing) "ai.message.edit.save" else "ai.message.edit"), false, submission);
+        if (editing) try self.messageButton(actions, index, .cancel, ui.icons.x, "取消编辑", if (submission != null) "ai.followup.edit.cancel" else "ai.message.edit.cancel", false, submission);
         try row.appendChild(self.allocator, actions);
         try parent.appendChild(self.allocator, row);
     }
@@ -2626,6 +2723,7 @@ const AiHost = struct {
     const TimelineContext = struct {
         host: *AiHost,
         turn: *@import("ai/conversation_turn.zig").Turn,
+        limit: ?usize = null,
         fn sync(raw: *anyopaque, retained: *@import("ui/ai_timeline_view.zig").View) !void {
             const context: *TimelineContext = @ptrCast(@alignCast(raw));
             const self = context.host;
@@ -2640,10 +2738,11 @@ const AiHost = struct {
             const now: u64 = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
             var first: usize = 0;
             var slot: usize = 0;
-            while (first < turn.timeline.items.len) : (slot += 1) {
+            const limit = @min(turn.timeline.items.len, context.limit orelse turn.timeline.items.len);
+            while (first < limit) : (slot += 1) {
                 const item = turn.timeline.items[first];
                 const kind: @FieldType(@import("ui/ai_timeline_view.zig").Row, "kind") = if (item == .message and groups.boundary(item)) .message else if (item == .input) .input else if (item == .notice) .notice else .group;
-                const end = if (kind == .group) groups.rangeEnd(turn, first) else first + 1;
+                const end = if (kind == .group) @min(limit, groups.rangeEnd(turn, first)) else first + 1;
                 const row = try retained.row(slot, first, kind);
                 var hash = std.hash.Wyhash.init(0);
                 for (turn.timeline.items[first..end]) |entry| switch (entry) {
@@ -2686,7 +2785,11 @@ const AiHost = struct {
                             self.conversation_scope = row.body_scope;
                             switch (kind) {
                                 .message => unreachable,
-                                .input => try self.appendSteerBubble(body, item.input.text.items, null, null),
+                                .input => {
+                                    const index = self.turnIndex(turn) orelse return error.StaleTurn;
+                                    const width = if (self.card_box) |box| @max(160, box.globalRect().w - 30) else 540;
+                                    try self.appendUserMessage(body, .{ .user = true, .text = item.input.text.items }, index, width, item.input.submission);
+                                },
                                 .notice => {
                                     _ = try @import("ui/ai_host_notice_view.zig").mount(self.cx, body, turn.host_notices.items[item.notice].text);
                                 },
@@ -2715,6 +2818,7 @@ const AiHost = struct {
                                 const body = try retained.body(row, row.group.?.content);
                                 row.body_scope = try row.scope.childScope();
                                 const details = try row.body_scope.?.createState(DetailsContext, .{ .host = self, .turn = turn, .first = first, .end = end });
+                                try self.bindTurnPointer(row.body_scope.?, turn, &details.turn);
                                 row.details = try @import("ui/ai_timeline_view.zig").View.mount(self.cx, row.body_scope.?, body, details, DetailsContext.sync, self.cx.on(AiHost, self, pauseConversationFollow));
                                 row.details.?.root.setStyleInline(self.allocator, .{ .gap = 6 });
                             }
@@ -2731,7 +2835,46 @@ const AiHost = struct {
         }
     };
 
+    fn bindTurnPointer(self: *AiHost, scope: *ui.Scope, turn: *@import("ai/conversation_turn.zig").Turn, pointer: **@import("ai/conversation_turn.zig").Turn) !void {
+        try self.turn_bindings.bind(scope, self.turnIndex(turn) orelse return error.StaleTurn, turn, .{ .turn = pointer });
+    }
+
+    const TurnProcess = struct {
+        host: *AiHost,
+        turn: *@import("ai/conversation_turn.zig").Turn,
+        fn proseEnd(turn: *const @import("ai/conversation_turn.zig").Turn) usize {
+            const prose = turn.prose.items;
+            return if (std.mem.endsWith(u8, prose, turn.answer)) prose.len - turn.answer.len else prose.len;
+        }
+        fn hasContent(turn: *const @import("ai/conversation_turn.zig").Turn) bool {
+            if (turn.timeline.items.len > 0) return turn.finalResponseStart() > 0;
+            return turn.thinking.items.len > 0 or turn.steps.items.len > 0 or turn.host_notices.items.len > 0 or proseEnd(turn) > 0;
+        }
+        fn render(raw: *anyopaque, parent: *ui.Node, scope: *ui.Scope) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const previous = self.host.conversation_scope;
+            self.host.conversation_scope = scope;
+            defer self.host.conversation_scope = previous;
+            try self.host.appendTurnProcess(parent, self.turn, self.turn.finalResponseStart(), proseEnd(self.turn));
+        }
+    };
     fn appendTurnSteps(self: *AiHost, parent: *ui.Node, turn: *@import("ai/conversation_turn.zig").Turn) !void {
+        const previous_image_turn = self.image_render_turn;
+        self.image_render_turn = turn;
+        defer self.image_render_turn = previous_image_turn;
+        if (turn.ended_at_ms != null and turn.answer.len > 0) {
+            if (TurnProcess.hasContent(turn)) {
+                const context = try self.conversation_scope.?.createState(TurnProcess, .{ .host = self, .turn = turn });
+                try self.bindTurnPointer(self.conversation_scope.?, turn, &context.turn);
+                const process = try @import("ui/ai_turn_summary_view.zig").View.mount(self.cx, self.conversation_scope.?, parent, turn, context, TurnProcess.render, self.cx.on(AiHost, self, pauseConversationFollow));
+                try self.bindTurnPointer(self.conversation_scope.?, turn, &process.turn);
+            }
+            try self.appendProse(parent, turn.answer);
+            return;
+        }
+        try self.appendTurnProcess(parent, turn, turn.timeline.items.len, turn.prose.items.len);
+    }
+    fn appendTurnProcess(self: *AiHost, parent: *ui.Node, turn: *@import("ai/conversation_turn.zig").Turn, limit: usize, prose_end: usize) !void {
         const previous_image_turn = self.image_render_turn;
         self.image_render_turn = turn;
         defer self.image_render_turn = previous_image_turn;
@@ -2739,7 +2882,8 @@ const AiHost = struct {
         const now: u64 = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
         if (turn.timeline.items.len > 0) {
             const timeline = @import("ui/ai_timeline_view.zig");
-            const context = try self.conversation_scope.?.createState(TimelineContext, .{ .host = self, .turn = turn });
+            const context = try self.conversation_scope.?.createState(TimelineContext, .{ .host = self, .turn = turn, .limit = if (turn.ended_at_ms != null) limit else null });
+            try self.bindTurnPointer(self.conversation_scope.?, turn, &context.turn);
             const retained = try timeline.View.mount(self.cx, self.conversation_scope.?, parent, context, TimelineContext.sync, self.cx.on(AiHost, self, pauseConversationFollow));
             if (turn == &self.current_turn) self.live_timeline = retained;
             try TimelineContext.sync(context, retained);
@@ -2750,16 +2894,18 @@ const AiHost = struct {
             if (turn.thinking_scroll == null) turn.thinking_scroll = try @import("ai/conversation_turn.zig").ThinkingScroll.create(self.allocator);
             const text = std.mem.trim(u8, turn.thinking.items, " \t\r\n");
             const last_line = @import("ai/step_groups.zig").thinkingProjection(text);
-            try parent.appendChild(self.allocator, try view.mount(self.cx, self.conversation_scope.?, .{ .title = "思考", .projection = last_line, .detail = text, .copy_detail = false, .phase = if (turn.thinking_ended_ms != null or turn.ended_at_ms != null) .succeeded else .running, .elapsed_ms = (turn.thinking_ended_ms orelse now) -| (turn.thinking_started_ms orelse now), .expanded = &turn.thinking_expanded, .scroll_position = turn.thinking_scroll, .test_id = "ai.thinking", .on_toggle = self.cx.on(AiHost, self, pauseConversationFollow) }));
+            const thinking = try view.mountRetained(self.cx, self.conversation_scope.?, .{ .title = "思考", .projection = last_line, .detail = text, .copy_detail = false, .phase = if (turn.thinking_ended_ms != null or turn.ended_at_ms != null) .succeeded else .running, .elapsed_ms = (turn.thinking_ended_ms orelse now) -| (turn.thinking_started_ms orelse now), .expanded = &turn.thinking_expanded, .scroll_position = turn.thinking_scroll, .test_id = "ai.thinking", .on_toggle = self.cx.on(AiHost, self, pauseConversationFollow) });
+            try self.turn_bindings.bind(self.conversation_scope.?, self.turnIndex(turn) orelse return error.StaleTurn, turn, .{ .thinking = thinking });
+            try parent.appendChild(self.allocator, thinking.root);
         }
         var prose_offset: usize = 0;
         for (turn.steps.items) |*step| {
-            const boundary = @min(turn.prose.items.len, @max(prose_offset, step.text_offset));
+            const boundary = @min(prose_end, @max(prose_offset, step.text_offset));
             try self.appendProse(parent, turn.prose.items[prose_offset..boundary]);
             prose_offset = boundary;
             if (!try self.appendToolStep(parent, turn, step, now)) return;
         }
-        try self.appendProse(parent, turn.prose.items[prose_offset..]);
+        try self.appendProse(parent, turn.prose.items[prose_offset..prose_end]);
         for (turn.host_notices.items) |notice| _ = try @import("ui/ai_host_notice_view.zig").mount(self.cx, parent, notice.text);
     }
     fn appendSteerBubble(self: *AiHost, parent: *ui.Node, content: []const u8, status: ?[]const u8, waiting_hint: ?[]const u8) !void {
@@ -2797,6 +2943,8 @@ const AiHost = struct {
                 break :found null;
             };
             if (displayed != null and displayed.?.hasInput(receipt.id)) continue;
+            // Completed timelines are authoritative, including an explicit rewind.
+            if (receipt.delivery == .consumed and displayed != null and displayed.?.ended_at_ms != null) continue;
             const waiting_hint: ?[]const u8 = if (receipt.delivery == .consumed) null else if (receipt.delivery == .outcome_unknown) "提交状态待核对，确认前不会重复发送" else if (receipt.pause != null) "消息尚未纳入处理，可重新填写后发送" else record.inbox.work_phase.waitingHint();
             try self.appendSteerBubble(parent, entry.payload.messages[0].content, if (receipt.delivery == .consumed) null else if (receipt.delivery == .outcome_unknown) "待核对" else if (receipt.pause != null) "已暂停" else "待处理", waiting_hint);
             if (receipt.pause != null and receipt.delivery == .accepted) {
@@ -2818,14 +2966,14 @@ const AiHost = struct {
     }
     fn appendTurnFooter(self: *AiHost, parent: *ui.Node, index: usize) !void {
         const turn = self.turnAt(index) orelse return;
-        if (index < self.history.items.len) try self.appendSteerMessages(parent, turn.id);
+        if (index < self.history.items.len or turn.ended_at_ms != null) try self.appendSteerMessages(parent, turn.id);
         const status = @import("ui/ai_turn_status_view.zig");
         const row = try status.mount(self.cx, self.conversation_scope.?, turn, self.welcome_logo_texture);
         if (turn.ended_at_ms != null) {
             try row.appendChild(self.allocator, try status.dot(self.cx));
-            try self.messageButton(row, index, .fork, ui.icons.copy, "复制模型正式输出", "ai.turn.copy", true);
+            try self.messageButton(row, index, .fork, ui.icons.copy, "复制模型正式输出", "ai.turn.copy", true, null);
             try row.appendChild(self.allocator, try status.dot(self.cx));
-            try self.messageButton(row, index, .fork, ui.icons.get("git-fork").?, "分叉为新会话，内容截止此回合", "ai.turn.fork", false);
+            try self.messageButton(row, index, .fork, ui.icons.get("git-fork").?, "分叉为新会话，内容截止此回合", "ai.turn.fork", false, null);
         }
         try parent.appendChild(self.allocator, row);
     }
@@ -2835,6 +2983,9 @@ const AiHost = struct {
         try self.commitHistorySnapshot(messages);
     }
     fn commitHistorySnapshot(self: *AiHost, messages: []const ai_provider.Message) !void {
+        // Compaction/checkpoint replaces owned context without necessarily
+        // changing the number of display messages. Force a full re-render.
+        self.transcript_force = true;
         const shared_host = self.shared_service orelse return;
         const state = self.assistant_states.?.find(self.display_conversation orelse return) orelse return;
         const record = shared_host.service.store.find(state.conversation_id) orelse return;
@@ -2846,15 +2997,17 @@ const AiHost = struct {
         try shared_host.service.store.checkpoint(ticket, record.last_turn, messages, true);
         self.display_content_revision = record.content_revision;
     }
-    fn truncateTurns(self: *AiHost, index: usize) !void {
+    fn truncateTurns(self: *AiHost, index: usize, retained: ?HistoryMessage) !void {
         const turn = self.turnAt(index) orelse return error.StaleTurn;
-        var before = try @import("ai/wire_history.zig").History.copy(self.allocator, turn.before.messages, "");
+        var before = try @import("ai/wire_history.zig").History.copy(self.allocator, if (retained) |message| message.turn.?.after.messages else turn.before.messages, "");
         errdefer before.deinit();
+        try self.history.ensureTotalCapacity(self.allocator, index + @as(usize, if (retained != null) 1 else 0));
         try self.commitHistorySnapshot(before.messages);
         self.wire_history.deinit();
         self.wire_history = before;
         for (self.history.items[index..]) |*message| message.deinit(self.allocator);
         self.history.shrinkRetainingCapacity(index);
+        if (retained) |message| self.history.appendAssumeCapacity(message);
         self.controller.stream.clearRetainingCapacity();
         self.current_turn.deinit(self.allocator);
         if (self.last_user_text) |value| self.allocator.free(value);
@@ -2866,6 +3019,7 @@ const AiHost = struct {
         if (self.last_user_images) |*bundle| bundle.deinit();
         self.last_user_images = null;
         self.tool_results.keepTurns(self.history.items);
+        if (retained) |message| self.tool_results.keepTurnPrefix(&message.turn.?);
         self.managerRef().discardTranscript();
         self.clearRequestHistory();
         self.execution().recovery_failed = false;
@@ -2874,9 +3028,15 @@ const AiHost = struct {
         self.execution().request_stats = .{ .usage_reported = false };
         self.execution().request_conversation = null;
         self.editing_index = null;
+        self.editing_submission = null;
         self.edit_seed = null;
         self.edit_text = null;
         self.compaction.cancel();
+        if (self.assistant_states) |store| if (store.find(self.display_conversation orelse 0)) |state| {
+            if (state.compaction_activity) |activity| {
+                if (activity.after_message == null or activity.after_message.? >= index) state.compaction_activity = null;
+            }
+        };
         @import("ai/tool_trace.zig").emit(.{ .event = "conversation_rollback", .conversation_id = self.display_conversation, .history_messages = self.wire_history.messages.len, .display_messages = self.history.items.len, .request_history_messages = self.execution().request_history.messages.len, .tool_records = self.tool_results.records.items.len, .manager_cards = self.managerRef().cards.count(), .manager_transcript = if (self.managerRef().tool_run) |run| run.messages.items.len else @as(usize, 0) });
     }
     fn processMessageAction(self: *AiHost) !void {
@@ -2884,7 +3044,7 @@ const AiHost = struct {
         self.message_action = null;
         if (action.conversation != null and action.conversation != self.display_conversation) return error.StaleTurn;
         if (self.execution().thread_state.load(.acquire) != 0) return error.AssistantBusy;
-        const message = self.userMessage(action.index) orelse return error.StaleTurn;
+        const message = self.actionMessage(action.index, action.submission) orelse return error.StaleTurn;
         switch (action.kind) {
             .rewind => {
                 const owner = self.display_owner orelse return;
@@ -2904,7 +3064,20 @@ const AiHost = struct {
                 if (message.images) |*bundle| try next_images.restoreHistory(bundle) else try next_images.clear();
                 const restored_text = try self.allocator.dupe(u8, message.text);
                 defer self.allocator.free(restored_text);
-                try self.truncateTurns(action.index);
+                var retained: ?HistoryMessage = null;
+                errdefer if (retained) |*value| value.deinit(self.allocator);
+                if (action.submission) |id| {
+                    const source = self.userMessage(action.index) orelse return error.StaleTurn;
+                    var prefix = try self.turnAt(action.index).?.prefixBeforeInput(self.allocator, id);
+                    errdefer prefix.deinit(self.allocator);
+                    var original = source;
+                    original.turn = null;
+                    retained = try original.clone(self.allocator);
+                    retained.?.turn = prefix;
+                    prefix = .{};
+                }
+                try self.truncateTurns(action.index, retained);
+                retained = null;
                 self.rollback_to_start = self.history.items.len == 0;
                 self.cancelConversationReaders(self.display_conversation orelse return);
                 std.mem.swap(ai_attachments.Draft, draft, &next_files);
@@ -2922,22 +3095,43 @@ const AiHost = struct {
                 self.focusComposer();
                 self.composer_hash = null;
                 self.promptChanged(self.prompt.peek());
-                if (self.image_gate == null) if (self.feedback) |view| view.show(@import("ui/ai_feedback_view.zig").rollback_label, .rollback);
+                if (self.image_gate == null) if (self.feedback) |view| view.show(if (action.submission != null) "已回退，原消息已恢复到输入框，此消息及后续对话已移除。" else @import("ui/ai_feedback_view.zig").rollback_label, .rollback);
                 if (self.tail_follow) |*follow| follow.reset();
             },
             .edit => {
                 self.editing_index = action.index;
+                self.editing_submission = action.submission;
                 self.edit_seed = null;
                 self.conversation_dirty = true;
             },
             .cancel => {
                 self.editing_index = null;
+                self.editing_submission = null;
                 self.edit_seed = null;
                 self.edit_text = null;
                 self.conversation_dirty = true;
             },
             .save => {
+                if (self.editing_index != action.index or !sameSubmission(self.editing_submission, action.submission)) return error.StaleTurn;
                 const value = (self.edit_text orelse return).peek();
+                if (action.submission) |id| {
+                    const turn = self.turnAt(action.index) orelse return error.StaleTurn;
+                    const location = try turn.inputLocation(id);
+                    var replacement: std.ArrayList(u8) = .empty;
+                    defer replacement.deinit(self.allocator);
+                    try replacement.appendSlice(self.allocator, value);
+                    try self.editContextAt(location.wire, message.text, value);
+                    const segment = turn.inputSegment(id) orelse return error.StaleTurn;
+                    std.mem.swap(std.ArrayList(u8), &segment.text, &replacement);
+                    self.editing_index = null;
+                    self.editing_submission = null;
+                    self.edit_seed = null;
+                    self.edit_text = null;
+                    self.conversation_dirty = true;
+                    self.saveDisplayedPresentation() catch |err| self.setFeedback(@errorName(err));
+                    self.cx.requestRedraw();
+                    return;
+                }
                 const copy = try self.allocator.dupe(u8, value);
                 errdefer self.allocator.free(copy);
                 const owner = self.display_owner orelse return error.StaleTurn;
@@ -2959,6 +3153,7 @@ const AiHost = struct {
                     self.last_user_wire = new_wire;
                 }
                 self.editing_index = null;
+                self.editing_submission = null;
                 self.edit_seed = null;
                 self.edit_text = null;
                 self.conversation_dirty = true;
@@ -2969,12 +3164,15 @@ const AiHost = struct {
                 self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
             },
         }
+        if (action.kind == .rewind or action.kind == .save) self.saveDisplayedPresentation() catch |err| self.setFeedback(@errorName(err));
         self.cx.requestRedraw();
     }
     fn editContext(self: *AiHost, index: usize, original: []const u8, edited: []const u8) !void {
-        const History = @import("ai/wire_history.zig").History;
         const target = self.turnAt(index) orelse return error.StaleTurn;
-        const offset = target.before.messages.len;
+        try self.editContextAt(target.before.messages.len, original, edited);
+    }
+    fn editContextAt(self: *AiHost, offset: usize, original: []const u8, edited: []const u8) !void {
+        const History = @import("ai/wire_history.zig").History;
         const Patch = struct { destination: *History, next: History };
         var patches: std.ArrayList(Patch) = .empty;
         defer {
@@ -3090,192 +3288,602 @@ const AiHost = struct {
                 if (message.user) {
                     user = i;
                     host.image_render_turn = host.turnAt(i);
-                    try host.appendUserMessage(root, message, i, self.width);
+                    try host.appendUserMessage(root, message, i, self.width, null);
                     if (host.turnAt(i)) |turn| {
-                        prose = turn.prose.items.len > 0;
+                        prose = turn.prose.items.len > 0 or turn.answer.len > 0;
                         try host.appendTurnSteps(root, turn);
                     }
                 } else if (!prose) try root.appendChild(host.allocator, try host.markdown(message.text));
             }
-            if (user) |index| try host.appendTurnFooter(root, index);
+            if (user) |index| {
+                try host.appendTurnFooter(root, index);
+                if (host.compactionActivity()) |activity| if (activity.after_message == index)
+                    try host.appendCompactionActivity(root, scope, activity);
+            }
             return root;
         }
     };
-    fn rebuildConversation(self: *AiHost, snap: *const @import("ai/float_view.zig").Snapshot) void {
-        const conv = self.conversation orelse return;
+    /// Re-evaluate the transcript as a sequence of keyed sections. A section
+    /// whose inputs are unchanged is left completely alone: its nodes, widget
+    /// scopes, measured heights, disclosure geometry and focus survive a submit.
+    /// This replaces the old whole-tree teardown that dropped all of that state
+    /// on every refresh (visible as a flash and a scroll jump after Enter).
+    fn syncConversation(self: *AiHost, snap: *const @import("ai/float_view.zig").Snapshot) bool {
+        const conv = self.conversation orelse return false;
         self.parkApprovalWidgets(conv);
-        self.live_timeline = null;
-        self.conversation_bubble_width = null;
-        self.live_card = null;
-        self.live_scope = null;
-        self.live_dirty = false;
-        self.streaming_label = null;
-        if (self.cx.pressed_node) |node| if (node.isDescendantOf(conv) or (if (self.turn_footer) |footer| node.isDescendantOf(footer) else false)) self.cx.cancelPointerInteractions(.explicit);
-        if (self.cx.focus_manager.current_focus) |node| if (node.isDescendantOf(conv) or (if (self.turn_footer) |footer| node.isDescendantOf(footer) else false)) self.cx.clearFocus();
-        if (self.conversation_scope) |scope| scope.dispose();
-        self.conversation_scope = null;
-        if (self.turn_footer) |footer| {
-            while (footer.children.items.len > 0) {
-                const child = footer.children.items[footer.children.items.len - 1];
-                self.cx.detachChild(footer, child);
-                self.cx.destroyDetached(child);
-            }
-            footer.setDisplay(.none);
-        }
-        // 清空旧流（status 节点不在 conv 内，安全）。
-        var count = conv.children.items.len;
-        while (count > 0) : (count -= 1) {
-            const child = conv.children.items[count - 1];
-            self.cx.detachChild(conv, child);
-            // Legacy status/card labels are host-owned and reused by refresh.
-            if (child != self.status and child != self.card_node) self.cx.destroyDetached(child);
-        }
         const cx = self.cx;
         const allocator = cx.allocator;
-        const bubble_content_width = @max(0, snap.width - 30);
-        self.conversation_scope = (self.scope orelse return).childScope() catch return;
-        var user_index: ?usize = null;
-        var timeline_prose = false;
-        self.image_render_turn = null;
-        defer self.image_render_turn = null;
+        if (self.conversation_scope == null)
+            self.conversation_scope = (self.scope orelse return false).childScope() catch return false;
+        if (self.transcript == null)
+            self.transcript = @import("ui/ai_transcript_view.zig").View.mount(cx, self.conversation_scope.?, conv) catch return false;
+        self.transcript_frame +%= 1;
+        if (self.transcript_force) {
+            self.transcript_force = false;
+            self.transcript_epoch +%= 1;
+        }
+        const width = @max(0, snap.width - 30);
+        self.transcript_width = width;
+        self.transcript_card_count = snap.card_count;
+        const T = @import("ui/ai_transcript_view.zig");
+        var specs: std.ArrayList(T.Spec) = .empty;
+        defer specs.deinit(allocator);
+        const compaction_activity = self.compactionActivity();
+        var compaction_rendered = false;
+        const compaction_spec: ?T.Spec = if (compaction_activity) |activity| blk: {
+            var hash = self.transcriptBase(0x434f4d50, width);
+            std.hash.autoHash(&hash, activity);
+            break :blk .{ .key = 0, .kind = .compaction, .fingerprint = hash.final(), .context = self, .render = AiHost.renderCompactionActivity };
+        } else null;
+        // Completed turns are the long, stateful part of the transcript. Each
+        // keeps its turn identity when the completed current turn is archived.
         if (self.history.items.len > 48 and self.tail_follow != null) {
-            const history = self.conversation_scope.?.createState(HistoryRows, .{ .host = self, .width = bubble_content_width }) catch return;
-            for (self.history.items, 0..) |message, i| if (i == 0 or message.user) {
-                history.starts.append(allocator, i) catch return;
+            var virtual_key = self.transcriptBase(0x564b4559, width);
+            specs.append(allocator, .{
+                .key = virtual_key.final(),
+                .kind = .virtual,
+                .fingerprint = self.virtualHistoryFingerprint(width),
+                .context = self,
+                .render = AiHost.renderVirtualHistory,
+                .update = AiHost.renderVirtualHistory,
+            }) catch return false;
+            if (compaction_activity) |activity| if (activity.after_message) |index| {
+                compaction_rendered = index < self.history.items.len;
             };
-            self.conversation_scope.?.onCleanup(HistoryRows, history, HistoryRows.cleanup) catch return;
-            if (self.history_heights_conversation != self.display_conversation or self.history_heights_width != bubble_content_width) {
-                self.history_heights.clearRetainingCapacity();
-                self.history_heights_conversation = self.display_conversation;
-                self.history_heights_width = bubble_content_width;
-            }
-            const view = @import("ui/ai_history_view.zig").View.mount(cx, self.conversation_scope.?, self.tail_follow.?.scroll, history.starts.items, &self.history_heights, history, HistoryRows.render) catch return;
-            conv.appendChild(allocator, view.root) catch return;
         } else {
-            for (self.history.items, 0..) |message, message_index| {
-                if (message.user) {
-                    if (user_index) |previous| self.appendTurnFooter(conv, previous) catch return;
-                    user_index = message_index;
-                    self.image_render_turn = self.turnAt(message_index);
-                    self.appendUserMessage(conv, message, message_index, bubble_content_width) catch return;
-                    timeline_prose = false;
-                    if (self.turnAt(message_index)) |turn| {
-                        timeline_prose = turn.prose.items.len > 0;
-                        self.appendTurnSteps(conv, turn) catch return;
-                    }
-                } else if (!timeline_prose) conv.appendChild(allocator, self.markdown(message.text) catch return) catch return;
+            for (self.history.items, 0..) |message, i| {
+                if (!message.user) continue;
+                specs.append(allocator, .{
+                    .key = if (message.turn != null and message.turn.?.id != 0) message.turn.?.id else 0x8000000000000000 | @as(u64, @intCast(i)),
+                    .kind = .history,
+                    .fingerprint = self.historyTurnFingerprint(i, width),
+                    .arg = i,
+                    .context = self,
+                    .render = AiHost.renderHistoryTurn,
+                }) catch return false;
+                if (compaction_activity) |activity| if (activity.after_message == i) {
+                    specs.append(allocator, compaction_spec.?) catch return false;
+                    compaction_rendered = true;
+                };
             }
-            if (user_index) |previous| self.appendTurnFooter(conv, previous) catch return;
         }
-        if (self.last_user_text) |text| {
-            self.appendUserMessage(conv, .{ .user = true, .text = text, .attachments = self.last_user_attachments, .images = self.last_user_images }, self.history.items.len, bubble_content_width) catch return;
-            self.appendTurnSteps(conv, &self.current_turn) catch return;
+        if (!compaction_rendered and compaction_spec != null and compaction_activity.?.after_message == null) {
+            specs.append(allocator, compaction_spec.?) catch return false;
+            compaction_rendered = true;
         }
+        const live = self.last_user_text != null;
+        const running = live and self.current_turn.ended_at_ms == null;
+        if (live) {
+            specs.append(allocator, .{
+                .key = self.current_turn.id,
+                .kind = if (self.current_turn.ended_at_ms != null) .history else .live,
+                .fingerprint = self.liveFingerprint(width),
+                .context = self,
+                .render = AiHost.renderLiveTurn,
+                .invalidate = AiHost.invalidateLiveWidgets,
+            }) catch return false;
+        }
+        // Short-lived surfaces are cheap to re-render and carry no retained
+        // reader state; re-rendering them every round avoids any risk of a stale
+        // status, recovery countdown or queued-input bubble.
+        const frame = self.transcript_frame;
+        if (self.current_turn.timeline.items.len == 0 and self.current_turn.prose.items.len == 0 and self.current_turn.answer.len == 0 and snap.card_count > 0) {
+            specs.append(allocator, .{ .key = 0x3000, .kind = .cards, .fingerprint = frame, .context = self, .render = AiHost.renderCards, .invalidate = AiHost.invalidateCardsWidgets }) catch return false;
+        }
+        if (!compaction_rendered) if (compaction_spec) |spec| {
+            specs.append(allocator, spec) catch return false;
+        };
+        if (running) {
+            specs.append(allocator, .{ .key = 0x4000, .kind = .steer, .fingerprint = self.steerFingerprint(width), .context = self, .render = AiHost.renderSteer }) catch return false;
+        }
+        if (self.recoveryVisible()) {
+            specs.append(allocator, .{ .key = 0x5000, .kind = .recovery, .fingerprint = frame, .context = self, .render = AiHost.renderRecovery }) catch return false;
+        }
+        if (snap.card_count == 0 and !live and self.history.items.len == 0 and !self.rollback_to_start and compaction_spec == null) {
+            specs.append(allocator, .{ .key = 0x6000, .kind = .empty, .fingerprint = self.emptyFingerprint(width), .context = self, .render = AiHost.renderEmpty }) catch return false;
+        }
+        if (self.message_actions_disabled) |disabled| disabled.set(self.execution().thread_state.load(.acquire) != 0);
+        var changed = self.transcript.?.sync(specs.items) catch {
+            self.conversation_dirty = true;
+            cx.requestRedraw();
+            return true;
+        };
+        // The live status stays outside the transcript scroll. Once complete,
+        // the original summary belongs to the retained turn, after its answer.
+        var footer_hash = self.transcriptBase(0x464f4f54, width);
+        std.hash.autoHash(&footer_hash, running);
+        if (running) self.hashTurn(&footer_hash, &self.current_turn);
+        const footer_fingerprint = footer_hash.final();
+        if (self.turn_footer) |footer| if (self.footer_fingerprint != footer_fingerprint) {
+            changed = true;
+            self.footer_fingerprint = null;
+            if (self.footer_scope) |previous| {
+                self.footer_scope = null;
+                previous.dispose();
+            }
+            self.footer_scope = (self.scope orelse return changed).childScope() catch {
+                self.conversation_dirty = true;
+                cx.requestRedraw();
+                return changed;
+            };
+            while (footer.children.items.len > 0) {
+                const child = footer.children.items[footer.children.items.len - 1];
+                cx.detachChild(footer, child);
+                cx.destroyDetached(child);
+            }
+            if (running) {
+                const previous_scope = self.conversation_scope;
+                self.conversation_scope = self.footer_scope;
+                footer.setDisplay(.flex);
+                self.appendTurnFooter(footer, self.history.items.len) catch {
+                    self.conversation_scope = previous_scope;
+                    self.conversation_dirty = true;
+                    cx.requestRedraw();
+                    return changed;
+                };
+                self.conversation_scope = previous_scope;
+            } else footer.setDisplay(.none);
+            self.footer_fingerprint = footer_fingerprint;
+        };
+        return changed;
+    }
+
+    /// Inputs shared by every section. Deliberately excludes per-round state
+    /// (running flag, editing index, live stream) so a submission does not
+    /// invalidate the completed history. `transcript_epoch` is the explicit
+    /// escape hatch for changes that cannot be expressed by a fingerprint.
+    fn transcriptBase(self: *AiHost, seed: u64, width: f32) std.hash.Wyhash {
+        var hash = std.hash.Wyhash.init(seed);
+        std.hash.autoHash(&hash, .{
+            self.transcript_epoch,
+            self.display_conversation,
+            @as(u32, @bitCast(width)),
+            if (self.runtime_config) |runtime| runtime.value.config_revision else @as(u64, 0),
+        });
+        return hash;
+    }
+
+    /// The empty surface and queued-input bubbles are long-lived but have small,
+    /// fully enumerable inputs, so they too can be reused instead of re-rendered.
+    fn emptyFingerprint(self: *AiHost, width: f32) u64 {
+        var hash = self.transcriptBase(0x454d5054, width);
+        std.hash.autoHash(&hash, self.hasSelectedModel());
+        if (self.assistant_states) |store| {
+            for (store.states.items) |*state| {
+                std.hash.autoHash(&hash, .{ state.id, state.closed, state.listed, state.title.text() != null });
+                if (state.title.text()) |title| hash.update(title);
+            }
+        }
+        return hash.final();
+    }
+
+    fn steerFingerprint(self: *AiHost, width: f32) u64 {
+        var hash = self.transcriptBase(0x53544552, width);
+        std.hash.autoHash(&hash, .{ self.current_turn.id, self.current_turn.ended_at_ms });
+        for (self.current_turn.timeline.items) |entry| if (entry == .input) std.hash.autoHash(&hash, entry.input.submission);
+        self.hashTurnInbox(&hash, self.current_turn.id);
+        return hash.final();
+    }
+
+    fn hashTurn(self: *AiHost, hash: *std.hash.Wyhash, turn: *const @import("ai/conversation_turn.zig").Turn) void {
+        _ = self;
+        std.hash.autoHash(hash, .{
+            turn.id,
+            turn.sent_at_ms,
+            turn.ended_at_ms,
+            turn.elapsed_ms,
+            turn.thinking_started_ms,
+            turn.thinking_ended_ms,
+            turn.input_tokens,
+            turn.output_tokens,
+            turn.request_count,
+            turn.timeline.items.len,
+            turn.steps.items.len,
+            turn.prose.items.len,
+            turn.answer.len,
+            turn.thinking.items.len,
+            turn.host_notices.items.len,
+            turn.round_timeline_len,
+            turn.round_steps_len,
+            turn.round_text_offset,
+            turn.round_thinking_offset,
+        });
+        hash.update(turn.answer);
+        hash.update(turn.prose.items);
+        hash.update(turn.thinking.items);
+        for (turn.timeline.items) |entry| {
+            std.hash.autoHash(hash, std.meta.activeTag(entry));
+            switch (entry) {
+                .message, .input, .thinking => |segment| {
+                    hash.update(segment.text.items);
+                    std.hash.autoHash(hash, .{ segment.started_ms, segment.ended_ms });
+                },
+                .tool => |i| std.hash.autoHash(hash, i),
+                .notice => |i| if (i < turn.host_notices.items.len) hash.update(turn.host_notices.items[i].text),
+            }
+        }
+        for (turn.steps.items) |step| {
+            hash.update(step.call_id);
+            hash.update(step.name);
+            hash.update(step.command);
+            hash.update(step.detail);
+            std.hash.autoHash(hash, .{
+                step.phase,
+                step.started_ms,
+                step.ended_ms,
+                step.decision,
+                step.text_offset,
+                step.activity_started_ms,
+                step.approval_elapsed_ms,
+            });
+        }
+        for (turn.host_notices.items) |notice| {
+            hash.update(notice.text);
+            std.hash.autoHash(hash, notice.revision);
+        }
+    }
+
+    fn hashTurnInbox(self: *AiHost, hash: *std.hash.Wyhash, turn_id: u64) void {
+        const shared_host = self.shared_service orelse return;
+        const state = (self.assistant_states orelse return).find(self.display_conversation orelse return) orelse return;
+        const record = shared_host.service.store.find(state.conversation_id) orelse return;
+        record.inbox.lock();
+        defer record.inbox.unlock();
+        const displayed: ?*const @import("ai/conversation_turn.zig").Turn = if (self.current_turn.id == turn_id) &self.current_turn else found: {
+            for (self.history.items) |*message| if (message.turn) |*turn| if (turn.id == turn_id) break :found turn;
+            break :found null;
+        };
+        for (record.inbox.entries.items) |entry| {
+            const receipt = entry.receipt;
+            if (receipt.turn != turn_id or receipt.route != .steer or receipt.delivery == .cancelled) continue;
+            if (displayed) |turn| {
+                if (turn.hasInput(receipt.id) or (receipt.delivery == .consumed and turn.ended_at_ms != null)) continue;
+            }
+            std.hash.autoHash(hash, receipt);
+            if (receipt.delivery != .consumed and receipt.delivery != .outcome_unknown and receipt.pause == null)
+                std.hash.autoHash(hash, record.inbox.work_phase);
+            if (entry.payload.messages.len > 0) hash.update(entry.payload.messages[0].content);
+        }
+    }
+
+    fn historyTurnFingerprint(self: *AiHost, index: usize, width: f32) u64 {
+        var hash = self.transcriptBase(0x48495354, width);
+        std.hash.autoHash(&hash, .{
+            index,
+            self.editing_index == index,
+            if (self.editing_index == index) self.editing_submission else null,
+        });
+        const message = self.userMessage(index) orelse return hash.final();
+        hash.update(message.text);
+        std.hash.autoHash(&hash, .{
+            message.user,
+            if (message.attachments) |bundle| bundle.items.len else @as(usize, 0),
+            if (message.images) |bundle| bundle.items.len else @as(usize, 0),
+        });
+        const turn_value = self.turnAt(index);
+        const timeline_prose = if (turn_value) |turn| turn.prose.items.len > 0 or turn.answer.len > 0 else false;
+        if (!timeline_prose) {
+            var i = index + 1;
+            while (i < self.history.items.len and !self.history.items[i].user) : (i += 1) {
+                std.hash.autoHash(&hash, i);
+                hash.update(self.history.items[i].text);
+            }
+        }
+        if (turn_value) |turn| {
+            self.hashTurn(&hash, turn);
+            for (self.tool_results.records.items) |record| {
+                if (record.turn_id != turn.id) continue;
+                std.hash.autoHash(&hash, .{ @intFromPtr(record), record.error_status, record.total_elapsed_ms, record.checks.items.items.len });
+                for (record.targets) |target| std.hash.autoHash(&hash, target.checks.items.items.len);
+            }
+            self.hashTurnInbox(&hash, turn.id);
+        }
+        return hash.final();
+    }
+
+    fn virtualHistoryFingerprint(self: *AiHost, width: f32) u64 {
+        var hash = self.transcriptBase(0x56495254, width);
+        for (self.history.items, 0..) |message, i| {
+            if (message.user) std.hash.autoHash(&hash, self.virtualRowFingerprint(i, width));
+        }
+        return hash.final();
+    }
+
+    fn virtualRowFingerprint(self: *AiHost, index: usize, width: f32) u64 {
+        var hash = std.hash.Wyhash.init(self.historyTurnFingerprint(index, width));
+        if (self.compactionActivity()) |activity| if (activity.after_message == index) std.hash.autoHash(&hash, activity);
+        return hash.final();
+    }
+
+    fn liveFingerprint(self: *AiHost, width: f32) u64 {
+        const turn = &self.current_turn;
+        if (turn.ended_at_ms != null) return self.historyTurnFingerprint(self.history.items.len, width);
+        var hash = self.transcriptBase(0x4c495645, width);
+        std.hash.autoHash(&hash, .{
+            turn.id,
+            turn.ended_at_ms != null,
+            turn.timeline.items.len > 0,
+            turn.steps.items.len > 0,
+            turn.host_notices.items.len > 0,
+            self.recoveryVisible(),
+            self.transcript_card_count,
+            self.execution().thread_state.load(.acquire),
+        });
+        if (self.last_user_text) |text| hash.update(text);
+        std.hash.autoHash(&hash, .{
+            if (self.last_user_attachments) |bundle| bundle.items.len else @as(usize, 0),
+            if (self.last_user_images) |bundle| bundle.items.len else @as(usize, 0),
+        });
+        // A retained timeline/card takes over stream updates. Without one, the
+        // section must be re-rendered each round so partial output is never stale.
+        if (self.live_timeline == null and self.live_card == null)
+            std.hash.autoHash(&hash, self.transcript_frame);
+        return hash.final();
+    }
+
+    fn renderHistoryTurn(raw: *anyopaque, arg: usize, scope: *ui.Scope, root: *ui.Node) anyerror!void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const index = arg;
+        const previous_scope = self.conversation_scope;
+        const previous_turn = self.image_render_turn;
+        self.conversation_scope = scope;
+        defer {
+            self.conversation_scope = previous_scope;
+            self.image_render_turn = previous_turn;
+        }
+        self.image_render_turn = self.turnAt(index);
+        try self.appendUserMessage(root, self.history.items[index], index, self.transcript_width, null);
+        var timeline_prose = false;
+        if (self.turnAt(index)) |turn| {
+            timeline_prose = turn.prose.items.len > 0 or turn.answer.len > 0;
+            try self.appendTurnSteps(root, turn);
+        }
+        var i = index + 1;
+        while (i < self.history.items.len and !self.history.items[i].user) : (i += 1) {
+            if (!timeline_prose) try root.appendChild(self.allocator, try self.markdown(self.history.items[i].text));
+        }
+        try self.appendTurnFooter(root, index);
+    }
+
+    fn renderVirtualHistory(raw: *anyopaque, arg: usize, scope: *ui.Scope, root: *ui.Node) anyerror!void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        _ = arg;
+        const previous_scope = self.conversation_scope;
+        self.conversation_scope = scope;
+        defer self.conversation_scope = previous_scope;
+        const row = self.transcript.?.rows.items[0];
+        const existing: ?*@import("ui/ai_history_view.zig").View = if (row.extra) |extra| @ptrCast(@alignCast(extra)) else null;
+        const history = if (existing) |view| @as(*HistoryRows, @ptrCast(@alignCast(view.context))) else blk: {
+            const value = try scope.createState(HistoryRows, .{ .host = self, .width = self.transcript_width });
+            try scope.onCleanup(HistoryRows, value, HistoryRows.cleanup);
+            break :blk value;
+        };
+        var starts: std.ArrayList(usize) = .empty;
+        defer starts.deinit(self.allocator);
+        var fingerprints: std.ArrayList(u64) = .empty;
+        defer fingerprints.deinit(self.allocator);
+        for (self.history.items, 0..) |message, i| if (i == 0 or message.user) {
+            try starts.append(self.allocator, i);
+            try fingerprints.append(self.allocator, self.virtualRowFingerprint(i, self.transcript_width));
+        };
+        std.mem.swap(std.ArrayList(usize), &history.starts, &starts);
+        if (self.history_heights_conversation != self.display_conversation or self.history_heights_width != self.transcript_width) {
+            self.history_heights.clearRetainingCapacity();
+            self.history_heights_conversation = self.display_conversation;
+            self.history_heights_width = self.transcript_width;
+        }
+        history.width = self.transcript_width;
+        if (existing) |view| {
+            try view.update(history.starts.items, fingerprints.items);
+        } else {
+            const view = try @import("ui/ai_history_view.zig").View.mount(self.cx, scope, self.tail_follow.?.scroll, history.starts.items, &self.history_heights, history, HistoryRows.render);
+            try view.update(history.starts.items, fingerprints.items);
+            try root.appendChild(self.allocator, view.root);
+            row.extra = view;
+        }
+    }
+
+    /// Retained stream widgets live inside a section body. Drop the host's
+    /// pointers before that body's scope and nodes are disposed.
+    fn invalidateLiveWidgets(raw: *anyopaque) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        self.live_timeline = null;
+        self.live_dirty = false;
+        self.streaming_label = null;
+    }
+
+    fn invalidateCardsWidgets(raw: *anyopaque) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        self.live_scope = null;
+        self.live_card = null;
+        self.live_card_owner = null;
+        self.live_dirty = false;
+    }
+
+    fn renderLiveTurn(raw: *anyopaque, arg: usize, scope: *ui.Scope, root: *ui.Node) anyerror!void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        _ = arg;
+        const previous_scope = self.conversation_scope;
+        const previous_turn = self.image_render_turn;
+        self.conversation_scope = scope;
+        defer {
+            self.conversation_scope = previous_scope;
+            self.image_render_turn = previous_turn;
+        }
+        // The live section owns the retained timeline; the cards section owns
+        // live_scope/live_card and clears them through its invalidate hook.
+        self.live_timeline = null;
+        self.live_dirty = false;
+        self.streaming_label = null;
+        self.image_render_turn = null;
+        try self.appendUserMessage(root, .{
+            .user = true,
+            .text = self.last_user_text orelse return,
+            .attachments = self.last_user_attachments,
+            .images = self.last_user_images,
+        }, self.history.items.len, self.transcript_width, null);
+        try self.appendTurnSteps(root, &self.current_turn);
+        if (self.current_turn.ended_at_ms != null) try self.appendTurnFooter(root, self.history.items.len);
         self.image_render_turn = &self.current_turn;
-        // 响应卡片
+    }
+
+    fn compactionActivity(self: *AiHost) ?@import("ai/assistant_store.zig").CompactionActivity {
+        const state = (self.assistant_states orelse return null).find(self.display_conversation orelse return null) orelse return null;
+        return state.compaction_activity;
+    }
+
+    fn renderCompactionActivity(raw: *anyopaque, _: usize, scope: *ui.Scope, root: *ui.Node) anyerror!void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        try self.appendCompactionActivity(root, scope, self.compactionActivity() orelse return);
+    }
+
+    fn appendCompactionActivity(self: *AiHost, root: *ui.Node, scope: *ui.Scope, activity: @import("ai/assistant_store.zig").CompactionActivity) !void {
+        try @import("ui/ai_compaction_view.zig").append(self.cx, scope, root, activity, self.cx.on(AiHost, self, cancelCompactionActivity));
+    }
+
+    fn renderCards(raw: *anyopaque, arg: usize, scope: *ui.Scope, root: *ui.Node) anyerror!void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        _ = arg;
+        const previous_scope = self.conversation_scope;
+        self.conversation_scope = scope;
+        defer self.conversation_scope = previous_scope;
+        self.live_card_owner = scope;
         var index: usize = 0;
-        while (self.current_turn.timeline.items.len == 0 and self.current_turn.prose.items.len == 0 and index < snap.card_count) : (index += 1) {
+        while (index < self.transcript_card_count) : (index += 1) {
             const view = self.controller.cardView(index) orelse continue;
             if (view.kind != .text and view.kind != .code) continue;
-            const card = ui.box(cx, @import("ui/ai_assistant_styles.zig").assistantMessage(), .{}) catch return;
+            const card = try ui.box(self.cx, @import("ui/ai_assistant_styles.zig").assistantMessage(), .{});
             const live_text = view.kind == .text and self.execution().thread_state.load(.acquire) == 1;
-            const body_text = if (live_text) blk: {
-                self.live_scope = self.conversation_scope.?.childScope() catch return;
+            const body = if (live_text) blk: {
+                self.live_scope = try scope.childScope();
                 self.live_card = card;
-                break :blk self.markdownIn(self.live_scope.?, view.body, &self.current_turn) catch return;
-            } else if (view.kind == .text) self.markdown(view.body) catch return else @import("ui/ai_message_view.zig").mountCode(cx, self.conversation_scope.?, view.body, view.title) catch return;
-            if (index == 0 and view.kind == .text) {
-                body_text.meta.ownership.meta.test_id = "ai.response";
-            }
-            card.appendChild(allocator, body_text) catch return;
-            conv.appendChild(allocator, card) catch return;
+                break :blk try self.markdownIn(self.live_scope.?, view.body, &self.current_turn);
+            } else if (view.kind == .text) try self.markdown(view.body) else try @import("ui/ai_message_view.zig").mountCode(self.cx, scope, view.body, view.title);
+            if (index == 0 and view.kind == .text) body.meta.ownership.meta.test_id = "ai.response";
+            try card.appendChild(self.allocator, body);
+            try root.appendChild(self.allocator, card);
         }
-        if (self.last_user_text != null) self.appendSteerMessages(conv, self.current_turn.id) catch return;
-        if (self.recoveryVisible()) {
-            if (self.conversation_scope == null) self.conversation_scope = (self.scope orelse return).childScope() catch return;
-            const run = self.managerRef().tool_run;
-            const safe = run != null and run.?.compaction_failure == null;
-            const unknown_outcome = self.recoveryHasUnknown();
-            const cooldown = self.managerRef().cooldownRemainingMs();
-            var retained_answer = false;
-            for (self.controller.stream.cards.items) |item| switch (item) {
-                .text => |text| {
-                    if (std.mem.trim(u8, text, " \t\r\n").len > 0 and !std.mem.eql(u8, text, "— 重新尝试答复 —")) {
-                        retained_answer = true;
-                        break;
-                    }
-                },
-                .code => |code| {
-                    if (code.body.len > 0) {
-                        retained_answer = true;
-                        break;
-                    }
-                },
-                else => {},
-            };
-            const recovery = @import("ui/ai_recovery_view.zig").mount(cx, self.conversation_scope.?, .{
-                .ticket = .{ .owner = self.execution().request_owner.?, .turn = self.managerRef().turn_id, .conversation_id = if (self.execution().request_host_context) |context| context.conversation_id else null },
-                .reason = self.recoveryReason(),
-                .detail = self.execution().failure_label,
-                .title = if (self.execution().request_failure != null and self.execution().request_failure.? == error.ContextFixedOverhead) "模型窗口不足" else if (run != null and run.?.compaction_failure != null) "上下文压缩失败" else if (self.execution().request_failure != null and self.execution().request_failure.? == error.Timeout) "请求超时" else "请求失败",
-                .retries = self.managerRef().retry_attempt,
-                .max_retries = self.managerRef().retry_policy.max_attempts,
-                .retry_enabled = safe and cooldown == 0,
-                .regenerate_enabled = !unknown_outcome and cooldown == 0,
-                .retry_disabled_reason = if (run == null) "仅重试答复不可用：缺少本轮上下文，请编辑问题后重新发送。" else if (run.?.compaction_failure != null) "仅重试答复不可用：上下文压缩失败，请先修复上下文。" else null,
-                .regenerate_disabled_reason = if (unknown_outcome) "新计划不可用：请先核实结果未知的操作。" else null,
-                .cooldown_seconds = (cooldown + 999) / 1000,
-                .retained_answer = retained_answer,
-                .has_tool_calls = if (run) |value| value.records.items.len > 0 else false,
-            }, .{ .context = self, .enqueue = enqueueRecovery }) catch return;
-            conv.appendChild(allocator, recovery) catch return;
-        }
-        if (self.last_user_text != null) {
-            const footer = self.turn_footer orelse conv;
-            footer.setDisplay(.flex);
-            self.appendTurnFooter(footer, self.history.items.len) catch return;
-        }
-        if (snap.card_count == 0 and self.last_user_text == null and self.history.items.len == 0 and !self.rollback_to_start) {
-            if (self.conversation_scope == null) self.conversation_scope = (self.scope orelse return).childScope() catch return;
-            const Empty = @import("ui/ai_empty_view.zig");
-            var recent: [2]Empty.Recent = undefined;
-            var recent_times: [2]u64 = .{ 0, 0 };
-            var recent_owners: [2][256]u8 = undefined;
-            var recent_count: usize = 0;
-            if (self.assistant_states) |store| {
-                var recent_index = store.states.items.len;
-                while (recent_index > 0) {
-                    recent_index -= 1;
-                    const state = &store.states.items[recent_index];
-                    if (state.child_agent != null or state.closed or !state.listed or self.display_conversation == state.id) continue;
-                    var title_scratch: @import("ai/conversation_title.zig").Title = .{};
-                    const fallback = state.titleText(state.history.items, state.last_user_text, &title_scratch) orelse continue;
-                    if (state.title.text() == null) _ = state.title.set(fallback);
-                    const title = state.title.text().?;
-                    var sent_at_ms = state.current_turn.sent_at_ms;
-                    for (state.history.items) |message| if (message.turn) |turn| {
-                        sent_at_ms = @max(sent_at_ms, turn.sent_at_ms);
-                    };
-                    var slot: usize = 0;
-                    while (slot < recent_count and recent_times[slot] >= sent_at_ms) : (slot += 1) {}
-                    if (slot >= recent.len) continue;
-                    recent_count = @min(recent_count + 1, recent.len);
-                    var move = recent_count - 1;
-                    while (move > slot) : (move -= 1) {
-                        recent[move] = recent[move - 1];
-                        recent_times[move] = recent_times[move - 1];
-                    }
-                    recent[slot] = self.conversationEntry(state.id, title, "");
-                    recent_times[slot] = sent_at_ms;
+    }
+
+    fn renderSteer(raw: *anyopaque, arg: usize, scope: *ui.Scope, root: *ui.Node) anyerror!void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        _ = arg;
+        const previous_scope = self.conversation_scope;
+        self.conversation_scope = scope;
+        defer self.conversation_scope = previous_scope;
+        try self.appendSteerMessages(root, self.current_turn.id);
+    }
+
+    fn renderRecovery(raw: *anyopaque, arg: usize, scope: *ui.Scope, root: *ui.Node) anyerror!void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        _ = arg;
+        const previous_scope = self.conversation_scope;
+        self.conversation_scope = scope;
+        defer self.conversation_scope = previous_scope;
+        const run = self.managerRef().tool_run;
+        const safe = run != null and run.?.compaction_failure == null;
+        const unknown_outcome = self.recoveryHasUnknown();
+        const cooldown = self.managerRef().cooldownRemainingMs();
+        var retained_answer = false;
+        for (self.controller.stream.cards.items) |item| switch (item) {
+            .text => |text| {
+                if (std.mem.trim(u8, text, " \t\r\n").len > 0 and !std.mem.eql(u8, text, "— 重新尝试答复 —")) {
+                    retained_answer = true;
+                    break;
                 }
+            },
+            .code => |code| {
+                if (code.body.len > 0) {
+                    retained_answer = true;
+                    break;
+                }
+            },
+            else => {},
+        };
+        const recovery = try @import("ui/ai_recovery_view.zig").mount(self.cx, scope, .{
+            .ticket = .{ .owner = self.execution().request_owner.?, .turn = self.managerRef().turn_id, .conversation_id = if (self.execution().request_host_context) |context| context.conversation_id else null },
+            .reason = self.recoveryReason(),
+            .detail = self.execution().failure_label,
+            .title = if (self.execution().request_failure != null and self.execution().request_failure.? == error.ContextFixedOverhead) "模型窗口不足" else if (run != null and run.?.compaction_failure != null) "上下文压缩失败" else if (self.execution().request_failure != null and self.execution().request_failure.? == error.Timeout) "请求超时" else "请求失败",
+            .retries = self.managerRef().retry_attempt,
+            .max_retries = self.managerRef().retry_policy.max_attempts,
+            .retry_enabled = safe and cooldown == 0,
+            .regenerate_enabled = !unknown_outcome and cooldown == 0,
+            .retry_disabled_reason = if (run == null) "仅重试答复不可用：缺少本轮上下文，请编辑问题后重新发送。" else if (run.?.compaction_failure != null) "仅重试答复不可用：上下文压缩失败，请先修复上下文。" else null,
+            .regenerate_disabled_reason = if (unknown_outcome) "新计划不可用：请先核实结果未知的操作。" else null,
+            .cooldown_seconds = (cooldown + 999) / 1000,
+            .retained_answer = retained_answer,
+            .has_tool_calls = if (run) |value| value.records.items.len > 0 else false,
+        }, .{ .context = self, .enqueue = enqueueRecovery });
+        try root.appendChild(self.allocator, recovery);
+    }
+
+    fn renderEmpty(raw: *anyopaque, arg: usize, scope: *ui.Scope, root: *ui.Node) anyerror!void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        _ = arg;
+        const cx = self.cx;
+        const allocator = cx.allocator;
+        const previous_scope = self.conversation_scope;
+        self.conversation_scope = scope;
+        defer self.conversation_scope = previous_scope;
+        const Empty = @import("ui/ai_empty_view.zig");
+        var recent: [2]Empty.Recent = undefined;
+        var recent_times: [2]u64 = .{ 0, 0 };
+        var recent_owners: [2][256]u8 = undefined;
+        var recent_count: usize = 0;
+        if (self.assistant_states) |store| {
+            var recent_index = store.states.items.len;
+            while (recent_index > 0) {
+                recent_index -= 1;
+                const state = &store.states.items[recent_index];
+                if (state.child_agent != null or state.closed or !state.listed or self.display_conversation == state.id) continue;
+                var title_scratch: @import("ai/conversation_title.zig").Title = .{};
+                const fallback = state.titleText(state.history.items, state.last_user_text, &title_scratch) orelse continue;
+                if (state.title.text() == null) _ = state.title.set(fallback);
+                const title = state.title.text().?;
+                var sent_at_ms = state.current_turn.sent_at_ms;
+                for (state.history.items) |message| if (message.turn) |turn| {
+                    sent_at_ms = @max(sent_at_ms, turn.sent_at_ms);
+                };
+                var slot: usize = 0;
+                while (slot < recent_count and recent_times[slot] >= sent_at_ms) : (slot += 1) {}
+                if (slot >= recent.len) continue;
+                recent_count = @min(recent_count + 1, recent.len);
+                var move = recent_count - 1;
+                while (move > slot) : (move -= 1) {
+                    recent[move] = recent[move - 1];
+                    recent_times[move] = recent_times[move - 1];
+                }
+                recent[slot] = self.conversationEntry(state.id, title, "");
+                recent_times[slot] = sent_at_ms;
             }
-            for (recent[0..recent_count], 0..) |*entry, recent_slot| {
-                const state = self.assistant_states.?.find(entry.id) orelse continue;
-                entry.owner = if (state.historical_environment and !entry.bound) "历史连接环境" else self.conversationOwnerLabel(state.owner, &recent_owners[recent_slot]);
-            }
-            const empty = Empty.mount(cx, self.conversation_scope.?, self.hasSelectedModel(), .{ .context = self, .logo_texture = self.welcome_logo_texture, .recent = recent[0..recent_count], .session_hooks = .{ .context = self, .select = selectConversation, .request_close = requestConversationClose, .remove = deleteConversation, .act = conversationAction }, .summarize = emptySummarize, .logs = emptyLogs, .history = emptyHistory, .settings = emptySettings, .ollama = emptyOllama }) catch return;
-            conv.appendChild(allocator, empty) catch return;
         }
+        for (recent[0..recent_count], 0..) |*entry, recent_slot| {
+            const state = self.assistant_states.?.find(entry.id) orelse continue;
+            entry.owner = if (state.historical_environment and !entry.bound) "历史连接环境" else self.conversationOwnerLabel(state.owner, &recent_owners[recent_slot]);
+        }
+        const empty = try Empty.mount(cx, scope, self.hasSelectedModel(), .{ .context = self, .logo_texture = self.welcome_logo_texture, .recent = recent[0..recent_count], .session_hooks = .{ .context = self, .select = selectConversation, .request_close = requestConversationClose, .remove = deleteConversation, .act = conversationAction }, .summarize = emptySummarize, .logs = emptyLogs, .history = emptyHistory, .settings = emptySettings, .ollama = emptyOllama });
+        try root.appendChild(allocator, empty);
     }
 
     fn appendSentAttachments(self: *AiHost, parent: *ui.Node, bundle: *const ai_attachments.Bundle) !void {
@@ -3435,14 +4043,19 @@ const AiHost = struct {
         if (width <= 0 or self.conversation_bubble_width == width) return false;
         self.conversation_bubble_width = width;
         const max_width = @import("ui/ai_assistant_styles.zig").userBubbleMaxWidth(@max(0, width - 30));
-        for (conversation.children.items) |row| {
-            const id = row.meta.ownership.meta.test_id orelse continue;
-            if (!std.mem.eql(u8, id, "ai.message.user.row")) continue;
-            for (row.children.items) |bubble| if (std.mem.eql(u8, bubble.meta.ownership.meta.test_id orelse "", "ai.message.user.bubble") or std.mem.eql(u8, bubble.meta.ownership.meta.test_id orelse "", "ai.message.attachments")) {
+        resizeBubblesIn(self, conversation, max_width);
+        return true;
+    }
+    /// Sections now wrap their nodes in a retained row, so the user bubbles are
+    /// no longer direct children of the conversation. Walk the whole subtree.
+    fn resizeBubblesIn(self: *AiHost, node: *ui.Node, max_width: f32) void {
+        const id = node.meta.ownership.meta.test_id orelse "";
+        if (std.mem.eql(u8, id, "ai.message.user.row")) {
+            for (node.children.items) |bubble| if (std.mem.eql(u8, bubble.meta.ownership.meta.test_id orelse "", "ai.message.user.bubble") or std.mem.eql(u8, bubble.meta.ownership.meta.test_id orelse "", "ai.message.attachments")) {
                 bubble.setStyle(self.cx.allocator, .max_width, max_width);
             };
         }
-        return true;
+        for (node.children.items) |child| self.resizeBubblesIn(child, max_width);
     }
 
     fn activeTerminalFocus(self: *AiHost) ?@import("ui/ai_return_focus.zig").Ticket {
@@ -4561,6 +5174,7 @@ const AiHost = struct {
             .workspace = self.workspace,
             .roster = self.roster,
             .file_application = self.file_application,
+            .ai_transfer_host = self.ai_transfer_host,
             .data_root = self.data_root,
             .recording_archive = self.recording_archive,
             .notification_window = self.notification_window,
@@ -5287,7 +5901,7 @@ const AiHost = struct {
             rejected.deinit(backend.allocator);
             return err;
         };
-        _ = receipt;
+        if (receipt.route != .queue) if (self.tail_follow) |*follow| follow.reset();
         self.prompt.set("");
         _ = try attachments.consumeSent(&bundle);
         _ = try image_draft.consumeSent(&image_bundle);
@@ -5425,7 +6039,7 @@ const AiHost = struct {
         if (!self.live_dirty) return false;
         self.live_dirty = false;
         const card = self.live_card orelse return false;
-        const scope = self.conversation_scope orelse return false;
+        const scope = self.live_card_owner orelse return false;
         const stream = &self.controller.stream;
         if (stream.cards.items.len == 0 or stream.cards.items[0] != .text) return false;
         if (self.cx.pressed_node) |node| if (node.isDescendantOf(card)) self.cx.cancelPointerInteractions(.explicit);
@@ -5616,6 +6230,11 @@ const AiHost = struct {
             self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
             self.execution().host_catalog_len += 1;
         }
+        if (self.ai_transfer_host != null) for (@import("ai/host_transfer.zig").contributions) |contribution| {
+            if (self.execution().tool_bridge.queries_only and contribution.definition.effect != .read_state) continue;
+            self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
+            self.execution().host_catalog_len += 1;
+        };
         if (self.execution().request_host_context) |authority| if (authority.child_origin == null) {
             self.execution().host_catalog[self.execution().host_catalog_len] = @import("ai/child_gateway.zig").contribution;
             self.execution().host_catalog_len += 1;
@@ -5885,6 +6504,53 @@ const AiHost = struct {
             const runtime = if (self.execution().lifecycle_runtime) |*value| value else return error.ToolNotAvailable;
             try runtime.acknowledgeResult(.{ .context = &self.execution().tool_bridge, .call = controllerScheduler }, context, operation);
         }
+    }
+    fn validateTransferContext(raw: *anyopaque, context: @import("ai/host_tools.zig").Context) !void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        try self.validateHostContext(context);
+    }
+    fn transferBackend(self: *AiHost) @import("ai/host_transfer.zig").Backend {
+        return .{ .context = self, .validate = validateTransferOwner, .submit = enqueueAiTransfer, .progress = aiTransferProgress, .cancel = cancelAiTransfer, .downloadDirectory = aiDownloadDirectory };
+    }
+    fn validateTransferOwner(raw: *anyopaque, context: @import("ai/host_tools.zig").Context, owner: @import("host/identity.zig").SessionHandle, require_live: bool) !void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        try self.validateHostContext(context);
+        const controller = lookupLifecycleTask(self, context.conversation_id, context.task_id) orelse return error.ScopeChanged;
+        if (!controller.inBinding(owner)) return error.TargetNotAuthorized;
+        const app = self.application_host orelse return error.ContextUnavailable;
+        if (app.sessions.queryState(owner) == null) return error.StaleSession;
+        if (!require_live) return;
+        const target = self.ai_transfer_host orelse return error.ToolNotAvailable;
+        _ = try @import("ui/ai_transfer_source.zig").resolve(target.application, owner, true);
+        try target.validateNewTransferPolicy();
+    }
+    fn enqueueAiTransfer(raw: *anyopaque, request: @import("ai/host_transfer.zig").Request) !transfer_mod.JobId {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const target = self.ai_transfer_host orelse return error.ToolNotAvailable;
+        const policy = target.workspace.app_config.transfer;
+        return target.enqueueSessionTransfer(request.owner.?, .{
+            .direction = request.direction(),
+            .sources = &.{request.source},
+            .remote_dir = if (request.kind == .upload_file) request.destination else "",
+            .local_dir = if (request.kind == .download_file) request.destination else "",
+            .resume_transfer = policy.@"resume",
+            .md5_check = policy.verify_md5,
+        });
+    }
+    fn aiTransferProgress(raw: *anyopaque, job: transfer_mod.JobId) ?transfer_mod.Progress {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        return (self.ai_transfer_host orelse return null).manager.progress(job);
+    }
+    fn cancelAiTransfer(raw: *anyopaque, job: transfer_mod.JobId) !void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        try (self.ai_transfer_host orelse return error.ToolNotAvailable).manager.cancel(job);
+    }
+    fn aiDownloadDirectory(raw: *anyopaque, allocator: std.mem.Allocator) ![]u8 {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const target = self.ai_transfer_host orelse return error.ToolNotAvailable;
+        const home = try @import("platform/account.zig").home(allocator);
+        defer allocator.free(home);
+        return @import("config/transfer_defaults.zig").downloadDirectory(allocator, target.workspace.app_config.transfer.download_dir, home);
     }
     fn validateHostContext(self: *AiHost, context: @import("ai/host_tools.zig").Context) !void {
         const app = self.application_host orelse return error.ContextUnavailable;
@@ -6205,6 +6871,18 @@ const AiHost = struct {
             } else return error.ToolNotAvailable;
             if (entry.definition.effect != .read_state and entry.definition.effect != .observe_image) return rejectedHostInvocation(invocation, allocator, error.ObservationOnlyTask);
         };
+        if (@import("ai/host_transfer.zig").supports(invocation.tool_id)) {
+            const transfer_host = self.ai_transfer_host orelse return error.ToolNotAvailable;
+            const runtime = if (self.execution().lifecycle_runtime) |*value| value else return error.ToolNotAvailable;
+            return @import("ui/ai_transfer_controller.zig").execute(.{
+                .registry = &transfer_host.ai_transfers,
+                .backend = self.transferBackend(),
+                .approvals = self.approvalsRef(),
+                .journal = runtime.journal_owner,
+                .policy_revision = self.execution().request_policy_revision,
+                .validate_context = validateTransferContext,
+            }, bridge, invocation, allocator, cancel);
+        }
         if (@import("ai/extension_gateway.zig").supports(invocation.tool_id)) return self.dispatchExtensionGateway(bridge, invocation, allocator, cancel);
         if (std.mem.eql(u8, invocation.tool_id, @import("ai/child_gateway.zig").tool_id)) return self.dispatchChildGateway(bridge, invocation, allocator, cancel);
         if (@import("ai/user_interaction.zig").supports(invocation.tool_id)) {
@@ -6581,7 +7259,7 @@ const AiHost = struct {
                 .title = switch (pending.kind) {
                     .network_url => "确认访问网址",
                     .mcp => "确认 MCP 操作",
-                    .lifecycle => "确认会话操作",
+                    .lifecycle => if (@import("ai/host_transfer.zig").supports(pending.tool.text())) "确认文件传输操作" else "确认会话操作",
                     .terminal_command => "确认执行命令",
                 },
                 .target = target,
@@ -7314,7 +7992,12 @@ const AiHost = struct {
             if (host.application_host) |application| {
                 host.execution().tool_bridge.pump(application);
                 if (host.transcript_images) |store| {
-                    if (store.tick(application)) host.conversation_dirty = true;
+                    if (store.tick(application)) {
+                        host.conversation_dirty = true;
+                        // Decoded image pixels change the Markdown tree in place;
+                        // no content fingerprint can express that lookup.
+                        host.transcript_force = true;
+                    }
                     if (store.busy()) host.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
                 }
                 host.execution().execution_bridge.pump(application);
@@ -7368,6 +8051,7 @@ const AiHost = struct {
                 };
                 if (host.send_base) |base| base.set(styles.primary());
                 host.painted_colors = colors;
+                host.transcript_force = true;
                 host.refresh("AI 助手");
             }
             const previous_owner = host.display_owner;
@@ -7387,6 +8071,7 @@ const AiHost = struct {
             if (host.runtime_config) |runtime| if (host.painted_config_revision != runtime.value.config_revision) {
                 host.painted_config_revision = runtime.value.config_revision;
                 host.composer_hash = null;
+                host.transcript_force = true;
                 host.refresh("AI 助手");
             };
             host.refreshComposer() catch |err| {
@@ -7418,14 +8103,15 @@ const AiHost = struct {
                 if (seconds != 0) host.cx.scheduleRedrawAfterNs(1000 * 1_000_000);
             }
             const rebuild = host.conversation_dirty;
+            var transcript_changed = false;
             if (rebuild) {
                 host.conversation_dirty = false;
                 const snap = host.controller.snapshot(.{ .x = 0, .y = 0, .width = 800, .height = 600 }, .{ .x = 0, .y = 0, .width = 1200, .height = 800 });
-                host.rebuildConversation(&snap);
+                transcript_changed = host.syncConversation(&snap);
             }
             const live_updated = if (!rebuild) host.refreshLiveMarkdown() catch false else false;
             const bubbles_resized = host.resizeConversationBubbles();
-            if (!rebuild and !live_updated and !composer_resized and !bubbles_resized) if (host.tail_follow) |*follow| {
+            if (!transcript_changed and !live_updated and !composer_resized and !bubbles_resized) if (host.tail_follow) |*follow| {
                 if ((host.attachments_view == null or !host.attachments_view.?.isPreviewOpen()) and (host.images_view == null or !host.images_view.?.isPreviewOpen())) follow.update();
             };
             if (host.child_identity != null) if (host.child_parent.?.child_dialog) |dialog| {
@@ -7434,9 +8120,9 @@ const AiHost = struct {
             };
             if (state == 1) {
                 host.cx.scheduleRedrawAfterNs(33 * 1_000_000);
-                return if (rebuild or live_updated or composer_resized or bubbles_resized) .needs_layout else .done;
+                return if (transcript_changed or live_updated or composer_resized or bubbles_resized) .needs_layout else .done;
             }
-            return if (rebuild or live_updated or composer_resized or bubbles_resized) .needs_layout else .done;
+            return if (transcript_changed or live_updated or composer_resized or bubbles_resized) .needs_layout else .done;
         }
     };
 
@@ -7657,7 +8343,7 @@ const ChildDialog = struct {
         const prefs = @import("ai/session_lifecycle.zig").Store.childPreferences(record);
         const prompt = try scope.createText(record.draft orelse state.draft orelse "", .{});
         const host = try cx.allocator.create(AiHost);
-        host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = parent.provider, .native_context = null, .native_client = null, .native_binding = null, .endpoint = "", .model = "", .panel = modal.body, .status = undefined, .card_node = undefined, .prompt = prompt, .runtime_config = parent.runtime_config, .assistant_states = &service.presentations, .shared_service = service, .workspace = parent.workspace, .application_host = parent.application_host, .roster = parent.roster, .file_application = parent.file_application, .data_root = parent.data_root, .recording_archive = parent.recording_archive, .notification_window = parent.notification_window, .child_identity = record.child.?.info.agent, .child_parent = parent, .display_conversation = state.id, .display_owner = state.owner, .settings_host = parent.settings_host };
+        host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = parent.provider, .native_context = null, .native_client = null, .native_binding = null, .endpoint = "", .model = "", .panel = modal.body, .status = undefined, .card_node = undefined, .prompt = prompt, .runtime_config = parent.runtime_config, .assistant_states = &service.presentations, .shared_service = service, .workspace = parent.workspace, .application_host = parent.application_host, .roster = parent.roster, .file_application = parent.file_application, .ai_transfer_host = parent.ai_transfer_host, .data_root = parent.data_root, .recording_archive = parent.recording_archive, .notification_window = parent.notification_window, .child_identity = record.child.?.info.agent, .child_parent = parent, .display_conversation = state.id, .display_owner = state.owner, .settings_host = parent.settings_host };
         try scope.onCleanup(AiHost, host, AiHost.cleanup);
         const self = try scope.createState(ChildDialog, .{ .parent = parent, .host = host, .scope = scope, .open = open, .dialog = modal.dialog, .parent_label = undefined, .props = undefined, .props_open = try scope.createSignal(bool, false), .apply_disabled = try scope.createSignal(bool, !host.childCanWrite()), .painted_colors = app_theme.current(), .name = try scope.createText(prefs.name, .{}), .reusable = try scope.createSignal(bool, prefs.reusable), .revision = record.child_settings_revision });
         const shell = try @import("ui/ai_assistant_header.zig").mount(cx, modal.body, prefs.name);
@@ -8211,6 +8897,18 @@ const MenuHost = struct {
     }
 
     /// MenuBridge callback: (ctx, trigger, host_index, tab_index, multi_tabs).
+    /// Sidebar route marker: Workspace resolved the host's session tab; the
+    /// chain card itself stays owned by the shared connection-details host.
+    fn sidebarChain(ctx: ?*anyopaque, tab_index: usize) void {
+        const self: *MenuHost = @ptrCast(@alignCast(ctx orelse return));
+        const details = self.connection_details_host orelse return;
+        details.showForTab(tab_index);
+    }
+    fn sidebarChainFeedback(ctx: ?*anyopaque, message: []const u8) void {
+        const self: *MenuHost = @ptrCast(@alignCast(ctx orelse return));
+        const details = self.connection_details_host orelse return;
+        details.showFeedback(message);
+    }
     fn sidebarAction(ctx: ?*anyopaque, index: usize, action: @import("ui/sidebar_view.zig").HostAction) void {
         const self: *MenuHost = @ptrCast(@alignCast(ctx orelse return));
         const workspace = self.workspace orelse return;
@@ -12066,6 +12764,7 @@ const AppNavHost = struct {
                 if (picker.shutdown()) picker.release() catch {};
             }
             ai.file_application = null;
+            ai.ai_transfer_host = null;
             ai.application_host = null;
         }
         const application_host = self.application_host;
@@ -13796,8 +14495,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const ai_panel = try ui.box(cx, .{
         .position = .absolute,
         .inset = .{ .top = .{ .px = 14 }, .left = .{ .px = 0 }, .right = .{ .px = 0 } },
-        .z_index = 200,
         .width = .fill(),
+        .hit_roles = .{ .pointer = false, .scroll = false },
         .direction = .row,
         .justify = .center,
         .align_items = .start,
@@ -14043,6 +14742,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     // runtime-owned root: replacing it bypasses viewport layout constraints.
 
     const status_text = try ui.text(cx, "未连接", .{ .font_size = 11, .color = p.fg_secondary });
+    status_text.meta.ownership.meta.test_id = "workspace.status";
 
     const main_row = try ui.boxStyled(cx, shell_styles.body, .{});
     main_row.meta.ownership.meta.test_id = "workspace.body";
@@ -14140,6 +14840,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
 
     // Wire the menu seam: sidebar/tab triggers flow Workspace → MenuHost.
     workspace.menu_bridge = .{ .context = @ptrCast(menu_host), .fire = MenuHost.bridgeFire, .host_action = MenuHost.sidebarAction };
+    workspace.chain_bridge = .{ .context = @ptrCast(menu_host), .open = MenuHost.sidebarChain, .feedback = MenuHost.sidebarChainFeedback };
     applog.info(.ui, "workspace ready: hosts={d} ui={s}x{s}", .{ workspace.registry.hosts.len, "1280", "800" });
 
     const quick_host = try cx.allocator.create(QuickConnectHost);
@@ -14337,6 +15038,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         .settings = settings_host,
         .manager = &tasks.manager,
         .retained_store = &tasks.retained_store,
+        .ai_transfers = @import("ai/host_transfer.zig").Registry.init(tasks.allocator),
     };
     try scope.onCleanup(TransferHost, transfer_host, TransferHost.cleanup);
     const tp_root = try transfer_host.panel_mounted(cx, scope);
@@ -14347,6 +15049,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     transfer_host.status_transfer = ticker;
     transfer_host.toolbar_progress = nav_host.mist_transfer;
     try status_bar.progress_slot.appendChild(cx.allocator, ticker.root);
+    ai_host.ai_transfer_host = transfer_host;
     nav_host.transfer_host = transfer_host;
     menu_host.transfer_host = transfer_host;
     file_application.setTransferHandler(.{ .context = transfer_host, .submit = TransferHost.showFileTransfer, .confirm = TransferHost.confirmFileTransfer, .export_start = TransferHost.exportFileTransfer, .export_poll = TransferHost.pollFileExport, .export_cancel = TransferHost.cancelFileExport });
@@ -14504,6 +15207,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     // renderer, focus and interaction tree walks. Changes attach after layout.
     _ = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, root, settings_panel);
     ai_host.retained_panel = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, root, ai_panel);
+    _ = try @import("ui/floating_surface.zig").Surface.mount(cx, scope, ai_panel);
     try @import("ui/layer_materials.zig").Policy.mount(cx, scope);
     if (app_config.value.ui.materials.background.enabled) {
         const startup = try @import("ui/startup_view.zig").View.mount(cx, scope);
@@ -14957,7 +15661,11 @@ const NotificationWindowHook = struct {
     }
     fn hasDot(raw: ?*anyopaque, owner: @import("host/identity.zig").ContentOwner) bool {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw orelse return false));
-        return self.host.coordinator.hasDot(owner);
+        if (!self.host.coordinator.policy.tab_dot) return false;
+        // Terminal output/system notifications and the session-level activity
+        // model (output, EOF, AI turn, transfer, plugin frames) share one tab
+        // attention state, but stay independent of system notification policy.
+        return self.host.coordinator.hasDot(owner) or self.host.activity.hasTabActivity(owner);
     }
     fn owns(raw: *anyopaque, target: @import("host/notification_coordinator.zig").Target) bool {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
@@ -15082,11 +15790,31 @@ const NotificationWindowHook = struct {
             if (visible) {
                 if (terminal.notificationReadSequence(owner)) |sequence| {
                     if (sequence == facts.output_sequence) {
+                        // Visibility while reading older output isn't a read receipt.
+                        // Clear tab attention even if the coordinator already acknowledged this sequence.
+                        _ = self.host.activity.markTabRead(tab.content_owner);
                         const read = self.host.coordinator.markRead(tab.content_owner, sequence, true);
                         if (read and @import("platform/runtime_mode.zig").automation) std.debug.print("NOTIFICATION_READ {{\"owner_id\":{d},\"owner_generation\":{d},\"through_sequence\":{d}}}\n", .{ @backingInt(owner.session_id), owner.generation, sequence });
                     }
                 }
             }
+        }
+        // Non-terminal tabs (KVM, files) have no TerminalViewNode and no host
+        // SessionRuntime, so the terminal loop above cannot see them. Frame
+        // observation reads only the renderer's cached frame generation (never
+        // pixels); the tracker deduplicates and throttles a steady RFB stream.
+        // File tabs have no renderer, but their transfer-completion attention
+        // still needs the same visible read receipt to clear.
+        for (self.workspace.tabs.items, 0..) |tab, index| {
+            if (tab.closing or tab.archived or tab.content_owner != .session or tab.terminal != null) continue;
+            if (tab.plugin_renderer) |renderer| if (renderer.vtable.frame_sequence) |read_frame| {
+                self.host.activity.observeTabFrame(tab.content_owner, read_frame(renderer.context), clock.monotonic_ms) catch |err| applog.warn(.app, "tab frame activity: {s}", .{@errorName(err)});
+            };
+            const bounds = tab.root.globalRect();
+            const grouped_visible = self.workspace.active_group_view != null and tab.root.isDisplayedInTree() and bounds.w > 0 and bounds.h > 0;
+            const standalone_visible = self.workspace.active_group_view == null and self.workspace.active_tab == index and painted(tab.root);
+            const visible = self.cx.window_active and (grouped_visible or standalone_visible) and !self.settings.open and (if (self.nav.ai) |ai| !ai.controller.model.visible else true);
+            if (visible) _ = self.host.activity.markTabRead(tab.content_owner);
         }
         self.workspace.refreshNotificationAttention();
     }
@@ -15105,6 +15833,7 @@ const TransferHost = struct {
     workspace: *ws.Workspace,
     panel: *transfer_panel_mod.Panel,
     manager: *transfer_mod.Manager,
+    ai_transfers: @import("ai/host_transfer.zig").Registry,
     notification_window: ?@import("host/notification_host.zig").WindowId = null,
     last_job: ?transfer_mod.JobId = null,
     /// 状态栏进度行容器（mountStatusBar 注入）。
@@ -15388,11 +16117,17 @@ const TransferHost = struct {
     }
 
     fn submitSessionTransfer(self: *TransferHost, owner: @import("host/identity.zig").SessionHandle, spec: transfer_mod.JobSpec) !void {
+        _ = try self.enqueueSessionTransfer(owner, spec);
+        self.panel.hide();
+    }
+
+    fn enqueueSessionTransfer(self: *TransferHost, owner: @import("host/identity.zig").SessionHandle, spec: transfer_mod.JobSpec) !transfer_mod.JobId {
         try self.validateNewTransferPolicy();
         try self.tasks.job_owners.ensureUnusedCapacity(self.allocator, 1);
         if (self.tasks.next_transfer_intent == std.math.maxInt(u64)) return error.IntentIdExhausted;
-        const dedicated = self.workspace.app_config.transfer.dedicated_connection;
-        const binding = if (dedicated) (try self.ensureAuxiliary(owner)).binding else (try self.ensureShared(owner)).binding;
+        const source = try @import("ui/ai_transfer_source.zig").resolve(self.application, owner, true);
+        const dedicated = source.auxiliary and self.workspace.app_config.transfer.dedicated_connection;
+        const binding = if (!source.auxiliary) source.binding.? else if (dedicated) (try self.ensureAuxiliary(owner)).binding else (try self.ensureShared(owner)).binding;
         const original = self.application.sessions.queryState(owner) orelse return error.StaleSession;
         const remote: @import("transfer/conflict.zig").Endpoint = .{ .sftp = .{
             .binding_id = binding.binding_id,
@@ -15405,7 +16140,7 @@ const TransferHost = struct {
         var captured = spec;
         captured.chunk_kb = self.workspace.app_config.transfer.chunk_kb;
         captured.window_chunks = self.workspace.app_config.transfer.window_chunks;
-        captured.pacing_kbps = if (dedicated) 0 else self.workspace.app_config.transfer.shared_pacing_kbps;
+        captured.pacing_kbps = if (source.auxiliary and !dedicated) self.workspace.app_config.transfer.shared_pacing_kbps else 0;
         captured.session_id = @backingInt(owner.session_id);
         captured.transfer_binding = binding;
         captured.conflict_context = .{
@@ -15420,8 +16155,8 @@ const TransferHost = struct {
         self.tasks.job_owners.appendAssumeCapacity(.{ .job = id, .owner = owner });
         if (@import("platform/runtime_mode.zig").automation) std.debug.print("FILE_SESSION_TRANSFER_ENQUEUED {{\"job\":{d},\"owner_id\":{d},\"owner_generation\":{d},\"binding_id\":{d},\"binding_generation\":{d},\"dedicated_connection\":{},\"pacing_kbps\":{d}}}\n", .{ id, @backingInt(owner.session_id), owner.generation, binding.binding_id, binding.binding_generation, dedicated, captured.pacing_kbps });
         self.last_job = id;
-        self.panel.hide();
         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        return id;
     }
 
     fn pollAuxiliary(self: *TransferHost) !void {
@@ -16857,6 +17592,7 @@ const TransferHost = struct {
     }
 
     fn cleanup(self: *TransferHost) void {
+        self.ai_transfers.deinit();
         self.seen_transfers.deinit(self.allocator);
         if (self.command_picker) |request| self.allocator.free(request.source);
         self.cx.removeAfterLayoutHook(self);
