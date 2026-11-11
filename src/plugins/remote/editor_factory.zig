@@ -46,6 +46,7 @@ pub fn mount(_: ?*anyopaque, args: contract.EditorMount) !contract.EditorInstanc
     if (args.initial) |initial| {
         var arena = std.heap.ArenaAllocator.init(args.cx.allocator);
         defer arena.deinit();
+        // An absent Keychain item is repairable in the form.
         var reader: @import("../ssh/connection_source.zig").CredentialReader = .{ .allocator = args.cx.allocator };
         defer reader.deinit();
         const host = try reader.resolve(try envelopes.decodeLegacy(arena.allocator(), initial));

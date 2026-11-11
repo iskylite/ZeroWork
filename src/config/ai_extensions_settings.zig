@@ -846,6 +846,7 @@ const Job = struct {
 };
 
 fn errorMessage(err: anyerror) []const u8 {
+    if (@import("../ui/feedback_message.zig").knownMessage(@errorName(err))) |message| return message;
     return switch (err) {
         error.FilePickerUnavailable => "无法打开技能选择器，请重试或拖入技能文件／文件夹。",
         error.SkillReplaceCollection => "重新导入时请选择单个技能文件夹。",
@@ -889,6 +890,9 @@ fn errorMessage(err: anyerror) []const u8 {
         error.McpTransportFailure => "MCP 连接中断，请检查服务状态。",
         error.McpHttpStatus => "MCP 服务返回了异常 HTTP 状态。",
         error.McpSecretReflected => "服务响应包含秘密配置，已阻止展示。",
-        else => @errorName(err),
+        else => blk: {
+            std.log.warn("extension settings operation failed: {s}", .{@errorName(err)});
+            break :blk "未能完成操作。请检查扩展配置后重试。";
+        },
     };
 }

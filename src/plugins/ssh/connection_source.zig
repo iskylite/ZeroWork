@@ -17,13 +17,15 @@ pub const CredentialReader = struct {
         var result = host;
         inline for (.{ .{ "password", "password_ref" }, .{ "key_passphrase", "key_passphrase_ref" }, .{ "totp_secret", "totp_secret_ref" } }) |fields| {
             if (@field(result, fields[0]) == null) if (@field(result, fields[1])) |reference| {
-                const secret = try credentials.get(self.allocator, reference);
-                errdefer {
-                    std.crypto.secureZero(u8, secret);
-                    self.allocator.free(secret);
+                const value = try credentials.getIfPresent(self.allocator, reference);
+                if (value) |secret| {
+                    errdefer {
+                        std.crypto.secureZero(u8, secret);
+                        self.allocator.free(secret);
+                    }
+                    try self.loaded.append(self.allocator, secret);
+                    @field(result, fields[0]) = secret;
                 }
-                try self.loaded.append(self.allocator, secret);
-                @field(result, fields[0]) = secret;
             };
         }
         return result;
@@ -114,6 +116,18 @@ test "remote saved credentials rehydrate reference-only envelopes before another
     try std.testing.expectEqualStrings("fixture-saved-password", editable.password.?);
     memory.denied = true;
     try std.testing.expectError(error.CredentialDenied, freezeSource(a, decoded, .{}, &.{}, 1, 0, ""));
+    memory.denied = false;
+    try credentials.eraseScope();
+    var target = decoded;
+    target.connection_id = @fromBackingInt(2);
+    target.host = "other.invalid";
+    target.route = &.{decoded.connection_id};
+    var source = try freezeSource(a, target, .{}, &.{decoded}, 2, 1, "");
+    defer source.deinit();
+    var route: [8]session.RouteHop = undefined;
+    const spec = sourceSpec(source.value, &route, "");
+    try std.testing.expect(spec.saved.immutable_config.auth == .password_prompt);
+    try std.testing.expect(route[0].auth == .password_prompt);
 }
 
 pub fn auth(host: hosts.HostConfig) session.AuthOptions {

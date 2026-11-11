@@ -56,12 +56,17 @@ const PreviewFixture = struct {
     draft: images.Draft,
     view: *V.View = undefined,
     removed: ?images.Ticket = null,
+    problem: ?anyerror = null,
     fn remove(raw: *anyopaque, ticket: images.Ticket) !void {
         const self: *PreviewFixture = @ptrCast(@alignCast(raw));
         if (self.draft.find(ticket) == null) return error.StaleAttachment;
         self.removed = ticket;
         _ = self.draft.remove(ticket.id);
         try self.view.update(&self.draft);
+    }
+    fn reportError(raw: *anyopaque, problem: anyerror) void {
+        const self: *PreviewFixture = @ptrCast(@alignCast(raw));
+        self.problem = problem;
     }
 };
 fn settle(cx: *ui.Cx) void {
@@ -89,7 +94,7 @@ test "AI images inline retain escape remove and immutable history use one captur
     defer fixture.draft.deinit();
     const holder = try ui.box(cx, .{ .width = .{ .px = 572 } }, .{});
     try cx.root.?.appendChild(a, holder);
-    fixture.view = try V.View.mount(cx, scope, .{ .context = &fixture, .remove = PreviewFixture.remove }, holder);
+    fixture.view = try V.View.mount(cx, scope, .{ .context = &fixture, .remove = PreviewFixture.remove, .on_error = PreviewFixture.reportError }, holder);
     try cx.root.?.appendChild(a, fixture.view.root);
     const ticket = try fixture.draft.begin("/original/captured.png", .{});
     var reference = try images.ContentRef.create(a, "/original/captured.png", pixel_png, 123, .{});
@@ -138,6 +143,22 @@ test "AI images inline retain escape remove and immutable history use one captur
     try std.testing.expectEqual(ui.types.Display.none, fixture.view.preview_remove.style.display);
     try std.testing.expectEqualStrings(pixel_png, fixture.view.preview_reference.content().?.bytes);
     try std.testing.expect(fixture.view.escapePreview());
+
+    const ready = try fixture.draft.beginBytes("clipboard.png", pixel_png, .{});
+    reference = try images.ContentRef.create(a, "clipboard.png", pixel_png, 123, .{});
+    try fixture.draft.complete(ready, &reference);
+    const processing = try fixture.draft.beginBytes("processing.png", pixel_png, .{});
+    try fixture.view.update(&fixture.draft);
+    click(cx, fixture.view.cards[0].remove_button);
+    try std.testing.expectEqual(ready, fixture.removed.?);
+    try std.testing.expectEqual(processing, fixture.view.cards[0].ticket.?);
+    try std.testing.expect(!fixture.view.isPreviewOpen());
+    try std.testing.expectEqual(null, fixture.problem);
+    click(cx, fixture.view.cards[0].remove_button);
+    try std.testing.expectEqual(processing, fixture.removed.?);
+    try std.testing.expectEqual(@as(usize, 0), fixture.draft.items.items.len);
+    try std.testing.expect(!fixture.view.isPreviewOpen());
+    try std.testing.expectEqual(null, fixture.problem);
 }
 
 test "AI images share one fixed-height horizontal rail with text attachments" {

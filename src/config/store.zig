@@ -71,12 +71,12 @@ pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: 
                 }
             }
         }
-        provider.api_key_ref = try tx.stage(io, allocator, if (provider.api_key.len != 0) provider.api_key else null, old);
+        provider.api_key_ref = try tx.stageSetting(io, allocator, provider.api_key, provider.api_key_ref, old);
     }
     disk.ai.extensions = try value.ai.extensions.clone(allocator);
     for (disk.ai.extensions.servers) |*server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |*entry| if (entry.secret) {
-        const secret = if (entry.value.len != 0) entry.value else if (entry.secret_ref) |ref| try credentials.get(a, ref) else "";
-        entry.secret_ref = try tx.stage(io, allocator, if (secret.len != 0) secret else null, entry.secret_ref);
+        const secret = if (entry.value.len != 0) entry.value else if (entry.secret_ref) |ref| (try credentials.getIfPresent(a, ref)) orelse "" else "";
+        entry.secret_ref = try tx.stageSetting(io, allocator, secret, entry.secret_ref, entry.secret_ref);
     };
     var previous = plugin_credential_references.References.init(a);
     defer previous.deinit();
@@ -124,12 +124,12 @@ pub fn loadWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator
     for (value.ai.providers[0..value.ai.provider_count]) |*provider| {
         if (provider.api_key_ref) |reference| {
             if (provider.api_key.len != 0) return error.AmbiguousCredential;
-            provider.api_key = try credentials.get(arena.allocator(), reference);
+            provider.api_key = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
         } else if (provider.api_key.len != 0) migrate = true;
     }
     for (value.ai.extensions.servers) |*server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |*entry| if (entry.secret_ref) |reference| {
         if (entry.value.len != 0) return error.AmbiguousCredential;
-        entry.value = try credentials.get(arena.allocator(), reference);
+        entry.value = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
     };
     if (migrate) {
         observeCleanup(try saveWithOptions(io, dir, sub_path, value, options));
@@ -272,13 +272,14 @@ pub fn loadHosts(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_
     return loadHostsWithOptions(io, dir, allocator, sub_path, .{});
 }
 pub fn loadHostsWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, options: CredentialOptions) !config.hosts.Registry {
-    return loadHostsInternal(io, dir, allocator, sub_path, true, options);
+    return loadHostsInternal(io, dir, allocator, sub_path, null, options);
 }
 /// Import sources are read-only. Persistence happens when the registry is saved.
-pub fn loadHostsForImport(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8) !config.hosts.Registry {
-    return loadHostsInternal(io, dir, allocator, sub_path, false, .{});
+pub fn loadHostsForImport(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, skipped_credentials: *usize) !config.hosts.Registry {
+    skipped_credentials.* = 0;
+    return loadHostsInternal(io, dir, allocator, sub_path, skipped_credentials, .{});
 }
-fn loadHostsInternal(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, migrate_plaintext: bool, options: CredentialOptions) anyerror!config.hosts.Registry {
+fn loadHostsInternal(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, skipped_credentials: ?*usize, options: CredentialOptions) anyerror!config.hosts.Registry {
     const source = try dir.readFileAlloc(io, sub_path, allocator, std.Io.Limit.limited(max_config_bytes));
     defer allocator.free(source);
     var registry = try config.hosts.Registry.parse(allocator, source);
@@ -288,12 +289,16 @@ fn loadHostsInternal(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, 
         inline for (.{ .{ "password", "password_ref" }, .{ "key_passphrase", "key_passphrase_ref" }, .{ "totp_secret", "totp_secret_ref" } }) |fields| {
             if (@field(host, fields[1])) |reference| {
                 if (@field(host, fields[0]) != null) return error.AmbiguousCredential;
-                @field(host, fields[0]) = try credentials.get(registry.arena.allocator(), reference);
+                @field(host, fields[0]) = try credentials.getIfPresent(registry.arena.allocator(), reference);
+                if (@field(host, fields[0]) == null) if (skipped_credentials) |count| {
+                    @field(host, fields[1]) = null;
+                    count.* += 1;
+                };
             } else if (@field(host, fields[0]) != null) migrate = true;
         }
         try host.validate();
     }
-    if (migrate and migrate_plaintext) {
+    if (migrate and skipped_credentials == null) {
         observeCleanup(try saveHostsWithOptions(io, dir, sub_path, registry, options));
         const migrated = try loadHostsWithOptions(io, dir, allocator, sub_path, options);
         registry.deinit();
@@ -322,7 +327,7 @@ fn stageHosts(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, tx: *credential
         };
         inline for (.{ .{ "password", "password_ref" }, .{ "key_passphrase", "key_passphrase_ref" }, .{ "totp_secret", "totp_secret_ref" } }) |fields| {
             const reference = if (old) |value| @field(value, fields[1]) else @field(host, fields[1]);
-            @field(host, fields[1]) = try tx.stage(io, a, @field(host, fields[0]), reference);
+            try tx.stageHost(io, a, &@field(host, fields[0]), &@field(host, fields[1]), reference);
         }
     }
     var previous = plugin_credential_references.References.init(a);

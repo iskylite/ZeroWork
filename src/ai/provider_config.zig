@@ -100,6 +100,7 @@ pub fn fromSettingsSelection(ai: app_config.Ai, selection: ?ModelSelection) !Pro
     const resolved = try settingsModel(ai, selection);
     const p = resolved.provider;
     if (p.endpoint.len == 0) return error.MissingEndpoint;
+    if (p.api_key_ref != null and p.api_key.len == 0) return error.MissingApiKey;
     const auth: Auth = switch (p.kind) {
         .ollama => if (p.api_key.len == 0) .none else .{ .bearer_memory = p.api_key },
         .anthropic => if (p.api_key.len == 0) return error.MissingApiKey else .{ .anthropic_memory = p.api_key },
@@ -397,11 +398,14 @@ pub fn supportsThinking(ai: app_config.Ai, selection: ?ModelSelection) !bool {
     return resolved.model.reasoning and resolved.model.reasoning_toggle and (resolved.model.reasoning_adaptive or toggleProtocol(resolved.provider.kind, resolved.provider.endpoint, resolved.model.id) != .none);
 }
 
-test "local OpenAI gateway accepts no auth while remote providers still require a key" {
+test "local OpenAI gateway accepts no auth but does not discard a missing saved credential" {
     var models = [_]app_config.AiModel{.{ .id = "local-model", .context_window = 8192, .default = true }};
     var providers = [_]app_config.AiProvider{.{ .name = "local", .kind = .openai_compat, .enabled = true, .endpoint = "http://127.0.0.1:3425/v1/chat/completions", .model_count = 1, .models = &models }};
     const ai = app_config.Ai{ .default_provider = "local", .provider_count = 1, .providers = &providers };
     try std.testing.expect((try fromSettings(ai)).auth == .none);
+    providers[0].api_key_ref = "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try std.testing.expectError(error.MissingApiKey, fromSettings(ai));
+    providers[0].api_key_ref = null;
     for ([_][]const u8{ "https://example.test/v1/chat/completions", "http://localhost.evil.test/chat/completions", "http://127.0.0.1@evil.test/chat/completions" }) |endpoint| {
         providers[0].endpoint = endpoint;
         try std.testing.expectError(error.MissingApiKey, fromSettings(ai));

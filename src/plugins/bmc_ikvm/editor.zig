@@ -376,7 +376,7 @@ pub const EditorView = struct {
             error.EditorSecretSubmitUnavailable => "凭据保存服务尚未就绪，请稍后重试",
             error.CredentialDenied, error.CredentialLocked => "密码存储访问被拒绝，草稿已保留",
             error.CredentialStorageFailure => "密码保存失败，草稿已保留",
-            else => "操作未完成，配置草稿已保留",
+            else => @import("../../ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "操作未完成，配置草稿已保留",
         };
         const field_index: ?usize = switch (err) {
             error.MissingName, error.DuplicateConnectionName => 0,

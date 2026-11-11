@@ -117,7 +117,9 @@ try {
   report.checks.push('Active and non-active host chain opens at upper right with multiple real SSH sessions; tab and host selection remain unchanged');
 
   await connect('Chain-SFTP', 4);
-  await visible('files.presentation');
+  const files = await visible('files.presentation');
+  await h.waitFor(async () => !(await h.query('connection.progress')).some(shown) || null);
+  assert.equal((await h.focused()).id, files.id, 'SFTP takes keyboard focus when connection progress closes');
   // Keep captured local file views inside this run's disposable directory.
   let local = await visible('files.local');
   await clickNode(flat(local).find(n => n.test_id === 'files.path.edit' && shown(n)));

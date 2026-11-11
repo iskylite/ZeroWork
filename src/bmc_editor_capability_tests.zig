@@ -381,6 +381,12 @@ test "BMC editor capability clear destroys staged refs and recycles editors with
     const first_ref = staged.reference.?;
     original.clear();
     try std.testing.expectError(error.CredentialMissing, credentials.get(a, &first_ref));
+    _ = try original.prepare(null, &first_ref, false);
+    memory.denied = true;
+    try std.testing.expectError(error.CredentialDenied, original.prepare("new-password", &first_ref, true));
+    memory.denied = false;
+    const replacement = try original.prepare("new-password", &first_ref, true);
+    try expectSecret(&replacement.reference.?, "new-password");
     staged = try original.prepare("draft-password", null, true);
     const old_handoff = try original.handoff(staged);
     try original.setDraftRevision(2);

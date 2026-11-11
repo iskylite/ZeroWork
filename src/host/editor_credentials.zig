@@ -155,7 +155,7 @@ pub const Facade = struct {
                     // Resolve old refs before replacement, preserving denial
                     // semantics. Keep password bytes outside the transaction's
                     // text arena so this editor can explicitly wipe the copy.
-                    const previous = try credentials.get(owner.allocator, old);
+                    const previous = (try credentials.getIfPresent(owner.allocator, old)) orelse break :blk false;
                     defer wipeFree(owner.allocator, previous);
                     break :blk std.mem.eql(u8, previous, value);
                 } else false;
@@ -169,7 +169,7 @@ pub const Facade = struct {
                 // the complete plugin/reference union and the atomic write.
             } else if (old_reference) |old| reference = old[0..68].*;
         } else {
-            temporary_secret = if (secret) |value| try owner.allocator.dupe(u8, value) else if (old_reference) |old| try credentials.get(owner.allocator, old) else null;
+            temporary_secret = if (secret) |value| try owner.allocator.dupe(u8, value) else if (old_reference) |old| try credentials.getIfPresent(owner.allocator, old) else null;
         }
         const staged: Staged = .{ .ticket = try owner.tickets.allocate(), .reference = reference };
         editor.pending = .{ .ticket = staged.ticket, .revision = editor.revision, .reference = reference, .transaction = transaction, .temporary_secret = temporary_secret };

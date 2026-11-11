@@ -4302,6 +4302,7 @@ pub const Workspace = struct {
             !std.mem.eql(u8, host.host, frozen.host) or !std.mem.eql(u8, host.user, frozen.user)) return error.RevisionConflict;
         const owner = host.owner();
         host.password = password;
+        host.password_ref = null;
         host.auth_mode = .password;
         _ = try candidate.update(owner, host);
         _ = try transaction.commitWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry, .{ .provider = self.credential_provider });

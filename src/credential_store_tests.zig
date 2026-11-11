@@ -91,7 +91,7 @@ test "credential staged file failure rolls back new refs and retains old secret"
     try std.testing.expectEqualStrings("owned-old", unchanged.value.ai.providers[0].api_key);
 }
 
-test "credential changes replace immutable refs without accumulating orphans missing refs fail" {
+test "credential changes replace immutable refs and a missing API key does not block settings" {
     var memory: credentials.MemoryBackend = .{};
     defer memory.deinit();
     const previous = credentials.useBackendForTesting(memory.backend());
@@ -113,9 +113,23 @@ test "credential changes replace immutable refs without accumulating orphans mis
     }
     try std.testing.expectEqual(@as(usize, 1), memory.values.count());
     try std.testing.expectError(error.CredentialMissing, credentials.get(std.testing.allocator, old_reference));
+    var before_missing = try store.load(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer before_missing.deinit(std.testing.allocator);
+    const missing = before_missing.value.ai.providers[0].api_key_ref.?;
     try credentials.eraseScope();
-    try std.testing.expectError(error.CredentialMissing, store.load(std.testing.io, tmp.dir, std.testing.allocator, "config.toml"));
-    try std.testing.expectError(error.CredentialMissing, store.save(std.testing.io, tmp.dir, "config.toml", value));
+    try store.prepareCredentials(std.testing.io, tmp.dir, std.testing.allocator, "config.toml", "hosts.toml");
+    var unavailable = try store.load(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer unavailable.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", unavailable.value.ai.providers[0].api_key);
+    try store.save(std.testing.io, tmp.dir, "config.toml", unavailable.value);
+    var preserved = try store.load(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer preserved.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(missing, preserved.value.ai.providers[0].api_key_ref.?);
+    providers[0].api_key = "replacement";
+    try store.save(std.testing.io, tmp.dir, "config.toml", value);
+    var recovered = try store.load(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer recovered.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("replacement", recovered.value.ai.providers[0].api_key);
 }
 
 test "credential partial staging failure rolls back completed writes" {
@@ -130,6 +144,103 @@ test "credential partial staging failure rolls back completed writes" {
     try std.testing.expectError(error.CredentialStorageFailure, store.saveHosts(std.testing.io, tmp.dir, "hosts.toml", registry));
     try std.testing.expectEqual(@as(usize, 0), memory.values.count());
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "hosts.toml", .{}));
+}
+
+test "credential loss isolates one MCP server and its settings remain repairable" {
+    var memory: credentials.MemoryBackend = .{};
+    defer memory.deinit();
+    const previous = credentials.useBackendForTesting(memory.backend());
+    defer credentials.restoreBackendForTesting(previous);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const mcp = @import("ai/mcp_client.zig");
+    var entries = [_]config.ai_extensions.Value{.{ .name = "TOKEN", .value = "fixture-old", .secret = true }};
+    var servers = [_]config.ai_extensions.Server{
+        .{ .id = "affected", .name = "Affected", .program = "/fixture/server", .environment = &entries },
+        .{ .id = "available", .name = "Available", .program = "/fixture/other" },
+    };
+    var value: config.Config = .{};
+    value.ai.extensions.servers = &servers;
+    try store.save(io, tmp.dir, "config.toml", value);
+    try credentials.eraseScope();
+    var loaded = try store.load(io, tmp.dir, a, "config.toml");
+    defer loaded.deinit(a);
+    try std.testing.expectError(error.McpCredentialMissing, mcp.Client.init(a, loaded.value.ai.extensions.servers[0]));
+    var unaffected = try mcp.Client.init(a, loaded.value.ai.extensions.servers[1]);
+    defer unaffected.deinit();
+    try store.save(io, tmp.dir, "config.toml", loaded.value);
+    var preserved = try store.load(io, tmp.dir, a, "config.toml");
+    defer preserved.deinit(a);
+    try std.testing.expect(preserved.value.ai.extensions.servers[0].environment[0].secret_ref != null);
+    try std.testing.expectEqualStrings("", preserved.value.ai.extensions.servers[0].environment[0].value);
+    entries[0].value = "fixture-replacement";
+    try store.save(io, tmp.dir, "config.toml", value);
+    var repaired = try store.load(io, tmp.dir, a, "config.toml");
+    defer repaired.deinit(a);
+    try std.testing.expectEqualStrings("fixture-replacement", repaired.value.ai.extensions.servers[0].environment[0].value);
+    var restored = try mcp.Client.init(a, repaired.value.ai.extensions.servers[0]);
+    defer restored.deinit();
+}
+
+test "credential missing from an owned host can be replaced without disturbing other hosts" {
+    var memory: credentials.MemoryBackend = .{};
+    defer memory.deinit();
+    const previous = credentials.useBackendForTesting(memory.backend());
+    defer credentials.restoreBackendForTesting(previous);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = "hosts.toml";
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var seed = try config.hosts.Registry.parse(a,
+        \\[[hosts]]
+        \\name="target"
+        \\host="target.invalid"
+        \\user="ops"
+        \\auth={password="old"}
+        \\[[hosts]]
+        \\name="other"
+        \\host="other.invalid"
+        \\user="ops"
+        \\auth={key="/fixture/key",passphrase="do not restore"}
+    );
+    defer seed.deinit();
+    try store.saveHosts(io, tmp.dir, path, seed);
+    var live = try store.loadHosts(io, tmp.dir, a, path);
+    defer live.deinit();
+    const missing = try a.dupe(u8, live.hosts[1].key_passphrase_ref.?);
+    defer a.free(missing);
+    try credentials.eraseScope();
+    var reopened = try store.loadHosts(io, tmp.dir, a, path);
+    defer reopened.deinit();
+    try std.testing.expect(reopened.hosts[0].password == null);
+    try std.testing.expect(reopened.hosts[0].password_ref != null);
+    var skipped: usize = 0;
+    var imported = try store.loadHostsForImport(io, tmp.dir, a, path, &skipped);
+    defer imported.deinit();
+    try std.testing.expectEqual(@as(usize, 2), skipped);
+    try std.testing.expect(imported.hosts[0].auth_mode == .password and imported.hosts[0].password_ref == null);
+    try std.testing.expect(imported.hosts[1].auth_mode == .private_key and imported.hosts[1].key_passphrase_ref == null);
+
+    var tx = try store.HostsTransaction.init(a, &live);
+    defer tx.deinit();
+    var target = tx.candidate.?.hosts[0];
+    target.password_ref = null;
+    target.password = "replacement";
+    const owner = try tx.candidate.?.update(target.owner(), target);
+    memory.denied = true;
+    try std.testing.expectError(error.CredentialDenied, tx.commit(io, tmp.dir, path, &live));
+    memory.denied = false;
+    try tx.commit(io, tmp.dir, path, &live);
+    var repaired = try store.loadHosts(io, tmp.dir, a, path);
+    defer repaired.deinit();
+    try std.testing.expectEqualStrings("replacement", (try repaired.get(owner)).password.?);
+    try std.testing.expectEqualStrings(missing, repaired.hosts[1].key_passphrase_ref.?);
+    try std.testing.expect(repaired.hosts[1].key_passphrase == null);
+    try std.testing.expect(live.hosts[1].key_passphrase == null);
+    try std.testing.expectEqual(@as(usize, 1), memory.values.count());
 }
 
 test "credential host conflict after staging preserves old secret and rolls back new" {
@@ -166,7 +277,9 @@ test "credential import source stays read-only until persistence" {
     defer tmp.cleanup();
     const source = "[[hosts]]\nname=\"fixture\"\nhost=\"localhost\"\nuser=\"fixture\"\nauth={password=\"owned-import\"}\n";
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "import.toml", .data = source });
-    var registry = try store.loadHostsForImport(std.testing.io, tmp.dir, std.testing.allocator, "import.toml");
+    var skipped: usize = 0;
+    var registry = try store.loadHostsForImport(std.testing.io, tmp.dir, std.testing.allocator, "import.toml", &skipped);
+    try std.testing.expectEqual(@as(usize, 0), skipped);
     defer registry.deinit();
     try std.testing.expectEqual(@as(usize, 0), memory.values.count());
     const disk = try tmp.dir.readFileAlloc(std.testing.io, "import.toml", std.testing.allocator, .limited(store.max_config_bytes));

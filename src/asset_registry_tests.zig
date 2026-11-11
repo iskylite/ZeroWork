@@ -274,8 +274,10 @@ test "review repair import remaps identities groups routes and plugin payloads b
     const source_text = "[[hosts]] name=\"import jump\";host=\"jump.test\";user=\"u\";group=\"Staging\"\n" ++
         "[[hosts]] name=\"import target\";host=\"target.test\";user=\"u\";protocol=\"sftp\";group=\"Staging\";jump_chain=[\"import jump\"];socks_exit=0\n";
     try tmp.dir.writeFile(io, .{ .sub_path = "import.toml", .data = source_text });
-    var source = try store.loadHostsForImport(io, tmp.dir, a, "import.toml");
+    var skipped: usize = 0;
+    var source = try store.loadHostsForImport(io, tmp.dir, a, "import.toml", &skipped);
     defer source.deinit();
+    try std.testing.expectEqual(@as(usize, 0), skipped);
     _ = try source.add(.{ .name = "import KVM", .host = "", .user = "", .protocol_id = "bmc_ikvm", .plugin_payload = "{\"endpoint\":{\"host\":\"bmc.test\"},\"username\":\"u\",\"access\":{\"ssh_route\":{\"hops\":[{\"asset_id\":1}]}}}" });
     const Resolver = struct {
         fn resolve(_: *const anyopaque, protocol: []const u8, version: u32) ?imports.RemapPayload {

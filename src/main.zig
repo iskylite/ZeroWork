@@ -2094,7 +2094,6 @@ const AiHost = struct {
             },
             .attachment => |kind| switch (kind) {
                 .image => try self.chooseImage(envelope.owner),
-                .paste_image => try self.pasteImages(envelope.owner),
                 .local_text => try self.chooseLocalText(envelope.owner, null),
                 .remote_file => try self.chooseRemoteFile(envelope.owner),
             },
@@ -2281,7 +2280,7 @@ const AiHost = struct {
         if (self.composer_hash == fingerprint) return;
         const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = estimated, .parts = parts, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
         const key: ?@import("ui/ai_composer_controls_view.zig").ModelKey = if (controls.model) |value| .{ .provider_id = value.provider_id, .model_id = value.model_id } else if (selected) |value| .{ .provider_id = config.ai.default_provider, .model_id = value.model } else null;
-        try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .thinking = controls.thinking, .attachments = .{ .image = true, .paste_image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite() });
+        try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .thinking = controls.thinking, .attachments = .{ .image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite() });
         if (catalog_changed) view.preserveModelPopup();
         self.composer_hash = fingerprint;
         self.promptChanged(self.prompt.peek());
@@ -9178,7 +9177,6 @@ const MenuHost = struct {
             if (!@import("ui/context_menus.zig").isVisible(item.action, context)) continue;
             const item_label = if (item.action == .pin_host and asset_pinned) "取消置顶" else if (host_asset_menu) switch (item.action) {
                 .clone_host => "复制主机配置",
-                .edit_host => "编辑连接配置",
                 .history => "历史会话",
                 .pin_host => "置顶主机",
                 .move_group => "移动到分组",
@@ -9581,7 +9579,8 @@ const MenuHost = struct {
                 const host = self.wizard_host orelse return;
                 if (host_index >= workspace.registry.hosts.len) return;
                 WizardHost.openCapturedAsset(host, workspace.registry.hosts[host_index].owner()) catch |err| {
-                    workspace.statusFailure(@errorName(err));
+                    applog.warn(.ui, "open host editor: {s}", .{@errorName(err)});
+                    workspace.statusFailure(@import("ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "无法打开主机配置。请从侧栏重新打开后重试。");
                     return;
                 };
                 self.edit_host_index = host_index;
@@ -12793,7 +12792,8 @@ const AppNavHost = struct {
 
     fn importHosts(self: *AppNavHost) void {
         self.importHostsFile() catch |err| {
-            if (self.workspace) |workspace| workspace.statusFailure(if (err == error.DuplicateConnectionName) "存在同名连接。请修改导入文件中的连接名称。" else @errorName(err));
+            applog.warn(.ui, "import hosts: {s}", .{@errorName(err)});
+            if (self.workspace) |workspace| workspace.statusFailure(if (err == error.DuplicateConnectionName) "存在同名连接。请修改导入文件中的连接名称。" else @import("ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "无法导入主机。请检查文件格式和连接配置后重试。");
         };
     }
 
@@ -12802,10 +12802,11 @@ const AppNavHost = struct {
         const sdk = self.cx.system_sdk orelse return error.NativeDialogUnavailable;
         var buffer: [4096]u8 = undefined;
         const path = (try sdk.runDialog(.{ .kind = .open_file, .title = "导入 hosts.toml" }, &buffer)) orelse return;
-        var imported = try @import("config/store.zig").loadHostsForImport(self.cx.io, std.Io.Dir.cwd(), self.allocator, path);
+        var skipped_credentials: usize = 0;
+        var imported = try @import("config/store.zig").loadHostsForImport(self.cx.io, std.Io.Dir.cwd(), self.allocator, path, &skipped_credentials);
         defer imported.deinit();
         try workspace.importHosts(&imported);
-        workspace.status("已导入主机配置");
+        workspace.status(if (skipped_credentials == 0) "已导入主机配置" else "主机已导入。此设备上找不到的凭据已跳过，可在主机配置中补填。");
     }
 
     fn cleanup(self: *AppNavHost) void {
@@ -15464,7 +15465,8 @@ const WizardHost = struct {
             return;
         };
         _ = self.probe_controller.start(draft.*, self.workspace.registry.hosts, self.workspace.app_config.*, editor.test_generation, &self.probe_library.?) catch |err| {
-            editor.setTestResult(.{ .fail = @errorName(err) });
+            applog.warn(.ui, "start connection test: {s}", .{@errorName(err)});
+            editor.setTestResult(.{ .fail = @import("ui/connection_progress_view.zig").failureText(err) });
             return;
         };
         self.cx_ptr.requestRedraw();
@@ -15527,7 +15529,7 @@ const WizardHost = struct {
                         applog.warn(.ui, "connection final test presentation: {s}", .{@errorName(err)});
                     };
                     var buffer: [160]u8 = undefined;
-                    const message = if (outcome.failure) |failure| @errorName(failure) else std.fmt.bufPrint(&buffer, "连接成功 · {d} ms", .{outcome.elapsed_ms}) catch "连接成功";
+                    const message = if (outcome.failure) |failure| @import("ui/connection_progress_view.zig").failureText(failure) else std.fmt.bufPrint(&buffer, "连接成功 · {d} ms", .{outcome.elapsed_ms}) catch "连接成功";
                     if (remote_editor.editor(self.wizard)) |editor| _ = editor.setTestResultForDraft(outcome.generation, outcome.draft_id, outcome.draft_revision, if (outcome.failure != null) .{ .fail = message } else .{ .ok = message });
                     self.probe_controller.retire(job) catch |err| {
                         applog.warn(.ui, "connection test cleanup pending: {s}", .{@errorName(err)});
@@ -17732,10 +17734,12 @@ fn wallClockMsTransfer() u64 {
 
 fn dataStartupAlert(err: anyerror, reset_pending: bool) bool {
     const Native = struct {
-        extern fn zw_data_startup_alert([*:0]const u8, c_int, [*]const u8, usize) c_int;
+        extern fn zw_data_startup_alert([*:0]const u8, [*]const u8, usize, c_int, [*]const u8, usize) c_int;
     };
+    std.log.err("opening application data: {s}", .{@errorName(err)});
+    const message = @import("ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "无法加载配置。请检查应用数据目录的权限和配置文件是否有效，再重新打开 ZeroWork。原有数据会保留。";
     const icon = @import("app_icon_assets").transparent;
-    return Native.zw_data_startup_alert(@errorName(err), if (reset_pending) 1 else 0, icon.ptr, icon.len) != 0;
+    return Native.zw_data_startup_alert(@errorName(err), message.ptr, message.len, if (reset_pending) 1 else 0, icon.ptr, icon.len) != 0;
 }
 
 pub fn main() !void {

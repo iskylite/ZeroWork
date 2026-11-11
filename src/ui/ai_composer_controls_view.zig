@@ -17,8 +17,9 @@ const retention_choices = [_]ui.widgets.SelectOption{
     .{ .value = "keep", .label = config.sessionRetentionLabel(.keep), .test_id = "ai.retention.keep" },
     .{ .value = "inherit", .label = "恢复默认", .test_id = "ai.retention.inherit" },
 };
-pub const Attachment = enum { image, local_text, remote_file, paste_image };
-pub const AttachmentState = struct { image: bool = false, local_text: bool = false, remote_file: bool = false, paste_image: bool = false, count: usize = 0 };
+pub const Attachment = enum { image, local_text, remote_file };
+const attachment_kinds = std.enums.values(Attachment);
+pub const AttachmentState = struct { image: bool = false, local_text: bool = false, remote_file: bool = false, count: usize = 0 };
 pub const ModelKey = struct {
     provider_id: []const u8,
     model_id: []const u8,
@@ -255,8 +256,8 @@ pub const View = struct {
     effort_name: *ui.Node = undefined,
     effort_title: *ui.Node = undefined,
     effort_ticks: [8]*ui.Node = undefined,
-    attachment_rows: [4]*ui.Node = undefined,
-    attachment_disabled: [4]*ui.Signal(bool) = undefined,
+    attachment_rows: [attachment_kinds.len]*ui.Node = undefined,
+    attachment_disabled: [attachment_kinds.len]*ui.Signal(bool) = undefined,
     usage_body: *ui.Node = undefined,
     usage_scope: ?*ui.Scope = null,
     ring: *ui.Node = undefined,
@@ -421,24 +422,21 @@ pub const View = struct {
         return .{ .widget = result, .body = body, .title = title };
     }
     fn mountAttachments(self: *View) !void {
-        const names = [_][]const u8{ "选择图片…", "选择本地文件…", "引用远程文件…", "粘贴图片" };
-        const assets = [_]ui.SvgAsset{ ui.icons.get("image").?, ui.icons.get("file-text").?, ui.icons.get("server").?, ui.icons.get("clipboard-paste").? };
         const parent = self.popups[@backingInt(S.Kind.attachment)].body;
-        for (0..4) |index| {
+        for (attachment_kinds, 0..) |kind, index| {
+            const row: struct { label: []const u8, icon: []const u8, id: []const u8 } = switch (kind) {
+                .image => .{ .label = "选择图片…", .icon = "image", .id = "ai.attachment.image" },
+                .local_text => .{ .label = "选择本地文件…", .icon = "file-text", .id = "ai.attachment.local_text" },
+                .remote_file => .{ .label = "引用远程文件…", .icon = "server", .id = "ai.attachment.remote_file" },
+            };
             self.attachment_disabled[index] = try self.scope.createSignal(bool, true);
-            const choice = try self.scope.createState(Choice, .{ .view = self, .kind = .attachment, .action = .{ .attachment = @fromBackingInt(@intCast(index)) } });
-            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = names[index], .disabled = self.attachment_disabled[index], .base_style = S.attachmentRow(), .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
+            const choice = try self.scope.createState(Choice, .{ .view = self, .kind = .attachment, .action = .{ .attachment = kind } });
+            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = row.label, .disabled = self.attachment_disabled[index], .base_style = S.attachmentRow(), .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
             prepareCustomButton(button, .start, self.cx.allocator);
             self.attachment_rows[index] = button;
-            button.meta.ownership.meta.test_id = switch (index) {
-                0 => "ai.attachment.image",
-                1 => "ai.attachment.local_text",
-                2 => "ai.attachment.remote_file",
-                else => "ai.attachment.paste_image",
-            };
-            try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, assets[index], S.theme.current().fg_2, S.icon(16)));
-            _ = try self.label(button, names[index], S.text(11.5, 400, 18, false), S.flexibleLabel(18));
-            _ = try self.label(button, if (index == 3) "⌘V" else "", S.text(10.5, 400, 16, true), S.label(38, 16));
+            button.meta.ownership.meta.test_id = row.id;
+            try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(row.icon).?, S.theme.current().fg_2, S.icon(16)));
+            _ = try self.label(button, row.label, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
             try parent.appendChild(self.cx.allocator, button);
         }
     }
@@ -931,7 +929,6 @@ pub const View = struct {
             .image => source.attachments.image,
             .local_text => source.attachments.local_text,
             .remote_file => source.attachments.remote_file,
-            .paste_image => source.attachments.paste_image,
         };
         if (!allowed) return false;
         // Capture remains available when the next model lacks vision. The
@@ -1097,8 +1094,8 @@ pub const View = struct {
             any_model = any_model or item.enabled;
         };
         var any_attachment = false;
-        for (0..4) |index| {
-            const enabled = self.attachmentAvailable(@fromBackingInt(@intCast(index)));
+        for (attachment_kinds, 0..) |kind, index| {
+            const enabled = self.attachmentAvailable(kind);
             self.attachment_disabled[index].set(!enabled);
             for (self.attachment_rows[index].children.items) |child| {
                 if (child.getText() != null) child.setTextColor(if (enabled) colors.fg_1 else colors.fg_3);
@@ -1449,7 +1446,7 @@ pub const View = struct {
         };
     }
 };
-fn firstEnabled(disabled: [4]*ui.Signal(bool)) ?usize {
+fn firstEnabled(disabled: [attachment_kinds.len]*ui.Signal(bool)) ?usize {
     for (disabled, 0..) |signal, index| if (!signal.peek()) return index;
     return null;
 }

@@ -81,8 +81,6 @@ pub const View = struct {
             card.root = try ui.boxStyled(cx, S.card, .{});
             @import("layer_materials.zig").card(card.root, .control);
             card.root.meta.ownership.meta.test_id = "ai.image";
-            _ = ui.clickable(card.root, cx.on(Card, card, Card.open));
-            card.root.behavior.interaction.a11y = .{ .role = .button, .label = "查看图片" };
             card.root.setDisplay(.none);
             try self.rail.content.appendChild(cx.allocator, card.root);
             card.preview = try self.button(card.root, "ai.image.preview", "查看图片", ui.icons.image, cx.on(Card, card, Card.open));

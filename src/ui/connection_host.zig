@@ -21,6 +21,7 @@ pub const Host = struct {
     authentication: *Presenter,
     challenges: *Shared,
     bridge: Bridge.Bridge = .{},
+    pending_file_focus: ?@import("../host/identity.zig").SessionHandle = null,
     painted_colors: ?theme.Colors = null,
     last_error: ?anyerror = null,
     totp_clock: @import("../proto/ssh/totp_prefill.zig").Clock = .{},
@@ -47,14 +48,25 @@ pub const Host = struct {
         return self.progress.isVisible() or self.bridge.visible();
     }
 
-    fn hook(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+    fn hook(raw: *anyopaque, _: u8, last_round: bool) ui.AfterLayoutResult {
         const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.pending_file_focus) |owner| {
+            self.pending_file_focus = null;
+            if (self.cx.focus_manager.activeScope() == null) if (self.workspace.active_tab) |index| {
+                const tab = self.workspace.tabs.items[index];
+                if (tab.content_owner.eql(.{ .session = owner })) self.cx.setFocus(tab.root);
+            };
+        }
         self.refresh() catch |err| {
             if (self.last_error == null or self.last_error.? != err) applog.warn(.ui, "connection presentation failed: {s}", .{@errorName(err)});
             self.last_error = err;
             return .done;
         };
         self.last_error = null;
+        if (self.pending_file_focus != null) {
+            if (last_round) self.cx.requestRedraw();
+            return .needs_layout;
+        }
         return .done;
     }
 
@@ -72,7 +84,7 @@ pub const Host = struct {
     fn refreshFilePresentation(self: *Host, pending: ?auth.Snapshot) !bool {
         // A later owner's prompt cannot replace the card currently being
         // read. Reconcile its actual attached/released receipt first.
-        const captured = self.progress.operationKey();
+        const captured = self.progress.operationKey() orelse if (self.bridge.current) |request| request.identity.key else null;
         const file_key = if (captured) |key| (if (self.application.fileConnectionProgress(key) != null) key else if (self.workspace.connectionProgress(key) != null) null else self.application.fileProgressKey()) else self.application.fileProgressKey();
         if (file_key) |key| {
             return self.refreshFile(key, pending);
@@ -160,6 +172,9 @@ pub const Host = struct {
         if (state.lifecycle == .attached or state.lifecycle == .closed or state.lifecycle == .ended) {
             self.application.dismissFileProgress(key);
             self.hide();
+            // Closing the modal restores the launcher's focus at the end of
+            // the reactive batch. Focus the attached workspace after that.
+            if (state.lifecycle == .attached) self.pending_file_focus = key.owner.session;
             return false;
         }
         const diagnostic = self.application.fileConnectionProgress(key) orelse return false;

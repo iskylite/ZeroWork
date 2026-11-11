@@ -554,9 +554,8 @@ test "AI composer attachment menu enables only actual hooks and never manufactur
     f.click(f.view.buttons[0]);
     const menu = find(f.cx.root.?, "ai.attachment.menu").?;
     try std.testing.expectEqual(@as(f32, 300), menu.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 166), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 128), menu.globalRect().h);
     try std.testing.expect(f.view.attachment_disabled[2].peek());
-    try std.testing.expect(f.view.attachment_disabled[3].peek());
     f.click(find(menu, "ai.attachment.remote_file").?);
     try std.testing.expectEqual(@as(usize, 0), f.calls);
     f.enter(find(menu, "ai.attachment.local_text").?);

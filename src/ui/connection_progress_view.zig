@@ -1279,7 +1279,8 @@ pub fn failureText(err: ?anyerror) []const u8 {
         error.HostKeyRevoked => "服务器主机密钥已被撤销",
         error.Cancelled => "已取消",
         error.SftpSubsystemDenied => "服务器拒绝 SFTP 子系统",
-        else => @import("../proto/ssh/handshake_failure.zig").description(failure) orelse @errorName(failure),
+        error.AuthenticationInteractionRequired => "此连接需要输入密码或口令。请在主机配置中补填，或从侧栏重新连接。",
+        else => @import("../proto/ssh/handshake_failure.zig").description(failure) orelse @import("feedback_message.zig").knownMessage(@errorName(failure)) orelse "无法完成连接，请检查主机地址、连接路径和认证设置。",
     } else "连接失败";
 }
 fn prepareCustomButton(button: *ui.Node) void {

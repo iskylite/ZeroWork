@@ -204,11 +204,21 @@ fn drain(factory: probes.ProbeFactory) !probes.ProbeUpdate {
 }
 fn expectReadableFailure(mode: []const u8, err: anyerror, message: []const u8, observed_ms: u64) !void {
     // These expectations describe the fixture's real failing operation. Keep
-    // them independent of the production label helper so a wrong phase/code
+    // them independent of the production label helper so a wrong phase/reason
     // does not pass just because the final message remains nonempty.
     const phase = if (std.mem.eql(u8, mode, "untrusted")) "TLS 握手" else if (std.mem.startsWith(u8, mode, "asset-")) "验证公开脚本摘要" else "读取公开设备身份";
+    const reason = switch (err) {
+        error.UnsupportedProfile => "当前版本不支持此设备或固件，请确认设备型号和固件版本。",
+        error.UnsupportedProfileIdentityUnavailable => "目标未返回可验证的设备身份，请确认地址指向 BMC 管理界面。",
+        error.UnsupportedProfileFirmwareUnavailable => "目标未返回可验证的固件信息。",
+        error.TrustReplyUnavailable => "本次测试无法确认目标证书。请检查证书信任设置后重试。",
+        error.UnsupportedProfilePublicEvidence => "无法取得可验证的公开设备信息，设备兼容性尚未确认。",
+        error.InvalidPublicMaterialGzip => "设备返回的脚本压缩数据无效，请检查设备服务后重试。",
+        error.BodyTooLarge => "设备返回的脚本超过大小上限，无法验证。",
+        else => return error.UnexpectedProbeFailure,
+    };
     var prefix_buffer: [256]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s}失败 · {s} · 总计 ", .{ phase, @errorName(err) });
+    const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s}失败 · {s} · 总计 ", .{ phase, reason });
     try std.testing.expectEqualStrings(prefix, message[0..@min(prefix.len, message.len)]);
     const suffix = " 秒";
     try std.testing.expect(std.mem.endsWith(u8, message, suffix));

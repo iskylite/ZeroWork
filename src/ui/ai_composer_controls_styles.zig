@@ -15,7 +15,7 @@ pub fn width(kind: Kind) f32 {
 }
 pub fn height(kind: Kind) f32 {
     return switch (kind) {
-        .attachment => 166,
+        .attachment => 128,
         .permission => 128,
         .model => 321.5,
         .effort => 86,

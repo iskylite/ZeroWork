@@ -2,7 +2,7 @@
 #include <string.h>
 
 // Startup failures precede the Zenit window. Never include configuration values.
-int zw_data_startup_alert(const char *code, int reset_pending, const unsigned char *icon_bytes, size_t icon_length) {
+int zw_data_startup_alert(const char *code, const unsigned char *message, size_t message_length, int reset_pending, const unsigned char *icon_bytes, size_t icon_length) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -25,7 +25,6 @@ int zw_data_startup_alert(const char *code, int reset_pending, const unsigned ch
         BOOL authentication_failed = code &&
             (strcmp(code, "CredentialAuthenticationCanceled") == 0 || strcmp(code, "CredentialAuthenticationFailed") == 0);
         alert.messageText = authentication_failed ? @"已保存的凭据尚未解锁" : credential_access ? @"需要授权访问已保存的凭据" : already_running ? @"此应用数据已在使用中" : reset_pending ? @"应用数据清除尚未完成" : @"无法安全打开应用数据";
-        NSString *reason = code ? [NSString stringWithUTF8String:code] : @"UnknownError";
         alert.informativeText = authentication_failed
             ? @"身份验证已取消或未通过，应用已停止启动。原有配置和凭据会保留，重新打开应用可再次使用 Touch ID 或系统提供的验证方式解锁。"
             : credential_access
@@ -36,7 +35,7 @@ int zw_data_startup_alert(const char *code, int reset_pending, const unsigned ch
             ? @"另一个 ZeroWork 进程正在使用同一应用数据或默认钥匙串凭据。请先退出该进程，再打开此应用。独立数据目录仍可同时运行。"
             : reset_pending
             ? @"上次清除未完成。可继续清除本应用的数据及钥匙串凭据，完成后退出。共享 SSH 文件、外部私钥、下载与导出文件会保留。"
-            : [NSString stringWithFormat:@"应用已停止加载配置，原有数据会保留。请处理目录冲突、权限或钥匙串访问问题后重试。\n错误：%@", reason];
+            : [[NSString alloc] initWithBytes:message length:message_length encoding:NSUTF8StringEncoding];
         [alert addButtonWithTitle:credential_access ? @"授权钥匙串并重试" : reset_pending ? @"继续清除并退出" : @"退出"];
         if (reset_pending || credential_access) [alert addButtonWithTitle:credential_access ? @"退出" : @"取消"];
         [NSApp activateIgnoringOtherApps:YES];

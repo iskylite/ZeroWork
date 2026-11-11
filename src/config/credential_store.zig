@@ -66,6 +66,12 @@ pub fn get(a: std.mem.Allocator, reference: []const u8) ![]u8 {
     if (builtin.is_test) unreachable;
     return native.get(a, s, reference);
 }
+pub fn getIfPresent(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
+    return get(a, reference) catch |err| switch (err) {
+        error.CredentialMissing => null,
+        else => return err,
+    };
+}
 fn add(reference: []const u8, secret: []const u8) !void {
     const s = try scope();
     if (backend()) |b| return b.add(b.context, s, reference, secret);
@@ -120,14 +126,35 @@ pub const Transaction = struct {
         if (!self.committed) for (self.created.items) |reference| deferCleanup(reference);
         self.arena.deinit();
     }
-    /// Existing refs are always resolved first; absence/denial cannot be overwritten.
     /// A changed value receives a cryptographically random, immutable new reference.
     pub fn stage(self: *Transaction, io: std.Io, a: std.mem.Allocator, secret: ?[]const u8, old_reference: ?[]const u8) !?[]const u8 {
+        return self.stageWithFallback(io, a, secret, old_reference, null);
+    }
+    pub fn stageSetting(self: *Transaction, io: std.Io, a: std.mem.Allocator, secret: []const u8, reference: ?[]const u8, old_reference: ?[]const u8) !?[]const u8 {
+        const value = if (secret.len != 0) secret else null;
+        return self.stageWithFallback(io, a, value, old_reference, .{ .reference = if (value == null) reference else null });
+    }
+    pub fn stageHost(self: *Transaction, io: std.Io, a: std.mem.Allocator, secret: *?[]const u8, reference: *?[]const u8, old_reference: ?[]const u8) !void {
+        reference.* = try self.stageWithFallback(io, a, secret.*, old_reference, .{ .cached_secret = secret, .reference = reference.* });
+    }
+    fn stageWithFallback(self: *Transaction, io: std.Io, a: std.mem.Allocator, secret: ?[]const u8, old_reference: ?[]const u8, fallback: ?struct { cached_secret: ?*?[]const u8 = null, reference: ?[]const u8 }) !?[]const u8 {
         const owned = self.arena.allocator();
         if (old_reference) |reference| {
-            const old_secret = try get(owned, reference);
-            if (secret) |value| if (std.mem.eql(u8, old_secret, value)) return try a.dupe(u8, reference);
-            try self.retired.append(owned, try owned.dupe(u8, reference));
+            const prior: ?[]u8 = get(owned, reference) catch |err| missing: {
+                if (err != error.CredentialMissing) return err;
+                const recovery = fallback orelse return err;
+                if (recovery.reference) |retained| {
+                    // Keep the untouched reference without recreating its cached secret.
+                    if (recovery.cached_secret) |cached| cached.* = null;
+                    return try a.dupe(u8, retained);
+                }
+                // The editor supplied a fresh value or explicitly saved it empty.
+                break :missing null;
+            };
+            if (prior) |old_secret| {
+                if (secret) |value| if (std.mem.eql(u8, old_secret, value)) return try a.dupe(u8, reference);
+                try self.retired.append(owned, try owned.dupe(u8, reference));
+            }
         }
         const value = secret orelse return null;
         if (self.created.items.len >= 4096) return error.CredentialLimitExceeded;
@@ -153,7 +180,7 @@ pub const Transaction = struct {
     pub fn retire(self: *Transaction, reference: []const u8) !void {
         for (self.retired.items) |old| if (std.mem.eql(u8, old, reference)) return;
         const owned = self.arena.allocator();
-        _ = try get(owned, reference);
+        _ = (try getIfPresent(owned, reference)) orelse return;
         try self.retired.append(owned, try owned.dupe(u8, reference));
     }
     pub fn commit(self: *Transaction) void {

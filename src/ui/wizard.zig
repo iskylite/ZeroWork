@@ -341,8 +341,9 @@ pub const Wizard = struct {
         editorSubmit(self, value, if (only) .save else .save_and_open) catch |err| self.showError(err);
     }
     fn showError(self: *Wizard, err: anyerror) void {
+        std.log.warn("connection editor operation failed: {s}", .{@errorName(err)});
         if (self.plugin_error) |node| {
-            node.setTextContent(self.alloc, @errorName(err)) catch {};
+            node.setTextContent(self.alloc, @import("feedback_message.zig").knownMessage(@errorName(err)) orelse "未能完成配置操作。请检查配置后重试。") catch {};
             node.setDisplay(.flex);
         }
         self.cx.requestRedraw();

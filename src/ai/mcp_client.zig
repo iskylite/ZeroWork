@@ -86,6 +86,9 @@ pub const Client = struct {
     input: std.ArrayList(u8) = .empty,
     pub fn init(a: std.mem.Allocator, server: config.Server) !Client {
         try (config.Extensions{ .servers = @constCast((&[_]config.Server{server})[0..]) }).validate();
+        for ([_][]config.Value{ server.environment, server.headers }) |entries| for (entries) |entry| {
+            if (entry.secret_ref != null and entry.value.len == 0) return error.McpCredentialMissing;
+        };
         var arena = std.heap.ArenaAllocator.init(a);
         errdefer arena.deinit();
         const copy = try (config.Extensions{ .servers = @constCast((&[_]config.Server{server})[0..]) }).clone(arena.allocator());

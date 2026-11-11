@@ -254,7 +254,7 @@ const host_asset = [_]Item{
     .{ .action = .new_window, .label = "新窗口连接", .icon = "🗔" },
     .{ .action = .open_in_current_group, .label = "在当前会话组内打开", .icon = "panels-top-left" },
     .{ .action = .clone_host, .label = "复制配置（克隆主机）", .icon = "⧉", .separator_before = true },
-    .{ .action = .edit_host, .label = "修改连接配置…", .icon = "✏️" },
+    .{ .action = .edit_host, .label = "编辑主机配置", .icon = "✏️" },
     .{ .action = .history, .label = "查看历史会话日志", .icon = "📜" },
     .{ .action = .pin_host, .label = "置顶到分组首位", .icon = "📌" },
     .{ .action = .move_group, .label = "移动分组 ▸", .icon = "📁", .separator_before = true },
