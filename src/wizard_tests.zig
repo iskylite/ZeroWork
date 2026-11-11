@@ -830,6 +830,13 @@ test "wizard jump picker commits registry identity through actual keyboard inter
     const bounds = trigger.globalRect();
     f.cx.handleMouseMove(bounds.x + bounds.w / 2, bounds.y + bounds.h / 2);
     feedbackFrames(&f);
+    try std.testing.expectEqual(ui.CursorShape.pointer, f.cx.current_cursor);
+    f.wizard.locked.?.set(true);
+    feedbackFrames(&f);
+    try std.testing.expectEqual(ui.CursorShape.not_allowed, f.cx.current_cursor);
+    f.wizard.locked.?.set(false);
+    feedbackFrames(&f);
+    try std.testing.expectEqual(ui.CursorShape.pointer, f.cx.current_cursor);
     try std.testing.expectEqual(ui.Color.TRANSPARENT, trigger.getBackground());
     const card = trigger.parent.?;
     const resting_fill = card.getBackground();

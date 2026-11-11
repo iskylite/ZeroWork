@@ -31,7 +31,7 @@ pub fn strip() ui.BoxStyle {
 }
 pub fn tab(width: f32, active: bool, at_capsule_start: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .cursor = .grab, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.selection else ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .corner_radii = if (at_capsule_start) .{ .each = .{ 14, 7, 7, 14 } } else null, .flex_shrink = 0 };
+    return .{ .cursor = .default, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.selection else ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .corner_radii = if (at_capsule_start) .{ .each = .{ 14, 7, 7, 14 } } else null, .flex_shrink = 0 };
 }
 pub fn underline(width: f32) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .top = .{ .px = height - 5 } }, .width = .{ .px = width - 24 }, .height = .{ .px = 2 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };

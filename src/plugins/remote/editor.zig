@@ -3799,6 +3799,7 @@ const RouteHopControl = struct {
             fn paint(ctx: anytype) void {
                 _ = ctx.theme.get();
                 const locked = ctx.locked.get();
+                ctx.trigger.setCursor(if (locked) .not_allowed else .pointer);
                 ctx.trigger.setFocusable(!locked);
                 ctx.trigger.behavior.interaction.a11y.?.disabled = locked;
                 const keyboard_focus = ctx.visible.get() and !locked;

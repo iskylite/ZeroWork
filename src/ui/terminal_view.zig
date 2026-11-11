@@ -384,6 +384,7 @@ pub const TerminalViewNode = struct {
         try track.appendChild(cx.allocator, fill);
         track.behavior.events.on_event = historyEvent;
         track.behavior.events.event_context = @ptrCast(self);
+        track.on_capture_lost = historyCaptureLost;
         try bar.appendChild(cx.allocator, track);
         const help = try ui.text(cx, "--:-- · 100%", .{ .font_size = 11, .color = c.fg_2, .use_monospace_font = true, .text_align = .end });
         help.setStyleInline(cx.allocator, .{ .width = .{ .px = 116 }, .flex_shrink = 0 });
@@ -740,13 +741,21 @@ pub const TerminalViewNode = struct {
         }
     };
 
+    fn historyCaptureLost(node: *ui.Node) void {
+        const self: *TerminalViewNode = @ptrCast(@alignCast(node.behavior.events.event_context orelse return));
+        self.history_dragging = false;
+    }
+
     fn historyEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *TerminalViewNode = @ptrCast(@alignCast(raw orelse return .ignored));
         switch (event) {
             .mouse_down => |mouse| {
                 if (mouse.button != .left) return .ignored;
+                const track = self.history_track orelse return .ignored;
+                self.cx.setPointerCapture(track);
+                // The cursor lease expires when the track loses capture.
+                _ = self.cx.acquireCursor(track, track.style.cursor) catch {};
                 self.history_dragging = true;
-                if (self.history_track) |track| self.cx.setPointerCapture(track);
                 self.seekHistory(mouse.x);
                 return .stop;
             },
@@ -5105,6 +5114,7 @@ pub const TerminalViewNode = struct {
     }
     /// Releases view-owned frame buffers (tab teardown).
     pub fn releaseBuffers(self: *TerminalViewNode, cx: *ui.Cx) void {
+        if (self.history_dragging) cx.releasePointerCapture();
         self.setHistoryHost(null) catch {};
         cx.removeAfterLayoutHook(self);
         if (self.history_live) |*live| live.deinit();
@@ -7667,12 +7677,18 @@ test "history track cursor follows window pointer coordinates and captures drag 
     try std.testing.expectEqual(@as(?usize, 1), view.history.selected);
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), view.history_fill.?.style.ext.?.scale_x, 0.01);
     cx.handleMouseMoveEx(rect.x + rect.w * 0.75, y + 50, .{});
+    try std.testing.expectEqual(ui.CursorShape.pointer, cx.current_cursor);
     try std.testing.expectEqual(@as(?usize, 3), view.history.selected);
     try std.testing.expectApproxEqAbs(@as(f32, 0.75), view.history_fill.?.style.ext.?.scale_x, 0.01);
     cx.handleMouseUpEx(rect.x + rect.w + 30, y + 50, .left, .{});
     try std.testing.expect(!view.history_dragging);
     try std.testing.expect(!cx.dispatcher.hasPointerCapture());
     try std.testing.expectEqual(@as(?usize, 4), view.history.selected);
+    cx.handleMouseDownEx(rect.x + rect.w * 0.75, y, .left, .{});
+    cx.handleMouseMoveEx(rect.x + rect.w * 0.75, y + 50, .{});
+    cx.cancelPointerInteractions(.window_blur);
+    try std.testing.expect(!view.history_dragging);
+    try std.testing.expectEqual(ui.CursorShape.text, cx.current_cursor);
     view.closeHistory();
     cx.layout();
     try std.testing.expect(view.history_bar.?.style.display == .none);
