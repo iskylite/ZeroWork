@@ -2565,7 +2565,8 @@ const View = struct {
         _ = child.wait(self.cx.io) catch {};
     }
 
-    fn applyBody(self: *View, text: []const u8) !void {        const lease = self.lease orelse return error.Unavailable;
+    fn applyBody(self: *View, text: []const u8) !void {
+        const lease = self.lease orelse return error.Unavailable;
         const prior = try self.documents.snapshot(lease);
         try self.captureEditBoundary(prior);
         try self.documents.edit(prior.stamp, .{ .title = prior.title, .body_md = text });

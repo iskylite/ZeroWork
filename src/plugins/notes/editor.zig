@@ -337,37 +337,36 @@ pub fn replace(allocator: std.mem.Allocator, body: []const u8, range: Block, rep
 }
 
 /// Move the block text of `moving` so it sits immediately before `anchor`.
-/// Both ranges are byte offsets into `body`. Paragraph separation is preserved
-/// by re-joining with a blank line; the result is a fresh allocation. When the
-/// anchor lies inside the moving range the body is returned unchanged.
+/// Both ranges are byte offsets into `body`. The document is rebuilt from its
+/// block list joined by blank lines, which preserves each block verbatim and
+/// keeps neighbours separated even when the moved block was their only
+/// separator (e.g. a heading between two paragraphs). The result is a fresh
+/// allocation; the body is returned unchanged when the anchor lies inside the
+/// moving range or the two refer to the same block.
 pub fn moveBlockBefore(allocator: std.mem.Allocator, body: []const u8, moving: Block, anchor: Block) ![]u8 {
     if (moving.start > moving.end or moving.end > body.len) return error.InvalidBlockRange;
     if (anchor.start > anchor.end or anchor.end > body.len) return error.InvalidBlockRange;
     if (anchor.start >= moving.start and anchor.start <= moving.end) return allocator.dupe(u8, body);
-    const moved = body[moving.start..moving.end];
-    // Remove the moving block plus the blank-line gap that followed it.
-    const remove_start = moving.start;
-    const remove_end = skipTrailingBlank(body, moving.end);
-    const stripped = try std.mem.concat(allocator, u8, &.{ body[0..remove_start], body[remove_end..] });
-    defer allocator.free(stripped);
-    // Re-map the anchor into the stripped body.
-    const anchor_pos = if (anchor.start > moving.end) blk: {
-        break :blk anchor.start - (remove_end - remove_start);
-    } else anchor.start;
-    const clamped = @min(anchor_pos, stripped.len);
-    var result = std.ArrayList(u8).empty;
-    errdefer result.deinit(allocator);
-    try result.appendSlice(allocator, stripped[0..clamped]);
-    // Ensure a blank line separates the moved block from what precedes it.
-    if (result.items.len > 0 and result.items[result.items.len - 1] != '\n') {
-        try result.appendSlice(allocator, "\n\n");
-    } else if (result.items.len >= 1 and !std.mem.endsWith(u8, result.items, "\n\n")) {
-        try result.appendSlice(allocator, "\n");
+
+    const parsed = try blocks(allocator, body);
+    defer allocator.free(parsed);
+    const from = indexOfBlock(parsed, moving) orelse return allocator.dupe(u8, body);
+    const before = indexOfBlock(parsed, anchor) orelse return allocator.dupe(u8, body);
+    if (from == before) return allocator.dupe(u8, body);
+
+    var order = try allocator.alloc(Block, parsed.len);
+    defer allocator.free(order);
+    var n: usize = 0;
+    for (parsed, 0..) |block, i| {
+        if (i == before) {
+            order[n] = parsed[from];
+            n += 1;
+        }
+        if (i == from) continue;
+        order[n] = block;
+        n += 1;
     }
-    try result.appendSlice(allocator, moved);
-    try result.appendSlice(allocator, "\n\n");
-    try result.appendSlice(allocator, stripped[clamped..]);
-    return result.toOwnedSlice(allocator);
+    return joinBlocks(allocator, body, order[0..n]);
 }
 
 /// Move `moving` to the very end of the document, separated by a blank line.
@@ -376,36 +375,42 @@ pub fn moveBlockBefore(allocator: std.mem.Allocator, body: []const u8, moving: B
 /// already the trailing block.
 pub fn moveBlockToEnd(allocator: std.mem.Allocator, body: []const u8, moving: Block) ![]u8 {
     if (moving.start > moving.end or moving.end > body.len) return error.InvalidBlockRange;
-    const remove_start = moving.start;
-    const remove_end = skipTrailingBlank(body, moving.end);
-    // Already trailing: nothing but blank lines follow it.
-    if (std.mem.trim(u8, body[remove_end..], " \t\r\n").len == 0) return allocator.dupe(u8, body);
-    const moved = body[moving.start..moving.end];
-    const stripped = try std.mem.concat(allocator, u8, &.{ body[0..remove_start], body[remove_end..] });
-    defer allocator.free(stripped);
-    const trimmed = std.mem.trimEnd(u8, stripped, " \t\r\n");
-    var result = std.ArrayList(u8).empty;
-    errdefer result.deinit(allocator);
-    try result.appendSlice(allocator, trimmed);
-    if (trimmed.len > 0) try result.appendSlice(allocator, "\n\n");
-    try result.appendSlice(allocator, moved);
-    return result.toOwnedSlice(allocator);
+    const parsed = try blocks(allocator, body);
+    defer allocator.free(parsed);
+    const from = indexOfBlock(parsed, moving) orelse return allocator.dupe(u8, body);
+    if (from == parsed.len - 1) return allocator.dupe(u8, body);
+
+    var order = try allocator.alloc(Block, parsed.len);
+    defer allocator.free(order);
+    var n: usize = 0;
+    for (parsed, 0..) |block, i| {
+        if (i == from) continue;
+        order[n] = block;
+        n += 1;
+    }
+    order[n] = parsed[from];
+    n += 1;
+    return joinBlocks(allocator, body, order[0..n]);
 }
 
-/// Absolute offset just past `end` plus any following blank lines and the
-/// single newline that terminates the block line.
-fn skipTrailingBlank(body: []const u8, end: usize) usize {
-    var i = end;
-    var newlines: usize = 0;
-    while (i < body.len and (body[i] == '\n' or body[i] == '\r')) {
-        if (body[i] == '\n') newlines += 1;
-        i += 1;
-        if (newlines >= 2) {
-            // Keep consuming nothing further; two newlines = one blank line.
-            return i;
-        }
+/// Index of the parsed block whose start matches `target.start`, or null when
+/// no block begins there (the caller passed a stale or fabricated range).
+fn indexOfBlock(parsed: []const Block, target: Block) ?usize {
+    for (parsed, 0..) |block, i| if (block.start == target.start) return i;
+    return null;
+}
+
+/// Rebuild a document from an ordered block list, each block's text taken
+/// verbatim from `body` and separated by a single blank line. Reparsing the
+/// result yields the same blocks in the same order.
+fn joinBlocks(allocator: std.mem.Allocator, body: []const u8, order: []const Block) ![]u8 {
+    var result = std.ArrayList(u8).empty;
+    errdefer result.deinit(allocator);
+    for (order, 0..) |block, i| {
+        if (i > 0) try result.appendSlice(allocator, "\n\n");
+        try result.appendSlice(allocator, std.mem.trim(u8, block.text(body), "\n\r"));
     }
-    return i;
+    return result.toOwnedSlice(allocator);
 }
 
 /// Canonical Markdown skeleton inserted by a slash command, or null when the
@@ -463,6 +468,35 @@ test "notes move block reorders paragraphs and keeps separation" {
     const same = try moveBlockBefore(allocator, body, parsed[0], parsed[0]);
     defer allocator.free(same);
     try std.testing.expectEqualStrings(body, same);
+}
+
+test "notes move block does not merge neighbours the moved block separated" {
+    // A heading between two paragraphs is their only separator (single `\n`).
+    // Moving it away must keep both neighbours as distinct blocks, not glue
+    // them into one, and must not introduce a leading or trailing blank line.
+    const allocator = std.testing.allocator;
+    const body = "intro\n# 标题\n\n正文";
+    const parsed = try blocks(allocator, body);
+    defer allocator.free(parsed);
+    try std.testing.expectEqual(@as(usize, 3), parsed.len);
+
+    const moved = try moveBlockBefore(allocator, body, parsed[1], parsed[0]);
+    defer allocator.free(moved);
+    const moved_blocks = try blocks(allocator, moved);
+    defer allocator.free(moved_blocks);
+    try std.testing.expectEqual(@as(usize, 3), moved_blocks.len);
+    try std.testing.expectEqualStrings("# 标题", std.mem.trim(u8, moved_blocks[0].text(moved), "\n\r"));
+    try std.testing.expectEqualStrings("intro", std.mem.trim(u8, moved_blocks[1].text(moved), "\n\r"));
+    try std.testing.expectEqualStrings("正文", std.mem.trim(u8, moved_blocks[2].text(moved), "\n\r"));
+
+    // A document with a wide blank gap after its first block must not gain a
+    // leading blank line when that block is moved to the end.
+    const gap = "A\n\n\nB";
+    const gap_parsed = try blocks(allocator, gap);
+    defer allocator.free(gap_parsed);
+    const to_end = try moveBlockToEnd(allocator, gap, gap_parsed[0]);
+    defer allocator.free(to_end);
+    try std.testing.expectEqualStrings("B\n\nA", to_end);
 }
 
 test "notes move block to end appends and is idempotent" {
