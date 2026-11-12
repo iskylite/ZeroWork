@@ -336,6 +336,162 @@ pub fn replace(allocator: std.mem.Allocator, body: []const u8, range: Block, rep
     return std.mem.concat(allocator, u8, &.{ body[0..range.start], replacement, body[range.end..] });
 }
 
+/// Move the block text of `moving` so it sits immediately before `anchor`.
+/// Both ranges are byte offsets into `body`. Paragraph separation is preserved
+/// by re-joining with a blank line; the result is a fresh allocation. When the
+/// anchor lies inside the moving range the body is returned unchanged.
+pub fn moveBlockBefore(allocator: std.mem.Allocator, body: []const u8, moving: Block, anchor: Block) ![]u8 {
+    if (moving.start > moving.end or moving.end > body.len) return error.InvalidBlockRange;
+    if (anchor.start > anchor.end or anchor.end > body.len) return error.InvalidBlockRange;
+    if (anchor.start >= moving.start and anchor.start <= moving.end) return allocator.dupe(u8, body);
+    const moved = body[moving.start..moving.end];
+    // Remove the moving block plus the blank-line gap that followed it.
+    const remove_start = moving.start;
+    const remove_end = skipTrailingBlank(body, moving.end);
+    const stripped = try std.mem.concat(allocator, u8, &.{ body[0..remove_start], body[remove_end..] });
+    defer allocator.free(stripped);
+    // Re-map the anchor into the stripped body.
+    const anchor_pos = if (anchor.start > moving.end) blk: {
+        break :blk anchor.start - (remove_end - remove_start);
+    } else anchor.start;
+    const clamped = @min(anchor_pos, stripped.len);
+    var result = std.ArrayList(u8).empty;
+    errdefer result.deinit(allocator);
+    try result.appendSlice(allocator, stripped[0..clamped]);
+    // Ensure a blank line separates the moved block from what precedes it.
+    if (result.items.len > 0 and result.items[result.items.len - 1] != '\n') {
+        try result.appendSlice(allocator, "\n\n");
+    } else if (result.items.len >= 1 and !std.mem.endsWith(u8, result.items, "\n\n")) {
+        try result.appendSlice(allocator, "\n");
+    }
+    try result.appendSlice(allocator, moved);
+    try result.appendSlice(allocator, "\n\n");
+    try result.appendSlice(allocator, stripped[clamped..]);
+    return result.toOwnedSlice(allocator);
+}
+
+/// Move `moving` to the very end of the document, separated by a blank line.
+/// Used when a block is dragged past the last block, where `moveBlockBefore`
+/// has no anchor to insert before. A no-op (returns a copy) when `moving` is
+/// already the trailing block.
+pub fn moveBlockToEnd(allocator: std.mem.Allocator, body: []const u8, moving: Block) ![]u8 {
+    if (moving.start > moving.end or moving.end > body.len) return error.InvalidBlockRange;
+    const remove_start = moving.start;
+    const remove_end = skipTrailingBlank(body, moving.end);
+    // Already trailing: nothing but blank lines follow it.
+    if (std.mem.trim(u8, body[remove_end..], " \t\r\n").len == 0) return allocator.dupe(u8, body);
+    const moved = body[moving.start..moving.end];
+    const stripped = try std.mem.concat(allocator, u8, &.{ body[0..remove_start], body[remove_end..] });
+    defer allocator.free(stripped);
+    const trimmed = std.mem.trimEnd(u8, stripped, " \t\r\n");
+    var result = std.ArrayList(u8).empty;
+    errdefer result.deinit(allocator);
+    try result.appendSlice(allocator, trimmed);
+    if (trimmed.len > 0) try result.appendSlice(allocator, "\n\n");
+    try result.appendSlice(allocator, moved);
+    return result.toOwnedSlice(allocator);
+}
+
+/// Absolute offset just past `end` plus any following blank lines and the
+/// single newline that terminates the block line.
+fn skipTrailingBlank(body: []const u8, end: usize) usize {
+    var i = end;
+    var newlines: usize = 0;
+    while (i < body.len and (body[i] == '\n' or body[i] == '\r')) {
+        if (body[i] == '\n') newlines += 1;
+        i += 1;
+        if (newlines >= 2) {
+            // Keep consuming nothing further; two newlines = one blank line.
+            return i;
+        }
+    }
+    return i;
+}
+
+/// Canonical Markdown skeleton inserted by a slash command, or null when the
+/// command is unknown. `caret` is the offset within the returned text where the
+/// caret should land.
+pub const SlashSnippet = struct { text: []const u8, caret: usize };
+
+pub fn slashSnippet(command: []const u8) ?SlashSnippet {
+    const t = std.mem.trim(u8, command, " \t");
+    if (std.mem.eql(u8, t, "h1") or std.mem.eql(u8, t, "标题1")) return .{ .text = "# ", .caret = 2 };
+    if (std.mem.eql(u8, t, "h2") or std.mem.eql(u8, t, "标题2")) return .{ .text = "## ", .caret = 3 };
+    if (std.mem.eql(u8, t, "h3") or std.mem.eql(u8, t, "标题3")) return .{ .text = "### ", .caret = 4 };
+    if (std.mem.eql(u8, t, "list") or std.mem.eql(u8, t, "列表") or std.mem.eql(u8, t, "bullet")) return .{ .text = "- ", .caret = 2 };
+    if (std.mem.eql(u8, t, "num") or std.mem.eql(u8, t, "ordered") or std.mem.eql(u8, t, "有序")) return .{ .text = "1. ", .caret = 3 };
+    if (std.mem.eql(u8, t, "todo") or std.mem.eql(u8, t, "task") or std.mem.eql(u8, t, "任务")) return .{ .text = "- [ ] ", .caret = 6 };
+    if (std.mem.eql(u8, t, "quote") or std.mem.eql(u8, t, "引用")) return .{ .text = "> ", .caret = 2 };
+    if (std.mem.eql(u8, t, "code") or std.mem.eql(u8, t, "代码")) return .{ .text = "```\n\n```", .caret = 4 };
+    if (std.mem.eql(u8, t, "table") or std.mem.eql(u8, t, "表格")) return .{ .text = "| 列一 | 列二 |\n| --- | --- |\n|  |  |", .caret = 17 };
+    if (std.mem.eql(u8, t, "hr") or std.mem.eql(u8, t, "divider") or std.mem.eql(u8, t, "分隔")) return .{ .text = "---\n", .caret = 4 };
+    return null;
+}
+
+/// Block kinds offered by the insert menu / slash command.
+pub const BlockKind = enum { heading1, heading2, heading3, bullet, ordered, task, quote, code, table, divider };
+
+pub fn blockSnippet(kind: BlockKind) SlashSnippet {
+    return switch (kind) {
+        .heading1 => slashSnippet("h1").?,
+        .heading2 => slashSnippet("h2").?,
+        .heading3 => slashSnippet("h3").?,
+        .bullet => slashSnippet("list").?,
+        .ordered => slashSnippet("num").?,
+        .task => slashSnippet("todo").?,
+        .quote => slashSnippet("quote").?,
+        .code => slashSnippet("code").?,
+        .table => slashSnippet("table").?,
+        .divider => slashSnippet("hr").?,
+    };
+}
+
+test "notes move block reorders paragraphs and keeps separation" {
+    const allocator = std.testing.allocator;
+    const body = "甲\n\n乙\n\n丙";
+    const parsed = try blocks(allocator, body);
+    defer allocator.free(parsed);
+    const moved = try moveBlockBefore(allocator, body, parsed[2], parsed[0]);
+    defer allocator.free(moved);
+    const moved_blocks = try blocks(allocator, moved);
+    defer allocator.free(moved_blocks);
+    try std.testing.expectEqual(@as(usize, 3), moved_blocks.len);
+    try std.testing.expectEqualStrings("丙", moved_blocks[0].text(moved));
+    try std.testing.expectEqualStrings("甲", moved_blocks[1].text(moved));
+    try std.testing.expectEqualStrings("乙", moved_blocks[2].text(moved));
+    // An anchor inside the moving block is a no-op.
+    const same = try moveBlockBefore(allocator, body, parsed[0], parsed[0]);
+    defer allocator.free(same);
+    try std.testing.expectEqualStrings(body, same);
+}
+
+test "notes move block to end appends and is idempotent" {
+    const allocator = std.testing.allocator;
+    const body = "甲\n\n乙\n\n丙";
+    const parsed = try blocks(allocator, body);
+    defer allocator.free(parsed);
+    const moved = try moveBlockToEnd(allocator, body, parsed[0]);
+    defer allocator.free(moved);
+    const moved_blocks = try blocks(allocator, moved);
+    defer allocator.free(moved_blocks);
+    try std.testing.expectEqual(@as(usize, 3), moved_blocks.len);
+    try std.testing.expectEqualStrings("乙", moved_blocks[0].text(moved));
+    try std.testing.expectEqualStrings("丙", moved_blocks[1].text(moved));
+    try std.testing.expectEqualStrings("甲", moved_blocks[2].text(moved));
+    // Moving the trailing block is a no-op.
+    const same = try moveBlockToEnd(allocator, body, parsed[2]);
+    defer allocator.free(same);
+    try std.testing.expectEqualStrings(body, same);
+}
+
+test "notes slash snippets expose canonical skeletons" {
+    try std.testing.expectEqualStrings("# ", slashSnippet("h1").?.text);
+    try std.testing.expectEqualStrings("- [ ] ", slashSnippet("todo").?.text);
+    try std.testing.expectEqualStrings("- ", slashSnippet("列表").?.text);
+    try std.testing.expect(slashSnippet("unknown") == null);
+    try std.testing.expectEqualStrings("```\n\n```", slashSnippet("code").?.text);
+}
+
 /// A rendered inline link `[label](url)`. All ranges are byte offsets into
 /// the same body, `end` points one past the closing paren.
 pub const LinkSpan = struct {
