@@ -100,6 +100,12 @@ const Action = union(enum) {
     format_inline: editor.InlineMark,
     /// Insert `[label](url)` around the current editor selection.
     insert_link,
+    /// Flip a rendered task checkbox at the given document byte offset.
+    toggle_task: usize,
+    /// Insert a block skeleton (heading, list, table, …) at the caret.
+    insert_block: editor.BlockKind,
+    /// Open the insert-block menu from the editor toolbar.
+    open_insert_menu,
 };
 
 const View = struct {
@@ -127,6 +133,8 @@ const View = struct {
     block_rows: []BlockRow = &.{},
     rendered_blocks: std.ArrayList(*RenderedBlock) = .empty,
     editing_row: ?EditorRow = null,
+    dragging_block: ?usize = null,
+    drag_target: ?usize = null,
     block_width: f32 = 0,
     block_compact: bool = false,
     block_theme: u32 = 0,
@@ -144,6 +152,7 @@ const View = struct {
     image_poll_timer: ?u64 = null,
     image_button: *ui.Node = undefined,
     format_buttons: [5]*ui.Node = undefined,
+    insert_menu: MoreMenu = undefined,
     image_disabled: *ui.Signal(bool),
     image_open: *ui.Signal(bool),
     image_modal_dialog: *ui.Node = undefined,
@@ -568,6 +577,51 @@ const View = struct {
                 _ = input.state.setAccessibilitySelection(@intCast(edit.start + edit.sel_start), @intCast(edit.start + edit.sel_end));
                 try self.applyBody(input.state.getText());
             },
+            .toggle_task => |check_offset| {
+                // A rendered task checkbox was clicked. Flip its state byte with
+                // a single-character edit so the block pool reuses every node.
+                const lease = self.lease orelse return;
+                const snapshot = try self.documents.snapshot(lease);
+                if (snapshot.read_only) return;
+                const body = snapshot.body_md;
+                if (check_offset >= body.len) return;
+                const current = body[check_offset];
+                const next: u8 = switch (current) {
+                    ' ' => 'x',
+                    'x', 'X' => ' ',
+                    else => return,
+                };
+                const edited = try self.cx.allocator.alloc(u8, body.len);
+                defer self.cx.allocator.free(edited);
+                @memcpy(edited, body);
+                edited[check_offset] = next;
+                try self.applyBody(edited);
+                try self.finishBoundary();
+            },
+            .insert_block => |kind| {
+                self.insert_menu.open.set(false);
+                const input = self.input orelse return;
+                if (self.source_mode) return;
+                const lease = self.lease orelse return;
+                if ((try self.documents.snapshot(lease)).read_only) return;
+                const snippet = editor.blockSnippet(kind);
+                const caret = input.state.cursor.offset;
+                const body = input.state.getText();
+                // Start the block on its own line: prepend a newline unless the
+                // caret already sits at the beginning of a line.
+                const at_line_start = caret == 0 or (caret <= body.len and body[caret - 1] == '\n');
+                var buf = std.ArrayList(u8).empty;
+                defer buf.deinit(self.cx.allocator);
+                if (!at_line_start) try buf.append(self.cx.allocator, '\n');
+                try buf.appendSlice(self.cx.allocator, snippet.text);
+                const lead: usize = if (at_line_start) 0 else 1;
+                try input.state.replaceRangeChecked(caret, caret, buf.items);
+                const target: u32 = @intCast(caret + lead + snippet.caret);
+                _ = input.state.setAccessibilitySelection(target, target);
+                try self.applyBody(input.state.getText());
+                self.cx.setFocus(input.input);
+            },
+            .open_insert_menu => self.insert_menu.open.set(!self.insert_menu.open.peek()),
         }
     }
 
@@ -1104,6 +1158,8 @@ const View = struct {
         self.image_button.setDisplay(if (!floating and self.key != null) .flex else .none);
         const editing = self.input != null and !self.source_mode;
         for (self.format_buttons) |btn| btn.setDisplay(if (editing) .flex else .none);
+        self.insert_menu.button.setDisplay(if (editing) .flex else .none);
+        if (!editing) self.insert_menu.open.set(false);
         self.find_button.setDisplay(if (self.key != null) .flex else .none);
         self.source_button.setDisplay(if (floating and self.key != null) .flex else .none);
         self.recent_button.setDisplay(if (floating) .flex else .none);
@@ -1412,6 +1468,33 @@ const View = struct {
         const menu = try ui.widgets.Menu(.{ .items = items, .position = .bottom_end, .width = 152 }).mount(scope, self.cx);
         const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.ellipsis, .a11y_label = "更多操作", .base_style = S.tool() }).mount(scope, self.cx);
         button.meta.ownership.meta.test_id = id;
+        try menu.trigger.appendChild(self.cx.allocator, button);
+        try parent.appendChild(self.cx.allocator, menu.wrapper);
+        return .{ .button = button, .open = menu.open.?, .wrapper = menu.wrapper };
+    }
+
+    /// Insert-block menu (slash-command equivalent): a `+` trigger listing the
+    /// block skeletons the editor can insert at the caret.
+    fn mountInsertMenu(self: *View, scope: *ui.Scope, parent: *ui.Node) !MoreMenu {
+        const specs = [_]struct { kind: editor.BlockKind, label: []const u8 }{
+            .{ .kind = .heading1, .label = "标题 1" },
+            .{ .kind = .heading2, .label = "标题 2" },
+            .{ .kind = .heading3, .label = "标题 3" },
+            .{ .kind = .bullet, .label = "无序列表" },
+            .{ .kind = .ordered, .label = "有序列表" },
+            .{ .kind = .task, .label = "任务列表" },
+            .{ .kind = .quote, .label = "引用" },
+            .{ .kind = .code, .label = "代码块" },
+            .{ .kind = .table, .label = "表格" },
+            .{ .kind = .divider, .label = "分隔线" },
+        };
+        var items: [specs.len]ui.widgets.MenuItem = undefined;
+        inline for (specs, 0..) |spec, i| {
+            items[i] = try self.menuItem(scope, spec.label, .{ .insert_block = spec.kind }, false);
+        }
+        const menu = try ui.widgets.Menu(.{ .items = &items, .position = .bottom_start, .width = 160 }).mount(scope, self.cx);
+        const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.plus, .a11y_label = "插入块", .base_style = S.tool() }).mount(scope, self.cx);
+        button.meta.ownership.meta.test_id = "notes.insert.menu";
         try menu.trigger.appendChild(self.cx.allocator, button);
         try parent.appendChild(self.cx.allocator, menu.wrapper);
         return .{ .button = button, .open = menu.open.?, .wrapper = menu.wrapper };
@@ -1978,7 +2061,9 @@ const View = struct {
             }
         }
         var source_map: ?*const ui.widgets.markdown.SourceMap = null;
-        const node = if (block.kind == .markdown) blk: {
+        const node = if (block.kind == .table) blk: {
+            break :blk try self.mountTable(scope, block, text, read_only);
+        } else if (block.kind == .markdown) blk: {
             const value = try scope.createText(content, .{});
             const options = self.markdownOptions();
             if (read_only) break :blk try ui.widgets.Markdown(.{ .text = value, .options = options }).mount(scope, cx);
@@ -1992,13 +2077,109 @@ const View = struct {
             break :blk label;
         };
         node.meta.ownership.meta.test_id = "notes.document.block";
-        if (!read_only) {
+        if (!read_only and block.kind != .table) {
             const action = try scope.createState(Click, .{ .view = self, .action = .{ .begin_block = .{ .range = block } }, .block_node = node, .source_map = source_map });
             rendered.edit = action;
             node.behavior.events.on_click = cx.on(Click, action, Click.invoke);
             node.behavior.interaction.a11y = .{ .role = .button, .label = "编辑正文" };
         }
         try rendered.node.appendChild(cx.allocator, node);
+        if (!read_only) try self.mountBlockHandle(rendered);
+    }
+
+    /// Attach the left-edge drag handle that reorders a read-mode block. The
+    /// handle sits in the gutter outside the content column, stays hidden until
+    /// the row is hovered, and drives a vertical drag that moves the block.
+    fn mountBlockHandle(self: *View, rendered: *RenderedBlock) !void {
+        const cx = self.cx;
+        const scope = rendered.scope;
+        const handle = try ui.box(cx, .{
+            .position = .absolute,
+            .inset = .{ .top = .{ .px = 0 }, .left = .{ .px = -20 } },
+            .width = .{ .px = 20 },
+            .height = .{ .px = 24 },
+            .align_items = .center,
+            .justify = .center,
+            .border = .{ .radius = 6 },
+            .cursor = .grab,
+            .flex_shrink = 0,
+        }, .{});
+        handle.meta.ownership.meta.test_id = "notes.block.drag-handle";
+        handle.setDisplay(.none);
+        const grip = try ui.iconTint(cx, ui.icons.grip_vertical, S.theme.current().fg_3, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+        S.theme.bindInk(grip, "fg_3");
+        try handle.appendChild(cx.allocator, grip);
+        try rendered.node.appendChild(cx.allocator, handle);
+        const context = try scope.createState(BlockHandle, .{ .view = self, .rendered = rendered, .handle = handle });
+        rendered.node.behavior.events.on_hover = cx.on(BlockHandle, context, BlockHandle.enter);
+        rendered.node.behavior.events.on_leave = cx.on(BlockHandle, context, BlockHandle.leave);
+        _ = try ui.interaction.drag.Binding.attach(scope, cx, handle, .{ .axis = .vertical, .activation_distance = 4, .active_cursor = .grabbing }, BlockHandle.drag, context);
+    }
+
+    /// Render a Markdown table block as a bordered grid. Cells carry inline
+    /// Markdown (bold, code, links) through the read renderer. The alignment
+    /// row is skipped; the first row is styled as a header. When editable, a
+    /// cell click opens the editor with the caret inside that cell's source.
+    fn mountTable(self: *View, scope: *ui.Scope, block: editor.Block, text: []const u8, read_only: bool) !*ui.Node {
+        const cx = self.cx;
+        const a = cx.allocator;
+        const c = S.theme.current();
+        const content = block.text(text);
+        const grid = try ui.box(cx, .{
+            .width = .fill(),
+            .min_width = 0,
+            .flex_shrink = 0,
+            .direction = .column,
+            .border = .{ .radius = 8, .width = 0.7, .color = c.border },
+            .overflow_hidden = true,
+        }, .{});
+        errdefer cx.destroyDetached(grid);
+        const rows = try editor.parseTableCells(a, content);
+        defer a.free(rows);
+        defer for (rows) |cells| a.free(cells);
+        const options = self.markdownOptions();
+        var rendered_rows: usize = 0;
+        for (rows, 0..) |cells, row_index| {
+            // The second line is the alignment separator; never show it.
+            if (row_index == 1) continue;
+            const header = row_index == 0;
+            const row_node = try ui.box(cx, .{
+                .width = .fill(),
+                .min_width = 0,
+                .direction = .row,
+                .background = if (header) c.well else null,
+                .border = if (rendered_rows == 0) .{} else .{ .width = 0.7, .color = c.border, .side_widths = .{ 0.7, 0, 0, 0 } },
+            }, .{});
+            try grid.appendChild(a, row_node);
+            for (cells) |cell| {
+                const cell_node = try ui.box(cx, .{
+                    .width = .fill(),
+                    .min_width = 0,
+                    .flex = 1,
+                    .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 6 },
+                }, .{});
+                try row_node.appendChild(a, cell_node);
+                const cell_text = content[cell.start..cell.end];
+                try ui.widgets.markdown.renderInto(cx, cell_node, cell_text, options);
+                if (header) for (cell_node.children.items) |child| {
+                    if (child.getText()) |t| {
+                        var bold = t;
+                        bold.font_weight = 600;
+                        child.setText(bold);
+                    }
+                };
+                if (!read_only) {
+                    // Clicking a cell edits it in place: the caret lands on the
+                    // cell's first source byte and the live projection reveals
+                    // that row's Markdown.
+                    const click = try scope.createState(Click, .{ .view = self, .action = .{ .begin_block = .{ .range = block, .offset = cell.start } } });
+                    cell_node.behavior.events.on_click = cx.on(Click, click, Click.invoke);
+                    cell_node.behavior.interaction.a11y = .{ .role = .button, .label = "编辑单元格" };
+                }
+            }
+            rendered_rows += 1;
+        }
+        return grid;
     }
 
     fn revealSource(self: *View) bool {
@@ -2359,8 +2540,32 @@ const View = struct {
         };
     }
 
-    fn applyBody(self: *View, text: []const u8) !void {
-        const lease = self.lease orelse return error.Unavailable;
+    /// When `byte` lands on a rendered task checkbox, return the offset of its
+    /// state character (the space or `x` inside the brackets). The click must
+    /// fall on the marker itself, not elsewhere on the line.
+    fn taskCheckboxAt(_: *View, body: []const u8, byte: usize) ?usize {
+        const line_start = if (std.mem.lastIndexOfScalar(u8, body[0..byte], '\n')) |nl| nl + 1 else 0;
+        const trimmed_start = blk: {
+            var i = line_start;
+            while (i < body.len and (body[i] == ' ' or body[i] == '\t')) i += 1;
+            break :blk i;
+        };
+        const check = editor.taskStateOffset(body, trimmed_start) orelse return null;
+        // Accept clicks anywhere within the `- [ ] ` marker (start of line
+        // through the space after the bracket), mirroring a real checkbox hit.
+        if (byte < trimmed_start or byte > check + 2) return null;
+        return check;
+    }
+
+    fn openLink(self: *View, url: []const u8) void {
+        if (url.len == 0) return;
+        // Pass the URL as a single argument, never as shell text. Only
+        // browser/mail style destinations are activated this way.
+        var child = std.process.spawn(self.cx.io, .{ .argv = &.{ "/usr/bin/open", "--", url } }) catch return;
+        _ = child.wait(self.cx.io) catch {};
+    }
+
+    fn applyBody(self: *View, text: []const u8) !void {        const lease = self.lease orelse return error.Unavailable;
         const prior = try self.documents.snapshot(lease);
         try self.captureEditBoundary(prior);
         try self.documents.edit(prior.stamp, .{ .title = prior.title, .body_md = text });
@@ -2377,6 +2582,36 @@ const View = struct {
         if (self.import_ticket != null and changed.pending_import == null) self.cancelImport();
         self.body_error = null;
         self.scheduleSave();
+    }
+
+    /// Commit a completed read-mode block drag. `moveBlockBefore` inserts the
+    /// moving block before an anchor, so a drop past the last block (target at
+    /// or beyond the range count) has no anchor and is ignored.
+    fn finishBlockDrag(self: *View) void {
+        const moving_index = self.dragging_block orelse return self.clearBlockDrag();
+        defer self.clearBlockDrag();
+        const target = self.drag_target orelse return;
+        if (target == moving_index) return;
+        const text = self.blocks_text orelse return;
+        if (moving_index >= self.block_ranges.len) return;
+        const lease = self.lease orelse return;
+        const snapshot = self.documents.snapshot(lease) catch |err| return self.showError(err);
+        if (snapshot.read_only) return;
+        // A drop at or past the last block appends; otherwise insert before the anchor.
+        const moved = if (target >= self.block_ranges.len)
+            editor.moveBlockToEnd(self.cx.allocator, text, self.block_ranges[moving_index]) catch |err| return self.showError(err)
+        else
+            editor.moveBlockBefore(self.cx.allocator, text, self.block_ranges[moving_index], self.block_ranges[target]) catch |err| return self.showError(err);
+        defer self.cx.allocator.free(moved);
+        self.applyBody(moved) catch |err| return self.showError(err);
+        self.finishBoundary() catch |err| return self.showError(err);
+        self.body_dirty = true;
+        self.redraw();
+    }
+
+    fn clearBlockDrag(self: *View) void {
+        self.dragging_block = null;
+        self.drag_target = null;
     }
 
     fn scheduleSave(self: *View) void {
@@ -3028,6 +3263,10 @@ const View = struct {
             self.enqueue(.{ .format_inline = .strikethrough });
             return .stop;
         }
+        if (key == .slash and mods.super and !mods.ctrl and !mods.alt and !self.search_open and self.input != null) {
+            self.enqueue(.open_insert_menu);
+            return .stop;
+        }
         if (key == .s and mods.super and !mods.shift and !mods.ctrl and !mods.alt) {
             self.retrySave();
             return .stop;
@@ -3351,13 +3590,94 @@ const Click = struct {
     fn invoke(self: *Click) void {
         var action = self.action;
         if (action == .begin_block) {
-            const cx = self.view.cx;
-            action.begin_block.offset = if (self.source_map) |map|
+            const view = self.view;
+            const cx = view.cx;
+            // A table cell click carries a fixed source offset and neither a
+            // source map nor a block node; keep that offset verbatim.
+            const offset = if (self.source_map) |map|
                 map.offsetAt(cx, cx.mouse_x, cx.mouse_y)
+            else if (self.block_node) |node|
+                ui.widgets.markdown.textOffsetAt(cx, node, cx.mouse_x, cx.mouse_y)
             else
-                ui.widgets.markdown.textOffsetAt(cx, self.block_node.?, cx.mouse_x, cx.mouse_y);
+                action.begin_block.offset;
+            if (offset) |byte| {
+                // A rendered click lands on source bytes. Intercept task
+                // checkboxes and links before falling back to editing.
+                if (self.block_node != null) if (view.blocks_text) |body| {
+                    if (view.taskCheckboxAt(body, byte)) |check_offset| {
+                        view.enqueue(.{ .toggle_task = check_offset });
+                        return;
+                    }
+                    const mods = cx.dispatcher.last_modifiers;
+                    const read_only = if (view.body_mode) |mode| mode.read_only else false;
+                    if (mods.super or read_only) {
+                        if (editor.findLinkAt(body, byte)) |link| {
+                            view.openLink(link.url(body));
+                            return;
+                        }
+                    }
+                };
+                action.begin_block.offset = byte;
+            }
         }
         self.view.enqueue(action);
+    }
+};
+
+/// Drag-handle context for a rendered read-mode block. `rendered.index` tracks
+/// the live block index across reparses, so the drag callback always resolves
+/// the current position. The handle node itself is hovered-in via the row's
+/// on_hover/on_leave; dragging it reorders the owning block.
+const BlockHandle = struct {
+    view: *View,
+    rendered: *RenderedBlock,
+    handle: *ui.Node,
+
+    fn enter(self: *BlockHandle) void {
+        if (self.view.dragging_block != null) return;
+        self.handle.setDisplay(.flex);
+        self.view.redraw();
+    }
+
+    fn leave(self: *BlockHandle) void {
+        if (self.view.dragging_block != null) return;
+        self.handle.setDisplay(.none);
+        self.view.redraw();
+    }
+
+    fn drag(event: ui.interaction.drag.Event, raw: *anyopaque) void {
+        const self: *BlockHandle = @ptrCast(@alignCast(raw));
+        const view = self.view;
+        switch (event.phase) {
+            .start => {
+                view.dragging_block = self.rendered.index;
+                view.drag_target = null;
+                self.handle.setDisplay(.flex);
+                self.rendered.node.setOpacity(0.5);
+                view.redraw();
+            },
+            .move => {
+                const host = view.blocks_host orelse return;
+                const top = event.position_window.y - host.globalRect().y;
+                var target = view.blockAt(top);
+                // Cursor in the lower half of a block means "drop after it".
+                if (target < view.block_rows.len and top > view.block_rows[target].top + view.blockHeight(target) + block_gap / 2) target += 1;
+                view.drag_target = target;
+                view.redraw();
+            },
+            .end => {
+                view.finishBlockDrag();
+                self.rendered.node.setOpacity(1);
+                self.handle.setDisplay(.none);
+            },
+            .cancel => {
+                view.dragging_block = null;
+                view.drag_target = null;
+                self.rendered.node.setOpacity(1);
+                self.handle.setDisplay(.none);
+                view.redraw();
+            },
+        }
     }
 };
 
@@ -3522,6 +3842,8 @@ pub fn mount(request: contract.ContentMount, store: *Store, documents: *sessions
         self.format_buttons[i] = button;
         try toolbar.appendChild(cx.allocator, button);
     }
+    self.insert_menu = try self.mountInsertMenu(scope, toolbar);
+    self.insert_menu.button.setDisplay(.none);
     const lock_click = try scope.createState(Click, .{ .view = self, .action = .toggle_read_only });
     self.lock = try ui.widgets.Button(.{
         .variant = .ghost,
@@ -4472,10 +4794,165 @@ test "notes renderer reuses shifted blocks and bounds visible work while retaini
     try std.testing.expectEqualStrings("最终后台变更", view.blocks_text.?);
 }
 
+test "notes renders tables and toggles rendered task checkboxes" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try Store.init(a, io, temporary.dir);
+    defer store.deinit();
+    var documents = sessions.Sessions.init(a, &store);
+    defer documents.deinit();
+    const library = try store.createLibrary("清单");
+    const key = try store.createNote(library, null, "任务");
+    const body =
+        "# 待办\n\n" ++
+        "- [ ] 写方案\n" ++
+        "- [x] 读源码\n\n" ++
+        "| 名称 | 状态 |\n| --- | --- |\n| 方案 | **进行** |\n| 源码 | 完成 |\n";
+    _ = try store.changeNote(key, 1, .{ .save = .{ .title = "任务", .body_md = body } });
+
+    const cx = try ui.Cx.init(a, io);
+    defer cx.deinit();
+    cx.setViewport(900, 600);
+    try cx.setTestFrameStep(16);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(7), .generation = 1 };
+    const instance = try mount(.{
+        .cx = cx,
+        .scope = scope,
+        .slot = cx.root.?,
+        .owner = owner,
+        .connection = .{ .protocol_id = "notes", .name = "笔记", .payload_version = 1, .payload = "{}" },
+    }, &store, &documents);
+    defer instance.vtable.unmount(instance.context);
+    const view = from(instance).?;
+    instance.vtable.presentation_changed.?(instance.context, .active);
+    try std.testing.expect(openNote(instance, key));
+    layoutTestFrames(cx);
+
+    // The table block parses as a single `.table` range (head + separator +
+    // two body rows) and renders without the alignment row.
+    var table_index: ?usize = null;
+    for (view.block_ranges, 0..) |range, i| {
+        if (range.kind == .table) table_index = i;
+    }
+    const ti = table_index orelse return error.TestExpectedEqual;
+    const table_node = view.block_rows[ti].rendered.?.node;
+    // One grid with three visible rows (header + two bodies), separator hidden.
+    const grid = table_node.children.items[0];
+    try std.testing.expectEqual(@as(usize, 3), grid.children.items.len);
+
+    // Toggling the first task checkbox flips its state byte in the document.
+    const marker = std.mem.indexOf(u8, body, "- [ ] 写方案").?;
+    const check = editor.taskStateOffset(body, marker).?;
+    try std.testing.expectEqual(@as(u8, ' '), body[check]);
+    view.enqueue(.{ .toggle_task = check });
+    layoutTestFrames(cx);
+    const after = (try documents.snapshot(view.lease.?)).body_md;
+    try std.testing.expectEqual(@as(u8, 'x'), after[check]);
+    // A second toggle restores the unchecked state.
+    view.enqueue(.{ .toggle_task = check });
+    layoutTestFrames(cx);
+    try std.testing.expectEqual(@as(u8, ' '), (try documents.snapshot(view.lease.?)).body_md[check]);
+
+    // The checkbox hit-test only fires on the marker, not on body text.
+    try std.testing.expect(view.taskCheckboxAt(body, check) != null);
+    try std.testing.expect(view.taskCheckboxAt(body, marker + 6) == null);
+
+    // Clicking a table body cell opens the editor with the caret inside that
+    // cell's source text (in-place editing via the live projection).
+    const body_row = grid.children.items[2];
+    const first_cell = body_row.children.items[0];
+    const cell_rect = first_cell.globalRect();
+    cx.handleMouseDown(cell_rect.x + 4, cell_rect.y + cell_rect.h / 2, .{});
+    cx.handleMouseUp(cell_rect.x + 4, cell_rect.y + cell_rect.h / 2);
+    layoutTestFrames(cx);
+    try std.testing.expect(view.input != null);
+    const cell_source = std.mem.indexOf(u8, body, "| 源码 |").? + 2;
+    try std.testing.expectEqual(cell_source, view.input.?.state.cursor.offset);
+}
+
 fn layoutTestFrames(cx: *ui.Cx) void {
     for (0..6) |_| {
         cx.advanceFrameClock();
         cx.layout();
         _ = cx.render();
+    }
+}
+
+test "notes drag handle reorders blocks and appends past the last block" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try Store.init(a, io, temporary.dir);
+    defer store.deinit();
+    var documents = sessions.Sessions.init(a, &store);
+    defer documents.deinit();
+    const library = try store.createLibrary("清单");
+    const key = try store.createNote(library, null, "笔记");
+    const body = "甲段落\n\n乙段落\n\n丙段落";
+    _ = try store.changeNote(key, 1, .{ .save = .{ .title = "笔记", .body_md = body } });
+
+    const cx = try ui.Cx.init(a, io);
+    defer cx.deinit();
+    cx.setViewport(900, 600);
+    try cx.setTestFrameStep(16);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(9), .generation = 1 };
+    const instance = try mount(.{
+        .cx = cx,
+        .scope = scope,
+        .slot = cx.root.?,
+        .owner = owner,
+        .connection = .{ .protocol_id = "notes", .name = "笔记", .payload_version = 1, .payload = "{}" },
+    }, &store, &documents);
+    defer instance.vtable.unmount(instance.context);
+    const view = from(instance).?;
+    instance.vtable.presentation_changed.?(instance.context, .active);
+    try std.testing.expect(openNote(instance, key));
+    layoutTestFrames(cx);
+
+    try std.testing.expectEqual(@as(usize, 3), view.block_ranges.len);
+    // Each rendered read-mode block carries a hidden drag handle.
+    const handle = view.block_rows[0].rendered.?.node.children.items;
+    const last = handle[handle.len - 1];
+    try std.testing.expectEqualStrings("notes.block.drag-handle", last.meta.ownership.meta.test_id.?);
+
+    // Dragging the last block before the first reorders the document.
+    view.dragging_block = 2;
+    view.drag_target = 0;
+    view.finishBlockDrag();
+    layoutTestFrames(cx);
+    {
+        const now = (try documents.snapshot(view.lease.?)).body_md;
+        const parsed = try editor.blocks(a, now);
+        defer a.free(parsed);
+        try std.testing.expectEqual(@as(usize, 3), parsed.len);
+        try std.testing.expectEqualStrings("丙段落", parsed[0].text(now));
+        try std.testing.expectEqualStrings("甲段落", parsed[1].text(now));
+        try std.testing.expectEqualStrings("乙段落", parsed[2].text(now));
+    }
+    try std.testing.expect(view.dragging_block == null);
+    try std.testing.expect(view.drag_target == null);
+
+    // Dragging the first block past the last (target == len) appends it.
+    view.dragging_block = 0;
+    view.drag_target = view.block_ranges.len;
+    view.finishBlockDrag();
+    layoutTestFrames(cx);
+    {
+        const now = (try documents.snapshot(view.lease.?)).body_md;
+        const parsed = try editor.blocks(a, now);
+        defer a.free(parsed);
+        try std.testing.expectEqual(@as(usize, 3), parsed.len);
+        try std.testing.expectEqualStrings("甲段落", parsed[0].text(now));
+        try std.testing.expectEqualStrings("乙段落", parsed[1].text(now));
+        try std.testing.expectEqualStrings("丙段落", parsed[2].text(now));
     }
 }
