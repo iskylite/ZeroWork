@@ -2,7 +2,7 @@
 //! active range and rebuilds the block boundaries after it leaves that range.
 const std = @import("std");
 
-pub const Kind = enum { text, markdown, raw, image };
+pub const Kind = enum { text, markdown, raw, image, table };
 
 pub const Block = struct {
     start: usize,
@@ -87,6 +87,34 @@ fn markdownLine(line: []const u8) bool {
     return hasInlineMarkup(line);
 }
 
+/// A table header line contains a `|` but does not start with a list or task
+/// marker such as `- [ ]`.
+fn tableHeadLine(line: []const u8) bool {
+    const clean = std.mem.trimStart(u8, line, " \t");
+    if (clean.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, clean, '|') == null) return false;
+    if (clean[0] == '-' or clean[0] == '*' or clean[0] == '+') return false;
+    return true;
+}
+
+/// An alignment separator row: starts with `|` or with a `-`/`|`/`:` run,
+/// contains only `|`, `-`, `:`, spaces (and tabs/CR), and at least one `-`.
+fn tableSeparatorLine(line: []const u8) bool {
+    const clean = std.mem.trim(u8, line, " \t\r");
+    if (clean.len == 0) return false;
+    const first = clean[0];
+    if (first != '|' and first != '-' and first != ':') return false;
+    var dashes: usize = 0;
+    for (clean) |c| {
+        switch (c) {
+            '|', ':', ' ' => {},
+            '-' => dashes += 1,
+            else => return false,
+        }
+    }
+    return dashes > 0;
+}
+
 pub fn blocks(allocator: std.mem.Allocator, body: []const u8) ![]Block {
     var result: std.ArrayList(Block) = .empty;
     errdefer result.deinit(allocator);
@@ -129,6 +157,17 @@ fn readBlock(body: []const u8, start: usize) Block {
         std.mem.endsWith(u8, std.mem.trim(u8, first, " \t\r"), ")"))
     {
         kind = .image;
+    } else if (end < body.len and tableHeadLine(first) and
+        tableSeparatorLine(body[end + 1 .. lineEnd(body, end + 1)]))
+    {
+        kind = .table;
+        while (end < body.len) {
+            const next = end + 1;
+            const next_end = lineEnd(body, next);
+            const line = body[next..next_end];
+            if (blank(line) or std.mem.indexOfScalar(u8, line, '|') == null) break;
+            end = next_end;
+        }
     } else {
         if (markdownLine(first)) kind = .markdown;
         while (end < body.len) {
@@ -369,27 +408,263 @@ pub fn taskStateOffset(body: []const u8, marker_start: usize) ?usize {
     };
 }
 
+/// Toggle an inline emphasis mark (`**`, `*`, `~~` or other exact pairs)
+/// around `[start, end)` of `body`. When the range is already delimited by
+/// `mark` the delimiters are removed instead. The result keeps the selection
+/// inside the marks so repeated invocations round-trip.
+pub const MarkToggle = struct {
+    body: []u8,
+    // Selection in the returned body, pointing at the wrapped text.
+    start: usize,
+    end: usize,
+};
+
+pub fn toggleInlineMark(allocator: std.mem.Allocator, body: []const u8, start: usize, end: usize, mark: []const u8) !MarkToggle {
+    const lo = @min(start, end);
+    const hi = @max(start, end);
+    if (mark.len == 0) return error.InvalidMark;
+    if (lo > hi or hi > body.len) return error.InvalidRange;
+    // Already marked: strip the delimiters.
+    if (lo >= mark.len and hi + mark.len <= body.len and
+        std.mem.eql(u8, body[lo - mark.len .. lo], mark) and
+        std.mem.eql(u8, body[hi .. hi + mark.len], mark))
+    {
+        const next = try std.mem.concat(allocator, u8, &.{ body[0 .. lo - mark.len], body[lo..hi], body[hi + mark.len ..] });
+        return .{ .body = next, .start = lo - mark.len, .end = hi - mark.len };
+    }
+    const next = try std.mem.concat(allocator, u8, &.{ body[0..lo], mark, body[lo..hi], mark, body[hi..] });
+    return .{ .body = next, .start = lo + mark.len, .end = hi + mark.len };
+}
+
+/// Wrap `[start, end)` as `[label](url)`. A non-empty selection becomes the
+/// label; an empty selection inserts `[](url)` and selects the label slot.
+pub const LinkEdit = struct {
+    body: []u8,
+    start: usize,
+    end: usize,
+};
+
+pub fn insertLink(allocator: std.mem.Allocator, body: []const u8, start: usize, end: usize, url: []const u8) !LinkEdit {
+    const lo = @min(start, end);
+    const hi = @max(start, end);
+    if (lo > hi or hi > body.len) return error.InvalidRange;
+    const label = body[lo..hi];
+    var result = std.ArrayList(u8).empty;
+    errdefer result.deinit(allocator);
+    try result.appendSlice(allocator, body[0..lo]);
+    try result.appendSlice(allocator, "[");
+    const label_start = result.items.len;
+    try result.appendSlice(allocator, label);
+    const label_end = result.items.len;
+    try result.appendSlice(allocator, "](");
+    try result.appendSlice(allocator, url);
+    try result.appendSlice(allocator, ")");
+    try result.appendSlice(allocator, body[hi..]);
+    return .{ .body = try result.toOwnedSlice(allocator), .start = label_start, .end = label_end };
+}
+
+/// Inline emphasis marks the editor can toggle around a selection.
+pub const InlineMark = enum { bold, italic, strikethrough, code };
+
+pub fn markString(mark: InlineMark) []const u8 {
+    return switch (mark) {
+        .bold => "**",
+        .italic => "*",
+        .strikethrough => "~~",
+        .code => "`",
+    };
+}
+
+/// Range-replacement toggle edit. Instead of rebuilding the whole body the
+/// result describes the single slice to replace, which lets callers feed it to
+/// a textarea's `replaceRangeChecked(start, end, replacement)` and keep undo
+/// history intact.
+pub const MarkEdit = struct {
+    // Replacement range start, in the original body.
+    start: usize,
+    // Replacement range end, in the original body.
+    end: usize,
+    // Replacement text (may embed the wrapped selection).
+    replacement: []u8,
+    // Caret/selection start after applying, as an offset into `replacement`.
+    sel_start: usize,
+    sel_end: usize,
+};
+
+pub fn toggleInlineMarkEdit(allocator: std.mem.Allocator, body: []const u8, start: usize, end: usize, mark: InlineMark) !MarkEdit {
+    const m = markString(mark);
+    const lo = @min(start, end);
+    const hi = @max(start, end);
+    if (hi > body.len) return error.InvalidRange;
+    // Already wrapped in the same mark: strip it.
+    if (lo >= m.len and hi + m.len <= body.len and
+        std.mem.eql(u8, body[lo - m.len .. lo], m) and
+        std.mem.eql(u8, body[hi .. hi + m.len], m))
+    {
+        const inner = try allocator.dupe(u8, body[lo..hi]);
+        return .{
+            .start = lo - m.len,
+            .end = hi + m.len,
+            .replacement = inner,
+            .sel_start = 0,
+            .sel_end = inner.len,
+        };
+    }
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, m);
+    try buf.appendSlice(allocator, body[lo..hi]);
+    try buf.appendSlice(allocator, m);
+    return .{
+        .start = lo,
+        .end = hi,
+        .replacement = try buf.toOwnedSlice(allocator),
+        .sel_start = m.len,
+        .sel_end = m.len + (hi - lo),
+    };
+}
+
+/// Range-replacement link edit, mirroring `insertLink` without rebuilding the
+/// body. The selection offsets point into `replacement` at the label slot.
+pub const LinkEditRange = struct {
+    start: usize,
+    end: usize,
+    replacement: []u8,
+    sel_start: usize,
+    sel_end: usize,
+};
+
+pub fn insertLinkEdit(allocator: std.mem.Allocator, body: []const u8, start: usize, end: usize, url: []const u8) !LinkEditRange {
+    const lo = @min(start, end);
+    const hi = @max(start, end);
+    if (hi > body.len) return error.InvalidRange;
+    const label = body[lo..hi];
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "[");
+    const label_start = buf.items.len;
+    try buf.appendSlice(allocator, label);
+    const label_end = buf.items.len;
+    try buf.appendSlice(allocator, "](");
+    try buf.appendSlice(allocator, url);
+    try buf.appendSlice(allocator, ")");
+    return .{
+        .start = lo,
+        .end = hi,
+        .replacement = try buf.toOwnedSlice(allocator),
+        .sel_start = label_start,
+        .sel_end = label_end,
+    };
+}
+
+/// Byte range of a table cell's text within the block's `text(body)` slice.
+pub const TableCell = struct { start: usize, end: usize };
+
+/// Parse a table block's text into a row-major matrix of cell ranges. Rows
+/// are split on newlines; each line is cut on `|` after dropping the leading
+/// and trailing pipes, and cell text is trimmed of surrounding spaces. The
+/// separator row is kept as a row so callers can skip it when rendering. All
+/// ranges index into `table_text` itself; no per-cell copies are made.
+pub fn parseTableCells(allocator: std.mem.Allocator, table_text: []const u8) ![][]TableCell {
+    var rows: std.ArrayList([]TableCell) = .empty;
+    errdefer {
+        for (rows.items) |row| allocator.free(row);
+        rows.deinit(allocator);
+    }
+    var line_start: usize = 0;
+    while (line_start <= table_text.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, table_text, line_start, '\n') orelse table_text.len;
+        const line = table_text[line_start..line_end];
+        var cells: std.ArrayList(TableCell) = .empty;
+        errdefer cells.deinit(allocator);
+        var cell_start: usize = 0;
+        if (line.len > 0 and line[0] == '|') cell_start = 1;
+        const scan_end = if (line.len > 0 and line[line.len - 1] == '|' and line.len > cell_start) line.len - 1 else line.len;
+        var i: usize = cell_start;
+        while (i <= scan_end) : (i += 1) {
+            if (i == scan_end or line[i] == '|') {
+                var s = cell_start;
+                var e = i;
+                while (s < e and line[s] == ' ') s += 1;
+                while (e > s and line[e - 1] == ' ') e -= 1;
+                try cells.append(allocator, .{ .start = line_start + s, .end = line_start + e });
+                cell_start = i + 1;
+            }
+        }
+        try rows.append(allocator, try cells.toOwnedSlice(allocator));
+        if (line_end == table_text.len) break;
+        line_start = line_end + 1;
+    }
+    return rows.toOwnedSlice(allocator);
+}
+
+test "notes inline mark toggle wraps unwrapped selections and strips marked ones" {
+    const allocator = std.testing.allocator;
+    const body = "前 plain 后";
+    const wrapped = try toggleInlineMark(allocator, body, 4, 9, "**");
+    defer allocator.free(wrapped.body);
+    try std.testing.expectEqualStrings("前 **plain** 后", wrapped.body);
+    try std.testing.expectEqual(@as(usize, 6), wrapped.start);
+    try std.testing.expectEqual(@as(usize, 11), wrapped.end);
+    const stripped = try toggleInlineMark(allocator, wrapped.body, wrapped.start, wrapped.end, "**");
+    defer allocator.free(stripped.body);
+    try std.testing.expectEqualStrings(body, stripped.body);
+    try std.testing.expectEqual(@as(usize, 4), stripped.start);
+    try std.testing.expectEqual(@as(usize, 9), stripped.end);
+}
+
+test "notes link insert wraps selection as label and points selection at label slot" {
+    const allocator = std.testing.allocator;
+    const body = "看 这里 继续";
+    // 「这里」占字节 4..10（每字 3 字节）；选区按字节偏移，不按字符数。
+    const linked = try insertLink(allocator, body, 4, 10, "https://example.com");
+    defer allocator.free(linked.body);
+    try std.testing.expectEqualStrings("看 [这里](https://example.com) 继续", linked.body);
+    try std.testing.expectEqual(@as(usize, 5), linked.start);
+    try std.testing.expectEqual(@as(usize, 11), linked.end);
+    const caret_only = try insertLink(allocator, body, 4, 4, "https://example.com");
+    defer allocator.free(caret_only.body);
+    // 原空格在插入点之前，插入选区后紧跟「这里」。
+    try std.testing.expectEqualStrings("看 [](https://example.com)这里 继续", caret_only.body);
+    try std.testing.expectEqual(@as(usize, 5), caret_only.start);
+    try std.testing.expectEqual(@as(usize, 5), caret_only.end);
+}
+
 test "notes link finder resolves innermost spans and rejects images and wrapped urls" {
-    const body = "see [docs](https://example.com/a) and ![img](img.png) and [deep [nest]](https://example.com/b) end";
-    const first = findLinkAt(body, 6).?;
-    try std.testing.expectEqualStrings("https://example.com/a", first.url(body));
+    const body = "pre [doc](https://example.com/a) mid ![pic](img.png) tail [deep [nest]](https://example.com/b) end";
+    const first = findLinkAt(body, std.mem.indexOf(u8, body, "doc").? + 1).?;
     try std.testing.expectEqual(@as(usize, 4), first.start);
-    const nested = findLinkAt(body, 62).?;
+    try std.testing.expectEqualStrings("https://example.com/a", first.url(body));
+    try std.testing.expect(std.mem.eql(u8, body[first.start..first.end], "[doc](https://example.com/a)"));
+    // 「[nest]」不带自己的 (url)，不是链接；命中其中的字节解析到
+    // 包住它的最内层真实链接 [deep [nest]](…)。
+    const nested = findLinkAt(body, std.mem.indexOf(u8, body, "nest").? + 1).?;
     try std.testing.expectEqualStrings("https://example.com/b", nested.url(body));
-    try std.testing.expectEqual(@as(usize, 58), nested.start);
-    const image = findLinkAt(body, 40);
+    try std.testing.expect(std.mem.startsWith(u8, body[nested.start..], "[deep [nest]]"));
+    // 命中外层标签其他位置得到同一个 span。
+    const outer = findLinkAt(body, std.mem.indexOf(u8, body, "deep").? + 1).?;
+    try std.testing.expectEqualStrings("https://example.com/b", outer.url(body));
+    try std.testing.expect(std.mem.startsWith(u8, body[outer.start..], "[deep [nest]]"));
+    // Image syntax is not a link.
+    const image = findLinkAt(body, std.mem.indexOf(u8, body, "pic").?);
     try std.testing.expect(image == null);
-    const escaped = findLinkAt("see \\[not](a) here", 7);
+    // Escaped open bracket is literal text.
+    const escaped = findLinkAt("\\[not](x)", 2);
     try std.testing.expect(escaped == null);
+    // Whitespace inside the url is not a link.
+    const spaced = findLinkAt("[bad](a b)", 5);
+    try std.testing.expect(spaced == null);
 }
 
 test "notes task state offset reads check byte of task lines only" {
-    const body = "- [ ] open\n- [x] close\n- [X] again\n- plain\n-[ ] tight";
+    const body = "- [ ] open\n- [x] done\n- [X] loud\n- plain\n-[ ]tight";
+    // 偏移按字节计：三条 task 行的标记分别在 0、11、22，状态字节是标记后第 3 字节。
     try std.testing.expectEqual(@as(usize, 3), taskStateOffset(body, 0).?);
     try std.testing.expectEqual(@as(usize, 14), taskStateOffset(body, 11).?);
-    try std.testing.expectEqual(@as(usize, 26), taskStateOffset(body, 23).?);
-    try std.testing.expect(taskStateOffset(body, 35) == null);
-    try std.testing.expect(taskStateOffset(body, 43) == null);
+    try std.testing.expectEqual(@as(usize, 25), taskStateOffset(body, 22).?);
+    // 「- plain」不是 task 项；「-[ ]tight」的 - 后没有空格。
+    try std.testing.expect(taskStateOffset(body, 33) == null);
+    try std.testing.expect(taskStateOffset(body, 41) == null);
 }
 
 test "notes blocks preserve UTF-8 byte ranges and fence boundaries" {
@@ -460,4 +735,101 @@ test "notes block matching keeps repeated text with moved neighboring blocks" {
     const matches = try matchBlocks(allocator, original, old_blocks, edited, new_blocks);
     defer allocator.free(matches);
     try std.testing.expectEqualSlices(?usize, &.{ 0, 4, 5, 6, 1, 2, 3, 7 }, matches);
+}
+
+test "notes inline mark edit wraps selection and strips wrapped marks" {
+    const allocator = std.testing.allocator;
+    const body = "前 plain 后";
+
+    const bold = try toggleInlineMarkEdit(allocator, body, 4, 9, .bold);
+    defer allocator.free(bold.replacement);
+    try std.testing.expectEqual(@as(usize, 4), bold.start);
+    try std.testing.expectEqual(@as(usize, 9), bold.end);
+    try std.testing.expectEqualStrings("**plain**", bold.replacement);
+    try std.testing.expectEqual(@as(usize, 2), bold.sel_start);
+    try std.testing.expectEqual(@as(usize, 7), bold.sel_end);
+
+    const italic = try toggleInlineMarkEdit(allocator, body, 4, 9, .italic);
+    defer allocator.free(italic.replacement);
+    try std.testing.expectEqualStrings("*plain*", italic.replacement);
+    try std.testing.expectEqual(@as(usize, 1), italic.sel_start);
+    try std.testing.expectEqual(@as(usize, 6), italic.sel_end);
+
+    // 已被 ** 包裹：剥掉标记，替换区间含两侧的 **。
+    const marked = "前 **plain** 后";
+    const stripped = try toggleInlineMarkEdit(allocator, marked, 6, 11, .bold);
+    defer allocator.free(stripped.replacement);
+    try std.testing.expectEqual(@as(usize, 4), stripped.start);
+    try std.testing.expectEqual(@as(usize, 13), stripped.end);
+    try std.testing.expectEqualStrings("plain", stripped.replacement);
+    try std.testing.expectEqual(@as(usize, 0), stripped.sel_start);
+    try std.testing.expectEqual(@as(usize, 5), stripped.sel_end);
+
+    // 单星号文本对 .bold 不算已包裹，会再裹一层 **；对 .italic 才能剥掉。
+    const italic_marked = "前 *plain* 后";
+    const stripped_i = try toggleInlineMarkEdit(allocator, italic_marked, 5, 10, .italic);
+    defer allocator.free(stripped_i.replacement);
+    try std.testing.expectEqual(@as(usize, 4), stripped_i.start);
+    try std.testing.expectEqual(@as(usize, 11), stripped_i.end);
+    try std.testing.expectEqualStrings("plain", stripped_i.replacement);
+    const wrapped_b = try toggleInlineMarkEdit(allocator, italic_marked, 5, 10, .bold);
+    defer allocator.free(wrapped_b.replacement);
+    try std.testing.expectEqualStrings("**plain**", wrapped_b.replacement);
+    try std.testing.expectEqual(@as(usize, 5), wrapped_b.start);
+    try std.testing.expectEqual(@as(usize, 10), wrapped_b.end);
+}
+
+test "notes link edit wraps selection as label and selects label slot when empty" {
+    const allocator = std.testing.allocator;
+    const body = "看 这里 继续";
+
+    const linked = try insertLinkEdit(allocator, body, 4, 10, "https://example.com");
+    defer allocator.free(linked.replacement);
+    try std.testing.expectEqual(@as(usize, 4), linked.start);
+    try std.testing.expectEqual(@as(usize, 10), linked.end);
+    try std.testing.expectEqualStrings("[这里](https://example.com)", linked.replacement);
+    try std.testing.expectEqual(@as(usize, 1), linked.sel_start);
+    try std.testing.expectEqual(@as(usize, 7), linked.sel_end);
+    try std.testing.expectEqualStrings("这里", linked.replacement[linked.sel_start..linked.sel_end]);
+
+    const caret_only = try insertLinkEdit(allocator, body, 4, 4, "https://example.com");
+    defer allocator.free(caret_only.replacement);
+    try std.testing.expectEqual(@as(usize, 4), caret_only.start);
+    try std.testing.expectEqual(@as(usize, 4), caret_only.end);
+    try std.testing.expectEqualStrings("[](https://example.com)", caret_only.replacement);
+    try std.testing.expectEqual(@as(usize, 1), caret_only.sel_start);
+    try std.testing.expectEqual(@as(usize, 1), caret_only.sel_end);
+}
+
+test "notes blocks recognize table blocks and keep paragraphs with pipes as markdown" {
+    const allocator = std.testing.allocator;
+    const source = "| 名称 | 值 |\n| --- | ---: |\n| a | 1 |\n| b | 2 |\n\n后段 **粗体**\n\n行内 a | b 不是表格\n只有一行\n";
+    const parsed = try blocks(allocator, source);
+    defer allocator.free(parsed);
+    try std.testing.expectEqual(@as(usize, 3), parsed.len);
+    try std.testing.expectEqual(.table, parsed[0].kind);
+    try std.testing.expectEqualStrings("| 名称 | 值 |\n| --- | ---: |\n| a | 1 |\n| b | 2 |", parsed[0].text(source));
+    try std.testing.expectEqual(.markdown, parsed[1].kind);
+    // 含 | 但下一行不是分隔行的段落不判为表格。
+    try std.testing.expect(parsed[2].kind != .table);
+    try std.testing.expectEqualStrings("行内 a | b 不是表格\n只有一行", parsed[2].text(source));
+}
+
+test "notes table cells parse rows with trimmed ranges and keep separator row" {
+    const allocator = std.testing.allocator;
+    const text = "| 名称 | 值 |\n| --- | ---: |\n| a | 1 |";
+    const rows = try parseTableCells(allocator, text);
+    defer {
+        for (rows) |row| allocator.free(row);
+        allocator.free(rows);
+    }
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    for (rows) |row| try std.testing.expectEqual(@as(usize, 2), row.len);
+
+    try std.testing.expectEqualStrings("名称", text[rows[0][0].start..rows[0][0].end]);
+    try std.testing.expectEqualStrings("值", text[rows[0][1].start..rows[0][1].end]);
+    try std.testing.expectEqualStrings("---", text[rows[1][0].start..rows[1][0].end]);
+    try std.testing.expectEqualStrings("---:", text[rows[1][1].start..rows[1][1].end]);
+    try std.testing.expectEqualStrings("a", text[rows[2][0].start..rows[2][0].end]);
+    try std.testing.expectEqualStrings("1", text[rows[2][1].start..rows[2][1].end]);
 }

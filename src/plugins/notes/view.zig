@@ -96,6 +96,10 @@ const Action = union(enum) {
     search_back,
     search_hit: queries.SourceRef,
     source_ref: queries.SourceRef,
+    /// Toggle `**` / `*` / `~~` / `` ` `` around the current editor selection.
+    format_inline: editor.InlineMark,
+    /// Insert `[label](url)` around the current editor selection.
+    insert_link,
 };
 
 const View = struct {
@@ -139,6 +143,7 @@ const View = struct {
     line_images: std.ArrayList(ui.widgets.input.TextareaLineImage) = .empty,
     image_poll_timer: ?u64 = null,
     image_button: *ui.Node = undefined,
+    format_buttons: [5]*ui.Node = undefined,
     image_disabled: *ui.Signal(bool),
     image_open: *ui.Signal(bool),
     image_modal_dialog: *ui.Node = undefined,
@@ -509,6 +514,59 @@ const View = struct {
                 try self.selectSource(source);
                 self.search_origin = null;
                 self.showSearch(false);
+            },
+            .format_inline => |mark| {
+                const input = self.input orelse return;
+                if (self.source_mode) return;
+                const lease = self.lease orelse return;
+                if ((try self.documents.snapshot(lease)).read_only) return;
+                const body = input.state.getText();
+                var sel_start: usize = undefined;
+                var sel_end: usize = undefined;
+                if (input.state.cursor.selection()) |sel| {
+                    sel_start = sel.start;
+                    sel_end = sel.end;
+                } else {
+                    sel_start = input.state.cursor.offset;
+                    sel_end = sel_start;
+                }
+                const edit = try editor.toggleInlineMarkEdit(self.cx.allocator, body, sel_start, sel_end, mark);
+                defer self.cx.allocator.free(edit.replacement);
+                try input.state.replaceRangeChecked(edit.start, edit.end, edit.replacement);
+                _ = input.state.setAccessibilitySelection(@intCast(edit.start + edit.sel_start), @intCast(edit.start + edit.sel_end));
+                try self.applyBody(input.state.getText());
+            },
+            .insert_link => {
+                const input = self.input orelse return;
+                if (self.source_mode) return;
+                const lease = self.lease orelse return;
+                if ((try self.documents.snapshot(lease)).read_only) return;
+                const body = input.state.getText();
+                var sel_start: usize = undefined;
+                var sel_end: usize = undefined;
+                if (input.state.cursor.selection()) |sel| {
+                    sel_start = sel.start;
+                    sel_end = sel.end;
+                } else {
+                    sel_start = input.state.cursor.offset;
+                    sel_end = sel_start;
+                }
+                const url = blk: {
+                    var clip = (editor_clipboard.read(self.cx) catch null) orelse break :blk try self.cx.allocator.dupe(u8, "https://");
+                    defer clip.deinit();
+                    const text = switch (clip.input) {
+                        .clipboard => |v| v,
+                        .file => |v| v,
+                    };
+                    if (std.mem.indexOf(u8, text, "://") != null) break :blk try self.cx.allocator.dupe(u8, text);
+                    break :blk try self.cx.allocator.dupe(u8, "https://");
+                };
+                defer self.cx.allocator.free(url);
+                const edit = try editor.insertLinkEdit(self.cx.allocator, body, sel_start, sel_end, url);
+                defer self.cx.allocator.free(edit.replacement);
+                try input.state.replaceRangeChecked(edit.start, edit.end, edit.replacement);
+                _ = input.state.setAccessibilitySelection(@intCast(edit.start + edit.sel_start), @intCast(edit.start + edit.sel_end));
+                try self.applyBody(input.state.getText());
             },
         }
     }
@@ -928,17 +986,12 @@ const View = struct {
                 rows * S.outline_row_height + @max(0, rows - 1) * S.outline_row_gap;
             const available_height = @max(0, body_height - 2 * S.outline_vertical_inset);
             const outline_height = @min(content_height, @min(S.outline_max_height, available_height));
-            var outline = S.floatingCard(S.outline_width, outline_height, .{
+            // 目录卡片始终悬浮在内容区右缘，不参与排版，不挤压正文和工具栏；
+            // 目录树固定显示时右移避让，保持与树并列。
+            const outline = S.floatingCard(S.outline_width, outline_height, .{
                 .top = .{ .px = toolbar_height + (body_height - outline_height) / 2 },
-                .right = .{ .px = 0 },
+                .right = .{ .px = if (pinned_tree) S.directory_width + S.directory_gap else 0 },
             });
-            if (!compact) {
-                outline.position = .relative;
-                outline.inset = .{};
-                outline.align_self = .center;
-                outline.margin = .{ .top = toolbar_height };
-                outline.z_index = 0;
-            }
             self.outline_card.setStyleInline(a, outline);
         }
         self.directory_header.setDisplay(if (!floating and !tree_popup) .flex else .none);
@@ -1049,6 +1102,8 @@ const View = struct {
         self.search_button.setDisplay(if (!floating and self.search_origin == null) .flex else .none);
         self.search_back_button.setDisplay(if (!floating and self.search_origin != null) .flex else .none);
         self.image_button.setDisplay(if (!floating and self.key != null) .flex else .none);
+        const editing = self.input != null and !self.source_mode;
+        for (self.format_buttons) |btn| btn.setDisplay(if (editing) .flex else .none);
         self.find_button.setDisplay(if (self.key != null) .flex else .none);
         self.source_button.setDisplay(if (floating and self.key != null) .flex else .none);
         self.recent_button.setDisplay(if (floating) .flex else .none);
@@ -2568,6 +2623,31 @@ const View = struct {
         return true;
     }
 
+    fn onDropFiles(self: *View, payload: ui.HandlerRef.DropPayload) void {
+        if (!self.acceptsNewEdits()) return;
+        const lease = self.lease orelse return;
+        if ((self.documents.snapshot(lease) catch return).read_only) return;
+        if (self.import_job != null or self.import_waiting_for_editor) return;
+        const paths = self.cx.allocator.dupe(u8, payload.paths) catch return;
+        defer self.cx.allocator.free(paths);
+        var any_valid = false;
+        var it = std.mem.tokenizeScalar(u8, paths, '\n');
+        while (it.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0) continue;
+            const ext = std.fs.path.extension(trimmed);
+            const lower = std.ascii.allocLowerString(self.cx.allocator, ext) catch continue;
+            defer self.cx.allocator.free(lower);
+            const valid = std.mem.eql(u8, lower, ".png") or std.mem.eql(u8, lower, ".jpg") or
+                std.mem.eql(u8, lower, ".jpeg") or std.mem.eql(u8, lower, ".gif") or
+                std.mem.eql(u8, lower, ".webp") or std.mem.eql(u8, lower, ".bmp");
+            if (!valid) continue;
+            any_valid = true;
+            self.queueImport(.{ .file = trimmed }) catch |err| self.importFailed(err);
+        }
+        if (!any_valid) return;
+    }
+
     fn queueImport(self: *View, input: editor_images.ImportInput) !void {
         if (self.import_job != null or self.import_waiting_for_editor) return error.ImportInProgress;
         try self.finishInput();
@@ -2926,6 +3006,26 @@ const View = struct {
         }
         if (key == .f and mods.super and !mods.shift and !mods.ctrl and !mods.alt) {
             self.enqueue(if (self.search_open) .search else .find_document);
+            return .stop;
+        }
+        if (key == .b and mods.super and !mods.ctrl and !mods.alt and !self.search_open and self.input != null) {
+            self.enqueue(.{ .format_inline = .bold });
+            return .stop;
+        }
+        if (key == .i and mods.super and !mods.ctrl and !mods.alt and !self.search_open and self.input != null) {
+            self.enqueue(.{ .format_inline = .italic });
+            return .stop;
+        }
+        if (key == .k and mods.super and !mods.ctrl and !mods.alt and !self.search_open and self.input != null) {
+            self.enqueue(.insert_link);
+            return .stop;
+        }
+        if (key == .grave and mods.super and !mods.ctrl and !mods.alt and !self.search_open and self.input != null) {
+            self.enqueue(.{ .format_inline = .code });
+            return .stop;
+        }
+        if (key == .x and mods.super and mods.shift and !mods.ctrl and !mods.alt and !self.search_open and self.input != null) {
+            self.enqueue(.{ .format_inline = .strikethrough });
             return .stop;
         }
         if (key == .s and mods.super and !mods.shift and !mods.ctrl and !mods.alt) {
@@ -3397,6 +3497,31 @@ pub fn mount(request: contract.ContentMount, store: *Store, documents: *sessions
     self.image_button.meta.ownership.meta.test_id = "notes.document.insert-image";
     self.image_button.setDisplay(.none);
     try toolbar.appendChild(cx.allocator, self.image_button);
+    const format_specs = [_]struct { mark: editor.InlineMark, label: []const u8, asset: ui.SvgAsset, id: []const u8 }{
+        .{ .mark = .bold, .label = "加粗", .asset = ui.icons.bold, .id = "notes.format.bold" },
+        .{ .mark = .italic, .label = "斜体", .asset = ui.icons.italic, .id = "notes.format.italic" },
+        .{ .mark = .strikethrough, .label = "删除线", .asset = ui.icons.strikethrough, .id = "notes.format.strikethrough" },
+        .{ .mark = .code, .label = "行内代码", .asset = ui.icons.code_xml, .id = "notes.format.code" },
+        .{ .mark = .bold, .label = "插入链接", .asset = ui.icons.link_2, .id = "notes.format.link" },
+    };
+    for (format_specs, 0..) |spec, i| {
+        const action: Action = if (i == 4) .insert_link else .{ .format_inline = spec.mark };
+        const state = try scope.createState(Click, .{ .view = self, .action = action });
+        const button = try ui.widgets.Button(.{
+            .variant = .ghost,
+            .icon_only = true,
+            .icon_asset = spec.asset,
+            .disabled = self.edit_disabled,
+            .icon_size = @as(f32, 16),
+            .a11y_label = spec.label,
+            .base_style = S.tool(),
+            .on_click = cx.on(Click, state, Click.invoke),
+        }).mount(scope, cx);
+        button.meta.ownership.meta.test_id = spec.id;
+        button.setDisplay(.none);
+        self.format_buttons[i] = button;
+        try toolbar.appendChild(cx.allocator, button);
+    }
     const lock_click = try scope.createState(Click, .{ .view = self, .action = .toggle_read_only });
     self.lock = try ui.widgets.Button(.{
         .variant = .ghost,
@@ -3471,6 +3596,7 @@ pub fn mount(request: contract.ContentMount, store: *Store, documents: *sessions
     const body_scroll = try ui.widgets.ScrollArea(.{ .rubber_band_y = false }).mount(scope, cx);
     self.body_scroll = body_scroll;
     body_scroll.container.behavior.events.on_click = cx.on(View, self, View.clickBodyBackground);
+    body_scroll.container.behavior.events.on_drop = ui.Cx.dropHandlerFrom(View, self, View.onDropFiles);
     body_scroll.container.meta.ownership.meta.test_id = "notes.document.scroll";
     body_scroll.content.style.flex_shrink = 0;
     self.body = try ui.box(cx, S.stack(18), .{});
