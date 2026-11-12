@@ -15462,6 +15462,14 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     try ai_card_box.appendChild(cx.allocator, ai_input_row);
 }
 
+/// Veto callback for the identity trigger's hover preview: graphical plugin
+/// sessions (web/BMC) attach a sticky details popover to the trigger; hover
+/// alone must not open it, only an explicit click may.
+fn projectsGraphicalHost(raw: *anyopaque) bool {
+    const host: *@import("ui/ssh_status_host.zig").Host = @ptrCast(@alignCast(raw));
+    return host.projectsGraphicalSession();
+}
+
 fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const presentation_window = try scope.allocator.create(PresentationWindow);
     presentation_window.* = .{ .context = @intFromPtr(cx), .target = @import("platform/presentation_wakeup.zig").registerWindow(@intFromPtr(cx)) };
@@ -16206,7 +16214,9 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const StatusPreview = @import("ui/status_hover_preview.zig").Preview;
     const status_previews = try scope.createState(@import("ui/status_hover_preview.zig").Group, .{});
     nav_host.status_previews = status_previews;
-    try StatusPreview.mount(cx, scope, status_previews, status_bar.controls.identity_button, details_host.ssh_status.info.chrome, details_host.ssh_status.info.open, cx.on(@import("ui/status_connection_view.zig").View, details_host.ssh_status.info, @import("ui/status_connection_view.zig").View.dismiss));
+    // A graphical (web/BMC) session repoints the identity trigger at a sticky
+    // route/details popover. Hover must stay inert there; only a real click opens it.
+    try StatusPreview.mountVetoed(cx, scope, status_previews, status_bar.controls.identity_button, details_host.ssh_status.info.chrome, details_host.ssh_status.info.open, cx.on(@import("ui/status_connection_view.zig").View, details_host.ssh_status.info, @import("ui/status_connection_view.zig").View.dismiss), details_host.ssh_status, projectsGraphicalHost);
     try StatusPreview.mountClick(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.dismiss));
     try StatusPreview.mountClick(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
     for ([_]*ui.Node{ status_bar.controls.theme_button, local_status.theme_button }) |trigger| {

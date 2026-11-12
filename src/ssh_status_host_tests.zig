@@ -24,6 +24,7 @@ const Fixture = struct {
     copies: usize = 0,
     reconnects: usize = 0,
     themes: usize = 0,
+    chain_clicks: usize = 0,
     captured: ?D.Snapshot = null,
     last_key: ?D.OperationKey = null,
     last_theme_trigger: ?*ui.Node = null,
@@ -631,4 +632,36 @@ test "SSH status click only panel ignores hover toggles and survives refreshed a
     try std.testing.expect(f.host.info.open.peek());
     f.click(f.bar.controls.identity_button);
     try std.testing.expect(!f.host.info.open.peek());
+}
+
+fn graphicalChainClick(raw: *anyopaque) void {
+    const self: *Fixture = @ptrCast(@alignCast(raw));
+    self.chain_clicks += 1;
+}
+
+fn graphicalBlocked(raw: *anyopaque) bool {
+    const host: *SSH.Host = @ptrCast(@alignCast(raw));
+    return host.projectsGraphicalSession();
+}
+
+test "graphical session identity hover stays inert until a real click" {
+    const Preview = @import("ui/status_hover_preview.zig");
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var group: Preview.Group = .{};
+    try Preview.Preview.mountVetoed(f.cx, f.scope, &group, f.bar.controls.identity_button, f.host.info.chrome, f.host.info.open, f.cx.on(@import("ui/status_connection_view.zig").View, f.host.info, @import("ui/status_connection_view.zig").View.dismiss), f.host, graphicalBlocked);
+    // The graphical projection repoints the identity trigger at the shared
+    // chain action, exactly as a web/BMC tab does in the live workspace.
+    try f.host.updateGraphical(.{ .state = .online, .label = "直接连接" });
+    f.bar.controls.identity_button.behavior.events.on_click = .{ .context = &f, .callback = graphicalChainClick };
+    const trigger = f.bar.controls.identity_button.globalRect();
+    f.cx.handleMouseMove(trigger.x + trigger.w / 2, trigger.y + trigger.h / 2);
+    f.settle();
+    try std.testing.expect(f.host.projectsGraphicalSession());
+    try std.testing.expectEqual(@as(usize, 0), f.chain_clicks);
+    try std.testing.expect(!f.host.info.open.peek());
+    // A genuine click still opens the sticky details popover.
+    f.click(f.bar.controls.identity_button);
+    try std.testing.expectEqual(@as(usize, 1), f.chain_clicks);
 }

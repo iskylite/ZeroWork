@@ -287,6 +287,13 @@ pub const Host = struct {
     graphical: ?@import("../host/plugin_ui_contract.zig").ConnectionStatus = null,
     layout_metrics: [3]f32 = @splat(-1),
 
+    /// True while the active tab is a plugin content session (web, BMC). The
+    /// identity trigger then opens a sticky native popover, which hover alone
+    /// must never trigger — callers gate their hover previews on this.
+    pub fn projectsGraphicalSession(self: *const Host) bool {
+        return self.projection_kind == .graphical;
+    }
+
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*Host {
         const self = try cx.allocator.create(Host);
         var registered = false;

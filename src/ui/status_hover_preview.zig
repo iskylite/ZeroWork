@@ -28,23 +28,35 @@ pub const Preview = struct {
     action: ui.HandlerRef,
     close: ui.HandlerRef,
     hover_enabled: bool = true,
+    /// External veto sampled each frame before hover invokes the action. A
+    /// graphical session (web/BMC) repoints the identity trigger at a sticky
+    /// native popover; hover must not open those, only a real click may.
+    hover_veto: ?struct { context: *anyopaque, blocked: *const fn (*anyopaque) bool } = null,
     preview: bool = false,
     pinned: bool = false,
     suppressed: bool = false,
     leave_ns: ?i128 = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, group: *Group, trigger: *ui.Node, panel: *ui.Node, open: *ui.Signal(bool), close: ui.HandlerRef) !void {
-        try mountWithHover(cx, scope, group, trigger, panel, open, close, true);
+        _ = try mountWithHover(cx, scope, group, trigger, panel, open, close, true);
     }
     /// Toolbar actions share click/toggle/exclusion behavior, without previews.
     pub fn mountClick(cx: *ui.Cx, scope: *ui.Scope, group: *Group, trigger: *ui.Node, panel: *ui.Node, open: *ui.Signal(bool), close: ui.HandlerRef) !void {
-        try mountWithHover(cx, scope, group, trigger, panel, open, close, false);
+        _ = try mountWithHover(cx, scope, group, trigger, panel, open, close, false);
     }
-    fn mountWithHover(cx: *ui.Cx, scope: *ui.Scope, group: *Group, trigger: *ui.Node, panel: *ui.Node, open: *ui.Signal(bool), close: ui.HandlerRef, hover_enabled: bool) !void {
-        const action = trigger.behavior.events.on_click orelse return;
+    /// Hover preview with an external veto: while blocked() returns true the
+    /// hover path stays inert; a genuine click still runs the action.
+    pub fn mountVetoed(cx: *ui.Cx, scope: *ui.Scope, group: *Group, trigger: *ui.Node, panel: *ui.Node, open: *ui.Signal(bool), close: ui.HandlerRef, context: *anyopaque, blocked: *const fn (*anyopaque) bool) !void {
+        if (try mountWithHover(cx, scope, group, trigger, panel, open, close, true)) |self| {
+            self.hover_veto = .{ .context = context, .blocked = blocked };
+        }
+    }
+    fn mountWithHover(cx: *ui.Cx, scope: *ui.Scope, group: *Group, trigger: *ui.Node, panel: *ui.Node, open: *ui.Signal(bool), close: ui.HandlerRef, hover_enabled: bool) !?*Preview {
+        const action = trigger.behavior.events.on_click orelse return null;
         const self = try scope.createState(Preview, .{ .group = group, .cx = cx, .trigger = trigger, .panel = panel, .open = open, .action = action, .close = close, .hover_enabled = hover_enabled });
         trigger.behavior.events.on_click = cx.on(Preview, self, click);
         try cx.addAfterLayoutHook(self, tick);
+        return self;
     }
     fn contains(self: *Preview, node: *ui.Node) bool {
         if (!node.isDisplayedInTree()) return false;
@@ -102,6 +114,14 @@ pub const Preview = struct {
         if (!inside) self.suppressed = false;
         if (self.group.pinned) |pinned| {
             if (!pinned.open.peek()) self.group.pinned = null;
+        }
+        const vetoed = if (self.hover_veto) |veto| veto.blocked(veto.context) else false;
+        if (inside and vetoed) {
+            // The action leads to a sticky popover this frame; wait for a real
+            // click instead of auto-invoking it, and don't re-arm on leave.
+            self.suppressed = true;
+            self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+            return .done;
         }
         if (inside and !shown and !self.suppressed and self.group.pinned == null) {
             // Reuse click actions without their keyboard focus side effects.

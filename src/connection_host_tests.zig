@@ -391,11 +391,14 @@ test "connection host released failure leaves the idle scene clean" {
     try std.testing.expectEqual(@import("ui/connection_progress_view.zig").State.failed, f.host.progress.source.?.value.state);
     try std.testing.expectEqual(@import("host/operation.zig").Cleanup.released, f.host.progress.source.?.value.cleanup);
     // Advance UI time deterministically: a loaded machine can spend the old
-    // wall-clock settling window on too few layout/animation frames.
+    // wall-clock settling window on too few layout/animation frames. Give the
+    // scene a bounded settle budget instead of a fixed frame count; the final
+    // assertions below still demand a fully idle scene.
     try f.cx.setTestFrameStep(16);
-    for (0..40) |_| {
+    for (0..400) |_| {
         _ = f.cx.processScheduledRedraw();
         try f.tick();
+        if (!f.cx.hasPendingSceneWork() and !f.cx.needs_redraw and f.cx.next_redraw_scheduled_at == null) break;
     }
     const revision = ui.Node.treeStructureRevision();
     for (0..8) |_| {
