@@ -4194,25 +4194,27 @@ pub const Workspace = struct {
             .close_on_escape = false,
             .width = 430,
             .overlay_color = app_theme.modal_barrier,
-            .background = app_theme.current().overlay,
         }).mount(self.scope, cx);
         if (!modal.portaled) try self.terminal_area.appendChild(cx.allocator, modal.overlay);
         _ = try scoped_modal.bind(cx, self.scope, modal, .{ .owner = .{ .resolve = .{ .context = self, .get = hostKeyOverlayOwner } } });
         self.host_key_open = open;
-        modal.dialog.style.padding = .{};
-        const card = try ui.box(cx, .{
-            .width = .fill(),
-            .direction = .column,
-            .gap = 10,
+        // The Modal's own dialog panel is the single surface (overlay fill,
+        // glass, radius, shadow). Earlier code nested a second filled card
+        // inside it, so the panel's own fill/shadow showed around the card as
+        // a visible double layer. The body stays a transparent padded holder.
+        const card = modal.dialog;
+        card.setStyleInline(cx.allocator, .{
             .background = app_theme.current().overlay,
             .glass = app_theme.overlayGlass(),
-            .padding = .{ .top = 22, .bottom = 22, .left = 26, .right = 26 },
             .border = .{ .width = 0, .color = ui.Color.rgba(19, 69, 246, 26), .radius = 12 },
             .shadow = .{ .blur = 44, .offset_y = 16, .color = ui.Color.rgba(15, 23, 42, 36) },
-        }, .{});
-        try card.appendChild(cx.allocator, try ui.text(cx, "主机密钥首连确认", .{ .font_size = 14, .font_weight = 600, .color = p.fg }));
+        });
+        const body = modal.body;
+        body.style.padding = .{ .top = 22, .bottom = 22, .left = 26, .right = 26 };
+        body.style.gap = 10;
+        try body.appendChild(cx.allocator, try ui.text(cx, "主机密钥首连确认", .{ .font_size = 14, .font_weight = 600, .color = p.fg }));
         const detail = try ui.text(cx, "", .{ .font_size = 11, .color = p.fg_secondary, .wrap = .word });
-        try card.appendChild(cx.allocator, detail);
+        try body.appendChild(cx.allocator, detail);
         const buttons = try ui.box(cx, .{ .direction = .row, .justify = .center, .gap = 10 }, .{});
         try buttons.appendChild(cx.allocator, try ui.widgets.Button(.{
             .label = "拒绝",
@@ -4242,7 +4244,7 @@ pub const Workspace = struct {
         }).mount(self.scope, cx);
         try app_theme.stylePrimary(cx, self.scope, remember_button, null);
         try buttons.appendChild(cx.allocator, remember_button);
-        try card.appendChild(cx.allocator, buttons);
+        try body.appendChild(cx.allocator, buttons);
         card.behavior.interaction.focusable = true;
         card.behavior.events.on_key_down = struct {
             fn onKey(key: ui.events.KeyCode, _: ui.events.Modifiers, ctx: ?*anyopaque) ui.events.EventResult {
@@ -4253,7 +4255,6 @@ pub const Workspace = struct {
             }
         }.onKey;
         card.behavior.events.key_context = @ptrCast(self);
-        try modal.body.appendChild(cx.allocator, card);
         self.host_key_root = modal.overlay;
         self.host_key_card = card;
         @import("floating_input.zig").protect(cx, card);
@@ -4695,21 +4696,22 @@ pub const Workspace = struct {
             .close_on_escape = false,
             .width = 420,
             .overlay_color = app_theme.modal_barrier,
-            .background = app_theme.current().overlay,
         }).mount(self.scope, cx);
         if (!modal.portaled) try self.terminal_area.appendChild(cx.allocator, modal.overlay);
         _ = try scoped_modal.bind(cx, self.scope, modal, .{ .owner = .{ .resolve = .{ .context = self, .get = closeOverlayOwner } } });
         self.confirm_open = open;
-        modal.dialog.style.padding = .{};
-        const card = try ui.box(cx, .{
-            .width = .fill(),
-            .direction = .column,
+        // Single surface on the Modal's own dialog panel; the body is a
+        // transparent padded holder. Nesting a second filled card here made
+        // the panel's fill and shadow show around it as a double layer.
+        const card = modal.dialog;
+        card.setStyleInline(cx.allocator, .{
             .background = app_theme.current().overlay,
             .glass = app_theme.overlayGlass(),
             .border = .{ .width = 0, .color = p.border, .radius = 12 },
-            .padding = ui.Padding.all(20),
             .shadow = .{ .blur = 28, .offset_y = 10, .color = ui.Color.rgba(15, 23, 42, 70) },
-        }, .{});
+        });
+        const body = modal.body;
+        body.style.padding = ui.Padding.all(20);
 
         card.meta.ownership.meta.test_id = "session.close.confirm";
         const title = try ui.text(cx, "关闭会话?", .{
@@ -4718,7 +4720,7 @@ pub const Workspace = struct {
             .color = danger_red,
             .wrap = .word,
         });
-        try card.appendChild(allocator, title);
+        try body.appendChild(allocator, title);
 
         const subtitle = try ui.box(cx, .{
             .width = .fill(),
@@ -4729,7 +4731,7 @@ pub const Workspace = struct {
             .color = p.fg_secondary,
             .wrap = .word,
         }));
-        try card.appendChild(allocator, subtitle);
+        try body.appendChild(allocator, subtitle);
 
         // Risk rows (category → detail, separated by spacing) — the
         // mockup-close-confirm rule list: 传输 / AI / SOCKS5 / 历史 plus the
@@ -4773,7 +4775,7 @@ pub const Workspace = struct {
             try rows.appendChild(allocator, row);
             try self.confirm_risk_rows.append(self.allocator, .{ .category = spec.category, .detail_node = detail_text, .row_node = row });
         }
-        try card.appendChild(allocator, rows);
+        try body.appendChild(allocator, rows);
 
         const buttons = try ui.box(cx, .{
             .width = .fill(),
@@ -4805,7 +4807,7 @@ pub const Workspace = struct {
         }).mount(self.scope, cx);
         force_button.meta.ownership.meta.test_id = "session.close.accept";
         try buttons.appendChild(allocator, force_button);
-        try card.appendChild(allocator, buttons);
+        try body.appendChild(allocator, buttons);
 
         // Esc cancels. Focus moves onto the card when it opens, so the
         // terminal pane behind never eats the keystroke; the handler also
@@ -4814,7 +4816,6 @@ pub const Workspace = struct {
         card.behavior.events.on_key_down = onCloseConfirmKeyDown;
         card.behavior.events.key_context = @ptrCast(self);
 
-        try modal.body.appendChild(allocator, card);
         self.confirm_root = modal.overlay;
         self.confirm_card = card;
         @import("floating_input.zig").protect(cx, card);
