@@ -144,6 +144,13 @@ pub const View = struct {
             const region: ui.ComputedRect = .{ .x = r.x, .y = r.y, .w = more_rect.x + more_rect.w - r.x, .h = r.h };
             const inside = contains(region, self.cx.mouse_x, self.cx.mouse_y);
             var popup = false;
+            if (self.workspace.active_tab) |index| {
+                if (index < self.workspace.tabs.items.len) {
+                    if (self.workspace.tabs.items[index].plugin_renderer) |renderer| {
+                        if (renderer.vtable.forwarding_details_open) |open| popup = open(renderer.context);
+                    }
+                }
+            }
             for (self.owned[0..self.owned_count]) |open| if (open.?.peek()) {
                 popup = true;
             };

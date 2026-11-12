@@ -1196,6 +1196,55 @@ pub fn updateItemCount(state: *VirtualListState, new_count: usize) void {
     state.content_node.markLayoutDirty();
 }
 
+/// Keep unchanged rows across edits to a list whose heights are known. The
+/// mapper returns a unique new index for each surviving row, or null to recycle it.
+pub fn reconcileKnownHeightItems(
+    state: *VirtualListState,
+    new_count: usize,
+    heights_changed: bool,
+    context: *anyopaque,
+    map: *const fn (*anyopaque, *Node) ?usize,
+) void {
+    std.debug.assert(!state.isMeasured());
+    const count_changed = state.item_count != new_count;
+    state.item_count = new_count;
+    var bindings_changed = count_changed;
+    for (state.pool_bindings, 0..) |*binding, slot| {
+        const old_index = binding.* orelse continue;
+        const node = state.pool_nodes[slot];
+        const new_index = map(context, node) orelse {
+            state.recycleSlot(slot);
+            bindings_changed = true;
+            continue;
+        };
+        std.debug.assert(new_index < new_count);
+        if (new_index != old_index) {
+            binding.* = new_index;
+            node.behavior.interaction.a11y = .{ .collection_item = @intCast(new_index) };
+            bindings_changed = true;
+        }
+    }
+    if (count_changed or heights_changed) {
+        if (state.measured) |ledger| {
+            ledger.setCount(new_count);
+            ledger.markAllDirty();
+            for (state.pool_bindings, state.pool_nodes) |binding, node| {
+                const index = binding orelse continue;
+                const height = state.itemHeight(index);
+                if (styleHeightEq(node, height)) continue;
+                node.style.height = .{ .px = height };
+                node.markLayoutDirty();
+            }
+        }
+        syncContentHeight(state);
+    }
+    if (bindings_changed) {
+        state.a11y_generation +%= 1;
+        state.initialized = false;
+        state.content_node.markLayoutDirty();
+    }
+}
+
 /// Scroll to index (item top aligns viewport top)
 pub fn scrollToIndex(state: *VirtualListState, index: usize) void {
     const target_y = state.offsetOf(index);

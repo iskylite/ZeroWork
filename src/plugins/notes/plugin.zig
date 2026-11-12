@@ -37,7 +37,7 @@ pub const Plugin = struct {
     pub fn manifest(self: *Plugin) registry.PluginManifest {
         return .{
             .id = id,
-            .display_name = "笔记",
+            .display_name = "我的笔记",
             .order = 25,
             .icons = .{ .settings = "notebook", .protocol = "notebook", .tab = "notebook" },
             .quick_create = .{ .validate_payload = validate },

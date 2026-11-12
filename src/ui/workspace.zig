@@ -3715,7 +3715,16 @@ pub const Workspace = struct {
     fn pollGroupClose(self: *Workspace) void {
         var retired: ?*group_view.View = null;
         for (self.group_views.items) |view| {
-            const plan = if (view.close) |*p| p else continue;
+            if (view.close == null) {
+                const roster = self.group_roster orelse continue;
+                const group = roster.findById(view.id) orelse continue;
+                if (group.membership_revision > 1 and group.members.items.len == 0) {
+                    retired = view;
+                    break;
+                }
+                continue;
+            }
+            const plan = &view.close.?;
             if (plan.phase != .closing and !(plan.phase == .partial and plan.awaiting != null)) continue;
             if (plan.awaiting) |id| {
                 if (self.sessionTab(id)) |tab| {
@@ -3799,6 +3808,8 @@ pub const Workspace = struct {
             self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
         }
         if (retired) |view| {
+            if (self.active_group_view == view.id) self.active_group_view = null;
+            self.cx.requestRedraw();
             if (self.groupTabId(view.id)) |id| {
                 const at = self.model.indexOf(id).?;
                 self.model.completeClose(id, self.model.tabs.items[at].owner) catch {};
@@ -8528,6 +8539,17 @@ test "group session creation new and duplicate preserve group without duplicate 
     workspace.registry.hosts[host_index].revision += 1;
     _ = workspace.pollGroupWorkspace();
     try std.testing.expectEqual(before_calls + 1, factory.calls);
+
+    const session_count = workspace.tabs.items.len;
+    const entry = roster.findById(quick_group).?;
+    while (entry.members.items.len > 1) try roster.leave(entry.name, entry.members.items[0].pane_id);
+    _ = workspace.pollGroupWorkspace();
+    try std.testing.expectEqual(parent, workspace.groupTabId(quick_group).?);
+    try roster.leave(entry.name, entry.members.items[0].pane_id);
+    _ = workspace.pollGroupWorkspace();
+    try std.testing.expect(workspace.groupTabId(quick_group) == null);
+    try std.testing.expect(workspace.active_group_view == null);
+    try std.testing.expectEqual(session_count, workspace.tabs.items.len);
 }
 
 test "material workspace confirmation cards retain overlay alpha and blur across publication" {

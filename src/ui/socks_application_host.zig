@@ -582,6 +582,7 @@ pub const Host = struct {
         } else "未启动";
         label.setTextContent(self.allocator, "端口转发") catch return;
         if (self.chip) |chip| if (chip.behavior.interaction.a11y) |*props| {
+            props.label = "端口转发";
             props.description = state_description;
         };
         const colors = @import("app_theme.zig").current();
@@ -673,7 +674,6 @@ pub const Host = struct {
                 self.last_phase = value.phase;
             }
         }
-        self.refreshChip();
         if (self.info) |view| if (view.root.style.display != .none or view.logs_visible) self.updateInfo();
         if (active or self.pending_restart != null) self.cx.scheduleRedrawAfterNs(40 * std.time.ns_per_ms);
     }

@@ -158,6 +158,9 @@ pub const RendererInstance = struct {
         /// Open the renderer's existing connection diagnostics for the shared
         /// status-bar connection/route entries.
         show_connection_details: ?*const fn (*anyopaque) void = null,
+        /// Show diagnostics for a renderer-owned forward at the workspace control.
+        show_forwarding_details: ?*const fn (*anyopaque, *ui.Node) void = null,
+        forwarding_details_open: ?*const fn (*anyopaque) bool = null,
         /// Optional UI-thread-safe scalar: the renderer's latest published frame
         /// generation. A monotonic increase means a new frame was published,
         /// not that its pixels changed; the host throttles it into tab

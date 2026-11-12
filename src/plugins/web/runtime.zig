@@ -520,6 +520,7 @@ pub const Runtime = struct {
             .reset_warning = controller.reset_warning,
             .login_notice = controller.show_login_notice and controller.path == .ready and controller.page == .displayed,
             .route_mode = controller.route,
+            .forwarding = self.forwarding(),
             .url_mode = self.url_mode,
             .current_url = current_url,
             .pending_url = pending_url,
@@ -532,6 +533,21 @@ pub const Runtime = struct {
             .error_message = error_message,
             .bookmarks = items,
             .hops = route_hops,
+        };
+    }
+
+    fn forwarding(self: *const Runtime) ?page_api.Forwarding {
+        if (self.controller.route != .ssh) return null;
+        if (self.proxy) |proxy| {
+            const state = proxy.snapshot();
+            if (state.local_port) |port| return .{ .listening = port };
+            if (state.phase == .closing) return .stopping;
+            if (state.phase == .failed or state.phase == .closed) return .disconnected;
+        }
+        return switch (self.controller.path) {
+            .idle => .idle,
+            .connecting => .connecting,
+            .ready, .disconnected, .closed => .disconnected,
         };
     }
 };
@@ -556,7 +572,7 @@ fn copyBookmarks(a: std.mem.Allocator, source: []const bookmarks.Bookmark) ![]co
 
 fn proxyError(err: anyerror) []const u8 {
     return switch (err) {
-        error.WebProxyUnavailable => "网页 SSH 转发需要 macOS 14 或更新版本。",
+        error.WebProxyUnavailable => "浏览器 SSH 转发需要 macOS 14 或更新版本。",
         error.PluginCleanupQueueFull => "连接仍在关闭，请稍后重试。",
         error.CredentialMissing, error.AuthenticationInteractionRequired => "SSH 跳板缺少可用凭据，请更新跳板配置后重新打开连接。",
         error.RevisionConflict, error.ConnectionNotFound => "SSH 跳板配置已变更，请重新打开连接。",

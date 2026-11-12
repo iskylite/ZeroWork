@@ -101,7 +101,7 @@ pub const Bridge = struct {
                         else => "SSH 交互认证",
                     },
                     .detail = target,
-                    .source_name = "网页连接",
+                    .source_name = "浏览器连接",
                     .fields = fields[0..request.prompt_count],
                 }, now + 60_000);
             },
@@ -123,7 +123,7 @@ pub const Bridge = struct {
                 try self.host.offer(self.owner, request_id, self.owner.generation, .trust_material, .{
                     .title = if (changed) "主机密钥已变更" else "确认 SSH 主机密钥",
                     .detail = if (changed) "核对新指纹后，输入 yes 替换保存的主机密钥。" else "通过可信渠道核对跳板指纹。",
-                    .source_name = "网页连接",
+                    .source_name = "浏览器连接",
                     .material = lines,
                     .fields = if (changed) &.{.{ .label = "输入 yes", .secret = false, .max_bytes = 3, .confirmation = "yes" }} else &.{},
                     .choices = if (changed) &.{} else choices[0..if (request.store_path_len == 0) @as(usize, 1) else 2],

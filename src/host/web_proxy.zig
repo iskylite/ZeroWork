@@ -16,13 +16,13 @@ pub const Snapshot = struct {
     owner: identity.SessionHandle,
     operation: OperationKey,
     phase: Phase,
+    local_port: ?u16,
     cleanup: transports.ReleaseReceipt,
     failure: ?anyerror,
     counts: forwarder.Counts,
 };
 
-/// Keep the endpoint private to the native view's proxy configuration. The
-/// password and port are neither connection data nor presentation state.
+/// Credentials stay private to the native view's proxy configuration.
 pub const Endpoint = struct { port: u16, credentials: forwarder.Credentials };
 
 pub const Proxy = struct {
@@ -94,7 +94,8 @@ pub const Proxy = struct {
     pub fn snapshot(self: *const Proxy) Snapshot {
         const finished = self.finished.load(.acquire);
         const stopped = self.cancelled.load(.acquire);
-        const ready = self.pump.port.load(.acquire) != 0;
+        const port = self.pump.port.load(.acquire);
+        const ready = port != 0;
         const failure = if (finished) self.failure else null;
         return .{
             .owner = self.owner,
@@ -109,6 +110,7 @@ pub const Proxy = struct {
                 .connecting
             else
                 .prepared,
+            .local_port = if (ready and !stopped and !finished) port else null,
             .cleanup = self.receipt(),
             .failure = failure,
             .counts = self.pump.counts.load(.acquire),

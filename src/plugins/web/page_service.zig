@@ -24,6 +24,14 @@ pub const Command = union(enum) {
 
 pub const Hop = struct { name: []const u8, host: []const u8, port: u16 };
 
+pub const Forwarding = union(enum) {
+    idle,
+    connecting,
+    listening: u16,
+    stopping,
+    disconnected,
+};
+
 pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
     path: nav.PathState,
@@ -31,6 +39,7 @@ pub const Snapshot = struct {
     reset_warning: nav.ResetWarning,
     login_notice: bool,
     route_mode: config.RouteMode,
+    forwarding: ?Forwarding,
     url_mode: config.UrlMode,
     current_url: ?[]const u8,
     pending_url: ?[]const u8,

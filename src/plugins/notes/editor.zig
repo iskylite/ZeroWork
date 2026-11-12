@@ -297,6 +297,101 @@ pub fn replace(allocator: std.mem.Allocator, body: []const u8, range: Block, rep
     return std.mem.concat(allocator, u8, &.{ body[0..range.start], replacement, body[range.end..] });
 }
 
+/// A rendered inline link `[label](url)`. All ranges are byte offsets into
+/// the same body, `end` points one past the closing paren.
+pub const LinkSpan = struct {
+    start: usize,
+    end: usize,
+    url_start: usize,
+    url_end: usize,
+
+    pub fn url(self: LinkSpan, body: []const u8) []const u8 {
+        return body[self.url_start..self.url_end];
+    }
+};
+
+fn escapedAt(text: []const u8, index: usize) bool {
+    var backslashes: usize = 0;
+    var i = index;
+    while (i > 0 and text[i - 1] == '\\') : (i -= 1) backslashes += 1;
+    return backslashes % 2 == 1;
+}
+
+fn matchingClose(text: []const u8, open: usize, open_char: u8, close_char: u8) ?usize {
+    var depth: usize = 0;
+    var i = open;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '\n') return null;
+        if (c == '\\' and i + 1 < text.len) {
+            i += 1;
+            continue;
+        }
+        if (c == open_char) depth += 1 else if (c == close_char) {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+/// Locate the innermost `[label](url)` link whose bytes contain `offset`.
+/// Mirrors the read renderer: links never span a line break and the URL must
+/// stay clear of whitespace. Images (`![alt](url)`) are excluded; the image
+/// viewer already handles those.
+pub fn findLinkAt(text: []const u8, offset: usize) ?LinkSpan {
+    var scan = @min(offset + 1, text.len);
+    while (scan > 0) {
+        scan -= 1;
+        if (text[scan] != '[' or (scan > 0 and text[scan - 1] == '!') or escapedAt(text, scan)) continue;
+        const close = matchingClose(text, scan, '[', ']') orelse continue;
+        if (close + 1 >= text.len or text[close + 1] != '(') continue;
+        const paren = matchingClose(text, close + 1, '(', ')') orelse continue;
+        if (offset < scan or offset > paren) continue;
+        const url = text[close + 2 .. paren];
+        if (std.mem.indexOfAny(u8, url, " \t\r\n") != null) continue;
+        return .{ .start = scan, .end = paren + 1, .url_start = close + 2, .url_end = paren };
+    }
+    return null;
+}
+
+/// The offset of the check-state byte in a task list line whose `- ` marker
+/// starts at `marker_start` (expects `[ ]`, `[x]` or `[X]` directly after the
+/// marker), or null when the line is not a task item.
+pub fn taskStateOffset(body: []const u8, marker_start: usize) ?usize {
+    if (marker_start + 5 >= body.len) return null;
+    if (body[marker_start] != '-' or body[marker_start + 1] != ' ') return null;
+    if (body[marker_start + 2] != '[' or body[marker_start + 4] != ']') return null;
+    if (body[marker_start + 5] != ' ') return null;
+    return switch (body[marker_start + 3]) {
+        ' ', 'x', 'X' => marker_start + 3,
+        else => null,
+    };
+}
+
+test "notes link finder resolves innermost spans and rejects images and wrapped urls" {
+    const body = "see [docs](https://example.com/a) and ![img](img.png) and [deep [nest]](https://example.com/b) end";
+    const first = findLinkAt(body, 6).?;
+    try std.testing.expectEqualStrings("https://example.com/a", first.url(body));
+    try std.testing.expectEqual(@as(usize, 4), first.start);
+    const nested = findLinkAt(body, 62).?;
+    try std.testing.expectEqualStrings("https://example.com/b", nested.url(body));
+    try std.testing.expectEqual(@as(usize, 58), nested.start);
+    const image = findLinkAt(body, 40);
+    try std.testing.expect(image == null);
+    const escaped = findLinkAt("see \\[not](a) here", 7);
+    try std.testing.expect(escaped == null);
+}
+
+test "notes task state offset reads check byte of task lines only" {
+    const body = "- [ ] open\n- [x] close\n- [X] again\n- plain\n-[ ] tight";
+    try std.testing.expectEqual(@as(usize, 3), taskStateOffset(body, 0).?);
+    try std.testing.expectEqual(@as(usize, 14), taskStateOffset(body, 11).?);
+    try std.testing.expectEqual(@as(usize, 26), taskStateOffset(body, 23).?);
+    try std.testing.expect(taskStateOffset(body, 35) == null);
+    try std.testing.expect(taskStateOffset(body, 43) == null);
+}
+
 test "notes blocks preserve UTF-8 byte ranges and fence boundaries" {
     const source = "\n# 标题\n说明 **粗体**\n\n```zig\n\nconst a = 1;\n````\n\n正文\n\n```\n未闭合\n";
     const parsed = try blocks(std.testing.allocator, source);

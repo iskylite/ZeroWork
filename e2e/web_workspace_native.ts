@@ -8,6 +8,7 @@ import {pathToFileURL} from 'node:url';
 
 const prefix = resolve(process.argv[2] ?? 'zig-out');
 const output = resolve(process.argv[3]);
+const routedPreset = process.argv[4] === 'preset';
 const macOSVersion = execFileSync('/usr/bin/sw_vers', ['-productVersion'], {encoding: 'utf8'}).trim();
 let macOSSDKVersion: string | null = null;
 try {
@@ -48,6 +49,13 @@ async function fill(id: string, value: string) {
     await click(id);
     await h.key('a', {cmd: true});
     await h.type_(value);
+}
+async function showForwarding() {
+    if (!(await h.query('status.connection.forward')).some(visible)) {
+        const {x, y, w, h: height} = (await find('toolbar.compact')).rect;
+        await h.mouseMove(x + w / 2, y + height / 2);
+    }
+    await click('status.connection.forward');
 }
 async function json(path: string) {
     return JSON.parse(await readFile(path, 'utf8'));
@@ -205,7 +213,8 @@ try {
     await h.resizeWindow(860, 480);
     await openWebWizard('Owned routed web', true);
     await h.resizeWindow(1280, 800);
-    await click('web.editor.mode.manual');
+    await click(routedPreset ? 'web.editor.mode.preset' : 'web.editor.mode.manual');
+    if (routedPreset) await fill('web.editor.url', ready.routed);
     await click('wizard.access.jump');
     for (const hop of [1, 2]) {
         await click(hop === 1 ? 'wizard.route.hop.0' : 'wizard.route.insert.1');
@@ -227,12 +236,18 @@ try {
     await h.resizeWindow(1280, 800);
     await click('web.editor.open');
     await h.waitFor(async () => !(await h.query('web.editor')).some(visible) || null, 12000);
-    stage = 'submit a target to the saved SSH route';
+    stage = routedPreset ? 'open the preset URL automatically over SSH' : 'submit a target to the saved SSH route';
     await find('web.address');
-    assert(!(await traffic()).some(event => event.ssh_connection), 'manual route starts on navigation');
-    await fill('web.address', ready.routed);
-    await h.key('return');
-    stage = 'navigate a manually entered IP through two SSH hops';
+    if (!routedPreset) {
+        assert(!(await traffic()).some(event => event.ssh_connection), 'manual route starts on navigation');
+        await showForwarding();
+        await find('web.route.popup', node => content(node).includes('SSH 转发未启动'));
+        assert(!(await h.query('web.route.endpoint')).some(visible));
+        await h.key('escape');
+        await fill('web.address', ready.routed);
+        await h.key('return');
+        stage = 'navigate a manually entered IP through two SSH hops';
+    }
     assert.equal((await received('/routed')).host, new URL(ready.routed).host);
     const routed = await traffic();
     assert(routed.some(event => event.hop === 'entry' && event.allowed && event.destination[1] === ready.ports[1]));
@@ -245,13 +260,42 @@ try {
     await click('web.reload');
     await h.waitFor(async () => (await traffic()).filter(event => event.path === '/routed').length === 2 || null, 12000);
     await h.waitFor(async () => !(await h.query('web.state')).some(visible) || null, 12000);
+    stage = 'show the actual session listener and update the open panel after disconnect';
+    await showForwarding();
+    const popup = await find('web.route.popup', node => content(node).includes('SSH 转发已就绪') && content(node).includes('Owned hop 2'));
+    await h.mouseMove(popup.rect.x + popup.rect.w / 2, popup.rect.y + popup.rect.h / 2);
+    const endpoint = content(await find('web.route.endpoint'));
+    const port = endpoint.match(/127\.0\.0\.1:(\d+)/)?.[1];
+    assert(port && Number(port) > 0 && !ready.ports.includes(Number(port)));
+    const listeners = execFileSync('/usr/sbin/lsof', ['-nP', '-a', '-p', String(app.pid), '-iTCP:' + port, '-sTCP:LISTEN'], {encoding: 'utf8'});
+    assert(listeners.includes('127.0.0.1:' + port));
+    await capture('ssh-forwarding');
     await writeFile(join(run, 'drop'), '');
-    await find('web.reconnect');
+    await find('web.route.popup', node => content(node).includes('SSH 转发已断开'));
+    assert(!(await h.query('web.route.endpoint')).some(visible));
+    await h.key('escape');
     await capture('ssh-disconnected');
     await click('web.reconnect');
     await h.waitFor(async () => (await traffic()).filter(event => event.path === '/routed').length === 3 || null, 18000);
     await h.waitFor(async () => !(await h.query('web.reconnect')).some(visible) || null, 12000);
     await capture('ssh-reconnected');
+
+    if (routedPreset) {
+        stage = 'edit the preset address without replacing the route or start URL';
+        const connections = (await traffic()).filter(event => event.ssh_connection).length;
+        const edited = new URL('/routed?edited=1', ready.routed).href;
+        await h.key('l', {cmd: true});
+        await h.type_(edited);
+        await h.key('escape');
+        await find('web.address', node => content(node).includes(ready.routed) && !content(node).includes('edited=1'));
+        await fill('web.address', edited);
+        await h.key('return');
+        await received('/routed?edited=1');
+        await click('web.menu');
+        await click('web.menu.start');
+        await h.waitFor(async () => (await traffic()).filter(event => event.path === '/routed').length === 4 || null, 12000);
+        assert.equal((await traffic()).filter(event => event.ssh_connection).length, connections);
+    }
 
     stage = 'quit and release the session';
     await h.request('POST', '/zerowork/windows', {action: 'quit'});

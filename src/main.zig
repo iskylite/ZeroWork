@@ -12885,6 +12885,42 @@ const AppNavHost = struct {
         return tab.plugin_renderer;
     }
 
+    fn activeWebRenderer(self: *AppNavHost) ?@import("host/plugin_ui_contract.zig").RendererInstance {
+        const workspace = self.workspace orelse return null;
+        const index = workspace.active_tab orelse return null;
+        if (index >= workspace.tabs.items.len) return null;
+        const tab = workspace.tabs.items[index];
+        if (tab.closing or !std.mem.eql(u8, tab.plugin_protocol_id, @import("plugins/web/config.zig").protocol_id)) return null;
+        return tab.plugin_renderer;
+    }
+
+    fn refreshForwardingChip(self: *AppNavHost) void {
+        const renderer = self.activeWebRenderer() orelse {
+            if (self.socks_host) |host| host.refreshChip();
+            return;
+        };
+        const status = (renderer.vtable.connection_status orelse return)(renderer.context);
+        const chip = self.socks_chip orelse return;
+        if (chip.behavior.interaction.a11y) |*props| {
+            props.label = "浏览器转发";
+            props.description = status.label;
+        }
+        const colors = app_theme.current();
+        const ink = switch (status.state) {
+            .online => colors.ok_ink,
+            .degraded => colors.danger_ink,
+            .connecting, .ended => colors.fg_2,
+        };
+        for (chip.children.items) |child| {
+            if (child.getIcon() != null) _ = child.setTint(ink);
+        }
+        if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
+            if (controls.forward_label.getText()) |label| if (!std.mem.eql(u8, label.content, "浏览器转发")) {
+                controls.forward_label.setTextContent(self.allocator, "浏览器转发") catch {};
+            };
+        };
+    }
+
     fn toggleSidebar(self: *AppNavHost) void {
         self.quick.toggleSidebar();
         self.applySidebar();
@@ -13269,7 +13305,8 @@ const AppNavHost = struct {
             const plugin_status = if (workspace.active_tab) |index| index < workspace.tabs.items.len and workspace.tabs.items[index].plugin_renderer != null else false;
             const forward_status = if (status_capabilities) |snapshot| @import("host/actions.zig").project(.toggle_socks, snapshot).visible else false;
             if (self.session_details) |details| details.setDisplay(if (has_session and (plugin_status or route_status or (terminal_active and !local_active))) .flex else .none);
-            if (self.socks_chip) |chip| chip.setDisplay(if (self.mist != null or forward_status or (terminal_active and !local_active)) .flex else .none);
+            if (self.socks_chip) |chip| chip.setDisplay(if (self.mist != null or forward_status or self.activeWebRenderer() != null or (terminal_active and !local_active)) .flex else .none);
+            self.refreshForwardingChip();
             if (self.status_bar) |bar| bar.setDisplay(if (self.mist != null or local_active or (has_session and !terminal_active and !route_status and !transfer_status and !plugin_status)) .none else .flex);
             if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
                 controls.sidebar_width = self.quick.sidebar.width();
@@ -16071,7 +16108,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     socks_host.exposure = exposure;
     if (!exposure.portaled and exposure.root.parent == null) try root.appendChild(cx.allocator, exposure.root);
     nav_host.socks_host = socks_host;
-    status_bar.socks_chip.behavior.events.on_click = .{ .callback = onSocksChipClick, .context = @ptrCast(socks_host) };
+    status_bar.socks_chip.behavior.events.on_click = .{ .callback = onSocksChipClick, .context = nav_host };
     try scope.onCleanup(Socks5Host, socks_host, Socks5Host.cleanup);
     try cx.addAfterLayoutHook(socks_host, Socks5Host.hookRun);
     const background_socks = try @import("ui/socks_background_host.zig").Host.mount(cx, scope, workspace, application_host, socks_host.backend);
@@ -16648,9 +16685,9 @@ const NotificationWindowHook = struct {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
         const target: @import("host/identity.zig").ContentOwner = .{ .session = owner };
         if (message) |detail| {
-            self.host.publishOperationError(self.id, target, "笔记", "笔记保存失败", detail, .open_content) catch |err| applog.warn(.ui, "notes save feedback: {s}", .{@errorName(err)});
+            self.host.publishOperationError(self.id, target, "我的笔记", "笔记保存失败", detail, .open_content) catch |err| applog.warn(.ui, "notes save feedback: {s}", .{@errorName(err)});
         } else {
-            self.host.resolveOwnerOperationErrors(self.id, target, "笔记");
+            self.host.resolveOwnerOperationErrors(self.id, target, "我的笔记");
         }
         self.cx.requestRedraw();
     }
@@ -18740,8 +18777,13 @@ fn onTransferSubmitFrozen(ctx: *anyopaque, owner: @import("host/identity.zig").S
 }
 
 fn onSocksChipClick(raw: *anyopaque) void {
-    const host: *Socks5Host = @ptrCast(@alignCast(raw));
-    host.showInfo();
+    const nav: *AppNavHost = @ptrCast(@alignCast(raw));
+    if (nav.activeWebRenderer()) |renderer| {
+        const anchor = nav.socks_chip orelse return;
+        if (renderer.vtable.show_forwarding_details) |show| show(renderer.context, anchor);
+    } else if (nav.socks_host) |host| {
+        host.showInfo();
+    }
 }
 
 fn onTransferCancel(ctx: *anyopaque) void {

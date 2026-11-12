@@ -963,13 +963,13 @@ test "notification notes save recovery opens and resolves only the original cont
     const host = try notification_host.Host.createWithApi(a, .{}, fake.api());
     defer host.destroy();
     const window = try host.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .open_content = Probe.open });
-    for ([_]Owner{ first, stale }) |owner| try host.publishOperationError(window, owner, "笔记", "笔记保存失败", "磁盘空间不足", .open_content);
+    for ([_]Owner{ first, stale }) |owner| try host.publishOperationError(window, owner, "我的笔记", "笔记保存失败", "磁盘空间不足", .open_content);
     const live_notice = host.coordinator.notification_records.items[0].fact_id;
     const stale_notice = host.coordinator.notification_records.items[1].fact_id;
     try host.dispatchAction(live_notice, 0);
     try std.testing.expect(first.eql(probe.opened.?));
     try std.testing.expectError(error.NotificationOwnerEnded, host.dispatchAction(stale_notice, 0));
-    host.resolveOwnerOperationErrors(window, first, "笔记");
+    host.resolveOwnerOperationErrors(window, first, "我的笔记");
     try std.testing.expect(host.coordinator.recordFor(live_notice).?.event.attention.resolved);
     try std.testing.expect(!host.coordinator.recordFor(stale_notice).?.event.attention.resolved);
     try std.testing.expectError(error.NotificationOwnerEnded, host.dispatchAction(live_notice, 0));

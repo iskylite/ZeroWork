@@ -17,7 +17,7 @@ pub const Callbacks = struct {
     saved: ?*const fn (*anyopaque, identity.AssetOwner) void = null,
 };
 const Action = enum(usize) { local, new_profile, new_sftp, new_kvm, new_web, notes };
-const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM", "新建网页", "笔记" };
+const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM", "新建浏览器", "我的笔记" };
 const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp", "session.menu.new_kvm", "session.menu.new_web", "session.menu.notes" };
 
 pub const View = struct {

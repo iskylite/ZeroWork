@@ -125,7 +125,7 @@ pub const Image = struct {
     failed: bool = false,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *Store, library: model.LibraryId, backend: frames.Backend, line: []const u8, source: assets.ImageLine, append_to: *ui.Node, open: Open) !*Image {
-        const node = try ui.box(cx, .{ .width = .{ .fit = .{} }, .height = .{ .fit = .{} }, .flex_shrink = 0, .hit_behavior = .@"opaque" }, .{});
+        const node = try ui.box(cx, .{ .width = .{ .fit = .{} }, .height = .{ .fit = .{} }, .flex_shrink = 0, .hit_behavior = .@"opaque", .cursor = .pointer }, .{});
         const label = try ui.text(cx, "", S.text(13, 400, S.theme.current().fg_2));
         try label.setTextContent(cx.allocator, if (source.alt.len == 0) "图片" else source.alt);
         try node.appendChild(cx.allocator, label);

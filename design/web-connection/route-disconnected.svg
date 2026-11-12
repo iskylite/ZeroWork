@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" fill="none" preserveAspectRatio="xMidYMid meet">
-  <title>ZeroWork · 网页连接已断开</title>
+  <title>ZeroWork · 浏览器连接已断开</title>
   <desc>主机侧栏、连接页签与网页内容。</desc>
   <defs>
     <style>
@@ -325,6 +325,9 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
     <symbol id="web-warn" viewBox="0 0 24 24">
       <path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Zm0-14v4m0 4h.01" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
     </symbol>
+    <symbol id="web-forwarding" viewBox="0 0 24 24">
+      <path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4ZM2 22l3-3m2.5-5.5L10 11m.5 5.5L13 14m5-11-4 4h6l-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    </symbol>
     <symbol id="web-more" viewBox="0 0 24 24">
       <path d="M5 12h.01M12 12h.01M19 12h.01" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.7" />
     </symbol>
@@ -501,14 +504,19 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
         </g>
       </g>
       <g id="toolbar.connections-transfer" transform="translate(32 0)">
-        <rect id="toolbar.connections-transfer.surface" x="1112" y="12" width="68" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)" />
+        <rect id="toolbar.connections-transfer.surface" x="1112" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)" />
         <g id="session.route">
           <title>当前会话连接链路</title>
           <rect id="session.route.hit" x="1116" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area" />
           <use id="session.route.icon" href="#network" x="1122" y="22" width="16" height="16" color="#676771" />
           <circle cx="1138" cy="20" r="2.5" fill="#B4652A" />
         </g>
-        <g id="global.transfer" transform="translate(-32 0)">
+        <g id="status.connection.forward">
+          <title>浏览器转发</title>
+          <rect x="1148" y="16" width="28" height="28" rx="14" fill="transparent" />
+          <use href="#web-forwarding" x="1154" y="22" width="16" height="16" color="#B54D47" />
+        </g>
+        <g id="global.transfer">
           <title>打开全局传输列表 · 68%</title>
           <rect id="global.transfer.hit" x="1180" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area" />
           <use href="#web-download" x="1186" y="22" width="16" height="16" color="#5B5B65" />
@@ -625,7 +633,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
           </g>
         </g>
         <g id="web.menu">
-          <title>网页操作</title>
+          <title>浏览器操作</title>
           <rect x="1389" y="78" width="28" height="28" fill="transparent" rx="14" />
           <use href="#web-more" x="1395" y="84" width="16" height="16" color="#5B5B65" />
         </g>

@@ -57,7 +57,7 @@ pub const Plugin = struct {
     pub fn manifest(self: *Plugin) registry.PluginManifest {
         return .{
             .id = config.protocol_id,
-            .display_name = "网页",
+            .display_name = "浏览器",
             .plugin_version = "0.6.0",
             .origin = .bundled,
             .host_api_version = 2,

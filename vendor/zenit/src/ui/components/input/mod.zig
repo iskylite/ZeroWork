@@ -49,6 +49,7 @@ pub const UndoSnapshot = editable_block.UndoSnapshot;
 pub const InputType = editable_block.InputType;
 pub const InputSize = control_shell.ControlSize;
 pub const TextareaState = textarea_mod.TextareaState;
+pub const TextareaLineImage = textarea_mod.LineImage;
 pub const inputEventHandler = events_mod.inputEventHandler;
 pub const EditableText = editable_text_mod.EditableText;
 pub const EditableTextResult = editable_text_mod.EditableTextResult;

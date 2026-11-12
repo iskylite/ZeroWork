@@ -76,7 +76,7 @@ pub const View = struct {
         try root.appendChild(cx.allocator, header);
         const title_icon = try ui.iconTint(cx, ui.icons.notebook, colors.accent, .{ .width = .{ .px = S.floating_header_icon_size }, .height = .{ .px = S.floating_header_icon_size }, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, title_icon);
-        const title = try ui.text(cx, "笔记", .{ .font_size = 14, .font_weight = 600, .color = colors.fg_1 });
+        const title = try ui.text(cx, "我的笔记", .{ .font_size = 14, .font_weight = 600, .color = colors.fg_1 });
         title.meta.ownership.meta.test_id = "notes.floating.title";
         title.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
         try header.appendChild(cx.allocator, title);

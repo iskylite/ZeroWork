@@ -109,7 +109,7 @@ test "notes floating quick creation reuses the same renderer in the tab and gate
     try std.testing.expect(transferred.dirty);
     try std.testing.expectEqualStrings("保存失败时保留这行", transferred.body_md);
     try std.testing.expectEqual(session.Lifecycle.attached, app.sessions.queryState(owner).?.lifecycle);
-    try std.testing.expectEqualStrings("笔记", tab.titleSlice());
+    try std.testing.expectEqualStrings("我的笔记", tab.titleSlice());
     try std.testing.expect(tab.terminal == null and tab.runtime == null and tab.host_snapshot == null);
     try std.testing.expectEqualStrings("notes.workspace", notes_view.rootNode(tab.plugin_renderer.?).?.meta.ownership.meta.test_id.?);
 

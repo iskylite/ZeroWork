@@ -625,7 +625,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
           </g>
         </g>
         <g id="web.menu">
-          <title>网页操作</title>
+          <title>浏览器操作</title>
           <rect x="1389" y="78" width="28" height="28" fill="transparent" rx="14" />
           <use href="#web-more" x="1395" y="84" width="16" height="16" color="#5B5B65" />
         </g>

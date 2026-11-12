@@ -517,7 +517,7 @@ fn lifecycleSubject(invocation: host.Invocation, authorized: Authorized, buffer:
         .close_session => "关闭所列会话及其进程或连接；实际关闭前会再次核查影响。",
         .set_session_retention => std.fmt.bufPrint(buffer, "将本任务所列会话的保留方式改为：{s}；旧的自动关闭计划同时撤销。", .{retention}) catch "修改本任务工作会话的保留方式。",
         .add_group_member => "仅将所列会话加入此组；不会建立连接、执行命令或授权读取其他会话内容。",
-        .remove_group_member => "仅将所列会话移出此组，不关闭会话；会话组与当前 AI 对话保留。",
+        .remove_group_member => "将所列会话移出此组，会话继续运行。最后一个成员移出后，会话组自动关闭。",
         .rename_group => "修改当前组的显示名称；组身份、成员及执行授权保持原来的边界。",
         .reconnect_session => "重新建立所列会话的连接；先前的执行不会恢复，也不会重新发送命令。",
         .disconnect_session => "断开所列会话的连接并保留历史，不自动重连。",

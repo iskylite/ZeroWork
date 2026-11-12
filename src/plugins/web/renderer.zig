@@ -96,6 +96,8 @@ const View = struct {
     feedback_open: *ui.Signal(bool) = undefined,
     feedback_text: *ui.Node = undefined,
     route_text: *ui.Node = undefined,
+    route_status: *ui.Node = undefined,
+    route_endpoint: *ui.Node = undefined,
     edit_title: *ui.Signal([]const u8) = undefined,
     edit_url: *ui.Signal([]const u8) = undefined,
     edit_name: Input = undefined,
@@ -296,7 +298,17 @@ const View = struct {
         else
             "输入网址";
         setText(cx, self.state_title, heading);
-        const detail = state.error_message orelse if (!disconnected and !failed and !connecting and state.pending_url == null and state.current_url == null)
+        var path: std.Io.Writer.Allocating = .init(cx.allocator);
+        defer path.deinit();
+        if (connecting and state.error_message == null) {
+            for (state.hops, 0..) |hop, index| {
+                if (index != 0) path.writer.writeAll(" → ") catch break;
+                path.writer.writeAll(hop.name) catch break;
+            }
+        }
+        const detail = state.error_message orelse if (connecting)
+            path.written()
+        else if (!disconnected and !failed and state.pending_url == null and state.current_url == null)
             "在地址栏输入网址，或选择书签。"
         else
             "";
@@ -308,6 +320,18 @@ const View = struct {
 
     fn projectRoute(self: *View) void {
         const state = self.snapshot orelse return;
+        const cx = self.request.cx;
+        show(self.route_status, state.forwarding != null);
+        if (state.forwarding) |forwarding| setText(cx, self.route_status, forwardingStatus(forwarding).label);
+        const port = if (state.forwarding) |forwarding| switch (forwarding) {
+            .listening => |port| port,
+            else => null,
+        } else null;
+        show(self.route_endpoint, port != null);
+        if (port) |value| {
+            var buffer: [32]u8 = undefined;
+            setText(cx, self.route_endpoint, std.fmt.bufPrint(&buffer, "SOCKS5 · 127.0.0.1:{d}", .{value}) catch unreachable);
+        }
         if (state.route_mode == .direct) {
             setText(self.request.cx, self.route_text, "直接连接");
             return;
@@ -451,13 +475,24 @@ const View = struct {
 
     fn status(raw: *anyopaque) contract.ConnectionStatus {
         const self: *View = @ptrCast(@alignCast(raw));
-        const state = self.snapshot orelse return .{ .state = .connecting, .label = "准备网页连接" };
+        const state = self.snapshot orelse return .{ .state = .connecting, .label = "准备浏览器连接" };
+        if (state.forwarding) |forwarding| return forwardingStatus(forwarding);
         return switch (state.path) {
             .idle => .{ .state = .connecting, .label = "等待网址" },
             .connecting => .{ .state = .connecting, .label = "正在连接 SSH" },
-            .ready => .{ .state = .online, .label = if (state.route_mode == .ssh) "SSH 转发" else "直接连接" },
+            .ready => .{ .state = .online, .label = "直接连接" },
             .disconnected => .{ .state = .degraded, .label = "SSH 转发已断开" },
             .closed => .{ .state = .ended, .label = "连接已关闭" },
+        };
+    }
+
+    fn forwardingStatus(forwarding: api.Forwarding) contract.ConnectionStatus {
+        return switch (forwarding) {
+            .idle => .{ .state = .connecting, .label = "SSH 转发未启动" },
+            .connecting => .{ .state = .connecting, .label = "正在连接 SSH" },
+            .listening => .{ .state = .online, .label = "SSH 转发已就绪" },
+            .stopping => .{ .state = .connecting, .label = "正在关闭 SSH 转发" },
+            .disconnected => .{ .state = .degraded, .label = "SSH 转发已断开" },
         };
     }
 
@@ -550,10 +585,27 @@ const View = struct {
     }
 
     fn showDetails(self: *View) void {
+        const anchor = if (self.route_button.isDisplayedInTree()) self.route_button else self.more_button;
+        self.openRouteDetails(anchor);
+    }
+
+    fn showForwardingDetails(raw: *anyopaque, anchor: *ui.Node) void {
+        const self: *View = @ptrCast(@alignCast(raw));
+        self.openRouteDetails(anchor);
+    }
+
+    fn forwardingDetailsOpen(raw: *anyopaque) bool {
+        const self: *View = @ptrCast(@alignCast(raw));
+        return self.active and !self.closed and self.route_open.peek();
+    }
+
+    fn openRouteDetails(self: *View, anchor: *ui.Node) void {
+        if (self.closed or !self.active) return;
         self.more_open.set(false);
-        self.popup_anchor = if (self.route_button.isDisplayedInTree()) self.route_button else self.more_button;
+        self.popup_anchor = anchor;
         self.projectRoute();
         self.route_open.set(true);
+        self.request.cx.requestRedraw();
     }
 
     fn mutate(self: *View, mutation: books.Mutation) !void {
@@ -770,6 +822,8 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
         .unmount = View.unmount,
         .connection_status = View.status,
         .show_connection_details = View.showDetailsRaw,
+        .show_forwarding_details = View.showForwardingDetails,
+        .forwarding_details_open = View.forwardingDetailsOpen,
         .focus_address = View.focusAddressRaw,
     } };
 }
@@ -801,11 +855,10 @@ fn buildToolbar(self: *View) !void {
     self.address = try ui.widgets.Input(.{
         .value = self.address_text,
         .placeholder = if (self.preset) "" else "输入网址，例如 https://intranet.example.com",
-        .readonly = self.preset,
         .growable = true,
         .embedded = true,
         .on_change = cx.on(View, self, View.addressChanged),
-        .on_submit = if (self.preset) null else cx.on(View, self, View.navigate),
+        .on_submit = cx.on(View, self, View.navigate),
     }).mountResult(scope, cx);
     self.address.node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 32 } });
     self.address.input_container.setStyleInline(cx.allocator, .{ .min_width = 0, .height = .{ .px = 32 } });
@@ -830,7 +883,7 @@ fn buildToolbar(self: *View) !void {
         control.* = try bookmarkControl(self, scope, self.scroll.content, index, true);
     show(self.strip, false);
 
-    self.more_button = try iconButton(cx, scope, "web.menu", "网页操作", ui.icons.ellipsis, false, @as(?ui.Color, null), cx.on(View, self, View.toggleMore));
+    self.more_button = try iconButton(cx, scope, "web.menu", "浏览器操作", ui.icons.ellipsis, false, @as(?ui.Color, null), cx.on(View, self, View.toggleMore));
     try self.toolbar.appendChild(cx.allocator, self.more_button);
 }
 
@@ -975,6 +1028,11 @@ fn buildPopups(self: *View) !void {
     const route = try makePopup(self, "web.route.popup", self.route_open, anchor, 326, null);
     route.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 8, .padding = ui.Padding.all(10) });
     try route.content.appendChild(cx.allocator, try caption(cx, "连接路径", 14, 650, false));
+    self.route_status = try caption(cx, "", 13, 400, false);
+    try route.content.appendChild(cx.allocator, self.route_status);
+    self.route_endpoint = try caption(cx, "", 13, 400, false);
+    self.route_endpoint.meta.ownership.meta.test_id = "web.route.endpoint";
+    try route.content.appendChild(cx.allocator, self.route_endpoint);
     self.route_text = try caption(cx, "", 13, 400, false);
     try route.content.appendChild(cx.allocator, self.route_text);
 

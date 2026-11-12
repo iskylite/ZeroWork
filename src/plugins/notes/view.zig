@@ -36,7 +36,12 @@ const TreeNote = struct { key: model.NoteKey, folder: ?model.FolderId, title: []
 const MoreMenu = struct { button: *ui.Node, open: *ui.Signal(bool), wrapper: *ui.Node };
 const Card = enum { none, tree, outline, search };
 const BodyMode = struct { key: model.NoteKey, read_only: bool, source: bool, can_lock: bool };
-const BlockRow = struct { height: f32, top: f32 = 0, rendered: ?*RenderedBlock = null };
+const BlockRow = struct {
+    height: f32,
+    top: f32 = 0,
+    rendered: ?*RenderedBlock = null,
+    image_size: ?struct { width: f32, height: f32 } = null,
+};
 const RenderedBlock = struct {
     index: usize,
     node: *ui.Node,
@@ -44,7 +49,7 @@ const RenderedBlock = struct {
     edit: ?*Click = null,
     image: ?*editor_images.Image = null,
 };
-const EditorRow = struct { node: *ui.Node, scope: *ui.Scope };
+const EditorRow = struct { node: *ui.Node, scope: *ui.Scope, image_revision: ?u64 = null };
 const RenderCounts = struct { layouts: usize = 0, parses: usize = 0, mounts: usize = 0, decodes: usize = 0, redraws: usize = 0 };
 const ImportFeedback = union(enum) { idle, running, failed: anyerror };
 const ImportNotice = struct { root: *ui.Node, message: *ui.Node, retry: *ui.Node, cancel_label: *ui.Signal([]const u8) };
@@ -112,9 +117,9 @@ const View = struct {
     body_scroll: ui.widgets.ScrollAreaResult = undefined,
     body_mode: ?BodyMode = null,
     blocks_host: ?*ui.Node = null,
-    append_button: ?*ui.Node = null,
     blocks_text: ?[]u8 = null,
     block_ranges: []editor.Block = &.{},
+    image_blocks: []usize = &.{},
     block_rows: []BlockRow = &.{},
     rendered_blocks: std.ArrayList(*RenderedBlock) = .empty,
     editing_row: ?EditorRow = null,
@@ -131,6 +136,7 @@ const View = struct {
     manager: *management.Manager = undefined,
     texture_backend: ?frames.Backend = null,
     images: std.ArrayList(*editor_images.Image) = .empty,
+    line_images: std.ArrayList(ui.widgets.input.TextareaLineImage) = .empty,
     image_poll_timer: ?u64 = null,
     image_button: *ui.Node = undefined,
     image_disabled: *ui.Signal(bool),
@@ -863,7 +869,18 @@ const View = struct {
             self.import_waiting_for_editor = false;
             self.startImport() catch |err| self.importFailed(err);
         }
-        if (!self.search_open and self.updateImages()) changed = true;
+        if (!self.search_open) {
+            const visible_images = self.updateEditorImageBlocks() catch |err| blk: {
+                self.showError(err);
+                break :blk false;
+            };
+            if (visible_images) changed = true;
+            if (self.updateImages()) changed = true;
+            if (self.syncEditorLineImages() catch |err| blk: {
+                self.showError(err);
+                break :blk false;
+            }) changed = true;
+        }
         return if (changed) .needs_layout else .done;
     }
 
@@ -1471,11 +1488,12 @@ const View = struct {
         self.blocks_text = null;
         a.free(self.block_ranges);
         self.block_ranges = &.{};
+        a.free(self.image_blocks);
+        self.image_blocks = &.{};
         a.free(self.block_rows);
         self.block_rows = &.{};
         self.rendered_blocks.clearRetainingCapacity();
         self.blocks_host = null;
-        self.append_button = null;
         self.editing_row = null;
     }
 
@@ -1485,6 +1503,7 @@ const View = struct {
         self.images.clearRetainingCapacity();
         self.resetBlockCache();
         self.body_mode = null;
+        self.body_scroll.container.setStyle(self.cx.allocator, .cursor, .inherit);
         self.title = null;
         self.title_label = null;
         self.clearEditorState();
@@ -1562,16 +1581,12 @@ const View = struct {
                 const host = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 0 }, .flex_shrink = 0, .margin = .{ .top = if (self.compact == true) 32 else 24 } }, .{});
                 try self.body_content.appendChild(a, host);
                 self.blocks_host = host;
-                if (!mode.read_only) {
-                    const button = try self.actionButton(scope, .append_block, "编辑正文", null, false, "notes.editor.append");
-                    try self.body_content.appendChild(a, button);
-                    self.append_button = button;
-                }
                 self.block_width = self.bodyWidth();
                 self.block_compact = self.compact == true;
                 self.block_theme = self.cx.theme_version;
             }
             self.body_mode = mode;
+            if (!mode.read_only and !mode.source) self.body_scroll.container.setStyle(self.cx.allocator, .cursor, .text);
         }
         if (self.title_label) |label| {
             if (!std.mem.eql(u8, label.getText().?.content, title)) try label.setTextContent(self.cx.allocator, title);
@@ -1582,7 +1597,6 @@ const View = struct {
             } else {
                 self.removeEditorRow();
                 try self.updateBlockContent(text);
-                if (self.append_button) |button| button.setDisplay(.flex);
             }
         }
         if (self.editor_offset) |offset| if (self.input) |input| {
@@ -1630,6 +1644,32 @@ const View = struct {
         }
     }
 
+    fn clickBodyBackground(self: *View) void {
+        const mode = self.body_mode orelse return;
+        if (mode.read_only or mode.source or self.pending != null or !self.acceptsNewEdits()) return;
+        const x = self.cx.mouse_x;
+        const y = self.cx.mouse_y;
+        const viewport = self.body_scroll.container.globalRect();
+        if (!viewport.contains(x, y) or x > viewport.x + viewport.w - 12) return;
+        if (self.title) |title| if (title.node.globalRect().contains(x, y)) return;
+        if (self.input) |input| {
+            if (input.wrapper.globalRect().contains(x, y) or input.state.imeIsComposing()) return;
+            if (self.import_notice) |notice| if (notice.root.globalRect().contains(x, y)) return;
+            const caret: u32 = @intCast(input.state.getText().len);
+            if (input.state.setAccessibilitySelection(caret, caret)) self.cx.setFocus(input.input);
+            return;
+        }
+        for (self.images.items) |image| if (image.node.globalRect().contains(x, y)) return;
+        const host = self.blocks_host orelse return;
+        const top = y - host.globalRect().y;
+        var index = self.blockAt(top);
+        if (index < self.block_ranges.len and top > self.block_rows[index].top + self.blockHeight(index) + block_gap / 2) index += 1;
+        if (index == self.block_ranges.len) return self.enqueue(.append_block);
+        const range = self.block_ranges[index];
+        const offset = if (top < self.block_rows[index].top) 0 else range.end - range.start;
+        self.enqueue(.{ .begin_block = .{ .range = range, .offset = offset } });
+    }
+
     fn bodyWidth(self: *View) f32 {
         const padding = self.body.style.padding;
         return @max(1, self.body_content.globalRect().w - padding.left - padding.right);
@@ -1656,6 +1696,12 @@ const View = struct {
             const matched = if (old_text) |old| try editor.matchBlocks(a, old, self.block_ranges, next_text, ranges) else null;
             defer if (matched) |indices| a.free(indices);
 
+            var image_blocks: std.ArrayList(usize) = .empty;
+            defer image_blocks.deinit(a);
+            for (ranges, 0..) |range, i| {
+                if (range.kind == .image) try image_blocks.append(a, i);
+            }
+            const image_indices = try image_blocks.toOwnedSlice(a);
             next_anchor = null;
             for (rows, ranges, 0..) |*row, range, i| {
                 if (matched) |indices| if (indices[i]) |old_index| {
@@ -1677,7 +1723,10 @@ const View = struct {
             self.blocks_text = next_text;
             self.block_ranges = ranges;
             self.block_rows = rows;
+            a.free(self.image_blocks);
+            self.image_blocks = image_indices;
         }
+        if (self.editing_row != null) return;
         self.positionBlocks();
         if (next_anchor) |index| {
             self.restoreBlockTop(self.block_rows[index].top + @min(anchor_offset, self.blockHeight(index)), old_top);
@@ -1986,9 +2035,70 @@ const View = struct {
         return false;
     }
 
+    fn updateEditorImageBlocks(self: *View) !bool {
+        const row = if (self.editing_row) |*value| value else return false;
+        if (self.texture_backend == null) return false;
+        const input = self.input.?.state;
+        const revision = input.doc.revision;
+        if (row.image_revision != revision) {
+            try self.updateBlockContent(input.getText());
+            row.image_revision = revision;
+        }
+        const visible = input.visibleSourceOffsets();
+        var changed = false;
+        var i = self.rendered_blocks.items.len;
+        while (i > 0) {
+            i -= 1;
+            const rendered = self.rendered_blocks.items[i];
+            const image = rendered.image orelse continue;
+            if (image == self.viewed_image) continue;
+            const range = self.block_ranges[rendered.index];
+            if (range.start >= visible.start and range.start <= visible.end) continue;
+            self.block_rows[rendered.index].rendered = null;
+            self.removeBlock(rendered);
+            changed = true;
+        }
+        const first = std.sort.partitionPoint(editor.Block, self.block_ranges, visible.start, struct {
+            fn before(start: usize, range: editor.Block) bool {
+                return range.start < start;
+            }
+        }.before);
+        for (self.block_ranges[first..], first..) |range, index| {
+            if (range.start > visible.end) break;
+            if (range.kind != .image or self.block_rows[index].rendered != null) continue;
+            try self.showBlock(self.blocks_host.?, index);
+            changed = true;
+        }
+        return changed;
+    }
+
+    fn syncEditorLineImages(self: *View) !bool {
+        if (self.editing_row == null or self.texture_backend == null) return false;
+        const width = self.bodyWidth();
+        self.line_images.clearRetainingCapacity();
+        for (self.image_blocks) |index| {
+            const range = self.block_ranges[index];
+            const row = &self.block_rows[index];
+            const image = if (row.rendered) |rendered| rendered.image else null;
+            if (image) |value| if (value.decoded.width != 0) {
+                row.image_size = .{ .width = @floatFromInt(value.decoded.width), .height = @floatFromInt(value.decoded.height) };
+            };
+            const size = row.image_size orelse continue;
+            const scale = @min(1, width / size.width);
+            try self.line_images.append(self.cx.allocator, .{
+                .offset = range.start,
+                .texture = if (image) |value| value.texture else null,
+                .width = size.width * scale,
+                .height = size.height * scale,
+            });
+        }
+        return try self.input.?.state.setLineImages(self.line_images.items);
+    }
+
     fn updateImages(self: *View) bool {
         const editor_updated = self.updateEditorImage();
-        if (self.images.items.len == 0 or self.input != null) return editor_updated;
+        if (self.images.items.len == 0) return editor_updated;
+        const in_editor = self.editing_row != null;
         const viewport = self.body_scroll.container.globalRect();
         const width = self.bodyWidth();
         if (viewport.h <= 0 or width <= 1) return editor_updated;
@@ -1996,14 +2106,14 @@ const View = struct {
         var used: usize = 0;
         for (self.images.items) |image| {
             const rect = image.node.globalRect();
-            if (rect.y + rect.h < viewport.y - 2 * viewport.h or rect.y > viewport.y + 3 * viewport.h) image.evict();
+            if (!in_editor and (rect.y + rect.h < viewport.y - 2 * viewport.h or rect.y > viewport.y + 3 * viewport.h)) image.evict();
             used += image.bytes();
             if (image.job != null) running += 1;
         }
         var changed = editor_updated;
         for (self.images.items) |image| {
             const rect = image.node.globalRect();
-            const visible = rect.y + rect.h >= viewport.y - viewport.h and rect.y <= viewport.y + 2 * viewport.h;
+            const visible = in_editor or (rect.y + rect.h >= viewport.y - viewport.h and rect.y <= viewport.y + 2 * viewport.h);
             const had_job = image.job != null;
             const before = image.bytes();
             if (image.tick(visible, width, running < 2, (96 * 1024 * 1024) -| used)) |updated| {
@@ -2103,8 +2213,6 @@ const View = struct {
         try self.body_content.appendChild(a, node);
         self.editing_row = .{ .node = node, .scope = scope };
         self.blocks_host.?.setDisplay(.none);
-        if (self.append_button) |button| button.setDisplay(.none);
-        for (self.images.items) |image| image.pause();
         self.scroll_restore = 0;
     }
 
@@ -2116,6 +2224,7 @@ const View = struct {
             .value = value,
             .rows = rows,
             .live_markdown = if (live) self.markdownOptions() else null,
+            .allow_line_images = live,
             .readonly = read_only,
             .disabled = self.edit_disabled,
             .borderless = true,
@@ -3063,6 +3172,7 @@ const View = struct {
         self.tree_actions.deinit(self.cx.allocator);
         self.collapsed_branches.deinit(self.cx.allocator);
         self.images.deinit(self.cx.allocator);
+        self.line_images.deinit(self.cx.allocator);
         self.cx.removeAfterLayoutHook(self);
         self.documents.releaseOwner(self.owner) catch |err| std.log.warn("notes release: {s}", .{@errorName(err)});
     }
@@ -3360,6 +3470,7 @@ pub fn mount(request: contract.ContentMount, store: *Store, documents: *sessions
 
     const body_scroll = try ui.widgets.ScrollArea(.{ .rubber_band_y = false }).mount(scope, cx);
     self.body_scroll = body_scroll;
+    body_scroll.container.behavior.events.on_click = cx.on(View, self, View.clickBodyBackground);
     body_scroll.container.meta.ownership.meta.test_id = "notes.document.scroll";
     body_scroll.content.style.flex_shrink = 0;
     self.body = try ui.box(cx, S.stack(18), .{});
@@ -3611,9 +3722,55 @@ test "notes renderer preserves the live Textarea and blocks navigation on save f
     try std.testing.expect(view.image_open.peek());
     try std.testing.expect(view.viewed_image == view.editor_image.?.image);
     view.clearEditorImage();
-    view.texture_backend = null;
+    for (0..100) |_| {
+        layoutTestFrames(cx);
+        if (view.line_images.items.len == 1 and view.line_images.items[0].texture != null) break;
+        try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    }
+    const virtual_rows = view.input.?.state.vl_state.?;
+    const inlineImageNode = struct {
+        fn find(rows: []*ui.Node) ?*ui.Node {
+            for (rows) |row| {
+                for (row.children.items) |child| {
+                    if (child.getImage() != null) return child;
+                }
+            }
+            return null;
+        }
+    }.find;
+    const image_node = inlineImageNode(virtual_rows.pool_nodes) orelse return error.TestExpectedEqual;
+    const image_id = image_node.id;
+    try std.testing.expectEqual(@as(u32, 1), image_node.getImage().?.texture_id);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), image_node.globalRect().h, 0.01);
     cx.setFocus(image_input);
+    const retained_image = view.images.items[0];
+    const decodes_before_edit = view.render_counts.decodes;
+    try std.testing.expect(view.input.?.state.setAccessibilitySelection(0, 0));
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectEqual(@as(usize, 1), view.input.?.state.line_images.items.len);
+    try std.testing.expectEqual(view.input.?.state.doc.revision, view.input.?.state.image_revision.?);
+    layoutTestFrames(cx);
+    try std.testing.expectEqual(retained_image, view.images.items[0]);
+    try std.testing.expectEqual(image_id, inlineImageNode(virtual_rows.pool_nodes).?.id);
+    cx.handleKeyDown(.delete, .{});
+    try std.testing.expectEqual(@as(usize, 1), view.input.?.state.line_images.items.len);
+    layoutTestFrames(cx);
+    try std.testing.expectEqual(retained_image, view.images.items[0]);
+    try std.testing.expectEqual(image_id, inlineImageNode(virtual_rows.pool_nodes).?.id);
+    try std.testing.expectEqual(decodes_before_edit, view.render_counts.decodes);
+    try std.testing.expectEqualStrings(image_text, view.input.?.state.getText());
+    // Keep the existing import/history assertions independent of this edit pair.
+    cx.handleKeyDown(.z, .{ .super = true });
+    cx.handleKeyDown(.z, .{ .super = true });
     try std.testing.expect(view.input.?.state.setAccessibilitySelection(@intCast(image_text.len), @intCast(image_text.len)));
+    layoutTestFrames(cx);
+    cx.handleKeyDown(.@"return", .{});
+    cx.advanceFrameClock();
+    cx.layout();
+    _ = cx.render();
+    try std.testing.expectEqual(@as(f32, 0), virtual_rows.scroll_state.scroll_y);
+    layoutTestFrames(cx);
+    cx.handleKeyDown(.z, .{ .super = true });
     cx.handleTextInput("图片后的正文");
     try std.testing.expect(std.mem.endsWith(u8, view.input.?.state.getText(), "\n\n图片后的正文"));
     cx.handleKeyDown(.z, .{ .super = true });
@@ -3623,6 +3780,9 @@ test "notes renderer preserves the live Textarea and blocks navigation on save f
     cx.handleKeyDown(.z, .{ .super = true, .shift = true });
     try std.testing.expectEqualStrings(image_text, (try documents.snapshot(view.lease.?)).body_md);
     cx.handleKeyDown(.z, .{ .super = true });
+    layoutTestFrames(cx);
+    try std.testing.expectEqual(@as(usize, 0), view.line_images.items.len);
+    view.texture_backend = null;
 
     try view.queueImport(.{ .clipboard = png });
     try std.testing.expectError(error.ImportInProgress, view.selectNote(first));
@@ -3769,8 +3929,14 @@ test "notes renderer preserves the live Textarea and blocks navigation on save f
     view.enqueue(.toggle_source);
     layoutTestFrames(cx);
     try std.testing.expect(!view.source_mode);
-    view.enqueue(.append_block);
+    const body_viewport = view.body_scroll.container.globalRect();
+    const blank_x = body_viewport.x + body_viewport.w / 2;
+    const blank_y = body_viewport.y + body_viewport.h - 24;
+    cx.handleMouseDown(blank_x, blank_y, .{});
+    cx.handleMouseUp(blank_x, blank_y);
     layoutTestFrames(cx);
+    try std.testing.expect(view.input != null);
+    try std.testing.expectEqual(view.input.?.input, cx.focus_manager.getFocused().?);
     const body_before_append = try a.dupe(u8, (try documents.snapshot(view.lease.?)).body_md);
     defer a.free(body_before_append);
     const suffix_start = body_before_append.len + 2;
