@@ -36,7 +36,7 @@ runs: for(const theme of ['dark','light','sauber'])for(const empty of (scope==='
   await key('escape');await absent('settings.panel');rec.checks.push({settings_size:size,viewport:vp.rect,footer:footer.rect,font_header:section.rect});
  }
  async function quick(size:string,keyboard:boolean){
-  if(keyboard)await key('k',{cmd:true});else await click('toolbar.quick_connect');await visible('quick.connect');await set('quick.query','Production');
+  if(keyboard)await key('p',{cmd:true});else await click('toolbar.quick_connect');await visible('quick.connect');await set('quick.query','Production');
   let panel=await visible('quick.connect'),input=await visible('quick.query');near(panel.rect.w,520,'quick saved width');near(panel.rect.h,306,'quick saved height');near(input.rect.w,488,'quick input width');near(input.rect.h,40,'quick input height');near(input.rect.x-panel.rect.x,16,'quick input x');near(input.rect.y-panel.rect.y,56,'quick input y');await absent('quick.clear');assert.equal((await query('quick.saved.row')).filter(shown).length,3);
   await capture(`${theme}-quick-saved-${size}`,['quick.connect','quick.query','quick.clear','quick.saved.row','quick.save','quick.submit']);
   await set('quick.query','no-such-host');panel=await visible('quick.connect');const clear=await visible('quick.clear'),submit=await visible('quick.submit');near(panel.rect.h,255,'quick no-match height');near(clear.rect.w,24,'clear width');near(clear.rect.h,24,'clear height');near(clear.rect.x-panel.rect.x,464,'clear x');near(clear.rect.y-panel.rect.y,64,'clear y');near(submit.rect.w,144,'submit width');near(submit.rect.h,34,'submit height');near(submit.rect.x-panel.rect.x,360,'submit x');near(submit.rect.y-panel.rect.y,203,'submit y');await absent('quick.save');

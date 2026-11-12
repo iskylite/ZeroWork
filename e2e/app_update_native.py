@@ -94,6 +94,28 @@ case('prepare-is-not-install-permission',vanished)
 def committed(c):
  c.prepare();c.commit();c.request('cancel');assert c.parent.poll() is None;c.exit_parent();r=c.stage('healthy');assert version(c.target)=='0.3.1';assert pathlib.Path(r['backup']).exists();assert r['decision']=='committed'
 case('commit-wins-late-cancel-and-healthy-start',committed)
+def delayed_healthy(c,restart=False):
+ c.env['ZW_UPDATE_TEST_READINESS_SECONDS']='.2'
+ c.prepare();c.commit();c.exit_parent();r=c.stage('readiness_unknown')
+ assert r['data_state']=='potentially_changed' and (c.txn/'data-may-change.json').exists()
+ if restart:
+  helper=c.processes[-1];helper.terminate();helper.wait(timeout=5);c.start()
+ for field,value in [('nonce','stale-nonce'),('pid',r['new_pid']+1),('birth',r['new_birth']+1)]:
+  receipt={'nonce':r['nonce'],'pid':r['new_pid'],'birth':r['new_birth'],'version':r['version']};receipt[field]=value
+  write(c.txn/'healthy.request',receipt);time.sleep(.15);assert record(c.txn)['stage']=='readiness_unknown'
+ (c.txn/'healthy.request').unlink()
+ c.newstop.touch();r=c.stage('healthy');assert version(c.target)=='0.3.1'
+ healthy=json.loads((c.txn/'healthy.request').read_bytes())
+ assert healthy['pid']==r['new_pid'] and healthy['birth']==r['new_birth'] and healthy['nonce']==r['nonce']
+case('late-authentication-can-complete-update',delayed_healthy,mode='delayed-healthy')
+case('restarted-helper-accepts-late-health-for-same-process',lambda c:delayed_healthy(c,True),mode='delayed-healthy')
+def delayed_gate(c):
+ c.env['ZW_UPDATE_TEST_STARTUP_SECONDS']='.2'
+ c.prepare();c.commit();c.exit_parent();r=c.stage('readiness_unknown')
+ assert r['data_state']=='unchanged' and not (c.txn/'data-may-change.json').exists()
+ c.newstop.touch();r=c.stage('healthy');assert r['data_state']=='potentially_changed'
+ assert version(c.target)=='0.3.1'
+case('late-startup-handshake-can-complete-update',delayed_gate,mode='delayed-gate')
 def restored(c):
  c.prepare();c.commit();c.exit_parent();r=c.stage('old_restored_verified');assert version(c.target)=='0.3.0-rc1';assert r['data_state']=='unchanged'
 case('launch-failure-restores-verified-old-app',restored,mode='early-crash')

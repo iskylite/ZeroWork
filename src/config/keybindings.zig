@@ -80,9 +80,10 @@ pub fn fromKey(key: anytype) KeyCode {
     return std.meta.stringToEnum(KeyCode, @tagName(key)) orelse .unknown;
 }
 
-pub const Action = enum { new_tab, close_tab, tab_1, tab_2, tab_3, tab_4, tab_5, tab_6, tab_7, tab_8, tab_9, previous_tab, next_tab, recent_tab, split_vertical, split_horizontal, copy, paste, search, completion, accept_completion, quick_connect, reconnect, sidebar, ai, upload, broadcast, notes_float, notes_directory };
+pub const Action = enum { new_tab, close_tab, tab_1, tab_2, tab_3, tab_4, tab_5, tab_6, tab_7, tab_8, tab_9, previous_tab, next_tab, recent_tab, split_vertical, split_horizontal, copy, paste, search, completion, accept_completion, quick_connect, reconnect, sidebar, ai, upload, broadcast, notes_float, notes_directory, previous_pane, next_pane };
 const action_count = @typeInfo(Action).@"enum".field_names.len;
 const notes_actions = [_]Action{ .notes_float, .notes_directory };
+const pane_actions = [_]Action{ .previous_pane, .next_pane };
 const unbound: Chord = .{ .key = .unknown, .command = false };
 pub const Chord = struct {
     key: KeyCode,
@@ -99,13 +100,27 @@ fn isNotesAction(action: Action) bool {
     return action == .notes_float or action == .notes_directory;
 }
 
+const layout_version = "2";
+const previous_defaults = [_]struct { action: Action, chord: Chord }{
+    .{ .action = .quick_connect, .chord = .{ .key = .k } },
+    .{ .action = .completion, .chord = .{ .key = .semicolon } },
+    .{ .action = .broadcast, .chord = .{ .key = .i, .shift = true } },
+};
+
+fn canBeUnbound(action: Action) bool {
+    return switch (action) {
+        .notes_float, .notes_directory, .quick_connect, .completion, .broadcast, .previous_pane, .next_pane => true,
+        else => false,
+    };
+}
+
 fn builtInChord(chord: Chord) bool {
     // Match the AppKit menu and native event pump, plus the workspace's
     // fixed actions and the notes editor's own save, search and undo keys.
     if (chord.key == .q or chord.key == .grave or (chord.key == .w and chord.shift)) return true;
     if (chord.option) return chord.key == .h and !chord.shift;
     if (chord.shift) return switch (chord.key) {
-        .b, .n, .r, .s, .z => true,
+        .n, .r, .s, .z => true,
         else => false,
     };
     return switch (chord.key) {
@@ -120,6 +135,7 @@ pub const rows = [_]Row{
     .{ .label = "上一个 / 下一个", .actions = &.{ .previous_tab, .next_tab } },
     .{ .label = "最近使用的页签", .actions = &.{.recent_tab} },
     .{ .label = "分栏", .actions = &.{ .split_vertical, .split_horizontal } },
+    .{ .label = "上一个 / 下一个分栏", .actions = &pane_actions },
     .{ .label = "复制 / 粘贴", .actions = &.{ .copy, .paste } },
     .{ .label = "搜索当前终端", .actions = &.{.search} },
     .{ .label = "补全菜单 / 采纳", .actions = &.{ .completion, .accept_completion } },
@@ -164,10 +180,10 @@ pub const Map = struct {
     /// Append this section to the same config.toml used by the settings host.
     pub fn format(self: Map, buffer: []u8) std.Io.Writer.Error![]const u8 {
         var writer = std.Io.Writer.fixed(buffer);
-        try writer.writeAll("[keys]\n");
+        try writer.writeAll("[keys]\nlayout_version = " ++ layout_version ++ "\n");
         for (self.chords, 0..) |chord, i| {
             const action: Action = @fromBackingInt(@intCast(i));
-            if (chord.key == .unknown and isNotesAction(action)) {
+            if (chord.key == .unknown and canBeUnbound(action)) {
                 try writer.print("{s} = \"unbound\"\n", .{@tagName(action)});
                 continue;
             }
@@ -178,6 +194,7 @@ pub const Map = struct {
     pub fn parse(source: []const u8) !Map {
         var map: Map = .{};
         var active = false;
+        var current_layout = false;
         var seen: [action_count]bool = @splat(false);
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |raw| {
@@ -190,13 +207,18 @@ pub const Map = struct {
             if (!active) continue;
             const split = std.mem.indexOfScalar(u8, line, '=') orelse return error.InvalidFormat;
             const name = std.mem.trim(u8, line[0..split], " ");
+            const quoted = std.mem.trim(u8, line[split + 1 ..], " ");
+            if (std.mem.eql(u8, name, "layout_version")) {
+                if (current_layout or !std.mem.eql(u8, quoted, layout_version)) return error.InvalidFormat;
+                current_layout = true;
+                continue;
+            }
             const action = std.meta.stringToEnum(Action, name) orelse return error.UnknownAction;
             if (seen[@backingInt(action)]) return error.DuplicateAction;
             seen[@backingInt(action)] = true;
-            const quoted = std.mem.trim(u8, line[split + 1 ..], " ");
             if (quoted.len < 2 or quoted[0] != '"' or quoted[quoted.len - 1] != '"') return error.InvalidFormat;
             const val = quoted[1 .. quoted.len - 1];
-            if (isNotesAction(action) and std.mem.eql(u8, val, "unbound")) {
+            if (canBeUnbound(action) and std.mem.eql(u8, val, "unbound")) {
                 map.chords[@backingInt(action)] = unbound;
                 continue;
             }
@@ -208,8 +230,21 @@ pub const Map = struct {
             if (chord.key == .unknown) return error.ReservedKey;
             map.chords[@backingInt(action)] = chord;
         }
+        // Older settings serialized every default. Upgrade those bindings while
+        // keeping customized chords and any keys they already occupy.
+        for (previous_defaults) |previous| {
+            const index = @backingInt(previous.action);
+            if (seen[index] and (current_layout or !map.chords[index].eql(previous.chord))) continue;
+            const preferred = defaults()[index];
+            map.chords[index] = if (preferred.key == .unknown or map.conflict(previous.action, preferred) == null)
+                preferred
+            else if (map.conflict(previous.action, previous.chord) == null)
+                previous.chord
+            else
+                unbound;
+        }
         // Existing custom chords take precedence over newly introduced defaults.
-        for (notes_actions) |action| {
+        for (notes_actions ++ pane_actions) |action| {
             const index = @backingInt(action);
             if (!seen[index] and map.conflict(action, map.chords[index]) != null) {
                 map.chords[index] = unbound;
@@ -243,6 +278,7 @@ pub const Map = struct {
 fn symbol(key: KeyCode) []const u8 {
     return switch (key) {
         .tab => "⇥",
+        .left => "←",
         .right => "→",
         .left_bracket => "[",
         .right_bracket => "]",
@@ -277,7 +313,39 @@ fn symbol(key: KeyCode) []const u8 {
     };
 }
 fn defaults() [action_count]Chord {
-    return .{ .{ .key = .t }, .{ .key = .w }, .{ .key = .@"1" }, .{ .key = .@"2" }, .{ .key = .@"3" }, .{ .key = .@"4" }, .{ .key = .@"5" }, .{ .key = .@"6" }, .{ .key = .@"7" }, .{ .key = .@"8" }, .{ .key = .@"9" }, .{ .key = .left_bracket, .shift = true }, .{ .key = .right_bracket, .shift = true }, .{ .key = .tab, .command = false, .control = true }, .{ .key = .d }, .{ .key = .d, .shift = true }, .{ .key = .c }, .{ .key = .v }, .{ .key = .f }, .{ .key = .semicolon }, .{ .key = .right, .command = false }, .{ .key = .k }, .{ .key = .r }, .{ .key = .b }, .{ .key = .j }, .{ .key = .u }, .{ .key = .i, .shift = true }, .{ .key = .n, .option = true }, .{ .key = .b, .option = true } };
+    return .{
+        .{ .key = .t },
+        .{ .key = .w },
+        .{ .key = .@"1" },
+        .{ .key = .@"2" },
+        .{ .key = .@"3" },
+        .{ .key = .@"4" },
+        .{ .key = .@"5" },
+        .{ .key = .@"6" },
+        .{ .key = .@"7" },
+        .{ .key = .@"8" },
+        .{ .key = .@"9" },
+        .{ .key = .left_bracket, .shift = true },
+        .{ .key = .right_bracket, .shift = true },
+        .{ .key = .tab, .command = false, .control = true },
+        .{ .key = .d },
+        .{ .key = .d, .shift = true },
+        .{ .key = .c },
+        .{ .key = .v },
+        .{ .key = .f },
+        .{ .key = .i },
+        .{ .key = .right, .command = false },
+        .{ .key = .p },
+        .{ .key = .r },
+        .{ .key = .b },
+        .{ .key = .j },
+        .{ .key = .u },
+        unbound,
+        .{ .key = .n, .option = true },
+        .{ .key = .b, .option = true },
+        .{ .key = .left, .option = true },
+        .{ .key = .right, .option = true },
+    };
 }
 
 test "notes shortcuts preserve existing custom chords when reading legacy maps" {
@@ -306,14 +374,30 @@ test "notes shortcuts reject native and fixed commands while accepting unused ch
     for ([_]Chord{
         .{ .key = .n },                 .{ .key = .s },                                .{ .key = .z, .shift = true },
         .{ .key = .q, .option = true }, .{ .key = .w, .shift = true, .option = true }, .{ .key = .grave, .option = true },
-        .{ .key = .h, .option = true }, .{ .key = .b, .shift = true },
+        .{ .key = .h, .option = true },
     }) |chord| {
         try std.testing.expectError(error.BuiltInKeyReserved, map.set(.notes_float, chord));
         try std.testing.expectError(error.BuiltInKeyReserved, map.set(.notes_directory, chord));
     }
     try map.set(.notes_float, .{ .key = .z, .option = true });
+    try map.set(.notes_directory, .{ .key = .b, .shift = true });
     try std.testing.expectError(error.BuiltInKeyReserved, Map.parse("[keys]\nnotes_directory = \"cmd+s\"\n"));
     try std.testing.expectError(error.InvalidKey, Map.parse("[keys]\nai = \"unbound\"\n"));
+}
+
+test "shortcut layout updates previous defaults and preserves customized bindings" {
+    const legacy = "[keys]\nquick_connect = \"cmd+k\"\ncompletion = \"cmd+semicolon\"\nbroadcast = \"cmd+shift+i\"\n";
+    try std.testing.expectEqualDeep(Map{}, try Map.parse(legacy));
+    var custom = try Map.parse("[keys]\nsearch = \"cmd+p\"\ncompletion = \"cmd+shift+space\"\nbroadcast = \"cmd+alt+i\"\n");
+    try std.testing.expectEqual(KeyCode.k, custom.get(.quick_connect).key);
+    try std.testing.expectEqual(KeyCode.p, custom.get(.search).key);
+    try std.testing.expect(custom.get(.completion).eql(.{ .key = .space, .shift = true }));
+    try std.testing.expect(custom.get(.broadcast).eql(.{ .key = .i, .option = true }));
+    try custom.set(.completion, .{ .key = .semicolon });
+    try custom.set(.broadcast, .{ .key = .i, .shift = true });
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectEqualDeep(custom, try Map.parse(try custom.format(&buffer)));
+    try std.testing.expectEqualDeep(Map{}, try Map.parse(try (Map{}).format(&buffer)));
 }
 
 test "pure shortcut map parses entire config and routes foreign enum by tag" {
@@ -325,4 +409,17 @@ test "pure shortcut map parses entire config and routes foreign enum by tag" {
     try std.testing.expect((Map{}).match(ForeignKey.c, Mods{ .ctrl = true }) == null);
     try std.testing.expectEqual(Action.search, (Map{}).match(ForeignKey.f, Mods{ .super = true }).?);
     try std.testing.expectError(error.Conflict, Map.parse("[keys]\nsearch = \"cmd+j\"\n"));
+}
+
+test "pane focus defaults respect existing custom arrow bindings" {
+    const Mods = struct { super: bool = true, ctrl: bool = false, shift: bool = false, alt: bool = true };
+    const factory: Map = .{};
+    try std.testing.expectEqual(Action.previous_pane, factory.match(KeyCode.left, Mods{}));
+    try std.testing.expectEqual(Action.next_pane, factory.match(KeyCode.right, Mods{}));
+    const legacy = try Map.parse("[keys]\nsearch = \"cmd+alt+left\"\n");
+    try std.testing.expectEqual(Action.search, legacy.match(KeyCode.left, Mods{}));
+    try std.testing.expectEqual(KeyCode.unknown, legacy.get(.previous_pane).key);
+    try std.testing.expectEqual(Action.next_pane, legacy.match(KeyCode.right, Mods{}));
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectEqualDeep(legacy, try Map.parse(try legacy.format(&buffer)));
 }

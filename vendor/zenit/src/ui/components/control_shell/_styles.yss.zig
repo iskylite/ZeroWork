@@ -1,3 +1,4 @@
+// GENERATED FILE, do not edit: generated from styles.yss; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! ControlShell styles: size recipe and variant coloring (YSS, shared source for
 //! Button/Input/Select/DatePicker),
 //! plus theme-computed metrics and cross-dimension geometry (literal Zig: line_height = font_size *
@@ -140,4 +141,4 @@ pub const ControlShellRecipe = recipe_mod.recipe(struct {
     }
 });
 
-//# yix-map src/ui/components/control_shell/styles.yss
+//# yix-map styles.yss

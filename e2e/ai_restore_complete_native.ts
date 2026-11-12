@@ -35,15 +35,32 @@ const flat=(n:any):any[]=>Array.isArray(n)?n.flatMap(flat):n?[n,...(n.children??
 const text=(n:any)=>flat(n).map(n=>n.text??'').join(' ');
 const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,20000);
 const report:any={status:'running',isolated,checks:[]};
-const tokenValues=async()=>(await h.query('ai.turn.tokens')).filter(shown).map((n:any)=>text(n));
 const click=async(id:string)=>{report.last_action=id;await visible(id);assert((await h.clickTestId(id)).ok,id)};
+async function tokenValues() {
+ const values: string[] = [];
+ for (const trigger of (await h.query('ai.turn.tokens')).filter(shown)) {
+  const {x, y, w, h: height} = trigger.rect;
+  assert((await h.clickAt(x + w / 2, y + height / 2)).ok);
+  values.push(text(await visible('ai.turn.usage.total')));
+  await h.key('escape');
+  await h.waitFor(async () => !(await h.query('ai.turn.usage.details')).some(shown) || null, 5000);
+ }
+ return values;
+}
 async function stable(count:number){await h.waitFor(async()=>{const n=(await h.query('ai.turn.complete')).filter(shown);return n.length===count&&n||null},20000);await h.sleep(400);assert(!text(await h.tree()).includes('InvalidUtf8'),'no freed-catalog UTF8 error after completion');}
 async function send(value:string,count:number){await click('ai.prompt');await h.type_(value);await click('ai.send');await stable(count)}
 async function confirmIfNeeded(){await h.sleep(150);if((await h.query('ai.session.close.accept')).some(shown))await click('ai.session.close.accept')}
-async function full(count:number,contains:string[]){await stable(count);const users=(await h.query('ai.message.user.text')).filter(shown);assert.equal(users.length,count);for(const s of contains)assert(text(users).includes(s));assert.equal((await h.query('ai.turn.tokens')).filter(shown).length,count);assert.equal((await h.query('ai.step_group')).filter(shown).length,count);}
+async function full(count: number, contains: string[]) {
+ await stable(count);
+ const users = (await h.query('ai.message.user.text')).filter(shown);
+ assert.equal(users.length, count, 'visible user messages');
+ for (const value of contains) assert(text(users).includes(value));
+ assert.equal((await h.query('ai.turn.tokens')).filter(shown).length, count, 'visible usage details actions');
+ assert.equal((await h.query('ai.turn.process.toggle')).filter(shown).length, count, 'visible process disclosure actions');
+}
 try{
  await h.waitForServerReady(60000);await h.resizeWindow(1280,960);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
- await send('FIRST 检查当前终端 🧑‍💻',1);await full(1,['FIRST']);const originalTokens=(await tokenValues())[0];assert(!originalTokens.includes('未返回'));report.checks.push('A fresh conversation completes with user, reasoning/tool group and usage; idle updates do not read freed tools');
+ await send('FIRST 检查当前终端 🧑‍💻',1);await full(1,['FIRST']);const originalTokens=(await tokenValues())[0];assert(originalTokens.includes('2.6K Token'));report.checks.push('A fresh conversation completes with user, reasoning/tool group and usage; idle updates do not read freed tools');
  await click('ai.collapse');await click('toolbar.new_session');await click('session.menu.local');await visible('terminal.surface');await click('toolbar.ai');await send('NEW_CONNECTION 新连接问答',1);report.checks.push('A second connection and new AI conversation also complete without InvalidUtf8');
  await click('ai.sessions');await click('ai.session.copy_use.1');await confirmIfNeeded();await full(1,['FIRST']);assert.equal((await tokenValues())[0],originalTokens);
  assert(!text(await h.query('ai.message.user.text')).includes('NEW_CONNECTION'));

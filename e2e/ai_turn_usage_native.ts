@@ -137,7 +137,7 @@ try {
     finishThinking();
     report.checks.push('Streamed thinking appears on demand and collapses again while the provider is still streaming');
     await visible('ai.turn.complete');
-    assert.equal(text(await visible('ai.turn.tokens')), '本回合用量 2.6K');
+    assert.equal(text(await visible('ai.turn.tokens')), '用量明细');
     assert((await h.screenshot(join(out, 'turn-usage.png'))).ok);
     await click('ai.turn.tokens');
     const details = await visible('ai.turn.usage.details');
@@ -151,6 +151,13 @@ try {
     assert((await h.screenshot(join(out, 'turn-usage-details.png'))).ok);
     await h.key('escape');
     await h.waitFor(async () => !(await h.query('ai.turn.usage.details')).some(shown) || null, 5000);
+    await click('ai.composer.usage');
+    const context = await visible('ai.usage.menu');
+    assert(text(context).includes('基准输入（实测）'));
+    assert.equal(text(await visible('ai.usage.part.value')), '1.4K');
+    assert(!text(await visible('ai.usage.summary')).includes('2.6K'));
+    await h.key('escape');
+    await h.waitFor(async () => !(await h.query('ai.usage.menu')).some(shown) || null, 5000);
     await h.resizeWindow(860, 480);
     await click('ai.turn.tokens');
     const compact = await visible('ai.turn.usage.details');
@@ -159,11 +166,11 @@ try {
     await h.sleep(300);
     assert((await h.screenshot(join(out, 'turn-usage-compact.png'))).ok);
     await h.key('escape');
-    report.checks.push('Two requests accumulate usage in one turn, including shared history; the card opens and fits both window sizes');
+    report.checks.push('Two requests report 2.6K cumulative usage while the current context uses only the 1.4K latest input as its baseline');
     await click('ai.prompt'); await h.type_('服务商不返回用量'); await click('ai.send');
     await h.waitFor(async () => (await h.query('ai.turn.complete')).filter(shown).length === 2 || null, 15000);
     const usages = (await h.query('ai.turn.tokens')).filter(shown);
-    assert.equal(text(usages.at(-1)), '本回合用量未返回');
+    assert.equal(text(usages.at(-1)), '用量明细');
     const {x, y, w, h: height} = usages.at(-1).rect;
     assert((await h.clickAt(x + w / 2, y + height / 2)).ok);
     const missing = await visible('ai.turn.usage.details');

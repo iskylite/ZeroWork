@@ -4,6 +4,21 @@ pub const theme = @import("../../ui/app_theme.zig");
 pub const directory_width: f32 = 252;
 pub const directory_gap: f32 = 16;
 pub const compact_width: f32 = 900;
+pub const toolbar_height: f32 = 64;
+pub const floating_header_height: f32 = 52;
+pub const floating_header_padding: f32 = 22;
+pub const floating_header_icon_size: f32 = 16;
+pub const floating_header_gap: f32 = 8;
+pub const floating_title_left = floating_header_padding + floating_header_icon_size + floating_header_gap;
+pub const floating_path_left: f32 = floating_title_left + 36;
+pub const outline_width: f32 = 228;
+pub const outline_max_height: f32 = 400;
+pub const outline_vertical_inset: f32 = 12;
+pub const outline_header_height: f32 = 32;
+pub const outline_row_height: f32 = 28;
+pub const outline_row_gap: f32 = 2;
+pub const outline_padding: f32 = 6;
+pub const floating_card_top: f32 = 4;
 
 pub fn root() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = directory_gap, .min_width = 0, .min_height = 0, .overflow_hidden = true };
@@ -28,6 +43,16 @@ pub fn navigation(compact: bool) ui.BoxStyle {
         .overflow_hidden = true,
         .z_index = if (compact) 2 else 0,
     };
+}
+
+pub fn floatingCard(width: f32, height: f32, inset: ui.Inset) ui.BoxStyle {
+    var style = navigation(true);
+    style.inset = inset;
+    style.width = .{ .px = width };
+    style.max_width = width;
+    style.height = .{ .px = height };
+    style.shadow = .{ .blur = 16, .offset_y = 6, .color = theme.current().shadow };
+    return style;
 }
 
 pub fn floatingSurface() ui.BoxStyle {

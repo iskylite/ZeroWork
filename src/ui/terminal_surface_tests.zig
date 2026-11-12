@@ -2626,12 +2626,12 @@ test "terminal surface preserves unaccepted text and keys across stale modes and
     try std.testing.expectEqualStrings("中文\x1bOA tailonce", transport.written.items);
 }
 
-test "terminal surface double click selects complete colored filenames and copies once" {
+test "terminal surface double click selects complete filenames and stops at parentheses" {
     var transport: FakeTransport = undefined;
     try transport.init(4, 100);
     defer transport.deinit();
     const filename = "clusbench-4.5.2-3.20261023+gitf77ff02.x86_64.rpm";
-    try transport.controller.feedOutput(owner, 1, "prefix \x1b[31m" ++ filename ++ "\x1b[0m neighbor\r\n中文文件-e\u{301}.tar.gz next", 1);
+    try transport.controller.feedOutput(owner, 1, "prefix \x1b[31m" ++ filename ++ "\x1b[0m neighbor\r\n中文文件-e\u{301}.tar.gz next\r\nPING p3c9m (172.20.3.225) 56(84) bytes of data.", 1);
     var clipboard: TestClipboard = .{};
     var sdk = TestSdk.init(a, &clipboard, &TestClipboard.vtable, .{ .clipboard = true });
     defer sdk.deinit();
@@ -2671,6 +2671,13 @@ test "terminal surface double click selects complete colored filenames and copie
     const unicode = (try view.copySelectionText(a)).?;
     defer a.free(unicode);
     try std.testing.expectEqualStrings("中文文件-e\u{301}.tar.gz", unicode);
+    const ip_hit = x + 16.5 * surface.options.cell_width;
+    const ip_y = y + 2 * surface.options.row_height;
+    _ = event(.{ .double_click = .{ .x = ip_hit, .y = ip_y } }, surface.root.behavior.events.event_context);
+    const ip = (try view.copySelectionText(a)).?;
+    defer a.free(ip);
+    try std.testing.expectEqualStrings("172.20.3.225", ip);
+    try std.testing.expectEqualStrings(ip, clipboard.text);
     // A regular click still clears the selection.
     cx.handleMouseDownEx(x, y, .left, .{});
     cx.handleMouseUpEx(x, y, .left, .{});

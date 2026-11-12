@@ -314,8 +314,8 @@ fn beginSelection(self: *Surface, x: f32, y: f32) !void {
     self.selection = .{ .start = start, .end = end, .rectangle = self.rectangle };
     self.force_snapshot = true;
 }
-// File names and paths are uninterrupted terminal tokens. Punctuation such as
-// '.', '-', '+', and '/' is deliberately retained; only whitespace separates.
+// Match xterm.js punctuation boundaries while retaining Unicode whitespace.
+// Keep punctuation inside paths, filenames, and addresses selectable.
 fn wordBoundary(projection: terminal.Projection, row: usize, col: u16) bool {
     const line = projection.visible_rows[row];
     if (col >= line.cell_count) return true;
@@ -326,6 +326,7 @@ fn wordBoundary(projection: terminal.Projection, row: usize, col: u16) bool {
     const cp = std.unicode.utf8Decode(text[0 .. std.unicode.utf8ByteSequenceLength(text[0]) catch return true]) catch return true;
     return switch (cp) {
         0...32, 0x7f, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
+        '(', ')', '[', ']', '{', '}', '\'', '"', ',', '`' => true,
         else => false,
     };
 }
@@ -582,7 +583,7 @@ fn showPasteModal(self: *Surface) !void {
         const text = try ui.text(self.cx, "", .{ .font_size = 12, .use_monospace_font = true, .wrap = .word });
         try scroll.content.appendChild(self.cx.allocator, text);
         try modal.body.appendChild(self.cx.allocator, scroll.container);
-        const buttons = try ui.hstack(self.cx, .{ .gap = 8 }, .{});
+        const buttons = try ui.hstack(self.cx, .{ .width = .fill(), .justify = .end, .gap = 8, .flex_shrink = 0 }, .{});
         try buttons.appendChild(self.cx.allocator, try ui.widgets.Button(.{ .label = "取消", .on_click = self.cx.on(Surface, self, cancelClick) }).mount(scope, self.cx));
         const approve = try ui.widgets.Button(.{ .label = "确认插入", .variant = .primary, .on_click = self.cx.on(Surface, self, approveClick) }).mount(scope, self.cx);
         try @import("app_theme.zig").stylePrimary(self.cx, scope, approve, null);

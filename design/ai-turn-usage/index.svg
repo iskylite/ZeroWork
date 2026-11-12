@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="280" height="272" viewBox="0 0 280 272" xml:lang="zh-CN">
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="320" viewBox="0 0 280 320" xml:lang="zh-CN">
   <title>本回合累计用量</title>
   <style>
     text { font-family: Inter, "PingFang SC", sans-serif; fill: #e4e9dc; dominant-baseline: central }
     .secondary { fill: #c5cdbd }
     .value { text-anchor: end; font-weight: 500 }
   </style>
-  <rect width="280" height="272" fill="#212520"/>
+  <rect width="280" height="320" fill="#212520"/>
   <g id="reported" transform="translate(16 16)">
     <rect width="248" height="138" rx="12" fill="#30382e"/>
     <text x="12" y="22" font-size="12" font-weight="600">本回合累计用量</text>
@@ -20,12 +20,14 @@
     </g>
     <path d="M12 106.5h224" stroke="#c5cdbd" stroke-opacity=".22"/>
     <text x="12" y="122" font-size="10.5" class="secondary">共享的上下文会在每次请求中重复计入。</text>
+    <text x="0" y="155" font-size="10.5" class="secondary">用量明细</text>
   </g>
-  <g id="unreported" transform="translate(16 170)">
+  <g id="unreported" transform="translate(16 194)">
     <rect width="248" height="86" rx="12" fill="#30382e"/>
     <text x="12" y="22" font-size="12" font-weight="600">本回合累计用量</text>
     <text x="12" y="46" font-size="11" class="secondary">服务商未返回完整用量。</text>
     <text x="12" y="64" font-size="11" class="secondary">模型请求</text>
     <text x="236" y="64" font-size="11" class="value">1 次</text>
+    <text x="0" y="103" font-size="10.5" class="secondary">用量明细</text>
   </g>
 </svg>

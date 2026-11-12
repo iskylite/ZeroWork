@@ -1,5 +1,6 @@
 const ui = @import("ui");
 const binding = @import("../settings_content_view.zig");
+const draft = @import("../settings_ai_draft.zig");
 const controls = @import("settings_controls.zig");
 
 pub fn matchesProviders(query: []const u8) bool {
@@ -63,9 +64,8 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         defer bound.scope.allocator.free(options);
         var count: usize = 0;
         for (bound.controller.model.value.ai.providers[0..bound.controller.model.value.ai.provider_count]) |provider| {
-            const name = if (provider.name.len != 0) provider.name else @tagName(provider.kind);
-            const text = try controls.owned(bound.scope, name);
-            options[count] = .{ .value = text, .label = text, .disabled = !provider.enabled or provider.endpoint.len == 0 or provider.model_count == 0 };
+            const text = try controls.owned(bound.scope, draft.providerName(provider));
+            options[count] = .{ .value = text, .label = text, .disabled = !provider.enabled or !draft.eligible(provider) };
             count += 1;
         }
         if (count != 0) try section.select(.{ .section = "ai", .key = "default_provider" }, "默认服务提供方", "新对话默认使用的模型服务。", options[0..count], null);

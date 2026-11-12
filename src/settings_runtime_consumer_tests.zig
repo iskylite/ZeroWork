@@ -25,7 +25,15 @@ test "settings runtime matcher invalidates replaced chords for every editable ac
                 if (other != action) try std.testing.expectEqualDeep(defaults.get(other), current.get(other));
             }
             current.reset();
-            try std.testing.expectEqual(action, current.match(old.key, ui.events.Modifiers{ .super = old.command, .shift = old.shift, .alt = old.option, .ctrl = old.control }).?);
+            try std.testing.expectEqualDeep(old, current.get(action));
+            const restored: ?keys.Action = if (old.key == .unknown) null else action;
+            try std.testing.expectEqual(restored, current.match(old.key, ui.events.Modifiers{ .super = old.command, .shift = old.shift, .alt = old.option, .ctrl = old.control }));
+            try std.testing.expect(current.match(keys.KeyCode.f12, ui.events.Modifiers{ .super = true, .shift = true, .alt = true }) == null);
+            if (old.key == .unknown) {
+                current = try keys.Map.parse(try current.format(&bytes));
+                try std.testing.expectEqualDeep(old, current.get(action));
+                try std.testing.expect(current.match(keys.KeyCode.f12, ui.events.Modifiers{ .super = true, .shift = true, .alt = true }) == null);
+            }
         }
     }
 }

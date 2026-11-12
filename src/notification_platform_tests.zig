@@ -729,9 +729,10 @@ test "notification shared transport submits one OS alert across all background w
         host.setWindowFocus(id, false);
     }
     for (windows, 1..) |window, index| {
-        try host.publishReconnectDetails(window.owner, index, 1, .failed, .{ .incident_id = 91 });
+        try host.publishReconnectDetails(window.owner, index, 1, .failed, .{ .object = "生产终端", .incident_id = 91, .hostname = "prod-web-01.example.com" });
     }
     try std.testing.expectEqual(@as(usize, 1), fake.sends);
+    try std.testing.expectEqualStrings("SSH 重连未成功（prod-web-01.example.com）", fake.last_body[0..fake.last_body_len]);
     try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
     try std.testing.expectEqual(@as(usize, 3), host.coordinator.incidentSourceCount(host.coordinator.notification_records.items[0]));
     try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);

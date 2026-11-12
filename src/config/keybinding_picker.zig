@@ -111,7 +111,15 @@ pub const Recorder = struct {
         self.callbacks.dismiss(self.callbacks.context);
     }
     fn reset(self: *Recorder) void {
-        self.record((keys.Map{}).get(self.action));
+        const chord = (keys.Map{}).get(self.action);
+        if (chord.key == .unknown) {
+            // An unbound factory default is valid, but is not a recorded key.
+            self.draft.chords[@backingInt(self.action)] = chord;
+            self.capture.setTextContent(self.cx.allocator, "未设置") catch {};
+            self.invalid.set(false);
+            self.status.setDisplay(.none);
+            self.cx.requestRedraw();
+        } else self.record(chord);
         self.focus();
     }
     fn button(self: *Recorder, scope: *ui.Scope, label: []const u8, comptime id: []const u8, comptime action: *const fn (*Recorder) void, primary: bool, disabled: bool) !*ui.Node {
@@ -176,6 +184,8 @@ fn chordText(chord: keys.Chord, buffer: []u8) ![]const u8 {
     const name = switch (chord.key) {
         .space => "Space",
         .semicolon => ";",
+        .left => "←",
+        .right => "→",
         .left_bracket => "[",
         .right_bracket => "]",
         .slash => "/",
@@ -209,6 +219,8 @@ fn actionName(action: keys.Action) []const u8 {
         .next_tab => "下一个页签",
         .split_vertical => "垂直分栏",
         .split_horizontal => "水平分栏",
+        .previous_pane => "聚焦上一个分栏",
+        .next_pane => "聚焦下一个分栏",
         .copy => "复制",
         .paste => "粘贴",
         .search => "搜索当前终端",

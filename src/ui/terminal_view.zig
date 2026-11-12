@@ -6298,7 +6298,7 @@ test "terminal completion follows saved and updated shortcuts without retaining 
     try map.set(.completion, .{ .key = .p, .shift = true });
     view.recordCompletionHistory("git status");
     view.line.record(cx.allocator, "git st");
-    try std.testing.expect(!view.handleCompletionKey(.semicolon, .{ .super = true }));
+    try std.testing.expect(!view.handleCompletionKey(.i, .{ .super = true }));
     try std.testing.expect(view.handleCompletionKey(.p, .{ .super = true, .shift = true }));
     try std.testing.expect(view.completion.state.menu_open);
     try std.testing.expectEqual(@as(usize, 1), view.completion_count);
@@ -6335,7 +6335,7 @@ test "terminal overlay global completion and replay repaint preserve retained in
     view.recordCompletionHistory("git stash");
     try view.addCompletionPath("git stash /srv/observed");
     view.line.record(cx.allocator, "git st");
-    try std.testing.expect(view.handleCompletionKey(.semicolon, .{ .super = true }));
+    try std.testing.expect(view.handleCompletionKey(.i, .{ .super = true }));
     try std.testing.expectEqual(@as(usize, 2), view.completion_count);
     const row = view.completion_rows.items[0];
     const row_id = row.id;
@@ -6434,11 +6434,11 @@ test "trusted completion routes Enter unchanged, replaces only on Right, and sup
     try std.testing.expect(view.handleCompletionKey(.escape, .{}));
     view.refreshCompletion();
     try std.testing.expect(!view.completion.state.menu_open);
-    try std.testing.expect(view.handleCompletionKey(.semicolon, .{ .super = true }));
+    try std.testing.expect(view.handleCompletionKey(.i, .{ .super = true }));
     try std.testing.expect(view.completion.state.menu_open);
     try std.testing.expect(!view.handleCompletionKey(.tab, .{ .shift = true }));
     try std.testing.expect(!view.completion.state.menu_open);
-    try std.testing.expect(view.handleCompletionKey(.semicolon, .{ .super = true }));
+    try std.testing.expect(view.handleCompletionKey(.i, .{ .super = true }));
     try std.testing.expect(view.handleCompletionKey(.down, .{}));
     try std.testing.expect(view.handleCompletionKey(.right, .{}));
     try std.testing.expectEqual(@as(usize, 1), provider.requests);
@@ -6585,7 +6585,7 @@ test "unbound terminal completion never consumes or replaces native input" {
     view.refreshCompletion();
     try std.testing.expect(!view.completion.state.menu_open);
     try std.testing.expect(!view.handleCompletionKey(.right, .{}));
-    try std.testing.expect(!view.handleCompletionKey(.semicolon, .{ .super = true }));
+    try std.testing.expect(!view.handleCompletionKey(.i, .{ .super = true }));
     try std.testing.expectEqualStrings("git st", view.line.content.items);
 }
 
@@ -6629,7 +6629,7 @@ test "observed completion records nested shell input after delayed echo and auto
     cx.handleKeyDown(.escape, .{});
     _ = try view.refreshTerminalService(fixture.owner, true);
     try std.testing.expect(!view.completion.state.menu_open);
-    cx.handleKeyDown(.semicolon, .{ .super = true });
+    cx.handleKeyDown(.i, .{ .super = true });
     try std.testing.expect(view.completion.state.menu_open);
     cx.handleKeyDown(.right, .{});
     try std.testing.expectEqualStrings(command ++ "\r" ++ command, transport.written.items);

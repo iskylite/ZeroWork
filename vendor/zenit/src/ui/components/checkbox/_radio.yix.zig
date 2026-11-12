@@ -1,3 +1,4 @@
+// GENERATED FILE, do not edit: generated from radio.yix; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Radio / RadioGroup view. Styling in styles.yss (RadioParts / RadioGroupLayout);
 //! public types and tests in mod.zig.
 const std = @import("std");
@@ -134,4 +135,4 @@ fn __yix_RadioGroup(__yix_props: RadioGroupProps, scope: *ui.Scope, cx: *ui.Cx) 
 
 //# yix-map-data [[430,425],[2608,1228],[5582,2740]]
 
-//# yix-map src/ui/components/checkbox/radio.yix
+//# yix-map radio.yix

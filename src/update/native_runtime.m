@@ -67,11 +67,13 @@ int zw_update_startup_gate(const char *data) {
             for(int i=0;i<50 && [stage isEqual:@"launching_new"];i++){usleep(100000);record=ZWRead([path stringByAppendingPathComponent:@"record.json"]);stage=record[@"stage"];}
         }
 
-        if([token isEqual:path.lastPathComponent] && [nonce isEqual:record[@"nonce"]] && [record[@"target"] isEqual:targetPath] && [record[@"version"] isEqual:Version()] && [stage isEqual:@"new_started"]) {
+        if([token isEqual:path.lastPathComponent] && [nonce isEqual:record[@"nonce"]] && [record[@"target"] isEqual:targetPath] && [record[@"version"] isEqual:Version()] && ([stage isEqual:@"new_started"] || ([stage isEqual:@"readiness_unknown"] && [record[@"data_state"] isEqual:@"unchanged"]))) {
             ZWWrite([path stringByAppendingPathComponent:@"startup.request"],@{@"nonce":nonce,@"pid":@(getpid()),@"birth":@(ZWBirth(getpid())),@"version":Version()});
             for(int i=0;i<100;i++) {
                 record=ZWRead([path stringByAppendingPathComponent:@"record.json"]);
-                if([record[@"stage"] isEqual:@"data_access_granted"] && [record[@"new_pid"] intValue]==getpid() && [record[@"new_birth"] unsignedLongLongValue]==ZWBirth(getpid())) { SetTransaction(path);return 1; }
+                NSDictionary *grant=ZWRead([path stringByAppendingPathComponent:@"data-may-change.json"]);
+                BOOL granted=[record[@"data_state"] isEqual:@"potentially_changed"] && [grant[@"nonce"] isEqual:nonce] && [grant[@"pid"] intValue]==getpid() && [grant[@"birth"] unsignedLongLongValue]==ZWBirth(getpid());
+                if(([record[@"stage"] isEqual:@"data_access_granted"] || [record[@"stage"] isEqual:@"readiness_unknown"]) && granted && [record[@"new_pid"] intValue]==getpid() && [record[@"new_birth"] unsignedLongLongValue]==ZWBirth(getpid())) { SetTransaction(path);return 1; }
                 usleep(100000);
             }
             ZWFail(@"未收到新版数据访问授权；应用尚未读取配置。恢复记录已保留。");
@@ -82,7 +84,9 @@ int zw_update_startup_gate(const char *data) {
 void zw_update_healthy(void){
     if(!Transaction())return;
     @try{NSDictionary *r=ZWRead([Transaction() stringByAppendingPathComponent:@"record.json"]);
-        if([r[@"stage"] isEqual:@"data_access_granted"] && [r[@"new_pid"] intValue]==getpid())ZWWrite([Transaction() stringByAppendingPathComponent:@"healthy.request"],@{@"nonce":r[@"nonce"],@"pid":@(getpid()),@"birth":@(ZWBirth(getpid())),@"version":Version()});
+        NSDictionary *grant=ZWRead([Transaction() stringByAppendingPathComponent:@"data-may-change.json"]);
+        BOOL granted=[r[@"data_state"] isEqual:@"potentially_changed"] && [grant[@"nonce"] isEqual:r[@"nonce"]] && [grant[@"pid"] intValue]==getpid() && [grant[@"birth"] unsignedLongLongValue]==ZWBirth(getpid());
+        if(([r[@"stage"] isEqual:@"data_access_granted"] || [r[@"stage"] isEqual:@"readiness_unknown"]) && granted && [r[@"new_pid"] intValue]==getpid() && [r[@"new_birth"] unsignedLongLongValue]==ZWBirth(getpid()) && [r[@"target"] isEqual:targetPath] && [r[@"version"] isEqual:Version()])ZWWrite([Transaction() stringByAppendingPathComponent:@"healthy.request"],@{@"nonce":r[@"nonce"],@"pid":@(getpid()),@"birth":@(ZWBirth(getpid())),@"version":Version()});
     }@catch(NSException *e){Publish(10,e.reason);}
 }
 

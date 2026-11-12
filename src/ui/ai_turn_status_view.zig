@@ -25,12 +25,6 @@ pub fn elapsedMs(turn: *const Turn, now_wall: u64, now_mono: u64) u64 {
     }
     return elapsed -| waiting;
 }
-pub fn usageLabel(buffer: []u8, turn: *const Turn) ![]const u8 {
-    const input = turn.input_tokens orelse return "本回合用量未返回";
-    const output = turn.output_tokens orelse return "本回合用量未返回";
-    var count_buffer: [32]u8 = undefined;
-    return std.fmt.bufPrint(buffer, "本回合用量 {s}", .{try @import("ai_token_count.zig").format(&count_buffer, input +| output)});
-}
 fn exactCount(buffer: *[26]u8, value: u64) ![]const u8 {
     var digits_buffer: [20]u8 = undefined;
     const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{value});
@@ -199,7 +193,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, turn: *const Turn, texture: ?u32) !*u
         popup.chrome.setStyleInline(cx.allocator, .{ .padding = ui.Padding.all(12), .border = .{ .width = 0, .radius = 12 } });
         try theme.bindMaterial(cx, scope, popup.chrome, "overlay");
         const usage = try ui.widgets.Button(.{
-            .label = try usageLabel(&buffer, turn),
+            .label = "用量明细",
             .a11y_label = "查看本回合用量明细",
             .variant = .ghost,
             .base_style = ui.BoxStyle{ .height = .{ .px = 22 }, .padding = .{ .left = 0, .right = 0 }, .font_size = 10.5, .text_color = theme.current().fg_2 },

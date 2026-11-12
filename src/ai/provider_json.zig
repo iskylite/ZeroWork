@@ -12,6 +12,8 @@ pub const Adapter = struct {
     sink_ctx: *anyopaque,
     stats: ?*provider.ChatStats = null,
     usage_seen: bool = false,
+    input_usage_seen: bool = false,
+    output_usage_seen: bool = false,
     failed: bool = false,
     terminal: bool = false,
     openai_text_deltas: usize = 0,
@@ -30,13 +32,19 @@ pub const Adapter = struct {
     };
     fn receiveAnthropicUsage(self: *Adapter, value: AnthropicUsage) void {
         const stats = self.stats orelse return;
-        self.usage_seen = true;
-        if (value.input_tokens) |n| self.anthropic_input = n;
+        if (value.input_tokens) |n| {
+            self.anthropic_input = n;
+            self.input_usage_seen = true;
+        }
         if (value.cache_read_input_tokens) |n| self.anthropic_cache_read = n;
         if (value.cache_creation_input_tokens) |n| self.anthropic_cache_write = n;
         // Anthropic splits total prompt input into three disjoint components.
         stats.input_tokens = self.anthropic_input +| self.anthropic_cache_read +| self.anthropic_cache_write;
-        if (value.output_tokens) |n| stats.output_tokens = n;
+        if (value.output_tokens) |n| {
+            stats.output_tokens = n;
+            self.output_usage_seen = true;
+        }
+        self.usage_seen = self.input_usage_seen and self.output_usage_seen;
     }
     const AnthropicTool = struct { block_index: u32 = 0, active: bool = false, arguments_seen: bool = false };
 
@@ -92,9 +100,15 @@ pub const Adapter = struct {
         };
         defer parsed.deinit();
         if (parsed.value.usage) |u| if (self.stats) |stats| {
-            self.usage_seen = true;
-            if (u.prompt_tokens) |v| stats.input_tokens = v;
-            if (u.completion_tokens) |v| stats.output_tokens = v;
+            if (u.prompt_tokens) |v| {
+                stats.input_tokens = v;
+                self.input_usage_seen = true;
+            }
+            if (u.completion_tokens) |v| {
+                stats.output_tokens = v;
+                self.output_usage_seen = true;
+            }
+            self.usage_seen = self.input_usage_seen and self.output_usage_seen;
         };
         if (parsed.value.@"error") |failure| {
             self.fail(failure.message orelse "provider error");
@@ -296,12 +310,13 @@ pub const Stream = struct {
         defer parsed.deinit();
         if (parsed.value.prompt_eval_count) |v| {
             self.stats.input_tokens = v;
-            self.adapter.usage_seen = true;
+            self.adapter.input_usage_seen = true;
         }
         if (parsed.value.eval_count) |v| {
             self.stats.output_tokens = v;
-            self.adapter.usage_seen = true;
+            self.adapter.output_usage_seen = true;
         }
+        self.adapter.usage_seen = self.adapter.input_usage_seen and self.adapter.output_usage_seen;
         if (parsed.value.@"error" orelse parsed.value.error_message) |message| {
             self.ollama_done = true;
             self.adapter.fail(message);
@@ -529,6 +544,34 @@ test "SSE usage preserves OpenAI and Anthropic actual token counts" {
     try anthropic.feed("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n");
     try std.testing.expectEqual(@as(u32, 2), anthropic.stats.input_tokens);
     try std.testing.expectEqual(@as(u32, 3), anthropic.stats.output_tokens);
+}
+
+test "stream usage requires both token fields and preserves partial reports across frames" {
+    const Sink = struct {
+        fn receive(_: *anyopaque, _: provider.Delta) void {}
+    };
+    const cases = [_]struct { kind: StreamKind, empty: []const u8, input: []const u8, output: []const u8 }{
+        .{ .kind = .openai_compat, .empty = "data: {\"usage\":{}}\n\n", .input = "data: {\"usage\":{\"prompt_tokens\":7}}\n\n", .output = "data: {\"usage\":{\"completion_tokens\":0}}\n\n" },
+        .{ .kind = .anthropic, .empty = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\n", .input = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n", .output = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":0}}\n\n" },
+        .{ .kind = .ollama, .empty = "{}\n", .input = "{\"prompt_eval_count\":7}\n", .output = "{\"eval_count\":0}\n" },
+    };
+    for (cases) |case| {
+        var stream = Stream.initWithKind(std.testing.allocator, case.kind, Sink.receive, undefined);
+        defer stream.deinit();
+        try stream.feed(case.empty);
+        try std.testing.expect(!stream.adapter.usage_seen);
+        try stream.feed(case.input);
+        try std.testing.expect(!stream.adapter.usage_seen);
+        try stream.feed(case.output);
+        try std.testing.expect(stream.adapter.usage_seen);
+        try std.testing.expectEqual(@as(u32, 7), stream.stats.input_tokens);
+        try std.testing.expectEqual(@as(u32, 0), stream.stats.output_tokens);
+
+        var output_only = Stream.initWithKind(std.testing.allocator, case.kind, Sink.receive, undefined);
+        defer output_only.deinit();
+        try output_only.feed(case.output);
+        try std.testing.expect(!output_only.adapter.usage_seen);
+    }
 }
 
 test "Ollama missing termination and bounded lines" {

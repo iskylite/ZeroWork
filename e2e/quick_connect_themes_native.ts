@@ -28,7 +28,7 @@ try{
   const capture=async(name:string)=>{await h.waitFor(async()=>{const v=(await h.query('quick.connect')).find(shown) as any;return v&&(v.effective_opacity??1)===1&&(v.scale_x??1)===1&&(v.scale_y??1)===1?v:null},15000);const ids=['quick.connect','quick.query','quick.saved.row','quick.footer','quick.submit'];const nodes=Object.fromEntries(await Promise.all(ids.map(async id=>[id,await h.query(id)])));await writeFile(join(out,name+'.json'),JSON.stringify(nodes,null,2));assert((await h.screenshot(join(out,name+'.png'))).ok);};
   try{
    await h.waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
-   await h.resizeWindow(960,640);await h.key('k',{cmd:true});const panel=await visible('quick.connect');assert.equal(panel.rect.w,520);
+   await h.resizeWindow(960,640);await h.key('p',{cmd:true});const panel=await visible('quick.connect');assert.equal(panel.rect.w,520);
    await h.waitFor(async()=>(await h.query('quick.saved.row')).filter(shown).length>=3||null);
    const rows=(await h.query('quick.saved.row')).filter(shown);assert(rows.every((r:any)=>r.rect.h===44));
    const nodes=descendants(rows[0]);const name=nodes.find(n=>n.test_id==='quick.saved.name'),endpoint=nodes.find(n=>n.test_id==='quick.saved.endpoint');assert(name&&endpoint);assert(endpoint.rect.y>=name.rect.y+name.rect.h);assert(name.rect.w>300);assert(endpoint.rect.w>300);
@@ -39,7 +39,7 @@ try{
     await h.resizeWindow(860,480);await input('ssh root@[2001:db8::1]:70000');await visible('quick.port');
     const temp=await visible('quick.connect'),submit=await visible('quick.submit');assert(temp.rect.y>=0&&temp.rect.y+temp.rect.h<=480);assert(submit.rect.y+submit.rect.h<=temp.rect.y+temp.rect.h);await capture(theme+'-invalid-minimum');
     await input('no-such-host');await visible('quick.empty.title');await capture(theme+'-empty-minimum');
-    await h.clickTestId('quick.clear');await h.waitFor(async()=>(await h.query('quick.saved.row')).filter(shown).length>=3||null);await h.key('escape');await h.waitFor(async()=>!(await h.query('quick.connect')).some(shown)||null);await h.key('k',{cmd:true});await visible('quick.query');item.checks.push('Arrow selection scrolls to fourth result; filter, clear, invalid and empty states; 860×480 fit; Esc closes and Cmd+K reopens');
+    await h.clickTestId('quick.clear');await h.waitFor(async()=>(await h.query('quick.saved.row')).filter(shown).length>=3||null);await h.key('escape');await h.waitFor(async()=>!(await h.query('quick.connect')).some(shown)||null);await h.key('p',{cmd:true});await visible('quick.query');item.checks.push('Arrow selection scrolls to fourth result; filter, clear, invalid and empty states; 860×480 fit; Esc closes and Cmd+P reopens');
    }
    item.status='passed';console.log(theme+' passed');
   }catch(e){item.status='failed';item.error=String(e);await capture(theme+'-failure').catch(()=>{});throw e;}

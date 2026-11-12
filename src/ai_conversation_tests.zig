@@ -581,14 +581,12 @@ test "AI conversation lifecycle row formats elapsed time and actual token usage 
     try std.testing.expectEqualStrings("处理用时30分钟20秒", try Status.elapsedLabel(&buffer, 1820000));
     var turn: turns.Turn = .{ .sent_at_ms = 1000, .started_mono_ms = 50 };
     try std.testing.expectEqual(@as(u64, 200000), Status.elapsedMs(&turn, 999999, 200050));
-    try std.testing.expectEqualStrings("本回合用量未返回", try Status.usageLabel(&buffer, &turn));
     turn.ended_at_ms = 400000;
     turn.elapsed_ms = 1820000;
     turn.input_tokens = 2400;
     turn.output_tokens = 160;
     turn.request_count = 2;
     try std.testing.expectEqual(@as(u64, 1820000), Status.elapsedMs(&turn, 9999999, 9999999));
-    try std.testing.expectEqualStrings("本回合用量 2.6K", try Status.usageLabel(&buffer, &turn));
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     const scope = try ui.Scope.init(a, null, cx.owner);

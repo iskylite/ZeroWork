@@ -20,6 +20,7 @@ const ended=new Promise<void>(done=>app.once('close',()=>done()));
 const shown=(node:any)=>node?.visible!==false&&node?.rect?.w>0&&node?.rect?.h>0&&(node.effective_opacity??1)>0;
 const visible=async(id:string)=>(await h.query(id)).filter(shown);
 const node=async(id:string):Promise<any>=>h.waitFor(async()=>(await visible(id))[0]??null,12000);
+const descendants=(n:h.QueryNode):h.QueryNode[]=>[n,...(n.children??[]).flatMap(descendants)];
 const click=async(id:string)=>{const n=await node(id);assert((await h.clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok);};
 const report:any={status:'running',checks:[],networkConnections:0};
 async function readyCommand(command:string,path:string){
@@ -49,6 +50,9 @@ try{
  assert.equal((await h.inputState('quick.query')).buffer,'no-matching-host');
  report.checks.push('saved Cmd+Shift+R opens quick connect while the AI input owns focus');
  await h.screenshot(output+'/native-ai-shortcut.png');await h.key('escape');
+ await h.waitFor(async()=>!(await visible('quick.connect')).length||null);
+ if(!(await visible('ai.panel')).length)await h.key('j',{cmd:true});
+ await node('ai.prompt');
  assert.equal((await h.inputState('ai.prompt')).buffer,'shortcut draft');
  await click('ai.prompt');await h.key('b',{cmd:true,shift:true});await node('session.menu');
  assert.equal((await visible('terminal.command-history')).length,0);
@@ -57,15 +61,42 @@ try{
  const surface=await node('terminal.surface');await h.clickAt(surface.rect.x+surface.rect.w/2,surface.rect.y+surface.rect.h/2);
  const seed=isolated+'/seed';await readyCommand(`printf ready > '${seed}'`,seed);
  await h.type_('printf rea');await h.sleep(200);
- await h.key('semicolon',{cmd:true});await h.sleep(150);
- assert.equal((await visible('terminal.completion')).length,0,'old completion binding must be inactive');
+ await h.key('i',{cmd:true});await h.sleep(150);
+ assert.equal((await visible('terminal.completion')).length,0,'default completion binding must be inactive when customized');
  await h.key('space',{cmd:true,shift:true});await node('terminal.completion');
- report.checks.push('saved Cmd+Shift+Space opens real history candidates; old completion binding stays inactive');
+ report.checks.push('saved Cmd+Shift+Space opens real history candidates; default completion binding stays inactive');
  await h.screenshot(output+'/native-completion.png');await h.key('escape');await h.key('c',{ctrl:true});
+ const standalone=await h.focused();
+ await h.key('right',{cmd:true,alt:true});
+ assert.equal((await h.focused()).id,standalone.id,'pane shortcut leaves a standalone terminal focused');
  await h.key('d',{cmd:true});await node('groups.workspace');await node('status.group.broadcast');
- await h.key('i',{cmd:true,shift:true});await node('group.broadcast.card');
+ const panes=async()=>(await visible('groups.workspace')).flatMap(descendants)
+   .filter(n=>/^groups\.pane\.\d+$/.test(n.test_id??'')&&shown(n)).sort((a,b)=>a.rect.x-b.rect.x);
+ await h.waitFor(async()=>(await panes()).length===2||null);
+ await h.key('d',{cmd:true});
+ await h.waitFor(async()=>(await panes()).length===3||null);
+ const ordered=await panes();
+ const inputs=ordered.map(pane=>descendants(pane).find(n=>n.test_id==='terminal.input')?.id);
+ assert(inputs.every(id=>id!==undefined));
+ await click(ordered[0].test_id!);
+ await h.waitFor(async()=>(await h.focused()).id===inputs[0]||null);
+ for(const [key,index] of [['left',2],['right',0],['right',1],['left',0]] as const){
+  assert((await h.key(key,{cmd:true,alt:true})).ok);
+  await h.waitFor(async()=>(await h.focused()).id===inputs[index]||null);
+ }
+ await h.key('f',{cmd:true});await node('terminal.search.query');
+ const search=await h.focused();
+ assert.notEqual(search.id,inputs[0]);
+ await h.key('right',{cmd:true,alt:true});
+ assert.equal((await h.focused()).id,search.id,'pane shortcut leaves the search editor focused');
+ await h.key('escape');
+ assert((await h.screenshot(output+'/native-pane-focus.png')).ok);
+ report.checks.push('Option+Cmd+arrows cycle in displayed pane order, wrap within the active group, and preserve standalone and search focus');
+ await h.key('i',{cmd:true,shift:true});await h.sleep(150);
+ assert.equal((await visible('group.broadcast.card')).length,0,'broadcast has no default shortcut');
+ await click('status.group.broadcast');await node('group.broadcast.card');
  assert((await visible('group.broadcast.accept')).length>0);
- report.checks.push('default broadcast binding opens the existing confirmation for the current group');
+ report.checks.push('the broadcast control opens confirmation for the current group without a default binding');
  await h.mouseMove(16,80);await h.resizeWindow(860,480);await h.mouseMove(16,80);await h.sleep(150);await h.screenshot(output+'/native-broadcast.png');
  await h.key('escape');report.status='passed';
 }catch(error){report.status='failed';report.error=String(error);await h.screenshot(output+'/failure.png').catch(()=>{});throw error;}

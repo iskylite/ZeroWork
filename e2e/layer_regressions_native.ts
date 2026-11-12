@@ -92,7 +92,7 @@ try {
   for (let i=0;i<4;i++) {await click('ai.collapse');await h.sleep(250);await click('ai.strip');await visible('ai.panel');}
   await capture('light-reopened');
   await h.resizeWindow(860,480); await capture('light-compact');
-  await h.resizeWindow(1440,900); await h.key('k',{cmd:true});
+  await h.resizeWindow(1440,900); await h.key('p',{cmd:true});
   await visible('quick.connect'); await h.key('down'); await h.key('down');
   await capture('quick-selection','quick.connect'); await h.key('escape');
   report.checks.push('Theme change before first AI open', 'Dark/Light/Sauber changes while detached preserve node ID and draft', 'Repeated collapse/reopen and 860×480', 'Quick-connect selected state');

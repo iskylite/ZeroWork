@@ -1134,7 +1134,7 @@ pub fn computeTextLayout(
 
     while (line_start < content.len and line_count < effective_max) {
         // Find current line break point.
-        const result = findLineBreak(content, line_start, available_width, wrap, font_size, font_weight, use_italic, use_monospace, spans);
+        const result = findLineBreak(content, line_start, available_width, wrap, font_size, font_weight, use_italic, use_monospace, spans, true);
         const line_end = line_start + result.byte_len;
         const line_width = result.width;
 
@@ -1218,6 +1218,18 @@ const LineBreakResult = struct {
 
 /// Find line break point within given width. content: full text, line_start:
 /// this line's start offset in content.
+/// One editable wrap step, with no limit on the number of display rows.
+pub fn nextWordWrapBoundary(content: []const u8, start: u32, width: f32, size: f32, weight: u16, spans: []const TextSpan) u32 {
+    // Drop completed spans so each row scans only the remaining style runs.
+    var low: usize = 0;
+    var high = spans.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (spans[mid].end <= start) low = mid + 1 else high = mid;
+    }
+    return start + findLineBreak(content, start, width, .word, size, weight, false, false, spans[low..], false).byte_len;
+}
+
 fn findLineBreak(
     content: []const u8,
     line_start: u32,
@@ -1228,18 +1240,21 @@ fn findLineBreak(
     use_italic: bool,
     use_monospace: bool,
     spans: []const TextSpan,
+    comptime measure_full_line: bool,
 ) LineBreakResult {
     const text = content[line_start..];
 
-    // Fast path: find this line's natural end (\n or EOF) first.
-    var natural_end: u32 = 0;
-    while (natural_end < text.len and text[natural_end] != '\n') natural_end += 1;
-    // Measure entire line once: if line width <= available_width, return
-    // directly, avoid per-character advance (drops O(N) CoreText calls to O(1)).
-    if (natural_end > 0) {
-        const full_width = measureSpanAware(content, line_start, line_start + natural_end, font_size, font_weight, use_italic, use_monospace, spans);
-        if (full_width <= available_width) {
-            return .{ .byte_len = natural_end, .width = full_width };
+    if (measure_full_line) {
+        // Fast path: find this line's natural end (\n or EOF) first.
+        var natural_end: u32 = 0;
+        while (natural_end < text.len and text[natural_end] != '\n') natural_end += 1;
+        // Measure entire line once: if line width <= available_width, return
+        // directly, avoid per-character advance (drops O(N) CoreText calls to O(1)).
+        if (natural_end > 0) {
+            const full_width = measureSpanAware(content, line_start, line_start + natural_end, font_size, font_weight, use_italic, use_monospace, spans);
+            if (full_width <= available_width) {
+                return .{ .byte_len = natural_end, .width = full_width };
+            }
         }
     }
 
@@ -1540,6 +1555,7 @@ test "findLineBreak preserves word wrap boundary with incremental width accumula
         use_italic,
         false,
         spans,
+        true,
     );
 
     try std.testing.expectEqual(@as(u32, 4), result.byte_len);
@@ -1552,7 +1568,7 @@ test "findLineBreak never splits an extended grapheme cluster" {
     const after_emoji: u32 = @intCast(grapheme.nextBoundary(content, after_a));
     const width_a = measureTextWidthWithSpans(content, 0, after_a, 10, 400, false, false, &.{});
     const width_through_emoji = measureTextWidthWithSpans(content, 0, after_emoji, 10, 400, false, false, &.{});
-    const result = findLineBreak(content, 0, (width_a + width_through_emoji) * 0.5, .char, 10, 400, false, false, &.{});
+    const result = findLineBreak(content, 0, (width_a + width_through_emoji) * 0.5, .char, 10, 400, false, false, &.{}, true);
     try std.testing.expectEqual(after_a, result.byte_len);
     try std.testing.expect(grapheme.nextBoundary(content, grapheme.prevBoundary(content, result.byte_len)) == result.byte_len);
 }

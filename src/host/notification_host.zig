@@ -25,7 +25,7 @@ pub const Window = struct {
     maintenance: ?*const fn (*anyopaque, bool) void = null,
 };
 pub const ReconnectResult = enum { disconnected, recovered, failed };
-pub const Details = struct { object: []const u8 = "", detail: []const u8 = "", incident_id: ?u64 = null };
+pub const Details = struct { object: []const u8 = "", detail: []const u8 = "", incident_id: ?u64 = null, hostname: []const u8 = "" };
 pub const AiCompletion = struct {
     details: Details = .{},
     result: enum { succeeded, failed, cancelled, unverified },
@@ -396,7 +396,7 @@ pub const Host = struct {
                 .failed => "SSH 重连未成功",
             },
             .terminal_confirmed = true,
-        }, .{ .object = details.object, .incident_id = details.incident_id, .detail = if (details.detail.len != 0) details.detail else switch (result) {
+        }, .{ .object = details.object, .incident_id = details.incident_id, .hostname = details.hostname, .detail = if (details.detail.len != 0) details.detail else switch (result) {
             .disconnected => "连接已中断，请查看连接状态。",
             .recovered => "SSH 连接已重新建立。",
             .failed => "未能重新建立连接，请查看连接日志。",
@@ -434,6 +434,12 @@ pub const Host = struct {
                 break;
             }
         };
+        const system_summary = if (event.system_enabled and event.kind == .reconnect and details.hostname.len != 0)
+            try std.fmt.allocPrint(self.allocator, "{s}（{s}）", .{ event.summary, details.hostname })
+        else
+            null;
+        defer if (system_summary) |summary| self.allocator.free(summary);
+        if (system_summary) |summary| event.summary = summary;
         const clock = try localClock();
         const published = try self.coordinator.publish(event, clock);
         const target = self.coordinator.records.items[published.record_index].target();
@@ -475,7 +481,7 @@ pub const Host = struct {
                     .succeeded, .recovered => .success,
                     else => .info,
                 },
-                .title = event.summary,
+                .title = value.summary,
                 .detail = bounded(details.detail, 4096),
                 .object_name = bounded(details.object, 1024),
                 .owner_name = if (window.value.owner_name) |resolve| bounded(resolve(window.value.context, event.owner), 256) else "",

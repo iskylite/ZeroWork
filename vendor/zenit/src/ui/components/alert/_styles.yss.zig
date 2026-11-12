@@ -1,3 +1,4 @@
+// GENERATED FILE, do not edit: generated from styles.yss; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Alert styles: variant determines accent; background and border are accent toward bg-primary
 //! blend.
 //! View in alert.yix; AlertVariant is public API defined in mod.zig.
@@ -17,4 +18,4 @@ pub const close = ui.css(.{ .width = 20, .height = 20, .background = ui.Color.TR
 pub const close_label = ui.css(.{ .color = ui.tokenRef(.color, "fg-secondary"), .font_size = 12, });
 pub const close_icon = ui.css(.{ .width = 12, .height = 12, .icon_color = ui.tokenRef(.color, "fg-secondary"), });
 
-//# yix-map src/ui/components/alert/styles.yss
+//# yix-map styles.yss

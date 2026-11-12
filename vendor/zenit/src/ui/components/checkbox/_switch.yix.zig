@@ -1,3 +1,4 @@
+// GENERATED FILE, do not edit: generated from switch.yix; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Switch view. Styles in styles.yss (SwitchParts), tests in mod.zig.
 const ui = @import("../../ui.zig");
 const S = @import("_styles.yss.zig");
@@ -50,4 +51,4 @@ fn __yix_Switch(__yix_props: SwitchProps, scope: *ui.Scope, cx: *ui.Cx) anyerror
 
 //# yix-map-data [[459,454]]
 
-//# yix-map src/ui/components/checkbox/switch.yix
+//# yix-map switch.yix

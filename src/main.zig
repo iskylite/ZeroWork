@@ -47,6 +47,7 @@ const ProcessWindows = struct {
             if (runtime.window(event.window_focused.window_id)) |app| {
                 if (!event.window_focused.focused) if (navFor(app)) |nav| {
                     if (nav.workspace) |workspace| workspace.notes_float_key = null;
+                    nav.group_pane_keys = .empty;
                 };
                 syncNotesWindowVisibility(app);
             }
@@ -2430,7 +2431,8 @@ const AiHost = struct {
         const controls = try self.selectedControls();
         var config = runtime.value;
         var catalog_changed = false;
-        if (self.execution().native_binding != null) {
+        // The window can discover models before the attached runner has a request binding.
+        if (self.native_binding != null or self.execution().native_binding != null) {
             if (try self.model_discovery.poll(config.ai, config.config_revision, @intCast(wallClockMsTransfer() / 1000))) {
                 catalog_changed = true;
                 self.composer_hash = null;
@@ -12579,8 +12581,9 @@ fn onSettingsToggleClick(raw: *anyopaque) void {
     }
 }
 
-/// Root-level keyboard shortcuts (⌘B sidebar, ⌘K quick connect).
+/// Root-level keyboard shortcuts and workspace navigation.
 const MistChrome = @import("ui/workspace_chrome.zig");
+const keybindings = @import("config/keybindings.zig");
 const AppNavHost = struct {
     hosts_import_picker: ?FileSheet = null,
     mist: ?*MistChrome.View = null,
@@ -12590,6 +12593,7 @@ const AppNavHost = struct {
     allocator: std.mem.Allocator,
     cx: *ui.Cx,
     quick: QuickConnect,
+    group_pane_keys: std.EnumSet(keybindings.KeyCode) = .empty,
     quick_panel: *ui.Node,
     quick_host: ?*QuickConnectHost = null,
     sidebar_panel: *ui.Node = undefined,
@@ -13381,10 +13385,6 @@ const AppNavHost = struct {
                 }
                 if (self.ime_composing) return .ignored;
                 const configured_action = if (self.workspace) |workspace| workspace.app_config.keys.match(key.key, key.modifiers) else null;
-                if (configured_action == null and key.key == .b and key.modifiers.super and key.modifiers.shift and !key.modifiers.alt and !key.modifiers.ctrl) {
-                    if (self.command_history) |history| history.toggle();
-                    return .handled;
-                }
                 if (key.key == .escape) {
                     if (self.transfer_host) |transfer| if (transfer.manager_panel) |panel| if (panel.root.style.display != .none) {
                         transfer.closeManagerPopover();
@@ -13493,6 +13493,13 @@ const AppNavHost = struct {
                             workspace.splitGroup(&self.roster, action == .split_horizontal) catch |err| workspace.statusFailure(@errorName(err));
                             return .handled;
                         },
+                        .previous_pane, .next_pane => {
+                            if (self.focusedTextEditor() or self.quick.quick_connect_open) return .ignored;
+                            if (!workspace.focusAdjacentGroupPane(action == .next_pane)) return .ignored;
+                            // A key-up must not reach the newly focused terminal.
+                            self.group_pane_keys.insert(keybindings.fromKey(key.key));
+                            return .stop;
+                        },
                         .quick_connect => {
                             self.toggleQuickConnect();
                             return .handled;
@@ -13558,7 +13565,7 @@ const AppNavHost = struct {
                             return .stop;
                         },
                         .tab_1, .tab_2, .tab_3, .tab_4, .tab_5, .tab_6, .tab_7, .tab_8, .tab_9 => {
-                            const index = @backingInt(action) - @backingInt(@import("config/keybindings.zig").Action.tab_1);
+                            const index = @backingInt(action) - @backingInt(keybindings.Action.tab_1);
                             workspace.selectTabOrdinal(index);
                             return .handled;
                         },
@@ -13587,6 +13594,11 @@ const AppNavHost = struct {
                         workspace.notes_float_key = null;
                         return .stop;
                     }
+                }
+                const code = keybindings.fromKey(key.key);
+                if (self.group_pane_keys.contains(code)) {
+                    self.group_pane_keys.remove(code);
+                    return .stop;
                 }
                 return .ignored;
             },
@@ -14990,7 +15002,7 @@ fn onNavClick(raw: *anyopaque) void {
     }
 }
 
-/// Quick Connect (⌘K) host: live filter over the saved hosts registry with
+/// Quick Connect host: live filter over the saved hosts registry with
 /// keyboard/click connect, mirroring docs/SPEC/mockups/mockup-quickconnect.
 /// The panel content is rebuilt from workspace.registry data on every query
 /// change — no static mock rows.
@@ -16755,7 +16767,12 @@ const NotificationWindowHook = struct {
         if (state.phase == .active and key.attempt_id.? > 1) {
             self.host.publishReconnectDetails(tab.content_owner, key.operation_id, key.attempt_id.?, .recovered, .{ .object = tab.titleSlice() }) catch |err| applog.warn(.app, "reconnect notification: {s}", .{@errorName(err)});
         } else if (state.phase == .waiting and state.cleanup == .released and (state.was_attached or tab.remote_retrying) and tab.remote_retry_deadline == null and state.failure != null) {
-            self.host.publishReconnectDetails(tab.content_owner, key.operation_id, key.attempt_id.?, .failed, .{ .object = tab.titleSlice(), .detail = @import("ui/connection_progress_view.zig").failureText(state.failure), .incident_id = state.notification_incident }) catch |err| applog.warn(.app, "disconnect notification: {s}", .{@errorName(err)});
+            self.host.publishReconnectDetails(tab.content_owner, key.operation_id, key.attempt_id.?, .failed, .{
+                .object = tab.titleSlice(),
+                .detail = @import("ui/connection_progress_view.zig").failureText(state.failure),
+                .incident_id = state.notification_incident,
+                .hostname = if (tab.host_snapshot) |snapshot| snapshot.value.host else "",
+            }) catch |err| applog.warn(.app, "disconnect notification: {s}", .{@errorName(err)});
         }
     }
     fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {

@@ -57,8 +57,10 @@ void zw_update_fixture_main(void){@autoreleasepool{
         NSDictionary *env=NSProcessInfo.processInfo.environment;NSString *mode=env[@"ZW_UPDATE_FIXTURE_MODE"]?:@"healthy";
         if([mode isEqual:@"early-crash"])exit(42);
         if([mode isEqual:@"before-gate-wait"]){while(access([env[@"ZW_UPDATE_FIXTURE_NEW_STOP"] fileSystemRepresentation],F_OK))usleep(20000);exit(42);}
+        if([mode isEqual:@"delayed-gate"]){while(access([env[@"ZW_UPDATE_FIXTURE_NEW_STOP"] fileSystemRepresentation],F_OK))usleep(20000);}
         if(!zw_update_startup_gate([env[@"ZW_UPDATE_FIXTURE_DATA"] UTF8String]))exit(43);
         if([mode isEqual:@"changed-crash"])exit(44);
+        if([mode isEqual:@"delayed-healthy"]){while(access([env[@"ZW_UPDATE_FIXTURE_NEW_STOP"] fileSystemRepresentation],F_OK))usleep(20000);}
         zw_update_healthy();sleep(2);
     }@catch(NSException *e){fprintf(stderr,"%s\n",e.reason.UTF8String);exit(45);}
 }}

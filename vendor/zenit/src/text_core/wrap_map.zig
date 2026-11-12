@@ -158,6 +158,10 @@ pub fn WrapMap(comptime Doc: type) type {
         /// over `measure_fn` when both are present.
         measure_ctx_fn: ?MeasureCtxFn = null,
         measure_ctx: ?*anyopaque = null,
+        /// Optional projection for editable styled text. Offsets remain source
+        /// bytes; returned breaks are owned by the WrapMap allocator.
+        project_wrap: ?*const fn (*anyopaque, Allocator, *const Doc, usize, []const u8, f32) anyerror!?[]u32 = null,
+        project_context: ?*anyopaque = null,
         font_size: f32 = 14,
         font_weight: u16 = 400,
         /// Monospace single-char width (ASCII), used quick wrap calc.
@@ -457,7 +461,7 @@ pub fn WrapMap(comptime Doc: type) type {
         }
 
         /// Mark entry interpolated (keep old breaks as coord placeholder).
-        fn markInterpolated(self: *Self, line_idx: usize) void {
+        pub fn markInterpolated(self: *Self, line_idx: usize) void {
             if (line_idx >= self.line_wraps.items.len) return;
             const entry = &self.line_wraps.items[line_idx];
             entry.is_interpolated = true;
@@ -1009,6 +1013,10 @@ pub fn WrapMap(comptime Doc: type) type {
             if (text_len == 0) return .{};
             const text = line_text[0..text_len];
 
+            if (self.project_wrap) |project| {
+                const custom = project(self.project_context.?, self.allocator, doc, line, text, self.wrap_width) catch return .{ .is_interpolated = true };
+                if (custom) |breaks| return .{ .breaks = breaks, .owned = breaks.len > 0 };
+            }
             return self.prepareAndComputeWraps(text);
         }
 

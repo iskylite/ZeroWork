@@ -68,6 +68,8 @@ pub const Model = struct {
 
 pub const Hooks = struct {
     context: ?*anyopaque = null,
+    placeholder: []const u8 = "搜索当前会话…",
+    input_label: []const u8 = "搜索当前会话",
     on_query: ?*const fn (?*anyopaque, []const u8) void = null,
     on_next: ?*const fn (?*anyopaque) void = null,
     on_previous: ?*const fn (?*anyopaque) void = null,
@@ -134,10 +136,10 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, model: *Model, hooks: Hooks) !View {
     const qctx = try cx.allocator.create(QueryCtx);
     qctx.* = .{ .hooks = hooks, .model = model, .allocator = cx.allocator, .cx = cx };
     try scope.onCleanup(QueryCtx, qctx, QueryCtx.cleanup);
-    const input = try ui.widgets.Input(.{ .value = sig, .placeholder = "搜索当前会话…", .embedded = true, .placeholder_color = theme.current().fg_2, .on_change = cx.on(QueryCtx, qctx, QueryCtx.change) }).mountResult(scope, cx);
+    const input = try ui.widgets.Input(.{ .value = sig, .placeholder = hooks.placeholder, .embedded = true, .placeholder_color = theme.current().fg_2, .on_change = cx.on(QueryCtx, qctx, QueryCtx.change) }).mountResult(scope, cx);
     styles.tuneInput(input);
     input.input_container.meta.ownership.meta.test_id = "terminal.search.query";
-    input.input_container.behavior.interaction.a11y.?.label = "搜索当前会话";
+    input.input_container.behavior.interaction.a11y.?.label = hooks.input_label;
     const focus_ring = try ui.box(cx, styles.focusRing(), .{});
     try input.node.appendChild(cx.allocator, focus_ring);
     qctx.input = input;

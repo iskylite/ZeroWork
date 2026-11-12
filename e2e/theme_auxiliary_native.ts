@@ -31,7 +31,7 @@ for(const theme of process.argv[4]?.split(',')??Object.keys(palettes.themes)){
  }
  for(const t of ['0','50','100']){
   await setT(t);await cap(theme,'t'+t+'-settings',['settings.panel']);await click('settings.close');await click('toolbar.ai');await vis('ai.response');await cap(theme,'t'+t+'-ai',['ai.panel','ai.response','ai.message.user.bubble','ai.prompt']);if(process.env.ZW_AUX_POPUPS_ONLY!=='1'){await click('ai.prompt');await cap(theme,'t'+t+'-ai-focus',['ai.panel','ai.prompt']);await openPermission();await cap(theme,'t'+t+'-ai-permission',['ai.permission.menu']);await h.key('escape');}await click('ai.collapse');
-  await h.key('k',{cmd:true});await vis('quick.connect');await cap(theme,'t'+t+'-quick',['quick.connect']);if(process.env.ZW_AUX_POPUPS_ONLY!=='1'){const row=await vis('quick.saved.row');await h.mouseMove(row.rect.x+row.rect.w-4,row.rect.y+4);await h.sleep(140);await h.screenshot(out+'/'+theme+'-t'+t+'-quick-hover.png');await writeFile(out+'/'+theme+'-t'+t+'-quick-hover.json',JSON.stringify(await h.query('quick.connect'),null,2));}await h.key('escape');await click('toolbar.settings');
+  await h.key('p',{cmd:true});await vis('quick.connect');await cap(theme,'t'+t+'-quick',['quick.connect']);if(process.env.ZW_AUX_POPUPS_ONLY!=='1'){const row=await vis('quick.saved.row');await h.mouseMove(row.rect.x+row.rect.w-4,row.rect.y+4);await h.sleep(140);await h.screenshot(out+'/'+theme+'-t'+t+'-quick-hover.png');await writeFile(out+'/'+theme+'-t'+t+'-quick-hover.json',JSON.stringify(await h.query('quick.connect'),null,2));}await h.key('escape');await click('toolbar.settings');
  }
  await setT('0');await click('settings.close');
  if(process.env.ZW_AUX_POPUPS_ONLY!=='1'){

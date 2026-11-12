@@ -1,3 +1,4 @@
+// GENERATED FILE, do not edit: generated from styles.yss; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Progress styles and rendering: state color, track, determined mode fill (vertical three-stop
 //! gradient), undetermined mode gloss bar (sweeps left-right per frame clock; see `barAt`). View in
 //! progress.yix.
@@ -103,4 +104,4 @@ pub fn drawBar(ctx: ui.DrawContext, b: Bar, frame: ui.view.Frame) anyerror!void 
     } });
 }
 
-//# yix-map src/ui/components/progress/styles.yss
+//# yix-map styles.yss

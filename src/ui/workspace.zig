@@ -3023,6 +3023,46 @@ pub const Workspace = struct {
         self.selectTabOrdinal(if (next) (at + 1) % count else (at + count - 1) % count);
     }
 
+    pub fn focusAdjacentGroupPane(self: *Workspace, next: bool) bool {
+        const id = self.active_group_view orelse return false;
+        const view = self.groupView(id) orelse return false;
+        const root = view.tree.root orelse return false;
+        if (view.panes.items.len < 2 or view.drag_source != null or view.resizing or self.groupClosing(id)) return false;
+        const focused = self.cx.focus_manager.getFocused() orelse return false;
+        const current = for (view.panes.items) |pane| {
+            if (focused.isDescendantOf(pane.node)) break pane.session;
+        } else return false;
+        var order: std.ArrayList(u64) = .empty;
+        defer order.deinit(self.allocator);
+        view.tree.appendPaneOrder(self.allocator, root, &order) catch return false;
+        var at = std.mem.indexOfScalar(u64, order.items, current) orelse return false;
+        for (1..order.items.len) |_| {
+            at = if (next) (at + 1) % order.items.len else (at + order.items.len - 1) % order.items.len;
+            const index = self.tabIndex(order.items[at]) orelse continue;
+            const tab = self.tabs.items[index];
+            if (tab.closing or !tab.root.isDisplayedInTree()) continue;
+            self.selectGroupMember(id, index);
+            self.focusGroupMemberContent(index);
+            self.cx.requestRedraw();
+            return true;
+        }
+        return false;
+    }
+
+    fn selectGroupMember(self: *Workspace, group: u32, index: usize) void {
+        self.active_tab = index;
+        const view = self.groupView(group) orelse return;
+        const session = self.tabs.items[index].id;
+        view.focused = session;
+        for (self.tabs.items) |tab| if (tab.plugin_renderer) |renderer| renderer.vtable.focus_changed(renderer.context, tab.id == session);
+        for (view.panes.items) |pane| if (pane.node.children.items.len > 0) pane.node.children.items[0].setBackground(if (pane.session == session) app_theme.current().selection else app_theme.current().surface_2);
+    }
+
+    fn focusGroupMemberContent(self: *Workspace, index: usize) void {
+        const tab = self.tabs.items[index];
+        self.cx.setFocus(if (tab.terminal) |terminal| terminal.root else tab.root);
+    }
+
     pub fn requestCloseActive(self: *Workspace) void {
         if (self.active_group_view) |id| self.requestCloseGroup(id) else if (self.active_tab) |index| self.requestCloseTab(index);
     }
@@ -3129,20 +3169,14 @@ pub const Workspace = struct {
         }
         fn focusContent(self: *@This()) void {
             const index = self.workspace.tabIndex(self.session) orelse return;
-            const tab = self.workspace.tabs.items[index];
-            self.workspace.cx.setFocus(if (tab.terminal) |terminal| terminal.root else tab.root);
+            self.workspace.focusGroupMemberContent(index);
         }
         fn event(event_value: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
             const self: *@This() = @ptrCast(@alignCast(raw orelse return .ignored));
             switch (event_value) {
                 .mouse_down => {
                     const index = self.workspace.tabIndex(self.session) orelse return .ignored;
-                    self.workspace.active_tab = index;
-                    if (self.workspace.groupView(self.group)) |view| {
-                        view.focused = self.session;
-                        for (self.workspace.tabs.items) |tab| if (tab.plugin_renderer) |renderer| renderer.vtable.focus_changed(renderer.context, tab.id == self.session);
-                        for (view.panes.items) |pane| if (pane.node.children.items.len > 0) pane.node.children.items[0].setBackground(if (pane.session == self.session) app_theme.current().selection else app_theme.current().surface_2);
-                    }
+                    self.workspace.selectGroupMember(self.group, index);
                 },
                 .key_down => |key| if (key.key == .escape) {
                     self.cancel();

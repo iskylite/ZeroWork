@@ -5,15 +5,21 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-11-12-scoped-dialog-input` (upstream revision and license unchanged)
+- Local patch revision: `2026-11-12-notes-live-markdown-yix-twins-code-fences` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
-- Canonical source files: `3507` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `e245e28f73d0d4ba3f90652d23fa95cf4fcaa20e6529207720f38bbf66c4b64a`
+- Canonical source files: `3508` (tracked sources plus declared working-tree additions)
+- Canonical tracked-tree SHA-256: `27e777f7d7f20b9c2f9f8cc375f8b63e09e3671d503e66774c512d5d55e7fcfc`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
+
+The live Markdown patch adds an opt-in Textarea presentation that shares the Markdown inline parser. Projected text and source UTF-8 offsets stay linked for wrapping, hit testing and caret placement. The underlying document remains the input, clipboard, IME and undo authority. Existing default Textarea behavior, the upstream license and the Zig toolchain stay unchanged.
+
+The Markdown code-block review patch requires a closing fence with the same marker and at least the opening fence length, without a trailing info string. Code rendering preserves internal and trailing blank rows and their source offsets. Parser and mounted-node regressions cover these cases.
+
+The YIX patch regenerates seven checked-in Zig outputs for Alert, Checkbox, Radio, Switch, ControlShell and Progress. The regenerated headers and source map paths restore the standalone build's default code generation. The compiler output between those metadata lines is identical.
 
 The scoped dialog patch lets applications set a live modal owner and manage its bounds. Scoped backdrops restrict semantic actions and focus to their input boundary, while Escape and backdrop dismissal follow the focused or clicked dialog. Existing window-modal defaults, the upstream source revision, license and toolchain are unchanged.
 

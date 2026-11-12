@@ -1,3 +1,5 @@
+const live_markdown = @import("textarea_markdown.zig");
+const MarkdownOptions = @import("../markdown/mod.zig").MarkdownOptions;
 const ImeReplacement = @import("ime_replacement.zig").ImeReplacement;
 const ImeText = @import("ime_text.zig").ImeText;
 /// Textarea, independent multiline text editing component.
@@ -86,6 +88,7 @@ pub const TextareaState = struct {
     /// Sticky physical x for repeated Up/Down navigation.
     preferred_visual_x: ?f32 = null,
     wrap_map: *TextareaWrapMap,
+    markdown: ?live_markdown.Presentation = null,
     a11y_scroll_request: ?core_ui.A11yProps.TextScrollRequest = null,
     allocator: Allocator,
 
@@ -224,6 +227,19 @@ pub const TextareaState = struct {
         const cx = self.cx_ref orelse return null;
         const text = self.doc.getText();
         if (start > end or end > text.len) return null;
+        if (self.markdown != null) {
+            // Geometry is borrowed until the next query on this editor.
+            const state: *TextareaState = @constCast(self);
+            const presentation = &state.markdown.?;
+            _ = presentation.geometry.reset(.{ .retain_with_limit = 256 * 1024 });
+            const scratch = presentation.geometry.allocator();
+            const row = self.wrap_map.displayLineInfo(display_line, self.doc).buffer_line;
+            if (presentation.segment(scratch, self.doc, row, start, end) catch null) |segment| {
+                if (segment.visualLine(cx, scratch) catch null) |line| {
+                    return .{ .start = start, .end = end, .display_line = display_line, .line = line };
+                }
+            }
+        }
         const line = cx.text.visualLine(.{
             .text = text[start..end],
             .font_family = "system",
@@ -414,22 +430,33 @@ pub const TextareaState = struct {
         const anchor = self.cursor.anchor orelse self.cursor.offset;
         const start = text_coordinates.clampByteOffset(old, .{ .value = @min(anchor, self.cursor.offset) }, .backward).value;
         const end = if (anchor == self.cursor.offset) start else text_coordinates.clampByteOffset(old, .{ .value = @max(anchor, self.cursor.offset) }, .forward).value;
+        try self.replaceRangeChecked(start, end, text);
+    }
+
+    /// Replace a known source range as one undoable operation. The owner
+    /// synchronizes the bound value after an external edit.
+    pub fn replaceRangeChecked(self: *TextareaState, start: usize, end: usize, text: []const u8) !void {
         var prepared = try self.doc.prepareReplace(start, end, text);
         defer prepared.deinit();
         try self.pushUndoChecked();
-        const old_lc = self.doc.lineCount();
         const first_line = self.doc.offsetToLineCol(start).line;
+        const last_old_line = self.doc.offsetToLineCol(end).line;
         prepared.commit();
         self.cursor.offset = start + text.len;
         self.cursor.anchor = null;
         self.cursor.preferred_col = null;
         self.cursor_affinity = .downstream;
         self.preferred_visual_x = null;
-        self.wrap_map.applyEdit(self.doc, first_line, old_lc - first_line, self.doc.lineCount() - first_line);
-        _ = self.wrap_map.rewrapInterpolatedAll(self.doc);
-        _ = self.wrap_map.takePendingPatch();
+        self.rewrapEdit(first_line, last_old_line, self.cursor.offset);
         self.markDirty();
         self.resetBlink();
+    }
+
+    fn rewrapEdit(self: *TextareaState, first_line: usize, last_old_line: usize, new_end: usize) void {
+        const last_new_line = self.doc.offsetToLineCol(new_end).line;
+        self.wrap_map.applyEdit(self.doc, first_line, last_old_line - first_line + 1, last_new_line - first_line + 1);
+        _ = self.wrap_map.rewrapInterpolatedAll(self.doc);
+        _ = self.wrap_map.takePendingPatch();
     }
 
     pub fn deleteBackward(self: *TextareaState) void {
@@ -492,18 +519,15 @@ pub const TextareaState = struct {
     fn doDeleteRange(self: *TextareaState, start: usize, end: usize) void {
         if (start >= end) return;
         self.pushUndoChecked() catch return;
-        const old_lc = self.doc.lineCount();
         const lc_before = self.doc.offsetToLineCol(start);
+        const last_old_line = self.doc.offsetToLineCol(end).line;
         self.doc.deleteRange(start, end - start) catch return;
         self.cursor.offset = start;
         self.cursor.anchor = null;
         self.cursor.preferred_col = null;
         self.cursor_affinity = .downstream;
         self.preferred_visual_x = null;
-        const new_lc = self.doc.lineCount();
-        self.wrap_map.applyEdit(self.doc, lc_before.line, old_lc - lc_before.line, new_lc - lc_before.line);
-        _ = self.wrap_map.rewrapInterpolatedAll(self.doc);
-        _ = self.wrap_map.takePendingPatch();
+        self.rewrapEdit(lc_before.line, last_old_line, start);
         self.markDirty();
         self.resetBlink();
     }
@@ -739,6 +763,7 @@ pub const TextareaState = struct {
         self.ime_render_buffer.deinit(self.allocator);
         self.extra_sel_nodes.deinit(self.allocator);
         self.extra_preedit_nodes.deinit(self.allocator);
+        if (self.markdown) |*presentation| presentation.deinit();
     }
 
     fn pushUndoChecked(self: *TextareaState) !void {
@@ -857,12 +882,10 @@ pub const TextareaState = struct {
         const rewrite = edit_reconcile.Rewrite.diff(old, text);
         var prepared = try self.doc.prepareReplace(rewrite.prefix, rewrite.old_end, text[rewrite.prefix..rewrite.new_end]);
         defer prepared.deinit();
-        const old_lc = self.doc.lineCount();
         const first_line = self.doc.offsetToLineCol(rewrite.prefix).line;
+        const last_old_line = self.doc.offsetToLineCol(rewrite.old_end).line;
         prepared.commit();
-        self.wrap_map.applyEdit(self.doc, first_line, old_lc - first_line, self.doc.lineCount() - first_line);
-        _ = self.wrap_map.rewrapInterpolatedAll(self.doc);
-        _ = self.wrap_map.takePendingPatch();
+        self.rewrapEdit(first_line, last_old_line, rewrite.new_end);
     }
 
     fn restoreHistory(self: *TextareaState, redo_direction: bool) !void {
@@ -1329,6 +1352,50 @@ pub const TextareaState = struct {
         if (self.preedit_underline_node) |n| n.markRenderDirty();
     }
 
+    pub fn setMarkdownOptions(self: *TextareaState, options: MarkdownOptions) void {
+        const presentation = if (self.markdown) |*value| value else return;
+        if (std.meta.eql(presentation.options, options)) return;
+        const size_changed = self.font_size != options.base_font_size;
+        presentation.options = options;
+        presentation.cached_key = null;
+        self.font_size = options.base_font_size;
+        if (size_changed) self.char_width = self.measureSlice("M");
+        self.markDirty();
+    }
+
+    fn syncMarkdown(self: *TextareaState) void {
+        const presentation = if (self.markdown) |*value| value else return;
+        const caret = if (self.focused) self.doc.offsetToLineCol(self.cursor.offset).line else null;
+        const anchor = if (self.focused) if (self.cursor.anchor) |byte| self.doc.offsetToLineCol(byte).line else null else null;
+        const composing: @TypeOf(presentation.composing) = if (self.ime_replacement) |replacement| .{
+            .start = self.doc.offsetToLineCol(@min(replacement.start, replacement.end)).line,
+            .end = self.doc.offsetToLineCol(@max(replacement.start, replacement.end)).line,
+        } else if (self.hasImePreedit()) .{
+            .start = self.doc.offsetToLineCol(self.cursor.offset).line,
+            .end = self.doc.offsetToLineCol(self.cursor.offset).line,
+        } else null;
+        if (caret != presentation.caret_line or anchor != presentation.anchor_line) {
+            for ([_]?usize{ presentation.caret_line, presentation.anchor_line, caret, anchor }) |maybe| {
+                if (maybe) |line| self.wrap_map.markInterpolated(line);
+            }
+            presentation.caret_line = caret;
+            presentation.anchor_line = anchor;
+            self.dirty = true;
+        }
+        if (!std.meta.eql(presentation.composing, composing)) {
+            if (presentation.composing) |range| for (range.start..range.end + 1) |line| self.wrap_map.markInterpolated(line);
+            if (composing) |range| for (range.start..range.end + 1) |line| self.wrap_map.markInterpolated(line);
+            presentation.composing = composing;
+            self.dirty = true;
+        }
+        presentation.refreshCode(self.doc) catch return;
+        if (presentation.code_changed) {
+            presentation.code_changed = false;
+            self.wrap_map.rebuildAll(self.doc);
+            self.dirty = true;
+        }
+    }
+
     fn cursorDisplayPoint(self: *const TextareaState) DisplayPoint {
         const lc = self.doc.offsetToLineCol(self.cursor.offset);
         return self.wrap_map.bufferToDisplay(lc.line, lc.col);
@@ -1582,6 +1649,17 @@ fn handleTextareaEvent(state: *TextareaState, event: Event) EventResult {
 
             // Enter
             if (e.key == .@"return" and !e.modifiers.super and !e.modifiers.ctrl) {
+                if (!e.modifiers.shift and !e.modifiers.alt and !state.cursor.hasSelection()) {
+                    if (state.markdown) |*presentation| {
+                        if (presentation.continueMarkup(state.allocator, state.doc, state.cursor.offset) catch null) |edit| {
+                            defer state.allocator.free(edit.text);
+                            state.replaceRangeChecked(edit.start, edit.end, edit.text) catch return .handled;
+                            state.cursor.offset = edit.start + edit.caret;
+                            fireOnChange(state);
+                            return .handled;
+                        }
+                    }
+                }
                 state.insertTextChecked("\n") catch return .handled;
                 fireOnChange(state);
                 return .handled;
@@ -1661,17 +1739,32 @@ fn textareaRenderItem(item_node: *Node, index: usize, cx: *Cx, user_context: ?*a
             @import("row_text.zig").retry(cx, state.input_container_node orelse item_node);
             return;
         };
-    } else if (state.ime_replacement) |replacement| {
+    } else if (state.ime_replacement != null and
+        (state.markdown == null or state.ime_replacement.?.removedInSegment(seg.start, line_content.len) > 0))
+    {
+        const replacement = state.ime_replacement.?;
         state.ime_render_buffer.resize(state.allocator, line_content.len) catch {
             state.dirty = true;
             @import("row_text.zig").retry(cx, state.input_container_node orelse item_node);
             return;
         };
         line_content = replacement.compose(line_content, seg.start, "", false, state.ime_render_buffer.items);
+    } else if (state.markdown) |*presentation| {
+        var scratch = std.heap.ArenaAllocator.init(cx.allocator);
+        defer scratch.deinit();
+        if (presentation.segment(scratch.allocator(), state.doc, info.buffer_line, seg.start, seg.end) catch null) |segment| {
+            segment.paint(cx, item_node, presentation.options.text_color, state.line_height) catch {
+                state.dirty = true;
+                @import("row_text.zig").retry(cx, state.input_container_node orelse item_node);
+            };
+            return;
+        }
     }
+    // A recycled row can previously have held formatted spans.
+    if (state.markdown != null) if (item_node.getText()) |old| if (old.spans.len > 0) item_node.setText(.{});
     const has_content = state.doc.totalLength() > 0 or state.hasImePreedit();
 
-    @import("row_text.zig").setEditable(item_node, cx, line_content, if (has_content) state.tokens.tokens.color.fg_primary else state.tokens.tokens.color.fg_secondary, state.font_size, state.font_weight, state.line_height) catch {
+    @import("row_text.zig").setEditable(item_node, cx, line_content, if (has_content) if (state.markdown) |presentation| presentation.options.text_color else state.tokens.tokens.color.fg_primary else state.tokens.tokens.color.fg_secondary, state.font_size, state.font_weight, state.line_height) catch {
         state.dirty = true;
         @import("row_text.zig").retry(cx, state.input_container_node orelse item_node);
         return;
@@ -1828,7 +1921,7 @@ fn textareaBeforeRender(node: *Node) void {
             .selection_start = @intCast(if (selection) |s| s.start else state.cursor.offset),
             .selection_end = @intCast(if (selection) |s| s.end else state.cursor.offset),
             .caret = @intCast(state.cursor.offset),
-            .uniform_format = true,
+            .uniform_format = state.markdown == null,
             .visible_start = textareaVisibleRange(state).start,
             .visible_end = textareaVisibleRange(state).end,
             .set_selection = struct {
@@ -1879,6 +1972,8 @@ fn textareaBeforeRender(node: *Node) void {
         _ = state.wrap_map.takePendingPatch();
         state.dirty = true;
     }
+
+    state.syncMarkdown();
 
     if (state.wrap_map.enabled and state.wrap_map.has_interpolated_lines) {
         _ = state.wrap_map.rewrapInterpolatedAll(state.doc);
@@ -2689,6 +2784,7 @@ pub const TextareaProps = struct {
     helper: Source([]const u8) = .{ .value = "" },
     error_msg: Source([]const u8) = .{ .value = "" },
     rows: u32 = 4,
+    live_markdown: ?MarkdownOptions = null,
     disabled: Source(bool) = .{ .value = false },
     required: bool = false,
     readonly: bool = false,
@@ -2712,6 +2808,21 @@ pub const TextareaResult = struct {
     state: *TextareaState,
     /// Text value signal (`ui.split` is null)
     value: ?*Signal([]const u8),
+
+    /// Fit short blocks into their document flow. Long blocks retain native
+    /// scrolling and virtual rows within the supplied viewport budget.
+    pub fn fitContent(self: TextareaResult, max_height: f32) bool {
+        const rows = @max(self.state.wrap_map.displayLineCount(), 1);
+        const natural = self.state.line_height * @as(f32, @floatFromInt(rows)) + self.state.padding_v * 2;
+        const height = @min(natural, @max(self.state.line_height, max_height));
+        if (self.input.style.height == .px and @abs(self.input.style.height.px - height) < 0.25) return false;
+        const size: @TypeOf(self.input.style.height) = .{ .px = height };
+        self.wrapper.setStyle(self.state.allocator, .height, size);
+        self.input.parent.?.setStyle(self.state.allocator, .height, size);
+        self.input.setStyle(self.state.allocator, .height, size);
+        if (self.state.focused) self.state.markDirty();
+        return true;
+    }
 
     /// `ui.view` hookup: `v.capture(&st.ta, W.Textarea(...))` grab edit state,
     /// `.parts = .{ .input = "id" }` mark input.
@@ -2856,10 +2967,10 @@ pub const TextareaBuilder = struct {
         const static_disabled = p.disabled.isStatic() and disabled0;
         const chrome_dynamic = !p.label_text.isStatic() or !p.helper.isStatic() or !p.error_msg.isStatic() or
             !p.placeholder.isStatic() or !p.disabled.isStatic();
-        const line_height: f32 = 20;
-        const font_size: f32 = 13;
+        const line_height: f32 = if (p.live_markdown != null) 26 else 20;
+        const font_size: f32 = if (p.live_markdown) |options| options.base_font_size else 13;
         const char_width: f32 = 7.8;
-        const pad: f32 = 8;
+        const pad: f32 = if (p.live_markdown != null) 0 else 8;
 
         const value = try reactive.resolveTextModel(my_scope, p.value);
 
@@ -2924,6 +3035,20 @@ pub const TextareaBuilder = struct {
             .borderless = p.borderless,
         };
         if (initial_value.len > 0) state.cursor.offset = doc.totalLength();
+        if (p.live_markdown) |options| {
+            state.markdown = .{
+                .options = options,
+                .geometry = std.heap.ArenaAllocator.init(allocator),
+                .projection = std.heap.ArenaAllocator.init(allocator),
+            };
+            wm.project_context = &state.markdown.?;
+            wm.project_wrap = struct {
+                fn project(raw: *anyopaque, a: Allocator, document: *const TextareaDocument, line: usize, source: []const u8, width: f32) anyerror!?[]u32 {
+                    const presentation: *live_markdown.Presentation = @ptrCast(@alignCast(raw));
+                    return presentation.breaks(a, document, line, source, width);
+                }
+            }.project;
+        }
         try my_scope.adoptResource(@ptrCast(state), struct {
             fn d(ptr: *anyopaque, alloc: Allocator) void {
                 const s: *TextareaState = @ptrCast(@alignCast(ptr));
@@ -3105,6 +3230,7 @@ pub const TextareaBuilder = struct {
                     fn h(c: *anyopaque) void {
                         const s: *TextareaState = @ptrCast(@alignCast(c));
                         s.focused = true;
+                        if (s.markdown != null) s.markDirty();
                         if (!s.borderless and !s.has_error) if (s.input_container_node) |cn| {
                             cn.setBorderColor(styles.borderColor(s.tokens, s.tokens.tokens.color.input_border, false, true, false));
                             cn.style.border.width = 1.5;
@@ -3122,6 +3248,7 @@ pub const TextareaBuilder = struct {
                         s.focused = false;
                         s.cancelImeComposition();
                         s.cursor.anchor = null;
+                        if (s.markdown != null) s.markDirty();
                         s.is_dragging = false;
                         s.drag_pointer = null;
                         s.suspend_drag_until_mouse_up = false;

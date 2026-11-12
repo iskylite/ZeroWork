@@ -32,6 +32,16 @@ pub const Tree = struct {
         for (self.nodes.items, 0..) |node, i| if (node == .leaf and node.leaf == session) return @intCast(i);
         return null;
     }
+    pub fn appendPaneOrder(self: *const Tree, allocator: std.mem.Allocator, id: u32, order: *std.ArrayList(u64)) !void {
+        switch (self.nodes.items[id]) {
+            .empty => {},
+            .leaf => |session| try order.append(allocator, session),
+            .split => |split| {
+                try self.appendPaneOrder(allocator, split.first, order);
+                try self.appendPaneOrder(allocator, split.second, order);
+            },
+        }
+    }
     fn prune(self: *Tree, id: u32, members: []const u64) ?u32 {
         switch (self.nodes.items[id]) {
             .empty => return null,
@@ -168,6 +178,18 @@ test "mixed group tree docks four sessions into independent left and right stack
     try std.testing.expectEqual(@as(usize, 3), tree.count());
     try std.testing.expectApproxEqAbs(@as(f32, 0.65), resized(300, 600, 90, 160, 160), 0.001);
 }
+test "pane order follows the displayed split tree after docking" {
+    const allocator = std.testing.allocator;
+    var tree: Tree = .{};
+    defer tree.deinit(allocator);
+    try tree.arrange(allocator, &.{ 1, 2, 3 }, .side_by_side);
+    try tree.dock(allocator, 3, 1, .top);
+    var order: std.ArrayList(u64) = .empty;
+    defer order.deinit(allocator);
+    try tree.appendPaneOrder(allocator, tree.root.?, &order);
+    try std.testing.expectEqualSlices(u64, &.{ 3, 1, 2 }, order.items);
+}
+
 test "mixed group layout rejects cycles and round trips its split tree" {
     const a = std.testing.allocator;
     var tree: Tree = .{};

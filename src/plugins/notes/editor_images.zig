@@ -65,7 +65,7 @@ pub fn insertion(a: std.mem.Allocator, body: []const u8, range: sessions.Range, 
     const before = body[0..range.start];
     const after = body[range.end..];
     const prefix = if (before.len == 0 or std.mem.endsWith(u8, before, "\n\n")) "" else if (std.mem.endsWith(u8, before, "\n")) "\n" else "\n\n";
-    const suffix = if (after.len == 0 or std.mem.startsWith(u8, after, "\n\n")) "" else if (std.mem.startsWith(u8, after, "\n")) "\n" else "\n\n";
+    const suffix = if (std.mem.startsWith(u8, after, "\n\n")) "" else if (std.mem.startsWith(u8, after, "\n")) "\n" else "\n\n";
     return std.fmt.allocPrint(a, "{s}![图片]({s}){s}", .{ prefix, path, suffix });
 }
 

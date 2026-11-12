@@ -57,6 +57,8 @@ pub const ActionId = enum(u16) {
     create_local_session = 45,
     request_close_window = 46,
     save_connection = 47,
+    previous_pane = 48,
+    next_pane = 49,
 };
 
 pub const Capability = enum { terminal, session_factory, connection, saved_connection, route, transfer, groups, recording, ai, appearance, forward };
@@ -95,7 +97,7 @@ pub const Descriptor = struct {
     action_id: []const u8,
     label: []const u8,
     default_chord: ?Chord = null,
-    /// Only these 27 entries appear in the factory settings table.
+    /// Links the action to its configurable shortcut.
     shortcut_action: ?keys.Action = null,
     /// Ctrl-Tab and Right are fixed context boundaries, not recordable keys.
     fixed_input_boundary: bool = false,
@@ -104,11 +106,12 @@ pub const Descriptor = struct {
 };
 
 fn shortcut(id: ActionId, action_id: []const u8, label: []const u8, legacy: keys.Action, rule: Rule) Descriptor {
+    const chord = (keys.Map{}).get(legacy);
     return .{
         .id = id,
         .action_id = action_id,
         .label = label,
-        .default_chord = (keys.Map{}).get(legacy),
+        .default_chord = if (chord.key == .unknown) null else chord,
         .shortcut_action = legacy,
         .fixed_input_boundary = legacy == .recent_tab or legacy == .accept_completion,
         .rule = rule,
@@ -133,6 +136,8 @@ pub const descriptors = [_]Descriptor{
     shortcut(.recent_tab, "workspace.recent_tab", "最近使用的页签", .recent_tab, .{ .scope = .tab }),
     shortcut(.split_vertical, "workspace.split_vertical", "垂直分栏", .split_vertical, .{ .scope = .terminal, .capabilities = &.{ .terminal, .session_factory } }),
     shortcut(.split_horizontal, "workspace.split_horizontal", "水平分栏", .split_horizontal, .{ .scope = .terminal, .capabilities = &.{ .terminal, .session_factory } }),
+    shortcut(.previous_pane, "workspace.previous_pane", "聚焦上一个分栏", .previous_pane, .{ .scope = .tab, .needs_group = true }),
+    shortcut(.next_pane, "workspace.next_pane", "聚焦下一个分栏", .next_pane, .{ .scope = .tab, .needs_group = true }),
     shortcut(.copy, "input.copy", "复制", .copy, .{ .scope = .text_input, .needs_selection = true }),
     shortcut(.paste, "input.paste", "粘贴", .paste, .{ .scope = .text_input, .needs_writable = true }),
     shortcut(.search_terminal, "terminal.search", "搜索当前终端", .search, .{ .scope = .terminal, .capabilities = &.{.terminal} }),
@@ -167,13 +172,13 @@ pub const descriptors = [_]Descriptor{
 };
 
 pub const factory_shortcuts = blk: {
-    var result: [27]ActionId = undefined;
+    var result: [29]ActionId = undefined;
     var index: usize = 0;
     for (descriptors) |item| if (item.shortcut_action != null) {
         result[index] = item.id;
         index += 1;
     };
-    if (index != result.len) @compileError("factory shortcut count must remain 27");
+    if (index != result.len) @compileError("factory shortcut count must match the catalog");
     break :blk result;
 };
 
@@ -310,13 +315,15 @@ pub fn evaluate(id: ActionId, context: Context) ?Unavailable {
     return null;
 }
 
-test "factory actions preserve 27 defaults and two fixed input boundaries" {
-    try std.testing.expectEqual(@as(usize, 27), factory_shortcuts.len);
+test "factory settings list workspace actions and two fixed input boundaries" {
+    try std.testing.expectEqual(@as(usize, 29), factory_shortcuts.len);
     var fixed: usize = 0;
     for (factory_shortcuts) |id| {
         const item = descriptor(id);
         const legacy = item.shortcut_action.?;
-        try std.testing.expect(item.default_chord.?.eql((keys.Map{}).get(legacy)));
+        const chord = (keys.Map{}).get(legacy);
+        const expected: ?Chord = if (chord.key == .unknown) null else chord;
+        try std.testing.expectEqualDeep(expected, item.default_chord);
         try std.testing.expectEqual(id, fromShortcutAction(legacy));
         if (item.fixed_input_boundary) fixed += 1;
     }
@@ -358,6 +365,13 @@ test "catalog has unique stable ids and chords across every source" {
             if (item.default_chord) |chord| if (other.default_chord) |other_chord| try std.testing.expect(!chord.eql(other_chord));
         }
     }
+}
+
+test "catalog reflects the updated default shortcuts" {
+    try std.testing.expectEqual(ActionId.quick_connect, fromShortcut(.{ .key = .p }).?);
+    try std.testing.expectEqual(ActionId.open_completion, fromShortcut(.{ .key = .i }).?);
+    try std.testing.expect(descriptor(.toggle_broadcast).default_chord == null);
+    try std.testing.expectEqual(keys.Action.broadcast, descriptor(.toggle_broadcast).shortcut_action.?);
 }
 
 test "metadata support never implies a live handler or permission" {

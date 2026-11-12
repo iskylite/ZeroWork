@@ -126,7 +126,7 @@ try {
     }, 12000);
     await capture('direct-web');
     stage = 'show the saved web origin in Quick Connect';
-    await h.key('k', {cmd: true});
+    await h.key('p', {cmd: true});
     await fill('quick.query', 'Owned direct web');
     await find('quick.saved.endpoint', node => content(node).includes(new URL(ready.direct).origin));
     await click('quick.close');

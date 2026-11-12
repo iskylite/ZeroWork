@@ -47,22 +47,35 @@ static void Restore(NSString *failure){
     }@catch(NSException *e){record[@"error"]=e.reason;Stage(@"restore_failed");Surface(@"旧版本恢复失败",e.reason);}
 }
 static void ObserveNew(void){
-    pid_t pid=[record[@"new_pid"] intValue];uint64_t birth=[record[@"new_birth"] unsignedLongLongValue];double deadline=NSDate.date.timeIntervalSince1970+45;
-    while(NSDate.date.timeIntervalSince1970<deadline){
+    pid_t pid=[record[@"new_pid"] intValue];uint64_t birth=[record[@"new_birth"] unsignedLongLongValue];double timeout=45,startupTimeout=45;
+#if ZW_UPDATE_TESTING
+    const char *testTimeout=getenv("ZW_UPDATE_TEST_READINESS_SECONDS");if(testTimeout)timeout=MAX(.1,atof(testTimeout));
+    const char *testStartupTimeout=getenv("ZW_UPDATE_TEST_STARTUP_SECONDS");if(testStartupTimeout)startupTimeout=MAX(.1,atof(testStartupTimeout));
+#endif
+    double deadline=NSDate.date.timeIntervalSince1970+startupTimeout;BOOL warned=NO;
+    while(YES){@autoreleasepool{
         NSDictionary *startup=ZWRead([directory stringByAppendingPathComponent:@"startup.request"]);
-        if([record[@"stage"] isEqual:@"new_started"] && [startup[@"nonce"] isEqual:record[@"nonce"]] && [startup[@"pid"] intValue]==pid && [startup[@"birth"] unsignedLongLongValue]==birth && [startup[@"version"] isEqual:record[@"version"]] && ZWAlive(pid,birth)){
+        if(([record[@"stage"] isEqual:@"new_started"] || ([record[@"stage"] isEqual:@"readiness_unknown"] && [record[@"data_state"] isEqual:@"unchanged"])) && [startup[@"nonce"] isEqual:record[@"nonce"]] && [startup[@"pid"] intValue]==pid && [startup[@"birth"] unsignedLongLongValue]==birth && [startup[@"version"] isEqual:record[@"version"]] && ZWAlive(pid,birth)){
             // Persist BEFORE main process is permitted to read/migrate its data.
             ZWWrite([directory stringByAppendingPathComponent:@"data-may-change.json"],@{@"pid":@(pid),@"birth":@(birth),@"nonce":record[@"nonce"]});
             record[@"data_state"]=@"potentially_changed";Stage(@"data_access_granted");
+            deadline=NSDate.date.timeIntervalSince1970+timeout;warned=NO;
         }
         NSDictionary *healthy=ZWRead([directory stringByAppendingPathComponent:@"healthy.request"]);
-        if([record[@"stage"] isEqual:@"data_access_granted"] && [healthy[@"nonce"] isEqual:record[@"nonce"]] && [healthy[@"version"] isEqual:record[@"version"]] && [healthy[@"pid"] intValue]==pid && [healthy[@"birth"] unsignedLongLongValue]==birth && ZWAlive(pid,birth)){
+        NSDictionary *grant=ZWRead([directory stringByAppendingPathComponent:@"data-may-change.json"]);
+        BOOL granted=[record[@"data_state"] isEqual:@"potentially_changed"] && [grant[@"nonce"] isEqual:record[@"nonce"]] && [grant[@"pid"] intValue]==pid && [grant[@"birth"] unsignedLongLongValue]==birth;
+        if(([record[@"stage"] isEqual:@"data_access_granted"] || [record[@"stage"] isEqual:@"readiness_unknown"]) && granted && [healthy[@"nonce"] isEqual:record[@"nonce"]] && [healthy[@"version"] isEqual:record[@"version"]] && [healthy[@"pid"] intValue]==pid && [healthy[@"birth"] unsignedLongLongValue]==birth && ZWAlive(pid,birth)){
             ZWVerifyApp(record[@"target"],record[@"version"]);Stage(@"healthy");Surface(@"更新完成",@"新版已完成本地启动与工作区初始化。安装备份和诊断记录已保留。");return;
         }
         if(!ZWAlive(pid,birth)){Restore(@"新版未完成健康启动。");return;}
-        usleep(100000);
+        if(!warned && NSDate.date.timeIntervalSince1970>=deadline){
+            warned=YES;Stage(@"readiness_unknown");
+            Surface(@"正在等待新版完成启动",@"新版仍在运行。请在新版中完成系统认证或处理启动提示；安装程序将继续等待，不会结束进程或恢复旧版。");
+        }
+        // Startup can wait for human authentication. The diagnostic deadline
+        // must not revoke the durable grant or discard a later healthy receipt.
+        }usleep(100000);
     }
-    Stage(@"readiness_unknown");Surface(@"新版启动状态尚未确认",@"新版仍在运行，未强制结束进程或覆盖应用。关闭新版后重新运行本安装程序，可继续检查恢复条件；若已访问数据，将只允许安装兼容版本。");
 }
 static void LaunchNew(void){
     ZWVerifyApp(record[@"target"],record[@"version"]);

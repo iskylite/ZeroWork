@@ -104,3 +104,34 @@ test "V3 recorder scrolls body while header and footer retain their size" {
     try std.testing.expect(body.y >= header.y + header.h - 0.5);
     try std.testing.expect(body.y + body.h <= footer.y + 0.5);
 }
+
+test "restoring the unbound broadcast default stays staged until confirmation" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var map: keys.Map = .{};
+    try map.set(.broadcast, .{ .key = .i, .shift = true });
+    const original = map;
+    var probe: Probe = .{};
+    const picker = try recorder.mount(cx, scope, root, root, &map, "broadcast", .{ .context = &probe, .changed = Probe.changed, .dismiss = Probe.dismissed });
+    try root.appendChild(cx.allocator, picker.root);
+    cx.advanceFrameClock();
+    _ = cx.render();
+    const button = tagged(picker.root, "settings.keybinding.reset").?.globalRect();
+    cx.handleMouseDown(button.x + button.w / 2, button.y + button.h / 2, .{});
+    cx.handleMouseUp(button.x + button.w / 2, button.y + button.h / 2);
+    try std.testing.expectEqualDeep(original, map);
+    try std.testing.expectEqual(@as(usize, 0), probe.changes);
+    try std.testing.expect(!picker.invalid.peek());
+    try std.testing.expectEqualStrings("未设置", picker.capture.getText().?.content);
+    picker.confirm();
+    try std.testing.expectEqual(@as(usize, 1), probe.changes);
+    try std.testing.expectEqual(@as(usize, 1), probe.dismissals);
+    try std.testing.expectEqualDeep(keys.Map{}, map);
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectEqualDeep(map, try keys.Map.parse(try map.format(&buffer)));
+}

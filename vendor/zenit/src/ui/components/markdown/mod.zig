@@ -12,7 +12,7 @@
 /// - Unclosed fence / malformed input is fuzz-safe: forced flush at end
 ///
 /// Not supported (explicit non-goals):
-///   - nested lists, setext headings, task lists, footnotes, definition lists, HTML passthrough
+///   - nested lists, setext headings, footnotes, definition lists, HTML passthrough
 ///   - tables (use a dedicated markdown editor)
 ///   - image fetching
 ///
@@ -127,7 +127,7 @@ pub const MarkdownBuilder = struct {
             }
         }.key, struct {
             fn build(c: Ctx, rebuild_scope: *Scope, host: *Node, text: []const u8) !void {
-                try renderBlocks(rebuild_scope, c.cx, host, text, c.options);
+                try renderBlocks(rebuild_scope, c.cx, host, text, c.options, null);
             }
         }.build);
         return container;
@@ -146,20 +146,111 @@ pub fn renderInto(cx: *Cx, container: *Node, text: []const u8, opts: MarkdownOpt
     // scope lives only this call; Markdown walks renderBlocks with rebuildOn's rebuild scope.
     const tmp_scope = try Scope.init(cx.allocator, null, cx.owner);
     defer tmp_scope.dispose();
-    try renderBlocks(tmp_scope, cx, container, text, opts);
+    try renderBlocks(tmp_scope, cx, container, text, opts, null);
 }
 
-fn renderBlocks(scope: *Scope, cx: *Cx, container: *Node, text: []const u8, opts: MarkdownOptions) !void {
+/// Mount immutable Markdown with source offsets for click-to-edit. The source
+/// text and the returned map live for the caller's mounting scope.
+pub fn mountMapped(scope: *Scope, cx: *Cx, text: []const u8, opts: MarkdownOptions) !struct { node: *Node, source_map: *const SourceMap } {
+    const node = try box(cx, mdRootStyle(opts), .{});
+    errdefer cx.freeNode(node);
+    node.meta.ownership.meta.component_name = "Markdown";
+    const map = try scope.createState(SourceMap, .{ .arena = std.heap.ArenaAllocator.init(cx.allocator), .source = text });
+    try scope.onCleanup(SourceMap, map, SourceMap.deinit);
+    try renderBlocks(scope, cx, node, text, opts, map);
+    return .{ .node = node, .source_map = map };
+}
+
+pub const SourceMap = struct {
+    arena: std.heap.ArenaAllocator,
+    source: []const u8,
+    entries: std.ArrayList(Entry) = .empty,
+
+    const Entry = struct {
+        node: *const Node,
+        start: usize,
+        len: usize,
+        edits: []const LiveLine.Edit,
+    };
+
+    fn deinit(self: *SourceMap) void {
+        self.arena.deinit();
+    }
+
+    fn add(self: *SourceMap, node: *const Node, raw: []const u8, edits: []const LiveLine.Edit) !void {
+        const a = self.arena.allocator();
+        try self.entries.append(a, .{
+            .node = node,
+            .start = @intFromPtr(raw.ptr) - @intFromPtr(self.source.ptr),
+            .len = raw.len,
+            .edits = try a.dupe(LiveLine.Edit, edits),
+        });
+    }
+
+    pub fn offsetAt(self: *const SourceMap, cx: *Cx, x: f32, y: f32) ?usize {
+        for (self.entries.items) |entry| {
+            const offset = textOffsetAt(cx, entry.node, x, y) orelse continue;
+            return entry.start + @min(entry.len, displayToSourceOffset(entry.edits, offset));
+        }
+        return null;
+    }
+};
+
+/// Resolve the displayed UTF-8 caret offset using this node's laid-out rows.
+pub fn textOffsetAt(cx: *Cx, node: *const Node, x: f32, y: f32) ?usize {
+    const rect = node.globalRect();
+    if (!rect.contains(x, y)) return null;
+    const t = node.getText() orelse return null;
+    const padding = node.style.padding;
+    const line: core.text_layout.LineInfo = if (node.layoutTextLayout()) |layout| blk: {
+        if (layout.line_count == 0) return null;
+        const row: usize = @intFromFloat(@max(0, y - rect.y - padding.top) / @max(1, t.font_size * t.line_height));
+        break :blk layout.lines[@min(row, layout.line_count - 1)];
+    } else .{ .byte_start = 0, .byte_end = @intCast(t.content.len), .width = rect.w - padding.horizontal() };
+    if (line.byte_end <= line.byte_start) return line.byte_start;
+    const alignment_offset = core.text_layout.alignLineOffset(t.text_align, rect.w - padding.horizontal(), line.width);
+    const local_x = x - rect.x - padding.left - alignment_offset;
+    if (t.spans.len == 0) {
+        if (cx.text.visualLine(.{
+            .text = t.content[line.byte_start..line.byte_end],
+            .font_family = "system",
+            .font_family_id = t.font_family,
+            .font_size = t.font_size,
+            .font_weight = t.font_weight,
+            .use_italic = t.use_italic_font,
+            .use_monospace = t.use_monospace_font,
+            .use_symbols = t.use_symbols_font,
+        }) catch null) |visual| {
+            return line.byte_start + visual.xToPosition(.{ .value = local_x }).byte.value;
+        }
+    }
+    const offset = core.text_layout.hitTestPrefixWidthRangeCached(
+        node.id,
+        node.meta.per_frame.caches.versions.content,
+        t.content,
+        line.byte_start,
+        line.byte_end,
+        local_x,
+        t.font_size,
+        t.font_weight,
+        t.use_italic_font,
+        t.use_monospace_font,
+        t.spans,
+    ) orelse return null;
+    return line.byte_start + offset;
+}
+
+fn renderBlocks(scope: *Scope, cx: *Cx, container: *Node, text: []const u8, opts: MarkdownOptions, map: ?*SourceMap) !void {
     const allocator = cx.allocator;
     var scanner = BlockScanner{ .src = text };
     while (try scanner.next(allocator)) |block| {
         switch (block) {
-            .paragraph => |lines| try emitParagraph(scope, cx, container, lines, opts),
-            .heading => |h| try emitHeading(scope, cx, container, h.level, h.text, opts),
-            .code_block => |c| try emitCodeBlock(scope, cx, container, c.content, opts),
+            .paragraph => |lines| try emitParagraph(scope, cx, container, lines, opts, map),
+            .heading => |h| try emitHeading(scope, cx, container, h.level, h.text, opts, map),
+            .code_block => |c| try emitCodeBlock(scope, cx, container, c.content, opts, map),
             .rule => try emitRule(scope, cx, container, opts),
-            .blockquote => |q| try emitBlockquote(scope, cx, container, q, opts),
-            .list_item => |li| try emitListItem(scope, cx, container, li.ordered, li.marker, li.text, opts),
+            .blockquote => |q| try emitBlockquote(scope, cx, container, q, opts, map),
+            .list_item => |li| try emitListItem(scope, cx, container, li.ordered, li.marker, li.text, opts, map),
         }
     }
 }
@@ -200,15 +291,17 @@ const BlockScanner = struct {
         // fenced code block
         if (std.mem.startsWith(u8, trimmed, "```") or std.mem.startsWith(u8, trimmed, "~~~")) {
             const fence_char = trimmed[0];
-            const fence_start = self.pos;
-            _ = fence_start;
+            var fence_length: usize = 3;
+            while (fence_length < trimmed.len and trimmed[fence_length] == fence_char) : (fence_length += 1) {}
             self.pos = line.next;
             const content_start = self.pos;
             // Scan to matching fence or EOF.
             while (self.pos < self.src.len) {
                 const l = peekLine(self.src, self.pos);
                 const t = trimAscii(l.content);
-                if (t.len >= 3 and t[0] == fence_char and t[1] == fence_char and t[2] == fence_char) {
+                var closing_length: usize = 0;
+                while (closing_length < t.len and t[closing_length] == fence_char) : (closing_length += 1) {}
+                if (closing_length >= fence_length and std.mem.trim(u8, t[closing_length..], " \t").len == 0) {
                     const content_end = self.pos;
                     self.pos = l.next;
                     return .{ .code_block = .{ .content = trimTrailingNewline(self.src[content_start..content_end]) } };
@@ -251,14 +344,9 @@ const BlockScanner = struct {
             }
         }
 
-        // Ordered list `1. xxx` / `10. xxx` (single level).
-        if (std.ascii.isDigit(trimmed[0])) {
-            var digit_end: usize = 0;
-            while (digit_end < trimmed.len and std.ascii.isDigit(trimmed[digit_end])) digit_end += 1;
-            if (digit_end > 0 and digit_end + 1 < trimmed.len and trimmed[digit_end] == '.' and trimmed[digit_end + 1] == ' ') {
-                self.pos = line.next;
-                return .{ .list_item = .{ .ordered = true, .marker = trimmed[0..digit_end], .text = trimmed[digit_end + 2 ..] } };
-            }
+        if (orderedMarkerEnd(trimmed)) |end| {
+            self.pos = line.next;
+            return .{ .list_item = .{ .ordered = true, .marker = trimmed[0..end], .text = std.mem.trimStart(u8, trimmed[end..], " \t") } };
         }
 
         // Paragraph: accumulate following non-empty non-special lines. First line unconditionally
@@ -276,11 +364,21 @@ const BlockScanner = struct {
             if (atxHeadingLevel(t) != null) break;
             if (t.len > 0 and t[0] == '>') break;
             if (t.len >= 2 and (t[0] == '-' or t[0] == '*' or t[0] == '+') and t[1] == ' ') break;
+            if (orderedMarkerEnd(t) != null) break;
             self.pos = l.next;
         }
         return .{ .paragraph = self.src[para_start..self.pos] };
     }
 };
+
+fn orderedMarkerEnd(line: []const u8) ?usize {
+    var end: usize = 0;
+    while (end < line.len and std.ascii.isDigit(line[end])) : (end += 1) {}
+    if (end == 0 or end > 9 or end + 1 >= line.len) return null;
+    if (line[end] != '.' and line[end] != ')') return null;
+    if (line[end + 1] != ' ' and line[end + 1] != '\t') return null;
+    return end + 1;
+}
 
 // ============================================================================
 // Block emitters
@@ -291,13 +389,13 @@ const BlockScanner = struct {
 // InlineBuilder then handed off; view.text has no spans entry, text writes post-mount.
 const grow_width = core.BoxStyle{ .width = .{ .grow = .{} } };
 
-fn emitParagraph(scope: *Scope, cx: *Cx, container: *Node, text: []const u8, opts: MarkdownOptions) !void {
+fn emitParagraph(scope: *Scope, cx: *Cx, container: *Node, text: []const u8, opts: MarkdownOptions, map: ?*SourceMap) !void {
     var node: *Node = undefined;
     try view.mount(scope, cx, container, view.capture(&node, view.box(.{ .style = grow_width }, {})));
-    try applyInlineText(cx, node, text, opts.base_font_size, opts.text_color, opts.line_height, 400, opts);
+    try applyInlineText(cx, node, text, opts.base_font_size, opts.text_color, opts.line_height, 400, opts, map);
 }
 
-fn emitHeading(scope: *Scope, cx: *Cx, container: *Node, level: u8, text: []const u8, opts: MarkdownOptions) !void {
+fn emitHeading(scope: *Scope, cx: *Cx, container: *Node, level: u8, text: []const u8, opts: MarkdownOptions, map: ?*SourceMap) !void {
     var node: *Node = undefined;
     try view.mount(scope, cx, container, view.capture(&node, view.box(.{
         .style = grow_width,
@@ -308,16 +406,19 @@ fn emitHeading(scope: *Scope, cx: *Cx, container: *Node, level: u8, text: []cons
     }, {})));
     const color = opts.heading_color orelse opts.text_color;
     const font_size = opts.base_font_size * mdHeadingSizeMul(level);
-    try applyInlineText(cx, node, text, font_size, color, opts.line_height, 600, opts);
+    try applyInlineText(cx, node, text, font_size, color, opts.line_height, 600, opts, map);
 }
 
-fn emitCodeBlock(scope: *Scope, cx: *Cx, container: *Node, code: []const u8, opts: MarkdownOptions) !void {
+fn emitCodeBlock(scope: *Scope, cx: *Cx, container: *Node, code: []const u8, opts: MarkdownOptions, map: ?*SourceMap) !void {
     var block: *Node = undefined;
     try view.mount(scope, cx, container, view.capture(&block, view.box(.{ .style = mdCodeBlockStyle(opts) }, {})));
     var it = std.mem.splitScalar(u8, code, '\n');
     while (it.next()) |line| {
-        if (line.len == 0) continue;
-        try view.mount(scope, cx, block, view.text(.{ .style = mdCodeLineText(opts) }, line));
+        var node: *Node = undefined;
+        // Keep a text row for empty source lines so code spacing and mapped
+        // click positions remain aligned with the document.
+        try view.mount(scope, cx, block, view.capture(&node, view.text(.{ .style = mdCodeLineText(opts) }, if (line.len == 0) " " else line)));
+        if (map) |source_map| try source_map.add(node, line, &.{});
     }
 }
 
@@ -325,27 +426,40 @@ fn emitRule(scope: *Scope, cx: *Cx, container: *Node, opts: MarkdownOptions) !vo
     try view.mount(scope, cx, container, view.box(.{ .style = mdRuleStyle(opts) }, {}));
 }
 
-fn emitBlockquote(scope: *Scope, cx: *Cx, container: *Node, text: []const u8, opts: MarkdownOptions) !void {
+fn emitBlockquote(scope: *Scope, cx: *Cx, container: *Node, text: []const u8, opts: MarkdownOptions, map: ?*SourceMap) !void {
     var body: *Node = undefined;
     try view.mount(scope, cx, container, view.box(.{ .style = mdBlockquoteStyle() }, .{
         view.box(.{ .style = mdBlockquoteBarStyle(opts) }, {}),
         view.capture(&body, view.box(.{ .style = mdBlockquoteBodyStyle() }, {})),
     }));
-    try applyInlineText(cx, body, text, opts.base_font_size, opts.text_color, opts.line_height, 400, opts);
+    try applyInlineText(cx, body, text, opts.base_font_size, opts.text_color, opts.line_height, 400, opts, map);
 }
 
-fn emitListItem(scope: *Scope, cx: *Cx, container: *Node, ordered: bool, marker: []const u8, text: []const u8, opts: MarkdownOptions) !void {
+fn emitListItem(scope: *Scope, cx: *Cx, container: *Node, ordered: bool, marker: []const u8, text: []const u8, opts: MarkdownOptions, map: ?*SourceMap) !void {
     var body: *Node = undefined;
+    var marker_node: *Node = undefined;
+    const task = if (ordered) null else taskMarker(text);
+    const label = if (task != null) text[4..] else text;
     try view.mount(scope, cx, container, view.box(.{
         .style = mdListRowStyle(),
         // Label text only, no bullet/number marker; marker is visual (AT broadcasts 'item N'
         // itself).
         .a11y = core.A11yProps{ .role = .listitem, .label = text },
     }, .{
-        view.text(.{ .style = mdListMarkerText(opts) }, if (ordered) marker else bulletGlyph()),
+        view.capture(&marker_node, view.text(.{ .style = mdListMarkerText(opts) }, if (ordered) marker else task orelse bulletGlyph())),
         view.capture(&body, view.box(.{ .style = grow_width }, {})),
     }));
-    try applyInlineText(cx, body, text, opts.base_font_size, opts.text_color, opts.line_height, 400, opts);
+    if (map) |source_map| try source_map.add(marker_node, marker, &.{});
+    try applyInlineText(cx, body, label, opts.base_font_size, opts.text_color, opts.line_height, 400, opts, map);
+}
+
+fn taskMarker(text: []const u8) ?[]const u8 {
+    if (text.len < 4 or text[0] != '[' or text[2] != ']' or text[3] != ' ') return null;
+    return switch (text[1]) {
+        ' ' => "☐",
+        'x', 'X' => "☑",
+        else => null,
+    };
 }
 
 fn bulletGlyph() []const u8 {
@@ -366,12 +480,15 @@ fn applyInlineText(
     line_height: f32,
     font_weight: u16,
     opts: MarkdownOptions,
+    map: ?*SourceMap,
 ) !void {
     const allocator = cx.allocator;
     var builder = InlineBuilder.init(allocator);
     defer builder.deinit();
 
+    if (map != null) builder.source = raw;
     try expandInline(&builder, raw, opts);
+    if (map) |source_map| try source_map.add(node, raw, builder.edits.items);
 
     // If nothing survives (all data:url discarded), use space to maintain height.
     if (builder.text.items.len == 0) {
@@ -400,10 +517,122 @@ fn applyInlineText(
     });
 }
 
+/// A rendered line and its reversible UTF-8 source coordinates. Only
+/// delimiters and block prefixes differ between the two byte streams.
+pub const LiveLine = struct {
+    text: []const u8,
+    spans: []const TextSpan,
+    edits: []const Edit,
+    font_size: f32,
+    font_weight: u16 = 400,
+
+    const Edit = struct { source_start: usize, source_end: usize, display_start: usize, display_end: usize };
+
+    pub fn sourceToDisplay(self: LiveLine, offset: usize) usize {
+        var lo: usize = 0;
+        var hi = self.edits.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.edits[mid].source_start < offset) lo = mid + 1 else hi = mid;
+        }
+        if (lo == 0) return offset;
+        const previous = self.edits[lo - 1];
+        if (offset < previous.source_end) return previous.display_start;
+        return previous.display_end + (offset - previous.source_end);
+    }
+
+    pub fn displayToSource(self: LiveLine, offset: usize) usize {
+        return displayToSourceOffset(self.edits, offset);
+    }
+};
+
+fn displayToSourceOffset(edits: []const LiveLine.Edit, offset: usize) usize {
+    var lo: usize = 0;
+    var hi = edits.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (edits[mid].display_end <= offset) lo = mid + 1 else hi = mid;
+    }
+    if (lo < edits.len and offset > edits[lo].display_start) return edits[lo].source_start;
+    if (lo == 0) return offset;
+    const previous = edits[lo - 1];
+    return previous.source_end + (offset - previous.display_end);
+}
+
+pub const LiveCode = enum { prose, fence, code };
+
+/// Uses the same inline parser as the read renderer. The allocator is scratch
+/// storage owned by the editor for one projection.
+pub fn projectLine(a: std.mem.Allocator, raw: []const u8, opts: MarkdownOptions, reveal: bool, code: LiveCode) !LiveLine {
+    var builder = InlineBuilder.init(a);
+    builder.source = raw;
+    builder.live = true;
+    builder.reveal = reveal;
+    var result: LiveLine = .{ .text = "", .spans = &.{}, .edits = &.{}, .font_size = opts.base_font_size };
+    if (code != .prose) {
+        var style = mdCodeSpanStyle(opts);
+        if (code == .fence) style.color = opts.rule_color;
+        try builder.appendStyled(raw, style);
+    } else {
+        const trimmed = std.mem.trimStart(u8, raw, " \t");
+        const indent = raw.len - trimmed.len;
+        var body = trimmed;
+        try builder.appendPlain(raw[0..indent]);
+        if (atxHeadingLevel(trimmed)) |level| {
+            body = std.mem.trimStart(u8, trimmed[level..], " \t");
+            try builder.appendMarker(trimmed[0 .. trimmed.len - body.len], "", opts);
+            result.font_size *= @min(mdHeadingSizeMul(level), 1.45);
+            result.font_weight = 600;
+        } else if (std.mem.startsWith(u8, trimmed, ">")) {
+            try builder.appendMarker(trimmed[0..1], "▏", opts);
+            body = trimmed[1..];
+        } else if (isHorizontalRule(trimmed)) {
+            try builder.appendMarker(trimmed, "────────", opts);
+            body = "";
+        } else if (trimmed.len >= 2 and trimmed[1] == ' ' and std.mem.indexOfScalar(u8, "-+*", trimmed[0]) != null) {
+            if (taskMarker(trimmed[2..])) |marker| {
+                try builder.appendMarker(trimmed[0..5], marker, opts);
+                body = trimmed[5..];
+            } else {
+                try builder.appendMarker(trimmed[0..1], bulletGlyph(), opts);
+                body = trimmed[1..];
+            }
+        }
+        try expandInlineStyled(&builder, body, opts, plain_inline_style, 0);
+    }
+    result.text = builder.text.items;
+    result.spans = builder.spans.items;
+    result.edits = builder.edits.items;
+    return result;
+}
+
 const InlineBuilder = struct {
     text: std.ArrayListUnmanaged(u8) = .empty,
     spans: std.ArrayListUnmanaged(TextSpan) = .empty,
     allocator: std.mem.Allocator,
+    source: ?[]const u8 = null,
+    live: bool = false,
+    reveal: bool = false,
+    edits: std.ArrayListUnmanaged(LiveLine.Edit) = .empty,
+
+    fn appendMarker(self: *InlineBuilder, raw: []const u8, replacement: []const u8, opts: MarkdownOptions) !void {
+        if (self.reveal) return self.appendSpan(raw, .{ .start = 0, .end = 0, .color = opts.rule_color });
+        try self.appendReplacement(raw, replacement, plain_inline_style);
+    }
+
+    fn appendReplacement(self: *InlineBuilder, raw: []const u8, replacement: []const u8, style: TextSpan) !void {
+        if (self.source) |source| {
+            const start = @intFromPtr(raw.ptr) - @intFromPtr(source.ptr);
+            const display = self.text.items.len;
+            try self.edits.append(self.allocator, .{
+                .source_start = start,
+                .source_end = start + raw.len,
+                .display_start = display,
+                .display_end = display + replacement.len,
+            });
+        }
+        try self.appendStyled(replacement, style);
+    }
 
     fn init(a: std.mem.Allocator) InlineBuilder {
         return .{ .allocator = a };
@@ -412,6 +641,7 @@ const InlineBuilder = struct {
     fn deinit(self: *InlineBuilder) void {
         self.text.deinit(self.allocator);
         self.spans.deinit(self.allocator);
+        self.edits.deinit(self.allocator);
     }
 
     fn appendPlain(self: *InlineBuilder, s: []const u8) !void {
@@ -460,6 +690,7 @@ fn inheritInlineStyle(parent: TextSpan, child: TextSpan) TextSpan {
     result.use_italic_font = parent.use_italic_font or child.use_italic_font;
     result.use_monospace_font = parent.use_monospace_font or child.use_monospace_font;
     result.underline = parent.underline or child.underline;
+    result.strikethrough = parent.strikethrough or child.strikethrough;
     if (child.bg_color != null) {
         result.bg_color = child.bg_color;
         result.inline_box_padding_left = child.inline_box_padding_left;
@@ -482,6 +713,11 @@ fn expandInlineStyled(builder: *InlineBuilder, raw: []const u8, opts: MarkdownOp
         const c = raw[i];
         // Paragraph-local soft breaks flatten to spaces, including in styled runs.
         if (c == '\n' or c == '\r') {
+            if (builder.live) {
+                try builder.appendStyled(raw[i..][0..1], inherited);
+                i += 1;
+                continue;
+            }
             var next = i + 1;
             if (c == '\r' and next < raw.len and raw[next] == '\n') next += 1;
             const has_previous_text = builder.text.items.len > 0;
@@ -489,29 +725,39 @@ fn expandInlineStyled(builder: *InlineBuilder, raw: []const u8, opts: MarkdownOp
             const previous_is_space = has_previous_text and
                 (builder.text.items[builder.text.items.len - 1] == ' ' or builder.text.items[builder.text.items.len - 1] == '\t');
             const following_is_space = has_following_text and (raw[next] == ' ' or raw[next] == '\t');
-            if (has_previous_text and has_following_text and !previous_is_space and !following_is_space) {
-                try builder.appendStyled(" ", inherited);
-            }
+            const separator = if (has_previous_text and has_following_text and !previous_is_space and !following_is_space) " " else "";
+            try builder.appendReplacement(raw[i..next], separator, inherited);
             i = next;
+            continue;
+        }
+
+        if (c == '\\' and i + 1 < raw.len and std.ascii.isPunctuation(raw[i + 1])) {
+            try builder.appendMarker(raw[i..][0..1], "", opts);
+            try builder.appendStyled(raw[i + 1 ..][0..1], inherited);
+            i += 2;
             continue;
         }
 
         // Code is opaque: its contents never become emphasis or links.
         if (c == '`') {
             if (findMatching(raw, i + 1, '`')) |end| {
+                try builder.appendMarker(raw[i..][0..1], "", opts);
                 if (end > i + 1) try builder.appendSpan(raw[i + 1 .. end], inheritInlineStyle(inherited, mdCodeSpanStyle(opts)));
+                try builder.appendMarker(raw[end..][0..1], "", opts);
                 i = end + 1;
                 continue;
             }
         }
 
-        if (c == '*' or c == '_') {
-            const width: usize = if (c == '*' and i + 1 < raw.len and raw[i + 1] == '*') 2 else 1;
+        if (c == '*' or c == '_' or (c == '~' and std.mem.startsWith(u8, raw[i..], "~~"))) {
+            const width: usize = if (i + 1 < raw.len and raw[i + 1] == c) 2 else 1;
             const word_underscore = c == '_' and i > 0 and isWordByte(raw[i - 1]);
             if (!word_underscore and canOpenEmphasis(raw, i, width)) {
                 if (findEmphasisEnd(raw, i + width, c, width, depth)) |end| {
-                    const style = if (width == 2) mdBoldSpanStyle() else mdItalicSpanStyle();
+                    const style = if (c == '~') TextSpan{ .start = 0, .end = 0, .strikethrough = true } else if (width == 2) mdBoldSpanStyle() else mdItalicSpanStyle();
+                    try builder.appendMarker(raw[i..][0..width], "", opts);
                     try expandInlineStyled(builder, raw[i + width .. end], opts, inheritInlineStyle(inherited, style), depth + 1);
+                    try builder.appendMarker(raw[end..][0..width], "", opts);
                     i = end + width;
                     continue;
                 }
@@ -525,12 +771,22 @@ fn expandInlineStyled(builder: *InlineBuilder, raw: []const u8, opts: MarkdownOp
         // Images retain the existing chip / literal-alt fallback behavior.
         if (c == '!' and i + 1 < raw.len and raw[i + 1] == '[') {
             if (parseLink(raw, i + 1)) |link| {
-                if (link.text.len > 0 and !isDataUri(link.url)) {
-                    try builder.appendStyled("[", inherited);
-                    try builder.appendStyled(link.text, inherited);
-                    try builder.appendStyled("]", inherited);
-                } else if (link.text.len > 0) {
-                    try builder.appendSpan(link.text, inheritInlineStyle(inherited, mdImageChipSpanStyle(opts)));
+                const label_start = i + 2;
+                const label_end = label_start + link.text.len;
+                if (builder.live) {
+                    const image_style = inheritInlineStyle(inherited, mdImageChipSpanStyle(opts));
+                    if (!builder.reveal and link.text.len == 0) {
+                        try builder.appendReplacement(raw[i..link.next], "图片", image_style);
+                    } else {
+                        try builder.appendMarker(raw[i..label_start], "", opts);
+                        try builder.appendStyled(link.text, image_style);
+                        try builder.appendMarker(raw[label_end..link.next], "", opts);
+                    }
+                } else {
+                    const brackets = link.text.len > 0 and !isDataUri(link.url);
+                    try builder.appendReplacement(raw[i..label_start], if (brackets) "[" else "", inherited);
+                    try builder.appendStyled(link.text, if (brackets) inherited else inheritInlineStyle(inherited, mdImageChipSpanStyle(opts)));
+                    try builder.appendReplacement(raw[label_end..link.next], if (brackets) "]" else "", inherited);
                 }
                 i = link.next;
                 continue;
@@ -539,7 +795,10 @@ fn expandInlineStyled(builder: *InlineBuilder, raw: []const u8, opts: MarkdownOp
 
         if (c == '[') {
             if (parseLink(raw, i)) |link| {
+                const label_end = i + 1 + link.text.len;
+                try builder.appendMarker(raw[i..][0..1], "", opts);
                 try expandInlineStyled(builder, link.text, opts, inheritInlineStyle(inherited, mdLinkSpanStyle(opts)), depth + 1);
+                try builder.appendMarker(raw[label_end..link.next], "", opts);
                 i = link.next;
                 continue;
             }
@@ -573,6 +832,10 @@ fn findEmphasisEndBounded(src: []const u8, start: usize, marker: u8, width: usiz
         if (budget.* == 0) return null;
         budget.* -= 1;
         const c = src[i];
+        if (c == '\\' and i + 1 < src.len and std.ascii.isPunctuation(src[i + 1])) {
+            i += 2;
+            continue;
+        }
         if (c == '\n' or c == '\r') return null;
         if (c == '`') {
             if (findMatching(src, i + 1, '`')) |end| {
@@ -586,15 +849,19 @@ fn findEmphasisEndBounded(src: []const u8, start: usize, marker: u8, width: usiz
                 continue;
             }
         }
-        if (c == '*' or c == '_') {
+        if (c == '*' or c == '_' or c == '~') {
             var run_end = i + 1;
             while (run_end < src.len and src[run_end] == c) : (run_end += 1) {}
             const run_width = run_end - i;
+            if (c == '~' and run_width < 2) {
+                i = run_end;
+                continue;
+            }
             const closes = i > start and !std.ascii.isWhitespace(src[i - 1]) and
                 (c != '_' or run_end == src.len or !isWordByte(src[run_end]));
             if (c == marker and run_width >= width and (width == 2 or run_width != 2) and closes) return i;
 
-            const nested_width: usize = if (c == '*' and run_width >= 2) 2 else 1;
+            const nested_width: usize = if (run_width >= 2) 2 else 1;
             const word_underscore = c == '_' and i > 0 and isWordByte(src[i - 1]);
             if ((c != marker or nested_width != width) and !word_underscore and canOpenEmphasis(src, i, nested_width)) {
                 if (findEmphasisEndBounded(src, i + nested_width, c, nested_width, depth + 1, budget)) |end| {
@@ -707,7 +974,10 @@ fn trimAscii(s: []const u8) []const u8 {
 
 fn trimTrailingNewline(s: []const u8) []const u8 {
     var end = s.len;
-    while (end > 0 and (s[end - 1] == '\n' or s[end - 1] == '\r')) end -= 1;
+    // Drop only the final line terminator; earlier newlines are blank rows
+    // belonging to the code block.
+    if (end > 0 and s[end - 1] == '\n') end -= 1;
+    if (end > 0 and s[end - 1] == '\r') end -= 1;
     return s[0..end];
 }
 
@@ -731,7 +1001,7 @@ fn atxHeadingLevel(trimmed: []const u8) ?u8 {
     if (trimmed.len == 0 or trimmed[0] != '#') return null;
     var level: u8 = 0;
     while (level < 6 and level < trimmed.len and trimmed[level] == '#') level += 1;
-    if (level < trimmed.len and trimmed[level] == ' ') return level;
+    if (level < trimmed.len and (trimmed[level] == ' ' or trimmed[level] == '\t')) return level;
     return null;
 }
 
@@ -775,6 +1045,41 @@ test "markdown: fenced code block with unclosed fence" {
     try std.testing.expectEqualStrings("foo\nbar", b.code_block.content);
 }
 
+test "markdown: fenced code requires a complete matching closing fence" {
+    const cases = [_]struct { source: []const u8, content: []const u8 }{
+        .{ .source = "````markdown\n```\nexample\n```\n````\nafter", .content = "```\nexample\n```" },
+        .{ .source = "~~~\n~~~not a closer\ncode\n~~~~\nafter", .content = "~~~not a closer\ncode" },
+    };
+    for (cases) |case| {
+        var scanner = BlockScanner{ .src = case.source };
+        const block = (try scanner.next(std.testing.allocator)).?;
+        try std.testing.expectEqualStrings(case.content, block.code_block.content);
+        const following = (try scanner.next(std.testing.allocator)).?;
+        try std.testing.expectEqualStrings("after", following.paragraph);
+        try std.testing.expectEqual(null, try scanner.next(std.testing.allocator));
+    }
+}
+
+test "markdown: fenced code preserves blank rows and source offsets" {
+    var cx = try Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    const source = "```\nfirst\n\nlast\n\n```";
+    const mounted = try mountMapped(scope, cx, source, .{});
+    defer cx.freeNode(mounted.node);
+    const code = mounted.node.children.items[0];
+    try std.testing.expectEqual(@as(usize, 4), code.children.items.len);
+    try std.testing.expectEqualStrings("first", code.children.items[0].getText().?.content);
+    try std.testing.expectEqualStrings(" ", code.children.items[1].getText().?.content);
+    try std.testing.expectEqualStrings("last", code.children.items[2].getText().?.content);
+    try std.testing.expectEqualStrings(" ", code.children.items[3].getText().?.content);
+    const blank = mounted.source_map.entries.items[1];
+    try std.testing.expectEqual(@as(usize, 10), blank.start);
+    try std.testing.expectEqual(@as(usize, 0), blank.len);
+    try std.testing.expectEqual(@as(usize, 16), mounted.source_map.entries.items[3].start);
+}
+
 test "markdown: horizontal rule" {
     var scanner = BlockScanner{ .src = "---\n" };
     const b = (try scanner.next(std.testing.allocator)).?;
@@ -791,6 +1096,49 @@ test "markdown: list items and blockquote" {
     const c = (try scanner.next(std.testing.allocator)).?;
     try std.testing.expect(c == .blockquote);
     try std.testing.expectEqualStrings("quoted", c.blockquote);
+}
+
+test "markdown live projection preserves source bytes for Unicode, nested styles and destinations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "# **运行 `nginx -t`** [说明](https://example.com/a_(b))";
+    const visible = try projectLine(arena.allocator(), source, .{}, false, .prose);
+    try std.testing.expectEqualStrings("运行 nginx -t 说明", visible.text);
+    try std.testing.expectEqual(@as(u16, 600), visible.font_weight);
+    const index = std.mem.indexOf(u8, source, "nginx").?;
+    const display_index = std.mem.indexOf(u8, visible.text, "nginx").?;
+    try std.testing.expectEqual(display_index, visible.sourceToDisplay(index));
+    try std.testing.expectEqual(index, visible.displayToSource(display_index));
+    try std.testing.expectEqual(source.len, visible.displayToSource(visible.text.len));
+    const editing = try projectLine(arena.allocator(), source, .{}, true, .prose);
+    try std.testing.expectEqualStrings(source, editing.text);
+    try std.testing.expectEqual(@as(usize, 0), editing.edits.len);
+    try std.testing.expectEqualStrings("☑ 完成", (try projectLine(arena.allocator(), "- [x] 完成", .{}, false, .prose)).text);
+    try std.testing.expectEqualStrings("~~未闭合", (try projectLine(arena.allocator(), "~~未闭合", .{}, false, .prose)).text);
+}
+
+test "markdown inline: source map follows folded breaks and hidden syntax" {
+    const source = "alpha\r\n**Bravo** ![图](image.png) [文档](doc)";
+    var builder = InlineBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    builder.source = source;
+    try expandInline(&builder, source, .{});
+    const rendered = builder.text.items;
+    try std.testing.expectEqualStrings("alpha Bravo [图] 文档", rendered);
+    for ([_][]const u8{ "Bravo", "图", "文档" }) |word| {
+        const offset = std.mem.indexOf(u8, rendered, word).?;
+        try std.testing.expectEqual(std.mem.indexOf(u8, source, word).?, displayToSourceOffset(builder.edits.items, offset));
+    }
+}
+
+test "markdown inline: single tildes stay literal inside emphasis" {
+    var builder = InlineBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try expandInline(&builder, "*a~b*c~d", .{});
+    try std.testing.expectEqualStrings("a~bc~d", builder.text.items);
+    try std.testing.expectEqual(@as(usize, 1), builder.spans.items.len);
+    try std.testing.expect(builder.spans.items[0].use_italic_font);
+    try std.testing.expectEqual(@as(u32, 3), builder.spans.items[0].end);
 }
 
 test "markdown inline: data uri image dropped to chip" {

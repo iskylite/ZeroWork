@@ -46,12 +46,19 @@ fn blank(line: []const u8) bool {
     return std.mem.trim(u8, line, " \t\r").len == 0;
 }
 
-fn heading(line: []const u8) bool {
+pub fn heading(line: []const u8) ?struct { level: usize, title: []const u8 } {
     const clean = std.mem.trimStart(u8, line, " ");
-    if (line.len - clean.len > 3 or clean.len < 2 or clean[0] != '#') return false;
+    if (line.len - clean.len > 3 or clean.len < 2 or clean[0] != '#') return null;
     var depth: usize = 1;
     while (depth < clean.len and clean[depth] == '#') depth += 1;
-    return depth <= 6 and depth < clean.len and (clean[depth] == ' ' or clean[depth] == '\t');
+    if (depth > 6 or depth == clean.len or (clean[depth] != ' ' and clean[depth] != '\t')) return null;
+    const title = std.mem.trim(u8, clean[depth + 1 ..], " \t\r");
+    const without_hashes = std.mem.trimEnd(u8, title, "#");
+    const label = if (without_hashes.len != title.len and (without_hashes.len == 0 or std.ascii.isWhitespace(without_hashes[without_hashes.len - 1])))
+        std.mem.trimEnd(u8, without_hashes, " \t")
+    else
+        title;
+    return .{ .level = depth, .title = label };
 }
 
 fn hasInlineMarkup(line: []const u8) bool {
@@ -67,7 +74,7 @@ fn hasInlineMarkup(line: []const u8) bool {
 
 fn markdownLine(line: []const u8) bool {
     const clean = std.mem.trimStart(u8, line, " \t");
-    if (heading(line) or clean.len == 0) return clean.len != 0;
+    if (heading(line) != null or clean.len == 0) return clean.len != 0;
     if (clean[0] == '>') return true;
     for ([_][]const u8{ "- ", "* ", "+ ", "---", "***", "___" }) |prefix| {
         if (std.mem.startsWith(u8, clean, prefix)) return true;
@@ -116,7 +123,7 @@ fn readBlock(body: []const u8, start: usize) Block {
                 break;
             }
         }
-    } else if (heading(first)) {
+    } else if (heading(first) != null) {
         kind = .markdown;
     } else if (std.mem.startsWith(u8, std.mem.trim(u8, first, " \t\r"), "![") and
         std.mem.endsWith(u8, std.mem.trim(u8, first, " \t\r"), ")"))
@@ -128,7 +135,7 @@ fn readBlock(body: []const u8, start: usize) Block {
             const next = end + 1;
             const next_end = lineEnd(body, next);
             const line = body[next..next_end];
-            if (blank(line) or heading(line) or Fence.opening(line) != null) break;
+            if (blank(line) or heading(line) != null or Fence.opening(line) != null) break;
             if (markdownLine(line)) kind = .markdown;
             end = next_end;
         }
@@ -285,25 +292,6 @@ pub fn matchBlocks(allocator: std.mem.Allocator, old_body: []const u8, old_block
     return matches;
 }
 
-/// Live edits may contain several blocks. Keeping the input mounted also keeps
-/// IME, selection and the native undo stack on the same editor.
-pub fn previewKind(body: []const u8) Kind {
-    var lines = std.mem.splitScalar(u8, body, '\n');
-    var fence: ?Fence = null;
-    var markup = false;
-    while (lines.next()) |line| {
-        if (fence) |opening| {
-            if (opening.closes(line)) fence = null;
-        } else if (Fence.opening(line)) |opening| {
-            fence = opening;
-            markup = true;
-        } else if (markdownLine(line)) {
-            markup = true;
-        }
-    }
-    return if (fence != null) .raw else if (markup) .markdown else .text;
-}
-
 pub fn replace(allocator: std.mem.Allocator, body: []const u8, range: Block, replacement: []const u8) ![]u8 {
     if (range.start > range.end or range.end > body.len) return error.InvalidBlockRange;
     return std.mem.concat(allocator, u8, &.{ body[0..range.start], replacement, body[range.end..] });
@@ -322,13 +310,6 @@ test "notes blocks preserve UTF-8 byte ranges and fence boundaries" {
     const edited = try replace(std.testing.allocator, source, parsed[3], "改写\n\n新段落");
     defer std.testing.allocator.free(edited);
     try std.testing.expectEqualStrings("\n# 标题\n说明 **粗体**\n\n```zig\n\nconst a = 1;\n````\n\n改写\n\n新段落\n\n```\n未闭合\n", edited);
-}
-
-test "notes live preview reads plain, Markdown and unfinished code independently" {
-    try std.testing.expectEqual(Kind.text, previewKind("普通段落\n保留换行"));
-    try std.testing.expectEqual(Kind.markdown, previewKind("运行 `nginx -t`"));
-    try std.testing.expectEqual(Kind.raw, previewKind("~~~ shell\nnginx -t"));
-    try std.testing.expectEqual(Kind.markdown, previewKind("~~~ shell\nnginx -t\n~~~~"));
 }
 
 test "notes incremental parse agrees with full parsing around fences and separators" {

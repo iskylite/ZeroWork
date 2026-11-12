@@ -8,9 +8,11 @@ const S = controls.S;
 pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const page = try controls.Page.create(cx, bound, "settings.keys");
     const query = bound.controller.search_query;
-    if (binding.matches(query, "页签 分栏 新建 关闭 序号 直达 上一个 下一个 最近使用 split tab")) {
-        const section = try page.section("页签与分栏", "16 个动作", ui.icons.keyboard, 4, "settings.keys.tabs", null);
-        for (keys.rows[0..5]) |row| for (row.actions) |action| {
+    if (binding.matches(query, "页签 分栏 新建 关闭 序号 直达 上一个 下一个 最近使用 split tab") or
+        try actionMatches(bound, query, .previous_pane) or try actionMatches(bound, query, .next_pane))
+    {
+        const section = try page.section("页签与分栏", "18 个动作", ui.icons.keyboard, 4, "settings.keys.tabs", null);
+        for (keys.rows[0..6]) |row| for (row.actions) |action| {
             try shortcutRow(cx, bound, section.body, actionLabel(action), &.{action});
         };
     }
@@ -18,7 +20,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try actionMatches(bound, query, .notes_float) or try actionMatches(bound, query, .notes_directory))
     {
         const section = try page.section("终端与应用", "13 个动作 · Control 与 Tab 保留给远端", ui.icons.terminal, 5, "settings.keys.terminal", null);
-        for (keys.rows[5..]) |row| for (row.actions) |action| {
+        for (keys.rows[6..]) |row| for (row.actions) |action| {
             try shortcutRow(cx, bound, section.body, actionLabel(action), &.{action});
         };
     }
@@ -95,6 +97,8 @@ fn actionLabel(action: keys.Action) []const u8 {
         .recent_tab => "最近使用的页签",
         .split_vertical => "垂直分栏",
         .split_horizontal => "水平分栏",
+        .previous_pane => "聚焦上一个分栏",
+        .next_pane => "聚焦下一个分栏",
         .copy => "复制",
         .paste => "粘贴",
         .search => "搜索当前终端",

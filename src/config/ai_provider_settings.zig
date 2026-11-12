@@ -463,7 +463,8 @@ pub const ProviderView = struct {
             try empty.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.box, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
             const message = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .direction = .column, .gap = 3 }, .{});
             try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, "尚未添加模型"));
-            try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "获取模型清单后选择，也可手动输入模型。"));
+            const hint = if (p.enabled and p.model.len == 0 and draft.connectionValid(p)) "助手会自动获取模型清单。" else "获取模型清单后选择，也可手动输入模型。";
+            try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, hint));
             try empty.appendChild(self.cx.allocator, message);
             const first = try self.textAction(.add_model, i, "添加第一个模型 →", null, false);
             first.meta.ownership.meta.test_id = try self.id(i, null, "first_model");
@@ -583,7 +584,8 @@ pub const ProviderView = struct {
         if (!model.reasoning and !model.vision) try metadata.appendChild(self.cx.allocator, try ui.text(self.cx, "仅文本", .{ .font_size = 10.5, .color = S.theme.current().fg_2, .line_height = 16.0 / 10.5 }));
         try root.appendChild(self.cx.allocator, try self.iconButton(.default_model, i, j, ui.icons.star, if (model.default) "默认模型" else "设为默认模型", 28, model.default, model.default or !self.savedEligible(i, j)));
         try root.appendChild(self.cx.allocator, try self.iconButton(.edit_model, i, j, ui.icons.pencil, "编辑模型", 24, false, false));
-        try root.appendChild(self.cx.allocator, try self.iconButton(.delete_model, i, j, ui.icons.trash_2, "删除模型前须选择默认替代项", 24, false, self.modelProtected(i, j)));
+        const protected = self.modelProtected(i, j);
+        try root.appendChild(self.cx.allocator, try self.iconButton(.delete_model, i, j, ui.icons.trash_2, if (protected) "删除默认模型前，请先将另一个模型设为默认" else "删除模型", 24, false, protected));
         return root;
     }
     fn capabilityIcon(self: *ProviderView, asset: []const u8, caption: []const u8) !*ui.Node {
@@ -653,7 +655,7 @@ pub const ProviderView = struct {
     }
     fn modelProtected(self: *ProviderView, i: usize, j: usize) bool {
         const p = self.controller.model.value.ai.providers[i];
-        return (p.enabled and p.model_count <= 1) or (p.model_count > 1 and p.models[j].default);
+        return p.model_count > 1 and p.models[j].default;
     }
     fn input(self: *ProviderView, address: draft.Address, placeholder: []const u8, width: f32, height: f32) !*ui.Node {
         const scope = self.render_scope.?;
@@ -1076,6 +1078,7 @@ const Click = struct {
                         std.mem.copyForwards(config.AiModel, p.models[self.model..], p.models[self.model + 1 .. p.model_count]);
                         p.model_count -= 1;
                         p.models = p.models[0..p.model_count];
+                        if (self.action == .delete_model and p.model_count == 0) p.model = "";
                         v.controller.editProviders(ai.*) catch return;
                         v.controller.ai_fields.removeModel(v.scope.allocator, self.provider, self.model);
                         v.controller.refreshDirty();

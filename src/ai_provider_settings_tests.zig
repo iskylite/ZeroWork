@@ -579,6 +579,57 @@ test "native provider saves enabled connection without models and discovers mode
     try std.testing.expectEqual(@as(usize, 0), target.value.ai.providers[0].model_count);
 }
 
+test "native provider deleting its last model keeps the enabled default in automatic discovery" {
+    var f: Fixture = undefined;
+    try f.initWithCount(true, 2);
+    defer f.deinit();
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const runtime = @import("config/runtime_config.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var target = try runtime.RuntimeConfig.loadOrDefault(io, tmp.dir, a, "settings.toml");
+    defer target.deinit();
+
+    var configured = try runtime.Snapshot.init(a, f.controller.model.value);
+    defer configured.deinit();
+    const ai = &configured.value.ai;
+    const primary = &ai.providers[0];
+    primary.kind = .openai_compat;
+    primary.endpoint = "http://127.0.0.1:1234/v1";
+    primary.api_key = "";
+    primary.model = "legacy-fallback";
+    var other_models = [_]Config.AiModel{.{ .id = "other-model", .context_window = 8192, .default = true }};
+    ai.providers[1] = .{
+        .name = "Other Gateway",
+        .endpoint = "http://127.0.0.1:1235/v1",
+        .enabled = true,
+        .models = &other_models,
+        .model_count = other_models.len,
+    };
+    try f.controller.editProviders(ai.*);
+    try f.controller.save(io, tmp.dir, &target);
+    try f.remount();
+
+    f.clickId("settings.ai.provider.0.model.0.delete_model");
+    f.clickId("settings.ai.delete.confirm");
+    const changed = f.controller.model.value.ai;
+    try std.testing.expectEqualStrings("anthropic", changed.default_provider);
+    try std.testing.expect(changed.providers[0].enabled);
+    try std.testing.expectEqual(@as(usize, 0), changed.providers[0].model_count);
+    try std.testing.expectEqualStrings("", changed.providers[0].model);
+    try std.testing.expectEqual(@as(usize, 1), changed.providers[1].model_count);
+    try std.testing.expect(hasText(f.mounted.root, "助手会自动获取模型清单。"));
+    try std.testing.expect(f.controller.canSave());
+    try f.controller.save(io, tmp.dir, &target);
+
+    var reopened = try runtime.RuntimeConfig.loadOrDefault(io, tmp.dir, a, "settings.toml");
+    defer reopened.deinit();
+    try std.testing.expectEqualStrings("anthropic", reopened.value.ai.default_provider);
+    try std.testing.expect(reopened.value.ai.providers[0].enabled);
+    try std.testing.expectEqual(@as(usize, 0), reopened.value.ai.providers[0].model_count);
+}
+
 test "provider folds animate without rebuilding forms or notifying settings changes" {
     var f: Fixture = undefined;
     try f.initWithCount(true, 2);

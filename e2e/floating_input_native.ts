@@ -38,7 +38,7 @@ try{
  await h.waitForServerReady();await h.resizeWindow(1440,900);await click('workspace.empty.local');await click('terminal.surface');await h.sleep(250);
  await h.type_("printf 'overlay audit\\n'");await h.key('return');await h.sleep(300);
  await click('toolbar.transfers');await trace('transfer-header','transfer.manager',240,8);await trace('transfer-footer','transfer.manager',240,(await vis('transfer.manager')).rect.h-8);await click('transfer.window.close');
- await h.key('k',{cmd:true});await trace('quick-connect-padding','quick.connect',4,80);await h.key('escape');await h.sleep(200);
+ await h.key('p',{cmd:true});await trace('quick-connect-padding','quick.connect',4,80);await h.key('escape');await h.sleep(200);
  await click('toolbar.ai');await trace('ai-side-padding','ai.panel',4,150);
  await click('ai.composer.permission');await trace('ai-permission-header','ai.permission.menu',8,6);await vis('ai.panel');
  await click('ai.permission.close');await hidden('ai.permission.menu');await click('ai.prompt');await h.type_('outside press draft');

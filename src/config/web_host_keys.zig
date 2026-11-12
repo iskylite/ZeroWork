@@ -21,13 +21,13 @@ pub fn isHostKey(map: keys.Map, key: anytype, mods: anytype) bool {
     if (code == recent.key and mods.super == recent.command and
         mods.ctrl == recent.control and mods.alt == recent.option) return true;
     if (configured_action) |action| return switch (action) {
-        .copy, .paste, .search, .completion, .accept_completion => false,
+        .copy, .paste, .search, .completion, .accept_completion, .previous_pane, .next_pane => false,
         else => true,
     };
     // Reserved workspace commands have no configurable action entry.
     return mods.super and !mods.ctrl and !mods.alt and switch (code) {
         .l, .n, .comma => !mods.shift,
-        .r, .b => mods.shift,
+        .r => mods.shift,
         else => false,
     };
 }
@@ -36,7 +36,7 @@ const Mods = struct { super: bool = false, ctrl: bool = false, alt: bool = false
 
 test "focused web page keeps configured workspace and recent-tab shortcuts" {
     const map: keys.Map = .{};
-    for ([_]keys.KeyCode{ .t, .w, .@"1", .@"2", .@"3", .@"4", .@"5", .@"6", .@"7", .@"8", .@"9", .l, .k, .r, .b, .j, .u, .d }) |key| {
+    for ([_]keys.KeyCode{ .t, .w, .@"1", .@"2", .@"3", .@"4", .@"5", .@"6", .@"7", .@"8", .@"9", .l, .p, .r, .b, .j, .u, .d }) |key| {
         try std.testing.expect(isHostKey(map, key, Mods{ .super = true }));
     }
     try std.testing.expect(isHostKey(map, keys.KeyCode.tab, Mods{ .ctrl = true }));
@@ -44,11 +44,15 @@ test "focused web page keeps configured workspace and recent-tab shortcuts" {
     try std.testing.expect(!isHostKey(map, keys.KeyCode.tab, Mods{}));
     try std.testing.expect(!isHostKey(map, keys.KeyCode.tab, Mods{ .super = true, .ctrl = true }));
     try std.testing.expect(!isHostKey(map, keys.KeyCode.tab, Mods{ .alt = true, .ctrl = true }));
+    try std.testing.expect(!isHostKey(map, keys.KeyCode.k, Mods{ .super = true }));
+    try std.testing.expect(!isHostKey(map, keys.KeyCode.b, Mods{ .super = true, .shift = true }));
     var customized = map;
     try customized.set(.new_tab, .{ .key = .f6, .shift = true });
     try std.testing.expect(isHostKey(customized, keys.KeyCode.f6, Mods{ .super = true, .shift = true }));
     try std.testing.expect(!isHostKey(customized, keys.KeyCode.t, Mods{ .super = true }));
     try std.testing.expect(isHostKey(map, keys.KeyCode.t, Mods{ .super = true }));
+    try customized.set(.new_tab, .{ .key = .b, .shift = true });
+    try std.testing.expect(isHostKey(customized, keys.KeyCode.b, Mods{ .super = true, .shift = true }));
 }
 
 test "focused web page preserves editing selection navigation and composition keys" {
@@ -57,6 +61,7 @@ test "focused web page preserves editing selection navigation and composition ke
         try std.testing.expect(!isHostKey(map, key, Mods{ .super = true }));
         try std.testing.expect(!isHostKey(map, key, Mods{ .super = true, .shift = true }));
     }
+    try std.testing.expect(!isHostKey(map, keys.KeyCode.i, Mods{ .super = true }));
     for ([_]keys.KeyCode{ .a, .n, .i, .@"return", .escape, .space, .right, .unknown }) |key| {
         try std.testing.expect(!isHostKey(map, key, Mods{}));
         try std.testing.expect(!isHostKey(map, key, Mods{ .ctrl = true }));

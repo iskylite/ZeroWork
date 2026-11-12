@@ -9,6 +9,7 @@ pub const LineCol = core_mod.cursor.LineCol;
 
 pub const TextareaDocument = struct {
     allocator: Allocator,
+    revision: u64 = 0,
     text: std.ArrayListUnmanaged(u8) = .empty,
     /// Start byte offset of each line (line_starts[0] == 0 always holds)
     line_starts: std.ArrayListUnmanaged(usize) = .empty,
@@ -44,6 +45,7 @@ pub const TextareaDocument = struct {
 
         pub fn commit(self: *PreparedReplace) void {
             std.debug.assert(self.active);
+            self.candidate.revision = self.owner.revision +% 1;
             std.mem.swap(TextareaDocument, self.owner, &self.candidate);
             self.deinit();
         }
@@ -134,6 +136,7 @@ pub const TextareaDocument = struct {
             std.mem.copyForwards(u8, items[actual_start .. items.len - actual_len], items[actual_end..items.len]);
         }
         self.text.shrinkRetainingCapacity(items.len - actual_len);
+        self.revision +%= 1;
 
         // Deletion cannot add lines, so the existing index capacity suffices.
         self.line_starts.clearRetainingCapacity();

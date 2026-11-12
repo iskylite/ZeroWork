@@ -1,8 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" fill="none">
   <title>ZeroWork 笔记</title>
   <desc>笔记、文档工具和目录。</desc>
-  <metadata id="notes.design.contract">{"theme": "reference-light", "units": "logical-px", "native-verified": false, "state": "floating-editing", "canvas": [1440, 900], "panel": [468.0, 60, 960.0, 828], "document_x": 516.0, "document_width": 596.0, "navigation": true, "navigation_overlay": false}</metadata>
+  <metadata id="notes.design.contract">{"theme": "reference-light", "units": "logical-px", "native-verified": false, "state": "floating-editing", "canvas": [1440, 900], "panel": [468.0, 60, 960.0, 828], "document_x": 514, "document_width": 622, "navigation": false, "navigation_overlay": false, "card": "outline"}</metadata>
   <defs>
+    <symbol id="notes-icon-library" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m16 6 4 14" />
+      <path d="M12 6v14" />
+      <path d="M8 8v12" />
+      <path d="M4 4v16" />
+    </symbol>
+    <symbol id="notes-icon-code-xml" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m18 16 4-4-4-4" />
+      <path d="m6 8-4 4 4 4" />
+      <path d="m14.5 4-5 16" />
+    </symbol>
+    <symbol id="notes-icon-trash-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    </symbol>
+    <symbol id="notes-icon-list-tree" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M8 5h13" />
+      <path d="M13 12h8" />
+      <path d="M13 19h8" />
+      <path d="M3 10a2 2 0 0 0 2 2h3" />
+      <path d="M3 5v12a2 2 0 0 0 2 2h3" />
+    </symbol>
+    <symbol id="notes-icon-chevron-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m18 15-6-6-6 6" />
+    </symbol>
     <symbol id="sidebar" viewBox="0 0 24 24">
       <g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="4" width="18" height="16" rx="3" />
@@ -270,10 +298,7 @@
       <rect x="274" y="60" width="1154" height="828" rx="0" fill="none" />
     </clipPath>
     <clipPath id="notes.document.clip">
-      <rect x="504" y="178" width="620" height="710" rx="0" fill="none" />
-    </clipPath>
-    <clipPath id="notes.tree.clip">
-      <rect x="1186" y="178" width="232" height="698" rx="0" fill="none" />
+      <rect x="502" y="114" width="646" height="774" rx="0" fill="none" />
     </clipPath>
   </defs>
   <g id="notes.canvas" clip-path="url(#window.clip)">
@@ -889,6 +914,43 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
       <g id="notes.floating.header">
         <use href="#notebook" x="490" y="78" width="16" height="16" color="#4F5ED9" />
         <text x="514" y="91" font-size="14" fill="#18181B" font-weight="600" class="notes-text">笔记</text>
+        <g id="notes.breadcrumb.open-tree" data-role="button">
+          <title>浏览全部笔记</title>
+          <g><title>知识库</title><use href="#notes-icon-library" x="550.000000" y="79" width="14" height="14" color="#5B5B65" /><text x="568.000000" y="90" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">工作笔记</text></g>
+          <use href="#chevron" x="620.000000" y="80" width="12" height="12" color="#5B5B65" />
+          <g><title>文件夹</title><use href="#folder" x="636.000000" y="79" width="14" height="14" color="#5B5B65" /><text x="654.000000" y="90" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">服务器运维  ›  Nginx</text></g>
+          <use href="#down" x="768.000000" y="80" width="12" height="12" color="#5B5B65" />
+        </g>
+          <g id="notes.find.open" data-role="button">
+            <title>搜索当前文档 ⌘F</title>
+            <rect x="1140" y="72" width="28" height="28" rx="8" fill="transparent" />
+            <use href="#search" x="1146.000000" y="78.0" width="16" height="16" color="#5B5B65" />
+          </g>
+          <g id="notes.read-only.toggle" data-role="button">
+            <title>设为只读</title>
+            <rect x="1176" y="72" width="28" height="28" rx="8" fill="transparent" />
+            <use href="#lock-open" x="1182.000000" y="78.0" width="16" height="16" color="#5B5B65" />
+          </g>
+          <g id="notes.document.source" data-role="button">
+            <title>切换 Markdown 源码</title>
+            <rect x="1212" y="72" width="28" height="28" rx="8" fill="transparent" />
+            <use href="#notes-icon-code-xml" x="1218.000000" y="78.0" width="16" height="16" color="#5B5B65" />
+          </g>
+          <g id="notes.document.recent" data-role="button">
+            <title>最近删除</title>
+            <rect x="1248" y="72" width="28" height="28" rx="8" fill="transparent" />
+            <use href="#notes-icon-trash-2" x="1254.000000" y="78.0" width="16" height="16" color="#5B5B65" />
+          </g>
+          <g id="notes.new" data-role="button">
+            <title>新建目录</title>
+            <rect x="1284" y="72" width="28" height="28" rx="8" fill="transparent" />
+            <use href="#plus" x="1290.000000" y="78.0" width="16" height="16" color="#5B5B65" />
+          </g>
+          <g id="notes.outline.toggle" data-role="button">
+            <title>文档标题目录</title>
+            <rect x="1320" y="72" width="28" height="28" rx="8" fill="transparent" />
+            <use href="#notes-icon-list-tree" x="1326.000000" y="78.0" width="16" height="16" color="#5B5B65" />
+          </g>
         <g id="notes.floating.open-tab" data-role="button" data-disabled="false">
           <title>在页签中打开</title>
           <rect x="1356" y="72" width="28" height="28" rx="14" fill="transparent" id="notes.floating.open-tab.hit" />
@@ -902,124 +964,32 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
         <path d="M484 111.5H1412" stroke="#EBEBEF" stroke-width="1" />
       </g>
       <g id="notes.presentation">
-        <g id="notes.document.toolbar">
-          <g id="notes.document.more" data-role="button" data-disabled="false">
-            <title>更多</title>
-            <rect x="1124" y="130" width="28" height="28" rx="14" fill="transparent" id="notes.document.more.hit" />
-            <use href="#more" x="1130" y="136" width="16" height="16" color="#5B5B65" />
-          </g>
-          <g id="notes.read-only.toggle" data-role="button" data-disabled="false">
-            <title>设为只读</title>
-            <rect x="1088" y="130" width="28" height="28" rx="14" fill="transparent" id="notes.read-only.toggle.hit" />
-            <use href="#lock-open" x="1094" y="136" width="16" height="16" color="#5B5B65" />
-          </g>
-          <g id="notes.insert.image" data-role="button" data-disabled="false">
-            <title>插入图片</title>
-            <rect x="1052" y="130" width="28" height="28" rx="14" fill="transparent" id="notes.insert.image.hit" />
-            <use href="#image" x="1058" y="136" width="16" height="16" color="#5B5B65" />
-          </g>
-          <g id="notes.search" data-role="button" data-disabled="false">
-            <title>搜索笔记 ⌘F</title>
-            <rect x="1016" y="130" width="28" height="28" rx="14" fill="transparent" id="notes.search.hit" />
-            <use href="#search" x="1022" y="136" width="16" height="16" color="#5B5B65" />
-          </g>
-          <text x="492" y="149" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">工作笔记</text>
-          <use href="#chevron" x="550" y="137" width="12" height="12" color="#5B5B65" />
-          <text x="570" y="149" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">服务器运维</text>
-          <use href="#chevron" x="638" y="137" width="12" height="12" color="#5B5B65" />
-          <text x="658" y="149" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">Nginx</text>
-        </g>
         <g id="notes.document.scroll" clip-path="url(#notes.document.clip)">
-          <text x="516" y="206" font-size="28" fill="#18181B" font-weight="650" id="notes.title" class="notes-text">生产环境证书更新</text>
-          <text x="516" y="271" font-size="18" fill="#18181B" font-weight="600" class="notes-text">更新前检查</text>
-          <circle cx="520" cy="302" r="2" fill="#5B5B65" />
-          <text x="534" y="307" font-size="15" fill="#18181B" font-weight="400" class="notes-text">确认域名、证书有效期与完整证书链。</text>
-          <circle cx="520" cy="334" r="2" fill="#5B5B65" />
-          <text x="534" y="339" font-size="15" fill="#18181B" font-weight="400" class="notes-text">备份现有证书与配置，记录回滚位置。</text>
+          <text x="514" y="142" font-size="28" fill="#18181B" font-weight="650" id="notes.title" class="notes-text">生产环境证书更新</text>
+          <text x="514" y="207" font-size="18" fill="#18181B" font-weight="600" class="notes-text">更新前检查</text>
+          <circle cx="518" cy="238" r="2" fill="#5B5B65" />
+          <text x="532" y="243" font-size="15" fill="#18181B" font-weight="400" class="notes-text">确认域名、证书有效期与完整证书链。</text>
+          <circle cx="518" cy="270" r="2" fill="#5B5B65" />
+          <text x="532" y="275" font-size="15" fill="#18181B" font-weight="400" class="notes-text">备份现有证书与配置，记录回滚位置。</text>
           <g id="notes.document.image">
-            <rect x="516" y="371" width="596" height="120.768421" rx="10" fill="transparent" id="notes.image.bounds" />
-            <use href="#notes.topology.asset" x="516" y="371" width="596" height="120.768421" />
+            <rect x="514" y="307" width="622" height="126.036842" rx="10" fill="transparent" id="notes.image.bounds" />
+            <use href="#notes.topology.asset" x="514" y="307" width="622" height="126.036842" />
           </g>
-          <text x="516" y="533.768421" font-size="18" fill="#18181B" font-weight="600" class="notes-text">验证与回滚</text>
+          <text x="514" y="475" font-size="18" fill="#18181B" font-weight="600" class="notes-text">验证与回滚</text>
           <g id="notes.editor.active" data-markdown="先运行 `nginx -t`，确认配置检查通过。&#10;&#10;**重新加载服务前**，保留旧证书与配置。&#10;&#10;如果验证失败，恢复备份并记录原因。">
-            <rect x="508" y="553.768421" width="612" height="120" rx="8" fill="#F5F5F8" id="notes.editor.source" />
-            <text x="516" y="576.768421" font-size="13" fill="#18181B" font-weight="400" id="notes.editor.line.0" class="notes-text">先运行 `nginx -t`，确认配置检查通过。</text>
-            <text x="516" y="616.768421" font-size="13" fill="#18181B" font-weight="400" id="notes.editor.line.2" class="notes-text">**重新加载服务前**，保留旧证书与配置。</text>
-            <text x="516" y="656.768421" font-size="13" fill="#18181B" font-weight="400" id="notes.editor.line.4" class="notes-text">如果验证失败，恢复备份并记录原因。</text>
-            <rect x="738" y="640.768421" width="1.5" height="18" rx="0" fill="#4F5ED9" id="notes.editor.caret" />
-          </g>
-          <g id="notes.editor.preview">
-            <text x="516" y="703.768421" font-size="15" fill="#18181B" font-weight="400" class="notes-text">先运行</text>
-            <rect x="564" y="685.768421" width="81" height="24" rx="4" fill="#F1F1F4" />
-            <text x="571" y="703.768421" font-size="13" fill="#4F5ED9" font-weight="400" class="notes-code">nginx -t</text>
-            <text x="653" y="703.768421" font-size="15" fill="#18181B" font-weight="400" class="notes-text">，确认配置检查通过。</text>
-            <text x="516" y="731.768421" font-size="15" fill="#18181B" font-weight="600" class="notes-text">重新加载服务前</text>
-            <text x="624" y="731.768421" font-size="15" fill="#18181B" font-weight="400" class="notes-text">，保留旧证书与配置。</text>
-            <text x="516" y="759.768421" font-size="15" fill="#18181B" font-weight="400" class="notes-text">如果验证失败，恢复备份并记录原因。</text>
+            <rect x="559" y="498" width="77.5" height="20" rx="3" fill="#F1F1F4" />
+            <text x="514" y="514" font-size="15" fill="#18181B" font-weight="400" id="notes.editor.line.0" class="notes-text">先运行<tspan class="notes-code" dx="2">nginx -t</tspan><tspan dx="2">，确认配置检查通过。</tspan></text>
+            <text x="514" y="566" font-size="15" fill="#18181B" font-weight="400" id="notes.editor.line.2" class="notes-text"><tspan fill="#5B5B65">**</tspan><tspan font-weight="700">重新加载服务前</tspan><tspan fill="#5B5B65">**</tspan>，保留旧证书与配置。</text>
+            <rect x="791.500000" y="547" width="1" height="24" fill="#18181B" id="notes.editor.caret" />
+            <text x="514" y="618" font-size="15" fill="#18181B" font-weight="400" id="notes.editor.line.4" class="notes-text">如果验证失败，恢复备份并记录原因。</text>
           </g>
         </g>
-        <g id="notes.navigation">
-          <rect x="1176" y="112" width="252" height="776" rx="12" fill="#F6F6F7" id="notes.navigation.surface" />
-          <text x="1192" y="149" font-size="14" fill="#18181B" font-weight="650" class="notes-text">目录</text>
-          <g id="notes.new" data-role="button" data-disabled="false">
-            <title>新建</title>
-            <rect x="1360" y="130" width="28" height="28" rx="14" fill="transparent" id="notes.new.hit" />
-            <use href="#plus" x="1366" y="136" width="16" height="16" color="#5B5B65" />
-          </g>
-          <g id="notes.navigation.scroll" clip-path="url(#notes.tree.clip)">
-            <g id="notes.tree.row.0">
-              <use href="#down" x="1188" y="190" width="12" height="12" color="#5B5B65" />
-              <use href="#folder" x="1204" y="188" width="16" height="16" color="#4F5ED9" />
-              <text x="1227" y="201" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">工作笔记</text>
-              <g id="notes.library.settings" data-role="button" data-disabled="false">
-                <title>工作笔记 · 目录设置</title>
-                <rect x="1392" y="184" width="24" height="28" rx="14" fill="transparent" id="notes.library.settings.hit" />
-                <use href="#more" x="1398" y="190" width="16" height="16" color="#5B5B65" />
-              </g>
-            </g>
-            <g id="notes.tree.row.1">
-              <use href="#file-markdown" x="1216" y="222" width="16" height="16" color="#42A5F5" />
-              <text x="1239" y="235" font-size="12.5" fill="#18181B" font-weight="400" class="notes-text">环境约定</text>
-            </g>
-            <g id="notes.tree.row.2">
-              <use href="#down" x="1200" y="258" width="12" height="12" color="#5B5B65" />
-              <use href="#folder" x="1216" y="256" width="16" height="16" color="#4F5ED9" />
-              <text x="1239" y="269" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">服务器运维</text>
-            </g>
-            <g id="notes.tree.row.3">
-              <use href="#down" x="1212" y="292" width="12" height="12" color="#5B5B65" />
-              <use href="#folder" x="1228" y="290" width="16" height="16" color="#4F5ED9" />
-              <text x="1251" y="303" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">Nginx</text>
-            </g>
-            <g id="notes.tree.row.4">
-              <rect x="1186" y="316" width="232" height="32" rx="7" fill="#EAEDFD" id="notes.document.selected" />
-              <use href="#file-markdown" x="1240" y="324" width="16" height="16" color="#42A5F5" />
-              <text x="1263" y="337" font-size="12.5" fill="#4F5ED9" font-weight="400" class="notes-text">生产环境证书更新</text>
-            </g>
-            <g id="notes.tree.row.5">
-              <use href="#file-markdown" x="1228" y="358" width="16" height="16" color="#42A5F5" />
-              <text x="1251" y="371" font-size="12.5" fill="#18181B" font-weight="400" class="notes-text">数据库备份</text>
-            </g>
-            <g id="notes.tree.row.6">
-              <use href="#chevron" x="1200" y="394" width="12" height="12" color="#5B5B65" />
-              <use href="#folder" x="1216" y="392" width="16" height="16" color="#4F5ED9" />
-              <text x="1239" y="405" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">项目记录</text>
-            </g>
-            <g id="notes.tree.row.7">
-              <use href="#down" x="1188" y="442" width="12" height="12" color="#5B5B65" />
-              <use href="#folder" x="1204" y="440" width="16" height="16" color="#4F5ED9" />
-              <text x="1227" y="453" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">个人笔记</text>
-            </g>
-            <g id="notes.tree.row.8">
-              <use href="#file-markdown" x="1216" y="474" width="16" height="16" color="#42A5F5" />
-              <text x="1239" y="487" font-size="12.5" fill="#18181B" font-weight="400" class="notes-text">工作备忘</text>
-            </g>
-          </g>
-        </g>
-        <g id="notes.navigation.toggle" data-role="button" data-disabled="false">
-          <title>收起目录 ⌥⌘B</title>
-          <rect x="1392" y="130" width="28" height="28" rx="14" fill="transparent" id="notes.navigation.toggle.hit" />
-          <use href="#panel-right-close" x="1398" y="136" width="16" height="16" color="#5B5B65" />
+
+        <g id="notes.outline" role="group" aria-label="文档标题目录">
+          <rect x="1200" y="449" width="228" height="102" rx="12" fill="#F6F6F7" filter="url(#notes.panel.shadow)" />
+          <text id="notes.outline.title" x="1214" y="470" font-size="13" fill="#18181B" font-weight="650" class="notes-text">目录</text>
+          <g id="notes.outline.first" data-role="button"><rect x="1206" y="487" width="216" height="28" rx="6" fill="transparent" /><text x="1224" y="505" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">更新前检查</text></g>
+          <g id="notes.outline.second" data-role="button"><rect x="1206" y="517" width="216" height="28" rx="6" fill="transparent" /><text x="1224" y="535" font-size="12.5" fill="#18181B" font-weight="550" class="notes-text">验证与回滚</text></g>
         </g>
       </g>
     </g>

@@ -1,3 +1,4 @@
+// GENERATED FILE, do not edit: generated from styles.yss; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Checkbox / Radio / Switch styling. Views in checkbox.yix / radio.yix / switch.yix,
 //! logic in mod.zig.
 const ui = @import("../../ui.zig");
@@ -31,4 +32,4 @@ pub const RadioParts = ui.sva(.{ .slots = .{ .root, .circle, .dot, .label, }, .b
 
 pub const RadioGroupLayout = ui.cva(.{ .base = .{ .height = .fit, }, .variants = .{ .horizontal = .{ .false = .{ .direction = .column, .gap = 8, }, .true = .{ .direction = .row, .gap = 16, }, }, }, .defaults = .{ .horizontal = false, }, });
 
-//# yix-map src/ui/components/checkbox/styles.yss
+//# yix-map styles.yss

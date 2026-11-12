@@ -86,7 +86,7 @@ pub const View = struct {
         return self;
     }
     fn button(self: *View, bar: *ui.Node, id: []const u8) !*ui.Node {
-        const trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "命令历史 · ⇧⌘B", .disabled = self.unavailable, .base_style = @import("status_connection_styles.zig").metricTrigger(28), .hover_style = .{ .background = S.theme.states().hover }, .on_click = self.cx.on(View, self, toggle) }).mount(self.scope, self.cx);
+        const trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "命令历史", .disabled = self.unavailable, .base_style = @import("status_connection_styles.zig").metricTrigger(28), .hover_style = .{ .background = S.theme.states().hover }, .on_click = self.cx.on(View, self, toggle) }).mount(self.scope, self.cx);
         trigger.setStyleInline(self.cx.allocator, .{ .align_items = .center, .justify = .center, .padding = .{}, .gap = 0 });
         trigger.meta.ownership.meta.test_id = id;
         try trigger.appendChild(self.cx.allocator, try S.theme.icon(self.cx, ui.icons.list_restart, "fg_2", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));

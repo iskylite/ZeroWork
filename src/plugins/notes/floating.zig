@@ -27,6 +27,7 @@ pub const View = struct {
     title_icon: *ui.Node,
     divider: *ui.Node,
     content: *ui.Node,
+    header_slots: notes_view.FloatingHeader,
     surface: *Surface = undefined,
     detached: ?Workspace.MountedPlugin = null,
     detached_visible: bool = false,
@@ -64,20 +65,27 @@ pub const View = struct {
         root.meta.ownership.meta.test_id = "notes.floating";
         const header = try ui.box(cx, .{
             .width = .fill(),
-            .height = .{ .px = 52 },
+            .height = .{ .px = S.floating_header_height },
             .flex_shrink = 0,
             .direction = .row,
             .align_items = .center,
-            .gap = 8,
-            .padding = .{ .left = 22, .right = 8 },
+            .gap = S.floating_header_gap,
+            .padding = .{ .left = S.floating_header_padding, .right = 8 },
         }, .{});
         header.meta.ownership.meta.test_id = "notes.floating.header";
         try root.appendChild(cx.allocator, header);
-        const title_icon = try ui.iconTint(cx, ui.icons.notebook, colors.accent, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+        const title_icon = try ui.iconTint(cx, ui.icons.notebook, colors.accent, .{ .width = .{ .px = S.floating_header_icon_size }, .height = .{ .px = S.floating_header_icon_size }, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, title_icon);
         const title = try ui.text(cx, "笔记", .{ .font_size = 14, .font_weight = 600, .color = colors.fg_1 });
-        title.setStyleInline(cx.allocator, .{ .width = .fill() });
+        title.meta.ownership.meta.test_id = "notes.floating.title";
+        title.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
         try header.appendChild(cx.allocator, title);
+        const document_tools = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .height = .fill() }, .{});
+        try document_tools.children.ensureUnusedCapacity(cx.allocator, 1);
+        try header.appendChild(cx.allocator, document_tools);
+        const directory_tools = try ui.box(cx, .{ .direction = .row, .gap = 8, .align_items = .center, .flex_shrink = 0 }, .{});
+        try directory_tools.children.ensureUnusedCapacity(cx.allocator, 2);
+        try header.appendChild(cx.allocator, directory_tools);
         const divider = try ui.box(cx, .{
             .position = .absolute,
             .inset = .{ .left = .{ .px = 16 }, .right = .{ .px = 16 }, .bottom = .{ .px = 0 } },
@@ -87,7 +95,19 @@ pub const View = struct {
         try header.appendChild(cx.allocator, divider);
         const content = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .min_height = 0 }, .{});
         try root.appendChild(cx.allocator, content);
-        const self = try scope.createState(View, .{ .cx = cx, .workspace = workspace, .parent = parent, .clip = clip, .root = root, .title = title, .title_icon = title_icon, .divider = divider, .content = content, .theme_version = cx.theme_version });
+        const self = try scope.createState(View, .{
+            .cx = cx,
+            .workspace = workspace,
+            .parent = parent,
+            .clip = clip,
+            .root = root,
+            .title = title,
+            .title_icon = title_icon,
+            .divider = divider,
+            .content = content,
+            .header_slots = .{ .document = document_tools, .directory = directory_tools },
+            .theme_version = cx.theme_version,
+        });
         const open = try ui.widgets.Button(.{ .a11y_label = "在页签中打开", .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.external_link, .icon_size = @as(f32, 16), .base_style = S.tool(), .on_click = cx.on(View, self, requestTab) }).mount(scope, cx);
         open.meta.ownership.meta.test_id = "notes.floating.open-tab";
         const open_hint = try ui.widgets.Tooltip(.{ .text = "在页签中打开" }).mount(scope, cx);
@@ -243,6 +263,7 @@ pub const View = struct {
         if (self.want_tab) {
             if (self.detached) |mounted| {
                 try host.promoteDetachedQuickContent(mounted);
+                notes_view.setFloatingHeader(mounted.instance, null);
                 self.detached = null;
                 self.detached_visible = false;
                 self.want_tab = false;
@@ -276,6 +297,7 @@ pub const View = struct {
                 const content = notes_view.rootNode(instance) orelse return error.ContentUnavailable;
                 self.setDisplay(true);
                 try self.workspace.floatPluginContent(existing, content, self.content);
+                notes_view.setFloatingHeader(instance, self.header_slots);
                 self.floated_tab = existing.id;
                 self.surface.activate();
                 self.cx.dispatcher.cancelScrollGesture();
@@ -295,6 +317,7 @@ pub const View = struct {
                 const mounted = (try host.mountDetachedQuickContent()) orelse return false;
                 errdefer mounted.destroy(self.cx);
                 try self.content.appendChild(self.cx.allocator, mounted.root);
+                notes_view.setFloatingHeader(mounted.instance, self.header_slots);
                 self.detached = mounted;
             }
             if (!self.detached_visible and self.want_visible) {
@@ -361,7 +384,10 @@ pub const View = struct {
         self.focus_on_reveal = null;
         self.setDisplay(false);
         if (self.floated_tab) |id| {
-            if (self.workspace.sessionTab(id)) |candidate| self.workspace.dockPluginContent(candidate);
+            if (self.workspace.sessionTab(id)) |candidate| {
+                if (candidate.plugin_renderer) |instance| notes_view.setFloatingHeader(instance, null);
+                self.workspace.dockPluginContent(candidate);
+            }
             self.floated_tab = null;
         }
         self.setDetachedVisibility(false);

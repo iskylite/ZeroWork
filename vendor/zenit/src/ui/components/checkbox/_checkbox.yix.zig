@@ -1,3 +1,4 @@
+// GENERATED FILE, do not edit: generated from checkbox.yix; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Checkbox view. Styles in styles.yss (CheckboxParts), tests in mod.zig.
 const ui = @import("../../ui.zig");
 const S = @import("_styles.yss.zig");
@@ -78,4 +79,4 @@ fn __yix_Checkbox(__yix_props: CheckboxProps, scope: *ui.Scope, cx: *ui.Cx) anye
 
 //# yix-map-data [[565,560]]
 
-//# yix-map src/ui/components/checkbox/checkbox.yix
+//# yix-map checkbox.yix

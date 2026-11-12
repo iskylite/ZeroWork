@@ -600,18 +600,23 @@ pub const HostRow = struct {
                 return .handled;
             },
             .click => |click| {
-                // A row click only selects. Repeated clicks do not connect;
-                // the separate action button and Return explicitly connect.
+                // The double-click event handles connection separately.
                 if (click.click_count > 1) return .handled;
                 // Child action buttons have already handled their own click.
-                // Stop the row's connect callback when that click bubbles.
+                // Skip row selection when that click bubbles.
                 if (self.cx.focus_manager.getFocused()) |focused| {
                     if (focused.isDescendantOf(self.actions)) return .handled;
                 }
                 const actions = self.actions.globalRect();
                 if (self.actions.isDisplayedInTree() and click.x >= actions.x and click.x < actions.x + actions.w and click.y >= actions.y and click.y < actions.y + actions.h) return .handled;
             },
-            .double_click => return .handled,
+            .double_click => |click| {
+                if (click.button != .left) return .handled;
+                // Trailing controls and status badges keep their own behavior.
+                if (self.trailing.isDisplayedInTree() and self.trailing.globalRect().contains(click.x, click.y)) return .handled;
+                self.connect();
+                return .handled;
+            },
             .key_down => |key| {
                 const focused = self.cx.focus_manager.getFocused();
                 if (key.key == .@"return" and focused == self.node) {

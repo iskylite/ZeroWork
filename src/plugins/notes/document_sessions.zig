@@ -287,6 +287,14 @@ pub const Sessions = struct {
         entry.pending_import = null;
     }
 
+    /// The active editor records this insertion in its own undo history.
+    pub fn completeImportInEditor(self: *Sessions, ticket: ImportTicket, markdown: []const u8) !void {
+        const entry = try self.importEntry(ticket);
+        if (!std.unicode.utf8ValidateSlice(markdown) or markdown.len == 0) return error.InvalidBody;
+        try self.replaceBodyRange(entry, entry.pending_import.?.range, markdown);
+        entry.pending_import = null;
+    }
+
     pub fn cancelImport(self: *Sessions, ticket: ImportTicket) !void {
         const entry = try self.importEntry(ticket);
         entry.pending_import = null;

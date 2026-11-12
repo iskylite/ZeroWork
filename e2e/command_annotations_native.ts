@@ -48,15 +48,20 @@ try{
  assert.equal((await h.query('terminal.command.metadata')).filter(shown).length,metadataBeforeClick,'releasing an empty-row click must preserve other command tags');
  await capture('empty-row-click');await h.mouseMove(10,10);
  report.checks.push('Pressing, holding and releasing a focus click on an empty terminal row preserves all existing command metadata tags');
- const button=await visible('local.status.command-history');await h.mouseMove(button.rect.x+button.rect.w/2,button.rect.y+button.rect.h/2);await visible('terminal.command-history');
+ const button=await visible('status.command-history');await h.mouseMove(button.rect.x+button.rect.w/2,button.rect.y+button.rect.h/2);await visible('terminal.command-history');
  await h.waitFor(async()=>(await h.query('terminal.command-history.record')).filter(shown).length>=3||null,10000);
  const commands=(await h.query('terminal.command-history.command')).filter(shown).map(text);assert(commands.filter((s:string)=>s==='false').length>=2);report.checks.push('Repeated human command executions remain separate native cards with real completion metadata');
  const panel=await visible('terminal.command-history');await h.mouseMove(panel.rect.x+30,panel.rect.y+30);await h.sleep(220);await visible('terminal.command-history');await capture('history-hover-preview');
  await h.mouseMove(10,10);await hidden('terminal.command-history');
- await click('local.status.command-history');await h.mouseMove(10,10);await h.sleep(250);await visible('terminal.command-history');await capture('history-pinned');
- await h.key('b',{shift:true,cmd:true});await hidden('terminal.command-history');await h.key('b',{shift:true,cmd:true});await visible('terminal.command-history');await h.mouseMove(10,10);await h.sleep(220);await visible('terminal.command-history');
- report.checks.push('History button hover previews; entering card retains it; leaving preview closes; click and ShiftCmdB toggle pinned state without mouse-leave close');
+ await click('status.command-history');await h.mouseMove(10,10);await h.sleep(250);await visible('terminal.command-history');await capture('history-pinned');
+ await h.key('b',{shift:true,cmd:true});await h.sleep(150);await visible('terminal.command-history');
+ report.checks.push('History button hover previews and click pins the panel; the former Shift+Cmd+B binding does not toggle it');
  await click('terminal.command-history.close');await hidden('terminal.command-history');
+ await h.key('b',{shift:true,cmd:true});await h.sleep(150);await hidden('terminal.command-history');
+ await click('terminal.surface');await h.type_("printf 'ZW_NATIVE_ANN");
+ await h.key('i',{cmd:true});await visible('terminal.completion');
+ await h.key('escape');await h.key('c',{ctrl:true});
+ report.checks.push('Cmd+I opens terminal completion for a previously executed command');
  await submit('sleep 2; true');
  await h.waitFor(async()=>(await h.query('terminal.command.metadata.code')).find((n:any)=>shown(n)&&text(n)==='—')??null,10000);await capture('command-running');
  await h.waitFor(async()=>!(await h.query('terminal.command.metadata.code')).some((n:any)=>shown(n)&&text(n)==='—')||null,10000);report.checks.push('Actual running Local command has unknown exit placeholder until its real completion; elapsed updates without a fabricated exit');
@@ -86,7 +91,7 @@ try{
  report.checks.push('Clear removes both old decorations while retained history remains; subsequent success/failure tags align with their actual submitted command rows before and after resize');
 
  await click('toolbar.settings');const search=await visible('settings.search');await h.clickAt(search.rect.x+40,search.rect.y+search.rect.h/2);await h.type_('command_info');await click('settings.toggle.command_info');await click('settings.save');await click('settings.close');await h.mouseMove(10,10);await hidden('terminal.command.metadata');assert(!(await h.query('terminal.command.status')).some(shown));report.checks.push('Saving global command_info=false immediately hides right metadata on the existing Local session with no left status icons');await capture('right-tag-hidden');
- assert((await h.request('POST','/quit')).ok);report.exit=await Promise.race([ended,h.sleep(20000).then(()=>null)]);assert(report.exit&&report.exit.code===0&&report.exit.signal===null,'isolated App did not quit cleanly');report.status='passed';
+ assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);report.exit=await Promise.race([ended,h.sleep(20000).then(()=>null)]);assert(report.exit&&report.exit.code===0&&report.exit.signal===null,'isolated App did not quit cleanly');report.status='passed';
 }catch(error){report.status='failed';report.error=String(error);await writeFile(join(out,'failure-tree.json'),JSON.stringify(await h.tree(),null,2)).catch(()=>{});await capture('failure').catch(()=>{});process.exitCode=1}
 finally{if(app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await Promise.race([ended,h.sleep(3000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended}}await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));await rm(base,{recursive:true,force:true})}
 console.log(JSON.stringify({status:report.status,error:report.error,out}));

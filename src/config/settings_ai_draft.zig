@@ -225,19 +225,16 @@ pub fn firstProblem(ai: config.Ai) ?Problem {
         for (ai.providers[0..i]) |other| if (std.mem.eql(u8, providerName(p), providerName(other))) return .{ .address = .{ .provider = i, .field = .name }, .err = error.DuplicateProviderName };
         if (!p.enabled) continue;
         if (connectionProblem(p, i)) |problem| return problem;
+        var defaults: usize = 0;
         for (p.models[0..p.model_count], 0..) |model, j| {
             const address: Address = .{ .provider = i, .model = j, .field = .model_id };
             if (std.mem.trim(u8, model.id, " \t\r\n").len == 0) return .{ .address = address, .err = error.EmptyModelId };
             if (model.context_window == 0) return .{ .address = .{ .provider = i, .model = j, .field = .context_window }, .err = error.InvalidContextWindow };
             if (!modelValid(model)) return .{ .address = address, .err = error.LastEffortRequired };
             for (p.models[0..j]) |other| if (std.mem.eql(u8, model.id, other.id)) return .{ .address = address, .err = error.DuplicateModelId };
+            if (model.default) defaults += 1;
         }
-        if (p.model_count == 0) continue;
-        var defaults: usize = 0;
-        for (p.models[0..p.model_count]) |model| if (model.default) {
-            defaults += 1;
-        };
-        if (defaults != 1) return .{ .address = .{ .provider = i, .field = .model_id }, .err = error.InvalidDefaultModel };
+        if (p.model_count != 0 and defaults != 1) return .{ .address = .{ .provider = i, .field = .model_id }, .err = error.InvalidDefaultModel };
         any_enabled = true;
         if (std.mem.eql(u8, providerName(p), ai.default_provider)) default_found = true;
     }
@@ -245,7 +242,7 @@ pub fn firstProblem(ai: config.Ai) ?Problem {
     return null;
 }
 pub fn eligible(p: config.AiProvider) bool {
-    if (!endpointValid(p.endpoint) or p.model_count == 0 or p.model_count > p.models.len or (p.api_key.len == 0 and !@import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint))) return false;
+    if (!connectionValid(p) or p.model_count > p.models.len) return false;
     for (p.models[0..p.model_count]) |model| if (!modelValid(model)) return false;
     return true;
 }
@@ -274,7 +271,7 @@ pub fn problemText(err: anyerror) []const u8 {
         error.InvalidDefaultModel => "请选择一个默认模型：点击模型右侧的星标。",
         error.InvalidDefaultProvider => "请在「其他行为」中选择已启用的默认服务提供方。",
         error.DefaultProtected => "请先选择已有合法的默认替代项",
-        error.IncompleteProvider => "请补齐连接信息和至少一个有效模型",
+        error.IncompleteProvider => "请补齐服务提供方的连接信息",
         error.InvalidText => "内容包含配置不支持的字符",
         else => "配置尚不完整，请检查当前字段",
     };
