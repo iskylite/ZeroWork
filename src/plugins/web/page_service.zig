@@ -21,7 +21,7 @@ pub const Command = union(enum) {
     acknowledge_reset,
     dismiss_login_notice,
     set_developer_mode: bool,
-    clear_console,
+    open_native_console,
 };
 
 pub const Hop = struct { name: []const u8, host: []const u8, port: u16 };

@@ -455,9 +455,7 @@ pub const Runtime = struct {
             },
             .acknowledge_reset => self.controller.markResetWarningShown(),
             .dismiss_login_notice => _ = self.controller.takeLoginNotice(),
-            .clear_console => {
-                if (self.surface) |*surface| try surface.clearConsole();
-            },
+            .open_native_console => try (try self.readySurface()).openNativeConsole(),
             .set_developer_mode => |enabled| {
                 if (!web.supportsInspection()) return error.WebInspectionUnavailable;
                 if (self.controller.path == .ready) {

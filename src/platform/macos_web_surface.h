@@ -57,10 +57,8 @@ int zw_web_surface_set_tls_review(ZWWebSurface *surface, int enabled);
 int zw_web_surface_supports_proxy(void);
 int zw_web_surface_supports_inspection(void);
 int zw_web_surface_set_inspectable(ZWWebSurface *surface, int enabled);
-// Console text is a caller-owned UTF-8 snapshot. Newest entries come first.
-uint64_t zw_web_surface_console_revision(ZWWebSurface *surface);
-char *zw_web_surface_copy_console(ZWWebSurface *surface);
-void zw_web_surface_clear_console(ZWWebSurface *surface);
+int zw_web_surface_supports_native_console(void);
+int zw_web_surface_open_native_console(ZWWebSurface *surface);
 ZWWebSurface *zw_web_surface_create(void);
 ZWWebSurface *zw_web_surface_create_proxied(uint16_t port, const uint8_t *username,
     size_t username_len, const uint8_t *password, size_t password_len);

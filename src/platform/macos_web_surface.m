@@ -8,6 +8,20 @@
 #include <string.h>
 #include "macos_web_surface.h"
 
+// WebKit exposes the local inspector through private selectors. Check availability before use.
+@protocol ZWNativeWebInspector
+- (void)showConsole;
+- (void)close;
+@end
+
+@interface WKWebView (ZWNativeConsole)
+- (id<ZWNativeWebInspector>)_inspector;
+@end
+
+@interface WKPreferences (ZWNativeConsole)
+- (void)_setDeveloperExtrasEnabled:(BOOL)enabled;
+@end
+
 #ifdef ZW_WEB_SURFACE_ACCEPTANCE
 static uint64_t zw_live_surface_owners;
 static uint64_t zw_pending_completions;
@@ -32,43 +46,6 @@ void zw_web_surface_acceptance_counts(uint64_t *owners, uint64_t *pending, uint6
 // Main-thread process-wide identities prevent a reply from an old WebKit
 // instance from matching a request in its replacement.
 static uint64_t zw_next_request_token;
-static uint64_t zw_console_revision;
-static NSString *const zw_console_channel = @"zeroworkPageConsole";
-static const NSUInteger zw_console_capacity = 100;
-static const NSUInteger zw_console_max_message = 1024;
-// Install before the page's first script so opening the panel after a failure
-// can still show its cause. This bridge accepts log text only.
-static NSString *const zw_console_script =
-    @"(() => {"
-    " const send = window.webkit.messageHandlers.zeroworkPageConsole.postMessage.bind(window.webkit.messageHandlers.zeroworkPageConsole);"
-    " const stringify = String, slice = Function.call.bind(String.prototype.slice);"
-    " const now = performance.now.bind(performance);"
-    " let epoch = 0, count = 0;"
-    " const post = (level, message) => {"
-    "   const time = now();"
-    "   if (time - epoch >= 1000) { epoch = time; count = 0; }"
-    "   if (count >= 40) return;"
-    "   count++;"
-    "   try { send([level, slice(message, 0, 1024)]); } catch {}"
-    " };"
-    " const format = value => { try { return slice(stringify(value), 0, 1024); } catch { return '[unprintable]'; } };"
-    " for (const level of ['debug', 'log', 'info', 'warn', 'error']) {"
-    "   const original = console[level].bind(console);"
-    "   console[level] = (...args) => {"
-    "     original(...args);"
-    "     try {"
-    "       let text = '';"
-    "       for (let i = 0; i < args.length && text.length < 1024; ++i)"
-    "         text += (i ? ' ' : '') + format(args[i]);"
-    "       post(level, text);"
-    "     } catch {}"
-    "   };"
-    " }"
-    " window.addEventListener('error', event => {"
-    "   if (event.message) post('error', event.message + (event.lineno ? ' (' + event.lineno + ':' + event.colno + ')' : ''));"
-    " });"
-    " window.addEventListener('unhandledrejection', event => post('error', 'Unhandled promise rejection: ' + format(event.reason)));"
-    "})();";
 static const NSUInteger zw_request_capacity = 8;
 #ifndef ZW_WEB_REQUEST_LIFETIME_NS
 #define ZW_WEB_REQUEST_LIFETIME_NS (120 * NSEC_PER_SEC)
@@ -176,7 +153,7 @@ static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) 
 }
 @end
 
-@interface ZWWebSurfaceOwner : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler>
+@interface ZWWebSurfaceOwner : NSObject <WKNavigationDelegate, WKUIDelegate>
 @property (nonatomic, strong) ZWWebClipView *clipView;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) WKNavigation *activeNavigation;
@@ -200,10 +177,7 @@ static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) 
 @property (nonatomic) uint64_t requestEpoch;
 @property (nonatomic, copy) NSURL *mainFrameURL;
 @property (nonatomic, strong) NSMutableArray<ZWWebPendingRequest *> *requests;
-@property (nonatomic, strong) NSMutableArray<NSString *> *consoleEntries;
-@property (nonatomic) uint64_t consoleRevision;
-@property (nonatomic) CFTimeInterval consoleEpoch;
-@property (nonatomic) NSUInteger consoleCount;
+@property (nonatomic, strong) id<ZWNativeWebInspector> nativeInspector;
 - (void)installWebView:(WKWebViewConfiguration *)configuration;
 - (void)observeNavigation:(WKNavigation *)navigation explicitGet:(BOOL)explicitGet;
 - (void)notifyChanged;
@@ -213,7 +187,6 @@ static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) 
 - (BOOL)finishRequest:(uint64_t)token accepted:(BOOL)accepted value:(NSString *)value secret:(NSString *)secret;
 - (void)cancelRequests;
 - (void)notice:(NSString *)message origin:(NSString *)origin;
-- (void)clearConsole;
 @end
 
 static NSArray<NSString *> *zw_observed_properties(void) {
@@ -260,11 +233,6 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
 }
 #endif
 - (void)installWebView:(WKWebViewConfiguration *)configuration {
-    self.consoleEntries = [NSMutableArray array];
-    WKUserContentController *content = configuration.userContentController;
-    [content addScriptMessageHandler:self name:zw_console_channel];
-    [content addUserScript:[[WKUserScript alloc] initWithSource:zw_console_script
-        injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     self.webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
     self.webView.navigationDelegate = self;
     self.webView.UIDelegate = self;
@@ -272,41 +240,6 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
         [self.webView addObserver:self forKeyPath:key options:0 context:NULL];
     }
     [self.clipView addSubview:self.webView];
-}
-- (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
-    if (self.closing || message.webView != self.webView || !message.frameInfo.isMainFrame ||
-        ![message.name isEqualToString:zw_console_channel] || !zw_is_web_url(message.frameInfo.request.URL)) return;
-    // Pages can call the handler themselves. Validate and bound the native side too.
-    CFTimeInterval now = CACurrentMediaTime();
-    if (now - self.consoleEpoch >= 1.0) {
-        self.consoleEpoch = now;
-        self.consoleCount = 0;
-    }
-    if (self.consoleCount >= 40) return;
-    ++self.consoleCount;
-    NSArray *body = [message.body isKindOfClass:NSArray.class] ? message.body : nil;
-    if (body.count != 2 || ![body[0] isKindOfClass:NSString.class] || ![body[1] isKindOfClass:NSString.class]) return;
-    NSString *level = body[0];
-    if (level.length > 5 || ![@[@"debug", @"log", @"info", @"warn", @"error"] containsObject:level]) return;
-    NSString *value = body[1];
-    if (value.length > zw_console_max_message) {
-        NSUInteger end = zw_console_max_message;
-        if (CFStringIsSurrogateHighCharacter([value characterAtIndex:end - 1])) --end;
-        value = [value substringToIndex:end];
-    }
-    value = [value stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
-    value = [value stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
-    value = [value stringByReplacingOccurrencesOfString:[NSString stringWithFormat:@"%C", (unichar)0] withString:@" "];
-    if (self.consoleEntries.count == zw_console_capacity) [self.consoleEntries removeLastObject];
-    [self.consoleEntries insertObject:[NSString stringWithFormat:@"%@  %@", level.uppercaseString, value] atIndex:0];
-    self.consoleRevision = ++zw_console_revision;
-    [self notifyChanged];
-}
-- (void)clearConsole {
-    if (self.consoleEntries.count == 0) return;
-    [self.consoleEntries removeAllObjects];
-    self.consoleRevision = ++zw_console_revision;
-    [self notifyChanged];
 }
 - (void)notifyChanged {
     if (self.changed) self.changed();
@@ -401,7 +334,6 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
     if ([self.retiredNavigations containsObject:navigation]) return;
     if (self.activeNavigation) [self.retiredNavigations addObject:self.activeNavigation];
     [self cancelRequests];
-    [self clearConsole];
     self.activeNavigation = navigation;
     self.cancelledAuthNavigation = nil;
     self.navigationId += 1;
@@ -725,6 +657,8 @@ void zw_web_surface_detach(ZWWebSurface *surface) {
     if (!NSThread.isMainThread || !surface) return;
     @autoreleasepool {
         ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
+        [owner.nativeInspector close];
+        owner.nativeInspector = nil;
         macos_set_embedded_input_view((__bridge void *)owner.clipView, 0, NULL, NULL, NULL);
         owner.clipView.hidden = YES;
         [owner.clipView removeFromSuperview];
@@ -751,7 +685,6 @@ void zw_web_surface_destroy(ZWWebSurface *surface) {
         owner.closing = YES;
         owner.changed = NULL;
         [owner cancelRequests];
-        [owner.webView.configuration.userContentController removeScriptMessageHandlerForName:zw_console_channel];
         owner.webView.navigationDelegate = nil;
         owner.webView.UIDelegate = nil;
         for (NSString *key in zw_observed_properties()) {
@@ -769,23 +702,27 @@ int zw_web_surface_supports_inspection(void) {
     return 0;
 }
 
-uint64_t zw_web_surface_console_revision(ZWWebSurface *surface) {
-    if (!NSThread.isMainThread || !surface) return 0;
-    return ((__bridge ZWWebSurfaceOwner *)surface).consoleRevision;
+int zw_web_surface_supports_native_console(void) {
+    Class inspector = NSClassFromString(@"_WKInspector");
+    return [WKWebView instancesRespondToSelector:@selector(_inspector)] &&
+        [WKPreferences instancesRespondToSelector:@selector(_setDeveloperExtrasEnabled:)] &&
+        [inspector instancesRespondToSelector:@selector(showConsole)] &&
+        [inspector instancesRespondToSelector:@selector(close)];
 }
 
-char *zw_web_surface_copy_console(ZWWebSurface *surface) {
-    if (!NSThread.isMainThread || !surface) return NULL;
+int zw_web_surface_open_native_console(ZWWebSurface *surface) {
+    if (!NSThread.isMainThread || !surface || !zw_web_surface_supports_native_console()) return 0;
     @autoreleasepool {
         ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
-        const char *text = [owner.consoleEntries componentsJoinedByString:@"\n"].UTF8String;
-        return text ? strdup(text) : NULL;
+        WKWebView *view = owner.webView;
+        if (owner.closing || !view.window) return 0;
+        id<ZWNativeWebInspector> inspector = [view _inspector];
+        if (!inspector) return 0;
+        [view.configuration.preferences _setDeveloperExtrasEnabled:YES];
+        owner.nativeInspector = inspector;
+        [inspector showConsole];
+        return 1;
     }
-}
-
-void zw_web_surface_clear_console(ZWWebSurface *surface) {
-    if (!NSThread.isMainThread || !surface) return;
-    @autoreleasepool { [(__bridge ZWWebSurfaceOwner *)surface clearConsole]; }
 }
 
 int zw_web_surface_set_inspectable(ZWWebSurface *surface, int enabled) {

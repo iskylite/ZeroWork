@@ -60,25 +60,6 @@ pub fn tool() ui.BoxStyle {
     };
 }
 
-pub fn consolePanel() ui.BoxStyle {
-    const colors = theme.current();
-    return .{
-        .width = .fill(),
-        .height = .{ .px = 216 },
-        .flex_shrink = 0,
-        .direction = .column,
-        .gap = 4,
-        .padding = .{ .left = 12, .right = 12, .top = 6, .bottom = 8 },
-        .background = colors.surface_1,
-        .border = .{ .width = 1, .radius = 10, .color = colors.border },
-        .overflow = .hidden,
-    };
-}
-
-pub fn consoleText() ui.TextStyle {
-    return .{ .font_size = 12, .line_height = 1.5, .color = theme.current().fg_1, .use_monospace_font = true, .wrap = .char };
-}
-
 pub fn toolHover() ?ui.BoxStyle {
     return .{ .background = theme.current().hover };
 }

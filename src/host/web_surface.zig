@@ -52,9 +52,8 @@ const NativeState = extern struct {
 extern fn zw_web_surface_supports_proxy() c_int;
 extern fn zw_web_surface_supports_inspection() c_int;
 extern fn zw_web_surface_set_inspectable(*NativeSurface, c_int) c_int;
-extern fn zw_web_surface_console_revision(*NativeSurface) u64;
-extern fn zw_web_surface_copy_console(*NativeSurface) ?[*:0]u8;
-extern fn zw_web_surface_clear_console(*NativeSurface) void;
+extern fn zw_web_surface_supports_native_console() c_int;
+extern fn zw_web_surface_open_native_console(*NativeSurface) c_int;
 extern fn zw_web_surface_create() ?*NativeSurface;
 extern fn zw_web_surface_create_proxied(u16, [*]const u8, usize, [*]const u8, usize) ?*NativeSurface;
 extern fn zw_web_surface_destroy(*NativeSurface) void;
@@ -84,6 +83,10 @@ pub fn supportsProxy() bool {
 
 pub fn supportsInspection() bool {
     return zw_web_surface_supports_inspection() != 0;
+}
+
+pub fn supportsNativeConsole() bool {
+    return zw_web_surface_supports_native_console() != 0;
 }
 
 pub const RequestKind = enum(c_int) { alert = 1, confirm, prompt, http_auth, notice, server_trust };
@@ -172,6 +175,11 @@ pub const Surface = struct {
     pub fn setInspectable(self: *Surface, enabled: bool) !void {
         if (zw_web_surface_set_inspectable(try self.nativeOnMain(), @intFromBool(enabled)) == 0)
             return error.WebInspectionUnavailable;
+    }
+
+    pub fn openNativeConsole(self: *Surface) !void {
+        if (zw_web_surface_open_native_console(try self.nativeOnMain()) == 0)
+            return error.WebNativeConsoleUnavailable;
     }
 
     pub fn deinit(self: *Surface) void {
@@ -303,20 +311,6 @@ pub const Surface = struct {
         const value = zw_web_surface_copy_title(try self.nativeOnMain()) orelse return null;
         defer std.c.free(value);
         return try allocator.dupe(u8, std.mem.span(value));
-    }
-
-    pub fn consoleRevision(self: *const Surface) !u64 {
-        return zw_web_surface_console_revision(try self.nativeOnMain());
-    }
-
-    pub fn copyConsole(self: *const Surface, allocator: std.mem.Allocator) ![]u8 {
-        const value = zw_web_surface_copy_console(try self.nativeOnMain()) orelse return error.OutOfMemory;
-        defer std.c.free(value);
-        return allocator.dupe(u8, std.mem.span(value));
-    }
-
-    pub fn clearConsole(self: *Surface) !void {
-        zw_web_surface_clear_console(try self.nativeOnMain());
     }
 
     fn nativeOnMain(self: *const Surface) !*NativeSurface {
