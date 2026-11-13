@@ -39,6 +39,7 @@ pub const Runtime = struct {
     proxy_uploaded: u64 = 0,
     proxy_downloaded: u64 = 0,
     surface: ?web.Surface = null,
+    developer_mode: bool = false,
     page_prompts: ?page_requests.Bridge = null,
     surface_state: ?web.Snapshot = null,
     displayed_url_revision: u64 = 0,
@@ -273,7 +274,10 @@ pub const Runtime = struct {
         if (!self.controller.routeFailed(attempt)) _ = self.controller.routeDisconnected(attempt);
         self.cancelPagePrompts();
         self.unbindSurface();
-        if (self.surface) |*surface| surface.stop() catch {};
+        if (self.surface) |*surface| {
+            if (self.developer_mode) surface.setInspectable(false) catch {};
+            surface.stop() catch {};
+        }
         self.requestProxyStop();
     }
 
@@ -284,6 +288,7 @@ pub const Runtime = struct {
         else
             try web.Surface.init(self.owner);
         errdefer surface.deinit();
+        if (self.developer_mode) try surface.setInspectable(true);
         try surface.setChangeCallback(nativeChanged);
         if (self.context) |ctx| if (ctx.challenges) |host| {
             self.page_prompts = page_requests.Bridge.init(self.owner, host, &self.ssh_prompt_ids);
@@ -450,6 +455,16 @@ pub const Runtime = struct {
             },
             .acknowledge_reset => self.controller.markResetWarningShown(),
             .dismiss_login_notice => _ = self.controller.takeLoginNotice(),
+            .clear_console => {
+                if (self.surface) |*surface| try surface.clearConsole();
+            },
+            .set_developer_mode => |enabled| {
+                if (!web.supportsInspection()) return error.WebInspectionUnavailable;
+                if (self.controller.path == .ready) {
+                    if (self.surface) |*surface| try surface.setInspectable(enabled);
+                }
+                self.developer_mode = enabled;
+            },
             .reconnect => try self.reconnect(),
             .stop => {
                 if (self.controller.path == .connecting) {
@@ -549,6 +564,8 @@ pub const Runtime = struct {
             .page = controller.page,
             .reset_warning = controller.reset_warning,
             .login_notice = controller.show_login_notice and controller.path == .ready and controller.page == .displayed,
+            .developer_mode = self.developer_mode,
+            .developer_mode_available = web.supportsInspection(),
             .route_mode = controller.route,
             .forwarding = self.forwarding(proxy),
             .forwarding_connections = if (proxy) |value| value.counts.active else 0,

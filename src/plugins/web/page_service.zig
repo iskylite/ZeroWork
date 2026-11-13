@@ -20,6 +20,8 @@ pub const Command = union(enum) {
     reconnect,
     acknowledge_reset,
     dismiss_login_notice,
+    set_developer_mode: bool,
+    clear_console,
 };
 
 pub const Hop = struct { name: []const u8, host: []const u8, port: u16 };
@@ -38,6 +40,8 @@ pub const Snapshot = struct {
     page: nav.PageState,
     reset_warning: nav.ResetWarning,
     login_notice: bool,
+    developer_mode: bool = false,
+    developer_mode_available: bool = false,
     route_mode: config.RouteMode,
     forwarding: ?Forwarding,
     forwarding_connections: usize = 0,

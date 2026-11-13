@@ -27,6 +27,18 @@ pub fn forPlugin(source: @import("../host/plugin_registry.zig").Registry, protoc
 pub const Os = @import("../proto/ssh/remote_os.zig").Kind;
 pub const TabState = enum { normal, connecting, failed };
 
+pub fn browserInk() ui.Color {
+    return ui.Color.hex(if (@import("app_theme.zig").currentName() == .dark) 0x88b4ff else 0x2d5ca8);
+}
+
+pub fn glyphInk(icon: ui.SvgAsset) ui.Color {
+    return glyphInkById(icon.icon_id);
+}
+
+pub fn glyphInkById(icon_id: ?u16) ui.Color {
+    return if (icon_id == ui.icons.globe.icon_id) browserInk() else @import("app_theme.zig").current().fg_2;
+}
+
 /// A separate neutral backplate preserves iSoft's dark source ink on any theme.
 pub fn artworkBackdrop(icon_id: u32) ui.Color {
     return if (icon_id == @import("host_os_assets.zig").isoft.icon_id.?) ui.Color.WHITE else ui.Color.TRANSPARENT;
@@ -37,7 +49,7 @@ pub fn tabTint(state: TabState, asset_value: ui.SvgAsset) ui.Color {
     return switch (state) {
         .failed => theme.danger_ink,
         .connecting => theme.fg_3,
-        .normal => if (@import("host_os_assets.zig").index(asset_value.icon_id.?) != null) ui.Color.WHITE else if (asset_value.icon_id == resolve(.local).icon_id) ui.Color.hex(0xa1a1aa) else theme.fg_2,
+        .normal => if (@import("host_os_assets.zig").index(asset_value.icon_id.?) != null) ui.Color.WHITE else if (asset_value.icon_id == resolve(.local).icon_id) ui.Color.hex(0xa1a1aa) else glyphInk(asset_value),
     };
 }
 
@@ -121,7 +133,7 @@ pub fn refreshHostTint(node: *ui.Node) void {
     const artwork = if (node.getIcon()) |icon| @import("host_os_assets.zig").index(icon.icon_id) != null else node.getImage() != null;
     const apple = if (node.getIcon()) |icon| icon.icon_id == resolve(.local).icon_id.? else false;
     const remote_screen = if (node.getIcon()) |icon| icon.icon_id == ui.icons.screen_share.icon_id.? else false;
-    _ = node.setTint(if (artwork) ui.Color.WHITE else if (apple) tabTint(.normal, resolve(.local)) else if (remote_screen) @import("sidebar_styles.zig").kvmIconInk() else @import("app_theme.zig").current().fg_2);
+    _ = node.setTint(if (artwork) ui.Color.WHITE else if (apple) tabTint(.normal, resolve(.local)) else if (remote_screen) @import("sidebar_styles.zig").kvmIconInk() else glyphInkById(if (node.getIcon()) |icon| icon.icon_id else null));
 }
 
 test "saved host and tab OS artwork share source colours" {

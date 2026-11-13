@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="996" height="216" viewBox="0 0 996 216">
+  <title>控制台</title>
+  <rect x=".5" y=".5" width="995" height="215" rx="10" fill="#F6F6F7" stroke="#D4D4D8"/>
+  <text x="12" y="27" fill="#18181B" font-family="-apple-system, 'PingFang SC', sans-serif" font-size="13" font-weight="650">控制台</text>
+  <g id="web.console.clear" transform="translate(936 15)" fill="none" stroke="#5B5B65" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+    <title>清空日志</title>
+    <path d="M2 3h12M6 3V1.5h4V3m-6 0 .75 10h6.5L12 3M6.5 6v4m3-4v4"/>
+  </g>
+  <g id="web.console.close" transform="translate(970 15)" fill="none" stroke="#5B5B65" stroke-width="1.2" stroke-linecap="round">
+    <title>关闭控制台</title>
+    <path d="m4 4 8 8m0-8-8 8"/>
+  </g>
+  <text id="web.console.log" x="12" y="58" fill="#18181B" font-family="Monaco, monospace" font-size="12" xml:space="preserve">ERROR  Unhandled promise rejection: Error: Fixture promise rejected<tspan x="12" dy="18">ERROR  Error: Fixture script failed (10:43)</tspan><tspan x="12" dy="18">ERROR  Explicit console error</tspan><tspan x="12" dy="18">LOG  Page loaded #1</tspan></text>
+</svg>

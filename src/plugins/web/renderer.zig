@@ -3,6 +3,7 @@ const ui = @import("ui");
 const contract = @import("../../host/plugin_ui_contract.zig");
 const theme = @import("../../ui/app_theme.zig");
 const hint = @import("../../ui/control_hint.zig");
+const session_icon = @import("../../ui/session_icon.zig");
 const config = @import("config.zig");
 const books = @import("bookmarks.zig");
 const api = @import("page_service.zig");
@@ -63,7 +64,12 @@ const View = struct {
     root: *ui.Node = undefined,
     toolbar: *ui.Node = undefined,
     document: *ui.Node = undefined,
+    console_panel: *ui.Node = undefined,
+    console_log: *ui.Node = undefined,
+    console_close: *ui.Node = undefined,
+    console_revision: ?u64 = null,
     address_shell: *ui.Node = undefined,
+    address_icon: *ui.Node = undefined,
     address: Input = undefined,
     address_text: *ui.Signal([]const u8) = undefined,
     state_panel: *ui.Node = undefined,
@@ -89,6 +95,8 @@ const View = struct {
     star_button: *ui.Node = undefined,
     more_button: *ui.Node = undefined,
     copy_disabled: *ui.Signal(bool) = undefined,
+    developer_mode_button: *ui.Node = undefined,
+    developer_mode_label: *ui.Signal([]const u8) = undefined,
     more_open: *ui.Signal(bool) = undefined,
     context_open: *ui.Signal(bool) = undefined,
     edit_open: *ui.Signal(bool) = undefined,
@@ -174,13 +182,16 @@ const View = struct {
         const connection_down = state.path == .disconnected;
         const visible = !connection_down and (state.page == .displayed or (state.page == .loading and state.current_url != null));
 
+        var surface: ?*@import("../../host/web_surface.zig").Surface = null;
         if (self.token) |token| {
             if (try self.page.surfaceBinding(token)) |binding| {
+                surface = binding.surface;
                 if (self.request.web_surface) |facade| {
                     try facade.sync(binding.surface, binding.binding, self.document, visible);
                 }
             }
         }
+        const console_changed = try self.refreshConsole(surface);
         if (!self.address_edited) self.address_text.set(self.displayAddress());
         self.back_disabled.set(!state.can_go_back or connection_down);
         self.forward_disabled.set(!state.can_go_forward or connection_down);
@@ -190,6 +201,8 @@ const View = struct {
         self.reload_icon.set(if (busy) ui.icons.x else ui.icons.rotate_cw);
         self.reload_label.set(if (connecting) "取消连接" else if (state.loading) "停止加载" else "重新加载");
         self.copy_disabled.set(state.current_url == null);
+        show(self.developer_mode_button, state.developer_mode_available);
+        self.developer_mode_label.set(if (state.developer_mode) "关闭开发者模式" else "开启开发者模式");
         self.projectStar();
         const status_changed = self.projectStatus(visible);
         if (state.path == .connecting) {
@@ -208,7 +221,39 @@ const View = struct {
         if (connection_down and state.reset_warning == .needs_display and self.state_warning.globalRect().h > 0) {
             try self.page.command(.acknowledge_reset);
         }
-        return status_changed;
+        return status_changed or console_changed;
+    }
+
+    fn refreshConsole(self: *View, surface: ?*@import("../../host/web_surface.zig").Surface) !bool {
+        if (self.console_panel.style.display == .none) return false;
+        const revision = if (surface) |value| try value.consoleRevision() else 0;
+        if (self.console_revision == revision) return false;
+        const allocator = self.request.cx.allocator;
+        const logs = if (surface != null and revision != 0) try surface.?.copyConsole(allocator) else null;
+        defer if (logs) |value| allocator.free(value);
+        const text = logs orelse "";
+        try self.console_log.setTextContent(allocator, if (text.len == 0) "暂无日志" else text);
+        self.console_log.setTextColor(if (text.len == 0) theme.current().fg_2 else theme.current().fg_1);
+        self.console_revision = revision;
+        return true;
+    }
+
+    fn openConsole(self: *View) void {
+        if (self.closed or !self.active) return;
+        self.more_open.set(false);
+        show(self.console_panel, true);
+        self.request.cx.setFocus(self.console_close);
+        self.request.cx.requestRedraw();
+    }
+
+    fn closeConsole(self: *View) void {
+        show(self.console_panel, false);
+        self.request.cx.setFocus(self.more_button);
+        self.request.cx.requestRedraw();
+    }
+
+    fn clearConsole(self: *View) void {
+        self.action(.clear_console);
     }
 
     fn refreshSavedBookmarks(self: *View, facade: contract.WebBookmarks) !void {
@@ -579,6 +624,22 @@ const View = struct {
         self.more_open.set(!self.more_open.peek());
     }
 
+    fn toggleDeveloperMode(self: *View) void {
+        if (self.closed or !self.active) return;
+        const state = self.snapshot orelse return;
+        self.more_open.set(false);
+        const enabled = !state.developer_mode;
+        self.page.command(.{ .set_developer_mode = enabled }) catch |err| {
+            self.report(err);
+            return;
+        };
+        if (enabled) {
+            setText(self.request.cx, self.feedback_text, "在 Safari 的「开发」菜单中选择当前网页。");
+            self.feedback_open.set(true);
+        }
+        self.request.cx.requestRedraw();
+    }
+
     fn showDetailsRaw(raw: *anyopaque) void {
         const self: *View = @ptrCast(@alignCast(raw));
         self.showDetails();
@@ -794,6 +855,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     self.star_icon = try scope.createSignal(?ui.SvgAsset, ui.icons.star);
     self.star_label = try scope.createText("添加书签", .{});
     self.copy_disabled = try scope.createSignal(bool, true);
+    self.developer_mode_label = try scope.createText("开启开发者模式", .{});
     self.more_open = try scope.createSignal(bool, false);
     self.context_open = try scope.createSignal(bool, false);
     self.edit_open = try scope.createSignal(bool, false);
@@ -814,6 +876,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     try request.slot.appendChild(cx.allocator, self.root);
     try buildToolbar(self);
     try buildDocument(self);
+    try buildConsole(self);
     try buildPopups(self);
     const address_focus = try ui.hooks.useFocusState(scope, cx, self.address.input_container);
     try scope.createEffect(.{ .view = self, .publication = try cx.themeSignal(scope), .focused = address_focus.focused }, struct {
@@ -822,7 +885,13 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
             const view = ctx.view;
             view.toolbar.setStyleInline(view.request.cx.allocator, S.toolbar());
             view.address_shell.setStyleInline(view.request.cx.allocator, S.address(ctx.focused.get()));
+            _ = view.address_icon.setTint(session_icon.browserInk());
             view.document.setStyleInline(view.request.cx.allocator, S.document());
+            const display = view.console_panel.style.display;
+            var console_style = S.consolePanel();
+            console_style.display = display;
+            view.console_panel.setStyleInline(view.request.cx.allocator, console_style);
+            view.console_revision = null;
         }
     }.repaint);
     try cx.addAfterLayoutHook(self, View.afterLayout);
@@ -860,8 +929,8 @@ fn buildToolbar(self: *View) !void {
 
     self.address_shell = try ui.box(cx, S.address(false), .{});
     try self.toolbar.appendChild(cx.allocator, self.address_shell);
-    const globe = try theme.icon(cx, ui.icons.globe, "fg_2", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
-    try self.address_shell.appendChild(cx.allocator, globe);
+    self.address_icon = try ui.iconTint(cx, ui.icons.globe, session_icon.browserInk(), .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+    try self.address_shell.appendChild(cx.allocator, self.address_icon);
     self.address_text = try scope.createText("", .{});
     self.address = try ui.widgets.Input(.{
         .value = self.address_text,
@@ -970,6 +1039,31 @@ fn buildDocument(self: *View) !void {
     show(self.state_actions, false);
 }
 
+fn buildConsole(self: *View) !void {
+    const cx = self.request.cx;
+    const scope = self.request.scope;
+    self.console_panel = try ui.box(cx, S.consolePanel(), .{});
+    self.console_panel.meta.ownership.meta.test_id = "web.console";
+    show(self.console_panel, false);
+    try self.root.appendChild(cx.allocator, self.console_panel);
+
+    const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6 }, .{});
+    try self.console_panel.appendChild(cx.allocator, header);
+    const title = try caption(cx, "控制台", 13, 650, false);
+    title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+    try header.appendChild(cx.allocator, title);
+    try header.appendChild(cx.allocator, try iconButton(cx, scope, "web.console.clear", "清空日志", ui.icons.trash_2, false, @as(?ui.Color, null), cx.on(View, self, View.clearConsole)));
+    self.console_close = try iconButton(cx, scope, "web.console.close", "关闭控制台", ui.icons.x, false, @as(?ui.Color, null), cx.on(View, self, View.closeConsole));
+    try header.appendChild(cx.allocator, self.console_close);
+
+    const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
+    try self.console_panel.appendChild(cx.allocator, scroll.container);
+    self.console_log = try ui.text(cx, "暂无日志", S.consoleText());
+    self.console_log.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .padding = .{ .top = 4, .right = 10 } });
+    self.console_log.meta.ownership.meta.test_id = "web.console.log";
+    try scroll.content.appendChild(cx.allocator, self.console_log);
+}
+
 fn buildPopups(self: *View) !void {
     const cx = self.request.cx;
     const scope = self.request.scope;
@@ -985,6 +1079,16 @@ fn buildPopups(self: *View) !void {
     try more.content.appendChild(cx.allocator, copy);
     if (self.preset) try more.content.appendChild(cx.allocator, try menuButton(cx, more.scope, "web.menu.start", "回到起始网址", cx.on(View, self, View.goStart)));
     try more.content.appendChild(cx.allocator, try menuButton(cx, more.scope, "web.menu.route", "查看路径", cx.on(View, self, View.showDetails)));
+    try more.content.appendChild(cx.allocator, try menuButton(cx, more.scope, "web.menu.console", "打开控制台", cx.on(View, self, View.openConsole)));
+    self.developer_mode_button = try ui.widgets.Button(.{
+        .label = self.developer_mode_label,
+        .variant = .ghost,
+        .base_style = S.menuRow(),
+        .on_click = cx.on(View, self, View.toggleDeveloperMode),
+    }).mount(more.scope, cx);
+    self.developer_mode_button.meta.ownership.meta.test_id = "web.menu.developer_mode";
+    try more.content.appendChild(cx.allocator, self.developer_mode_button);
+    show(self.developer_mode_button, false);
     self.menu_list = try ui.widgets.ScrollArea(.{ .height = 1, .direction = .vertical, .rubber_band_y = false }).mount(more.scope, cx);
     self.menu_list.container.meta.ownership.meta.test_id = "web.menu.bookmarks";
     try more.content.appendChild(cx.allocator, self.menu_list.container);

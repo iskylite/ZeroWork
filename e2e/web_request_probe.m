@@ -68,6 +68,15 @@ int main(void) {
         assert(surface);
         zw_web_surface_set_change_callback(surface, changed);
         WKWebView *view = [(__bridge id)surface valueForKey:@"webView"];
+        if (@available(macOS 13.3, *)) {
+            assert(zw_web_surface_supports_inspection());
+            assert(!view.inspectable);
+            assert(zw_web_surface_set_inspectable(surface, 1) && view.inspectable);
+            assert(zw_web_surface_set_inspectable(surface, 0) && !view.inspectable);
+        } else {
+            assert(!zw_web_surface_supports_inspection());
+            assert(!zw_web_surface_set_inspectable(surface, 1));
+        }
         id<WKUIDelegate> ui = view.UIDelegate;
         id<WKNavigationDelegate> nav = view.navigationDelegate;
         WKFrameInfo *frame = (WKFrameInfo *)[[FixtureFrame alloc] init];

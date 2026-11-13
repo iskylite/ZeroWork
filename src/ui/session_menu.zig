@@ -2,6 +2,7 @@
 const std = @import("std");
 const ui = @import("ui");
 const S = @import("session_menu_styles.zig");
+const session_icon = @import("session_icon.zig");
 const identity = @import("../host/identity.zig");
 pub const Saved = struct { owner: identity.AssetOwner, name: []const u8, icon: ui.SvgAsset };
 
@@ -104,7 +105,7 @@ pub const View = struct {
             try node.appendChild(cx.allocator, highlight);
             self.highlights[index] = highlight;
             const content = try ui.box(cx, S.rowContent(), .{});
-            self.icons[index] = try ui.iconTint(cx, icons[index], S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+            self.icons[index] = try ui.iconTint(cx, icons[index], session_icon.glyphInk(icons[index]), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
             try content.appendChild(cx.allocator, self.icons[index]);
             self.labels[index] = try ui.text(cx, label, S.label());
             try content.appendChild(cx.allocator, self.labels[index]);
@@ -235,7 +236,7 @@ pub const View = struct {
             button.meta.ownership.meta.test_id = "session.menu.saved";
             if (button.behavior.interaction.a11y) |*a| a.role = .menuitem;
             const content = try ui.box(self.cx, S.rowContent(), .{});
-            const icon = try ui.iconTint(self.cx, entry.icon, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+            const icon = try ui.iconTint(self.cx, entry.icon, session_icon.glyphInk(entry.icon), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
             const label = try ui.text(self.cx, entry.name, S.label());
             try label.setTextContent(self.cx.allocator, entry.name);
             label.setStyleInline(self.cx.allocator, .{ .min_width = 0, .flex = 1 });
@@ -355,11 +356,11 @@ pub const View = struct {
         self.more_popup.chrome.setStyleInline(self.cx.allocator, S.panel());
         for (self.labels, self.icons) |label, icon| {
             label.setTextColor(colors.fg_1);
-            _ = icon.setTint(colors.fg_2);
+            _ = icon.setTint(session_icon.glyphInkById(if (icon.getIcon()) |glyph| glyph.icon_id else null));
         }
         for (self.saved_rows.items) |row| {
             row.label.setTextColor(colors.fg_1);
-            _ = row.icon.setTint(colors.fg_2);
+            _ = row.icon.setTint(session_icon.glyphInkById(if (row.icon.getIcon()) |glyph| glyph.icon_id else null));
         }
         self.paintSelection();
         self.paint_revision = self.cx.theme_version;
