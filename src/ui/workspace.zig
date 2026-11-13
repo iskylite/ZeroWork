@@ -388,6 +388,7 @@ pub const Workspace = struct {
     content_focus: ?plugin_ui.ContentFocus = null,
     notes_window_visible: bool = true,
     notes_float_surface: ?*ui.Node = null,
+    settings_backdrop: ?*ui.Node = null,
     notes_float_key: ?ui.events.KeyCode = null,
 
     font_family_resolver: ?*const fn ([]const u8) u16 = null,

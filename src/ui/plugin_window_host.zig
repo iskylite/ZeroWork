@@ -585,7 +585,10 @@ pub const Host = struct {
         }
         const app: *NativeApp = @ptrCast(@alignCast(self.native_context));
         const rect = slot.globalRect();
-        const show = visible and slot.isDisplayedInTree() and rect.w > 0 and rect.h > 0;
+        // The window-wide preferences backdrop blocks both painting and input.
+        // Read its display state even before the retained panel is laid out.
+        const settings_visible = if (workspace.settings_backdrop) |backdrop| backdrop.isDisplayedInTree() else false;
+        const show = visible and !settings_visible and slot.isDisplayedInTree() and rect.w > 0 and rect.h > 0;
         if (!show and binding.* == null) return;
         if (binding.* == null) binding.* = try surface.bind(owner, app.windowId());
         var covers: [self.cx.overlay_stack.layers.len * 2 + 1]web_surface.Occlusion = undefined;

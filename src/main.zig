@@ -15802,6 +15802,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     workspace.history_card_host = history_card_host;
     workspace.status_node = status_text;
     settings_host.workspace = workspace;
+    workspace.settings_backdrop = settings_panel;
     workspace.font_family_resolver = terminalFamilyId;
     workspace.terminal_typography_resolver = applyResolvedTerminalTypography;
     ai_host.workspace = workspace;
