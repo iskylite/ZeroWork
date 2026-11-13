@@ -280,6 +280,21 @@ test "file workspace narrow columns fit with independent vertical scrolling and 
     try std.testing.expectEqual(@as(f32, 0), left.header.style.translate_x);
 }
 
+test "file workspace root breadcrumb navigates the clicked pane to slash" {
+    var f: Fixture = undefined;
+    try f.init(1194, 794);
+    defer f.deinit();
+
+    for ([_]files.Side{ .local, .remote }) |side| {
+        const calls = f.calls;
+        f.click(f.node(side, "files.path.root"), .{});
+        try std.testing.expectEqual(calls + 1, f.calls);
+        try std.testing.expectEqual(std.meta.Tag(files.Action).navigate, f.record.tag);
+        try std.testing.expectEqual(f.view.panes[@backingInt(side)].projection().?.stamp, f.record.stamp);
+        try std.testing.expectEqualStrings("/", f.record.path[0..f.record.path_len]);
+    }
+}
+
 test "file workspace real row click Cmd Shift checkbox selection uses original keys and host ack" {
     var f: Fixture = undefined;
     try f.init(1194, 794);

@@ -1,4 +1,4 @@
-//! Shared OS-first icon selection for session tabs and saved connections.
+//! Shared icon selection for session tabs and saved connections.
 const ui = @import("ui");
 pub const Kind = enum { local, history, file, terminal };
 pub fn resolve(kind: Kind) ui.SvgAsset {
@@ -73,19 +73,22 @@ pub fn forOs(kind: Os) ?ui.SvgAsset {
     };
 }
 pub fn forConnection(source: @import("../host/plugin_registry.zig").Registry, protocol_id: []const u8, kind: Os, archived: bool) ui.SvgAsset {
+    if (!archived and @import("std").mem.eql(u8, protocol_id, "sftp")) return resolve(.file);
     return forOs(kind) orelse forPlugin(source, protocol_id, archived);
 }
-pub fn setNode(node: *ui.Node, kind: Os) void {
-    const selected = forOs(kind) orelse return;
+pub fn setNode(node: *ui.Node, selected: ui.SvgAsset) void {
     const tint = if (node.getIcon()) |old| old.tint else ui.Color.WHITE;
     node.setImage(null);
     node.setIcon(.{ .icon_id = selected.icon_id.?, .rep = selected.pickRep(14).?, .tint = tint });
     node.markRenderDirty();
 }
 
-test "OS icons take precedence over protocol and retain unknown fallback" {
+test "SFTP icons stay folders and SSH tabs prefer the OS icon" {
     const std = @import("std");
-    try std.testing.expectEqual(forOs(.ubuntu).?.icon_id, forConnection(.{}, "sftp", .ubuntu, false).icon_id);
+    for ([_]Os{ .unknown, .centos }) |kind| {
+        try std.testing.expectEqual(ui.icons.folder.icon_id, forConnection(.{}, "sftp", kind, false).icon_id);
+        try std.testing.expectEqual(ui.icons.folder.icon_id, forHost(.{}, "sftp", kind).icon_id);
+    }
     try std.testing.expectEqual(forOs(.windows).?.icon_id, forConnection(.{}, "ssh", .windows, false).icon_id);
     try std.testing.expectEqual(forPlugin(.{}, "ssh", false).icon_id, forConnection(.{}, "ssh", .unknown, false).icon_id);
 }
@@ -93,6 +96,7 @@ test "OS icons take precedence over protocol and retain unknown fallback" {
 /// Saved OS artwork uses source colours; protocol glyphs use theme ink.
 /// Tab appearance is selected independently through tabTint.
 pub fn forHost(source: @import("../host/plugin_registry.zig").Registry, protocol_id: []const u8, kind: Os) ui.SvgAsset {
+    if (@import("std").mem.eql(u8, protocol_id, "sftp")) return resolve(.file);
     if (@import("std").mem.eql(u8, protocol_id, "bmc_ikvm")) return ui.icons.screen_share;
     const os = @import("host_os_assets.zig");
     return switch (kind) {
@@ -107,7 +111,7 @@ pub fn forHost(source: @import("../host/plugin_registry.zig").Registry, protocol
         .freebsd => os.freebsd,
         .windows => os.windows,
         .macos => forOs(kind).?,
-        .unknown => if (@import("std").mem.eql(u8, protocol_id, "ssh") or @import("std").mem.eql(u8, protocol_id, "sftp")) os.linux else forPlugin(source, protocol_id, false),
+        .unknown => if (@import("std").mem.eql(u8, protocol_id, "ssh")) os.linux else forPlugin(source, protocol_id, false),
         .kylin, .neokylin, .openkylin, .ubuntukylin, .uos, .deepin, .openeuler, .euleros, .anolis, .opencloudos, .tencentos, .alinux, .loongnix, .aosc, .bclinux, .kylinsec, .nfs, .linx, .isoft, .redflag => domesticAsset(kind),
         inline .rhel, .centos, .almalinux, .oraclelinux, .sles, .opensuse, .amazonlinux, .nixos, .gentoo, .kali, .linuxmint, .manjaro, .openbsd, .netbsd => |value| @field(os, @tagName(value)),
     };
@@ -176,7 +180,6 @@ test "identified OS logos replace the Linux fallback in both host and tab artwor
     for (kinds) |kind| {
         const host = forHost(.{}, "ssh", kind);
         try std.testing.expectEqual(host.icon_id, forOs(kind).?.icon_id);
-        try std.testing.expectEqual(host.icon_id, forHost(.{}, "sftp", kind).icon_id);
         const pixels = artwork.pixels[artwork.index(host.icon_id.?).?];
         try std.testing.expectEqual(@as(usize, 72 * 72 * 4), pixels.len);
         try std.testing.expect(!std.mem.eql(u8, artwork.pixels[artwork.index(artwork.linux.icon_id.?).?], pixels));

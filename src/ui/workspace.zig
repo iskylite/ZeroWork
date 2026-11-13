@@ -388,6 +388,7 @@ pub const Workspace = struct {
     content_focus: ?plugin_ui.ContentFocus = null,
     notes_window_visible: bool = true,
     notes_float_surface: ?*ui.Node = null,
+    dismiss_notes_float: ?ui.HandlerRef = null,
     settings_backdrop: ?*ui.Node = null,
     notes_float_key: ?ui.events.KeyCode = null,
 
@@ -2762,7 +2763,7 @@ pub const Workspace = struct {
         if (self.groupClosing(group)) return;
         if (self.group_tab_menu == null) {
             const state = try self.scope.createState(GroupTabMenu, .{ .workspace = self, .open = try self.scope.createSignal(bool, false) });
-            const popup = try ui.widgets.Popover(.{ .open = state.open, .trigger = .manual, .position = .bottom_start, .width = 208, .anchor = .{ .virtual = .{ .ctx = state, .getRect = GroupTabMenu.rect } } }).mount(self.scope, self.cx);
+            const popup = try ui.widgets.Popover(.{ .open = state.open, .trigger = .manual, .position = .bottom_start, .width = 208, .group = @import("floating_surface.zig").workspace_popup, .anchor = .{ .virtual = .{ .ctx = state, .getRect = GroupTabMenu.rect } } }).mount(self.scope, self.cx);
             popup.content.setStyleInline(self.allocator, .{ .padding = ui.Padding.all(6), .gap = 2, .background = app_theme.current().overlay, .glass = app_theme.overlayGlass(), .border = .{ .radius = 10 } });
             popup.content.meta.ownership.meta.test_id = "groups.tab.menu";
             inline for (.{ .{ "重命名会话组", "groups.tab.rename", GroupTabMenu.rename }, .{ "页签颜色", "groups.tab.color", GroupTabMenu.color }, .{ "全部左右排列", "groups.tab.side", GroupTabMenu.side }, .{ "全部上下排列", "groups.tab.stack", GroupTabMenu.stack }, .{ "断开并关闭会话组…", "groups.tab.close", GroupTabMenu.close } }) |item| {
@@ -6219,8 +6220,11 @@ pub const Workspace = struct {
                 }
             }
             for (self.tab_nodes.items) |*node| if (node.tab_id == tab.tab_id and !tabShowsHistory(tab)) {
-                if (session_icon.forOs(kind)) |asset| node.icon_asset = asset;
-                session_icon.setNode(node.type_icon, kind);
+                const asset = self.tabIcon(tab);
+                if (node.icon_asset.icon_id != asset.icon_id) {
+                    node.icon_asset = asset;
+                    session_icon.setNode(node.type_icon, asset);
+                }
             };
             self.cx.requestRedraw();
         }
@@ -7540,6 +7544,11 @@ test "file presentation selects and closes without constructing a terminal or co
     try std.testing.expect(tab.content_owner.eql(.{ .session = owner }));
     try std.testing.expectEqual(@as(usize, 0), workspace.connect_jobs.items.len);
     try std.testing.expectEqualStrings("operator@files.test:22 · SFTP", workspace.model.tabs.items[0].details);
+    try workspace.renderTabBar();
+    try std.testing.expectEqual(@as(usize, 1), workspace.tab_nodes.items.len);
+    try std.testing.expectEqual(ui.icons.folder.icon_id, workspace.tab_nodes.items[0].icon_asset.icon_id);
+    workspace.updateSessionOs(owner, .centos, null);
+    try std.testing.expectEqual(ui.icons.folder.icon_id.?, workspace.tab_nodes.items[0].type_icon.getIcon().?.icon_id);
     workspace.selectTab(0);
     cx.layout();
     try std.testing.expectEqual(@as(?usize, 0), workspace.active_tab);

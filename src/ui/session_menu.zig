@@ -66,7 +66,7 @@ pub const View = struct {
         self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .open = try scope.createSignal(bool, false), .hover_style = try scope.createSignal(?ui.BoxStyle, .{ .background = S.theme.states().hover }) };
         try scope.onCleanup(View, self, cleanup);
         adopted = true;
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } }, .position = .bottom_start, .width = S.width, .max_width = S.width, .offset = .{ .static = 0 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .shift_main_axis = true, .size_policy = .fit_content, .close_on_escape = true, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = self.open, .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } }, .position = .bottom_start, .width = S.width, .max_width = S.width, .offset = .{ .static = 0 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .shift_main_axis = true, .size_policy = .fit_content, .close_on_escape = true, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -133,7 +133,7 @@ pub const View = struct {
         self.cx.requestRedraw();
     }
     pub fn hide(self: *View) void {
-        self.more_popup.close.invoke();
+        if (self.more_popup.open) |open| open.set(false);
         self.open.set(false);
         self.restoreFocus();
         self.cx.requestRedraw();
@@ -266,7 +266,7 @@ pub const View = struct {
         try more_content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.chevron_right, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
         try button.appendChild(self.cx.allocator, more_content);
         try parent.appendChild(self.cx.allocator, button);
-        const popup = try ui.widgets.Popover(.{ .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = moreAnchor } }, .position = .right_start, .width = @as(f32, 240), .max_width = @as(f32, 240), .viewport_padding = 8, .constrain_width_to_viewport = true, .shift_main_axis = true, .close_on_escape = false, .close_on_outside_click = false, .offset = .{ .static = 2 }, .size_policy = .fit_content }).mount(self.scope, self.cx);
+        const popup = try ui.widgets.Popover(.{ .trigger = .manual, .anchor = .{ .node = button }, .position = .right_start, .width = @as(f32, 240), .max_width = @as(f32, 240), .viewport_padding = 8, .constrain_width_to_viewport = true, .shift_main_axis = true, .close_on_escape = false, .close_on_outside_click = false, .offset = .{ .static = 2 }, .size_policy = .fit_content }).mount(self.scope, self.cx);
         self.more_popup = popup;
         popup.chrome.behavior.events.on_event_capture = onEvent;
         popup.chrome.behavior.events.capture_context = self;
@@ -302,12 +302,6 @@ pub const View = struct {
                 ctx.view.cx.scheduleRedrawAfterNs(180 * std.time.ns_per_ms);
             }
         }.run);
-    }
-    fn moreAnchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
-        const self: *View = @ptrCast(@alignCast(raw));
-        const r = self.more_button.globalRect();
-        const panel = self.chrome.globalRect();
-        return .{ .x = panel.x, .y = r.y, .w = panel.w, .h = r.h };
     }
     fn openMore(self: *View) void {
         self.more_suppressed = false;

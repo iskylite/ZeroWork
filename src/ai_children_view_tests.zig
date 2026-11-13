@@ -105,7 +105,7 @@ test "v0.4 shared assistant header and floating shadows retain the same geometry
     try std.testing.expectApproxEqAbs(parent.bar.globalRect().y, child.bar.globalRect().y, 0.1);
     try std.testing.expectApproxEqAbs(parent.bar.globalRect().h, child.bar.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(parent.owner.globalRect().y, child.owner.globalRect().y, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 456), child_panel.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(parent_panel.globalRect().h, child_panel.globalRect().h, 0.1);
     for ([_]ui.BoxStyle{ child_styles.popup(cx.tokens), child_styles.settings(cx.tokens), S.panel(cx.tokens) }) |style| {
         const panel = try ui.box(cx, style, .{});
         try cx.root.?.appendChild(a, panel);

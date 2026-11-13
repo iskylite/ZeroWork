@@ -44,7 +44,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     try scope.onCleanup(View, self, View.cleanup);
     const focus_guard = try scope.childScope();
     self.open = try scope.createSignal(bool, false);
-    const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
+    const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = self.open, .trigger = .manual, .close_on_outside_click = false, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
     self.scope = popup.scope;
     self.wrapper = popup.wrapper;
     self.portaled = popup.portaled;
@@ -147,7 +147,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.message.setDisplay(.none);
     try self.body.content.appendChild(cx.allocator, self.message);
     self.logs_open = try scope.createSignal(bool, false);
-    const logs_popup = try ui.widgets.Popover(.{ .open = self.logs_open, .trigger = .manual, .position = .top, .width = S.logs_width, .max_width = S.logs_width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.logsOpenChanged) }).mount(scope, cx);
+    const logs_popup = try ui.widgets.Popover(.{ .on_group_dismiss = cx.on(View, self, View.hide), .group = @import("floating_surface.zig").workspace_popup, .open = self.logs_open, .trigger = .manual, .position = .top, .width = S.logs_width, .max_width = S.logs_width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.logsOpenChanged) }).mount(scope, cx);
     self.logs_wrapper = logs_popup.wrapper;
     self.logs_portaled = logs_popup.portaled;
     self.logs_root = logs_popup.chrome;

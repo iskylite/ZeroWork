@@ -1,82 +1,80 @@
-//! Activation order for peer, non-modal panels mounted directly in one window.
-//! Portaled popovers/tooltips and modal backdrops keep their existing higher bands.
+//! Retained panels share the window overlay stack with portaled popovers.
 const ui = @import("ui");
-const base_z: i16 = 200;
-const Capture = *const fn (ui.events.Event, ?*anyopaque) ui.events.EventResult;
+const Layer = @typeInfo(@typeInfo(@FieldType(@FieldType(ui.Cx, "overlay_stack"), "layers")).array.child).optional.child;
+pub const workspace_popup = "zerowork.workspace-popup";
 
 pub const Surface = struct {
     cx: *ui.Cx,
     node: *ui.Node,
-    order: u64 = 0,
-    visible: bool = false,
-    previous_capture: ?Capture,
-    previous_context: ?*anyopaque,
+    handle: ?@FieldType(Layer, "handle") = null,
+    close: ?ui.HandlerRef,
+    tier: @FieldType(@FieldType(Layer, "config"), "tier"),
+    group: ?[]const u8,
+    coverage: *ui.Node,
+    outside_click: bool,
 
-    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node) !*Surface {
-        const self = try scope.createState(Surface, .{ .cx = cx, .node = node, .previous_capture = node.behavior.events.on_event_capture, .previous_context = node.behavior.events.capture_context });
+    pub const Options = struct {
+        close: ?ui.HandlerRef = null,
+        dialog: bool = false,
+        group: ?[]const u8 = null,
+        coverage: ?*ui.Node = null,
+        outside_click: bool = false,
+    };
+
+    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, options: Options) !*Surface {
+        const self = try scope.createState(Surface, .{ .cx = cx, .node = node, .close = options.close, .tier = if (options.dialog) .dialog else .overlay, .group = options.group, .coverage = options.coverage orelse node, .outside_click = options.outside_click });
+        _ = try node.style.ensureExtFallible(cx.allocator);
         try cx.addAfterLayoutHook(self, afterLayout);
         errdefer cx.removeAfterLayoutHook(self);
         try scope.onCleanup(Surface, self, cleanup);
-        node.behavior.events.on_event_capture = capture;
-        node.behavior.events.capture_context = self;
         return self;
-    }
-    fn fromNode(node: *ui.Node) ?*Surface {
-        if (node.behavior.events.on_event_capture != capture) return null;
-        return @ptrCast(@alignCast(node.behavior.events.capture_context orelse return null));
     }
     fn displayed(self: *const Surface) bool {
         const root = self.cx.root orelse return false;
-        return self.node.isDescendantOf(root) and self.node.isDisplayedInTree();
+        return self.node.isDescendantOf(root) and self.node.isDisplayedInTree() and self.node.frame_state.state_bits.flags.hit_test_visible;
     }
     /// Opening an already visible panel through its toolbar also activates it.
     pub fn activate(self: *Surface) void {
-        const parent = self.node.parent orelse return;
         if (!self.displayed()) return;
-        var latest: u64 = self.order;
-        for (parent.children.items) |node| if (fromNode(node)) |peer| {
-            latest = @max(latest, peer.order);
-        };
-        self.order = latest +| 1;
-        self.visible = true;
-        // Recompute small peer ranks instead of letting z-index grow with every
-        // click. Modal/settings and portal priority cannot be overtaken over time.
-        var changed = false;
-        for (parent.children.items) |node| if (fromNode(node)) |peer| {
-            if (!peer.displayed()) continue;
-            var rank: i16 = 0;
-            for (parent.children.items) |other| if (fromNode(other)) |candidate| {
-                if (candidate.displayed() and (candidate.order < peer.order or (candidate.order == peer.order and other.id < node.id))) rank +|= 1;
+        const stack = &self.cx.overlay_stack;
+        if (self.handle) |handle| {
+            stack.raise(handle);
+        } else {
+            const handle = stack.push(.{
+                .kind = .non_modal,
+                .tier = self.tier,
+                .group = self.group,
+                .dismiss = .{ .outside_click = if (self.outside_click) .close else .none, .escape = self.close != null },
+                .on_dismiss_request = self.close,
+                .focus = .{ .auto_focus = false, .restore = false },
+                .enter_transition = .none,
+                .exit_transition = .none,
+                .retained_panel = true,
+            }) catch |err| {
+                @import("std").log.warn("floating panel: {s}", .{@errorName(err)});
+                return;
             };
-            const z = base_z +| rank;
-            if (node.style.z_index() != z) {
-                node.setStyle(self.cx.allocator, .z_index, z);
-                changed = true;
-            }
-        };
-        if (changed) parent.markOrderDirty();
+            stack.bindRetainedPanel(handle, self.node, self.coverage);
+            if (stack.findLayer(handle)) |layer| layer.skip_outside_click_frame = true;
+            self.handle = handle;
+        }
         self.cx.requestRedraw();
     }
-    fn capture(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
-        const self: *Surface = @ptrCast(@alignCast(raw orelse return .ignored));
-        if (event == .mouse_down) self.activate();
-        return if (self.previous_capture) |previous| previous(event, self.previous_context) else .ignored;
+    pub fn deactivate(self: *Surface) void {
+        if (self.handle) |handle| self.cx.overlay_stack.removePermanently(handle);
+        self.handle = null;
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Surface = @ptrCast(@alignCast(raw));
-        const visible = self.displayed();
-        if (visible and !self.visible) {
+        if (!self.displayed()) {
+            self.deactivate();
+        } else if (self.handle == null) {
             self.activate();
-            return .needs_layout;
         }
-        self.visible = visible;
         return .done;
     }
     fn cleanup(self: *Surface) void {
         self.cx.removeAfterLayoutHook(self);
-        if (self.node.behavior.events.on_event_capture == capture and self.node.behavior.events.capture_context == @as(?*anyopaque, @ptrCast(self))) {
-            self.node.behavior.events.on_event_capture = self.previous_capture;
-            self.node.behavior.events.capture_context = self.previous_context;
-        }
+        self.deactivate();
     }
 };

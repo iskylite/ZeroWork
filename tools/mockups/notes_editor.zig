@@ -62,6 +62,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
             .code_color = ui.arb.hex(0x18181b),
             .code_bg = ui.arb.hex(0xf1f1f4),
             .rule_color = ui.arb.hex(0x5b5b65),
+            .standalone_tasks = true,
         },
     }).mountResult(scope, cx);
     input.input.meta.ownership.meta.test_id = "notes.editor.active";

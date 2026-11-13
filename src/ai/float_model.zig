@@ -3,6 +3,7 @@ const status = @import("status.zig");
 const error_feedback = @import("error_feedback.zig");
 
 pub const Rect = struct { x: f32, y: f32, width: f32, height: f32 };
+pub const default_height: f32 = 480;
 pub const minimum_width: f32 = 520;
 pub const minimum_height: f32 = 354;
 pub const Edge = enum {
@@ -90,7 +91,7 @@ pub const Model = struct {
         if (self.maximized) return bounds;
         if (self.expanded) if (self.desired) |value| return clampRect(value, pane, window);
         const width: f32 = @min(if (self.expanded) @as(f32, 600) else 100, bounds.width);
-        const height: f32 = @min(if (self.expanded) @as(f32, 456) else 14, bounds.height);
+        const height: f32 = @min(if (self.expanded) default_height else 14, bounds.height);
         const x = std.math.clamp(pane.x + (pane.width - width) / 2, bounds.x, bounds.x + bounds.width - width);
         const y = std.math.clamp(pane.y + 14, bounds.y, bounds.y + bounds.height - height);
         return .{ .x = x, .y = y, .width = width, .height = height };
@@ -180,7 +181,7 @@ test "AI default float centers below its own pane strip and clamps within the pa
     const window: Rect = .{ .x = 0, .y = 0, .width = 1440, .height = 900 };
     const pane: Rect = .{ .x = 240, .y = 62, .width = 1190, .height = 790 };
     const normal = model.rect(pane, window);
-    try std.testing.expectEqualDeep(Rect{ .x = 535, .y = 76, .width = 600, .height = 456 }, normal);
+    try std.testing.expectEqualDeep(Rect{ .x = 535, .y = 76, .width = 600, .height = 480 }, normal);
     const small: Rect = .{ .x = 240, .y = 62, .width = 400, .height = 250 };
     const clamped = model.rect(small, window);
     try std.testing.expect(clamped.x >= small.x + 8 and clamped.y >= small.y + 8);

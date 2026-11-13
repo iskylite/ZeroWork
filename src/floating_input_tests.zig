@@ -306,9 +306,9 @@ test "floating surfaces activate on open and child press with matching paint and
     var first: FloatingCounters = .{};
     var second: FloatingCounters = .{};
     const one = try floatingCard(f, 80, 80, &first);
-    _ = try Surface.mount(f.cx, f.scope, one);
+    _ = try Surface.mount(f.cx, f.scope, one, .{});
     const two = try floatingCard(f, 220, 130, &second);
-    const second_surface = try Surface.mount(f.cx, f.scope, two);
+    const second_surface = try Surface.mount(f.cx, f.scope, two, .{});
     two.setDisplay(.none);
     f.frames();
     two.setDisplay(.flex);
@@ -340,16 +340,16 @@ test "floating surfaces preserve reopen ordering bounded priority and modal shie
     defer f.deinit();
     var counters: FloatingCounters = .{};
     const one = try floatingCard(f, 80, 80, &counters);
-    const first = try Surface.mount(f.cx, f.scope, one);
+    const first = try Surface.mount(f.cx, f.scope, one, .{});
     const two = try floatingCard(f, 220, 130, &counters);
-    const second = try Surface.mount(f.cx, f.scope, two);
+    const second = try Surface.mount(f.cx, f.scope, two, .{});
     f.frames();
     for (0..1000) |_| {
         first.activate();
         second.activate();
     }
-    try std.testing.expectEqual(@as(i16, 200), one.style.z_index());
-    try std.testing.expectEqual(@as(i16, 201), two.style.z_index());
+    try std.testing.expect(two.style.z_index() > one.style.z_index());
+    try std.testing.expect(two.style.z_index() < 1000);
     two.setDisplay(.none);
     f.frames();
     first.activate();
@@ -374,7 +374,7 @@ test "floating surface wrapper keeps empty space pass through and popovers above
     defer f.deinit();
     const wrapper = try ui.box(f.cx, .{ .position = .absolute, .inset = .{ .top = .{ .px = 80 } }, .width = .fill(), .direction = .row, .justify = .center, .hit_roles = .{ .pointer = false, .scroll = false } }, .{});
     try f.background.appendChild(f.cx.allocator, wrapper);
-    _ = try Surface.mount(f.cx, f.scope, wrapper);
+    _ = try Surface.mount(f.cx, f.scope, wrapper, .{});
     const card = try ui.box(f.cx, .{ .width = .{ .px = 320 }, .height = .{ .px = 260 }, .hit_behavior = .@"opaque" }, .{});
     input.protect(f.cx, card);
     try wrapper.appendChild(f.cx.allocator, card);
@@ -393,4 +393,48 @@ test "floating surface wrapper keeps empty space pass through and popovers above
     f.click(rect.x + rect.w / 2, rect.y + rect.h / 2);
     try std.testing.expect(open.peek());
     try std.testing.expectEqual(before, f.clicks);
+}
+
+test "floating surfaces and portaled popovers share paint and hit order" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const portal = try f.cx.ensurePopoverPortalRoot();
+    var counter: FloatingCounters = .{};
+    const panel = try floatingCard(f, 140, 100, &counter);
+    try portal.appendChild(f.cx.allocator, panel);
+    _ = try Surface.mount(f.cx, f.scope, panel, .{});
+    panel.setDisplay(.none);
+    const open = try f.scope.createSignal(bool, false);
+    const popup = try ui.widgets.Popover(.{
+        .open = open,
+        .trigger = .manual,
+        .width = @as(f32, 240),
+        .close_on_outside_click = false,
+        .enter_transition = .none,
+        .exit_transition = .none,
+    }).mount(f.scope, f.cx);
+    popup.wrapper.setStyleInline(f.cx.allocator, .{
+        .position = .absolute,
+        .inset = .{ .left = .{ .px = 300 }, .top = .{ .px = 130 } },
+        .width = .{ .px = 30 },
+        .height = .{ .px = 20 },
+    });
+    try f.background.appendChild(f.cx.allocator, popup.wrapper);
+    try popup.content.appendChild(f.cx.allocator, try ui.box(f.cx, .{ .width = .fill(), .height = .{ .px = 130 } }, .{}));
+    open.set(true);
+    f.frames();
+    panel.setDisplay(.flex);
+    f.frames();
+    const p = popup.chrome.globalRect();
+    const r = panel.globalRect();
+    try std.testing.expect(p.x < r.x + r.w and r.x < p.x + p.w);
+    try std.testing.expect(p.y < r.y + r.h and r.y < p.y + p.h);
+    try std.testing.expect(panel.style.z_index() > popup.chrome.style.z_index());
+    f.click(p.x + p.w - 5, p.y + 5);
+    f.frames();
+    try std.testing.expect(popup.chrome.style.z_index() > panel.style.z_index());
+    f.click(r.x + 5, r.y + 60);
+    f.frames();
+    try std.testing.expect(panel.style.z_index() > popup.chrome.style.z_index());
+    try std.testing.expect(open.peek());
 }

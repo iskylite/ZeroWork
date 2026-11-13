@@ -502,7 +502,6 @@ const AiHost = struct {
     feedback: ?*@import("ui/ai_feedback_view.zig").View = null,
     model_gate: ?anyerror = null,
     rollback_to_start: bool = false,
-    card_node: *ui.Node,
     prompt: *ui.Signal([]const u8),
     textarea: ?*ui.widgets.input.TextareaState = null,
     composer_input: ?ui.widgets.input.TextareaResult = null,
@@ -5478,7 +5477,6 @@ const AiHost = struct {
             .cx = undefined,
             .panel = undefined,
             .status = undefined,
-            .card_node = undefined,
             .prompt = undefined,
             .controller = AiController.init(a),
             .manager = AiManager.init(a),
@@ -9049,7 +9047,7 @@ const ChildDialog = struct {
         const prefs = @import("ai/session_lifecycle.zig").Store.childPreferences(record);
         const prompt = try scope.createText(record.draft orelse state.draft orelse "", .{});
         const host = try cx.allocator.create(AiHost);
-        host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = parent.provider, .native_context = null, .native_client = null, .native_binding = null, .endpoint = "", .model = "", .panel = modal.body, .status = undefined, .card_node = undefined, .prompt = prompt, .runtime_config = parent.runtime_config, .assistant_states = &service.presentations, .shared_service = service, .workspace = parent.workspace, .application_host = parent.application_host, .roster = parent.roster, .file_application = parent.file_application, .ai_transfer_host = parent.ai_transfer_host, .data_root = parent.data_root, .recording_archive = parent.recording_archive, .notification_window = parent.notification_window, .child_identity = record.child.?.info.agent, .child_parent = parent, .display_conversation = state.id, .display_owner = state.owner, .settings_host = parent.settings_host };
+        host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = parent.provider, .native_context = null, .native_client = null, .native_binding = null, .endpoint = "", .model = "", .panel = modal.body, .status = undefined, .prompt = prompt, .runtime_config = parent.runtime_config, .assistant_states = &service.presentations, .shared_service = service, .workspace = parent.workspace, .application_host = parent.application_host, .roster = parent.roster, .file_application = parent.file_application, .ai_transfer_host = parent.ai_transfer_host, .data_root = parent.data_root, .recording_archive = parent.recording_archive, .notification_window = parent.notification_window, .child_identity = record.child.?.info.agent, .child_parent = parent, .display_conversation = state.id, .display_owner = state.owner, .settings_host = parent.settings_host };
         try scope.onCleanup(AiHost, host, AiHost.cleanup);
         const self = try scope.createState(ChildDialog, .{ .parent = parent, .host = host, .scope = scope, .open = open, .dialog = modal.dialog, .parent_label = undefined, .props = undefined, .props_open = try scope.createSignal(bool, false), .apply_disabled = try scope.createSignal(bool, !host.childCanWrite()), .painted_colors = app_theme.current(), .name = try scope.createText(prefs.name, .{}), .reusable = try scope.createSignal(bool, prefs.reusable), .revision = record.child_settings_revision });
         const shell = try @import("ui/ai_assistant_header.zig").mount(cx, modal.body, prefs.name);
@@ -9184,8 +9182,6 @@ const ChildDialog = struct {
         try props_footer.appendChild(cx.allocator, apply);
         try self.props.appendChild(cx.allocator, props_footer);
         const conversation = try ui.boxStyled(cx, @import("ui/ai_assistant_styles.zig").conversation, .{});
-        host.card_node = try ui.textStyled(cx, @import("ui/ai_assistant_styles.zig").secondary, "");
-        try conversation.appendChild(cx.allocator, host.card_node);
         const scroll = try ui.widgets.ScrollArea(.{ .height = 276, .direction = .vertical }).mount(scope, cx);
         @import("ui/ai_card_scroll.zig").showOverflowScrollbar(scroll);
         scroll.content.setStyleInline(cx.allocator, .{ .will_change_transform = false });
@@ -10525,6 +10521,8 @@ const MenuHost = struct {
 };
 
 const HistoryHost = @import("ui/history_host.zig").Host;
+const FloatingSurface = @import("ui/floating_surface.zig");
+const workspace_popup = FloatingSurface.workspace_popup;
 
 const SettingsHost = struct {
     const SettingsFilePicker = struct {
@@ -11058,6 +11056,8 @@ const SettingsHost = struct {
             self.controller.ai_fields.existing_open = false;
             self.controller.theme_library.open = false;
             self.selectPage(self.controller.search_return_page orelse self.controller.model.page_index);
+            self.cx.overlay_stack.dismissGroup(workspace_popup, null);
+            self.cx.overlay_stack.dismissUnownedPopovers(self.panel);
             self.open = true;
             self.validateFont();
             self.loadCurrentBackground();
@@ -13327,7 +13327,16 @@ const AppNavHost = struct {
 
     fn dismissTransientSurfaces(self: *AppNavHost, target: *ui.Node) void {
         if (self.modalOwnsInput()) return;
-        if (self.ai) |ai| ai.dismissOnOutsidePress(target);
+        if (self.notes_float) |notes| notes.dismissOnOutsidePress(target);
+        const persistent = for (&self.cx.overlay_stack.layers) |*slot| {
+            const layer = if (slot.*) |*entry| entry else continue;
+            if (!layer.config.retained_panel or layer.config.group != null or layer.config.tier != .overlay) continue;
+            if (layer.content_node) |panel| if (@import("ui/floating_input.zig").containsPress(self.cx, panel, target)) break true;
+        } else false;
+        const transfer_trigger = if (self.transfer_anchor) |anchor| target.isDescendantOf(anchor) else false;
+        if (!persistent and !transfer_trigger) {
+            if (self.ai) |ai| ai.dismissOnOutsidePress(target);
+        }
         if (self.status_previews) |previews| previews.dismissOnOutsidePress(target);
     }
 
@@ -15472,6 +15481,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     // ── Overlay panels (hidden by default) ──────────────────────────
     // AI Float（mockup-ai-float .af）：锚 pane 顶中央（top14 居中），600 宽
     // 浮窗。外层为全宽定位容器（display 切换目标），内层 .af 卡片承载视觉。
+    const panel_parent = try cx.ensurePopoverPortalRoot();
     const ai_panel = try ui.box(cx, .{
         .position = .absolute,
         .inset = .{ .top = .{ .px = 14 }, .left = .{ .px = 0 }, .right = .{ .px = 0 } },
@@ -15526,10 +15536,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const ai_close_icon = try ui.iconTint(cx, ui.icons.x, app_theme.current().fg_2, ai_styles.windowIcon());
     try ai_close.appendChild(cx.allocator, ai_close_icon);
     try ai_header.appendChild(cx.allocator, ai_close);
-    const ai_card = try ui.textStyled(cx, ai_styles.secondary, "");
     const ai_conversation = try ui.boxStyled(cx, ai_styles.conversation, .{});
     ai_conversation.meta.ownership.meta.test_id = "ai.conversation";
-    try ai_conversation.appendChild(cx.allocator, ai_card);
     const ai_scroll = try ui.widgets.ScrollArea(.{ .height = 276, .direction = .vertical }).mount(scope, cx);
     @import("ui/ai_card_scroll.zig").showOverflowScrollbar(ai_scroll);
     ai_scroll.container.meta.ownership.meta.test_id = "ai.conversation.viewport";
@@ -15575,7 +15583,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     }
     const endpoint = provider_config.endpoint;
     const model = provider_config.model;
-    ai_host.* = .{ .workspace_view = ai_workspace_view, .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = ai_provider_instance, .native_context = native_context, .native_client = native_client, .native_binding = native_binding, .endpoint = endpoint, .model = model, .panel = ai_panel, .status = ai_status, .card_node = ai_card, .prompt = ai_prompt, .conversation = ai_conversation };
+    ai_host.* = .{ .workspace_view = ai_workspace_view, .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .execution_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = ai_provider_instance, .native_context = native_context, .native_client = native_client, .native_binding = native_binding, .endpoint = endpoint, .model = model, .panel = ai_panel, .status = ai_status, .prompt = ai_prompt, .conversation = ai_conversation };
     ai_host.data_root = data_paths.directory;
     ai_host.manager.observer = .{ .context = ai_host, .reset = AiHost.streamReset, .delta = AiHost.streamDelta, .tool_rejected = AiHost.streamToolRejected, .round_start = AiHost.streamRoundStart, .context_usage = AiHost.streamContextUsage, .input_consumed = AiHost.streamInputConsumed };
     ai_host.window_base = ai_window_base;
@@ -15629,6 +15637,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     // Frozen V3 settings: centered shell, independently scrolling navigation and content.
     const settings_panel = try ui.boxStyled(cx, shell_styles.settingsBackdrop, .{});
     try scoped_modal.registerWindowCover(cx, settings_panel);
+    _ = try FloatingSurface.Surface.mount(cx, scope, settings_panel, .{ .dialog = true });
     settings_panel.meta.ownership.meta.test_id = "settings.overlay";
     settings_panel.setDisplay(.none);
     const settings_card = try ui.boxStyled(cx, shell_styles.settingsPanel, .{});
@@ -15696,7 +15705,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     menu_host.* = .{ .allocator = cx.allocator, .cx = cx, .panel = undefined, .scope = scope };
     const menu_open = try scope.createSignal(bool, false);
     menu_host.popover_open = menu_open;
-    const menu_popover = try ui.widgets.Popover(.{ .open = menu_open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = menu_host, .getRect = MenuHost.popoverAnchor } }, .position = .bottom_start, .width = 258, .offset = .{ .static = 4 }, .viewport_padding = 8, .shift_main_axis = true, .size_policy = .fit_content, .close_on_escape = false, .on_open_change = cx.on(MenuHost, menu_host, MenuHost.popoverChanged) }).mount(scope, cx);
+    const menu_popover = try ui.widgets.Popover(.{ .group = workspace_popup, .open = menu_open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = menu_host, .getRect = MenuHost.popoverAnchor } }, .position = .bottom_start, .width = 258, .offset = .{ .static = 4 }, .viewport_padding = 8, .shift_main_axis = true, .size_policy = .fit_content, .close_on_escape = false, .on_open_change = cx.on(MenuHost, menu_host, MenuHost.popoverChanged) }).mount(scope, cx);
     menu_popover.wrapper.style.position = .absolute;
     menu_popover.wrapper.style.width = .{ .px = 0 };
     menu_popover.wrapper.style.height = .{ .px = 0 };
@@ -15741,6 +15750,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try content_stack.appendChild(cx.allocator, history_card_host);
     const terminal_area = try ui.boxStyled(cx, shell_styles.pane, .{});
     terminal_area.meta.ownership.meta.test_id = "workspace.pane";
+    terminal_area.setStyleInline(cx.allocator, .{ .hit_roles = .{ .pointer = true } });
     terminal_area.style.flex_shrink = 1;
     try content_stack.appendChild(cx.allocator, terminal_area);
     // Empty workspace keeps the Local / saved-connection entry points.
@@ -15877,7 +15887,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     if (cx.root) |window_root| try window_root.insertChildBefore(cx.allocator, background_view.root, if (window_root.children.items.len != 0) window_root.children.items[0] else null);
 
     settings_host.native_close_waiter = &nav_host.native_close_pending;
-    nav_host.notes_float = try @import("plugins/notes/floating.zig").View.mount(workspace, scope, root);
+    nav_host.notes_float = try @import("plugins/notes/floating.zig").View.mount(workspace, scope, panel_parent);
     workspace.content_focus = .{ .context = nav_host, .focus = AppNavHost.focusContentOwner };
     const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .new_sftp = AppNavHost.newSftpProfile, .new_kvm = AppNavHost.newKvmProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .notes = AppNavHost.openNotes, .new_web = AppNavHost.newWebProfile, .saved = AppNavHost.savedSession });
     session_menu.root.style.position = .absolute;
@@ -15969,15 +15979,15 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
 
     const title_bar = try mountTitleBar(cx, scope, p, settings_host, workspace, ai_host, nav_host, history_host);
     try content_stack.insertChildBefore(cx.allocator, title_bar, history_card_host);
-    try root.insertChildBefore(cx.allocator, settings_panel, main_row);
+    try panel_parent.appendChild(cx.allocator, settings_panel);
     ai_host.strip = try @import("ui/ai_strip_view.zig").View.mount(cx, scope, cx.on(AiHost, ai_host, AiHost.openFromStrip));
 
     ai_host.dock_titlebar = title_bar;
     try root.appendChild(cx.allocator, ai_host.strip.?.root);
-    try root.appendChild(cx.allocator, ai_panel);
+    try panel_parent.appendChild(cx.allocator, ai_panel);
     try root.insertChildBefore(cx.allocator, quick_panel, main_row);
     try root.insertChildBefore(cx.allocator, menu_popover.wrapper, main_row);
-    try root.insertChildBefore(cx.allocator, history_panel, main_row);
+    try panel_parent.appendChild(cx.allocator, history_panel);
 
     const status_bar = try mountStatusBar(cx, scope, p, status_text);
     try background_view.bindShell(.{ title_bar, sidebar, terminal_area, status_bar.bar });
@@ -16001,7 +16011,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     nav_host.local_status_view = local_status;
     try background_view.bindLocalStatus(local_status.root);
     try root.appendChild(cx.allocator, local_status.root);
-    const command_history = try @import("ui/command_history_view.zig").View.mount(cx, scope, workspace, status_bar.bar, local_status.root);
+    const command_history = try @import("ui/command_history_view.zig").View.mount(cx, scope, workspace, panel_parent, status_bar.bar, local_status.root);
     command_history.workspace_chrome = true;
     nav_host.command_history = command_history;
     menu_host.command_history = command_history;
@@ -16047,7 +16057,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     transfer_host.conflict_view = try transfer_conflict_view.View.mount(cx, scope, .{ .context = transfer_host, .decision = TransferHost.conflictDecision, .defer_conflict = TransferHost.deferConflict, .overlay_owner = TransferHost.conflictOverlayOwner });
     try background_view.isolate(scope, transfer_host.conflict_view.?.dialog);
     if (nav_host.transfer_anchor) |anchor| download_list.setAnchor(anchor);
-    try root.appendChild(cx.allocator, download_list.root);
+    try panel_parent.appendChild(cx.allocator, download_list.root);
     try cx.addAfterLayoutHook(transfer_host, TransferHost.hookRun);
 
     if (process_notifications) |notifications| {
@@ -16200,9 +16210,9 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try cx.addAfterLayoutHook(nav_host, AppNavHost.hookRun);
     // Keep draft/composer state, but exclude closed heavyweight panels from
     // renderer, focus and interaction tree walks. Changes attach after layout.
-    _ = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, root, settings_panel);
-    ai_host.retained_panel = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, root, ai_panel);
-    _ = try @import("ui/floating_surface.zig").Surface.mount(cx, scope, ai_panel);
+    _ = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, panel_parent, settings_panel);
+    ai_host.retained_panel = try @import("ui/retained_panel.zig").Panel.mount(cx, scope, panel_parent, ai_panel);
+    _ = try FloatingSurface.Surface.mount(cx, scope, ai_panel, .{ .coverage = ai_card_box });
     try @import("ui/layer_materials.zig").Policy.mount(cx, scope);
     if (app_config.value.ui.materials.background.enabled) {
         const startup = try @import("ui/startup_view.zig").View.mount(cx, scope);

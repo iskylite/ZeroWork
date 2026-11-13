@@ -87,6 +87,11 @@ pub const NoteKey = struct {
     note_id: NoteId,
 };
 
+pub const Timestamps = struct {
+    created_at: ?i64,
+    updated_at: i64,
+};
+
 pub const Note = struct {
     schema_version: u32 = model_schema_version,
     id: NoteId,
@@ -96,10 +101,18 @@ pub const Note = struct {
     body_md: []const u8 = "",
     read_only: bool = false,
     revision: u64 = 1,
+    created_at: ?i64 = null,
     updated_at: i64,
     deleted_at: ?i64 = null,
 
     const model_schema_version = schema_version;
+
+    pub fn timestamps(self: Note) Timestamps {
+        return .{
+            .created_at = self.created_at orelse if (self.revision == 1) self.updated_at else null,
+            .updated_at = self.updated_at,
+        };
+    }
 
     pub fn key(self: Note) NoteKey {
         return .{ .library_id = self.library_id, .note_id = self.id };

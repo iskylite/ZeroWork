@@ -1173,22 +1173,22 @@ pub const Pane = struct {
         const scope = try self.view.scope.childScope();
         self.breadcrumb_scope = scope;
         var parts = std.mem.splitScalar(u8, path_, '/');
-        var count: usize = 0;
+        var needs_separator = false;
         var end: usize = 0;
         while (parts.next()) |part| {
             end += part.len + 1;
-            if (part.len == 0) continue;
-            if (count > 0) try self.breadcrumb.appendChild(cx.allocator, try ui.text(cx, "/", .{ .font_size = 10, .color = S.theme.current().fg_2 }));
-            const target = try scope.createText(path_[0..@min(path_.len, end - 1)], .{});
-            const part_text = try scope.createText(part, .{});
+            const is_root = end == 1;
+            if (part.len == 0 and !is_root) continue;
+            if (needs_separator) try self.breadcrumb.appendChild(cx.allocator, try ui.text(cx, "/", .{ .font_size = 10, .color = S.theme.current().fg_2 }));
+            const target = try scope.createText(if (is_root) "/" else path_[0..@min(path_.len, end - 1)], .{});
+            const part_text = try scope.createText(if (is_root) "/" else part, .{});
             const choice = try scope.createState(PathPart, .{ .pane = self, .path = target.peek() });
             const button_ = try ui.widgets.Button(.{ .label = part_text, .variant = .ghost, .disabled = self.nav_disabled, .base_style = .{ .height = .{ .px = 24 }, .padding = .{ .left = 6, .right = 6 }, .font_size = 10, .font_weight = 400, .border = .{ .radius = 4 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 }, .on_click = cx.on(PathPart, choice, PathPart.choose) }).mount(scope, cx);
             breadcrumbFont(button_);
-            button_.meta.ownership.meta.test_id = "files.path.part";
+            button_.meta.ownership.meta.test_id = if (is_root) "files.path.root" else "files.path.part";
             try self.breadcrumb.appendChild(cx.allocator, button_);
-            count += 1;
+            needs_separator = !is_root;
         }
-        if (count == 0) try self.breadcrumb.appendChild(cx.allocator, try ui.text(cx, "/", .{ .font_size = 10, .color = S.theme.current().fg_2 }));
     }
     fn selectAll(self: *Pane, checked: bool) void {
         self.selectAllFallible(checked) catch |err| self.report(err);

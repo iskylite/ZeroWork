@@ -21,7 +21,7 @@ pub fn registerWindowCover(cx: *ui.Cx, node: *ui.Node) !void {
 pub fn coversPoint(cx: *const ui.Cx, x: f32, y: f32) bool {
     for (&cx.overlay_stack.layers) |*slot| if (slot.*) |*layer| {
         if (layer.suspended or layer.state == .exiting) continue;
-        const node = if (layer.config.kind == .modal or layer.config.scoped_mask) layer.barrier_node else layer.content_node;
+        const node = if (layer.config.kind == .modal or layer.config.scoped_mask) layer.barrier_node else layer.retained_coverage orelse layer.content_node;
         if (node) |surface| {
             if (surface.isDisplayedInTree() and surface.frame_state.state_bits.flags.hit_test_visible and surface.globalRect().contains(x, y)) return true;
         }

@@ -179,6 +179,9 @@ pub const PopoverProps = struct {
     enter_transition: overlay_stack_mod.Transition = .scale_fade,
     /// Semantic z-index tier; null = overlay (Tooltip passes .tooltip). See StackTier.
     tier: ?overlay_stack_mod.StackTier = null,
+    /// A window-wide set of peer popovers that replace one another.
+    group: ?[]const u8 = null,
+    on_group_dismiss: ?Handler(void) = null,
     /// Exit animation
     exit_transition: overlay_stack_mod.Transition = .scale_fade,
     /// Keep hidden measurable layout after close, for first-frame warmup.
@@ -280,6 +283,16 @@ const PopoverOpen = struct {
         const self: *PopoverOpen = @ptrCast(@alignCast(context));
         self.open.propose(false, self.on_open_change);
     }
+
+    fn dismissPeer(context: *anyopaque) void {
+        const self: *PopoverOpen = @ptrCast(@alignCast(context));
+        // Group replacement can originate from another popover's open effect.
+        // Group members use local or bound signals, so there is no input proposal.
+        const signal = self.open.signal orelse return;
+        if (!signal.peek()) return;
+        signal.set(false);
+        if (self.on_open_change) |changed| changed.call(false);
+    }
 };
 
 pub const PopoverBuilder = struct {
@@ -296,6 +309,7 @@ pub const PopoverBuilder = struct {
         const p = self.props;
 
         const open_bound = try reactive.resolveModel(bool, my_scope, p.open);
+        if (p.group != null and open_bound.signal == null and p.on_group_dismiss == null) return error.PopoverGroupRequiresWritableSignal;
         const open_ctl = try my_scope.allocator.create(PopoverOpen);
         open_ctl.* = .{ .open = open_bound, .on_open_change = p.on_open_change };
         try my_scope.adoptResource(@ptrCast(open_ctl), struct {
@@ -377,11 +391,16 @@ pub const PopoverBuilder = struct {
                 .escape = p.close_on_escape,
             },
             .enter_transition = p.enter_transition,
-            .exit_transition = p.exit_transition,
+            .exit_transition = if (p.group != null) .none else p.exit_transition,
             .enter_delay_ms = p.open_delay_ms,
             .on_dismiss_request = core.Cx.simpleHandler(PopoverOpen.hide, open_ctl),
-            .trigger_node = trigger_node,
+            .trigger_node = if (p.anchor) |a| switch (a) {
+                .node => |node| node,
+                .virtual => trigger_node,
+            } else trigger_node,
             .tier = p.tier,
+            .group = p.group,
+            .on_group_dismiss = p.on_group_dismiss orelse if (p.group != null) core.Cx.simpleHandler(PopoverOpen.dismissPeer, open_ctl) else null,
         };
         popover_content.style.width = .{ .px = 0 };
         popover_content.style.height = .{ .px = 0 };
@@ -496,20 +515,11 @@ pub const PopoverBuilder = struct {
         }, struct {
             fn update(c: anytype) void {
                 if (c.is_open.get()) {
-                    const handle = ensurePopoverLayer(c.mount_ctx) catch |err| {
+                    activatePopoverLayer(c.mount_ctx) catch |err| {
                         std.log.warn("popover open: {s}", .{@errorName(err)});
                         return;
                     };
                     ensurePopoverContentAttached(c.mount_ctx);
-                    c.cx.overlay_stack.reactivate(handle);
-                    // Re-open mid-exit animation: reactivate only handles suspended layers; exiting
-                    // layers
-                    // must pull back to entering, else animation finishes commitExit writes
-                    // just-set true
-                    // visible back to false (same Modal/Sheet handling).
-                    if (c.cx.overlay_stack.findLayer(handle)) |layer| {
-                        if (layer.state == .exiting) c.cx.overlay_stack.cancelExit(handle, .entering);
-                    }
                     var sizing_changed = false;
                     // size_policy=.fit_or_scroll: popover_content fixed px (max_width/max_height),
                     // internal ScrollArea handles scrolling. On each open, actively reset to px
@@ -694,6 +704,14 @@ fn ensurePopoverLayer(ctx: *DetachedContentCtx) !overlay_stack_mod.LayerHandle {
     if (ctx.cx.overlay_stack.findLayer(handle)) |layer| layer.skip_outside_click_frame = true;
     ctx.content.markRuntimeIndexFullRebuild();
     return handle;
+}
+
+fn activatePopoverLayer(ctx: *DetachedContentCtx) !void {
+    const handle = try ensurePopoverLayer(ctx);
+    ctx.cx.overlay_stack.reactivate(handle);
+    if (ctx.cx.overlay_stack.findLayer(handle)) |layer| {
+        if (layer.state == .exiting) ctx.cx.overlay_stack.cancelExit(handle, .entering);
+    }
 }
 
 fn detachPopoverContentIfSuspended(ctx: *DetachedContentCtx) void {

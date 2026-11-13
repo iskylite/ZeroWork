@@ -303,6 +303,7 @@
     <clipPath id="notes.tree.clip">
       <rect x="1186" y="120" width="280" height="336" rx="0" fill="none" />
     </clipPath>
+    <symbol id="notes-icon-file-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /><path d="M10 12.5 8 15l2 2.5" /><path d="m14 12.5 2 2.5-2 2.5" /></symbol>
   </defs>
   <g id="notes.canvas" clip-path="url(#window.clip)">
     <svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" id="notes.connection.reference">
@@ -915,56 +916,68 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
     <g id="notes.floating" clip-path="url(#notes.host.clip)">
       <rect x="468" y="60" width="960" height="828" rx="12" fill="#FFFFFF" id="notes.floating.surface" stroke="#E5E5EA" stroke-width=".7" filter="url(#notes.panel.shadow)" />
       <g id="notes.floating.header">
-        <use href="#notebook" x="490" y="78" width="16" height="16" color="#4F5ED9" />
-        <text x="514" y="91" font-size="14" fill="#18181B" font-weight="600" class="notes-text">笔记</text>
-        <g id="notes.breadcrumb.open-tree" data-role="button">
-          <title>浏览全部笔记</title>
-          <g><title>知识库</title><use href="#notes-icon-library" x="550.000000" y="79" width="14" height="14" color="#5B5B65" /><text x="568.000000" y="90" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">工作笔记</text></g>
-          <use href="#chevron" x="620.000000" y="80" width="12" height="12" color="#5B5B65" />
-          <g><title>文件夹</title><use href="#folder" x="636.000000" y="79" width="14" height="14" color="#5B5B65" /><text x="654.000000" y="90" font-size="12" fill="#5B5B65" font-weight="400" class="notes-text">服务器运维  ›  Nginx</text></g>
-          <use href="#down" x="768.000000" y="80" width="12" height="12" color="#5B5B65" />
+        <g id="notes.floating.breadcrumb">
+          <rect x="482" y="68" width="306" height="36" rx="18" fill="#18181B" fill-opacity=".047" stroke="#E5E5EA" stroke-width=".7" />
+          <use href="#notebook" x="490" y="78" width="16" height="16" color="#4F5ED9" />
+          <text id="notes.floating.title" x="512" y="90.5" font-size="13" fill="#5B5B65" font-weight="500" class="notes-text">我的笔记</text>
+          <use href="#chevron" x="570" y="80" width="12" height="12" color="#777780" />
+          <g id="notes.breadcrumb.open-tree" data-role="button">
+            <title>浏览全部笔记</title>
+            <text x="588" y="90" font-size="12" fill="#18181B" class="notes-text">工作笔记</text>
+            <use href="#chevron" x="640" y="80" width="12" height="12" color="#5B5B65" />
+            <use href="#folder" x="656" y="79" width="14" height="14" color="#5B5B65" />
+            <text x="674" y="90" font-size="12" fill="#5B5B65" class="notes-text">服务器运维  ›  Nginx</text>
+            <use href="#down" x="768" y="80" width="12" height="12" color="#5B5B65" />
+          </g>
         </g>
-          <g id="notes.find.open" data-role="button">
-            <title>搜索当前文档 ⌘F</title>
-            <rect x="1140" y="72" width="28" height="28" rx="8" fill="transparent" />
-            <use href="#search" x="1146.000000" y="78.0" width="16" height="16" color="#5B5B65" />
+        <g id="notes.floating.actions">
+          <g id="notes.floating.document">
+            <rect x="1160" y="68" width="186" height="36" rx="18" fill="#18181B" fill-opacity=".047" stroke="#E5E5EA" stroke-width=".7" />
+            <g id="notes.find.open" data-role="button">
+              <title>搜索当前文档 ⌘F</title>
+              <rect x="1164" y="72" width="28" height="28" rx="8" fill="transparent" />
+              <use href="#search" x="1170" y="78.0" width="16" height="16" color="#5B5B65" />
+            </g>
+            <g id="notes.read-only.toggle" data-role="button">
+              <title>设为只读</title>
+              <rect x="1194" y="72" width="28" height="28" rx="8" fill="transparent" />
+              <use href="#lock-open" x="1200" y="78.0" width="16" height="16" color="#5B5B65" />
+            </g>
+            <g id="notes.document.source" data-role="button">
+              <title>切换 Markdown 源码</title>
+              <rect x="1224" y="72" width="28" height="28" rx="8" fill="transparent" />
+              <use href="#notes-icon-file-code" x="1230" y="78.0" width="16" height="16" color="#5B5B65" />
+            </g>
+            <g id="notes.document.recent" data-role="button">
+              <title>最近删除</title>
+              <rect x="1254" y="72" width="28" height="28" rx="8" fill="transparent" />
+              <use href="#notes-icon-trash-2" x="1260" y="78.0" width="16" height="16" color="#5B5B65" />
+            </g>
+            <g id="notes.new" data-role="button">
+              <title>新建目录</title>
+              <rect x="1284" y="72" width="28" height="28" rx="8" fill="transparent" />
+              <use href="#plus" x="1290" y="78.0" width="16" height="16" color="#5B5B65" />
+            </g>
+            <g id="notes.outline.toggle" data-role="button">
+              <title>文档标题目录</title>
+              <rect x="1314" y="72" width="28" height="28" rx="8" fill="transparent" />
+              <use href="#notes-icon-list-tree" x="1320" y="78.0" width="16" height="16" color="#5B5B65" />
+            </g>
           </g>
-          <g id="notes.read-only.toggle" data-role="button">
-            <title>设为只读</title>
-            <rect x="1176" y="72" width="28" height="28" rx="8" fill="transparent" />
-            <use href="#lock-open" x="1182.000000" y="78.0" width="16" height="16" color="#5B5B65" />
+          <g id="notes.floating.window">
+            <rect x="1354" y="68" width="66" height="36" rx="18" fill="#18181B" fill-opacity=".047" stroke="#E5E5EA" stroke-width=".7" />
+            <g id="notes.floating.open-tab" data-role="button" data-disabled="false">
+              <title>在页签中打开</title>
+              <rect x="1358" y="72" width="28" height="28" rx="14" fill="transparent" id="notes.floating.open-tab.hit" />
+              <use href="#external-link" x="1364" y="78" width="16" height="16" color="#5B5B65" />
+            </g>
+            <g id="notes.floating.close" data-role="button" data-disabled="false">
+              <title>收起笔记 ⌥⌘N</title>
+              <rect x="1390" y="72" width="28" height="28" rx="14" fill="transparent" id="notes.floating.close.hit" />
+              <use href="#close" x="1396" y="78" width="16" height="16" color="#5B5B65" />
+            </g>
           </g>
-          <g id="notes.document.source" data-role="button">
-            <title>切换 Markdown 源码</title>
-            <rect x="1212" y="72" width="28" height="28" rx="8" fill="transparent" />
-            <use href="#notes-icon-code-xml" x="1218.000000" y="78.0" width="16" height="16" color="#5B5B65" />
-          </g>
-          <g id="notes.document.recent" data-role="button">
-            <title>最近删除</title>
-            <rect x="1248" y="72" width="28" height="28" rx="8" fill="transparent" />
-            <use href="#notes-icon-trash-2" x="1254.000000" y="78.0" width="16" height="16" color="#5B5B65" />
-          </g>
-          <g id="notes.new" data-role="button">
-            <title>新建目录</title>
-            <rect x="1284" y="72" width="28" height="28" rx="8" fill="transparent" />
-            <use href="#plus" x="1290.000000" y="78.0" width="16" height="16" color="#5B5B65" />
-          </g>
-          <g id="notes.outline.toggle" data-role="button">
-            <title>文档标题目录</title>
-            <rect x="1320" y="72" width="28" height="28" rx="8" fill="transparent" />
-            <use href="#notes-icon-list-tree" x="1326.000000" y="78.0" width="16" height="16" color="#5B5B65" />
-          </g>
-        <g id="notes.floating.open-tab" data-role="button" data-disabled="false">
-          <title>在页签中打开</title>
-          <rect x="1356" y="72" width="28" height="28" rx="14" fill="transparent" id="notes.floating.open-tab.hit" />
-          <use href="#external-link" x="1362" y="78" width="16" height="16" color="#5B5B65" />
         </g>
-        <g id="notes.floating.close" data-role="button" data-disabled="false">
-          <title>收起笔记 ⌥⌘N</title>
-          <rect x="1392" y="72" width="28" height="28" rx="14" fill="transparent" id="notes.floating.close.hit" />
-          <use href="#close" x="1398" y="78" width="16" height="16" color="#5B5B65" />
-        </g>
-        <path d="M484 111.5H1412" stroke="#EBEBEF" stroke-width="1" />
       </g>
       <g id="notes.presentation">
         <g id="notes.document.scroll" clip-path="url(#notes.document.clip)">

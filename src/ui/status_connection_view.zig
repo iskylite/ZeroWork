@@ -100,7 +100,7 @@ pub const View = struct {
         try scope.onCleanup(View, self, cleanup);
         registered = true;
         const focus_guard = try scope.childScope();
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top_start, .width = S.width, .max_width = S.width, .max_height = S.height, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = self.open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top_start, .width = S.width, .max_width = S.width, .max_height = S.height, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;

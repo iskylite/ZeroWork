@@ -8347,7 +8347,7 @@ test "terminal command history keeps executions distinct and virtualizes complet
     const local_bar = try ui.box(cx, .{}, .{});
     try root.appendChild(a, ssh_bar);
     try root.appendChild(a, local_bar);
-    const popup = try @import("command_history_view.zig").View.mount(cx, scope, &workspace, ssh_bar, local_bar);
+    const popup = try @import("command_history_view.zig").View.mount(cx, scope, &workspace, root, ssh_bar, local_bar);
     popup.show(true);
     for (0..5) |_| {
         cx.advanceFrameClock();

@@ -1120,6 +1120,7 @@ fn makePopup(
 ) !Popup {
     const cx = self.request.cx;
     const popup = try ui.widgets.Popover(.{
+        .group = @import("../../ui/floating_surface.zig").workspace_popup,
         .trigger = .manual,
         .open = open,
         .on_open_change = on_change,

@@ -454,7 +454,7 @@ pub const Panel = struct {
         p.root.meta.ownership.meta.test_id = "transfer.manager";
         if (!native_window and !tray) {
             p.root.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 46 }, .right = .{ .px = 14 } } });
-            p.floating = try @import("floating_surface.zig").Surface.mount(cx, scope, p.root);
+            p.floating = try @import("floating_surface.zig").Surface.mount(cx, scope, p.root, .{ .close = cx.on(Panel, p, closeGlobal) });
         }
         p.root.setDisplay(.none);
         p.head = try ui.box(cx, S.row(if (tray) 28 else 30, 6), .{});
@@ -1355,6 +1355,7 @@ pub const Panel = struct {
     }
     /// Context switches must not return focus to the previous session's trigger.
     pub fn dismiss(self: *Panel) void {
+        if (self.floating) |surface| surface.deactivate();
         self.tray_requested_show = false;
         if (self.event_view) |view| view.close();
         self.cx.invalidateReferencesTo(self.root);
@@ -1362,6 +1363,7 @@ pub const Panel = struct {
         self.cx.requestRedraw();
     }
     pub fn hide(self: *Panel) void {
+        if (self.floating) |surface| surface.deactivate();
         self.tray_requested_show = false;
         if (self.event_view) |view| view.close();
         if (self.options.presentation != .window) {
@@ -1370,6 +1372,10 @@ pub const Panel = struct {
         }
         self.root.setDisplay(.none);
         self.cx.requestRedraw();
+    }
+    fn closeGlobal(self: *Panel) void {
+        self.hide();
+        if (self.hooks.closed) |closed| closed(self.hooks.context);
     }
     pub fn setAnchor(self: *Panel, anchor: *ui.Node) void {
         self.anchor_id = anchor.id;

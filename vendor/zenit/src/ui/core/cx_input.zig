@@ -85,6 +85,10 @@ pub fn handleMouseDownEx(self: *Cx, x: f32, y: f32, button: MouseButton, modifie
             return;
         }
 
+        if (target) |node| if (self.overlay_stack.findLayerForNode(node)) |layer| {
+            self.overlay_stack.raise(layer.handle);
+        };
+
         if (button != .left) {
             _ = self.dispatcher.dispatchMouseDownButton(x, y, target, button, modifiers);
             rebuildRuntimeIndexesIfCurrentRootDirty(self);

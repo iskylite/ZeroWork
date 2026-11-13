@@ -25,7 +25,13 @@ pub const View = struct {
     root: *ui.Node,
     title: *ui.Node,
     title_icon: *ui.Node,
-    divider: *ui.Node,
+    header: *ui.Node,
+    header_row: *ui.Node,
+    actions: *ui.Node,
+    window_tools: *ui.Node,
+    more: *ui.Node,
+    compact_tools: bool = false,
+    tools_expanded: bool = false,
     content: *ui.Node,
     header_slots: notes_view.FloatingHeader,
     surface: *Surface = undefined,
@@ -63,36 +69,70 @@ pub const View = struct {
         }, .{});
         root.setStyleInline(cx.allocator, S.floatingSurface());
         root.meta.ownership.meta.test_id = "notes.floating";
-        const header = try ui.box(cx, .{
+        const header = try ui.box(cx, .{ .width = .fill(), .direction = .column, .flex_shrink = 0, .z_index = 4 }, .{});
+        header.meta.ownership.meta.test_id = "notes.floating.header";
+        try header.children.ensureUnusedCapacity(cx.allocator, 2);
+        try root.appendChild(cx.allocator, header);
+        const header_row = try ui.box(cx, .{
             .width = .fill(),
             .height = .{ .px = S.floating_header_height },
             .flex_shrink = 0,
             .direction = .row,
             .align_items = .center,
             .gap = S.floating_header_gap,
-            .padding = .{ .left = S.floating_header_padding, .right = 8 },
+            .padding = .{ .left = S.floating_header_padding - 8, .right = 8 },
         }, .{});
-        header.meta.ownership.meta.test_id = "notes.floating.header";
-        try root.appendChild(cx.allocator, header);
+        try header_row.children.ensureUnusedCapacity(cx.allocator, 4);
+        try header.appendChild(cx.allocator, header_row);
+        var breadcrumb_style = S.floatingIsland();
+        breadcrumb_style.flex_shrink = 1;
+        breadcrumb_style.gap = 6;
+        breadcrumb_style.padding = .{ .left = 8, .right = 8 };
+        const breadcrumb = try ui.box(cx, breadcrumb_style, .{});
+        breadcrumb.meta.ownership.meta.test_id = "notes.floating.breadcrumb";
+        try breadcrumb.children.ensureUnusedCapacity(cx.allocator, 4);
+        try header_row.appendChild(cx.allocator, breadcrumb);
         const title_icon = try ui.iconTint(cx, ui.icons.notebook, colors.accent, .{ .width = .{ .px = S.floating_header_icon_size }, .height = .{ .px = S.floating_header_icon_size }, .flex_shrink = 0 });
-        try header.appendChild(cx.allocator, title_icon);
-        const title = try ui.text(cx, "我的笔记", .{ .font_size = 14, .font_weight = 600, .color = colors.fg_1 });
+        try breadcrumb.appendChild(cx.allocator, title_icon);
+        const title = try ui.text(cx, "我的笔记", .{ .font_size = 13, .font_weight = 500, .color = colors.fg_2, .selectable = false });
         title.meta.ownership.meta.test_id = "notes.floating.title";
         title.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
-        try header.appendChild(cx.allocator, title);
-        const document_tools = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .height = .fill() }, .{});
-        try document_tools.children.ensureUnusedCapacity(cx.allocator, 1);
-        try header.appendChild(cx.allocator, document_tools);
-        const directory_tools = try ui.box(cx, .{ .direction = .row, .gap = 8, .align_items = .center, .flex_shrink = 0 }, .{});
-        try directory_tools.children.ensureUnusedCapacity(cx.allocator, 2);
-        try header.appendChild(cx.allocator, directory_tools);
-        const divider = try ui.box(cx, .{
-            .position = .absolute,
-            .inset = .{ .left = .{ .px = 16 }, .right = .{ .px = 16 }, .bottom = .{ .px = 0 } },
-            .height = .{ .px = 1 },
-            .background = S.floatingDivider(),
+        try breadcrumb.appendChild(cx.allocator, title);
+        const separator = try S.theme.icon(cx, ui.icons.chevron_right, "fg_3", .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 });
+        separator.setDisplay(.none);
+        try breadcrumb.appendChild(cx.allocator, separator);
+        try header_row.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill(), .min_width = 0 }, .{}));
+
+        const actions = try ui.box(cx, .{
+            .direction = .row,
+            .align_items = .center,
+            .justify = .end,
+            .gap = S.floating_header_gap,
+            .flex_shrink = 0,
         }, .{});
-        try header.appendChild(cx.allocator, divider);
+        actions.meta.ownership.meta.test_id = "notes.floating.actions";
+        const editing = try ui.box(cx, S.floatingIsland(), .{});
+        editing.meta.ownership.meta.test_id = "notes.floating.editing";
+        editing.setDisplay(.none);
+        try editing.children.ensureUnusedCapacity(cx.allocator, 6);
+        try actions.appendChild(cx.allocator, editing);
+        const document = try ui.box(cx, S.floatingIsland(), .{});
+        document.meta.ownership.meta.test_id = "notes.floating.document";
+        try actions.appendChild(cx.allocator, document);
+        const document_tools = try ui.box(cx, .{ .direction = .row, .align_items = .center }, .{});
+        try document_tools.children.ensureUnusedCapacity(cx.allocator, 1);
+        try document.appendChild(cx.allocator, document_tools);
+        const directory_tools = try ui.box(cx, .{ .direction = .row, .gap = 2, .align_items = .center, .flex_shrink = 0 }, .{});
+        try directory_tools.children.ensureUnusedCapacity(cx.allocator, 2);
+        try document.appendChild(cx.allocator, directory_tools);
+        const window_tools = try ui.box(cx, S.floatingIsland(), .{});
+        window_tools.meta.ownership.meta.test_id = "notes.floating.window";
+        try actions.appendChild(cx.allocator, window_tools);
+        const more = try ui.box(cx, S.floatingIsland(), .{});
+        more.setDisplay(.none);
+        try header_row.appendChild(cx.allocator, more);
+        try header_row.appendChild(cx.allocator, actions);
+        input.protect(cx, actions);
         const content = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .min_height = 0 }, .{});
         try root.appendChild(cx.allocator, content);
         const self = try scope.createState(View, .{
@@ -103,24 +143,34 @@ pub const View = struct {
             .root = root,
             .title = title,
             .title_icon = title_icon,
-            .divider = divider,
+            .header = header,
+            .header_row = header_row,
+            .actions = actions,
+            .window_tools = window_tools,
+            .more = more,
             .content = content,
-            .header_slots = .{ .document = document_tools, .directory = directory_tools },
+            .header_slots = .{ .breadcrumb = breadcrumb, .separator = separator, .editing = editing, .document = document_tools, .directory = directory_tools },
             .theme_version = cx.theme_version,
         });
+        const expand = try ui.widgets.Button(.{ .a11y_label = "展开笔记工具", .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.ellipsis, .icon_size = @as(f32, 16), .base_style = S.tool(), .on_click = cx.on(View, self, expandTools) }).mount(scope, cx);
+        expand.meta.ownership.meta.test_id = "notes.floating.expand";
+        expand.setPointerDownFocus(.preserve);
+        if (expand.behavior.interaction.a11y) |*a11y| a11y.expanded = false;
+        try more.appendChild(cx.allocator, expand);
         const open = try ui.widgets.Button(.{ .a11y_label = "在页签中打开", .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.external_link, .icon_size = @as(f32, 16), .base_style = S.tool(), .on_click = cx.on(View, self, requestTab) }).mount(scope, cx);
         open.meta.ownership.meta.test_id = "notes.floating.open-tab";
         const open_hint = try ui.widgets.Tooltip(.{ .text = "在页签中打开" }).mount(scope, cx);
         try open_hint.trigger.appendChild(cx.allocator, open);
-        try header.appendChild(cx.allocator, open_hint.wrapper);
+        try window_tools.appendChild(cx.allocator, open_hint.wrapper);
         const close = try ui.widgets.Button(.{ .a11y_label = "收起笔记", .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 16), .base_style = S.tool(), .on_click = cx.on(View, self, requestHide) }).mount(scope, cx);
         close.meta.ownership.meta.test_id = "notes.floating.close";
-        try header.appendChild(cx.allocator, close);
+        try window_tools.appendChild(cx.allocator, close);
         input.protect(cx, root);
         try clip.appendChild(cx.allocator, root);
-        self.surface = try Surface.mount(cx, scope, clip);
+        self.surface = try Surface.mount(cx, scope, clip, .{ .coverage = root });
         try parent.appendChild(cx.allocator, clip);
         workspace.notes_float_surface = root;
+        workspace.dismiss_notes_float = cx.on(View, self, dismissOnContentPress);
         return self;
     }
 
@@ -209,6 +259,31 @@ pub const View = struct {
     fn requestHide(self: *View) void {
         self.want_visible = false;
         self.cx.requestRedraw();
+    }
+
+    fn expandTools(self: *View) void {
+        self.tools_expanded = true;
+        self.cx.requestRedraw();
+    }
+
+    fn toolsOwnOverlay(self: *View) bool {
+        for (self.cx.overlay_stack.layers) |entry| {
+            const layer = entry orelse continue;
+            if (layer.suspended or layer.state == .exiting or layer.config.tier == .tooltip) continue;
+            const trigger = self.cx.node_registry.resolve(layer.trigger_handle orelse continue, null) orelse continue;
+            if (input.containsPress(self.cx, self.actions, trigger)) return true;
+        }
+        return false;
+    }
+
+    pub fn dismissOnOutsidePress(self: *View, target: *ui.Node) void {
+        if (self.clip.style.display == .none or input.containsPress(self.cx, self.root, target)) return;
+        const in_history = if (self.workspace.history_card_host) |host| target.isDescendantOf(host) else false;
+        if (target.isDescendantOf(self.workspace.terminal_area) or in_history) self.dismissOnContentPress();
+    }
+
+    fn dismissOnContentPress(self: *View) void {
+        if (self.workspace.notes_window_visible and self.clip.style.display != .none) self.requestHide();
     }
 
     pub fn focused(self: *View) ?contract.RendererInstance {
@@ -352,13 +427,81 @@ pub const View = struct {
             self.root.setStyle(self.cx.allocator, .width, .{ .px = width });
             changed = true;
         }
-        if (self.theme_version != self.cx.theme_version) {
+        const compact = width < S.floating_header_compact_width;
+        const compact_changed = self.compact_tools != compact;
+        const more_width = S.floating_island_height;
+        if (compact_changed) {
+            self.compact_tools = compact;
+            self.tools_expanded = false;
+            self.more.setDisplay(if (compact) .flex else .none);
+            const parent_row = if (compact) self.header else self.header_row;
+            parent_row.appendChild(self.cx.allocator, self.actions) catch unreachable;
+            self.actions.setStyleInline(self.cx.allocator, .{
+                .position = if (compact) .absolute else .relative,
+                .inset = if (compact) .{
+                    .top = .{ .px = S.floating_header_height },
+                    .right = .{ .px = S.floating_header_gap },
+                } else .{},
+                .flex_wrap = if (compact) .wrap else .no_wrap,
+            });
+            changed = true;
+        }
+        if (compact) {
+            const tools_max = @max(0, width - 2 * S.floating_header_gap);
+            if (@abs(self.actions.style.max_width() - tools_max) > 0.25) {
+                self.actions.setStyle(self.cx.allocator, .max_width, tools_max);
+                changed = true;
+            }
+            const more_rect = self.more.globalRect();
+            const mouse_x = self.cx.mouse_x;
+            const mouse_y = self.cx.mouse_y;
+            const over_more = more_rect.w > 0 and more_rect.contains(mouse_x, mouse_y);
+            if (over_more) {
+                self.tools_expanded = true;
+            } else if (self.tools_expanded and self.actions.style.display != .none and self.actions.globalRect().w > 0) {
+                const tools_rect = self.actions.globalRect();
+                // Bridge the vertical gap below the trigger so the pointer can
+                // reach the tools without the row collapsing on the way down.
+                const over_gap = mouse_x >= tools_rect.x and mouse_x <= more_rect.x + more_rect.w and
+                    mouse_y >= more_rect.y + more_rect.h and mouse_y < tools_rect.y;
+                const keyboard_focus = if (self.cx.focus_manager.getFocused()) |node|
+                    self.cx.focus_manager.focus_visible and (node.isDescendantOf(self.actions) or node.isDescendantOf(self.more))
+                else
+                    false;
+                self.tools_expanded = tools_rect.contains(mouse_x, mouse_y) or over_gap or keyboard_focus or self.toolsOwnOverlay();
+            }
+        } else if (compact_changed) {
+            self.actions.setStyle(self.cx.allocator, .max_width, std.math.inf(f32));
+        }
+        const display: @TypeOf(self.actions.style.display) = if (!compact or self.tools_expanded) .flex else .none;
+        if (self.actions.style.display != display) {
+            self.actions.setDisplay(display);
+            if (self.more.children.items[0].behavior.interaction.a11y) |*a11y| a11y.expanded = compact and self.tools_expanded;
+            changed = true;
+        }
+        // Only the ellipsis occupies the first row in compact mode.
+        const tools_width = if (compact) more_width else self.actions.globalRect().w;
+        const breadcrumb_max = @max(0, width - S.floating_header_padding - 2 * S.floating_header_gap - tools_width);
+        const breadcrumb = self.header_slots.breadcrumb;
+        if (@abs(breadcrumb.style.max_width() - breadcrumb_max) > 0.25) {
+            breadcrumb.setStyle(self.cx.allocator, .max_width, breadcrumb_max);
+            changed = true;
+        }
+        if (compact_changed or self.theme_version != self.cx.theme_version) {
             self.theme_version = self.cx.theme_version;
             const colors = theme.current();
             self.root.setStyleInline(self.cx.allocator, S.floatingSurface());
-            self.title.setTextColor(colors.fg_1);
+            self.title.setTextColor(colors.fg_2);
             _ = self.title_icon.setTint(colors.accent);
-            self.divider.setStyle(self.cx.allocator, .background, S.floatingDivider());
+            for ([_]*ui.Node{ breadcrumb, self.more, self.header_slots.editing, self.header_slots.document.parent.?, self.window_tools }) |island| {
+                island.setStyleInline(self.cx.allocator, .{
+                    .background = if (compact and island.parent == self.actions)
+                        ui.Color.lerp(colors.overlay.withAlpha(255), colors.fg_1, 12.0 / 255.0)
+                    else
+                        S.floatingIslandFill(),
+                    .border = .{ .radius = S.floating_island_height / 2, .width = 0.7, .color = S.floatingDivider() },
+                });
+            }
         }
         return changed;
     }
@@ -381,6 +524,7 @@ pub const View = struct {
     pub fn hide(self: *View) void {
         const restore = self.focused() != null;
         self.want_visible = false;
+        self.tools_expanded = false;
         self.focus_on_reveal = null;
         self.setDisplay(false);
         if (self.floated_tab) |id| {
@@ -398,6 +542,7 @@ pub const View = struct {
     }
 
     fn setDisplay(self: *View, visible: bool) void {
+        if (!visible) self.surface.deactivate();
         const display: @TypeOf(self.root.style.display) = if (visible) .flex else .none;
         self.clip.setDisplay(display);
         self.root.setDisplay(display);

@@ -74,18 +74,19 @@ static void *macos_get_metal_view(void *zenit_window) {
     return NULL;
 }
 static int macos_set_embedded_input_view(void *view, int enabled, ZWWebHostKey host_key,
-    ZWWebFocusEntered focus_entered, void *focus_context) {
+    ZWWebInputCallback focus_entered, ZWWebInputCallback left_press, void *input_context) {
     (void)view;
     (void)enabled;
     (void)host_key;
     (void)focus_entered;
-    (void)focus_context;
+    (void)left_press;
+    (void)input_context;
     return 0;
 }
 #else
 extern void *macos_get_metal_view(void *zenit_window);
 extern int macos_set_embedded_input_view(void *view, int enabled, ZWWebHostKey host_key,
-    ZWWebFocusEntered focus_entered, void *focus_context);
+    ZWWebInputCallback focus_entered, ZWWebInputCallback left_press, void *input_context);
 #endif
 
 @interface ZWWebClipView : NSView
@@ -621,7 +622,7 @@ static NSRect zw_view_rect(NSView *view, ZWWebRect logical) {
 
 int zw_web_surface_sync(ZWWebSurface *surface, void *zenit_window, ZWWebRect slot,
     ZWWebRect clip, const ZWWebRect *occlusions, size_t occlusion_count, int visible, ZWWebHostKey host_key,
-    ZWWebFocusEntered focus_entered, void *focus_context) {
+    ZWWebInputCallback focus_entered, ZWWebInputCallback left_press, void *input_context) {
     if (!NSThread.isMainThread || !surface || !zenit_window) return 0;
     @autoreleasepool {
         ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
@@ -632,7 +633,7 @@ int zw_web_surface_sync(ZWWebSurface *surface, void *zenit_window, ZWWebRect slo
         NSRect document = zw_view_rect(parent, slot);
         NSRect clipped = NSIntersectionRect(NSIntersectionRect(document, zw_view_rect(parent, clip)), parent.bounds);
         if (!owner.webView || !visible || NSIsEmptyRect(clipped)) {
-            if (container.superview) macos_set_embedded_input_view((__bridge void *)container, 0, NULL, NULL, NULL);
+            if (container.superview) macos_set_embedded_input_view((__bridge void *)container, 0, NULL, NULL, NULL, NULL);
             container.hidden = YES;
             return 1;
         }
@@ -647,7 +648,7 @@ int zw_web_surface_sync(ZWWebSurface *surface, void *zenit_window, ZWWebRect slo
             zw_add_nonempty_rect(covers, [container convertRect:cover fromView:parent]);
         }
         BOOL exposed = [container applyOcclusions:covers];
-        if (!macos_set_embedded_input_view((__bridge void *)container, exposed, host_key, focus_entered, focus_context)) return 0;
+        if (!macos_set_embedded_input_view((__bridge void *)container, exposed, host_key, focus_entered, left_press, input_context)) return 0;
         container.hidden = !exposed;
         return 1;
     }
@@ -659,7 +660,7 @@ void zw_web_surface_detach(ZWWebSurface *surface) {
         ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
         [owner.nativeInspector close];
         owner.nativeInspector = nil;
-        macos_set_embedded_input_view((__bridge void *)owner.clipView, 0, NULL, NULL, NULL);
+        macos_set_embedded_input_view((__bridge void *)owner.clipView, 0, NULL, NULL, NULL, NULL);
         owner.clipView.hidden = YES;
         [owner.clipView removeFromSuperview];
     }

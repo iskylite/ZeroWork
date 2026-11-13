@@ -45,7 +45,7 @@ fn mountContent(cx: *ui.Cx, scope: *ui.Scope, value: []const u8, width: f32, ima
             defer cx.allocator.free(code);
             const source = if (end < lines.items.len and end > i + 1) try std.mem.concat(cx.allocator, u8, &.{ code, "\n" }) else try cx.allocator.dupe(u8, code);
             defer cx.allocator.free(source);
-            const code_state = try appendCode(cx, scope, root, code, source, trimmed[fence_len..]);
+            const code_state = try appendCode(cx, scope, root, code, source, trimmed[fence_len..], true);
             if (retained_code) |slot| slot.* = code_state;
             i = end;
             start = @min(end + 1, lines.items.len);
@@ -145,11 +145,17 @@ fn unescapeTablePipes(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
 }
 
 pub fn mountCode(cx: *ui.Cx, scope: *ui.Scope, code: []const u8, language: []const u8) !*ui.Node {
-    const root = try ui.box(cx, S.assistantMessage(), .{});
-    _ = try appendCode(cx, scope, root, code, code, language);
-    try @import("ai_text_selection.zig").attach(cx, scope, root);
-    return root;
+    return (try mountCodeCard(cx, scope, code, code, language, true)).node;
 }
+
+pub fn mountCodeCard(cx: *ui.Cx, scope: *ui.Scope, code: []const u8, source: []const u8, language: []const u8, selectable: bool) !struct { node: *ui.Node, text: *ui.Node, viewport: *ui.Node } {
+    const root = try ui.box(cx, S.assistantMessage(), .{});
+    errdefer cx.destroyDetached(root);
+    const state = try appendCode(cx, scope, root, code, source, language, selectable);
+    if (selectable) try @import("ai_text_selection.zig").attach(cx, scope, root);
+    return .{ .node = root, .text = state.text, .viewport = state.scroll.container };
+}
+
 pub fn languageLabel(info: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, info, " \t\r");
     const token = trimmed[0 .. std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len];
@@ -416,8 +422,9 @@ const CodeState = struct {
         self.cx.removeAfterLayoutHook(self);
     }
 };
-fn appendCode(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, code: []const u8, source: []const u8, language: []const u8) !*CodeState {
+fn appendCode(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, code: []const u8, source: []const u8, language: []const u8, selectable: bool) !*CodeState {
     const block = try ui.box(cx, S.codeBlock(), .{});
+    errdefer cx.destroyDetached(block);
     block.meta.ownership.meta.test_id = "ai.message.code";
     @import("layer_materials.zig").card(block, .control);
     const toolbar = try ui.box(cx, S.codeToolbar(), .{});
@@ -446,7 +453,7 @@ fn appendCode(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, code: []const u8, 
     scroll.container.meta.ownership.meta.test_id = "ai.message.code.scroll";
     scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .max_height = S.code_max_height, .flex_shrink = 0 });
     const content_width = textWidth(cx, code, 11, 450);
-    const text = try ui.text(cx, code, .{ .font_size = 11, .font_weight = 450, .line_height = 16.0 / 11.0, .wrap = .newline_only, .use_monospace_font = true, .color = S.markdownOptions().code_color });
+    const text = try ui.text(cx, code, .{ .font_size = 11, .font_weight = 450, .line_height = 16.0 / 11.0, .wrap = .newline_only, .use_monospace_font = true, .selectable = selectable, .color = S.markdownOptions().code_color });
     @import("app_theme.zig").bindInk(text, "fg_1");
     text.meta.ownership.meta.test_id = "ai.message.code.text";
     text.setStyleInline(cx.allocator, .{ .width = .{ .px = content_width }, .min_height = 16, .flex_shrink = 0 });

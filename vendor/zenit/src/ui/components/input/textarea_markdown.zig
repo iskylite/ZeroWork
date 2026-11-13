@@ -18,12 +18,46 @@ pub const Presentation = struct {
     cached_key: ?ProjectionKey = null,
     cached_line: ?markdown.LiveLine = null,
 
-    const ProjectionKey = struct { revision: u64, index: usize, reveal: bool, kind: markdown.LiveCode };
+    const ProjectionKey = struct { revision: u64, index: usize, reveal_image: bool, kind: markdown.LiveCode };
 
     pub fn deinit(self: *Presentation) void {
         self.code.deinit(self.geometry.child_allocator);
         self.geometry.deinit();
         self.projection.deinit();
+    }
+
+    pub fn completeHeading(self: *Presentation, a: std.mem.Allocator, doc: *const Document, caret: usize) !?[]u8 {
+        const index = doc.offsetToLineCol(caret).line;
+        const start = doc.getLineStart(index);
+        const source = doc.getText();
+        const end = doc.getLineEnd(index);
+        if (caret != end and !(caret + 1 == end and source[caret] == '\r')) return null;
+        const prefix = std.mem.trimStart(u8, source[start..caret], " ");
+        if (caret - start - prefix.len > 3 or prefix.len == 0 or prefix.len > 6 or
+            std.mem.indexOfNone(u8, prefix, "#") != null) return null;
+
+        try self.refreshCode(doc);
+        if (self.code.items[index] != .prose) return null;
+        var previous = index;
+        while (previous > 0) {
+            previous -= 1;
+            if (self.code.items[previous] != .prose) continue;
+            const raw = std.mem.trimEnd(u8, source[doc.getLineStart(previous)..doc.getLineEnd(previous)], "\r");
+            const heading = std.mem.trimStart(u8, raw, " ");
+            if (raw.len - heading.len > 3) continue;
+            const level = markdown.atxHeadingLevel(heading) orelse continue;
+            if (level > prefix.len) continue;
+            if (level < prefix.len) return null;
+
+            const body = skipSpaces(heading, level);
+            const number = Number.read(heading, body, endOfDigits(heading, body), true) orelse return null;
+            return try std.fmt.allocPrint(a, " {s}{d}{s} ", .{
+                heading[body..number.start],
+                number.value + 1,
+                heading[number.end..number.delimiter_end],
+            });
+        }
+        return null;
     }
 
     pub fn refreshCode(self: *Presentation, doc: *const Document) !void {
@@ -38,7 +72,7 @@ pub const Presentation = struct {
                 if (Fence.read(text)) |closing| {
                     if (closing.marker == opening.marker and closing.count >= opening.count and closing.suffix.len == 0) {
                         fence = null;
-                        break :blk .fence;
+                        break :blk .closing_fence;
                     }
                 }
                 break :blk .code;
@@ -46,7 +80,7 @@ pub const Presentation = struct {
                 if (Fence.read(text)) |opening| {
                     if (opening.marker != '`' or std.mem.indexOfScalar(u8, opening.suffix, '`') == null) {
                         fence = opening;
-                        break :blk .fence;
+                        break :blk .opening_fence;
                     }
                 }
                 break :blk .prose;
@@ -67,7 +101,7 @@ pub const Presentation = struct {
         const has_cr = line_end > start and source[line_end - 1] == '\r';
         const end_without_cr = line_end - @intFromBool(has_cr);
         const raw = source[start..end_without_cr];
-        const marker = Markup.read(raw) orelse return null;
+        const marker = Markup.read(raw, self.options.standalone_tasks) orelse return null;
         if (caret - start < marker.body or caret > end_without_cr) return null;
         const exit = std.mem.trim(u8, raw[marker.body..], " \t").len == 0;
         const edit_start = if (exit) start + marker.exitAt() else caret;
@@ -85,7 +119,7 @@ pub const Presentation = struct {
                 try replacement.appendSlice(a, raw[number.end..marker.body]);
             } else {
                 try replacement.appendSlice(a, raw[0..marker.body]);
-                if (marker.task) replacement.items[newline.len + marker.check_offset] = ' ';
+                if (marker.check_offset) |offset| replacement.items[newline.len + offset] = ' ';
             }
         }
         const next_caret = replacement.items.len;
@@ -98,9 +132,9 @@ pub const Presentation = struct {
                 if (self.code.items[index] != .prose) break;
                 const next_start = doc.getLineStart(index);
                 const next_line = doc.getText()[next_start..doc.getLineEnd(index)];
-                const next = Markup.read(next_line) orelse break;
+                const next = Markup.read(next_line, self.options.standalone_tasks) orelse break;
                 const next_number = next.number orelse break;
-                if (marker.heading or next.heading or next_number.value != expected or
+                if (next_number.value != expected or
                     !std.mem.eql(u8, raw[0..number.start], next_line[0..next_number.start]) or
                     raw[number.end] != next_line[next_number.end]) break;
                 if (!exit and expected == 999_999_999) break;
@@ -113,6 +147,10 @@ pub const Presentation = struct {
         return .{ .start = edit_start, .end = end, .text = try replacement.toOwnedSlice(a), .caret = next_caret };
     }
 
+    pub fn revealsImage(self: *const Presentation, index: usize, raw: []const u8) bool {
+        return (index == self.caret_line or index == self.anchor_line) and std.mem.indexOf(u8, raw, "![") != null;
+    }
+
     fn line(self: *Presentation, doc: *const Document, index: usize, raw: []const u8) !?markdown.LiveLine {
         try self.refreshCode(doc);
         if (self.composing) |range| if (index >= range.start and index <= range.end) return null;
@@ -121,13 +159,13 @@ pub const Presentation = struct {
         const key: ProjectionKey = .{
             .revision = doc.revision,
             .index = index,
-            .reveal = index == self.caret_line or index == self.anchor_line,
+            .reveal_image = self.revealsImage(index, raw),
             .kind = kind,
         };
         if (self.cached_key) |cached| if (std.meta.eql(cached, key)) return self.cached_line;
         self.cached_key = null;
         _ = self.projection.reset(.{ .retain_with_limit = 256 * 1024 });
-        const projected = try markdown.projectLine(self.projection.allocator(), raw, self.options, key.reveal, kind);
+        const projected = try markdown.projectLine(self.projection.allocator(), raw, self.options, key.reveal_image, kind);
         self.cached_line = if (projected.spans.len != 0 or projected.edits.len != 0 or projected.font_size != self.options.base_font_size)
             projected
         else
@@ -189,75 +227,82 @@ pub const Presentation = struct {
 
 const NewlineEdit = struct { start: usize, end: usize, text: []u8, caret: usize };
 
+fn skipSpaces(line: []const u8, start: usize) usize {
+    var i = start;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    return i;
+}
+
+fn endOfDigits(line: []const u8, start: usize) usize {
+    var end = start;
+    while (end < line.len and std.ascii.isDigit(line[end])) : (end += 1) {}
+    return end;
+}
+
+const Number = struct {
+    start: usize,
+    end: usize,
+    delimiter_end: usize,
+    value: u32,
+
+    fn read(line: []const u8, start: usize, first_end: usize, heading: bool) ?Number {
+        var digits = start;
+        var end = first_end;
+        if (end == start) return null;
+        if (heading) {
+            while (end + 1 < line.len and line[end] == '.' and std.ascii.isDigit(line[end + 1])) {
+                digits = end + 1;
+                end = endOfDigits(line, digits);
+            }
+        }
+        var delimiter_end = end;
+        if (end < line.len and (line[end] == '.' or (!heading and line[end] == ')'))) delimiter_end += 1;
+        if (delimiter_end == end and (!heading or digits == start)) return null;
+        if (delimiter_end < line.len and skipSpaces(line, delimiter_end) == delimiter_end) return null;
+        if (end - digits > 9) return null;
+        const value = std.fmt.parseInt(u32, line[digits..end], 10) catch return null;
+        if (value >= 999_999_999) return null;
+        return .{ .start = digits, .end = end, .delimiter_end = delimiter_end, .value = value };
+    }
+};
+
 const Markup = struct {
     prefix: usize,
     body: usize,
     quote: ?usize = null,
-    heading: bool = false,
-    task: bool = false,
-    check_offset: usize = 0,
-    number: ?struct { start: usize, end: usize, value: u32 } = null,
-
-    fn spaces(line: []const u8, start: usize) usize {
-        var i = start;
-        while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
-        return i;
-    }
+    check_offset: ?usize = null,
+    number: ?Number = null,
 
     fn exitAt(self: Markup) usize {
         return if (self.body == self.prefix) self.quote orelse self.prefix else self.prefix;
     }
 
-    fn read(line: []const u8) ?Markup {
-        var start = spaces(line, 0);
+    fn read(line: []const u8, standalone_tasks: bool) ?Markup {
+        var start = skipSpaces(line, 0);
         var quote: ?usize = null;
         while (start < line.len and line[start] == '>') {
             quote = start;
-            start = spaces(line, start + 1);
+            start = skipSpaces(line, start + 1);
         }
         var marker: Markup = .{ .prefix = start, .body = start, .quote = quote };
         if (start >= line.len) return if (quote != null) marker else null;
 
-        var end = start;
-        while (end < line.len and line[end] == '#') : (end += 1) {}
-        if (end > start) {
-            const content = spaces(line, end);
-            if (end - start > 6 or content == end) return null;
-            marker.heading = true;
-            start = content;
-        } else if (std.mem.indexOfScalar(u8, "-*+", line[start]) != null and spaces(line, start + 1) > start + 1) {
-            marker.body = spaces(line, start + 1);
-            const tail = line[marker.body..];
-            if (tail.len >= 3 and tail[0] == '[' and tail[2] == ']' and std.mem.indexOfScalar(u8, " xX", tail[1]) != null and
-                (tail.len == 3 or spaces(tail, 3) > 3))
-            {
-                marker.task = true;
-                marker.check_offset = marker.body + 1;
-                marker.body = spaces(line, marker.body + 3);
-            }
+        if (line[start] == '#') return null;
+        if (markdown.taskPrefix(line[start..], standalone_tasks)) |task| {
+            marker.body = skipSpaces(line, start + task.end);
+            marker.check_offset = if (task.short) null else start + task.state;
+            return marker;
+        }
+        if (std.mem.indexOfScalar(u8, "-*+", line[start]) != null and skipSpaces(line, start + 1) > start + 1) {
+            marker.body = skipSpaces(line, start + 1);
             return marker;
         }
 
-        var digits = start;
-        end = start;
-        while (end < line.len and std.ascii.isDigit(line[end])) : (end += 1) {}
-        if (end == start) return if (quote != null and !marker.heading) marker else null;
-        if (marker.heading) {
-            while (end + 1 < line.len and line[end] == '.' and std.ascii.isDigit(line[end + 1])) {
-                digits = end + 1;
-                end = digits;
-                while (end < line.len and std.ascii.isDigit(line[end])) : (end += 1) {}
-            }
-        }
-        var delimiter_end = end;
-        if (end < line.len and (line[end] == '.' or (!marker.heading and line[end] == ')'))) delimiter_end += 1;
-        if (delimiter_end == end and (!marker.heading or digits == start)) return if (quote != null and !marker.heading) marker else null;
-        marker.body = spaces(line, delimiter_end);
-        if (marker.body == delimiter_end and delimiter_end != line.len) return null;
-        if (end - digits > 9) return null;
-        const number = std.fmt.parseInt(u32, line[digits..end], 10) catch return null;
-        if (number >= 999_999_999) return null;
-        marker.number = .{ .start = digits, .end = end, .value = number };
+        const end = endOfDigits(line, start);
+        if (end == start or end == line.len or (line[end] != '.' and line[end] != ')')) return if (quote != null) marker else null;
+        const number = Number.read(line, start, end, false) orelse return null;
+        marker.body = skipSpaces(line, number.delimiter_end);
+        marker.number = number;
         return marker;
     }
 };

@@ -76,7 +76,7 @@ pub const View = struct {
         try self.badge.appendChild(cx.allocator, self.badge_text);
         try trigger.appendChild(cx.allocator, self.badge);
         trigger.behavior.events.on_click = .{ .callback = toggle, .context = self };
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = trigger }, .position = .bottom_end, .offset = .{ .static = 8 }, .width = S.width, .max_width = S.width, .viewport_padding = 12, .constrain_width_to_viewport = true, .shift_main_axis = true, .size_policy = .fit_content, .clip_subtree_to_chrome = true, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = open, .trigger = .manual, .anchor = .{ .node = trigger }, .position = .bottom_end, .offset = .{ .static = 8 }, .width = S.width, .max_width = S.width, .viewport_padding = 12, .constrain_width_to_viewport = true, .shift_main_axis = true, .size_policy = .fit_content, .clip_subtree_to_chrome = true, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         // Manual anchoring still returns a wrapper owned by the caller.
         // Keep that invisible subtree attached so normal window teardown frees
         // its nodes; the visible content is independently hosted in the portal.
@@ -140,7 +140,9 @@ pub const View = struct {
         self.cx.requestRedraw();
     }
     fn openChanged(self: *View, _: bool) void {
-        if (!self.open.peek() and self.was_open) self.cx.setFocus(self.trigger);
+        if (!self.open.peek() and self.was_open) if (self.cx.focus_manager.getFocused()) |node| {
+            if (node.isDescendantOf(self.root)) self.cx.setFocus(self.trigger);
+        };
         self.cx.requestRedraw();
     }
     fn hide(self: *View) void {

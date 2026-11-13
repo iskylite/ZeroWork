@@ -25,7 +25,8 @@ pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = expanded_width }, .height = .fill(), .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 16 }, .overflow = .hidden };
 }
 pub fn full() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .column, .min_height = 0, .padding = .{ .top = 66, .left = 10, .right = 10, .bottom = 10 }, .gap = 12 };
+    // Align the sidebar title's visible top with the first terminal line.
+    return .{ .width = .fill(), .height = .fill(), .direction = .column, .min_height = 0, .padding = .{ .top = 55, .left = 10, .right = 10, .bottom = 10 }, .gap = 12 };
 }
 pub fn header() ui.BoxStyle {
     return .{ .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{}, .flex_shrink = 0 };

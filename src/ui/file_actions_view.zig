@@ -28,7 +28,7 @@ pub const View = struct {
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, pane: *Files.Pane, model: *Controller.Controller) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .pane = pane, .model = model, .open = try scope.createSignal(bool, false) });
         try scope.onCleanup(View, self, cleanup);
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .bottom_start, .max_width = @as(f32, 340), .max_height = @as(f32, 380), .offset = .{ .static = 4 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .size_policy = .fit_content, .close_on_escape = true, .close_on_outside_click = true }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = self.open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .bottom_start, .max_width = @as(f32, 340), .max_height = @as(f32, 380), .offset = .{ .static = 4 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .size_policy = .fit_content, .close_on_escape = true, .close_on_outside_click = true }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;

@@ -5,15 +5,19 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-11-12-notes-editor-retained-rows` (upstream revision and license unchanged)
+- Local patch revision: `2026-11-13-notes-live-markdown-ime-embedded-press-overlay-stack` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3508` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `5a8b2659e456bbd73b4a9792fce59089a2a1809ee4e003abc5d86f98ace60179`
+- Canonical tracked-tree SHA-256: `408fd55de75be67ff130168202214a5d2a7a26582542a298f260c7ab23ed56a7`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
+
+In live Markdown, Enter inserts a newline after a heading. Typing an ATX marker and a space on an empty line continues the numeric prefix of the nearest sibling heading within the current section. Lists and blockquotes continue through Enter. Complete Markdown syntax is projected on the active line, and AppKit anchors marked-text queries to the painted caret.
+
+The embedded-view bridge can notify the host of a left press delivered inside the exposed native child, including when that child already owns focus. ZeroWork uses this callback to dismiss the Notes floating panel when the user clicks the web page.
 
 The line-image patch lets Textarea hosts add textures at Markdown line offsets. The virtual list includes their heights when laying out text, placing the caret, hit testing and scrolling. Markdown remains the editable document. Text edits rebase unchanged image offsets before layout, retaining their textures and heights through insertions, deletions and history changes.
 
@@ -22,6 +26,8 @@ The live Markdown patch adds an opt-in Textarea presentation that shares the Mar
 The Markdown code-block review patch requires a closing fence with the same marker and at least the opening fence length, without a trailing info string. Code rendering preserves internal and trailing blank rows and their source offsets. Parser and mounted-node regressions cover these cases.
 
 The YIX patch regenerates seven checked-in Zig outputs for Alert, Checkbox, Radio, Switch, ControlShell and Progress. The regenerated headers and source map paths restore the standalone build's default code generation. The compiler output between those metadata lines is identical.
+
+The overlay stack patch puts retained panels and portaled popovers in a shared window order. Open and pointer activation update the order, with nested popovers following their owner. Popovers may join a window-wide exclusion group.
 
 The scoped dialog patch lets applications set a live modal owner and manage its bounds. Scoped backdrops restrict semantic actions and focus to their input boundary, while Escape and backdrop dismissal follow the focused or clicked dialog. Existing window-modal defaults, the upstream source revision, license and toolchain are unchanged.
 

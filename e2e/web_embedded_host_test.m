@@ -56,12 +56,16 @@ uint64_t zenit_text_input_utf8_for_utf16(uint32_t w, uint64_t n) { return n; }
 - (void)selectAll:(id)sender { self.nativeEdits++; }
 @end
 
-typedef struct { uint16_t key; NSUInteger calls; } HostKeys;
+typedef struct { uint16_t key; NSUInteger calls; NSUInteger leftPresses; } HostInput;
 static int hostKey(void *context, uint16_t key, uint32_t modifiers) {
-    HostKeys *host = context;
+    HostInput *host = context;
     CHECK(host);
     host->calls++;
     return key == host->key && modifiers == NSEventModifierFlagCommand;
+}
+static void hostLeftPress(void *context) {
+    HostInput *host = context;
+    host->leftPresses++;
 }
 static void dispatch(WindowWrapper *window, NSEventType type, uint16_t code, NSString *text, NSEventModifierFlags modifiers) {
     NSEvent *event = [NSEvent keyEventWithType:type location:NSZeroPoint
@@ -82,8 +86,8 @@ int main(void) {
         EmbeddedProbe *page = [[EmbeddedProbe alloc] initWithFrame:clip.bounds];
         [clip addSubview:page];
         [window.metalView addSubview:clip];
-        HostKeys first = { .key = 17 }, second = { .key = 14 };
-        CHECK(macos_set_embedded_input_view((__bridge void *)clip, 1, hostKey, NULL, &first));
+        HostInput first = { .key = 17 }, second = { .key = 14 };
+        CHECK(macos_set_embedded_input_view((__bridge void *)clip, 1, hostKey, NULL, hostLeftPress, &first));
         for (int i = 0; i < 16; i++) pumpAppEventsWithTimeout(0);
         NSMenu *defaultMenu = NSApp.mainMenu;
         NSApp.mainMenu = [[NSMenu alloc] initWithTitle:@"Test"];
@@ -105,7 +109,7 @@ int main(void) {
         [window.keyEventQueue.firstObject getValue:&flags];
         CHECK(flags.keycode == 59 && !flags.pressed && flags.modifiers == 0);
         [window.keyEventQueue removeAllObjects];
-        CHECK(macos_set_embedded_input_view((__bridge void *)clip, 1, hostKey, NULL, &second));
+        CHECK(macos_set_embedded_input_view((__bridge void *)clip, 1, hostKey, NULL, hostLeftPress, &second));
         dispatch(window, NSEventTypeKeyDown, 14, @"e", NSEventModifierFlagCommand);
         CHECK(second.calls == 1 && first.calls == 3 && window.keyEventQueue.count == 1);
         [window.keyEventQueue removeAllObjects];
@@ -140,6 +144,19 @@ int main(void) {
         CHECK([clip hitTest:[clip convertPoint:NSMakePoint(200, 20) toView:clip.superview]] == nil);
         CHECK([clip applyOcclusions:@[]] && clip.layer.mask == nil);
         CHECK([window.metalView accessibilityHitTest:point] == page);
+        NSPoint click = [page convertPoint:NSMakePoint(20, 20) toView:nil];
+        NSEvent *down = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:click
+            modifierFlags:0 timestamp:0 windowNumber:window.window.windowNumber
+            context:nil eventNumber:1 clickCount:1 pressure:1];
+        NSEvent *up = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:click
+            modifierFlags:0 timestamp:0 windowNumber:window.window.windowNumber
+            context:nil eventNumber:1 clickCount:1 pressure:0];
+        CHECK([clip applyOcclusions:covers]);
+        CHECK(!zenitDispatchEmbeddedPointer(window, down) && second.leftPresses == 0);
+        CHECK([clip applyOcclusions:@[]]);
+        CHECK([window.window makeFirstResponder:page]);
+        CHECK(zenitDispatchEmbeddedPointer(window, down) && second.leftPresses == 1 && first.leftPresses == 0);
+        CHECK(zenitDispatchEmbeddedPointer(window, up) && second.leftPresses == 1);
         NSView *overlay = [[NSView alloc] initWithFrame:clip.frame];
         [window.metalView addSubview:overlay positioned:NSWindowAbove relativeTo:clip];
         CHECK([window.metalView accessibilityHitTest:point] != page);
@@ -156,7 +173,7 @@ int main(void) {
         virtualTree = NO;
         CHECK([window.metalView.accessibilityChildren isEqualToArray:@[page]]);
         CHECK([window.window makeFirstResponder:page]);
-        CHECK(macos_set_embedded_input_view((__bridge void *)clip, 0, NULL, NULL, NULL));
+        CHECK(macos_set_embedded_input_view((__bridge void *)clip, 0, NULL, NULL, NULL, NULL));
         CHECK(window.window.firstResponder == window.metalView);
         CHECK(window.metalView.accessibilityChildren.count == 0);
         [clip removeFromSuperview];

@@ -174,6 +174,7 @@ const View = struct {
     path_row: *ui.Node = undefined,
     path_max_width: f32 = 0,
     path_library: *ui.Node = undefined,
+    path_library_icon: *ui.Node = undefined,
     path_folders: *ui.Node = undefined,
     path_leaf: *ui.Node = undefined,
     path_folder_group: *ui.Node = undefined,
@@ -249,6 +250,8 @@ const View = struct {
     input: ?ui.widgets.input.TextareaResult = null,
     title: ?ui.widgets.EditableTextResult = null,
     title_label: ?*ui.Node = null,
+    timestamp_labels: ?[2]*ui.Node = null,
+    timestamps_seen: ?model.Timestamps = null,
     title_width: f32 = 0,
     title_invalid: bool = false,
     title_rejected: bool = false,
@@ -579,24 +582,16 @@ const View = struct {
                 _ = input.state.setAccessibilitySelection(@intCast(edit.start + edit.sel_start), @intCast(edit.start + edit.sel_end));
                 try self.applyBody(input.state.getText());
             },
-            .toggle_task => |check_offset| {
-                // A rendered task checkbox was clicked. Flip its state byte with
-                // a single-character edit so the block pool reuses every node.
+            .toggle_task => |line_start| {
                 const lease = self.lease orelse return;
                 const snapshot = try self.documents.snapshot(lease);
-                if (snapshot.read_only) return;
+                if (snapshot.read_only or line_start >= snapshot.body_md.len) return;
                 const body = snapshot.body_md;
-                if (check_offset >= body.len) return;
-                const current = body[check_offset];
-                const next: u8 = switch (current) {
-                    ' ' => 'x',
-                    'x', 'X' => ' ',
-                    else => return,
-                };
-                const edited = try self.cx.allocator.alloc(u8, body.len);
+                const task = editor.taskAt(body, line_start) orelse return;
+                const value: []const u8 = if (task.checked) " " else "x";
+                const suffix = task.state + @as(usize, @intFromBool(!task.short));
+                const edited = try std.mem.concat(self.cx.allocator, u8, &.{ body[0..task.state], value, body[suffix..] });
                 defer self.cx.allocator.free(edited);
-                @memcpy(edited, body);
-                edited[check_offset] = next;
                 try self.applyBody(edited);
                 try self.finishBoundary();
             },
@@ -643,7 +638,12 @@ const View = struct {
     }
 
     fn syncToolbarVisibility(self: *View) void {
-        self.toolbar.setDisplay(if (self.floating_header != null and self.search_open) .none else .flex);
+        if (self.floating_header) |slots| {
+            const display: @TypeOf(self.toolbar.style.display) = if (self.search_open) .none else .flex;
+            slots.document.setDisplay(display);
+            self.path_slot.setDisplay(display);
+            slots.separator.setDisplay(display);
+        }
     }
 
     fn treePinned(self: *const View) bool {
@@ -928,6 +928,11 @@ const View = struct {
             self.rebuildOutline() catch |err| self.showError(err);
             changed = true;
         }
+        if (!self.search_open and self.timestamp_labels != null) if (self.lease) |lease| {
+            if (self.documents.snapshot(lease)) |document| {
+                if (self.updateTimestamps(document.timestamps) catch false) changed = true;
+            } else |_| {}
+        };
         if (self.card == .search) {
             self.find_view.fitPane(self.main.globalRect().w);
             if (self.find_theme != self.cx.theme_version) {
@@ -942,10 +947,11 @@ const View = struct {
         };
         if (!self.search_open) if (self.editing_row) |row| {
             const input = self.input.?;
-            const top: f32 = if (self.compact == true) 32 else 24;
-            if (row.node.style.margin.top != top) row.node.setStyle(self.cx.allocator, .margin, .{ .top = top });
+            const scroll = self.body_scroll;
+            const top = row.node.globalRect().y - scroll.content.globalRect().y;
+            const available = scroll.container.globalRect().h - top - self.body.style.padding.bottom;
             input.state.setMarkdownOptions(self.markdownOptions());
-            if (input.fitContent(self.body_scroll.container.globalRect().h * 0.8)) changed = true;
+            if (input.fitContent(available)) changed = true;
         };
         if (self.input) |input| if (input.state.tokens != self.cx.tokens) {
             input.state.tokens = self.cx.tokens;
@@ -1023,7 +1029,7 @@ const View = struct {
         const body_height = @max(0, self.layout_height - toolbar_height);
         if (tree_popup) {
             const height = @max(0, body_height - 2 * S.floating_card_top);
-            const left = if (floating) S.floating_path_left else @max(24, self.path_slot.globalRect().x - self.root.globalRect().x);
+            const left = @max(24, self.path_slot.globalRect().x - self.root.globalRect().x);
             var tree_style = S.floatingCard(300, @min(height, 352), .{
                 .top = .{ .px = toolbar_height + S.floating_card_top },
                 .left = .{ .px = left },
@@ -1071,9 +1077,19 @@ const View = struct {
             .bottom = .{ .px = 0 },
         });
         self.directory_shield.setDisplay(if (covered or tree_popup or (compact and self.card == .outline)) .flex else .none);
-        const edge: f32 = if (compact) 24 else 48;
-        self.body.setStyle(a, .padding, .{ .left = if (self.floating_header != null) S.floating_title_left else edge, .right = edge, .top = 4 });
-        if (self.blocks_host) |host| host.setStyle(a, .margin, .{ .top = if (compact) 32 else 24 });
+        const edge = self.documentInset();
+        self.body.setStyle(a, .padding, .{ .left = edge, .right = edge, .top = 4, .bottom = edge });
+        if (self.blocks_host) |host| host.setStyle(a, .margin, .{ .top = self.documentBodyMargin() });
+        if (self.editing_row) |row| row.node.setStyle(a, .margin, .{ .top = self.documentBodyMargin() });
+    }
+
+    fn documentInset(self: *const View) f32 {
+        if (self.floating_header != null) return S.floating_title_left;
+        return if (self.compact == true) 24 else 48;
+    }
+
+    fn documentBodyMargin(self: *const View) f32 {
+        return self.documentInset() - self.body.style.gap;
     }
 
     fn fitTreeCard(self: *View) bool {
@@ -1102,12 +1118,23 @@ const View = struct {
 
     fn fitPath(self: *View) bool {
         const slot = self.path_slot.globalRect();
-        if (slot.w <= 0 or @abs(self.path_max_width - slot.w) < 0.25) return false;
-        self.path_max_width = slot.w;
-        const style: ui.BoxStyle = .{ .max_width = slot.w };
+        const width = if (self.floating_header) |slots|
+            @max(0, slots.breadcrumb.style.max_width() - (slot.x - slots.breadcrumb.globalRect().x) - slots.breadcrumb.style.padding.right)
+        else
+            slot.w;
+        if (slot.w <= 0 or !std.math.isFinite(width) or @abs(self.path_max_width - width) < 0.25) return false;
+        self.path_max_width = width;
+        const style: ui.BoxStyle = .{ .max_width = width };
         self.path_button.setStyleInline(self.cx.allocator, style);
         self.path_row.setStyleInline(self.cx.allocator, style);
-        const short = slot.w < 220;
+        if (self.floating_header != null) {
+            const a = self.cx.allocator;
+            // Keep the down arrow visible when the library label is truncated.
+            const arrow_width: f32 = 12;
+            const path_gap: f32 = 4;
+            self.path_library.setStyle(a, .max_width, @max(0, width - arrow_width - path_gap));
+        }
+        const short = width < 220;
         self.path_folders.setDisplay(if (short) .none else .flex);
         self.path_leaf.setDisplay(if (short) .flex else .none);
         return true;
@@ -1119,27 +1146,53 @@ const View = struct {
         const a = self.cx.allocator;
         if (header) |slots| {
             self.showCard(.none);
+            slots.breadcrumb.appendChild(a, self.path_slot) catch unreachable;
+            self.path_slot.setStyleInline(a, .{ .width = .{ .fit = .{} }, .flex_shrink = 1 });
+            self.path_button.setStyle(a, .max_width, std.math.inf(f32));
+            self.path_row.setStyle(a, .max_width, std.math.inf(f32));
+            self.path_max_width = 0;
+            self.path_library_icon.setDisplay(.none);
+            self.path_button.setStyle(a, .overflow, .hidden);
+            self.path_row.setStyle(a, .overflow, .hidden);
+            self.path_library.setTextColor(S.theme.current().fg_1);
+            S.theme.bindInk(self.path_library, "fg_1");
+            for (self.format_buttons) |button| slots.editing.appendChild(a, button) catch unreachable;
+            slots.editing.appendChild(a, self.insert_menu.wrapper) catch unreachable;
             slots.document.appendChild(a, self.toolbar) catch unreachable;
             slots.directory.appendChild(a, self.directory_add) catch unreachable;
             slots.directory.appendChild(a, self.outline_hint) catch unreachable;
-            self.toolbar.setStyleInline(a, .{ .height = .{ .px = S.floating_header_height }, .padding = .{} });
+            self.toolbar.setStyleInline(a, .{ .width = .{ .fit = .{} }, .height = .{ .px = S.floating_island_height }, .gap = 2, .padding = .{} });
             self.toggle.setDisplay(.none);
             self.directory_header.setDisplay(.none);
             self.directory_shield.setStyle(a, .inset, .{ .top = .{ .px = 0 }, .left = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 } });
-            for ([_]*ui.Node{ self.toolbar, slots.directory }) |node| {
+            for ([_]*ui.Node{ self.toolbar, slots.breadcrumb, slots.editing, slots.directory }) |node| {
                 node.behavior.events.capture_context = self;
                 node.behavior.events.on_event_capture = keyEvent;
             }
         } else if (self.floating_header) |slots| {
             self.showCard(.none);
-            for ([_]*ui.Node{ self.toolbar, slots.directory }) |node| {
+            for ([_]*ui.Node{ self.toolbar, slots.breadcrumb, slots.editing, slots.directory }) |node| {
                 node.behavior.events.capture_context = null;
                 node.behavior.events.on_event_capture = null;
             }
+            slots.editing.setDisplay(.none);
+            slots.separator.setDisplay(.none);
+            self.toolbar.insertChildBefore(a, self.path_slot, self.lock_status) catch unreachable;
+            self.path_slot.setDisplay(.flex);
+            self.path_slot.setStyleInline(a, .{ .width = .fill(), .flex_shrink = 0 });
+            self.path_library_icon.setDisplay(.flex);
+            self.path_button.setStyle(a, .overflow, .visible);
+            self.path_row.setStyle(a, .overflow, .visible);
+            self.path_library.setStyle(a, .max_width, std.math.inf(f32));
+            self.path_library.setTextColor(S.theme.current().fg_2);
+            S.theme.bindInk(self.path_library, "fg_2");
+            for (self.format_buttons) |button| self.toolbar.insertChildBefore(a, button, self.find_button) catch unreachable;
+            self.toolbar.insertChildBefore(a, self.insert_menu.wrapper, self.find_button) catch unreachable;
+            self.path_max_width = 0;
             self.main.insertChildBefore(a, self.toolbar, self.banner) catch unreachable;
             self.directory_header.appendChild(a, self.directory_add) catch unreachable;
             self.toolbar.appendChild(a, self.outline_hint) catch unreachable;
-            self.toolbar.setStyle(a, .height, .{ .px = S.toolbar_height });
+            self.toolbar.setStyleInline(a, .{ .width = .fill(), .height = .{ .px = S.toolbar_height }, .gap = 8 });
             self.toggle.setDisplay(.flex);
             self.directory_header.setDisplay(.flex);
             self.tree.setStyleInline(a, .{ .shadows = .{}, .padding = .{} });
@@ -1159,8 +1212,9 @@ const View = struct {
         self.search_back_button.setDisplay(if (!floating and self.search_origin != null) .flex else .none);
         self.image_button.setDisplay(if (!floating and self.key != null) .flex else .none);
         const editing = self.input != null and !self.source_mode;
+        if (self.floating_header) |slots| slots.editing.setDisplay(if (editing and !self.search_open) .flex else .none);
         for (self.format_buttons) |btn| btn.setDisplay(if (editing) .flex else .none);
-        self.insert_menu.button.setDisplay(if (editing) .flex else .none);
+        self.insert_menu.wrapper.setDisplay(if (editing) .flex else .none);
         if (!editing) self.insert_menu.open.set(false);
         self.find_button.setDisplay(if (self.key != null) .flex else .none);
         self.source_button.setDisplay(if (floating and self.key != null) .flex else .none);
@@ -1189,7 +1243,8 @@ const View = struct {
         const path = try ui.box(cx, path_style, .{});
         self.path_row = path;
         try self.path_button.appendChild(a, path);
-        try path.appendChild(a, try self.pathIcon(ui.icons.library, "知识库"));
+        self.path_library_icon = try self.pathIcon(ui.icons.library, "知识库");
+        try path.appendChild(a, self.path_library_icon);
         self.path_library = try self.pathLabel("全部笔记");
         self.path_library.meta.ownership.meta.test_id = "notes.breadcrumb.library";
         try path.appendChild(a, self.path_library);
@@ -1646,6 +1701,8 @@ const View = struct {
         self.body_scroll.container.setStyle(self.cx.allocator, .cursor, .inherit);
         self.title = null;
         self.title_label = null;
+        self.timestamp_labels = null;
+        self.timestamps_seen = null;
         self.clearEditorState();
         return self.replaceContent(self.body_content, &self.body_scope);
     }
@@ -1674,6 +1731,7 @@ const View = struct {
             var note = try self.store.loadNote(self.cx.allocator, key, .active);
             defer note.deinit();
             try self.mountDocument(.{ .key = key, .read_only = true, .can_lock = false, .source = self.source_mode }, note.value.title, note.value.body_md);
+            _ = try self.updateTimestamps(note.value.timestamps());
             self.read_revision_seen = note.value.revision;
         }
     }
@@ -1718,7 +1776,7 @@ const View = struct {
                 try self.mountEditor(scope, self.body_content, text, mode.read_only, false);
             } else {
                 const a = self.cx.allocator;
-                const host = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 0 }, .flex_shrink = 0, .margin = .{ .top = if (self.compact == true) 32 else 24 } }, .{});
+                const host = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 0 }, .flex_shrink = 0, .margin = .{ .top = self.documentBodyMargin() } }, .{});
                 try self.body_content.appendChild(a, host);
                 self.blocks_host = host;
                 self.block_width = self.bodyWidth();
@@ -1753,6 +1811,8 @@ const View = struct {
     fn mountDocumentHeader(self: *View, scope: *ui.Scope, mode: BodyMode, title: []const u8) !void {
         const cx = self.cx;
         const compact = self.compact == true;
+        const header = try ui.box(cx, S.stack(4), .{});
+        try self.body_content.appendChild(cx.allocator, header);
         self.lock.setDisplay(if (mode.can_lock and !mode.read_only) .flex else .none);
         self.unlock.setDisplay(if (mode.can_lock and mode.read_only) .flex else .none);
         self.image_disabled.set(mode.read_only);
@@ -1762,7 +1822,7 @@ const View = struct {
             S.theme.bindInk(heading, "fg_1");
             self.title_label = heading;
             try heading.setTextContent(cx.allocator, title);
-            try self.body_content.appendChild(cx.allocator, heading);
+            try header.appendChild(cx.allocator, heading);
         } else {
             const title_value = try scope.createText(title, .{});
             const title_edit = try scope.createState(TitleEdit, .{ .view = self, .value = title_value });
@@ -1776,12 +1836,37 @@ const View = struct {
             }).mountResult(scope, cx);
             self.title.?.state.accept_newline = false;
             self.title.?.node.meta.ownership.meta.test_id = "notes.title";
-            try self.body_content.appendChild(cx.allocator, self.title.?.node);
+            try header.appendChild(cx.allocator, self.title.?.node);
         }
+        const timestamps = try ui.box(cx, .{ .width = .fill(), .direction = .row, .gap = 12, .flex_wrap = .wrap }, .{});
+        try header.appendChild(cx.allocator, timestamps);
+        var labels: [2]*ui.Node = undefined;
+        for ([_][]const u8{ "notes.created-at", "notes.updated-at" }, &labels) |id, *label| {
+            label.* = try ui.text(cx, "", S.text(12, 400, S.theme.current().fg_3));
+            label.*.setStyle(cx.allocator, .flex_shrink, 0);
+            label.*.meta.ownership.meta.test_id = id;
+            S.theme.bindInk(label.*, "fg_3");
+            try timestamps.appendChild(cx.allocator, label.*);
+        }
+        self.timestamp_labels = labels;
         if (self.occupied != null) {
             const occupied = try self.actionButton(scope, .{ .focus_editor = self.key.? }, "在编辑窗口中打开", ui.icons.external_link, false, "notes.document.focus-editor");
             try self.body_content.appendChild(cx.allocator, occupied);
         }
+    }
+
+    fn updateTimestamps(self: *View, timestamps: model.Timestamps) !bool {
+        const labels = self.timestamp_labels orelse return false;
+        if (std.meta.eql(self.timestamps_seen, @as(?model.Timestamps, timestamps))) return false;
+        const localDateTimestamp = @import("../../ui/terminal_surface_input.zig").localDateTimestamp;
+        for (labels, [_][]const u8{ "创建于", "更新于" }, [_]?i64{ timestamps.created_at, timestamps.updated_at }) |label, prefix, stamp| {
+            var date: [19]u8 = undefined;
+            const value = if (stamp) |ms| localDateTimestamp(&date, ms) catch "未知" else "未知";
+            var buffer: [48]u8 = undefined;
+            try label.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{s} {s}", .{ prefix, value }));
+        }
+        self.timestamps_seen = timestamps;
+        return true;
     }
 
     fn clickBodyBackground(self: *View) void {
@@ -1792,6 +1877,9 @@ const View = struct {
         const viewport = self.body_scroll.container.globalRect();
         if (!viewport.contains(x, y) or x > viewport.x + viewport.w - 12) return;
         if (self.title) |title| if (title.node.globalRect().contains(x, y)) return;
+        if (self.timestamp_labels) |labels| {
+            if (labels[0].parent.?.globalRect().contains(x, y)) return;
+        }
         if (self.input) |input| {
             if (input.wrapper.globalRect().contains(x, y) or input.state.imeIsComposing()) return;
             if (self.import_notice) |notice| if (notice.root.globalRect().contains(x, y)) return;
@@ -1806,6 +1894,12 @@ const View = struct {
         if (index < self.block_ranges.len and top > self.block_rows[index].top + self.blockHeight(index) + block_gap / 2) index += 1;
         if (index == self.block_ranges.len) return self.enqueue(.append_block);
         const range = self.block_ranges[index];
+        if (range.kind == .code) {
+            // Clicks inside the card belong to the code text, controls or scroll area.
+            if (self.block_rows[index].rendered) |rendered| {
+                if (rendered.node.children.items[0].globalRect().contains(x, y)) return;
+            }
+        }
         const offset = if (top < self.block_rows[index].top) 0 else range.end - range.start;
         self.enqueue(.{ .begin_block = .{ .range = range, .offset = offset } });
     }
@@ -2063,7 +2157,14 @@ const View = struct {
             }
         }
         var source_map: ?*const ui.widgets.markdown.SourceMap = null;
-        const node = if (block.kind == .table) blk: {
+        var code_hit: ?Click.CodeHit = null;
+        const node = if (block.kind == .code) blk: {
+            const code = editor.codeBlock(content);
+            const card = @import("../../ui/ai_message_view.zig");
+            const mounted = try card.mountCodeCard(cx, scope, code.code, code.source, code.language, read_only);
+            if (!read_only) code_hit = .{ .text = mounted.text, .viewport = mounted.viewport, .offset = code.offset };
+            break :blk mounted.node;
+        } else if (block.kind == .table) blk: {
             break :blk try self.mountTable(scope, block, text, read_only);
         } else if (block.kind == .markdown) blk: {
             const value = try scope.createText(content, .{});
@@ -2080,10 +2181,12 @@ const View = struct {
         };
         node.meta.ownership.meta.test_id = "notes.document.block";
         if (!read_only and block.kind != .table) {
-            const action = try scope.createState(Click, .{ .view = self, .action = .{ .begin_block = .{ .range = block } }, .block_node = node, .source_map = source_map });
+            const action = try scope.createState(Click, .{ .view = self, .action = .{ .begin_block = .{ .range = block } }, .block_node = node, .source_map = source_map, .code = code_hit });
             rendered.edit = action;
-            node.behavior.events.on_click = cx.on(Click, action, Click.invoke);
-            node.behavior.interaction.a11y = .{ .role = .button, .label = "编辑正文" };
+            // The card's wrap and copy controls keep their own click path.
+            const target = if (code_hit) |code| code.text else node;
+            target.behavior.events.on_click = cx.on(Click, action, Click.invoke);
+            target.behavior.interaction.a11y = .{ .role = .button, .label = "编辑正文" };
         }
         try rendered.node.appendChild(cx.allocator, node);
         if (!read_only) try self.mountBlockHandle(rendered);
@@ -2432,10 +2535,12 @@ const View = struct {
             .text_color = c.fg_1,
             .code_color = c.fg_1,
             .code_bg = c.well,
+            .live_code_block_bg = S.theme.popupInset(),
             .rule_color = c.fg_2,
             .link_color = c.accent_ink,
             .paragraph_gap = 8,
             .code_line_height = 2.1,
+            .standalone_tasks = true,
         };
     }
 
@@ -2446,7 +2551,7 @@ const View = struct {
         errdefer scope.dispose();
         const node = try ui.box(self.cx, S.stack(8), .{});
         errdefer self.cx.destroyDetached(node);
-        node.setStyle(a, .margin, .{ .top = if (self.compact == true) 32 else 24 });
+        node.setStyle(a, .margin, .{ .top = self.documentBodyMargin() });
         try self.mountEditor(scope, node, text, false, true);
         try self.body_content.appendChild(a, node);
         self.editing_row = .{ .node = node, .scope = scope };
@@ -2470,6 +2575,10 @@ const View = struct {
             .on_change = cx.on(View, self, bodyChanged),
         }).mountResult(scope, cx);
         input.input.meta.ownership.meta.test_id = "notes.editor.active";
+        if (input.state.vl_state) |list| {
+            list.container_node.setStyle(cx.allocator, .overflow_fade, null);
+            list.scroll_state.rubber_band_y_enabled = false;
+        }
         self.input = input;
         if (live) {
             input.wrapper.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
@@ -2542,21 +2651,11 @@ const View = struct {
         };
     }
 
-    /// When `byte` lands on a rendered task checkbox, return the offset of its
-    /// state character (the space or `x` inside the brackets). The click must
-    /// fall on the marker itself, not elsewhere on the line.
-    fn taskCheckboxAt(_: *View, body: []const u8, byte: usize) ?usize {
+    /// A mapped marker click must resolve within its own source line.
+    fn taskCheckboxAt(body: []const u8, byte: usize) ?usize {
         const line_start = if (std.mem.lastIndexOfScalar(u8, body[0..byte], '\n')) |nl| nl + 1 else 0;
-        const trimmed_start = blk: {
-            var i = line_start;
-            while (i < body.len and (body[i] == ' ' or body[i] == '\t')) i += 1;
-            break :blk i;
-        };
-        const check = editor.taskStateOffset(body, trimmed_start) orelse return null;
-        // Accept clicks anywhere within the `- [ ] ` marker (start of line
-        // through the space after the bracket), mirroring a real checkbox hit.
-        if (byte < trimmed_start or byte > check + 2) return null;
-        return check;
+        const task = editor.taskAt(body, line_start) orelse return null;
+        return if (byte >= task.start and byte <= task.end) line_start else null;
     }
 
     fn openLink(self: *View, url: []const u8) void {
@@ -2789,7 +2888,7 @@ const View = struct {
         self.tree_dirty = self.tree_dirty or refresh_tree;
         if (self.active) {
             if (self.save_banner and !self.title_invalid) self.clearError();
-            if (refresh_tree) self.redraw();
+            self.redraw();
         }
     }
 
@@ -3589,32 +3688,38 @@ const Click = struct {
     action: Action,
     block_node: ?*ui.Node = null,
     source_map: ?*const ui.widgets.markdown.SourceMap = null,
+    code: ?CodeHit = null,
+
+    const CodeHit = struct { text: *ui.Node, viewport: *ui.Node, offset: usize };
 
     fn invoke(self: *Click) void {
         var action = self.action;
         if (action == .begin_block) {
             const view = self.view;
             const cx = view.cx;
-            // A table cell click carries a fixed source offset and neither a
-            // source map nor a block node; keep that offset verbatim.
-            const offset = if (self.source_map) |map|
+            const offset = if (self.code) |code| blk: {
+                if (code.viewport.globalRect().contains(cx.mouse_x, cx.mouse_y)) {
+                    if (ui.widgets.markdown.textOffsetAt(cx, code.text, cx.mouse_x, cx.mouse_y)) |byte| break :blk code.offset + byte;
+                }
+                break :blk code.offset;
+            } else if (self.source_map) |map|
                 map.offsetAt(cx, cx.mouse_x, cx.mouse_y)
             else if (self.block_node) |node|
                 ui.widgets.markdown.textOffsetAt(cx, node, cx.mouse_x, cx.mouse_y)
             else
                 action.begin_block.offset;
             if (offset) |byte| {
-                // A rendered click lands on source bytes. Intercept task
-                // checkboxes and links before falling back to editing.
-                if (self.block_node != null) if (view.blocks_text) |body| {
-                    if (view.taskCheckboxAt(body, byte)) |check_offset| {
-                        view.enqueue(.{ .toggle_task = check_offset });
-                        return;
+                const range = action.begin_block.range;
+                if (self.block_node != null and self.code == null) if (view.blocks_text) |body| {
+                    const absolute = range.start + byte;
+                    if (self.source_map != null) {
+                        if (View.taskCheckboxAt(body, absolute)) |line_start| {
+                            view.enqueue(.{ .toggle_task = line_start });
+                            return;
+                        }
                     }
-                    const mods = cx.dispatcher.last_modifiers;
-                    const read_only = if (view.body_mode) |mode| mode.read_only else false;
-                    if (mods.super or read_only) {
-                        if (editor.findLinkAt(body, byte)) |link| {
+                    if (cx.dispatcher.last_modifiers.super) {
+                        if (editor.findLinkAt(body, absolute)) |link| {
                             view.openLink(link.url(body));
                             return;
                         }
@@ -3712,7 +3817,13 @@ pub fn rootNode(instance: contract.RendererInstance) ?*ui.Node {
     return (from(instance) orelse return null).root;
 }
 
-pub const FloatingHeader = struct { document: *ui.Node, directory: *ui.Node };
+pub const FloatingHeader = struct {
+    breadcrumb: *ui.Node,
+    separator: *ui.Node,
+    editing: *ui.Node,
+    document: *ui.Node,
+    directory: *ui.Node,
+};
 
 pub fn setFloatingHeader(instance: contract.RendererInstance, header: ?FloatingHeader) void {
     const view = from(instance) orelse return;
@@ -3848,7 +3959,7 @@ pub fn mount(request: contract.ContentMount, store: *Store, documents: *sessions
         try toolbar.appendChild(cx.allocator, button);
     }
     self.insert_menu = try self.mountInsertMenu(scope, toolbar);
-    self.insert_menu.button.setDisplay(.none);
+    self.insert_menu.wrapper.setDisplay(.none);
     const lock_click = try scope.createState(Click, .{ .view = self, .action = .toggle_read_only });
     self.lock = try ui.widgets.Button(.{
         .variant = .ghost,
@@ -3881,7 +3992,7 @@ pub fn mount(request: contract.ContentMount, store: *Store, documents: *sessions
         try self.menuItem(scope, "最近删除", .{ .manage = .recent }, false),
     }, "notes.document.toolbar.more")).wrapper;
     self.find_button = try self.toolHint(try self.actionButton(scope, .find_document, "搜索当前文档", ui.icons.search, true, "notes.find.open"), "搜索当前文档");
-    self.source_button = try self.toolHint(try self.actionButton(scope, .toggle_source, "切换 Markdown 源码", ui.icons.code_xml, true, "notes.document.source"), "切换 Markdown 源码");
+    self.source_button = try self.toolHint(try self.actionButton(scope, .toggle_source, "切换 Markdown 源码", ui.icons.file_code, true, "notes.document.source"), "切换 Markdown 源码");
     self.recent_button = try self.toolHint(try self.actionButton(scope, .{ .manage = .recent }, "最近删除", ui.icons.trash_2, true, "notes.document.recent"), "最近删除");
     self.find_button.setDisplay(.none);
     try toolbar.insertChildBefore(cx.allocator, self.find_button, self.lock);
@@ -4698,6 +4809,13 @@ test "notes renderer reuses shifted blocks and bounds visible work while retaini
     try std.testing.expect(view.rendered_blocks.items.len < 60);
     try std.testing.expect(view.block_rows[239].rendered == null);
     const heading = view.title.?.node;
+    const timestamp_labels = view.timestamp_labels.?;
+    const created_rect = timestamp_labels[0].globalRect();
+    const updated_rect = timestamp_labels[1].globalRect();
+    try std.testing.expect(created_rect.w > 0 and updated_rect.w > 0);
+    try std.testing.expectApproxEqAbs(heading.globalRect().x, created_rect.x, 0.01);
+    try std.testing.expect(created_rect.y >= heading.globalRect().y + heading.globalRect().h);
+    try std.testing.expect(created_rect.x + created_rect.w <= updated_rect.x);
     try std.testing.expectApproxEqAbs(@as(f32, 790), view.block_rows[2].rendered.?.node.globalRect().w, 0.01);
 
     const block = view.block_rows[0].rendered.?.edit.?.block_node.?;
@@ -4708,6 +4826,29 @@ test "notes renderer reuses shifted blocks and bounds visible work while retaini
     try std.testing.expect(view.input != null);
     const input = view.input.?;
     try std.testing.expectEqual("alpha\n段落 0 **内容**".len, input.state.cursor.offset);
+    const viewport = view.body_scroll.container.globalRect();
+    const editor_rect = input.input.globalRect();
+    const header_rect = heading.parent.?.globalRect();
+    for ([_]f32{
+        editor_rect.x - viewport.x,
+        viewport.x + viewport.w - editor_rect.x - editor_rect.w,
+        editor_rect.y - header_rect.y - header_rect.h,
+        viewport.y + viewport.h - editor_rect.y - editor_rect.h,
+    }) |inset| try std.testing.expectApproxEqAbs(@as(f32, 48), inset, 0.01);
+    const list = input.state.vl_state.?;
+    try std.testing.expect(list.container_node.style.overflow_fade() == null);
+    const bottom = list.scroll_state.maxScrollY();
+    try std.testing.expect(bottom > 0);
+    for ([_]f32{ 120, -120 }) |dy| {
+        const edge: f32 = if (dy > 0) 0 else bottom;
+        ui.widgets.scroll_area.setScrollY(list.scroll_state, list.content_node, edge);
+        const x = editor_rect.x + 20;
+        const y = editor_rect.y + 20;
+        cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = 0, .phase = .began });
+        cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = dy, .phase = .changed });
+        try std.testing.expectEqual(edge, list.scroll_state.effectiveScrollY());
+        cx.handleScroll(.{ .x = x, .y = y, .dx = 0, .dy = 0, .phase = .ended });
+    }
     try std.testing.expect(input.state.setAccessibilitySelection(0, 3));
     const editor_text = try a.dupe(u8, input.state.getText());
     defer a.free(editor_text);
@@ -4799,7 +4940,7 @@ test "notes renderer reuses shifted blocks and bounds visible work while retaini
     try std.testing.expectEqualStrings("最终后台变更", view.blocks_text.?);
 }
 
-test "notes renders tables and toggles rendered task checkboxes" {
+test "notes renders Markdown tables, task checkboxes and fenced code" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     var temporary = std.testing.tmpDir(.{});
@@ -4812,9 +4953,10 @@ test "notes renders tables and toggles rendered task checkboxes" {
     const key = try store.createNote(library, null, "任务");
     const body =
         "# 待办\n\n" ++
-        "- [ ] 写方案\n" ++
+        "[] 写方案\n" ++
         "- [x] 读源码\n\n" ++
-        "| 名称 | 状态 |\n| --- | --- |\n| 方案 | **进行** |\n| 源码 | 完成 |\n";
+        "| 名称 | 状态 |\n| --- | --- |\n| 方案 | **进行** |\n| 源码 | 完成 |\n\n" ++
+        "~~~sh\n  echo first\n\n  echo second\n~~~\n";
     _ = try store.changeNote(key, 1, .{ .save = .{ .title = "任务", .body_md = body } });
 
     const cx = try ui.Cx.init(a, io);
@@ -4850,23 +4992,6 @@ test "notes renders tables and toggles rendered task checkboxes" {
     const grid = table_node.children.items[0];
     try std.testing.expectEqual(@as(usize, 3), grid.children.items.len);
 
-    // Toggling the first task checkbox flips its state byte in the document.
-    const marker = std.mem.indexOf(u8, body, "- [ ] 写方案").?;
-    const check = editor.taskStateOffset(body, marker).?;
-    try std.testing.expectEqual(@as(u8, ' '), body[check]);
-    view.enqueue(.{ .toggle_task = check });
-    layoutTestFrames(cx);
-    const after = (try documents.snapshot(view.lease.?)).body_md;
-    try std.testing.expectEqual(@as(u8, 'x'), after[check]);
-    // A second toggle restores the unchecked state.
-    view.enqueue(.{ .toggle_task = check });
-    layoutTestFrames(cx);
-    try std.testing.expectEqual(@as(u8, ' '), (try documents.snapshot(view.lease.?)).body_md[check]);
-
-    // The checkbox hit-test only fires on the marker, not on body text.
-    try std.testing.expect(view.taskCheckboxAt(body, check) != null);
-    try std.testing.expect(view.taskCheckboxAt(body, marker + 6) == null);
-
     // Clicking a table body cell opens the editor with the caret inside that
     // cell's source text (in-place editing via the live projection).
     const body_row = grid.children.items[2];
@@ -4876,8 +5001,41 @@ test "notes renders tables and toggles rendered task checkboxes" {
     cx.handleMouseUp(cell_rect.x + 4, cell_rect.y + cell_rect.h / 2);
     layoutTestFrames(cx);
     try std.testing.expect(view.input != null);
-    const cell_source = std.mem.indexOf(u8, body, "| 源码 |").? + 2;
+    const cell_source = std.mem.indexOf(u8, (try documents.snapshot(view.lease.?)).body_md, "| 源码 |").? + 2;
     try std.testing.expectEqual(cell_source, view.input.?.state.cursor.offset);
+
+    view.enqueue(.end_block);
+    layoutTestFrames(cx);
+    const marker = std.mem.indexOf(u8, body, "[] 写方案").?;
+    const task_row = view.block_rows[1].rendered.?.node.children.items[0].children.items[0];
+    const checkbox = task_row.children.items[0].globalRect();
+    for ([_][]const u8{ "[x] 写方案", "[ ] 写方案" }) |expected| {
+        cx.handleMouseDown(checkbox.x + checkbox.w / 2, checkbox.y + checkbox.h / 2, .{});
+        cx.handleMouseUp(checkbox.x + checkbox.w / 2, checkbox.y + checkbox.h / 2);
+        layoutTestFrames(cx);
+        const current = (try documents.snapshot(view.lease.?)).body_md;
+        try std.testing.expect(std.mem.startsWith(u8, current[marker..], expected));
+        try std.testing.expect(view.input == null);
+    }
+
+    const code_index = ti + 1;
+    const rendered_code = view.block_rows[code_index].rendered.?.edit.?.code.?;
+    try std.testing.expectEqualStrings("  echo first\n\n  echo second", rendered_code.text.getText().?.content);
+    const card = view.block_rows[code_index].rendered.?.node.children.items[0].children.items[0];
+    const wrap = card.children.items[0].children.items[1].globalRect();
+    cx.handleMouseDown(wrap.x + wrap.w / 2, wrap.y + wrap.h / 2, .{});
+    cx.handleMouseUp(wrap.x + wrap.w / 2, wrap.y + wrap.h / 2);
+    layoutTestFrames(cx);
+    try std.testing.expect(view.input == null);
+    try std.testing.expectEqual(.char, rendered_code.text.getText().?.wrap);
+
+    const code_rect = rendered_code.text.globalRect();
+    cx.handleMouseDown(code_rect.x + 25, code_rect.y + 40, .{});
+    cx.handleMouseUp(code_rect.x + 25, code_rect.y + 40);
+    layoutTestFrames(cx);
+    const code_source = std.mem.indexOf(u8, (try documents.snapshot(view.lease.?)).body_md, "  echo second").?;
+    const caret = view.input.?.state.cursor.offset;
+    try std.testing.expect(caret > code_source and caret < code_source + "  echo second".len);
 }
 
 test "notes keep the original image after typing above it and apply toolbar formatting to the selection" {

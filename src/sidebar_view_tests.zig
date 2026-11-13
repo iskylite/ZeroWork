@@ -759,12 +759,12 @@ test "main workspace sidebar follows V4 measured group search and footer geometr
         const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "Captured target", .detail = "audit@127.0.0.1:1", .route = "本机 → Captured target", .hops = 0, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
         try group.members.appendChild(h.cx.allocator, row.node);
         h.frames();
-        try std.testing.expectApproxEqAbs(@as(f32, 66), view.search_box.globalRect().y, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 55), view.search_box.globalRect().y, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 24), view.search_box.globalRect().w, 0.1);
         try std.testing.expect(view.search.node.style.display == .none);
         try std.testing.expectEqual(T.current().fg_2, view.search.state.placeholder_color.?);
         try std.testing.expectApproxEqAbs(@as(f32, 10), group.root.globalRect().x, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 102), group.root.globalRect().y, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 91), group.root.globalRect().y, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 218), group.root.globalRect().w, 0.1);
         try std.testing.expectEqual(ui.Color.TRANSPARENT, group.root.getBackground());
         try std.testing.expectApproxEqAbs(firstIcon(view.header).?.globalRect().x, firstIcon(group.header).?.globalRect().x, 0.1);
@@ -1054,7 +1054,7 @@ test "sidebar Rocky discovery replaces cached Linux texture and tab retains stat
     const status = ui.Color.rgb(0x22, 0xc5, 0x5e);
     const tab = try ui.iconTint(h.cx, icons.forOs(.linux).?, status, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
     try h.root.appendChild(h.cx.allocator, tab);
-    icons.setNode(tab, .rocky);
+    icons.setNode(tab, icons.forOs(.rocky).?);
     try std.testing.expectEqual(icons.forOs(.rocky).?.icon_id.?, tab.getIcon().?.icon_id);
     try std.testing.expect(ui.Color.eql(status, tab.getIcon().?.tint));
 }
@@ -1071,14 +1071,14 @@ test "domestic OS discovery replaces uploaded host and tab textures" {
     host.setIcon(null);
     host.setImage(.{ .texture_id = 1, .tint = ui.Color.WHITE });
     icons.setHostNode(host, .{}, "ssh", .kylin);
-    icons.setNode(tab, .kylin);
+    icons.setNode(tab, icons.forOs(.kylin).?);
     try std.testing.expect(host.getImage() == null);
     try std.testing.expectEqual(icons.forHost(.{}, "ssh", .kylin).icon_id.?, host.getIcon().?.icon_id);
     try std.testing.expectEqual(icons.forOs(.kylin).?.icon_id.?, tab.getIcon().?.icon_id);
     // A later discovery must also replace a tab's uploaded distribution logo.
     tab.setIcon(null);
     tab.setImage(.{ .texture_id = 2, .tint = ui.Color.WHITE });
-    icons.setNode(tab, .uos);
+    icons.setNode(tab, icons.forOs(.uos).?);
     try std.testing.expect(tab.getImage() == null);
     try std.testing.expectEqual(icons.forOs(.uos).?.icon_id.?, tab.getIcon().?.icon_id);
 }

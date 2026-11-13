@@ -182,3 +182,40 @@ test "AI welcome recent actions preserve history semantics and phase updates" {
         try std.testing.expectEqualStrings(label, text(f.node("ai.session.phase_tag")));
     }
 }
+
+test "AI welcome fits two recent sessions at the default floating height" {
+    var f: Fixture = undefined;
+    try f.init(titles[0]);
+    defer f.deinit();
+    const styles = @import("ui/ai_assistant_styles.zig");
+    const panel = try ui.boxStyled(f.cx, styles.panel, .{});
+    f.cx.root.?.removeChildRetained(f.view);
+    f.cx.root.?.setStyleInline(a, .{ .padding = .{} });
+    try f.cx.root.?.appendChild(a, panel);
+    _ = try @import("ui/ai_assistant_header.zig").mount(f.cx, panel, "Local Terminal");
+    const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(f.scope, f.cx);
+    @import("ui/ai_card_scroll.zig").showOverflowScrollbar(scroll);
+    scroll.container.setStyleInline(a, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .margin = .{ .bottom = 6 }, .overflow_hidden = true });
+    const conversation = try ui.boxStyled(f.cx, styles.conversation, .{});
+    try conversation.appendChild(a, f.view);
+    try scroll.content.appendChild(a, conversation);
+    try panel.appendChild(a, scroll.container);
+    const composer = try ui.boxStyled(f.cx, styles.composer, .{});
+    try panel.appendChild(a, composer);
+
+    const float = @import("ai/float_model.zig");
+    const bounds: float.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
+    const rect = (float.Model{ .expanded = true }).rect(bounds, bounds);
+    f.cx.setViewport(rect.width, rect.height);
+    f.settle();
+
+    const viewport = scroll.container.globalRect();
+    const last_row = f.node("ai.session.row.29").globalRect();
+    try std.testing.expectApproxEqAbs(rect.height, panel.globalRect().h, 0.1);
+    try std.testing.expectEqual(@as(f32, 0), scroll.state.maxScrollY());
+    try std.testing.expect(last_row.y + last_row.h <= viewport.y + viewport.h);
+
+    panel.setStyleInline(a, .{ .height = .{ .px = float.minimum_height } });
+    f.settle();
+    try std.testing.expect(scroll.state.maxScrollY() > 0);
+}

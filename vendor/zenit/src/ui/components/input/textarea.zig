@@ -139,6 +139,7 @@ pub const TextareaState = struct {
     overlay_node: ?*Node = null,
     /// Selection underlay (must draw under text, else selection color blocks glyphs)
     selection_underlay_node: ?*Node = null,
+    code_underlay_node: ?*Node = null,
     input_container_node: ?*Node = null,
     focus_ring_host: ?*Node = null,
     /// Mixed bidi selections can produce several rectangles per display line,
@@ -1726,6 +1727,16 @@ fn handleTextareaEvent(state: *TextareaState, event: Event) EventResult {
                 return .handled;
             }
             if (state.consumeImePostCommitDuplicate(filtered)) return .handled;
+            if (std.mem.eql(u8, filtered, " ") and !state.cursor.hasSelection()) {
+                if (state.markdown) |*presentation| {
+                    if (presentation.completeHeading(state.allocator, state.doc, state.cursor.offset) catch null) |text| {
+                        defer state.allocator.free(text);
+                        state.insertTextChecked(text) catch return .handled;
+                        fireOnChange(state);
+                        return .handled;
+                    }
+                }
+            }
             state.insertTextChecked(filtered) catch return .handled;
             fireOnChange(state);
             return .handled;
@@ -1943,8 +1954,10 @@ fn describeTextareaRow(state: *const TextareaState, index: usize) ?RetainedRow {
     var image = state.imageAtRow(index);
     // Placement can change independently of the rendered texture and size.
     if (image) |*value| value.offset = 0;
-    const reveal = (info.buffer_line == presentation.caret_line or info.buffer_line == presentation.anchor_line) and
-        (image != null or (kind == .prose and std.mem.indexOfAny(u8, state.getText()[start..end], "#>*+_-~`[\\") != null));
+    const reveal = if (image != null)
+        info.buffer_line == presentation.caret_line or info.buffer_line == presentation.anchor_line
+    else
+        kind == .prose and presentation.revealsImage(info.buffer_line, state.getText()[start..end]);
     return .{
         .source_start = start,
         .source_len = end - start,
@@ -2336,6 +2349,8 @@ fn textareaBeforeRender(node: *Node) void {
     // but VL content offset on scroll; cursor/selection need scroll_y compensation
     const scroll_y: f32 = if (state.vl_state) |vl| vl.scroll_state.effectiveScrollY() else 0;
 
+    paintCodeUnderlay(state, scroll_y, node.rectFromWorldOrFallback().h);
+
     // Caret node
     if (state.cursor_node) |cnode| {
         if (state.focused) {
@@ -2376,7 +2391,7 @@ fn textareaBeforeRender(node: *Node) void {
 
             if (state.cx_ref) |cx| {
                 const global = node.globalRect();
-                _ = cx.setImeCursorRect(global.x + container_inner_x + cursor_x, global.y + container_inner_y + cursor_y, 1, cursor_h);
+                _ = cx.setImeCursorRect(global.x + @round(container_inner_x + cursor_x), global.y + @round(container_inner_y + cursor_y), 1, cursor_h);
             }
         } else {
             cnode.setLayoutRect(.{ .x = 0, .y = 0, .w = 0, .h = 0 });
@@ -2492,6 +2507,79 @@ fn textareaBeforeRender(node: *Node) void {
             hideExtraPreeditNodes(state);
         }
         line.markRenderDirty();
+    }
+}
+
+/// One rounded surface per visible fenced block, painted behind the selection
+/// and independent of the text rows (including blank and soft-wrapped rows).
+fn paintCodeUnderlay(state: *TextareaState, scroll_y: f32, viewport_h: f32) void {
+    const host = state.code_underlay_node orelse return;
+    const cx = state.cx_ref orelse return;
+    const presentation = &state.markdown.?;
+    if (presentation.revision != state.doc.revision) return;
+    const background = presentation.options.live_code_block_bg orelse presentation.options.code_bg;
+    const count = state.wrap_map.displayLineCount();
+    var used: usize = 0;
+    if (count != 0 and viewport_h > 0) {
+        var row = @min(state.rowAtY(@max(0, scroll_y - state.padding_v)), count - 1);
+        const end = @min(state.rowAtY(@max(0, scroll_y + viewport_h - state.padding_v)) + 1, count);
+        while (row < end) {
+            const info = state.wrap_map.displayLineInfo(@intCast(row), state.doc);
+            const kind = presentation.code.items[info.buffer_line];
+            if (kind == .prose) {
+                row += 1;
+                continue;
+            }
+            const first = row;
+            const top = kind == .opening_fence and info.wrap_index == 0;
+            var bottom = false;
+            while (row < end) {
+                const current = state.wrap_map.displayLineInfo(@intCast(row), state.doc);
+                const current_kind = presentation.code.items[current.buffer_line];
+                if (current_kind == .prose or (row != first and current_kind == .opening_fence and current.wrap_index == 0)) break;
+                row += 1;
+                if (current_kind == .closing_fence and
+                    (row == count or state.wrap_map.displayLineInfo(@intCast(row), state.doc).buffer_line != current.buffer_line))
+                {
+                    bottom = true;
+                    break;
+                }
+            }
+            const surface = if (used < host.children.items.len) host.children.items[used] else blk: {
+                const child = box(cx, .{ .position = .absolute, .hit_behavior = .pass_through }, .{}) catch break;
+                host.appendChild(cx.allocator, child) catch {
+                    cx.destroyDetached(child);
+                    break;
+                };
+                break :blk child;
+            };
+            used += 1;
+            const top_radius: f32 = if (top) 6 else 0;
+            const bottom_radius: f32 = if (bottom or row == count) 6 else 0;
+            const radii: core_ui.CornerRadius = .{ .each = .{ top_radius, top_radius, bottom_radius, bottom_radius } };
+            if (!std.meta.eql(if (surface.style.ext) |ext| ext.corner_radius else null, @as(?core_ui.CornerRadius, radii)))
+                surface.setStyle(cx.allocator, .corner_radius, radii);
+            const y = state.textTop(@intCast(first));
+            const rect: core_ui.ComputedRect = .{
+                .x = state.padding_h,
+                .y = state.padding_v + y - scroll_y,
+                .w = state.input_inner_w,
+                .h = state.textTop(@intCast(row - 1)) + state.line_height - y,
+            };
+            if (!std.meta.eql(surface.rectFromWorldOrFallback(), rect)) {
+                surface.setLayoutRect(rect);
+                surface.markRenderDirty();
+            }
+            if (!std.meta.eql(surface.getBackground(), background)) {
+                surface.setBackgroundRaw(background);
+                surface.markRenderDirty();
+            }
+        }
+    }
+    for (host.children.items[used..]) |surface| {
+        if (surface.rectFromWorldOrFallback().h == 0) continue;
+        surface.setLayoutRect(.{ .x = 0, .y = 0, .w = 0, .h = 0 });
+        surface.markRenderDirty();
     }
 }
 
@@ -3404,6 +3492,7 @@ pub const TextareaBuilder = struct {
             field_shell: *Node = undefined,
             textarea: *Node = undefined,
             underlay: *Node = undefined,
+            code_underlay: *Node = undefined,
             selection: *Node = undefined,
             helper: ?*Node = null,
         };
@@ -3439,6 +3528,7 @@ pub const TextareaBuilder = struct {
                     },
                     .focusable = !disabled0,
                 }, .{
+                    if (p.live_markdown != null) view.capture(&parts.code_underlay, view.box(.{ .style = layer_style }, .{})) else null,
                     // Selection underlay, append before text (vl.container):
                     // selection color blocks glyphs when after. Before, selection was in overlay
                     // after text,
@@ -3485,6 +3575,7 @@ pub const TextareaBuilder = struct {
         state.focus_ring_host = if (p.borderless) null else field_shell;
         state.input_container_node = textarea_node;
         if (!p.borderless) textarea_node.applyTransition(allocator, &comptime recipe_mod.transition("border-color 150ms"));
+        if (p.live_markdown != null) state.code_underlay_node = parts.code_underlay;
         state.selection_underlay_node = parts.underlay;
         state.selection_node = parts.selection;
 

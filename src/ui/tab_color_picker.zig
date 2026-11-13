@@ -29,7 +29,7 @@ pub const View = struct {
         self.* = .{ .cx = cx, .hooks = hooks, .open = try scope.createSignal(bool, false) };
         try scope.onCleanup(View, self, cleanup);
         registered = true;
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } }, .position = .bottom_start, .offset = .{ .static = 6 }, .width = 344, .max_width = 344, .viewport_padding = 12, .constrain_width_to_viewport = true, .shift_main_axis = true, .consume_outside_click = true, .close_on_escape = true, .a11y_role = .dialog, .on_open_change = cx.on(View, self, changed) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = self.open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } }, .position = .bottom_start, .offset = .{ .static = 6 }, .width = 344, .max_width = 344, .viewport_padding = 12, .constrain_width_to_viewport = true, .shift_main_axis = true, .consume_outside_click = true, .close_on_escape = true, .a11y_role = .dialog, .on_open_change = cx.on(View, self, changed) }).mount(scope, cx);
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
         self.chrome.meta.ownership.meta.test_id = "tabs.color";

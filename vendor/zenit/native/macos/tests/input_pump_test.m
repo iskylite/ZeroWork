@@ -323,9 +323,35 @@ static void verifyCandidateAnchor(WindowWrapper *w) {
     [w.metalView firstRectForCharacterRange:NSMakeRange(1, 3) actualRange:&actual];
     assert(queriedStart == 1 && queriedEnd == 4);
     assert(actual.location == 1 && actual.length == 3);
+
+    [document setString:@"abc\ndef\nghi"];
+    [w.metalView.markedTextStorage setAttributedString:[[NSAttributedString alloc] initWithString:@"nihao"]];
+    w.metalView.markedDocumentRange = NSMakeRange(2, 5);
+    w.metalView.markedTextSelectedRange = NSMakeRange(5, 0);
+    // Marked text covers offsets that also exist on a later committed row.
+    // The marked range must use the editor's painted caret, even when the
+    // same numeric range is valid in the committed document.
+    macos_set_ime_cursor_rect((__bridge void *)w, 120, 45, 1, 24);
+    liveFrame = NSMakeRect(10, 71, 20, 26);
+    const NSRect candidate = zenitLogicalScreenRect(w, 120, 45, 1, 24);
+    NSRect result = [w.metalView firstRectForCharacterRange:NSMakeRange(2, 5) actualRange:&actual];
+    assert(NSEqualRects(result, candidate));
+    assert(NSEqualRanges(actual, NSMakeRange(2, 5)));
+    result = [w.metalView firstRectForCharacterRange:NSMakeRange(7, 0) actualRange:&actual];
+    assert(NSEqualRects(result, candidate));
+    result = [w.metalView firstRectForCharacterRange:NSMakeRange(NSNotFound, 0) actualRange:&actual];
+    assert(NSEqualRects(result, candidate));
+    assert(NSEqualRanges(actual, NSMakeRange(7, 0)));
+    [w.metalView firstRectForCharacterRange:NSMakeRange(0, 1) actualRange:&actual];
+    assert(queriedStart == 0 && queriedEnd == 1);
+    w.hasImeCursorRect = NO;
+    [w.metalView firstRectForCharacterRange:NSMakeRange(7, 0) actualRange:&actual];
+    assert(queriedStart == 2 && queriedEnd == 2);
+    [w.metalView.markedTextStorage setAttributedString:[[NSAttributedString alloc] initWithString:@""]];
+    w.metalView.markedDocumentRange = NSMakeRange(NSNotFound, 0);
     [document setString:@""];
     liveFrameEnabled = NO;
-    fprintf(stderr, "PASS: IME unspecified range follows live terminal caret; explicit editor range preserved\n");
+    fprintf(stderr, "PASS: IME marked text follows the painted caret; committed ranges use live geometry\n");
 }
 
 @interface DiscardInputContext : NSTextInputContext

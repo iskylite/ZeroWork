@@ -4,6 +4,8 @@ const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 const geometry = @import("material_geometry.zig");
+const LayerSlots = @FieldType(@FieldType(ui.Cx, "overlay_stack"), "layers");
+const Layer = @typeInfo(@typeInfo(LayerSlots).array.child).optional.child;
 const Rect = ui.ComputedRect;
 pub const CardRole = enum { overlay, surface_1, surface_2, well, action, control, settings_card, custom, global_notification };
 pub fn card(node: *ui.Node, comptime role: CardRole) void {
@@ -99,9 +101,11 @@ pub const Policy = struct {
         // capture/blur nodes are image processing, not floating UI surfaces.
         return !glass.capture_current_target and !glass.a11y_exempt;
     }
-    fn portal(self: *Policy, node: *ui.Node) bool {
-        for (self.cx.overlay_stack.layers) |slot| if (slot) |layer| if (layer.content_node == node) return true;
-        return false;
+    fn portal(self: *Policy, node: *ui.Node) ?*const Layer {
+        for (&self.cx.overlay_stack.layers) |*slot| if (slot.*) |*layer| {
+            if (!layer.config.retained_panel and layer.content_node == node) return layer;
+        };
+        return null;
     }
     fn portalKey(self: *Policy) u64 {
         var hash = std.hash.Wyhash.init(0);
@@ -120,7 +124,11 @@ pub const Policy = struct {
     }
     fn collect(self: *Policy, node: *ui.Node, depth: usize, owner: ?*ui.Node, portal_root: bool) !void {
         if (node.meta.ownership.meta.test_id) |id| if (std.mem.eql(u8, id, "appearance.background") or std.mem.eql(u8, id, "appearance.material.compensation")) return;
-        if (!portal_root and self.portal(node)) return;
+        if (!portal_root) if (self.portal(node)) |layer| {
+            if (layer.suspended) return;
+            const anchor = trigger(self.cx, layer.*);
+            return self.collect(node, 1 + self.ownerLevel(anchor, 32), self.nearest(anchor), true);
+        };
         if (std.mem.eql(u8, node.meta.ownership.meta.component_name orelse "", "MaterialBackdrop.variable"))
             try self.variable_backdrops.append(self.cx.allocator, node);
         const boundary = portal_root or marked(node) or floating(node);
@@ -153,7 +161,7 @@ pub const Policy = struct {
     }
     fn nearest(self: *Policy, node: ?*ui.Node) ?*ui.Node {
         var cursor = node;
-        while (cursor) |n| : (cursor = n.parent) if (marked(n) or floating(n) or self.portal(n)) return n;
+        while (cursor) |n| : (cursor = n.parent) if (marked(n) or floating(n) or self.portal(n) != null) return n;
         return null;
     }
     fn rebuild(self: *Policy, portal_key: u64) !void {
@@ -161,21 +169,6 @@ pub const Policy = struct {
         self.variable_backdrops.clearRetainingCapacity();
         self.scene_ids.clearRetainingCapacity();
         if (self.cx.root) |root| try self.collect(root, 0, null, false);
-        // Overlay content is already sorted by its manager's inherited z-index.
-        var portals: std.ArrayList(Entry) = .empty;
-        defer portals.deinit(self.cx.allocator);
-        for (self.cx.overlay_stack.layers) |slot| if (slot) |layer| {
-            if (layer.suspended) continue;
-            const content = layer.content_node orelse continue;
-            const anchor = trigger(self.cx, layer);
-            try portals.append(self.cx.allocator, .{ .node = content, .owner = self.nearest(anchor), .level = 1 + self.ownerLevel(anchor, 32), .portal_root = true });
-        };
-        std.mem.sort(Entry, portals.items, {}, struct {
-            fn less(_: void, a: Entry, b: Entry) bool {
-                return a.node.style.z_index() < b.node.style.z_index();
-            }
-        }.less);
-        for (portals.items) |entry| try self.collect(entry.node, entry.level, entry.owner, true);
         self.scene_revision = self.structureRevision();
         self.portal_revision = portal_key;
         self.scene_root = self.cx.root;
@@ -417,7 +410,7 @@ pub const Policy = struct {
             // Portal DOM ancestry stops at the portal; resume at its live trigger.
             for (self.cx.overlay_stack.layers) |slot| {
                 const layer = slot orelse continue;
-                if (layer.suspended or layer.content_node != current) continue;
+                if (layer.suspended or layer.config.retained_panel or layer.content_node != current) continue;
                 return 1 + self.ownerLevel(trigger(self.cx, layer), remaining - 1);
             }
             if (marked(current) or floating(current)) {

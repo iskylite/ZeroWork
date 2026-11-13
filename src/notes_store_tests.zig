@@ -54,6 +54,38 @@ test "notes hierarchy enforces two levels for every document and directory opera
     try expectEqual(@as(usize, 3), all.len);
 }
 
+test "notes timestamps preserve creation across saves and read legacy records" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.init(a, io, tmp.dir);
+    defer store.deinit();
+    const library = try store.createLibrary("时间");
+    const key = try store.createNote(library, null, "笔记");
+    const fresh = try store.loadNote(a, key, .active);
+    defer fresh.deinit();
+    try expectEqual(@as(?i64, fresh.value.updated_at), fresh.value.created_at);
+
+    const filename = "notes/libraries/" ++ std.fmt.bytesToHex(library.bytes, .lower) ++ "/documents/" ++
+        std.fmt.bytesToHex(key.note_id.bytes, .lower) ++ ".json";
+    for ([_]u64{ 1, 2 }) |revision| {
+        const legacy = try std.json.Stringify.valueAlloc(a, .{
+            .id = key.note_id,
+            .library_id = library,
+            .folder_id = @as(?model.FolderId, null),
+            .title = "旧笔记",
+            .revision = revision,
+            .updated_at = @as(i64, 123456789),
+        }, .{});
+        defer a.free(legacy);
+        try tmp.dir.writeFile(io, .{ .sub_path = filename, .data = legacy });
+        const saved = try store.commitNote(key, revision, .{ .save = .{ .title = "旧笔记", .body_md = "新内容" } });
+        try expectEqual(if (revision == 1) @as(?i64, 123456789) else null, saved.timestamps.created_at);
+        const reopened = try store.loadNote(a, key, .active);
+        defer reopened.deinit();
+        try expectEqual(saved.timestamps, reopened.value.timestamps());
+    }
+}
+
 test "notes restore keeps stable IDs and requires a visible parent and explicit unique name" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

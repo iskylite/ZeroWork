@@ -195,6 +195,9 @@ pub const LayerConfig = struct {
     on_dismiss_request: ?core.HandlerRef = null,
     trigger_node: ?*Node = null,
     group: ?[]const u8 = null,
+    on_group_dismiss: ?core.HandlerRef = null,
+    /// A caller-owned panel whose display, opacity and hit roles are managed by its view.
+    retained_panel: bool = false,
     hover: ?HoverConfig = null,
     /// Entrance delay (ms): layer held at progress=0 (invisible) for this long after
     /// push/reactivate
@@ -224,6 +227,7 @@ pub const OverlayLayer = struct {
     skip_outside_click_frame: bool = false,
     enter_paused: bool = false,
     content_node: ?*Node = null,
+    retained_coverage: ?*Node = null,
     barrier_node: ?*Node = null,
     previous_focus: ?NodeHandle = null,
     scope_pushed: bool = false,
@@ -313,20 +317,7 @@ pub const OverlayStack = struct {
             return error.TooManyLayers;
         }
 
-        // Mutex group: non_modal layers in same group auto-close
-        if (config.group) |group| {
-            for (&self.layers) |*slot| {
-                if (slot.*) |*layer| {
-                    if (!layer.suspended and layer.state != .exiting and layer.config.kind != .modal) {
-                        if (layer.config.group) |eg| {
-                            if (std.mem.eql(u8, eg, group)) {
-                                self.requestDismiss(layer);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        if (config.group) |group| self.dismissGroup(group, null);
 
         const z = config.z_index orelse self.next_z;
         if (config.z_index) |_| {
@@ -437,6 +428,111 @@ pub const OverlayStack = struct {
     /// Compat helper: reserved for barrier-less floating overlay calls.
     pub fn bindFloatingContent(self: *OverlayStack, allocator: Allocator, handle: LayerHandle, content_node: *Node) void {
         self.bindContentNode(allocator, handle, content_node);
+    }
+
+    pub fn bindRetainedPanel(self: *OverlayStack, handle: LayerHandle, node: *Node, coverage: *Node) void {
+        const layer = self.findLayer(handle) orelse return;
+        std.debug.assert(layer.config.retained_panel);
+        layer.content_node = node;
+        layer.retained_coverage = coverage;
+        self.syncAllLayerVisualOrder();
+    }
+
+    pub fn hasGroup(self: *const OverlayStack, group: []const u8) bool {
+        for (&self.layers) |*slot| if (slot.*) |*layer| {
+            if (inGroup(layer, group)) return true;
+        };
+        return false;
+    }
+
+    pub fn dismissUnownedPopovers(self: *OverlayStack, owner: *Node) void {
+        var victims: [MAX_LAYERS]LayerHandle = undefined;
+        var len: usize = 0;
+        for (&self.layers) |*slot| if (slot.*) |*layer| {
+            if (layer.suspended or layer.state == .exiting or layer.config.kind != .non_modal or
+                layer.config.retained_panel or layerTier(layer) != .overlay) continue;
+            if (self.resolveTrigger(layer)) |trigger| if (isSemanticDescendant(trigger, owner)) continue;
+            victims[len] = layer.handle;
+            len += 1;
+        };
+        for (victims[0..len]) |handle| {
+            const layer = self.findLayer(handle) orelse continue;
+            self.requestDismiss(layer);
+        }
+    }
+
+    pub fn dismissGroup(self: *OverlayStack, group: []const u8, except: ?LayerHandle) void {
+        // Dismiss callbacks may remove layers or open another one.
+        var victims: [MAX_LAYERS]LayerHandle = undefined;
+        var len: usize = 0;
+        for (&self.layers) |*slot| if (slot.*) |*layer| {
+            if (!inGroup(layer, group) or (except != null and layer.handle.id == except.?.id)) continue;
+            victims[len] = layer.handle;
+            len += 1;
+        };
+        for (victims[0..len]) |handle| {
+            const layer = self.findLayer(handle) orelse continue;
+            if (layer.config.on_group_dismiss) |dismiss| dismiss.invoke() else self.requestDismiss(layer);
+        }
+    }
+
+    fn inGroup(layer: *const OverlayLayer, group: []const u8) bool {
+        return !layer.suspended and layer.state != .exiting and layer.config.kind == .non_modal and
+            std.mem.eql(u8, layer.config.group orelse return false, group);
+    }
+
+    /// Raise a peer and its owned overlays together, keeping children above their parent.
+    pub fn raise(self: *OverlayStack, handle: LayerHandle) void {
+        var layer = self.findLayer(handle) orelse return;
+        if (layer.suspended or layer.state == .exiting) return;
+        var ordered: [MAX_LAYERS]usize = undefined;
+        const count = self.collectOrderedLayerIndices(&ordered, true);
+        if (self.resolveTrigger(layer)) |trigger| {
+            for (ordered[0..count]) |idx| {
+                const parent = &self.layers[idx].?;
+                if (parent.activation_order >= layer.activation_order) break;
+                if (self.layerContainsOwnedNode(parent, trigger)) {
+                    layer = parent;
+                    break;
+                }
+            }
+        }
+        var owned: [MAX_LAYERS]usize = undefined;
+        var len: usize = 0;
+        for (ordered[0..count]) |idx| {
+            const child = &self.layers[idx].?;
+            if (child.handle.id == layer.handle.id or if (self.resolveTrigger(child)) |trigger|
+                self.layerContainsOwnedNode(layer, trigger)
+            else
+                false)
+            {
+                owned[len] = idx;
+                len += 1;
+            }
+        }
+        for (owned[0..len]) |idx| self.layers[idx].?.activation_order = self.allocateActivationOrder();
+        self.syncAllLayerVisualOrder();
+    }
+
+    /// Publish the physical order before deciding which branch owns Escape.
+    /// Activation order alone cannot compare a modal with a later non-modal panel.
+    fn escapeOrder(self: *const OverlayStack, ordered: *[MAX_LAYERS]usize) usize {
+        const count = self.collectOrderedLayerIndices(ordered, true);
+        std.mem.sort(usize, ordered[0..count], self, struct {
+            fn less(stack: *const OverlayStack, a: usize, b: usize) bool {
+                const first = &stack.layers[a].?;
+                const second = &stack.layers[b].?;
+                const first_z = visualZ(first);
+                const second_z = visualZ(second);
+                return if (first_z == second_z) first.activation_order < second.activation_order else first_z < second_z;
+            }
+        }.less);
+        return count;
+    }
+
+    fn visualZ(layer: *const OverlayLayer) i16 {
+        const node = layer.barrier_node orelse layer.content_node orelse return layer.handle.z_index;
+        return node.style.z_index();
     }
 
     /// Whether any layer is exiting (test/diagnostic use).
@@ -559,6 +655,9 @@ pub const OverlayStack = struct {
     /// Resume suspended layer (called by component Effect on reopen)
     pub fn reactivate(self: *OverlayStack, handle: LayerHandle) void {
         self.bumpAnimGen();
+        if (self.findLayer(handle)) |layer| if (layer.suspended) {
+            if (layer.config.group) |group| self.dismissGroup(group, handle);
+        };
         if (self.findLayer(handle)) |layer| {
             if (!layer.suspended) return;
             layer.suspended = false;
@@ -623,11 +722,15 @@ pub const OverlayStack = struct {
     pub fn cancelExit(self: *OverlayStack, handle: LayerHandle, next_state: LayerState) void {
         self.bumpAnimGen();
         std.debug.assert(next_state != .exiting);
+        if (self.findLayer(handle)) |layer| if (layer.state == .exiting and next_state == .entering) {
+            if (layer.config.group) |group| self.dismissGroup(group, handle);
+        };
         if (self.findLayer(handle)) |layer| {
             if (layer.state != .exiting) return;
             if (layer.suspended) return;
             layer.state = next_state;
             if (next_state == .entering) {
+                layer.activation_order = self.allocateActivationOrder();
                 layer.skip_outside_click_frame = true;
                 layer.enter_ctrl = TransitionController.initWithTime(layer.config.enter_transition, .entering, render_engine.current_frame_time_ms);
                 // Pull back mid-exit: enter continues from current exit progress (skip enter_delay,
@@ -673,7 +776,7 @@ pub const OverlayStack = struct {
         if (self.layer_count == 0) return false;
 
         var ordered: [MAX_LAYERS]usize = undefined;
-        const count = self.collectOrderedLayerIndices(&ordered, true);
+        const count = self.escapeOrder(&ordered);
 
         var i = count;
         while (i > 0) {
@@ -688,6 +791,7 @@ pub const OverlayStack = struct {
                     self.requestDismiss(layer);
                     return true;
                 }
+                if (layer.config.retained_panel and layerTier(layer) == .dialog) return false;
                 // modal blocks Escape downward propagation
                 if (layer.config.kind == .modal) return true;
             }
@@ -1601,6 +1705,7 @@ fn writeNodeZIndex(node: *Node, z_index: i16) void {
     if (node.style.ext) |ext| {
         if (ext.z_index == z_index) return;
         ext.z_index = z_index;
+        if (node.parent) |parent| parent.markOrderDirty();
         node.markInteractionDirty();
         node.markRenderDirty();
     }

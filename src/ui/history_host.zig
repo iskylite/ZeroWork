@@ -15,6 +15,7 @@ pub const Host = struct {
     scope: *ui.Scope,
     workspace: ?*@import("workspace.zig").Workspace = null,
     panel: *ui.Node,
+    floating: *@import("floating_surface.zig").Surface,
     card: *ui.Node,
     list: *ui.Node,
     count: *ui.Node,
@@ -63,13 +64,12 @@ pub const Host = struct {
         errdefer dir.close(cx.io);
         const self = try cx.allocator.create(Host);
         errdefer cx.allocator.destroy(self);
-        const panel = try ui.box(cx, .{ .position = .absolute, .width = .fill(), .height = .fill(), .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } }, .z_index = 500, .hit_behavior = .@"opaque" }, .{});
+        const panel = try ui.box(cx, .{ .position = .absolute, .width = .fill(), .height = .fill(), .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } }, .hit_behavior = .children_only }, .{});
         panel.setDisplay(.none);
         panel.behavior.interaction.focus_scope = .{ .trap = true };
         const card = try ui.box(cx, S.card(), .{});
         card.meta.ownership.meta.test_id = "history.panel";
         card.setPointerDownFocus(.preserve);
-        @import("floating_input.zig").protect(cx, panel);
         @import("floating_input.zig").protect(cx, card);
         try panel.appendChild(cx.allocator, card);
         const head = try ui.box(cx, S.header(), .{});
@@ -168,10 +168,16 @@ pub const Host = struct {
         confirm_button.meta.ownership.meta.test_id = "history.delete.confirm";
         try confirmation_actions.appendChild(cx.allocator, confirm_button);
         try confirmation_body.appendChild(cx.allocator, confirmation_actions);
-        self.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .panel = panel, .card = card, .list = list, .count = count, .message = message, .query_input = query_input, .scroll = scroll, .close_button = close_button, .close_hint = close_hint.open.?, .filter_buttons = filter_buttons, .retry_button = retry_button, .archive = .{ .allocator = cx.allocator, .io = cx.io, .dir = dir }, .model = undefined, .colors = theme.current(), .confirmation = confirmation, .confirmation_open = confirmation_open, .clear_button = clear, .confirmation_text = confirmation_text, .cancel_button = cancel_button, .clear_disabled = clear_disabled, .actions_disabled = actions_disabled };
-        self.model = catalog.Model.init(cx.allocator, &self.archive);
-        panel.behavior.events.event_context = self;
+        panel.behavior.events.capture_context = self;
         panel.behavior.events.on_event_capture = onPanelEvent;
+        const floating = try @import("floating_surface.zig").Surface.mount(cx, scope, panel, .{
+            .close = cx.on(Host, self, close),
+            .group = @import("floating_surface.zig").workspace_popup,
+            .coverage = card,
+            .outside_click = true,
+        });
+        self.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .panel = panel, .floating = floating, .card = card, .list = list, .count = count, .message = message, .query_input = query_input, .scroll = scroll, .close_button = close_button, .close_hint = close_hint.open.?, .filter_buttons = filter_buttons, .retry_button = retry_button, .archive = .{ .allocator = cx.allocator, .io = cx.io, .dir = dir }, .model = undefined, .colors = theme.current(), .confirmation = confirmation, .confirmation_open = confirmation_open, .clear_button = clear, .confirmation_text = confirmation_text, .cancel_button = cancel_button, .clear_disabled = clear_disabled, .actions_disabled = actions_disabled };
+        self.model = catalog.Model.init(cx.allocator, &self.archive);
         try cx.addAfterLayoutHook(self, frame);
         try scope.onCleanup(Host, self, cleanup);
         return self;
@@ -190,6 +196,7 @@ pub const Host = struct {
                 self.pending_reload = true;
             }
             self.panel.setDisplay(.flex);
+            self.floating.activate();
             self.cx.setFocus(self.query_input.input_container);
             return;
         }
@@ -209,6 +216,7 @@ pub const Host = struct {
         S.repaint(self.card, self.colors);
         self.colors = theme.current();
         self.panel.setDisplay(.flex);
+        self.floating.activate();
         self.refresh_job = try loading.CatalogJob.start(self.archive, self.generation);
         self.needs_rebuild = true;
         self.pending_focus = true;
@@ -217,14 +225,19 @@ pub const Host = struct {
         self.cx.requestRedraw();
     }
     pub fn close(self: *Host) void {
+        self.floating.deactivate();
         self.cancelDelete();
+        self.pending_focus = false;
         self.close_hint.set(false);
         self.generation +%= 1;
         if (self.open_job) |job| job.cancel.store(true, .release);
         if (self.refresh_job) |job| job.cancel.store(true, .release);
         self.panel.setDisplay(.none);
         if (self.cx.focus_manager.activeScope() == self.panel) self.cx.focus_manager.popScope();
-        self.cx.setFocus(if (self.restore_focus) |handle| self.cx.node_registry.resolve(handle, null) else self.cx.root);
+        if (self.cx.focus_manager.getFocused()) |focused| {
+            if (@import("floating_input.zig").containsPress(self.cx, self.panel, focused))
+                self.cx.setFocus(if (self.restore_focus) |handle| self.cx.node_registry.resolve(handle, null) else self.cx.root);
+        }
         self.cx.requestRedraw();
     }
     fn queryChanged(self: *Host, query: []const u8) void {
@@ -549,7 +562,7 @@ pub const Host = struct {
             }
             self.selected = null;
             self.pending_reload = true;
-            self.cx.setFocus(self.query_input.input_container);
+            if (self.panel.style.display != .none) self.cx.setFocus(self.query_input.input_container);
         };
         if (self.refresh_job) |job| if (job.done.load(.acquire)) {
             self.refresh_job = null;
@@ -617,13 +630,6 @@ pub const Host = struct {
     fn onPanelEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *Host = @ptrCast(@alignCast(raw orelse return .ignored));
         switch (event) {
-            .mouse_down => |mouse| {
-                const rect = self.card.globalRect();
-                if (mouse.x < rect.x or mouse.x > rect.x + rect.w or mouse.y < rect.y or mouse.y > rect.y + rect.h) {
-                    self.close();
-                    return .stop;
-                }
-            },
             .key_down => |key| {
                 if (key.key == .escape) {
                     if (self.confirmation_open.peek()) {

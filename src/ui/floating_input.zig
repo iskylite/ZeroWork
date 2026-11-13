@@ -7,6 +7,7 @@ pub fn containsPress(cx: *ui.Cx, surface: *ui.Node, target: *ui.Node) bool {
     var node = target;
     while (!node.isDescendantOf(surface)) {
         const layer = cx.overlay_stack.findLayerForNode(node) orelse return false;
+        if (layer.config.retained_panel) return false;
         node = cx.node_registry.resolve(layer.trigger_handle, null) orelse return false;
     }
     return true;
@@ -67,7 +68,7 @@ pub const Policy = struct {
                 // Keep Tooltip passive across retained close/reopen cycles too.
                 layer.config.content_hit_test_visible = false;
                 content.setHitTestVisible(false);
-            } else if (layer.config.content_hit_test_visible) protect(self.cx, content);
+            } else if (layer.config.content_hit_test_visible and !layer.config.retained_panel) protect(self.cx, content);
             if (layer.barrier_node) |barrier| protect(self.cx, barrier);
             const active = !passive and !layer.suspended and layer.state != .exiting;
             const id: ?u32 = if (active) layer.handle.id else null;

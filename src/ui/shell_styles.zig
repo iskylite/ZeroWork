@@ -93,7 +93,6 @@ pub fn settingsBackdrop(_: *const ui.ThemeTokens) ui.BoxStyle {
         .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } },
         .width = .fill(),
         .height = .fill(),
-        .z_index = 400,
         .hit_behavior = .@"opaque",
         .hit_roles = .{ .pointer = true, .scroll = true },
         .direction = .column,

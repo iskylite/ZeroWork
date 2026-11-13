@@ -420,6 +420,8 @@
       </g>
       <g id="notes.document.scroll" clip-path="url(#notes.document.clip)">
         <text x="322" y="154" font-size="28" fill="#18181B" font-weight="650" id="notes.title" class="notes-text">生产环境证书更新</text>
+        <text x="322" y="175" font-size="12" fill="#71717A" id="notes.created-at" class="notes-text">创建于 2026-11-06 09:18:22</text>
+        <text x="485" y="175" font-size="12" fill="#71717A" id="notes.updated-at" class="notes-text">更新于 2026-11-06 09:27:36</text>
         <text x="322" y="219" font-size="18" fill="#18181B" font-weight="600" class="notes-text">更新前检查</text>
         <circle cx="326" cy="250" r="2" fill="#5B5B65" />
         <text x="340" y="255" font-size="15" fill="#18181B" font-weight="400" class="notes-text">确认域名、证书有效期与完整证书链。</text>

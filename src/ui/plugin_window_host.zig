@@ -602,8 +602,14 @@ pub const Host = struct {
             .occlusions = covers[0..cover_count],
             .visible = show,
             .host_key = webHostKey,
-            .focus_entered = .{ .callback = webFocusEntered, .context = self },
+            .input = .{ .focus_entered = webFocusEntered, .left_press = webLeftPress, .context = self },
         });
+    }
+
+    fn webLeftPress(context: ?*anyopaque) callconv(.c) void {
+        const self: *Host = @ptrCast(@alignCast(context orelse return));
+        if (self.closed or self.shutdown_prepared) return;
+        if (self.application.workspace.dismiss_notes_float) |dismiss| dismiss.invoke();
     }
 
     fn webFocusEntered(context: ?*anyopaque) callconv(.c) void {
@@ -761,14 +767,18 @@ pub const Host = struct {
 
 fn collectWebOcclusions(cx: *const ui.Cx, notes: ?*ui.Node, slot: ui.ComputedRect, covers: []web_surface.Occlusion) usize {
     var count: usize = 0;
-    if (notes) |node| appendWebOcclusion(node, slot, covers, &count);
+    var covered_notes = false;
     for (&cx.overlay_stack.layers) |*maybe| if (maybe.*) |*layer| {
         if (layer.suspended) continue;
         if (layer.barrier_node) |barrier| if (layer.config.barrier != .none and (!layer.config.scoped_dialog or layer.config.scoped_mask)) {
             appendWebOcclusion(barrier, slot, covers, &count);
         };
-        if (layer.content_node) |node| appendWebOcclusion(node, slot, covers, &count);
+        if (layer.retained_coverage orelse layer.content_node) |node| {
+            appendWebOcclusion(node, slot, covers, &count);
+            covered_notes = covered_notes or node == notes;
+        }
     };
+    if (!covered_notes) if (notes) |node| appendWebOcclusion(node, slot, covers, &count);
     return count;
 }
 

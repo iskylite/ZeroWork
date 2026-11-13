@@ -6,7 +6,7 @@
 
 typedef struct ZWWebSurface ZWWebSurface;
 typedef int (*ZWWebHostKey)(void *context, uint16_t keycode, uint32_t modifiers);
-typedef void (*ZWWebFocusEntered)(void *context);
+typedef void (*ZWWebInputCallback)(void *context);
 typedef void (*ZWWebSurfaceChanged)(void);
 
 typedef struct {
@@ -66,7 +66,7 @@ void zw_web_surface_destroy(ZWWebSurface *surface);
 void zw_web_surface_set_change_callback(ZWWebSurface *surface, ZWWebSurfaceChanged callback);
 int zw_web_surface_sync(ZWWebSurface *surface, void *zenit_window, ZWWebRect slot,
     ZWWebRect clip, const ZWWebRect *occlusions, size_t occlusion_count, int visible, ZWWebHostKey host_key,
-    ZWWebFocusEntered focus_entered, void *focus_context);
+    ZWWebInputCallback focus_entered, ZWWebInputCallback left_press, void *input_context);
 void zw_web_surface_detach(ZWWebSurface *surface);
 void zw_web_surface_release_focus(ZWWebSurface *surface);
 int zw_web_surface_navigate(ZWWebSurface *surface, const uint8_t *url, size_t len);

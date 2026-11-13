@@ -11,6 +11,7 @@ text{font-family:SidebarInter,'PingFang SC','Helvetica Neue',sans-serif;text-ren
 <filter id="panel-shadow" x="-12%" y="-3%" width="130%" height="108%"><feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#18181b" flood-opacity=".07"/></filter>
 <filter id="button-shadow" x="-40%" y="-30%" width="180%" height="180%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#18181b" flood-opacity=".07"/></filter>
 <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f4f4f6"/><stop offset="1" stop-color="#f7f7f8"/></linearGradient>
+<symbol id="sftp-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></symbol>
 </defs>
 <defs xmlns="http://www.w3.org/2000/svg"><symbol id="sidebar" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M9 4v16" /></g></symbol>
 
@@ -168,7 +169,7 @@ text{font-family:SidebarInter,'PingFang SC','Helvetica Neue',sans-serif;text-ren
 <g id="host.tj-sims-v3-jump.route"><title>连接路径 · 0 跳</title><use href="#route" x="205" y="298.5" width="16" height="16" color="#5b5b65"/><text class="route-count" x="222" y="302.5" text-anchor="middle">0</text></g>
 </g>
 <g id="host.tj-sims-v3-sftp" data-state="normal">
-<use href="#os-centos" x="40" y="334.5" width="18" height="18" color="#2d5ca8"/>
+<use href="#sftp-folder" x="40" y="334.5" width="18" height="18" color="#5B5B65" />
 <text class="host-name" x="67.5" y="348.0">TJ-SIMS-V3-SFTP</text>
 <g id="host.tj-sims-v3-sftp.route"><title>连接路径 · 0 跳</title><use href="#route" x="205" y="335.5" width="16" height="16" color="#5b5b65"/><text class="route-count" x="222" y="339.5" text-anchor="middle">0</text></g>
 </g>

@@ -2,8 +2,9 @@
 //! active range and rebuilds the block boundaries after it leaves that range.
 const std = @import("std");
 const assets = @import("assets.zig");
+const markdown = @import("ui").widgets.markdown;
 
-pub const Kind = enum { text, markdown, raw, image, table };
+pub const Kind = enum { text, markdown, raw, image, table, code };
 
 pub const Block = struct {
     start: usize,
@@ -52,7 +53,7 @@ fn hasInlineMarkup(line: []const u8) bool {
 fn markdownLine(line: []const u8) bool {
     const clean = std.mem.trimStart(u8, line, " \t");
     if (heading(line) != null or clean.len == 0) return clean.len != 0;
-    if (clean[0] == '>') return true;
+    if (clean[0] == '>' or markdown.taskPrefix(clean, true) != null) return true;
     for ([_][]const u8{ "- ", "* ", "+ ", "---", "***", "___" }) |prefix| {
         if (std.mem.startsWith(u8, clean, prefix)) return true;
     }
@@ -70,7 +71,7 @@ fn tableHeadLine(line: []const u8) bool {
     const clean = std.mem.trimStart(u8, line, " \t");
     if (clean.len == 0) return false;
     if (std.mem.indexOfScalar(u8, clean, '|') == null) return false;
-    if (clean[0] == '-' or clean[0] == '*' or clean[0] == '+') return false;
+    if (clean[0] == '-' or clean[0] == '*' or clean[0] == '+' or markdown.taskPrefix(clean, true) != null) return false;
     return true;
 }
 
@@ -128,7 +129,7 @@ fn readBlock(body: []const u8, start: usize) Block {
             const next = end + 1;
             end = lineEnd(body, next);
             if (fence.closes(body[next..end])) {
-                kind = .markdown;
+                kind = .code;
                 break;
             }
         }
@@ -570,18 +571,25 @@ pub fn findLinkAt(text: []const u8, offset: usize) ?LinkSpan {
     return null;
 }
 
-/// The offset of the check-state byte in a task list line whose `- ` marker
-/// starts at `marker_start` (expects `[ ]`, `[x]` or `[X]` directly after the
-/// marker), or null when the line is not a task item.
-pub fn taskStateOffset(body: []const u8, marker_start: usize) ?usize {
-    if (marker_start + 5 >= body.len) return null;
-    if (body[marker_start] != '-' or body[marker_start + 1] != ' ') return null;
-    if (body[marker_start + 2] != '[' or body[marker_start + 4] != ']') return null;
-    if (body[marker_start + 5] != ' ') return null;
-    return switch (body[marker_start + 3]) {
-        ' ', 'x', 'X' => marker_start + 3,
-        else => null,
-    };
+pub fn taskAt(body: []const u8, line_start: usize) ?struct { start: usize, end: usize, state: usize, short: bool, checked: bool } {
+    const line = body[line_start..lineEnd(body, line_start)];
+    const trimmed = std.mem.trimStart(u8, line, " \t");
+    const start = line_start + line.len - trimmed.len;
+    const task = markdown.taskPrefix(trimmed, true) orelse return null;
+    return .{ .start = start, .end = start + task.end, .state = start + task.state, .short = task.short, .checked = task.checked };
+}
+
+/// The source slices of a complete fenced block. Keep the final newline in
+/// the copy text, and remove only the line break before the closing fence in the display.
+pub fn codeBlock(content: []const u8) struct { language: []const u8, code: []const u8, source: []const u8, offset: usize } {
+    const first_end = lineEnd(content, 0);
+    const first = content[0..first_end];
+    const fence = assets.Fence.opening(first).?;
+    const start = first_end + 1;
+    const closing = std.mem.lastIndexOfScalar(u8, content, '\n').? + 1;
+    const source = content[start..closing];
+    const code = if (source.len != 0) std.mem.trimEnd(u8, source[0 .. source.len - 1], "\r") else source;
+    return .{ .language = std.mem.trimStart(u8, first, " ")[fence.count..], .code = code, .source = source, .offset = start };
 }
 
 /// Toggle an inline emphasis mark (`**`, `*`, `~~` or other exact pairs)
@@ -835,12 +843,12 @@ test "notes link finder resolves innermost spans and rejects images and wrapped 
 test "notes task state offset reads check byte of task lines only" {
     const body = "- [ ] open\n- [x] done\n- [X] loud\n- plain\n-[ ]tight";
     // 偏移按字节计：三条 task 行的标记分别在 0、11、22，状态字节是标记后第 3 字节。
-    try std.testing.expectEqual(@as(usize, 3), taskStateOffset(body, 0).?);
-    try std.testing.expectEqual(@as(usize, 14), taskStateOffset(body, 11).?);
-    try std.testing.expectEqual(@as(usize, 25), taskStateOffset(body, 22).?);
+    try std.testing.expectEqual(@as(usize, 3), taskAt(body, 0).?.state);
+    try std.testing.expectEqual(@as(usize, 14), taskAt(body, 11).?.state);
+    try std.testing.expectEqual(@as(usize, 25), taskAt(body, 22).?.state);
     // 「- plain」不是 task 项；「-[ ]tight」的 - 后没有空格。
-    try std.testing.expect(taskStateOffset(body, 33) == null);
-    try std.testing.expect(taskStateOffset(body, 41) == null);
+    try std.testing.expect(taskAt(body, 33) == null);
+    try std.testing.expect(taskAt(body, 41) == null);
 }
 
 test "notes blocks preserve UTF-8 byte ranges and fence boundaries" {

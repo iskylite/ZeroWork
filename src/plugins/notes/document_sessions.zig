@@ -26,6 +26,7 @@ pub const ImportTicket = struct { stamp: Stamp, serial: u64 };
 
 pub const Snapshot = struct {
     stamp: Stamp,
+    timestamps: model.Timestamps,
     body_generation: u64,
     title: []const u8,
     body_md: []const u8,
@@ -46,7 +47,7 @@ const Request = struct {
 };
 pub const Receipt = struct {
     request: Request,
-    result: anyerror!u64,
+    result: anyerror!storage.Store.NoteCommit,
 };
 pub const Commit = struct {
     request: Request,
@@ -61,7 +62,7 @@ pub const Commit = struct {
             .unlock => .unlock,
         };
         const stamp = self.request.stamp;
-        return .{ .request = self.request, .result = store.changeNote(stamp.lease.key, stamp.base_revision, change) };
+        return .{ .request = self.request, .result = store.commitNote(stamp.lease.key, stamp.base_revision, change) };
     }
 
     pub fn failed(self: Commit, err: anyerror) Receipt {
@@ -151,6 +152,7 @@ const History = struct {
 
 const Entry = struct {
     stamp: Stamp,
+    timestamps: model.Timestamps,
     draft: OwnedDraft,
     folder_id: ?model.FolderId,
     read_only: bool,
@@ -206,6 +208,7 @@ pub const Sessions = struct {
         errdefer self.allocator.free(draft.bytes);
         try self.entries.append(self.allocator, .{
             .stamp = .{ .lease = lease, .base_revision = note.revision, .edit_generation = 1 },
+            .timestamps = note.timestamps(),
             .draft = draft,
             .folder_id = note.folder_id,
             .read_only = note.read_only,
@@ -219,6 +222,7 @@ pub const Sessions = struct {
         const draft = entry.draft.view();
         return .{
             .stamp = entry.stamp,
+            .timestamps = entry.timestamps,
             .body_generation = entry.body_generation,
             .title = draft.title,
             .body_md = draft.body_md,
@@ -335,11 +339,12 @@ pub const Sessions = struct {
         const request = entry.saving orelse return error.StaleSave;
         if (!std.meta.eql(request, receipt.request)) return error.StaleSave;
         entry.saving = null;
-        const revision = receipt.result catch |err| {
+        const committed = receipt.result catch |err| {
             entry.save_error = err;
             return err;
         };
-        entry.stamp.base_revision = revision;
+        entry.stamp.base_revision = committed.revision;
+        entry.timestamps = committed.timestamps;
         entry.save_error = null;
         switch (request.mode) {
             .save => {
@@ -384,7 +389,9 @@ pub const Sessions = struct {
     pub fn move(self: *Sessions, stamp: Stamp, folder_id: ?model.FolderId) !void {
         const entry = try self.editable(stamp);
         try self.flush(stamp.lease);
-        entry.stamp.base_revision = try self.store.changeNote(stamp.lease.key, entry.stamp.base_revision, .{ .move = folder_id });
+        const committed = try self.store.commitNote(stamp.lease.key, entry.stamp.base_revision, .{ .move = folder_id });
+        entry.stamp.base_revision = committed.revision;
+        entry.timestamps = committed.timestamps;
         entry.folder_id = folder_id;
     }
 

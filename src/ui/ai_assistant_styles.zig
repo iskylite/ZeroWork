@@ -1,9 +1,10 @@
-//! Figma 416:1912203/2206/2207/2227/2272: default 600×456 float.
+//! AI assistant floating panel.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
+const float = @import("../ai/float_model.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .hit_behavior = .@"opaque", .width = .{ .px = 600 }, .height = .{ .px = 456 }, .direction = .column, .padding = ui.Padding.all(1), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 14 }, .shadows = ui.ShadowList.of(&.{.{ .color = ui.Color.rgba(0, 0, 0, 119), .blur = 48, .offset_y = 18 }}), .overflow = .hidden };
+    return .{ .hit_behavior = .@"opaque", .width = .{ .px = 600 }, .height = .{ .px = float.default_height }, .direction = .column, .padding = ui.Padding.all(1), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 14 }, .shadows = ui.ShadowList.of(&.{.{ .color = ui.Color.rgba(0, 0, 0, 119), .blur = 48, .offset_y = 18 }}), .overflow = .hidden };
 }
 pub fn gripRow(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 14 }, .flex_shrink = 0, .align_items = .center, .justify = .center };

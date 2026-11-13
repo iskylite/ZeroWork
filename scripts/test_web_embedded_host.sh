@@ -8,6 +8,6 @@ xcrun clang -fobjc-arc -Wno-deprecated-declarations \
   "$ROOT/e2e/web_embedded_host_test.m" \
   -framework Cocoa -framework Metal -framework IOSurface -framework QuartzCore \
   -framework CoreVideo -framework UniformTypeIdentifiers \
-  -framework WebKit -framework Network \
+  -framework WebKit -framework Network -framework Security \
   -o "$TEST_DIR/web-embedded-host-test"
 "$TEST_DIR/web-embedded-host-test"

@@ -79,12 +79,10 @@ def probe(directory, screenshot):
     key("down", cmd=True)
     editor = node(EDITOR)
     assert (editor["rect"]["w"], editor["rect"]["h"]) == (560, 78)
-    if screenshot:
-        assert call("/screenshot", {"path": str(screenshot.resolve())})["ok"]
 
     source = "更新配置，先运行 `nginx -t`"
     replace(source)
-    wait_for_line(source)
+    wait_for_line("更新配置，先运行 nginx -t")
     assert call("/text_input", {"text": "\n待验证"})["ok"]
     wait_for_line("更新配置，先运行 nginx -t")
     assert state()["buffer"] == source + "\n待验证"
@@ -100,6 +98,37 @@ def probe(directory, screenshot):
     wait_for_line("待验证")
     key("z", cmd=True, shift=True)
     wait_for_line("待验证通过")
+
+    for marker in ("-", "*", "+"):
+        replace(marker)
+        wait_for_line(marker)
+        assert call("/text_input", {"text": " "})["ok"]
+        wait_for_line("• ")
+        assert state()["buffer"] == marker + " "
+        assert call("/text_input", {"text": "列表项"})["ok"]
+        wait_for_line("• 列表项")
+        key("return")
+        wait_for_line("• ")
+        assert state()["buffer"] == f"{marker} 列表项\n{marker} "
+        key("return")
+        assert state()["buffer"] == f"{marker} 列表项\n"
+
+    for prefix, suffix, rendered in [
+        (">", " 引用", "▏ 引用"),
+        ("#", " 标题", "标题"),
+        ("- [x", "]", "☑"),
+        ("**强调*", "*", "强调"),
+        ("~~删除~", "~", "删除"),
+        ("[链接](doc", ")", "链接"),
+        ("1.", " 有序项", "1. 有序项"),
+        ("```sh\n-", " echo", "- echo"),
+    ]:
+        replace(prefix)
+        assert call("/text_input", {"text": suffix})["ok"]
+        wait_for_line(rendered)
+        assert state()["buffer"] == prefix + suffix
+        key("z", cmd=True)
+        assert state()["buffer"] == prefix
 
     # Select across paragraph boundaries with the same keyboard target.
     replace("甲段\n\n**乙段**\n丙段")
@@ -125,7 +154,9 @@ def probe(directory, screenshot):
     assert state()["buffer"] == "9. 第九项\n10. 现有项"
 
     for previous, suffix in [
-        ("## 1.9 核对配置", "\n## 1.10 "),
+        ("# 1. 你好", "\n"),
+        ("## 1.9 核对配置", "\n"),
+        ("# 2. ", "\n"),
         ("- [x] 已完成", "\n- [ ] "),
         ("> 引用", "\n> "),
         ("```sh\n1. echo example", "\n"),
@@ -134,6 +165,49 @@ def probe(directory, screenshot):
         replace(previous)
         key("return")
         assert state()["buffer"] == previous + suffix, state()
+
+    source = "# 1. 你好"
+    replace(source)
+    key("return")
+    assert call("/text_input", {"text": "正文"})["ok"]
+    key("return")
+    assert call("/text_input", {"text": "#"})["ok"]
+    assert state()["buffer"] == source + "\n正文\n#"
+    assert call("/text_input", {"text": " "})["ok"]
+    assert state()["buffer"] == source + "\n正文\n# 2. "
+    assert call("/text_input", {"text": "我也是"})["ok"]
+    wait_for_line("2. 我也是")
+    key("return")
+    wait_for_line("2. 我也是")
+    assert state()["buffer"] == source + "\n正文\n# 2. 我也是\n"
+
+    for previous, prefix, numbered in [
+        ("## 1.9 核对配置", "##", " 1.10 "),
+        ("## 1.9 核对配置", "#", " "),
+        ("# 第一章\n## 1.9 核对配置\n# 第二章", "##", " "),
+        ("# 概览", "#", " "),
+        ("# 1. 概览\n```sh\n# 9. 字面内容\n```", "#", " 2. "),
+        ("# 1. 概览\n```sh", "#", " "),
+    ]:
+        replace(previous)
+        key("return")
+        assert call("/text_input", {"text": prefix})["ok"]
+        assert call("/text_input", {"text": " "})["ok"]
+        assert state()["buffer"] == previous + "\n" + prefix + numbered, state()
+        key("z", cmd=True)
+        assert state()["buffer"] == previous + "\n" + prefix, state()
+
+    replace("[] 待核对\n[x] 已核对")
+    wait_for_line("☐ 待核对")
+    wait_for_line("☑ 已核对")
+    key("return")
+    assert state()["buffer"] == "[] 待核对\n[x] 已核对\n[ ] "
+
+    # Fenced code keeps its original text, indentation and blank line.
+    replace("~~~sh\n  echo first\n\n  echo second\n~~~")
+    key("up", cmd=True)
+    wait_for_line("  echo first")
+    assert state()["buffer"] == "~~~sh\n  echo first\n\n  echo second\n~~~"
 
     long_line = "证书配置更新后的验证与回滚。" * 60
     replace(long_line)

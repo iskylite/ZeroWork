@@ -1830,7 +1830,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     state.connection_focused = (try ui.hooks.useFocusState(scope, cx, disconnect)).focused;
     for (menu_names, menu_ids, menu_icons, 0..) |name, id, icon, index| {
         const action = try cx.bindState(MenuAction, .{ .view = state, .menu = @fromBackingInt(@intCast(index)) });
-        var popup = try ui.widgets.Popover(.{ .trigger = .manual, .open = state.open[index], .position = @as(ui.widgets.popover.PopoverPosition, if (index >= 3) .bottom_end else .bottom_start), .anchor = if (index >= 3) ui.widgets.popover.Anchor{ .virtual = .{ .ctx = action, .getRect = MenuAction.anchor } } else null, .width = if (index == 4) S.boot_width else S.popup_width, .max_width = if (index == 4) S.boot_width else S.popup_width, .constrain_width_to_viewport = true, .max_height = @as(f32, 730), .viewport_padding = @as(f32, 12), .shift_main_axis = true, .offset = .{ .static = 8 }, .size_policy = .fit_content, .enter_transition = .fade, .exit_transition = .fade, .on_open_change = cx.on(MenuAction, action, MenuAction.changed) }).mount(scope, cx);
+        var popup = try ui.widgets.Popover(.{ .group = @import("../../ui/floating_surface.zig").workspace_popup, .trigger = .manual, .open = state.open[index], .position = @as(ui.widgets.popover.PopoverPosition, if (index >= 3) .bottom_end else .bottom_start), .anchor = if (index >= 3) ui.widgets.popover.Anchor{ .virtual = .{ .ctx = action, .getRect = MenuAction.anchor } } else null, .width = if (index == 4) S.boot_width else S.popup_width, .max_width = if (index == 4) S.boot_width else S.popup_width, .constrain_width_to_viewport = true, .max_height = @as(f32, 730), .viewport_padding = @as(f32, 12), .shift_main_axis = true, .offset = .{ .static = 8 }, .size_policy = .fit_content, .enter_transition = .fade, .exit_transition = .fade, .on_open_change = cx.on(MenuAction, action, MenuAction.changed) }).mount(scope, cx);
         popup.chrome.setStyleInline(cx.allocator, S.popup());
         popup.chrome.meta.ownership.meta.test_id = try scopedId(scope, id, ".popover");
         // This vendor's fit_or_scroll fixes its height to max_height. Keep the
@@ -1866,7 +1866,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
         try head.appendChild(cx.allocator, close);
         try mountMenu(state, @fromBackingInt(@intCast(index)), popup);
     }
-    const more = try ui.widgets.Popover(.{ .trigger = .manual, .open = state.more_open.?, .position = .bottom_end, .width = @as(f32, 152), .constrain_width_to_viewport = true, .viewport_padding = @as(f32, 12), .offset = .{ .static = 8 }, .size_policy = .fit_content, .enter_transition = .fade, .exit_transition = .fade, .on_open_change = cx.on(View, state, MoreAction.changed) }).mount(scope, cx);
+    const more = try ui.widgets.Popover(.{ .group = @import("../../ui/floating_surface.zig").workspace_popup, .trigger = .manual, .open = state.more_open.?, .position = .bottom_end, .width = @as(f32, 152), .constrain_width_to_viewport = true, .viewport_padding = @as(f32, 12), .offset = .{ .static = 8 }, .size_policy = .fit_content, .enter_transition = .fade, .exit_transition = .fade, .on_open_change = cx.on(View, state, MoreAction.changed) }).mount(scope, cx);
     state.more = more;
     more.chrome.meta.ownership.meta.test_id = "bmc.more.popover";
     var more_popup_style = S.popup();

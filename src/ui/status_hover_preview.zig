@@ -116,9 +116,9 @@ pub const Preview = struct {
             if (!pinned.open.peek()) self.group.pinned = null;
         }
         const vetoed = if (self.hover_veto) |veto| veto.blocked(veto.context) else false;
-        if (inside and vetoed) {
-            // The action leads to a sticky popover this frame; wait for a real
-            // click instead of auto-invoking it, and don't re-arm on leave.
+        const peer_open = !shown and self.cx.overlay_stack.hasGroup(@import("floating_surface.zig").workspace_popup);
+        if (inside and (vetoed or peer_open)) {
+            // Keep the preview suppressed until the pointer leaves the trigger.
             self.suppressed = true;
             self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
             return .done;

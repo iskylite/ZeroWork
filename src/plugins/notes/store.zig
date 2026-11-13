@@ -276,12 +276,14 @@ pub const Store = struct {
         const library = try self.readLibrary(self.allocator, directory, library_id);
         defer library.deinit();
         try requireVisibleFolder(library.value, folder_id);
+        const created_at = self.now();
         const note: model.Note = .{
             .id = model.NoteId.generate(),
             .library_id = library_id,
             .folder_id = folder_id,
             .title = title,
-            .updated_at = self.now(),
+            .created_at = created_at,
+            .updated_at = created_at,
         };
         const documents = try ensureDir(self.io, directory, documents_dir, false);
         defer documents.close(self.io);
@@ -334,9 +336,17 @@ pub const Store = struct {
         return ids.toOwnedSlice(a);
     }
 
-    /// Controller-issued writes use the last committed revision. Lock commits
-    /// the full draft together with the protected state in the same record.
     pub fn changeNote(self: *Store, key: model.NoteKey, expected_revision: u64, change: NoteChange) !u64 {
+        return (try self.commitNote(key, expected_revision, change)).revision;
+    }
+
+    pub const NoteCommit = struct {
+        revision: u64,
+        timestamps: model.Timestamps,
+    };
+
+    /// Lock commits the full draft and protected state in the same record.
+    pub fn commitNote(self: *Store, key: model.NoteKey, expected_revision: u64, change: NoteChange) !NoteCommit {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         const directory = try self.openLibrary(key.library_id);
@@ -361,12 +371,12 @@ pub const Store = struct {
                 note.read_only = change == .lock;
             },
             .unlock => {
-                if (!note.read_only) return note.revision;
+                if (!note.read_only) return .{ .revision = note.revision, .timestamps = note.timestamps() };
                 note.read_only = false;
             },
             .move => |folder_id| {
                 try requireVisibleFolder(library.value, folder_id);
-                if (std.meta.eql(note.folder_id, folder_id)) return note.revision;
+                if (std.meta.eql(note.folder_id, folder_id)) return .{ .revision = note.revision, .timestamps = note.timestamps() };
                 note.folder_id = folder_id;
             },
             .delete => note.deleted_at = self.now(),
@@ -376,6 +386,7 @@ pub const Store = struct {
                 note.deleted_at = null;
             },
         }
+        note.created_at = note.timestamps().created_at;
         note.revision = try identity.advance(note.revision);
         note.updated_at = self.now();
         try note.validate(library.value);
@@ -383,7 +394,7 @@ pub const Store = struct {
         const query_revision = try self.nextDocumentRevision(key.library_id);
         try self.writeRecord(documents, &filename, note.*, max_note_bytes, true);
         self.documentCommitted(key, query_revision);
-        return note.revision;
+        return .{ .revision = note.revision, .timestamps = note.timestamps() };
     }
 
     /// Capture only the caller's current scope. Callers allocate in a query

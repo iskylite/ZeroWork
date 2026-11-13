@@ -1080,13 +1080,36 @@ static NSString * const ZenitInternalDragType = @"dev.zenit.internal-drag";
 }
 
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
+    id wrapper = wrapperForWindow(self.window);
+    const NSRange marked = self.markedDocumentRange;
+    const BOOL queriesPreedit = self.hasMarkedText && marked.location != NSNotFound &&
+        (range.location == NSNotFound ||
+         (range.location >= marked.location && range.location - marked.location <= marked.length));
+    // Overlay preedit is absent from the committed text model. Its offsets
+    // can also be valid document offsets, but refer to a different row.
+    if (queriesPreedit && [[wrapper valueForKey:@"hasImeCursorRect"] boolValue]) {
+        if (actualRange) {
+            *actualRange = range.location == NSNotFound
+                ? self.selectedRange
+                : NSMakeRange(range.location, MIN(range.length, NSMaxRange(marked) - range.location));
+        }
+        return zenitLogicalScreenRect(wrapper,
+            [[wrapper valueForKey:@"imeCursorX"] floatValue],
+            [[wrapper valueForKey:@"imeCursorY"] floatValue],
+            [[wrapper valueForKey:@"imeCursorWidth"] floatValue],
+            [[wrapper valueForKey:@"imeCursorHeight"] floatValue]);
+    }
+
     const uint32_t wid = zenitA11yWindowIdForView(self);
-    uint64_t start64 = range.location == NSNotFound
+    // The first marked update can arrive before the editor paints a caret.
+    // Use the insertion point until its composed geometry is available.
+    const NSRange documentRange = queriesPreedit ? NSMakeRange(marked.location, 0) : range;
+    uint64_t start64 = documentRange.location == NSNotFound
         ? ZENIT_TEXT_OFFSET_INVALID
-        : zenit_text_input_utf8_for_utf16(wid, range.location);
-    uint64_t end64 = range.location == NSNotFound
+        : zenit_text_input_utf8_for_utf16(wid, documentRange.location);
+    uint64_t end64 = documentRange.location == NSNotFound
         ? ZENIT_TEXT_OFFSET_INVALID
-        : zenit_text_input_utf8_for_utf16(wid, NSMaxRange(range));
+        : zenit_text_input_utf8_for_utf16(wid, NSMaxRange(documentRange));
     // IMEs may query an unspecified range before/while composing. A terminal
     // has an empty document but a real insertion point; use that live caret
     // instead of a stale editor rectangle or the whole view's bottom edge.
@@ -1117,7 +1140,6 @@ static NSString * const ZenitInternalDragType = @"dev.zenit.internal-drag";
         return zenitLogicalScreenRect(wrapperForWindow(self.window),live_x,live_y,live_w>0?live_w:1,h);
     }
     if (actualRange) *actualRange = range;
-    id wrapper = wrapperForWindow(self.window);
     if (wrapper &&
         [[wrapper valueForKey:@"hasImeCursorRect"] boolValue] &&
         [wrapper valueForKey:@"window"] &&
@@ -2925,7 +2947,7 @@ typedef struct {
 @end
 
 typedef int (*ZenitEmbeddedHostKey)(void *context, uint16_t keycode, uint32_t modifiers);
-typedef void (*ZenitEmbeddedFocusEntered)(void *context);
+typedef void (*ZenitEmbeddedInputCallback)(void *context);
 
 @interface WindowWrapper : NSObject <NSWindowDelegate> {
 @public
@@ -2938,8 +2960,9 @@ typedef void (*ZenitEmbeddedFocusEntered)(void *context);
 @property (nonatomic, strong) MetalView *metalView;
 @property (nonatomic, weak) NSView *embeddedInputView;
 @property (nonatomic) ZenitEmbeddedHostKey embeddedHostKey;
-@property (nonatomic) ZenitEmbeddedFocusEntered embeddedFocusEntered;
-@property (nonatomic) void *embeddedFocusContext;
+@property (nonatomic) ZenitEmbeddedInputCallback embeddedFocusEntered;
+@property (nonatomic) ZenitEmbeddedInputCallback embeddedLeftPress;
+@property (nonatomic) void *embeddedInputContext;
 @property (nonatomic) NSUInteger embeddedMouseButtons;
 @property (nonatomic, weak) NSView *embeddedMouseGestureView;
 @property (nonatomic, strong) ZenitFullscreenHeaderHost *fullscreenHeader;
@@ -4089,7 +4112,8 @@ static id zenitEmbeddedAccessibilityHitTest(NSView *host, NSPoint point) {
 // The explicit view must be attached directly to the registered window's Metal
 // content view. Unregistering an old view cannot revoke its replacement.
 int macos_set_embedded_input_view(void *view_ptr, int enabled, ZenitEmbeddedHostKey hostKey,
-                                 ZenitEmbeddedFocusEntered focusEntered, void *focusContext) {
+                                 ZenitEmbeddedInputCallback focusEntered, ZenitEmbeddedInputCallback leftPress,
+                                 void *inputContext) {
     if (!NSThread.isMainThread || !view_ptr) return 0;
     NSView *view = (__bridge NSView *)view_ptr;
     WindowWrapper *wrapper = wrapperForWindow(view.window);
@@ -4101,14 +4125,16 @@ int macos_set_embedded_input_view(void *view_ptr, int enabled, ZenitEmbeddedHost
         wrapper.embeddedInputView = view;
         wrapper.embeddedHostKey = hostKey;
         wrapper.embeddedFocusEntered = focusEntered;
-        wrapper.embeddedFocusContext = focusContext;
+        wrapper.embeddedLeftPress = leftPress;
+        wrapper.embeddedInputContext = inputContext;
     } else if (wrapper.embeddedInputView == view) {
         changed = YES;
         if (zenitEmbeddedHasFocus(wrapper)) [wrapper.window makeFirstResponder:wrapper.metalView];
         wrapper.embeddedInputView = nil;
         wrapper.embeddedHostKey = NULL;
         wrapper.embeddedFocusEntered = NULL;
-        wrapper.embeddedFocusContext = NULL;
+        wrapper.embeddedLeftPress = NULL;
+        wrapper.embeddedInputContext = NULL;
         if (wrapper.embeddedMouseGestureView == view) wrapper.embeddedMouseGestureView = nil;
     }
     if (changed) NSAccessibilityPostNotification(wrapper.window, NSAccessibilityLayoutChangedNotification);
@@ -4158,9 +4184,12 @@ static BOOL zenitDispatchEmbeddedPointer(WindowWrapper *wrapper, NSEvent *event)
         }
         const BOOL mayTransferFocus = down && !zenitEmbeddedHasFocus(wrapper);
         [NSApp sendEvent:event];
+        if (event.type == NSEventTypeLeftMouseDown && wrapper.embeddedInputView == view && wrapper.embeddedLeftPress) {
+            wrapper.embeddedLeftPress(wrapper.embeddedInputContext);
+        }
         if (mayTransferFocus && wrapper.embeddedInputView == view &&
             zenitEmbeddedHasFocus(wrapper) && wrapper.embeddedFocusEntered) {
-            wrapper.embeddedFocusEntered(wrapper.embeddedFocusContext);
+            wrapper.embeddedFocusEntered(wrapper.embeddedInputContext);
         }
         return YES;
     }
@@ -6388,7 +6417,7 @@ static void pumpAppEventsWithTimeout(uint32_t timeout_ms) {
                 }
 
                 if (zenitEmbeddedHasFocus(target)) {
-                    if (target.embeddedHostKey && target.embeddedHostKey(target.embeddedFocusContext, event.keyCode, (uint32_t)event.modifierFlags)) {
+                    if (target.embeddedHostKey && target.embeddedHostKey(target.embeddedInputContext, event.keyCode, (uint32_t)event.modifierFlags)) {
                         enqueueKeyEvent(target, event);
                     } else {
                         [NSApp sendEvent:event];

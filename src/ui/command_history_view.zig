@@ -10,6 +10,7 @@ const S = @import("command_history_styles.zig");
 const clock = @import("../platform/realtime.zig");
 
 pub const Mode = enum { closed, preview, pinned };
+const floating_surface = @import("floating_surface.zig");
 pub const View = struct {
     workspace_chrome: bool = false,
     unavailable: *ui.Signal(bool),
@@ -17,6 +18,7 @@ pub const View = struct {
     scope: *ui.Scope,
     workspace: *Workspace,
     root: *ui.Node,
+    floating: *floating_surface.Surface,
     title: *ui.Node,
     count: *ui.Node,
     scroll: ui.widgets.ScrollAreaResult,
@@ -47,7 +49,7 @@ pub const View = struct {
     };
     const Row = struct { root: *ui.Node, card: *ui.Node, state: *ui.Node, command: *ui.Node, meta: *ui.Node, tip: *ui.Node, tip_open: ?*ui.Signal(bool), action: *Action };
 
-    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, workspace: *Workspace, ssh_bar: *ui.Node, local_bar: *ui.Node) !*View {
+    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, workspace: *Workspace, parent: *ui.Node, ssh_bar: *ui.Node, local_bar: *ui.Node) !*View {
         const self = try cx.allocator.create(View);
         const root = try ui.box(cx, S.panel(), .{});
         @import("floating_input.zig").protect(cx, root);
@@ -78,11 +80,12 @@ pub const View = struct {
         empty.meta.ownership.meta.test_id = "terminal.command-history.empty";
         empty.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 70 }, .padding = .{ .top = 18 } });
         try root.appendChild(cx.allocator, empty);
-        self.* = .{ .cx = cx, .scope = scope, .workspace = workspace, .root = root, .title = title, .count = count, .scroll = scroll, .empty = empty, .virtual = list.state, .buttons = undefined, .colors = S.theme.current(), .unavailable = try scope.createSignal(bool, true) };
+        self.* = .{ .cx = cx, .scope = scope, .workspace = workspace, .root = root, .floating = undefined, .title = title, .count = count, .scroll = scroll, .empty = empty, .virtual = list.state, .buttons = undefined, .colors = S.theme.current(), .unavailable = try scope.createSignal(bool, true) };
         try scope.onCleanup(View, self, cleanup);
         self.buttons = .{ try self.button(ssh_bar, "status.command-history"), try self.button(local_bar, "local.status.command-history") };
-        try cx.root.?.appendChild(cx.allocator, root);
+        try parent.appendChild(cx.allocator, root);
         try cx.addAfterLayoutHook(self, tick);
+        self.floating = try floating_surface.Surface.mount(cx, scope, root, .{ .close = cx.on(View, self, hide), .group = floating_surface.workspace_popup });
         return self;
     }
     fn button(self: *View, bar: *ui.Node, id: []const u8) !*ui.Node {
@@ -101,10 +104,14 @@ pub const View = struct {
         return &tab.terminal.?;
     }
     pub fn show(self: *View, enabled: bool) void {
-        if (enabled and self.terminal() == null) return;
-        if (enabled and self.mode == .closed) self.cx.dispatcher.cancelScrollGesture();
+        if (enabled) {
+            const terminal_node = self.terminal() orelse return;
+            if (self.mode == .closed) self.cx.dispatcher.cancelScrollGesture();
+            terminal_node.refreshCommandHistory(true);
+        }
         self.mode = if (enabled) .pinned else .closed;
-        if (enabled) if (self.terminal()) |terminal_node| terminal_node.refreshCommandHistory(true);
+        self.root.setDisplay(if (enabled) .flex else .none);
+        if (enabled) self.floating.activate() else self.floating.deactivate();
         self.suppressed = !enabled;
         self.leave_ns = null;
         self.cx.requestRedraw();
@@ -131,7 +138,8 @@ pub const View = struct {
         for (self.buttons, 0..) |button_node, index| button_node.setDisplay(if (active != null or (self.workspace_chrome and index == 0)) .flex else .none);
         if (active == null) self.mode = .closed;
         const inside = self.contains(self.buttons[0]) or self.contains(self.buttons[1]);
-        if (!inside) self.suppressed = false;
+        const popup_open = self.mode == .closed and self.cx.overlay_stack.hasGroup(floating_surface.workspace_popup);
+        if (!inside or popup_open) self.suppressed = inside;
         if (active != null and inside and self.mode == .closed and !self.suppressed) self.mode = .preview;
         if (self.mode == .preview) {
             if (inside or self.contains(self.root)) self.leave_ns = null else {
@@ -175,7 +183,8 @@ pub const View = struct {
         const trigger = self.buttons[0].globalRect();
         const left = if (self.workspace_chrome) std.math.clamp(trigger.x + trigger.w / 2 - w / 2, 8, @max(8, self.cx.viewport.width - w - 8)) else pane.x + pane.w - w - 12;
         const top = if (self.workspace_chrome) trigger.y + trigger.h + 6 else pane.y + pane.h - h - 12;
-        self.root.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = left }, .top = .{ .px = top } }, .width = .{ .px = w }, .height = .{ .px = h } });
+        const parent = self.root.parent.?.globalRect();
+        self.root.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = left - parent.x }, .top = .{ .px = top - parent.y } }, .width = .{ .px = w }, .height = .{ .px = h } });
     }
     fn clearRecords(self: *View) void {
         for (self.records.items) |command| if (command.command) |text| self.cx.allocator.free(text);

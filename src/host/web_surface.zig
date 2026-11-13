@@ -27,9 +27,10 @@ const Rect = extern struct {
 /// Return nonzero to keep a keyboard shortcut in Zenit instead of the page.
 /// This callback only classifies the event. Zenit later dispatches it normally.
 pub const HostKey = *const fn (context: ?*anyopaque, keycode: u16, modifiers: u32) callconv(.c) c_int;
-const FocusCallback = *const fn (context: ?*anyopaque) callconv(.c) void;
-pub const FocusEntered = struct {
-    callback: FocusCallback,
+const InputCallback = *const fn (context: ?*anyopaque) callconv(.c) void;
+pub const InputCallbacks = struct {
+    focus_entered: InputCallback,
+    left_press: InputCallback,
     context: *anyopaque,
 };
 pub const ChangeCallback = *const fn () callconv(.c) void;
@@ -58,7 +59,7 @@ extern fn zw_web_surface_create() ?*NativeSurface;
 extern fn zw_web_surface_create_proxied(u16, [*]const u8, usize, [*]const u8, usize) ?*NativeSurface;
 extern fn zw_web_surface_destroy(*NativeSurface) void;
 extern fn zw_web_surface_set_change_callback(*NativeSurface, ?ChangeCallback) void;
-extern fn zw_web_surface_sync(*NativeSurface, *anyopaque, Rect, Rect, [*]const Rect, usize, c_int, ?HostKey, ?FocusCallback, ?*anyopaque) c_int;
+extern fn zw_web_surface_sync(*NativeSurface, *anyopaque, Rect, Rect, [*]const Rect, usize, c_int, ?HostKey, ?InputCallback, ?InputCallback, ?*anyopaque) c_int;
 extern fn zw_web_surface_detach(*NativeSurface) void;
 extern fn zw_web_surface_release_focus(*NativeSurface) void;
 extern fn zw_web_surface_navigate(*NativeSurface, [*]const u8, usize) c_int;
@@ -136,7 +137,7 @@ pub const Layout = struct {
     occlusions: []const Rect = &.{},
     visible: bool,
     host_key: ?HostKey = null,
-    focus_entered: ?FocusEntered = null,
+    input: ?InputCallbacks = null,
 };
 
 pub const Occlusion = Rect;
@@ -211,8 +212,9 @@ pub const Surface = struct {
             layout.occlusions.len,
             @intFromBool(layout.visible),
             layout.host_key,
-            if (layout.focus_entered) |focus| focus.callback else null,
-            if (layout.focus_entered) |focus| focus.context else null,
+            if (layout.input) |input| input.focus_entered else null,
+            if (layout.input) |input| input.left_press else null,
+            if (layout.input) |input| input.context else null,
         ) == 0) return error.WebSurfaceMountFailed;
     }
 

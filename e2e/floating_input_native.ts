@@ -2,7 +2,7 @@
  * node e2e/floating_input_native.ts BINARY OUTPUT_DIR
  */
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {execFileSync,spawn} from 'node:child_process';
 import {mkdir,mkdtemp,open,readFile,writeFile,rm,realpath} from 'node:fs/promises';
 import {join} from 'node:path';
 import * as h from '../vendor/zenit/e2e/client.ts';
@@ -13,11 +13,22 @@ await writeFile(join(shell,'.zshrc'),"PS1='audit%# '\nbindkey -e\n");
 await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\n');
 const logPath=join(out,'app.log'),log=await open(logPath,'w');
 const app=spawn(process.argv[2],[],{env:{...process.env,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZDOTDIR:shell,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1',ZENIT_DEVTOOLS_HIT_DEBUG:'1'},stdio:['ignore',log.fd,log.fd]});
-const ended=new Promise(r=>app.once('close',r));const report={status:'running',cases:[]};
+const ended=new Promise(r=>app.once('close',(code,signal)=>r({code,signal})));
+const report={status:'running',cases:[]};
 const shown=n=>n.visible!==false&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0;
-const vis=id=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,10000);
+const vis=id=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,10000).catch(error=>{throw new Error('Waiting for '+id,{cause:error});});
 const hidden=id=>h.waitFor(async()=>!(await h.query(id)).some(shown)||null,10000);
 async function click(id){const n=await vis(id);await h.clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2);await h.sleep(130);}
+async function requestQuit(){
+ assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);
+}
+function foregroundTask(pid){
+ let info;
+ try{info=execFileSync('/bin/ps',['-p',String(pid),'-o','pgid=,tpgid=,comm='],{encoding:'utf8'}).trim();}
+ catch(error){if(error.status===1)return false;throw error;}
+ const [group,foreground,command]=info.split(/\s+/);
+ return Number(group)===pid&&Number(foreground)===pid&&command==='/bin/sleep';
+}
 async function trace(name,id,dx=5,dy=8){
  const n=await vis(id),point={x:n.rect.x+dx,y:n.rect.y+dy};
  const offset=(await readFile(logPath,'utf8')).length;
@@ -29,7 +40,9 @@ async function trace(name,id,dx=5,dy=8){
  assert(hits.some(l=>l.includes('pointer_hit=')),name+': pointer hit captured');
  assert(hits.every(l=>!l.includes('test_id=terminal.surface')&&!l.includes('test_id=ai.conversation.viewport')),name+': input must remain in floating surface');
  const wheel=hits.find(l=>l.includes('dispatch_scroll_target='));
- assert(wheel.includes('test_id='+id+' ')||(name==='local-close-scrim'&&wheel.includes('component=Modal ')),name+': wheel must stop on the expected surface');
+ const hitId=name==='local-close-scrim'?'local.close.overlay':id;
+ assert(wheel.includes('test_id='+hitId+' '),name+': wheel must stop on the expected surface');
+ if(name==='local-close-scrim')assert(hits.some(l=>l.includes('pointer_hit=')&&l.includes('test_id='+hitId+' ')),name+': click must hit the scrim');
  const item={name,id,rect:n.rect,point,focus:await h.focused(),lines};report.cases.push(item);
  await h.screenshot(join(out,name+'.png'));await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));
  console.log(name,lines.filter(l=>/pointer_hit=|dispatch_scroll_target=/.test(l)).join('\n'));
@@ -52,14 +65,30 @@ try{
  await trace('settings-card-padding','settings.panel',150,8);await h.clickAt(3,450);await vis('settings.panel');await h.key('escape');await hidden('settings.panel');
  await click('toolbar.notifications');await trace('notifications-header','notifications.history',120,8);await click('notifications.history.close');
  await click('terminal.surface');await h.type_('@');await h.sleep(250);await trace('command-catalogue-header','terminal.commands',100,10);await h.key('escape');await h.key('backspace');
- await h.request('POST','/quit',{});await trace('local-close-header','local.close.confirmation',180,8);
- // This point is in the modal scrim above the isolated terminal.
+ await h.type_("/bin/sh -c 'echo $$ > \"$ZDOTDIR/foreground.pid\"; exec /bin/sleep 120'");
+ await h.key('return');
+ const pid=await h.waitFor(async()=>{
+  const text=await readFile(join(shell,'foreground.pid'),'utf8').catch(error=>{if(error.code==='ENOENT')return '';throw error;});
+  const value=Number(text.trim());
+  return Number.isSafeInteger(value)&&value>1&&foregroundTask(value)?value:null;
+ },10000);
+ report.foregroundPid=pid;
+ await requestQuit();await trace('local-close-header','local.close.confirmation',180,8);
+ // A click on the scrim cancels Quit and leaves the same task in the foreground.
  await trace('local-close-scrim','local.close.confirmation',-210,70);
- // Outside click dismisses this dialog. A repeated window-close request may
- // complete the retained close transaction without showing another dialog.
- await h.request('POST','/quit',{});await h.sleep(700);
- if(app.exitCode===null&&app.signalCode===null)await click('local.close.accept');
- await h.waitFor(()=>app.exitCode!==null||app.signalCode!==null||null,10000);report.exitCode=await ended;assert.equal(report.exitCode,0);
+ await hidden('local.close.confirmation');
+ await h.waitFor(async()=>{
+  const snapshot=await h.request('GET','/zerowork/windows');
+  return snapshot.ok&&snapshot.windows.length===1&&snapshot.windows[0].closing===false||null;
+ },10000);
+ await vis('terminal.surface');
+ assert(foregroundTask(pid),'cancelling Quit preserves the original foreground task');
+ await requestQuit();await vis('local.close.confirmation');await click('local.close.accept');
+ await h.waitFor(()=>app.exitCode!==null||app.signalCode!==null||null,10000);
+ const exit=await ended;
+ report.exitCode=exit.code;
+ assert.deepEqual(exit,{code:0,signal:null});
+ assert.throws(()=>process.kill(pid,0),{code:'ESRCH'},'confirmed Quit releases the original foreground task');
  report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);process.exitCode=1;console.error(e);await h.screenshot(join(out,'failure.png')).catch(()=>{});}
 finally{if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await ended;await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));await rm(iso,{recursive:true,force:true});}

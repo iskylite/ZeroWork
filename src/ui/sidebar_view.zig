@@ -72,7 +72,7 @@ pub const View = struct {
         const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = T.states().hover });
         const host_disabled = try scope.createSignal(bool, actions.bridge.new_host == null);
         const group_disabled = try scope.createSignal(bool, actions.bridge.new_group == null);
-        const new_menu = try ui.widgets.Popover(.{ .trigger = .click, .position = .bottom_start, .close_on_escape = true, .close_on_outside_click = true, .width = new_menu_width, .max_width = new_menu_width, .max_height = @as(f32, 106) }).mount(scope, cx);
+        const new_menu = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .trigger = .click, .position = .bottom_start, .close_on_escape = true, .close_on_outside_click = true, .width = new_menu_width, .max_width = new_menu_width, .max_height = @as(f32, 106) }).mount(scope, cx);
         var new_menu_style = S.menu(106);
         new_menu_style.width = .{ .px = new_menu_width };
         new_menu.content.setStyleInline(cx.allocator, new_menu_style);
@@ -685,7 +685,7 @@ pub const GroupRow = struct {
         const plus = try iconButton(cx, scope, "plus", "组内新建主机", "sidebar.group.new", S.action(24), tint, hover, cx.on(GroupRow, self, GroupRow.newHost), swallowDoubleClick);
         if (bridge.new_host == null) plus.behavior.interaction.focusable = false;
         try actions.appendChild(cx.allocator, plus);
-        const menu = try ui.widgets.Popover(.{ .trigger = .click, .position = .bottom_start, .close_on_escape = true, .close_on_outside_click = true, .width = @as(f32, 258), .max_width = @as(f32, 258), .max_height = @as(f32, 199) }).mount(scope, cx);
+        const menu = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .trigger = .click, .position = .bottom_start, .close_on_escape = true, .close_on_outside_click = true, .width = @as(f32, 258), .max_width = @as(f32, 258), .max_height = @as(f32, 199) }).mount(scope, cx);
         menu.content.setStyleInline(cx.allocator, S.menu(199));
         menu.content.meta.ownership.meta.test_id = "sidebar.group.menu";
         self.menu = menu;
