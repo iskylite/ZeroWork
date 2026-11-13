@@ -34,6 +34,10 @@ pub const Runtime = struct {
     ssh_prompt_ids: ssh_auth.RequestCounter = .{},
     proxy_attempt: ?navigation.RouteAttempt = null,
     proxy_stopping: bool = false,
+    proxy_started_ns: ?i128 = null,
+    proxy_logs: @import("../../proto/ssh/forward_diagnostics.zig").Journal = .{},
+    proxy_uploaded: u64 = 0,
+    proxy_downloaded: u64 = 0,
     surface: ?web.Surface = null,
     page_prompts: ?page_requests.Bridge = null,
     surface_state: ?web.Snapshot = null,
@@ -123,12 +127,14 @@ pub const Runtime = struct {
         if (try self.controller.nextWork()) |work| {
             switch (work) {
                 .connect => |attempt| self.startProxy(attempt) catch |err| {
+                    self.proxy_logs.add("SSH 转发启动失败", self.proxy_started_ns, err);
                     self.path_error = proxyError(err);
                     _ = self.controller.routeFailed(attempt);
                 },
                 .open_get => |request| {
                     self.awaiting_navigation = true;
                     self.page_error = null;
+                    if (self.page_prompts) |*prompts| prompts.tls_error = null;
                     self.surface.?.navigate(request.url) catch |err| {
                         self.awaiting_navigation = false;
                         _ = self.controller.didFail(request.navigation);
@@ -160,6 +166,10 @@ pub const Runtime = struct {
 
     fn startProxy(self: *Runtime, attempt: navigation.RouteAttempt) !void {
         std.debug.assert(self.proxy == null);
+        self.proxy_uploaded = 0;
+        self.proxy_downloaded = 0;
+        self.proxy_started_ns = @import("../../platform/realtime.zig").monotonicNs();
+        self.proxy_logs.add("启动网页 SSH 转发", null, null);
         if (!web.supportsProxy()) return error.WebProxyUnavailable;
         const ctx = self.context orelse return error.HostContextUnavailable;
         var factory = ctx.transports orelse return error.TransportFactoryUnavailable;
@@ -198,13 +208,16 @@ pub const Runtime = struct {
                 var endpoint = proxy.endpoint(self.owner, self.operation) orelse return false;
                 defer std.crypto.secureZero(u8, &endpoint.credentials.username);
                 defer std.crypto.secureZero(u8, &endpoint.credentials.password);
+                self.proxy_logs.add("本地 SOCKS5 开始监听", self.proxy_started_ns, null);
                 self.openSurface(&endpoint) catch |err| {
+                    self.proxy_logs.add("绑定网页代理失败", null, err);
                     self.disconnect(attempt, surfaceError(err));
                     self.destroySurface();
                 };
                 return true;
             },
             .closing, .failed, .closed => {
+                self.proxy_logs.add("SSH 转发已断开", null, state.failure);
                 self.disconnect(attempt, if (state.failure) |err| proxyError(err) else "SSH 转发已断开。");
                 _ = self.cleanupProxy();
                 return true;
@@ -214,6 +227,7 @@ pub const Runtime = struct {
 
     fn requestProxyStop(self: *Runtime) void {
         if (self.proxy) |proxy| {
+            if (!self.proxy_stopping) self.proxy_logs.add("正在释放网页 SSH 转发", null, null);
             proxy.requestStop();
             self.proxy_stopping = true;
         }
@@ -226,6 +240,9 @@ pub const Runtime = struct {
         switch (state.cleanup) {
             .released => {
                 proxy.deinit() catch return .awaiting;
+                self.proxy_uploaded = state.bytes_up;
+                self.proxy_downloaded = state.bytes_down;
+                self.proxy_logs.add("网页 SSH 转发已释放", null, null);
                 self.proxy = null;
                 self.destroyPrompts();
                 self.proxy_attempt = null;
@@ -268,10 +285,14 @@ pub const Runtime = struct {
             try web.Surface.init(self.owner);
         errdefer surface.deinit();
         try surface.setChangeCallback(nativeChanged);
-        self.surface = surface;
         if (self.context) |ctx| if (ctx.challenges) |host| {
             self.page_prompts = page_requests.Bridge.init(self.owner, host, &self.ssh_prompt_ids);
+            if (ctx.trust.tls) |trust| {
+                try surface.enableTlsReview();
+                self.page_prompts.?.tls_context = .{ .trust = trust, .operation = self.operation };
+            }
         };
+        self.surface = surface;
     }
 
     fn destroySurface(self: *Runtime) void {
@@ -300,6 +321,9 @@ pub const Runtime = struct {
         const state = try surface.snapshot();
         var changed = !std.meta.eql(self.surface_state, @as(?web.Snapshot, state));
         if (self.page_prompts) |*prompts| {
+            if (self.surface_state) |previous| {
+                if (previous.navigation_id != state.navigation_id) prompts.tls_error = null;
+            }
             changed = (try prompts.poll(surface)) or changed;
         } else if (try surface.copyRequest()) |incoming| {
             var request = incoming;
@@ -507,12 +531,18 @@ pub const Runtime = struct {
         const items = try copyBookmarks(out, self.bookmark_items);
         const active_view = controller.path == .ready and controller.view_ready;
         const waiting_for_cleanup = controller.path == .idle and self.proxy_stopping;
-        const generic_error: ?[]const u8 = if (controller.page == .failed) "网页加载失败。" else null;
+        const tls_error = if (self.page_prompts) |prompts| prompts.tls_error else null;
+        const generic_error: ?[]const u8 = if (controller.page == .failed)
+            if (state != null and state.?.tls_failed) tls_error orelse "无法验证网站证书，当前连接无法继续。" else "网页加载失败。"
+        else
+            null;
         const cleanup_unknown = waiting_for_cleanup and self.closeReceipt() == .unknown;
         const error_message: ?[]const u8 = if (cleanup_unknown)
             "旧 SSH 转发仍在清理，请重试。"
         else
             self.path_error orelse self.page_error orelse generic_error;
+        const proxy = if (self.proxy) |value| value.snapshot() else null;
+        var log_buffer: [4096]u8 = undefined;
         return .{
             .arena = arena,
             .path = if (cleanup_unknown) .disconnected else if (waiting_for_cleanup) .connecting else controller.path,
@@ -520,7 +550,12 @@ pub const Runtime = struct {
             .reset_warning = controller.reset_warning,
             .login_notice = controller.show_login_notice and controller.path == .ready and controller.page == .displayed,
             .route_mode = controller.route,
-            .forwarding = self.forwarding(),
+            .forwarding = self.forwarding(proxy),
+            .forwarding_connections = if (proxy) |value| value.counts.active else 0,
+            .forwarding_uploaded = if (proxy) |value| value.bytes_up else self.proxy_uploaded,
+            .forwarding_downloaded = if (proxy) |value| value.bytes_down else self.proxy_downloaded,
+            .forwarding_error = self.path_error orelse "",
+            .forwarding_logs = try out.dupe(u8, self.proxy_logs.format(&log_buffer)),
             .url_mode = self.url_mode,
             .current_url = current_url,
             .pending_url = pending_url,
@@ -536,10 +571,9 @@ pub const Runtime = struct {
         };
     }
 
-    fn forwarding(self: *const Runtime) ?page_api.Forwarding {
+    fn forwarding(self: *const Runtime, proxy: ?proxy_api.Snapshot) ?page_api.Forwarding {
         if (self.controller.route != .ssh) return null;
-        if (self.proxy) |proxy| {
-            const state = proxy.snapshot();
+        if (proxy) |state| {
             if (state.local_port) |port| return .{ .listening = port };
             if (state.phase == .closing) return .stopping;
             if (state.phase == .failed or state.phase == .closed) return .disconnected;

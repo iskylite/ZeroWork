@@ -56,6 +56,10 @@ async function showForwarding() {
         await h.mouseMove(x + w / 2, y + height / 2);
     }
     await click('status.connection.forward');
+    await find('socks.info');
+    for (const action of ['config', 'control', 'test']) {
+        assert(!(await h.query('socks.info.' + action)).some(visible), action + ' is hidden for Web forwarding');
+    }
 }
 async function json(path: string) {
     return JSON.parse(await readFile(path, 'utf8'));
@@ -133,6 +137,10 @@ try {
         return payload && JSON.parse(JSON.parse(payload)).bookmarks.length === 1 ? true : null;
     }, 12000);
     await capture('direct-web');
+    await showForwarding();
+    await find('socks.info.status', node => content(node).includes('直接连接'));
+    assert(!(await h.query('socks.info.address')).some(visible));
+    await click('socks.info.close');
     stage = 'show the saved web origin in Quick Connect';
     await h.key('p', {cmd: true});
     await fill('quick.query', 'Owned direct web');
@@ -241,8 +249,8 @@ try {
     if (!routedPreset) {
         assert(!(await traffic()).some(event => event.ssh_connection), 'manual route starts on navigation');
         await showForwarding();
-        await find('web.route.popup', node => content(node).includes('SSH 转发未启动'));
-        assert(!(await h.query('web.route.endpoint')).some(visible));
+        await find('socks.info.status', node => content(node).includes('未开启'));
+        assert(!(await h.query('socks.info.address')).some(visible));
         await h.key('escape');
         await fill('web.address', ready.routed);
         await h.key('return');
@@ -262,17 +270,27 @@ try {
     await h.waitFor(async () => !(await h.query('web.state')).some(visible) || null, 12000);
     stage = 'show the actual session listener and update the open panel after disconnect';
     await showForwarding();
-    const popup = await find('web.route.popup', node => content(node).includes('SSH 转发已就绪') && content(node).includes('Owned hop 2'));
+    await find('socks.info.status', node => content(node).includes('正在监听'));
+    await find('socks.info.exit', node => content(node).includes('Owned hop 2'));
+    const popup = await find('socks.info');
     await h.mouseMove(popup.rect.x + popup.rect.w / 2, popup.rect.y + popup.rect.h / 2);
-    const endpoint = content(await find('web.route.endpoint'));
+    const endpoint = content(await find('socks.info.address'));
     const port = endpoint.match(/127\.0\.0\.1:(\d+)/)?.[1];
     assert(port && Number(port) > 0 && !ready.ports.includes(Number(port)));
     const listeners = execFileSync('/usr/sbin/lsof', ['-nP', '-a', '-p', String(app.pid), '-iTCP:' + port, '-sTCP:LISTEN'], {encoding: 'utf8'});
     assert(listeners.includes('127.0.0.1:' + port));
+    await find('socks.info.copy');
+    const statistics = await find('socks.info.statistics', node => /下载 [1-9]/.test(content(node)) && /上传 [1-9]/.test(content(node)));
+    assert(content(statistics).includes('上传'));
     await capture('ssh-forwarding');
+    await click('socks.info.logs');
+    await find('socks.info.logs.content', node => content(node).includes('本地 SOCKS5 开始监听'));
+    await capture('ssh-forwarding-logs');
+    await click('socks.logs.close');
+    await find('socks.info.status', node => content(node).includes('正在监听'));
     await writeFile(join(run, 'drop'), '');
-    await find('web.route.popup', node => content(node).includes('SSH 转发已断开'));
-    assert(!(await h.query('web.route.endpoint')).some(visible));
+    await find('socks.info.status', node => content(node).includes('连接已断开'));
+    assert(!(await h.query('socks.info.address')).some(visible));
     await h.key('escape');
     await capture('ssh-disconnected');
     await click('web.reconnect');
@@ -297,11 +315,56 @@ try {
         assert.equal((await traffic()).filter(event => event.ssh_connection).length, connections);
     }
 
+    async function closeActiveWebTab() {
+        const count = (await webTabs()).length;
+        await h.key('w', {cmd: true});
+        await h.waitFor(async () => (await webTabs()).length === count - 1 || null, 12000);
+    }
+
+    await closeActiveWebTab();
+    async function openTlsTab(name: string, path: string) {
+        await openWebWizard(name);
+        await click('web.editor.mode.preset');
+        await fill('web.editor.url', ready.tls + path);
+        await click('wizard.access.jump');
+        await click('wizard.route.hop.0');
+        await click('wizard.route.option', node => content(node).includes('Owned hop 2'));
+        await click('web.editor.temporary');
+    }
+
+    stage = 'accept and remember a self-signed HTTPS certificate over SSH';
+    await openTlsTab('TLS fixture', '/tls-approved');
+    await find('plugin.challenge.certificate.title', node => content(node).includes('无法验证网站身份'));
+    await find('plugin.challenge.certificate.endpoint', node => content(node).includes(ready.tls));
+    await find('plugin.challenge.certificate.leaf', node => content(node).includes(ready.tls_fingerprints[0]));
+    assert(!(await traffic()).some(event => event.path === '/tls-approved'));
+    await capture('https-certificate-warning');
+    await click('plugin.challenge.certificate.save');
+    await received('/tls-approved');
+    await closeActiveWebTab();
+
+    stage = 'use a remembered certificate in a new web session';
+    await openTlsTab('New TLS fixture', '/tls-remembered');
+    await received('/tls-remembered');
+    assert(!(await h.query('plugin.challenge.modal')).some(visible));
+    await closeActiveWebTab();
+
+    stage = 'require a new decision after certificate rotation';
+    await writeFile(join(run, 'rotate-tls'), '');
+    await openTlsTab('Rotated TLS fixture', '/tls-rotated');
+    await find('plugin.challenge.certificate.title', node => content(node).includes('网站证书已变化'));
+    await find('plugin.challenge.certificate.leaf', node => content(node).includes(ready.tls_fingerprints[1]));
+    assert(!(await traffic()).some(event => event.path === '/tls-rotated'));
+    await capture('https-certificate-changed');
+    await click('plugin.challenge.certificate.reject');
+    await find('web.state', node => content(node).includes('未信任网站证书'));
+    assert(!(await traffic()).some(event => event.path === '/tls-rotated'));
+
     stage = 'quit and release the session';
     await h.request('POST', '/zerowork/windows', {action: 'quit'});
     await Promise.race([appExit, h.sleep(12000)]);
     assert.equal(app.exitCode, 0, 'application should close the native surface and SSH route');
-    console.log(`PASS macOS ${macOSVersion}, SDK ${macOSSDKVersion ?? 'unavailable'}: shared wizard, saved bookmark, JS dialogs and empty/cancelled prompts, HTTP authentication, direct WebKit, two-hop SOCKS5, GET reload/reconnect and normal Quit`);
+    console.log(`PASS macOS ${macOSVersion}, SDK ${macOSSDKVersion ?? 'unavailable'}: shared wizard, saved bookmark, JS dialogs and empty/cancelled prompts, HTTP authentication, direct WebKit, two-hop SOCKS5, GET reload/reconnect, HTTPS certificate review, remembered trust, certificate rotation and normal Quit`);
 } catch (error) {
     if (app?.exitCode === null) await capture('failure').catch(() => {});
     throw new Error(stage, {cause: error});

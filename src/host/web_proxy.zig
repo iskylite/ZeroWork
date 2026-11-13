@@ -20,6 +20,8 @@ pub const Snapshot = struct {
     cleanup: transports.ReleaseReceipt,
     failure: ?anyerror,
     counts: forwarder.Counts,
+    bytes_up: u64,
+    bytes_down: u64,
 };
 
 /// Credentials stay private to the native view's proxy configuration.
@@ -114,6 +116,8 @@ pub const Proxy = struct {
             .cleanup = self.receipt(),
             .failure = failure,
             .counts = self.pump.counts.load(.acquire),
+            .bytes_up = self.pump.bytes_up.load(.monotonic),
+            .bytes_down = self.pump.bytes_down.load(.monotonic),
         };
     }
 

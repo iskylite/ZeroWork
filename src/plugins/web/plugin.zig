@@ -22,6 +22,7 @@ const dependencies = [_]registry.Dependency{
     .{ .id = "host", .major = 2 },
     .{ .id = "host.session_service_access" },
     .{ .id = "host.web_surface" },
+    .{ .id = "host.tls_trust" },
 };
 
 pub const Plugin = struct {

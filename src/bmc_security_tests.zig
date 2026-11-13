@@ -310,6 +310,39 @@ test "BMC persistent trust is durable scoped CAS and blocks changed leaf" {
     try std.testing.expectError(error.InvalidTrustPin, b.load(b.context, key));
 }
 
+test "web TLS pins survive store restart and require review after certificate rotation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const parent = path_buffer[0..try tmp.dir.realPath(std.testing.io, &path_buffer)];
+    const path = try std.fs.path.join(a, &.{ parent, "tls-pins" });
+    defer a.free(path);
+    var disk = try tls.FilePinStore.init(a, path);
+    defer disk.deinit();
+    var verifier: FakeVerifier = .{};
+    {
+        var store = tls.Store.init(a, verifier.verifier(), disk.backend());
+        defer store.deinit();
+        const facade = store.facade(owner);
+        const initial = (try facade.evaluateWeb(op, authority, chain)).challenge;
+        _ = try facade.answer(initial, .persistent);
+    }
+    var store = tls.Store.init(a, verifier.verifier(), disk.backend());
+    defer store.deinit();
+    const facade = store.facade(second_owner);
+    const key = operation(second_owner, 99, 1);
+    try std.testing.expectEqual(.persistent_pin, (try facade.evaluateWeb(key, authority, chain)).trusted.source);
+    try std.testing.expect((try facade.evaluate(key, authority, chain)) == .challenge);
+    try std.testing.expect((try facade.evaluateWeb(key, .{ .host = authority.host, .port = 443 }, chain)) == .challenge);
+    const rotated = &.{ "rotated-leaf", "synthetic-intermediate" };
+    const prompt = (try facade.evaluateWeb(key, authority, rotated)).challenge;
+    try std.testing.expect(prompt.scope_changed);
+    _ = try facade.answer(prompt, .persistent);
+    try std.testing.expectEqual(.persistent_pin, (try facade.evaluateWeb(key, authority, rotated)).trusted.source);
+    verifier.failures.revoked = true;
+    try std.testing.expectEqual(.unexceptable_failure, (try facade.evaluateWeb(key, authority, rotated)).denied.reason);
+}
+
 test "BMC persistent storage failure never grants trust" {
     var verifier: FakeVerifier = .{};
     var store = tls.Store.init(a, verifier.verifier(), null);

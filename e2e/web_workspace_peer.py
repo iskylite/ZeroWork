@@ -6,12 +6,15 @@ Neither peer opens any caller-supplied socket address.
 """
 import argparse
 import base64
+from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import select
 import signal
 import socket
+import ssl
+import subprocess
 import threading
 import time
 
@@ -24,15 +27,19 @@ TARGET = "192.0.2.40"
 
 
 class Hop(Peer):
-    def __init__(self, key, label, destination, outlet, record):
+    def __init__(self, key, label, destination, outlet, record, https_port=None):
         super().__init__(key)
         self.label = label
         self.destination = destination
         self.outlet = outlet
         self.record = record
+        self.https_port = https_port
+        self.channel_outlets = {}
 
     def check_channel_direct_tcpip_request(self, channel_id, origin, destination):
-        allowed = destination == self.destination
+        allowed = destination == self.destination or (self.https_port is not None and destination == (TARGET, self.https_port))
+        if allowed:
+            self.channel_outlets[channel_id] = (LOOPBACK, self.https_port) if destination != self.destination else self.outlet
         self.record({"hop": self.label, "destination": destination, "allowed": allowed})
         return paramiko.OPEN_SUCCEEDED if allowed else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
@@ -46,6 +53,7 @@ class Hop(Peer):
                 break
             self.record({"ssh_connection": self.label})
             with connection:
+                self.channel_outlets.clear()
                 transport = paramiko.Transport(connection)
                 self.transport = transport
                 try:
@@ -54,7 +62,8 @@ class Hop(Peer):
                     while transport.is_active() and not self.finished.is_set():
                         channel = transport.accept(0.05)
                         if channel is not None:
-                            worker = threading.Thread(target=self.echo, args=(channel,), daemon=True)
+                            outlet = self.channel_outlets.pop(channel.get_id())
+                            worker = threading.Thread(target=self.echo, args=(channel, outlet), daemon=True)
                             self.workers.append(worker)
                             worker.start()
                 except (EOFError, OSError, paramiko.SSHException):
@@ -63,10 +72,10 @@ class Hop(Peer):
                     transport.close()
                     self.transport = None
 
-    def echo(self, channel):
+    def echo(self, channel, outlet):
         channel.settimeout(3)
         try:
-            with socket.create_connection(self.outlet, timeout=3) as socket_out:
+            with socket.create_connection(outlet, timeout=3) as socket_out:
                 source_to_target = {channel: socket_out, socket_out: channel}
                 while source_to_target and not self.finished.is_set():
                     ready, _, _ = select.select(list(source_to_target), [], [], 0.1)
@@ -186,12 +195,38 @@ def main():
         with lock, (args.directory / "traffic.jsonl").open("a") as log:
             print(json.dumps(event), file=log)
 
-    with ThreadingHTTPServer((LOOPBACK, 0), Page) as origin:
+    tls_contexts = []
+    fingerprints = []
+    for index in range(2):
+        cert = args.directory / f"web-tls-{index}.pem"
+        key = args.directory / f"web-tls-{index}.key"
+        config = args.directory / "web-tls.cnf"
+        config.write_text("[req]\ndistinguished_name=dn\n[dn]\n[server]\n"
+                          "basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n"
+                          "subjectAltName=IP:127.0.0.1,IP:192.0.2.40\n")
+        subprocess.run(["/usr/bin/openssl", "req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-days", "2", "-sha256", "-subj", f"/CN=ZeroWork Fixture {index}",
+                        "-config", str(config), "-extensions", "server", "-keyout", str(key), "-out", str(cert)],
+                       check=True, capture_output=True)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        tls_contexts.append(context)
+        fingerprints.append(sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest())
+
+    with ThreadingHTTPServer((LOOPBACK, 0), Page) as origin, ThreadingHTTPServer((LOOPBACK, 0), Page) as https:
+        https.record = record
+        https.socket = tls_contexts[0].wrap_socket(https.socket, server_side=True)
+        def rotate(ssl_socket, _hostname, _context):
+            if (args.directory / "rotate-tls").exists():
+                ssl_socket.context = tls_contexts[1]
+        tls_contexts[0].set_servername_callback(rotate)
+        https_thread = threading.Thread(target=https.serve_forever, daemon=True)
+        https_thread.start()
         origin.record = record
         origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
         origin_thread.start()
         port = origin.server_port
-        exit_hop = Hop(paramiko.RSAKey.generate(2048), "exit", (TARGET, port), (LOOPBACK, port), record)
+        exit_hop = Hop(paramiko.RSAKey.generate(2048), "exit", (TARGET, port), (LOOPBACK, port), record, https.server_port)
         entry = Hop(paramiko.RSAKey.generate(2048), "entry", (LOOPBACK, exit_hop.port), (LOOPBACK, exit_hop.port), record)
         hops = (entry, exit_hop)
         for hop in hops:
@@ -199,6 +234,8 @@ def main():
         try:
             ready = {
                 "direct": f"http://{LOOPBACK}:{port}/direct",
+                "tls": f"https://{TARGET}:{https.server_port}",
+                "tls_fingerprints": fingerprints,
                 "routed": f"http://{TARGET}:{port}/routed",
                 "target": [TARGET, port],
                 "ports": [hop.port for hop in hops],
@@ -215,6 +252,8 @@ def main():
         finally:
             for hop in hops:
                 hop.stop()
+            https.shutdown()
+            https_thread.join()
             origin.shutdown()
             origin_thread.join()
 

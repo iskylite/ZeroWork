@@ -526,7 +526,7 @@ const View = struct {
             },
             .format_inline => |mark| {
                 const input = self.input orelse return;
-                if (self.source_mode) return;
+                if (self.source_mode or input.state.imeIsComposing()) return;
                 const lease = self.lease orelse return;
                 if ((try self.documents.snapshot(lease)).read_only) return;
                 const body = input.state.getText();
@@ -542,12 +542,13 @@ const View = struct {
                 const edit = try editor.toggleInlineMarkEdit(self.cx.allocator, body, sel_start, sel_end, mark);
                 defer self.cx.allocator.free(edit.replacement);
                 try input.state.replaceRangeChecked(edit.start, edit.end, edit.replacement);
+                input.value.?.set(input.state.getText());
                 _ = input.state.setAccessibilitySelection(@intCast(edit.start + edit.sel_start), @intCast(edit.start + edit.sel_end));
                 try self.applyBody(input.state.getText());
             },
             .insert_link => {
                 const input = self.input orelse return;
-                if (self.source_mode) return;
+                if (self.source_mode or input.state.imeIsComposing()) return;
                 const lease = self.lease orelse return;
                 if ((try self.documents.snapshot(lease)).read_only) return;
                 const body = input.state.getText();
@@ -574,6 +575,7 @@ const View = struct {
                 const edit = try editor.insertLinkEdit(self.cx.allocator, body, sel_start, sel_end, url);
                 defer self.cx.allocator.free(edit.replacement);
                 try input.state.replaceRangeChecked(edit.start, edit.end, edit.replacement);
+                input.value.?.set(input.state.getText());
                 _ = input.state.setAccessibilitySelection(@intCast(edit.start + edit.sel_start), @intCast(edit.start + edit.sel_end));
                 try self.applyBody(input.state.getText());
             },
@@ -1654,7 +1656,7 @@ const View = struct {
     }
 
     fn rebuildBody(self: *View) !void {
-        self.syncDocumentTools();
+        defer self.syncDocumentTools();
         try self.updateBreadcrumb();
         const key = self.key orelse {
             const scope = try self.resetBody();
@@ -3839,6 +3841,8 @@ pub fn mount(request: contract.ContentMount, store: *Store, documents: *sessions
             .on_click = cx.on(Click, state, Click.invoke),
         }).mount(scope, cx);
         button.meta.ownership.meta.test_id = spec.id;
+        // Textarea clears its selection on blur, before the click is handled.
+        button.behavior.interaction.pointer_down_focus = .preserve;
         button.setDisplay(.none);
         self.format_buttons[i] = button;
         try toolbar.appendChild(cx.allocator, button);
@@ -4874,6 +4878,140 @@ test "notes renders tables and toggles rendered task checkboxes" {
     try std.testing.expect(view.input != null);
     const cell_source = std.mem.indexOf(u8, body, "| 源码 |").? + 2;
     try std.testing.expectEqual(cell_source, view.input.?.state.cursor.offset);
+}
+
+test "notes keep the original image after typing above it and apply toolbar formatting to the selection" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try Store.init(a, io, temporary.dir);
+    defer store.deinit();
+    var documents = sessions.Sessions.init(a, &store);
+    defer documents.deinit();
+    const library = try store.createLibrary("回归");
+    const note = try store.createNote(library, null, "图片笔记");
+    const other = try store.createNote(library, null, "另一篇笔记");
+    const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" ++
+        "\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
+        "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d" ++
+        "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+    var cancel: assets.CancelToken = .{};
+    const imported = try assets.importBytes(a, &store, library, png, &cancel, .{});
+    const reference = try std.fmt.allocPrint(a, "![图片]({s})", .{imported.relativePath()});
+    defer a.free(reference);
+    const before = try std.mem.concat(a, u8, &.{ "开头\n\n", reference });
+    defer a.free(before);
+    const after = try std.mem.concat(a, u8, &.{ "开头\n你好\n", reference });
+    defer a.free(after);
+    _ = try store.changeNote(note, 1, .{ .save = .{ .title = "图片笔记", .body_md = before } });
+
+    const cx = try ui.Cx.init(a, io);
+    defer cx.deinit();
+    cx.setViewport(1154, 828);
+    try cx.setTestFrameStep(16);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const instance = try mount(.{
+        .cx = cx,
+        .scope = scope,
+        .slot = cx.root.?,
+        .owner = .{ .session_id = @fromBackingInt(1), .generation = 1 },
+        .connection = .{ .protocol_id = "notes", .name = "笔记", .payload_version = 1, .payload = "{}" },
+    }, &store, &documents);
+    defer instance.vtable.unmount(instance.context);
+    const view = from(instance).?;
+    const Raster = struct {
+        fn create(_: *anyopaque, w: u32, h: u32) !u32 {
+            try std.testing.expectEqual(@as(u32, 1), w);
+            try std.testing.expectEqual(@as(u32, 1), h);
+            return 42;
+        }
+        fn update(_: *anyopaque, _: u32, pixels: []const u8) !void {
+            try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, pixels);
+        }
+        fn release(_: *anyopaque, _: u32) void {}
+
+        fn wait(view_: *View) !void {
+            for (0..100) |_| {
+                layoutTestFrames(view_.cx);
+                if (view_.input) |input_| {
+                    for (input_.state.vl_state.?.pool_nodes) |row| {
+                        for (row.children.items) |child| {
+                            if (child.getImage()) |image| {
+                                try std.testing.expectEqual(@as(u32, 42), image.texture_id);
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    for (view_.images.items) |image| {
+                        if (image.node.getImage()) |texture| {
+                            try std.testing.expectEqual(@as(u32, 42), texture.texture_id);
+                            return;
+                        }
+                    }
+                }
+                try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+            }
+            return error.ExpectedRenderedImage;
+        }
+    };
+    view.texture_backend = .{ .context = view, .create = Raster.create, .update = Raster.update, .release = Raster.release };
+    instance.vtable.presentation_changed.?(instance.context, .active);
+    try std.testing.expect(openNote(instance, note));
+    try Raster.wait(view);
+    view.enqueue(.{ .begin_block = .{ .range = view.block_ranges[0], .offset = "开头\n".len } });
+    layoutTestFrames(cx);
+    try Raster.wait(view);
+    const input = view.input orelse return error.ExpectedEditor;
+    const decodes = view.render_counts.decodes;
+    cx.handleImePreedit("nihao", 5);
+    cx.handleImeCommit("你好");
+    layoutTestFrames(cx);
+    try std.testing.expectEqualStrings(after, input.state.getText());
+    try std.testing.expectEqualStrings(after, (try documents.snapshot(view.lease.?)).body_md);
+    try Raster.wait(view);
+    try std.testing.expectEqual(decodes, view.render_counts.decodes);
+
+    cx.handleKeyDown(.z, .{ .super = true });
+    try Raster.wait(view);
+    try std.testing.expectEqualStrings(before, input.state.getText());
+    cx.handleKeyDown(.z, .{ .super = true, .shift = true });
+    try Raster.wait(view);
+    try std.testing.expectEqualStrings(after, input.state.getText());
+
+    // Exercise pointer down/up, since invoking the button directly bypasses blur.
+    try std.testing.expect(input.state.setAccessibilitySelection("开头\n你好".len, "开头\n".len));
+    layoutTestFrames(cx);
+    const button = view.format_buttons[2].globalRect();
+    cx.handleMouseDown(button.x + button.w / 2, button.y + button.h / 2, .{});
+    cx.handleMouseUp(button.x + button.w / 2, button.y + button.h / 2);
+    layoutTestFrames(cx);
+    const formatted = try std.mem.concat(a, u8, &.{ "开头\n~~你好~~\n", reference });
+    defer a.free(formatted);
+    try std.testing.expectEqualStrings(formatted, input.state.getText());
+    try std.testing.expectEqualStrings(formatted, (try documents.snapshot(view.lease.?)).body_md);
+    try std.testing.expectEqual(input.input, cx.focus_manager.getFocused().?);
+    const selection = input.state.cursor.selection().?;
+    try std.testing.expectEqualStrings("你好", input.state.getText()[selection.start..selection.end]);
+    cx.handleKeyDown(.z, .{ .super = true });
+    try std.testing.expectEqualStrings(after, input.state.getText());
+
+    // Leaving the note flushes the draft and releases the editor lease.
+    try std.testing.expect(openNote(instance, other));
+    layoutTestFrames(cx);
+    try std.testing.expectEqual(other, view.key.?);
+    var saved = try store.loadNote(a, note, .active);
+    defer saved.deinit();
+    try std.testing.expectEqualStrings(after, saved.value.body_md);
+    try std.testing.expect(openNote(instance, note));
+    try Raster.wait(view);
+    view.enqueue(.{ .begin_block = .{ .range = view.block_ranges[0], .offset = "开头\n".len } });
+    layoutTestFrames(cx);
+    try Raster.wait(view);
+    try std.testing.expectEqualStrings(after, view.input.?.state.getText());
 }
 
 fn layoutTestFrames(cx: *ui.Cx) void {

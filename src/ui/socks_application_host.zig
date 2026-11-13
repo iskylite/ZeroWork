@@ -430,6 +430,47 @@ pub const Host = struct {
             else => "—",
         };
     }
+    fn rendererForwarding(tab: *const ws.SessionTab) ?@import("../host/plugin_ui_contract.zig").ForwardingStatus {
+        if (tab.closing) return null;
+        const renderer = tab.plugin_renderer orelse return null;
+        const project = renderer.vtable.forwarding_status orelse return null;
+        return project(renderer.context);
+    }
+
+    pub fn hasRendererForwarding(self: *Host) bool {
+        const tab = self.workspace.sessionTab(self.activeSession() orelse return false) orelse return false;
+        return rendererForwarding(tab) != null;
+    }
+
+    fn automaticForwardingData(tab: *const ws.SessionTab, forwarding: @import("../host/plugin_ui_contract.zig").ForwardingStatus) Info.Data {
+        return .{
+            .read_only = true,
+            .configured = forwarding.state != .direct,
+            .state = switch (forwarding.state) {
+                .direct, .idle => .off,
+                .connecting => .connecting,
+                .listening => .running,
+                .stopping => .stopping,
+                .disconnected => .paused,
+            },
+            .status_label = if (forwarding.state == .direct) "直接连接" else null,
+            .intro_label = switch (forwarding.state) {
+                .idle => "打开网页时自动启动转发",
+                .listening => "网页会话正在使用此代理",
+                .disconnected => "可在网页内重新连接",
+                else => null,
+            },
+            .connections = forwarding.connections,
+            .uploaded = forwarding.uploaded,
+            .downloaded = forwarding.downloaded,
+            .error_text = forwarding.error_text,
+            .logs = forwarding.logs,
+            .port = if (forwarding.state == .listening) forwarding.state.listening else 0,
+            .host = tab.titleSlice(),
+            .exit = forwarding.exit,
+        };
+    }
+
     pub fn showInfo(self: *Host) void {
         const info = self.info orelse return;
         self.info_owner = self.activeOwner() orelse return;
@@ -448,7 +489,14 @@ pub const Host = struct {
             self.info_owner = null;
             return;
         }
-        const host = self.configured(self.activeSession() orelse return) orelse return;
+        const legacy = self.activeSession() orelse return;
+        const tab = self.workspace.sessionTab(legacy) orelse return;
+        if (rendererForwarding(tab)) |forwarding| {
+            info.update(automaticForwardingData(tab, forwarding)) catch {};
+            if (forwarding.state == .listening) self.cx.scheduleRedrawAfterNs(250 * std.time.ns_per_ms);
+            return;
+        }
+        const host = self.configured(legacy) orelse return;
         const value = self.activeSnapshot();
         const stats: routes.listener.Stats = if (value) |snapshot| snapshot.stats else .{};
         const exit = if (value) |snapshot| self.backend.exitHost(snapshot.owner) else null;
@@ -489,6 +537,15 @@ pub const Host = struct {
         if (!self.infoOwnerIsCurrent()) {
             if (self.info) |info| info.hide();
             self.info_owner = null;
+            return;
+        }
+        const tab = self.workspace.sessionTab(self.activeSession() orelse return) orelse return;
+        if (rendererForwarding(tab)) |forwarding| {
+            if (action == .copy_export and forwarding.state == .listening) {
+                var buffer: [32]u8 = undefined;
+                const address = std.fmt.bufPrint(&buffer, "127.0.0.1:{d}", .{forwarding.state.listening}) catch return;
+                if (self.info) |info| info.copy_feedback.copy(address);
+            }
             return;
         }
         switch (action) {
@@ -570,8 +627,17 @@ pub const Host = struct {
     }
     pub fn refreshChip(self: *Host) void {
         const label = self.chip_label orelse return;
+        const tab = if (self.activeSession()) |legacy| self.workspace.sessionTab(legacy) else null;
+        const automatic = if (tab) |session_tab| rendererForwarding(session_tab) else null;
         const snapshot = self.activeSnapshot();
-        const state_description: []const u8 = if (snapshot) |value| switch (value.phase) {
+        const state_description: []const u8 = if (automatic) |forwarding| switch (forwarding.state) {
+            .direct => "直接连接",
+            .idle => "未启动",
+            .connecting => "启动中",
+            .listening => "运行中",
+            .stopping => "停止中",
+            .disconnected => "已断开",
+        } else if (snapshot) |value| switch (value.phase) {
             .ready => "运行中",
             .connecting => "启动中",
             .paused => "已暂停",
@@ -587,12 +653,17 @@ pub const Host = struct {
         };
         const colors = @import("app_theme.zig").current();
         const ForwardColors = @import("socks_info_styles.zig");
-        const state_color = (if (snapshot) |value| switch (value.phase) {
+        const state_color = if (automatic) |forwarding| switch (forwarding.state) {
+            .listening => ForwardColors.text(.success),
+            .connecting, .stopping => ForwardColors.text(.warning),
+            .disconnected => ForwardColors.text(.danger),
+            .direct, .idle => colors.fg_2,
+        } else if (snapshot) |value| switch (value.phase) {
             .ready => ForwardColors.text(.success),
             .connecting, .paused, .closing => ForwardColors.text(.warning),
             .failed, .cleanup_unknown => ForwardColors.text(.danger),
             .closed => if (value.failure != null) ForwardColors.text(.danger) else colors.fg_2,
-        } else colors.fg_2);
+        } else colors.fg_2;
         const state_ink = ForwardColors.statusBarInk(state_color);
         label.setTextColor(colors.fg_1);
         if (self.chip) |chip| for (chip.children.items) |child| {

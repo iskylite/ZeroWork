@@ -1,6 +1,7 @@
 //! Byte ranges are derived from Markdown. The editor replaces only the
 //! active range and rebuilds the block boundaries after it leaves that range.
 const std = @import("std");
+const assets = @import("assets.zig");
 
 pub const Kind = enum { text, markdown, raw, image, table };
 
@@ -11,30 +12,6 @@ pub const Block = struct {
 
     pub fn text(self: Block, body: []const u8) []const u8 {
         return body[self.start..self.end];
-    }
-};
-
-const Fence = struct {
-    marker: u8,
-    count: usize,
-
-    fn opening(line: []const u8) ?Fence {
-        const clean = std.mem.trimStart(u8, line, " ");
-        if (line.len - clean.len > 3 or clean.len < 3) return null;
-        const marker = clean[0];
-        if (marker != '`' and marker != '~') return null;
-        var count: usize = 1;
-        while (count < clean.len and clean[count] == marker) count += 1;
-        if (count < 3 or (marker == '`' and std.mem.indexOfScalar(u8, clean[count..], marker) != null)) return null;
-        return .{ .marker = marker, .count = count };
-    }
-
-    fn closes(self: Fence, line: []const u8) bool {
-        const clean = std.mem.trimStart(u8, line, " ");
-        if (line.len - clean.len > 3 or clean.len < self.count) return false;
-        var count: usize = 0;
-        while (count < clean.len and clean[count] == self.marker) count += 1;
-        return count >= self.count and std.mem.trim(u8, clean[count..], " \t\r").len == 0;
     }
 };
 
@@ -137,11 +114,15 @@ fn skipBlankLines(body: []const u8, start: usize) ?usize {
     return null;
 }
 
+fn startsIndependentBlock(line: []const u8) bool {
+    return assets.parseImageLine(line) != null or assets.Fence.opening(line) != null or assets.commentStart(line) != null;
+}
+
 fn readBlock(body: []const u8, start: usize) Block {
     var end = lineEnd(body, start);
     const first = body[start..end];
     var kind: Kind = .text;
-    if (Fence.opening(first)) |fence| {
+    if (assets.Fence.opening(first)) |fence| {
         kind = .raw;
         while (end < body.len) {
             const next = end + 1;
@@ -151,11 +132,16 @@ fn readBlock(body: []const u8, start: usize) Block {
                 break;
             }
         }
+    } else if (assets.commentStart(first)) |continues| {
+        kind = .raw;
+        if (continues) while (end < body.len) {
+            const next = end + 1;
+            end = lineEnd(body, next);
+            if (std.mem.indexOf(u8, body[next..end], "-->") != null) break;
+        };
     } else if (heading(first) != null) {
         kind = .markdown;
-    } else if (std.mem.startsWith(u8, std.mem.trim(u8, first, " \t\r"), "![") and
-        std.mem.endsWith(u8, std.mem.trim(u8, first, " \t\r"), ")"))
-    {
+    } else if (assets.parseImageLine(first) != null) {
         kind = .image;
     } else if (end < body.len and tableHeadLine(first) and
         tableSeparatorLine(body[end + 1 .. lineEnd(body, end + 1)]))
@@ -165,7 +151,7 @@ fn readBlock(body: []const u8, start: usize) Block {
             const next = end + 1;
             const next_end = lineEnd(body, next);
             const line = body[next..next_end];
-            if (blank(line) or std.mem.indexOfScalar(u8, line, '|') == null) break;
+            if (blank(line) or std.mem.indexOfScalar(u8, line, '|') == null or startsIndependentBlock(line)) break;
             end = next_end;
         }
     } else {
@@ -174,7 +160,7 @@ fn readBlock(body: []const u8, start: usize) Block {
             const next = end + 1;
             const next_end = lineEnd(body, next);
             const line = body[next..next_end];
-            if (blank(line) or heading(line) != null or Fence.opening(line) != null) break;
+            if (blank(line) or heading(line) != null or startsIndependentBlock(line)) break;
             if (markdownLine(line)) kind = .markdown;
             end = next_end;
         }
@@ -874,7 +860,8 @@ test "notes blocks preserve UTF-8 byte ranges and fence boundaries" {
 
 test "notes incremental parse agrees with full parsing around fences and separators" {
     const allocator = std.testing.allocator;
-    const original = "\n# heading\nparagraph\n\n```zig\ncode\n```\n\n![image](asset)\n\nlast\n";
+    const original = "\n# heading\nparagraph\n\n```zig\ncode\n```\n\n" ++
+        "![image](assets/" ++ @as([64]u8, @splat('a')) ++ ".png)\n\nlast\n";
     const old_blocks = try blocks(allocator, original);
     defer allocator.free(old_blocks);
     for (0..original.len + 1) |start| {
@@ -889,6 +876,27 @@ test "notes incremental parse agrees with full parsing around fences and separat
             try std.testing.expectEqualSlices(Block, expected, actual);
         }
     }
+}
+
+test "notes recognize standalone local images beside prose and tables but outside opaque blocks" {
+    const a = std.testing.allocator;
+    const path = "assets/" ++ @as([64]u8, @splat('a')) ++ ".png";
+    const image = "![图片 | 说明](" ++ path ++ ")";
+    const prose = "正文\r\n";
+    const fence = "```md\r\n" ++ image ++ "\r\n```\r\n";
+    const comment = "<!--\r\n\r\n" ++ image ++ "\r\n-->\r\n";
+    const table = "| 标题 |\r\n| --- |\r\n| 内容 |\r\n";
+    const body = prose ++ fence ++ comment ++ table ++ image ++ "\r\n下一行";
+    const parsed = try blocks(a, body);
+    defer a.free(parsed);
+    var references = assets.ReferenceIterator.init(body);
+    try std.testing.expectEqualStrings(path, references.next().?.relative_path);
+    try std.testing.expect(references.next() == null);
+    try std.testing.expectEqual(@as(usize, 6), parsed.len);
+    try std.testing.expectEqual(.table, parsed[3].kind);
+    try std.testing.expectEqual(.image, parsed[4].kind);
+    try std.testing.expectEqualStrings(image, std.mem.trimEnd(u8, parsed[4].text(body), "\r"));
+    for (parsed[0..4]) |block| try std.testing.expect(block.kind != .image);
 }
 
 test "notes block matching anchors shifted suffixes and consumes duplicate identities once" {

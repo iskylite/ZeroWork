@@ -73,22 +73,20 @@ pub const ReferenceIterator = struct {
 
     pub fn next(self: *ReferenceIterator) ?ImageLine {
         while (self.lines.next()) |raw| {
-            const trimmed = std.mem.trimStart(u8, raw, " ");
             if (self.fence) |open| {
-                if (raw.len - trimmed.len <= 3 and open.closes(trimmed)) self.fence = null;
+                if (open.closes(raw)) self.fence = null;
                 continue;
             }
             if (self.in_comment) {
                 if (std.mem.indexOf(u8, raw, "-->") != null) self.in_comment = false;
                 continue;
             }
-            if (raw.len - trimmed.len > 3) continue;
-            if (Fence.start(trimmed)) |open| {
+            if (Fence.opening(raw)) |open| {
                 self.fence = open;
                 continue;
             }
-            if (std.mem.startsWith(u8, trimmed, "<!--")) {
-                self.in_comment = std.mem.indexOf(u8, trimmed[4..], "-->") == null;
+            if (commentStart(raw)) |continues| {
+                self.in_comment = continues;
                 continue;
             }
             if (parseImageLine(raw)) |image| return image;
@@ -97,7 +95,15 @@ pub const ReferenceIterator = struct {
     }
 };
 
-const Fence = struct {
+/// Returns whether an HTML comment starting on this line continues onto later
+/// lines, or null if the line does not start a top-level comment.
+pub fn commentStart(raw: []const u8) ?bool {
+    const line = std.mem.trimStart(u8, raw, " ");
+    if (raw.len - line.len > 3 or !std.mem.startsWith(u8, line, "<!--")) return null;
+    return std.mem.indexOf(u8, line[4..], "-->") == null;
+}
+
+pub const Fence = struct {
     marker: u8,
     count: usize,
 
@@ -107,16 +113,19 @@ const Fence = struct {
         return index;
     }
 
-    fn start(line: []const u8) ?Fence {
-        if (line.len < 3 or (line[0] != '`' and line[0] != '~')) return null;
+    pub fn opening(raw: []const u8) ?Fence {
+        const line = std.mem.trimStart(u8, raw, " ");
+        if (raw.len - line.len > 3 or line.len < 3 or (line[0] != '`' and line[0] != '~')) return null;
         const count = run(line, line[0]);
         if (count < 3 or (line[0] == '`' and std.mem.indexOfScalar(u8, line[count..], '`') != null)) return null;
         return .{ .marker = line[0], .count = count };
     }
 
-    fn closes(self: Fence, line: []const u8) bool {
+    pub fn closes(self: Fence, raw: []const u8) bool {
+        const line = std.mem.trimStart(u8, raw, " ");
+        if (raw.len - line.len > 3) return false;
         const count = run(line, self.marker);
-        return count >= self.count and std.mem.trim(u8, line[count..], " \t").len == 0;
+        return count >= self.count and std.mem.trim(u8, line[count..], " \t\r").len == 0;
     }
 };
 

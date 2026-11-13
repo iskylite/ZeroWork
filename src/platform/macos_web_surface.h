@@ -25,6 +25,7 @@ typedef struct {
     int ready;
     int committed;
     int committed_get;
+    int tls_failed;
 } ZWWebSurfaceState;
 
 enum ZWWebRequestKind {
@@ -33,6 +34,7 @@ enum ZWWebRequestKind {
     ZWWebRequestPrompt,
     ZWWebRequestHTTPAuth,
     ZWWebRequestNotice,
+    ZWWebRequestServerTrust,
 };
 
 typedef struct {
@@ -44,6 +46,12 @@ typedef struct {
     char *default_text;
     char *realm;
 } ZWWebRequest;
+
+typedef struct { const uint8_t *data; size_t length; } ZWWebCertificate;
+// The certificate data and hostname are borrowed until the request is retired.
+size_t zw_web_surface_tls_peer(ZWWebSurface *surface, uint64_t token, const char **host,
+    uint16_t *port, ZWWebCertificate *certificates, size_t capacity);
+int zw_web_surface_set_tls_review(ZWWebSurface *surface, int enabled);
 
 // All calls, including destruction, are confined to the AppKit main thread.
 int zw_web_surface_supports_proxy(void);

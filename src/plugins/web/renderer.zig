@@ -586,26 +586,37 @@ const View = struct {
 
     fn showDetails(self: *View) void {
         const anchor = if (self.route_button.isDisplayedInTree()) self.route_button else self.more_button;
-        self.openRouteDetails(anchor);
-    }
-
-    fn showForwardingDetails(raw: *anyopaque, anchor: *ui.Node) void {
-        const self: *View = @ptrCast(@alignCast(raw));
-        self.openRouteDetails(anchor);
-    }
-
-    fn forwardingDetailsOpen(raw: *anyopaque) bool {
-        const self: *View = @ptrCast(@alignCast(raw));
-        return self.active and !self.closed and self.route_open.peek();
-    }
-
-    fn openRouteDetails(self: *View, anchor: *ui.Node) void {
         if (self.closed or !self.active) return;
         self.more_open.set(false);
         self.popup_anchor = anchor;
         self.projectRoute();
         self.route_open.set(true);
         self.request.cx.requestRedraw();
+    }
+
+    fn connectionDetailsOpen(raw: *anyopaque) bool {
+        const self: *View = @ptrCast(@alignCast(raw));
+        return self.active and !self.closed and self.route_open.peek();
+    }
+
+    fn projectForwarding(raw: *anyopaque) contract.ForwardingStatus {
+        const self: *View = @ptrCast(@alignCast(raw));
+        const state = self.snapshot orelse return .{ .state = .idle };
+        return .{
+            .state = if (state.forwarding) |value| switch (value) {
+                .idle => .idle,
+                .connecting => .connecting,
+                .listening => |port| .{ .listening = port },
+                .stopping => .stopping,
+                .disconnected => .disconnected,
+            } else .direct,
+            .exit = if (state.hops.len != 0) state.hops[state.hops.len - 1].name else "",
+            .connections = state.forwarding_connections,
+            .uploaded = state.forwarding_uploaded,
+            .downloaded = state.forwarding_downloaded,
+            .error_text = state.forwarding_error,
+            .logs = state.forwarding_logs,
+        };
     }
 
     fn mutate(self: *View, mutation: books.Mutation) !void {
@@ -822,8 +833,8 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
         .unmount = View.unmount,
         .connection_status = View.status,
         .show_connection_details = View.showDetailsRaw,
-        .show_forwarding_details = View.showForwardingDetails,
-        .forwarding_details_open = View.forwardingDetailsOpen,
+        .connection_details_open = View.connectionDetailsOpen,
+        .forwarding_status = View.projectForwarding,
         .focus_address = View.focusAddressRaw,
     } };
 }

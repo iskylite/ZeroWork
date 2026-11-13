@@ -87,11 +87,11 @@ pub const ChallengeBridge = struct {
                     else
                         try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ challenge.authority.host(), challenge.authority.port });
                     defer self.allocator.free(authority);
-                    const starts = try utcDate(self.allocator, challenge.verification.not_before_unix);
+                    const starts = try tls.utcDate(self.allocator, challenge.verification.not_before_unix);
                     defer self.allocator.free(starts);
-                    const ends = try utcDate(self.allocator, challenge.verification.not_after_unix);
+                    const ends = try tls.utcDate(self.allocator, challenge.verification.not_after_unix);
                     defer self.allocator.free(ends);
-                    const failures = try trustFailures(self.allocator, challenge.verification.failures);
+                    const failures = try tls.describeFailures(self.allocator, challenge.verification.failures);
                     defer self.allocator.free(failures);
                     try host.offer(self.owner, self.request_id, self.owner.generation, .choice, .{
                         .title = "信任 BMC 证书",
@@ -188,48 +188,17 @@ pub const ChallengeBridge = struct {
 
 fn trustMaterial(a: std.mem.Allocator, challenge: tls.Challenge) ![]u8 {
     const verification = challenge.verification;
-    const starts = try utcDate(a, verification.not_before_unix);
+    const starts = try tls.utcDate(a, verification.not_before_unix);
     defer a.free(starts);
-    const ends = try utcDate(a, verification.not_after_unix);
+    const ends = try tls.utcDate(a, verification.not_after_unix);
     defer a.free(ends);
     var material: std.Io.Writer.Allocating = .init(a);
     defer material.deinit();
     try material.writer.print("目标：{s}:{d}\n证书 SHA-256：{s}\n证书链 SHA-256：{s}\nSubject：{s}\nIssuer：{s}\n有效期开始：{s}\n有效期结束：{s}\n验证失败原因：\n", .{ challenge.authority.host(), challenge.authority.port, std.fmt.bytesToHex(verification.leaf_fingerprint, .lower), std.fmt.bytesToHex(verification.chain_fingerprint, .lower), verification.subjectText(), verification.issuerText(), starts, ends });
-    const failures = try trustFailures(a, verification.failures);
+    const failures = try tls.describeFailures(a, verification.failures);
     defer a.free(failures);
     try material.writer.print("{s}\n证书或例外变化：{s}", .{ failures, if (challenge.scope_changed) "是" else "否" });
     return material.toOwnedSlice();
-}
-
-fn trustFailures(a: std.mem.Allocator, failures: tls.FailureSet) ![]u8 {
-    var material: std.Io.Writer.Allocating = .init(a);
-    defer material.deinit();
-    if (failures.untrusted_issuer) try material.writer.writeAll("- 证书颁发者不受信任（可能为自签名证书或未知 CA）\n");
-    if (failures.expired) try material.writer.writeAll("- 证书已过期\n");
-    if (failures.not_yet_valid) try material.writer.writeAll("- 证书尚未生效\n");
-    if (failures.hostname_mismatch) try material.writer.writeAll("- 证书主机名与目标不匹配\n");
-    if (failures.excessive_validity) try material.writer.writeAll("- 证书总有效期超过系统允许上限\n");
-    if (failures.revoked) try material.writer.writeAll("- 证书已被吊销（不允许例外）\n");
-    if (failures.invalid_chain) try material.writer.writeAll("- 证书链无效（不允许例外）\n");
-    if (failures.evaluation_unavailable) try material.writer.writeAll("- 系统证书验证不可用（不允许例外）\n");
-    if (failures.reserved != 0) try material.writer.writeAll("- 未知证书验证失败（不允许例外）\n");
-    if (failures.empty()) try material.writer.writeAll("- 无\n");
-    if (material.written().len != 0 and material.written()[material.written().len - 1] == '\n') material.writer.end -= 1;
-    return material.toOwnedSlice();
-}
-
-fn utcDate(a: std.mem.Allocator, seconds: i64) ![]u8 {
-    // Keep malformed/out-of-range certificate metadata honest. A 400-year
-    // Gregorian cycle lets the unsigned epoch API also format pre-1970 dates.
-    if (seconds < -62135596800 or seconds > 253402300799) return std.fmt.allocPrint(a, "超出可显示的 UTC 日期范围（Unix 秒：{d}）", .{seconds});
-    const cycle_seconds = 146097 * @as(i64, std.time.epoch.secs_per_day);
-    const cycles = if (seconds < 0) @divFloor(seconds, cycle_seconds) else 0;
-    const epoch: std.time.epoch.EpochSeconds = .{ .secs = @intCast(seconds - cycles * cycle_seconds) };
-    const year_day = epoch.getEpochDay().calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day = epoch.getDaySeconds();
-    const year: u16 = @intCast(@as(i64, year_day.year) + cycles * 400);
-    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC", .{ year, @backingInt(month_day.month), month_day.day_index + 1, day.getHoursIntoDay(), day.getMinutesIntoHour(), day.getSecondsIntoMinute() });
 }
 
 pub const Resources = struct { frame_budget: *budgets.Budget, journal: *ledger.Journal, management_policy: svc.ManagementPolicy = .user_approved };

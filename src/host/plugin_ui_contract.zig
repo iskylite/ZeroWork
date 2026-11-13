@@ -158,9 +158,9 @@ pub const RendererInstance = struct {
         /// Open the renderer's existing connection diagnostics for the shared
         /// status-bar connection/route entries.
         show_connection_details: ?*const fn (*anyopaque) void = null,
-        /// Show diagnostics for a renderer-owned forward at the workspace control.
-        show_forwarding_details: ?*const fn (*anyopaque, *ui.Node) void = null,
-        forwarding_details_open: ?*const fn (*anyopaque) bool = null,
+        connection_details_open: ?*const fn (*anyopaque) bool = null,
+        /// Borrowed diagnostics for an automatic forward, consumed on the UI thread.
+        forwarding_status: ?*const fn (*anyopaque) ForwardingStatus = null,
         /// Optional UI-thread-safe scalar: the renderer's latest published frame
         /// generation. A monotonic increase means a new frame was published,
         /// not that its pixels changed; the host throttles it into tab
@@ -171,6 +171,15 @@ pub const RendererInstance = struct {
 pub const ConnectionStatus = struct {
     state: enum { connecting, online, degraded, ended },
     label: []const u8,
+};
+pub const ForwardingStatus = struct {
+    state: union(enum) { direct, idle, connecting, listening: u16, stopping, disconnected },
+    exit: []const u8 = "",
+    connections: usize = 0,
+    uploaded: u64 = 0,
+    downloaded: u64 = 0,
+    error_text: []const u8 = "",
+    logs: []const u8 = "",
 };
 pub const RendererDefinition = struct {
     kind: []const u8,

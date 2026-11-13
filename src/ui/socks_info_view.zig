@@ -11,6 +11,9 @@ pub const Data = struct {
     target_port: u16 = 0,
     state: State = .off,
     configured: bool = false,
+    read_only: bool = false,
+    status_label: ?[]const u8 = null,
+    intro_label: ?[]const u8 = null,
     port: u16 = 1080,
     bind: []const u8 = "127.0.0.1",
     host: []const u8 = "",
@@ -114,9 +117,10 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.mode_label = try text(self, "SOCKS5", 12, 400, .secondary, false);
     try identity.appendChild(cx.allocator, self.mode_label);
     const endpoint = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .gap = 8, .align_items = .center, .flex_shrink = 0 }, .{});
+    self.endpoint = endpoint;
     self.address.setStyleInline(cx.allocator, .{ .flex = 1 });
     try endpoint.appendChild(cx.allocator, self.address);
-    self.copy_button = try button(self, endpoint, "复制代理", .copy_export);
+    self.copy_button = try button(self, endpoint, "复制", .copy_export);
     try self.rule.appendChild(cx.allocator, endpoint);
     try self.rule.appendChild(cx.allocator, self.bind_note);
     try self.rule.appendChild(cx.allocator, self.exit);
@@ -125,6 +129,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.statistics.setStyleInline(cx.allocator, .{ .margin = .{ .top = 6 }, .padding = .{ .top = 8 }, .flex_shrink = 0 });
     try self.rule.appendChild(cx.allocator, self.statistics);
     const details_row = try ui.box(cx, S.line(34), .{});
+    self.details_row = details_row;
     self.protocol = try text(self, "0 个活跃连接 · TCP · 不支持 UDP", 12, 400, .primary, false);
     self.protocol.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
     try details_row.appendChild(cx.allocator, self.protocol);
@@ -242,6 +247,9 @@ pub const View = struct {
     mode_label: *ui.Node = undefined,
     config_text: *ui.Node = undefined,
     has_rule: bool = false,
+    read_only: bool = false,
+    details_row: *ui.Node = undefined,
+    endpoint: *ui.Node = undefined,
     test_disabled: *ui.Signal(bool),
     control_disabled: *ui.Signal(bool),
     button_paints: [6]struct { style: *ui.Signal(ButtonStyle), interaction: *ui.Signal(?ButtonStyle), action: Action } = undefined,
@@ -273,10 +281,22 @@ pub const View = struct {
         if (!std.mem.eql(u8, self.logs_text.getText().?.content, logs))
             try self.logs_text.setTextContent(self.cx.allocator, logs);
         self.message_is_error = data.error_text.len > 0;
+        self.read_only = data.read_only;
         self.has_rule = data.configured or data.state != .off;
-        self.empty.setDisplay(if (self.has_rule) .none else .flex);
-        self.rule.setDisplay(if (self.has_rule) .flex else .none);
-        self.control_button.setDisplay(if (self.has_rule) .flex else .none);
+        const has_endpoint = !data.read_only or data.state == .running;
+        self.intro.setDisplay(if (!data.read_only or data.configured) .flex else .none);
+        self.empty.setDisplay(if (self.has_rule or data.read_only) .none else .flex);
+        self.rule.setDisplay(if (self.has_rule or data.read_only) .flex else .none);
+        self.footer.setDisplay(if (data.read_only) .none else .flex);
+        self.control_button.setDisplay(if (self.has_rule and !data.read_only) .flex else .none);
+        self.config_button.setDisplay(if (data.read_only) .none else .flex);
+        self.endpoint.setDisplay(if (has_endpoint) .flex else .none);
+        self.address.setDisplay(if (has_endpoint) .flex else .none);
+        self.bind_note.setDisplay(if (has_endpoint) .flex else .none);
+        self.exit.setDisplay(if (!data.read_only or data.exit.len != 0) .flex else .none);
+        self.mode_label.setDisplay(if (!data.read_only or data.configured) .flex else .none);
+        self.statistics.setDisplay(if (!data.read_only or data.configured) .flex else .none);
+        self.details_row.setDisplay(if (!data.read_only or data.configured) .flex else .none);
         try self.config_text.setTextContent(self.cx.allocator, if (self.has_rule) "配置" else "添加转发");
         try self.mode_label.setTextContent(self.cx.allocator, switch (data.mode) {
             .socks5 => "SOCKS5 · 动态目标",
@@ -296,7 +316,7 @@ pub const View = struct {
         try self.protocol.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{d} 个活跃连接 · {s}", .{ data.connections, if (data.mode == .socks5) "TCP · 不支持 UDP" else "固定TCP目标" }));
         try self.owner.setTextContent(self.cx.allocator, if (data.host.len > 0) try std.fmt.bufPrint(&count_buffer, "#{s}", .{data.host}) else "");
         try self.logs_owner.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{s}  ·  最近 24 条", .{self.owner.getText().?.content}));
-        try self.status.setTextContent(self.cx.allocator, switch (data.state) {
+        try self.status.setTextContent(self.cx.allocator, data.status_label orelse switch (data.state) {
             .off => "未开启",
             .connecting => "启动中",
             .running => "正在监听",
@@ -304,7 +324,7 @@ pub const View = struct {
             .stopping => "停止中",
             .failed => "启动失败",
         });
-        try self.intro.setTextContent(self.cx.allocator, switch (data.state) {
+        try self.intro.setTextContent(self.cx.allocator, data.intro_label orelse switch (data.state) {
             .running => "监听已就绪，可连接下方地址",
             .connecting => "正在建立转发，请稍候",
             .failed => "转发未运行，请检查错误后重试",
@@ -313,8 +333,8 @@ pub const View = struct {
             .off => if (self.has_rule) "配置已就绪" else "尚未配置转发规则",
         });
         self.test_disabled.set(data.state != .running or data.mode != .socks5);
-        self.copy_button.setDisplay(if (self.has_rule and data.mode == .socks5) .flex else .none);
-        self.test_button.setDisplay(if (self.has_rule and data.mode == .socks5) .flex else .none);
+        self.copy_button.setDisplay(if (has_endpoint and self.has_rule and data.mode == .socks5) .flex else .none);
+        self.test_button.setDisplay(if (!data.read_only and self.has_rule and data.mode == .socks5) .flex else .none);
         self.control_disabled.set(data.state == .stopping);
         const active = data.state == .running or data.state == .paused;
         try self.control_text.setTextContent(self.cx.allocator, if (active) "停止转发" else if (data.state == .connecting) "取消启动" else if (data.state == .stopping) "停止中…" else if (data.state == .failed) "重试" else "启动转发");
@@ -422,8 +442,9 @@ pub const View = struct {
         // Hug the measured content; only a viewport-constrained body scrolls.
         // The popover remains anchored to the same bottom-bar trigger.
         const natural = @max(@as(f32, 1), self.body.content.globalRect().h);
-        const body_h = @min(natural, @max(@as(f32, 1), available - S.chrome_height));
-        const card_h = body_h + S.chrome_height;
+        const chrome_height = if (self.read_only) S.chrome_height - S.footer_height else S.chrome_height;
+        const body_h = @min(natural, @max(@as(f32, 1), available - chrome_height));
+        const card_h = body_h + chrome_height;
         var changed = false;
         if (self.root.style.width != .px or @abs(self.root.style.width.px - width) > 0.5) {
             self.root.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width } });
@@ -471,6 +492,7 @@ pub const View = struct {
         if (self.cx.focus_manager.current_focus) |focused| if (focused.isDescendantOf(self.root) or focused.isDescendantOf(self.logs_root)) self.cx.clearFocus();
     }
     pub fn dispatch(self: *View, requested: Action) void {
+        if (self.read_only and requested != .copy_export and requested != .logs and requested != .logs_back) return;
         if (requested == .logs) {
             self.logs_visible = true;
             self.open.set(false);

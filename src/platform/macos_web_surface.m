@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <Network/Network.h>
 #import <QuartzCore/QuartzCore.h>
+#import <Security/Security.h>
 #import <WebKit/WebKit.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +46,9 @@ static const int64_t zw_request_lifetime = ZW_WEB_REQUEST_LIFETIME_NS;
 @property (nonatomic, copy) NSString *message;
 @property (nonatomic, copy) NSString *defaultText;
 @property (nonatomic, copy) NSString *realm;
+@property (nonatomic, copy) NSString *tlsHost;
+@property (nonatomic) uint16_t tlsPort;
+@property (nonatomic, copy) NSArray<NSData *> *tlsChain;
 @property (nonatomic, copy) void (^complete)(BOOL, NSString *, NSString *);
 @end
 @implementation ZWWebPendingRequest
@@ -146,6 +150,7 @@ static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) 
 @property (nonatomic) uint64_t urlRevision;
 @property (nonatomic) BOOL displayed;
 @property (nonatomic) BOOL failed;
+@property (nonatomic) BOOL tlsFailed;
 @property (nonatomic) BOOL committed;
 @property (nonatomic) BOOL committedGet;
 @property (nonatomic, copy) NSURL *committedURL;
@@ -153,11 +158,15 @@ static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) 
 @property (nonatomic) BOOL pendingGet;
 @property (nonatomic) BOOL closing;
 @property (nonatomic) BOOL invalidatingRequests;
+@property (nonatomic) BOOL tlsReview;
+@property (nonatomic) NSUInteger tlsReviewsInFlight;
+@property (nonatomic) uint64_t requestEpoch;
+@property (nonatomic, copy) NSURL *mainFrameURL;
 @property (nonatomic, strong) NSMutableArray<ZWWebPendingRequest *> *requests;
 - (void)installWebView:(WKWebViewConfiguration *)configuration;
 - (void)observeNavigation:(WKNavigation *)navigation explicitGet:(BOOL)explicitGet;
 - (void)notifyChanged;
-- (void)enqueueKind:(int)kind origin:(NSString *)origin message:(NSString *)message
+- (ZWWebPendingRequest *)enqueueKind:(int)kind origin:(NSString *)origin message:(NSString *)message
     defaultText:(NSString *)defaultText realm:(NSString *)realm
     completion:(void (^)(BOOL, NSString *, NSString *))completion;
 - (BOOL)finishRequest:(uint64_t)token accepted:(BOOL)accepted value:(NSString *)value secret:(NSString *)secret;
@@ -220,12 +229,12 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
 - (void)notifyChanged {
     if (self.changed) self.changed();
 }
-- (void)enqueueKind:(int)kind origin:(NSString *)origin message:(NSString *)message
+- (ZWWebPendingRequest *)enqueueKind:(int)kind origin:(NSString *)origin message:(NSString *)message
     defaultText:(NSString *)defaultText realm:(NSString *)realm
     completion:(void (^)(BOOL, NSString *, NSString *))completion {
     if (self.closing || self.invalidatingRequests || self.requests.count >= zw_request_capacity || zw_next_request_token == UINT64_MAX) {
         if (completion) completion(NO, nil, nil);
-        return;
+        return nil;
     }
     ZWWebPendingRequest *request = [[ZWWebPendingRequest alloc] init];
     request.token = ++zw_next_request_token;
@@ -246,6 +255,7 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
         [weakOwner finishRequest:token accepted:NO value:nil secret:nil];
     });
     [self notifyChanged];
+    return request;
 }
 - (BOOL)finishRequest:(uint64_t)token accepted:(BOOL)accepted value:(NSString *)value secret:(NSString *)secret {
     NSUInteger index = [self.requests indexOfObjectPassingTest:^BOOL(ZWWebPendingRequest *request, NSUInteger i, BOOL *stop) {
@@ -255,9 +265,15 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
     ZWWebPendingRequest *request = self.requests[index];
     // Remove before invoking WebKit: a completion can cause a new callback.
     [self.requests removeObjectAtIndex:index];
-    BOOL rejectedNavigationAuth = request.kind == ZWWebRequestHTTPAuth && !accepted && !self.closing
+    BOOL rejectedNavigationAuth = (request.kind == ZWWebRequestHTTPAuth || request.kind == ZWWebRequestServerTrust) && !accepted && !self.closing
         && !self.invalidatingRequests && !self.committed && request.navigationId == self.navigationId;
-    if (rejectedNavigationAuth) self.cancelledAuthNavigation = self.activeNavigation;
+    if (rejectedNavigationAuth) {
+        self.cancelledAuthNavigation = self.activeNavigation;
+        if (request.kind == ZWWebRequestServerTrust) {
+            self.failed = YES;
+            self.tlsFailed = YES;
+        }
+    }
     void (^completion)(BOOL, NSString *, NSString *) = request.complete;
     request.complete = nil;
 #ifdef ZW_WEB_SURFACE_ACCEPTANCE
@@ -277,6 +293,7 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
 - (void)cancelRequests {
     // Complete only the original set; a reentrant callback belongs to its own
     // token and must not make cancellation an unbounded loop.
+    self.requestEpoch += 1;
     BOOL invalidating = self.invalidatingRequests;
     self.invalidatingRequests = YES;
     NSArray<ZWWebPendingRequest *> *requests = [self.requests copy];
@@ -311,6 +328,7 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
     self.committedGet = NO;
     self.committedURL = nil;
     self.failed = NO;
+    self.tlsFailed = NO;
     [self notifyChanged];
 }
 - (void)webView:(WKWebView *)view decidePolicyForNavigationAction:(WKNavigationAction *)action
@@ -327,6 +345,7 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
     BOOL allowed = zw_is_web_url(action.request.URL);
     BOOL isGet = [action.request.HTTPMethod isEqualToString:@"GET"];
     if (allowed && action.targetFrame) {
+        self.mainFrameURL = action.request.URL;
         self.pendingGet = isGet;
         if (!self.committed) self.activeGet = isGet;
     }
@@ -383,6 +402,11 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
     if (cancelledAuthentication) self.cancelledAuthNavigation = nil;
     if (navigation == self.activeNavigation && (cancelledAuthentication || error.code != NSURLErrorCancelled)) {
         self.failed = YES;
+        self.tlsFailed = self.tlsFailed || ([error.domain isEqualToString:NSURLErrorDomain] &&
+            (error.code == NSURLErrorServerCertificateUntrusted ||
+             error.code == NSURLErrorServerCertificateHasUnknownRoot ||
+             error.code == NSURLErrorServerCertificateHasBadDate ||
+             error.code == NSURLErrorServerCertificateNotYetValid));
         [self notifyChanged];
     }
 }
@@ -424,10 +448,73 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
 - (void)webView:(WKWebView *)view didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
     completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completion {
     NSURLProtectionSpace *space = challenge.protectionSpace;
+    if ([space.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        NSString *origin = zw_origin(space.protocol, space.host, space.port);
+        NSURL *target = self.mainFrameURL;
+        SecTrustRef trust = space.serverTrust;
+        if (!self.tlsReview || !trust || space.isProxy || challenge.previousFailureCount ||
+            !target || ![target.scheme.lowercaseString isEqualToString:@"https"] ||
+            ![origin.lowercaseString isEqualToString:zw_url_origin(target).lowercaseString] ||
+            space.port < 1 || space.port > UINT16_MAX) {
+            ZW_COMPLETE(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+            return;
+        }
+        // Copy the peer data off the AppKit thread. Reject late completions
+        // after navigation or surface teardown.
+        if (self.invalidatingRequests || self.tlsReviewsInFlight >= zw_request_capacity) {
+            ZW_COMPLETE(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+            return;
+        }
+        self.tlsReviewsInFlight += 1;
+        uint64_t requestEpoch = self.requestEpoch;
+        uint64_t navigationId = self.navigationId;
+        id retainedTrust = (__bridge id)trust;
+        __weak ZWWebSurfaceOwner *weakOwner = self;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            SecTrustRef peer = (__bridge SecTrustRef)retainedTrust;
+            SecTrustSetNetworkFetchAllowed(peer, false);
+            NSArray *certs = CFBridgingRelease(SecTrustCopyCertificateChain(peer));
+            NSMutableArray<NSData *> *chain = [NSMutableArray array];
+            size_t total = 0;
+            if (certs.count <= 16) for (id cert in certs) {
+                NSData *der = CFBridgingRelease(SecCertificateCopyData((__bridge SecCertificateRef)cert));
+                if (!der.length || der.length > 1024 * 1024 - total) { [chain removeAllObjects]; break; }
+                total += der.length;
+                [chain addObject:der];
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ZWWebSurfaceOwner *owner = weakOwner;
+                if (owner) owner.tlsReviewsInFlight -= 1;
+                if (!owner || owner.closing || owner.requestEpoch != requestEpoch || owner.navigationId != navigationId ||
+                    ![origin.lowercaseString isEqualToString:zw_url_origin(owner.mainFrameURL).lowercaseString]) {
+                    ZW_COMPLETE(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+                    return;
+                }
+                if (chain.count == 0) {
+                    ZW_COMPLETE(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+                    return;
+                }
+                ZWWebPendingRequest *request = [owner enqueueKind:ZWWebRequestServerTrust origin:origin message:nil
+                    defaultText:nil realm:nil completion:^(BOOL accepted, NSString *value, NSString *secret) {
+                        if (accepted && [value isEqualToString:@"exception"]) {
+                            NSURLCredential *credential = [NSURLCredential credentialForTrust:(__bridge SecTrustRef)retainedTrust];
+                            ZW_COMPLETE(NSURLSessionAuthChallengeUseCredential, credential);
+                        } else if (accepted && [value isEqualToString:@"system"]) {
+                            ZW_COMPLETE(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+                        } else {
+                            ZW_COMPLETE(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+                        }
+                    }];
+                request.tlsHost = space.host;
+                request.tlsPort = (uint16_t)space.port;
+                request.tlsChain = chain;
+            });
+        });
+        return;
+    }
     BOOL passwordAuth = [space.authenticationMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]
         || [space.authenticationMethod isEqualToString:NSURLAuthenticationMethodHTTPDigest];
     if (!passwordAuth || space.isProxy) {
-        // In particular, server TLS always uses the system trust decision.
         ZW_COMPLETE(NSURLSessionAuthChallengePerformDefaultHandling, nil);
         return;
     }
@@ -600,6 +687,7 @@ int zw_web_surface_navigate(ZWWebSurface *surface, const uint8_t *url, size_t le
         NSString *value = [[NSString alloc] initWithBytes:url length:len encoding:NSUTF8StringEncoding];
         NSURL *target = value ? [NSURL URLWithString:value] : nil;
         if (!owner.webView || !zw_is_web_url(target)) return 0;
+        owner.mainFrameURL = target;
         WKNavigation *navigation = [owner.webView loadRequest:[NSURLRequest requestWithURL:target]];
         [owner observeNavigation:navigation explicitGet:YES];
         return navigation != nil;
@@ -610,6 +698,7 @@ int zw_web_surface_go_back(ZWWebSurface *surface) {
     if (!NSThread.isMainThread || !surface) return 0;
     @autoreleasepool {
         ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
+        owner.mainFrameURL = owner.webView.backForwardList.backItem.URL;
         WKNavigation *navigation = [owner.webView goBack];
         [owner observeNavigation:navigation explicitGet:NO];
         return navigation != nil;
@@ -620,6 +709,7 @@ int zw_web_surface_go_forward(ZWWebSurface *surface) {
     if (!NSThread.isMainThread || !surface) return 0;
     @autoreleasepool {
         ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
+        owner.mainFrameURL = owner.webView.backForwardList.forwardItem.URL;
         WKNavigation *navigation = [owner.webView goForward];
         [owner observeNavigation:navigation explicitGet:NO];
         return navigation != nil;
@@ -682,6 +772,29 @@ int zw_web_surface_copy_request(ZWWebSurface *surface, ZWWebRequest *result) {
     }
 }
 
+int zw_web_surface_set_tls_review(ZWWebSurface *surface, int enabled) {
+    if (!NSThread.isMainThread || !surface) return 0;
+    ((__bridge ZWWebSurfaceOwner *)surface).tlsReview = enabled != 0;
+    return 1;
+}
+
+size_t zw_web_surface_tls_peer(ZWWebSurface *surface, uint64_t token, const char **host,
+    uint16_t *port, ZWWebCertificate *certificates, size_t capacity) {
+    if (!NSThread.isMainThread || !surface || !host || !port || !certificates) return 0;
+    for (ZWWebPendingRequest *request in ((__bridge ZWWebSurfaceOwner *)surface).requests) {
+        if (request.token != token || request.kind != ZWWebRequestServerTrust) continue;
+        if (!request.tlsChain.count || request.tlsChain.count > capacity) return 0;
+        *host = request.tlsHost.UTF8String;
+        *port = request.tlsPort;
+        for (size_t i = 0; i < request.tlsChain.count; ++i) {
+            NSData *der = request.tlsChain[i];
+            certificates[i] = (ZWWebCertificate){ der.bytes, der.length };
+        }
+        return request.tlsChain.count;
+    }
+    return 0;
+}
+
 int zw_web_surface_request_pending(ZWWebSurface *surface, uint64_t token) {
     if (!NSThread.isMainThread || !surface || !token) return 0;
     for (ZWWebPendingRequest *request in ((__bridge ZWWebSurfaceOwner *)surface).requests) {
@@ -724,6 +837,7 @@ ZWWebSurfaceState zw_web_surface_state(ZWWebSurface *surface) {
             .ready = view != nil,
             .committed = owner.committed,
             .committed_get = owner.committedGet && [owner.committedURL isEqual:view.URL],
+            .tls_failed = owner.tlsFailed,
         };
     }
 }

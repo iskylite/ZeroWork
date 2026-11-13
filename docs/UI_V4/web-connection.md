@@ -10,7 +10,7 @@
 | --- | --- |
 | [预设网址 · 已打开](../../design/web-connection/preset-ready.svg) | 自动打开保存的网址，地址栏可编辑，实心星表示该页已收藏 |
 | [正在连接 SSH](../../design/web-connection/route-connecting.svg) | 页签沿配置路径建链，用户聚焦地址栏后可更换待打开的网址 |
-| [查看浏览器转发](../../design/web-connection/route-status.svg) | 右上角转发入口打开当前会话状态，监听就绪时显示实际端口和跳板顺序 |
+| 查看端口转发 | 右上角「端口转发」打开与 SSH 共用的只读气泡 |
 | [手动输入 · 待打开](../../design/web-connection/manual-entry.svg) | 地址栏已聚焦，也可点击已存书签，尚未启动 SSH |
 | [书签 · 横向滚动](../../design/web-connection/bookmark-overflow.svg) | 书签滚到中间，长标题省略，当前未收藏页面显示空心星 |
 | [编辑连接 · 预设网址](../../design/web-connection/editor-preset.svg) | 显示起始网址，共享拓扑已滚动到目标网页 |
@@ -38,7 +38,7 @@
 
 ## 工作区与交互
 
-- 右上角的转发入口在网页页签打开当前网页会话的只读状态，窄窗时从右上角「…」展开工具组。面板显示跳板顺序及实际转发状态，监听就绪时显示系统分配的 `127.0.0.1:端口`，断开或清理时移除旧端口。直连显示「直接连接」。页签之间只复用跳板资产配置，每个页签各自建立 SSH 链和监听。
+- 右上角「端口转发」复用普通 SSH 的气泡，显示网页代理的状态和出口。监听就绪时显示实际地址。网页会话隐藏底部的配置、启停和测试按钮，保留连接数、流量、复制监听地址和转发日志。「通信链路」和网页菜单里的「查看路径」可查看完整跳板顺序。每个网页页签各自建立 SSH 链和监听。
 - **状态文案以代码为准**：顶栏状态条和文档面板中的「直接连接」「正在连接 SSH」「SSH 转发已就绪」「SSH 转发已断开」等文案，唯一来源是 `src/plugins/web/renderer.zig` 中 `View.status` 和 `forwardingStatus` 两个方法。设计文档不重复定义文案，只引用代码事实。
 - 工具栏从左到右为后退、前进、重新加载或停止加载、地址、书签、更多。无法操作时禁用。地址栏右端的五角星用于收藏当前页。更多包含「复制网址」，预设连接另有「回到起始网址」；窄窗时收纳点击即可打开的书签列表，不设置「管理书签」。两种模式都可点击编辑地址，⌘L 聚焦并选中完整网址。回车在当前页签导航，资产的起始网址在连接设置中编辑。宿主优先处理应用快捷键，网页获得自己的输入、滚动、文本选择和 IME。
 - **路径与页面分别记状态。** 路径可待启动、逐跳认证、监听就绪、断开或关闭；页面可空白、加载、已显示或加载失败。监听成功不代表网页可达。HTTP 4xx/5xx 保留站点自己的页面；域名解析、证书、转发中断和 WebKit 内容进程退出分别给出对应操作。
@@ -70,7 +70,7 @@
 | 回环目标 | localhost、127.0.0.1、::1 等保留本机语义，顶层导航、重定向与页面子资源访问运行 ZeroWork 的本机属于预期行为，不作为代理故障或交付阻塞。出口与断链回退验证使用非回环目标，见 [§5](../DESIGN/V0.6_WEB_CONNECTION.md#5-网络与平台)。 |
 | 代理绑定 | 只监听 127.0.0.1，使用临时端口和每代独立的随机认证凭证；本代数据仓绑定本代代理，对需要代理的非回环目标禁止直连回退。SOCKS5 拒绝无认证／旧凭证，认证后开流前复验 owner/generation；旧数据仓不绑定新代理。凭证不进入配置、UI 或日志。WebKit 认证及强制复用旧端口隔离必须在阶段 A 验证，不通过则不交付 SSH 网页能力；不退回无认证。 |
 | 回收终态 | 输入及代次撤销、pending 回调／桥接任务结清、surface／原生强引用释放、监听及 worker 退出、握手／排队／活动流归零、transport 返回 released 后，本代自有资源即可发布 released。WebKit 内部引用与共享网络进程的退出不可作为正常回收前提；新代认证阻断端口复用后的旧请求。只有真实未释放资源保留有界回收记录，不永久保留旧监听。见 [§6.4](../DESIGN/V0.6_WEB_CONNECTION.md#64-关闭前检查与回收)。 |
-| 原始网址 | 保留原域名、端口、HTTP Host、TLS SNI 与正常证书校验，让重定向、Cookie 和跨域资源按原始站点规则工作。证书不受信任时显示错误。只在出口可解析的域名、跨域资源、WebSocket 和目标站点登录流程均需实测；SOCKS TCP 路线不等同于系统 VPN，不承诺 UDP/WebRTC。 |
+| 原始网址 | 保留原域名、端口、HTTP Host、TLS SNI 与正常证书校验，让重定向、Cookie 和跨域资源按原始站点规则工作。系统可提供证书且错误允许例外时，弹窗显示目标地址和 SHA-256 指纹，用户可本次继续或记住后继续。记住的例外只匹配该主机、端口、证书链和校验错误。证书变更时重新确认，无法解析或已撤销的证书继续拒绝。只在出口可解析的域名、跨域资源、WebSocket 和目标站点登录流程均需实测；SOCKS TCP 路线不等同于系统 VPN，不承诺 UDP/WebRTC。 |
 | 平台与包体 | [WebView 专用代理 API](https://developer.apple.com/documentation/webkit/wkwebsitedatastore/proxyconfigurations-6g21z) 从 macOS 14 起可用；本轮网页连接在当前目标系统验收，记录实际 OS/SDK。使用系统 WebKit 与 Network.framework，无浏览器引擎随 DMG 分发。插件和桥接代码的增量以 ReleaseFast 同条件打包结果为准。 |
 
 [Apple：SOCKS5 与直连回退](https://developer.apple.com/documentation/network/proxyconfiguration) · [非持久网站数据](https://developer.apple.com/documentation/webkit/wkwebsitedatastore/nonpersistent%28%29) · [网页弹窗行为](https://developer.apple.com/documentation/webkit/wkuidelegate)

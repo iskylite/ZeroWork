@@ -6,6 +6,8 @@ const App = @import("zenit_app").App;
 const identity = @import("identity.zig");
 
 const NativeSurface = opaque {};
+const tls = @import("tls_trust.zig");
+const NativeCertificate = extern struct { data: [*]const u8, length: usize };
 const Rect = extern struct {
     x: f32,
     y: f32,
@@ -44,6 +46,7 @@ const NativeState = extern struct {
     ready: c_int,
     committed: c_int,
     committed_get: c_int,
+    tls_failed: c_int,
 };
 
 extern fn zw_web_surface_supports_proxy() c_int;
@@ -61,6 +64,8 @@ extern fn zw_web_surface_reload(*NativeSurface) c_int;
 extern fn zw_web_surface_stop(*NativeSurface) void;
 extern fn zw_web_surface_copy_request(*NativeSurface, *Request) c_int;
 extern fn zw_web_request_dispose(*Request) void;
+extern fn zw_web_surface_set_tls_review(*NativeSurface, c_int) c_int;
+extern fn zw_web_surface_tls_peer(*NativeSurface, u64, *[*:0]const u8, *u16, [*]NativeCertificate, usize) usize;
 extern fn zw_web_surface_request_pending(*NativeSurface, u64) c_int;
 extern fn zw_web_surface_reply_request(*NativeSurface, u64, c_int, [*]const u8, usize, [*]const u8, usize) c_int;
 extern fn zw_web_surface_cancel_requests(*NativeSurface) void;
@@ -72,7 +77,7 @@ pub fn supportsProxy() bool {
     return zw_web_surface_supports_proxy() != 0;
 }
 
-pub const RequestKind = enum(c_int) { alert = 1, confirm, prompt, http_auth, notice };
+pub const RequestKind = enum(c_int) { alert = 1, confirm, prompt, http_auth, notice, server_trust };
 
 /// Owns independent copies of public presentation data only. Native completion
 /// handlers remain in the bounded main-thread queue until reply or cancellation.
@@ -102,6 +107,7 @@ pub const Snapshot = struct {
     ready: bool,
     committed: bool,
     committed_get: bool,
+    tls_failed: bool = false,
 };
 
 pub const Mount = struct {
@@ -228,6 +234,21 @@ pub const Surface = struct {
         };
     }
 
+    pub fn enableTlsReview(self: *Surface) !void {
+        if (zw_web_surface_set_tls_review(try self.nativeOnMain(), 1) == 0) return error.WebTlsReviewUnavailable;
+    }
+
+    pub fn evaluateTlsPeer(self: *const Surface, token: u64, trust: tls.Facade, operation: tls.OperationKey) !tls.Evaluation {
+        var certificates: [tls.max_chain_certificates]NativeCertificate = undefined;
+        var host: [*:0]const u8 = undefined;
+        var port: u16 = undefined;
+        const count = zw_web_surface_tls_peer(try self.nativeOnMain(), token, &host, &port, &certificates, certificates.len);
+        if (count == 0 or count > certificates.len) return error.StaleWebTlsPeer;
+        var chain: [tls.max_chain_certificates][]const u8 = undefined;
+        for (certificates[0..count], chain[0..count]) |cert, *der| der.* = cert.data[0..cert.length];
+        return trust.evaluateWeb(operation, .{ .host = std.mem.span(host), .port = port }, chain[0..count]);
+    }
+
     pub fn requestPending(self: *const Surface, token: u64) !bool {
         return zw_web_surface_request_pending(try self.nativeOnMain(), token) != 0;
     }
@@ -254,6 +275,7 @@ pub const Surface = struct {
             .ready = value.ready != 0,
             .committed = value.committed != 0,
             .committed_get = value.committed_get != 0,
+            .tls_failed = value.tls_failed != 0,
         };
     }
 

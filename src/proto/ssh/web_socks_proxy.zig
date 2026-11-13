@@ -69,6 +69,8 @@ pub fn Pump(comptime Stream: type, comptime max_active: usize) type {
         // Published separately from the allocator-owned client table.
         port: std.atomic.Value(u16) = .init(0),
         counts: std.atomic.Value(Counts) = .init(.{}),
+        bytes_up: std.atomic.Value(u64) = .init(0),
+        bytes_down: std.atomic.Value(u64) = .init(0),
         clients: [max_clients]Client = @splat(.{}),
         next_candidate: usize = 0,
         mutex: c.pthread_mutex_t = .{},
@@ -166,8 +168,8 @@ pub fn Pump(comptime Stream: type, comptime max_active: usize) type {
             if ((socket_events | stream_events) & invalid_poll != 0) return error.ProxySocketFailed;
             if (client.protocol.phase == .stream) {
                 const destination = client.stream.?.fd;
-                try client.upload.step(client.socket, destination, socket_events, stream_events, now);
-                try client.download.step(destination, client.socket, stream_events, socket_events, now);
+                try client.upload.step(client.socket, destination, socket_events, stream_events, now, &self.bytes_up);
+                try client.download.step(destination, client.socket, stream_events, socket_events, now, &self.bytes_down);
                 if (client.upload.shutdown and client.download.shutdown) client.close();
                 return;
             }
@@ -345,7 +347,7 @@ const Direction = struct {
         return self.start != self.end and now >= self.write_deadline_ms;
     }
 
-    fn step(self: *Direction, from: c.fd_t, to: c.fd_t, read_events: c_short, write_events: c_short, now: u64) !void {
+    fn step(self: *Direction, from: c.fd_t, to: c.fd_t, read_events: c_short, write_events: c_short, now: u64, bytes_written: *std.atomic.Value(u64)) !void {
         if (self.timedOut(now)) return error.ProxyWriteTimeout;
         if (self.readEvents() != 0 and read_events & readable != 0) {
             if (try readSome(from, &self.bytes)) |count| {
@@ -358,6 +360,7 @@ const Direction = struct {
         if (self.writeEvents() != 0 and write_events & (c.POLL.OUT | c.POLL.HUP) != 0) {
             if (try writeSome(to, self.bytes[self.start..self.end])) |count| {
                 self.start += count;
+                _ = bytes_written.fetchAdd(count, .monotonic);
                 self.write_deadline_ms = now + write_timeout_ms;
             }
         }
@@ -654,6 +657,8 @@ test "web SOCKS pump revokes old credentials on the same port and drains a half-
     stopped = true;
     try std.testing.expectEqual(@as(?anyerror, null), fixture.error_after_join);
     try std.testing.expectEqual(@as(usize, 1), fixture.open_count.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 8), fixture.pump.bytes_up.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 6), fixture.pump.bytes_down.load(.monotonic));
     try std.testing.expectEqual(Counts{}, fixture.pump.counts.load(.acquire));
     try std.testing.expectEqual(@as(u16, 0), fixture.pump.port.load(.acquire));
 }

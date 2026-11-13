@@ -13,7 +13,7 @@ def main():
             "xcrun", "clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
             "-mmacosx-version-min=13.0", "-DZW_WEB_SURFACE_HEADLESS=1", "-DZW_WEB_SURFACE_ACCEPTANCE=1",
             "-DZW_WEB_REQUEST_LIFETIME_NS=100000000", "-framework", "AppKit", "-framework", "WebKit",
-            "-framework", "Network", "-framework", "QuartzCore", str(root / "e2e/web_request_probe.m"),
+            "-framework", "Network", "-framework", "QuartzCore", "-framework", "Security", str(root / "e2e/web_request_probe.m"),
             str(root / "src/platform/macos_web_surface.m"), "-o", str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True, timeout=10)

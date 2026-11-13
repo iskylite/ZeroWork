@@ -115,12 +115,16 @@ pub const View = struct {
     pub fn show(self: *View, payload: challenge.Payload) !void {
         const certificate = payload.certificate_trust orelse return error.MissingCertificatePresentation;
         try self.title.setTextContent(self.cx.allocator, payload.title);
+        self.title.clearTextLayout();
+        self.title.markSizingDirty();
         try self.name.setTextContent(self.cx.allocator, if (payload.source_name.len != 0) payload.source_name else "TLS 证书");
         try self.endpoint.setTextContent(self.cx.allocator, certificate.authority);
         const color = if (certificate.scope_changed) A.theme.current().danger_ink else A.theme.current().warn_ink;
         self.notice.setStyleInline(self.cx.allocator, S.notice(certificate.scope_changed));
         self.notice_title.setTextColor(color);
         try self.notice_title.setTextContent(self.cx.allocator, if (certificate.scope_changed) "证书或验证例外已变化" else "无法验证此证书");
+        self.notice_title.clearTextLayout();
+        self.notice_title.markSizingDirty();
         const icon = if (certificate.scope_changed) ui.icons.shield_alert else ui.icons.shield_question;
         if (icon.icon_id) |id| if (icon.pickRep(18)) |rep| self.title_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = color });
         try self.detail.setTextContent(self.cx.allocator, payload.detail);
@@ -134,6 +138,8 @@ pub const View = struct {
         try self.valid_from.setTextContent(self.cx.allocator, certificate.valid_from);
         try self.valid_until.setTextContent(self.cx.allocator, certificate.valid_until);
         try self.scope_change.setTextContent(self.cx.allocator, if (certificate.scope_changed) "已变化，请重新核对" else "未发现证书或例外变化");
+        self.scope_change.clearTextLayout();
+        self.scope_change.markSizingDirty();
         self.problem.setDisplay(.none);
         ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
     }

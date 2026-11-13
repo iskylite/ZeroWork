@@ -12885,42 +12885,6 @@ const AppNavHost = struct {
         return tab.plugin_renderer;
     }
 
-    fn activeWebRenderer(self: *AppNavHost) ?@import("host/plugin_ui_contract.zig").RendererInstance {
-        const workspace = self.workspace orelse return null;
-        const index = workspace.active_tab orelse return null;
-        if (index >= workspace.tabs.items.len) return null;
-        const tab = workspace.tabs.items[index];
-        if (tab.closing or !std.mem.eql(u8, tab.plugin_protocol_id, @import("plugins/web/config.zig").protocol_id)) return null;
-        return tab.plugin_renderer;
-    }
-
-    fn refreshForwardingChip(self: *AppNavHost) void {
-        const renderer = self.activeWebRenderer() orelse {
-            if (self.socks_host) |host| host.refreshChip();
-            return;
-        };
-        const status = (renderer.vtable.connection_status orelse return)(renderer.context);
-        const chip = self.socks_chip orelse return;
-        if (chip.behavior.interaction.a11y) |*props| {
-            props.label = "浏览器转发";
-            props.description = status.label;
-        }
-        const colors = app_theme.current();
-        const ink = switch (status.state) {
-            .online => colors.ok_ink,
-            .degraded => colors.danger_ink,
-            .connecting, .ended => colors.fg_2,
-        };
-        for (chip.children.items) |child| {
-            if (child.getIcon() != null) _ = child.setTint(ink);
-        }
-        if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
-            if (controls.forward_label.getText()) |label| if (!std.mem.eql(u8, label.content, "浏览器转发")) {
-                controls.forward_label.setTextContent(self.allocator, "浏览器转发") catch {};
-            };
-        };
-    }
-
     fn toggleSidebar(self: *AppNavHost) void {
         self.quick.toggleSidebar();
         self.applySidebar();
@@ -13305,8 +13269,9 @@ const AppNavHost = struct {
             const plugin_status = if (workspace.active_tab) |index| index < workspace.tabs.items.len and workspace.tabs.items[index].plugin_renderer != null else false;
             const forward_status = if (status_capabilities) |snapshot| @import("host/actions.zig").project(.toggle_socks, snapshot).visible else false;
             if (self.session_details) |details| details.setDisplay(if (has_session and (plugin_status or route_status or (terminal_active and !local_active))) .flex else .none);
-            if (self.socks_chip) |chip| chip.setDisplay(if (self.mist != null or forward_status or self.activeWebRenderer() != null or (terminal_active and !local_active)) .flex else .none);
-            self.refreshForwardingChip();
+            const automatic_forwarding = if (self.socks_host) |host| host.hasRendererForwarding() else false;
+            if (self.socks_chip) |chip| chip.setDisplay(if (self.mist != null or forward_status or automatic_forwarding or (terminal_active and !local_active)) .flex else .none);
+            if (self.socks_host) |host| host.refreshChip();
             if (self.status_bar) |bar| bar.setDisplay(if (self.mist != null or local_active or (has_session and !terminal_active and !route_status and !transfer_status and !plugin_status)) .none else .flex);
             if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
                 controls.sidebar_width = self.quick.sidebar.width();
@@ -16101,6 +16066,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const socks_info = try @import("ui/socks_info_view.zig").mount(cx, scope, .{ .context = @ptrCast(socks_host), .action = Socks5Host.infoAction });
     socks_host.info = socks_info;
     try background_view.isolate(socks_info.scope, socks_info.root);
+    try background_view.isolate(socks_info.scope, socks_info.logs_root);
     if (!socks_info.portaled) try root.appendChild(cx.allocator, socks_info.wrapper);
     const socks_config = try @import("ui/socks_config_view.zig").View.mount(cx, scope, .{
         .context = @ptrCast(socks_host),
@@ -16205,6 +16171,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         chrome.own(details_host.ssh_status.info.open);
         chrome.own(status_detail.open);
         chrome.own(socks_info.open);
+        chrome.own(socks_info.logs_open);
         chrome.own(background_socks.view.popover.open.?);
     }
     try details_host.view.setMaterial(background_view);
@@ -18788,12 +18755,7 @@ fn onTransferSubmitFrozen(ctx: *anyopaque, owner: @import("host/identity.zig").S
 
 fn onSocksChipClick(raw: *anyopaque) void {
     const nav: *AppNavHost = @ptrCast(@alignCast(raw));
-    if (nav.activeWebRenderer()) |renderer| {
-        const anchor = nav.socks_chip orelse return;
-        if (renderer.vtable.show_forwarding_details) |show| show(renderer.context, anchor);
-    } else if (nav.socks_host) |host| {
-        host.showInfo();
-    }
+    if (nav.socks_host) |host| host.showInfo();
 }
 
 fn onTransferCancel(ctx: *anyopaque) void {

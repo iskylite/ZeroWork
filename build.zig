@@ -1018,6 +1018,6 @@ fn addWebNative(b: *std.Build, module: *std.Build.Module, headless: bool, accept
         .file = b.path("src/platform/macos_web_surface.m"),
         .flags = flags,
     });
-    for ([_][]const u8{ "AppKit", "WebKit", "Network", "QuartzCore" }) |framework| module.linkFramework(framework, .{});
+    for ([_][]const u8{ "AppKit", "WebKit", "Network", "QuartzCore", "Security" }) |framework| module.linkFramework(framework, .{});
     module.linkSystemLibrary("icucore", .{});
 }

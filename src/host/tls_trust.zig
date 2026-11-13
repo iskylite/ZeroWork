@@ -112,6 +112,37 @@ pub const FailureSet = packed struct(u32) {
     }
 };
 
+pub fn describeFailures(a: std.mem.Allocator, failures: FailureSet) ![]u8 {
+    var material: std.Io.Writer.Allocating = .init(a);
+    defer material.deinit();
+    if (failures.untrusted_issuer) try material.writer.writeAll("- 证书颁发者不受信任（可能为自签名证书或未知 CA）\n");
+    if (failures.expired) try material.writer.writeAll("- 证书已过期\n");
+    if (failures.not_yet_valid) try material.writer.writeAll("- 证书尚未生效\n");
+    if (failures.hostname_mismatch) try material.writer.writeAll("- 证书主机名与目标不匹配\n");
+    if (failures.excessive_validity) try material.writer.writeAll("- 证书总有效期超过系统允许上限\n");
+    if (failures.revoked) try material.writer.writeAll("- 证书已被吊销（不允许例外）\n");
+    if (failures.invalid_chain) try material.writer.writeAll("- 证书链无效（不允许例外）\n");
+    if (failures.evaluation_unavailable) try material.writer.writeAll("- 系统证书验证不可用（不允许例外）\n");
+    if (failures.reserved != 0) try material.writer.writeAll("- 未知证书验证失败（不允许例外）\n");
+    if (failures.empty()) try material.writer.writeAll("- 无\n");
+    if (material.written().len != 0 and material.written()[material.written().len - 1] == '\n') material.writer.end -= 1;
+    return material.toOwnedSlice();
+}
+
+pub fn utcDate(a: std.mem.Allocator, seconds: i64) ![]u8 {
+    // Keep malformed/out-of-range certificate metadata honest. A 400-year
+    // Gregorian cycle lets the unsigned epoch API also format pre-1970 dates.
+    if (seconds < -62135596800 or seconds > 253402300799) return std.fmt.allocPrint(a, "超出可显示的 UTC 日期范围（Unix 秒：{d}）", .{seconds});
+    const cycle_seconds = 146097 * @as(i64, std.time.epoch.secs_per_day);
+    const cycles = if (seconds < 0) @divFloor(seconds, cycle_seconds) else 0;
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = @intCast(seconds - cycles * cycle_seconds) };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day = epoch.getDaySeconds();
+    const year: u16 = @intCast(@as(i64, year_day.year) + cycles * 400);
+    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC", .{ year, @backingInt(month_day.month), month_day.day_index + 1, day.getHoursIntoDay(), day.getMinutesIntoHour(), day.getSecondsIntoMinute() });
+}
+
 pub const VerificationResult = struct {
     failures: FailureSet = .{},
     leaf_fingerprint: Fingerprint = @splat(0),
@@ -180,8 +211,21 @@ pub const Evaluation = union(enum) {
     denied: struct { reason: Denial, verification: VerificationResult },
 };
 
-const Pending = struct { challenge: Challenge, prior_pin: ?Pin };
-const Once = struct { owner: identity.SessionHandle, operation: OperationKey, authority: CanonicalAuthority, pin: Pin };
+const PinScope = enum {
+    bmc,
+    web,
+
+    fn digest(self: PinScope, authority: CanonicalAuthority) Fingerprint {
+        const key = authority.digest();
+        if (self == .bmc) return key;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("zerowork/web-tls/v1\x00");
+        hash.update(&key);
+        return hash.finalResult();
+    }
+};
+const Pending = struct { challenge: Challenge, prior_pin: ?Pin, scope: PinScope };
+const Once = struct { owner: identity.SessionHandle, operation: OperationKey, authority: CanonicalAuthority, pin: Pin, scope: PinScope };
 
 /// Stored only by the host. The public facade's owner is a consistency check;
 /// it never selects the authority used by the backend.
@@ -194,9 +238,9 @@ const FacadeContext = struct {
         if (!self.owner.eql(owner)) return error.WrongOwner;
         return self;
     }
-    fn evaluate(raw: ?*anyopaque, owner: identity.SessionHandle, operation: OperationKey, authority: Authority, chain: []const []const u8) !Evaluation {
+    fn evaluate(raw: ?*anyopaque, owner: identity.SessionHandle, operation: OperationKey, authority: Authority, chain: []const []const u8, scope: PinScope) !Evaluation {
         const self = try resolve(raw, owner);
-        return self.store.evaluate(self.owner, operation, authority, chain);
+        return self.store.evaluate(self.owner, operation, authority, chain, scope);
     }
     fn answer(raw: ?*anyopaque, owner: identity.SessionHandle, challenge: Challenge, choice: TrustChoice) !Evaluation {
         const self = try resolve(raw, owner);
@@ -290,7 +334,7 @@ pub const Store = struct {
             if (self.once.items[i].owner.eql(owner)) _ = self.once.swapRemove(i) else i += 1;
         }
     }
-    fn evaluate(self: *Store, owner: identity.SessionHandle, operation: OperationKey, authority: Authority, chain: []const []const u8) !Evaluation {
+    fn evaluate(self: *Store, owner: identity.SessionHandle, operation: OperationKey, authority: Authority, chain: []const []const u8, scope: PinScope) !Evaluation {
         try requireOperation(owner, operation);
         self.lock();
         self.requireLive(owner, operation) catch |err| {
@@ -310,48 +354,48 @@ pub const Store = struct {
         self.lock();
         defer self.mutex.unlock();
         try self.requireLive(owner, operation);
-        const old_pin = if (self.pins) |backend| try backend.load(backend.context, canonical.digest()) else null;
+        const old_pin = if (self.pins) |backend| try backend.load(backend.context, scope.digest(canonical)) else null;
+        if (scope == .bmc and old_pin != null and !std.mem.eql(u8, &old_pin.?.leaf_fingerprint, &candidate.leaf_fingerprint)) {
+            self.invalidatePending(operation, canonical, scope);
+            return .{ .denied = .{ .reason = .certificate_changed, .verification = verification } };
+        }
+        if (!verification.failures.empty() and !verification.failures.canExcept()) {
+            self.invalidatePending(operation, canonical, scope);
+            return .{ .denied = .{ .reason = .unexceptable_failure, .verification = verification } };
+        }
         if (old_pin) |pin| {
-            if (!std.mem.eql(u8, &pin.leaf_fingerprint, &candidate.leaf_fingerprint)) {
-                self.invalidatePending(operation, canonical);
-                return .{ .denied = .{ .reason = .certificate_changed, .verification = verification } };
-            }
             if (pin.eql(candidate)) {
-                self.invalidatePending(operation, canonical);
+                self.invalidatePending(operation, canonical, scope);
                 return .{ .trusted = .{ .source = .persistent_pin, .verification = verification } };
             }
         }
         for (self.once.items) |grant| {
-            if (grant.owner.eql(owner) and grant.operation.eql(operation) and grant.authority.eql(&canonical) and grant.pin.eql(candidate)) {
-                self.invalidatePending(operation, canonical);
+            if (grant.scope == scope and grant.owner.eql(owner) and grant.operation.eql(operation) and grant.authority.eql(&canonical) and grant.pin.eql(candidate)) {
+                self.invalidatePending(operation, canonical, scope);
                 return .{ .trusted = .{ .source = .once, .verification = verification } };
             }
         }
         if (old_pin == null and verification.failures.empty()) {
-            self.invalidatePending(operation, canonical);
+            self.invalidatePending(operation, canonical, scope);
             return .{ .trusted = .{ .source = .system, .verification = verification } };
         }
-        if (!verification.failures.empty() and !verification.failures.canExcept()) {
-            self.invalidatePending(operation, canonical);
-            return .{ .denied = .{ .reason = .unexceptable_failure, .verification = verification } };
-        }
         for (self.pending.items) |entry| {
-            if (entry.challenge.operation.eql(operation) and entry.challenge.authority.eql(&canonical) and Pin.from(entry.challenge.verification).eql(candidate))
+            if (entry.scope == scope and entry.challenge.operation.eql(operation) and entry.challenge.authority.eql(&canonical) and Pin.from(entry.challenge.verification).eql(candidate))
                 return .{ .challenge = entry.challenge };
         }
         // A new peer/exception invalidates the older prompt for this endpoint.
-        self.invalidatePending(operation, canonical);
+        self.invalidatePending(operation, canonical, scope);
         if (self.pending.items.len >= 64) return error.TrustChallengeQueueFull;
         if (self.next_challenge == std.math.maxInt(u64)) return error.TrustChallengeExhausted;
         const challenge: Challenge = .{ .id = self.next_challenge, .owner = owner, .operation = operation, .authority = canonical, .verification = verification, .scope_changed = old_pin != null };
-        try self.pending.append(self.allocator, .{ .challenge = challenge, .prior_pin = old_pin });
+        try self.pending.append(self.allocator, .{ .challenge = challenge, .prior_pin = old_pin, .scope = scope });
         self.next_challenge += 1;
         return .{ .challenge = challenge };
     }
-    fn invalidatePending(self: *Store, operation: OperationKey, authority: CanonicalAuthority) void {
+    fn invalidatePending(self: *Store, operation: OperationKey, authority: CanonicalAuthority, scope: PinScope) void {
         var i: usize = 0;
         while (i < self.pending.items.len) {
-            if (self.pending.items[i].challenge.operation.eql(operation) and self.pending.items[i].challenge.authority.eql(&authority)) _ = self.pending.swapRemove(i) else i += 1;
+            if (self.pending.items[i].scope == scope and self.pending.items[i].challenge.operation.eql(operation) and self.pending.items[i].challenge.authority.eql(&authority)) _ = self.pending.swapRemove(i) else i += 1;
         }
     }
     fn answer(self: *Store, owner: identity.SessionHandle, challenge: Challenge, choice: TrustChoice) !Evaluation {
@@ -370,14 +414,14 @@ pub const Store = struct {
                 return .{ .denied = .{ .reason = .rejected, .verification = saved.verification } };
             }
             const candidate = Pin.from(saved.verification);
-            const current = if (self.pins) |backend| try backend.load(backend.context, saved.authority.digest()) else null;
+            const current = if (self.pins) |backend| try backend.load(backend.context, entry.scope.digest(saved.authority)) else null;
             if (!optionalPinEqual(current, entry.prior_pin)) return error.TrustPinConflict;
             if (choice == .persistent) {
                 const backend = self.pins orelse return error.PersistentTrustUnavailable;
-                try backend.save(backend.context, saved.authority.digest(), entry.prior_pin, candidate);
+                try backend.save(backend.context, entry.scope.digest(saved.authority), entry.prior_pin, candidate);
             } else {
                 if (self.once.items.len >= 256) return error.TrustLeaseLimit;
-                try self.once.append(self.allocator, .{ .owner = owner, .operation = saved.operation, .authority = saved.authority, .pin = candidate });
+                try self.once.append(self.allocator, .{ .owner = owner, .operation = saved.operation, .authority = saved.authority, .pin = candidate, .scope = entry.scope });
             }
             _ = self.pending.swapRemove(index);
             return .{ .trusted = .{ .source = if (choice == .persistent) .persistent_pin else .once, .verification = saved.verification } };
@@ -396,7 +440,11 @@ pub const Facade = struct {
     owner: identity.SessionHandle,
 
     pub fn evaluate(self: Facade, operation: OperationKey, authority: Authority, chain: []const []const u8) !Evaluation {
-        return FacadeContext.evaluate(self.context, self.owner, operation, authority, chain);
+        return FacadeContext.evaluate(self.context, self.owner, operation, authority, chain, .bmc);
+    }
+
+    pub fn evaluateWeb(self: Facade, operation: OperationKey, authority: Authority, chain: []const []const u8) !Evaluation {
+        return FacadeContext.evaluate(self.context, self.owner, operation, authority, chain, .web);
     }
     pub fn answer(self: Facade, challenge: Challenge, choice: TrustChoice) !Evaluation {
         return FacadeContext.answer(self.context, self.owner, challenge, choice);

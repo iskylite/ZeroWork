@@ -147,7 +147,7 @@ pub const View = struct {
             if (self.workspace.active_tab) |index| {
                 if (index < self.workspace.tabs.items.len) {
                     if (self.workspace.tabs.items[index].plugin_renderer) |renderer| {
-                        if (renderer.vtable.forwarding_details_open) |open| popup = open(renderer.context);
+                        if (renderer.vtable.connection_details_open) |open| popup = open(renderer.context);
                     }
                 }
             }
