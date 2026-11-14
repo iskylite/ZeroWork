@@ -217,7 +217,7 @@ pub const Host = struct {
         self.colors = theme.current();
         self.panel.setDisplay(.flex);
         self.floating.activate();
-        self.refresh_job = try loading.CatalogJob.start(self.archive, self.generation);
+        self.refresh_job = try loading.CatalogJob.start(self.archive, self.generation, self.retentionDays());
         self.needs_rebuild = true;
         self.pending_focus = true;
         self.resize();
@@ -524,10 +524,13 @@ pub const Host = struct {
         self.resize();
         self.cx.requestRedraw();
     }
+    fn retentionDays(self: *const Host) u16 {
+        return if (self.workspace) |workspace| workspace.app_config.log.retention_days else 0;
+    }
     fn retry(self: *Host) void {
         if (self.refresh_job != null or self.open_job != null or self.delete_job != null) return;
         self.generation +%= 1;
-        self.refresh_job = loading.CatalogJob.start(self.archive, self.generation) catch |err| {
+        self.refresh_job = loading.CatalogJob.start(self.archive, self.generation, self.retentionDays()) catch |err| {
             self.report(err);
             return;
         };
@@ -573,11 +576,28 @@ pub const Host = struct {
                     self.report(err);
                 } else if (job.catalog) |*loaded| {
                     self.catalog_failure = false;
+                    const omitted = loaded.omitted;
                     self.model.install(loaded, self.source) catch |err| {
                         self.report(err);
                         return;
                     };
                     job.catalog = null;
+                    if (omitted != 0 or job.cleaned != 0 or job.cleanup_failure != null) {
+                        var buffer: [120]u8 = undefined;
+                        const notice = if (job.cleanup_failure != null)
+                            "部分旧记录暂未清理，已显示符合限额的记录"
+                        else if (job.cleaned == 0)
+                            "仅显示限额内的记录，部分旧记录暂未清理"
+                        else if (omitted > job.cleaned)
+                            std.fmt.bufPrint(&buffer, "仅显示限额内的记录，已清理 {d} 条旧记录", .{job.cleaned}) catch unreachable
+                        else
+                            std.fmt.bufPrint(&buffer, "已清理 {d} 条超过保留期限或容量的旧记录", .{job.cleaned}) catch unreachable;
+                        self.message_warning = job.cleanup_failure != null;
+                        self.message.setTextColor(if (self.message_warning) historyWarningInk() else self.colors.fg_2);
+                        self.message.setTextContent(self.allocator, notice) catch {};
+                        self.message.setDisplay(.flex);
+                        self.retry_button.setDisplay(.none);
+                    }
                     self.model.applyFilter(self.model.query.items, self.model.type_filter) catch |err| self.report(err);
                 }
                 self.needs_rebuild = true;
@@ -601,7 +621,7 @@ pub const Host = struct {
         };
         if (self.pending_reload and self.refresh_job == null and self.open_job == null and self.delete_job == null and self.panel.style.display != .none) {
             self.pending_reload = false;
-            self.refresh_job = loading.CatalogJob.start(self.archive, self.generation) catch |err| {
+            self.refresh_job = loading.CatalogJob.start(self.archive, self.generation, self.retentionDays()) catch |err| {
                 self.report(err);
                 return;
             };

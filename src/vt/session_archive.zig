@@ -220,8 +220,26 @@ pub const Archive = struct {
     index_path: []const u8 = "logs/history/index.tsv",
 
     pub fn loadCatalog(self: *Archive, allocator: std.mem.Allocator) !Catalog {
-        return catalogLoad(self, allocator);
+        var catalog = try catalogLoad(self, allocator);
+        catalog.limit(std.math.minInt(i64));
+        return catalog;
     }
+    /// One frozen snapshot drives both the displayed rows and the removal plan.
+    pub fn loadHistory(self: *Archive, allocator: std.mem.Allocator, cutoff: i64, cleaned: *usize) !Catalog {
+        lockIndex();
+        defer index_mutex.unlock();
+        var catalog = try catalogLoad(self, allocator);
+        const kept = catalog.retainedPrefix(cutoff);
+        if (kept < catalog.entries.items.len) {
+            cleaned.* = self.pruneCatalog(&catalog, kept) catch |err| blk: {
+                catalog.cleanup_failure = err;
+                break :blk 0;
+            };
+        }
+        catalog.limit(cutoff);
+        return catalog;
+    }
+
     pub fn loadCatalogForCleanup(self: *Archive, allocator: std.mem.Allocator) !Catalog {
         return catalogLoadWithActive(self, allocator, true);
     }
@@ -262,76 +280,81 @@ pub const Archive = struct {
         try validateField(entry.user);
         try validatePath(entry.cast_path);
         if (std.fs.path.dirname(self.index_path)) |parent| try self.dir.createDirPath(self.io, parent);
-        const old = self.dir.readFileAlloc(self.io, self.index_path, self.allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
-            error.FileNotFound => try self.allocator.dupe(u8, ""),
-            else => return err,
-        };
-        defer self.allocator.free(old);
         var buf: [4096]u8 = undefined;
-        var line = std.ArrayList(u8).empty;
-        defer line.deinit(self.allocator);
-        try line.appendSlice(self.allocator, old);
         var writer = std.Io.Writer.fixed(&buf);
         try writer.print("{d}\t{d}\t{d}\t{d}\t{d}\t{s}\t{s}\t{s}\t{s}\t{d}\n", .{
             entry.id,                                             entry.started_ms,                   entry.ended_ms,       entry.duration_ms,
             entry.exit_code orelse -2147483648,                   sanitize(entry.host),               sanitize(entry.user), sanitize(entry.cast_path),
             if (entry.source_kind) |kind| @tagName(kind) else "", entry.saved_connection_id orelse 0,
         });
-        try line.appendSlice(self.allocator, writer.buffered());
         var atomic = try self.dir.createFileAtomic(self.io, self.index_path, .{ .permissions = @as(std.Io.File.Permissions, @fromBackingInt(0o600)), .make_path = true, .replace = true });
         defer atomic.deinit(self.io);
-        try atomic.file.writePositionalAll(self.io, line.items, 0);
+        var index_buffer: [8192]u8 = undefined;
+        var output = atomic.file.writer(self.io, &index_buffer);
+        if (self.dir.openFile(self.io, self.index_path, .{ .follow_symlinks = false })) |previous| {
+            defer previous.close(self.io);
+            var input_buffer: [8192]u8 = undefined;
+            var input = previous.reader(self.io, &input_buffer);
+            _ = try input.interface.streamRemaining(&output.interface);
+        } else |err| if (err != error.FileNotFound) return err;
+        try output.interface.writeAll(writer.buffered());
+        try output.interface.flush();
         try atomic.file.sync(self.io);
         try atomic.replace(self.io);
     }
 
     /// Loads valid entries, skipping a partial/corrupt trailing line.
     pub fn load(self: *Archive, allocator: std.mem.Allocator) !std.ArrayList(Entry) {
-        return self.loadBounded(allocator, 16 * 1024 * 1024, std.math.maxInt(usize));
-    }
-    fn loadBounded(self: *Archive, allocator: std.mem.Allocator, byte_limit: usize, entry_limit: usize) !std.ArrayList(Entry) {
         var out: std.ArrayList(Entry) = .empty;
         errdefer self.freeEntries(&out);
-        const data = self.dir.readFileAlloc(self.io, self.index_path, allocator, .limited(byte_limit)) catch |err| {
+        const file = self.dir.openFile(self.io, self.index_path, .{ .follow_symlinks = false }) catch |err| {
             if (err == error.FileNotFound) return out;
             return err;
         };
-        defer allocator.free(data);
-        var lines = std.mem.splitScalar(u8, data, '\n');
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            var fields = std.mem.splitScalar(u8, line, '\t');
-            const id = parseU64(fields.next() orelse continue) orelse continue;
-            const started = parseI64(fields.next() orelse continue) orelse continue;
-            const ended = parseI64(fields.next() orelse continue) orelse continue;
-            const duration = parseU64(fields.next() orelse continue) orelse continue;
-            const exit_raw = parseI64(fields.next() orelse continue) orelse continue;
-            if (exit_raw < std.math.minInt(i32) or exit_raw > std.math.maxInt(i32)) continue;
-            const host_raw = fields.next() orelse continue;
-            const user_raw = fields.next() orelse continue;
-            const path_raw = fields.next() orelse continue;
-            const identity_fields = parseIdentity(&fields) orelse continue;
-            if (out.items.len == entry_limit) return error.CatalogLimit;
-            const host = try allocator.dupe(u8, host_raw);
+        defer file.close(self.io);
+        var buffer: [8192]u8 = undefined;
+        var reader = file.reader(self.io, &buffer);
+        while (true) {
+            const line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+                error.StreamTooLong => {
+                    _ = try reader.interface.discardDelimiterInclusive('\n');
+                    continue;
+                },
+                else => return err,
+            } orelse break;
+            const entry = parseEntry(line) orelse continue;
+            const host = try allocator.dupe(u8, entry.host);
             errdefer allocator.free(host);
-            const user = try allocator.dupe(u8, user_raw);
+            const user = try allocator.dupe(u8, entry.user);
             errdefer allocator.free(user);
-            const path = try allocator.dupe(u8, path_raw);
+            const path = try allocator.dupe(u8, entry.cast_path);
             errdefer allocator.free(path);
-            try out.append(allocator, .{ .id = id, .started_ms = started, .ended_ms = ended, .duration_ms = duration, .exit_code = if (exit_raw == -2147483648) null else @intCast(exit_raw), .host = host, .user = user, .cast_path = path, .source_kind = identity_fields.kind, .saved_connection_id = identity_fields.connection_id });
+            var owned = entry;
+            owned.host = host;
+            owned.user = user;
+            owned.cast_path = path;
+            try out.append(allocator, owned);
         }
         return out;
     }
 
-    /// Removes entries older than keep_days and rewrites the index atomically.
-    /// The cast file is removed only after it is no longer indexed.
+    /// Applies the same age and capacity limits used by the history list.
     pub fn prune(self: *Archive, keep_days: u16, now_ms: i64) !usize {
         if (keep_days == 0) return 0;
+        return self.pruneHistory(now_ms -| @as(i64, keep_days) * std.time.ms_per_day);
+    }
+    pub fn pruneHistory(self: *Archive, cutoff: i64) !usize {
         lockIndex();
         defer index_mutex.unlock();
+        var catalog = try catalogLoad(self, self.allocator);
+        defer catalog.deinit();
+        return self.pruneCatalog(&catalog, catalog.retainedPrefix(cutoff));
+    }
+
+    fn pruneCatalog(self: *Archive, catalog: *const Catalog, retained: usize) !usize {
+        if (retained == catalog.entries.items.len) return 0;
         var entries = try self.load(self.allocator);
         defer self.freeEntries(&entries);
-        const cutoff = now_ms - @as(i64, keep_days) * std.time.ms_per_day;
         var kept: std.ArrayList(Entry) = .empty;
         defer kept.deinit(self.allocator);
         try kept.ensureTotalCapacity(self.allocator, entries.items.len);
@@ -343,49 +366,39 @@ pub const Archive = struct {
         try plans.ensureTotalCapacity(self.allocator, entries.items.len);
         var atomic = try self.dir.createFileAtomic(self.io, self.index_path, .{ .permissions = @as(std.Io.File.Permissions, @fromBackingInt(0o600)), .make_path = true, .replace = true });
         defer atomic.deinit(self.io);
-        for (entries.items) |entry| {
-            if (entry.ended_ms >= cutoff) {
-                kept.appendAssumeCapacity(entry);
-                continue;
-            }
-            var already_planned = false;
-            for (plans.items) |plan| {
-                for (plan.paths.items) |path| if (std.mem.eql(u8, path, entry.cast_path)) {
-                    already_planned = true;
-                    break;
-                };
-                if (already_planned) break;
-            }
-            if (already_planned) continue;
-            const plan = makeRemovalPlan(self.allocator, self.io, self.dir, entry.cast_path) catch |err| switch (err) {
-                error.RecordBusy => {
-                    kept.appendAssumeCapacity(entry);
-                    continue;
-                },
-                else => return err,
-            };
-            plans.appendAssumeCapacity(plan);
+        var protected_casts: std.StringHashMapUnmanaged(void) = .empty;
+        defer protected_casts.deinit(self.allocator);
+        for (catalog.entries.items[0..retained]) |descriptor| {
+            if (descriptor.entry.cast_path.len != 0) try protected_casts.put(self.allocator, descriptor.entry.cast_path, {});
         }
-        var catalog = try catalogLoad(self, self.allocator);
-        defer catalog.deinit();
-        for (catalog.entries.items) |descriptor| {
-            const document = descriptor.document orelse continue;
-            if (document.state == .tombstone or descriptor.entry.ended_ms >= cutoff) continue;
-            var indexed = false;
-            for (entries.items) |entry| if (std.mem.eql(u8, entry.cast_path, descriptor.entry.cast_path)) {
-                indexed = true;
-                break;
-            };
-            if (indexed) continue;
-            const plan = makeRemovalPlanAt(self.allocator, self.io, self.dir, descriptor.entry.cast_path, descriptor.manifest_path) catch |err| switch (err) {
-                error.RecordBusy => continue,
+        var removed_casts: std.StringHashMapUnmanaged(void) = .empty;
+        defer removed_casts.deinit(self.allocator);
+        for (catalog.entries.items[retained..]) |descriptor| {
+            if (descriptor.manifest_path != null and descriptor.document == null) continue;
+            if (isActiveRecord(descriptor.archive_key)) continue;
+            const cast_path = descriptor.entry.cast_path;
+            if (cast_path.len != 0 and (removed_casts.contains(cast_path) or protected_casts.contains(cast_path))) continue;
+            var plan = makeRemovalPlanAt(self.allocator, self.io, self.dir, cast_path, descriptor.manifest_path) catch |err| switch (err) {
+                error.RecordBusy, error.FileNotFound => continue,
                 else => return err,
             };
-            plans.append(self.allocator, plan) catch |err| {
-                var rejected = plan;
-                rejected.deinit();
-                return err;
-            };
+            var transferred = false;
+            defer if (!transferred) plan.deinit();
+            if (isActiveRecord(descriptor.archive_key)) continue;
+            if (descriptor.manifest_path) |path| {
+                const current = manifest.load(self.allocator, self.io, self.dir, path) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => return err,
+                };
+                defer current.deinit();
+                if (current.value.manifest_revision != descriptor.manifest_revision or !std.mem.eql(u8, current.value.archive_key, descriptor.archive_key)) continue;
+            }
+            try plans.append(self.allocator, plan);
+            transferred = true;
+            if (cast_path.len != 0) try removed_casts.put(self.allocator, cast_path, {});
+        }
+        for (entries.items) |entry| {
+            if (!removed_casts.contains(entry.cast_path)) kept.appendAssumeCapacity(entry);
         }
         // Every dependency and every reservation is prepared before the first
         // deletion. Readers cannot observe a half removed artifact group.
@@ -479,6 +492,22 @@ pub const Archive = struct {
         entries.deinit(self.allocator);
     }
 };
+
+fn parseEntry(line: []const u8) ?Entry {
+    var fields = std.mem.splitScalar(u8, line, '\t');
+    const id = parseU64(fields.next() orelse return null) orelse return null;
+    const started = parseI64(fields.next() orelse return null) orelse return null;
+    const ended = parseI64(fields.next() orelse return null) orelse return null;
+    const duration = parseU64(fields.next() orelse return null) orelse return null;
+    const exit = parseI64(fields.next() orelse return null) orelse return null;
+    if (exit < std.math.minInt(i32) or exit > std.math.maxInt(i32)) return null;
+    const host = fields.next() orelse return null;
+    const user = fields.next() orelse return null;
+    const path = fields.next() orelse return null;
+    manifest.validatePath(path) catch return null;
+    const identity = parseIdentity(&fields) orelse return null;
+    return .{ .id = id, .started_ms = started, .ended_ms = ended, .duration_ms = duration, .exit_code = if (exit == std.math.minInt(i32)) null else @intCast(exit), .host = host, .user = user, .cast_path = path, .source_kind = identity.kind, .saved_connection_id = identity.connection_id };
+}
 
 const ParsedIdentity = struct { kind: ?SourceKind = null, connection_id: ?u64 = null };
 
@@ -656,10 +685,29 @@ pub const Descriptor = struct {
     can_export: bool = false,
     display: manifest.Display = .{},
     document: ?manifest.Manifest = null,
+    metadata_bytes: usize = 0,
 };
 pub const Catalog = struct {
     arena: std.heap.ArenaAllocator,
     entries: std.ArrayList(Descriptor) = .empty,
+    omitted: usize = 0,
+    cleanup_failure: ?anyerror = null,
+
+    fn limit(self: *Catalog, cutoff: i64) void {
+        const retained = self.retainedPrefix(cutoff);
+        self.omitted = self.entries.items.len - retained;
+        self.entries.shrinkRetainingCapacity(retained);
+    }
+
+    fn retainedPrefix(self: Catalog, cutoff: i64) usize {
+        var bytes: usize = 0;
+        for (self.entries.items[0..@min(max_catalog_entries, self.entries.items.len)], 0..) |entry, index| {
+            if (entry.entry.ended_ms < cutoff or entry.metadata_bytes > max_catalog_metadata_bytes - bytes) return index;
+            bytes += entry.metadata_bytes;
+        }
+        return @min(max_catalog_entries, self.entries.items.len);
+    }
+
     pub fn deinit(self: *Catalog) void {
         self.arena.deinit();
         self.* = undefined;
@@ -798,6 +846,7 @@ fn descriptorFromManifest(allocator: std.mem.Allocator, path: []const u8, value:
     };
 }
 pub const max_catalog_metadata_bytes: usize = 16 * 1024 * 1024;
+pub const max_catalog_entries: usize = 16_384;
 fn catalogLoad(archive: *Archive, allocator: std.mem.Allocator) !Catalog {
     return catalogLoadWithActive(archive, allocator, false);
 }
@@ -805,29 +854,18 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
     var out: Catalog = .{ .arena = std.heap.ArenaAllocator.init(allocator) };
     errdefer out.deinit();
     const owned = out.arena.allocator();
-    // Scan only the application's bounded archive directory. A sidecar commit
-    // remains discoverable even if the subsequent TSV replace failed/crashed.
+    // A sidecar commit remains discoverable if the subsequent TSV replace failed.
     const history = archive.dir.openDir(archive.io, "logs/history", .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return out,
         else => return err,
     };
     defer history.close(archive.io);
     var iterator = history.iterate();
-    var scanned: usize = 0;
-    var metadata_bytes: u64 = 0;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(archive.allocator);
     while (try iterator.next(archive.io)) |file| {
-        scanned += 1;
-        if (scanned > 16384) return error.CatalogLimit;
         if (file.kind != .file or !std.mem.endsWith(u8, file.name, ".session.json")) continue;
         const path = try std.fmt.allocPrint(owned, "logs/history/{s}", .{file.name});
-        const metadata_file = try manifest.openManaged(archive.io, archive.dir, path);
-        const metadata_stat = metadata_file.stat(archive.io) catch |err| {
-            metadata_file.close(archive.io);
-            return err;
-        };
-        metadata_file.close(archive.io);
-        if (metadata_stat.size > max_catalog_metadata_bytes -| metadata_bytes) return error.CatalogLimit;
-        metadata_bytes += metadata_stat.size;
         const sized = manifest.loadSized(archive.allocator, archive.io, archive.dir, path) catch |err| {
             if (err == error.OutOfMemory) return err;
             const failure_entry: Entry = .{ .id = 0, .started_ms = 0, .ended_ms = 0, .duration_ms = 0, .host = "", .user = "", .cast_path = path };
@@ -841,17 +879,13 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
         };
         const parsed = sized.parsed;
         defer parsed.deinit();
-        if (sized.source_length > metadata_stat.size) {
-            const extra = sized.source_length - metadata_stat.size;
-            if (extra > max_catalog_metadata_bytes -| metadata_bytes) return error.CatalogLimit;
-            metadata_bytes += extra;
-        }
         if (!include_active and (parsed.value.state == .tombstone or (parsed.value.state == .active and isActiveRecord(parsed.value.archive_key)))) continue;
         // Catalog rows retain display/identity/file metadata only. Detailed
         // event/range/baseline arrays are loaded for the single resolver target.
         var projection = parsed.value;
         projection.events = &.{};
         projection.execution_ranges = &.{};
+        projection.command_history = &.{};
         projection.gaps = &.{};
         const generations = try archive.allocator.dupe(manifest.Generation, projection.recording.generations);
         defer archive.allocator.free(generations);
@@ -863,7 +897,9 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
         const encoded = try std.json.Stringify.valueAlloc(archive.allocator, projection, .{});
         defer archive.allocator.free(encoded);
         const copy = try std.json.parseFromSliceLeaky(manifest.Manifest, owned, encoded, .{ .allocate = .alloc_always });
+        if ((try seen.getOrPut(archive.allocator, copy.archive_key)).found_existing) continue;
         var descriptor = try descriptorFromManifest(owned, path, copy);
+        descriptor.metadata_bytes = sized.source_length;
         if (copy.state == .active and !isActiveRecord(copy.archive_key)) {
             descriptor.coverage = .partial;
             descriptor.failure = "AbnormalTermination";
@@ -878,22 +914,9 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
             data.close(archive.io);
             descriptor.can_export = true;
         }
-        var duplicate = false;
-        for (out.entries.items) |existing| if (std.mem.eql(u8, existing.archive_key, descriptor.archive_key)) {
-            duplicate = true;
-            break;
-        };
-        if (!duplicate) try out.entries.append(owned, descriptor);
+        try out.entries.append(owned, descriptor);
     }
-    if (archive.dir.openFile(archive.io, archive.index_path, .{ .follow_symlinks = false })) |index_file| {
-        defer index_file.close(archive.io);
-        if ((try index_file.stat(archive.io)).size > max_catalog_metadata_bytes -| metadata_bytes) return error.CatalogLimit;
-    } else |err| if (err != error.FileNotFound) return err;
-    const remaining: usize = @intCast(max_catalog_metadata_bytes -| metadata_bytes);
-    var entries = archive.loadBounded(archive.allocator, remaining, 16384) catch |err| switch (err) {
-        error.StreamTooLong => return error.CatalogLimit,
-        else => return err,
-    };
+    var entries = try archive.load(archive.allocator);
     defer archive.freeEntries(&entries);
     for (entries.items) |entry| {
         const sidecar_path = try manifest.pathForCast(owned, entry.cast_path);
@@ -902,7 +925,8 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
             file.close(archive.io);
             continue;
         } else |err| if (err != error.FileNotFound) continue;
-        var descriptor: Descriptor = .{ .archive_key = try legacyKey(owned, archive, entry), .entry = entry, .title = entry.host, .connection_id = entry.saved_connection_id };
+        var descriptor: Descriptor = .{ .archive_key = try legacyKey(owned, archive, entry), .entry = entry, .title = entry.host, .connection_id = entry.saved_connection_id, .metadata_bytes = entry.host.len + entry.user.len + entry.cast_path.len + 128 };
+        if ((try seen.getOrPut(archive.allocator, descriptor.archive_key)).found_existing) continue;
         descriptor.entry.host = try owned.dupe(u8, entry.host);
         descriptor.entry.user = try owned.dupe(u8, entry.user);
         descriptor.entry.cast_path = try owned.dupe(u8, entry.cast_path);
@@ -914,17 +938,12 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
             descriptor.can_open = false;
             descriptor.failure = @errorName(err);
         }
-        var duplicate = false;
-        for (out.entries.items) |existing| if (std.mem.eql(u8, existing.archive_key, descriptor.archive_key)) {
-            duplicate = true;
-            break;
-        };
-        if (!duplicate) try out.entries.append(owned, descriptor);
+        try out.entries.append(owned, descriptor);
     }
-    if (out.entries.items.len > 16384) return error.CatalogLimit;
     const Sort = struct {
         fn less(_: void, a: Descriptor, b: Descriptor) bool {
-            return a.entry.ended_ms > b.entry.ended_ms;
+            if (a.entry.ended_ms != b.entry.ended_ms) return a.entry.ended_ms > b.entry.ended_ms;
+            return std.mem.lessThan(u8, a.archive_key, b.archive_key);
         }
     };
     std.mem.sort(Descriptor, out.entries.items, {}, Sort.less);
@@ -1024,6 +1043,7 @@ pub fn writeTombstone(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir,
     value.failure = reason;
     value.execution_ranges = &.{};
     value.events = &.{};
+    value.command_history = &.{};
     value.gaps = &.{};
     value.display = .{};
     value.commit.state = .removed;
@@ -1136,10 +1156,27 @@ const RemovalPlan = struct {
         }
         for (self.paths.items) |path| {
             if (self.manifest_path) |sidecar| if (std.mem.eql(u8, path, sidecar)) continue;
-            dir.deleteFile(io, path) catch |err| if (err != error.FileNotFound) return err;
+            deleteManaged(io, dir, path) catch |err| if (err != error.FileNotFound) return err;
         }
     }
 };
+
+fn deleteManaged(io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
+    try manifest.validatePath(path);
+    var current = dir;
+    var owns_dir = false;
+    defer if (owns_dir) current.close(io);
+    var parts = std.mem.splitScalar(u8, path, '/');
+    var part = parts.next().?;
+    while (parts.next()) |next| {
+        const child = try current.openDir(io, part, .{ .follow_symlinks = false });
+        if (owns_dir) current.close(io);
+        current = child;
+        owns_dir = true;
+        part = next;
+    }
+    try current.deleteFile(io, part);
+}
 
 /// The parent manifest's removal guard also protects all execution segments.
 pub fn removeExecutionSegments(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, parent_path: []const u8) !void {
@@ -1188,6 +1225,7 @@ fn makeRemovalPlanAt(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, 
 }
 
 fn appendRemovalPath(plan: *RemovalPlan, path: []const u8) !void {
+    try manifest.validatePath(path);
     try plan.paths.ensureUnusedCapacity(plan.allocator, 1);
     plan.paths.appendAssumeCapacity(try plan.allocator.dupe(u8, path));
 }
@@ -1443,15 +1481,33 @@ test "archive unrecorded metadata never labels an actual writer failure as disab
     try std.testing.expectEqual(@as(?u64, 42), resolved.descriptor.connection_id);
 }
 
-test "archive catalog rejects cumulative metadata beyond its budget without returning a truncated list" {
+test "archive history retains the newest rows and prunes overflow with the same budget" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var archive: Archive = .{ .allocator = std.testing.allocator, .io = std.testing.io, .dir = tmp.dir };
     const title = try std.testing.allocator.alloc(u8, 6 * 1024 * 1024);
     defer std.testing.allocator.free(title);
     @memset(title, 'x');
-    for (0..3) |index| _ = try archive.publishMetadata(.{ .identity = MetadataIdentity.generate(), .owner = .{ .session_id = @fromBackingInt(index + 1) }, .source_kind = .local, .started_ms = 1, .ended_ms = 2, .initial_cols = 80, .initial_rows = 24, .display = .{ .title = title }, .reason = .RecordingDisabled });
-    try std.testing.expectError(error.CatalogLimit, archive.loadCatalog(std.testing.allocator));
+    for (0..3) |index| _ = try archive.publishMetadata(.{ .identity = MetadataIdentity.generate(), .owner = .{ .session_id = @fromBackingInt(index + 1) }, .source_kind = .local, .started_ms = 1, .ended_ms = @intCast(index + 2), .initial_cols = 80, .initial_rows = 24, .display = .{ .title = title }, .reason = .RecordingDisabled });
+    var listing = try archive.loadCatalog(std.testing.allocator);
+    defer listing.deinit();
+    try std.testing.expectEqual(@as(usize, 2), listing.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), listing.omitted);
+    try std.testing.expectEqual(@as(i64, 4), listing.entries.items[0].entry.ended_ms);
+    try std.testing.expectEqual(@as(i64, 3), listing.entries.items[1].entry.ended_ms);
+    var newest = try archive.resolveRecord(std.testing.allocator, .{ .archive_key = listing.entries.items[0].archive_key });
+    defer newest.deinit();
+    var cleaned: usize = 0;
+    var history = try archive.loadHistory(std.testing.allocator, std.math.minInt(i64), &cleaned);
+    defer history.deinit();
+    try std.testing.expectEqual(@as(usize, 1), cleaned);
+    try std.testing.expectEqual(@as(usize, 1), history.omitted);
+    try std.testing.expect(history.cleanup_failure == null);
+    var after = try archive.loadCatalog(std.testing.allocator);
+    defer after.deinit();
+    try std.testing.expectEqual(@as(usize, 2), after.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), after.omitted);
+    try std.testing.expectEqual(@as(i64, 3), after.entries.items[1].entry.ended_ms);
 }
 
 test "archive explicit deletion preserves new entries and refuses a leased recording" {

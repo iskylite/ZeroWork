@@ -1301,7 +1301,9 @@ test "production Local command history preserves approved AI and manual repeats 
     defer catalog.deinit();
     try std.testing.expectEqual(@as(usize, 1), catalog.entries.items.len);
     const descriptor = catalog.entries.items[0];
-    const metadata = descriptor.document.?;
+    var resolved = try archive.resolveRecord(a, .{ .archive_key = descriptor.archive_key });
+    defer resolved.deinit();
+    const metadata = resolved.descriptor.document.?;
     var count: usize = 0;
     for (metadata.command_history) |item| if (item.value.command != null and std.mem.eql(u8, item.value.command.?, "true")) {
         try std.testing.expectEqual(@as(u64, 1), item.recording_generation);

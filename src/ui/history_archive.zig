@@ -104,19 +104,24 @@ pub const CatalogJob = struct {
     cancel: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
     catalog: ?Archive.Catalog = null,
-    pub fn start(archive: Archive.Archive, generation: u64) !*CatalogJob {
+    cleanup_cutoff: i64,
+    cleaned: usize = 0,
+    cleanup_failure: ?anyerror = null,
+    pub fn start(archive: Archive.Archive, generation: u64, retention_days: u16) !*CatalogJob {
         const self = try std.heap.c_allocator.create(CatalogJob);
         errdefer std.heap.c_allocator.destroy(self);
-        self.* = .{ .archive = archive, .generation = generation };
+        const now = @import("../platform/realtime.zig").milliseconds(undefined);
+        self.* = .{ .archive = archive, .generation = generation, .cleanup_cutoff = if (retention_days == 0 or now == 0) std.math.minInt(i64) else now -| @as(i64, retention_days) * std.time.ms_per_day };
         self.archive.allocator = std.heap.c_allocator;
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
     }
     fn run(self: *CatalogJob) void {
-        if (!self.cancel.load(.acquire)) self.catalog = self.archive.loadCatalog(std.heap.c_allocator) catch |err| blk: {
-            self.failure = if (err == error.StreamTooLong) error.HistoryIndexTooLarge else err;
+        if (!self.cancel.load(.acquire)) self.catalog = self.archive.loadHistory(std.heap.c_allocator, self.cleanup_cutoff, &self.cleaned) catch |err| blk: {
+            self.failure = err;
             break :blk null;
         };
+        if (self.catalog) |value| self.cleanup_failure = value.cleanup_failure;
         self.done.store(true, .release);
         wake.notify();
     }
@@ -213,7 +218,6 @@ pub fn errorText(err: anyerror) []const u8 {
         error.HistoryDecodedBudgetExceeded => "已打开记录达到 256 MiB 预算，请先关闭一条历史记录",
         error.EmptyRecording => "录制内容为空，没有可回看的真实帧",
         error.InvalidCast, error.InvalidFrame, error.SyntaxError, error.UnexpectedToken, error.InvalidCharacter, error.MissingField => "录制内容损坏，无法回看",
-        error.CatalogLimit => "历史目录元信息超过 16 MiB 或 16384 条上限",
         else => @errorName(err),
     };
 }
