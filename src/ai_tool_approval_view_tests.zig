@@ -131,13 +131,13 @@ test "AI approval view is hidden until a captured call and owns complete command
     try std.testing.expectEqualStrings("printf captured-command", f.view.command_owned.?);
     try std.testing.expectEqualStrings("本机 · zsh · #101 · 目录 /tmp/approval fixture", f.view.identity.getText().?.content);
     try std.testing.expectEqual(@as(f32, 572), f.view.card.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 167.625), f.view.card.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 90.625), f.view.body.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 137.625), f.view.card.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 60.625), f.view.body.globalRect().h);
     try f.visibleActions();
     try std.testing.expectEqual(@as(usize, 0), f.attempts);
 }
 
-test "AI approval default short command shows entire risk feedback without scrolling" {
+test "AI approval default short command omits the generic impact notice" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -146,24 +146,18 @@ test "AI approval default short command shows entire risk feedback without scrol
     try f.view.update(approval);
     f.settle();
     const body = f.view.body.globalRect();
-    const feedback = f.view.feedback.globalRect();
     const content = f.view.command.parent.?.parent.?;
-    try std.testing.expectEqual(@as(f32, 90.625), body.h);
-    try std.testing.expectEqual(@as(f32, 167.625), f.view.height());
+    try std.testing.expectEqual(@as(f32, 60.625), body.h);
+    try std.testing.expectEqual(@as(f32, 137.625), f.view.height());
     try std.testing.expectEqual(@as(f32, 0), content.style.translate_y);
-    try std.testing.expectEqualStrings("影响 · 尚未核实", f.view.feedback.getText().?.content);
+    try std.testing.expectEqualStrings("", f.view.feedback.getText().?.content);
     const title = f.view.title.globalRect();
     const target = f.view.header_identity.globalRect();
     try std.testing.expectEqualStrings(approval.target, f.view.header_identity.getText().?.content);
     try std.testing.expect(target.x > title.x + title.w);
     try std.testing.expect(@abs((target.y + target.h / 2) - (title.y + title.h / 2)) < 1);
     try std.testing.expect(f.view.identity.style.display == .flex);
-    const notice = f.node("ai.approval.impact_notice").globalRect();
-    try std.testing.expectEqual(@as(f32, 30), notice.h);
-    try std.testing.expect(feedback.y >= notice.y and feedback.y + feedback.h <= notice.y + notice.h + 0.01);
-    try std.testing.expect(feedback.w > 0 and feedback.h > 0);
-    try std.testing.expect(feedback.x >= body.x and feedback.x + feedback.w <= body.x + body.w + 0.01);
-    try std.testing.expect(feedback.y >= body.y and feedback.y + feedback.h <= body.y + body.h + 0.01);
+    try std.testing.expect(f.node("ai.approval.impact_notice").style.display == .none);
     try f.visibleActions();
 }
 
@@ -176,7 +170,6 @@ test "AI approval long command scrolls with fixed visible accept reject at minim
     try f.show(1, command);
     const accept_before = f.node("ai.approval.accept").globalRect();
     const reject_before = f.node("ai.approval.reject").globalRect();
-    const body = f.view.body.globalRect();
     const command_scroll = f.node("ai.approval.command_scroll");
     const viewport = command_scroll.globalRect();
     const content = f.view.command.parent.?;
@@ -185,7 +178,7 @@ test "AI approval long command scrolls with fixed visible accept reject at minim
     try std.testing.expect(isDescendant(f.view.body, command_scroll));
     try std.testing.expectEqual(@as(f32, 37), viewport.h);
     try std.testing.expect(content.globalRect().h > viewport.h);
-    try std.testing.expect(feedback_before.y >= body.y and feedback_before.y + feedback_before.h <= body.y + body.h + 0.01);
+    try std.testing.expect(f.node("ai.approval.impact_notice").style.display == .none);
     const content_y = content.globalRect().y;
     f.cx.handleScroll(.{ .x = viewport.x + 20, .y = viewport.y + viewport.h / 2, .dx = 0, .dy = -10_000 });
     f.settle();
@@ -215,16 +208,16 @@ test "AI approval disclosure keeps target arguments and impact visible without a
     try f.show(1, "printf disclosure");
     const hash = f.view.arguments_hash;
     f.click(f.node("ai.approval.disclosure"));
-    try std.testing.expectEqual(@as(f32, 167.625), f.view.height());
-    try std.testing.expectEqual(@as(f32, 167.625), f.view.card.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 137.625), f.view.height());
+    try std.testing.expectEqual(@as(f32, 137.625), f.view.card.globalRect().h);
     try std.testing.expect(f.view.body.style.display == .flex);
     try f.visibleActions();
     try f.view.update(Fixture.source(1, "printf disclosure"));
     f.settle();
-    try std.testing.expectEqual(@as(f32, 167.625), f.view.height());
+    try std.testing.expectEqual(@as(f32, 137.625), f.view.height());
     f.enter(f.node("ai.approval.disclosure"));
-    try std.testing.expectEqual(@as(f32, 167.625), f.view.height());
-    try std.testing.expectEqual(@as(f32, 167.625), f.view.card.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 137.625), f.view.height());
+    try std.testing.expectEqual(@as(f32, 137.625), f.view.card.globalRect().h);
     try std.testing.expect(f.view.body.style.display == .flex);
     try f.visibleActions();
     try std.testing.expectEqual(@as(u64, 1), f.view.sequence.?);
@@ -275,7 +268,7 @@ test "AI approval stale host sequence shows error then fresh sequence can decide
     try std.testing.expect(!f.view.decision_pending.peek());
     try std.testing.expectEqualStrings("StaleApproval", f.view.feedback.getText().?.content);
     try f.show(2, "printf fresh");
-    try std.testing.expectEqualStrings("影响 · 尚未核实", f.view.feedback.getText().?.content);
+    try std.testing.expectEqualStrings("", f.view.feedback.getText().?.content);
     f.click(f.node("ai.approval.reject"));
     try std.testing.expectEqual(@as(usize, 1), f.decisions);
     try std.testing.expectEqual(@as(u64, 2), f.last_sequence.?);
@@ -336,6 +329,7 @@ test "group AI approval preserves complete frozen targets and fixed actions at c
     try std.testing.expectEqual(@as(f32, 572), f.view.card.globalRect().w);
     try std.testing.expectEqualStrings(approval.target, f.view.identity.getText().?.content);
     try std.testing.expectEqualStrings(approval.target, f.view.target_owned.?);
+    try std.testing.expectEqualStrings("每个所列目标各执行一次。", f.view.feedback.getText().?.content);
     const button = f.node("ai.approval.accept");
     const reject = f.node("ai.approval.reject");
     try std.testing.expectEqual(@as(f32, 76), button.globalRect().w);
@@ -734,9 +728,7 @@ test "tool action approval shows parameter action with tool identity only in det
     try std.testing.expect(isDescendant(f.view.body, f.node("ai.approval.tool")));
     try std.testing.expectEqualStrings(raw, f.view.command_owned.?);
     try std.testing.expectEqual(approval.arguments_hash, f.view.arguments_hash);
-    const impact = f.node("ai.approval.impact_notice").globalRect();
-    const body = f.view.body.globalRect();
-    try std.testing.expect(impact.y + impact.h <= body.y + body.h + 0.1);
+    try std.testing.expect(f.node("ai.approval.impact_notice").style.display == .none);
     try f.visibleActions();
     approval.sequence += 1;
     approval.tool_id = "bmc_ikvm.screenshot";

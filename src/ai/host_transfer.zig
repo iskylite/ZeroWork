@@ -6,7 +6,7 @@ const transfer = @import("../transfer/manager.zig");
 const approval = @import("host_approval.zig");
 pub const Kind = enum { upload_file, download_file, get_transfer, wait_transfer, cancel_transfer };
 const session = "\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
-const key = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
+const key = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"description\":\"Use 1 to 128 ASCII letters, digits, or these characters: - _ . :\"}";
 const ref = "\"transfer_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
 fn path(comptime name: []const u8) []const u8 {
     return "\"" ++ name ++ "\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}";

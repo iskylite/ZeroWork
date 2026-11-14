@@ -184,7 +184,7 @@ pub const Bridge = struct {
                 } else |_| {}
             }
             if (exchange.cancel.load(.acquire)) reader.cancel();
-            if (@import("../platform/realtime.zig").monotonicNs() - self.file_started_ns >= @as(i128, exchange.invocation.timeout_ms) * std.time.ns_per_ms) {
+            if (@import("../platform/realtime.zig").monotonicNs() - self.file_started_ns >= @as(i128, exchange.invocation.call.executionTimeoutMs()) * std.time.ns_per_ms) {
                 self.file_timed_out = true;
                 reader.cancel();
             }
@@ -438,7 +438,7 @@ pub const Bridge = struct {
                 }
                 const key = current.operation_key.?;
                 current.verification = .{ .owner = capture.owner, .service = capture.exec_binding, .create_key = capture.create_key, .operation_key = key, .turn_id = current.invocation.key.turn_id, .call_hash = @import("../ai/readonly_verification.zig").digest(current.invocation.key.call_id), .arguments_hash = current.invocation.arguments_hash };
-                const handle = facade.exec(current.invocation.call.command, .{ .key = key, .call_id = key.operation_id, .service_binding = capture.exec_binding, .cwd = capture.cwd, .timeout_ms = current.invocation.timeout_ms, .capture_cap = if (current.invocation.output_context != null) @import("../ai/batch_output.zig").capture_limit else @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) }) catch |err| {
+                const handle = facade.exec(current.invocation.call.command, .{ .key = key, .call_id = key.operation_id, .service_binding = capture.exec_binding, .cwd = capture.cwd, .timeout_ms = current.invocation.call.executionTimeoutMs(), .capture_cap = if (current.invocation.output_context != null) @import("../ai/batch_output.zig").capture_limit else @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) }) catch |err| {
                     if (err == error.WorkerBusy) return;
                     _ = app.sessions.journal.failReleased(key, .{ .domain = .host, .code = @errorName(err), .cleanup = .released, .safe_message = "SSH tool did not start" }) catch {};
                     return failure(current, .failed, err);
@@ -461,7 +461,7 @@ pub const Bridge = struct {
                 const bindings = self.capture.?.file_bindings.?;
                 const state = host.state(bindings.directory) orelse return failure(current, .rejected, error.StaleBinding);
                 if (state.phase == .connecting) {
-                    if (@import("../platform/realtime.zig").monotonicNs() - self.file_started_ns >= @as(i128, current.invocation.timeout_ms) * std.time.ns_per_ms) return failure(current, .timed_out, error.ToolDeadlineExceeded);
+                    if (@import("../platform/realtime.zig").monotonicNs() - self.file_started_ns >= @as(i128, current.invocation.call.executionTimeoutMs()) * std.time.ns_per_ms) return failure(current, .timed_out, error.ToolDeadlineExceeded);
                     return;
                 }
                 if (state.phase != .ready) return failure(current, .failed, error.RemoteFilesUnavailable);

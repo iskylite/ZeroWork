@@ -10,8 +10,20 @@ pub fn serverRequest(method: []const u8) bool {
     inline for (.{ "roots/list", "sampling/createMessage", "elicitation/create" }) |name| if (std.mem.eql(u8, method, name)) return true;
     return false;
 }
+const request_methods = [_][]const u8{
+    "ping",                 "server/discover",     "resources/list",        "resources/templates/list",
+    "resources/read",       "resources/subscribe", "resources/unsubscribe", "prompts/list",
+    "prompts/get",          "completion/complete", "logging/setLevel",      "tasks/list",
+    "tasks/get",            "tasks/result",        "tasks/cancel",          "notifications/poll",
+    "subscriptions/listen", "tasks/update",
+};
+pub const request_method_enum = methods: {
+    var json: []const u8 = "[";
+    for (request_methods, 0..) |name, index| json = json ++ (if (index == 0) "" else ",") ++ "\"" ++ name ++ "\"";
+    break :methods json ++ "]";
+};
 pub fn requestMethod(method: []const u8) bool {
-    inline for (.{ "ping", "server/discover", "resources/list", "resources/templates/list", "resources/read", "resources/subscribe", "resources/unsubscribe", "prompts/list", "prompts/get", "completion/complete", "logging/setLevel", "tasks/list", "tasks/get", "tasks/result", "tasks/cancel", "notifications/poll", "subscriptions/listen", "tasks/update" }) |name| if (std.mem.eql(u8, method, name)) return true;
+    for (request_methods) |name| if (std.mem.eql(u8, method, name)) return true;
     return false;
 }
 pub const max_response_bytes = 32 * 1024 * 1024;

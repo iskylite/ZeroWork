@@ -143,7 +143,7 @@ test "schema uses string content and actual reconnect backoff values" {
 test "execution policy settings participate in atomic draft change and merge" {
     const baseline: config.Config = .{};
     var draft = baseline;
-    draft.ai.execution_mode = .new_pty;
+    draft.ai.execution_mode = .interactive;
     draft.ai.session_retention = .keep;
     const dirty = changed(baseline, draft);
     try std.testing.expectEqual(@as(usize, 2), dirty.count());
@@ -152,7 +152,7 @@ test "execution policy settings participate in atomic draft change and merge" {
     var latest = baseline;
     latest.ai.permission_mode = .auto;
     const merged = merge(latest, draft, dirty);
-    try std.testing.expectEqual(config.ExecutionMode.new_pty, merged.ai.execution_mode);
+    try std.testing.expectEqual(config.ExecutionMode.interactive, merged.ai.execution_mode);
     try std.testing.expectEqual(config.SessionRetention.keep, merged.ai.session_retention);
     try std.testing.expectEqual(config.PermissionMode.auto, merged.ai.permission_mode);
 }

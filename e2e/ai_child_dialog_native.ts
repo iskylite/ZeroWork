@@ -9,7 +9,7 @@ const prefix=resolve(process.env.ZW_AI_TEST_PREFIX??'/tmp/zw-v04-task-build'),bi
 const out=resolve(process.argv[2]??'/tmp/zw-child-dialog-native');await mkdir(out,{recursive:true});
 const iso=await realpath(await mkdtemp('/tmp/zw-task-gateway-')),data=join(iso,'data'),rpc=join(iso,'rpc'),zdot=join(iso,'zdot');
 for(const dir of [data,rpc,zdot])await mkdir(dir);await writeFile(join(zdot,'.zshrc'),"bindkey -e\nPS1='task-gateway%# '\n");
-const requests:any[]=[];let childHeld:any=null,parentHeld:any=null,rootRound=0,childId='',serverError='',manual=0,childCompleted=false;
+const requests:any[]=[];let childHeld:any=null,parentHeld:any=null,rootRound=0,stopBlocked=false,childId='',serverError='',manual=0,childCompleted=false;
 const marker=join(iso,'child-command-once');
 const frame=(delta:any)=>'data: '+JSON.stringify({choices:[{index:0,delta}]})+'\n\n';
 const finish=(res:any,text:string)=>res.end(frame({content:text})+'data: [DONE]\n\n');
@@ -24,7 +24,7 @@ const server=createServer(async(req,res)=>{try{
  const agentTasks=body.tools.find((t:any)=>t.function?.name===wire('host.agent_tasks'))?.function;
  if(agentTasks){
   rootRound++;
-  assert.match(agentTasks.description,/send requires task_id, text, and a non-empty request_key/);
+  assert.match(agentTasks.description,/send requires task_id, text, and request_key/);
   if(!results.has('ctx')){tool(res,'ctx','host.get_current_context',{});return}
   if(!results.has('create')){tool(res,'create','host.agent_tasks',{action:'create',request_key:'native-child',name:'日志核验',text:'CHILD_DIALOG_TASK',context_mode:'independent',session_refs:[results.get('ctx').binding_ref],reusable:false});return}
   const childTask=results.get('create').task;
@@ -39,9 +39,14 @@ const server=createServer(async(req,res)=>{try{
   assert.equal(rejection.receipt.side_effect_started,false);
   assert.equal(rejection.receipt.local_released,true);
   assert.equal(rejection.receipt.remote_effect_unknown,false);
+  if(results.has('stop-waiting-child')){
+   assert.equal(envelopes.get('stop-waiting-child').status,'rejected');
+   assert.equal(results.get('stop-waiting-child').error_code,'ChildAwaitingUser');
+   stopBlocked=true;
+  }
   const reports=[...results].filter(([key])=>key.startsWith('events-'));
   const latest=reports.at(-1)?.[1];
-  if(!latest&&!childCompleted){parentHeld=res;res.write(frame({content:'等待子任务核验 '}));return}
+  if(!latest&&!childCompleted&&!stopBlocked){parentHeld=res;res.write(frame({content:'等待子任务核验 '}));return}
   if(!childCompleted||!JSON.stringify(latest).includes('CHILD_DIALOG_DONE')){tool(res,'events-'+reports.length,'host.agent_tasks',{action:'wait_events',after_sequence:latest?.watermark??0,wait_ms:10000});return}
   finish(res,'PARENT_DIALOG_DONE');
   return;
@@ -54,7 +59,17 @@ const server=createServer(async(req,res)=>{try{
  assert(JSON.stringify(results.get('question')).includes('check'));
  const context:any=results.get('childctx');if(!context){tool(res,'childctx','host.get_current_context',{});return}
  let ready=false;for(let i=0;i<8;i++){const state:any=results.get('ready'+i);if(!state){if(i)await new Promise(r=>setTimeout(r,200));tool(res,'ready'+i,'host.get_session',{session_ref:context.binding_ref});return}if(state.session?.capabilities?.trusted_pty_execution){ready=true;break}}
- assert(ready);if(!results.has('command')){tool(res,'command','run_command',{session_ids:[context.current_binding.session],command:`printf CHILD_DIALOG_OK; printf once >> '${marker}'`});return}childCompleted=true;finish(res,'CHILD_DIALOG_DONE');if(parentHeld){tool(parentHeld,'events-0','host.agent_tasks',{action:'wait_events',after_sequence:0,wait_ms:10000});parentHeld=null}
+ assert(ready);
+ if(!results.has('denied-command')){
+  tool(res,'denied-command','host.run_in_terminal',{session_ref:context.binding_ref,command:`printf rejected >> '${marker}'`,request_key:'denied-command',wait_ms:2000});
+  return;
+ }
+ assert.equal(results.get('denied-command').error_code,'ToolApprovalRejected');
+ if(!results.has('command')){
+  tool(res,'command','run_command',{session_ids:[context.current_binding.session],command:`printf CHILD_DIALOG_OK; printf once >> '${marker}'`});
+  return;
+ }
+ childCompleted=true;finish(res,'CHILD_DIALOG_DONE');
  }catch(error){serverError=String(error);finish(res,'FIXTURE_ERROR '+serverError)}
 });
 await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));
@@ -78,8 +93,25 @@ try{
  await click('ai.prompt');await h.type_('PARENT_DRAFT_KEEP');assert(!(await h.query('ai.children.list')).some(shown));await click('ai.children');await visible('ai.children.list');const listRow=await visible('ai.child.'+childId);const listName=flat(listRow).find(n=>n.test_id==='ai.child.row.name');const listLogo=flat(listRow).find(n=>n.test_id==='ai.child.logo');const listStatus=flat(listRow).find(n=>n.test_id==='ai.child.status.icon');assert(listName&&listLogo&&listStatus);assert(Math.abs(listName.rect.x-(await visible('ai.children.title')).rect.x)<1);assert.equal(listLogo.rect.w,32);assert.equal(listStatus.rect.w,16);report.list_geometry={name:listName.rect,logo:listLogo.rect,status:listStatus.rect};await capture('01-child-list-human-wait');await click('ai.child.'+childId);await visible('ai.child.dialog');const mainRect=(await visible('ai.panel')).rect,childRect=(await visible('ai.child.dialog')).rect;assert.equal(childRect.w,600);assert.equal(childRect.h,456);report.shared_shell={main:mainRect,child:childRect};await visible('ai.child.interaction.option.0');await click('ai.child.interaction.postpone');
  await click('ai.child.prompt');await h.type_('CHILD_DRAFT_KEEP');const imageInput=await visible('ai.child.prompt'),image=resolve('assets/macos/AppIcon.png');await h.dragAt(imageInput.rect.x+20,imageInput.rect.y+20,0,image);await h.dragAt(imageInput.rect.x+20,imageInput.rect.y+20,3,image);await visible('ai.child.image');assert(!(await h.query('ai.image')).some(shown));await capture('02-child-question');await click('ai.child.collapse');await h.waitFor(async()=>!(await h.query('ai.child.dialog')).some(shown)||null,15000);assert.equal((await h.inputState('ai.prompt')).buffer,'PARENT_DRAFT_KEEP');
  await click('ai.children');await click('ai.child.'+childId);await visible('ai.child.dialog');assert.equal((await h.inputState('ai.child.prompt')).buffer,'CHILD_DRAFT_KEEP');if((await h.query('ai.child.interaction.option.0')).some(shown))await click('ai.child.interaction.postpone');await visible('ai.child.image');await click('ai.child.image.remove');if((await h.query('ai.child.interaction.pending')).some(shown))await click('ai.child.interaction.pending');
- await click('ai.child.interaction.option.0');await click('ai.child.interaction.submit');await visible('ai.child.interaction.approve');await capture('03-child-approval');assert(!(await h.query('ai.interaction.approve')).some(shown),'child approval is not routed to parent composer');await click('ai.child.interaction.approve');
- await h.waitFor(async()=>{if(serverError)throw Error(serverError);return text(await h.query('ai.child.dialog')).includes('CHILD_DIALOG_DONE')||null},25000);await h.waitFor(async()=>text(await h.query('ai.panel')).includes('PARENT_DIALOG_DONE')||null,25000);assert.equal(await readFile(marker,'utf8'),'once');
+ await click('ai.child.interaction.option.0');await click('ai.child.interaction.submit');
+ await visible('ai.child.interaction.reject');await click('ai.child.collapse');
+ await h.waitFor(async()=>!(await h.query('ai.child.dialog')).some(shown)||null,15000);
+ assert.match(text(await visible('ai.interaction.title')),/日志核验/);
+ assert.match(text(await visible('ai.interaction.command')),/printf rejected/);
+ await h.waitFor(()=>parentHeld||null,10000);
+ const launchEvent=(await journal()).find(row=>row.event?.kind==='child_launch').event;
+ tool(parentHeld,'stop-waiting-child','host.agent_tasks',{action:'stop',task_id:launchEvent.task_fact.task});parentHeld=null;
+ await h.waitFor(()=>{if(serverError)throw Error(serverError);return stopBlocked||null},10000);
+ await capture('03-parent-child-approval');await click('ai.interaction.reject');
+ await h.waitFor(async()=>{if(serverError)throw Error(serverError);return text(await h.query('ai.interaction.command')).includes('CHILD_DIALOG_OK')||null},15000);
+ assert.match(text(await visible('ai.interaction.title')),/日志核验/);
+ await assert.rejects(readFile(marker,'utf8'),{code:'ENOENT'});
+ await click('ai.interaction.approve');
+ await h.waitFor(async()=>{if(serverError)throw Error(serverError);return text(await h.query('ai.panel')).includes('PARENT_DIALOG_DONE')||null},25000);
+ assert.equal(await readFile(marker,'utf8'),'once');
+ assert.equal((await h.inputState('ai.prompt')).buffer,'PARENT_DRAFT_KEEP');
+ await click('ai.children');await click('ai.child.'+childId);
+ await h.waitFor(async()=>text(await h.query('ai.child.dialog')).includes('CHILD_DIALOG_DONE')||null,25000);
  await click('ai.child.composer.permission');const auto=await visible('ai.child.permission.auto');await h.clickAt(auto.rect.x+auto.rect.w/2,auto.rect.y+auto.rect.h/2);assert(text(await h.query('ai.child.composer.permission')).includes('确认后执行'));assert(!(await journal()).some(r=>r.event?.child_settings?.permission==='auto'));await capture('03b-parent-permission-ceiling');await h.key('escape');await h.sleep(250);
  const before=await journal(),launch=before.find(r=>r.event?.kind==='child_launch').event;assert.equal(launch.child_info.reusable,false);const parentRequests=rootRound;
  await click('ai.child.prompt');await h.key('a',{cmd:true});await h.type_('USER_CONTINUE 继续当前子上下文');await click('ai.child.send');await h.waitFor(async()=>text(await h.query('ai.child.dialog')).includes('USER_CHILD_DONE')||null,20000);assert.equal(manual,1);assert.equal(rootRound,parentRequests,'direct child continuation does not revive parent root');
@@ -115,7 +147,7 @@ try{
  await click('ai.child.prompt');await h.type_('KEEP_RUNNING 接收引导');await click('ai.child.send');await h.waitFor(()=>childHeld||null,20000);await click('ai.child.prompt');await h.type_('STEER_CHILD 保留当前任务');await h.key('return',{cmd:true,shift:true});finish(childHeld,'CHILD_STEER_BOUNDARY');childHeld=null;await h.waitFor(async()=>text(await h.query('ai.child.dialog')).includes('CHILD_STEER_DONE')||null,20000);
  await h.resizeWindow(860,480);await capture('05-compact-background-result');const compactTranscript=(await visible('ai.child.conversation.viewport')).rect;await click('ai.child.properties');const settings=await visible('ai.child.settings');assert(settings.rect.x>=0&&settings.rect.y>=0&&settings.rect.x+settings.rect.w<=860&&settings.rect.y+settings.rect.h<=480);assert.deepEqual((await visible('ai.child.conversation.viewport')).rect,compactTranscript);assert((await visible('ai.child.tasks.label')).rect.w>200,'updated task count remains untruncated');await capture('05b-compact-settings-popover');await h.key('escape');await capture('05c-compact-settings-closed');await h.waitFor(async()=>!(await h.query('ai.child.settings')).some(shown)||null,10000);await visible('ai.child.dialog');
  const beforeHistory=requests.length;await click('ai.child.close');await click('ai.close');await click('ai.close.confirmation.confirm');await h.waitFor(async()=>!(await h.query('ai.panel')).some(shown)||null,15000);await click('toolbar.ai');await click('ai.sessions');await click('ai.session.jump.1');await click('ai.history.children');await visible('ai.children.list');await click('ai.child.'+childId);await visible('ai.child.restore_parent');assert(!(await h.query('ai.child.prompt')).some(shown));await capture('06-unbound-child-readonly');await click('ai.child.restore_parent');await h.waitFor(async()=>{if((await h.query('ai.session.close.accept')).some(shown))await click('ai.session.close.accept');return (await journal()).some(r=>r.event?.kind==='bind'&&r.event.conversation===launch.child_info.owning_parent_conversation)||null},15000);assert.equal(requests.length,beforeHistory,'historical child view and explicit parent restore start no provider request');await click('ai.children');await click('ai.child.'+childId);await visible('ai.child.prompt');await capture('07-restored-parent-child-ready');
- const rows=await journal();await writeFile(join(out,'journal.json'),JSON.stringify(rows,null,2));const facts=rows.flatMap(r=>r.event?.task_fact?[r.event.task_fact]:[]).filter(f=>f.agent===childId);assert(facts.filter(f=>f.parent===null&&f.task===f.root&&f.status==='succeeded').length>=4);const receipts=rows.flatMap(r=>[...(r.receipt?[r.receipt]:[]),...(r.consumed_batch??[]).map((entry:any)=>entry.receipt)]).filter(r=>r.fence.conversation===launch.conversation);const steerReceipt=receipts.find(r=>r.route==='steer'&&r.delivery==='consumed');assert(steerReceipt);assert(receipts.some(r=>r.route==='start'&&r.turn===steerReceipt.turn));assert.equal(new Set(facts.map(f=>f.task)).size,5,'steer keeps the active Task rather than creating another root');assert(rows.some(r=>r.event?.conversation===launch.conversation&&r.event?.kind==='conversation_model'&&r.event.conversation_model?.explicit?.key?.model_id==='child-model'));assert(rows.some(r=>r.event?.kind==='child_config'&&r.event.child_settings.name==='用户继续核验'));assert.equal((await readFile(join(data,'config.toml'),'utf8')).includes('permission_mode="confirm"'),true);report.requests=requests;report.checks.push('actual running count excludes human wait; stable child list opens its independent writable conversation','child question and command approval consume exact child tickets once; parent composer draft survives child edits and close','non-reusable child accepts explicit user continuation with a fresh root; parent completed root does not revive','child config persists independently, closing presentation keeps actual child work alive and reopening shows its saved result','real image drafts survive child close/reopen without appearing in parent; child model selection persists without changing parent; parent confirm ceiling disables auto', 'child queue creates a new Worker/root after cleanup and steer is consumed in the active child task', 'settings use a separate icon-triggered popover, preserve transcript geometry and dismiss independently with Escape at 860x480', 'unbound parent history exposes read-only child details; explicit parent restore starts no provider request and re-enables child input');report.status='passed';
+ const rows=await journal();await writeFile(join(out,'journal.json'),JSON.stringify(rows,null,2));const facts=rows.flatMap(r=>r.event?.task_fact?[r.event.task_fact]:[]).filter(f=>f.agent===childId);assert(facts.filter(f=>f.parent===null&&f.task===f.root&&f.status==='succeeded').length>=4);const receipts=rows.flatMap(r=>[...(r.receipt?[r.receipt]:[]),...(r.consumed_batch??[]).map((entry:any)=>entry.receipt)]).filter(r=>r.fence.conversation===launch.conversation);const steerReceipt=receipts.find(r=>r.route==='steer'&&r.delivery==='consumed');assert(steerReceipt);assert(receipts.some(r=>r.route==='start'&&r.turn===steerReceipt.turn));assert.equal(new Set(facts.map(f=>f.task)).size,5,'steer keeps the active Task rather than creating another root');assert(rows.some(r=>r.event?.conversation===launch.conversation&&r.event?.kind==='conversation_model'&&r.event.conversation_model?.explicit?.key?.model_id==='child-model'));assert(rows.some(r=>r.event?.kind==='child_config'&&r.event.child_settings.name==='用户继续核验'));assert.equal((await readFile(join(data,'config.toml'),'utf8')).includes('permission_mode="confirm"'),true);report.requests=requests;report.checks.push('actual running count excludes human wait; stable child list opens its independent writable conversation','parent composer rejects the child host command, approves the child terminal tool once, and keeps its draft; parent stop is blocked while approval is pending','non-reusable child accepts explicit user continuation with a fresh root; parent completed root does not revive','child config persists independently, closing presentation keeps actual child work alive and reopening shows its saved result','real image drafts survive child close/reopen without appearing in parent; child model selection persists without changing parent; parent confirm ceiling disables auto', 'child queue creates a new Worker/root after cleanup and steer is consumed in the active child task', 'settings use a separate icon-triggered popover, preserve transcript geometry and dismiss independently with Escape at 860x480', 'unbound parent history exposes read-only child details; explicit parent restore starts no provider request and re-enables child input');report.status='passed';
 
 }catch(error){report.status='failed';report.error=serverError||String(error);report.requests=requests;process.exitCode=1;await capture('failure').catch(()=>{});await h.tree().then(tree=>writeFile(join(out,'failure-all-tree.json'),JSON.stringify(tree,null,2))).catch(()=>{});await h.query('ai.child.dialog').then(tree=>writeFile(join(out,'failure-tree.json'),JSON.stringify(tree,null,2))).catch(()=>{})}
 finally{

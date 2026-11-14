@@ -107,7 +107,10 @@ test "AI limits steering compacts old context before consuming the new input" {
     @memset(update, 'b');
     var run = loop.Loop.init(a, .{ .owner = .{ .session = 1 }, .members = .{} }, 1, .{ .context_window = 8192 });
     defer run.deinit();
-    try run.start(.{ .model = "mock", .system = "", .messages = &.{.{ .content = old }}, .max_output = 512 });
+    try run.start(.{ .model = "mock", .system = "", .messages = &.{
+        .{ .content = "Original requirement." },
+        .{ .role = .assistant, .content = old },
+    }, .max_output = 512 });
     run.compaction_config = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:1", .model = "mock", .auth = .none, .context_window = 8192 };
     run.compaction_provider = .{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models };
     const prepared = try run.prepareMessage(.{ .content = update });

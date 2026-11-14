@@ -399,11 +399,11 @@ test "API2 runtime unsent members release reserved resources without clearing un
             for (results) |*result| result.deinit(a);
             a.free(results);
         }
-        try std.testing.expectEqual(tools.Status.cancelled_unsent, results[1].status);
+        try std.testing.expectEqual(if (mode == .preflight) tools.Status.succeeded else .cancelled_unsent, results[1].status);
         try std.testing.expect(results[1].receipt.local_released);
         try std.testing.expect(history.lookup(fixture.members[1].owner, 1).?.resources_released);
         if (mode == .preflight) {
-            try std.testing.expectEqual(@as(usize, 0), fixture.dispatches);
+            try std.testing.expectEqual(@as(usize, 1), fixture.dispatches);
             try std.testing.expect(history.lookup(fixture.members[0].owner, 1).?.resources_released);
             try std.testing.expectEqual(@as(usize, 2), history.clearCompleted(false));
         } else {
@@ -415,6 +415,62 @@ test "API2 runtime unsent members release reserved resources without clearing un
             if (mode == .unknown) try std.testing.expectEqual(@as(usize, 0), history.clearCompleted(true));
         }
     }
+}
+
+test "API2 permission change pauses only an unsent member of a batch" {
+    const a = std.testing.allocator;
+    const Fixture = struct {
+        fake: Fake = .{ .policy = .{ .engine = .{ .mode = .auto } } },
+        history: *operations.Store,
+        approvals: usize = 0,
+
+        fn liveMembers(raw: *anyopaque) ![]const tools.Member {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.fake.members;
+        }
+        fn policy(raw: *anyopaque) tools.Policy {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.fake.policy;
+        }
+        fn approve(raw: *anyopaque, invocation: tools.DynamicInvocation, ticket: *tools.ApprovalTicket, _: ?*@import("provider.zig").CancelToken) !bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualSlices(u64, &.{102}, invocation.parsed.targets.slice());
+            try std.testing.expectEqual(operations.Stage.succeeded, self.history.lookup(self.fake.members[0].owner, invocation.operation_id).?.stage);
+            try std.testing.expectEqual(@as(usize, 1), ticket.len);
+            self.approvals += 1;
+            return true;
+        }
+        fn invoke(raw: *anyopaque, _: tools.TargetBinding, request: tools.Invocation, allocator: std.mem.Allocator, _: ?*@import("provider.zig").CancelToken) !tools.ToolResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(@backingInt(request.owner.session_id) == 102, request.user_approved);
+            try tools.markSent(self.history, request.owner, request.operation_id, request.call_id, request.tool_id, request.arguments_hash);
+            const result = try Fake.handler(&self.fake, request, allocator);
+            self.fake.policy.engine.mode = .confirm;
+            return result;
+        }
+    };
+    var history = operations.Store.init(a);
+    defer history.deinit();
+    var fixture: Fixture = .{ .history = &history };
+    const members = [_]tools.Member{ member(&fixture.fake, 101, &.{binding}), member(&fixture.fake, 102, &.{binding}) };
+    fixture.fake.members = &members;
+    var table = try tools.RequestTable.init(a, captured, &.{definition()}, &members);
+    defer table.deinit();
+    const arguments = "{\"session_ids\":[101,102],\"value\":3}";
+    var call = try table.parse(a, table.entries[0].provider_name, arguments);
+    defer call.deinit();
+    const runtime: tools.Runtime = .{ .context = &fixture, .live_scope = Fake.liveScope, .live_members = Fixture.liveMembers, .current_policy = Fixture.policy, .now_ms = Fake.now, .approval = Fixture.approve, .operations = &history, .invoke = Fixture.invoke };
+    const invocation: tools.DynamicInvocation = .{ .table = &table, .parsed = call, .turn_id = 1, .call_id = "batch", .arguments = arguments, .operation_id = 1 };
+    const results = try runtime.execute(invocation, a, null);
+    defer {
+        for (results) |*result| result.deinit(a);
+        a.free(results);
+    }
+    for (results) |result| try std.testing.expectEqual(tools.Status.succeeded, result.status);
+    try std.testing.expectEqual(@as(usize, 1), fixture.approvals);
+    try std.testing.expectEqual(@as(usize, 2), fixture.fake.count);
+    try std.testing.expectError(error.ToolOperationAlreadyRecorded, runtime.execute(invocation, a, null));
+    try std.testing.expectEqual(@as(usize, 2), fixture.fake.count);
 }
 
 test "API2 approved controller input preserves focus rejection before dispatch" {

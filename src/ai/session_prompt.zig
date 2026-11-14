@@ -93,16 +93,15 @@ pub fn buildWithSkills(allocator: std.mem.Allocator, mode: config.ExecutionMode,
 
     const pty = has(tools, "host.run_in_terminal");
     const batch = has(tools, "run_command");
-    if (pty or batch or mode == .attached_pty) {
+    if (pty or batch or mode == .interactive) {
         try text.appendSlice(allocator, "Current host execution mode: ");
         try text.appendSlice(allocator, @tagName(mode));
         try text.appendSlice(allocator, ". ");
         switch (mode) {
-            .attached_pty => {
-                try text.appendSlice(allocator, "Keep pending terminal commands on their exact authorized PTY. Never switch to batch execution or a different session to recover an unavailable Shell integration, even when batch tools are advertised. ");
-                try text.appendSlice(allocator, if (pty) "Use host.run_in_terminal in the authorized current terminal by default. If the user requested a separate monitoring session, use host.run_in_terminal with the exact newly created, ready work session's session_ref. Prefer simple, bounded read-only commands for routine observation. Obey the actual host result and never send monitoring input to the occupied original terminal. " else "Wait for the current terminal's execution capability before submitting a command. ");
+            .interactive => {
+                try text.appendSlice(allocator, "Never switch to batch execution in interactive mode. Prefer an authorized, ready terminal suited to the task, and reuse an existing work session for follow-up commands. Open a separate work session when the current terminal is occupied and the work can run independently, or when the user requests one. If the task depends on an occupied terminal's exact shell state, wait for it. For a new work session, use the available lifecycle tools and wait for that exact target to become ready before sending a command. Never enter input into an occupied terminal to run unrelated work. ");
+                if (pty) try text.appendSlice(allocator, "Use host.run_in_terminal with the chosen session_ref. ") else try text.appendSlice(allocator, "Wait until an authorized terminal exposes interactive execution before submitting a command. ");
             },
-            .new_pty => try text.appendSlice(allocator, "Execution requires an authorized new work terminal. Use available lifecycle tools to create it, then wait for its capability to appear in the refreshed catalog before execution. Never execute in the borrowed source terminal. "),
             .isolated_exec => try text.appendSlice(allocator, if (batch) "Use run_command for independent batch execution, outside the interactive terminal. " else "The current catalog cannot execute an isolated batch; obtain an authorized capability or mode change before submitting a command. "),
             .auto, .ask => {
                 if (batch) try text.appendSlice(allocator, "Use run_command for independent batch execution on its advertised targets. ");
@@ -117,7 +116,7 @@ pub fn buildWithSkills(allocator: std.mem.Allocator, mode: config.ExecutionMode,
     if (pty and mode != .isolated_exec and has(tools, "host.wait_execution")) try text.appendSlice(allocator, "Use host.run_in_terminal wait_ms=2000 for short commands. For an ongoing execution, call host.wait_execution once with its execution_ref and until=decision, omitting wait_ms. If the wait expires, report the observed state and keep the original execution reference for follow-up. Avoid shell sleep and repeated status polling. ");
     if (pty) try text.appendSlice(allocator, "An execution marked handed_off or input_handed_off has released its input lease; this can also happen when the lease expires. Do not say the user explicitly took over unless the host reports that event, and do not infer that the original process has stopped or completed. ");
     if (has(tools, "host.attach_shell") and has(tools, "host.read_terminal")) {
-        if (mode == .attached_pty) try text.appendSlice(allocator, "With a pending command, an unavailable Shell integration, prompt_ready=false, or a pending shell_switch on its session requires Shell recovery before execution. Start recovery immediately on the same session_ref. ");
+        if (mode == .interactive) try text.appendSlice(allocator, "If your chosen terminal has unavailable Shell integration, prompt_ready=false, or a pending shell_switch, check its readiness before sending the command. If the operation needs that exact shell state, recover the same session_ref. ");
         try text.appendSlice(allocator, "For Shell recovery on an advertised target, including ShellPromptNotObserved or IntegrationUnavailable before dispatch, first call host.read_terminal with include_control=true on the same live session_ref. Take the Shell ID/revision and input/output counters from that read. If the latest screen confirms an empty interactive Bash/Zsh prompt and integration is still needed, call host.attach_shell yourself with those values, prompt_evidence and wait_ms=30000. Omit shell_id if the read reports no ID. If the observation goes stale, read the same terminal again before attaching. A shell_switch notice alone cannot establish readiness. If the screen shows authentication, a foreground program, a continuation prompt or a TUI, do not attach; report the actual blocker when you cannot proceed. An attaching result means keep waiting for readiness, without starting another attachment. ");
         if (has(tools, "host.get_session")) try text.appendSlice(allocator, "If still attaching, check that session with host.get_session for readiness before proceeding. ");
         if (pty) try text.appendSlice(allocator, "Once prompt_ready=true and terminal input and execution are available, use host.run_in_terminal on the same session with the current Shell ID/revision. Submit only the unchanged command confirmed unsent, using a fresh request_key after a confirmed unsent rejection. Observe and verify any command with unknown effects. ");
@@ -220,7 +219,7 @@ test "session prompt uses exact catalog names for PTY execution and shell recove
         tool.* = .{ .session_ids = &.{}, .dynamic = .{ .id = id, .name = try arena.allocator().dupe(u8, try @import("plugin_tools.zig").encodeName(&name, id)), .schema = "{}", .description = "" } };
     }
     const catalog = wire ++ [_]provider.ToolDefinition{.{ .tool = .run_command, .session_ids = &.{1} }};
-    for ([_]config.ExecutionMode{ .attached_pty, .auto, .ask }) |mode| {
+    for ([_]config.ExecutionMode{ .interactive, .auto, .ask }) |mode| {
         const prompt = try build(a, mode, &catalog);
         defer a.free(prompt);
         try std.testing.expect(std.mem.indexOf(u8, prompt, "Use host__run_uin_uterminal") != null);
@@ -229,7 +228,7 @@ test "session prompt uses exact catalog names for PTY execution and shell recove
             try std.testing.expect(std.mem.indexOf(u8, prompt, tool.name()) != null);
             try std.testing.expect(std.mem.indexOf(u8, prompt, tool.dynamic.?.id) == null);
         }
-        if (mode == .attached_pty) {
+        if (mode == .interactive) {
             try std.testing.expect(std.mem.indexOf(u8, prompt, "Never switch to batch execution") != null);
             try std.testing.expect(std.mem.indexOf(u8, prompt, "prompt_ready=false") != null);
             try std.testing.expect(std.mem.indexOf(u8, prompt, "first call host__read_uterminal with include_control=true on the same live session_ref") != null);
@@ -245,7 +244,7 @@ test "session creation guidance follows each refreshed catalog" {
     const group: provider.ToolDefinition = .{ .session_ids = &.{}, .dynamic = .{ .id = "host.create_group", .name = "host__create_ugroup", .schema = "{}", .description = "" } };
     const open: provider.ToolDefinition = .{ .session_ids = &.{}, .dynamic = .{ .id = "host.open_session", .name = "host__open_usession", .schema = "{}", .description = "" } };
 
-    const single = try build(a, .attached_pty, &.{group});
+    const single = try build(a, .interactive, &.{group});
     defer a.free(single);
     try std.testing.expect(std.mem.indexOf(u8, single, "first call host__create_ugroup") != null);
     try std.testing.expect(std.mem.indexOf(u8, single, "Do not silently substitute an existing SFTP or batch channel") != null);
@@ -253,13 +252,13 @@ test "session creation guidance follows each refreshed catalog" {
     try std.testing.expect(std.mem.indexOf(u8, single, "host.open_session") == null);
     try std.testing.expect(std.mem.indexOf(u8, single, "host__open_usession") == null);
 
-    const grouped = try build(a, .attached_pty, &.{open});
+    const grouped = try build(a, .interactive, &.{open});
     defer a.free(grouped);
     try std.testing.expect(std.mem.indexOf(u8, grouped, "use host__open_usession") != null);
     try std.testing.expect(std.mem.indexOf(u8, grouped, "keep the original foreground command undisturbed") != null);
     try std.testing.expect(std.mem.indexOf(u8, grouped, "host__create_ugroup") == null);
 
-    const queries = try build(a, .attached_pty, &.{});
+    const queries = try build(a, .interactive, &.{});
     defer a.free(queries);
     try std.testing.expect(std.mem.indexOf(u8, queries, "another work session") == null);
 }

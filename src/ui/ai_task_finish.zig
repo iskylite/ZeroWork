@@ -170,6 +170,11 @@ const Task = struct {
     active_executions: usize = 0,
     remote_effect_unknown: bool = false,
     feedback: ?[]const u8 = null,
+    fn submitFinish(self: *Task, execution: ?ExecutionSource) !void {
+        if (!self.model_ended or self.finish_sent) return;
+        if (execution) |source| try source.finish_model(source.context, self.context);
+        self.finish_sent = true;
+    }
     fn isCompletionNotice(self: *const Task) bool {
         return !self.remote_effect_unknown and switch (self.phase) {
             .retained, .kept, .closed => true,
@@ -261,6 +266,10 @@ pub const Controller = struct {
         const task = self.find(context.task_id).?;
         if (!task.model_ended or (task.receipt == null and outcome == .cancelled)) task.outcome = outcome;
         task.model_ended = true;
+    }
+    pub fn finishModel(self: *Controller, context: host.Context, execution: ExecutionSource) !void {
+        const task = self.find(context.task_id) orelse return error.NotFound;
+        try task.submitFinish(execution);
     }
     pub fn control(self: *Controller, task_id: identity.TaskId, revision: u64, action: Control) !void {
         const task = self.find(task_id) orelse return error.NotFound;
@@ -622,13 +631,10 @@ pub const Controller = struct {
                     };
                     task.stop_sent = true;
                 }
-                if (task.model_ended and !task.finish_sent) {
-                    if (execution) |source| source.finish_model(source.context, task.context) catch {
-                        pending = true;
-                        continue;
-                    };
-                    task.finish_sent = true;
-                }
+                task.submitFinish(execution) catch {
+                    pending = true;
+                    continue;
+                };
                 const evidence: ExecutionEvidence = if (execution) |source| source.evidence(source.context, task.context.task_id) orelse {
                     pending = true;
                     continue;

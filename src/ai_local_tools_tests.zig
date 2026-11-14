@@ -512,7 +512,7 @@ const Worker = struct {
 fn invocation(id: u64, command: []const u8, verdict: @import("ai/permission.zig").Verdict) Loop.Invocation {
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(command, &hash, .{});
-    return .{ .key = .{ .owner = .{ .session = id }, .turn_id = 1, .call_id = "local-call-1" }, .scope = .{ .owner = .{ .session = id }, .members = .{ .ids = .{id} ++ @as([15]u64, @splat(0)), .len = 1 } }, .round_index = 0, .call_index = 0, .arguments = command, .arguments_hash = hash, .call = .{ .tool = .run_command, .command = command, .targets = .{ .ids = .{id} ++ @as([15]u64, @splat(0)), .len = 1 } }, .verdict = verdict, .policy_revision = 1, .timeout_ms = 5000 };
+    return .{ .key = .{ .owner = .{ .session = id }, .turn_id = 1, .call_id = "local-call-1" }, .scope = .{ .owner = .{ .session = id }, .members = .{ .ids = .{id} ++ @as([15]u64, @splat(0)), .len = 1 } }, .round_index = 0, .call_index = 0, .arguments = command, .arguments_hash = hash, .call = .{ .tool = .run_command, .command = command, .targets = .{ .ids = .{id} ++ @as([15]u64, @splat(0)), .len = 1 }, .timeout_ms = 5000 }, .verdict = verdict, .policy_revision = 1 };
 }
 fn awaitResult(f: *Fixture, bridge: *LocalTools.Bridge, worker: *Worker) !void {
     const deadline = clock.monotonicNs() + 6 * std.time.ns_per_s;

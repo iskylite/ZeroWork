@@ -251,12 +251,12 @@ pub const Bridge = struct {
         if (invocation.context.child_origin != null and proposed == .new_terminal and fixed == .current_terminal) fixed = proposed;
         const resolution = broker.execution_route.resolve(invocation.context, target, subject.detail, fixed);
         if (!resolution.trusted) if (broker.execution_route.followupTargetChange(invocation.context, target)) |needs_creation|
-            return try planChange(invocation, allocator, .new_terminal, needs_creation);
-        if (resolution.trusted and (resolution.route != proposed or resolution.needs_creation)) return try planChange(invocation, allocator, resolution.route, resolution.needs_creation);
-        if (!resolution.trusted and self.execution_mode != .auto and self.execution_mode != .ask and fixed != proposed) return try planChange(invocation, allocator, resolution.route, resolution.route == .new_terminal);
+            return try planChange(invocation, allocator, .new_terminal, needs_creation, false);
+        if (resolution.trusted and (resolution.route != proposed or resolution.needs_creation)) return try planChange(invocation, allocator, resolution.route, resolution.needs_creation, false);
+        if (!resolution.trusted and resolution.route != proposed) return try planChange(invocation, allocator, resolution.route, false, self.execution_mode == .interactive);
         const choice: routing.Choice = resolution.choice orelse .{ .route = resolution.route, .source = .{ .session = target }, .retention = self.session_retention };
         if (resolution.trusted and !resolution.approved) try broker.execution_route.select(invocation.context, choice, subject.detail, false);
-        subject.route = .{ .proposed = proposed, .choice = choice, .target = target, .selectable = self.execution_mode == .ask and !resolution.trusted, .reason = if (resolution.trusted) "按本次用户明确指令；仅覆盖此命令。" else "按本次命令选择运行方式；权限确认与选择合并。" };
+        subject.route = .{ .proposed = proposed, .choice = choice, .target = target, .selectable = self.execution_mode == .ask and !resolution.trusted };
         return null;
     }
     pub fn requestHostRoute(self: *Bridge, invocation: host_tools.Invocation, subject: approvals.Subject, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !approvals.Permit {
@@ -273,17 +273,17 @@ pub const Bridge = struct {
     pub fn hostRouteChange(self: *Bridge, invocation: host_tools.Invocation, subject: approvals.Subject, permit: approvals.Permit, allocator: std.mem.Allocator) !?host_tools.Result {
         const proposed = (subject.route orelse return null).proposed;
         const selected = try (self.route_broker orelse return error.RouteSelectionUnavailable).selectedRoute(permit);
-        if (selected.route != proposed) return try planChange(invocation, allocator, selected.route, selected.route == .new_terminal or selected.create_new);
+        if (selected.route != proposed) return try planChange(invocation, allocator, selected.route, selected.route == .new_terminal or selected.create_new, false);
         return null;
     }
     pub fn consumeHostRoute(self: *Bridge, invocation: host_tools.Invocation, target: identity.SessionHandle, command: []const u8) void {
         if (self.route_broker) |broker| broker.execution_route.consume(invocation.context, target, command);
     }
-    fn planChange(invocation: host_tools.Invocation, allocator: std.mem.Allocator, selected: routing.Route, requires_creation: bool) !host_tools.Result {
+    fn planChange(invocation: host_tools.Invocation, allocator: std.mem.Allocator, selected: routing.Route, requires_creation: bool, choose_interactive_target: bool) !host_tools.Result {
         const blocked_new_target = selected == .current_terminal and std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal");
         const next_tool = try tools.toolHints(allocator, if (blocked_new_target) &.{} else if (requires_creation and selected == .batch) &.{ "host.create_group", "host.open_session", "run_command" } else if (selected == .batch) &.{"run_command"} else if (selected == .current_terminal or !requires_creation) &.{"host.run_in_terminal"} else &.{ "host.create_group", "host.open_session", "host.run_in_terminal" });
         defer allocator.free(next_tool);
-        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = "requires_plan_change", .state = "cancelled_unsent", .selected_route = @tagName(selected), .requires_new_session = requires_creation, .host_fact = if (blocked_new_target) "当前运行方式未授权在所选新会话执行，命令未发送。不要重复相同调用，也不要向正在运行前台命令的原终端输入；说明需要调整运行方式或明确选择。" else "当前运行方式已确定，当前工具没有派发。请直接使用 next_tool 指定的工具；无需为了重新确认运行模式查询上下文。仅补充缺少的目标、能力或创建依赖信息，命令权限仍由宿主验证。", .next_tool = next_tool, .side_effect_started = false }, .{});
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = "requires_plan_change", .state = "cancelled_unsent", .selected_route = @tagName(selected), .requires_new_session = requires_creation, .host_fact = if (choose_interactive_target) "本次设置为交互式，批处理命令没有发送。请按任务选择当前终端或先创建工作会话，再对就绪的目标调用 next_tool。命令权限仍由宿主验证。" else if (blocked_new_target) "当前运行方式未授权在所选新会话执行，命令未发送。不要重复相同调用，也不要向正在运行前台命令的原终端输入；说明需要调整运行方式或明确选择。" else "当前运行方式已确定，当前工具没有派发。请直接使用 next_tool 指定的工具；无需为了重新确认运行模式查询上下文。仅补充缺少的目标、能力或创建依赖信息，命令权限仍由宿主验证。", .next_tool = next_tool, .side_effect_started = false }, .{});
         errdefer allocator.free(body);
         const blocks = try allocator.alloc(host_tools.Block, 1);
         blocks[0] = .{ .structured = body };
@@ -867,9 +867,12 @@ pub const Bridge = struct {
     }
     pub fn bindingChanged(self: *Bridge, owner: scope.Owner) void {
         self.lock();
+        defer self.mutex.unlock();
+        if (self.captured_scope) |captured| {
+            if (captured.owner.eql(owner)) return;
+        }
         self.pending_binding = owner;
         for (self.children.items) |child| releaseAutomation(child, true);
-        self.mutex.unlock();
     }
     pub fn hostExecutionStarted(self: *Bridge, invocation: host_tools.Invocation) void {
         if (invocation.terminal_target != null) {
@@ -966,8 +969,7 @@ pub const Bridge = struct {
     fn executeDynamicInner(self: *Bridge, invocation: tools.DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) ![]tools.ToolResult {
         if (self.queries_only) return error.ToolNotAvailable;
         const batch_command = std.mem.eql(u8, invocation.parsed.entry.definition.id, "run_command");
-        if (batch_command and self.execution_mode == .attached_pty and (self.route_broker == null or invocation.parsed.targets.len != 1)) return error.ModeConflict;
-        if (batch_command and self.execution_mode == .new_pty and self.route_broker == null) return error.ModeConflict;
+        if (batch_command and self.execution_mode == .interactive and (self.route_broker == null or invocation.parsed.targets.len != 1)) return error.ModeConflict;
         _ = self.validation_arena.reset(.retain_capacity);
         self.lock();
         self.running = invocation;
@@ -1026,8 +1028,7 @@ pub const Bridge = struct {
             try self.callController(&check, BatchTargetCheck.run, cancel);
         }
         if (batch_command and self.route_broker != null) {
-            // Complete target/capability and forbidden preflight before showing
-            // a route card. An approval never makes a blocked command legal.
+            // Check target and capability before showing a route card.
             try tools.preflight(invocation.table, invocation.parsed, try liveScope(self), try liveMembers(self));
             _ = try tools.callNeedsApproval(invocation.parsed, self.permissionPolicy(), invocation.table.captured_scope.owner == .group);
             if (invocation.parsed.targets.len != 1) {
@@ -1041,7 +1042,7 @@ pub const Bridge = struct {
                 if (command_value != .string) return error.InvalidToolArguments;
                 const binding = self.host_binding orelse return error.InvalidHostAuthority;
                 route_invocation = .{ .context = binding.context, .authority = .execution_control, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .call_id = invocation.call_id, .tool_id = "run_command", .arguments = invocation.parsed.json.value, .arguments_json = invocation.arguments, .arguments_hash = invocation.parsed.arguments_hash, .canonical_arguments_hash = try @import("../ai/canonical_arguments.zig").digest(allocator, invocation.parsed.json.value) };
-                route_subject = .{ .kind = .terminal_command, .target = try std.fmt.bufPrint(&route_label, "会话 #{d} · generation {d}", .{ @backingInt(target.session_id), target.generation }), .detail = command_value.string, .impact = "仅执行上述完整命令。新工作终端将以此会话为来源，创建前会单独确认；会话按本次任务的设置保留。" };
+                route_subject = .{ .kind = .terminal_command, .target = try std.fmt.bufPrint(&route_label, "会话 #{d} · generation {d}", .{ @backingInt(target.session_id), target.generation }), .detail = command_value.string };
                 if (try self.prepareHostRoute(route_invocation, &route_subject, target, .batch, allocator)) |changed| return try self.dynamicRouteResult(invocation, target, changed, allocator);
                 if (self.execution_mode == .ask or route_subject.route.?.choice.route == .batch and self.route_broker.?.execution_route.resolve(binding.context, target, command_value.string, .batch).trusted) {
                     const permit = try self.requestHostRoute(route_invocation, route_subject, allocator, cancel);
@@ -1258,11 +1259,22 @@ pub const Bridge = struct {
         if (self.active_route) |route| {
             if (!std.mem.eql(u8, &ticket.arguments_hash, &route.invocation.arguments_hash)) return error.StaleApproval;
             const broker = self.route_broker.?;
-            try broker.waitForDecision(route.permit, cancel);
-            if (self.stopped.load(.acquire)) return error.CancelledBeforeDispatch;
-            if (broker.authorizeSubject(route.permit, route.invocation, route.subject, self.policy_revision) != .allow) return error.ScopeChanged;
-            ticket.policy_bypass = try broker.approvalIsAutomatic(route.permit);
-            return true;
+            while (true) {
+                try broker.waitForDecision(route.permit, cancel);
+                if (self.stopped.load(.acquire)) return error.CancelledBeforeDispatch;
+                if (invocation.dispatch_fence) |fence| try fence.check();
+                switch (broker.authorizeSubject(route.permit, route.invocation, route.subject, self.policy_revision)) {
+                    .approval_required => continue,
+                    .allow => {
+                        ticket.policy_bypass = broker.approvalIsAutomatic(route.permit) catch |err| {
+                            if (err == error.StaleApproval) continue;
+                            return err;
+                        };
+                        return true;
+                    },
+                    else => return error.ScopeChanged,
+                }
+            }
         }
         self.lock();
         if (self.pending != null or self.stopped.load(.acquire)) {
@@ -1282,16 +1294,23 @@ pub const Bridge = struct {
         }
         while (true) {
             if (invocation.dispatch_fence) |fence| try fence.check();
-            self.lock();
-            if (exchange.decision == .pending and !(tools.callNeedsApproval(invocation.parsed, self.permissionPolicy(), invocation.table.captured_scope.owner == .group) catch |err| {
-                self.mutex.unlock();
-                return err;
-            })) {
-                ticket.policy_bypass = true;
-                exchange.decision = .approved;
-            }
-            const decision = exchange.decision;
-            self.mutex.unlock();
+            const decision = decision: {
+                self.lock();
+                defer self.mutex.unlock();
+                const captured = self.captured_scope orelse return error.ScopeChanged;
+                if (self.pending_binding != null or !captured.owner.eql(invocation.table.captured_scope.owner)) return error.ScopeChanged;
+                for (ticket.targets[0..ticket.len]) |target| {
+                    const member = for (self.children.items) |child| {
+                        if (child.owner.eql(target.owner)) break child.member;
+                    } else return error.StaleToolAuthority;
+                    if (!member.authorized or member.capability_revision != target.capability_revision or member.policy_revision != target.policy_revision) return error.StaleToolAuthority;
+                }
+                if (exchange.decision == .pending and !try tools.callNeedsApproval(invocation.parsed, self.permissionPolicy(), invocation.table.captured_scope.owner == .group)) {
+                    ticket.policy_bypass = true;
+                    exchange.decision = .approved;
+                }
+                break :decision exchange.decision;
+            };
             if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
             switch (decision) {
                 .approved => return true,
@@ -1362,7 +1381,25 @@ pub const Bridge = struct {
         }
         if (target.binding.execution == .worker) {
             if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
-            try tools.markSent(self.operationHistory(), request.owner, request.operation_id, request.call_id, request.tool_id, request.arguments_hash);
+            {
+                self.lock();
+                defer self.mutex.unlock();
+                if (self.running) |running| {
+                    if (running.dispatch_fence) |fence| try fence.check();
+                    const captured = self.captured_scope orelse return error.ScopeChanged;
+                    if (self.pending_binding != null or !captured.owner.eql(running.table.captured_scope.owner)) return error.ScopeChanged;
+                    const child = for (self.children.items) |candidate| {
+                        if (candidate.owner.eql(target.owner)) break candidate;
+                    } else return error.StaleToolAuthority;
+                    var selected = running.parsed;
+                    selected.targets.ids[0] = @backingInt(target.owner.session_id);
+                    selected.targets.len = 1;
+                    try tools.preflight(running.table, selected, captured, &.{child.member});
+                    const required = try tools.callNeedsApproval(selected, self.permissionPolicy(), captured.owner == .group);
+                    if (required and !request.user_approved) return error.ToolApprovalRequired;
+                }
+                try tools.markSent(self.operationHistory(), request.owner, request.operation_id, request.call_id, request.tool_id, request.arguments_hash);
+            }
             if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
             if (self.running) |running| self.emitStep(running, .running, "");
             if (std.mem.eql(u8, request.tool_id, @import("../ai/image_offload.zig").tool_id)) {
@@ -1400,14 +1437,17 @@ pub const Bridge = struct {
     pub fn pump(self: *Bridge, app: *Application.ApplicationHost) void {
         self.reconnect_app = app;
         self.lock();
-        var roster_valid = true;
-        if (self.roster) |roster| if (self.captured_scope) |captured| {
-            const group = roster.findById(@intCast(captured.owner.group));
-            roster_valid = if (group) |value| value.membership_revision == self.roster_revision else false;
-        };
+        const group = if (self.roster) |roster| if (self.captured_scope) |captured|
+            roster.findById(@intCast(captured.owner.group))
+        else
+            null else null;
         for (self.children.items) |child| {
             const current = app.sessions.typedBindingsFor(child.owner);
-            child.member.authorized = roster_valid and current != null and app.legacyForHandle(child.owner) != null;
+            const pane_id = app.legacyForHandle(child.owner);
+            const member_still_allowed = if (group) |entry| for (entry.members.items) |member| {
+                if (member.active and member.pane_id == pane_id) break true;
+            } else false else self.roster == null;
+            child.member.authorized = member_still_allowed and current != null and pane_id != null;
             child.member.capability_revision = app.sessions.capabilityRevisionFor(child.owner) orelse 0;
             child.member.policy_revision = app.workspace.app_config.agentPolicyRevision();
             if (child.automation) |grant| {
@@ -1437,7 +1477,12 @@ pub const Bridge = struct {
                     self.mutex.unlock();
                     return;
                 };
-                tools.preflight(running.table, running.parsed, self.captured_scope.?, live_members[0..self.children.items.len]) catch |err| {
+                var parsed = running.parsed;
+                parsed.targets.ids[0] = @backingInt(current.invocation.owner.session_id);
+                parsed.targets.len = 1;
+                var live_scope = self.captured_scope.?;
+                if (self.pending_binding) |owner| live_scope.owner = owner;
+                tools.preflight(running.table, parsed, live_scope, live_members) catch |err| {
                     current.failure = err;
                     current.ready.store(true, .release);
                     self.mutex.unlock();
@@ -1451,6 +1496,19 @@ pub const Bridge = struct {
                     current.ready.store(true, .release);
                     self.mutex.unlock();
                     return;
+                }
+                if (!current.sent) {
+                    const authorization: ?anyerror = tryDispatch: {
+                        if (running.dispatch_fence) |fence| fence.check() catch |err| break :tryDispatch err;
+                        const required = tools.callNeedsApproval(parsed, self.permissionPolicy(), running.table.captured_scope.owner == .group) catch |err| break :tryDispatch err;
+                        break :tryDispatch if (required and !current.invocation.user_approved) error.ToolApprovalRequired else null;
+                    };
+                    if (authorization) |err| {
+                        current.failure = err;
+                        current.ready.store(true, .release);
+                        self.mutex.unlock();
+                        return;
+                    }
                 }
                 if (effect == .remote_input) {
                     const child = for (self.children.items) |candidate| {
@@ -2258,15 +2316,12 @@ test "fixed PTY mode rejects isolated command before any bridge mailbox or targe
     const json = try std.json.parseFromSlice(std.json.Value, a, "{}", .{});
     defer json.deinit();
     const invocation: tools.DynamicInvocation = .{ .table = &table, .parsed = .{ .json = json, .entry = &entry, .targets = .{}, .arguments_hash = @splat(0) }, .turn_id = 1, .call_id = "fixed-mode", .arguments = "{}", .operation_id = 1 };
-    for ([_]@import("../config/config.zig").ExecutionMode{ .attached_pty, .new_pty }) |mode| {
-        bridge.execution_mode = mode;
-        try std.testing.expectError(error.ModeConflict, Bridge.executeDynamic(&bridge, invocation, a, null));
-        try std.testing.expect(bridge.running == null and bridge.pending == null and bridge.controller == null);
-        try std.testing.expectEqual(@as(usize, 0), bridge.children.items.len);
-    }
+    bridge.execution_mode = .interactive;
+    try std.testing.expectError(error.ModeConflict, Bridge.executeDynamic(&bridge, invocation, a, null));
+    try std.testing.expect(bridge.running == null and bridge.pending == null and bridge.controller == null);
+    try std.testing.expectEqual(@as(usize, 0), bridge.children.items.len);
     var broker: approvals.Broker = .{};
     bridge.route_broker = &broker;
-    bridge.execution_mode = .attached_pty;
     var multi_target = invocation;
     multi_target.parsed.targets.ids[0..2].* = .{ 1, 2 };
     multi_target.parsed.targets.len = 2;
@@ -2400,7 +2455,7 @@ test "fixed execution mode mismatch gives actionable route without dispatch or d
     defer bridge.deinit();
     bridge.route_broker = &broker;
     const invocation: host_tools.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "fixed-mode", .tool_id = "run_command", .arguments = .null, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
-    inline for (.{ .attached_pty, .new_pty, .isolated_exec }) |mode| {
+    inline for (.{ .interactive, .isolated_exec }) |mode| {
         bridge.execution_mode = mode;
         var subject: approvals.Subject = .{ .kind = .terminal_command, .target = "session", .detail = "pwd", .impact = "exact command" };
         var result = (try bridge.prepareHostRoute(invocation, &subject, target, if (mode == .isolated_exec) .current_terminal else .batch, a)).?;
@@ -2409,8 +2464,17 @@ test "fixed execution mode mismatch gives actionable route without dispatch or d
         defer parsed.deinit();
         try std.testing.expectEqualStrings("requires_plan_change", parsed.value.object.get("error_code").?.string);
         try std.testing.expect(!parsed.value.object.get("side_effect_started").?.bool);
-        try std.testing.expectEqualStrings(if (mode == .isolated_exec) "run_command" else if (mode == .attached_pty) "host__run_uin_uterminal" else "host__create_ugroup/host__open_usession/host__run_uin_uterminal", parsed.value.object.get("next_tool").?.string);
+        try std.testing.expectEqualStrings(if (mode == .isolated_exec) "run_command" else "host__run_uin_uterminal", parsed.value.object.get("next_tool").?.string);
         try std.testing.expect(bridge.running == null and bridge.pending == null and bridge.host_exchange == null);
+    }
+    bridge.execution_mode = .interactive;
+    var terminal_call = invocation;
+    terminal_call.tool_id = "host.run_in_terminal";
+    for ([_]routing.Route{ .current_terminal, .new_terminal }) |route| {
+        var subject: approvals.Subject = .{ .kind = .terminal_command, .target = "session", .detail = "pwd" };
+        try std.testing.expect((try bridge.prepareHostRoute(terminal_call, &subject, target, route, a)) == null);
+        try std.testing.expectEqual(route, subject.route.?.choice.route);
+        try std.testing.expect(!subject.route.?.selectable);
     }
 }
 

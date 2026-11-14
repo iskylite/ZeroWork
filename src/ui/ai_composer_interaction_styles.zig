@@ -13,7 +13,7 @@ pub fn impactRow() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .start, .gap = 6, .flex_shrink = 0 };
 }
 pub fn heading() ui.BoxStyle {
-    return .{ .width = .fill(), .direction = .row, .align_items = .start, .gap = 6, .flex_shrink = 0 };
+    return .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 };
 }
 pub fn text(size: f32, line: f32, weight: u16, secondary: bool) ui.TextStyle {
     return .{ .font_size = size, .line_height = line / size, .font_weight = weight, .wrap = .word, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1 };

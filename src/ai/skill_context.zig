@@ -31,12 +31,12 @@ pub fn latest(messages: []const provider.Message) ?Selection {
     while (index > 0) {
         index -= 1;
         const message = messages[index];
-        if (message.role != .user or message.origin != .user_or_tool) continue;
-        if (latest_input == null) latest_input = index;
+        if (message.role != .user or message.origin == .host_context_notice) continue;
+        if (latest_input == null and message.origin == .user_or_tool) latest_input = index;
         if (message.skill) |reference| return .{
             .reference = reference,
-            .input_index = latest_input.?,
-            .is_latest_input = latest_input.? == index and !std.mem.startsWith(u8, message.content, @import("context_compaction.zig").memory_prefix),
+            .input_index = latest_input orelse index,
+            .is_latest_input = latest_input == index and !std.mem.startsWith(u8, message.content, @import("context_compaction.zig").memory_prefix),
         };
     }
     return null;

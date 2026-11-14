@@ -75,10 +75,6 @@ _zw_exec_request() {
         if [[ $_zw_exec_stage != prepared || $id != $_zw_exec_id || $fence != $_zw_exec_fence || $epoch != $_zw_exec_epoch || -n $BUFFER ]] || ! _zw_exec_safe; then
             _zw_exec_emit rejected "$id" stale_buffer; return 0
         fi
-        # Parse a complete command without running it. No continuation guessing.
-        if ! /bin/zsh -f -n <<< "$command" 2>/dev/null; then
-            _zw_exec_emit rejected "$id" incomplete_syntax; return 0
-        fi
         BUFFER=$command CURSOR=${#command} MARK=0 REGION_ACTIVE=0
         _zw_exec_buffer=$command _zw_exec_hash=$hash _zw_exec_end=$token
         _zw_exec_stage=accepted

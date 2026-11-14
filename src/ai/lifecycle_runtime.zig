@@ -182,6 +182,7 @@ pub const Authorized = struct {
     group: ?identity.GroupOwner = null,
     retention: lifecycle.Retention = .auto_idle,
     allow_new_fallback: bool = false,
+    opens_local_terminal: bool = false,
     explicit_user_close: bool = false,
     approval_required: bool = true,
     policy_revision: u64 = 1,
@@ -371,33 +372,47 @@ pub const Runtime = struct {
             }
         }
         if (request.kind == .reconnect_session and try self.journal_owner.reconnectFailedForTask(invocation.context, request.session.?)) return error.ReconnectFailedForTask;
+        var permit: ?approvals.Permit = null;
+        defer if (permit) |value| self.approval.?.finish(value);
         const first = try self.controllerCall(scheduler, invocation.context, .{ .authorize = request }, cancel);
         if (first.result != .authorized) return error.InvalidControllerReceipt;
         var authorized = first.result.authorized;
-        var permit: ?approvals.Permit = null;
-        var impact: [2048]u8 = undefined;
-        const subject = lifecycleSubject(invocation, authorized, &impact);
-        defer if (permit) |value| self.approval.?.finish(value);
-        if (authorized.approval_required) {
-            const broker = self.approval orelse return error.ApprovalRequired;
-            permit = try broker.requestSubject(invocation, subject, authorized.policy_revision, a, cancel);
-        }
-        try cancelled(cancel);
-        const checked = try self.controllerCall(scheduler, invocation.context, .{ .authorize = request }, cancel);
-        if (checked.result != .authorized) return error.ScopeChanged;
-        if (!std.meta.eql(authorized, checked.result.authorized)) {
-            if (request.kind != .reconnect_session or !checked.result.authorized.observe_automatic_reconnect or !checked.result.authorized.create_operation.?.eql(authorized.create_operation.?)) return error.ScopeChanged;
-            authorized = checked.result.authorized;
+        var reconfirm = false;
+        while (true) {
+            if (!authorized.observe_automatic_reconnect) if (invocation.dispatch_fence) |fence| try fence.check();
+            if (authorized.approval_required) {
+                const broker = self.approval orelse return error.ApprovalRequired;
+                var impact: [2048]u8 = undefined;
+                var subject = lifecycleSubject(invocation, authorized, &impact);
+                subject.reconfirmation = reconfirm;
+                permit = try broker.requestSubject(invocation, subject, authorized.policy_revision, a, cancel);
+            }
+            try cancelled(cancel);
+            const checked = try self.controllerCall(scheduler, invocation.context, .{ .authorize = request }, cancel);
+            if (checked.result != .authorized) return error.ScopeChanged;
+            if (std.meta.eql(authorized, checked.result.authorized)) {
+                self.validatePermit(permit, invocation, authorized) catch |err| {
+                    if (err != error.ApprovalRequired) return err;
+                    if (permit) |value| self.approval.?.finish(value);
+                    permit = null;
+                    reconfirm = true;
+                    continue;
+                };
+                break;
+            }
+            // Nothing has been dispatched. Reconfirm the same request using
+            // the current facts, without carrying over its old permit.
             if (permit) |value| self.approval.?.finish(value);
             permit = null;
+            authorized = checked.result.authorized;
+            reconfirm = true;
         }
-        if (permit) |value| if (self.approval.?.authorizeSubject(value, invocation, subject, authorized.policy_revision) != .allow) return error.ScopeChanged;
         switch (request.kind) {
             .create_group => return self.createGroup(scheduler, invocation, request, authorized, handle, a, cancel, permit),
             .open_session => return self.open(scheduler, invocation, request, authorized, handle, a, cancel, permit),
             .close_session => return self.close(scheduler, invocation, request, authorized, handle, a, cancel, permit),
             .reconnect_session => {
-                try self.validatePermit(permit, invocation, authorized);
+                try self.confirmBeforeDispatch(permit, invocation, authorized, cancel);
                 try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started });
                 const applied = self.controllerCall(scheduler, invocation.context, .{ .queue_reconnect = .{ .operation = handle.operation_ref, .request = request, .authorized = authorized, .mutation_fence = invocation.mutation_fence } }, cancel) catch |err| {
                     try self.journal_owner.update(handle, 2, .{ .stage = .failed });
@@ -408,8 +423,8 @@ pub const Runtime = struct {
                 return reconnectResult(a, invocation, handle.operation_ref, applied.result.reconnect, false, false, !applied.result.reconnect.joined_automatic);
             },
             .disconnect_session => {
+                try self.confirmBeforeDispatch(permit, invocation, authorized, cancel);
                 try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = request.session });
-                try self.validatePermit(permit, invocation, authorized);
                 const applied = try self.controllerCall(scheduler, invocation.context, .{ .mutate = .{ .operation = handle.operation_ref, .request = request, .authorized = authorized } }, cancel);
                 if (applied.result != .mutation) return error.InvalidControllerReceipt;
                 const receipt = applied.result.mutation;
@@ -417,16 +432,16 @@ pub const Runtime = struct {
                 return disconnectResult(a, invocation, handle.operation_ref, request.session.?, receipt, false);
             },
             .set_session_retention => {
+                try self.confirmBeforeDispatch(permit, invocation, authorized, cancel);
                 try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = request.session });
-                try self.validatePermit(permit, invocation, authorized);
                 const updated = try self.controllerCall(scheduler, invocation.context, .{ .set_retention = .{ .session = request.session.?, .retention = request.retention.? } }, cancel);
                 if (updated.result != .session) return error.InvalidControllerReceipt;
                 try self.journal_owner.update(handle, 2, .{ .stage = .succeeded });
                 return sessionResult(a, invocation, handle.operation_ref, updated.result.session, false, false);
             },
             else => {
+                try self.confirmBeforeDispatch(permit, invocation, authorized, cancel);
                 try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = request.session, .created_group = if (request.group) |group| @backingInt(group.id) else null });
-                try self.validatePermit(permit, invocation, authorized);
                 const applied = try self.controllerCall(scheduler, invocation.context, .{ .mutate = .{ .operation = handle.operation_ref, .request = request, .authorized = authorized } }, cancel);
                 if (applied.result != .mutation) return error.InvalidControllerReceipt;
                 const receipt = applied.result.mutation;
@@ -457,9 +472,8 @@ pub const Runtime = struct {
         // Release prepared allocations even when cancellation or journal IO fails.
         defer _ = self.controllerCall(scheduler, invocation.context, .{ .release_group = plan }, null) catch {};
         if (plan.id == 0 or (!plan.background and plan.binding_revision <= invocation.context.binding_revision) or plan.background != (invocation.context.child_origin != null) or plan.notice_revision == 0) return error.InvalidControllerReceipt;
-        try cancelled(cancel);
+        try self.confirmBeforeDispatch(permit, invocation, authorized, cancel);
         try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_group = plan.id });
-        try self.validatePermit(permit, invocation, authorized);
         _ = try self.controllerCall(scheduler, invocation.context, .{ .commit_group = plan }, cancel);
         // If this sync fails, the durable dispatch_started receipt fences retries
         // even though the UI already published. Never rebuild from the name.
@@ -484,11 +498,11 @@ pub const Runtime = struct {
             snapshot = queried.result.session;
         }
         if (snapshot.state != .prepared or snapshot.session == null) return error.SessionPrepareFailed;
-        try self.validatePermit(permit, invocation, authorized);
+        try self.confirmBeforeDispatch(permit, invocation, authorized, cancel);
         if (authorized.bootstrap_required) try self.prepareBootstrap(scheduler, invocation, handle.operation_ref, snapshot.session.?, authorized, a, cancel, permit);
         try cancelled(cancel);
+        if (!authorized.bootstrap_required) try self.confirmBeforeDispatch(permit, invocation, authorized, cancel);
         try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = snapshot.session, .ownership = .created_task });
-        if (!authorized.bootstrap_required) try self.validatePermit(permit, invocation, authorized);
         const dispatched = try self.controllerCall(scheduler, invocation.context, .{ .authorize_open = .{ .operation = handle.operation_ref, .revision = snapshot.revision, .session = snapshot.session.? } }, cancel);
         if (dispatched.result != .session or dispatched.result.session.session == null or !dispatched.result.session.session.?.eql(snapshot.session.?)) return error.InvalidControllerReceipt;
         snapshot = dispatched.result.session;
@@ -524,8 +538,8 @@ pub const Runtime = struct {
         _ = try self.controllerCall(scheduler, invocation.context, .{ .install_bootstrap = prepared }, cancel);
     }
     fn close(self: *Runtime, scheduler: Scheduler, invocation: host.Invocation, request: tools.Request, authorized: Authorized, handle: journal.Handle, a: std.mem.Allocator, cancel: ?*provider.CancelToken, permit: ?approvals.Permit) !host.Result {
+        try self.confirmBeforeDispatch(permit, invocation, authorized, cancel);
         try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = request.session });
-        try self.validatePermit(permit, invocation, authorized);
         const accepted = try self.controllerCall(scheduler, invocation.context, .{ .queue_close = .{ .operation = handle.operation_ref, .session = request.session.?, .explicit_user_close = authorized.explicit_user_close } }, cancel);
         if (accepted.result != .close) return error.InvalidControllerReceipt;
         const snapshot = accepted.result.close;
@@ -539,8 +553,25 @@ pub const Runtime = struct {
         if (permit) |value| {
             var impact: [2048]u8 = undefined;
             const subject = lifecycleSubject(invocation, authorized, &impact);
-            if (self.approval.?.authorizeSubject(value, invocation, subject, authorized.policy_revision) != .allow) return error.ScopeChanged;
+            switch (self.approval.?.authorizeSubject(value, invocation, subject, authorized.policy_revision)) {
+                .allow => {},
+                .approval_required => return error.ApprovalRequired,
+                .denied => return error.ToolApprovalRejected,
+                .scope_changed => return error.ScopeChanged,
+            }
         } else if (authorized.approval_required) return error.ApprovalRequired;
+    }
+    fn confirmBeforeDispatch(self: *Runtime, permit: ?approvals.Permit, invocation: host.Invocation, authorized: Authorized, cancel: ?*provider.CancelToken) !void {
+        while (true) {
+            if (!authorized.observe_automatic_reconnect) if (invocation.dispatch_fence) |fence| try fence.check();
+            try cancelled(cancel);
+            self.validatePermit(permit, invocation, authorized) catch |err| {
+                if (err != error.ApprovalRequired or permit == null) return err;
+                try self.approval.?.waitForDecision(permit.?, cancel);
+                continue;
+            };
+            return;
+        }
     }
     pub fn acknowledgeNotice(self: *Runtime, context: host.Context, revision: u64) !void {
         try self.journal_owner.acknowledgeNotice(context, revision);
@@ -627,8 +658,22 @@ fn lifecycleSubject(invocation: host.Invocation, authorized: Authorized, buffer:
     const impact = switch (kind) {
         .open_session => blk: {
             const policy = invocation.arguments.object.get("connection_policy").?.string;
-            const connection = if (std.mem.eql(u8, policy, "prefer_reuse")) "先复用来源连接；不可复用时明确允许建立新连接" else if (std.mem.eql(u8, policy, "reuse_only")) "仅复用来源连接并新开 shell；不可复用则停止，不新建连接" else "始终新建独立工作终端，不复用原连接";
-            break :blk std.fmt.bufPrint(buffer, "{s}。不执行用户命令。{s}本次会话的保留方式：{s}。", .{ connection, if (authorized.bootstrap_required) "将先只读检查远端系统和 zsh，再单独确认临时执行组件的目录、文件和校验值。" else "默认启用终端集成；SSH 如需命令事件，仅在原 shell 内初始化文本钩子，不上传运行文件。", retention }) catch "创建独立工作会话；不执行用户命令。";
+            const connection = if (authorized.opens_local_terminal)
+                "打开新的本地终端"
+            else if (authorized.saved_source != null)
+                "新建 SSH 连接"
+            else if (std.mem.eql(u8, policy, "prefer_reuse"))
+                "优先复用 SSH 连接，无法复用时新建连接"
+            else if (std.mem.eql(u8, policy, "reuse_only"))
+                "仅复用现有 SSH 连接"
+            else
+                "新建 SSH 连接";
+            const after_task = switch (authorized.retention) {
+                .auto_idle => "任务结束后在终端空闲时关闭",
+                .ask => "任务结束时询问是否关闭终端",
+                .keep => "任务结束后保留终端",
+            };
+            break :blk std.fmt.bufPrint(buffer, "{s}，{s}。{s}", .{ connection, after_task, if (authorized.bootstrap_required) "安装临时执行组件前会另行确认。" else "" }) catch after_task;
         },
         .create_group => if (invocation.context.child_origin != null) "在后台创建子任务的工作组，原终端和主对话留在原处。" else "创建终端组并加入原会话；当前 AI 对话、历史和草稿将移到该组。",
         .close_session => "关闭所列会话及其进程或连接；实际关闭前会再次核查影响。",

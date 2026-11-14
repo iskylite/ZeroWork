@@ -112,7 +112,7 @@ pub const Record = struct {
     fn markResumedHistory(self: *Record) void {
         var user_messages: usize = 0;
         for (self.history.messages) |message| {
-            if (message.role == .user and message.origin != .host_context_notice and message.content.len != 0) user_messages += 1;
+            if (message.role == .user and message.origin == .user_or_tool and message.content.len != 0) user_messages += 1;
         }
         self.resumed_history = if (user_messages == 0 and self.last_turn == 0) null else .{ .through_turn = self.last_turn, .user_messages = user_messages };
     }

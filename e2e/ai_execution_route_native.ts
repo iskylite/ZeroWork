@@ -160,32 +160,46 @@ try{
   report.active_stage=stage;await send(stage);const approved=new Set<string>(),start=performance.now();
   while(!finalEmitted&&performance.now()-start<100000){
    assert.equal(fixtureFailure,null);const recovery=(await h.query('ai.recovery')).find(shown);assert(!recovery,`provider recovery: ${text(recovery)}`);
-   if((await h.query('ai.host_approval')).some(shown)){
+   if((await h.query('ai.interaction.panel')).some(shown)){
     assert(activeCall,'every pending card belongs to the current original provider call');const call=activeCall,id=call.id;
     if(approved.has(id)){await h.sleep(80);continue}
     assert.equal(await exists(cases.EXTRA.file),false);
     const lifecycle=['new-group','new-open'].includes(id),extra=id==='intent-extra',trusted=stage==='INTENT'&&!extra;
-    report.pending_approval={stage,id,tool:call.name,arguments:call.arguments,native:await h.query('ai.host_approval')};
+    report.pending_approval={stage,id,tool:call.name,arguments:call.arguments,native:await h.query('ai.interaction.panel')};
     if(!lifecycle&&!extra&&id===stage.toLowerCase()+'-actual'&&!trusted)report.primary_failure={category:'product',phase:'exact-route-grant-reuse',reason:`The selected exact command requested an unexpected second approval at ${id}`,evidence:report.pending_approval};
     assert(lifecycle||extra||id===stage.toLowerCase()+'-wrong'||trusted&&id==='intent-actual',`unexpected new approval ${id}; exact route grant was not reused`);
-    const card=await visible('ai.host_approval'),summary=text(await visible('ai.host_approval.summary')),targetText=text(await visible('ai.host_approval.target'));
+    const card=await visible('ai.interaction.panel'),summary=text(await visible('ai.interaction.command')),targetText=text(await visible('ai.interaction.target'));
     if(!lifecycle){
-     const expected=extra?cases.EXTRA.command:cases[stage].command;assert.equal(summary,Buffer.from(expected).subarray(0,200).toString('utf8'));
-     await click('ai.host_approval.copy');const complete=(await promisify(execFile)('/usr/bin/pbpaste',[],{encoding:'utf8'})).stdout;assert.equal(complete,expected,'native copy preserves the full exact pending command');
+     const expected=extra?cases.EXTRA.command:cases[stage].command;assert.equal(summary,expected);
+     await click('ai.interaction.copy');const complete=(await promisify(execFile)('/usr/bin/pbpaste',[],{encoding:'utf8'})).stdout;assert.equal(complete,expected,'native copy preserves the full exact pending command');
      assert.equal(await exists((extra?cases.EXTRA:cases[stage]).file),false,'no command write before permission');
-     if(trusted){assert.equal((await h.query('ai.host_approval.route.batch')).filter(shown).length,0,'actual submitted intent fixes only this command route')}
+     if(trusted){assert.equal((await h.query('ai.interaction.route.0')).filter(shown).length,0,'actual submitted intent fixes only this command route')}
      else{
-      for(const option of['batch','current','new'])await visible('ai.host_approval.route.'+option);
+      for(const option of['batch','current','new'])await visible('ai.interaction.route.'+['batch','current','new'].indexOf(option));
       const order=stage==='CURRENT'?['batch','current','new','current']:[stage==='BATCH'?'batch':stage==='NEW'?'new':'current'];
       const beforeRequests=requests.length;
       for(const option of order){
-       await click('ai.host_approval.route.'+option);const same=await visible('ai.host_approval');assert.equal(same.id,card.id);assert.equal(text(await visible('ai.host_approval.summary')),summary);assert.equal(text(await visible('ai.host_approval.target')),targetText);assert.equal(requests.length,beforeRequests,'selection alone must not advance provider or execute');assert.equal(await exists((extra?cases.EXTRA:cases[stage]).file),false);
+       await click('ai.interaction.route.'+['batch','current','new'].indexOf(option));const same=await visible('ai.interaction.panel');assert.equal(same.id,card.id);assert.equal(text(await visible('ai.interaction.command')),summary);assert.equal(text(await visible('ai.interaction.target')),targetText);assert.equal(requests.length,beforeRequests,'selection alone must not advance provider or execute');assert.equal(await exists((extra?cases.EXTRA:cases[stage]).file),false);
        report.route_selections.push({stage,id,option,card_id:same.id,summary,target:targetText,provider_requests:requests.length,zero_writes:true});await capture(stage.toLowerCase()+'-pending-'+option);
       }
      }
     }
+    if(stage==='CURRENT'&&id==='current-wrong'){
+     const title=await visible('ai.interaction.title'),targetLabel=await visible('ai.interaction.target');
+     assert(targetLabel.rect.x>=title.rect.x+title.rect.w&&Math.abs(targetLabel.rect.y+targetLabel.rect.h/2-title.rect.y-title.rect.h/2)<1,'title and target share one row');
+     assert.equal((await h.query('ai.interaction.impact.note')).filter(shown).length,0,'current terminal selection needs no generic explanatory paragraph');
+     const beforeRequests=requests.length;
+     await click('toolbar.settings');await click('settings.nav.appearance');await click('settings.toggle.input_line_highlight');
+     await click('settings.save');
+     await h.waitFor(async()=>/config_revision\s*=\s*[2-9]/.test(await readFile(join(data,'config.toml'),'utf8'))||null,5000);
+     await click('settings.close');
+     assert.equal(text(await visible('ai.interaction.command')),summary,'appearance save retains the same approval');
+     assert.equal(requests.length,beforeRequests,'appearance save does not restart the task');
+     assert.equal(await exists(cases.CURRENT.file),false,'appearance save cannot approve the command');
+     report.checks.push('Saving appearance with a command awaiting approval retains the same task and approval');
+    }
     await capture(stage.toLowerCase()+'-'+id+'-before-'+(extra?'reject':'approve'));
-    approved.add(id);report.approvals.push({stage,id,kind:lifecycle?'lifecycle':'command',decision:extra?'reject':'approve',summary,target:targetText});await click(extra?'ai.host_approval.reject':'ai.host_approval.accept');
+    approved.add(id);report.approvals.push({stage,id,kind:lifecycle?'lifecycle':'command',decision:extra?'reject':'approve',summary,target:targetText});await click(extra?'ai.interaction.reject':'ai.interaction.approve');
    }
    if(!finalEmitted)await h.sleep(80);
   }

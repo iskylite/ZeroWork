@@ -6,15 +6,24 @@ const ui = @import("ui");
 const question = @import("../ai/user_interaction.zig");
 const routing = @import("../ai/execution_routing.zig");
 const S = @import("ai_composer_interaction_styles.zig");
+pub const ApprovalTicket = struct {
+    sequence: u64,
+    hash: [32]u8,
+    authority: ?@import("../ai/host_tools.zig").Context = null,
+
+    fn eql(a: ApprovalTicket, b: ApprovalTicket) bool {
+        return a.sequence == b.sequence and std.mem.eql(u8, &a.hash, &b.hash) and std.meta.eql(a.authority, b.authority);
+    }
+};
 pub const Ticket = union(enum) {
-    tool: struct { sequence: u64, hash: [32]u8 },
-    host: struct { sequence: u64, hash: [32]u8 },
+    tool: ApprovalTicket,
+    host: ApprovalTicket,
     question: question.Ticket,
     pub fn eql(a: Ticket, b: Ticket) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
-            .tool => |v| v.sequence == b.tool.sequence and std.mem.eql(u8, &v.hash, &b.tool.hash),
-            .host => |v| v.sequence == b.host.sequence and std.mem.eql(u8, &v.hash, &b.host.hash),
+            .tool => |v| v.eql(b.tool),
+            .host => |v| v.eql(b.host),
             .question => |v| v.eql(b.question),
         };
     }
@@ -30,7 +39,7 @@ pub const Snapshot = struct {
     allow_custom: bool = true,
     route: ?routing.Route = null,
     route_selectable: bool = false,
-    route_reason: []const u8 = "",
+    reconfirm: bool = false,
 };
 pub const Action = union(enum) { approve, reject, answer: struct { option_id: ?[]const u8, text: []const u8 }, route: routing.Route };
 pub const Callbacks = struct { context: *anyopaque, act: *const fn (*anyopaque, Ticket, Action) anyerror!void };
@@ -42,7 +51,7 @@ const Owned = struct {
         errdefer arena.deinit();
         const allocator = arena.allocator();
         var value = source;
-        inline for (.{ "title", "target", "detail", "impact", "route_reason" }) |field| @field(value, field) = try allocator.dupe(u8, @field(source, field));
+        inline for (.{ "title", "target", "detail", "impact" }) |field| @field(value, field) = try allocator.dupe(u8, @field(source, field));
         const options = try allocator.dupe(Option, source.options);
         for (options) |*option| {
             option.id = try allocator.dupe(u8, option.id);
@@ -88,7 +97,6 @@ pub const View = struct {
     disabled: *ui.Signal(bool),
     pending_label: *ui.Node = undefined,
     route_row: *ui.Node = undefined,
-    route_reason: *ui.Node = undefined,
     route_buttons: [3]*ui.Node = undefined,
     error_label: *ui.Node = undefined,
     source: ?Owned = null,
@@ -112,10 +120,10 @@ pub const View = struct {
         try heading.appendChild(cx.allocator, self.heading_icon);
         self.title = try self.label(heading, "", S.text(13, 20, 600, false));
         self.title.meta.ownership.meta.test_id = "ai.interaction.title";
-        try self.content.appendChild(cx.allocator, heading);
-        self.target = try self.label(self.content, "", S.text(11, 16, 400, true));
-        self.target.setStyleInline(cx.allocator, .{ .margin = .{ .left = 24, .top = -8 } });
+        self.target = try self.label(heading, "", S.text(11, 16, 400, true));
+        self.target.setStyleInline(cx.allocator, .{ .flex_shrink = 1 });
         self.target.meta.ownership.meta.test_id = "ai.interaction.target";
+        try self.content.appendChild(cx.allocator, heading);
         self.command_row = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
         self.command = try self.label(self.command_row, "", @import("ai_tool_approval_styles.zig").command(cx.tokens));
         self.command.setStyleInline(cx.allocator, .{ .padding = .{ .top = 8, .bottom = 8, .left = 10, .right = 10 }, .background = S.theme.current().surface_2, .border = .{ .radius = 7 } });
@@ -131,10 +139,9 @@ pub const View = struct {
         self.impact = try self.label(self.impact_row, "", S.text(11, 18, 400, true));
         try self.content.appendChild(cx.allocator, self.impact_row);
         self.impact.meta.ownership.meta.test_id = "ai.interaction.impact";
-        self.route_row = try ui.box(cx, .{ .width = .fill(), .direction = .row, .gap = 6, .flex_shrink = 0 }, .{});
+        self.route_row = try ui.box(cx, .{ .width = .fill(), .direction = .row, .gap = 6, .flex_shrink = 0, .flex_wrap = .wrap }, .{});
         inline for (.{ .{ "批处理", chooseBatch }, .{ "当前终端", chooseCurrent }, .{ "新工作终端", chooseNew } }, 0..) |item, index| self.route_buttons[index] = try self.button(self.route_row, item[0], item[0], "terminal", std.fmt.comptimePrint("ai.interaction.route.{d}", .{index}), false, item[1]);
         try self.content.appendChild(cx.allocator, self.route_row);
-        self.route_reason = try self.label(self.content, "", S.text(11, 16, 400, true));
         self.option_group = try ui.widgets.RadioGroup(.{ .options = &radio_options, .value = self.selected, .disabled = self.disabled, .on_change = cx.on(View, self, selectionChanged) }).mount(scope, cx);
         self.option_group.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 4, .flex_shrink = 0 });
         for (self.option_group.children.items, 0..) |row, index| {
@@ -225,12 +232,11 @@ pub const View = struct {
                 const value = owned.value;
                 const is_question = value.ticket == .question;
                 try self.title.setTextContent(self.cx.allocator, value.title);
+                self.title.setStyleInline(self.cx.allocator, .{ .width = if (value.target.len == 0) .fill() else .{ .fit = .{} }, .flex = if (value.target.len == 0) 1 else 0, .flex_shrink = 1 });
                 try self.target.setTextContent(self.cx.allocator, value.target);
                 self.target.setDisplay(if (value.target.len == 0) .none else .flex);
                 try self.command.setTextContent(self.cx.allocator, value.detail);
                 self.command_row.setDisplay(if (is_question or value.detail.len == 0) .none else .flex);
-                try self.impact.setTextContent(self.cx.allocator, value.impact);
-                self.impact_row.setDisplay(if (value.impact.len == 0) .none else .flex);
                 self.option_group.setDisplay(if (is_question) .flex else .none);
                 for (0..6) |index| {
                     self.option_rows[index].setDisplay(if (is_question and index < value.options.len) .flex else .none);
@@ -250,9 +256,11 @@ pub const View = struct {
         }
         if (snapshot) |value| {
             self.route_row.setDisplay(if (value.route_selectable) .flex else .none);
-            self.route_reason.setDisplay(if (value.route_reason.len > 0 and value.route_selectable) .flex else .none);
+            const impact = if (value.reconfirm) "执行条件已变化，请重新确认。" else if (value.impact.len != 0) value.impact else if (value.route_selectable and value.route == .new_terminal) @import("../ai/host_approval.zig").new_terminal_confirmation else "";
+            const previous_impact = if (self.impact.getText()) |current_text| current_text.content else "";
+            if (!std.mem.eql(u8, previous_impact, impact)) try self.impact.setTextContent(self.cx.allocator, impact);
+            self.impact_row.setDisplay(if (impact.len == 0) .none else .flex);
             if (value.route_selectable) {
-                try self.route_reason.setTextContent(self.cx.allocator, value.route_reason);
                 for (self.route_buttons, 0..) |button_node, index| button_node.setBackground(if (value.route != null and @backingInt(value.route.?) == index) S.theme.popupSelection() else S.theme.popupAction());
             }
         }

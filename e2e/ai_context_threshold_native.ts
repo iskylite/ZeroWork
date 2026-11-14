@@ -16,8 +16,10 @@ await mkdir(output,{recursive:true});
 const iso=await mkdtemp('/private/tmp/zw-compaction-native-'), data=join(iso,'data'), rpc=join(iso,'rpc'), frozen=join(output,'frozen');
 await Promise.all([mkdir(data),mkdir(rpc),mkdir(frozen,{recursive:true})]);
 await copyFile(source,join(frozen,'zerowork')); await copyFile(join(dirname(source),'zw_ipc.so'),join(frozen,'zw_ipc.so'));
-const contextWindow=options['--failure']==='true'?18000:20000;
+const contextWindow=32000;
 let mode='success', summaryCount=0, ordinaryCount=0;
+let releaseFailure:()=>void=()=>{};
+const failCompaction=new Promise<void>(resolve=>{releaseFailure=resolve;});
 const requests:any[]=[];
 const server=createServer(async(req,res)=>{
   if(req.method==='GET') {res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:'compaction-native',context_window:contextWindow,reasoning:false,vision:false}]}));return;}
@@ -29,10 +31,13 @@ const server=createServer(async(req,res)=>{
     summaryCount++;assert(!body.tools?.length);
 
     assert(!JSON.stringify(body.messages).includes('RECENT_NATIVE_SECOND'));
-    if(mode==='failure'){await sleep(1500);res.writeHead(400);res.end('summary failed');record.completed=true;return;}
+    if(mode==='failure'){await failCompaction;res.writeHead(400);res.end('summary failed');record.completed=true;return;}
     await sleep(mode==='cancel'?1800:550);
     text='MEMORY_NATIVE_BACKUP_TESTS_PASSED. Goal backup; constraint no deployment; pending review.';
-  } else {ordinaryCount++;text='VISIBLE_NATIVE_ANSWER_'+ordinaryCount;}
+  } else {
+    ordinaryCount++;text='VISIBLE_NATIVE_ANSWER_'+ordinaryCount;
+    if(ordinaryCount===1)text+=' '+ 'LARGE_OBSERVATION '.repeat(mode==='failure'?6175:6500);
+  }
   res.writeHead(200,{'Content-Type':'text/event-stream'});
   res.end('data: '+JSON.stringify({choices:[{delta:{content:text}}]})+'\n\ndata: [DONE]\n\n');record.completed=true;
 });
@@ -59,24 +64,26 @@ try{
   await resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await visible('ai.prompt');
   if(options['--failure']==='true') {
     mode='failure';
-    const original=('ORIGINAL_FAILED_INPUT '+ 'PREFLIGHT_DATA '.repeat(90)).trim();
+    await send('OLD_NATIVE_MARKER inspect the terminal',1);
+    const original=('ORIGINAL_FAILED_INPUT '+ 'PREFLIGHT_DATA '.repeat(200)).trim();
     await click('ai.prompt');assert((await type_(original)).ok);await click('ai.send');
-    await waitFor(async()=>summaryCount===1||null,20000);
+    await waitFor(async()=>summaryCount>0||null,20000);
     await click('ai.prompt');assert((await type_('NEW_DRAFT_DURING_COMPACTION')).ok);
-    await waitFor(async()=>{const value=await inputState('ai.prompt');return value.buffer.includes(original)&&value.buffer.includes('NEW_DRAFT_DURING_COMPACTION')||null;},20000);
-    assert.equal(ordinaryCount,0);
-    assert((await history()).some(x=>x.includes('ORIGINAL_FAILED_INPUT')), 'original visible prompt preserved');
+    releaseFailure();
+    await waitFor(async()=>requests.filter(r=>r.summary).every(r=>r.completed)&&!(await query('ai.stop')).some(shown)||null,20000);
+    assert((await inputState('ai.prompt')).buffer.includes('NEW_DRAFT_DURING_COMPACTION'));
+    assert.equal(ordinaryCount,1);
+    assert((await history()).some(x=>x.includes('OLD_NATIVE_MARKER')), 'prior visible prompt preserved');
     const count=summaryCount;await sleep(2200);assert.equal(summaryCount,count,'failure must not restart automatic compaction');
-    await click('ai.composer.usage');await visible('ai.usage.compaction.start');await cap('01-failed-input-restored');
-    await key('Escape');mode='success';await click('ai.send');
+    await click('ai.composer.usage');await visible('ai.usage.compaction.start');await cap('01-failed-compaction');
+    await key('Escape');mode='success';await click('ai.prompt');assert((await key('a',{cmd:true})).ok);assert((await type_(original)).ok);await click('ai.send');
     await waitFor(async()=>summaryCount>count||null,20000);
     await waitFor(async()=>requests.filter(r=>r.summary).every(r=>r.completed)||null,20000);
     await sleep(800);
-    await waitFor(async()=>(await query('ai.response')).some(n=>text(n).includes('VISIBLE_NATIVE_ANSWER_1'))||null,20000);
-    report.status='passed';report.original_input_preserved=true;report.concurrent_draft_preserved=true;report.no_automatic_retry=true;report.manual_retry_available=true;
+    await waitFor(async()=>(await query('ai.response')).some(n=>text(n).includes('VISIBLE_NATIVE_ANSWER_2'))||null,20000);
+    report.status='passed';report.prior_prompt_preserved=true;report.concurrent_draft_preserved=true;report.manual_retry_available=true;
   } else {
-  await send('OLD_NATIVE_MARKER inspect the terminal '+ 'PREFLIGHT_DATA '.repeat(1800),1);
-  assert(requests[0].summary, 'over-budget captured draft must compact before the first ordinary request');
+  await send('OLD_NATIVE_MARKER inspect the terminal',1);
   await waitFor(async()=>summaryCount>0||null,20000);
   await waitFor(async()=>{const r=requests.filter(r=>r.summary);return r.length>0&&r.every(r=>r.completed)||null;},20000);
   await sleep(500);
@@ -87,15 +94,15 @@ try{
   const next=requests.filter(r=>!r.summary).at(-1).body;
   const wire=JSON.stringify(next.messages);
   assert(wire.includes('MEMORY_NATIVE_BACKUP_TESTS_PASSED'));
-  assert(!wire.includes('OLD_NATIVE_MARKER'));
+  assert(next.messages.some((m:any)=>m.role==='user'&&m.content==='OLD_NATIVE_MARKER inspect the terminal'));
   assert(!wire.includes('LARGE_OBSERVATION'));
   await click('ai.composer.usage');await cap('02-short-turn-manual-ready');
   const before=summaryCount;await click('ai.usage.compaction.start');await waitFor(async()=>summaryCount>before||null,20000);await sleep(800);
   await cap('03-short-turn-manual-completed');
   report.status='passed';report.automatic_compaction=true;report.next_request_uses_summary=true;report.short_turn_manual_compaction=true;
   }
-}catch(e){report.status='failed';report.error=String(e);try{await cap('failure');}catch{}}
+}catch(e){report.status='failed';report.error=e instanceof Error?e.stack:String(e);try{await cap('failure');}catch{}}
 finally{
-  report.requests=requests;report.finished_at=new Date().toISOString();if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await Promise.race([ended,sleep(2000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended;}server.close();await log.close();await writeFile(join(output,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,report:join(output,'report.json')}));
+  releaseFailure();report.requests=requests;report.finished_at=new Date().toISOString();if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await Promise.race([ended,sleep(2000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended;}server.close();await log.close();await writeFile(join(output,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,report:join(output,'report.json')}));
 }
 if(report.status!=='passed')process.exitCode=1;

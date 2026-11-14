@@ -245,7 +245,7 @@ pub const Config = struct {
                     const a = allocator orelse return error.RequiresAllocator;
                     const encoded = try parseOwnedString(allocator, value);
                     self.ai.extensions = std.json.parseFromSliceLeaky(ai_extensions.Extensions, a, encoded, .{ .allocate = .alloc_always }) catch return error.InvalidValue;
-                } else if (eq(key, "child_context_mode")) self.ai.child_context_mode = std.meta.stringToEnum(ChildContextMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "child_reuse_policy")) self.ai.child_reuse_policy = std.meta.stringToEnum(ChildReusePolicy, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "default_effort")) self.ai.default_effort = std.meta.stringToEnum(@import("../ai/provider.zig").Effort, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
+                } else if (eq(key, "child_context_mode")) self.ai.child_context_mode = std.meta.stringToEnum(ChildContextMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "child_reuse_policy")) self.ai.child_reuse_policy = std.meta.stringToEnum(ChildReusePolicy, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "default_effort")) self.ai.default_effort = std.meta.stringToEnum(@import("../ai/provider.zig").Effort, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = ExecutionMode.parse(try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
             },
             .log => {
                 if (eq(key, "ring_mb")) self.log.ring_mb = try parseInt(u16, value) else if (eq(key, "checkpoint_sec")) self.log.checkpoint_sec = try parseInt(u16, value) else if (eq(key, "retention_days")) self.log.retention_days = try parseInt(u16, value) else if (eq(key, "export_format")) self.log.export_format = try parseString(value) else return error.UnknownKey;
@@ -389,7 +389,26 @@ pub const Transfer = struct { dedicated_connection: bool = false, window_chunks:
 pub const Ssh = struct { keepalive_sec: u16 = 30, reconnect_max: u8 = 5, reconnect_backoff: [5]u8 = .{ 1, 2, 4, 8, 16 }, connect_timeout_sec: u16 = 15, term: []const u8 = "xterm-256color", compression: bool = false, auto_shell_integration: bool = true, auto_reconnect: bool = true, buffer_input: bool = true, socks_port: u16 = 1080, socks_bind: []const u8 = "127.0.0.1", otp_modal: bool = true, totp_autofill: bool = false };
 pub const PermissionMode = enum { confirm, auto };
 /// Command routing is independent of the existing permission approval policy.
-pub const ExecutionMode = enum { auto, ask, isolated_exec, attached_pty, new_pty };
+pub const ExecutionMode = enum {
+    auto,
+    ask,
+    isolated_exec,
+    interactive,
+
+    pub fn parse(value: []const u8) ?ExecutionMode {
+        if (eq(value, "attached_pty") or eq(value, "new_pty")) return .interactive;
+        return std.meta.stringToEnum(ExecutionMode, value);
+    }
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ExecutionMode {
+        return parse(try std.json.innerParse([]const u8, allocator, source, options)) orelse error.InvalidEnumTag;
+    }
+
+    pub fn jsonParseFromValue(_: std.mem.Allocator, value: std.json.Value, _: std.json.ParseOptions) !ExecutionMode {
+        if (value != .string) return error.UnexpectedToken;
+        return parse(value.string) orelse error.InvalidEnumTag;
+    }
+};
 pub const SessionRetention = enum { auto_idle, ask, keep };
 pub const ExecutionPolicy = struct { execution_mode: ExecutionMode, session_retention: SessionRetention };
 
@@ -403,8 +422,7 @@ pub fn executionModeLabel(mode: ExecutionMode) []const u8 {
         .auto => "自行判断",
         .ask => "每次询问",
         .isolated_exec => "批处理",
-        .attached_pty => "附加现有 PTY",
-        .new_pty => "新建 PTY",
+        .interactive => "交互式",
     };
 }
 pub fn sessionRetentionLabel(retention: SessionRetention) []const u8 {
@@ -761,11 +779,18 @@ test "execution policy defaults migrate legacy config and invalid values fail ex
     try std.testing.expectEqual(PermissionMode.auto, legacy.ai.permission_mode);
     try std.testing.expectEqual(ExecutionMode.auto, legacy.ai.execution_mode);
     try std.testing.expectEqual(SessionRetention.auto_idle, legacy.ai.session_retention);
+    inline for (.{ "attached_pty", "new_pty" }) |mode| {
+        const from_toml = try Config.parse("[ai]\nexecution_mode = \"" ++ mode ++ "\"\n");
+        try std.testing.expectEqual(ExecutionMode.interactive, from_toml.ai.execution_mode);
+        const from_history = try std.json.parseFromSlice(struct { execution_mode: ?ExecutionMode }, std.testing.allocator, "{\"execution_mode\":\"" ++ mode ++ "\"}", .{});
+        defer from_history.deinit();
+        try std.testing.expectEqual(ExecutionMode.interactive, from_history.value.execution_mode.?);
+    }
     try std.testing.expectError(error.InvalidExecutionMode, Config.parse("[ai]\nexecution_mode = \"unsafe\"\n"));
     try std.testing.expectError(error.InvalidSessionRetention, Config.parse("[ai]\nsession_retention = \"always_close\"\n"));
 }
 
-test "execution policy five modes and retention round trip separately from permissions" {
+test "execution policy modes and retention round trip separately from permissions" {
     inline for (@typeInfo(ExecutionMode).@"enum".field_names) |name| {
         var value: Config = .{};
         value.ai.execution_mode = @field(ExecutionMode, name);
@@ -781,7 +806,7 @@ test "execution policy five modes and retention round trip separately from permi
     const frozen = resolveExecutionPolicy(defaults, null, .keep);
     try std.testing.expectEqual(ExecutionMode.isolated_exec, frozen.execution_mode);
     try std.testing.expectEqual(SessionRetention.keep, frozen.session_retention);
-    try std.testing.expectEqual(ExecutionMode.new_pty, resolveExecutionPolicy(.{}, .new_pty, null).execution_mode);
+    try std.testing.expectEqual(ExecutionMode.interactive, resolveExecutionPolicy(.{}, .interactive, null).execution_mode);
     try std.testing.expectEqual(ExecutionMode.isolated_exec, frozen.execution_mode);
 }
 

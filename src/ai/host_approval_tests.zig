@@ -241,6 +241,9 @@ test "routing approval combines selection and permission and cross tool stays ze
     correct.route.?.proposed = .current_terminal;
     correct.route.?.choice.route = .current_terminal;
     correct.route.?.selectable = false;
+    correct.human_review = true;
+    try std.testing.expect(try broker.beginGrantedSubject(call, correct, 9, a) == null);
+    correct.human_review = false;
     const carried = (try broker.beginGrantedSubject(call, correct, 9, a)).?;
     try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorizeSubject(carried, call, correct, 9));
     broker.finish(carried);
@@ -395,28 +398,14 @@ test "live permission PTY rejudges the same pending permit and revokes only auto
     try std.testing.expect(try broker.poll(permit));
 }
 
-test "live permission PTY gates session variable access and retains route rejection and stop checks" {
+test "live permission PTY ignores command contents and retains route rejection and stop checks" {
     const a = std.testing.allocator;
-    const prompt_quote = "value=hello; printf '%s' \"${value@Q}\"";
-    const prompt_literal = "value=hello; printf '%s' \"${value@P}\"";
-    const prompt_blocked = "value='$(shutdown now)'; printf '%s' \"${value@P}\"";
-    const prompt_unknown = "printf '%s' \"${value@P}\"";
-    const shell_tests = @import("shell_policy_tests.zig");
-    const automatic_commands = [_][]const u8{
-        "df -h",                               "kubectl rollout restart deploy/api", "touch /tmp/fixture",                "df -h; echo x",
-        shell_tests.heredoc_pipeline,          shell_tests.heredoc_shell_pipeline,   shell_tests.heredoc_python_pipeline, shell_tests.heredoc_shell_multiple,
-        shell_tests.herestring_shell_pipeline, shell_tests.case_pattern_data,
-    };
-    const manual_commands = [_][]const u8{
-        shell_tests.cluster_query, "value=hello",  "printf '%s' \"$value\"", prompt_quote,
-        prompt_literal,            prompt_blocked, prompt_unknown,           "echo x; shutdown now",
-    };
-    for (automatic_commands ++ manual_commands, 0..) |command, index| {
+    for ([_][]const u8{ "df -h", "value=hello", "cat <<'EOF'\nhello\nEOF", "for i in 1 2; do echo $((i+2)); done" }) |command| {
         for ([_]bool{ false, true }) |selectable| {
             var broker: approval.Broker = .{};
             const ctx = context();
             try broker.configure(ctx, 9);
-            broker.updatePermissionPolicy(.{ .mode = .auto, .whitelist = &.{"kubectl rollout restart"} });
+            broker.updatePermissionPolicy(.{ .mode = .auto });
             const json = try std.json.Stringify.valueAlloc(a, .{ .command = command }, .{});
             defer a.free(json);
             const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
@@ -428,15 +417,8 @@ test "live permission PTY gates session variable access and retains route reject
             const subject: approval.Subject = .{ .kind = .terminal_command, .target = "session 1", .detail = command, .route = .{ .proposed = .current_terminal, .choice = .{ .route = .current_terminal, .source = .{ .session = target } }, .target = target, .selectable = selectable } };
             const permit = try broker.beginSubject(call, subject, 9, a);
             defer broker.finish(permit);
-            const automatic = !selectable and index < automatic_commands.len;
-            try std.testing.expectEqual(automatic, try broker.poll(permit));
-            if (!selectable and std.mem.eql(u8, command, "value=hello")) {
-                try std.testing.expectEqual(@import("fetch_url.zig").Decision.approval_required, broker.authorizeSubject(permit, call, subject, 9));
-                try broker.decide(permit.sequence, permit.arguments_hash, true);
-                try std.testing.expect(try broker.poll(permit));
-                try std.testing.expect(!try broker.approvalIsAutomatic(permit));
-                try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorizeSubject(permit, call, subject, 9));
-            } else if (!automatic) {
+            try std.testing.expectEqual(!selectable, try broker.poll(permit));
+            if (selectable) {
                 try broker.decide(permit.sequence, permit.arguments_hash, false);
                 broker.updatePermissionPolicy(.{ .mode = .auto });
                 try std.testing.expectError(error.ToolApprovalRejected, broker.poll(permit));
@@ -455,7 +437,7 @@ test "automatic permission covers host lifecycle network input and group command
         .{ .tool = "run_command", .kind = .terminal_command, .authority = .execution_control, .json = "{\"command\":\"touch /tmp/auto-fixture\"}", .detail = "touch /tmp/auto-fixture" },
         .{ .tool = "run_command", .kind = .terminal_command, .authority = .execution_control, .json = "{\"command\":\"value=hello\"}", .detail = "value=hello" },
         .{ .tool = "host.send_execution_input", .kind = .terminal_command, .authority = .execution_control, .json = "{\"text\":\"continue\"}", .detail = "continue" },
-        .{ .tool = "host.send_execution_input", .kind = .terminal_command, .authority = .execution_control, .json = "{\"text\":\"value=hello\"}", .detail = "value=hello", .automatic = false },
+        .{ .tool = "host.send_execution_input", .kind = .terminal_command, .authority = .execution_control, .json = "{\"text\":\"value=hello\"}", .detail = "value=hello" },
         .{ .tool = "host.send_execution_input", .kind = .terminal_command, .authority = .execution_control, .json = "{\"host_secret_request\":true}", .detail = "host secret", .automatic = false },
         .{ .tool = "host.create_group", .kind = .lifecycle, .authority = .lifecycle, .json = "{}", .detail = "create group" },
         .{ .tool = "host.open_session", .kind = .lifecycle, .authority = .lifecycle, .json = "{}", .detail = "open session with its exact bootstrap dependencies" },

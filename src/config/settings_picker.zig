@@ -28,7 +28,7 @@ const terms = blk: {
 };
 const binds = [_]Choice{ .{ .label = "127.0.0.1", .value = "127.0.0.1" }, .{ .label = "0.0.0.0", .value = "0.0.0.0" } };
 const permissions = [_]Choice{ .{ .label = "确认后执行", .value = "confirm" }, .{ .label = "自动执行", .value = "auto" } };
-const execution_modes = [_]Choice{ .{ .label = "自行判断", .value = "auto" }, .{ .label = "每次询问", .value = "ask" }, .{ .label = "批处理", .value = "isolated_exec" }, .{ .label = "附加现有 PTY", .value = "attached_pty" }, .{ .label = "新建 PTY", .value = "new_pty" } };
+const execution_modes = [_]Choice{ .{ .label = "自行判断", .value = "auto" }, .{ .label = "每次询问", .value = "ask" }, .{ .label = "批处理", .value = "isolated_exec" }, .{ .label = "交互式", .value = "interactive" } };
 const retentions = [_]Choice{ .{ .label = "空闲后关闭", .value = "auto_idle" }, .{ .label = "每次询问", .value = "ask" }, .{ .label = "保留任务会话", .value = "keep" } };
 const step_displays = [_]Choice{ .{ .label = "折叠", .value = "collapsed" }, .{ .label = "展开", .value = "expanded" } };
 const formats = [_]Choice{ .{ .label = ".txt / .cast", .value = "txt_cast" }, .{ .label = ".txt", .value = "txt" }, .{ .label = ".cast", .value = "cast" } };

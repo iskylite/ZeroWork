@@ -54,6 +54,8 @@ pub const Backend = struct {
     context: *anyopaque,
     prepare: *const fn (*anyopaque, std.mem.Allocator, std.Io, Context) anyerror!Prepared,
     capture: ?*const fn (*anyopaque, Context) anyerror!void = null,
+    /// Notify resource owners as soon as the worker joins, before disk writes.
+    joined: ?*const fn (*anyopaque, *Runner) void = null,
     completed: ?*const fn (*anyopaque, *Runner) anyerror!void = null,
     stop: ?*const fn (*anyopaque, Context) void = null,
     /// Nonblocking controller query. Required for a tool backend: worker
@@ -694,6 +696,7 @@ pub const Service = struct {
             runner.pending_notify = true;
             runner.state.store(.failed, .release);
             record.inbox.finish(context.turn, .failure);
+            if (runner.backend.joined) |joined| joined(runner.backend.context, runner);
             return err;
         };
         runner.agent.busy = true;
@@ -705,6 +708,7 @@ pub const Service = struct {
             record.inbox.finish(runner.context.?.turn, .failure);
             runner.saved = true;
             runner.pending_notify = true;
+            if (runner.backend.joined) |joined| joined(runner.backend.context, runner);
             return err;
         };
     }
@@ -753,6 +757,7 @@ pub const Service = struct {
             runner.thread.?.join();
             runner.thread = null;
             runner.pending_commit = true;
+            if (runner.backend.joined) |joined| joined(runner.backend.context, runner);
         }
         if (runner.pending_commit) {
             if (runner.capture_failed) try runner.capture();

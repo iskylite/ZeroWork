@@ -612,6 +612,7 @@ const ControlledHost = struct {
     mode: enum { success, real_exec, uncertain, remote_unknown, cleanup_unknown, throws, wait_approval, cancel_after_success, no_exit } = .success,
     waiting: std.atomic.Value(bool) = .init(false),
     releases: usize = 0,
+    expected_timeout_ms: u32 = 300_000,
 
     fn interface(self: *ControlledHost) loop_mod.Host {
         return .{ .context = self, .execute = execute };
@@ -622,7 +623,7 @@ const ControlledHost = struct {
         try std.testing.expect(scope_mod.Owner.eql(scope.owner, invocation.key.owner));
         try std.testing.expectEqual(@as(u64, 77), invocation.key.turn_id);
         try std.testing.expectEqual(@as(u64, 101), invocation.call.targets.ids[0]);
-        try std.testing.expectEqual(@as(u32, 60_000), invocation.timeout_ms);
+        try std.testing.expectEqual(self.expected_timeout_ms, invocation.call.executionTimeoutMs());
         try std.testing.expectEqual(@as(u32, 65536), invocation.capture_bytes);
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(invocation.arguments, &hash, .{});
@@ -647,7 +648,7 @@ const ControlledHost = struct {
         const native = @import("../local/native.zig");
         const owner: @import("../host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 13 };
         var failure: native.Failure = .{};
-        var command = try local_exec.Command.start(allocator, owner, .{ .owner = .{ .session = owner }, .operation_id = 701 }, 91, invocation.call.command, "/tmp", .{ .timeout_ms = invocation.timeout_ms, .capture_bytes = invocation.capture_bytes }, &failure);
+        var command = try local_exec.Command.start(allocator, owner, .{ .owner = .{ .session = owner }, .operation_id = 701 }, 91, invocation.call.command, "/tmp", .{ .timeout_ms = invocation.call.executionTimeoutMs(), .capture_bytes = invocation.capture_bytes }, &failure);
         defer command.deinit() catch @panic("controlled local exec did not release");
         while (true) {
             if (cancel) |token| if (token.isCancelled()) try command.cancel(owner);
@@ -726,6 +727,40 @@ test "tool loop provider retries and repeated call ID never repeat a completed d
     try std.testing.expectEqualStrings("actual-controlled-output", result.value.object.get("targets").?.array.items[0].object.get("stdout").?.string);
 }
 
+test "batch command timeout reaches both host dispatch paths" {
+    const legacy = @import("legacy_adapter.zig");
+    for ([_][]const u8{
+        df.arguments,
+        "{\"session_ids\":[101],\"command\":\"df -h\",\"timeout_ms\":120000}",
+        "{\"session_ids\":[101],\"command\":\"df -h\",\"timeout_ms\":480000}",
+    }, [_]u32{ 300_000, 120_000, 480_000 }) |arguments, expected| {
+        var call = df;
+        call.arguments = arguments;
+        var script: Script = .{ .rounds = &.{ .{ .calls = &.{call} }, .{ .text = "done" } } };
+        defer script.deinit();
+        var host: ControlledHost = .{ .expected_timeout_ms = expected };
+        var manager = managerFor(&host);
+        defer manager.deinit();
+        _ = try manager.run(script.interface(), makeRequest(null));
+        try std.testing.expectEqual(@as(usize, 1), host.count);
+
+        var context: legacy.InvocationContext = .{ .host = host.interface(), .captured_scope = scope };
+        var result = try legacy.invoke(&context, .{
+            .owner = .{ .session_id = @fromBackingInt(101) },
+            .operation_id = 1,
+            .turn_id = 77,
+            .call_id = df.id,
+            .tool_id = df.name,
+            .arguments = .null,
+            .arguments_json = arguments,
+            .arguments_hash = manager.tool_run.?.records.items[0].arguments_hash,
+        }, a);
+        defer result.deinit(a);
+        try std.testing.expectEqual(@as(usize, 2), host.count);
+        try std.testing.expectEqual(.succeeded, result.status);
+    }
+}
+
 test "same call ID with changed arguments is structured rejection without redispatch" {
     var changed = df;
     changed.arguments = "{\"session_ids\":[101],\"command\":\"df -i\"}";
@@ -746,9 +781,11 @@ test "strict malformed unavailable and out of scope calls return errors with zer
         .{ .id = "unknown", .name = "spawn_agent", .arguments = "{}" },
         .{ .id = "out", .name = "run_command", .arguments = "{\"session_ids\":[999],\"command\":\"df -h\"}" },
         .{ .id = "extra", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df -h\",\"max_bytes\":1}" },
+        .{ .id = "zero-timeout", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df -h\",\"timeout_ms\":0}" },
+        .{ .id = "oversize-timeout", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df -h\",\"timeout_ms\":4294967296}" },
+        .{ .id = "string-timeout", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df -h\",\"timeout_ms\":\"300000\"}" },
         .{ .id = "nul", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df\\u0000-h\"}" },
         .{ .id = "file", .name = "read_remote_file", .arguments = "{\"session_ids\":[101],\"path\":\"/etc/hosts\"}" },
-        .{ .id = "blocked", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"rm -rf /\"}" },
     };
     var script: Script = .{ .rounds = &.{ .{ .calls = &invalid }, .{ .text = "rejections received" } } };
     defer script.deinit();
@@ -1527,7 +1564,6 @@ test "live permission manager rechecks calls in one batch and following rounds" 
     };
     var manager = manager_mod.Manager.init(a);
     defer manager.deinit();
-    manager.permission_engine = .{ .mode = .confirm, .whitelist = &.{"touch"} };
     manager.scope = scope;
     manager.tool_limits.context_window = 200_000;
     var fixture: Fixture = .{ .manager = &manager };
@@ -1539,7 +1575,7 @@ test "live permission manager rechecks calls in one batch and following rounds" 
     defer script.deinit();
     _ = try manager.run(script.interface(), .{ .model = "test", .system = "", .messages = &.{.{ .content = "permission test" }}, .tools = &definitions });
     try std.testing.expectEqual(@as(usize, 3), fixture.count);
-    try std.testing.expectEqualSlices(permission.Verdict, &.{ .allow_auto, .allow_auto, .need_confirm }, &fixture.verdicts);
+    try std.testing.expectEqualSlices(permission.Verdict, &.{ .need_confirm, .allow_auto, .need_confirm }, &fixture.verdicts);
 }
 
 test "AI context budget tool overhead does not attempt first-turn compaction" {

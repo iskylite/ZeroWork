@@ -303,12 +303,14 @@ test "production Local input lease gates ordinary write paste key and edit and e
     try std.testing.expect(std.mem.indexOf(u8, f.output.items, "never-injected") == null);
 }
 
-test "production Local incomplete syntax never submits or repairs the shell buffer" {
+test "production Local passes a complete heredoc to the session shell" {
     var f = try Fixture.init();
     defer f.deinit();
-    try f.run("printf 'unterminated");
-    const cancelled = try f.wait(.cancelled_unsent);
-    try std.testing.expect(!cancelled.submit_sent and !cancelled.command_accepted and cancelled.local_released);
+    try f.run("cat <<'EOF'\nheredoc-body-marker\nEOF");
+    const completed = try f.wait(.interval_recorded);
+    try std.testing.expect(completed.submit_sent and completed.command_accepted and completed.local_released);
+    try std.testing.expectEqual(@as(?u8, 0), completed.process.?.exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "heredoc-body-marker\r\n") != null);
 }
 
 test "BoundaryFence streaming parser preserves unregistered forged output through every read split" {

@@ -450,13 +450,13 @@ test "host discovery reports frozen execution retention and permission independe
     const a = std.testing.allocator;
     const context: host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 3 };
     var sessions = [_]Session{.{ .handle = .{ .session_id = @fromBackingInt(1) }, .title = "Local", .protocol = "local", .state = "attached", .ready = true, .trusted_pty_execution = true }};
-    var snapshot: Snapshot = .{ .context = context, .initial_binding = context.binding, .execution_policy = .{ .execution_mode = .new_pty, .session_retention = .auto_idle }, .permission_mode = .confirm, .lifecycle_management = true, .observed_at = 10, .source_revision = 11, .cursor_key = @splat(7), .sessions = &sessions, .groups = &.{} };
+    var snapshot: Snapshot = .{ .context = context, .initial_binding = context.binding, .execution_policy = .{ .execution_mode = .interactive, .session_retention = .auto_idle }, .permission_mode = .confirm, .lifecycle_management = true, .observed_at = 10, .source_revision = 11, .cursor_key = @splat(7), .sessions = &sessions, .groups = &.{} };
     var current = try testQuery(a, snapshot, "host.get_current_context", "{}");
     defer current.deinit(a);
     const first = try std.json.parseFromSlice(std.json.Value, a, current.blocks[0].structured, .{});
     defer first.deinit();
-    try std.testing.expectEqualStrings("new_pty", first.value.object.get("mode").?.string);
-    try std.testing.expectEqualStrings("new_pty", first.value.object.get("execution_mode").?.string);
+    try std.testing.expectEqualStrings("interactive", first.value.object.get("mode").?.string);
+    try std.testing.expectEqualStrings("interactive", first.value.object.get("execution_mode").?.string);
     try std.testing.expectEqualStrings("auto_idle", first.value.object.get("retention").?.string);
     try std.testing.expectEqualStrings("confirm", first.value.object.get("permission_mode").?.string);
     try std.testing.expect(first.value.object.get("capabilities").?.object.get("lifecycle_management").?.bool);

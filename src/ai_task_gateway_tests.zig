@@ -469,8 +469,21 @@ test "v0.4 task atomic launch allocation failures do not publish child or input"
     try std.testing.checkAllAllocationFailures(a, Check.run, .{});
 }
 test "v0.4 task gateway schemas reject irrelevant authority fields and bounded events are real receipts" {
-    try @import("ai/plugin_tools.zig").validateDefinition(gateway.contribution.definition);
-    for ([_][]const u8{ "{\"action\":\"reuse\",\"agent_id\":\"invalid\",\"model\":{\"provider_id\":\"p\",\"model_id\":\"m\"}}", "{\"action\":\"list\",\"session_refs\":[]}", "{\"action\":\"wait_events\",\"wait_ms\":10001}", "{\"action\":\"stop\",\"parent\":\"forged\"}" }) |json| {
+    const definition = gateway.contribution.definition;
+    try @import("ai/plugin_tools.zig").validateDefinition(definition);
+    const schema = try std.json.parseFromSlice(std.json.Value, a, definition.schema, .{});
+    defer schema.deinit();
+    const purpose = schema.value.object.get("properties").?.object.get("purpose").?.object.get("description").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, purpose, "reuse only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, purpose, "Omit for create") != null);
+
+    for ([_][]const u8{
+        "{\"action\":\"create\",\"request_key\":\"new\",\"name\":\"child\",\"text\":\"task\",\"session_refs\":[],\"purpose\":\"work\"}",
+        "{\"action\":\"reuse\",\"agent_id\":\"invalid\",\"model\":{\"provider_id\":\"p\",\"model_id\":\"m\"}}",
+        "{\"action\":\"list\",\"session_refs\":[]}",
+        "{\"action\":\"wait_events\",\"wait_ms\":10001}",
+        "{\"action\":\"stop\",\"parent\":\"forged\"}",
+    }) |json| {
         const value = try std.json.parseFromSlice(std.json.Value, a, json, .{});
         defer value.deinit();
         if (gateway.parse(a, value.value)) |parsed| {
@@ -478,6 +491,14 @@ test "v0.4 task gateway schemas reject irrelevant authority fields and bounded e
             return error.UnexpectedGatewayAcceptance;
         } else |_| {}
     }
+
+    const reuse = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"action":"reuse","request_key":"next","agent_id":"01010101010101010101010101010101","text":"check","session_refs":[],"purpose":"verify"}
+    , .{});
+    defer reuse.deinit();
+    const request = try gateway.parse(a, reuse.value);
+    defer request.deinit();
+    try std.testing.expect(request.value.purpose == .verify);
 }
 
 test "v0.4 task waiting for model capacity consumes no request or active time and cancellation needs no slot" {
@@ -549,7 +570,7 @@ test "v0.4 task automatic compaction uses the same provider slot budget and usag
     const long = try a.alloc(u8, 30000);
     defer a.free(long);
     @memset(long, 'm');
-    try service.store.checkpoint(fence, 1, &.{ .{ .content = long }, .{ .role = .assistant, .content = "prior complete answer" } }, true);
+    try service.store.checkpoint(fence, 1, &.{ .{ .content = "prior requirement" }, .{ .role = .assistant, .content = long } }, true);
     _ = try service.submit(fence, .generate(), .{ .content = "continue with current material" }, null);
     const start = (Clock{}).now();
     while (runner.thread != null or runner.agent.busy or runner.pending_notify) {

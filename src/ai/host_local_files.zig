@@ -12,14 +12,14 @@ const reference = @import("../host/local_file_reference.zig");
 pub const openReference = reference.open;
 const sealReference = reference.seal;
 
-pub const path_fields = "\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4095},\"base_directory\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4095}";
+pub const path_fields = "\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4095},\"base_directory\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4095,\"description\":\"Absolute Mac directory for a relative path. Omit with an absolute path, a ~/ path, or file_ref.\"}";
 const scan_fields = path_fields ++ ",\"glob\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"cursor\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8192},\"respect_ignores\":{\"type\":\"boolean\"}";
 const Kind = enum { read, list, search };
 pub const contributions = [_]host.Contribution{
     .{ .authority = .local_files, .definition = .{
         .id = "host.local_read_text",
-        .description = "Read UTF-8 text from the Mac, independent of the bound connection. Supply path or an unchanged file_ref. Use next_offset or next_line with the returned version to continue, and never combine pages from different versions. A relative path uses the local workspace unless base_directory is specified.",
-        .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ path_fields ++ ",\"file_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8192},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"start_line\":{\"type\":\"integer\",\"minimum\":1},\"max_lines\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1000},\"max_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":8192},\"expected_version\":{\"type\":\"string\",\"maxLength\":68}}}",
+        .description = "Read UTF-8 text from the Mac, independent of the bound connection. Supply path or an unchanged file_ref. Use next_offset or next_line with the returned version to continue, and never combine pages from different versions. Choose byte pagination with offset or line pagination with start_line and max_lines. Supply expected_version when offset is nonzero or start_line is greater than 1. Omit base_directory with file_ref. A relative path uses the local workspace unless base_directory is specified.",
+        .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ path_fields ++ ",\"file_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8192},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"start_line\":{\"type\":\"integer\",\"minimum\":1},\"max_lines\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1000},\"max_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":8192},\"expected_version\":{\"type\":\"string\",\"minLength\":68,\"maxLength\":68,\"description\":\"Use the exact zw1: version returned by the local read.\"}}}",
     } },
     .{ .authority = .local_files, .definition = .{
         .id = "host.local_list_files",
@@ -28,7 +28,7 @@ pub const contributions = [_]host.Contribution{
     } },
     .{ .authority = .local_files, .definition = .{
         .id = "host.local_search_text",
-        .description = "Search for literal UTF-8 text under a local directory. Results include file versions and are a bounded live scan, not a stable snapshot. An incomplete scan does not prove there are no more matches.",
+        .description = "Search for literal UTF-8 text under a local directory. Use a single-line pattern of at most 256 UTF-8 bytes. Results include file versions and are a bounded live scan, not a stable snapshot. An incomplete scan does not prove there are no more matches.",
         .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ scan_fields ++ ",\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16},\"pattern\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"context_lines\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":2},\"follow_directory_symlinks\":{\"type\":\"boolean\"}},\"required\":[\"pattern\"]}",
     } },
 };

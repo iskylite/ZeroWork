@@ -282,7 +282,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
 <use href="#down" x="125" y="429" width="12" height="12" color="#676771"/>
 <rect id="ai.composer.execution" x="153" y="423" width="112" height="24" rx="8" fill="#EBEBED" />
 <use href="#terminal" x="161" y="429" width="12" height="12" color="#676771"/>
-<text  x="179" y="438" font-size="10" font-weight="400" fill="#5B5B65" >附加现有 PTY</text>
+<text  x="179" y="438" font-size="10" font-weight="400" fill="#5B5B65" >交互式</text>
 <use href="#down" x="245" y="429" width="12" height="12" color="#676771"/>
 <rect id="ai.composer.usage" x="287" y="423" width="48" height="24" rx="8" fill="#EBEBED" />
 <circle cx="299" cy="435" r="3.6" stroke="#676771" stroke-width="1.1"/>

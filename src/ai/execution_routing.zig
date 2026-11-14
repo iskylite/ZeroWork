@@ -289,8 +289,7 @@ pub fn fixedRoute(mode: config.ExecutionMode, proposed: Route) Route {
     return switch (mode) {
         .auto, .ask => proposed,
         .isolated_exec => .batch,
-        .attached_pty => .current_terminal,
-        .new_pty => .new_terminal,
+        .interactive => if (proposed == .batch) .current_terminal else proposed,
     };
 }
 pub fn digest(text: []const u8) [32]u8 {

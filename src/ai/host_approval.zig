@@ -12,13 +12,15 @@ pub const RouteSelection = struct {
     choice: routing.Choice,
     target: @import("../host/identity.zig").SessionHandle,
     selectable: bool = false,
-    reason: []const u8 = "按本次任务选择运行方式；只覆盖此命令。",
+    reason: []const u8 = "",
 };
 pub const SubjectKind = enum { network_url, lifecycle, terminal_command, mcp, local_file };
+pub const new_terminal_confirmation = "创建工作终端前会另行确认。";
 /// Display data comes from a trusted preflight, never an authorization decision.
 /// The owner still checks lifecycle grants, execution modes and live targets.
 pub const Subject = struct {
     human_review: bool = false,
+    reconfirmation: bool = false,
     kind: SubjectKind,
     target: []const u8,
     detail: []const u8,
@@ -66,6 +68,7 @@ pub const Snapshot = struct {
     expires_at_ms: i64,
     expired: bool = false,
     requires_user_input: bool = false,
+    reconfirmation: bool = false,
 };
 pub const Permit = struct { sequence: u64, arguments_hash: [32]u8 };
 const permission = @import("permission.zig");
@@ -123,12 +126,7 @@ pub const Broker = struct {
             .terminal_command => blk: {
                 const tool = saved.tool.text();
                 if (!std.mem.eql(u8, tool, "host.run_in_terminal") and !std.mem.eql(u8, tool, "run_command") and !std.mem.eql(u8, tool, "host.send_execution_input") and !std.mem.eql(u8, tool, "host.attach_shell")) break :blk false;
-                const grouped = saved.context.binding == .group;
-                const verdict = if (std.mem.eql(u8, tool, "run_command"))
-                    permission.classify(policy, saved.detail.text(), grouped)
-                else
-                    permission.classifyTerminal(policy, saved.detail.text(), grouped);
-                break :blk verdict == .allow_auto;
+                break :blk true;
             },
         };
         if (automatic) {
@@ -187,7 +185,8 @@ pub const Broker = struct {
         var frozen: Snapshot = .{
             .evidence_hash = subject.evidence_hash,
             .kind = subject.kind,
-            .requires_user_input = subject.human_review or (subject.kind == .terminal_command and args.object.get("host_secret_request") != null),
+            .requires_user_input = subject.human_review or subject.reconfirmation or (subject.kind == .terminal_command and args.object.get("host_secret_request") != null),
+            .reconfirmation = subject.reconfirmation,
             .route = if (subject.route) |route| .{ .proposed = route.proposed, .choice = route.choice, .target = route.target, .selectable = route.selectable, .reason = try Fixed(1024).init(route.reason) } else null,
             .target = try Fixed(8192).init(subject.target),
             .detail = try Fixed(65534).init(subject.detail),
@@ -318,6 +317,7 @@ pub const Broker = struct {
     /// A later real tool call can reuse a prior exact route+command approval.
     /// All ordinary backend preflights and forbidden rules still run first.
     pub fn beginGrantedSubject(self: *Broker, invocation: host.Invocation, subject: Subject, policy_revision: u64, allocator: std.mem.Allocator) !?Permit {
+        if (subject.human_review or subject.reconfirmation) return null;
         const route = subject.route orelse return null;
         const target = route.target;
         const resolution = self.execution_route.resolve(invocation.context, target, subject.detail, route.proposed);

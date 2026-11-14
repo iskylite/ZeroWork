@@ -1,5 +1,6 @@
 //! All transfer/session access is marshalled to the controller. Journal IO,
-//! approval waits and bounded progress waits stay on the AI worker.
+//! approval waits and bounded progress waits stay on the AI worker. Durable
+//! dispatch intent is recorded with the final recheck before queue submission.
 const std = @import("std");
 const transfers = @import("../ai/host_transfer.zig");
 const runtime = @import("../ai/host_transfer_runtime.zig");
@@ -32,7 +33,9 @@ const Exchange = struct {
     fn preflight(raw: *anyopaque) !void {
         const self: *@This() = @ptrCast(@alignCast(raw));
         try self.validate();
-        self.prepared = try self.access.registry.prepare(self.invocation, self.access.backend, self.allocator);
+        const next = try self.access.registry.prepare(self.invocation, self.access.backend, self.allocator);
+        if (self.prepared) |*previous| previous.deinit(self.allocator);
+        self.prepared = next;
     }
     fn replay(raw: *anyopaque) !void {
         const self: *@This() = @ptrCast(@alignCast(raw));
@@ -46,9 +49,18 @@ const Exchange = struct {
         const self: *@This() = @ptrCast(@alignCast(raw));
         try self.validate();
         const subject = self.prepared.?.subject();
-        if (self.access.approvals.authorizeSubject(self.permit.?, self.invocation, subject, self.access.policy_revision) != .allow) return error.ScopeChanged;
+        var current = try self.access.registry.prepare(self.invocation, self.access.backend, self.allocator);
+        defer current.deinit(self.allocator);
+        if (!std.mem.eql(u8, self.prepared.?.detail, current.detail)) return error.ReconfirmTransfer;
+        switch (self.access.approvals.authorizeSubject(self.permit.?, self.invocation, subject, self.access.policy_revision)) {
+            .allow => {},
+            .approval_required => return error.ReconfirmTransfer,
+            else => return error.ScopeChanged,
+        }
         var approved = self.invocation;
         approved.approval_sequence = self.permit.?.sequence;
+        if (approved.dispatch_fence) |fence| try fence.check();
+        if (self.operation) |operation| try operation.dispatched();
         self.result = if (transfers.starts(self.prepared.?.request.kind)) try self.access.registry.submit(approved, self.operation.?.handle.operation_ref, self.prepared.?, self.access.backend, self.allocator) else try self.access.registry.cancel(approved, self.access.backend, self.allocator);
     }
     fn query(raw: *anyopaque) !void {
@@ -98,23 +110,39 @@ pub fn execute(access: Access, bridge: *Bridge, invocation: host.Invocation, a: 
         }
         return err;
     };
-    const permit = bridge.requestHostRoute(invocation, exchange.prepared.?.subject(), a, cancel) catch |err| {
-        if (operation) |*value| {
-            try value.failed(err);
-            return value.failureResult(invocation, err, a);
-        }
-        return err;
-    };
-    defer access.approvals.finish(permit);
-    exchange.permit = permit;
-    if (operation) |*value| try value.dispatched();
-    bridge.callController(&exchange, Exchange.dispatch, cancel) catch |err| {
-        if (operation) |*value| {
-            try value.failed(err);
-            return value.failureResult(invocation, err, a);
-        }
-        return err;
-    };
+    var reconfirm = false;
+    while (true) {
+        var subject = exchange.prepared.?.subject();
+        subject.reconfirmation = reconfirm;
+        const permit = bridge.requestHostRoute(invocation, subject, a, cancel) catch |err| {
+            if (operation) |*value| {
+                try value.failed(err);
+                return value.failureResult(invocation, err, a);
+            }
+            return err;
+        };
+        defer access.approvals.finish(permit);
+        exchange.permit = permit;
+        bridge.callController(&exchange, Exchange.dispatch, cancel) catch |err| {
+            if (err == error.ReconfirmTransfer) {
+                bridge.callController(&exchange, Exchange.preflight, cancel) catch |failure| {
+                    if (operation) |*value| {
+                        try value.failed(failure);
+                        return value.failureResult(invocation, failure, a);
+                    }
+                    return failure;
+                };
+                reconfirm = true;
+                continue;
+            }
+            if (operation) |*value| {
+                try value.failed(err);
+                return value.failureResult(invocation, err, a);
+            }
+            return err;
+        };
+        break;
+    }
     var result = exchange.result orelse return error.InvalidControllerReceipt;
     if (operation) |*value| value.accepted() catch |err| {
         result.deinit(a);

@@ -4,7 +4,7 @@
  * ZW_AI_TEST_PREFIX=/tmp/zw-patch-integrated node e2e/ai_execution_lifecycle_native.ts /tmp/zw-ai-execution-lifecycle-evidence
  * Add ZW_AI_TEST_CLOSE_ONLY=1 for the real Local + settled AI Task normal-close
  * acceptance; that mode does not invoke terminal command execution.
- * ZW_AI_TEST_NEGATIVE_ONLY=1 checks fixed new_pty legacy-batch denial and a
+ * ZW_AI_TEST_NEGATIVE_ONLY=1 checks fixed interactive legacy-batch denial and a
  * rejected unknown execution reference, then normal close, without dispatch.
  * ZW_AI_TEST_TAKEOVER_ONLY=1 checks one precise input handoff while the same
  * provider Task and a second real Local execution keep running.
@@ -239,7 +239,7 @@ const server=createServer(async(req,res)=>{
   }
   if(stage==='NEGATIVE'){
    assert(negativeOnly);initialContext=result(results,'negative-context');if(!initialContext)return emitMany(body,res,[{id:'negative-context',name:'host.get_current_context',arguments:{}},{id:'negative-sessions',name:'host.list_sessions',arguments:{limit:16}}]);
-   assert.equal(initialContext.execution_mode,'new_pty');const inventory=result(results,'negative-sessions');assert(inventory);assert.equal(inventory.sessions.length,1);initialSession=inventory.sessions[0];assert.equal(initialSession.ready,true);assert.equal(initialSession.session_ref,initialContext.binding_ref);
+   assert.equal(initialContext.execution_mode,'interactive');const inventory=result(results,'negative-sessions');assert(inventory);assert.equal(inventory.sessions.length,1);initialSession=inventory.sessions[0];assert.equal(initialSession.ready,true);assert.equal(initialSession.session_ref,initialContext.binding_ref);
    const legacy=result(results,'negative-legacy-run',false);if(!legacy)return emit(body,res,'negative-legacy-run','run_command',{session_ids:[initialSession.session_id],command:stopCommand});
    assert(['rejected','failed'].includes(legacy.status),'legacy ModeConflict must be a known denial');assert.equal(legacy.error_code,'ModeConflict');assert.deepEqual(legacy.session_ids,[initialSession.session_id]);assert.equal(await exists(stopFile),false);
    const unknown=result(results,'negative-unknown-execution',false);if(!unknown)return emit(body,res,'negative-unknown-execution','host.get_execution',{execution_ref:unknownExecutionRef,max_bytes:1024});
@@ -293,7 +293,7 @@ const server=createServer(async(req,res)=>{
  }catch(error){if(takeoverOnly){if(error instanceof AcceptanceFailure)recordFailure(error.category,error.phase,error.message,error.evidence);else recordFailure('verification','provider-fixture-assertion',String(error),{active_call:activeCall})}fixtureFailure??=String(error);await writeFile(join(out,'fixture-failure.txt'),fixtureFailure);if(!res.headersSent)res.writeHead(500);res.end()}
 });
 await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const port=(server.address() as any).port;
-await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n[ai]\ndefault_provider="execution-lifecycle-fixture"\npermission_mode="confirm"\nexecution_mode="${negativeOnly?'new_pty':'auto'}"\nsession_retention="ask"\n[[ai.providers]]\nid="execution-lifecycle-fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="execution-lifecycle-fixture"\ncontext_window=200000\ndefault=true\n[log]\nring_mb=1\ncheckpoint_sec=1\n`);
+await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n[ai]\ndefault_provider="execution-lifecycle-fixture"\npermission_mode="confirm"\nexecution_mode="${negativeOnly?'interactive':'auto'}"\nsession_retention="ask"\n[[ai.providers]]\nid="execution-lifecycle-fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="execution-lifecycle-fixture"\ncontext_window=200000\ndefault=true\n[log]\nring_mb=1\ncheckpoint_sec=1\n`);
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const binarySha256=createHash('sha256').update(await readFile(binary)).digest('hex');
 if(process.env.ZW_AI_TEST_EXPECTED_SHA256)assert.equal(binarySha256,process.env.ZW_AI_TEST_EXPECTED_SHA256,'candidate binary differs from the explicitly delivered build');
@@ -487,7 +487,7 @@ try{acceptance:{
   const events=await traceEvents();assert(!events.some(event=>event.event==='exec_started'));
   const denied=events.filter(event=>event.event==='dynamic_rejected'&&event.call_id==='negative-legacy-run');assert.equal(denied.length,1);assert.equal(denied[0].reason,'ModeConflict');assert.equal(denied[0].dispatched,false);
   assert(![...emitted.values()].some(call=>call.name==='host.run_in_terminal'));report.rejections={legacy:observations.get('negative-legacy-run'),unknown_execution:observations.get('negative-unknown-execution')};
-  report.checks.push('The real new_pty catalog discovers the current Local session ID; legacy run_command returns ModeConflict before approval or dispatch, with no exec_started and no marker file','Unknown x1 get_execution returns a structured rejected ExecutionNotFound with the same CID/Task, side_effect_started=false, local_released=true and remote_effect_unknown=false; the provider can continue to final text');
+  report.checks.push('The real interactive catalog discovers the current Local session ID; legacy run_command returns ModeConflict before approval or dispatch, with no exec_started and no marker file','Unknown x1 get_execution returns a structured rejected ExecutionNotFound with the same CID/Task, side_effect_started=false, local_released=true and remote_effect_unknown=false; the provider can continue to final text');
   await capture('negative-only-rejections');await normalClose();report.status='passed_negative_only';break acceptance;
  }
  if(closeOnly){

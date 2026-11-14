@@ -256,13 +256,9 @@ pub const View = struct {
                 .lifecycle => if (@import("../ai/host_transfer.zig").supports(pending.tool.text())) "来源 · 当前对话 · 文件传输" else "来源 · 当前对话 · 会话管理",
                 .terminal_command => if (interaction) "来源 · 已授权执行 · 受控交互输入" else "来源 · 当前对话 · 交互式终端命令",
             });
-            try self.feedback.setTextContent(self.cx.allocator, if (pending.impact.len != 0) pending.impact.text() else switch (pending.kind) {
-                .mcp => "仅批准当前工具和本次参数。",
-                .local_file => "仅批准所示路径和本次修改。",
-                .network_url => impact_copy,
-                .lifecycle => "仅批准本调用列明的对象与操作。",
-                .terminal_command => "仅批准本调用列明的终端与命令。",
-            });
+            const impact = if (pending.impact.len != 0) pending.impact.text() else if (network) impact_copy else "";
+            try self.feedback.setTextContent(self.cx.allocator, impact);
+            self.feedback.parent.?.setDisplay(if (impact.len == 0) .none else .flex);
             if (self.requested_url) |old| self.cx.allocator.free(old);
             self.requested_url = url;
             self.sequence = pending.sequence;
@@ -282,12 +278,13 @@ pub const View = struct {
         try self.state_label.setTextContent(self.cx.allocator, "待确认");
         const has_routes = pending.route != null and pending.route.?.selectable;
         self.route_row.setDisplay(if (has_routes) .flex else .none);
-        self.route_reason.setDisplay(if (has_routes) .flex else .none);
         if (pending.route) |route| {
             self.route_selected = route.choice.route;
-            try self.route_reason.setTextContent(self.cx.allocator, route.reason.text());
+            const reason = if (route.choice.route == .new_terminal and route.proposed != .new_terminal) approval.new_terminal_confirmation else route.reason.text();
+            try self.route_reason.setTextContent(self.cx.allocator, reason);
+            self.route_reason.setDisplay(if (has_routes and reason.len != 0) .flex else .none);
             for (self.route_buttons, 0..) |signal, index| signal.set(R.button(index == @backingInt(route.choice.route)));
-        }
+        } else self.route_reason.setDisplay(.none);
         self.root.setDisplay(.flex);
     }
     pub fn height(self: *const View) f32 {
@@ -301,6 +298,8 @@ pub const View = struct {
         if (self.decision_pending.peek()) return;
         self.callbacks.on_decision(self.callbacks.context, sequence, self.arguments_hash, approved) catch |err| {
             self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
+            self.feedback.parent.?.setDisplay(.flex);
+            self.cx.requestRedraw();
             return;
         };
         // The containing subtree remains alive until its next controller tick.
@@ -313,11 +312,12 @@ pub const View = struct {
         const callback = self.callbacks.on_route orelse return;
         callback(self.callbacks.context, sequence, self.arguments_hash, route) catch |err| {
             self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
+            self.feedback.parent.?.setDisplay(.flex);
+            self.cx.requestRedraw();
             return;
         };
         self.route_selected = route;
         for (self.route_buttons, 0..) |signal, index| signal.set(R.button(index == @backingInt(route)));
-        self.feedback.setTextContent(self.cx.allocator, if (route == .new_terminal) "以卡片所列会话为来源新建工作终端，创建前会单独确认。本次只批准这一条命令。" else "只批准上述完整命令、目标及所选运行方式。") catch {};
         self.cx.requestRedraw();
     }
     fn chooseBatch(self: *View) void {

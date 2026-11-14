@@ -460,19 +460,6 @@ pub fn normalizeCommand(a: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 pub fn validateCommand(bytes: []const u8) !void {
     if (bytes.len == 0 or bytes.len > max_command or !std.unicode.utf8ValidateSlice(bytes) or std.mem.trim(u8, bytes, " \t\n").len == 0) return error.InvalidCommand;
-    // zsh -n accepts an EOF-terminated unfinished heredoc. Until the native
-    // parser negotiates an exact heredoc delimiter receipt, conservatively
-    // refuse every << token (including tokens joined by escaped newlines).
-    var previous: u8 = 0;
-    var index: usize = 0;
-    while (index < bytes.len) : (index += 1) {
-        if (bytes[index] == '\\' and index + 1 < bytes.len and bytes[index + 1] == '\n') {
-            index += 1;
-            continue;
-        }
-        if (previous == '<' and bytes[index] == '<') return error.UnsupportedSyntax;
-        previous = bytes[index];
-    }
     var iterator = (try std.unicode.Utf8View.init(bytes)).iterator();
     while (iterator.nextCodepoint()) |cp| if ((cp < 32 and cp != 9 and cp != 10) or cp == 127 or (cp >= 128 and cp <= 159)) return error.InvalidCommand;
 }
@@ -504,7 +491,9 @@ test "lease expiry revoke and epochs never authorize an old producer" {
     try std.testing.expectError(error.InputConflict, lease.acquire(request, 200));
 }
 
-test "heredoc without parser completeness receipt is refused before transport" {
-    try std.testing.expectError(error.UnsupportedSyntax, validateCommand("cat <<EOF\nunterminated"));
-    try std.testing.expectError(error.UnsupportedSyntax, validateCommand("cat <\\\n<EOF\nunterminated"));
+test "command normalization accepts complete heredoc text unchanged" {
+    const text = "cat <<'EOF'\nhello\nEOF";
+    const normalized = try normalizeCommand(std.testing.allocator, text);
+    defer std.testing.allocator.free(normalized);
+    try std.testing.expectEqualStrings(text, normalized);
 }

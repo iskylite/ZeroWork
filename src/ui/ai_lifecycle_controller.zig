@@ -343,7 +343,8 @@ pub const Controller = struct {
                     if (broker.execution_route.requiresIndependentFollowup(context) and policy != .new_only) return error.IndependentSessionRequired;
                 }
                 if (request.source) |source| {
-                    if (context.child_origin != null) _ = try self.app.childOpenSource(source) else _ = try self.app.ownedOpenSource(source, result.group.?.id, policy);
+                    const mapping = if (context.child_origin != null) try self.app.childOpenSource(source) else try self.app.ownedOpenSource(source, result.group.?.id, policy);
+                    result.opens_local_terminal = mapping.process != null;
                 } else {
                     try self.authorizeAsset(request.saved_source.?);
                     if (policy == .reuse_only) return error.ReuseUnavailable;
@@ -927,7 +928,7 @@ test "lifecycle controller converts a retained ended session to a group and open
     var bridge = Bridge.init(a);
     defer bridge.deinit();
     const context = try testContext(&store, source);
-    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .attached_pty, .session_retention = .auto_idle } });
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .interactive, .session_retention = .auto_idle } });
     defer controller.deinitAfterWorker();
     const journal = try runtime.ProcessJournal.acquire(.{ .data_root = fixture.directory, .path = "ended-group.json" });
     defer journal.release();
@@ -975,7 +976,7 @@ test "lifecycle controller requires an independent connection for the foreground
     var broker: @import("../ai/host_approval.zig").Broker = .{};
     bridge.route_broker = &broker;
     const context = try testContext(&store, source);
-    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .attached_pty, .session_retention = .auto_idle } });
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .interactive, .session_retention = .auto_idle } });
     defer controller.deinitAfterWorker();
     try broker.configure(context, controller.config_revision);
     try broker.execution_route.captureFollowup(context, "你可以再开会话监控下带宽或者文件大小呢", source, .auto_idle);
@@ -1036,7 +1037,7 @@ test "lifecycle controller real Local group open and close preserve conversation
     var next = context;
     next.binding = moved.owner;
     next.binding_revision = moved.binding_revision;
-    moved.controls.execution_mode = .attached_pty;
+    moved.controls.execution_mode = .interactive;
     moved.controls.session_retention = .keep;
     try controller.refreshAuthority(next);
     try std.testing.expectEqual(config.ExecutionMode.auto, controller.execution_policy.execution_mode);
@@ -1681,7 +1682,7 @@ test "lifecycle real Local takeover keeps original observation until natural fin
     var bridge = Bridge.init(a);
     defer bridge.deinit();
     const context = try testContext(&store, source);
-    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .attached_pty, .session_retention = .keep } });
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .interactive, .session_retention = .keep } });
     defer controller.deinitAfterWorker();
     const journal = try runtime.ProcessJournal.acquire(.{ .data_root = fixture.directory, .path = "local-takeover-finish.json" });
     defer journal.release();
@@ -1929,7 +1930,7 @@ test "lifecycle default shell integration opens SSH work terminal without helper
     var bridge = Bridge.init(a);
     defer bridge.deinit();
     const context = try testContext(&store, source);
-    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .new_pty, .session_retention = .keep } });
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .interactive, .session_retention = .keep } });
     defer controller.deinitAfterWorker();
     const journal_owner = try runtime.ProcessJournal.acquire(.{ .data_root = fixture.directory, .path = "ssh-bootstrap-product.json" });
     defer journal_owner.release();

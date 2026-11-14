@@ -263,9 +263,8 @@ pub const Context = struct {
         const controller = try self.current(invocation.context, false);
         const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
         try controller.bridge.checkCommandTarget(self.app, invocation.context, invocation.operation_id, handle, hash);
-        const boundary = try self.captureBoundary(controller, handle, true, false, hash);
+        const boundary = try self.captureBoundary(controller, handle, true, hash);
         try validateShellExpectation(invocation.arguments, boundary.shell);
-        try checkForbidden(command);
         const evidence = try describe(invocation.context, boundary);
         const record: Admission = .{ .context = invocation.context, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .call_hash = execution.digest(invocation.call_id), .arguments_hash = invocation.arguments_hash, .canonical_hash = invocation.canonical_arguments_hash, .command_hash = hash, .boundary = boundary, .evidence = evidence };
         for (self.admissions.items) |*item| if (item.*) |*prior| {
@@ -284,7 +283,7 @@ pub const Context = struct {
         const request = try @import("../ai/shell_attachment.zig").parse(invocation);
         const controller = try self.current(invocation.context, false);
         const handle = try parseSession(invocation.context, request.reference);
-        const boundary = try self.captureBoundaryMode(controller, handle, true, false, execution.digest("@shell attach"), true);
+        const boundary = try self.captureBoundaryMode(controller, handle, true, execution.digest("@shell attach"), true);
         const key_hash = execution.digest(request.key);
         var duplicate = false;
         for (self.attachments.items) |item| if (item) |record| if (record.context.eql(invocation.context) and std.mem.eql(u8, &record.key_hash, &key_hash)) {
@@ -302,8 +301,13 @@ pub const Context = struct {
     }
     pub fn dispatchAttachment(self: *Context, invocation: host.Invocation, prepared: AttachmentPrepared, permit: approvals.Permit, allocator: std.mem.Allocator) !host.Result {
         const controller = try self.current(invocation.context, false);
-        if (self.approval.authorizeSubject(permit, invocation, prepared.subject, controller.config_revision) != .allow) return error.PermissionDenied;
-        const now = try self.captureBoundaryMode(controller, prepared.boundary.handle, true, false, execution.digest("@shell attach"), true);
+        switch (self.approval.authorizeSubject(permit, invocation, prepared.subject, controller.config_revision)) {
+            .allow => {},
+            .approval_required => return error.ReconfirmShellAttachment,
+            else => return error.PermissionDenied,
+        }
+        if (invocation.dispatch_fence) |fence| try fence.check();
+        const now = try self.captureBoundaryMode(controller, prepared.boundary.handle, true, execution.digest("@shell attach"), true);
         if (!sameService(now.service, prepared.boundary.service) or now.membership_revision != prepared.boundary.membership_revision or now.ownership_revision != prepared.boundary.ownership_revision or !std.meta.eql(now.input, prepared.boundary.input)) return error.ScopeChanged;
         if (!prepared.duplicate) {
             try self.attachments.append(self.app.allocator, null);
@@ -325,7 +329,7 @@ pub const Context = struct {
     /// scheduler; the worker owns the bounded wait and cancellation.
     pub fn pollAttachment(self: *Context, invocation: host.Invocation, prepared: AttachmentPrepared, allocator: std.mem.Allocator, timed_out: bool) !?host.Result {
         const controller = try self.current(invocation.context, false);
-        const now = try self.captureBoundaryMode(controller, prepared.boundary.handle, true, false, execution.digest("@shell attach"), true);
+        const now = try self.captureBoundaryMode(controller, prepared.boundary.handle, true, execution.digest("@shell attach"), true);
         if (!sameService(now.service, prepared.boundary.service) or now.membership_revision != prepared.boundary.membership_revision or now.ownership_revision != prepared.boundary.ownership_revision) return error.ScopeChanged;
         const snapshot = try now.service.executionSnapshot();
         const ready = snapshot.interactive_execution and snapshot.input_ready and snapshot.shell.prompt_ready == true;
@@ -364,7 +368,7 @@ pub const Context = struct {
             const controller = try self.current(invocation.context, true);
             const service = try self.resolveAdmission(record, false);
             if (record.cleanup_only) return error.PermissionDenied;
-            const boundary = try self.captureBoundary(controller, record.boundary.handle, false, false, record.command_hash);
+            const boundary = try self.captureBoundary(controller, record.boundary.handle, false, record.command_hash);
             if (boundary.membership_revision != record.boundary.membership_revision or boundary.ownership_revision != record.boundary.ownership_revision) return error.ScopeChanged;
             const snapshot = try service.executionSnapshot();
             if (!snapshot.owner.eql(record.boundary.handle) or snapshot.execution_id == null or !snapshot.execution_id.?.eql(id) or snapshot.state != .running or snapshot.remote_effect_unknown or snapshot.input_handed_off) return error.InputNotExpected;
@@ -395,6 +399,7 @@ pub const Context = struct {
         }
         const sequence = invocation.approval_sequence orelse return error.ApprovalRequired;
         const frozen = try self.taskGrant(invocation.context);
+        if (invocation.dispatch_fence) |fence| try fence.check();
         switch (self.approval.authorizeSubject(.{ .sequence = sequence, .arguments_hash = invocation.arguments_hash }, invocation, prepared.subject, frozen.config_revision)) {
             .allow => {},
             .approval_required => return error.ApprovalRequired,
@@ -448,7 +453,7 @@ pub const Context = struct {
             if (record.handed_to_user or record.cleanup_only) return error.OwnershipChanged;
             const service = try self.resolveAdmission(record, false);
             if (record.cleanup_only) return error.PermissionDenied;
-            const boundary = try self.captureBoundary(controller, handle, false, false, record.command_hash);
+            const boundary = try self.captureBoundary(controller, handle, false, record.command_hash);
             if (boundary.membership_revision != record.boundary.membership_revision or boundary.ownership_revision != record.boundary.ownership_revision) return error.ScopeChanged;
             const snapshot = try service.executionSnapshot();
             if (snapshot.state != .running or snapshot.remote_effect_unknown or snapshot.input_handed_off or snapshot.grant == null or !std.meta.eql(snapshot.grant.?, request.grant) or snapshot.input_wait == null or snapshot.input_wait.?.kind != .host_secret or snapshot.input_wait.?.sequence != request.wait_sequence) return error.InputNotExpected;
@@ -511,7 +516,7 @@ pub const Context = struct {
             },
         };
     }
-    fn ownership(self: *Context, controller: *Controller, handle: identity.SessionHandle, handed_to_user: bool, command_hash: [32]u8) !u64 {
+    fn ownership(self: *Context, controller: *Controller, handle: identity.SessionHandle, command_hash: [32]u8) !u64 {
         const owned = self.app.lifecycle_supervisor.resource(handle);
         if (owned) |entry| if (entry.snapshot.ownership == .created_task) controller.adoptRouteSession(controller.authority, entry.request.operation_ref, entry.snapshot);
         const mode = (try self.taskGrant(controller.authority)).mode;
@@ -521,11 +526,10 @@ pub const Context = struct {
             if (entry.snapshot.ownership == .created_task) {
                 if (!sameTask(entry.request.context, controller.authority)) return error.OwnershipChanged;
                 if (entry.snapshot.state != .ready or !entry.snapshot.membership_committed) return error.SessionNotReady;
-            } else if (mode == .new_pty and !handed_to_user and !route_exception) return error.ModeConflict;
+            }
             if (entry.snapshot.state == .closing or entry.snapshot.state == .closed) return error.AlreadyClosing;
             return entry.snapshot.ownership_revision;
         }
-        if (mode == .new_pty and !route_exception) return error.ModeConflict;
         return 1; // Borrowing never manufactures lifecycle ownership.
     }
     fn inputAuthority(self: *Context, handle: identity.SessionHandle) !InputAuthority {
@@ -535,10 +539,10 @@ pub const Context = struct {
         if (input.automation) |lease| if (!input.authorized or lease.authorization_revision != input.authorization_revision or lease.context_instance != input.context_instance) return error.StaleInputLease;
         return .{ .instance = input.context_instance, .revision = input.authorization_revision, .authorized = input.authorized, .automation = input.automation };
     }
-    fn captureBoundary(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, handed_to_user: bool, command_hash: [32]u8) !Boundary {
-        return self.captureBoundaryMode(controller, handle, idle, handed_to_user, command_hash, false);
+    fn captureBoundary(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, command_hash: [32]u8) !Boundary {
+        return self.captureBoundaryMode(controller, handle, idle, command_hash, false);
     }
-    fn captureBoundaryMode(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, handed_to_user: bool, command_hash: [32]u8, attaching: bool) !Boundary {
+    fn captureBoundaryMode(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, command_hash: [32]u8, attaching: bool) !Boundary {
         if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
         if (idle) if (self.app.domain.ai) |ai| {
             if (ai.service.childReservesSession(handle, controller.authority.task_id)) return error.TerminalBusy;
@@ -555,7 +559,7 @@ pub const Context = struct {
             if (!group.contains(legacy) or self.app.workspace.groupClosing(group.id)) return error.TargetOutsideScope;
             break :blk group.membership_revision;
         } else try self.membership(controller, handle, legacy);
-        const ownership_revision = try self.ownership(controller, handle, handed_to_user, command_hash);
+        const ownership_revision = try self.ownership(controller, handle, command_hash);
         var next_input: u64 = 0;
         const service = if (tab.terminal) |view| if (view.terminal_surface) |surface| blk: {
             if (!surface.owner.eql(handle)) return error.StaleReference;
@@ -586,7 +590,7 @@ pub const Context = struct {
             if (!idle) return self.restrictToCleanup(record);
             return err;
         };
-        const now = self.captureBoundary(controller, record.boundary.handle, idle, record.handed_to_user, record.command_hash) catch |err| {
+        const now = self.captureBoundary(controller, record.boundary.handle, idle, record.command_hash) catch |err| {
             if (!idle and err != error.WorkerBusy) return self.restrictToCleanup(record);
             return err;
         };
@@ -607,7 +611,7 @@ pub const Context = struct {
             return error.StaleInputLease;
         }
         if (idle and (!std.meta.eql(now.shell.id, before.shell.id) or now.shell.revision != before.shell.revision)) return error.ShellContextChanged;
-        if (idle and (now.membership_revision != before.membership_revision or now.execution_revision != before.execution_revision or now.input_epoch != before.input_epoch or now.next_input != before.next_input)) return error.InputConflict;
+        if (idle and (now.execution_revision != before.execution_revision or now.input_epoch != before.input_epoch or now.next_input != before.next_input)) return error.ToolApprovalChanged;
         return now.service;
     }
     fn restrictToCleanup(self: *Context, record: *Admission) !terminal.Service {
@@ -651,7 +655,7 @@ pub const Context = struct {
         const handle = try parseSession(invocation.context, reference);
         if (!handle.eql(record.boundary.handle)) return error.StaleReference;
         try self.app.checkReconnectSuccessor(invocation.context, handle);
-        try checkForbidden(command);
+        if (invocation.dispatch_fence) |fence| try fence.check();
         try self.validateApproval(invocation, command, hash);
         const service = try self.resolveAdmission(record, true);
         // The controller can expose/await its receipt while native admission
@@ -709,7 +713,7 @@ pub const Context = struct {
                     _ = try self.resolveAdmission(record, false);
                     if (record.cleanup_only) return error.PermissionDenied;
                     const controller = try self.current(record.context, true);
-                    const boundary = try self.captureBoundary(controller, record.boundary.handle, false, false, record.command_hash);
+                    const boundary = try self.captureBoundary(controller, record.boundary.handle, false, record.command_hash);
                     if (boundary.membership_revision != record.boundary.membership_revision or boundary.ownership_revision != record.boundary.ownership_revision) return error.ScopeChanged;
                     return supervisor.performTerminal(service, action);
                 };
@@ -773,7 +777,6 @@ fn validateInputInvocation(invocation: host.Invocation) !void {
     } else if (invocation.arguments.object.get("text")) |text| {
         if (text != .string) return error.InvalidArguments;
         try execution.validateInput(text.string);
-        try checkForbidden(text.string);
     } else if (invocation.arguments.object.get("key")) |key_value| {
         if (key_value != .string or !std.mem.eql(u8, key_value.string, "enter")) return error.InvalidArguments;
     } else return error.InvalidArguments;
@@ -801,9 +804,6 @@ fn validateNormalized(invocation: host.Invocation, command: []const u8, hash: [3
     const digest = try canonical.digest(allocator.allocator(), invocation.arguments);
     if (!std.mem.eql(u8, &digest, &invocation.canonical_arguments_hash) or !std.mem.eql(u8, &execution.digest(invocation.arguments_json), &invocation.arguments_hash)) return error.InvalidArguments;
 }
-fn checkForbidden(command: []const u8) !void {
-    if (@import("../ai/permission.zig").classifyTerminal(.{}, command, true) == .deny_exec_copy_only) return error.PermissionDenied;
-}
 fn subject(invocation: host.Invocation, command: []const u8, impact: []const u8) approvals.Subject {
     return .{ .kind = .terminal_command, .target = string(invocation.arguments, "session_ref") catch "", .detail = command, .impact = impact };
 }
@@ -823,7 +823,7 @@ fn decimal(text: []const u8) !u64 {
 }
 fn describe(_: host.Context, _: Boundary) !ApprovalEvidence {
     var result: ApprovalEvidence = .{};
-    const text = try std.fmt.bufPrint(&result.bytes, "将在此终端执行上方命令。执行期间由 AI 控制输入；你可随时接管，当前命令会继续运行，需要中断时请按 Ctrl+C。记录覆盖命令运行期间的终端输出，可能混入其他程序的输出，也可能不包含命令结束后的后台输出；输出来源的确认情况会单独显示。此批准仅适用于本次命令。", .{});
+    const text = try std.fmt.bufPrint(&result.bytes, "执行期间由 AI 控制终端输入，你可以随时接管。", .{});
     result.len = text.len;
     return result;
 }

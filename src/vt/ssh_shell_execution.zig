@@ -35,7 +35,6 @@ pub const Bridge = struct {
     prompt_seen: bool = false,
     prompt_clean: bool = false,
     prompt_offset: u64 = 0,
-    debug_start: bool = false,
     active: bool = false,
     start_pending: bool = false,
     end_pending: bool = false,
@@ -118,7 +117,6 @@ pub const Bridge = struct {
         // TAB (readline completion) without shell-specific editing capability.
         if (std.mem.indexOfAny(u8, request.command, "\n\t") != null or request.command.len > 4094) return error.UnsupportedSyntax;
         if (!std.mem.eql(u8, &execution.digest(request.command), &request.command_hash)) return error.CommandHashMismatch;
-        if (self.debug_start and std.mem.startsWith(u8, std.mem.trimStart(u8, request.command, " "), "(")) return error.UnsupportedSyntax;
         const command = try self.allocator.alloc(u8, request.command.len + 1);
         errdefer self.allocator.free(command);
         @memcpy(command[0..request.command.len], request.command);
@@ -436,7 +434,7 @@ pub const Bridge = struct {
     // Swap only shell activity. OSC parsing, initialization and the one PTY
     // input lease remain owned by this root bridge.
     fn swapActivity(self: *Bridge, other: *Bridge) void {
-        inline for (.{ "switch_input", "switch_tracking", "snapshot", "decision_event", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "prompt_offset", "debug_start", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "interrupt_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
+        inline for (.{ "switch_input", "switch_tracking", "snapshot", "decision_event", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "prompt_offset", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "interrupt_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
             std.mem.swap(@FieldType(Bridge, name), &@field(self, name), &@field(other, name));
         }
     }
@@ -585,7 +583,6 @@ pub const Bridge = struct {
             },
             'A' => {
                 if (self.active) self.fail("ShellCompletionMissing");
-                if (std.mem.indexOf(u8, frame, "zw_start=debug") != null) self.debug_start = true;
                 self.prompt_seen = true;
             },
             'B' => {
@@ -753,7 +750,6 @@ test "SSH malformed or missing shell events never prove completion" {
     bridge.output("\x1b]133;Afoo\x07\x1b]133;B\x07", harness.sink(), 1);
     try std.testing.expect(!bridge.snapshot.interactive_execution);
     bridge.output("\x1b]133;A;zw_start=debug\x07\x1b]133;B\x07", harness.sink(), 1);
-    try std.testing.expectError(error.UnsupportedSyntax, bridge.begin(Harness.request("(exit 7)"), 2));
     try bridge.begin(Harness.request("true"), 2);
     bridge.prepared(@splat('a'), 1, 1);
     try bridge.enqueue(&queue);

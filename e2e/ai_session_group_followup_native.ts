@@ -64,9 +64,9 @@ assert(!liveReconnect || followUpMode === 'steer');
 assert(!(reconnectAfterDrop && reconnectDuringCommand));
 assert(!reconnectNextTask || (reconnectFailure && reconnectDuringCommand && autoReconnect));
 assert(!reconnectGroup || reconnectNextTask);
-const executionMode = process.env.ZW_SESSION_GROUP_EXECUTION_MODE ?? 'attached_pty';
-assert(['attached_pty', 'auto'].includes(executionMode));
-assert(!deepEP || (!live && !monitor && !cleanup && !disconnected && !reconnect && followUpMode === 'steer' && executionMode === 'attached_pty'));
+const executionMode = process.env.ZW_SESSION_GROUP_EXECUTION_MODE ?? 'interactive';
+assert(['interactive', 'auto'].includes(executionMode));
+assert(!deepEP || (!live && !monitor && !cleanup && !disconnected && !reconnect && followUpMode === 'steer' && executionMode === 'interactive'));
 const gateway = process.env.ZW_SESSION_GROUP_GATEWAY;
 const gatewayKey = process.env.ZW_SESSION_GROUP_GATEWAY_KEY;
 const liveModel = process.env.ZW_SESSION_GROUP_MODEL;
@@ -363,7 +363,7 @@ const validateCalls = async (calls: any[]) => {
       }
     }
     else if (name === 'run_command') {
-      // The attached_pty route rejects batch dispatch. The isolated SSH peer
+      // The interactive route rejects batch dispatch. The isolated SSH peer
       // also rejects every non-diagnostic exec request, even in auto mode.
       const ids = [sourceRef, openedRef].filter(Boolean).map(ref => Number(ref.split(':')[2]));
       assert(Array.isArray(args.session_ids) && args.session_ids.length && args.session_ids.every((id: number) => ids.includes(id)), 'Batch targets must belong to this fixture');
@@ -1187,7 +1187,7 @@ try {
   const peerErrors: string[] = report.peer?.errors ?? ['missing-peer-report'];
   report.denied_batch_exec = peerErrors.filter(value => value.startsWith('forbidden-exec:'));
   const unexpectedPeerErrors = peerErrors.filter(value => !value.startsWith('forbidden-exec:'));
-  if (executionMode === 'attached_pty') unexpectedPeerErrors.push(...report.denied_batch_exec);
+  if (executionMode === 'interactive') unexpectedPeerErrors.push(...report.denied_batch_exec);
   const shells = report.peer?.actions.filter((item: any[]) => item[1] === 'shell').length;
   const expectedShells = reconnect ? shells === (reconnectFailure && !reconnectNextTask ? 1 : 2) : shells >= 2;
   const rejectedReconnects = report.peer?.actions.filter((item: any[]) => item[1] === 'reconnect-rejected').length;

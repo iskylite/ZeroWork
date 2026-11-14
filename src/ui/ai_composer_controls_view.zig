@@ -11,6 +11,7 @@ const WorkspaceTicket = @import("ai_workspace_view.zig").Ticket;
 pub const Effort = provider.Effort;
 pub const PermissionMode = config.PermissionMode;
 pub const ExecutionMode = config.ExecutionMode;
+const execution_mode_count = @typeInfo(ExecutionMode).@"enum".field_names.len;
 pub const SessionRetention = config.SessionRetention;
 const retention_choices = [_]ui.widgets.SelectOption{
     .{ .value = "auto_idle", .label = config.sessionRetentionLabel(.auto_idle), .test_id = "ai.retention.auto_idle" },
@@ -245,9 +246,9 @@ pub const View = struct {
     permission_styles: [2]*ui.Signal(ui.BoxStyle) = undefined,
     permission_checks: [2]*ui.Node = undefined,
     execution_scroll: ui.widgets.ScrollAreaResult = undefined,
-    execution_rows: [5]*ui.Node = undefined,
-    execution_styles: [5]*ui.Signal(ui.BoxStyle) = undefined,
-    execution_checks: [5]*ui.Node = undefined,
+    execution_rows: [execution_mode_count]*ui.Node = undefined,
+    execution_styles: [execution_mode_count]*ui.Signal(ui.BoxStyle) = undefined,
+    execution_checks: [execution_mode_count]*ui.Node = undefined,
     retention_select: ui.widgets.SelectResult = undefined,
     retention_value: *ui.Signal(?[]const u8),
     retention_default: *ui.Signal([]const u8),
@@ -496,7 +497,7 @@ pub const View = struct {
             try button.appendChild(self.cx.allocator, self.permission_checks[index]);
             try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(if (mode == .confirm) "hand" else "shield-check").?, S.theme.current().fg_2, S.icon(16)));
             _ = try self.label(button, permissionLabel(mode), S.text(12, 500, 18, false), S.label(if (mode == .confirm) 60 else 48, 18));
-            _ = try self.label(button, if (mode == .confirm) "部分读取自动，其余按策略确认" else "授权内自动执行（含组内写入）", S.text(10.5, 400, 16, true), S.flexibleLabel(16));
+            _ = try self.label(button, if (mode == .confirm) "执行命令前确认" else "授权内自动执行（含组内写入）", S.text(10.5, 400, 16, true), S.flexibleLabel(16));
             try parent.appendChild(self.cx.allocator, button);
         }
         self.inventory_revoke = try ui.widgets.Button(.{ .variant = .ghost, .label = "撤销会话列表授权", .a11y_label = "撤销当前对话的会话列表授权", .disabled = self.inventory_revoke_disabled, .base_style = S.option(32, false), .hover_style = self.hover_style, .on_click = self.cx.on(View, self, revokeInventory) }).mount(self.scope, self.cx);
@@ -512,7 +513,7 @@ pub const View = struct {
         scroll.container.meta.ownership.meta.test_id = "ai.execution.viewport";
         scroll.content.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 2 });
         try popup.body.appendChild(self.cx.allocator, scroll.container);
-        for (0..5) |index| {
+        for (0..execution_mode_count) |index| {
             const mode: ExecutionMode = @fromBackingInt(@intCast(index));
             const name = config.executionModeLabel(mode);
             self.execution_styles[index] = try self.scope.createSignal(ui.BoxStyle, S.executionOption(false));
@@ -523,14 +524,12 @@ pub const View = struct {
                 .auto => "ai.execution.auto",
                 .ask => "ai.execution.ask",
                 .isolated_exec => "ai.execution.isolated_exec",
-                .attached_pty => "ai.execution.attached_pty",
-                .new_pty => "ai.execution.new_pty",
+                .interactive => "ai.execution.interactive",
             };
             self.execution_rows[index] = button;
             self.execution_checks[index] = try ui.iconTint(self.cx, ui.icons.circle, S.theme.current().accent, S.icon(14));
             try button.appendChild(self.cx.allocator, self.execution_checks[index]);
             _ = try self.label(button, name, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
-            if (mode == .attached_pty or mode == .new_pty) _ = try self.label(button, "交互式", S.text(10.5, 400, 16, true), S.label(34, 16));
             try scroll.content.appendChild(self.cx.allocator, button);
         }
         const policy = try ui.box(self.cx, S.policySection(), .{});
@@ -555,7 +554,7 @@ pub const View = struct {
         try self.labels[5].?.setTextContent(self.cx.allocator, config.executionModeLabel(selected orelse global));
         if (self.buttons[5].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[5].?.getText().?.content;
         self.button_styles[5].set(if (self.execution_compact) S.iconButton(8) else S.executionChip());
-        for (0..5) |index| {
+        for (0..execution_mode_count) |index| {
             const active = index == @as(usize, @intCast(@backingInt(selected orelse global)));
             self.execution_styles[index].set(S.executionOption(active));
             setAsset(self.execution_checks[index], if (active) "check" else "circle", 14, colors.accent);

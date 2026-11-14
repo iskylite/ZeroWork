@@ -6,7 +6,7 @@ const provider = @import("provider.zig");
 pub const max_options = 6;
 pub const contribution: host.Contribution = .{ .authority = .conversation_context, .definition = .{
     .id = "host.request_user_input",
-    .description = "Ask the user a question in the assistant composer and wait for their explicit answer. Use for missing information or a choice; never use to approve tool execution or request secrets. Options have stable unique IDs. The user can postpone without answering. Returns selected option ID and answer text. Cancellation produces no answer.",
+    .description = "Ask the user a question in the assistant composer and wait for their explicit answer. Use for missing information or a choice; never use to approve tool execution or request secrets. Use a nonblank question and nonblank option IDs and labels. Option IDs must be unique. Text limits are measured in UTF-8 bytes. If allow_custom=false, supply at least one option. The user can postpone without answering. Returns selected option ID and answer text. Cancellation produces no answer.",
     .schema =
     \\{"type":"object","additionalProperties":false,"properties":{"question":{"type":"string","minLength":1,"maxLength":1024},"options":{"type":"array","maxItems":6,"items":{"type":"object","additionalProperties":false,"properties":{"id":{"type":"string","minLength":1,"maxLength":64},"label":{"type":"string","minLength":1,"maxLength":256},"description":{"type":"string","maxLength":512}},"required":["id","label"]}},"allow_custom":{"type":"boolean"}},"required":["question"]}
     ,

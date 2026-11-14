@@ -11,14 +11,14 @@ const library = "\"library_id\":" ++ id_schema;
 const folder = "\"folder_id\":" ++ id_schema;
 const note = "\"note_id\":" ++ id_schema;
 const revision = "\"expected_revision\":{\"type\":\"integer\",\"minimum\":1}";
-const cursor = "\"cursor\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256}";
+const cursor = "\"cursor\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}";
 const object = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{";
 
 pub const contributions = [_]host.Contribution{
-    tool(.list, "List authorized knowledge bases, or one folder's immediate children. Pass the returned cursor to continue.", object ++ library ++ "," ++ folder ++ "," ++ cursor ++ "}}"),
+    tool(.list, "List authorized knowledge bases, or one folder's immediate children. When supplying folder_id, also supply its library_id. Pass the returned cursor to continue.", object ++ library ++ "," ++ folder ++ "," ++ cursor ++ "}}"),
     tool(.search, "Find committed notes by short literal keywords, such as a configuration name or two Chinese characters. Results include source_ref for citation.", object ++ "\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"library_ids\":{\"type\":\"array\",\"maxItems\":64,\"uniqueItems\":true,\"items\":" ++ id_schema ++ "}," ++ folder ++ "," ++ cursor ++ ",\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":20}},\"required\":[\"query\"]}"),
-    tool(.read, "Read committed Markdown from an authorized note. To continue, pass next_byte as start_byte with the same expected_revision.", object ++ note ++ "," ++ revision ++ ",\"start_byte\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32768}},\"required\":[\"note_id\"]}"),
-    tool(.read_image, "Read one image explicitly referenced by the committed, authorized note at expected_revision.", object ++ note ++ "," ++ revision ++ ",\"asset_ref\":{\"type\":\"string\",\"maxLength\":128}},\"required\":[\"note_id\",\"expected_revision\",\"asset_ref\"]}"),
+    tool(.read, "Read committed Markdown from an authorized note. A nonzero start_byte requires expected_revision. To continue, use the returned next_byte and revision.", object ++ note ++ "," ++ revision ++ ",\"start_byte\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32768}},\"required\":[\"note_id\"]}"),
+    tool(.read_image, "Read one image explicitly referenced by the committed, authorized note at expected_revision.", object ++ note ++ "," ++ revision ++ ",\"asset_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}},\"required\":[\"note_id\",\"expected_revision\",\"asset_ref\"]}"),
 };
 
 const Kind = enum { list, search, read, read_image };

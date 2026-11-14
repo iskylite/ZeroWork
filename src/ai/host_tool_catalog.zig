@@ -38,3 +38,34 @@ test "AI group host catalog fits every contribution and builds a valid request t
     try std.testing.expect(table.lookup("host__cancel_utransfer") != null);
     try std.testing.expectEqual(buffer.len, table.entries.len);
 }
+
+test "AI group host catalog advertises supported argument shapes" {
+    const std = @import("std");
+    const tools = @import("plugin_tools.zig");
+    const a = std.testing.allocator;
+    var table = try tools.RequestTable.initWithHost(a, .{ .owner = .{ .group = 7 }, .members = .{} }, &.{}, &.{}, .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = .{ .group = 7 }, .binding_revision = 2, .grant_revision = 1 }, &all);
+    defer table.deinit();
+    const cases = [_]struct { tool: []const u8, arguments: []const u8, valid: bool }{
+        .{ .tool = "host.search_terminal", .arguments = "{\"session_ref\":\"s\"}", .valid = false },
+        .{ .tool = "host.search_terminal", .arguments = "{\"session_ref\":\"s\",\"query\":\"x\",\"match_kind\":\"regex\"}", .valid = false },
+        .{ .tool = "host.search_terminal", .arguments = "{\"session_ref\":\"s\",\"query\":\"x\",\"match_kind\":\"literal\"}", .valid = true },
+        .{ .tool = "host.list_terminal_commands", .arguments = "{\"session_ref\":\"s\",\"range_kind\":\"command\",\"command_ref\":\"c\"}", .valid = false },
+        .{ .tool = "host.read_terminal", .arguments = "{\"recording_ref\":\"r\",\"range_kind\":\"command\",\"command_ref\":\"c\"}", .valid = true },
+        .{ .tool = "host.send_execution_input", .arguments = "{\"execution_ref\":\"x\",\"request_key\":\"once\",\"host_secret_request\":false}", .valid = false },
+        .{ .tool = "host.send_execution_input", .arguments = "{\"execution_ref\":\"x\",\"request_key\":\"once\",\"key\":\"enter\"}", .valid = true },
+        .{ .tool = "host.mcp_request", .arguments = "{\"server_id\":\"m\",\"method\":\"tools/call\",\"params\":{}}", .valid = false },
+        .{ .tool = "host.mcp_request", .arguments = "{\"server_id\":\"m\",\"method\":\"resources/list\",\"params\":{}}", .valid = true },
+        .{ .tool = "host.mcp_catalog", .arguments = "{\"action\":\"schema\",\"capability_ref\":\"m\",\"resource\":\"annotations\"}", .valid = true },
+        .{ .tool = "host.mcp_catalog", .arguments = "{\"action\":\"schema\",\"capability_ref\":\"m\",\"resource\":\"unknown\"}", .valid = false },
+    };
+    for (cases) |case| {
+        var encoded: [64]u8 = undefined;
+        const name = try tools.encodeName(&encoded, case.tool);
+        if (case.valid) {
+            var call = try table.parse(a, name, case.arguments);
+            call.deinit();
+        } else {
+            try std.testing.expectError(error.InvalidToolArguments, table.parse(a, name, case.arguments));
+        }
+    }
+}

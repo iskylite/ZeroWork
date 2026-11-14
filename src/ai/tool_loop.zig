@@ -88,7 +88,6 @@ pub const Invocation = struct {
     call: scope_mod.Call,
     verdict: permission.Verdict,
     policy_revision: u64,
-    timeout_ms: u32 = 60_000,
     capture_bytes: u32 = 64 * 1024,
     output_context: ?@import("batch_output.zig").Context = null,
 };
@@ -312,7 +311,9 @@ pub const Loop = struct {
         const old_context = previous.host_context orelse return error.InvalidHostAuthority;
         const context = next.table.host_context orelse return error.InvalidHostAuthority;
         try context.validate();
-        if (!context.conversation_id.eql(old_context.conversation_id) or !context.task_id.eql(old_context.task_id) or context.grant_revision != old_context.grant_revision or context.binding_revision < old_context.binding_revision or !context.binding.eql(next.table.captured_scope.owner)) return error.InvalidHostAuthority;
+        if (!context.conversation_id.eql(old_context.conversation_id) or !context.task_id.eql(old_context.task_id) or !context.binding.eql(next.table.captured_scope.owner)) return error.InvalidHostAuthority;
+        if (context.grant_revision != old_context.grant_revision) return error.AiGrantChanged;
+        if (context.binding_revision < old_context.binding_revision) return error.InvalidBindingHandoff;
         if (!context.binding.eql(old_context.binding) and (old_context.binding != .session or context.binding != .group or context.binding_revision != old_context.binding_revision +| 1)) return error.InvalidBindingHandoff;
         if (context.binding_revision == old_context.binding_revision and !context.binding.eql(old_context.binding)) return error.InvalidBindingHandoff;
         if (next.notice.len != 0 and (next.notice_revision == 0 or next.notice_revision <= self.notice_revision)) return error.StaleNotice;
@@ -677,11 +678,7 @@ pub const Loop = struct {
             return record.result_body.?;
         }
         const live_policy = if (host.current_permission) |read| read(host.context) else policy;
-        const verdict = if (selected.tool == .run_command) permission.classify(live_policy, selected.command, self.scope.owner == .group) else permission.Verdict.allow_auto;
-        if (verdict == .deny_exec_copy_only) {
-            record.result_body = try self.errorBody("ToolExecutionDenied", &selected.targets);
-            return record.result_body.?;
-        }
+        const verdict = if (selected.tool == .run_command) permission.commandVerdict(live_policy) else permission.Verdict.allow_auto;
         if (cancel) |token| if (token.isCancelled()) {
             record.result_body = try std.json.Stringify.valueAlloc(a, .{ .status = Status.cancelled, .error_code = "CancelledBeforeDispatch", .session_ids = selected.targets.slice() }, .{});
             return record.result_body.?;
@@ -752,7 +749,7 @@ pub const Loop = struct {
             const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.WorkspaceChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ExecutionDeadlineBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
             record.dispatched = !preflight;
             if (!preflight and affecting) self.stopForUnknownDispatch();
-            record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else if (!affecting) dynamic.Status.failed else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .side_effect_started = !preflight and affecting, .request_sent = if (parsed.entry.authority == .local_network_read and preflight) @as(?bool, false) else null, .local_released = preflight or !affecting, .remote_effect_unknown = !preflight and affecting }, .{});
+            record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else if (!affecting) dynamic.Status.failed else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .message = if (preflight) @as(?[]const u8, @import("step_failure.zig").explanation(@errorName(err))) else null, .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .side_effect_started = !preflight and affecting, .request_sent = if (parsed.entry.authority == .local_network_read and preflight) @as(?bool, false) else null, .local_released = preflight or !affecting, .remote_effect_unknown = !preflight and affecting }, .{});
             return record.result_body.?;
         };
         result.validate(context, operation_id) catch {
@@ -837,7 +834,7 @@ pub const Loop = struct {
         const results = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .workspace_revision = self.request.workspace_revision, .table = table, .parsed = parsed, .turn_id = self.turn_id, .call_id = call.id, .arguments = call.arguments, .operation_id = operation_id }, self.allocator, cancel) catch |err| {
             // Policy and approval rejection happen before any dispatch. Other
             // failures are conservatively unknown and never automatically replay.
-            const preflight = err == error.ScopeChanged or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded or err == error.OperationHistoryFull or err == error.ModeConflict or err == error.ReconnectTargetChanged or err == error.ReconnectTargetUnavailable;
+            const preflight = err == error.ScopeChanged or err == error.AssistantOwnerChanged or err == error.TargetOutsideAssistant or err == error.ToolCapabilityUnavailable or err == error.StaleBinding or err == error.RequiredServiceUnavailable or err == error.ServiceDenied or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded or err == error.OperationHistoryFull or err == error.ModeConflict or err == error.ReconnectTargetChanged or err == error.ReconnectTargetUnavailable;
             if (!preflight) self.stopForUnknownDispatch();
             record.dispatched = !preflight;
             @import("tool_trace.zig").emit(.{ .event = "dynamic_rejected", .call_id = call.id, .tool_id = call.name, .owner = self.scope.owner, .reason = @errorName(err), .dispatched = !preflight });
@@ -1062,12 +1059,16 @@ fn parseStrict(allocator: std.mem.Allocator, scope: scope_mod.Scope, name: []con
     while (fields.next()) |field| {
         const key = field.key_ptr.*;
         const allowed = std.mem.eql(u8, key, "session_ids") or switch (tool) {
-            .run_command => std.mem.eql(u8, key, "command"),
+            .run_command => std.mem.eql(u8, key, "command") or std.mem.eql(u8, key, "timeout_ms"),
             .read_terminal => false,
             .list_remote_files => std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "offset") or std.mem.eql(u8, key, "source_version") or std.mem.eql(u8, key, "max_entries"),
             .read_remote_file => std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "max_bytes") or std.mem.eql(u8, key, "offset") or std.mem.eql(u8, key, "source_version"),
         };
         if (!allowed) return error.InvalidToolArguments;
+        if (std.mem.eql(u8, key, "timeout_ms")) {
+            const timeout = field.value_ptr.*;
+            if (timeout != .integer or timeout.integer <= 0 or timeout.integer > std.math.maxInt(u32)) return error.InvalidToolArguments;
+        }
     }
     var parsed = try scope_mod.parse(allocator, scope, name, arguments);
     errdefer parsed.deinit();

@@ -784,9 +784,15 @@ test "OpenAI tool declarations contain separate bounded capability and argument 
         try std.testing.expectEqualStrings("session_ids", required[0].string);
         switch (definition.tool) {
             .run_command => {
-                try std.testing.expectEqual(@as(usize, 2), properties.count());
+                try std.testing.expectEqual(@as(usize, 3), properties.count());
+                try std.testing.expectEqual(@as(usize, 2), required.len);
                 try std.testing.expectEqualStrings("command", required[1].string);
                 try std.testing.expectEqual(@as(i64, 65534), properties.get("command").?.object.get("maxLength").?.integer);
+                const timeout = properties.get("timeout_ms").?.object;
+                try std.testing.expectEqualStrings("integer", timeout.get("type").?.string);
+                try std.testing.expectEqual(@as(i64, 1), timeout.get("minimum").?.integer);
+                try std.testing.expectEqual(@as(i64, std.math.maxInt(u32)), timeout.get("maximum").?.integer);
+                try std.testing.expectEqual(@as(i64, @import("tool_scope.zig").default_command_timeout_ms), timeout.get("default").?.integer);
                 try std.testing.expect(properties.get("path") == null and properties.get("max_bytes") == null);
             },
             .read_terminal => {

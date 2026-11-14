@@ -35,6 +35,7 @@ pub const Invocation = struct {
     arguments: std.json.Value,
     arguments_json: []const u8,
     arguments_hash: [32]u8,
+    user_approved: bool = false,
     /// Issued by the generic content host only after approval/preflight. This
     /// borrowed proof is checked by input services at every effect boundary.
     automation_proof: ?@import("../host/content_context.zig").AutomationProof = null,
@@ -796,6 +797,9 @@ pub const Runtime = struct {
         var uncertain = false;
         for (parsed.targets.slice(), output) |id, *result| {
             const target = entryTarget(parsed.entry, id).?;
+            var selected = parsed;
+            selected.targets.ids[0] = id;
+            selected.targets.len = 1;
             const cancelled = if (cancel) |token| token.isCancelled() else false;
             const superseded = if (invocation.dispatch_fence) |fence| !fence.current(fence.context, fence.revision) else false;
             if (cancelled or uncertain or superseded) {
@@ -805,18 +809,7 @@ pub const Runtime = struct {
                 initialized += 1;
                 continue;
             }
-            // Revalidate just before each send; earlier callbacks can revoke a
-            // later member, but can never redirect it to another connection.
-            preflight(invocation.table, parsed, try self.live_scope(self.context), try self.live_members(self.context)) catch |err| {
-                try self.operations.cancel(target.owner, invocation.operation_id);
-                try self.operations.resourcesReleased(target.owner, invocation.operation_id);
-                result.* = try dispatchFailure(allocator, target.owner, invocation.operation_id, parsed.entry.definition.id, err, false);
-                initialized += 1;
-                continue;
-            };
-            if (self.invoke == null) try markSent(self.operations, target.owner, invocation.operation_id, invocation.call_id, parsed.entry.definition.id, parsed.arguments_hash);
-            const request: Invocation = .{ .owner = target.owner, .operation_id = invocation.operation_id, .call_id = invocation.call_id, .turn_id = invocation.turn_id, .tool_id = parsed.entry.definition.id, .effect = parsed.entry.definition.effect, .arguments = parsed.json.value, .arguments_json = invocation.arguments, .arguments_hash = parsed.arguments_hash };
-            result.* = (if (self.invoke) |invoke| invoke(self.context, target, request, allocator, cancel) else target.binding.handler(target.context, request, allocator)) catch |err| {
+            result.* = self.dispatchTarget(invocation, selected, target, if (ticket) |value| value.approved else false, allocator, cancel) catch |err| {
                 const stage = self.operations.lookup(target.owner, invocation.operation_id).?.stage;
                 const was_sent = stage == .sent or stage == .verifying or stage == .outcome_unknown;
                 try self.operations.cancel(target.owner, invocation.operation_id);
@@ -843,6 +836,39 @@ pub const Runtime = struct {
             @import("tool_trace.zig").emit(.{ .event = "dynamic_result", .call_id = invocation.call_id, .tool_id = parsed.entry.definition.id, .owner = target.owner, .operation_id = invocation.operation_id, .status = result.status, .local_released = result.receipt.local_released, .remote_effect_unknown = result.receipt.remote_effect_unknown });
         }
         return output;
+    }
+
+    fn dispatchTarget(self: Runtime, invocation: DynamicInvocation, selected: ParsedCall, target: TargetBinding, approved: bool, allocator: std.mem.Allocator, cancel: ?*@import("provider.zig").CancelToken) !ToolResult {
+        const grouped = invocation.table.captured_scope.owner == .group;
+        var user_approved = approved;
+        var pending_invocation = invocation;
+        pending_invocation.parsed = selected;
+        while (true) {
+            if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
+            if (invocation.dispatch_fence) |fence| try fence.check();
+            try preflight(invocation.table, selected, try self.live_scope(self.context), try self.live_members(self.context));
+            const needs_approval = try callNeedsApproval(selected, self.current_policy(self.context), grouped);
+            if (needs_approval and !user_approved) {
+                var ticket = try ApprovalTicket.waiting(invocation.table, selected);
+                const stage = self.operations.lookup(target.owner, invocation.operation_id).?.stage;
+                if (stage == .prepared) try self.operations.transition(target.owner, invocation.operation_id, .pending_approval, "");
+                const ask = self.approval orelse return error.ToolApprovalRequired;
+                if (!try ask(self.context, pending_invocation, &ticket, cancel)) return error.ToolApprovalRejected;
+                user_approved = !ticket.policy_bypass;
+                if (stage == .prepared) try self.operations.transition(target.owner, invocation.operation_id, .approved, "");
+                continue;
+            }
+            const request: Invocation = .{ .owner = target.owner, .operation_id = invocation.operation_id, .call_id = invocation.call_id, .turn_id = invocation.turn_id, .tool_id = selected.entry.definition.id, .effect = selected.entry.definition.effect, .arguments = selected.json.value, .arguments_json = invocation.arguments, .arguments_hash = selected.arguments_hash, .user_approved = user_approved };
+            if (self.invoke) |invoke| return invoke(self.context, target, request, allocator, cancel) catch |err| {
+                if (err != error.ToolApprovalRequired or user_approved) return err;
+                // Retry only the member the adapter proved it never sent.
+                const stage = self.operations.lookup(target.owner, invocation.operation_id).?.stage;
+                if (stage != .prepared and stage != .approved) return err;
+                continue;
+            };
+            try markSent(self.operations, target.owner, invocation.operation_id, invocation.call_id, selected.entry.definition.id, selected.arguments_hash);
+            return target.binding.handler(target.context, request, allocator);
+        }
     }
 };
 

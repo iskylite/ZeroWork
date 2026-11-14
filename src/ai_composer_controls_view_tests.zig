@@ -290,7 +290,7 @@ test "AI composer permission labels preserve real confirm and auto modes and onl
     const menu = find(f.cx.root.?, "ai.permission.menu").?;
     try std.testing.expectEqual(@as(f32, 344), menu.globalRect().w);
     try std.testing.expectEqual(@as(f32, 128), menu.globalRect().h);
-    for ([_][]const u8{ "部分读取自动，其余按策略确认", "授权内自动执行（含组内写入）" }) |hint| {
+    for ([_][]const u8{ "执行命令前确认", "授权内自动执行（含组内写入）" }) |hint| {
         const node = textNode(menu, hint) orelse return error.MissingPermissionHint;
         const label = node.getText().?;
         const measured = f.cx.text.measureTextWidth(label.content, label.font_size, label.font_weight, false);
@@ -911,14 +911,14 @@ test "AI composer execution mode selects effective default without duplicate inh
     try std.testing.expect(find(menu, "ai.execution.inherit") == null);
     try std.testing.expect(find(menu, "ai.execution.isolated_exec").?.behavior.interaction.a11y.?.selected);
     try std.testing.expect(hasText(f.view.retention_select.trigger, "每次询问"));
-    f.enter(find(menu, "ai.execution.new_pty").?);
-    try std.testing.expectEqual(config.ExecutionMode.new_pty, f.last.?.action.execution_mode.?);
+    f.enter(find(menu, "ai.execution.interactive").?);
+    try std.testing.expectEqual(config.ExecutionMode.interactive, f.last.?.action.execution_mode.?);
     try std.testing.expectEqualStrings("批处理", f.view.labels[5].?.getText().?.content);
     try std.testing.expectEqual(config.PermissionMode.confirm, source.permission);
-    source.execution_mode_override = .new_pty;
+    source.execution_mode_override = .interactive;
     try f.view.update(source);
     f.settle();
-    try std.testing.expectEqualStrings("新建 PTY", f.view.labels[5].?.getText().?.content);
+    try std.testing.expectEqualStrings("交互式", f.view.labels[5].?.getText().?.content);
     f.enter(f.view.buttons[5]);
     f.enter(find(menu, "ai.execution.auto").?);
     try std.testing.expectEqual(config.ExecutionMode.auto, f.last.?.action.execution_mode.?);
@@ -966,7 +966,7 @@ test "AI composer longest model and execution choices remain reachable at minimu
     var source = f.snapshot();
     source.revision += 1;
     source.current.?.model_id = f.models[0].id;
-    source.execution_mode_override = .attached_pty;
+    source.execution_mode_override = .interactive;
     source.usage = .{ .used_tokens = 999, .limit_tokens = 1000 };
     try f.view.update(source);
     f.panel.setStyleInline(a, .{ .width = .{ .px = 520 } });
@@ -977,7 +977,7 @@ test "AI composer longest model and execution choices remain reachable at minimu
     try std.testing.expect(f.view.labels[2].?.globalRect().w < f.cx.text.measureTextWidth(f.models[0].id, 10, 400, false));
     try std.testing.expect(!f.view.execution_compact);
     try std.testing.expect(f.view.labels[5].?.globalRect().w > 0);
-    try std.testing.expectEqualStrings("附加现有 PTY", f.view.labels[5].?.getText().?.content);
+    try std.testing.expectEqualStrings("交互式", f.view.labels[5].?.getText().?.content);
     try std.testing.expectApproxEqAbs(row.x + row.w - 28, f.send.globalRect().x, 0.1);
     f.cx.setViewport(860, 480);
     f.panel.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 100 }, .top = .{ .px = 30 } } });
@@ -985,8 +985,8 @@ test "AI composer longest model and execution choices remain reachable at minimu
     f.enter(f.view.buttons[5]);
     try std.testing.expect(f.view.isOpen());
     const menu = find(f.cx.root.?, "ai.execution.menu").?;
-    try std.testing.expectEqual(@as(f32, 220), menu.globalRect().h);
-    const selected_row = find(menu, "ai.execution.attached_pty").?.globalRect();
+    try std.testing.expectEqual(@as(f32, 218), menu.globalRect().h);
+    const selected_row = find(menu, "ai.execution.interactive").?.globalRect();
     const viewport = f.view.execution_scroll.container.globalRect();
     try std.testing.expectApproxEqAbs(@min(selected_row.y, viewport.y + viewport.h - selected_row.h), selected_row.y, 0.5);
     try std.testing.expect(selected_row.y >= viewport.y - 0.5);

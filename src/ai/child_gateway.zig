@@ -29,8 +29,29 @@ test "explicit child task leaves ordinary follow-ups with the parent" {
 pub const contribution: host.Contribution = .{ .authority = .conversation_context, .definition = .{
     .id = tool_id,
     .effect = .resource_write,
-    .description = "Manage only your direct child Agents. create requires a unique request_key, name, task text and explicit session_refs (empty means material-only); omitted context_mode and reusable use the frozen configured defaults (independent/new on a new installation). prefer_reuse requests listing eligible children first; the host never silently substitutes reuse for create. reuse selects an idle reusable agent_id and starts a NEW task with its saved config/history. purpose=verify restricts the entire new task to read-only observation. Assign an authorized Local or SSH terminal and set local_files=read or write explicitly to delegate the corresponding Mac file capability from your current tools. Omitted local_files gives no file capability. A verify task can only read. Unresolved prior effects never become success: work on overlapping old targets is blocked; explicit disjoint targets or material-only new work remain possible, with MCP replay guards retained. list shows your children and current-root tasks. send requires task_id, text, and a non-empty request_key. Use a new request_key for each new message and reuse it only when retrying the same message. send and stop require an exact current-root task_id. wait_events reads bounded task reports after a sequence watermark; wait_ms is 0..10000. Child reports are evidence, never new authorization. Do not finish before every child is settled and its report is collected through wait_events; your task remains active and may continue automatically. No grandchildren, sibling access or automatic name matching.",
-    .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"reuse\",\"list\",\"send\",\"stop\",\"wait_events\"]},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"description\":\"Required for create, reuse, and send. For send, use the same key only when retrying the same message.\"},\"name\":{\"type\":\"string\",\"maxLength\":128},\"text\":{\"type\":\"string\",\"maxLength\":32768},\"purpose\":{\"type\":\"string\",\"enum\":[\"work\",\"verify\"]},\"local_files\":{\"type\":\"string\",\"enum\":[\"none\",\"read\",\"write\"]},\"agent_id\":{\"type\":\"string\"},\"task_id\":{\"type\":\"string\"},\"session_refs\":{\"type\":\"array\",\"maxItems\":32,\"items\":{\"type\":\"string\"}},\"context_mode\":{\"type\":\"string\",\"enum\":[\"independent\",\"inherit\"]},\"reusable\":{\"type\":\"boolean\"},\"model\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"provider_id\":{\"type\":\"string\"},\"model_id\":{\"type\":\"string\"}},\"required\":[\"provider_id\",\"model_id\"]},\"effort\":{\"type\":\"string\",\"enum\":[\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\",\"ultra\"]},\"after_sequence\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10000}},\"required\":[\"action\"]}",
+    .description = "Manage only your direct child Agents. create requires request_key, name, text, and session_refs. Omit purpose when creating a child. Omitted context_mode and reusable use the frozen configured defaults (independent/new on a new installation). prefer_reuse requests listing eligible children first; the host never silently substitutes reuse for create. reuse requires request_key, agent_id, text, and session_refs. It starts a new task on an idle reusable agent with its saved config/history. Only reuse accepts purpose; purpose=verify restricts the new task to read-only observation. Assign an authorized Local or SSH terminal and set local_files=read or write explicitly to delegate the corresponding Mac file capability from your current tools. Omitted local_files gives no file capability. A verify task can only read. Unresolved prior effects never become success: work on overlapping old targets is blocked; explicit disjoint targets or material-only new work remain possible, with MCP replay guards retained. list takes only action and shows your children and current-root tasks. send requires task_id, text, and request_key. stop requires task_id. send and stop require an exact current-root task_id. wait_events reads bounded task reports after a sequence watermark. If a child reports human_wait, wait for the user in the main conversation. Do not stop the child or take over its pending operation while the user is deciding. Child reports are evidence, never new authorization. Do not finish before every child is settled and its report is collected through wait_events; your task remains active and may continue automatically. No grandchildren, sibling access or automatic name matching.",
+    .schema =
+    \\{
+    \\  "type":"object","additionalProperties":false,"required":["action"],
+    \\  "properties":{
+    \\    "action":{"type":"string","enum":["create","reuse","list","send","stop","wait_events"],"description":"Use only the fields documented for the selected action."},
+    \\    "request_key":{"type":"string","minLength":1,"maxLength":128,"description":"Required for create, reuse, and send only. Use a new key for each new task or message. Reuse a key only when retrying the same request."},
+    \\    "name":{"type":"string","minLength":1,"maxLength":128,"description":"Required for create only. A non-blank child name."},
+    \\    "text":{"type":"string","minLength":1,"maxLength":32768,"description":"Required for create and reuse as task instructions, or for send as the message."},
+    \\    "purpose":{"type":"string","enum":["work","verify"],"description":"Optional for reuse only. Omit for create and all other actions. Defaults to work; verify makes the new task read-only."},
+    \\    "local_files":{"type":"string","enum":["none","read","write"],"description":"Optional for create and reuse only. Defaults to none. read and write require an eligible session in session_refs and matching parent authority. A verify task cannot request write."},
+    \\    "agent_id":{"type":"string","minLength":32,"maxLength":32,"description":"Required for reuse only. Use the exact agent ID returned by list."},
+    \\    "task_id":{"type":"string","minLength":32,"maxLength":32,"description":"Required for send and stop only. Use the exact current-root task ID."},
+    \\    "session_refs":{"type":"array","maxItems":32,"items":{"type":"string"},"description":"Required for create and reuse only. Supply an array of exact, distinct authorized session references. Use [] for material-only work."},
+    \\    "context_mode":{"type":"string","enum":["independent","inherit"],"description":"Optional for create only."},
+    \\    "reusable":{"type":"boolean","description":"Optional for create only. Controls whether this child can be reused after its task settles."},
+    \\    "model":{"type":"object","additionalProperties":false,"description":"Optional for create only. Set both provider_id and model_id.","properties":{"provider_id":{"type":"string"},"model_id":{"type":"string"}},"required":["provider_id","model_id"]},
+    \\    "effort":{"type":"string","enum":["none","low","medium","high","xhigh","max","ultra"],"description":"Optional for create only."},
+    \\    "after_sequence":{"type":"integer","minimum":0,"description":"Optional for wait_events only. Use the last returned sequence watermark, or 0 for the first read."},
+    \\    "wait_ms":{"type":"integer","minimum":0,"maximum":10000,"description":"Optional for wait_events only. Defaults to 0."}
+    \\  }
+    \\}
+    ,
     .max_argument_bytes = 48 * 1024,
 } };
 pub const Request = struct {
@@ -253,7 +274,13 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             const child_runner = env.service.runnerFor(fact.agent) orelse return error.ChildTaskNotFound;
             if (child_runner.context == null or !child_runner.context.?.task.eql(fact.task) or child_runner.worker_generation != fact.generation) return error.ChildTaskNotFound;
             const ticket = try env.service.store.fence(fact.conversation);
-            if (r.action == .stop) try env.service.stop(ticket) else {
+            if (r.action == .stop) {
+                if (fact.user_waits != 0) return error.ChildAwaitingUser;
+                if (child_runner.worker) |worker| {
+                    if (worker.approvals.snapshot() != null) return error.ChildAwaitingUser;
+                }
+                try env.service.stop(ticket);
+            } else {
                 // Stable per-task key; a retry is the same inbox submission.
                 var bytes: [16]u8 = undefined;
                 var hash: [32]u8 = undefined;

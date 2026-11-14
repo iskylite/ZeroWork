@@ -26,12 +26,12 @@ const server=createServer(async(req,res)=>{
   let text:string;
   if(summary){
     summaryCount++;assert(!body.tools?.length);
-    assert(JSON.stringify(body.messages).includes('OLD_NATIVE_MARKER'));
+    assert(JSON.stringify(body.messages).includes('OLD_ASSISTANT_OUTPUT'));
     assert(!JSON.stringify(body.messages).includes('RECENT_NATIVE_SECOND'));
     if(mode==='failure'){res.writeHead(400);res.end('summary failed');return;}
     await sleep(mode==='cancel'?1800:550);
     text='MEMORY_NATIVE_BACKUP_TESTS_PASSED. Goal backup; constraint no deployment; pending review.';
-  } else {ordinaryCount++;text='VISIBLE_NATIVE_ANSWER_'+ordinaryCount;}
+  } else {ordinaryCount++;text='VISIBLE_NATIVE_ANSWER_'+ordinaryCount;if(ordinaryCount===1)text+=' '+ 'OLD_ASSISTANT_OUTPUT '.repeat(100);}
   res.writeHead(200,{'Content-Type':'text/event-stream'});
   res.end('data: '+JSON.stringify({choices:[{delta:{content:text}}]})+'\n\ndata: [DONE]\n\n');
 });
@@ -59,7 +59,8 @@ async function history(){return (await query('ai.message.user.bubble')).map(text
 try{
   await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
   await resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await visible('ai.prompt');
-  await send('OLD_NATIVE_MARKER '+('Historical source data. '.repeat(65))+' Goal backup. No deployment. Tests passed. Pending review.',1);
+  const original='OLD_NATIVE_MARKER Goal backup. No deployment.';
+  await send(original,1);
   await send('RECENT_NATIVE_SECOND',2);await send('RECENT_NATIVE_LAST',3);
   const before=await history();assert.equal(before.length,3);
   await click('ai.composer.permission');const permission=await settled('ai.permission.menu');assert.equal(permission.rect.h,128);assert(!text(permission).includes('当前助手范围'));report.permission_rect=permission.rect;await cap('permission');await click('ai.permission.close');await closed('ai.permission.menu');
@@ -86,7 +87,7 @@ try{
   await click('ai.usage.close');await closed('ai.usage.menu');
   await status('已压缩');await send('NEXT_NATIVE_REQUEST',4);
   const next=requests.filter(r=>!r.summary).at(-1).body;
-  const wire=JSON.stringify(next.messages);assert(wire.includes('MEMORY_NATIVE_BACKUP_TESTS_PASSED'));assert(!wire.includes('OLD_NATIVE_MARKER'));assert(wire.includes('RECENT_NATIVE_SECOND')&&wire.includes('RECENT_NATIVE_LAST'));
+  const wire=JSON.stringify(next.messages);assert(wire.includes('MEMORY_NATIVE_BACKUP_TESTS_PASSED'));assert(!wire.includes('OLD_ASSISTANT_OUTPUT'));assert(next.messages.some((m:any)=>m.role==='user'&&m.content===original));assert(wire.includes('RECENT_NATIVE_SECOND')&&wire.includes('RECENT_NATIVE_LAST'));
   assert.equal((await history()).length,4);await closed('ai.transcript.compaction');await cap('06-next-request');
   report.status='passed';report.visible_history_count_before=before.length;report.visible_history_count_after=(await history()).length;report.next_request_uses_summary=true;report.summary_requests=summaryCount;report.ordinary_requests=ordinaryCount;
 }catch(e){report.status='failed';report.error=e instanceof Error ? e.stack : String(e);try{await cap('failure');}catch{}}

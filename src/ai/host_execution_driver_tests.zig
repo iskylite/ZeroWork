@@ -67,6 +67,7 @@ const Backend = struct {
         interrupt_calls: usize = 0,
         revoke_busy: bool = false,
         request_count: usize = 0,
+        request_busy: bool = false,
     };
     ui_thread: std.Thread.Id,
     targets: [5]Target,
@@ -124,6 +125,7 @@ const Backend = struct {
                 return .{ .snapshot = target.snapshot };
             },
             .request => |request| {
+                if (target.request_busy) return error.WorkerBusy;
                 const fence = target.snapshot.execution_fence + 1;
                 target.request_count += 1;
                 target.snapshot = .{ .owner = target.snapshot.owner, .execution_id = request.execution_id, .command_hash = request.command_hash, .execution_fence = fence, .execution_input_epoch = request.expected_input_epoch, .input_epoch = request.expected_input_epoch, .grant = .{ .execution_id = request.execution_id, .task_id = request.task_id, .fence = fence, .input_epoch = request.expected_input_epoch, .ownership_revision = request.ownership_revision }, .state = .running, .interactive_execution = true, .local_released = false, .input_ready = false, .revision = target.snapshot.revision + 1, .output_scope = self.output_scope };
@@ -251,6 +253,53 @@ test "execution driver settles released command while next SSH prompt or human d
         if (now() > deadline) return error.TaskSettlementBlockedByPrompt;
         pause();
     }
+}
+
+test "execution driver finishes old dispatch in background and accepts a new task" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(path);
+    const journal = try runtime.ProcessJournal.acquire(.{ .data_root = path, .path = "finish-overlap.json", .dir = tmp.dir, .io = std.testing.io });
+    defer journal.release();
+    var pump: Pump = .{};
+    var backend: Backend = .{ .ui_thread = std.Thread.getCurrentId(), .targets = undefined };
+    for (&backend.targets, 0..) |*target, index| target.* = .{ .snapshot = .{ .owner = .{ .session_id = @fromBackingInt(index + 1), .generation = 1 }, .state = .idle, .interactive_execution = true, .input_epoch = 1 } };
+    backend.targets[0].request_busy = true;
+    const driver = try driver_mod.Driver.start(a, journal, .{ .context = &pump, .call = Pump.schedule }, .{ .context = &backend, .authorize = Backend.authorize, .resolve = Backend.resolve, .terminal_call = Backend.call });
+    defer {
+        driver.requestShutdown();
+        while (!driver.shutdownReady()) {
+            pump.pump();
+            pause();
+        }
+        driver.finish() catch unreachable;
+    }
+    const original: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .group = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    var next = original;
+    next.task_id = .generate();
+    const old_json = "{\"session_ref\":\"0\",\"command\":\"true\",\"request_key\":\"old-busy\"}";
+    const new_json = "{\"session_ref\":\"1\",\"command\":\"true\",\"request_key\":\"new-ready\"}";
+    var old_args = try std.json.parseFromSlice(std.json.Value, a, old_json, .{});
+    defer old_args.deinit();
+    var new_args = try std.json.parseFromSlice(std.json.Value, a, new_json, .{});
+    defer new_args.deinit();
+    var old_result = try Tool.execute(driver, &pump, .{ .context = original, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "old-busy", .tool_id = "host.run_in_terminal", .arguments = old_args.value, .arguments_json = old_json, .arguments_hash = @splat(1), .canonical_arguments_hash = @splat(2) });
+    defer old_result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), backend.targets[0].request_count);
+    try driver.finishTask(original);
+    var new_result = try Tool.execute(driver, &pump, .{ .context = next, .authority = .execution_control, .operation_id = 2, .turn_id = 2, .call_id = "new-ready", .tool_id = "host.run_in_terminal", .arguments = new_args.value, .arguments_json = new_json, .arguments_hash = @splat(3), .canonical_arguments_hash = @splat(4) });
+    defer new_result.deinit(a);
+    backend.targets[0].request_busy = false;
+    const deadline = now() + 3000;
+    while (true) {
+        pump.pump();
+        if (driver.taskEvidenceFor(original)) |fact| if (fact.model_done and fact.pending_dispatch == 0) break;
+        if (now() > deadline) return error.FinishEvidenceMissing;
+        pause();
+    }
+    try std.testing.expectEqual(@as(usize, 0), backend.targets[0].request_count);
+    try std.testing.expectEqual(@as(usize, 1), backend.targets[1].request_count);
 }
 
 test "execution driver precise input takeover preserves Task and read-only observation without interruption" {

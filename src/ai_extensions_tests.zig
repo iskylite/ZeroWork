@@ -358,7 +358,7 @@ test "v0.4 extensions settings save merge stale callback revert and no process a
     try controller.save(std.testing.io, tmp.dir, &target);
     try std.testing.expectEqual(@as(u8, 18), target.value.ui.font_size);
     try std.testing.expectEqualStrings("/does/not/exist", target.value.ai.extensions.servers[0].program);
-    try std.testing.expect(target.value.agentPolicyRevision() > before);
+    try std.testing.expectEqual(before, target.value.agentPolicyRevision());
     const policy = target.value.agentPolicyRevision();
     servers[0].enabled = false;
     try controller.setExtensions(.{ .servers = &servers });

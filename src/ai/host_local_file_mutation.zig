@@ -13,12 +13,12 @@ const ProcessJournal = @import("lifecycle_runtime.zig").ProcessJournal;
 
 pub const write_id = "host.local_write_text";
 pub const edit_id = "host.local_edit_text";
-const key_field = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
-const version_field = "\"expected_version\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
+const key_field = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"description\":\"Use 1 to 128 ASCII letters, digits, or these characters: - _ . :\"}";
+const version_field = "\"expected_version\":{\"type\":\"string\",\"minLength\":68,\"maxLength\":68,\"description\":\"Use the exact version from a current read. Required for edit and replace. Omit for create.\"}";
 const ref_field = "\"file_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8192}";
 pub const contributions = [_]host.Contribution{
-    definition(write_id, "Create or replace UTF-8 text on the Mac. Use a stable request_key. Create is exclusive. Replace requires expected_version from a current local read.", key_field ++ "," ++ version_field ++ ",\"mode\":{\"type\":\"string\",\"enum\":[\"create\",\"replace\"]},\"text\":{\"type\":\"string\"},\"create_parents\":{\"type\":\"boolean\"}", "\"request_key\",\"path\",\"mode\",\"text\""),
-    definition(edit_id, "Apply exact, nonoverlapping edits to one local UTF-8 file. Supply path or file_ref and expected_version from a current local read. Reuse request_key only for the same request.", key_field ++ "," ++ version_field ++ "," ++ ref_field ++ ",\"edits\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":128,\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"old_text\":{\"type\":\"string\",\"minLength\":1},\"new_text\":{\"type\":\"string\"}},\"required\":[\"old_text\",\"new_text\"]}}", "\"request_key\",\"expected_version\",\"edits\""),
+    definition(write_id, "Create or replace UTF-8 text on the Mac. Use a stable request_key. Create is exclusive and requires omitting expected_version. Replace requires expected_version from a current local read. Use create_parents=true only with mode=create.", key_field ++ "," ++ version_field ++ ",\"mode\":{\"type\":\"string\",\"enum\":[\"create\",\"replace\"]},\"text\":{\"type\":\"string\"},\"create_parents\":{\"type\":\"boolean\",\"description\":\"Set to true only with mode=create to allow creating missing parent directories.\"}", "\"request_key\",\"path\",\"mode\",\"text\""),
+    definition(edit_id, "Apply exact, nonoverlapping edits to one local UTF-8 file. Supply exactly one of path and file_ref, plus expected_version from a current local read. Omit base_directory with file_ref. Reuse request_key only for the same request.", key_field ++ "," ++ version_field ++ "," ++ ref_field ++ ",\"edits\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":128,\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"old_text\":{\"type\":\"string\",\"minLength\":1},\"new_text\":{\"type\":\"string\"}},\"required\":[\"old_text\",\"new_text\"]}}", "\"request_key\",\"expected_version\",\"edits\""),
 };
 fn definition(comptime id: []const u8, comptime description: []const u8, comptime extra: []const u8, comptime required: []const u8) host.Contribution {
     return .{ .authority = .local_files, .definition = .{

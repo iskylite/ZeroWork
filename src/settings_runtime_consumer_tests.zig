@@ -212,18 +212,8 @@ test "settings runtime AI selected provider effort redaction and permission feed
     var plain = try snapshot.assembleText(a, "echo 10.0.0.1", .{ .host = "10.0.0.1", .user = "fixture-user" }, null, null, cfg.ai.redact_ip, selected.context_window);
     defer plain.deinit(a);
     try std.testing.expect(std.mem.indexOf(u8, plain.text, "host=10.0.0.1 user=fixture-user") != null);
-    const command = "fixture read";
-    const whitelist: []const []const u8 = &.{"fixture read"};
-    try std.testing.expectEqual(permission.Verdict.need_confirm, permission.classify(.{ .mode = .confirm, .whitelist = whitelist }, command, false));
-    try std.testing.expectEqual(permission.Verdict.allow_auto, permission.classify(.{ .mode = .auto, .whitelist = whitelist }, command, false));
-    // Automatic mode allows non-blocked compound commands; confirm mode still
-    // requires approval, and deny rules take precedence over either mode.
-    const compound = "fixture read; touch /tmp/never-executed";
-    try std.testing.expectEqual(permission.Verdict.allow_auto, permission.classify(.{ .mode = .auto, .whitelist = whitelist }, compound, false));
-    try std.testing.expectEqual(permission.Verdict.need_confirm, permission.classify(.{ .mode = .confirm, .whitelist = whitelist }, compound, false));
-    for ([_]permission.Mode{ .confirm, .auto }) |mode| {
-        try std.testing.expectEqual(permission.Verdict.deny_exec_copy_only, permission.classify(.{ .mode = mode, .whitelist = whitelist }, "fixture read; shutdown now", false));
-    }
+    try std.testing.expectEqual(permission.Verdict.need_confirm, permission.commandVerdict(.{ .mode = .confirm }));
+    try std.testing.expectEqual(permission.Verdict.allow_auto, permission.commandVerdict(.{ .mode = .auto }));
 }
 
 test "settings runtime saved retention controls actual Recording close pruning" {

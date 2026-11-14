@@ -433,6 +433,12 @@ pub const Driver = struct {
                     return true;
                 }
                 if (request.wait) |wait| {
+                    // Finishing closes command admission. Explicit reads of
+                    // an existing execution can still observe it settling.
+                    if (std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal") and self.controller.taskFinishing(invocation.context)) {
+                        self.complete(request, error.TaskFinishing);
+                        return true;
+                    }
                     if (invocation.dispatch_fence) |fence| if (!fence.current(fence.context, fence.revision)) {
                         const result = if (std.mem.eql(u8, invocation.tool_id, "host.wait_execution"))
                             self.controller.interruptedReadWait(wait, "new_input")

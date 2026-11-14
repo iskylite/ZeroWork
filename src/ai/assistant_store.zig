@@ -222,6 +222,7 @@ pub const State = struct {
     owner: scope.Owner,
     history: std.ArrayList(Message) = .empty,
     presentation_revision: u64 = 0,
+    presentation_dirty: bool = false,
     wire_history: @import("wire_history.zig").History = .{},
     compaction_activity: ?CompactionActivity = null,
     stream: cards.Stream,

@@ -120,7 +120,7 @@ pub const View = struct {
         const impact = try ui.boxStyled(cx, S.impactNotice, .{});
         impact.meta.ownership.meta.test_id = "ai.approval.impact_notice";
         try impact.appendChild(cx.allocator, try theme.icon(cx, ui.icons.get("triangle-alert").?, "warn_ink", .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
-        self.feedback = try ui.textStyled(cx, S.impact, "影响 · 尚未核实");
+        self.feedback = try ui.textStyled(cx, S.impact, "");
         self.feedback.meta.ownership.meta.test_id = "ai.approval.impact";
         self.feedback.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1, .flex_shrink = 0 });
         try impact.appendChild(cx.allocator, self.feedback);
@@ -185,7 +185,8 @@ pub const View = struct {
             const display = if (file_change) try @import("../ai/terminal_file_tools.zig").approvalText(self.cx.allocator, source.tool_id.?, source.command) else null;
             defer if (display) |text| self.cx.allocator.free(text);
             try self.command.setTextContent(self.cx.allocator, display orelse command);
-            try self.feedback.setTextContent(self.cx.allocator, if (source.group) (if (terminal) "影响 · 上述全部目标各执行一次此命令；写入及业务影响尚未核实。" else "影响 · 上述全部目标各执行一次此调用；写入及业务影响尚未核实。") else "影响 · 尚未核实");
+            try self.feedback.setTextContent(self.cx.allocator, if (source.group) "每个所列目标各执行一次。" else "");
+            self.feedback.parent.?.setDisplay(if (source.group) .flex else .none);
             const target_copy = try self.cx.allocator.dupe(u8, target);
             if (self.target_owned) |old| self.cx.allocator.free(old);
             self.target_owned = target_copy;
@@ -204,7 +205,8 @@ pub const View = struct {
         const file_extra: f32 = if (source.tool_id) |name| if (std.mem.startsWith(u8, name, "file.")) 93 else 0 else 0;
         self.command_row.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 37 + file_extra } });
         self.command_viewport.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 37 + file_extra } });
-        const desired: f32 = (if (source.group) @as(f32, 207.625) else 167.625) + tool_height + file_extra;
+        const base_height: f32 = if (source.group) 207.625 else if (self.feedback.parent.?.style.display == .flex) 167.625 else 137.625;
+        const desired = base_height + tool_height + file_extra;
         self.card_height = desired;
         self.target_copy.setDisplay(.flex);
         self.footer.setDisplay(.flex);
@@ -214,7 +216,7 @@ pub const View = struct {
         self.root.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = 14, .right = 14, .top = 9 } });
         self.identity.setDisplay(.flex);
         self.identity.setStyleInline(self.cx.allocator, .{ .height = .{ .fit = .{} } });
-        self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = (if (source.group) @as(f32, 130.625) else 90.625) + tool_height + file_extra } });
+        self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired - 77 } });
         if (self.card.style.height != .px or self.card.style.height.px != desired) self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired } });
         self.root.setDisplay(.flex);
     }
@@ -236,6 +238,13 @@ pub const View = struct {
         if (self.decision_pending.peek()) return;
         self.callbacks.decide(self.callbacks.context, sequence, self.arguments_hash, approved) catch |err| {
             self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
+            if (self.feedback.parent.?.style.display == .none) {
+                self.feedback.parent.?.setDisplay(.flex);
+                self.card_height += 30;
+                self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.card_height - 77 } });
+                self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.card_height } });
+            }
+            self.cx.requestRedraw();
             return;
         };
         self.decision_pending.set(true);

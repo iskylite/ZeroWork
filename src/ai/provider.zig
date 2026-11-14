@@ -111,7 +111,7 @@ pub const SkillReference = struct {
 pub const Message = struct {
     role: Role = .user,
     /// Internal provenance; provider transports still encode the wire role.
-    origin: enum { user_or_tool, host_context_notice } = .user_or_tool,
+    origin: enum { user_or_tool, host_context_notice, conversation_memory } = .user_or_tool,
     content: []const u8,
     /// Host-resolved user selection. Never serialized as part of provider history.
     skill: ?SkillReference = null,

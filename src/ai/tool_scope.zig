@@ -76,6 +76,8 @@ test "frozen directory exceeds one call without granting extra call targets" {
     try std.testing.expectError(error.DuplicateTarget, frozen.validateDirectory(&.{ 300, 300 }));
 }
 pub const Tool = enum { run_command, read_terminal, list_remote_files, read_remote_file };
+pub const default_command_timeout_ms: u32 = 300_000;
+pub const default_observation_timeout_ms: u32 = 60_000;
 pub const Call = struct {
     tool: Tool,
     command: []const u8 = "",
@@ -85,6 +87,11 @@ pub const Call = struct {
     offset: u64 = 0,
     max_entries: u32 = 128,
     expected_version: ?u64 = null,
+    timeout_ms: ?u32 = null,
+
+    pub fn executionTimeoutMs(self: Call) u32 {
+        return self.timeout_ms orelse if (self.tool == .run_command) default_command_timeout_ms else default_observation_timeout_ms;
+    }
 };
 pub const ParsedCall = struct {
     json: std.json.Parsed(Arguments),
@@ -93,7 +100,7 @@ pub const ParsedCall = struct {
         self.json.deinit();
     }
 };
-const Arguments = struct { session_ids: []const u64, command: []const u8 = "", path: []const u8 = "", max_bytes: u32 = 4096, offset: u64 = 0, max_entries: u32 = 128, source_version: []const u8 = "" };
+const Arguments = struct { session_ids: []const u64, command: []const u8 = "", path: []const u8 = "", max_bytes: u32 = 4096, offset: u64 = 0, max_entries: u32 = 128, source_version: []const u8 = "", timeout_ms: ?u32 = null };
 
 pub fn parse(allocator: std.mem.Allocator, scope: Scope, name: []const u8, arguments: []const u8) !ParsedCall {
     const tool = std.meta.stringToEnum(Tool, name) orelse return error.UnsupportedTool;
@@ -101,6 +108,7 @@ pub fn parse(allocator: std.mem.Allocator, scope: Scope, name: []const u8, argum
     errdefer json.deinit();
     const value = json.value;
     const targets = try scope.validate(value.session_ids);
+    if (value.timeout_ms) |ms| if (tool != .run_command or ms == 0) return error.InvalidToolArguments;
     switch (tool) {
         .run_command => if (std.mem.trim(u8, value.command, " \t\r\n").len == 0 or value.path.len != 0) return error.InvalidToolArguments,
         .read_remote_file, .list_remote_files => {
@@ -113,7 +121,7 @@ pub fn parse(allocator: std.mem.Allocator, scope: Scope, name: []const u8, argum
     if (value.max_entries == 0 or value.max_entries > 128) return error.InvalidToolArguments;
     const version = if (value.source_version.len == 0) null else if (value.source_version.len == 16) std.fmt.parseInt(u64, value.source_version, 16) catch return error.InvalidToolArguments else return error.InvalidToolArguments;
     if (value.offset != 0 and version == null) return error.InvalidToolArguments;
-    return .{ .json = json, .call = .{ .offset = value.offset, .max_entries = value.max_entries, .expected_version = version, .tool = tool, .command = value.command, .path = value.path, .targets = targets, .max_bytes = value.max_bytes } };
+    return .{ .json = json, .call = .{ .offset = value.offset, .max_entries = value.max_entries, .expected_version = version, .tool = tool, .command = value.command, .path = value.path, .targets = targets, .max_bytes = value.max_bytes, .timeout_ms = value.timeout_ms } };
 }
 
 /// Dispatcher binding lives with the assistant, not the selected UI tab.
@@ -126,13 +134,7 @@ pub const Dispatcher = struct {
         _ = try captured.validate(call.targets.slice());
         _ = try live.validate(call.targets.slice());
         if (call.max_bytes == 0 or call.max_bytes > 64 * 1024) return error.InvalidToolArguments;
-        if (call.tool == .run_command) {
-            switch (permission.classify(policy, call.command, captured.owner == .group)) {
-                .deny_exec_copy_only => return error.ToolExecutionDenied,
-                .need_confirm => if (!approved) return error.ToolApprovalRequired,
-                .allow_auto => {},
-            }
-        }
+        if (call.tool == .run_command and permission.commandVerdict(policy) == .need_confirm and !approved) return error.ToolApprovalRequired;
         for (call.targets.slice()) |id| try self.invoke(self.ctx, call.tool, id, if (call.tool == .run_command) call.command else call.path, call.max_bytes);
     }
 };
@@ -170,11 +172,11 @@ test "dispatch rejects stale membership before contacting any remote target" {
     const dispatcher: Dispatcher = .{ .ctx = &fake, .invoke = Fake.invoke };
     try std.testing.expectError(error.TargetOutsideAssistant, dispatcher.dispatch(live, captured, call, .{}, false));
     try std.testing.expectEqual(@as(usize, 0), fake.count);
-    try dispatcher.dispatch(captured, captured, call, .{}, false);
+    try dispatcher.dispatch(captured, captured, call, .{ .mode = .auto }, false);
     try std.testing.expectEqual(@as(usize, 2), fake.count);
 }
 
-test "approval never overrides blacklist including compounds and group writes require approval" {
+test "group commands require approval in confirm mode and pass unchanged in auto mode" {
     const Fake = struct {
         count: usize = 0,
         fn invoke(raw: *anyopaque, _: Tool, _: u64, _: []const u8, _: u32) !void {
@@ -187,9 +189,10 @@ test "approval never overrides blacklist including compounds and group writes re
     const dispatcher: Dispatcher = .{ .ctx = &fake, .invoke = Fake.invoke };
     var call: Call = .{ .tool = .run_command, .command = "touch /tmp/file", .targets = try scope.validate(&.{101}) };
     try std.testing.expectError(error.ToolApprovalRequired, dispatcher.dispatch(scope, scope, call, .{}, false));
-    for ([_][]const u8{ "rm -rf /", "printf safe; rm -rf /tmp/fixture", "if true; then shutdown now; fi" }) |command| {
-        call.command = command;
-        try std.testing.expectError(error.ToolExecutionDenied, dispatcher.dispatch(scope, scope, call, .{ .mode = .auto }, true));
-    }
+    call.command = "for i in 1 2; do printf '%s' \"$((i+2))\"; done";
+    try std.testing.expectError(error.ToolApprovalRequired, dispatcher.dispatch(scope, scope, call, .{}, false));
     try std.testing.expectEqual(@as(usize, 0), fake.count);
+    try dispatcher.dispatch(scope, scope, call, .{}, true);
+    try dispatcher.dispatch(scope, scope, call, .{ .mode = .auto }, false);
+    try std.testing.expectEqual(@as(usize, 2), fake.count);
 }

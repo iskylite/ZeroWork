@@ -13,16 +13,15 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     if (matchesProviders(query)) try page.root.appendChild(cx.allocator, try bound.providers(cx));
     if (binding.matches(query, "权限 确认 执行 自动执行 permission_mode")) {
         const section = try page.section("权限", "执行前的默认确认方式", ui.icons.shield, 24, "settings.ai.permissions", null);
-        try section.select(.{ .section = "ai", .key = "permission_mode" }, "默认权限模式", "确认后执行：部分读取自动进行，其余按策略判断。自动执行：授权范围内可自动运行命令和工具，包括组内写操作；禁止项不可执行。", &[_]ui.widgets.SelectOption{ .{ .value = "confirm", .label = "确认后执行" }, .{ .value = "auto", .label = "自动执行" } }, null);
+        try section.select(.{ .section = "ai", .key = "permission_mode" }, "默认权限模式", "确认后执行：执行命令前确认。自动执行：授权范围内可自动运行命令和工具，包括组内写操作。", &[_]ui.widgets.SelectOption{ .{ .value = "confirm", .label = "确认后执行" }, .{ .value = "auto", .label = "自动执行" } }, null);
     }
-    if (binding.matches(query, "运行方式 执行 批处理 交互 附加现有 PTY 新建 PTY 自行判断 每次询问 execution_mode 保留 任务结束 空闲后关闭 保留任务会话 session_retention")) {
+    if (binding.matches(query, "运行方式 执行 批处理 交互式 自行判断 每次询问 execution_mode 保留 任务结束 空闲后关闭 保留任务会话 session_retention")) {
         const section = try page.section("运行方式", "全局默认；对话可以单独调整", ui.icons.terminal, 28, "settings.ai.execution", null);
-        try section.select(.{ .section = "ai", .key = "execution_mode" }, "默认运行方式", "自行判断、每次询问、批处理、附加现有 PTY 或新建 PTY。仅影响下一次执行，权限独立，当前执行保持原选择。", &[_]ui.widgets.SelectOption{
+        try section.select(.{ .section = "ai", .key = "execution_mode" }, "默认运行方式", "交互式由助手按任务选择使用当前终端或新建工作会话。", &[_]ui.widgets.SelectOption{
             .{ .value = "auto", .label = "自行判断" },
             .{ .value = "ask", .label = "每次询问" },
             .{ .value = "isolated_exec", .label = "批处理" },
-            .{ .value = "attached_pty", .label = "附加现有 PTY" },
-            .{ .value = "new_pty", .label = "新建 PTY" },
+            .{ .value = "interactive", .label = "交互式" },
         }, null);
         try section.select(.{ .section = "ai", .key = "session_retention" }, "任务会话处理", "空闲后关闭、每次询问或保留任务会话。只作用于随后由 AI 创建的资源；已有终端和已创建资源保留原策略。", &[_]ui.widgets.SelectOption{
             .{ .value = "auto_idle", .label = "空闲后关闭" },

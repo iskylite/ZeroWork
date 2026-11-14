@@ -347,14 +347,14 @@ test "icon background accepts only supported choices" {
 
 test "execution policy settings mutate only validated fields and preserve permission" {
     var value: config.Config = .{};
-    try writeConfig(&value, "ai", "execution_mode", .{ .text = "attached_pty" });
+    try writeConfig(&value, "ai", "execution_mode", .{ .text = "interactive" });
     try writeConfig(&value, "ai", "session_retention", .{ .text = "keep" });
-    try std.testing.expectEqual(config.ExecutionMode.attached_pty, value.ai.execution_mode);
+    try std.testing.expectEqual(config.ExecutionMode.interactive, value.ai.execution_mode);
     try std.testing.expectEqual(config.SessionRetention.keep, value.ai.session_retention);
     try std.testing.expectEqual(config.PermissionMode.confirm, value.ai.permission_mode);
     try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ai", "execution_mode", .{ .text = "anything" }));
     try std.testing.expectError(error.InvalidType, writeConfig(&value, "ai", "session_retention", .{ .boolean = true }));
-    try std.testing.expectEqualStrings("attached_pty", read(value, "ai", "execution_mode").?.text);
+    try std.testing.expectEqualStrings("interactive", read(value, "ai", "execution_mode").?.text);
     try std.testing.expectEqualStrings("keep", read(value, "ai", "session_retention").?.text);
 }
 

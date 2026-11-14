@@ -265,7 +265,7 @@ pub const Bridge = struct {
             .run_command => {
                 if (capture.cwd == null) return failure(current, .rejected, error.UnknownDirectory);
                 const key = app.sessions.journal.begin(.{ .session = capture.owner }, null) catch |err| return failure(current, .failed, err);
-                const handle = app.local_adapter.startExec(capture.exec_binding, .{ .operation = key, .call_id = key.operation_id, .command = current.invocation.call.command, .cwd = capture.cwd, .limits = .{ .timeout_ms = current.invocation.timeout_ms, .cancel_on_capture_limit = current.invocation.output_context == null, .capture_bytes = if (current.invocation.output_context != null) @import("../ai/batch_output.zig").capture_limit else @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) } }) catch |err| {
+                const handle = app.local_adapter.startExec(capture.exec_binding, .{ .operation = key, .call_id = key.operation_id, .command = current.invocation.call.command, .cwd = capture.cwd, .limits = .{ .timeout_ms = current.invocation.call.executionTimeoutMs(), .cancel_on_capture_limit = current.invocation.output_context == null, .capture_bytes = if (current.invocation.output_context != null) @import("../ai/batch_output.zig").capture_limit else @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) } }) catch |err| {
                     _ = app.sessions.journal.failReleased(key, .{ .domain = .host, .code = @errorName(err), .cleanup = .released, .safe_message = "Local tool did not start" }) catch {};
                     if (err == error.WorkerBusy) return;
                     return failure(current, .failed, err);

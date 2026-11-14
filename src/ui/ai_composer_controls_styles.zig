@@ -22,7 +22,7 @@ pub fn height(kind: Kind) f32 {
         .model => 321.5,
         .effort => 86,
         .usage => 156,
-        .execution => 251,
+        .execution => 218,
     };
 }
 pub fn row() ui.BoxStyle {
@@ -104,7 +104,7 @@ pub fn wrapper() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 }, .padding = .{}, .gap = 0 };
 }
 pub fn panel(kind: Kind, viewport: ui.Size) ui.BoxStyle {
-    const requested_height = if (kind == .execution and viewport.height <= 480) @as(f32, 220) else height(kind);
+    const requested_height = height(kind);
     const panel_height = @min(requested_height, @max(0, viewport.height - 16));
     return .{ .width = .{ .px = @min(width(kind), @max(0, viewport.width - 16)) }, .height = .{ .px = panel_height }, .min_height = panel_height, .direction = .column, .padding = if (kind == .model) ui.Padding.all(15) else if (kind == .attachment) ui.Padding.all(10) else if (kind == .usage) ui.Padding.all(14) else .{ .top = 10, .left = 12, .right = 12, .bottom = 12 }, .gap = if (kind == .attachment or kind == .model) 6 else 8, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = if (kind == .attachment or kind == .usage or kind == .model) 11 else 14 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
 }

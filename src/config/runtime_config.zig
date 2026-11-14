@@ -194,18 +194,9 @@ pub const RuntimeConfig = struct {
         var next = candidate;
         next.config_revision = self.value.config_revision + 1;
         const changed = schema.changed(self.value, next);
-        var policy_changes = changed;
-        // A running turn owns its Provider snapshot. Catalog edits only
-        // change future turns, so do not revoke the current tool authority.
-        policy_changes.unset(schema.providers_index);
-        policy_changes.unset(default_provider_index);
-        policy_changes.unset(schema.extensions_index);
-        policy_changes.unset(schema.find("ai", "child_context_mode").?);
-        policy_changes.unset(schema.find("ai", "child_reuse_policy").?);
-        policy_changes.unset(schema.find("ai", "permission_mode").?);
-        policy_changes.unset(schema.find("ai", "execution_mode").?);
-        policy_changes.unset(schema.default_effort_index);
-        next.agent_policy_revision = if (policy_changes.count() == 0) self.value.agentPolicyRevision() else next.config_revision;
+        // Settings defaults are captured by new turns. Live authorization is
+        // checked against the current tool, target, and permission mode.
+        next.agent_policy_revision = self.value.agentPolicyRevision();
         try next.validate();
         return .{ .expected_revision = self.value.config_revision, .changed_fields = changed, .owned = try Snapshot.init(self.allocator, next) };
     }
@@ -338,7 +329,7 @@ test "AI defaults persist across restart while existing agents keep their choice
     existing.ensureDefaults(runtime.value.ai);
     const fence = runtime.value.agentPolicyRevision();
     try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "permission_mode", .{ .text = "auto" });
-    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "execution_mode", .{ .text = "new_pty" });
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "execution_mode", .{ .text = "interactive" });
     existing.ensureDefaults(runtime.value.ai);
     try std.testing.expectEqual(config.PermissionMode.confirm, existing.permission.?);
     try std.testing.expectEqual(config.ExecutionMode.auto, existing.execution_mode.?);
@@ -349,9 +340,13 @@ test "AI defaults persist across restart while existing agents keep their choice
     var next: Controls = .{};
     next.ensureDefaults(restarted.value.ai);
     try std.testing.expectEqual(config.PermissionMode.auto, next.permission.?);
-    try std.testing.expectEqual(config.ExecutionMode.new_pty, next.execution_mode.?);
+    try std.testing.expectEqual(config.ExecutionMode.interactive, next.execution_mode.?);
     try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "session_retention", .{ .text = "keep" });
-    try std.testing.expectEqual(runtime.value.config_revision, runtime.value.agentPolicyRevision());
+    try std.testing.expectEqual(fence, runtime.value.agentPolicyRevision());
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ui", "font_size", .{ .unsigned = 18 });
+    try runtime.updateSetting(std.testing.io, tmp.dir, "notify", "bell", .{ .boolean = !runtime.value.notify.bell });
+    try runtime.updateSetting(std.testing.io, tmp.dir, "log", "ring_mb", .{ .unsigned = 64 });
+    try std.testing.expectEqual(fence, runtime.value.agentPolicyRevision());
 }
 
 test "reasoning effort default persists atomically without invalidating discovery or policy" {
@@ -407,9 +402,9 @@ test "loaded background permits AI defaults while unprepared replacements remain
     try runtime.confirmLoadedBackground(&asset);
     try std.testing.expectEqual(revision, runtime.value.config_revision);
     try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "permission_mode", .{ .text = "auto" });
-    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "execution_mode", .{ .text = "new_pty" });
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "execution_mode", .{ .text = "interactive" });
     try std.testing.expectEqual(config.PermissionMode.auto, runtime.value.ai.permission_mode);
-    try std.testing.expectEqual(config.ExecutionMode.new_pty, runtime.value.ai.execution_mode);
+    try std.testing.expectEqual(config.ExecutionMode.interactive, runtime.value.ai.execution_mode);
     var candidate = runtime.value;
     candidate.ui.materials.background.path = "/fixture/other-backgrounds";
     try std.testing.expectError(error.BackgroundNotPrepared, runtime.save(std.testing.io, tmp.dir, candidate));
@@ -419,7 +414,7 @@ test "loaded background permits AI defaults while unprepared replacements remain
     var restarted = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
     defer restarted.deinit();
     try std.testing.expectEqual(config.PermissionMode.auto, restarted.value.ai.permission_mode);
-    try std.testing.expectEqual(config.ExecutionMode.new_pty, restarted.value.ai.execution_mode);
+    try std.testing.expectEqual(config.ExecutionMode.interactive, restarted.value.ai.execution_mode);
     try std.testing.expect(!restarted.background_ready);
 }
 
@@ -506,6 +501,7 @@ test "extended settings persist together and reload from the same path" {
     defer tmp.cleanup();
     var runtime = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "settings.toml");
     defer runtime.deinit();
+    const policy_revision = runtime.value.agentPolicyRevision();
     var candidate = runtime.value;
     try settings.writeConfig(&candidate, "ssh", "connect_timeout_sec", .{ .unsigned = 45 });
     try settings.writeConfig(&candidate, "ssh", "term", .{ .text = "vt100" });
@@ -521,7 +517,8 @@ test "extended settings persist together and reload from the same path" {
     var persisted = runtime.value;
     persisted.agent_policy_revision = null;
     try std.testing.expectEqualDeep(persisted, restarted.value);
-    try std.testing.expectEqual(runtime.value.agentPolicyRevision(), restarted.value.agentPolicyRevision());
+    try std.testing.expectEqual(policy_revision, runtime.value.agentPolicyRevision());
+    try std.testing.expectEqual(restarted.value.config_revision, restarted.value.agentPolicyRevision());
     try std.testing.expectEqual(@as(u16, 45), restarted.value.ssh.connect_timeout_sec);
     try std.testing.expect(!restarted.value.transfer.@"resume");
     try std.testing.expect(!restarted.value.completion.enabled);

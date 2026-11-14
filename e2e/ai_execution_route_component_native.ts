@@ -22,15 +22,21 @@ for(const width of [600,360]){
   await h.resizeWindow(width,400);
   const card=await visible('ai.host_approval'),title=await visible('ai.host_approval.title'),icon=await visible('ai.host_approval.icon.terminal'),row=await visible('ai.host_approval.routes'),footer=await visible('ai.host_approval.footer');
   assert(Math.abs(icon.rect.y+icon.rect.h/2-title.rect.y-title.rect.h/2)<.5);
-  assert.equal(row.rect.h,32);assert.equal(card.children[0].rect.h,289.625);
+  assert.equal(row.rect.h,32);assert(card.children[0].rect.h<=289.625);
   const choices=[];
   for(const suffix of ['batch','current','new']){
    const id=`ai.host_approval.route.${suffix}`,button=await visible(id);assert.equal(button.rect.h,26.5);assert(button.rect.x>=row.rect.x&&button.rect.x+button.rect.w<=row.rect.x+row.rect.w+.5);assert((await h.clickTestId(id)).ok);await visible(id);choices.push({suffix,rect:button.rect});
-   assert.deepEqual((await visible('ai.host_approval.footer')).rect,footer.rect);
+   if(suffix==='new'){
+    assert.equal(text(await visible('ai.host_approval.route.reason')),'创建工作终端前会另行确认。');
+    const currentFooter=await visible('ai.host_approval.footer');
+    assert(currentFooter.rect.y+currentFooter.rect.h<=400);
+   }else{
+    assert(!(await h.query('ai.host_approval.route.reason')).some(shown));
+    assert.deepEqual((await visible('ai.host_approval.footer')).rect,footer.rect);
+   }
    assert((await h.screenshot(join(out,`${width}-${suffix}.png`))).ok);
   }
-  const reason=await visible('ai.host_approval.route.reason');assert(text(reason).includes('此命令'));
-  for(const node of [title,icon,row,reason])assert.equal(node.effective_opacity??1,1);
+  for(const node of [title,icon,row])assert.equal(node.effective_opacity??1,1);
   report.measurements.push({width,card:card.children[0].rect,row:row.rect,title:title.rect,icon:icon.rect,footer:footer.rect,choices});
   await writeFile(join(out,`${width}.json`),JSON.stringify(await h.query('host_approval.preview'),null,2));
   assert((await h.clickTestId(width===600?'ai.host_approval.accept':'ai.host_approval.reject')).ok);

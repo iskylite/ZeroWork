@@ -23,7 +23,7 @@ pub const Request = struct {
 };
 const session = "\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
 const group = "\"group_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
-const key = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
+const key = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"description\":\"Use 1 to 128 ASCII letters, digits, or these characters: - _ . :\"}";
 const name = "\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":120}";
 const policy = "\"connection_policy\":{\"type\":\"string\",\"enum\":[\"reuse_only\",\"new_only\",\"prefer_reuse\"]}";
 const retention = "\"retention\":{\"type\":\"string\",\"enum\":[\"auto_idle\",\"ask\",\"keep\"]}";

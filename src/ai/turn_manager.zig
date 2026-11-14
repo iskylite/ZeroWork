@@ -289,7 +289,10 @@ pub const Manager = struct {
             current.cancel = cancel;
             self.turn.state = .streaming;
             if (self.input) |inbox| inbox.setWorkPhase(self.turn_id, .response);
-            const stats = try self.runRoundUntil(p, current, budget.deadline_ns, budget.timing);
+            const stats = self.runRoundUntil(p, current, budget.deadline(), budget.timing) catch |err| {
+                if (err == error.WorkspaceChanged and self.tool_host != null) continue;
+                return err;
+            };
             try budget.check();
             if (self.tool_run) |loop| if (self.tool_host) |host| try loop.acknowledgeNotice(host, cancel);
             try budget.check();
@@ -606,9 +609,6 @@ pub const Manager = struct {
                         try self.recordFailure(request.model);
                         return wait_err;
                     };
-                    if (self.input) |inbox| if (request.workspace_revision) |revision| {
-                        if (inbox.workspaceRevision() != revision) return error.WorkspaceChanged;
-                    };
                     attempt += 1;
                     if (!self.buffering_answer) if (self.observer) |observer| observer.reset(observer.context);
                     self.truncateCards(cards_start);
@@ -619,6 +619,9 @@ pub const Manager = struct {
                     self.answer_requested_tool = false;
                     self.last_error = null;
                     self.saw_done = false;
+                    if (self.input) |inbox| if (request.workspace_revision) |revision| {
+                        if (inbox.workspaceRevision() != revision) return error.WorkspaceChanged;
+                    };
                     continue;
                 } else |_| {
                     self.turn.abort();
@@ -832,7 +835,7 @@ pub const Manager = struct {
         try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = value, .verdict = "tool_plan", .target = "provider", .call_id = call_id });
         _ = try self.cards.append(.{ .exec_plan = .{
             .cmd = value,
-            .verdict = permission.classify(self.permissionEngine(), value, false),
+            .verdict = permission.commandVerdict(self.permissionEngine()),
             .call_id = call_id,
         } });
     }
@@ -886,7 +889,7 @@ pub const Manager = struct {
                     .tool = call.tool,
                     .owner = scope.owner,
                     .targets = call.targets,
-                    .verdict = if (call.tool == .run_command) permission.classify(self.permissionEngine(), command, scope.owner == .group) else .allow_auto,
+                    .verdict = if (call.tool == .run_command) permission.commandVerdict(self.permissionEngine()) else .allow_auto,
                 } });
                 try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = tool.arguments.items, .verdict = "scoped_tool_plan", .target = name, .call_id = tool.call_id });
             } else {
@@ -1927,16 +1930,12 @@ test "approval explicit Stop interrupts a valid paused budget" {
     try std.testing.expect(token.isCancelled());
 }
 
-test "v0.4.3 a no-tool response refreshes workspace without sending paused steering" {
+test "workspace changes refresh the same turn after a model response or during retry" {
     const input = @import("session_input.zig");
     const identity = @import("../host/identity.zig");
     const dynamic = @import("plugin_tools.zig");
     const a = std.testing.allocator;
     const fence: input.Fence = .{ .agent = identity.AgentId.generate(), .conversation = identity.ConversationId.generate(), .binding = 1, .environment = 1 };
-    var inbox = input.Inbox.init(a, fence);
-    defer inbox.deinit();
-    const first = try inbox.admit(fence, identity.SubmissionId.generate(), .{ .content = "initial task" }, .queue);
-    _ = try inbox.claim(first.id, first.revision, null, 31, .start);
     const current: tool_scope.Scope = .{ .owner = .{ .group = 8 }, .members = .{} };
     const context: dynamic.host.Context = .{ .conversation_id = fence.conversation, .task_id = identity.TaskId.generate(), .binding = current.owner, .binding_revision = 1, .grant_revision = 1 };
     var table = try dynamic.RequestTable.initWithHost(a, current, &.{}, &.{}, context, &.{});
@@ -1947,6 +1946,7 @@ test "v0.4.3 a no-tool response refreshes workspace without sending paused steer
         rounds: u32 = 0,
         notices_acked: u32 = 0,
         refreshed: bool = false,
+        fail_first_request: bool,
 
         fn chat(raw: *anyopaque, req: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, receiver: *anyopaque) !provider.ChatStats {
             const self: *@This() = @ptrCast(@alignCast(raw));
@@ -1962,6 +1962,10 @@ test "v0.4.3 a no-tool response refreshes workspace without sending paused steer
                     try self.inbox.beginWorkspaceChange();
                     self.inbox.setWorkspaceRevision(2);
                     self.inbox.endWorkspaceChange();
+                    if (self.fail_first_request) {
+                        sink(receiver, .{ .text = "discard this failed attempt" });
+                        return error.RequestRejected;
+                    }
                 },
                 2 => {
                     try std.testing.expectEqual(@as(?u64, 2), req.workspace_revision);
@@ -1997,24 +2001,31 @@ test "v0.4.3 a no-tool response refreshes workspace without sending paused steer
             return error.UnexpectedTool;
         }
     };
-    var fixture: Fixture = .{ .inbox = &inbox };
-    var manager = Manager.init(a);
-    defer manager.deinit();
-    manager.input = &inbox;
-    manager.scope = current;
-    manager.turn_id = 31;
-    manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute, .refresh_authority = Fixture.refresh, .acknowledge_notice = Fixture.ack };
-    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = TestRetryProvider.models }, .{
-        .model = "fixture",
-        .system = "workspace A",
-        .messages = &.{},
-        .tool_table = &table,
-        .workspace_revision = 1,
-    });
-    try std.testing.expectEqual(@as(u32, 2), fixture.rounds);
-    try std.testing.expectEqual(@as(u32, 1), fixture.notices_acked);
-    try std.testing.expectEqual(input.Pause.workspace_changed, inbox.receipt(fixture.steer.?).?.pause.?);
-    try std.testing.expectEqual(input.Delivery.consumed, inbox.receipt(first.id).?.delivery);
+    for ([_]bool{ false, true }) |fail_first_request| {
+        var run_inbox = input.Inbox.init(a, fence);
+        defer run_inbox.deinit();
+        const accepted = try run_inbox.admit(fence, identity.SubmissionId.generate(), .{ .content = "initial task" }, .queue);
+        _ = try run_inbox.claim(accepted.id, accepted.revision, null, 31, .start);
+        var fixture: Fixture = .{ .inbox = &run_inbox, .fail_first_request = fail_first_request };
+        var manager = Manager.init(a);
+        defer manager.deinit();
+        manager.input = &run_inbox;
+        manager.scope = current;
+        manager.turn_id = 31;
+        manager.retry_policy = .{ .delays_ms = .{ 1, 2, 4 } };
+        manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute, .refresh_authority = Fixture.refresh, .acknowledge_notice = Fixture.ack };
+        _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = TestRetryProvider.models }, .{
+            .model = "fixture",
+            .system = "workspace A",
+            .messages = &.{},
+            .tool_table = &table,
+            .workspace_revision = 1,
+        });
+        try std.testing.expectEqual(@as(u32, 2), fixture.rounds);
+        try std.testing.expectEqual(@as(u32, 1), fixture.notices_acked);
+        try std.testing.expectEqual(input.Pause.workspace_changed, run_inbox.receipt(fixture.steer.?).?.pause.?);
+        try std.testing.expectEqual(input.Delivery.consumed, run_inbox.receipt(accepted.id).?.delivery);
+    }
 }
 
 test "v0.4.3 workspace refresh compacts completed history before publishing and acknowledging the notice" {
@@ -2164,8 +2175,8 @@ test "v0.4.3 workspace refresh compacts completed history before publishing and 
             .model = "fixture",
             .system = Fixture.old,
             .messages = &.{
-                .{ .content = "old user turn " ++ @as([18_000]u8, @splat('h')) },
-                .{ .role = .assistant, .content = "old assistant response" },
+                .{ .content = "old user turn" },
+                .{ .role = .assistant, .content = "old assistant response " ++ @as([18_000]u8, @splat('h')) },
                 .{ .content = "recent user turn" },
                 .{ .role = .assistant, .content = "recent assistant response" },
             },

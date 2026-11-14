@@ -241,7 +241,7 @@ pub const Bridge = struct {
                         for (current.target_errors) |maybe_error| if (maybe_error) |err| {
                             if (err == error.WorkerBusy) waiting = true else failed = true;
                         };
-                        if (waiting and @import("../platform/realtime.zig").monotonicNs() - current.started_ns >= @as(i128, current.invocation.timeout_ms) * std.time.ns_per_ms) {
+                        if (waiting and @import("../platform/realtime.zig").monotonicNs() - current.started_ns >= @as(i128, current.invocation.call.executionTimeoutMs()) * std.time.ns_per_ms) {
                             current.preflight_error = error.ToolDeadlineExceeded;
                             failed = true;
                         }

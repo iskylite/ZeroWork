@@ -15,13 +15,13 @@ pub const contribution: host.Contribution = .{
     .authority = .local_files,
     .definition = .{
         .id = tool_id,
-        .description = "List managed local file changes for the current task and authorized child tasks. Optionally select task_ref, or pass one exact operation_ref or change_ref from a receipt to read the bounded diff. A version discontinuity describes edits outside the listed operations. verify observes current files without changing the original commit receipt. Shell, MCP, remote tools, and external edits are outside this log.",
+        .description = "List managed local file changes for the current task and authorized child tasks. For a list, optionally pass task_ref, cursor and limit. For a bounded diff, pass exactly one of operation_ref or change_ref from a receipt and omit task_ref, cursor and limit. A version discontinuity describes edits outside the listed operations. verify observes current files without changing the original commit receipt. Shell, MCP, remote tools, and external edits are outside this log.",
         .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++
             "\"task_ref\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}," ++
             "\"operation_ref\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}," ++
             "\"change_ref\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}," ++
             "\"cursor\":{\"type\":\"string\",\"maxLength\":128}," ++
-            "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":12}," ++
+            "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":12,\"description\":\"List only. Maximum 4 with verify=true.\"}," ++
             "\"verify\":{\"type\":\"boolean\"}}}",
     },
 };

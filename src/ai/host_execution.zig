@@ -7,16 +7,16 @@ const execution = terminal.execution;
 const host = @import("host_tools.zig");
 const journal_mod = @import("lifecycle_journal.zig");
 const ref_field = "\"execution_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
-const key_field = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
+const key_field = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"description\":\"Use 1 to 128 ASCII letters, digits, or these characters: - _ . :\"}";
 const wait_fields = "\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}";
 const until_field = "\"until\":{\"type\":\"string\",\"enum\":[\"revision\",\"decision\",\"terminal\"]}";
-const output_fields = "\"output_cursor\":{\"type\":\"string\",\"maxLength\":128},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65536}";
+const output_fields = "\"output_cursor\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"description\":\"Use the exact next_cursor string from the previous result.\"},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65536}";
 const default_decision_wait_ms = 5 * std.time.ms_per_min;
 pub const contributions = [_]host.Contribution{
-    tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. For nested shells, first host.get_session and include control.shell_context.id/revision as shell_id/shell_revision. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. If ShellPromptNotObserved or IntegrationUnavailable rejects this call before dispatch, inspect host.read_terminal/host.get_session and use host.attach_shell to initialize the confirmed current Shell, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
+    tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. Provide shell_id and shell_revision together or omit both. For nested shells, both are required; use control.shell_context.id and revision from host.get_session. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. If ShellPromptNotObserved or IntegrationUnavailable rejects this call before dispatch, inspect host.read_terminal/host.get_session and use host.attach_shell to initialize the confirmed current Shell, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
     tool("get_execution", "Read one execution in this conversation/task, its true process/output/recording stages, recording range and bounded incremental output. An ordinary prompt or printed marker never proves completion.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
-    tool("wait_execution", "For an ongoing command, call once with its execution_ref and until=decision, omitting wait_ms. The host waits within the task budget, or up to five minutes when no task deadline is set, for a foreground result, explicit input request, failure, unknown outcome or takeover. Ordinary output stays buffered. Explicit wait_ms requests a shorter bounded observation. Legacy until=revision remains available. If the wait times out or is interrupted, use the returned state and preserve the original execution_ref; do not replay the command or start a shell sleep to check it.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
-    tool("send_execution_input", "Send approved non-secret text or Enter to the current execution using its live input capability, current fence and fresh per-input approval. controlled_line is a helper-attested consumer; terminal_stream only authorizes ordinary PTY bytes and does not prove which foreground program consumes them or that it is waiting. A written receipt means native write completed, not foreground consumption. Text is single line UTF-8, at most 4096 bytes; Enter is a separate key request. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Use user takeover for unknown input targets, raw/TUI interaction or secrets; never infer input authority from prompt text.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
+    tool("wait_execution", "For an ongoing command, call once with its execution_ref and until=decision, omitting wait_ms. The host waits within the task budget, or up to five minutes when no task deadline is set, for a foreground result, explicit input request, failure, unknown outcome or takeover. Ordinary output stays buffered. Explicit wait_ms requests a shorter bounded observation. Use after_revision with until=revision to wait for a newer revision. If the wait times out or is interrupted, use the returned state and preserve the original execution_ref; do not replay the command or start a shell sleep to check it.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
+    tool("send_execution_input", "Send input to the current execution using its live input capability, current fence and fresh per-input approval. Supply exactly one of text, key=enter, or host_secret_request=true. Omit the other two fields. controlled_line is a helper-attested consumer; terminal_stream only authorizes ordinary PTY bytes and does not prove which foreground program consumes them or that it is waiting. A written receipt means native write completed, not foreground consumption. Text is a single line of UTF-8, at most 4096 bytes, with no control characters. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Use user takeover for unknown input targets, raw/TUI interaction or secrets; never infer input authority from prompt text.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\",\"enum\":[true],\"description\":\"Set to true only to request the supported native secret collector. Omit when sending text or Enter.\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("stop_execution", "Revoke future AI input for this exact execution and request only its supported foreground interrupt. Release is distinct from process exit; unknown effects stay unknown. This never aborts a shared SSH transport or closes a borrowed terminal.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ "},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("attach_shell", @import("shell_attachment.zig").description, @import("shell_attachment.zig").schema),
 };
@@ -318,16 +318,13 @@ pub const Controller = struct {
         }
         return self.interruptedWait(wait, reason);
     }
-    /// Host control loop calls this independently of model polling; an abandoned
-    /// tool worker therefore stops renewing and the terminal watchdog releases.
+    /// Close admission immediately. The driver retries durable cancellation
+    /// and observes already submitted commands under their original identity.
     pub fn finishTask(self: *Controller, context: host.Context) !void {
         for (self.finished_tasks.items) |prior| if (sameAuthority(prior, context)) return;
         try self.finished_tasks.append(self.allocator, context);
-        // A known-unsent mailbox operation cannot become a new effect after
-        // model_done. Already accepted/running commands keep their lease.
-        for (self.entries.items, 0..) |entry, index| if (sameAuthority(entry.context, context) and entry.dispatch_pending != null) try self.cancelPending(index, "TaskFinishing");
     }
-    fn taskFinishing(self: *const Controller, context: host.Context) bool {
+    pub fn taskFinishing(self: *const Controller, context: host.Context) bool {
         for (self.finished_tasks.items) |prior| if (sameAuthority(prior, context)) return true;
         return false;
     }
@@ -424,7 +421,8 @@ pub const Controller = struct {
         }
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
         const target = self.backend.authorize(self.backend.context, invocation, ref, command, hash) catch |err| {
-            if (err == error.WorkerBusy or err == error.ApprovalRequired) return err;
+            if (err == error.WorkerBusy) return err;
+            if (err == error.ApprovalRequired or err == error.ToolApprovalChanged) return error.ReconfirmTerminalCommand;
             try self.journal.update(operation, record.revision, .{ .stage = if (err == error.CancelledBeforeDispatch) .cancelled_unsent else .rejected });
             if (err == error.CancelledBeforeDispatch) return err;
             return rejectedRun(self.allocator, invocation, err);
@@ -503,7 +501,10 @@ pub const Controller = struct {
         }
         const sequence = if (retry_input) |input_index| self.inputs.items[input_index].input_sequence else try identity.advance(self.next_input_sequence);
         const request: execution.InputRequest = .{ .grant = grant, .wait_sequence = wait.sequence, .input_sequence = sequence, .kind = payload.kind, .text = payload.text };
-        try authorize(self.backend.context, invocation, entry.target, entry.id, request);
+        authorize(self.backend.context, invocation, entry.target, entry.id, request) catch |err| {
+            if (err == error.ApprovalRequired) return error.ReconfirmExecutionInput;
+            return err;
+        };
         const service = try self.backend.resolve(self.backend.context, entry.context, entry.target);
         const current = try self.terminalSnapshot(service);
         if (!current.owner.eql(entry.target) or current.execution_id == null or !current.execution_id.?.eql(entry.id) or current.grant == null or !std.meta.eql(current.grant.?, grant) or current.input_wait == null or !std.meta.eql(current.input_wait.?, wait)) return error.InputConflict;
@@ -580,6 +581,10 @@ pub const Controller = struct {
     fn refresh(self: *Controller, index: usize, now: i64) !void {
         const entry = &self.entries.items[index];
         if (entry.dispatch_pending != null) {
+            if (self.taskFinishing(entry.context)) {
+                try self.cancelPending(index, "TaskFinishing");
+                return;
+            }
             if (entry.stop_intent != .none) {
                 try self.cancelPending(index, "CancelledBeforeDispatch");
                 return;
@@ -641,7 +646,7 @@ pub const Controller = struct {
         }
         const previous = entry.snapshot;
         if (terminalState(current.state) and entry.final_output == null) entry.final_output = self.terminalOutput(service, entry.id, 0, 65536) catch null;
-        if (current.grant) |grant| if (entry.stop_intent == .none and now >= entry.next_renew_at) {
+        if (current.grant) |grant| if (entry.stop_intent == .none and !self.taskFinishing(entry.context) and now >= entry.next_renew_at) {
             _ = try self.terminalCall(service, .{ .renew = grant });
             entry.next_renew_at = now + execution.renew_ms;
         };

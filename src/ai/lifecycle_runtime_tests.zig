@@ -30,6 +30,8 @@ const Fixture = struct {
     fail_after_publish: bool = false,
     fail_before_dispatch: bool = false,
     approval_required: bool = false,
+    revise_approval_once: bool = false,
+    authorization_count: usize = 0,
     bootstrap_required: bool = false,
     bootstrap_installed: ?*backend.bootstrap_product.Prepared = null,
     bootstrap_install_count: usize = 0,
@@ -43,7 +45,8 @@ const Fixture = struct {
         switch (call.action) {
             .authorize => |request| {
                 if (!self.close_authorized and request.kind == .close_session) return error.CloseApprovalRequired;
-                call.result = .{ .authorized = .{ .source = request.source, .saved_source = request.saved_source, .session = request.session, .group = request.group, .retention = request.retention orelse .auto_idle, .approval_required = self.approval_required, .explicit_user_close = self.close_authorized, .bootstrap_required = self.bootstrap_required } };
+                self.authorization_count += 1;
+                call.result = .{ .authorized = .{ .source = request.source, .saved_source = request.saved_source, .session = request.session, .group = request.group, .retention = request.retention orelse .auto_idle, .approval_required = self.approval_required, .explicit_user_close = self.close_authorized, .bootstrap_required = self.bootstrap_required, .impact_revision = if (self.revise_approval_once) @as(u64, if (self.authorization_count == 1) 1 else 2) else null } };
             },
             .prepare_group => |request| {
                 self.prepare_count += 1;
@@ -342,6 +345,59 @@ test "lifecycle runtime requires the precise lifecycle approval before preparing
     try std.testing.expectEqual(@as(usize, 0), fixture.prepare_count);
     try std.testing.expect(std.mem.indexOf(u8, result.blocks[0].structured, "ApprovalRequired") != null);
     try std.testing.expect(!result.receipt.side_effect_started);
+}
+
+test "lifecycle runtime reconfirms changed impact before dispatching once" {
+    const approval = @import("host_approval.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const owner = try backend.ProcessJournal.acquire(.{ .data_root = "/test/group-reconfirmation", .dir = tmp.dir, .io = io });
+    defer owner.release();
+    var fixture: Fixture = .{ .owner = owner, .ctx = context(), .approval_required = true, .revise_approval_once = true };
+    var broker: approval.Broker = .{};
+    try broker.configure(fixture.ctx, 1);
+    const args = try createArgs(fixture.ctx, "重新确认");
+    defer a.free(args);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, args, .{});
+    defer parsed.deinit();
+    const Worker = struct {
+        fixture: *Fixture,
+        broker: *approval.Broker,
+        invocation: host.Invocation,
+        result: ?anyerror!host.Result = null,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            var runtime = self.fixture.runtime();
+            runtime.approval = self.broker;
+            self.result = runtime.execute(self.fixture.scheduler(), self.invocation, a, null);
+            self.done.store(true, .release);
+        }
+    };
+    var worker: Worker = .{ .fixture = &fixture, .broker = &broker, .invocation = .{ .context = fixture.ctx, .authority = .lifecycle, .operation_id = 1, .turn_id = 1, .call_id = "reconfirm", .tool_id = "host.create_group", .arguments = parsed.value, .arguments_json = args, .arguments_hash = @import("../host/terminal_execution.zig").digest(args), .canonical_arguments_hash = try @import("canonical_arguments.zig").digest(a, parsed.value) } };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    defer thread.join();
+    errdefer broker.stop();
+    var first: ?approval.Snapshot = null;
+    var count: usize = 0;
+    const deadline = (@import("retry.zig").Clock{}).now() + 3 * std.time.ns_per_s;
+    while (!worker.done.load(.acquire)) {
+        if (broker.snapshot()) |snapshot| {
+            count += 1;
+            if (first) |previous| {
+                try std.testing.expect(snapshot.sequence > previous.sequence);
+                try std.testing.expect(snapshot.requires_user_input);
+                try std.testing.expectError(error.StaleApproval, broker.decide(previous.sequence, previous.arguments_hash, true));
+            } else first = snapshot;
+            try broker.decide(snapshot.sequence, snapshot.arguments_hash, true);
+        }
+        if ((@import("retry.zig").Clock{}).now() > deadline) return error.ReconfirmationTimedOut;
+        try @import("retry.zig").wait(2, null);
+    }
+    var result = try worker.result.?;
+    defer result.deinit(a);
+    try std.testing.expectEqual(@import("plugin_tools.zig").Status.succeeded, result.status);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(usize, 1), fixture.publish_count);
 }
 
 test "lifecycle runtime persists notice watermark only after matching task acknowledgement" {

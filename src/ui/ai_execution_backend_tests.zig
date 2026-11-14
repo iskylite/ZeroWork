@@ -401,7 +401,7 @@ test "execution backend wait retains approved identity while native dispatch is 
     defer store.deinit();
     var bridge = Bridge.init(a);
     defer bridge.deinit();
-    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .attached_pty);
+    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .interactive);
     defer controller.deinitAfterWorker();
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
@@ -443,7 +443,7 @@ test "execution backend wait retains approved identity while native dispatch is 
     try std.testing.expect(runner.entries.items[wait.index].id.eql(id));
 }
 
-test "execution backend fixed modes deny borrowed new PTY and forbid rules precede approval" {
+test "execution backend interactive accepts current terminal and isolated execution refuses it at preflight" {
     var fixture: Fixture = undefined;
     try fixture.init();
     var roster = groups.Roster.init(a);
@@ -454,7 +454,7 @@ test "execution backend fixed modes deny borrowed new PTY and forbid rules prece
     defer store.deinit();
     var bridge = Bridge.init(a);
     defer bridge.deinit();
-    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .new_pty);
+    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .interactive);
     defer controller.deinitAfterWorker();
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
@@ -465,7 +465,7 @@ test "execution backend fixed modes deny borrowed new PTY and forbid rules prece
     defer call.deinit();
     var prepared = try backend.prepare(call.value, a);
     defer prepared.deinit();
-    try std.testing.expectError(error.ModeConflict, ctx.preflight(prepared.invocation, prepared.command, prepared.command_hash));
+    _ = try ctx.preflight(prepared.invocation, prepared.command, prepared.command_hash);
     controller.execution_policy.execution_mode = .isolated_exec;
     var isolated = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
     defer isolated.deinit();
@@ -475,11 +475,11 @@ test "execution backend fixed modes deny borrowed new PTY and forbid rules prece
     var allowed = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
     defer allowed.deinit();
     try allowed.captureTask(&controller);
-    var forbidden = try Call.init(controller.authority, target, "printf safe; rm -rf /", 22);
-    defer forbidden.deinit();
-    var blocked = try backend.prepare(forbidden.value, a);
-    defer blocked.deinit();
-    try std.testing.expectError(error.PermissionDenied, allowed.preflight(blocked.invocation, blocked.command, blocked.command_hash));
+    var heredoc = try Call.init(controller.authority, target, "cat <<'EOF'\nhello\nEOF", 22);
+    defer heredoc.deinit();
+    var multiline = try backend.prepare(heredoc.value, a);
+    defer multiline.deinit();
+    _ = try allowed.preflight(multiline.invocation, multiline.command, multiline.command_hash);
     try std.testing.expect(broker.snapshot() == null);
 }
 
@@ -494,7 +494,7 @@ test "execution backend keeps admitted handoff lineage but rejects old binding n
     defer store.deinit();
     var bridge = Bridge.init(a);
     defer bridge.deinit();
-    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .attached_pty);
+    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .interactive);
     defer controller.deinitAfterWorker();
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
@@ -520,7 +520,7 @@ test "execution backend keeps admitted handoff lineage but rejects old binding n
     _ = try api.resolve(api.context, original, target);
 }
 
-test "execution backend new PTY accepts only this Task actual owned creation and revokes on user takeover" {
+test "execution backend interactive accepts the task work terminal and revokes the old admission on takeover" {
     var fixture: Fixture = undefined;
     try fixture.init();
     var roster = groups.Roster.init(a);
@@ -531,7 +531,7 @@ test "execution backend new PTY accepts only this Task actual owned creation and
     defer store.deinit();
     var bridge = Bridge.init(a);
     defer bridge.deinit();
-    var controller = try makeController(&fixture, &store, &roster, &bridge, source, .new_pty);
+    var controller = try makeController(&fixture, &store, &roster, &bridge, source, .interactive);
     defer controller.deinitAfterWorker();
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
@@ -574,11 +574,6 @@ test "execution backend new PTY accepts only this Task actual owned creation and
     try std.testing.expectEqual(@import("../host/lifecycle_supervisor.zig").Ownership.handed_to_user, fixture.app.lifecycle_supervisor.resource(target).?.snapshot.ownership);
     _ = try api.resolve(api.context, current, target);
     try std.testing.expectError(error.OwnershipChanged, authorize(&ctx, prepared));
-    var next_call = try Call.init(current, target, "true", 42);
-    defer next_call.deinit();
-    var next_prepared = try backend.prepare(next_call.value, a);
-    defer next_prepared.deinit();
-    try std.testing.expectError(error.ModeConflict, ctx.preflight(next_prepared.invocation, next_prepared.command, next_prepared.command_hash));
 }
 
 const Withdrawal = enum { membership, config_revision, closed_conversation };
@@ -603,7 +598,7 @@ fn revokeWithdrawnAuthorityBody(fixture: *Fixture, roster: *groups.Roster, kind:
     defer store.deinit();
     var bridge = Bridge.init(a);
     defer bridge.deinit();
-    var controller = try makeController(fixture, &store, roster, &bridge, target, .attached_pty);
+    var controller = try makeController(fixture, &store, roster, &bridge, target, .interactive);
     defer controller.deinitAfterWorker();
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};
@@ -954,7 +949,7 @@ test "execution backend keeps config policy revision distinct from exact metadat
     fixture.config_.agent_policy_revision = fixture.config_.config_revision;
     fixture.config_.config_revision += 1;
     fixture.config_.ai.permission_mode = .auto;
-    fixture.config_.ai.execution_mode = .new_pty;
+    fixture.config_.ai.execution_mode = .interactive;
     _ = try authorize(&ctx, prepared);
     fixture.config_.agent_policy_revision = fixture.config_.config_revision;
     try std.testing.expectError(error.ScopeChanged, authorize(&ctx, prepared));
@@ -1001,7 +996,7 @@ test "current-tab execution preflight rejects external existing and nonexistent 
     defer store.deinit();
     var bridge = Bridge.init(a);
     defer bridge.deinit();
-    var controller = try makeController(&fixture, &store, &roster, &bridge, current, .attached_pty);
+    var controller = try makeController(&fixture, &store, &roster, &bridge, current, .interactive);
     defer controller.deinitAfterWorker();
     var lookup: Lookup = .{ .controller = &controller };
     var broker: approvals.Broker = .{};

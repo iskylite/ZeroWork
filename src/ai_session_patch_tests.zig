@@ -13,6 +13,7 @@ const RuntimeFixture = struct {
     cleaned: bool = true,
     ready_next: bool = false,
     uses_tools: bool = false,
+    joined_count: usize = 0,
     hold_prepare: bool = false,
     fail_first: bool = false,
     preparing: std.atomic.Value(bool) = .init(false),
@@ -1081,7 +1082,7 @@ test "AI session PATCH steering compaction leaves inbox unlocked for stop and ne
     const update = try std.testing.allocator.alloc(u8, 6000);
     defer std.testing.allocator.free(update);
     @memset(update, 'b');
-    const initial = try inbox.admit(ticket, .generate(), .{ .content = old }, .queue);
+    const initial = try inbox.admit(ticket, .generate(), .{ .content = "Original requirement." }, .queue);
     _ = try inbox.claim(initial.id, initial.revision, null, 1, .start);
     var fixture: Fixture = .{ .inbox = inbox, .ticket = ticket, .update = update };
     var manager = Manager.init(std.testing.allocator);
@@ -1091,7 +1092,12 @@ test "AI session PATCH steering compaction leaves inbox unlocked for stop and ne
     manager.scope = .{ .owner = agent.owner, .members = .{} };
     manager.tool_limits.context_window = 8192;
     manager.compaction_config = .{ .kind = .openai_compat, .endpoint = "http://127.0.0.1:1", .model = "mock", .auth = .none, .context_window = 8192 };
-    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "mock", .system = "", .messages = &.{}, .max_output = 512 });
+    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{
+        .model = "mock",
+        .system = "",
+        .messages = &.{ .{ .content = "Prior requirement." }, .{ .role = .assistant, .content = old } },
+        .max_output = 512,
+    });
     try std.testing.expect(fixture.compacted);
     try std.testing.expectEqual(@as(usize, 2), fixture.calls);
 }
@@ -1197,12 +1203,24 @@ test "AI session PATCH asynchronous checkpoint acknowledges durability before pu
             @as(*@This(), @ptrCast(@alignCast(raw))).releases += 1;
         }
     };
+    const Joined = struct {
+        fn notify(_: *anyopaque, runner: *runtime.Runner) void {
+            std.debug.assert(runner.thread == null and runner.pending_commit);
+            std.debug.assert(runner.record.?.history.messages.len == 0);
+            // Record the driver's early handoff without borrowing a fixture
+            // across the worker thread boundary.
+            const fixture: *RuntimeFixture = @ptrCast(@alignCast(runner.backend.context));
+            fixture.joined_count += 1;
+        }
+    };
     var fixture: RuntimeFixture = .{};
     fixture.release.store(true, .release);
     var gate: Gate = .{};
     var service = runtime.Service.init(std.testing.allocator);
     defer service.deinit();
-    const runner = try service.attach(.{ .session = 123 }, fixture.backend());
+    var backend = fixture.backend();
+    backend.joined = Joined.notify;
+    const runner = try service.attach(.{ .session = 123 }, backend);
     const ticket = try service.store.create(runner.agent.id);
     service.store.persist = .{ .context = &gate, .write = Gate.write, .checkpoint = Gate.begin };
     _ = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "input" }, null);
@@ -1221,6 +1239,7 @@ test "AI session PATCH asynchronous checkpoint acknowledges durability before pu
     try std.testing.expect(runner.agent.busy and runner.pending_commit);
     try std.testing.expectEqual(@as(usize, 0), record.history.messages.len);
     try std.testing.expectEqual(@as(usize, 1), gate.starts);
+    try std.testing.expectEqual(@as(usize, 1), fixture.joined_count);
     gate.ready_value = true;
     gate.fail = true;
     try std.testing.expectError(error.StorageUnavailable, service.poll());
@@ -1232,6 +1251,7 @@ test "AI session PATCH asynchronous checkpoint acknowledges durability before pu
     try std.testing.expectEqualStrings("done", record.history.messages[record.history.messages.len - 1].content);
     try std.testing.expectEqual(@as(usize, 2), gate.starts);
     try std.testing.expectEqual(@as(usize, 2), gate.releases);
+    try std.testing.expectEqual(@as(usize, 1), fixture.joined_count);
 }
 
 test "AI session PATCH async journal checkpoint survives concurrent binding handoff and replay" {

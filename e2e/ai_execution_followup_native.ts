@@ -104,7 +104,7 @@ const server = createServer(async (req, res) => {
   }
 });
 await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-await writeFile(join(data, 'config.toml'), `[meta]\nconfig_revision=1\n[ui]\ntheme="sauber"\nfont_size=14\n[ai]\ndefault_provider="followup-fixture"\npermission_mode="auto"\nexecution_mode="attached_pty"\nfollow_up_mode="steer"\n[[ai.providers]]\nid="followup-fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${(server.address() as any).port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="followup-fixture"\ncontext_window=200000\ndefault=true\n`);
+await writeFile(join(data, 'config.toml'), `[meta]\nconfig_revision=1\n[ui]\ntheme="sauber"\nfont_size=14\n[ai]\ndefault_provider="followup-fixture"\npermission_mode="auto"\nexecution_mode="interactive"\nfollow_up_mode="steer"\n[[ai.providers]]\nid="followup-fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${(server.address() as any).port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="followup-fixture"\ncontext_window=200000\ndefault=true\n`);
 process.env.ZENIT_E2E_FILE_RPC_DIR = rpc;
 const h = await import(join(prefix, 'share/zenit/harness/client.ts'));
 const log = await open(join(isolated, 'app.log'), 'w');
