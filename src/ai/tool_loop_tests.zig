@@ -770,14 +770,14 @@ test "unknown result or thrown receipt blocks further dispatch and is never fail
     for ([_]@FieldType(ControlledHost, "mode"){ .uncertain, .throws, .no_exit }) |mode| {
         var other = df;
         other.id = "second-call";
-        var script: Script = .{ .rounds = &.{.{ .calls = &.{ df, other } }} };
+        var script: Script = .{ .rounds = &.{ .{ .calls = &.{ df, other } }, .{ .text = "已有工具结果待核实。" } } };
         defer script.deinit();
         var host: ControlledHost = .{ .mode = mode };
         var manager = managerFor(&host);
         defer manager.deinit();
-        try std.testing.expectError(error.ToolOutcomeUnknown, manager.run(script.interface(), makeRequest(null)));
+        _ = try manager.run(script.interface(), makeRequest(null));
         try std.testing.expectEqual(@as(usize, 1), host.count);
-        try std.testing.expectEqual(@as(usize, 1), script.index);
+        try std.testing.expectEqual(@as(usize, 2), script.index);
         try std.testing.expect(manager.tool_run.?.uncertain);
         const record = manager.tool_run.?.records.items[0];
         try std.testing.expect(record.dispatched);
@@ -913,16 +913,24 @@ test "answer only retry retains completed ledger and cannot replay the same logi
     try std.testing.expectEqualStrings("recovered answer", manager.cards.cards.items[manager.cards.count() - 1].text);
 }
 
-test "answer only retry rejects unexpected tool calls without a second execution" {
-    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .calls = &.{df} } }, .transient_round = 1 };
+test "answer only retry requests text again when a provider emits a tool call" {
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .text = "I will execute this again.", .calls = &.{df} }, .{ .text = "recovered text" } }, .transient_round = 1 };
     defer script.deinit();
     var host: ControlledHost = .{};
     var manager = managerFor(&host);
     defer manager.deinit();
     manager.retry_policy.max_attempts = 0;
     try std.testing.expectError(error.Transient, manager.run(script.interface(), makeRequest(null)));
-    try std.testing.expectError(error.ToolInvocationDuringAnswerRetry, manager.resumeAnswer(script.interface(), null));
+    const stats = try manager.resumeAnswer(script.interface(), null);
+    try std.testing.expectEqual(@as(u32, 2), stats.request_count);
     try std.testing.expectEqual(@as(usize, 1), host.count);
+    try std.testing.expectEqualStrings("recovered text", manager.round_text.items);
+    try std.testing.expectEqual(@as(usize, 1), manager.tool_run.?.records.items.len);
+    for (script.requests.items[2..]) |wire| {
+        const request = try std.json.parseFromSlice(std.json.Value, a, wire, .{});
+        defer request.deinit();
+        try std.testing.expect(request.value.object.get("tools") == null);
+    }
 }
 
 test "frozen messages definitions owner and model own their source buffers" {
@@ -1007,7 +1015,7 @@ test "binary stdout is preserved with explicit encoding and no fabricated exit" 
     try std.testing.expectEqualStrings("failed", target.get("status").?.string);
 }
 
-test "answer retry explains unknown SSH effects without replaying or changing exact facts" {
+test "answer recovery explains unknown SSH effects without replaying or changing exact facts" {
     var other = df;
     other.id = "must-not-dispatch";
     var script: Script = .{ .rounds = &.{ .{ .calls = &.{ df, other } }, .{ .text = "已有部分输出，原操作结果仍待核实。" } } };
@@ -1015,14 +1023,11 @@ test "answer retry explains unknown SSH effects without replaying or changing ex
     var host: ControlledHost = .{ .mode = .remote_unknown };
     var manager = managerFor(&host);
     defer manager.deinit();
-    try std.testing.expectError(error.ToolOutcomeUnknown, manager.run(script.interface(), makeRequest(null)));
-    try std.testing.expectEqual(@as(usize, 1), host.count);
-    try std.testing.expectEqual(@as(usize, 1), script.index);
+    const stats = try manager.run(script.interface(), makeRequest(null));
+    try std.testing.expectEqual(@as(u32, 2), stats.request_count);
     const run = manager.tool_run.?;
     try std.testing.expect(run.uncertain);
     try std.testing.expectError(error.ToolOutcomeUnknown, run.nextRequest());
-    try run.verification_notes.appendSlice(run.arena.allocator(), "Verified original operation: local cleanup remains unknown.");
-    _ = try manager.resumeAnswer(script.interface(), null);
     try std.testing.expectEqual(@as(usize, 1), host.count);
     try std.testing.expectEqual(run, manager.tool_run.?);
     try std.testing.expect(run.uncertain);
@@ -1034,7 +1039,6 @@ test "answer retry explains unknown SSH effects without replaying or changing ex
     try std.testing.expect(request.value.object.get("tools") == null);
     const wire = script.requests.items[1];
     try std.testing.expect(std.mem.indexOf(u8, wire, "[Answer-only recovery]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, wire, "Verified original operation: local cleanup remains unknown.") != null);
     try std.testing.expect(std.mem.indexOf(u8, wire, "Partial output is not proof of completion") != null);
     try std.testing.expect(std.mem.indexOf(u8, wire, "original partial stdout") != null);
     try std.testing.expect(std.mem.indexOf(u8, wire, "EarlierToolOutcomeUnknown") != null);
@@ -1052,12 +1056,12 @@ test "answer retry explains unknown SSH effects without replaying or changing ex
 }
 
 test "answer retry of unknown tools rejects new calls and preserves owner and budget gates" {
-    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .calls = &.{df} } } };
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .calls = &.{df} }, .{ .calls = &.{df} } }, .transient_round = 1, .interrupted_error = error.ProviderFailure };
     defer script.deinit();
     var host: ControlledHost = .{ .mode = .throws };
     var manager = managerFor(&host);
     defer manager.deinit();
-    try std.testing.expectError(error.ToolOutcomeUnknown, manager.run(script.interface(), makeRequest(null)));
+    try std.testing.expectError(error.ProviderFailure, manager.run(script.interface(), makeRequest(null)));
     const run = manager.tool_run.?;
     const body = try a.dupe(u8, run.records.items[0].result_body.?);
     defer a.free(body);
@@ -1073,22 +1077,24 @@ test "answer retry of unknown tools rejects new calls and preserves owner and bu
     run.limits.context_window = 1;
     try std.testing.expectError(error.ContextFixedOverhead, manager.resumeAnswer(script.interface(), null));
     run.limits.context_window = 200_000;
-    try std.testing.expectError(error.ToolInvocationDuringAnswerRetry, manager.resumeAnswer(script.interface(), null));
+    try run.verification_notes.appendSlice(run.arena.allocator(), "Verified original operation: local cleanup remains unknown.");
+    _ = try manager.resumeAnswer(script.interface(), null);
+    try std.testing.expect(std.mem.indexOf(u8, script.requests.items[2], "Verified original operation: local cleanup remains unknown.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, manager.round_text.items, "结果仍待核实") != null);
     try std.testing.expectEqual(@as(usize, 1), host.count);
-    try std.testing.expectEqual(@as(usize, 2), script.index);
+    try std.testing.expectEqual(@as(usize, 3), script.index);
     try std.testing.expect(run.uncertain);
     try std.testing.expectEqualStrings(body, run.records.items[0].result_body.?);
     try std.testing.expectEqualStrings("frozen system", run.request.system);
 }
 
-test "answer retry keeps known exit separate from unknown SSH cleanup" {
+test "answer recovery keeps known exit separate from unknown SSH cleanup" {
     var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .text = "命令已返回退出码 0，但资源清理仍待确认。" } } };
     defer script.deinit();
     var host: ControlledHost = .{ .mode = .cleanup_unknown };
     var manager = managerFor(&host);
     defer manager.deinit();
-    try std.testing.expectError(error.ToolOutcomeUnknown, manager.run(script.interface(), makeRequest(null)));
-    _ = try manager.resumeAnswer(script.interface(), null);
+    _ = try manager.run(script.interface(), makeRequest(null));
     const run = manager.tool_run.?;
     const target = run.records.items[0].outcome.?.targets[0];
     try std.testing.expectEqual(@as(usize, 1), host.count);
@@ -1143,7 +1149,7 @@ test "answer retry after timeout or interrupted text sends a fresh request with 
         const body = try std.json.parseFromSlice(std.json.Value, a, script.requests.items[1], .{});
         defer body.deinit();
         const messages = body.value.object.get("messages").?.array.items;
-        try std.testing.expectEqualStrings("original system", messages[0].object.get("content").?.string);
+        try std.testing.expect(std.mem.startsWith(u8, messages[0].object.get("content").?.string, "original system\n\n[Answer-only recovery]"));
         try std.testing.expectEqualStrings("previous question", messages[1].object.get("content").?.string);
         try std.testing.expectEqualStrings("previous answer", messages[2].object.get("content").?.string);
         try std.testing.expectEqualStrings("current question", messages[3].object.get("content").?.string);
@@ -1159,6 +1165,7 @@ test "answer retry after a completed tool and provider timeout retains paired re
     var host: ControlledHost = .{};
     var manager = managerFor(&host);
     defer manager.deinit();
+    manager.retry_policy.max_attempts = 0;
     var original_stop: provider.CancelToken = .{};
     try std.testing.expectError(error.Timeout, manager.run(script.interface(), makeRequest(&original_stop)));
     const captured = manager.tool_run.?;
@@ -1180,6 +1187,21 @@ test "answer retry after a completed tool and provider timeout retains paired re
     try std.testing.expectEqualStrings("actual-controlled-output", result.value.object.get("targets").?.array.items[0].object.get("stdout").?.string);
     try std.testing.expect(body.value.object.get("tools") == null);
     try std.testing.expect(!next_stop.isCancelled());
+}
+
+test "interrupted follow-up stream retries the model round with the original tool receipt" {
+    for ([_]anyerror{ error.Timeout, error.ProviderMissingDone }) |failure| {
+        var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .text = "continued from the original result" } }, .transient_round = 1, .interrupted_error = failure };
+        defer script.deinit();
+        var host: ControlledHost = .{};
+        var manager = managerFor(&host);
+        defer manager.deinit();
+        const stats = try manager.run(script.interface(), makeRequest(null));
+        try std.testing.expectEqual(@as(u32, 3), stats.request_count);
+        try std.testing.expectEqual(@as(usize, 1), host.count);
+        try std.testing.expectEqualStrings(script.requests.items[1], script.requests.items[2]);
+        try std.testing.expectEqualStrings("continued from the original result", manager.round_text.items);
+    }
 }
 
 test "manual answer retry honors retained Retry-After deadline without requesting or replaying" {
@@ -1273,6 +1295,66 @@ test "host uncertain execution blocks a fresh command while preserving exact rea
     try std.testing.expectEqual(@as(usize, 1), gateway.writes);
     try std.testing.expectEqual(@as(usize, 4), gateway.calls);
     try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
+}
+
+test "batch SSH unknown receipt allows read-only follow-up without redispatch" {
+    const tools = @import("plugin_tools.zig");
+    const legacy = @import("legacy_adapter.zig");
+    const Gateway = struct {
+        commands: usize = 0,
+        reads: usize = 0,
+        fn legacyDispatch(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn handler(_: *anyopaque, _: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
+            return error.UnexpectedDirectDispatch;
+        }
+        fn execute(raw: *anyopaque, call: tools.DynamicInvocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) ![]tools.ToolResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const command = std.mem.eql(u8, call.parsed.entry.definition.id, "run_command");
+            if (command) self.commands += 1 else self.reads += 1;
+            const results = try allocator.alloc(tools.ToolResult, 1);
+            results[0] = .{ .status = if (command) .outcome_unknown else .succeeded, .receipt = .{ .owner = call.parsed.entry.targets[0].owner, .operation_id = call.operation_id, .local_released = !command, .remote_effect_unknown = command } };
+            return results;
+        }
+    };
+    var gateway: Gateway = .{};
+    const bindings = [_]tools.ToolBinding{
+        .{ .plugin_id = "ssh", .definition_id = "run_command", .handler = Gateway.handler },
+        .{ .plugin_id = "ssh", .definition_id = "read_remote_file", .handler = Gateway.handler },
+    };
+    const members = [_]tools.Member{.{ .owner = .{ .session_id = @fromBackingInt(101), .generation = 1 }, .plugin_id = "ssh", .context = &gateway, .bindings = &bindings }};
+    var table = try tools.RequestTable.init(a, scope, &legacy.builtin_definitions, &members);
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const read_name = for (wire) |tool| {
+        if (std.mem.eql(u8, tool.name(), "read_remote_file")) break tool.name();
+    } else return error.MissingReadTool;
+    const run_name = for (wire) |tool| {
+        if (std.mem.eql(u8, tool.name(), "run_command")) break tool.name();
+    } else return error.MissingRunTool;
+    const initial: provider.ToolCall = .{ .id = "initial-batch", .name = run_name, .arguments = "{\"session_ids\":[101],\"command\":\"sleep 75\"}" };
+    var replay = initial;
+    replay.id = "new-call-id";
+    const read: provider.ToolCall = .{ .id = "read-after-timeout", .name = read_name, .arguments = "{\"session_ids\":[101],\"path\":\"/tmp/observed.log\"}" };
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{initial} }, .{ .calls = &.{ replay, read } }, .{ .text = "读取成功，原命令结果仍待核实。" } } };
+    defer script.deinit();
+    var manager = manager_mod.Manager.init(a);
+    defer manager.deinit();
+    manager.scope = scope;
+    manager.tool_host = .{ .context = &gateway, .execute = Gateway.legacyDispatch, .execute_dynamic = Gateway.execute };
+    manager.tool_limits.context_window = 100_000;
+    _ = try manager.run(script.interface(), .{ .model = "test", .system = "", .messages = &.{.{ .content = "check the existing log" }}, .tools = wire, .tool_table = &table });
+    try std.testing.expectEqual(@as(usize, 1), gateway.commands);
+    try std.testing.expectEqual(@as(usize, 1), gateway.reads);
+    const run = manager.tool_run.?;
+    try std.testing.expect(run.uncertain and run.host_observation_only);
+    try std.testing.expect(!run.records.items[1].dispatched and run.records.items[2].dispatched);
+    const request = try std.json.parseFromSlice(std.json.Value, a, script.requests.items[1], .{});
+    defer request.deinit();
+    const visible = request.value.object.get("tools").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), visible.len);
+    try std.testing.expectEqualStrings(read_name, visible[0].object.get("function").?.object.get("name").?.string);
 }
 
 test "group terminal continuation stops when a second dispatch has no receipt" {

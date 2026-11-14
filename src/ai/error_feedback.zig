@@ -47,13 +47,58 @@ pub fn budgetFailureMessage(err: anyerror) ?[]const u8 {
 pub fn recoveryReason(err: anyerror, diagnostic: []const u8, http_status: u16) []const u8 {
     if (localFailureLabel(@errorName(err))) |message| return message;
     if (budgetFailureMessage(err)) |message| return message;
+    if (executionFailureMessage(err)) |message| return message;
     if (http_status != 0) return diagnostic;
     return switch (err) {
-        error.ToolOutcomeUnknown => "部分工具执行结果待核实，已保留收到的内容",
         error.Timeout => "模型长时间未返回新内容，已保留收到的答复和附件",
+        error.ProviderMissingDone => "模型回复提前结束，请重试答复。",
+        error.StreamCallbackFailed => "ZeroWork 处理模型回复时出错，请重试答复。",
+        error.HtmlResponse, error.InvalidModelResponse => diagnostic,
+        error.ResponseTooLarge => "模型返回的内容超过大小上限，请缩小问题范围后重试。",
+        error.InsecureEndpoint => "模型服务地址需要使用 HTTPS，请检查 AI 设置。",
+        error.UnsupportedThinking, error.UnsupportedEffort, error.UnsupportedToolProtocol, error.UnsupportedImageProtocol, error.ProviderProtocolMismatch => "当前服务与所选模型功能不兼容，请检查模型设置或更换模型。",
+        error.InvalidToolDefinition, error.InvalidToolMessage, error.InvalidToolArguments, error.InvalidToolCall, error.MissingToolName, error.MissingToolCallId, error.ToolIdChanged, error.ToolNameChanged, error.DuplicateToolCall, error.ToolArgumentsTooLarge => "工具调用信息不完整或格式有误，本轮已中断。",
+        error.UnknownHostName, error.ConnectionRefused, error.ConnectionResetByPeer, error.NetworkUnreachable, error.ConnectionTimedOut => "与模型服务通信时出错，请检查网络连接后重试。",
         error.RequestRejected, error.RateLimited => "服务暂不可用或请求受限，请在冷却结束后重试",
-        error.MissingApiKey, error.ProviderFailure => "服务请求失败，请检查 AI 设置",
-        else => diagnostic,
+        error.ProviderFailure => "模型服务未能完成这次请求，请检查 AI 设置后重试。",
+        else => @import("../ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "本轮遇到未能识别的问题，请在对话中查看错误详情。",
+    };
+}
+
+pub fn recoveryTitle(failure: ?anyerror) []const u8 {
+    return switch (failure orelse return "请求失败") {
+        error.ContextFixedOverhead => "模型窗口不足",
+        error.Timeout, error.SharedTaskTimeout => "请求超时",
+        error.AiPolicyChanged, error.AiGrantChanged, error.AiBindingChanged, error.ConversationEnded, error.ConversationEnding, error.ConversationNotFound, error.MissingAssistantOwner, error.TaskAuthorityUnavailable, error.ChildTaskAuthorityChanged, error.ToolResultScopeChanged, error.RecordingScopeChanged, error.ScopeChanged => "本轮已中断",
+        else => "请求失败",
+    };
+}
+
+fn executionFailureMessage(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.AiPolicyChanged => "ZeroWork 设置在运行期间发生变化，本轮已停止使用原设置执行。",
+        error.AiGrantChanged => "本轮使用的工具授权已变更，需要按当前授权重新规划。",
+        error.AiBindingChanged, error.BindingChanged, error.ToolOwnerChanged => "对话绑定的终端或会话组已变更，本轮无法继续使用原目标。",
+        error.ConversationEnded, error.ConversationEnding => "这段 AI 对话已结束或正在关闭，本轮已停止。",
+        error.ConversationNotFound => "找不到这次任务所属的 AI 对话，本轮已中断。",
+        error.MissingAssistantOwner, error.GroupRemoved, error.StaleSession => "这次任务原来使用的终端或会话组已不可用，本轮已中断。",
+        error.TaskAuthorityUnavailable => "ZeroWork 已找不到本轮的工具执行权限，本轮已中断。",
+        error.ChildTaskAuthorityChanged, error.ParentBindingChanged, error.NoActiveParentTask => "子任务已无法沿用原来的会话或授权，本轮已中断。",
+        error.ToolResultScopeChanged => "刚收到的工具结果与当前任务对不上，ZeroWork 停止了本轮。",
+        error.RecordingScopeChanged => "ZeroWork 无法重新确认本轮可读取的终端记录，本轮已中断。",
+        error.InvalidHostAuthority, error.InvalidBindingHandoff, error.StaleNotice, error.ScopeChanged => "ZeroWork 无法确认本轮仍可使用原来的操作目标或工具权限，已停止继续执行。",
+        error.WorkspaceChanged => "本轮使用的工作目录已变更，请确认当前目录后重新发送。",
+        error.ToolResultRevoked => "部分工具结果的读取权限已失效，包含这些结果的请求已中断。",
+        error.ToolOutcomeUnknown => "部分工具执行结果待核实，已保留收到的内容",
+        error.Cancelled, error.CancelledBeforeDispatch => "本轮已取消。",
+        error.TransitionPending => "对话正在切换绑定，本轮暂时无法继续。",
+        error.ContextUnavailable, error.ToolHostUnavailable, error.ToolScopeUnavailable => "ZeroWork 无法取得本轮所需的会话或工具，本轮已中断。",
+        error.SharedTaskTimeout => "主任务和子任务已用完共用的运行时间，本轮已停止。",
+        error.TaskAlreadyFinished => "这次任务已经结束，无法继续执行。",
+        error.TaskPersistenceFailed => "ZeroWork 无法保存任务进度，本轮已中断。",
+        error.ModelSlotQueueFull => "等待模型的任务太多，请稍后重试。",
+        error.UpdateInProgress => "ZeroWork 正在准备更新，本轮无法继续。",
+        else => null,
     };
 }
 
@@ -69,9 +114,17 @@ test "AI recovery distinguishes retained tool capacity from transport failure an
     try std.testing.expect(std.mem.indexOf(u8, message, "工具结果缓存") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "不会重放") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "连接") == null);
-    try std.testing.expectEqualStrings("请求失败 · StreamCallbackFailed", recoveryReason(error.StreamCallbackFailed, "请求失败 · StreamCallbackFailed", 0));
+    try std.testing.expectEqualStrings("ZeroWork 处理模型回复时出错，请重试答复。", recoveryReason(error.StreamCallbackFailed, "请求失败 · StreamCallbackFailed", 0));
     try std.testing.expectEqualStrings("HTTP 422 · 服务端拒绝请求参数", recoveryReason(error.ProviderFailure, "HTTP 422 · 服务端拒绝请求参数", 422));
     try std.testing.expectEqualStrings("部分工具执行结果待核实，已保留收到的内容", recoveryReason(error.ToolOutcomeUnknown, "请求失败 · ToolOutcomeUnknown", 0));
+}
+
+test "AI recovery explains authority failures and reserves unknown codes for details" {
+    try std.testing.expectEqualStrings("ZeroWork 设置在运行期间发生变化，本轮已停止使用原设置执行。", recoveryReason(error.AiPolicyChanged, "AiPolicyChanged", 0));
+    try std.testing.expectEqualStrings("对话绑定的终端或会话组已变更，本轮无法继续使用原目标。", recoveryReason(error.AiBindingChanged, "AiBindingChanged", 0));
+    try std.testing.expectEqualStrings("这段 AI 对话已结束或正在关闭，本轮已停止。", recoveryReason(error.ConversationEnded, "ConversationEnded", 0));
+    try std.testing.expectEqualStrings("ZeroWork 无法确认本轮仍可使用原来的操作目标或工具权限，已停止继续执行。", recoveryReason(error.ScopeChanged, "ScopeChanged", 0));
+    try std.testing.expectEqualStrings("本轮遇到未能识别的问题，请在对话中查看错误详情。", recoveryReason(error.FutureFailureCode, "FutureFailureCode", 0));
 }
 
 test "local image and context budget failures explain retained facts instead of claiming a stream loss" {

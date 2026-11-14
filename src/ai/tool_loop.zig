@@ -280,7 +280,7 @@ pub const Loop = struct {
                 const read = entry.definition.effect == .read_state or entry.definition.effect == .observe_image;
                 if (read or (!self.read_only and (std.mem.eql(u8, entry.definition.id, "host.stop_execution") or
                     (std.mem.eql(u8, entry.definition.id, "host.reconnect_session") and uncertain_terminal) or
-                    (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") and (independent_group_work or self.hasRecoveredTerminal(null, null))) or
+                    (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") and independent_group_work) or
                     (std.mem.eql(u8, entry.definition.id, "run_command") and independent_group_work)))) try visible.append(self.arena.allocator(), definition);
             }
             self.request.tools = try visible.toOwnedSlice(self.arena.allocator());
@@ -572,15 +572,7 @@ pub const Loop = struct {
         const target = @import("host_lifecycle.zig").sessionHandle(context, ref.string) catch return false;
         if (std.mem.eql(u8, name, "host.reconnect_session")) return self.hasUncertainTerminal(target) and !self.hasRecoveredTerminal(target, null);
         if (!std.mem.eql(u8, name, "host.run_in_terminal")) return false;
-        if (context.binding == .group and self.permitsIndependentGroupTarget(target.session_id)) return true;
-        if (!self.hasRecoveredTerminal(null, target)) return false;
-        // Preserve the unknown outcome and never replay the old command.
-        const command = arguments.object.get("command") orelse return false;
-        if (command != .string) return false;
-        // Only these argument-free shell observations have no remote writes
-        // or expansions. Other effects remain blocked while outcome is unknown.
-        const text = std.mem.trim(u8, command.string, " \t\r\n");
-        return std.mem.eql(u8, text, "pwd") or std.mem.eql(u8, text, "pwd -P") or std.mem.eql(u8, text, "pwd -L");
+        return context.binding == .group and self.permitsIndependentGroupTarget(target.session_id);
     }
     /// Retains results even when Stop wins or the next request exceeds budget.
     pub fn complete(self: *Loop, text: []const u8, calls: []const provider.ToolCall, host: Host, policy: permission.Engine, policy_revision: u64, cancel: ?*provider.CancelToken) !void {
@@ -882,8 +874,9 @@ pub const Loop = struct {
                 },
             };
             if (result.status == .outcome_unknown or result.receipt.remote_effect_unknown or !result.receipt.local_released) {
-                if (!self.uncertain and result.managed_local_file) self.host_observation_only = true;
-                if (!result.managed_local_file) self.host_observation_only = false;
+                const can_observe = result.managed_local_file or std.mem.eql(u8, parsed.entry.definition.id, "run_command");
+                if (!self.uncertain) self.host_observation_only = can_observe;
+                if (!can_observe) self.host_observation_only = false;
                 self.uncertain = true;
             }
             target.* = .{ .session_id = id, .status = result.status, .content = blocks, .operation_id = result.receipt.operation_id, .local_released = result.receipt.local_released, .remote_effect_unknown = result.receipt.remote_effect_unknown };

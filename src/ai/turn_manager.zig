@@ -138,6 +138,8 @@ pub const Manager = struct {
     tool_run: ?*tool_loop.Loop = null,
     round_text: std.ArrayList(u8) = .empty,
     pending_tools: std.ArrayList(PendingTool) = .empty,
+    buffering_answer: bool = false,
+    answer_requested_tool: bool = false,
     const PendingTool = struct {
         index: u32,
         call_id: ?[]u8 = null,
@@ -291,10 +293,7 @@ pub const Manager = struct {
             try budget.check();
             if (self.tool_run) |loop| if (self.tool_host) |host| try loop.acknowledgeNotice(host, cancel);
             try budget.check();
-            total.input_tokens +|= stats.input_tokens;
-            total.output_tokens +|= stats.output_tokens;
-            total.request_count +|= stats.request_count;
-            total.usage_reported = total.usage_reported and stats.usage_reported;
+            addStats(&total, stats);
             if (self.pending_tools.items.len == 0 or self.tool_run == null) {
                 if (self.shared_task) |shared| if (self.tool_run) |loop| if (shared.root.needsChildren(shared.task)) {
                     if (self.round_text.items.len != 0) loop.appendPrepared(try loop.prepareMessage(.{ .role = .assistant, .content = self.round_text.items }));
@@ -325,8 +324,15 @@ pub const Manager = struct {
             if (self.input) |inbox| inbox.setWorkPhase(self.turn_id, .tools);
             try self.completeTools(current.cancel, self.permissionEngine(), frozen_policy_revision);
             try budget.check();
-            if (self.tool_run.?.uncertain and !self.tool_run.?.host_observation_only) return error.ToolOutcomeUnknown;
-            try budget.check();
+            const loop = self.tool_run.?;
+            if (loop.uncertain and !loop.host_observation_only) {
+                if (self.input) |inbox| {
+                    inbox.pauseAll(.failure);
+                    inbox.setWorkPhase(self.turn_id, .response);
+                }
+                addStats(&total, try self.finishFromReceipts(p, loop, budget, cancel));
+                return total;
+            }
         }
     }
 
@@ -415,28 +421,67 @@ pub const Manager = struct {
             if (observer.round_start) |notify| notify(observer.context);
             try budget.check();
             observer.reset(observer.context);
-            try budget.check();
         }
+        return self.finishFromReceipts(p, loop, budget, cancel);
+    }
+
+    fn addStats(total: *provider.ChatStats, stats: provider.ChatStats) void {
+        total.input_tokens +|= stats.input_tokens;
+        total.output_tokens +|= stats.output_tokens;
+        total.request_count +|= stats.request_count;
+        total.usage_reported = total.usage_reported and stats.usage_reported;
+    }
+
+    fn finishFromReceipts(self: *Manager, p: provider.Provider, loop: *tool_loop.Loop, budget: anytype, cancel: *provider.CancelToken) !provider.ChatStats {
         // Include recovery guidance in admission without changing the frozen
         // system snapshot. Unknown receipts remain unknown after this answer.
         const original_system = loop.request.system;
-        const answer_system = if (loop.uncertain) try std.fmt.allocPrint(self.allocator, "{s}\n\n[Answer-only recovery]\nGenerate an answer using only the retained transcript and tool results. No tools are available: do not request or replay any operation. Distinguish completed, failed, skipped and unknown results using the recorded receipts. Partial output is not proof of completion. Unknown remote effects or cleanup remain unverified; do not claim success or that cleanup finished. Explain missing evidence and any verification still needed.\nRead-only observations (they do not clear prior unknown outcomes):\n{s}", .{ original_system, loop.verification_notes.items }) else null;
-        defer if (answer_system) |text| self.allocator.free(text);
-        if (answer_system) |text| loop.request.system = text;
-        defer loop.request.system = original_system;
+        const original_tools = loop.request.tools;
+        const answer_system = try std.fmt.allocPrint(self.allocator, "{s}\n\n[Answer-only recovery]\nGenerate an answer using only the retained transcript and tool results. No tools are available: do not request or replay any operation. Distinguish completed, failed, skipped and unknown results using the recorded receipts. Partial output is not proof of completion. Unknown remote effects or cleanup remain unverified; do not claim success or that cleanup finished. Explain missing evidence and any verification still needed.\nRead-only observations (they do not clear prior unknown outcomes):\n{s}", .{ original_system, loop.verification_notes.items });
+        defer self.allocator.free(answer_system);
+        loop.request.system = answer_system;
+        loop.request.tools = &.{};
+        defer {
+            loop.request.system = original_system;
+            loop.request.tools = original_tools;
+        }
         try loop.checkRequestBudget();
         var resumed = loop.request;
         resumed.messages = loop.messages.items;
-        resumed.tools = &.{};
         resumed.cancel = cancel;
-        // The retry uses the updated transcript after budget compaction.
-        try budget.check();
-        const stats = try self.runRoundUntil(p, resumed, budget.deadline_ns, budget.timing);
-        try budget.check();
-        if (self.pending_tools.items.len != 0) return error.ToolInvocationDuringAnswerRetry;
+        self.buffering_answer = true;
+        defer self.buffering_answer = false;
+        self.turn.state = .streaming;
+        const card_count = self.cards.count();
+        const reasoning_start = self.reasoning.items.len;
+        // A recovery attempt shares the original budget and never enters dispatch.
+        var total: provider.ChatStats = .{};
+        for (0..2) |attempt| {
+            try budget.check();
+            const stats = try self.runRoundUntil(p, resumed, budget.deadline(), budget.timing);
+            addStats(&total, stats);
+            try budget.check();
+            if (!self.answer_requested_tool and std.mem.trim(u8, self.round_text.items, " \t\r\n").len != 0) break;
+            self.truncateCards(card_count);
+            self.open_text_card = null;
+            self.reasoning.shrinkRetainingCapacity(reasoning_start);
+            if (attempt == 1) {
+                const fallback = if (loop.uncertain)
+                    "\n\n部分工具执行结果仍待核实。请展开原工具结果，查看已收到的输出、退出状态和可用的核实记录。"
+                else
+                    "\n\n模型未能根据已收到的结果生成答复。请展开本轮工具结果查看详情。";
+                self.round_text.clearRetainingCapacity();
+                try self.round_text.appendSlice(self.allocator, fallback);
+                try self.appendText(fallback);
+            }
+        }
+        if (self.observer) |observer| {
+            try observer.delta(observer.context, .{ .text = self.round_text.items });
+            try observer.delta(observer.context, .done);
+        }
         try self.turn.done();
         try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = loop.turn_id, .command = self.command, .verdict = "answer_retry_done", .target = resumed.model });
-        return stats;
+        return total;
     }
 
     pub fn cooldownRemainingMs(self: *const Manager) u64 {
@@ -478,6 +523,7 @@ pub const Manager = struct {
         var round_cancel = round_budget.childToken();
         if (self.observer) |observer| if (observer.round_start) |notify| notify(observer.context);
         self.clearPending();
+        self.answer_requested_tool = false;
         self.round_text.clearRetainingCapacity();
         self.saw_done = false;
         self.last_error = null;
@@ -511,7 +557,10 @@ pub const Manager = struct {
             self.retry_attempt = attempt;
             if (self.tool_run) |loop| _ = loop.discardRevokedResults();
             self.publishContextUsage(attempt_request, null, 0);
-            const result = p.chat(p.ctx, attempt_request, receive, self);
+            const result = if (p.chat(p.ctx, attempt_request, receive, self)) |stats|
+                if (self.last_error != null) error.StreamCallbackFailed else if (!self.saw_done) error.ProviderMissingDone else stats
+            else |err|
+                err;
             if (retry_after_ms) |delay| self.cooldown_deadline_ms = monotonicMs() +| delay;
             // Stop wins on both success and failure. Providers and their
             // epilogues must also stay within the original retry budget.
@@ -527,12 +576,6 @@ pub const Manager = struct {
                 return if (cancelled) error.Cancelled else error.Timeout;
             }
             if (result) |stats| {
-                if (self.last_error != null or !self.saw_done) {
-                    self.audit_log.truncate(audit_start);
-                    self.turn.abort();
-                    try self.recordFailure(request.model);
-                    return if (self.last_error != null) error.StreamCallbackFailed else error.ProviderMissingDone;
-                }
                 if (stats.usage_reported and stats.input_tokens > 0) self.last_context_usage = @import("context_usage.zig").Sample.capture(attempt_request, stats.input_tokens) catch null;
                 self.publishContextUsage(attempt_request, if (stats.usage_reported and stats.input_tokens > 0) stats.input_tokens else null, self.round_text.items.len);
                 var reported = stats;
@@ -540,7 +583,10 @@ pub const Manager = struct {
                 return reported;
             } else |err| {
                 self.audit_log.truncate(audit_start);
-                if (!retry.isRetryable(err) or (request.workspace_revision != null and err != error.RequestRejected and err != error.RateLimited)) {
+                const interrupted_stream = err == error.ProviderMissingDone or err == error.Timeout;
+                const retryable = interrupted_stream or (retry.isRetryable(err) and
+                    (request.workspace_revision == null or err == error.RequestRejected or err == error.RateLimited));
+                if (!retryable) {
                     self.turn.abort();
                     try self.recordFailure(request.model);
                     return err;
@@ -564,12 +610,13 @@ pub const Manager = struct {
                         if (inbox.workspaceRevision() != revision) return error.WorkspaceChanged;
                     };
                     attempt += 1;
-                    if (self.observer) |observer| observer.reset(observer.context);
+                    if (!self.buffering_answer) if (self.observer) |observer| observer.reset(observer.context);
                     self.truncateCards(cards_start);
                     self.open_text_card = null; // retry restarts the text run
                     self.reasoning.shrinkRetainingCapacity(reasoning_start);
                     self.round_text.clearRetainingCapacity();
                     self.clearPending();
+                    self.answer_requested_tool = false;
                     self.last_error = null;
                     self.saw_done = false;
                     continue;
@@ -595,7 +642,7 @@ pub const Manager = struct {
             if (delta != .done) self.last_error = "delta after completed provider round";
             return;
         }
-        if (delta != .tool_plan) if (self.observer) |observer| observer.delta(observer.context, delta) catch {
+        if (!self.buffering_answer and delta != .tool_plan) if (self.observer) |observer| observer.delta(observer.context, delta) catch {
             self.last_error = "live output delivery failed";
         };
         switch (delta) {
@@ -614,6 +661,10 @@ pub const Manager = struct {
                 };
             },
             .tool_plan => |value| {
+                if (self.buffering_answer) {
+                    self.answer_requested_tool = true;
+                    return;
+                }
                 self.queueTool(value.index, value.call_id, value.name, value.arguments) catch {
                     self.last_error = "invalid or oversized tool stream";
                 };
@@ -1073,7 +1124,7 @@ test "retry deadline native HTTP 429 long backoff can be stopped and joined" {
 }
 
 const TestMultiRun = struct {
-    const Step = struct { work_ms: u32 = 0, calls: []const []const u8 = &.{}, err: ?anyerror = null };
+    const Step = struct { work_ms: u32 = 0, calls: []const []const u8 = &.{}, err: ?anyerror = null, text: []const u8 = "" };
     const scope: tool_scope.Scope = .{ .owner = .{ .session = 101 }, .members = .{ .ids = .{101} ++ @as([15]u64, @splat(0)), .len = 1 } };
     timing: *TestRetryTiming,
     steps: []const Step,
@@ -1095,6 +1146,7 @@ const TestMultiRun = struct {
         self.provider_calls += 1;
         self.timing.ns += @as(i128, step.work_ms) * std.time.ns_per_ms;
         if (step.err) |err| return err;
+        if (step.text.len != 0) sink(ctx, .{ .text = step.text });
         for (step.calls, 0..) |id, index| sink(ctx, .{ .tool_plan = .{ .call_id = id, .name = "read_terminal", .index = @intCast(index), .arguments = "{\"session_ids\":[101]}" } });
         sink(ctx, .done);
         return .{ .output_tokens = 1 };
@@ -1241,7 +1293,7 @@ test "tool deadline Stop during notice acknowledgement cannot finish the run" {
 }
 test "tool deadline manual answer retry gets one fresh budget including setup and automatic retries" {
     var timing: TestRetryTiming = .{};
-    var fixture: TestMultiRun = .{ .timing = &timing, .steps = &.{ .{ .work_ms = 40, .calls = &.{"completed"} }, .{ .err = error.Transient }, .{ .work_ms = 20, .err = error.Transient }, .{ .work_ms = 2 } } };
+    var fixture: TestMultiRun = .{ .timing = &timing, .steps = &.{ .{ .work_ms = 40, .calls = &.{"completed"} }, .{ .err = error.Transient }, .{ .work_ms = 20, .err = error.Transient }, .{ .work_ms = 2, .text = "retained result" } } };
     var manager = fixture.makeManager();
     defer manager.deinit();
     manager.retry_policy.max_attempts = 0;

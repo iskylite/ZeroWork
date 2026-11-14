@@ -274,7 +274,7 @@ pub const Runner = struct {
         if (self.worker.?.manager.tool_run) |loop| {
             try loop.sealInterrupted();
             _ = loop.discardRevokedResults();
-            const snapshot = try wire.History.copy(self.allocator, loop.messages.items, if (self.capture_final and self.worker.?.manager.saw_done and !loop.uncertain) self.worker.?.manager.round_text.items else "");
+            const snapshot = try wire.History.copy(self.allocator, loop.messages.items, if (self.capture_final and self.worker.?.manager.saw_done) self.worker.?.manager.round_text.items else "");
             self.worker.?.result.deinit();
             self.worker.?.result = snapshot;
         }
@@ -780,7 +780,8 @@ pub const Service = struct {
             }
             runner.saved = true;
             runner.pending_commit = false;
-            record.inbox.finish(context.turn, if (state == .done and runner.failure == null) null else if (state == .stopped) .stop else .failure);
+            const uncertain = if (runner.worker.?.manager.tool_run) |loop| loop.uncertain else false;
+            record.inbox.finish(context.turn, if (state == .stopped) .stop else if (state == .done and runner.failure == null and !uncertain) null else .failure);
             runner.agent.busy = false;
             runner.pending_notify = true;
         }

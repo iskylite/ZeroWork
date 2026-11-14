@@ -2662,7 +2662,7 @@ const AiHost = struct {
             };
         }
         if (self.execution().request_failure != null) {
-            var message = try (HistoryMessage{ .user = false, .text = @constCast(self.execution().failure_label) }).clone(self.allocator);
+            var message = try (HistoryMessage{ .user = false, .text = @constCast(self.recoveryReason()) }).clone(self.allocator);
             additions.append(self.allocator, message) catch |err| {
                 message.deinit(self.allocator);
                 return err;
@@ -4267,7 +4267,7 @@ const AiHost = struct {
             .ticket = .{ .owner = self.execution().request_owner.?, .turn = self.managerRef().turn_id, .conversation_id = if (self.execution().request_host_context) |context| context.conversation_id else null },
             .reason = self.recoveryReason(),
             .detail = self.execution().failure_label,
-            .title = if (self.execution().request_failure != null and self.execution().request_failure.? == error.ContextFixedOverhead) "模型窗口不足" else if (run != null and run.?.compaction_failure != null) "上下文压缩失败" else if (self.execution().request_failure != null and self.execution().request_failure.? == error.Timeout) "请求超时" else "请求失败",
+            .title = if (run != null and run.?.compaction_failure != null) "上下文压缩失败" else @import("ai/error_feedback.zig").recoveryTitle(self.execution().request_failure),
             .retries = self.managerRef().retry_attempt,
             .max_retries = self.managerRef().retry_policy.max_attempts,
             .retry_enabled = safe and cooldown == 0,
@@ -7237,12 +7237,11 @@ const AiHost = struct {
                 const self = value.host;
                 const backend = self.execution();
                 const app = self.application_host orelse return error.ContextUnavailable;
-                const live = (value.bridge.host_binding orelse return error.ScopeChanged).context;
-                if (!live.eql(value.previous) or app.workspace.app_config.agentPolicyRevision() != backend.request_policy_revision) return error.ScopeChanged;
+                try self.validateAuthorityRefresh(value.bridge, value.previous);
                 const next_context = value.next.host_binding.?.context;
                 const states = self.assistant_states orelse return error.ConversationNotFound;
                 const state = states.findConversation(next_context.conversation_id) orelse return error.ConversationNotFound;
-                if (state.closed or state.ended) return error.ScopeChanged;
+                if (state.closed or state.ended) return error.ConversationEnded;
                 const service = self.shared_service orelse return error.ContextUnavailable;
                 const record = service.service.store.find(next_context.conversation_id) orelse return error.ConversationNotFound;
                 // A directory, membership or capability may change while the
@@ -7253,20 +7252,20 @@ const AiHost = struct {
                     if (group.membership_revision != value.next.roster_revision) return error.AuthorityRefreshStale;
                 }
                 if (value.next.queries_only != value.bridge.refreshQueriesOnly()) return error.AuthorityRefreshStale;
-                const controller = lookupLifecycleTask(self, next_context.conversation_id, next_context.task_id) orelse return error.ScopeChanged;
+                const controller = lookupLifecycleTask(self, next_context.conversation_id, next_context.task_id) orelse return error.TaskAuthorityUnavailable;
                 const prior_authority = controller.authority;
                 try controller.refreshAuthority(next_context);
                 errdefer controller.authority = prior_authority;
-                const finish_refresh = if (backend.task_finish) |*finish| try finish.prepareRefresh(next_context) else null;
+                const finish_refresh = if (backend.task_finish) |*finish| finish.prepareRefresh(next_context) catch |err| return if (err == error.ScopeChanged) error.TaskAuthorityUnavailable else err else null;
                 const RecordingAccess = @import("ui/ai_recording_query_access.zig").Access;
-                const recording_capture = if (backend.recording_access) |*access| try access.prepareCapture(next_context, app, self.roster, &value.next) else null;
+                const recording_capture = if (backend.recording_access) |*access| access.prepareCapture(next_context, app, self.roster, &value.next) catch |err| return if (err == error.ScopeChanged) error.RecordingScopeChanged else err else null;
                 var new_recording: ?RecordingAccess = null;
                 defer if (new_recording) |*access| access.deinit();
                 if (recording_capture == null) if (backend.recording_archive) |archive_snapshot| {
                     var archive = archive_snapshot;
                     if (backend.ai_io) |io| archive.io = io.io();
                     new_recording = try RecordingAccess.init(self.allocator, archive, next_context);
-                    try new_recording.?.captureUi(app, self.roster, &value.next);
+                    new_recording.?.captureUi(app, self.roster, &value.next) catch |err| return if (err == error.ScopeChanged) error.RecordingScopeChanged else err;
                     try new_recording.?.captureClosedReceipts(app);
                 };
                 value.bridge.replacePreparedExact(&value.next) catch |err| return if (err == error.ToolCleanupPending) error.AuthorityRefreshStale else err;
@@ -7310,12 +7309,10 @@ const AiHost = struct {
                 const value: *@This() = @ptrCast(@alignCast(context));
                 const self = value.host;
                 const app = self.application_host orelse return error.ContextUnavailable;
-                const binding_context = (value.bridge.host_binding orelse return error.ScopeChanged).context;
-                if (!binding_context.eql(value.previous)) return error.ScopeChanged;
-                if (app.workspace.app_config.agentPolicyRevision() != self.execution().request_policy_revision) return error.ScopeChanged;
+                try self.validateAuthorityRefresh(value.bridge, value.previous);
                 const store = if (self.assistant_states) |items| items else return error.ConversationNotFound;
                 const state = store.findConversation(value.previous.conversation_id) orelse return error.ConversationNotFound;
-                if (state.closed or state.ended) return error.ScopeChanged;
+                if (state.closed or state.ended) return error.ConversationEnded;
                 const service = self.shared_service orelse return error.ContextUnavailable;
                 const workspace_store = &service.service.store;
                 const fence = try workspace_store.fence(value.previous.conversation_id);
@@ -7353,7 +7350,7 @@ const AiHost = struct {
                     backend.host_notice_revision
                 else
                     try @import("host/identity.zig").advance(backend.authority_notice_revision +| @intFromBool(backend.authority_notice_revision == 0));
-                const controller = lookupLifecycleTask(self, next_context.conversation_id, next_context.task_id) orelse return error.ScopeChanged;
+                const controller = lookupLifecycleTask(self, next_context.conversation_id, next_context.task_id) orelse return error.TaskAuthorityUnavailable;
                 const staged = try value.allocator.create(Staged);
                 staged.* = .{
                     .host = self,
@@ -7524,8 +7521,8 @@ const AiHost = struct {
 
     fn acceptedHostResult(raw: *anyopaque, context: @import("ai/host_tools.zig").Context, name: []const u8, result: *const @import("ai/host_tools.zig").Result, cancel: ?*ai_provider.CancelToken) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
-        const active = self.execution().request_host_context orelse return error.ScopeChanged;
-        if (!active.conversation_id.eql(context.conversation_id) or !active.task_id.eql(context.task_id)) return error.ScopeChanged;
+        const active = self.execution().request_host_context orelse return error.TaskAuthorityUnavailable;
+        if (!active.conversation_id.eql(context.conversation_id) or !active.task_id.eql(context.task_id)) return error.ToolResultScopeChanged;
         // This callback follows the entire closed call/result batch. The
         // worker blocks on this explicit exchange while UI deep-copies facts;
         // Poll must never inspect a concurrently mutable Loop.
@@ -7543,7 +7540,7 @@ const AiHost = struct {
                     const states = if (owner.assistant_states) |value| value else return error.ConversationNotFound;
                     const state = states.findConversation(capture.context.conversation_id) orelse return error.ConversationNotFound;
                     const current = if (capture.run.tool_table) |table| table.host_context orelse return error.InvalidHostAuthority else return error.InvalidHostAuthority;
-                    if (!current.conversation_id.eql(capture.context.conversation_id) or !current.task_id.eql(capture.context.task_id)) return error.ScopeChanged;
+                    if (!current.conversation_id.eql(capture.context.conversation_id) or !current.task_id.eql(capture.context.task_id)) return error.ToolResultScopeChanged;
                     const sources = try owner.execution().tool_bridge.resultSources(owner.allocator);
                     defer owner.allocator.free(sources);
                     const displayed = owner.display_conversation == state.id;
@@ -7568,9 +7565,9 @@ const AiHost = struct {
                 context: @import("ai/host_tools.zig").Context,
                 fn run(raw_capture: *anyopaque) !void {
                     const capture: *@This() = @ptrCast(@alignCast(raw_capture));
-                    try capture.host.validateHostContext(capture.context);
+                    try capture.host.validateActiveHostContext(capture.context);
                     capture.host.captureSubmittedHistory(capture.context.conversation_id);
-                    try capture.host.prepareRecordingAccess(capture.context);
+                    capture.host.prepareRecordingAccess(capture.context) catch |err| return if (err == error.ScopeChanged) error.RecordingScopeChanged else err;
                 }
             };
             var capture: CaptureRecording = .{ .host = self, .context = context };
@@ -7638,17 +7635,30 @@ const AiHost = struct {
         defer allocator.free(home);
         return @import("config/transfer_defaults.zig").downloadDirectory(allocator, target.workspace.app_config.transfer.download_dir, home);
     }
-    fn validateHostContext(self: *AiHost, context: @import("ai/host_tools.zig").Context) !void {
+    fn validateAuthorityRefresh(self: *AiHost, bridge: *const @import("ui/ai_tools.zig").Bridge, context: @import("ai/host_tools.zig").Context) !void {
         const app = self.application_host orelse return error.ContextUnavailable;
-        const binding = self.execution().tool_bridge.host_binding orelse return error.ScopeChanged;
-        if (!binding.context.eql(context) or app.workspace.app_config.agentPolicyRevision() != self.execution().request_policy_revision) return error.ScopeChanged;
+        const binding = bridge.host_binding orelse return error.TaskAuthorityUnavailable;
+        if (app.workspace.app_config.agentPolicyRevision() != self.execution().request_policy_revision) return error.AiPolicyChanged;
+        if (!binding.context.eql(context)) return error.AiBindingChanged;
+    }
+    fn validateHostContext(self: *AiHost, context: @import("ai/host_tools.zig").Context) !void {
+        self.validateActiveHostContext(context) catch |err| return switch (err) {
+            error.TaskAuthorityUnavailable, error.AiBindingChanged, error.AiPolicyChanged, error.ConversationNotFound, error.ConversationEnded, error.MissingAssistantOwner, error.ChildTaskAuthorityChanged => error.ScopeChanged,
+            else => err,
+        };
+    }
+    fn validateActiveHostContext(self: *AiHost, context: @import("ai/host_tools.zig").Context) !void {
+        try self.validateAuthorityRefresh(&self.execution().tool_bridge, context);
         const store = if (self.assistant_states) |value| value else return error.ContextUnavailable;
-        const state = store.findConversation(context.conversation_id) orelse return error.ScopeChanged;
+        const state = store.findConversation(context.conversation_id) orelse return error.ConversationNotFound;
         if (self.shared_service) |service| if (service.service.store.find(context.conversation_id)) |record| if (record.transition != null) return error.TransitionPending;
         if (context.child_origin != null or state.child_agent != null) {
-            _ = try (self.shared_service orelse return error.ScopeChanged).service.validateAuthority(context);
+            const service = self.shared_service orelse return error.ChildTaskAuthorityChanged;
+            _ = service.service.validateAuthority(context) catch |err| return if (err == error.ScopeChanged) error.ChildTaskAuthorityChanged else err;
         }
-        if (state.closed or state.ended or !state.owner.eql(context.binding) or state.binding_revision != context.binding_revision or !self.attachmentOwnerExists(state.owner)) return error.ScopeChanged;
+        if (state.closed or state.ended) return error.ConversationEnded;
+        if (!state.owner.eql(context.binding) or state.binding_revision != context.binding_revision) return error.AiBindingChanged;
+        if (!self.attachmentOwnerExists(state.owner)) return error.MissingAssistantOwner;
     }
     fn validateCleanupWaitContext(raw: *anyopaque, context: @import("ai/host_tools.zig").Context) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
@@ -9067,12 +9077,13 @@ const AiHost = struct {
         if (self.execution().recording_access) |*access| access.deinit();
         self.execution().recording_access = null;
         self.retainWireHistory(state == 2 and self.managerRef().saw_done) catch |err| {
-            self.execution().failure_label = wireHistoryFailureLabel(err);
-            if (self.workspace) |workspace| workspace.status(self.execution().failure_label);
+            const label = wireHistoryFailureLabel(err);
+            if (state != 3) self.execution().failure_label = label;
+            if (self.workspace) |workspace| workspace.status(label);
         };
         const retained_results = self.retainToolResults() catch |err| failed: {
-            self.execution().failure_label = @errorName(err);
-            if (self.workspace) |workspace| workspace.status(self.execution().failure_label);
+            if (state != 3) self.execution().failure_label = @errorName(err);
+            if (self.workspace) |workspace| workspace.status(@errorName(err));
             break :failed false;
         };
         if (retained_results) self.conversation_dirty = true;
@@ -9136,7 +9147,7 @@ const AiHost = struct {
                 }
                 break :released true;
             } else true;
-            const completion: @import("host/notification_host.zig").AiCompletion = .{ .result = if (uncertain) .unverified else if (state == 4) .cancelled else if (state == 2 and self.managerRef().saw_done) .succeeded else .failed, .resources_released = resources_released, .final_answer = state == 2 and self.managerRef().saw_done and final_answer and !uncertain, .details = .{ .detail = if (state == 3) self.execution().failure_label else "" } };
+            const completion: @import("host/notification_host.zig").AiCompletion = .{ .result = if (uncertain) .unverified else if (state == 4) .cancelled else if (state == 2 and self.managerRef().saw_done) .succeeded else .failed, .resources_released = resources_released, .final_answer = state == 2 and self.managerRef().saw_done and final_answer and !uncertain, .details = .{ .detail = if (state == 3) self.recoveryReason() else "" } };
             if (self.execution().request_host_context) |context| {
                 self.deferAiCompletion(context, owner, operation, self.managerRef().turn_id, completion) catch |err| {
                     if (self.workspace) |workspace| workspace.statusFailure(@errorName(err));
@@ -9165,7 +9176,7 @@ const AiHost = struct {
         // A producer may append between the poll's first drain and its terminal
         // release-store. Join, drain again, and empty the channel before reuse.
         self.consumeLiveOutput() catch |err| {
-            self.execution().failure_label = @errorName(err);
+            if (state != 3) self.execution().failure_label = @errorName(err);
         };
         self.consumeStepEvents() catch {};
         const completed_turn = if (self.requestDisplayed()) &self.current_turn else &(self.assistant_states.?.find(self.execution().request_conversation orelse return) orelse return).current_turn;
@@ -9219,7 +9230,7 @@ const AiHost = struct {
             }
             self.clearRequestHistory();
             self.consumeResult();
-            if (self.requestDisplayed()) self.refresh(self.execution().failure_label);
+            if (self.requestDisplayed()) self.refresh(self.recoveryReason());
         } else {
             self.consumeResult();
             if (state == 4 and self.requestDisplayed()) self.refresh("AI 已停止");

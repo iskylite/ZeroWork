@@ -95,9 +95,12 @@ pub const Controller = struct {
     /// Updating authority does not change historical call/journal ownership.
     pub fn refreshAuthority(self: *Controller, authority: host.Context) !void {
         try authority.validate();
-        if (!authority.conversation_id.eql(self.authority.conversation_id) or !authority.task_id.eql(self.authority.task_id)) return error.ScopeChanged;
+        if (!authority.conversation_id.eql(self.authority.conversation_id) or !authority.task_id.eql(self.authority.task_id)) return error.TaskAuthorityUnavailable;
         const state = self.store.findConversation(authority.conversation_id) orelse return error.ConversationNotFound;
-        if (state.closed or state.ended or !state.owner.eql(authority.binding) or state.binding_revision != authority.binding_revision or self.bridge.policy_revision != self.config_revision or authority.grant_revision != self.authority.grant_revision or self.app.workspace.app_config.agentPolicyRevision() != self.config_revision) return error.ScopeChanged;
+        if (state.closed or state.ended) return error.ConversationEnded;
+        if (!state.owner.eql(authority.binding) or state.binding_revision != authority.binding_revision) return error.AiBindingChanged;
+        if (self.bridge.policy_revision != self.config_revision or self.app.workspace.app_config.agentPolicyRevision() != self.config_revision) return error.AiPolicyChanged;
+        if (authority.grant_revision != self.authority.grant_revision) return error.AiGrantChanged;
         self.authority = authority;
     }
     /// Called on the controller thread only after its worker joined. This is
@@ -1200,7 +1203,7 @@ test "lifecycle controller keeps exact metadata grant distinct from configuratio
     authorize_call.context.grant_revision += 1;
     try std.testing.expectError(error.ScopeChanged, Controller.invoke(&controller, &authorize_call));
     bridge.policy_revision += 1;
-    try std.testing.expectError(error.ScopeChanged, controller.refreshAuthority(context));
+    try std.testing.expectError(error.AiPolicyChanged, controller.refreshAuthority(context));
 }
 
 test "lifecycle controller invalidated group plan publishes no ghost and releases after grant change" {
@@ -1294,7 +1297,7 @@ test "lifecycle controller group publication is allocation free after validated 
     try std.testing.expectError(error.ScopeChanged, Controller.invoke(&controller, &stale));
     try std.testing.expectEqualStrings("已预分配工作组", roster.groups.items[0].name);
     fixture.config_.config_revision += 1;
-    try std.testing.expectError(error.ScopeChanged, controller.refreshAuthority(next));
+    try std.testing.expectError(error.AiPolicyChanged, controller.refreshAuthority(next));
 }
 
 test "current-tab lifecycle rejects existing external selected handles and removed members before metadata" {

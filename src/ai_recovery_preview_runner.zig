@@ -4,7 +4,7 @@ const ui = @import("ui");
 const App = @import("zenit_app").App;
 const V = @import("ui/ai_recovery_view.zig");
 const theme = @import("ui/app_theme.zig");
-var fixture: enum { unknown, cooldown, context, verification, verification_stale, verification_legacy } = .unknown;
+var fixture: enum { unknown, cooldown, context, policy_changed, verification, verification_stale, verification_legacy } = .unknown;
 
 const Preview = struct {
     cx: *ui.Cx,
@@ -74,18 +74,21 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     result.meta.ownership.meta.test_id = "ai.recovery.preview.result";
     const state = try scope.createState(Preview, .{ .cx = cx, .result = result });
     const context_failed = fixture == .context;
+    const policy_changed = fixture == .policy_changed;
+    const feedback = @import("ai/error_feedback.zig");
+    const policy_diagnostic = "请求失败 · AiPolicyChanged";
     try root.appendChild(cx.allocator, try V.mount(cx, scope, .{
         .ticket = .{ .owner = .{ .session = 101 }, .turn = 77 },
-        .title = if (context_failed) "上下文压缩失败" else "请求失败",
-        .reason = if (context_failed) "上下文压缩失败，原始上下文、输入和附件已保留" else "部分工具执行结果待核实，已保留收到的内容",
-        .detail = if (context_failed) "ContextCompactionFailed" else "请求失败 · ToolOutcomeUnknown",
+        .title = if (context_failed) "上下文压缩失败" else feedback.recoveryTitle(if (policy_changed) error.AiPolicyChanged else null),
+        .reason = if (context_failed) "上下文压缩失败，原始上下文、输入和附件已保留" else if (policy_changed) feedback.recoveryReason(error.AiPolicyChanged, policy_diagnostic, 0) else "部分工具执行结果待核实，已保留收到的内容",
+        .detail = if (context_failed) "ContextCompactionFailed" else if (policy_changed) policy_diagnostic else "请求失败 · ToolOutcomeUnknown",
         .retries = 0,
         .max_retries = 3,
         .has_tool_calls = !context_failed,
-        .retry_enabled = fixture == .unknown or fixture == .verification or fixture == .verification_stale or fixture == .verification_legacy,
-        .regenerate_enabled = context_failed,
+        .retry_enabled = fixture != .cooldown and !context_failed,
+        .regenerate_enabled = context_failed or policy_changed,
         .retry_disabled_reason = if (context_failed) "仅重试答复不可用：上下文压缩失败，请先修复上下文。" else null,
-        .regenerate_disabled_reason = if (!context_failed) "新计划不可用：请先核实结果未知的操作。" else null,
+        .regenerate_disabled_reason = if (!context_failed and !policy_changed) "新计划不可用：请先核实结果未知的操作。" else null,
         .cooldown_seconds = if (fixture == .cooldown) 2 else 0,
     }, .{ .context = state, .enqueue = Preview.enqueue }));
     if (fixture == .verification or fixture == .verification_stale or fixture == .verification_legacy) {

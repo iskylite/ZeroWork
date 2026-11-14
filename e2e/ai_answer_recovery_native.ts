@@ -12,7 +12,7 @@ const shown = (n: any) => n && n.visible !== false && !n.hidden && n.rect?.w > 0
 const visible = (id: string) => h.waitFor(async () => (await h.query(id)).find(shown) ?? null, 10000);
 const result = async () => (await visible('ai.recovery.preview.result')).text;
 
-for (const fixture of ['unknown', 'cooldown', 'context']) {
+for (const fixture of ['unknown', 'cooldown', 'context', 'policy_changed']) {
   const rpc = await mkdtemp('/tmp/zw-answer-recovery-rpc-');
   process.env.ZENIT_E2E_FILE_RPC_DIR = rpc;
   const log = await open(join(out, `${fixture}.log`), 'w');
@@ -36,7 +36,12 @@ for (const fixture of ['unknown', 'cooldown', 'context']) {
         }
       }
       assert((await visible('ai.recovery.answer.hint')).text.includes('不执行命令'));
-      if (fixture !== 'context') assert((await visible('ai.recovery.regenerate.disabled_reason')).text.includes('先核实'));
+      if (fixture === 'unknown' || fixture === 'cooldown') assert((await visible('ai.recovery.regenerate.disabled_reason')).text.includes('先核实'));
+      if (fixture === 'policy_changed') {
+        const reason = (await visible('ai.recovery.reason')).text;
+        assert(reason.includes('ZeroWork 设置在运行期间发生变化'));
+        assert(!reason.includes('AiPolicyChanged'));
+      }
       if (fixture === 'cooldown') assert((await visible('ai.recovery.cooldown')).text.includes('2 秒'));
       if (fixture === 'context') assert((await visible('ai.recovery.answer.disabled_reason')).text.includes('上下文压缩失败'));
       assert((await h.screenshot(join(out, `${fixture}-${width}.png`))).ok);
@@ -47,11 +52,15 @@ for (const fixture of ['unknown', 'cooldown', 'context']) {
       await h.waitFor(async () => (await result())?.includes('仅重试答复') || null, 3000);
       await h.clickTestId('ai.recovery.regenerate');
       assert((await result())?.includes('仅重试答复'), 'disabled new plan dispatches no action');
+    } else if (fixture === 'policy_changed') {
+      await h.waitFor(async () => (await result())?.includes('仅重试答复') || null, 3000);
+      await h.clickTestId('ai.recovery.regenerate');
+      await h.waitFor(async () => (await result()) === '已请求新计划' || null, 3000);
     } else assert.equal(await result(), '等待恢复操作', 'disabled answer dispatches no action');
     await h.clickTestId('ai.recovery.details.toggle');
     const details = await visible('ai.recovery.details');
     const text = JSON.stringify(details);
-    assert(text.includes(fixture === 'context' ? 'ContextCompactionFailed' : 'ToolOutcomeUnknown'));
+    assert(text.includes(fixture === 'context' ? 'ContextCompactionFailed' : fixture === 'policy_changed' ? 'AiPolicyChanged' : 'ToolOutcomeUnknown'));
     assert(!text.includes('部分工具执行结果待核实'), 'details do not repeat the summary');
     await h.clickTestId('ai.recovery.edit');
     await h.waitFor(async () => (await result()) === '已回填问题' || null, 3000);
