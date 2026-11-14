@@ -3,6 +3,7 @@
 const host = @import("host_tools.zig");
 pub const all = [_]host.Contribution{@import("user_interaction.zig").contribution} ++
     @import("host_queries.zig").contributions ++
+    @import("host_recall.zig").contributions ++
     @import("host_local_files.zig").contributions ++
     @import("host_local_file_mutation.zig").contributions ++
     [_]host.Contribution{@import("local_file_change_query.zig").contribution} ++
@@ -28,6 +29,8 @@ test "AI group host catalog fits every contribution and builds a valid request t
     try std.testing.expect(table.lookup("host__run_uin_uterminal") != null);
     try std.testing.expect(table.lookup("host__close_usession") != null);
     try std.testing.expect(table.lookup("host__get_ucurrent_ucontext") != null);
+    try std.testing.expect(table.lookup("host__list_uai_uconversations") != null);
+    try std.testing.expect(table.lookup("host__recall") != null);
     try std.testing.expect(table.lookup("host__upload_ufile") != null);
     try std.testing.expect(table.lookup("host__download_ufile") != null);
     try std.testing.expect(table.lookup("host__get_utransfer") != null);

@@ -49,6 +49,13 @@ pub const Receipt = struct {
     workspace_revision: ?u64 = null,
     archived: bool = false,
     original: ?identity.SubmissionId = null,
+
+    pub fn canCancelPending(self: Receipt) bool {
+        // An accepted input is still local. When paused, it can no longer
+        // be reserved for consumption by the worker.
+        return !self.archived and (self.delivery == .queued or
+            (self.delivery == .accepted and self.pause != null));
+    }
 };
 pub const Entry = struct {
     receipt: Receipt,
@@ -390,11 +397,12 @@ pub const Inbox = struct {
         entry.receipt = value;
         if (terminal(delivery) and !entry.receipt.archived) self.releaseBudget(entry);
     }
-    pub fn cancelQueued(self: *Inbox, id: identity.SubmissionId, revision: u64) !void {
+    pub fn cancelPending(self: *Inbox, id: identity.SubmissionId, revision: u64) !void {
         self.lock();
         defer self.unlock();
         const entry = self.findLocked(id) orelse return error.SubmissionNotFound;
-        if (entry.receipt.revision != revision or entry.receipt.delivery != .queued) return error.SubmissionNotReady;
+        if (entry.receipt.delivery == .submitting or entry.receipt.delivery == .outcome_unknown) return error.SubmissionUnconfirmed;
+        if (entry.receipt.revision != revision or !entry.receipt.canCancelPending()) return error.SubmissionNotReady;
         var value = entry.receipt;
         value.delivery = .cancelled;
         const next_queue = try identity.advance(self.queue_revision);
@@ -601,6 +609,32 @@ test "followup consumption waits until accepted steer supersedes prior approvals
     inbox.endAdmission();
     try std.testing.expect(try inbox.reserveConsumption(null, revision, &entries, &rows, 1));
     inbox.publishConsumption(&entries, &rows, true);
+}
+
+test "followup cancellation targets only unsent entries during cleanup" {
+    const fence: Fence = .{ .agent = .generate(), .conversation = .generate(), .binding = 1, .environment = 1 };
+    var inbox = Inbox.init(std.testing.allocator, fence);
+    defer inbox.deinit();
+    inbox.active_turn = 7;
+    const queued = try inbox.admit(fence, .generate(), .{ .content = "queued" }, .queue);
+    try inbox.cancelPending(queued.id, queued.revision);
+    try std.testing.expectEqual(Delivery.cancelled, inbox.receipt(queued.id).?.delivery);
+
+    const paused = try inbox.admit(fence, .generate(), .{ .content = "paused" }, .queue);
+    const accepted = try inbox.admit(fence, .generate(), .{ .content = "accepted" }, .steer);
+    const sending = try inbox.admit(fence, .generate(), .{ .content = "sending" }, .steer);
+    const entries = [_]*Entry{inbox.findLocked(sending.id).?};
+    var rows: [1]Consumption = undefined;
+    try std.testing.expect(try inbox.reserveConsumption(null, inbox.inputRevision(), &entries, &rows, 1));
+    inbox.pauseAll(.end);
+    try inbox.cancelPending(paused.id, paused.revision);
+    try inbox.cancelPending(accepted.id, accepted.revision);
+    try std.testing.expectError(error.SubmissionUnconfirmed, inbox.cancelPending(sending.id, sending.revision));
+    inbox.publishConsumption(&entries, &rows, false);
+    try std.testing.expectError(error.SubmissionUnconfirmed, inbox.cancelPending(sending.id, sending.revision));
+    try std.testing.expectEqual(Delivery.cancelled, inbox.receipt(paused.id).?.delivery);
+    try std.testing.expectEqual(Delivery.cancelled, inbox.receipt(accepted.id).?.delivery);
+    try std.testing.expectEqual(Delivery.outcome_unknown, inbox.receipt(sending.id).?.delivery);
 }
 
 test "reconnect keeps operation observation across transport fences only" {

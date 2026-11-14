@@ -680,6 +680,48 @@ test "visible results stay quiet while background results and failures remain av
     try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
 }
 
+test "notification AI confirmation and input waits follow the app to background once" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .ai_ready = false, .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
+    _ = try host.poll();
+    const original = @import("host/identity.zig").ConversationId.generate();
+    var window: WindowProbe = .{ .conversation = original };
+    const id = try host.registerWindow(window.callbacks());
+    for ([_][]const u8{ "AI 任务正在等待确认", "AI 任务正在等待输入" }, 1..) |title, attempt| {
+        host.setWindowFocus(id, true);
+        const operation = try host.reserveAiConversation(id, original);
+        var notice: notifications.NotificationEvent = .{
+            .definition_id = "host.ai_attention",
+            .owner = .{ .window_id = @backingInt(id), .content = target.owner },
+            .operation_id = operation,
+            .attempt_id = attempt,
+            .event_revision = 1,
+            .phase = .accepted,
+            .title = title,
+            .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true, .source_visible = attempt == 1 },
+        };
+        const origin = try host.publish(notice);
+        try std.testing.expectEqual(attempt - 1, fake.sends);
+        host.setWindowFocus(id, false);
+        notice.event_revision += 1;
+        const background = try host.publish(notice);
+        try std.testing.expectEqual(origin.fact_id, background.fact_id);
+        try std.testing.expectEqual(attempt, fake.sends);
+        try std.testing.expectEqual(operation, fake.last_target.operation_id);
+        notice.event_revision += 1;
+        _ = try host.publish(notice);
+        try std.testing.expectEqual(attempt, fake.sends);
+        notice.event_revision += 1;
+        notice.phase = .succeeded;
+        notice.attention.resolved = true;
+        _ = try host.publish(notice);
+        try std.testing.expectEqual(attempt, fake.sends);
+        try std.testing.expect(!host.coordinator.recordFor(origin.fact_id).?.pending());
+    }
+}
+
 test "reconnect attempts replace previous notices for the same session" {
     var fake: Fake = .{};
     const host = try notification_host.Host.createWithApi(a, .{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());

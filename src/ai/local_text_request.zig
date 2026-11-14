@@ -156,9 +156,9 @@ pub fn checkFixedBudget(reserve: usize, output: usize, window: u32) !void {
 pub fn checkFixedContext(request: provider.ChatRequest, window: u32) !void {
     try checkFixedBudget(try fixedTokens(request), outputTokens(request.max_output, window), window);
 }
-pub fn inputTokens(request: provider.ChatRequest) !usize {
+pub fn messageTextTokens(messages: []const provider.Message) !usize {
     var bytes: usize = 0;
-    for (request.messages) |message| {
+    for (messages) |message| {
         bytes = std.math.add(usize, bytes, message.content.len) catch return error.RequestTooLarge;
         bytes = std.math.add(usize, bytes, 32) catch return error.RequestTooLarge;
         if (message.tool_call_id) |id| bytes = std.math.add(usize, bytes, id.len) catch return error.RequestTooLarge;
@@ -166,8 +166,12 @@ pub fn inputTokens(request: provider.ChatRequest) !usize {
             bytes = std.math.add(usize, bytes, call.id.len + call.name.len + call.arguments.len + 64) catch return error.RequestTooLarge;
         }
     }
+    return textTokens(bytes);
+}
+pub fn inputTokens(request: provider.ChatRequest) !usize {
+    const messages = try messageTextTokens(request.messages);
     const image_tokens = try @import("image_budget.zig").validate(request);
-    const text_tokens = std.math.add(usize, textTokens(bytes), try fixedTokens(request)) catch return error.RequestTooLarge;
+    const text_tokens = std.math.add(usize, messages, try fixedTokens(request)) catch return error.RequestTooLarge;
     return std.math.add(usize, text_tokens, image_tokens) catch error.RequestTooLarge;
 }
 pub fn checkContext(request: provider.ChatRequest, window: u32) !void {

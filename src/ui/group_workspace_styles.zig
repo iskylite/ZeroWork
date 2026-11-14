@@ -1,6 +1,7 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub const gap: f32 = 4;
+pub const header_status_text_min_width: f32 = 180;
 pub fn root(vertical: bool) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = if (vertical) .column else .row, .gap = gap, .flex_shrink = 0 };
 }
@@ -8,7 +9,16 @@ pub fn pane() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .background = theme.current().terminal, .border = .{ .radius = 11 }, .overflow_hidden = true };
 }
 pub fn header() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = gap, .margin = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 } };
+    return .{
+        .width = .fill(),
+        .height = .{ .px = 28 },
+        .flex_shrink = 0,
+        .direction = .row,
+        .align_items = .center,
+        .gap = 4,
+        .padding = .{ .left = 6, .right = 6, .top = 2, .bottom = 2 },
+        .background = theme.current().surface_1,
+    };
 }
 pub fn control() ui.BoxStyle {
     return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0, .border = .{ .radius = 7 } };

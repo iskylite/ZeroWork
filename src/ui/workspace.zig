@@ -3228,6 +3228,24 @@ pub const Workspace = struct {
         try parent.appendChild(self.allocator, button);
     }
 
+    const GroupHeader = struct {
+        cx: *ui.Cx,
+        header: *ui.Node,
+        status: *ui.Node,
+        fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const width = self.header.globalRect().w;
+            if (width <= 0) return .done;
+            const display: @TypeOf(self.status.style.display) = if (width < group_styles.header_status_text_min_width) .none else .flex;
+            if (self.status.style.display == display) return .done;
+            self.status.setDisplay(display);
+            return .needs_layout;
+        }
+        fn cleanup(self: *@This()) void {
+            self.cx.removeAfterLayoutHook(self);
+        }
+    };
+
     fn presentGroup(self: *Workspace, view: *group_view.View) !void {
         self.loadGroupLayout(view);
         const roster = self.group_roster orelse return;
@@ -3288,13 +3306,7 @@ pub const Workspace = struct {
             try view.panes.append(self.allocator, .{ .session = tab.id, .node = pane });
             pane.behavior.events.capture_context = cell;
             pane.behavior.events.on_event_capture = GroupCell.event;
-            var header_style = group_styles.header();
-            header_style.height = .{ .px = 36 };
-            header_style.margin = .{};
-            header_style.padding = .{ .left = 11, .right = 11, .top = 5, .bottom = 5 };
-            header_style.gap = 8;
-            header_style.background = app_theme.current().surface_1;
-            const header = try ui.box(self.cx, header_style, .{});
+            const header = try ui.box(self.cx, group_styles.header(), .{});
             // A header selects its member but is not an editor. Let the
             // pointer's default focus transfer settle on that member's content
             // instead of clearing focus after the capture callback returns.
@@ -3328,15 +3340,20 @@ pub const Workspace = struct {
             label.setStyleInline(self.allocator, .{ .cursor = .default, .width = .fill(), .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
             try header.appendChild(self.allocator, label);
             const online = groupConnectionState(tab) == .online;
+            const connection_status = if (tab.closing) "关闭中" else self.tabStatus(tab.tab_id);
             const status_dot = try ui.box(self.cx, .{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = if (online) app_theme.current().ok else app_theme.current().danger, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
             status_dot.meta.ownership.meta.test_id = "groups.pane.status_dot";
-            try header.appendChild(self.allocator, status_dot);
+            status_dot.behavior.interaction.a11y = .{ .role = .status, .label = connection_status };
+            try header.appendChild(self.allocator, try sidebar_view.hint(self.cx, scope, status_dot, connection_status, .bottom));
             var status_style = group_styles.label();
             status_style.font_size = 11;
-            const status_label = try ui.text(self.cx, if (tab.closing) "关闭中" else self.tabStatus(tab.tab_id), status_style);
+            const status_label = try ui.text(self.cx, connection_status, status_style);
             status_label.meta.ownership.meta.test_id = "groups.pane.status";
             status_label.setStyleInline(self.allocator, .{ .flex_shrink = 0 });
             try header.appendChild(self.allocator, status_label);
+            const header_layout = try scope.createState(GroupHeader, .{ .cx = self.cx, .header = header, .status = status_label });
+            try scope.onCleanup(GroupHeader, header_layout, GroupHeader.cleanup);
+            try self.cx.addAfterLayoutHook(header_layout, GroupHeader.afterLayout);
             if (tab.terminal != null) {
                 const broadcasting = tab.group_broadcast_enabled;
                 const broadcast_cell = try self.groupCell(scope, view.id, tab.id, .toggle_broadcast);
@@ -3753,7 +3770,7 @@ pub const Workspace = struct {
                     if (reported == .cleanup_unknown) {
                         const changed = plan.record(id, .cleanup_unknown);
                         plan.phase = .partial;
-                        if (changed) self.showGroupCloseDialog(view, true) catch {};
+                        if (changed and view.dialog_open != null and view.dialog_open.?.peek()) self.showGroupCloseDialog(view, true) catch {};
                         self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
                         continue;
                     }
@@ -3765,7 +3782,7 @@ pub const Workspace = struct {
                     _ = plan.record(id, if (reported == .failed) .failed else .cancelled);
                     plan.awaiting = null;
                     plan.stop();
-                    self.showGroupCloseDialog(view, true) catch {};
+                    if (view.dialog_open != null and view.dialog_open.?.peek()) self.showGroupCloseDialog(view, true) catch {};
                     continue;
                 }
                 _ = plan.record(id, .closed);
@@ -3775,7 +3792,7 @@ pub const Workspace = struct {
                 self.group_present_pending = self.active_group_view == view.id;
                 if (plan.phase == .partial) {
                     if (plan.counts().closed != plan.members.items.len) {
-                        self.showGroupCloseDialog(view, true) catch {};
+                        if (view.dialog_open != null and view.dialog_open.?.peek()) self.showGroupCloseDialog(view, true) catch {};
                         continue;
                     }
                     // The last original cleanup may converge after Stop.
@@ -3825,6 +3842,7 @@ pub const Workspace = struct {
                         }
                     }
                 }
+                if (plan.awaiting != null and view.dialog_open != null and view.dialog_open.?.peek()) self.showGroupCloseDialog(view, true) catch {};
             } else _ = plan.record(member.id, .closed);
             self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
         }

@@ -79,6 +79,8 @@ pub const Record = struct {
     workspace_source: ?WorkspaceSource = null,
     workspace_change: ?WorkspaceChange = null,
     workspace_ack_revision: u64 = 1,
+    /// A project may recall this chat only if its directory was chosen before any history.
+    recall_workspace_scoped: bool = false,
     history: wire.History = .{},
     presentation: ?[]u8 = null,
     presentation_version: ?display.Version = null,
@@ -355,6 +357,15 @@ pub const Store = struct {
         self.publishWorkspace(record, next, change);
     }
     fn publishWorkspace(self: *Store, record: *Record, next: *local_workspace.Snapshot, change: ?WorkspaceChange) void {
+        if (change) |delta| switch (delta.reason) {
+            .set => {
+                record.inbox.lock();
+                defer record.inbox.unlock();
+                record.recall_workspace_scoped = delta.before_revision == 1 and record.inbox.next_sequence == 1 and record.last_turn == 0 and record.history.messages.len == 0;
+            },
+            .changed, .removed => record.recall_workspace_scoped = false,
+            .unavailable, .available => {},
+        };
         record.workspace.deinit(self.allocator);
         record.workspace = next.*;
         next.* = .{};

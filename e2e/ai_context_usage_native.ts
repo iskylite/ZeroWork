@@ -80,28 +80,42 @@ try {
     const send = async (value: string) => { const turn = replies + 1; await click('ai.prompt'); await h.type_(value); await click('ai.send'); await h.waitFor(async () => (await h.query('ai.turn.complete')).filter(shown).length === turn || null, 15000); };
     const usageMenu = async () => { await click('ai.composer.usage'); return visible('ai.usage.menu'); };
     const summary = async () => text(await visible('ai.usage.summary'));
-    const noBaseline = async () => { const menu = await usageMenu(); assert(!text(menu).includes('基准输入（实测）'), text(menu)); assert(text(menu).includes('终端上下文')); await h.key('escape'); };
+    const measured = async () => text(await visible('ai.usage.measured'));
+    const checkGeometry = async () => {
+        const track = (await visible('ai.usage.track')).rect;
+        const segments = (await h.query('ai.usage.part.segment')).filter(shown).map((n: any) => n.rect);
+        let right = track.x;
+        for (const segment of segments) {
+            assert(Math.abs(segment.x - right) < 1, 'Source segments are contiguous and never overlap');
+            right = segment.x + segment.w;
+        }
+        assert(right <= track.x + track.w + 1, 'Source segments stay within the window budget');
+        const rows = (await h.query('ai.usage.part.row')).filter(shown).map((n: any) => n.rect);
+        for (let i = 1; i < rows.length; i++) assert(rows[i].y >= rows[i - 1].y + rows[i - 1].h - 0.5);
+    };
+    const noBaseline = async () => { const menu = await usageMenu(); assert(!text(menu).includes('上次请求输入（实测）'), text(menu)); assert(text(menu).includes('系统提示词')); await h.key('escape'); };
     await send('第一轮：检查上下文实测值');
     let menu = await usageMenu();
     assert((await summary()).includes('当前占用'));
-    assert(text(menu).includes('基准输入（实测）'));
-    assert(text(menu).includes('新增内容（估算）'));
-    let values = (await h.query('ai.usage.part.value')).filter(shown).map(text);
-    assert.equal(values[0], '24.0K');
+    for (const part of ['系统提示词', '工具定义', '对话消息', '未归因用量', '未发送草稿']) assert(text(menu).includes(part), part);
+    assert((await measured()).endsWith('24.0K'));
+    assert(!(await h.query('ai.usage.part.value')).filter(shown).map(text).includes('24.0K'));
+    const values = (await h.query('ai.usage.part.value')).filter(shown).map(text);
     assert(values[1].startsWith('~'));
+    await checkGeometry();
     const beforeDraft = await summary();
     await h.sleep(300); assert((await h.screenshot(join(out, 'measured-context.png'))).ok);
     await h.key('escape'); await click('ai.prompt'); await h.type_('x'.repeat(4000));
-    menu = await usageMenu(); values = (await h.query('ai.usage.part.value')).filter(shown).map(text);
-    assert.equal(values[0], '24.0K'); assert.notEqual(await summary(), beforeDraft);
-    report.checks.push('24000 measured input retained; only answer and draft estimated, fixed costs not added twice');
+    menu = await usageMenu();
+    assert((await measured()).endsWith('24.0K')); assert.notEqual(await summary(), beforeDraft);
+    assert.equal((await h.query('ai.usage.part.value')).filter(shown).map(text).at(-1), '~1.0K');
+    report.checks.push('Provider input appears outside the source rows; estimates and draft only fill their own portions');
     await h.key('escape'); await click('ai.prompt'); await h.key('a', {cmd: true}); await h.key('backspace');
     const viewport = await visible('ai.conversation.viewport'); await h.scrollAt(viewport.rect.x + viewport.rect.w / 2, viewport.rect.y + viewport.rect.h / 2, 0, 100000);
     await click('ai.message.edit'); await click('ai.message.edit.input'); await h.key('a', {cmd: true}); await h.type_('第一轮已编辑'); await click('ai.message.edit.save');
     await noBaseline(); report.checks.push('Editing user history invalidates the measured baseline');
     await send('第二轮：重新获取实测基准');
-    menu = await usageMenu(); assert(text(menu).includes('基准输入（实测）'));
-    values = (await h.query('ai.usage.part.value')).filter(shown).map(text); assert.equal(values[0], '48.0K'); await h.key('escape');
+    menu = await usageMenu(); assert((await measured()).endsWith('48.0K')); await h.key('escape');
     const selectModel = async (name: string) => {
         await click('ai.composer.model');
         const option = await h.waitFor(async () => (await h.query('ai.model.option')).filter(shown).find((n: any) => text(n).includes(name)) ?? null, 5000);
@@ -111,7 +125,7 @@ try {
     await selectModel('idle-fixture'); await noBaseline();
     report.checks.push('Switching models invalidates permanently; switching back does not revive an old baseline');
     await send('第三轮：准备压缩上下文');
-    menu = await usageMenu(); assert(text(menu).includes('基准输入（实测）'));
+    menu = await usageMenu(); assert(text(menu).includes('上次请求输入（实测）'));
     await click('ai.usage.compaction.start');
     await h.waitFor(async () => summaries > 0 && !(await h.query('ai.usage.compaction.cancel')).some(shown) || null, 20000);
     await h.key('escape'); await noBaseline();
@@ -119,6 +133,7 @@ try {
     missingUsage = true; await send('第四轮：服务商缺少用量'); await noBaseline();
     report.checks.push('Missing provider usage falls back to an explicit estimate');
     await h.resizeWindow(860, 480); await usageMenu(); await h.sleep(300);
+    await checkGeometry();
     assert((await h.screenshot(join(out, 'estimated-context-compact.png'))).ok);
     report.status = 'passed';
 } catch (error) {

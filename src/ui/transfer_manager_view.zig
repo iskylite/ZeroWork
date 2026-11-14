@@ -73,6 +73,9 @@ pub const Hooks = struct {
     closed: ?*const fn (*anyopaque) void = null,
 };
 pub const Filter = enum { all, active, waiting, paused, failed, ended };
+const status_filters = [_]Filter{ .active, .waiting, .paused, .failed, .ended };
+const status_labels = [_][]const u8{ "进行中", "等待", "暂停", "失败", "结束" };
+const status_test_ids = [_][]const u8{ "transfer.states.active", "transfer.states.waiting", "transfer.states.paused", "transfer.states.failed", "transfer.states.ended" };
 pub const Counts = struct { active: usize = 0, waiting: usize = 0, paused: usize = 0, failed: usize = 0, ended: usize = 0, speed_bps: u64 = 0 };
 
 fn category(phase: Phase) Filter {
@@ -83,6 +86,15 @@ fn category(phase: Phase) Filter {
         .failed, .checksum_failed => .failed,
         .succeeded, .skipped, .cancelled => .ended,
     };
+}
+fn newerTask(rows: []const Task, lhs: usize, rhs: usize) bool {
+    const left = rows[lhs];
+    const right = rows[rhs];
+    const left_active = category(left.phase) == .active;
+    const right_active = category(right.phase) == .active;
+    if (left_active != right_active) return left_active;
+    // Manager job IDs advance when a transfer is enqueued.
+    return left.target.job > right.target.job;
 }
 pub fn phaseLabel(phase: Phase) []const u8 {
     return switch (phase) {
@@ -285,7 +297,7 @@ const Control = struct {
         p.in_action = true;
         defer p.in_action = false;
         switch (self.kind) {
-            .state_filter => p.setFilter(self.state_filter.?),
+            .state_filter => p.setFilter(if (p.filter == self.state_filter.?) .all else self.state_filter.?),
             .action => p.perform(self.target.?, self.action.?) catch |err| p.fail(err),
             .events => {
                 const task_ = p.task(self.target.?) orelse return;
@@ -424,7 +436,8 @@ pub const Panel = struct {
     v3_filter_labels: [3]?*ui.Node = @splat(null),
     counts_row: *ui.Node,
     tools_row: *ui.Node,
-    counts_labels: [5]*ui.Node,
+    counts_buttons: [status_filters.len]struct { node: *ui.Node, label: *ui.Node, style: *ui.Signal(ui.BoxStyle) } = undefined,
+    filter_value: *ui.Signal(?[]const u8),
     title_badge: *ui.Node,
     notice: *ui.Node,
     footer_label: *ui.Node,
@@ -446,7 +459,7 @@ pub const Panel = struct {
 
     pub fn mountProjection(cx: *ui.Cx, scope: *ui.Scope, options: Options, hooks: Hooks) !*Panel {
         const p = try cx.allocator.create(Panel);
-        p.* = .{ .cx = cx, .scope = scope, .root = undefined, .options = options, .hooks = hooks, .window_disabled = try scope.createSignal(bool, hooks.window == null), .paint_colors = S.theme.current(), .head = undefined, .heading_title = undefined, .foot = undefined, .scope_row = undefined, .counts_row = undefined, .tools_row = undefined, .counts_labels = undefined, .title_badge = undefined, .notice = undefined, .footer_label = undefined, .footer_rate = undefined, .empty = undefined, .failure = undefined, .search = try scope.createText("", .{}), .search_node = undefined, .filters_node = undefined, .batch_row = undefined, .batch_label = undefined, .list = undefined, .virtual = undefined };
+        p.* = .{ .cx = cx, .scope = scope, .root = undefined, .options = options, .hooks = hooks, .window_disabled = try scope.createSignal(bool, hooks.window == null), .paint_colors = S.theme.current(), .head = undefined, .heading_title = undefined, .foot = undefined, .scope_row = undefined, .counts_row = undefined, .tools_row = undefined, .filter_value = try scope.createSignal(?[]const u8, "all"), .title_badge = undefined, .notice = undefined, .footer_label = undefined, .footer_rate = undefined, .empty = undefined, .failure = undefined, .search = try scope.createText("", .{}), .search_node = undefined, .filters_node = undefined, .batch_row = undefined, .batch_label = undefined, .list = undefined, .virtual = undefined };
         try scope.onCleanup(Panel, p, cleanup);
         const tray = options.presentation == .session_tray;
         const window = !tray;
@@ -496,13 +509,16 @@ pub const Panel = struct {
         try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (tray) 6 else 9), .{}));
         p.scope_row = try ui.box(cx, S.row(@import("workspace_tab_styles.zig").height, 4), .{});
         try p.root.appendChild(cx.allocator, p.scope_row);
-        p.counts_row = try ui.box(cx, S.row(28, 6), .{});
+        p.counts_row = try ui.box(cx, S.statusToolbar(), .{});
         p.counts_row.meta.ownership.meta.test_id = "transfer.states.toolbar";
         try p.root.appendChild(cx.allocator, p.counts_row);
-        for (&p.counts_labels, 0..) |*label_, i| {
-            const box = try ui.box(cx, S.badge(if (i == 0) 64 else 54, countColor(i)), .{});
-            label_.* = try p.label(box, "", 10, 500, true);
-            try p.counts_row.appendChild(cx.allocator, box);
+        for (status_filters, status_labels, &p.counts_buttons, 0..) |filter, title, *chip, i| {
+            const state = try scope.createState(Control, .{ .panel = p, .kind = .state_filter, .state_filter = filter });
+            const style = try scope.createSignal(ui.BoxStyle, S.statusFilter(i == 0, false, S.theme.current().fg_3));
+            const node = try ui.widgets.Button(.{ .variant = .ghost, .label = title, .a11y_label = title, .base_style = style, .on_click = cx.on(Control, state, Control.run) }).mount(scope, cx);
+            node.meta.ownership.meta.test_id = status_test_ids[i];
+            chip.* = .{ .node = node, .label = firstTextNode(node) orelse return error.MissingFilterLabel, .style = style };
+            try p.counts_row.appendChild(cx.allocator, node);
         }
         try p.counts_row.appendChild(cx.allocator, try ui.spacer(cx));
         p.tools_row = try ui.box(cx, .{ .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
@@ -518,7 +534,7 @@ pub const Panel = struct {
             .{ .value = "paused", .label = "暂停" },
             .{ .value = "failed", .label = "失败" },
             .{ .value = "ended", .label = "结束" },
-        }, .placeholder = "全部状态", .width = 120, .on_change = cx.on(Panel, p, filterChanged) }).mount(scope, cx);
+        }, .value = p.filter_value, .placeholder = "全部状态", .width = 120, .on_change = cx.on(Panel, p, filterChanged) }).mount(scope, cx);
         p.filters_node = filter_result.wrapper;
         p.filters_node.meta.ownership.meta.test_id = "transfer.filter";
         try p.root.appendChild(cx.allocator, p.filters_node);
@@ -588,7 +604,7 @@ pub const Panel = struct {
         p.virtual = list.state;
         p.list = .{ .container = list.container, .content = list.state.content_node, .state = list.state.scroll_state };
         list.container.setStyleInline(cx.allocator, S.viewport());
-        p.list.content.style.padding.right = if (tray) 0 else 14;
+        p.list.content.style.padding.right = if (tray) 0 else S.list_scroll_gutter;
         try p.root.appendChild(cx.allocator, list.container);
         try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (tray) 0 else 6), .{}));
         p.foot = try ui.box(cx, if (native_window or window) S.row(32, 6) else S.v3Footer(), .{});
@@ -733,6 +749,7 @@ pub const Panel = struct {
             if (query.len > 0 and !contains(task_.name, query) and !contains(task_.local_path, query) and !contains(task_.remote_path, query) and !contains(task_.owner_label, query)) continue;
             try self.visible.append(self.cx.allocator, i);
         }
+        std.mem.sort(usize, self.visible.items, source.value.rows, newerTask);
         var selected_index: usize = 0;
         while (selected_index < self.selection.items.len) {
             var retained = false;
@@ -765,10 +782,13 @@ pub const Panel = struct {
         try self.notice.setTextContent(self.cx.allocator, source.value.notice);
         self.notice.parent.?.setDisplay(if (self.options.presentation != .session_popover and source.value.notice.len != 0) .flex else .none);
         const values = [_]usize{ self.counts.active, self.counts.waiting, self.counts.paused, self.counts.failed, self.counts.ended };
-        for ([_][]const u8{ "进行中", "等待", "暂停", "失败", "结束" }, values, self.counts_labels, 0..) |name, count, node, i| {
-            try self.format(node, "{s} {d}", .{ name, count });
-            node.setTextColor(if (count == 0) S.theme.current().fg_3 else countColor(i));
-            node.parent.?.setStyleInline(self.cx.allocator, S.badge(if (i == 0) 64 else 54, if (count == 0) S.theme.current().fg_3 else countColor(i)));
+        for (status_filters, status_labels, values, &self.counts_buttons, 0..) |filter, name, count_, *chip, i| {
+            const selected = self.filter == filter;
+            const ink = if (count_ == 0 and !selected) S.theme.current().fg_3 else countColor(i);
+            chip.style.set(S.statusFilter(i == 0, selected, ink));
+            try self.format(chip.label, "{s} {d}", .{ name, count_ });
+            chip.label.setTextColor(ink);
+            if (chip.node.behavior.interaction.a11y) |*a11y| a11y.pressed = selected;
         }
         const has_tasks = self.counts.active + self.counts.waiting + self.counts.paused + self.counts.failed + self.counts.ended != 0;
         self.counts_row.setDisplay(if (self.options.presentation != .session_tray and has_tasks) .flex else .none);
@@ -796,7 +816,7 @@ pub const Panel = struct {
         try self.format(self.batch_label, "已选择 {d} 项", .{self.selection.items.len});
         self.empty_container.setDisplay(if (self.visible.items.len == 0) .flex else .none);
         self.list.container.setDisplay(if (self.visible.items.len == 0) .none else .flex);
-        try self.empty.setTextContent(self.cx.allocator, if (self.options.presentation == .global_popover) "没有传输任务" else if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) "当前没有传输任务" else if (self.filter != .all or query.len > 0) "没有符合筛选的任务" else switch (self.selected_scope) {
+        try self.empty.setTextContent(self.cx.allocator, if (self.filter != .all or query.len > 0) "没有符合筛选的任务" else if (self.options.presentation == .global_popover) "没有传输任务" else if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) "当前没有传输任务" else switch (self.selected_scope) {
             .all => "暂无传输任务",
             .session => "本会话暂无传输任务",
             .sessions => "所选组暂无传输任务",
@@ -1336,8 +1356,7 @@ pub const Panel = struct {
         control.run();
     }
     fn filterChanged(self: *Panel, value: ?[]const u8) void {
-        self.filter = std.meta.stringToEnum(Filter, value orelse "all") orelse .all;
-        self.invalidate();
+        self.setFilter(std.meta.stringToEnum(Filter, value orelse "all") orelse .all);
     }
     pub fn setDirectionFilter(self: *Panel, direction: ?backend.Direction) void {
         self.direction_filter = direction;
@@ -1345,7 +1364,10 @@ pub const Panel = struct {
         self.cx.requestRedraw();
     }
     pub fn setFilter(self: *Panel, filter: Filter) void {
+        if (self.filter == filter) return;
         self.filter = filter;
+        self.filter_value.set(@tagName(filter));
+        ui.widgets.scroll_area.setScrollY(self.list.state, self.list.content, 0);
         self.invalidate();
     }
     pub fn show(self: *Panel) void {

@@ -11,6 +11,7 @@ const out=resolve(process.argv[2]??'/tmp/zw-ai-reminder-conversation');await mkd
 const binary=resolve(process.env.ZW_AI_TEST_BINARY??'zig-out/bin/zerowork');
 const iso=await realpath(await mkdtemp('/tmp/zw-ai-reminder-')),data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);
 let pending:any=null,requests=0;
+const questionMode=process.argv.includes('--question');
 const frame=(delta:any)=>'data: '+JSON.stringify({choices:[{index:0,delta}]})+'\n\n';
 const server=createServer(async(req,res)=>{
  if(req.method!=='POST'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({data:[{id:'reminder-fixture'}]}));return;}
@@ -27,12 +28,12 @@ const server=createServer(async(req,res)=>{
  pending={res,id};
 });
 await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const port=(server.address() as any).port;
-await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\n[ai]\ndefault_provider="reminder-fixture"\npermission_mode="confirm"\n[[ai.providers]]\nid="reminder-fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="reminder-fixture"\ncontext_window=200000\ndefault=true\n`);
+await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\n[notify]\nquiet_hours="00:00-00:00"\n[ai]\ndefault_provider="reminder-fixture"\npermission_mode="confirm"\n[[ai.providers]]\nid="reminder-fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="reminder-fixture"\ncontext_window=200000\ndefault=true\n`);
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const log=await open(join(out,'app.log'),'w'),app=spawn(binary,[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1',ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:''},stdio:['ignore',log.fd,log.fd]});
 const ended=new Promise(r=>app.once('close',r));
 const shown=(n:any)=>n&&n.hidden!==true&&n.visible!==false&&(n.effective_opacity??1)>0&&n.rect?.w>0&&n.rect?.h>0;
-const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,15000);
+const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,15000).catch(error=>{throw Error(id+': '+error)});
 const absent=(id:string)=>h.waitFor(async()=>!(await h.query(id)).some(shown)||null,10000);
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok,id)};
 const capture=async(name:string)=>{await h.sleep(200);assert((await h.screenshot(join(out,name+'.png'))).ok);};
@@ -41,10 +42,20 @@ try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
  await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
  await click('ai.prompt');await h.type_('原对话：等待确认后再执行本地操作。');await click('ai.send');await h.waitFor(async()=>pending||null,10000);
- await click('ai.session.new');await visible('ai.prompt');await click('ai.prompt');await h.type_('另一段对话的独立草稿');assert.equal((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
+ await click('toolbar.new_session');await click('session.menu.local');
+ await absent('ai.panel');
+ await click('toolbar.ai');
+ await click('ai.prompt');await h.type_('另一段对话的独立草稿');assert.equal((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
  const call=pending;pending=null;
- call.res.end(frame({tool_calls:[{index:0,id:'reminder-approval',type:'function',function:{name:'run_command',arguments:JSON.stringify({session_ids:[call.id],command:`mkdir '${join(iso,'should-not-be-created')}'`})}}]})+'data: [DONE]\n\n');
- await visible('notifications.unread');
+ const requested=questionMode
+  ? {name:'host__request_uuser_uinput',arguments:JSON.stringify({question:'请选择下一步',options:[{id:'continue',label:'继续'}]})}
+  : {name:'run_command',arguments:JSON.stringify({session_ids:[call.id],command:`mkdir '${join(iso,'should-not-be-created')}'`})};
+ call.res.end(frame({tool_calls:[{index:0,id:'reminder-approval',type:'function',function:requested}]})+'data: [DONE]\n\n');
+ const dot=await visible('notifications.unread');
+ assert.equal(dot.rect.w,6);
+ assert.equal(dot.rect.h,6);
+ assert.equal(dot.children?.length??0,0,'the bell shows a single dot');
+ if(process.argv.includes('--layers-only')){
  for(const [width,height] of [[1440,900],[860,480]]){
   await h.resizeWindow(width,height);
   const toast=await visible('notifications.toast.0'),assistant=await visible('ai.panel');
@@ -54,17 +65,29 @@ try{
  await click('notifications.dismiss.0');await absent('notifications.toast.0');
  assert((await visible('ai.panel')).rect.w>0,'dismiss reaches the notification while the assistant stays open');
  report.checks.push('Global notification remains visible over the maximized assistant at 1440x900 and 860x480; its overlapping dismiss button works');
- if(!process.argv.includes('--layers-only')){
+ }
+ if(questionMode){
+  await click('toolbar.notifications');
+  const record=await visible('notifications.history.record');
+  const text=(node:any):string=>(node.text??'')+(node.children??[]).map(text).join('');
+  assert(text(record).includes('等待输入'),'question notices use the input title');
+  await click('notifications.history.action');
+  await visible('ai.interaction.option.0');
+  await capture('original-question');
+  report.checks.push('Input notice returns to the original question');
+ }
+ if(!questionMode&&!process.argv.includes('--layers-only')){
  await h.resizeWindow(1440,900);await click('toolbar.notifications');await visible('notifications.history.action');await capture('01-background-dialog-reminder');
- await click('notifications.history.action');await visible('ai.approval');await absent('notifications.history');await capture('02-exact-origin-approval');
+ await click('notifications.history.action');await visible('ai.interaction.reject');await absent('notifications.history');await capture('02-exact-origin-approval');
  assert.notEqual((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
- await click('ai.approval.reject');await absent('ai.approval');await visible('ai.turn.complete');
- const queryTitle=await h.waitFor(async()=>(await h.query('ai.tool.result.title')).find((n:any)=>shown(n)&&n.text==='读取对话状态')??null,10000);
- await h.clickAt(queryTitle.rect.x+20,queryTitle.rect.y+8);
- await h.waitFor(async()=>(await h.query('ai.tool.result.stdout')).some((n:any)=>shown(n)&&String(n.text).includes('conversation_id'))||null,10000);
+ await click('ai.interaction.reject');await absent('ai.interaction.reject');await visible('ai.turn.complete');
+ const responseText=(node:any):string=>(node.text??'')+(node.children??[]).map(responseText).join('');
+ await h.waitFor(async()=>(await h.query('ai.panel')).some(node=>responseText(node).includes('已取消该操作，未执行命令。'))||null,10000);
  await capture('03-query-and-rejected-results');
- await h.clickAt(queryTitle.rect.x+20,queryTitle.rect.y+8);
- await click('ai.sessions');await visible('ai.session.jump.2');await h.sleep(250);await click('ai.session.jump.2');await absent('ai.sessions.menu');
+ await click('tabs.tab.2');
+ await absent('ai.panel');
+ await click('toolbar.ai');
+ await visible('ai.prompt');
  assert.equal((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
  assert.equal(requests,3);await assert.rejects(stat(join(iso,'should-not-be-created')),{code:'ENOENT'});
  report.checks.push('Background approval reminder selects the original conversation, not the currently selected dialog','The other conversation retains its exact draft after switching back','Rejected approval returns the correlated tool result; no command is executed');

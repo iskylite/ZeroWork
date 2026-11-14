@@ -273,7 +273,11 @@ pub const Coordinator = struct {
             }
             if (record.listed and !was_listed and !record.owner_ended) {
                 if (event.attention.app_focused and definition.default_channels.in_app and !self.policy.quiet_hours.contains(clock.local_minute) and self.open_centers == 0) self.enqueue(record.fact_id);
-                if (!event.attention.app_focused) self.deliverNotification(record, definition, clock);
+            }
+            if (record.listed and !event.attention.app_focused and !record.owner_ended and
+                (!was_listed or (record.pending() and record.system_event_id == null and std.mem.eql(u8, event.definition_id, "host.ai_attention"))))
+            {
+                self.deliverNotification(record, definition, clock);
             }
             if (!record.pending()) self.dismissNotification(record.fact_id);
             return .{ .fact_id = record.fact_id, .duplicate = false, .updated = true };

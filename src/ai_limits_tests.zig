@@ -67,7 +67,7 @@ test "AI limits cancelled input receipts do not impose a conversation lifetime l
     defer inbox.deinit();
     for (0..512) |_| {
         const receipt = try inbox.admit(fence, .generate(), .{ .content = "x" }, .queue);
-        try inbox.cancelQueued(receipt.id, receipt.revision);
+        try inbox.cancelPending(receipt.id, receipt.revision);
     }
     _ = try inbox.admit(fence, .generate(), .{ .content = "x" }, .queue);
 }

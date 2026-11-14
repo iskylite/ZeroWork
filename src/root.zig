@@ -27,6 +27,7 @@ comptime {
     _ = @import("ui/ai_recording_query_access.zig");
 }
 test {
+    _ = @import("ai/host_recall.zig");
     _ = @import("notes_store_tests.zig");
     _ = @import("notes_document_sessions_tests.zig");
     _ = @import("notes_assets_tests.zig");

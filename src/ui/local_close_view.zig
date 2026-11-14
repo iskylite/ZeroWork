@@ -23,8 +23,11 @@ pub const View = struct {
     scroll: ui.widgets.ScrollAreaResult = undefined,
     dialog: *ui.Node,
     body: *ui.Node,
+    actions: *ui.Node = undefined,
+    action_spacer: *ui.Node = undefined,
     cancel_button: *ui.Node,
     compact: bool = false,
+    stacked: bool = false,
     focus_pending: bool = false,
     confirm_button: *ui.Node = undefined,
     risk: *ui.Node = undefined,
@@ -83,7 +86,9 @@ pub const View = struct {
         try scroll.content.appendChild(cx.allocator, self.notice);
         try modal.body.appendChild(cx.allocator, scroll.container);
         const actions = try ui.box(cx, styles.row(30), .{});
-        try actions.appendChild(cx.allocator, try ui.spacer(cx));
+        self.actions = actions;
+        self.action_spacer = try ui.spacer(cx);
+        try actions.appendChild(cx.allocator, self.action_spacer);
         self.cancel_button = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .on_click = cx.on(View, self, cancel) }).mount(scope, cx);
         self.cancel_button.setStyleInline(cx.allocator, styles.button(72, false));
         self.cancel_button.meta.ownership.meta.test_id = "local.close.cancel";
@@ -149,13 +154,26 @@ pub const View = struct {
         const c = theme.current();
         self.dialog.setStyleInline(self.cx.allocator, styles.dialogPaint());
         self.risk.setBackground(theme.popupAction());
-        self.cancel_button.setStyleInline(self.cx.allocator, styles.button(if (self.compact) 44 else 72, false));
-        self.confirm_button.setStyleInline(self.cx.allocator, styles.button(if (self.compact) 76 else 112, true));
+        self.styleActions();
         _ = self.title_icon.setTint(c.accent);
         for ([_]*ui.Node{ self.title, self.identity, self.risk_title }) |node| node.setTextColor(c.fg_1);
         for ([_]*ui.Node{ self.risk_detail, self.extra_text, self.notice }) |node| node.setTextColor(c.fg_2);
         self.colors = c;
         self.cx.requestRedraw();
+    }
+    fn styleActions(self: *View) void {
+        var row = styles.row(if (self.stacked) 66 else 30);
+        if (self.stacked) row.direction = .column;
+        self.actions.setStyleInline(self.cx.allocator, row);
+        self.action_spacer.setDisplay(if (self.stacked) .none else .flex);
+        var cancel_style = styles.button(if (self.compact) 44 else 72, false);
+        var confirm_style = styles.button(if (self.compact) 76 else 112, true);
+        if (self.stacked) {
+            cancel_style.width = .fill();
+            confirm_style.width = .fill();
+        }
+        self.cancel_button.setStyleInline(self.cx.allocator, cancel_style);
+        self.confirm_button.setStyleInline(self.cx.allocator, confirm_style);
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
@@ -163,11 +181,12 @@ pub const View = struct {
         const rect = self.dialog.globalRect();
         if (self.open.peek() and rect.w > 0 and rect.h > 0) {
             const compact = rect.w < 224 or rect.h < 132;
-            if (self.compact != compact) {
+            const stacked = rect.w < 142;
+            if (self.compact != compact or self.stacked != stacked) {
                 self.compact = compact;
+                self.stacked = stacked;
                 self.body.setStyleInline(self.cx.allocator, styles.body(compact));
-                self.cancel_button.setStyleInline(self.cx.allocator, styles.button(if (compact) 44 else 72, false));
-                self.confirm_button.setStyleInline(self.cx.allocator, styles.button(if (compact) 76 else 112, true));
+                self.styleActions();
                 return .needs_layout;
             }
         }

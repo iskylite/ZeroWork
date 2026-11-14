@@ -27,15 +27,19 @@ pub const Tracker = struct {
         tail.tools = &.{};
         const start = if (self.baseline) |sample| sample.prefix_count else 0;
         tail.messages = request.messages[start..];
-        const added = try budget.inputTokens(tail);
-        const reserved = if (!@import("image_budget.zig").supports(request.model)) try @import("image_budget.zig").validate(tail) else 0;
+        const messages = try budget.messageTextTokens(tail.messages);
+        const images = try @import("image_budget.zig").validate(tail);
+        const added = messages +| images;
+        const reserved = if (!@import("image_budget.zig").supports(request.model)) images else 0;
         const input = if (self.baseline) |sample| sample.input_tokens else fixed.tokens();
         self.response_bytes = response_bytes;
         self.snapshot = .{ .fixed = fixed, .summary = .{
             .tokens = input +| added,
             .measured_tokens = if (self.baseline) |sample| sample.input_tokens else null,
+            .measured_sources = if (self.baseline) |sample| sample.sources else null,
             .added_tokens = added,
             .reserved_image_tokens = reserved,
+            .image_tokens = images,
             .estimated = self.baseline == null or tail.messages.len != 0,
         } };
         return self.current().?;

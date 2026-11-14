@@ -40,8 +40,6 @@ pub const View = struct {
     host: *host.Host,
     trigger: *ui.Node,
     badge: *ui.Node,
-    badge_text: *ui.Node = undefined,
-    badge_count: ?usize = null,
     open: *ui.Signal(bool),
     root: *ui.Node,
     scroll: ui.widgets.ScrollAreaResult,
@@ -69,11 +67,9 @@ pub const View = struct {
         const open = try scope.createSignal(bool, false);
         const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .host = notification_host, .trigger = trigger, .badge = undefined, .open = open, .root = undefined, .scroll = undefined, .failure = undefined, .clear_button = undefined, .colors = theme.current() });
         try scope.onCleanup(View, self, cleanup);
-        self.badge = try ui.box(cx, .{ .position = .absolute, .inset = .{ .right = .{ .px = 4 }, .top = .{ .px = 3 } }, .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = theme.current().accent, .border = .{ .radius = 3 } }, .{});
+        self.badge = try ui.box(cx, .{ .position = .absolute, .inset = .{ .right = .{ .px = 4 }, .top = .{ .px = 3 } }, .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = theme.current().danger, .border = .{ .radius = 3 }, .hit_behavior = .pass_through }, .{});
         self.badge.meta.ownership.meta.test_id = "notifications.unread";
         self.badge.setDisplay(.none);
-        self.badge_text = try ui.text(cx, "", .{ .font_size = 9, .font_weight = 600, .line_height = 1, .color = theme.current().fg_1, .text_align = .center, .selectable = false });
-        try self.badge.appendChild(cx.allocator, self.badge_text);
         try trigger.appendChild(cx.allocator, self.badge);
         trigger.behavior.events.on_click = .{ .callback = toggle, .context = self };
         const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = open, .trigger = .manual, .anchor = .{ .node = trigger }, .position = .bottom_end, .offset = .{ .static = 8 }, .width = S.width, .max_width = S.width, .viewport_padding = 12, .constrain_width_to_viewport = true, .shift_main_axis = true, .size_policy = .fit_content, .clip_subtree_to_chrome = true, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
@@ -330,7 +326,7 @@ pub const View = struct {
         if (!std.meta.eql(self.colors, colors)) {
             @import("quick_connect_styles.zig").repaint(self.root, self.colors);
             self.colors = colors;
-            self.badge.setBackground(colors.accent);
+            self.badge.setBackground(colors.danger);
             self.revision = null;
         }
         const opened = self.open.peek();
@@ -359,15 +355,6 @@ pub const View = struct {
         }
         self.was_open = opened;
         const pending = self.host.coordinator.historyCount(true);
-        if (self.badge_count == null or self.badge_count.? != pending) {
-            self.badge_count = pending;
-            var buffer: [16]u8 = undefined;
-            try self.badge_text.setTextContent(self.cx.allocator, if (pending == 0) "" else if (pending > 99) "99+" else try std.fmt.bufPrint(&buffer, "{d}", .{pending}));
-            self.badge.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (pending == 0) 6 else if (pending > 99) 20 else 14 }, .height = .{ .px = if (pending == 0) 6 else 14 }, .align_items = .center, .justify = .center, .border = .{ .radius = if (pending == 0) 3 else 7 } });
-        }
-        const badge_color = if (pending == 0) colors.accent else theme.popupSelection();
-        if (!ui.Color.eql(self.badge.getBackground(), badge_color)) self.badge.setBackground(badge_color);
-        if (self.badge_text.getText()) |text| if (!ui.Color.eql(text.color, colors.fg_1)) self.badge_text.setTextColor(colors.fg_1);
         self.badge.setDisplay(if (pending > 0 or self.host.coordinator.unreadHistoryCount() > 0) .flex else .none);
     }
     fn cleanup(self: *View) void {

@@ -78,7 +78,10 @@ async function restore() {
 async function menu() { await click('ai.composer.usage'); return visible('ai.usage.menu'); }
 async function lastPresentation() {
     const lines = (await readFile(join(data, 'ai-sessions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    return lines.map(row => row.event).filter(event => event?.kind === 'presentation' && event.presentation.includes('重启恢复基准')).at(-1);
+    const events = lines.map(row => row.event).filter(event => event?.kind === 'presentation');
+    const source = events.find(event => event.presentation.includes('重启恢复基准'));
+    // Subsequent records may contain only a compact presentation patch.
+    return source && events.findLast(event => JSON.stringify(event.conversation) === JSON.stringify(source.conversation));
 }
 const report: any = {status: 'running', checks: []};
 try {
@@ -87,19 +90,19 @@ try {
     await h.waitFor(async () => (await lastPresentation())?.context_usage?.baseline?.sample?.input_tokens === 24000 || null, 10000);
     await stop();
     await launch(); await restore();
-    assert(text(await menu()).includes('基准输入（实测）'));
-    assert.equal((await h.query('ai.usage.part.value')).filter(shown).map(text)[0], '24.0K');
+    assert(text(await menu()).includes('上次请求输入（实测）'));
+    assert(text(await visible('ai.usage.measured')).endsWith('24.0K'));
     assert.equal(replies, 1, 'Restoring a counter must not query the model');
     await h.sleep(300); assert((await h.screenshot(join(out, 'restored-measured-context.png'))).ok);
     report.checks.push('A fresh process restores the 24000-token measured baseline without a model request');
     await stop();
     await config(true); await launch(); await restore();
-    assert(!text(await menu()).includes('基准输入（实测）'));
+    assert(!text(await menu()).includes('上次请求输入（实测）'));
     await h.waitFor(async () => (await lastPresentation())?.context_usage === null || null, 10000);
     report.checks.push('A different configured model rejects the saved baseline and durably clears it');
     await stop();
     await config(); await launch(); await restore();
-    assert(!text(await menu()).includes('基准输入（实测）'));
+    assert(!text(await menu()).includes('上次请求输入（实测）'));
     assert.equal(replies, 1);
     report.checks.push('Another restart with the original model does not revive the invalidated baseline');
     report.status = 'passed';

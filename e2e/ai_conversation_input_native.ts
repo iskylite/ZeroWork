@@ -9,6 +9,7 @@ import {mkdir,mkdtemp,writeFile,readFile,open} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 const prefix=resolve(process.env.ZW_AI_TEST_PREFIX??'/tmp/zw-queue-svg-native');
 const out=resolve(process.argv[2]??'/tmp/zerowork-ui-patch-acceptance');await mkdir(out,{recursive:true});
+const recallOnly=process.argv.includes('--recall-only');
 const iso=await mkdtemp('/private/tmp/zw-conversation-ui-'),data=join(iso,'data'),rpc=join(iso,'rpc'),zdot=join(iso,'zdot');for(const dir of [data,rpc,zdot])await mkdir(dir);
 await writeFile(join(zdot,'.zshrc'),"bindkey -e\nPS1='conversation-ui%# '\n");
 const frame=(content:string)=>'data: '+JSON.stringify({choices:[{index:0,delta:{content}}]})+'\n\n';
@@ -28,6 +29,15 @@ const flat=(n:any):any[]=>Array.isArray(n)?n.flatMap(flat):n?[n,...(n.children??
 const text=(n:any)=>flat(n).map(n=>n.text??'').join(' ');
 const visible=(id:string)=>h.waitFor(async()=>{assert(alive(),'native App must remain alive');return(await h.query(id)).find(shown)??null},20000);
 const click=async(id:string)=>{report.last_action=id;const match=/^ai\.pending\.(?:edit|remove)\.(\d+)$/.exec(id);if(match){const row=(await visible('ai.pending.card.'+match[1])).rect;await h.mouseMove(row.x+40,row.y+row.h/2)}await visible(id);assert((await h.clickTestId(id)).ok,id)};
+async function openSessions(){
+ await click('ai.sessions');
+ const {x,y,w,h:height}=(await visible('ai.sessions')).rect;
+ // The portaled menu opens after layout. Drive a native frame before polling
+ // visibility, especially when reopening after Locate closes the old menu.
+ assert((await h.mouseMove(x+w/2,y+height/2)).ok,'advance the native frame for the conversation menu');
+ report.last_action='ai.sessions.menu';
+ await visible('ai.sessions.menu');
+}
 const absent=(id:string)=>h.waitFor(async()=>!(await h.query(id)).some(shown)||null,15000);
 const input=async(value:string)=>{await click('ai.prompt');await h.key('a',{cmd:true});await h.type_(value)};
 const send=async(value:string)=>{await input(value);await click('ai.send')};
@@ -51,19 +61,37 @@ try{
  await click('ai.pending.toggle');await h.waitFor(async()=>(await visible('ai.pending')).rect.h===26||null,10000);await capture('queue-collapsed');await h.key('return');await h.waitFor(async()=>(await visible('ai.pending')).rect.h===62||null,10000);await h.mouseMove(1,1);await h.key('tab');await h.waitFor(async()=>(await h.focused()).test_id==='ai.pending.edit.0'||null,10000);await visible('ai.pending.edit.0');await capture('queue-keyboard-focus',true);await click('ai.prompt');await h.mouseMove(1,1);report.checks.push('single 58px queue card has stable default/hover/focus geometry, keyboard reaches hidden actions, collapse preserves header focus, and More reorders with the original receipt');
  await assertQueueLayout();await capture('queue-cards');await h.resizeWindow(860,480);await assertQueueLayout();await capture('queue-cards-compact');await h.resizeWindow(1200,900);
  await input('STEER_THIS 先核对日志，保留当前任务');await h.key('return',{cmd:true,shift:true});await visible('ai.followup.pending');assert.equal((await h.inputState('ai.prompt')).buffer,'');assert.equal(modelRequests().length,1,'steering waits for the local request boundary');await capture('steer-pending');
+ await input('正在编辑的草稿');await h.key('up');assert.equal((await h.inputState('ai.prompt')).buffer,'STEER_THIS 先核对日志，保留当前任务');
+ await h.key('up');assert.equal((await h.inputState('ai.prompt')).buffer,'FIRST_TASK 检查当前连接的状态');
+ await h.key('down');assert.equal((await h.inputState('ai.prompt')).buffer,'STEER_THIS 先核对日志，保留当前任务');
+ await h.key('down');assert.equal((await h.inputState('ai.prompt')).buffer,'正在编辑的草稿');
+ await h.key('a',{cmd:true});await h.key('backspace');
  await click('ai.pending.edit.0');await click('ai.pending.editor');await h.key('a',{cmd:true});await h.type_('UNSAVED_EDIT 保留未保存的排队编辑');
  held.end(frame('第一个请求的当前响应已完成。')+'data: [DONE]\n\n');held=null;
  await h.waitFor(async()=>text(await h.query('ai.panel')).includes('SECOND_FINISHED')||null,30000);await absent('ai.pending');await absent('ai.stop');assert((await h.inputState('ai.prompt')).buffer.includes('UNSAVED_EDIT'),'claimed queued input preserves an in-progress edit as the original conversation draft');assert(!JSON.stringify(modelRequests()).includes('UNSAVED_EDIT'),'recovered editing text must never send automatically');
  const model=modelRequests();assert.equal(model.length,4);const lastUser=(r:any)=>r.messages.filter((m:any)=>m.role==='user').at(-1).content;assert(lastUser(model[1]).includes('STEER_THIS'));assert(lastUser(model[2]).includes('THIRD_TASK'));assert(lastUser(model[3]).includes('SECOND_EDITED'));assert(!JSON.stringify(model).includes('REMOVE_ME'));assert.equal(model[1].messages.filter((m:any)=>m.role==='user'&&String(m.content).includes('FIRST_TASK')).length,1);report.checks.push('queue edit/reorder/remove use original owned inputs; alternate shortcut steers within the current Turn; successful completion consumes the remaining queue in order');
- await input('保留原会话草稿');const beforeHistory=modelRequests().length;await click('ai.sessions');await click('ai.session.jump.1');await visible('ai.history');assert(text(await h.query('ai.history.body')).includes('FIRST_TASK'));assert(!(await h.query('ai.history.restore')).some(shown));assert.equal(modelRequests().length,beforeHistory);await capture('readonly-history');await h.resizeWindow(860,480);await capture('readonly-history-compact');const modalRect=(await visible('ai.history')).rect;assert(modalRect.x>=0&&modalRect.y>=0&&modalRect.x+modalRect.w<=860.6&&modalRect.y+modalRect.h<=480.6);await click('ai.history.end');await absent('ai.history');await visible('ai.close.confirmation');await capture('history-end-confirmation');await click('ai.close.confirmation.cancel');await absent('ai.close.confirmation');await h.resizeWindow(1200,900);await click('ai.sessions');await click('ai.session.jump.1');await visible('ai.history');
- await click('ai.history.copy');await absent('ai.history');if(!(await h.query('ai.sessions.menu')).some(shown))await click('ai.sessions');await visible('ai.session.row.2');assert(!(await h.query('ai.session.restore.1')).some(shown));await capture('bound-and-copy');
+ await input('回合结束后的草稿');await h.key('up');assert.match((await h.inputState('ai.prompt')).buffer,/^SECOND_EDITED/);
+ await h.key('up',{cmd:true});await h.key('up');assert.match((await h.inputState('ai.prompt')).buffer,/^THIRD_TASK/);
+ await h.key('up');assert.equal((await h.inputState('ai.prompt')).buffer,'STEER_THIS 先核对日志，保留当前任务');
+ await h.key('up');assert.equal((await h.inputState('ai.prompt')).buffer,'FIRST_TASK 检查当前连接的状态');
+ await h.key('down');assert.equal((await h.inputState('ai.prompt')).buffer,'STEER_THIS 先核对日志，保留当前任务');
+ await h.key('down');assert.match((await h.inputState('ai.prompt')).buffer,/^THIRD_TASK/);
+ await h.key('down');assert.match((await h.inputState('ai.prompt')).buffer,/^SECOND_EDITED/);
+ await h.key('down');assert.equal((await h.inputState('ai.prompt')).buffer,'回合结束后的草稿');
+ report.checks.push('Composer Up and Down visit pending and completed steer input in conversation order and restore the draft without sending');
+ if(recallOnly){
+   await capture('steer-recall');
+   report.status='passed';
+ }else{
+ await input('保留原会话草稿');const beforeHistory=modelRequests().length;await openSessions();await click('ai.session.jump.1');await visible('ai.history');assert(text(await h.query('ai.history.body')).includes('FIRST_TASK'));assert(!(await h.query('ai.history.restore')).some(shown));assert.equal(modelRequests().length,beforeHistory);await capture('readonly-history');await h.resizeWindow(860,480);await capture('readonly-history-compact');const modalRect=(await visible('ai.history')).rect;assert(modalRect.x>=0&&modalRect.y>=0&&modalRect.x+modalRect.w<=860.6&&modalRect.y+modalRect.h<=480.6);await click('ai.history.end');await absent('ai.history');await visible('ai.close.confirmation');await capture('history-end-confirmation');await click('ai.close.confirmation.cancel');await absent('ai.close.confirmation');await h.resizeWindow(1200,900);await openSessions();await click('ai.session.jump.1');await visible('ai.history');
+ await click('ai.history.copy');await absent('ai.history');if(!(await h.query('ai.sessions.menu')).some(shown))await openSessions();await visible('ai.session.row.2');assert(!(await h.query('ai.session.restore.1')).some(shown));await capture('bound-and-copy');
  // A second attached Agent gets its own copy while the source remains bound.
  await click('ai.sessions.close');await click('toolbar.new_session');await click('session.menu.local');await visible('terminal.surface');await absent('ai.panel');await click('toolbar.ai');await visible('ai.prompt');
- await click('ai.sessions');await click('ai.session.copy_use.1');await absent('ai.sessions.menu');assert(!(await h.query('ai.session.close.confirmation')).some(shown));assert.equal(modelRequests().length,beforeHistory);
- await click('ai.sessions');assert(!(await h.query('ai.session.restore.1')).some(shown),'a bound source cannot be restored by the other Agent');await capture('cross-agent-copy');await click('ai.session.locate.1');await absent('ai.sessions.menu');await h.waitFor(async()=>(await h.inputState('ai.prompt')).buffer==='保留原会话草稿'||null,10000);report.checks.push('cross-Agent copy creates another conversation without ending or stealing the bound source; Locate returns to the original writer');
- await click('ai.sessions');await click('ai.session.copy_use.1');await visible('ai.session.close.confirmation');await click('ai.session.close.cancel');await absent('ai.session.close.confirmation');assert.equal((await h.inputState('ai.prompt')).buffer,'保留原会话草稿');
- await click('ai.sessions');await click('ai.session.copy_use.1');await visible('ai.session.close.confirmation');await capture('copy-confirmation');await click('ai.session.close.accept');await absent('ai.session.close.confirmation');await h.waitFor(async()=>!(await h.query('ai.pending')).some(shown)||null,10000);assert.equal((await h.inputState('ai.prompt')).buffer,'','copy does not carry the source draft');assert.equal(modelRequests().length,beforeHistory);
- await click('ai.sessions');await visible('ai.session.restore.1');await capture('unbound-source');await click('ai.session.restore.1');await visible('ai.session.close.confirmation');await capture('restore-confirmation');await click('ai.session.close.accept');await absent('ai.session.close.confirmation');await h.waitFor(async()=>(await h.inputState('ai.prompt')).buffer==='保留原会话草稿'||null,10000);assert.equal(modelRequests().length,beforeHistory,'restore never sends a continue request or replays tools');
+ await openSessions();await click('ai.session.copy_use.1');await absent('ai.sessions.menu');assert(!(await h.query('ai.session.close.confirmation')).some(shown));assert.equal(modelRequests().length,beforeHistory);
+ await openSessions();assert(!(await h.query('ai.session.restore.1')).some(shown),'a bound source cannot be restored by the other Agent');await capture('cross-agent-copy');await click('ai.session.locate.1');await absent('ai.sessions.menu');await h.waitFor(async()=>(await h.inputState('ai.prompt')).buffer==='保留原会话草稿'||null,10000);report.checks.push('cross-Agent copy creates another conversation without ending or stealing the bound source; Locate returns to the original writer');
+ await openSessions();await click('ai.session.copy_use.1');await visible('ai.session.close.confirmation');await click('ai.session.close.cancel');await absent('ai.session.close.confirmation');assert.equal((await h.inputState('ai.prompt')).buffer,'保留原会话草稿');
+ await openSessions();await click('ai.session.copy_use.1');await visible('ai.session.close.confirmation');await capture('copy-confirmation');await click('ai.session.close.accept');await absent('ai.session.close.confirmation');await h.waitFor(async()=>!(await h.query('ai.pending')).some(shown)||null,10000);assert.equal((await h.inputState('ai.prompt')).buffer,'','copy does not carry the source draft');assert.equal(modelRequests().length,beforeHistory);
+ await openSessions();await visible('ai.session.restore.1');await capture('unbound-source');await click('ai.session.restore.1');await visible('ai.session.close.confirmation');await capture('restore-confirmation');await click('ai.session.close.accept');await absent('ai.session.close.confirmation');await h.waitFor(async()=>(await h.inputState('ai.prompt')).buffer==='保留原会话草稿'||null,10000);assert.equal(modelRequests().length,beforeHistory,'restore never sends a continue request or replays tools');
  const forkViewport=(await visible('ai.conversation.viewport')).rect,fork=(await h.query('ai.turn.fork')).find(n=>shown(n)&&n.rect.y>=forkViewport.y&&n.rect.y+n.rect.h<=forkViewport.y+forkViewport.h);assert(fork,'a completed Turn fork action is visible after the long transcript is restored');assert((await h.clickAt(fork.rect.x+fork.rect.w/2,fork.rect.y+fork.rect.h/2)).ok);await visible('ai.session.close.confirmation');await capture('turn-fork-confirmation');await click('ai.session.close.cancel');await absent('ai.session.close.confirmation');assert.equal((await h.inputState('ai.prompt')).buffer,'保留原会话草稿','cancelled Turn fork must not end the source or clear its draft');assert.equal(modelRequests().length,beforeHistory);
  await click('ai.close');await visible('ai.close.confirmation');await capture('end-confirmation');await click('ai.close.confirmation.confirm');await absent('ai.panel');await visible('terminal.surface');await click('toolbar.ai');await visible('ai.prompt');assert.equal((await h.inputState('ai.prompt')).buffer,'');report.checks.push('read-only history does not activate; copy has a fresh identity and omits draft; cancel preserves the current conversation; confirmed restore preserves source identity and draft; End unbinds while the Local connection remains open');
  // Real settings transaction, including search and the existing Save action.
@@ -81,7 +109,14 @@ try{
  const forks=lifecycle.filter((e:any)=>e.kind==='fork'||e.kind==='fork_bound');assert.equal(forks.length,3);assert.equal(new Set(forks.map((e:any)=>e.conversation)).size,3);for(const fork of forks){assert.equal(fork.parent,source);assert.notEqual(fork.conversation,source);assert.equal(fork.draft,null)}
  assert(lifecycle.some((e:any)=>e.kind==='bind'&&e.conversation===source));assert.equal(lifecycle.filter((e:any)=>e.kind==='unbind'&&e.conversation===source).length,2);assert.equal(checkpoints.at(-1).messages.filter((m:any)=>m.role==='user').length,4);
  report.journal_kinds=lifecycle.map((e:any)=>e.kind);report.requests=model;report.status='passed';
-}catch(error){report.error=String(error);report.status='failed';process.exitCode=1;await capture('failure').catch(()=>{});await h.query('ai.panel').then((r:any)=>writeFile(join(out,'failure-tree.json'),JSON.stringify(r,null,2))).catch(()=>{});}
+ }
+}catch(error){
+ report.error=String(error);report.status='failed';process.exitCode=1;
+ const ids=[...new Set(['ai.panel','ai.sessions.menu','ai.session.close.confirmation',report.last_action].filter(Boolean))];
+ const surfaces=Object.fromEntries(await Promise.all(ids.map(async id=>[id,await h.query(id).catch(String)])));
+ await writeFile(join(out,'failure-tree.json'),JSON.stringify(surfaces,null,2)).catch(()=>{});
+ await capture('failure',true).catch(()=>{});
+}
 finally{
  if(held){held.destroy();held=null}try{if(alive()){await h.request('POST','/zerowork/windows',{action:'quit'});const start=performance.now();while(alive()&&performance.now()-start<15000){for(const id of ['settings.close.discard','groups.close.accept','local.close.accept','session.close.accept'])try{if((await h.query(id)).some(shown))await h.clickTestId(id)}catch{}await Promise.race([ended,h.sleep(80)])}}}catch(e){report.quit_error=String(e)}
  if(alive()){report.forced=true;app.kill('SIGTERM');await ended}report.exit_code=app.exitCode;report.signal=app.signalCode;if(report.forced||app.exitCode!==0){report.status='failed';process.exitCode=1}server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,out}));

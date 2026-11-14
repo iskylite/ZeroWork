@@ -28,12 +28,14 @@ pub const ModelKey = struct {
         return std.mem.eql(u8, self.provider_id, other.provider_id) and std.mem.eql(u8, self.model_id, other.model_id);
     }
 };
-pub const UsagePart = struct { name: []const u8, tokens: u64, estimated: ?bool = null };
+pub const UsagePartKind = enum { system, tools, messages, images, unattributed, draft };
+pub const UsagePart = struct { name: []const u8, tokens: u64, estimated: ?bool = null, kind: ?UsagePartKind = null };
 pub const Usage = struct {
     used_tokens: u64,
     limit_tokens: u64,
     estimated: bool = false,
     parts: []const UsagePart = &.{},
+    measured_input: ?u64 = null,
     request_tokens: ?u64 = null,
     redacted: ?bool = null,
     compaction: @import("../ai/context_compaction.zig").Status = .idle,
@@ -903,7 +905,7 @@ pub const View = struct {
                     style.min_height = panel_height;
                 }
                 if (kind == .usage) if (self.source) |source| if (source.value.usage) |usage| {
-                    const panel_height = @min(@as(f32, 116) + @as(f32, @floatFromInt(usage.parts.len)) * 26, @max(0, self.cx.viewport.height - 16));
+                    const panel_height = S.usageHeight(usage.parts.len, usage.measured_input != null, self.cx.viewport.height);
                     style.height = .{ .px = panel_height };
                     style.min_height = panel_height;
                     style.max_height = panel_height;
@@ -1323,7 +1325,9 @@ pub const View = struct {
         try summary.appendChild(self.cx.allocator, try ui.spacer(self.cx));
         var used_buffer: [24]u8 = undefined;
         var limit_buffer: [24]u8 = undefined;
-        _ = try self.label(summary, try std.fmt.bufPrint(&buffer, "{s}{s} / {s}", .{ if (usage.estimated) "~" else "", try tokenText(&used_buffer, usage.used_tokens), try tokenText(&limit_buffer, usage.limit_tokens) }), S.text(11.5, 500, 18, false), S.label(112, 18));
+        var total_style = S.text(11.5, 500, 18, false);
+        total_style.text_align = .end;
+        _ = try self.label(summary, try std.fmt.bufPrint(&buffer, "{s}{s} / {s}", .{ if (usage.estimated) "~" else "", try tokenText(&used_buffer, usage.used_tokens), try tokenText(&limit_buffer, usage.limit_tokens) }), total_style, S.label(112, 18));
         try self.usage_body.appendChild(self.cx.allocator, summary);
         const track_row = try ui.box(self.cx, S.usageTrackRow(), .{});
         const track = try ui.box(self.cx, S.usageTrack(), .{});
@@ -1332,7 +1336,9 @@ pub const View = struct {
         for (usage.parts, 0..) |part, index| {
             const ratio = @min(remaining, @as(f32, @floatFromInt(part.tokens)) / @as(f32, @floatFromInt(usage.limit_tokens)));
             if (ratio <= 0) continue;
-            try track.appendChild(self.cx.allocator, try ui.box(self.cx, S.usageSegment(ratio, index), .{}));
+            const segment = try ui.box(self.cx, S.usageSegment(ratio, if (part.kind) |kind| @backingInt(kind) else index), .{});
+            segment.meta.ownership.meta.test_id = "ai.usage.part.segment";
+            try track.appendChild(self.cx.allocator, segment);
             remaining -= ratio;
         }
         try track_row.appendChild(self.cx.allocator, track);
@@ -1351,15 +1357,25 @@ pub const View = struct {
         try hint.trigger.appendChild(self.cx.allocator, button);
         try track_row.appendChild(self.cx.allocator, hint.wrapper);
         try self.usage_body.appendChild(self.cx.allocator, track_row);
+        var value_style = S.text(11, 400, 18, false);
+        value_style.text_align = .end;
         for (usage.parts, 0..) |part, index| {
             const row = try ui.box(self.cx, S.usageRow(), .{});
-            try row.appendChild(self.cx.allocator, try ui.box(self.cx, S.usageSwatch(index), .{}));
+            row.meta.ownership.meta.test_id = "ai.usage.part.row";
+            try row.appendChild(self.cx.allocator, try ui.box(self.cx, S.usageSwatch(if (part.kind) |kind| @backingInt(kind) else index), .{}));
             _ = try self.label(row, part.name, S.text(11, 400, 18, true), S.flexibleLabel(18));
-            const value = try self.label(row, try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (part.estimated orelse usage.estimated) "~" else "", try tokenText(&used_buffer, part.tokens) }), S.text(11, 400, 18, false), S.label(64, 18));
+            const value = try self.label(row, try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (part.tokens != 0 and (part.estimated orelse usage.estimated)) "~" else "", try tokenText(&used_buffer, part.tokens) }), value_style, S.label(64, 18));
             value.meta.ownership.meta.test_id = "ai.usage.part.value";
             try self.usage_body.appendChild(self.cx.allocator, row);
         }
-        const desired_height = @min(@as(f32, 116) + @as(f32, @floatFromInt(usage.parts.len)) * 26, @max(0, self.cx.viewport.height - 16));
+        if (usage.measured_input) |measured| {
+            const reference = try ui.box(self.cx, S.usageRow(), .{});
+            reference.meta.ownership.meta.test_id = "ai.usage.measured";
+            _ = try self.label(reference, "上次请求输入（实测）", S.text(11, 400, 18, true), S.flexibleLabel(18));
+            _ = try self.label(reference, try tokenText(&used_buffer, measured), value_style, S.label(64, 18));
+            try self.usage_body.appendChild(self.cx.allocator, reference);
+        }
+        const desired_height = S.usageHeight(usage.parts.len, usage.measured_input != null, self.cx.viewport.height);
         self.popups[@backingInt(S.Kind.usage)].widget.chrome.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired_height }, .min_height = desired_height, .max_height = desired_height });
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
@@ -1544,8 +1560,8 @@ fn projectionEql(first: Projection, second: Projection) bool {
 fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;
     const two = second orelse return false;
-    if (one.compaction_before != two.compaction_before or one.compaction_after != two.compaction_after or one.compaction != two.compaction or one.can_compact != two.can_compact or one.used_tokens != two.used_tokens or one.limit_tokens != two.limit_tokens or one.estimated != two.estimated or one.request_tokens != two.request_tokens or one.redacted != two.redacted or one.parts.len != two.parts.len) return false;
-    for (one.parts, two.parts) |left, right| if (left.tokens != right.tokens or left.estimated != right.estimated or !std.mem.eql(u8, left.name, right.name)) return false;
+    if (one.compaction_before != two.compaction_before or one.compaction_after != two.compaction_after or one.compaction != two.compaction or one.can_compact != two.can_compact or one.used_tokens != two.used_tokens or one.limit_tokens != two.limit_tokens or one.estimated != two.estimated or one.measured_input != two.measured_input or one.request_tokens != two.request_tokens or one.redacted != two.redacted or one.parts.len != two.parts.len) return false;
+    for (one.parts, two.parts) |left, right| if (left.tokens != right.tokens or left.estimated != right.estimated or left.kind != right.kind or !std.mem.eql(u8, left.name, right.name)) return false;
     return true;
 }
 fn prepareCustomButton(button: *ui.Node, justify: ui.JustifyContent, allocator: std.mem.Allocator) void {

@@ -180,14 +180,18 @@ test "native transfer semantic paints stay readable and retheme across all built
         _ = theme.setMaterialParameters(100, 0);
         h.cx.setTheme(theme.widgetTheme(theme.currentName()));
         p.retheme();
+        h.cx.handleMouseMove(0, 0);
+        // The native Buttons transition their backgrounds for 150 ms.
+        h.frames();
+        h.frames();
         h.frames();
         try std.testing.expectEqual(theme.current().warn_ink, text(p.root, "已暂停 40%").?.getText().?.color);
         try std.testing.expectEqual(theme.current().ok_ink, text(p.root, "已完成 100%").?.getText().?.color);
         for ([_]usize{ 2, 3, 4 }) |index| {
-            const label_ = p.counts_labels[index];
-            const background = label_.parent.?.getBackground();
+            const chip = p.counts_buttons[index];
+            const background = chip.node.getBackground();
             try std.testing.expectEqual(theme.popupInset(), background);
-            try std.testing.expect(paintContrast(label_.getText().?.color, background) >= 4.5);
+            try std.testing.expect(paintContrast(chip.label.getText().?.color, background) >= 4.5);
         }
         const styles = @import("ui/transfer_styles.zig");
         const enabled_option = styles.optionTag(true).background.?;
@@ -461,14 +465,15 @@ test "transfer projection unknown owner disabled scope selection removed and man
     const p = try h.panel(&c, .window);
     var rows: [500]V.Task = undefined;
     for (&rows, 0..) |*r, i| r.* = row(@intCast(i + 1), 101, .running);
-    rows[0].target.owner = null;
+    const unowned = &rows[rows.len - 1];
+    unowned.target.owner = null;
     try p.update(.{ .revision = 1, .rows = &rows });
     p.show();
     h.frames();
     try std.testing.expect(count(p.root, "transfer.task") < 20);
     click(h, id(p.root, "transfer.task.primary").?);
     try std.testing.expectEqual(@as(usize, 0), c.calls);
-    try std.testing.expectError(error.UnknownOwner, p.perform(rows[0].target, .pause));
+    try std.testing.expectError(error.UnknownOwner, p.perform(unowned.target, .pause));
     try p.selection.append(h.cx.allocator, rows[1].target);
     try p.update(.{ .revision = 2, .rows = &rows, .scope = .{ .session = handle(201, 1) } });
     try std.testing.expectEqual(@as(usize, 0), p.selection.items.len);
@@ -1182,7 +1187,7 @@ test "transfer projection Manager scopes filter original owners and survive live
     try std.testing.expectEqual(@as(usize, 0), capture.actions);
 }
 
-test "transfer projection Figma category filters retain real states without mutating jobs" {
+test "transfer projection status buttons filter ordered jobs without mutating transfers" {
     const h = try H.init(1440, 900);
     defer h.deinit();
     var capture: Capture = .{};
@@ -1192,16 +1197,36 @@ test "transfer projection Figma category filters retain real states without muta
     p.show();
     h.frames();
     try std.testing.expectEqual(@as(usize, 7), p.visible.items.len);
+    for (p.visible.items, [_]u64{ 3, 2, 7, 6, 5, 4, 1 }) |index, job| {
+        try std.testing.expectEqual(job, p.source.?.value.rows[index].target.job);
+    }
     try std.testing.expect(text(p.counts_row, "进行中 2") != null);
     try std.testing.expect(text(p.counts_row, "等待 1") != null);
     try std.testing.expect(text(p.counts_row, "结束 2") != null);
-    p.setFilter(.active);
+    const toolbar_filter = id(p.root, "transfer.filter.toggle").?.globalRect();
+    const task_actions = id(p.root, "transfer.task.actions").?.globalRect();
+    try std.testing.expectApproxEqAbs(task_actions.x + task_actions.w, toolbar_filter.x + toolbar_filter.w, 0.1);
+    for ([_][]const u8{ "active", "waiting", "paused", "failed", "ended" }, [_]usize{ 2, 1, 1, 1, 2 }) |status, total| {
+        var buf: [40]u8 = undefined;
+        const chip = id(p.root, try std.fmt.bufPrint(&buf, "transfer.states.{s}", .{status})).?;
+        click(h, chip);
+        h.frames();
+        try std.testing.expectEqual(total, p.visible.items.len);
+        try std.testing.expectEqualStrings(status, p.filter_value.peek().?);
+        try std.testing.expect(chip.behavior.interaction.a11y.?.pressed);
+        h.cx.handleMouseMove(0, 0);
+        h.frames();
+        const inactive = id(p.root, if (std.mem.eql(u8, status, "active")) "transfer.states.waiting" else "transfer.states.active").?;
+        try std.testing.expect(!ui.Color.eql(inactive.getBackground(), chip.getBackground()));
+        click(h, chip);
+        h.frames();
+        try std.testing.expectEqual(@as(usize, 7), p.visible.items.len);
+        try std.testing.expect(!chip.behavior.interaction.a11y.?.pressed);
+    }
+    const ended = id(p.root, "transfer.states.ended").?;
+    click(h, ended);
     h.frames();
-    try std.testing.expectEqual(@as(usize, 2), p.visible.items.len);
-    p.setFilter(.ended);
-    h.frames();
-    try std.testing.expectEqual(@as(usize, 2), p.visible.items.len);
-    try std.testing.expectEqual(@as(u64, 5), p.source.?.value.rows[p.visible.items[0]].target.job);
+    try std.testing.expectEqual(@as(u64, 6), p.source.?.value.rows[p.visible.items[0]].target.job);
     try std.testing.expectApproxEqAbs(@as(f32, 76), id(p.root, "transfer.task").?.globalRect().h, 0.1);
     try std.testing.expectEqual(@as(usize, 0), capture.calls);
     click(h, id(p.root, "transfer.window.close").?);
@@ -1357,18 +1382,18 @@ test "transfer projection presents only mounted viewport rows matching current f
     try p.update(.{ .revision = 1, .rows = &rows });
     p.show();
     h.frames();
-    try std.testing.expect(p.presents(1));
-    try std.testing.expect(!p.presents(80));
-    p.setFilter(.failed);
+    try std.testing.expect(p.presents(80));
     try std.testing.expect(!p.presents(1));
+    p.setFilter(.failed);
+    try std.testing.expect(!p.presents(80));
     p.setFilter(.all);
     p.search.set("unmatched-file-name");
-    try std.testing.expect(!p.presents(1));
+    try std.testing.expect(!p.presents(80));
     p.search.set("");
     h.frames();
     ui.widgets.scroll_area.setScrollY(p.list.state, p.list.content, 520);
     h.frames();
-    try std.testing.expect(!p.presents(1));
+    try std.testing.expect(!p.presents(80));
 }
 
 test "transfer projection direction filter keeps each file card owner scoped" {
@@ -1841,7 +1866,7 @@ test "transfer projection numeric progress retains row controls scopes and toolt
     var capture: Capture = .{};
     const p = try h.panel(&capture, .window);
     var rows = [_]V.Task{ row(1, 101, .running), row(2, 101, .running) };
-    rows[0].total_bytes = 1000;
+    rows[1].total_bytes = 1000;
     try p.update(.{ .revision = 1, .rows = &rows });
     p.show();
     h.frames();
@@ -1849,17 +1874,18 @@ test "transfer projection numeric progress retains row controls scopes and toolt
     const menu_id = id(p.root, "transfer.scope.select").?.id;
     const epoch = p.root.ownedTreeStructureRevision();
     for (2..122) |revision| {
-        rows[0].done_bytes = revision;
-        rows[0].speed_bps = revision * 10;
+        rows[1].done_bytes = revision;
+        rows[1].speed_bps = revision * 10;
         try p.update(.{ .revision = revision, .rows = &rows });
     }
     try std.testing.expectEqual(epoch, p.root.ownedTreeStructureRevision());
     try std.testing.expectEqual(task_id, id(p.root, "transfer.task").?.id);
     try std.testing.expectEqual(menu_id, id(p.root, "transfer.scope.select").?.id);
-    try std.testing.expectEqual(@as(u64, 121), p.source.?.value.rows[0].done_bytes);
+    try std.testing.expectEqual(@as(u64, 121), p.source.?.value.rows[1].done_bytes);
     try std.testing.expectEqualStrings("传输中 12%", id(p.root, "transfer.task.status").?.getText().?.content);
-    rows[0].phase = .succeeded;
+    rows[1].phase = .succeeded;
     try p.update(.{ .revision = 122, .rows = &rows });
     h.frames();
-    try std.testing.expectEqualStrings("已完成 100%", id(p.root, "transfer.task.status").?.getText().?.content);
+    try std.testing.expectEqualStrings("传输中 40%", id(p.root, "transfer.task.status").?.getText().?.content);
+    try std.testing.expect(text(p.root, "已完成 100%") != null);
 }

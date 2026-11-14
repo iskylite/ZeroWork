@@ -570,8 +570,7 @@ pub const Host = struct {
             if (!registered) return error.UnregisteredNotificationAction;
         };
         var gated = event;
-        gated.attention.app_focused = false;
-        for (self.windows.items) |registration| gated.attention.app_focused = gated.attention.app_focused or registration.focused;
+        gated.attention.app_focused = self.appFocused();
         // The host owns source identity; plugins may publish just the event.
         if (gated.owner_name.len == 0) {
             if (previous) |record| gated.owner_name = record.event.owner_name;
@@ -581,11 +580,16 @@ pub const Host = struct {
         }
         for (self.windows.items) |registration| if (@backingInt(registration.id) == event.owner.window_id) {
             gated.system_enabled = event.system_enabled and !gated.attention.app_focused;
-            if (registration.value.result_presented) |presented| gated.attention.source_visible = presented(registration.value.context, switch (event.attention.kind) {
-                .task_blocked, .outcome_unknown => .ai_ready,
-                .transfer_batch_stopped => .transfer_done,
-                else => .reconnect,
-            }, event.owner.content);
+            // The AI wait producer knows which exact dialog and prompt is visible.
+            // A different dialog may share the same terminal owner.
+            if (!std.mem.eql(u8, event.definition_id, "host.ai_attention")) {
+                if (registration.value.result_presented) |presented| gated.attention.source_visible = presented(registration.value.context, switch (event.attention.kind) {
+                    .task_blocked, .outcome_unknown => .ai_ready,
+                    .transfer_batch_stopped => .transfer_done,
+                    else => .reconnect,
+                }, event.owner.content);
+            }
+            gated.attention.source_visible = gated.attention.source_visible and gated.attention.app_focused;
             if (event.attention.kind == .transfer_batch_stopped) if (registration.value.transfer_presented) |presented| {
                 gated.attention.source_visible = gated.attention.source_visible or presented(registration.value.context, event.operation_id);
             };
@@ -660,6 +664,10 @@ pub const Host = struct {
             window.focused = focused;
             return;
         };
+    }
+    pub fn appFocused(self: *const Host) bool {
+        for (self.windows.items) |window| if (window.focused) return true;
+        return false;
     }
     pub fn registerAction(self: *Host, owner: ContentOwner, kind: notifications.ActionKind, handler: ActionHandler) !u64 {
         if (self.actions.items.len >= 128) return error.NotificationActionLimit;

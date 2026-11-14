@@ -17,6 +17,18 @@ try {await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(jo
  for(const [w,h] of [[860,480],[1440,900]]) {await resizeWindow(w,h);const card=await visible('transfer.manager');await sleep(120);await writeFile(join(out,`${w}.json`),JSON.stringify(await query('transfer.manager'),null,2));assert((await screenshot(join(out,`${w}.png`))).ok);report.captures.push({w,h,card:card.rect});
  if(mode==='tray'){const card=(await visible('transfer.manager')).rect;const row=await visible('transfer.task');const progress=await visible('transfer.task.progress');assert(row.rect.y>=card.y&&row.rect.y+row.rect.h<=card.y+card.h,'First tray card fully fits');assert(progress.rect.y+progress.rect.h<=card.y+card.h,'Tray progress fully fits');}
  if(mode!=='main'){const rows=(await query('transfer.task')).filter(shown);assert(rows.length>0);for(const row of rows)assert.equal(row.rect.h,76);const actions=(await query('transfer.task.actions')).filter(shown);for(const action of actions){const row=rows.find((r:any)=>action.rect.y>=r.rect.y&&action.rect.y+action.rect.h<=r.rect.y+r.rect.h);assert(row,'Actions stay within the current card main row');assert(action.rect.x+action.rect.w<=row.rect.x+row.rect.w+0.5);}}}
+ if(mode==='fixture'){
+  const filter=await visible('transfer.filter.toggle'), actions=await visible('transfer.task.actions');
+  assert(Math.abs(filter.rect.x+filter.rect.w-actions.rect.x-actions.rect.w)<0.5,'Toolbar and task action right edges align');
+  const names=async()=> (await query('transfer.task.name')).filter(shown).sort((a,b)=>a.rect.y-b.rect.y).map(n=>n.text);
+  assert.deepEqual((await names()).slice(0,3),['worker.stdout.log','release.tar.gz','release-second-session.tar.gz']);
+  await click('transfer.states.failed');
+  await waitFor(async()=>JSON.stringify(await names())===JSON.stringify(['db-backup.sql.gz'])||null,3000);
+  assert((await screenshot(join(out,'filtered.png'))).ok);
+  await click('transfer.states.failed');
+  await waitFor(async()=>(await names())[0]==='worker.stdout.log'||null,3000);
+  report.checks.push('Active transfers first, newest first within both sections, status button toggles filter, aligned right edges');
+ }
  if(mode!=='main'){
  for(const column of ['transfer.task.owner','transfer.task.status','transfer.task.rate']){const cells=(await query(column)).filter(shown);if(cells.length>1){const right=cells[0].rect.x+cells[0].rect.w;for(const cell of cells)assert(Math.abs(cell.rect.x+cell.rect.w-right)<0.5,'Shared metadata column right edge: '+column);}}
  assert(!(await query('transfer.task.select')).some(shown));

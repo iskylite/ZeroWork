@@ -18,6 +18,7 @@ const output=resolve(args['--out']);await mkdir(output,{recursive:true});assert.
 const binary=join(output,'zerowork-frozen');await copyFile(resolve(args['--binary']),binary);for(const artifact of ['zw_ipc.so','zw_execution.so','zw_secret_consume.so','zw_execution_guard']) await copyFile(join(dirname(resolve(args['--binary'])),artifact),join(output,artifact));assert.equal(createHash('sha256').update(await readFile(binary)).digest('hex'),args['--expected-sha']);
 const isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-group-close-'))),rpc=join(isolated,'rpc'),data=join(isolated,'data');await Promise.all([mkdir(rpc),mkdir(data)]);const shellConfig=join(isolated,'shell-config');await mkdir(shellConfig);await writeFile(join(shellConfig,'.zshrc'),"bindkey -e\nPS1='ZeroWork-acceptance%# '\n");
 const privateConfig=sshEnabled?JSON.parse(await readFile(args['--config']??'/tmp/zerowork-next-acceptance-20261021.json','utf8')).direct:{host:'local-only.invalid',port:22,user:'tester',password:''};
+if(sshEnabled&&privateConfig.known_host)await writeFile(join(data,'known_hosts'),privateConfig.known_host,{mode:0o600});
 const q=(x:any)=>JSON.stringify(x);
 await writeFile(join(data,'hosts.toml'),sshEnabled?`[[hosts]]\nname = "Close acceptance SSH"\nhost = ${q(privateConfig.host)}\nport = ${privateConfig.port}\nuser = ${q(privateConfig.user)}\nauth_mode = "password"\nauth = { password = ${q(privateConfig.password)} }\noptions = { strict_host_key = true }\n`:'',{mode:0o600});
 await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision = 1\n[ui]\ntheme = "dark"\nfont_family = "Menlo"\nfont_size = 14\n');
@@ -28,8 +29,8 @@ const report:any={status:'running',pid:app.pid,binary,sha256:args['--expected-sh
 const save=()=>writeFile(join(output,'report.json'),JSON.stringify(report,null,2));
 const shown=(n:any)=>n?.rect&&!n.hidden&&n.visible!==false&&n.rect.w>0&&n.rect.h>0&&(n.effective_opacity??1)>0;
 const flat=(n:any):any[]=>shown(n)?[n,...(n.children??[]).flatMap(flat)]:[];
-const visible=async(id:string)=>waitFor(async()=>(await query(id)).find(shown)??null,20000);
-const hidden=async(id:string)=>waitFor(async()=>!(await query(id)).some(shown)||null,20000);
+const visible=async(id:string)=>waitFor(async()=>(await query(id)).find(shown)??null,20000).catch(error=>{throw Error(`Waiting for ${id} to appear`,{cause:error})});
+const hidden=async(id:string)=>waitFor(async()=>!(await query(id)).some(shown)||null,20000).catch(error=>{throw Error(`Waiting for ${id} to disappear`,{cause:error})});
 const clickNode=async(n:any)=>{assert(shown(n));assert((await clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok)};
 const click=async(id:string)=>{if(id.startsWith('tabs.close.')){const tab=await visible(`tabs.tab.${id.split('.').at(-1)}`);await mouseMove(tab.rect.x+tab.rect.w/2,tab.rect.y+tab.rect.h/2);await sleep(100)}report.last_action={kind:'click',id};await save();await clickNode(await visible(id))};
 const press=async(name:string,mods?:any)=>{assert((await key(name,mods)).ok)};
@@ -37,28 +38,46 @@ const type=async(text:string)=>{assert((await type_(text)).ok)};
 const tabNodes=async()=>{const result=await query('tabs.strip');const strip=Array.isArray(result)?result.find(shown):null;return strip?flat(strip).filter(n=>/^tabs\.tab\.\d+$/.test(n.test_id??'')):[]};
 const sessionIds=async()=>{const ids:string[]=[];for(let candidate=1;candidate<=localCount+(sshEnabled?2:0);candidate++){const r=await screenPos(`groups.pane.${candidate}`);if(r.w>0&&r.h>0)ids.push(String(candidate))}return ids};
 const groupVisible=async()=>waitFor(async()=>{const r=await screenPos('groups.workspace');return r.w>0&&r.h>0?r:null},15000);
-const capture=async(name:string)=>{await sleep(120);assert((await screenshot(join(output,`${name}.png`))).ok);const observations:any={};for(const id of ['tabs.strip','groups.workspace','groups.close.confirm','groups.close.partial','local.close.confirmation','status.connection.identity','status.connection.chain','status.connection.forward','status.transfer','transfer.session']) observations[id]=await query(id);await writeFile(join(output,`${name}.queries.json`),JSON.stringify(observations,null,2));report.screenshots.push(name);await save()};
+const capture=async(name:string)=>{await sleep(120);assert((await screenshot(join(output,`${name}.png`))).ok);const observations:any={};for(const id of ['tabs.strip','groups.workspace','groups.close.confirm','groups.close.partial','local.close.confirmation','status.connection.identity','status.connection.chain','status.connection.forward','connection.details','transfer.manager']) observations[id]=await query(id);await writeFile(join(output,`${name}.queries.json`),JSON.stringify(observations,null,2));report.screenshots.push(name);await save()};
 const check=(name:string,detail:any={})=>report.checks.push({name,status:'passed',detail});
+function checkPartialGeometry(panel:any){
+ const {x,y,w,h}=panel.rect;assert(Math.abs(w-480)<1&&h>116&&h<=248);
+ const nodes=flat(panel);
+ for(const id of ['groups.close.heading','groups.close.members','groups.close.cancel','groups.close.accept']){
+  const rect=nodes.find(n=>n.test_id===id)?.rect;assert(rect,`Missing ${id}`);
+  assert(rect.x>=x-.5&&rect.y>=y-.5&&rect.x+rect.w<=x+w+.5&&rect.y+rect.h<=y+h+.5,`${id} must fit the result dialog`);
+ }
+}
 async function checkPaneHeaders(stage:string){
- if(args['--confirm-only']==='1')return;
  const panes=(await query('groups.workspace')).filter(shown).flatMap(flat).filter(n=>/^groups\.pane\.\d+$/.test(n.test_id??''));assert.equal(panes.length,totalCount);
  const geometry=panes.map(pane=>{
   const header=pane.children?.find(shown);assert(header,'Group pane header must be visible');
-  const nodes=flat(header),title=nodes.find(n=>n.test_id==='groups.pane.title'),status=nodes.find(n=>n.test_id==='groups.pane.status');assert(title&&status,'Actual pane title and status must be queryable');
+  assert(Math.abs(header.rect.h-28)<=.5,`${stage}: grouped terminal header should be 28pt tall`);
+  const nodes=flat(header),title=nodes.find(n=>n.test_id==='groups.pane.title');
+  const statusText=nodes.find(n=>n.test_id==='groups.pane.status'),statusDot=nodes.find(n=>n.test_id==='groups.pane.status_dot');
+  assert(title&&statusDot,'Pane title and connection state indicator must remain visible');
+  assert.equal(Boolean(statusText),header.rect.w>=180,'Only compact pane headers should collapse the connection state label');
+  const status=statusText??statusDot;
   const id=pane.test_id.split('.').at(-1),pin=nodes.find(n=>n.test_id===`groups.pin.${id}`),menu=nodes.find(n=>n.test_id===`groups.menu.${id}`),grip=header.children?.find(shown);assert(pin&&menu&&grip,'All pane header controls must be visible');
   const within=(r:any)=>r.x>=header.rect.x-.5&&r.y>=header.rect.y-.5&&r.x+r.w<=header.rect.x+header.rect.w+.5&&r.y+r.h<=header.rect.y+header.rect.h+.5;
-  for(const node of [title,status,grip,pin,menu])assert(within(node.rect),`${stage}: ${node.test_id??'grip'} must stay inside pane header`);
-  assert(title.rect.x+title.rect.w<=status.rect.x-4+.5,`${stage}: pane title must leave the 4px gap before status`);
+  const broadcast=nodes.find(n=>n.test_id===`groups.broadcast.${id}`);
+  for(const node of [title,statusDot,status,grip,pin,menu,...(broadcast?[broadcast]:[])])assert(within(node.rect),`${stage}: ${node.test_id??'grip'} must stay inside pane header`);
+  for(const node of [grip,pin,menu,...(broadcast?[broadcast]:[])])assert(node.rect.h>=23.5,`${stage}: ${node.test_id??'grip'} should retain its 24pt target height`);
+  assert(title.rect.x+title.rect.w<=statusDot.rect.x-4+.5,`${stage}: pane title must leave the 4px gap before status`);
   assert(status.rect.x+status.rect.w<=pin.rect.x-4+.5,`${stage}: status must leave the 4px gap before pin`);
   assert(pin.rect.x+pin.rect.w<=menu.rect.x-4+.5,`${stage}: controls must not overlap`);
   return {pane:pane.test_id,header:header.rect,title:{text:title.text,rect:title.rect},status:{text:status.text,rect:status.rect},grip:grip.rect,pin:pin.rect,menu:menu.rect};
  });
  check(`real group pane headers stay bounded without title/status overlap (${stage})`,geometry);await save();
 }
-function noEstablishedSsh(stage:string){
- if(!sshEnabled)return;
+function establishedSsh(){
  let listing='';try{listing=execFileSync('/usr/sbin/lsof',['-nP','-a','-p',String(app.pid),'-iTCP','-sTCP:ESTABLISHED'],{encoding:'utf8',stdio:['ignore','pipe','pipe']})}catch(error:any){assert.equal(error.status,1);listing=String(error.stdout??'')}
- assert.equal(listing.trim(),'','This owned app must release its real SSH TCP connections before runner cleanup');check(`real SSH sockets released before app teardown (${stage})`);
+ return listing.trim().split('\n').slice(1).map(line=>line.trim().split(/\s+/).at(-2));
+}
+async function noEstablishedSsh(stage:string){
+ if(!sshEnabled)return;
+ await waitFor(async()=>establishedSsh().length===0||null,10000).catch(error=>{throw Error(`Owned SSH sockets must be released after ${stage}`,{cause:error})});
+ check(`real SSH sockets released before app teardown (${stage})`);
 }
 
 const file=async(path:string)=>{try{return await readFile(path,'utf8')}catch{return ''}};
@@ -68,6 +87,18 @@ async function trusted(cmd:string){
  assert(ok,'Production trusted command editor must open');await type(cmd);await press('right');await hidden('terminal.commands');await press('return');
 }
 async function focusSession(id:string){const r=await screenPos(`groups.pane.${id}`);assert(r.w>0&&r.h>0);assert((await clickAt(r.x+r.w/2,r.y+Math.max(60,r.h/2))).ok)}
+async function expandToolbar(id:string){
+ if((await query(id)).some(shown))return;
+ const expand=await visible('toolbar.expand');
+ await mouseMove(expand.rect.x+expand.rect.w/2,expand.rect.y+expand.rect.h/2);
+ await visible(id);
+}
+async function openThemeMenu(){
+ const id=(await query('local.status.theme')).some(shown)?'local.status.theme':'status.connection.theme';
+ await expandToolbar(id);
+ await click(id);
+ await visible('status.theme');
+}
 const localOwners:{id:string,pid:number,tab:string}[]=[];const ownedShells:number[]=[];
 try{
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await resizeWindow(1440,900);
@@ -83,12 +114,16 @@ try{
  if(sshEnabled){
   // Real SSH -> production Cmd+D -> group + actual duplicate SSH. The
   // duplicate is closed normally; the original live SSH remains in its group.
-  await click('sidebar.host');await authenticateUntil(async()=>{return (await query('status.connection.identity')).some(shown)&&!(await query('connection.progress')).some(shown)});
+  const host=await visible('sidebar.host');assert((await clickAt(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2,2)).ok);
+  await authenticateUntil(async()=>{return (await query('status.connection.identity')).some(shown)&&!(await query('connection.progress')).some(shown)});
   sshTab=(await tabNodes())[0].test_id;await press('d',{cmd:true});await press('modifiers_released');await groupVisible();
   await authenticateUntil(async()=>(await sessionIds()).length===2);
   const holder=await visible('groups.tab');const title=flat(holder).map(n=>n.text??'').find(t=>t.startsWith('组 · '));assert(title);groupName=title.slice('组 · '.length);assert(groupName.length>0);
-  const duplicate=(await tabNodes()).at(-1)!.test_id;assert.notEqual(duplicate,sshTab);await click(`tabs.close.${duplicate.split('.').at(-1)}`);
-  await waitFor(async()=>!(await tabNodes()).some(n=>n.test_id===duplicate)||null,20000);await click('groups.tab');await groupVisible();
+  const created=await sessionIds();assert.equal(created.length,2);
+  const duplicate=created[1];
+  await click(`groups.menu.${duplicate}`);const closeDuplicate=flat(await visible('groups.member_menu')).find(n=>n.text==='断开并关闭会话');assert(closeDuplicate);await clickNode(closeDuplicate);
+  await waitFor(async()=>!(await sessionIds()).includes(duplicate)||null,20000);
+  await click('groups.tab');await groupVisible();
   const left=await sessionIds();assert.equal(left.length,1);sshId=left[0];check('production SSH Cmd+D group keeps original owner after normal duplicate close',{sshTab,sshId,groupName});
  }
  for(let i=0;i<localCount;i++){
@@ -102,13 +137,29 @@ try{
  const original=await sessionIds();check(sshEnabled?'mixed group includes live Local processes and one real authenticated SSH owner':'real Local group ready',{sessions:original});
  await checkPaneHeaders('initial-real-members');
  if(sshEnabled){
-  await focusSession(sshId!);await visible('status.connection.identity');await visible('status.connection.chain');await visible('status.connection.forward');await visible('status.transfer');
-  await click('status.transfer');const scoped=flat(await visible('transfer.session')).map(n=>n.text??'').join('\n');assert(scoped.includes('本组传输')&&scoped.includes('所选组暂无传输任务'),scoped);await capture('00-group-ssh-status-and-transfer-scope');
-  await click(localOwners[0].tab);await hidden('transfer.session');await hidden('groups.workspace');check('leaving actual group dismisses frozen group transfer popover');
-  await click('groups.tab');await groupVisible();await focusSession(localOwners[0].id);await visible('status.transfer');await hidden('status.connection.chain');await hidden('status.connection.forward');
-  const rawIdentity=await query('status.connection.identity');const localIdentity=(Array.isArray(rawIdentity)?rawIdentity:[]).filter(shown);assert(!localIdentity.some(n=>flat(n).some(v=>v.text==='已连接')),'Local pane must not retain previous SSH connection state');
-  await click('status.transfer');const localScope=flat(await visible('transfer.session')).map(n=>n.text??'').join('\n');assert(localScope.includes('本组传输')&&localScope.includes('所选组暂无传输任务'),localScope);await capture('00-group-local-status-keeps-transfer-scope');await click('status.transfer');await hidden('transfer.session');
-  await focusSession(sshId!);await visible('status.connection.chain');await visible('status.connection.forward');await capture('00-group-original-ssh-status-restored');check('mixed group bottom bar follows real focused session while transfer scope remains all frozen group members');
+  const readDirectChain=async()=>{
+   await expandToolbar('status.connection.chain');await visible('status.connection.forward');await click('status.connection.chain');
+   const nodes=flat(await visible('connection.details'));const chain=nodes.filter(n=>/^connection\.details\.node\.\d+$/.test(n.test_id??''));
+   assert.deepEqual(chain.map(n=>n.test_id),['connection.details.node.0','connection.details.node.1'],'Direct SSH must show the local machine and destination without an intermediate hop');
+   const endpoint=flat(chain[1]).map(n=>n.text??'').join('\n');assert(endpoint.includes(privateConfig.host),endpoint);
+   await click('connection.details.close');await hidden('connection.details');return endpoint;
+  };
+  const openTransfers=async()=>{
+   await expandToolbar('toolbar.transfers');await click('toolbar.transfers');
+   const text=flat(await visible('transfer.manager')).map(n=>n.text??'').join('\n');
+   assert(text.includes('全局')&&text.includes('没有传输任务'),text);
+  };
+  await focusSession(sshId!);await visible('status.connection.identity');
+  const originalChain=await readDirectChain(),originalSocket=establishedSsh();assert.equal(originalSocket.length,1);
+  await openTransfers();await capture('00-group-ssh-status-and-transfer-scope');
+  await click('transfer.window.close');await hidden('transfer.manager');
+  await click(localOwners[0].tab);await hidden('groups.workspace');
+  await click('groups.tab');await groupVisible();await focusSession(localOwners[0].id);
+  await expandToolbar('status.connection.chain');await click('status.connection.chain');await hidden('connection.details');
+  const localIdentity=(await query('status.connection.identity')).filter(shown);assert(!localIdentity.some(n=>flat(n).some(v=>v.text==='已连接')),'Local pane must not retain previous SSH connection state');
+  await openTransfers();await capture('00-group-local-status-keeps-transfer-scope');await press('escape');await hidden('transfer.manager');
+  await focusSession(sshId!);assert.equal(await readDirectChain(),originalChain);assert.deepEqual(establishedSsh(),originalSocket);
+  await capture('00-group-original-ssh-status-restored');check('mixed group exposes the same live direct SSH route after switching through Local, and either focus can open and dismiss global transfers');
  }
  const localTarget=localOwners[0],otherLocal=localOwners[1],otherMarker=join(isolated,'other-pane-live');
  await focusSession(localTarget.id);await command('/bin/sleep 60');await sleep(500);
@@ -122,7 +173,7 @@ try{
  // The same real frozen membership is rendered under each persisted theme
  // at standard and minimum window sizes. No design/demo state is injected.
  for(const theme of ['light','sauber','dark']){
-  await resizeWindow(1440,900);await click(localOwners[0].tab);await click((await query('local.status.theme')).some(shown)?'local.status.theme':'status.connection.theme');await visible('status.theme');await click(`status.theme.item.${theme}`);await waitFor(async()=>new RegExp(`theme\\s*=\\s*"${theme}"`).test(await readFile(join(data,'config.toml'),'utf8'))||null,10000);await click('status.theme.close');await click('groups.tab');
+  await resizeWindow(1440,900);await click(localOwners[0].tab);await openThemeMenu();await click(`status.theme.item.${theme}`);await waitFor(async()=>new RegExp(`theme\\s*=\\s*"${theme}"`).test(await readFile(join(data,'config.toml'),'utf8'))||null,10000);await click('status.theme.close');await click('groups.tab');
   for(const [size,w,h] of [['standard',1440,900],['minimum',860,480]] as const){await resizeWindow(w,h);await checkPaneHeaders(`${theme}-${size}`);await capture(`headers-${theme}-${size}`);await click('groups.close');const panel=await visible('groups.close.confirm');assert(Math.abs(panel.rect.w-480)<1&&panel.rect.h<=294);await capture(`confirm-${theme}-${size}`);await click('groups.close.cancel');await hidden('groups.close.confirm')}
  }
  if(args['--confirm-only']==='1'){report.status='passed';report.mode='confirmation_visual_only';}
@@ -131,26 +182,59 @@ try{
  // A foreground transition after capture changes the actual Local impact,
  // while the same boolean risk remains true: this must force reconfirmation.
  await focusSession(localOwners[sshEnabled?1:0].id);await command('sleep 2; sleep 45');await sleep(350);await click('groups.close');await visible('groups.close.confirm');await sleep(2500);await click('groups.close.accept');await visible('groups.close.confirm');for(const owner of localOwners)process.kill(owner.pid,0);check('same-kind foreground PID change invalidates approval before any close');await capture('02-reconfirm-new-foreground');await click('groups.close.cancel');await hidden('groups.close.confirm');
- // This run owns the second Local foreground process. Ignoring HUP/TERM
+ // This run owns the first Local foreground process. Ignoring HUP/TERM
  // forces the real V0.1.1 Local cleanup to wait for its existing KILL deadline,
  // giving the UI a deterministic interval to stop only unstarted members.
- await focusSession(localOwners[sshEnabled?0:1].id);await command("python3 -c 'import signal,time;signal.signal(signal.SIGHUP,signal.SIG_IGN);signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(45)'");await sleep(400);
- // Begin actual closes and stop the unstarted remainder after observing a
- // real standalone tab disappear. No product results are set by this driver.
- await click('groups.close');await visible('groups.close.confirm');await click('groups.close.accept');
- await waitFor(async()=>{const tabs=await tabNodes();return tabs.some(n=>n.test_id===(sshEnabled?sshTab:localOwners[0].tab))?null:true},20000);
- await click('groups.close.cancel');await visible('groups.close.partial');await sleep(4800);await capture('03-real-partial-stop');
- const partial=await visible('groups.close.partial');const text=flat(partial).map(n=>n.text??'').join('\n');assert(/已关闭 [1-9]/.test(text),text);assert(/未关闭 [1-9]/.test(text),text);assert(/已取消|未关闭|等待/.test(text),text);assert(Math.abs(partial.rect.w-480)<1&&Math.abs(partial.rect.h-280)<1);
+ const slow=localOwners[0],slowReady=join(isolated,'slow-close-ready');
+ await focusSession(slow.id);
+ if(!sshEnabled){await press('c',{ctrl:true});await sleep(200)}
+ const slowProcess=`import os,signal,time;signal.signal(signal.SIGHUP,signal.SIG_IGN);signal.signal(signal.SIGTERM,signal.SIG_IGN);open(${q(slowReady)},"w").write(str(os.getpid()));time.sleep(90)`;
+ await command(`/usr/bin/python3 -c '${slowProcess}'`);
+ const slowPid=await waitFor(async()=>{const pid=await file(slowReady);return /^\d+$/.test(pid)?pid:null},10000);
+ // Local foreground metadata refreshes independently of the PTY. Wait for
+ // the slow process to reach the real confirmation before granting approval.
+ const confirmSlowProcess=async()=>{
+  const panel=(await query('groups.close.confirm')).find(shown);
+  return panel&&flat(panel).some(n=>String(n.text??'').includes(`(PID ${slowPid})`))?panel:null;
+ };
+ await waitFor(async()=>{
+  if(await confirmSlowProcess())return true;
+  if((await query('groups.close.confirm')).some(shown)){await click('groups.close.cancel');await hidden('groups.close.confirm');await sleep(100)}
+  await click('groups.close');await visible('groups.close.confirm');return await confirmSlowProcess();
+ },10000);
+ // Observe a real close in flight while other original members are queued.
+ // Waiting for the last in-flight member to close would let the poll dispatch
+ // its successor before the Harness could click Stop.
+ await click('groups.close.accept');
+ await waitFor(async()=>{
+  const panel=(await query('groups.close.partial')).find(shown);
+  const text=panel?flat(panel).map(n=>n.text??'').join('\n'):'';
+  return text.includes(`#${slow.id} · 正在关闭`)&&text.includes('等待关闭')||null;
+ },20000).catch(error=>{throw Error('Waiting for the slow Local member to close while other group members remain queued',{cause:error})});
+ await click('groups.close.cancel');
+ const stopped=await visible('groups.close.partial');
+ assert(flat(stopped).some(n=>String(n.text??'').includes('已取消 · 仍存活')),'Stop records cancelled members while the current close is still draining');
+ await click('groups.close.cancel');await hidden('groups.close.partial');
+ await waitFor(async()=>!(await sessionIds()).includes(slow.id)||null,20000);
+ await hidden('groups.close.partial');
+ await click('groups.close');
+ const partial=await waitFor(async()=>{
+  const panel=(await query('groups.close.partial')).find(shown);
+  const text=panel?flat(panel).map(n=>n.text??'').join('\n'):'';
+  return panel&&text.includes(`#${slow.id} · 已关闭`)?panel:null;
+ },20000);
+ const text=flat(partial).map(n=>n.text??'').join('\n');assert(/已关闭 [1-9]/.test(text),text);assert(/未关闭 [1-9]/.test(text),text);assert(text.includes('已取消 · 仍存活'),text);
+ checkPartialGeometry(partial);await capture('03-real-partial-stop');
  await click('groups.close.cancel');await hidden('groups.close.partial');await click('groups.close');await visible('groups.close.partial');check('dismissing and reopening partial results preserves original receipt ledger');
- const remaining=await sessionIds();assert(remaining.length>0&&remaining.length<totalCount);const closed=original.filter(id=>!remaining.includes(id));assert(closed.length>0);for(const owner of localOwners.filter(x=>remaining.includes(x.id)))process.kill(owner.pid,0);check('partial preserves real closed receipts and healthy unstarted remainder',{closed,remaining,text});noEstablishedSsh('partial');
+ const remaining=await sessionIds();assert(remaining.length>0&&remaining.length<totalCount);const closed=original.filter(id=>!remaining.includes(id));assert(closed.includes(slow.id));if(sshEnabled)assert(closed.includes(sshId!),'The original SSH owner preceding the slow Local owner must have a closed receipt');for(const owner of localOwners.filter(x=>remaining.includes(x.id)))process.kill(owner.pid,0);check('partial preserves real closed receipts and healthy unstarted remainder',{closed,remaining,text});await noEstablishedSsh('partial');
  // Reopen the retained partial ledger under all three persisted themes,
  // including the minimum native window. Closed identities remain read-only.
  for(const theme of ['light','sauber','dark']){
   await click('groups.close.cancel');await hidden('groups.close.partial');
   const healthy=localOwners.find(x=>remaining.includes(x.id));
-  await resizeWindow(1440,900);await click((healthy?.tab??sshTab)!);await click((await query('local.status.theme')).some(shown)?'local.status.theme':'status.connection.theme');await visible('status.theme');await click(`status.theme.item.${theme}`);await waitFor(async()=>new RegExp(`theme\\s*=\\s*"${theme}"`).test(await readFile(join(data,'config.toml'),'utf8'))||null,10000);await click('status.theme.close');await click('groups.tab');
+  await resizeWindow(1440,900);await click((healthy?.tab??sshTab)!);await openThemeMenu();await click(`status.theme.item.${theme}`);await waitFor(async()=>new RegExp(`theme\\s*=\\s*"${theme}"`).test(await readFile(join(data,'config.toml'),'utf8'))||null,10000);await click('status.theme.close');await click('groups.tab');
   for(const [size,w,h] of [['standard',1440,900],['minimum',860,480]] as const){
-   await resizeWindow(w,h);await click('groups.close');const panel=await visible('groups.close.partial');assert(Math.abs(panel.rect.w-480)<1&&Math.abs(panel.rect.h-280)<1);await capture(`partial-${theme}-${size}`);await click('groups.close.cancel');await hidden('groups.close.partial');
+   await resizeWindow(w,h);await click('groups.close');const panel=await visible('groups.close.partial');checkPartialGeometry(panel);await capture(`partial-${theme}-${size}`);await click('groups.close.cancel');await hidden('groups.close.partial');
   }
   await click('groups.close');await visible('groups.close.partial');
  }
@@ -160,9 +244,9 @@ try{
  await click('groups.close.accept');await visible('groups.close.confirm');const retryText=flat(await visible('groups.close.confirm')).map(n=>n.text??'').join('\n');for(const id of closed)assert(!new RegExp(`#${id} · 确认关闭`).test(retryText));await capture('04-retry-original-remainder');
  const scroll=flat(await visible('groups.close.confirm')).find(n=>n.test_id==='groups.close.members');assert(scroll);const fixedAccept=(await visible('groups.close.accept')).rect,fixedCancel=(await visible('groups.close.cancel')).rect;
  assert((await scrollAt(scroll.rect.x+scroll.rect.w/2,scroll.rect.y+scroll.rect.h/2,0,-2000)).ok);
- const notes=await waitFor(async()=>{const current=flat(await visible('groups.close.confirm'));const effect=current.find(n=>n.text==='停止命令、AI 与 SOCKS；传输暂停并保留。'),cancel=current.find(n=>n.text==='取消不会断开；已关闭的成员不能自动恢复。');return effect&&cancel&&[effect,cancel].every(n=>n.rect.y>=scroll.rect.y-.5&&n.rect.y+n.rect.h<=scroll.rect.y+scroll.rect.h+.5)?{effect:effect.rect,cancel:cancel.rect}:null},10000);
+ const notes=await waitFor(async()=>{const current=flat(await visible('groups.close.confirm'));const effect=current.find(n=>n.text==='停止命令、AI 与 SOCKS；传输暂停并保留。'),cancel=current.find(n=>n.text==='已关闭的成员不能自动恢复。');return effect&&cancel&&[effect,cancel].every(n=>n.rect.y>=scroll.rect.y-.5&&n.rect.y+n.rect.h<=scroll.rect.y+scroll.rect.h+.5)?{effect:effect.rect,cancel:cancel.rect}:null},10000);
  const acceptButton=await visible('groups.close.accept'),cancelButton=await visible('groups.close.cancel');assert.deepEqual(acceptButton.rect,fixedAccept);assert.deepEqual(cancelButton.rect,fixedCancel);assert(acceptButton.focusable&&cancelButton.focusable);check('public group-close ScrollArea reveals complete effect and cancel notes while fixed actions remain enabled',{scroll:scroll.rect,notes,accept:acceptButton.rect,cancel:cancelButton.rect});await capture('04b-retry-notes-scrolled-fixed-actions');await click('groups.close.accept');
- await waitFor(async()=>{if((await query('local.close.confirmation')).some(shown)){await click('local.close.accept');return null}return (await tabNodes()).length===0||null},30000);await hidden('groups.workspace');for(const owner of localOwners){assert.throws(()=>process.kill(owner.pid,0))}check('retry closes only remaining original handles and releases all original Local processes');noEstablishedSsh('complete');await capture('05-all-original-handles-released');
+ await waitFor(async()=>{if((await query('local.close.confirmation')).some(shown)){await click('local.close.accept');return null}return (await tabNodes()).length===0||null},30000);await hidden('groups.workspace');for(const owner of localOwners){assert.throws(()=>process.kill(owner.pid,0))}check('retry closes only remaining original handles and releases all original Local processes');await noEstablishedSsh('complete');await capture('05-all-original-handles-released');
  report.status='passed';
  }
 }catch(error){report.status='failed';report.error=String(error);await capture('failed').catch(()=>{});process.exitCode=1}

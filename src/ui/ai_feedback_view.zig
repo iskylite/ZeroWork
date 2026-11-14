@@ -5,7 +5,7 @@ const ui = @import("ui");
 const S = @import("ai_assistant_styles.zig");
 const theme = @import("app_theme.zig");
 
-pub const Kind = enum { rollback, completion, warning };
+pub const Kind = enum { rollback, completion, warning, status };
 pub const completion_duration_ns = 6 * std.time.ns_per_s;
 pub const rollback_label = "已回退，原消息已恢复到输入框，此回合及后续对话已移除。";
 
@@ -45,12 +45,13 @@ pub const View = struct {
     }
 
     pub fn show(self: *View, label: []const u8, kind: Kind) void {
-        if (kind == .warning and self.completion_until_ns == null and
+        const persistent = kind == .warning or kind == .status;
+        if (persistent and self.completion_until_ns == null and
             self.root.style.display == .flex and std.mem.eql(u8, self.text.getText().?.content, label)) return;
         self.text.setTextContent(self.cx.allocator, label) catch return;
-        self.completion_until_ns = if (kind == .warning) null else @import("../platform/realtime.zig").monotonicNs() + completion_duration_ns;
+        self.completion_until_ns = if (persistent) null else @import("../platform/realtime.zig").monotonicNs() + completion_duration_ns;
         self.rollback_icon.setDisplay(if (kind == .rollback) .flex else .none);
-        self.warning_icon.setDisplay(if (kind == .rollback) .none else .flex);
+        self.warning_icon.setDisplay(if (kind == .rollback or kind == .status) .none else .flex);
         self.dismiss_button.setDisplay(if (kind == .rollback) .flex else .none);
         self.root.setDisplay(.flex);
         _ = self.rollback_icon.setTint(theme.current().fg_2);

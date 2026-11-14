@@ -1253,13 +1253,11 @@ const AiHost = struct {
         if (self.share_button) |button| button.clearStatus();
         self.rollback_to_start = false;
         self.image_gate = null;
-        self.recall_index = null;
+        self.resetRecall();
         self.editing_index = null;
         self.editing_submission = null;
         self.edit_seed = null;
         self.edit_text = null;
-        if (self.recall_draft) |value| self.allocator.free(value);
-        self.recall_draft = null;
         self.display_owner = current_owner;
         self.conversation_dirty = true;
         self.streaming_label = null;
@@ -2594,7 +2592,6 @@ const AiHost = struct {
         const selected = controls.resolveModel(config.ai) catch null;
         const live_usage = self.liveComposerUsage(selected);
         const fixed_usage = if (live_usage) |live| live.fixed else self.composerUsageFixed();
-        const context_tokens = fixed_usage.system_tokens;
         const history_usage = if (live_usage) |live| live.summary else try self.composerUsage(selected);
         var response_bytes: usize = 0;
         if (live_usage == null and self.execution().thread_state.load(.acquire) != 0) for (self.controller.stream.cards.items) |card| {
@@ -2609,34 +2606,24 @@ const AiHost = struct {
         const can_compact = reserve_fits and self.execution().thread_state.load(.acquire) == 0 and self.compaction.job == null and history_usage.can_compact;
         std.hash.autoHash(&hash, compact_status);
         std.hash.autoHash(&hash, can_compact);
-        const reserved_image_tokens = history_usage.reserved_image_tokens;
         const draft_tokens = @import("ai/local_text_request.zig").draftTokens(self.prompt.peek());
         const live_tokens = if (live_usage != null) 0 else (response_bytes + 3) / 4 + if (self.requestDisplayed() and self.execution().thread_state.load(.acquire) != 0 and !self.execution().answer_only) @import("ai/local_text_request.zig").draftTokens(self.execution().request_text orelse "") else @as(usize, 0);
-        const catalog_tokens = fixed_usage.tool_tokens;
+        const sources = history_usage.sources(fixed_usage, live_tokens);
         const Part = @import("ui/ai_composer_controls_view.zig").UsagePart;
-        const fallback_parts = [_]Part{
-            .{ .name = "终端上下文", .tokens = context_tokens },
-            .{ .name = "对话", .tokens = (history_usage.added_tokens -| reserved_image_tokens) +| live_tokens },
-            .{ .name = "草稿", .tokens = draft_tokens },
-            .{ .name = "工具定义", .tokens = catalog_tokens },
-            .{ .name = "图片保守预留", .tokens = reserved_image_tokens },
-        };
-        const measured_parts = [_]Part{
-            .{ .name = "基准输入（实测）", .tokens = history_usage.measured_tokens orelse 0, .estimated = false },
-            .{ .name = "新增内容（估算）", .tokens = (history_usage.added_tokens -| reserved_image_tokens) +| live_tokens, .estimated = true },
-            .{ .name = "草稿", .tokens = draft_tokens, .estimated = true },
-            .{ .name = "图片保守预留", .tokens = reserved_image_tokens, .estimated = true },
-        };
-        const parts: []const Part = if (history_usage.measured_tokens != null) measured_parts[0..if (reserved_image_tokens > 0) 4 else 3] else fallback_parts[0..if (reserved_image_tokens > 0) 5 else 4];
-        const used = history_usage.tokens +| draft_tokens +| live_tokens;
+        var storage: [6]Part = undefined;
+        var parts: std.ArrayList(Part) = .initBuffer(&storage);
+        parts.appendAssumeCapacity(.{ .name = "系统提示词", .tokens = sources.system, .estimated = true, .kind = .system });
+        parts.appendAssumeCapacity(.{ .name = "工具定义", .tokens = sources.tools, .estimated = true, .kind = .tools });
+        parts.appendAssumeCapacity(.{ .name = "对话消息", .tokens = sources.messages, .estimated = true, .kind = .messages });
+        if (sources.images > 0) parts.appendAssumeCapacity(.{ .name = if (history_usage.reserved_image_tokens > 0) "图片预算" else "图片", .tokens = sources.images, .estimated = true, .kind = .images });
+        if (sources.unattributed > 0) parts.appendAssumeCapacity(.{ .name = "未归因用量", .tokens = sources.unattributed, .estimated = true, .kind = .unattributed });
+        parts.appendAssumeCapacity(.{ .name = "未发送草稿", .tokens = draft_tokens, .estimated = true, .kind = .draft });
+        const used = sources.total() +| draft_tokens;
         const estimated = history_usage.estimated or draft_tokens > 0 or live_tokens > 0;
-        std.hash.autoHash(&hash, .{ history_usage.measured_tokens, estimated, draft_tokens, live_tokens });
-        std.hash.autoHash(&hash, used);
-        std.hash.autoHash(&hash, reserved_image_tokens);
-        std.hash.autoHash(&hash, context_tokens);
+        std.hash.autoHash(&hash, .{ history_usage.measured_tokens, estimated, sources, draft_tokens, history_usage.reserved_image_tokens });
         const fingerprint = hash.final();
         if (self.composer_hash == fingerprint) return;
-        const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = estimated, .parts = parts, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
+        const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = estimated, .parts = parts.items, .measured_input = history_usage.measured_tokens, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
         const key: ?@import("ui/ai_composer_controls_view.zig").ModelKey = if (controls.model) |value| .{ .provider_id = value.provider_id, .model_id = value.model_id } else if (selected) |value| .{ .provider_id = config.ai.default_provider, .model_id = value.model } else null;
         try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .workspace = workspace_ticket, .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .model_selection_required = controls.model_selection_required, .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .effort_fallback_from = controls.effort_fallback_from, .thinking = controls.thinking, .attachments = .{ .image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite() });
         if (catalog_changed) view.preserveModelPopup();
@@ -2696,6 +2683,14 @@ const AiHost = struct {
     fn setFeedback(self: *AiHost, label: []const u8) void {
         if (label.len == 0) {
             if (self.feedback) |view| view.clearWarning();
+            return;
+        }
+        if (std.mem.eql(u8, label, "AI 已停止") or std.mem.eql(u8, label, "已停止生成") or std.mem.eql(u8, label, "正在停止 AI…") or std.mem.eql(u8, label, "ResourceCleanupPending")) {
+            if (self.feedback) |view| view.show(@import("ai/error_feedback.zig").localFailureLabel(label) orelse label, .status);
+            return;
+        }
+        if (std.mem.eql(u8, label, "TurnChanged") or std.mem.eql(u8, label, "SubmissionUnconfirmed")) {
+            if (self.feedback) |view| view.show(@import("ai/error_feedback.zig").localFailureLabel(label) orelse label, .warning);
             return;
         }
         if (std.mem.startsWith(u8, label, "已") or std.mem.startsWith(u8, label, "正在") or std.mem.startsWith(u8, label, "图片处理中")) {
@@ -3510,9 +3505,7 @@ const AiHost = struct {
                 std.mem.swap(ai_attachments.Draft, draft, &next_files);
                 std.mem.swap(ai_images.Draft, images, &next_images);
                 self.prompt.set(restored_text);
-                self.recall_index = null;
-                if (self.recall_draft) |value| self.allocator.free(value);
-                self.recall_draft = null;
+                self.resetRecall();
                 self.conversation_dirty = true;
                 if (self.assistant_states) |store| if (self.display_conversation) |id| if (store.find(id)) |state| {
                     state.phase = if (self.history.items.len == 0) .idle else .done;
@@ -3659,6 +3652,74 @@ const AiHost = struct {
         self.lifecycle_command = command;
         self.cx.requestRedraw();
     }
+    const RecallSearch = struct {
+        target: ?usize,
+        next_index: usize = 0,
+        value: ?Entry = null,
+
+        const Entry = struct { index: usize, text: []const u8 };
+
+        fn visit(self: *RecallSearch, value: []const u8) bool {
+            if (value.len == 0) return false;
+            const index = self.next_index;
+            self.next_index += 1;
+            if (self.target) |target| {
+                if (target != index) return false;
+            }
+            self.value = .{ .index = index, .text = value };
+            return self.target != null;
+        }
+
+        fn visitTurn(self: *RecallSearch, turn: *const @import("ai/conversation_turn.zig").Turn) bool {
+            for (turn.timeline.items) |item| {
+                if (item == .input and self.visit(ai_attachment_request.displayPrompt(item.input.text.items))) return true;
+            }
+            return false;
+        }
+    };
+
+    fn findRecallPrompt(self: *AiHost, target: ?usize, inbox_text: *?[]u8) !?RecallSearch.Entry {
+        var search: RecallSearch = .{ .target = target };
+        for (self.history.items) |*message| {
+            if (!message.user) continue;
+            if (search.visit(message.text)) return search.value;
+            if (message.turn) |*turn| if (search.visitTurn(turn)) return search.value;
+        }
+        if (self.last_user_text) |text| {
+            if (search.visit(text) or search.visitTurn(&self.current_turn)) return search.value;
+        }
+
+        // Until the consumed input reaches the timeline, the live steer bubble
+        // reads it from the inbox. Keep recall in that same order.
+        const shared_host = self.shared_service orelse return search.value;
+        const state = (self.assistant_states orelse return search.value).find(self.display_conversation orelse return search.value) orelse return search.value;
+        const record = shared_host.service.store.find(state.conversation_id) orelse return search.value;
+        if (self.current_turn.id == 0) return search.value;
+        record.inbox.lock();
+        defer record.inbox.unlock();
+        const timeline_end = search.next_index;
+        for (record.inbox.entries.items) |entry| {
+            const receipt = entry.receipt;
+            if (receipt.route != .steer or receipt.turn != self.current_turn.id or receipt.delivery == .cancelled) continue;
+            if (self.current_turn.hasInput(receipt.id) or (receipt.delivery == .consumed and self.current_turn.ended_at_ms != null)) continue;
+            if (entry.payload.messages.len == 0) continue;
+            if (search.visit(ai_attachment_request.displayPrompt(entry.payload.messages[0].content))) break;
+        }
+        if (search.value) |*value| {
+            if (value.index >= timeline_end) {
+                inbox_text.* = try self.allocator.dupe(u8, value.text);
+                value.text = inbox_text.*.?;
+            }
+        }
+        return search.value;
+    }
+
+    fn resetRecall(self: *AiHost) void {
+        self.recall_index = null;
+        if (self.recall_draft) |value| self.allocator.free(value);
+        self.recall_draft = null;
+    }
+
     fn recallPrompt(self: *AiHost, older: bool) bool {
         const input = self.textarea orelse return false;
         const text = input.getText();
@@ -3666,30 +3727,23 @@ const AiHost = struct {
         const offset = @min(input.cursor.offset, text.len);
         if (older and std.mem.indexOfScalar(u8, text[0..offset], '\n') != null) return false;
         if (!older and std.mem.indexOfScalar(u8, text[offset..], '\n') != null) return false;
-        var chosen: ?usize = null;
-        if (older) {
-            var i = self.recall_index orelse (self.history.items.len + @as(usize, @intFromBool(self.last_user_text != null)));
-            while (i > 0) {
-                i -= 1;
-                if (self.userMessage(i) != null) {
-                    chosen = i;
-                    break;
-                }
-            }
-            if (chosen == null) return self.recall_index != null;
-            if (self.recall_index == null) {
-                if (self.recall_draft) |value| self.allocator.free(value);
-                self.recall_draft = self.allocator.dupe(u8, text) catch return false;
-            }
+
+        const target = if (self.recall_index) |index| blk: {
+            if (older and index == 0) return true;
+            break :blk if (older) index - 1 else index + 1;
+        } else if (older) null else return false;
+        var inbox_text: ?[]u8 = null;
+        defer if (inbox_text) |value| self.allocator.free(value);
+        const chosen = self.findRecallPrompt(target, &inbox_text) catch return false;
+        if (chosen) |entry| {
+            if (self.recall_index == null) self.recall_draft = self.allocator.dupe(u8, text) catch return false;
+            self.recall_index = entry.index;
+            self.prompt.set(entry.text);
         } else {
-            var i = (self.recall_index orelse return false) + 1;
-            while (i <= self.history.items.len) : (i += 1) if (self.userMessage(i) != null) {
-                chosen = i;
-                break;
-            };
+            if (older or self.recall_index == null) return false;
+            self.prompt.set(self.recall_draft orelse "");
+            self.resetRecall();
         }
-        self.recall_index = chosen;
-        self.prompt.set(if (chosen) |i| (self.userMessage(i) orelse return false).text else self.recall_draft orelse "");
         self.promptChanged(self.prompt.peek());
         self.cx.requestRedraw();
         return true;
@@ -4805,6 +4859,18 @@ const AiHost = struct {
         const state = (self.assistant_states orelse return error.ConversationNotFound).find(id) orelse return error.ConversationNotFound;
         const record = (try self.shared()).service.store.find(state.conversation_id) orelse return error.ConversationNotFound;
         const binding = record.binding orelse return error.ConversationUnbound;
+        if (record.child) |child| {
+            const parent = self.assistant_states.?.findConversation(child.info.owning_parent_conversation) orelse return error.ConversationNotFound;
+            const parent_record = self.shared_service.?.service.store.find(parent.conversation_id) orelse return error.ConversationNotFound;
+            const parent_binding = parent_record.binding orelse return error.ConversationUnbound;
+            const parent_bridge = self.shared_service.?.bridgeFor(parent_binding.agent) orelse return error.OwnerWindowUnavailable;
+            const backend: *AiHost = @ptrCast(@alignCast(parent_bridge.context));
+            const view = backend.attachedView();
+            try self.locateConversation(parent.id);
+            view.child_open_requested = .{ .agent = child.info.agent, .revision = record.child_settings_revision, .parent = parent.conversation_id };
+            view.cx.requestRedraw();
+            return;
+        }
         const bridge = self.shared_service.?.bridgeFor(binding.agent) orelse return error.OwnerWindowUnavailable;
         const backend: *AiHost = @ptrCast(@alignCast(bridge.context));
         const view = backend.attachedView();
@@ -5558,6 +5624,11 @@ const AiHost = struct {
             };
         }
     }
+    fn composerEdited(self: *AiHost, text: []const u8) void {
+        self.resetRecall();
+        self.promptChanged(text);
+    }
+
     fn promptChanged(self: *AiHost, text: []const u8) void {
         self.refreshSendHint();
 
@@ -6357,6 +6428,7 @@ const AiHost = struct {
     fn pumpAttached(raw: *anyopaque) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         const app = self.application_host orelse return;
+        self.observeApprovalNotification();
         self.attachedView().persistDisplayedDraft() catch |err| {
             if (err != error.JournalBusy) self.attachedView().setFeedback(@errorName(err));
         };
@@ -6479,6 +6551,7 @@ const AiHost = struct {
         self.attached_inputs = inputs;
     }
     fn destroyAttachedResources(self: *AiHost) void {
+        self.resolveApprovalNotification();
         if (self.extension_session) |*session| session.deinit();
         self.extension_session = null;
         if (self.recording_access) |*value| value.deinit();
@@ -6536,6 +6609,17 @@ const AiHost = struct {
         const receipt = action.ticket.receipt;
         const state = self.assistant_states.?.find(self.display_conversation orelse return error.BindingChanged) orelse return error.BindingChanged;
         if (!state.conversation_id.eql(receipt.fence.conversation)) return error.BindingChanged;
+        if (action.action == .remove) {
+            // Cancelling a specific unsent input requires neither a runnable
+            // conversation nor an idle worker. The inbox owns delivery.
+            const record = shared_host.service.store.find(state.conversation_id) orelse return error.BindingChanged;
+            try record.inbox.cancelPending(receipt.id, receipt.revision);
+            if (self.pending_view) |view| {
+                view.clearError();
+                view.scrollToTop();
+            }
+            return;
+        }
         const current = try shared_host.service.store.fence(state.conversation_id);
         const record = try shared_host.service.store.validate(current);
         if (action.action == .inspect) {
@@ -6563,7 +6647,7 @@ const AiHost = struct {
             return;
         }
         if (record.ending != null or !record.inbox.admission) return error.ConversationEnding;
-        if (action.action != .remove and action.action != .continue_queue and !current.eql(receipt.fence)) return error.BindingChanged;
+        if (action.action != .continue_queue and !current.eql(receipt.fence)) return error.BindingChanged;
         const runner = self.execution().attached_runner orelse return error.AgentNotFound;
         if (!runner.agent.id.eql(receipt.fence.agent)) return error.BindingChanged;
         record.inbox.lock();
@@ -6598,15 +6682,11 @@ const AiHost = struct {
                 frozen.file_reference_spans = projected.file_reference_spans;
                 if (self.pending_view) |view| view.finishEdit();
             },
-            .remove => {
-                try record.inbox.cancelQueued(receipt.id, receipt.revision);
-                if (self.pending_view) |view| view.scrollToTop();
-            },
             .now => {
                 _ = try shared_host.service.sendNow(receipt.fence, receipt.id, receipt.revision);
             },
             .continue_queue => try shared_host.service.continueQueue(current),
-            .copy_text, .inspect => unreachable,
+            .remove, .copy_text, .inspect => unreachable,
             .up, .down => {
                 var ids: std.ArrayList(@import("host/identity.zig").SubmissionId) = .empty;
                 defer ids.deinit(self.allocator);
@@ -6660,7 +6740,7 @@ const AiHost = struct {
                     if (entry.receipt.delivery == .accepted and entry.receipt.pause == null) std.hash.autoHash(&hash, value.inbox.work_phase);
                 }
                 if (entry.receipt.archived or @import("ai/session_input.zig").terminal(entry.receipt.delivery)) continue;
-                if (entry.receipt.route == .steer) continue;
+                if (entry.receipt.route == .steer and entry.receipt.pause == null) continue;
                 if (entry.receipt.route == .start and entry.receipt.pause == null and entry.receipt.delivery != .outcome_unknown) continue;
                 var text = ai_attachment_request.displayPrompt(entry.payload.messages[0].content);
                 var attachments = entry.payload.messages[0].images.len;
@@ -6776,6 +6856,7 @@ const AiHost = struct {
             state.compaction_activity = null;
         };
         if (receipt.route != .queue) if (self.tail_follow) |*follow| follow.reset();
+        self.resetRecall();
         self.prompt.set("");
         _ = try attachments.consumeSent(&bundle);
         _ = try image_draft.consumeSent(&image_bundle);
@@ -7023,6 +7104,15 @@ const AiHost = struct {
         const app = self.application_host orelse return error.ContextUnavailable;
         if (app.workspace.app_config.agentPolicyRevision() != self.execution().request_policy_revision) return error.ScopeChanged;
         const controller = lookupLifecycleTask(self, invocation.context.conversation_id, invocation.context.task_id) orelse return error.ScopeChanged;
+        const history = @import("ai/host_recall.zig");
+        if (history.supports(invocation.tool_id)) {
+            const bridge = &self.execution().tool_bridge;
+            if (bridge.queries_only) return error.ToolNotAvailable;
+            const shared_host = self.shared_service orelse return error.ScopeChanged;
+            const record = try shared_host.service.validateAuthority(invocation.context);
+            const project_granted = invocation.workspace_revision == record.workspace.revision and (self.localFileAuthority(invocation.context, bridge) catch .none) != .none;
+            return history.execute(&shared_host.service.store, record, project_granted, invocation, allocator) catch |err| return rejectedHostInvocation(invocation, allocator, err);
+        }
         if (std.mem.eql(u8, invocation.tool_id, @import("ai/builtin_tools.zig").id)) {
             const request = try @import("ai/builtin_tools.zig").parse(invocation.arguments);
             for (self.execution().tool_bridge.children.items) |child| {
@@ -7119,6 +7209,14 @@ const AiHost = struct {
         for (@import("ai/host_queries.zig").contributions) |contribution| {
             self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
             self.execution().host_catalog_len += 1;
+        }
+        const history = @import("ai/host_recall.zig");
+        if (!bridge.queries_only) {
+            if (self.shared_service) |shared_host| {
+                if (shared_host.service.store.find(authority.conversation_id)) |record| {
+                    if (history.available(record)) for (history.contributions) |contribution| self.appendLocalContribution(contribution);
+                }
+            }
         }
         {
             const capability = self.localFileAuthority(authority, bridge) catch .none;
@@ -8389,6 +8487,7 @@ const AiHost = struct {
         if (std.mem.eql(u8, invocation.tool_id, @import("ai/builtin_tools.zig").id)) return bridge.queryHost(invocation, allocator, cancel);
         if (@import("ai/batch_output.zig").supports(invocation.tool_id)) return bridge.queryHost(invocation, allocator, cancel);
         if (@import("ai/host_queries.zig").supports(invocation.tool_id)) return bridge.queryHost(invocation, allocator, cancel);
+        if (@import("ai/host_recall.zig").supports(invocation.tool_id)) return bridge.queryHost(invocation, allocator, cancel);
         if (@import("ai/host_terminal_queries.zig").supports(invocation.tool_id)) return bridge.queryHost(invocation, allocator, cancel);
         if (@import("ai/host_catalog.zig").supports(invocation.tool_id)) {
             if (!@import("ai/host_catalog.zig").isMutation(invocation.tool_id)) return bridge.queryHost(invocation, allocator, cancel);
@@ -9362,27 +9461,49 @@ const AiHost = struct {
         if (!self.requestDisplayed()) self.refresh("AI 助手");
     }
 
+    fn resolveApprovalNotification(self: *AiHost) void {
+        const notifications = process_notifications orelse return;
+        const backend = self.execution();
+        var resolved = backend.approval_notification orelse return;
+        resolved.event_revision += 1;
+        resolved.phase = .succeeded;
+        resolved.attention.resolved = true;
+        resolved.title = "AI 等待已结束";
+        _ = notifications.publish(resolved) catch return;
+        backend.approval_notification = null;
+    }
+
     fn observeApprovalNotification(self: *AiHost) void {
         const notifications = process_notifications orelse return;
-        const approval = self.execution().tool_bridge.pendingApproval();
+        const backend = self.execution();
+        const approval = backend.tool_bridge.pendingApproval();
         const host_approval = self.approvalsRef().snapshot();
-        const inventory_approval = self.execution().inventory_approval.snapshot();
+        const inventory_approval = backend.inventory_approval.snapshot();
         const question = self.questionsRef().snapshot();
         const sequence: ?u64 = if (question) |pending| pending.ticket.sequence | (@as(u64, 1) << 61) else if (host_approval) |pending| pending.sequence | (@as(u64, 1) << 63) else if (inventory_approval) |pending| pending.ticket.sequence | (@as(u64, 1) << 62) else if (approval) |pending| pending.sequence else null;
-        if (self.execution().approval_notification) |old| {
-            if (sequence != null and self.execution().request_operation_id == old.operation_id and sequence.? == old.attempt_id) return;
-            var resolved = old;
-            resolved.event_revision += 1;
-            resolved.phase = .succeeded;
-            resolved.attention.resolved = true;
-            resolved.title = "AI 确认等待已结束";
-            _ = notifications.publish(resolved) catch return;
-            self.execution().approval_notification = null;
+        const view = backend.attachedView();
+        const app_focused = notifications.appFocused();
+        const source_visible = app_focused and view.cx.window_active and backend.request_conversation != null and
+            backend.request_conversation == view.display_conversation and view.controller.model.visible and
+            view.controller.model.expanded and NotificationWindowHook.painted(view.panel);
+        if (backend.approval_notification) |old| {
+            if (sequence != null and backend.request_operation_id == old.operation_id and sequence.? == old.attempt_id) {
+                if (old.attention.app_focused == app_focused and old.attention.source_visible == source_visible) return;
+                var updated = old;
+                updated.event_revision += 1;
+                updated.attention.app_focused = app_focused;
+                updated.attention.source_visible = source_visible;
+                _ = notifications.publish(updated) catch return;
+                backend.approval_notification = updated;
+                return;
+            }
+            self.resolveApprovalNotification();
+            if (backend.approval_notification != null) return;
         }
         const pending_sequence = sequence orelse return;
-        const operation = self.execution().request_operation_id orelse return;
-        const owner = self.execution().request_content_owner orelse return;
-        const window = self.notification_window orelse return;
+        const operation = backend.request_operation_id orelse return;
+        const owner = backend.request_content_owner orelse return;
+        const window = backend.notification_window orelse return;
         const event: @import("host/notification_coordinator.zig").NotificationEvent = .{
             .definition_id = "host.ai_attention",
             .owner = .{ .window_id = @backingInt(window), .content = owner },
@@ -9391,13 +9512,13 @@ const AiHost = struct {
             .event_revision = 1,
             .phase = .accepted,
             .severity = .warning,
-            .title = "AI 任务正在等待确认",
-            .detail = "任务需要你在原对话中确认后才能继续。",
-            .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true },
+            .title = if (question != null) "AI 任务正在等待输入" else "AI 任务正在等待确认",
+            .detail = if (question != null) "请在原对话中回答后继续。" else "请在原对话中确认后继续。",
+            .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true, .app_focused = app_focused, .source_visible = source_visible },
             .actions = &.{.{ .kind = .locate_owner, .label = "查看对话" }},
         };
         _ = notifications.publish(event) catch return;
-        self.execution().approval_notification = event;
+        backend.approval_notification = event;
     }
 
     /// UI-thread poll: one after-layout hook, self-scheduling only while a
@@ -9482,7 +9603,7 @@ const AiHost = struct {
                     host.execution().inventory_approval.stop();
                 }
             };
-            host.observeApprovalNotification();
+            if (host.execution().attached_runner == null) host.observeApprovalNotification();
             if (host.execution().thread_state.load(.acquire) == 1) if (host.assistant_states) |store| if (host.execution().request_conversation) |id| {
                 if (store.find(id)) |state| state.phase = if (host.execution().tool_bridge.pendingApproval() != null or host.approvalsRef().snapshot() != null or host.execution().inventory_approval.snapshot() != null or host.questionsRef().snapshot() != null) .approval else .running;
             };
@@ -16229,7 +16350,7 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     const ai_input_row = try ui.boxStyled(cx, ai_styles.composer, .{});
     ai_styles.finishComposer(cx, ai_input_row);
     try ai_input_row.appendChild(cx.allocator, ai_host.attachments_view.?.root);
-    const ai_input = try ui.widgets.Textarea(.{ .value = ai_prompt, .borderless = true, .rows = 1, .placeholder = "继续提问…", .on_change = cx.on(AiHost, ai_host, AiHost.promptChanged) }).mountResult(scope, cx);
+    const ai_input = try ui.widgets.Textarea(.{ .value = ai_prompt, .borderless = true, .rows = 1, .placeholder = "继续提问…", .on_change = cx.on(AiHost, ai_host, AiHost.composerEdited) }).mountResult(scope, cx);
     ai_input.wrapper.setStyleInline(cx.allocator, ai_styles.input());
     ai_input.input.setStyleInline(cx.allocator, ai_styles.input());
     ai_host.input_node = ai_input.input;

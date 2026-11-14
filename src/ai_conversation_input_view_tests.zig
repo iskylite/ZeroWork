@@ -119,6 +119,34 @@ test "conversation UI cards invalidate an old press and preserve an edit draft o
     try std.testing.expectEqual(@as(u64, 2), f.last.?.queue_revision);
 }
 
+test "conversation UI pending cancellation remains a row action during cleanup" {
+    var f: Fixture = undefined;
+    try f.init(360, 358);
+    defer f.deinit();
+    var entries = [_]V.Item{ item(1), item(2), item(3), item(4), item(5) };
+    entries[1].receipt.pause = .stop;
+    entries[2].receipt.route = .start;
+    entries[2].receipt.delivery = .accepted;
+    entries[2].receipt.pause = .environment;
+    entries[3].receipt.delivery = .submitting;
+    entries[3].receipt.pause = .end;
+    entries[4].receipt.delivery = .outcome_unknown;
+    entries[4].receipt.pause = .unknown;
+    for (entries[1..]) |*entry| entry.mutable = false;
+    _ = try f.pending.update(&entries, 7, false, false);
+    f.settle();
+    f.click("ai.pending.remove.0");
+    try std.testing.expectEqual(V.Action.remove, f.last_action.?);
+    try std.testing.expect(f.last.?.receipt.id.eql(entries[0].receipt.id));
+    f.click("ai.pending.cancel_message.1");
+    try std.testing.expect(f.last.?.receipt.id.eql(entries[1].receipt.id));
+    f.click("ai.pending.cancel_message.2");
+    try std.testing.expect(f.last.?.receipt.id.eql(entries[2].receipt.id));
+    try std.testing.expectEqual(@as(usize, 3), f.calls);
+    try std.testing.expect(find(f.cx.root.?, "ai.pending.cancel_message.3") == null);
+    try std.testing.expect(find(f.cx.root.?, "ai.pending.cancel_message.4") == null);
+}
+
 test "conversation UI queue arrow names the current action or the wait" {
     var f: Fixture = undefined;
     try f.init(600, 456);
@@ -278,7 +306,7 @@ test "conversation UI single card reveals stable actions on hover and keyboard f
         const remove = find(f.cx.root.?, "ai.pending.remove.0").?;
         const now = find(f.cx.root.?, "ai.pending.now.0").?;
         const before = now.globalRect();
-        try std.testing.expect(opacity(edit) == 0 and opacity(remove) == 0 and opacity(now) == 1);
+        try std.testing.expect(opacity(edit) == 0 and opacity(remove) == 1 and opacity(now) == 1);
         const card = find(f.cx.root.?, "ai.pending.card.0").?.globalRect();
         f.cx.handleMouseMove(card.x + 40, card.y + 12);
         f.settle();
@@ -288,7 +316,7 @@ test "conversation UI single card reveals stable actions on hover and keyboard f
         f.cx.handleMouseMove(0, 0);
         f.cx.clearFocus();
         f.settle();
-        try std.testing.expect(opacity(edit) == 0 and opacity(remove) == 0);
+        try std.testing.expect(opacity(edit) == 0 and opacity(remove) == 1);
         // Tab into the initially hidden secondary action: focus reveals the row.
         f.cx.setFocus(find(f.cx.root.?, "ai.pending.toggle").?);
         f.cx.handleKeyDown(.tab, .{});

@@ -145,7 +145,7 @@ pub const View = struct {
         cx: *ui.Cx,
         hovered: *ui.Signal(bool),
         focused: [4]?*ui.Signal(bool) = @splat(null),
-        extra: [2]?Button = @splat(null),
+        edit: Button,
         menu_open: ?*ui.Signal(bool) = null,
         fn apply(self: *Reveal) void {
             var active = self.hovered.get();
@@ -153,10 +153,8 @@ pub const View = struct {
                 active = signal.get() or active;
             };
             if (self.menu_open) |open| active = open.get() or active;
-            for (self.extra) |entry| if (entry) |b| {
-                b.wrapper.setOpacityRaw(if (active) 1 else 0);
-                b.node.setHitTestVisible(active);
-            };
+            self.edit.wrapper.setOpacityRaw(if (active) 1 else 0);
+            self.edit.node.setHitTestVisible(active);
             self.cx.requestRedraw();
         }
     };
@@ -205,7 +203,7 @@ pub const View = struct {
     fn more(self: *View, scope: *ui.Scope, row: *ui.Node, cell: *Cell, index: usize, count: usize, reorder: bool, data: std.mem.Allocator) !struct { button: Button, open: ?*ui.Signal(bool) } {
         var options: [4]ui.widgets.MenuItem = undefined;
         options[0] = .{ .id = "edit", .label = "编辑消息", .icon_asset = ui.icons.get("pencil").?, .on_click = self.cx.on(Cell, cell, Cell.edit) };
-        inline for (.{ .{ Action.remove, "移除消息", "x", "remove" }, .{ Action.up, "上移", "arrow-up", "up" }, .{ Action.down, "下移", "arrow-down", "down" } }, 1..) |spec, i| {
+        inline for (.{ .{ Action.remove, "取消排队消息", "x", "remove" }, .{ Action.up, "上移", "arrow-up", "up" }, .{ Action.down, "下移", "arrow-down", "down" } }, 1..) |spec, i| {
             const action = try scope.createState(Cell, .{ .view = self, .ticket = cell.ticket, .action = spec[0] });
             options[i] = .{ .id = spec[3], .label = spec[1], .icon_asset = ui.icons.get(spec[2]).?, .disabled = if (spec[0] == .up) !reorder or index == 0 else if (spec[0] == .down) !reorder or index + 1 == count else false, .on_click = self.cx.on(Cell, action, Cell.run) };
         }
@@ -344,11 +342,11 @@ pub const View = struct {
             }
             const row = if (editing) try ui.box(self.cx, S.row(), .{}) else card;
             if (editing) try card.appendChild(self.cx.allocator, row);
-            const state = if (item.receipt.delivery == .outcome_unknown) "待核对" else if (item.receipt.pause != null) "已暂停" else if (item.receipt.delivery != .queued) "待处理" else "排队";
+            const state = if (item.receipt.delivery == .outcome_unknown) "待核对" else if (item.receipt.delivery == .submitting) "正在提交" else if (item.receipt.pause != null) "已暂停" else if (item.receipt.delivery != .queued) "待处理" else "排队";
             const status = try std.fmt.allocPrint(data, "{s} · {d}{s}", .{ state, index + 1, if (item.attachments != 0) " · 含附件" else "" });
             const status_hint = try ui.widgets.Tooltip(.{ .text = status }).mount(scope, self.cx);
             status_hint.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 14 }, .height = .{ .px = 18 }, .flex_shrink = 0, .align_items = .center, .justify = .center });
-            const status_node = try ui.text(self.cx, if (item.receipt.delivery == .outcome_unknown) "?" else if (item.receipt.pause != null) "Ⅱ" else if (item.receipt.delivery != .queued) "…" else try std.fmt.allocPrint(data, "{d}", .{index + 1}), S.queueText(true));
+            const status_node = try ui.text(self.cx, if (item.receipt.delivery == .outcome_unknown) "?" else if (item.receipt.delivery == .submitting) "…" else if (item.receipt.pause != null) "Ⅱ" else if (item.receipt.delivery != .queued) "…" else try std.fmt.allocPrint(data, "{d}", .{index + 1}), S.queueText(true));
             status_node.meta.ownership.meta.test_id = try std.fmt.allocPrint(data, "ai.pending.status.{d}", .{index});
             status_node.setTextColor(T.current().fg_3);
             status_node.behavior.interaction.a11y = .{ .label = status };
@@ -371,13 +369,11 @@ pub const View = struct {
                 _ = try self.button(scope, row, "x", "取消编辑", "ai.pending.cancel", false, self.cx.on(Cell, cell, Cell.cancel), null);
                 _ = try self.button(scope, row, "check", "保存排队消息", "ai.pending.save", !mutable, self.cx.on(Cell, cell, Cell.run), null);
             } else if (mutable and item.receipt.pause != .environment) {
-                const reveal = try scope.createState(Reveal, .{ .cx = self.cx, .hovered = try ui.hooks.useHover(scope, card) });
                 const edit = try self.button(scope, row, "pencil", "编辑排队消息", try std.fmt.allocPrint(data, "ai.pending.edit.{d}", .{index}), false, self.cx.on(Cell, cell, Cell.edit), null);
-                reveal.extra[0] = edit;
+                const reveal = try scope.createState(Reveal, .{ .cx = self.cx, .hovered = try ui.hooks.useHover(scope, card), .edit = edit });
                 reveal.focused[0] = edit.focused;
                 const remove_cell = try scope.createState(Cell, .{ .view = self, .ticket = ticket, .action = .remove });
-                const remove = try self.button(scope, row, "x", "移除排队消息", try std.fmt.allocPrint(data, "ai.pending.remove.{d}", .{index}), false, self.cx.on(Cell, remove_cell, Cell.run), null);
-                reveal.extra[1] = remove;
+                const remove = try self.button(scope, row, "x", "取消排队消息", try std.fmt.allocPrint(data, "ai.pending.remove.{d}", .{index}), false, self.cx.on(Cell, remove_cell, Cell.run), null);
                 reveal.focused[1] = remove.focused;
                 const now_cell = try scope.createState(Cell, .{ .view = self, .ticket = ticket, .action = .now });
                 const now = try self.button(scope, row, "arrow-up", item.send_now.label(), try std.fmt.allocPrint(data, "ai.pending.now.{d}", .{index}), !item.send_now.enabled(), self.cx.on(Cell, now_cell, Cell.run), null);
@@ -387,15 +383,15 @@ pub const View = struct {
                 reveal.focused[3] = menu.button.focused;
                 try scope.createEffect(reveal, Reveal.apply);
             } else {
-                if (item.receipt.delivery != .outcome_unknown) {
+                if (item.receipt.delivery != .outcome_unknown and item.receipt.delivery != .submitting) {
                     const copy = try scope.createState(Cell, .{ .view = self, .ticket = ticket, .action = .copy_text });
                     _ = try self.button(scope, row, "copy", "复制文字到草稿", "ai.pending.copy_text", false, self.cx.on(Cell, copy, Cell.run), null);
                 }
                 const inspect_cell = try scope.createState(Cell, .{ .view = self, .ticket = ticket, .action = .inspect });
                 _ = try self.button(scope, row, "eye", "查看待处理消息", "ai.pending.inspect", false, self.cx.on(Cell, inspect_cell, Cell.run), null);
-                if (mutable) {
+                if (item.receipt.canCancelPending()) {
                     const remove = try scope.createState(Cell, .{ .view = self, .ticket = ticket, .action = .remove });
-                    _ = try self.button(scope, row, "x", "移除排队消息", "ai.pending.remove_paused", false, self.cx.on(Cell, remove, Cell.run), null);
+                    _ = try self.button(scope, row, "x", "取消待处理消息", try std.fmt.allocPrint(data, "ai.pending.cancel_message.{d}", .{index}), false, self.cx.on(Cell, remove, Cell.run), null);
                 }
             }
             try self.scroll.content.insertChildBefore(self.cx.allocator, card, before);

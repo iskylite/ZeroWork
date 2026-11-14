@@ -7,10 +7,22 @@ const budget = @import("local_text_request.zig");
 pub const Summary = struct {
     tokens: usize = 0,
     reserved_image_tokens: usize = 0,
+    image_tokens: usize = 0,
     can_compact: bool = false,
     measured_tokens: ?usize = null,
+    measured_sources: ?usage.Sources = null,
     added_tokens: usize = 0,
     estimated: bool = true,
+
+    pub fn sources(self: Summary, fixed: usage.Fixed, extra_messages: usize) usage.Sources {
+        var result: usage.Sources = self.measured_sources orelse .{
+            .system = fixed.system_tokens,
+            .tools = fixed.tool_tokens,
+        };
+        result.messages +|= (self.added_tokens -| self.image_tokens) +| extra_messages;
+        result.images +|= self.image_tokens;
+        return result;
+    }
 };
 pub const Cache = struct {
     key: ?u64 = null,
@@ -42,17 +54,28 @@ pub const Cache = struct {
             for (message.tool_calls) |call| bytes +|= call.id.len +| call.name.len +| call.arguments.len +| 64;
         }
         var reserved: usize = 0;
+        var image_tokens: usize = 0;
         const added = if (selected) |model| estimate: {
             const request = model.chatRequest(.{ .model = model.model, .system = "", .messages = messages, .tool_images = model.vision });
-            if (!@import("image_budget.zig").supports(model.model)) reserved = @import("image_budget.zig").validate(request) catch 0;
-            break :estimate budget.inputTokens(request) catch budget.textTokens(bytes);
+            const message_tokens = budget.messageTextTokens(messages) catch break :estimate budget.textTokens(bytes);
+            image_tokens = @import("image_budget.zig").validate(request) catch break :estimate message_tokens;
+            if (!@import("image_budget.zig").supports(model.model)) reserved = image_tokens;
+            break :estimate message_tokens +| image_tokens;
         } else budget.textTokens(bytes);
         const measured = if (history.usage) |baseline| baseline.sample.input_tokens else null;
+        // Previously saved measurements contain only the aggregate and prefix.
+        const measured_sources = if (history.usage) |baseline| baseline.sample.sources orelse blk: {
+            const model = selected.?;
+            const request = model.chatRequest(.{ .model = model.model, .system = "", .messages = history.messages[0..start], .tool_images = model.vision });
+            break :blk usage.Sources.measuredInput(request, fixed, baseline.sample.input_tokens);
+        } else null;
         self.value = .{
             .tokens = (measured orelse fixed.tokens()) +| added,
             .reserved_image_tokens = reserved,
+            .image_tokens = image_tokens,
             .can_compact = @import("context_compaction.zig").cutoff(history.messages) != null,
             .measured_tokens = measured,
+            .measured_sources = measured_sources,
             .added_tokens = added,
             .estimated = measured == null or messages.len != 0,
         };
@@ -95,9 +118,33 @@ test "context usage uses measured input plus only retained new content without d
     try std.testing.expectEqual(12000 + tail, result.tokens);
     try std.testing.expectEqual(tail, result.added_tokens);
     try std.testing.expect(result.estimated);
+    const parts = result.sources(fixed, 10);
+    try std.testing.expectEqual(result.tokens + 10, parts.total());
+    try std.testing.expectEqual(fixed.system_tokens, parts.system);
+    try std.testing.expectEqual(fixed.tool_tokens, parts.tools);
+    try std.testing.expectEqual((try budget.messageTextTokens(test_request.messages)) + tail + 10, parts.messages);
+    try std.testing.expect(parts.unattributed > 0);
     const computations = cache.computations;
     _ = cache.readWithFixed(&history, test_model, fixed);
     try std.testing.expectEqual(computations, cache.computations);
+}
+test "context usage reads a legacy measured sample without source metadata" {
+    var history = try measuredHistory("answer");
+    defer history.deinit();
+    const stored_sources = history.usage.?.sample.sources;
+    history.usage.?.sample.sources = null;
+    var cache: Cache = .{};
+    const result = cache.readWithFixed(&history, test_model, try usage.Fixed.capture(test_request));
+    try std.testing.expectEqual(stored_sources, result.measured_sources);
+}
+
+test "context usage reconciles local estimates above provider input without counting it twice" {
+    const estimated: usage.Sources = .{ .system = 80, .tools = 90, .messages = 100, .images = 130 };
+    const result = estimated.fitMeasured(100);
+    try std.testing.expectEqual(@as(usize, 100), result.total());
+    try std.testing.expectEqual(@as(usize, 0), result.unattributed);
+    try std.testing.expectEqual(@as(usize, 20), result.system);
+    try std.testing.expectEqual(@as(usize, 25), result.messages);
 }
 test "context usage unchanged measured prefix is exact and prefix edits cannot reuse its measurement" {
     var history = try measuredHistory("");

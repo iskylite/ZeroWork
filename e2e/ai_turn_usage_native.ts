@@ -153,8 +153,8 @@ try {
     await h.waitFor(async () => !(await h.query('ai.turn.usage.details')).some(shown) || null, 5000);
     await click('ai.composer.usage');
     const context = await visible('ai.usage.menu');
-    assert(text(context).includes('基准输入（实测）'));
-    assert.equal(text(await visible('ai.usage.part.value')), '1.4K');
+    assert(text(context).includes('上次请求输入（实测）'));
+    assert(text(await visible('ai.usage.measured')).endsWith('1.4K'));
     assert(!text(await visible('ai.usage.summary')).includes('2.6K'));
     await h.key('escape');
     await h.waitFor(async () => !(await h.query('ai.usage.menu')).some(shown) || null, 5000);

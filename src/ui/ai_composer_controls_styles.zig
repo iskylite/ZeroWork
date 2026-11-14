@@ -163,11 +163,17 @@ pub fn ring() ui.BoxStyle {
 
 pub fn usageColor(index: usize) ui.Color {
     const colors = theme.current();
-    return switch (index % 3) {
+    return switch (index) {
         0 => colors.fg_3,
         1 => colors.accent,
-        else => colors.ok_ink,
+        2 => colors.ok_ink,
+        3 => colors.warn_ink,
+        4 => colors.fg_3.withAlpha(140),
+        else => colors.fg_1,
     };
+}
+pub fn usageHeight(parts: usize, measured: bool, viewport_height: f32) f32 {
+    return @min(@as(f32, 116) + @as(f32, @floatFromInt(parts)) * 26 + (if (measured) @as(f32, 26) else 0), @max(0, viewport_height - 16));
 }
 pub fn compactionButton() ui.BoxStyle {
     var style = iconButton(8);
@@ -179,7 +185,7 @@ pub fn usageTrackRow() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
 }
 pub fn usageTrack() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 4 }, .direction = .row, .gap = 1, .background = theme.popupInset(), .border = .{ .radius = 2 }, .overflow = .hidden, .flex = 1, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 4 }, .direction = .row, .background = theme.popupInset(), .border = .{ .radius = 2 }, .overflow = .hidden, .flex = 1, .min_width = 0 };
 }
 pub fn usageSegment(ratio: f32, index: usize) ui.BoxStyle {
     return .{ .width = .{ .percent = ratio * 100 }, .height = .fill(), .background = usageColor(index), .flex_shrink = 0 };
