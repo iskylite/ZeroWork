@@ -73,7 +73,11 @@ try{
  const journal=await readFile(join(data,'ai-sessions.jsonl'),'utf8');const events=journal.trim().split('\n').map(s=>JSON.parse(s));await writeFile(join(out,'journal.json'),JSON.stringify(events,null,2));
  const lifecycle=events.flatMap((e:any)=>e.event?[e.event]:[]);
  const checkpoints=events.filter((e:any)=>e.event?.kind==='checkpoint');const source=checkpoints[0].event.conversation;
- const consumed=events.flatMap((e:any)=>e.receipt?.delivery==='consumed'?[e.receipt]:[]);assert.equal(consumed.length,4);assert.equal(consumed[0].turn,consumed[1].turn);assert.equal(consumed[1].route,'steer');assert(consumed[2].turn>consumed[1].turn&&consumed[3].turn>consumed[2].turn);
+ const consumed=events.flatMap((e:any)=>e.consumed_batch?.map((entry:any)=>entry.receipt)??(e.receipt?.delivery==='consumed'?[e.receipt]:[]));
+ assert.equal(consumed.length,4,'durable journal must record all four consumed inputs');
+ assert(consumed.every((receipt:any)=>receipt.delivery==='consumed'&&receipt.fence.conversation===source));
+ assert.equal(new Set(consumed.map((receipt:any)=>receipt.id)).size,4,'a submission must be consumed only once');
+ assert.equal(consumed[0].turn,consumed[1].turn);assert.equal(consumed[1].route,'steer');assert(consumed[2].turn>consumed[1].turn&&consumed[3].turn>consumed[2].turn);
  const forks=lifecycle.filter((e:any)=>e.kind==='fork'||e.kind==='fork_bound');assert.equal(forks.length,3);assert.equal(new Set(forks.map((e:any)=>e.conversation)).size,3);for(const fork of forks){assert.equal(fork.parent,source);assert.notEqual(fork.conversation,source);assert.equal(fork.draft,null)}
  assert(lifecycle.some((e:any)=>e.kind==='bind'&&e.conversation===source));assert.equal(lifecycle.filter((e:any)=>e.kind==='unbind'&&e.conversation===source).length,2);assert.equal(checkpoints.at(-1).messages.filter((m:any)=>m.role==='user').length,4);
  report.journal_kinds=lifecycle.map((e:any)=>e.kind);report.requests=model;report.status='passed';

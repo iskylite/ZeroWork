@@ -118,6 +118,23 @@ test "conversation UI cards invalidate an old press and preserve an edit draft o
     try std.testing.expectEqual(@as(u64, 2), f.last.?.receipt.revision);
     try std.testing.expectEqual(@as(u64, 2), f.last.?.queue_revision);
 }
+
+test "conversation UI queue arrow names the current action or the wait" {
+    var f: Fixture = undefined;
+    try f.init(600, 456);
+    defer f.deinit();
+    var entry = item(1);
+    const id = "ai.pending.now.0";
+    for ([_]V.SendNow{ .current_turn, .saving, .tools, .paused, .unconfirmed, .steer, .start }) |state| {
+        entry.send_now = state;
+        _ = try f.pending.update(&.{entry}, 1, false, false);
+        f.settle();
+        try std.testing.expectEqualStrings(state.label(), find(f.cx.root.?, id).?.behavior.interaction.a11y.?.label.?);
+        const before = f.calls;
+        f.click(id);
+        try std.testing.expectEqual(before + @intFromBool(state.enabled()), f.calls);
+    }
+}
 const SessionFixture = struct {
     actions: usize = 0,
     last: ?Sessions.Action = null,

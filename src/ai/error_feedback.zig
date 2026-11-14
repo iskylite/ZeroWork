@@ -5,6 +5,7 @@ pub fn localFailureLabel(label: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, label, "JournalLimit")) return "本地聊天记录存储已达上限，暂时无法保存新内容；请先备份记录，再导出或整理历史会话";
     if (std.mem.eql(u8, label, "JournalConflict")) return "本地聊天记录文件已变化，已暂停写入；请重新打开应用后继续";
     if (std.mem.eql(u8, label, "TurnChanged")) return "当前回复轮次已结束或变化，消息仍在待处理列表中，请再次发送";
+    if (std.mem.eql(u8, label, "SubmissionUnconfirmed")) return "上一条消息的发送结果待核对，已保留本次输入";
     if (std.mem.eql(u8, label, "ExplicitSkillNotFound")) return "未找到指定技能。请输入 /skill 技能名，在下一行填写任务。";
     if (std.mem.eql(u8, label, "ExplicitSkillDisabled")) return "指定技能已停用，请在 AI 设置中启用后重试。";
     if (std.mem.eql(u8, label, "ExplicitSkillUnavailable")) return "指定技能或版本在当前对话中不可用，请检查技能设置后重新选择。";

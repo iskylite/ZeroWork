@@ -328,7 +328,7 @@ pub const Context = struct {
         const now = try self.captureBoundaryMode(controller, prepared.boundary.handle, true, false, execution.digest("@shell attach"), true);
         if (!sameService(now.service, prepared.boundary.service) or now.membership_revision != prepared.boundary.membership_revision or now.ownership_revision != prepared.boundary.ownership_revision) return error.ScopeChanged;
         const snapshot = try now.service.executionSnapshot();
-        const ready = snapshot.interactive_execution and snapshot.shell.prompt_ready == true;
+        const ready = snapshot.interactive_execution and snapshot.input_ready and snapshot.shell.prompt_ready == true;
         const failed = if (snapshot.failure) |failure| std.mem.eql(u8, failure, "UnsupportedShell") or std.mem.eql(u8, failure, "UnsupportedMultiplexer") or std.mem.eql(u8, failure, "ShellHooksConflict") else false;
         if (!ready and !failed and !timed_out) return null;
         var temporary = std.heap.ArenaAllocator.init(allocator);

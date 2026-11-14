@@ -7,7 +7,33 @@ const S = @import("ai_pending_styles.zig");
 const T = @import("app_theme.zig");
 pub const Ticket = struct { receipt: input.Receipt, queue_revision: u64 };
 pub const Action = enum { save, remove, now, up, down, continue_queue, copy_text, inspect };
-pub const Item = struct { receipt: input.Receipt, text: []const u8, attachments: usize = 0, mutable: bool = true };
+pub const SendNow = enum {
+    steer,
+    start,
+    current_turn,
+    saving,
+    tools,
+    paused,
+    unconfirmed,
+    workspace_changed,
+
+    pub fn label(self: SendNow) []const u8 {
+        return switch (self) {
+            .steer => "引导当前回合",
+            .start => "发送为新一轮",
+            .current_turn => "等待当前回合结束",
+            .saving => "等待保存上一轮记录",
+            .tools => "等待上一轮工具收尾",
+            .paused => "队列已暂停，请先继续队列",
+            .unconfirmed => "请先核对上一条消息的发送结果",
+            .workspace_changed => "工作区已变更，请重新发送消息",
+        };
+    }
+    pub fn enabled(self: SendNow) bool {
+        return self == .steer or self == .start;
+    }
+};
+pub const Item = struct { receipt: input.Receipt, text: []const u8, attachments: usize = 0, mutable: bool = true, send_now: SendNow = .steer };
 pub const Hooks = struct { context: *anyopaque, act: *const fn (*anyopaque, Ticket, Action, []const u8) anyerror!void };
 pub const View = struct {
     cx: *ui.Cx,
@@ -102,6 +128,9 @@ pub const View = struct {
         self.error_node.setTextContent(self.cx.allocator, message) catch {};
         self.error_node.setDisplay(.flex);
         self.cx.requestRedraw();
+    }
+    pub fn clearError(self: *View) void {
+        self.error_node.setDisplay(.none);
     }
     pub fn finishEdit(self: *View) void {
         self.cancel_requested = true;
@@ -211,7 +240,7 @@ pub const View = struct {
         var h = std.hash.Wyhash.init(0);
         std.hash.autoHash(&h, .{ queue_revision, compact, continuing, T.current() });
         for (items) |item| {
-            std.hash.autoHash(&h, .{ item.receipt, item.attachments, item.mutable });
+            std.hash.autoHash(&h, .{ item.receipt, item.attachments, item.mutable, item.send_now });
             h.update(item.text);
         }
         const hash = h.final();
@@ -276,7 +305,7 @@ pub const View = struct {
         for (items, 0..) |item, index| {
             const editing = if (self.editing) |edit| edit.receipt.id.eql(item.receipt.id) else false;
             var row_hash = std.hash.Wyhash.init(0);
-            std.hash.autoHash(&row_hash, .{ item.receipt, item.attachments, item.mutable, index, index + 1 == items.len, editing, T.current() });
+            std.hash.autoHash(&row_hash, .{ item.receipt, item.attachments, item.mutable, item.send_now, index, index + 1 == items.len, editing, T.current() });
             row_hash.update(item.text);
             const fingerprint = row_hash.final();
             if (index < self.retained.items.len and self.retained.items[index].hash == fingerprint) {
@@ -351,7 +380,7 @@ pub const View = struct {
                 reveal.extra[1] = remove;
                 reveal.focused[1] = remove.focused;
                 const now_cell = try scope.createState(Cell, .{ .view = self, .ticket = ticket, .action = .now });
-                const now = try self.button(scope, row, "arrow-up", "立即引导当前任务", try std.fmt.allocPrint(data, "ai.pending.now.{d}", .{index}), item.receipt.pause != null, self.cx.on(Cell, now_cell, Cell.run), null);
+                const now = try self.button(scope, row, "arrow-up", item.send_now.label(), try std.fmt.allocPrint(data, "ai.pending.now.{d}", .{index}), !item.send_now.enabled(), self.cx.on(Cell, now_cell, Cell.run), null);
                 reveal.focused[2] = now.focused;
                 const menu = try self.more(scope, row, cell, index, items.len, item.receipt.pause == null, data);
                 reveal.menu_open = menu.open;

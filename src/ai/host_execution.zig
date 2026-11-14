@@ -28,6 +28,30 @@ pub fn supports(name: []const u8) bool {
     for (contributions) |item| if (std.mem.eql(u8, item.definition.id, name)) return true;
     return false;
 }
+pub fn needsShellObservation(failure: anyerror) bool {
+    return failure == error.ShellPromptNotObserved or failure == error.IntegrationUnavailable or failure == error.ShellContextChanged;
+}
+
+/// Use only when this invocation is known to have sent no command bytes.
+pub fn rejectedRun(allocator: std.mem.Allocator, invocation: host.Invocation, failure: anyerror) !host.Result {
+    const session_ref = if (needsShellObservation(failure)) string(invocation.arguments, "session_ref") catch null else null;
+    var tool_name: [64]u8 = undefined;
+    const next_tool = if (session_ref != null) try @import("plugin_tools.zig").encodeName(&tool_name, "host.read_terminal") else null;
+    const body = try std.json.Stringify.valueAlloc(allocator, .{
+        .error_code = @errorName(failure),
+        .message = if (session_ref != null) "命令未发送。先读取同一终端的最新画面和控制状态，按当前执行方式恢复 Shell 就绪后再提交。" else @import("step_failure.zig").explanation(@errorName(failure)),
+        .state = "cancelled_unsent",
+        .side_effect_started = false,
+        .local_released = true,
+        .remote_effect_unknown = false,
+        .next_tool = next_tool,
+        .next_arguments = if (session_ref) |reference| .{ .session_ref = reference, .include_control = true } else null,
+    }, .{ .emit_null_optional_fields = false });
+    errdefer allocator.free(body);
+    var result = try ownedResult(allocator, invocation.context, invocation.operation_id, body, false, false);
+    result.status = .rejected;
+    return result;
+}
 /// These callbacks keep disk IO behind a shared process journal owner. The
 /// direct Journal adapter remains useful for isolated controller tests.
 pub const JournalAccess = struct {
@@ -403,17 +427,13 @@ pub const Controller = struct {
             if (err == error.WorkerBusy or err == error.ApprovalRequired) return err;
             try self.journal.update(operation, record.revision, .{ .stage = if (err == error.CancelledBeforeDispatch) .cancelled_unsent else .rejected });
             if (err == error.CancelledBeforeDispatch) return err;
-            const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .error_code = @errorName(err), .message = @import("step_failure.zig").explanation(@errorName(err)), .state = "cancelled_unsent", .side_effect_started = false, .local_released = true, .remote_effect_unknown = false }, .{});
-            errdefer self.allocator.free(body);
-            var response = try ownedResult(self.allocator, invocation.context, invocation.operation_id, body, false, false);
-            response.status = .rejected;
-            return response;
+            return rejectedRun(self.allocator, invocation, err);
         };
         self.tick(now);
         const snapshot = try self.terminalSnapshot(target.service);
         if (!snapshot.interactive_execution) {
-            try self.journal.update(operation, record.revision, .{ .stage = .failed });
-            return error.IntegrationUnavailable;
+            try self.journal.update(operation, record.revision, .{ .stage = .rejected });
+            return rejectedRun(self.allocator, invocation, error.IntegrationUnavailable);
         }
         if (self.backend.should_cancel) |check| if (check(self.backend.context)) {
             try self.journal.update(operation, record.revision, .{ .stage = .cancelled_unsent });
@@ -785,8 +805,8 @@ fn ownedResult(a: std.mem.Allocator, context: host.Context, operation_id: u64, b
 
 test "execution authorization rejection retains known unsent facts" {
     const Mock = struct {
-        fn authorize(_: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !Target {
-            return error.TargetNotAuthorized;
+        fn authorize(raw: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !Target {
+            return @as(*anyerror, @ptrCast(@alignCast(raw))).*;
         }
         fn resolve(_: *anyopaque, _: host.Context, _: identity.SessionHandle) !terminal.Service {
             return error.UnexpectedDispatch;
@@ -797,8 +817,8 @@ test "execution authorization rejection retains known unsent facts" {
     defer tmp.cleanup();
     var journal = try journal_mod.Journal.open(a, std.testing.io, tmp.dir, "denied.json");
     defer journal.deinit();
-    var marker: u8 = 0;
-    var controller = Controller.init(a, &journal, .{ .context = &marker, .authorize = Mock.authorize, .resolve = Mock.resolve });
+    var failure: anyerror = error.TargetNotAuthorized;
+    var controller = Controller.init(a, &journal, .{ .context = &failure, .authorize = Mock.authorize, .resolve = Mock.resolve });
     defer controller.deinit();
     const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
     const json = "{\"session_ref\":\"approved-target\",\"command\":\"pwd\",\"request_key\":\"denied\",\"wait_ms\":2000}";
@@ -817,6 +837,29 @@ test "execution authorization rejection retains known unsent facts" {
     defer body.deinit();
     try std.testing.expectEqualStrings("TargetNotAuthorized", body.value.object.get("error_code").?.string);
     try std.testing.expectEqualStrings("cancelled_unsent", body.value.object.get("state").?.string);
+    try std.testing.expect(body.value.object.get("next_tool") == null);
+
+    var recovery = invocation;
+    recovery.operation_id = 2;
+    recovery.call_id = "unsent-shell-command";
+    recovery.arguments_json = "{\"session_ref\":\"approved-target\",\"command\":\"pwd\",\"request_key\":\"unsent-shell\",\"wait_ms\":2000}";
+    const recovery_args = try std.json.parseFromSlice(std.json.Value, a, recovery.arguments_json, .{});
+    defer recovery_args.deinit();
+    recovery.arguments = recovery_args.value;
+    recovery.arguments_hash = execution.digest(recovery.arguments_json);
+    failure = error.IntegrationUnavailable;
+    var unavailable = (try controller.execute(recovery, 2)).result;
+    defer unavailable.deinit(a);
+    try unavailable.validate(context, 2);
+    try std.testing.expectEqual(.rejected, unavailable.status);
+    try std.testing.expect(!unavailable.receipt.side_effect_started and !unavailable.receipt.remote_effect_unknown);
+    try std.testing.expectEqual(@as(usize, 0), controller.entries.items.len);
+    const hint = try std.json.parseFromSlice(std.json.Value, a, unavailable.blocks[0].structured, .{});
+    defer hint.deinit();
+    const next = hint.value.object.get("next_arguments").?.object;
+    try std.testing.expectEqualStrings("host__read_uterminal", hint.value.object.get("next_tool").?.string);
+    try std.testing.expectEqualStrings("approved-target", next.get("session_ref").?.string);
+    try std.testing.expect(next.get("include_control").?.bool);
 }
 
 test "execution unknown receipt retains its uncertainty and never becomes a successful RPC" {

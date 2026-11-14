@@ -14,6 +14,7 @@ const RuntimeFixture = struct {
     ready_next: bool = false,
     uses_tools: bool = false,
     hold_prepare: bool = false,
+    fail_first: bool = false,
     preparing: std.atomic.Value(bool) = .init(false),
     release_prepare: std.atomic.Value(bool) = .init(false),
     fn prepare(raw: *anyopaque, _: std.mem.Allocator, _: std.Io, context: runtime.Context) !runtime.Prepared {
@@ -33,6 +34,7 @@ const RuntimeFixture = struct {
             if (request.cancel) |cancel| if (cancel.isCancelled()) return error.Cancelled;
             std.Thread.yield() catch {};
         }
+        if (self.fail_first and std.mem.eql(u8, request.messages[request.messages.len - 1].content, "first")) return error.ProviderFailure;
         sink(ctx, .{ .text = "done" });
         sink(ctx, .done);
         return .{};
@@ -124,6 +126,8 @@ test "AI session PATCH next turn starts with an owned execution while end waits 
 
     const next = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "next" }, .steer);
     try std.testing.expectEqual(input.Delivery.queued, next.delivery);
+    try std.testing.expectEqual(input.Route.start, next.route);
+    try std.testing.expectEqual(runtime.Service.NextTurnWait.tools, runtime.Service.nextTurnWait(runner, runner.record.?).?);
     fixture.ready_next = true;
     try service.poll();
     try waitIdle(&service, runner);
@@ -932,7 +936,7 @@ test "AI session PATCH journal owns actual image bytes and preserves distinct hi
     try std.testing.expectEqualSlices(u8, png, message.offloaded_images[0].reference.content().?.bytes);
 }
 
-test "AI session PATCH follow-up preview shares startup admission and keeps early input queued" {
+test "AI session PATCH follow-up steers during startup while explicit queue waits for the next turn" {
     var service = runtime.Service.init(std.testing.allocator);
     defer service.deinit();
     var fixture: RuntimeFixture = .{ .hold_prepare = true };
@@ -942,11 +946,12 @@ test "AI session PATCH follow-up preview shares startup admission and keeps earl
     try std.testing.expectEqual(input.Route.start, try service.previewInput(ticket, .steer));
     _ = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "first" }, .steer);
     // Preparation is held on the worker, leaving the controller free to receive input.
-    try std.testing.expectEqual(input.Route.queue, try service.previewInput(ticket, .steer));
+    try std.testing.expectEqual(input.Route.steer, try service.previewInput(ticket, .steer));
     try std.testing.expectEqual(input.Route.queue, try service.previewInput(ticket, .queue));
     const early = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "after startup" }, .steer);
-    try std.testing.expectEqual(input.Route.queue, early.route);
+    try std.testing.expectEqual(input.Route.steer, early.route);
     try std.testing.expectEqual(input.Mode.steer, early.mode);
+    const queued = try service.submit(ticket, .generate(), .{ .content = "after this turn" }, .queue);
     fixture.release_prepare.store(true, .release);
     try waitStarted(&fixture);
     const first_turn = runner.context.?.turn;
@@ -954,13 +959,15 @@ test "AI session PATCH follow-up preview shares startup admission and keeps earl
     try std.testing.expectEqual(input.Route.queue, try service.previewInput(ticket, .queue));
     fixture.release.store(true, .release);
     try waitIdle(&service, runner);
-    const delivered = service.store.find(ticket.conversation).?.inbox.receipt(early.id).?;
-    try std.testing.expectEqual(input.Route.start, delivered.route);
-    try std.testing.expect(delivered.turn.? > first_turn);
+    const inbox = &service.store.find(ticket.conversation).?.inbox;
+    const delivered = inbox.receipt(early.id).?;
+    try std.testing.expectEqual(input.Route.steer, delivered.route);
+    try std.testing.expectEqual(first_turn, delivered.turn.?);
+    try std.testing.expect(inbox.receipt(queued.id).?.turn.? > first_turn);
     try std.testing.expectEqual(@as(usize, 2), fixture.calls.load(.acquire));
 }
 
-test "AI session PATCH follow-up close boundary queues late input and never reopens the old turn" {
+test "AI session PATCH follow-up close boundary directs late input to a new turn" {
     var store = lifecycle.Store.init(std.testing.allocator);
     defer store.deinit();
     const agent = try store.attach(.{ .session = 1 });
@@ -974,18 +981,61 @@ test "AI session PATCH follow-up close boundary queues late input and never reop
     try std.testing.expectEqual(input.Route.steer, inbox.previewRoute(.steer));
     // The view saw steer; completion wins the mutex before the click is admitted.
     try std.testing.expect(inbox.tryClose());
-    try std.testing.expectEqual(input.Route.queue, inbox.previewRoute(.steer));
+    try std.testing.expectEqual(input.Route.start, inbox.previewRoute(.steer));
     const late = try inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "late" }, .steer);
-    try std.testing.expectEqual(input.Route.queue, late.route);
+    try std.testing.expectEqual(input.Route.start, late.route);
     try std.testing.expectEqual(@as(?u64, null), late.turn);
     try std.testing.expectError(error.TurnChanged, inbox.claim(late.id, late.revision, null, 7, .steer));
     inbox.setWorkPhase(7, .response);
-    try std.testing.expectEqual(input.Route.queue, inbox.previewRoute(.steer));
-    inbox.finish(7, null);
-    try std.testing.expectEqual(input.Route.queue, inbox.previewRoute(.steer));
+    try std.testing.expectEqual(input.Route.start, inbox.previewRoute(.steer));
+    inbox.finish(7, .failure);
+    try std.testing.expectEqual(late.id, inbox.next().?.id);
     const claimed = try inbox.claim(late.id, late.revision, null, 8, .start);
     try std.testing.expectEqual(@as(?u64, 8), claimed.turn);
     try std.testing.expectEqual(input.Route.start, claimed.route);
+}
+
+test "AI session PATCH stopped turn preserves a later direct submission but keeps earlier queued input paused" {
+    var store = lifecycle.Store.init(std.testing.allocator);
+    defer store.deinit();
+    const agent = try store.attach(.{ .session = 1 });
+    const ticket = try store.create(agent.id);
+    const inbox = &store.find(ticket.conversation).?.inbox;
+    const first = try inbox.admit(ticket, .generate(), .{ .content = "first" }, .queue);
+    _ = try inbox.claim(first.id, first.revision, null, 7, .start);
+    const queued = try inbox.admit(ticket, .generate(), .{ .content = "queued" }, .queue);
+    inbox.pauseAll(.stop);
+    inbox.closeInput(7);
+    const next = try inbox.admit(ticket, .generate(), .{ .content = "new turn" }, .steer);
+    inbox.finish(7, .stop);
+    try std.testing.expectEqual(next.id, inbox.next().?.id);
+    try std.testing.expectEqual(@as(?input.Pause, .stop), inbox.receipt(queued.id).?.pause);
+}
+
+test "AI session PATCH failed turn accepts new input during cleanup without resuming an older queue" {
+    var service = runtime.Service.init(std.testing.allocator);
+    defer service.deinit();
+    var fixture: RuntimeFixture = .{ .fail_first = true, .uses_tools = true, .cleaned = false, .ready_next = true };
+    var backend = fixture.backend();
+    backend.ready_for_next = RuntimeFixture.nextReady;
+    const runner = try service.attach(.{ .session = 1 }, backend);
+    const ticket = try service.store.create(runner.agent.id);
+    const original = try service.submit(ticket, .generate(), .{ .content = "first" }, .steer);
+    try waitStarted(&fixture);
+    const old = try service.submit(ticket, .generate(), .{ .content = "queued" }, .queue);
+    fixture.release.store(true, .release);
+    try waitIdle(&service, runner);
+    try std.testing.expectEqual(@as(?anyerror, error.ProviderFailure), runner.failure);
+    try std.testing.expectEqual(input.Route.start, try service.previewInput(ticket, .steer));
+
+    const next = try service.submit(ticket, .generate(), .{ .content = "new input" }, .steer);
+    try std.testing.expectEqual(input.Route.start, next.route);
+    try std.testing.expect(next.turn.? > original.turn.?);
+    try waitIdle(&service, runner);
+    const inbox = &runner.record.?.inbox;
+    try std.testing.expectEqual(input.Delivery.consumed, inbox.receipt(next.id).?.delivery);
+    try std.testing.expectEqual(@as(?input.Pause, .failure), inbox.receipt(old.id).?.pause);
+    try std.testing.expectEqual(@as(usize, 2), fixture.calls.load(.acquire));
 }
 
 test "AI session PATCH steering compaction leaves inbox unlocked for stop and new input" {

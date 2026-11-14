@@ -193,13 +193,17 @@ pub const Inbox = struct {
         return self.routeLocked(mode);
     }
     fn routeLocked(self: *Inbox, mode: Mode) Route {
-        if (!self.admission) return .queue;
-        if (self.active_turn != null) return if (mode == .steer and !self.closing and self.work_phase != .starting) .steer else .queue;
+        if (mode == .steer) return if (self.active_turn != null and !self.closing) .steer else .start;
+        if (!self.admission or self.active_turn != null) return .queue;
         for (self.entries.items) |entry| {
             if (entry.receipt.archived) continue;
             if (entry.receipt.delivery == .outcome_unknown or (entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(self.fence))) return .queue;
         }
         return .start;
+    }
+    pub fn hasUnconfirmedLocked(self: *const Inbox) bool {
+        for (self.entries.items) |entry| if (entry.receipt.delivery == .outcome_unknown and !entry.receipt.archived) return true;
+        return false;
     }
     pub fn setWorkPhase(self: *Inbox, turn: u64, phase: WorkPhase) void {
         self.lock();
@@ -247,12 +251,16 @@ pub const Inbox = struct {
         errdefer if (self.budget) |b| b.release(1, message.content.len);
         const next_sequence = try identity.advance(self.next_sequence);
         const queue_rev = try identity.advance(self.queue_revision);
-        const is_steer = self.routeLocked(mode) == .steer;
+        const route = self.routeLocked(mode);
+        if (mode == .steer and self.hasUnconfirmedLocked()) return error.SubmissionUnconfirmed;
+        const is_steer = route == .steer;
         const input_rev = if (is_steer) try identity.advance(self.revision) else self.revision;
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
         const entry = try self.allocator.create(Entry);
         errdefer self.allocator.destroy(entry);
-        const value: Receipt = .{ .id = id, .fence = fence, .sequence = self.next_sequence, .mode = mode, .route = if (is_steer) .steer else .queue, .expected_turn = if (is_steer) self.active_turn else null, .turn = if (is_steer) self.active_turn else null, .delivery = if (is_steer) .accepted else .queued, .original = original, .workspace_revision = self.workspace_revision };
+        // A direct start can wait for the previous worker/checkpoint without
+        // becoming part of the user's follow-up queue.
+        const value: Receipt = .{ .id = id, .fence = fence, .sequence = self.next_sequence, .mode = mode, .route = if (mode == .steer) route else .queue, .expected_turn = if (is_steer) self.active_turn else null, .turn = if (is_steer) self.active_turn else null, .delivery = if (is_steer) .accepted else .queued, .original = original, .workspace_revision = self.workspace_revision };
         try self.save(value, payload.messages);
         entry.* = .{ .receipt = value, .payload = payload, .text_bytes = message.content.len };
         self.entries.appendAssumeCapacity(entry);
@@ -271,7 +279,7 @@ pub const Inbox = struct {
         if (!entry.receipt.fence.eql(self.fence) or entry.receipt.revision != revision) return error.BindingChanged;
         if (self.workspace_changing or !self.workspaceMatches(entry.receipt)) return error.WorkspaceChanged;
         if (entry.receipt.delivery != .queued or entry.receipt.pause != null) return error.SubmissionNotReady;
-        for (self.entries.items) |other| if (other.receipt.delivery == .outcome_unknown and !other.receipt.archived) return error.SubmissionUnconfirmed;
+        if (self.hasUnconfirmedLocked()) return error.SubmissionUnconfirmed;
         if (target_route == .steer) {
             if (self.active_turn != turn or self.closing) return error.TurnChanged;
         } else if (target_route == .start) {
@@ -301,9 +309,15 @@ pub const Inbox = struct {
         self.lock();
         defer self.unlock();
         if (!self.admission or self.active_turn != null or self.workspace_changing) return null;
-        for (self.entries.items) |entry| if (entry.receipt.delivery == .outcome_unknown and !entry.receipt.archived) return null;
-        for (self.entries.items) |entry| if (entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(self.fence)) return entry.receipt;
-        return null;
+        if (self.hasUnconfirmedLocked()) return null;
+        var head: ?Receipt = null;
+        for (self.entries.items) |entry| {
+            const receipt_value = entry.receipt;
+            if (receipt_value.delivery != .queued or receipt_value.pause != null or !receipt_value.fence.eql(self.fence)) continue;
+            if (receipt_value.route == .start) return receipt_value;
+            if (head == null) head = receipt_value;
+        }
+        return head;
     }
     pub fn edit(self: *Inbox, id: identity.SubmissionId, revision: u64, message: provider.Message) !Receipt {
         try validateMessage(message);
@@ -336,7 +350,7 @@ pub const Inbox = struct {
         const slots = try self.allocator.alloc(usize, self.entries.items.len);
         defer self.allocator.free(slots);
         var count: usize = 0;
-        for (self.entries.items, 0..) |entry, i| if (entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(self.fence)) {
+        for (self.entries.items, 0..) |entry, i| if (entry.receipt.route == .queue and entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(self.fence)) {
             slots[count] = i;
             count += 1;
         };
@@ -346,7 +360,7 @@ pub const Inbox = struct {
         for (order, 0..) |id, i| {
             for (order[0..i]) |prior| if (id.eql(prior)) return error.InvalidQueueOrder;
             const entry = self.findLocked(id) orelse return error.InvalidQueueOrder;
-            if (entry.receipt.delivery != .queued or entry.receipt.pause != null or !entry.receipt.fence.eql(self.fence)) return error.SubmissionNotReady;
+            if (entry.receipt.route != .queue or entry.receipt.delivery != .queued or entry.receipt.pause != null or !entry.receipt.fence.eql(self.fence)) return error.SubmissionNotReady;
             ordered[i] = entry;
         }
         const next_queue = try identity.advance(self.queue_revision);
@@ -402,7 +416,7 @@ pub const Inbox = struct {
         self.lock();
         defer self.unlock();
         if (!self.admission or !self.fence.eql(fence) or self.active_turn != null) return error.BindingChanged;
-        for (self.entries.items) |entry| if (entry.receipt.delivery == .outcome_unknown and !entry.receipt.archived) return error.SubmissionUnconfirmed;
+        if (self.hasUnconfirmedLocked()) return error.SubmissionUnconfirmed;
         for (self.entries.items) |entry| if (entry.receipt.delivery == .queued and entry.receipt.fence.eql(fence)) {
             entry.receipt.pause = if (self.workspaceMatches(entry.receipt)) null else .workspace_changed;
         };
@@ -456,11 +470,20 @@ pub const Inbox = struct {
         self.closing = true;
         return true;
     }
+    pub fn closeInput(self: *Inbox, turn: u64) void {
+        self.lock();
+        defer self.unlock();
+        if (self.active_turn == turn) self.closing = true;
+    }
     pub fn finish(self: *Inbox, turn: u64, reason: ?Pause) void {
         self.lock();
         defer self.unlock();
         if (self.active_turn != turn) return;
         if (reason) |why| for (self.entries.items) |entry| if (!terminal(entry.receipt.delivery)) {
+            // Explicit sends admitted after the old input gate closed belong
+            // to the next turn. A Stop issued after admission still pauses
+            // them via pauseAll.
+            if ((why == .failure or why == .stop) and entry.receipt.route == .start and entry.receipt.delivery == .queued and entry.receipt.pause == null) continue;
             entry.receipt.pause = self.pauseReason(entry.receipt, why);
         };
         self.active_turn = null;

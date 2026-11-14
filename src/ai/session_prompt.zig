@@ -93,12 +93,15 @@ pub fn buildWithSkills(allocator: std.mem.Allocator, mode: config.ExecutionMode,
 
     const pty = has(tools, "host.run_in_terminal");
     const batch = has(tools, "run_command");
-    if (pty or batch) {
+    if (pty or batch or mode == .attached_pty) {
         try text.appendSlice(allocator, "Current host execution mode: ");
         try text.appendSlice(allocator, @tagName(mode));
         try text.appendSlice(allocator, ". ");
         switch (mode) {
-            .attached_pty => try text.appendSlice(allocator, if (pty) "Use host.run_in_terminal in the authorized current terminal by default. If the user requested a separate monitoring session, use host.run_in_terminal with the exact newly created, ready work session's session_ref. In this mode run_command is a batch tool and does not execute in that terminal, even when the catalog advertises it. Prefer simple, bounded read-only commands for routine observation. Obey the actual host result and never send monitoring input to the occupied original terminal. " else "The current catalog cannot execute in the attached terminal; obtain an authorized capability or mode change before submitting a command. "),
+            .attached_pty => {
+                try text.appendSlice(allocator, "Keep pending terminal commands on their exact authorized PTY. Never switch to batch execution or a different session to recover an unavailable Shell integration, even when batch tools are advertised. ");
+                try text.appendSlice(allocator, if (pty) "Use host.run_in_terminal in the authorized current terminal by default. If the user requested a separate monitoring session, use host.run_in_terminal with the exact newly created, ready work session's session_ref. Prefer simple, bounded read-only commands for routine observation. Obey the actual host result and never send monitoring input to the occupied original terminal. " else "Wait for the current terminal's execution capability before submitting a command. ");
+            },
             .new_pty => try text.appendSlice(allocator, "Execution requires an authorized new work terminal. Use available lifecycle tools to create it, then wait for its capability to appear in the refreshed catalog before execution. Never execute in the borrowed source terminal. "),
             .isolated_exec => try text.appendSlice(allocator, if (batch) "Use run_command for independent batch execution, outside the interactive terminal. " else "The current catalog cannot execute an isolated batch; obtain an authorized capability or mode change before submitting a command. "),
             .auto, .ask => {
@@ -113,7 +116,12 @@ pub fn buildWithSkills(allocator: std.mem.Allocator, mode: config.ExecutionMode,
     if (pty) try text.appendSlice(allocator, "Unsupported PTY execution is not success. completion_source distinguishes private_protocol, shell_reported and unknown; shell reports are not a security boundary. ");
     if (pty and mode != .isolated_exec and has(tools, "host.wait_execution")) try text.appendSlice(allocator, "Use host.run_in_terminal wait_ms=2000 for short commands. For an ongoing execution, call host.wait_execution once with its execution_ref and until=decision, omitting wait_ms. If the wait expires, report the observed state and keep the original execution reference for follow-up. Avoid shell sleep and repeated status polling. ");
     if (pty) try text.appendSlice(allocator, "An execution marked handed_off or input_handed_off has released its input lease; this can also happen when the lease expires. Do not say the user explicitly took over unless the host reports that event, and do not infer that the original process has stopped or completed. ");
-    if (has(tools, "host.attach_shell") and has(tools, "host.read_terminal")) try text.appendSlice(allocator, "For Shell attachment on its advertised targets, use host.read_terminal include_control=true and host.attach_shell wait_ms. A shell_switch notice is a candidate, not proof of entry. After ShellPromptNotObserved or IntegrationUnavailable before dispatch, inspect the current screen and shell fences. Attach only a confirmed empty Bash/Zsh prompt; password/OTP questions, foreground programs and TUIs require appropriate interaction or user takeover. Wait for attachment readiness before submitting the unsent command; never replay an unknown command. Observation and attachment do not themselves authorize business input. ");
+    if (has(tools, "host.attach_shell") and has(tools, "host.read_terminal")) {
+        if (mode == .attached_pty) try text.appendSlice(allocator, "With a pending command, an unavailable Shell integration, prompt_ready=false, or a pending shell_switch on its session requires Shell recovery before execution. Start recovery immediately on the same session_ref. ");
+        try text.appendSlice(allocator, "For Shell recovery on an advertised target, including ShellPromptNotObserved or IntegrationUnavailable before dispatch, first call host.read_terminal with include_control=true on the same live session_ref. Take the Shell ID/revision and input/output counters from that read. If the latest screen confirms an empty interactive Bash/Zsh prompt and integration is still needed, call host.attach_shell yourself with those values, prompt_evidence and wait_ms=30000. Omit shell_id if the read reports no ID. If the observation goes stale, read the same terminal again before attaching. A shell_switch notice alone cannot establish readiness. If the screen shows authentication, a foreground program, a continuation prompt or a TUI, do not attach; report the actual blocker when you cannot proceed. An attaching result means keep waiting for readiness, without starting another attachment. ");
+        if (has(tools, "host.get_session")) try text.appendSlice(allocator, "If still attaching, check that session with host.get_session for readiness before proceeding. ");
+        if (pty) try text.appendSlice(allocator, "Once prompt_ready=true and terminal input and execution are available, use host.run_in_terminal on the same session with the current Shell ID/revision. Submit only the unchanged command confirmed unsent, using a fresh request_key after a confirmed unsent rejection. Observe and verify any command with unknown effects. ");
+    }
     if (has(tools, "host.send_execution_input")) try text.appendSlice(allocator, "Send execution input only with the current input capability and approval. Unknown password/OTP consumers, raw/TUI interaction and secrets require user takeover; a visible prompt alone grants no input authority. ");
     if (has(tools, "host.read_command_output")) try text.appendSlice(allocator, "Use host.read_command_output to page an existing batch output by its returned reference and cursor; a missing reply never authorizes command replay. ");
 
@@ -205,20 +213,29 @@ test "session prompt uses exact catalog names for PTY execution and shell recove
     const a = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
-    const ids = [_][]const u8{ "host.run_in_terminal", "host.read_terminal", "host.wait_execution", "host.attach_shell" };
+    const ids = [_][]const u8{ "host.run_in_terminal", "host.read_terminal", "host.wait_execution", "host.attach_shell", "host.get_session" };
     var wire: [ids.len]provider.ToolDefinition = undefined;
     for (ids, &wire) |id, *tool| {
         var name: [64]u8 = undefined;
         tool.* = .{ .session_ids = &.{}, .dynamic = .{ .id = id, .name = try arena.allocator().dupe(u8, try @import("plugin_tools.zig").encodeName(&name, id)), .schema = "{}", .description = "" } };
     }
+    const catalog = wire ++ [_]provider.ToolDefinition{.{ .tool = .run_command, .session_ids = &.{1} }};
     for ([_]config.ExecutionMode{ .attached_pty, .auto, .ask }) |mode| {
-        const prompt = try build(a, mode, &wire);
+        const prompt = try build(a, mode, &catalog);
         defer a.free(prompt);
         try std.testing.expect(std.mem.indexOf(u8, prompt, "Use host__run_uin_uterminal") != null);
         try std.testing.expect(std.mem.indexOf(u8, prompt, "host__run_in_terminal") == null);
         for (wire) |tool| {
             try std.testing.expect(std.mem.indexOf(u8, prompt, tool.name()) != null);
             try std.testing.expect(std.mem.indexOf(u8, prompt, tool.dynamic.?.id) == null);
+        }
+        if (mode == .attached_pty) {
+            try std.testing.expect(std.mem.indexOf(u8, prompt, "Never switch to batch execution") != null);
+            try std.testing.expect(std.mem.indexOf(u8, prompt, "prompt_ready=false") != null);
+            try std.testing.expect(std.mem.indexOf(u8, prompt, "first call host__read_uterminal with include_control=true on the same live session_ref") != null);
+            try std.testing.expect(std.mem.indexOf(u8, prompt, "call host__attach_ushell yourself") != null);
+            try std.testing.expect(std.mem.indexOf(u8, prompt, "Once prompt_ready=true and terminal input and execution are available") != null);
+            try std.testing.expect(std.mem.indexOf(u8, prompt, "command confirmed unsent") != null);
         }
     }
 }

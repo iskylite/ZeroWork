@@ -81,8 +81,9 @@ class Peer(paramiko.ServerInterface):
 
 
 class Fixture:
-    def __init__(self, shell, mode, home):
+    def __init__(self, shell, mode, home, output_filter=None):
         self.shell, self.mode, self.home = shell, mode, home
+        self.output_filter = output_filter
         if mode in {"existing", "disabled-existing"}:
             # Preconfigured server fixture, created before its SSH listener.
             # The client cannot upload it and must discover the existing events.
@@ -141,6 +142,7 @@ class Fixture:
                     os.execve(args[0], args, env)
                 os.set_blocking(master, False)
                 pending = bytearray()
+                filter_output = self.output_filter() if self.output_filter else None
                 while not self.stop.is_set() and not channel.closed:
                     if channel.recv_ready():
                         data = channel.recv(65536)
@@ -166,7 +168,9 @@ class Fixture:
                         if not data:
                             break
                         self.outputs.extend(data)
-                        channel.sendall(data)
+                        forwarded = filter_output(data) if filter_output else data
+                        if forwarded:
+                            channel.sendall(forwarded)
                         if self.mode == "disconnect" and b"DISCONNECT_armed" in self.outputs:
                             channel.transport.close()
                             break

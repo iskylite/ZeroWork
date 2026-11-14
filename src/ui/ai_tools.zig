@@ -148,6 +148,15 @@ pub const Bridge = struct {
     } = null,
 
     pub fn observeVerification(self: *Bridge, app: *Application.ApplicationHost, anchor: @import("../ai/readonly_verification.zig").Anchor) !@import("../ai/readonly_verification.zig").Observation {
+        for (self.retired.items) |retained| {
+            return retained.observePreparedVerification(app, anchor) catch |err| switch (err) {
+                error.VerificationSourceUnavailable, error.VerificationIdentityMismatch => continue,
+                else => return err,
+            };
+        }
+        return self.observePreparedVerification(app, anchor);
+    }
+    fn observePreparedVerification(self: *Bridge, app: *Application.ApplicationHost, anchor: @import("../ai/readonly_verification.zig").Anchor) !@import("../ai/readonly_verification.zig").Observation {
         for (self.children.items) |child| {
             if (!child.owner.eql(anchor.owner)) continue;
             const adapter = child.adapter orelse return error.VerificationSourceUnavailable;
@@ -623,7 +632,10 @@ pub const Bridge = struct {
     pub fn refreshQueriesOnly(self: *const Bridge) bool {
         // Set only by the test-mode app to exercise the native catalog flow.
         if (self.cleanup_test_release) |marker| if (std.c.access(marker.ptr, 0) != 0) return true;
-        if (self.cleanup_clear_pending or self.retired.items.len != 0) return true;
+        return self.cleanup_clear_pending or self.nativeCleanupPending();
+    }
+    pub fn nativeCleanupPending(self: *const Bridge) bool {
+        if (self.retired.items.len != 0) return true;
         for (self.children.items) |child| if (child.adapter) |adapter| {
             if (adapter.vtable.impact(adapter.context, child.owner).ai != 0) return true;
         };
@@ -948,7 +960,9 @@ pub const Bridge = struct {
     }
     fn executeDynamicInner(self: *Bridge, invocation: tools.DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) ![]tools.ToolResult {
         if (self.queries_only) return error.ToolNotAvailable;
-        if (self.route_broker == null and std.mem.eql(u8, invocation.parsed.entry.definition.id, "run_command") and (self.execution_mode == .attached_pty or self.execution_mode == .new_pty)) return error.ModeConflict;
+        const batch_command = std.mem.eql(u8, invocation.parsed.entry.definition.id, "run_command");
+        if (batch_command and self.execution_mode == .attached_pty and (self.route_broker == null or invocation.parsed.targets.len != 1)) return error.ModeConflict;
+        if (batch_command and self.execution_mode == .new_pty and self.route_broker == null) return error.ModeConflict;
         _ = self.validation_arena.reset(.retain_capacity);
         self.lock();
         self.running = invocation;
@@ -991,7 +1005,6 @@ pub const Bridge = struct {
             self.active_route = null;
             if (route_permit) |permit| self.route_broker.?.finish(permit);
         }
-        const batch_command = std.mem.eql(u8, invocation.parsed.entry.definition.id, "run_command");
         if (batch_command and invocation.table.captured_scope.owner == .group and self.host_binding != null) {
             try tools.preflight(invocation.table, invocation.parsed, try liveScope(self), try liveMembers(self));
             const command = invocation.parsed.json.value.object.get("command") orelse return error.InvalidToolArguments;
@@ -2246,6 +2259,14 @@ test "fixed PTY mode rejects isolated command before any bridge mailbox or targe
         try std.testing.expect(bridge.running == null and bridge.pending == null and bridge.controller == null);
         try std.testing.expectEqual(@as(usize, 0), bridge.children.items.len);
     }
+    var broker: approvals.Broker = .{};
+    bridge.route_broker = &broker;
+    bridge.execution_mode = .attached_pty;
+    var multi_target = invocation;
+    multi_target.parsed.targets.ids[0..2].* = .{ 1, 2 };
+    multi_target.parsed.targets.len = 2;
+    try std.testing.expectError(error.ModeConflict, Bridge.executeDynamic(&bridge, multi_target, a, null));
+    try std.testing.expect(bridge.running == null and bridge.pending == null and bridge.controller == null);
     bridge.queries_only = true;
     bridge.execution_mode = .auto;
     try std.testing.expectError(error.ToolNotAvailable, Bridge.executeDynamic(&bridge, invocation, a, null));

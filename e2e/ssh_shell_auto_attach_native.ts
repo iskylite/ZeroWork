@@ -39,7 +39,7 @@ const server=createServer(async(req,res)=>{
   if(!get('sessions'))return emit('sessions','host.list_sessions',{limit:8});
   const source=get('sessions').sessions[0];assert(source?.ready);const reference=source.session_ref;
   if(phase==='unknown'){
-   if(!get('run'))return emit('run','host.run_in_terminal',{session_ref:reference,request_key:'unknown-run',command:"PROMPT_COMMAND=__zw_osc_arm; printf 'UNKNOWN_SCREEN_OK\\n'",shell_id:source.control.shell_context.id,shell_revision:source.control.shell_context.revision});
+   if(!get('run'))return emit('run','host.run_in_terminal',{session_ref:reference,request_key:'unknown-run',command:"printf 'UNKNOWN_SCREEN_OK\\n'",shell_id:source.control.shell_context.id,shell_revision:source.control.shell_context.revision});
    const run=get('run');assert(run.execution_ref,JSON.stringify(run));
    let last=run;
    for(let i=0;i<4&&!JSON.stringify(last).includes('outcome_unknown');i++){
@@ -53,32 +53,40 @@ const server=createServer(async(req,res)=>{
    finished=true;res.end(frame({content:'没有收到结束回执；屏幕已出现 UNKNOWN_SCREEN_OK。退出码仍未知，命令没有重发。'})+'data: [DONE]\n\n');return;
   }
 
-  if(phase==='fallback'&&!get('unsent'))return emit('unsent','host.run_in_terminal',{session_ref:reference,command:'printf FALLBACK_UNSENT',request_key:'fallback-unsent',shell_id:source.control.shell_context.id,shell_revision:source.control.shell_context.revision});
-  if(phase==='fallback')assert(['ShellPromptNotObserved','IntegrationUnavailable'].includes(get('unsent').error_code),JSON.stringify(get('unsent')));
-  if(!get('screen'))return emit('screen','host.read_terminal',{session_ref:reference,max_lines:100,max_bytes:8192});
+  const businessCommand=`printf 'SHELL_AUTO_${phase}_OK\\n'`;
+  if(phase==='fallback'&&!get('unsent'))return emit('unsent','host.run_in_terminal',{session_ref:reference,command:businessCommand,request_key:'fallback-unsent',shell_id:source.control.shell_context.id,shell_revision:source.control.shell_context.revision});
+  if(phase==='fallback'){
+   const unsent=get('unsent');
+   assert(['ShellPromptNotObserved','IntegrationUnavailable'].includes(unsent.error_code),JSON.stringify(unsent));
+   assert.equal(unsent.state,'cancelled_unsent');assert.equal(unsent.side_effect_started,false);
+   assert.equal(unsent.next_tool,wire('host.read_terminal'));
+   assert.deepEqual(unsent.next_arguments,{session_ref:reference,include_control:true});
+  }
+  if(!get('screen'))return emit('screen','host.read_terminal',phase==='fallback'?get('unsent').next_arguments:{session_ref:reference,include_control:true});
   assert(JSON.stringify(get('screen')).includes(phase==='proactive'?'fixture>':'bash-'),JSON.stringify(get('screen')));
   if(!get('before'))return emit('before','host.get_session',{session_ref:reference});
-  const before=get('before').session,control=before.control;
-  if(phase==='proactive'){assert(control.shell_switch.pending,'ordinary SSH must be a candidate');assert.equal(control.shell_switch.kind,'ssh')}
-  else assert(!control.shell_switch.pending,'alias must exercise missed detection');
+  const before=get('before').session,control=get('screen').control;
+  if(phase==='proactive'){assert(before.control.shell_switch.pending,'ordinary SSH must be a candidate');assert.equal(before.control.shell_switch.kind,'ssh')}
+  else assert(!before.control.shell_switch.pending,'alias must exercise missed detection');
   const attachArgs={session_ref:reference,request_key:phase+'-attach',shell_id:control.shell_context.id,shell_revision:control.shell_context.revision,input_epoch:control.input_epoch,output_sequence:control.output_sequence,prompt_evidence:phase==='proactive'?'最新末行是空 Zsh fixture> 提示符，SSH 已完成连接，没有密码或确认问题。':'最新末行是空 bash-3.2$ 提示符，没有密码或确认问题。'};
   if(phase==='proactive'&&!get('stale'))return emit('stale','host.attach_shell',{...attachArgs,request_key:'stale-attach',input_epoch:control.input_epoch+1});
   if(phase==='proactive'){assert.equal(get('stale').error_code,'ShellAttachmentStale');assert.equal(get('stale').side_effect_started,false)}
-  if(!get('attach'))return emit('attach','host.attach_shell',attachArgs);
-  assert.equal(get('attach').state,'attaching');
-  let current:any;
-  for(let i=0;i<12;i++){
+  if(!get('attach'))return emit('attach','host.attach_shell',phase==='fallback'?{...attachArgs,wait_ms:30000}:attachArgs);
+  const attachment=get('attach');
+  assert.equal(attachment.state,phase==='fallback'?'attached':'attaching',JSON.stringify(attachment));
+  let shell=attachment.shell_context;
+  for(let i=0;phase==='proactive'&&i<12;i++){
    const snapshot=get('ready-'+i);
    if(!snapshot){await new Promise(r=>setTimeout(r,450));return emit('ready-'+i,'host.get_session',{session_ref:reference})}
-   current=snapshot.session;if(current.control.shell_context.prompt_ready)break;
+   shell=snapshot.session.control.shell_context;if(shell.prompt_ready)break;
   }
-  assert(current?.control.shell_context.prompt_ready,JSON.stringify(current));
-  assert.notEqual(current.control.shell_context.id,control.shell_context.id);
+  assert(shell?.prompt_ready,JSON.stringify(shell));
+  assert.notEqual(shell.id,control.shell_context.id);
   if(phase==='proactive'&&!get('duplicate'))return emit('duplicate','host.attach_shell',attachArgs);
   if(phase==='proactive')assert.equal(get('duplicate').duplicate,true);
   if(phase==='proactive'&&!get('key-conflict'))return emit('key-conflict','host.attach_shell',{...attachArgs,prompt_evidence:'different request with the same key'});
   if(phase==='proactive')assert.equal(get('key-conflict').error_code,'IdempotencyConflict');
-  if(!get('run'))return emit('run','host.run_in_terminal',{session_ref:reference,request_key:phase+'-run',command:`printf 'SHELL_AUTO_${phase}_OK\\n'`,shell_id:current.control.shell_context.id,shell_revision:current.control.shell_context.revision});
+  if(!get('run'))return emit('run','host.run_in_terminal',{session_ref:reference,request_key:phase+'-run',command:businessCommand,shell_id:shell.id,shell_revision:shell.revision});
   assert(get('run').execution_ref,JSON.stringify(get('run')));
   let execution:any;
   for(let i=0;i<5;i++){
@@ -86,6 +94,10 @@ const server=createServer(async(req,res)=>{
    execution=value;if(JSON.stringify(value).includes('interval_recorded'))break;
   }
   assert(JSON.stringify(execution).includes('interval_recorded'),JSON.stringify(execution));
+  if(phase==='fallback'){
+   if(!get('verify'))return emit('verify','host.read_terminal',{session_ref:reference,max_lines:30});
+   assert.equal(get('verify').lines.filter((line:any)=>line.text.trim()==='SHELL_AUTO_fallback_OK').length,1,'the pending command must execute once after attachment');
+  }
   finished=true;res.end(frame({content:'Shell 已原地接入，验证命令已完成。'})+'data: [DONE]\n\n');
  }catch(error){fixtureFailure=String(error);if(!res.headersSent)res.writeHead(500);res.end()}
 });
@@ -121,9 +133,10 @@ try{
  report.checks.push('Ordinary nested SSH entry -> bound model notice -> terminal read -> AI attach -> verified business execution; zero human attach or permission clicks');
  await click('ai.collapse');await command("alias inner='bash --noprofile --norc -i'");await h.sleep(200);await command('inner');await h.sleep(250);phase='fallback';await click('toolbar.ai');await click('ai.maximize');await ask();await capture('02-missed-alias-ai-recovery');
  report.checks.push('Alias entry missed by classifier -> known-unsent business rejection -> terminal read -> same AI attachment API -> one successful execution');
- phase='unknown';await ask();await capture('03-unknown-result-screen-observation');
+ phase='unknown';await writeFile(join(iso,'peer','drop-completion'),'');
+ await ask();await capture('03-unknown-result-screen-observation');
+ assert(JSON.parse(await readFile(join(iso,'peer','state.json'),'utf8')).completion_dropped,'the SSH peer must drop a completion frame');
  report.checks.push('Real missing Shell completion keeps exit unknown, permits a subsequent model round reading the terminal, and removes command/attachment effects from the tool catalog');
- const terminal=text(await h.query('terminal.input'));assert(!terminal.includes('FALLBACK_UNSENT'),'unsent business command must never reach the terminal');
  report.status='passed';
 }catch(error){report.status='failed';report.error=String(error);report.fixture_failure=fixtureFailure;process.exitCode=1;await capture('failure').catch(()=>{})}
 finally{

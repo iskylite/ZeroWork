@@ -5508,8 +5508,8 @@ const AiHost = struct {
     fn previewInputRoute(self: *AiHost, mode: @import("ai/session_input.zig").Mode) @import("ai/session_input.zig").Route {
         const host = self.shared_service orelse return .start;
         const state = (self.assistant_states orelse return .start).find(self.display_conversation orelse return .start) orelse return .start;
-        const ticket = host.service.store.fence(state.conversation_id) catch return .queue;
-        return host.service.previewInput(ticket, mode) catch .queue;
+        const ticket = host.service.store.fence(state.conversation_id) catch return .start;
+        return host.service.previewInput(ticket, mode) catch .start;
     }
     fn refreshSendHint(self: *AiHost) void {
         const mode = if (self.runtime_config) |config| config.value.ai.follow_up_mode else .steer;
@@ -5518,15 +5518,19 @@ const AiHost = struct {
         if (self.send_hint) |hint| {
             const text = switch (route) {
                 .start => "发送问题",
-                .steer => "引导当前任务 · ⌘⇧Enter 加入队列",
-                .queue => if (opposite == .steer) "加入队列 · ⌘⇧Enter 引导当前任务" else "加入队列，当前任务就绪后处理",
+                .steer => "引导当前回合 · ⌘⇧Enter 加入队列",
+                .queue => switch (opposite) {
+                    .steer => "加入队列 · ⌘⇧Enter 引导当前回合",
+                    .start => "加入队列 · ⌘⇧Enter 发送为新一轮",
+                    .queue => "加入队列，当前任务就绪后处理",
+                },
             };
             if (!std.mem.eql(u8, hint.peek(), text)) hint.set(text);
         }
         if (self.send_button) |button| {
             if (button.behavior.interaction.a11y) |*a11y| a11y.label = switch (route) {
                 .start => "发送问题",
-                .steer => "引导当前任务",
+                .steer => "引导当前回合",
                 .queue => "加入队列",
             };
         }
@@ -5825,11 +5829,11 @@ const AiHost = struct {
         if (application_test_mode) if (std.c.getenv("ZW_TEST_AI_TOOL_CLEANUP_RELEASE")) |marker| {
             self.tool_bridge.cleanup_test_release = std.mem.span(marker);
         };
-        try self.tool_bridge.beginRequest();
         self.request_tools = &.{};
         self.request_tools_len = 0;
         self.request_tool_tokens = 0;
         self.request_host_context = null;
+        try self.tool_bridge.beginRequest();
         self.reconnect_environment = null;
         self.lost_ssh_session = null;
         self.managerRef().tool_host = null;
@@ -5852,7 +5856,6 @@ const AiHost = struct {
         self.request_session = if (tab) |value| value.id else null;
         if (self.application_host) |app| if (self.assistantToolsAvailable(context.owner)) {
             const authority: @import("ai/host_tools.zig").Context = .{ .conversation_id = context.fence.conversation, .task_id = context.task, .binding = context.owner, .binding_revision = context.fence.binding, .grant_revision = self.request_policy_revision, .child_origin = context.child_origin };
-            self.request_host_context = authority;
             try self.approvalsRef().configure(authority, self.request_policy_revision);
             self.questionsRef().configure(authority);
             try self.inventory_approval.configure(authority, self.request_policy_revision);
@@ -5863,6 +5866,7 @@ const AiHost = struct {
             try self.tool_bridge.configureRouting(self.approvalsRef(), authority, input.text, if (context.owner == .session) tab.?.content_owner.session else null);
             if (self.lifecycle_runtime == null) self.lifecycle_runtime = .{ .journal_owner = try @import("ai/lifecycle_runtime.zig").ProcessJournal.acquire(.{ .data_root = self.data_root }), .controller = .{ .context = self, .invoke = lifecycleCall }, .approval = self.approvalsRef() };
             try self.prepareLifecycleTask(authority);
+            self.request_host_context = authority;
             self.authority_notice_revision = self.host_notice_revision;
             self.prepareHostCatalog(authority, &self.tool_bridge);
             try self.tool_bridge.configureHost(.{ .context = authority, .handler_context = self, .invoke = queryHost, .invoke_worker = dispatchHostWorker, .managed_local_files = true, .contributions = self.host_catalog[0..self.host_catalog_len], .refresh = refreshHostAuthority, .acknowledge_notice = acknowledgeHostNotice, .accepted_result = acceptedHostResult, .validate_context = validateCleanupWaitContext });
@@ -6328,7 +6332,7 @@ const AiHost = struct {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         const app = self.application_host orelse return;
         self.attachedView().persistDisplayedDraft() catch |err| {
-            if (err != error.JournalBusy) return err;
+            if (err != error.JournalBusy) self.attachedView().setFeedback(@errorName(err));
         };
         if (self.attached_runner.?.agent.role == .child and self.parentPermission() != .auto and self.request_permission_mode == .auto) {
             self.request_permission_mode = .confirm;
@@ -6364,6 +6368,8 @@ const AiHost = struct {
         view.syncApprovalSteps();
         const settling = view.tickTaskFinish();
         if (settling or (if (self.execution_driver) |driver| driver.hasWork() else false)) view.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        const runner = self.attached_runner.?;
+        if (runner.thread == null and (self.tool_bridge.nativeCleanupPending() or (if (runner.record) |record| record.ending == null and record.inbox.next() != null else false))) view.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
         view.consumeInputHandoffs();
         try view.flushIdleHostNotices();
         view.publishSettledAiCompletions();
@@ -6375,22 +6381,20 @@ const AiHost = struct {
             }
         }
     }
-    fn attachedWorkerReady(self: *AiHost) bool {
+    fn attachedWorkerQuiescent(self: *AiHost) bool {
         if (self.attached_runner.?.thread != null) return false;
         const view = self.attachedView();
         if (view.compaction_agent) |agent| if (agent.eql(self.attached_runner.?.agent.id) and view.compaction.job != null) return false;
-        // The worker has joined. Keep only the cached Token count for the
-        // composer before clear() frees the definitions' strings and schemas.
-        self.request_tools = &.{};
-        self.request_tools_len = 0;
-        self.tool_bridge.clear() catch return false;
-        return true;
+        return self.tool_bridge.quiescent() == true;
     }
     fn attachedReadyForNext(raw: *anyopaque, current: @import("ai/session_runtime.zig").Context) bool {
         const self: *AiHost = @ptrCast(@alignCast(raw));
-        if (!self.attachedWorkerReady()) return false;
+        // beginRequest retains any still-owned native adapter and restricts
+        // the new tool catalog until that adapter is released.
+        if (!self.attachedWorkerQuiescent()) return false;
         if (self.execution_driver) |driver| if (self.request_host_context) |context| {
-            if (!context.conversation_id.eql(current.fence.conversation) or !context.task_id.eql(current.task)) return false;
+            // A capture that failed before binding its host has no dispatches.
+            if (!context.conversation_id.eql(current.fence.conversation) or !context.task_id.eql(current.task)) return true;
             const fact = driver.taskEvidenceFor(context) orelse return false;
             return fact.model_done and fact.pending_dispatch == 0 and fact.pending_waits == 0;
         };
@@ -6398,7 +6402,10 @@ const AiHost = struct {
     }
     fn attachedReleased(raw: *anyopaque, _: @import("ai/session_runtime.zig").Context) bool {
         const self: *AiHost = @ptrCast(@alignCast(raw));
-        if (!self.attachedWorkerReady()) return false;
+        if (!self.attachedWorkerQuiescent()) return false;
+        self.request_tools = &.{};
+        self.request_tools_len = 0;
+        self.tool_bridge.clear() catch return false;
         if (self.execution_driver) |driver| if (self.request_host_context) |context| {
             const fact = driver.taskEvidenceFor(context) orelse return false;
             if (!fact.input_grants_released or fact.pending_dispatch != 0) return false;
@@ -6582,7 +6589,7 @@ const AiHost = struct {
                 record.inbox.lock();
                 {
                     defer record.inbox.unlock();
-                    for (record.inbox.entries.items) |entry| if (entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(receipt.fence)) {
+                    for (record.inbox.entries.items) |entry| if (entry.receipt.route == .queue and entry.receipt.delivery == .queued and entry.receipt.pause == null and entry.receipt.fence.eql(receipt.fence)) {
                         if (entry.receipt.id.eql(receipt.id)) selected = count;
                         try ids.append(self.allocator, entry.receipt.id);
                         count += 1;
@@ -6595,6 +6602,7 @@ const AiHost = struct {
                 if (self.pending_view) |view| view.scrollToTop();
             },
         }
+        if (self.pending_view) |view| view.clearError();
     }
     fn updatePending(self: *AiHost) !void {
         self.refreshSendHint();
@@ -6608,8 +6616,17 @@ const AiHost = struct {
         var continuing = false;
         var hash = std.hash.Wyhash.init(0);
         if (record) |value| {
+            const runtime = @import("ai/session_runtime.zig");
+            const Pending = @import("ui/ai_pending_view.zig");
+            const runner = if (value.binding) |binding| shared_host.service.runnerFor(binding.agent) else null;
+            const send_now: Pending.SendNow = if (value.inbox.previewRoute(.steer) == .steer) .steer else if (runner) |active| if (runtime.Service.nextTurnWait(active, value)) |wait| switch (wait) {
+                .current_turn => .current_turn,
+                .saving => .saving,
+                .tools => .tools,
+            } else .start else .current_turn;
             value.inbox.lock();
             defer value.inbox.unlock();
+            const unconfirmed = value.inbox.hasUnconfirmedLocked();
             revision = value.inbox.queue_revision;
             for (value.inbox.entries.items) |entry| {
                 if (entry.receipt.route == .steer) {
@@ -6618,14 +6635,15 @@ const AiHost = struct {
                 }
                 if (entry.receipt.archived or @import("ai/session_input.zig").terminal(entry.receipt.delivery)) continue;
                 if (entry.receipt.route == .steer) continue;
+                if (entry.receipt.route == .start and entry.receipt.pause == null and entry.receipt.delivery != .outcome_unknown) continue;
                 var text = entry.payload.messages[0].content;
                 var attachments = entry.payload.messages[0].images.len;
                 if (self.execution().attachedInput(entry.receipt.id)) |frozen| {
                     text = frozen.text;
                     attachments += frozen.attachments.items.len;
                 } else |_| {}
-                try items.append(self.allocator, .{ .receipt = entry.receipt, .text = text, .attachments = attachments, .mutable = value.ending == null and value.inbox.admission });
-                continuing = continuing or (value.ending == null and value.inbox.admission and entry.receipt.delivery == .queued and entry.receipt.pause != null and entry.receipt.fence.eql(value.inbox.fence));
+                try items.append(self.allocator, .{ .receipt = entry.receipt, .text = text, .attachments = attachments, .mutable = value.ending == null and value.inbox.admission, .send_now = if (unconfirmed) .unconfirmed else if (entry.receipt.pause == .workspace_changed) .workspace_changed else if (entry.receipt.pause != null) .paused else send_now });
+                continuing = continuing or (!unconfirmed and value.inbox.active_turn == null and value.ending == null and value.inbox.admission and entry.receipt.delivery == .queued and entry.receipt.pause != null and entry.receipt.pause != .workspace_changed and entry.receipt.fence.eql(value.inbox.fence));
             }
         }
         if (view.editing) |edit| {
@@ -8382,7 +8400,9 @@ const AiHost = struct {
                     const deadline = @import("platform/realtime.zig").monotonicNs() + @as(i128, wait_ms) * std.time.ns_per_ms;
                     while (true) {
                         attachment.timed_out = @import("platform/realtime.zig").monotonicNs() >= deadline;
-                        bridge.callController(&attachment, Attachment.poll, cancel) catch break;
+                        bridge.callController(&attachment, Attachment.poll, cancel) catch |err| {
+                            if (err != error.WorkerBusy) break;
+                        };
                         if (attachment.progress) |progress| {
                             if (attachment.result) |*initial_result| initial_result.deinit(allocator);
                             return progress;
@@ -8505,7 +8525,9 @@ const AiHost = struct {
     }
     fn rejectedHostInvocation(invocation: @import("ai/host_tools.zig").Invocation, allocator: std.mem.Allocator, failure: anyerror) !@import("ai/host_tools.zig").Result {
         const host = @import("ai/host_tools.zig");
-        const recover_shell = failure == error.ShellPromptNotObserved or failure == error.IntegrationUnavailable or failure == error.ShellContextChanged;
+        const host_execution = @import("ai/host_execution.zig");
+        const recover_shell = host_execution.needsShellObservation(failure);
+        if (recover_shell and std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal")) return host_execution.rejectedRun(allocator, invocation, failure);
         const next_tool = if (recover_shell) try @import("ai/plugin_tools.zig").toolHints(allocator, &.{ "host.read_terminal", "host.get_session", "host.attach_shell" }) else null;
         defer if (next_tool) |hint| allocator.free(hint);
         const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = @errorName(failure), .message = @import("ai/step_failure.zig").explanation(@errorName(failure)), .next_tool = next_tool, .side_effect_started = false, .local_released = true, .remote_effect_unknown = false }, .{});
@@ -9286,7 +9308,9 @@ const AiHost = struct {
             }
             if (host.conversation_titles.jobs.items.len != 0) host.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
             host.processQueueAction() catch |err| {
-                if (host.pending_view) |view| view.fail(@errorName(err));
+                if (host.pending_view) |view| {
+                    if (err == error.ResourceCleanupPending) view.clearError() else view.fail(@errorName(err));
+                }
             };
             host.updatePending() catch |err| host.setFeedback(@errorName(err));
             host.processChildren() catch |err| {

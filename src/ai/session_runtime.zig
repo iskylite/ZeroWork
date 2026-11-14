@@ -204,6 +204,7 @@ pub const Runner = struct {
         } else |err| {
             self.failure = err;
         }
+        self.record.?.inbox.closeInput(self.context.?.turn);
         self.state.store(if (self.worker.?.cancel.isCancelled()) .stopped else if (self.failure != null) .failed else .done, .release);
     }
     fn execute(self: *Runner, io: std.Io) !provider.ChatStats {
@@ -577,7 +578,7 @@ pub const Service = struct {
         const record = try self.store.validateExecution(ticket);
         const runner = self.runnerFor(ticket.agent) orelse return error.AgentNotFound;
         const route = record.inbox.previewRoute(mode);
-        if (route == .start and (runner.controller_busy or runner.thread != null or runner.agent.busy or runner.pending_commit or runner.pending_notify or !readyForNext(runner))) return .queue;
+        if (mode == .queue and route == .start and nextTurnWait(runner, record) != null) return .queue;
         return route;
     }
     pub fn submit(self: *Service, ticket: input.Fence, id: identity.SubmissionId, message: provider.Message, override: ?input.Mode) !input.Receipt {
@@ -619,15 +620,13 @@ pub const Service = struct {
     pub fn pump(self: *Service, runner: *Runner) !void {
         if (runner.controller_busy or runner.thread != null or runner.agent.busy or runner.pending_commit or runner.pending_notify) return;
         const conversation = runner.agent.current orelse return;
-        if (!readyForNext(runner)) return;
         const record = self.store.find(conversation).?;
         if (record.ending != null) return;
         const queued = record.inbox.next() orelse return;
+        if (nextTurnWait(runner, record) != null) return;
         try self.start(runner, record, queued);
     }
     fn start(self: *Service, runner: *Runner, record: *lifecycle.Record, queued: input.Receipt) !void {
-        if (runner.pending_commit or runner.pending_notify or (record.task_pending and runner.pending_task == null)) return error.ResourceCleanupPending;
-        if (!readyForNext(runner)) return error.ResourceCleanupPending;
         _ = try runner.ensureWorker();
         runner.worker_released = false;
         const conversation = record.id;
@@ -712,6 +711,14 @@ pub const Service = struct {
         const check = if (runner.end_when_idle) runner.backend.local_released else runner.backend.ready_for_next orelse runner.backend.local_released;
         const ready = check orelse return false;
         return ready(runner.backend.context, context);
+    }
+    pub const NextTurnWait = enum { current_turn, saving, tools };
+    pub fn nextTurnWait(runner: *Runner, record: *const lifecycle.Record) ?NextTurnWait {
+        if (runner.pending_commit or runner.pending_notify) return .saving;
+        if (runner.controller_busy or runner.thread != null or runner.agent.busy) return .current_turn;
+        if (record.task_pending and runner.pending_task == null) return .saving;
+        if (!readyForNext(runner)) return .tools;
+        return null;
     }
     /// Serialized controller tick; join only after release-store. A durable
     /// store performs IO here, so use the application coordinator, not a view
@@ -1004,7 +1011,8 @@ pub const Service = struct {
         if (runner.controller_busy) return error.ResourceCleanupPending;
         const item = record.inbox.receipt(id) orelse return error.SubmissionNotFound;
         if (item.revision != revision) return error.QueueChanged;
-        if (runner.agent.busy) {
+        if (item.delivery != .queued or item.pause != null) return error.SubmissionNotReady;
+        if (record.inbox.previewRoute(.steer) == .steer) {
             const turn = runner.context orelse return error.TurnChanged;
             record.inbox.beginAdmission();
             defer record.inbox.endAdmission();
@@ -1012,7 +1020,7 @@ pub const Service = struct {
             runner.supersedeWorker();
             if (!runner.worker_released) if (runner.backend.supersede) |wake| wake(runner.backend.context, turn);
         } else {
-            if (runner.thread != null or runner.pending_commit or runner.pending_notify) return error.ResourceCleanupPending;
+            if (nextTurnWait(runner, record) != null) return error.ResourceCleanupPending;
             try self.start(runner, record, item);
         }
         return record.inbox.receipt(id).?;
