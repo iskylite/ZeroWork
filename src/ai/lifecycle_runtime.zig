@@ -193,7 +193,7 @@ pub const Authorized = struct {
     disconnect_binding: ?@import("../host/session_host.zig").ServiceHandle = null,
     bootstrap_required: bool = false,
 };
-pub const GroupPlan = struct { id: u64, token: *anyopaque, binding_revision: u64, notice_revision: u64 };
+pub const GroupPlan = struct { id: u64, token: *anyopaque, binding_revision: u64, notice_revision: u64, background: bool = false };
 pub const CloseSnapshot = struct {
     operation_ref: identity.HostOperationId,
     session: identity.SessionHandle,
@@ -456,14 +456,14 @@ pub const Runtime = struct {
         const plan = prepared.result.group_plan;
         // Release prepared allocations even when cancellation or journal IO fails.
         defer _ = self.controllerCall(scheduler, invocation.context, .{ .release_group = plan }, null) catch {};
-        if (plan.id == 0 or plan.binding_revision <= invocation.context.binding_revision or plan.notice_revision == 0) return error.InvalidControllerReceipt;
+        if (plan.id == 0 or (!plan.background and plan.binding_revision <= invocation.context.binding_revision) or plan.background != (invocation.context.child_origin != null) or plan.notice_revision == 0) return error.InvalidControllerReceipt;
         try cancelled(cancel);
         try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_group = plan.id });
         try self.validatePermit(permit, invocation, authorized);
         _ = try self.controllerCall(scheduler, invocation.context, .{ .commit_group = plan }, cancel);
         // If this sync fails, the durable dispatch_started receipt fences retries
         // even though the UI already published. Never rebuild from the name.
-        try self.journal_owner.update(handle, 2, .{ .stage = .committed, .created_group = plan.id, .committed_binding = .{ .group = plan.id }, .committed_binding_revision = plan.binding_revision, .notice_revision = plan.notice_revision });
+        try self.journal_owner.update(handle, 2, .{ .stage = .committed, .created_group = plan.id, .committed_binding = if (plan.background) null else .{ .group = plan.id }, .committed_binding_revision = if (plan.background) null else plan.binding_revision, .notice_revision = plan.notice_revision });
         var record = try self.journal_owner.snapshot(a, handle);
         defer record.deinit(a);
         return recordResult(a, invocation, record, false);
@@ -630,7 +630,7 @@ fn lifecycleSubject(invocation: host.Invocation, authorized: Authorized, buffer:
             const connection = if (std.mem.eql(u8, policy, "prefer_reuse")) "先复用来源连接；不可复用时明确允许建立新连接" else if (std.mem.eql(u8, policy, "reuse_only")) "仅复用来源连接并新开 shell；不可复用则停止，不新建连接" else "始终新建独立工作终端，不复用原连接";
             break :blk std.fmt.bufPrint(buffer, "{s}。不执行用户命令。{s}本次会话的保留方式：{s}。", .{ connection, if (authorized.bootstrap_required) "将先只读检查远端系统和 zsh，再单独确认临时执行组件的目录、文件和校验值。" else "默认启用终端集成；SSH 如需命令事件，仅在原 shell 内初始化文本钩子，不上传运行文件。", retention }) catch "创建独立工作会话；不执行用户命令。";
         },
-        .create_group => "创建终端组并加入原会话；当前 AI 对话、历史和草稿将移到该组。",
+        .create_group => if (invocation.context.child_origin != null) "在后台创建子任务的工作组，原终端和主对话留在原处。" else "创建终端组并加入原会话；当前 AI 对话、历史和草稿将移到该组。",
         .close_session => "关闭所列会话及其进程或连接；实际关闭前会再次核查影响。",
         .set_session_retention => std.fmt.bufPrint(buffer, "将本任务所列会话的保留方式改为：{s}；旧的自动关闭计划同时撤销。", .{retention}) catch "修改本任务工作会话的保留方式。",
         .add_group_member => "仅将所列会话加入此组；不会建立连接、执行命令或授权读取其他会话内容。",
@@ -795,7 +795,7 @@ fn recordResult(a: std.mem.Allocator, invocation: host.Invocation, record: journ
         .cancelled_unsent => .cancelled_unsent,
         else => .failed,
     };
-    return jsonResult(a, invocation, status, .{ .operation_ref = try tools.operationRef(a, invocation.context, record.operation_ref), .state = if (unknown) "outcome_unknown" else @tagName(record.stage), .idempotent_reuse = reused, .result_acknowledgement_required = std.mem.eql(u8, invocation.tool_id, "host.close_session") and record.stage == .committed, .code = if (record.stage == .prepared) @as(?[]const u8, "OperationBusy") else if (unknown) @as(?[]const u8, "OutcomeUnknown") else null, .group_ref = if (record.created_group) |group| try queries.groupRef(a, invocation.context, group) else null, .session_ref = if (record.created_session) |session| try queries.sessionRef(a, invocation.context, session) else null, .initial_member = if (record.context.binding == .session) record.context.binding.session else @as(?u64, null), .handoff_revision = record.committed_binding_revision, .same_conversation_id = record.context.conversation_id, .source_revision = record.revision, .notice_revision = record.notice_revision, .side_effect_started = record.dispatch_started, .local_released = record.local_released and !unknown, .remote_effect_unknown = unknown, .recovery_hint = if (unknown) "Inspect the original operation; do not replay or create another resource to recover this reply." else if (record.stage == .prepared) "Original operation is in progress; do not dispatch another copy." else "Use the original receipt." }, record.dispatch_started, unknown);
+    return jsonResult(a, invocation, status, .{ .operation_ref = try tools.operationRef(a, invocation.context, record.operation_ref), .state = if (unknown) "outcome_unknown" else @tagName(record.stage), .idempotent_reuse = reused, .result_acknowledgement_required = std.mem.eql(u8, invocation.tool_id, "host.close_session") and record.stage == .committed, .code = if (record.stage == .prepared) @as(?[]const u8, "OperationBusy") else if (unknown) @as(?[]const u8, "OutcomeUnknown") else null, .group_ref = if (record.created_group) |group| try queries.groupRef(a, invocation.context, group) else null, .session_ref = if (record.created_session) |session| try queries.sessionRef(a, invocation.context, session) else null, .initial_member = if (record.context.child_origin == null and record.context.binding == .session) record.context.binding.session else @as(?u64, null), .handoff_revision = record.committed_binding_revision, .same_conversation_id = record.context.conversation_id, .source_revision = record.revision, .notice_revision = record.notice_revision, .side_effect_started = record.dispatch_started, .local_released = record.local_released and !unknown, .remote_effect_unknown = unknown, .recovery_hint = if (unknown) "Inspect the original operation; do not replay or create another resource to recover this reply." else if (record.stage == .prepared) "Original operation is in progress; do not dispatch another copy." else "Use the original receipt." }, record.dispatch_started, unknown);
 }
 fn sessionResult(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, snapshot: lifecycle.Snapshot, timed_out: bool, reused: bool) !host.Result {
     if (!snapshot.context.conversation_id.eql(invocation.context.conversation_id) or !snapshot.context.task_id.eql(invocation.context.task_id)) return error.InvalidControllerReceipt;

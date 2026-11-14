@@ -302,7 +302,13 @@ pub const RequestTable = struct {
             kept += 1;
         }
         for (contributions) |contribution| {
-            if (context.child_origin != null and (contribution.authority == .lifecycle or std.mem.eql(u8, contribution.definition.id, "host.agent_tasks"))) continue;
+            if (context.child_origin != null) {
+                if (std.mem.eql(u8, contribution.definition.id, "host.agent_tasks")) continue;
+                if (contribution.authority == .lifecycle) {
+                    const lifecycle = @import("host_lifecycle.zig");
+                    if (!lifecycle.childCanUse(lifecycle.kind(contribution.definition.id) orelse continue)) continue;
+                }
+            }
             const index = kept;
             const definition = contribution.definition;
             if (contribution.authority == .session_targets or !std.mem.startsWith(u8, definition.id, "host.") or definition.required_services.len != 0) return error.InvalidHostAuthority;

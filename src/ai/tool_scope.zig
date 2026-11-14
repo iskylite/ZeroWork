@@ -27,6 +27,8 @@ pub const Scope = struct {
     /// A frozen directory may contain more members than one tool call. Owners
     /// of a request must clone this slice; the legacy Targets stay call-sized.
     inventory: ?[]const u64 = null,
+    /// The controller may add sessions created for this exact child task.
+    child_inventory: bool = false,
 
     pub fn memberIds(self: *const Scope) []const u64 {
         return self.inventory orelse self.members.slice();
@@ -42,7 +44,7 @@ pub const Scope = struct {
             if (id == 0 or std.mem.indexOfScalar(u64, self.memberIds(), id) == null) return error.TargetOutsideAssistant;
             if (std.mem.indexOfScalar(u64, ids[0..i], id) != null) return error.DuplicateTarget;
             switch (self.owner) {
-                .session => |session| if (id != session) return error.TargetOutsideAssistant,
+                .session => |session| if (id != session and !self.child_inventory) return error.TargetOutsideAssistant,
                 .group => {},
             }
         }

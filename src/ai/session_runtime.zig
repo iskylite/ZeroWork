@@ -325,7 +325,7 @@ pub const Runner = struct {
             const a = arena.allocator();
             var projected = request;
             projected.system = try std.fmt.allocPrint(a, "{s}\n本轮起始绑定版本 {d}，环境版本 {d}；当前范围以最新宿主上下文通知和工具表为准。历史环境的连接、目录、执行和审批标识不提供当前操作权；仅当前工具表及本轮查询可确定目标。历史环境前缀用于识别上下文来源，请直接回答用户并省略此前缀。", .{ request.system, self.context.fence.binding, self.context.fence.environment });
-            if (self.context.child_origin != null) projected.system = try std.fmt.allocPrint(a, "{s}\n你是当前父对话分配的子智能体，只处理本次分配的范围。你不能再派生子智能体、修改父级绑定或管理兄弟任务。继承的历史、技能和用户补充不扩大本次目标或操作授权；当前工具目录和宿主复验决定真实能力。", .{projected.system});
+            if (self.context.child_origin != null) projected.system = try std.fmt.allocPrint(a, "{s}\n你是当前父对话分配的子智能体，只处理本次分配的范围。你不能再派生子智能体、修改父级绑定或管理兄弟任务。需要终端时优先使用已分配且空闲的终端；如没有可用终端，用 host__get_ucurrent_ucontext 或 host__list_usessions 获取来源引用，再用 host__create_ugroup 创建后台工作组，使用返回的 group_ref 和来源引用以 new_only 调用 host__open_usession。来源仅用于创建独立会话，不能在只提供来源的终端执行。等待新会话就绪，再用其 session_ref 调用 host__run_uin_uterminal。继承的历史、技能和用户补充不扩大本次目标或操作授权；当前工具目录和宿主复验决定真实能力。", .{projected.system});
             if (self.read_only) projected.system = try std.fmt.allocPrint(a, "{s}\n本任务仅允许只读核验。此前结果未知的操作仍是未知，禁止重放、修复或任何写入；只报告本次实际观察及其局限。", .{projected.system});
             const slot_wait = provider.CancelToken.beginResourceWait(request.cancel);
             var waiting = true;
@@ -562,6 +562,16 @@ pub const Service = struct {
             return false;
         _ = self.store.validateExecution(parent) catch return false;
         return child.task_root == parent_runner.task_root;
+    }
+
+    /// Controller-side reservation lasts until child settlement releases its runner.
+    pub fn childReservesSession(self: *const Service, owner: identity.SessionHandle, requesting_task: identity.TaskId) bool {
+        for (self.runners.items) |runner| {
+            if (runner.agent.role != .child or runner.agent.current == null or runner.worker_released) continue;
+            if (runner.context) |context| if (context.task.eql(requesting_task)) continue;
+            for (runner.agent.targets) |target| if (target.eql(owner)) return true;
+        }
+        return false;
     }
 
     pub fn runnerFor(self: *Service, agent: identity.AgentId) ?*Runner {

@@ -40,8 +40,8 @@ const Prepared = struct {
     context: host.Context,
     source: identity.SessionHandle,
     group: groups.Roster.PreparedGroup,
-    handoff: assistants.Store.Handoff,
-    view: Workspace.PreparedGroupView,
+    handoff: ?assistants.Store.Handoff = null,
+    view: ?Workspace.PreparedGroupView = null,
     notice_revision: u64,
     published: bool = false,
 };
@@ -57,6 +57,7 @@ pub const Controller = struct {
     execution_policy: config.ExecutionPolicy,
     config_revision: u64,
     notice_revision: u64,
+    child_group: ?u32 = null,
     callbacks: Callbacks,
     prepared: std.ArrayList(*Prepared) = .empty,
     close_targets: std.ArrayList(CloseTarget) = .empty,
@@ -72,8 +73,8 @@ pub const Controller = struct {
         return self;
     }
     pub fn available(self: *Controller, tool_id: []const u8) bool {
-        if (self.authority.child_origin != null) return false;
         const kind = tools.kind(tool_id) orelse return false;
+        if (self.authority.child_origin != null) return tools.childCanUse(kind);
         return switch (kind) {
             .create_group => self.authority.binding == .session,
             .open_session, .rename_group, .add_group_member, .remove_group_member => self.authority.binding == .group,
@@ -149,6 +150,7 @@ pub const Controller = struct {
         return owner.group;
     }
     pub fn inBinding(self: *Controller, handle_: identity.SessionHandle) bool {
+        if (self.authority.child_origin != null and self.app.childOwnsReadySession(self.authority, handle_)) return true;
         if (self.authority.child_origin) |origin| {
             const service = &(self.app.domain.ai orelse return false).service;
             _ = service.validateAuthority(self.authority) catch return false;
@@ -208,8 +210,23 @@ pub const Controller = struct {
     /// Model-facing preflight also runs before idempotent receipt reuse, so
     /// a former member cannot be revived by a historical request key.
     pub fn validateRequestScope(self: *Controller, context: host.Context, request: tools.Request) !void {
-        if (context.child_origin != null) return error.TargetNotAuthorized;
         try self.validateAuthority(context);
+        if (context.child_origin != null) {
+            _ = try (self.app.domain.ai orelse return error.ScopeChanged).service.validateAuthority(context);
+            switch (request.kind) {
+                .create_group => {
+                    if (request.session == null or !self.app.childMayUseSource(context, request.session.?)) return error.TargetNotAuthorized;
+                    return;
+                },
+                .open_session => {
+                    if (request.group == null or self.child_group == null or self.child_group.? != @backingInt(request.group.?.id) or request.connection_policy != .new_only) return error.TargetNotAuthorized;
+                    if (request.saved_source != null or !self.app.childMayUseSource(context, request.source orelse return error.TargetNotAuthorized)) return error.TargetNotAuthorized;
+                    return;
+                },
+                .wait_session_ready => {},
+                else => return error.TargetNotAuthorized,
+            }
+        }
         if (request.group) |group| if (context.binding != .group or context.binding.group != @backingInt(group.id)) return error.TargetNotAuthorized;
         if (request.session) |target| if (!self.inBinding(target) and !(request.kind == .reconnect_session and (self.reconnectReplayTarget(context, target) or self.automaticReconnectTarget(target) != null)) and !((request.kind == .close_session or request.kind == .wait_session_ready) and self.permitsHistoricalOwner(target))) return error.TargetNotAuthorized;
         if (request.source) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
@@ -293,11 +310,12 @@ pub const Controller = struct {
         // Every existing-object ref is rejected before identity/state/source
         // metadata lookup. Existence, generation and old selections cannot
         // affect the external-target error.
-        if (request.session) |target| if (!self.inBinding(target) and !(request.kind == .reconnect_session and self.automaticReconnectTarget(target) != null)) return error.TargetNotAuthorized;
-        if (request.source) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
+        if (context.child_origin == null) {
+            if (request.session) |target| if (!self.inBinding(target) and !(request.kind == .reconnect_session and self.automaticReconnectTarget(target) != null)) return error.TargetNotAuthorized;
+            if (request.source) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
+        }
         var result: runtime.Authorized = .{ .session = request.session, .source = request.source, .saved_source = request.saved_source, .retention = request.retention orelse self.execution_policy.session_retention, .approval_required = true, .policy_revision = self.config_revision };
         if (request.group) |group| {
-            if (context.binding != .group or context.binding.group != @backingInt(group.id)) return error.TargetNotAuthorized;
             result.group = try self.groupOwner(@backingInt(group.id));
             const entry = self.roster.findById(@intCast(@backingInt(group.id))).?;
             result.membership_revision = entry.membership_revision;
@@ -308,10 +326,15 @@ pub const Controller = struct {
         }
         switch (request.kind) {
             .create_group => {
-                if (context.binding != .session) return error.AlreadyGroup;
                 const target = request.session orelse return error.InvalidArguments;
-                if (!self.inBinding(target)) return error.SourceChanged;
-                _ = try self.validateGroupSource(target);
+                if (context.child_origin != null) {
+                    if (self.child_group != null) return error.AlreadyGroup;
+                    _ = try self.app.childOpenSource(target);
+                } else {
+                    if (context.binding != .session) return error.AlreadyGroup;
+                    if (!self.inBinding(target)) return error.SourceChanged;
+                    _ = try self.validateGroupSource(target);
+                }
             },
             .open_session => {
                 if (result.group == null or (request.source == null) == (request.saved_source == null)) return error.InvalidArguments;
@@ -320,7 +343,7 @@ pub const Controller = struct {
                     if (broker.execution_route.requiresIndependentFollowup(context) and policy != .new_only) return error.IndependentSessionRequired;
                 }
                 if (request.source) |source| {
-                    _ = try self.app.ownedOpenSource(source, result.group.?.id, policy);
+                    if (context.child_origin != null) _ = try self.app.childOpenSource(source) else _ = try self.app.ownedOpenSource(source, result.group.?.id, policy);
                 } else {
                     try self.authorizeAsset(request.saved_source.?);
                     if (policy == .reuse_only) return error.ReuseUnavailable;
@@ -408,52 +431,63 @@ pub const Controller = struct {
         const authorized = try self.authorize(context, input.request);
         if (!std.meta.eql(authorized, input.authorized)) return error.ScopeChanged;
         const source = input.request.session orelse return error.InvalidArguments;
-        const legacy = try self.validateGroupSource(source);
-        if (self.store.authority) |service| {
+        const background = context.child_origin != null;
+        const legacy = if (background) null else try self.validateGroupSource(source);
+        if (!background) if (self.store.authority) |service| {
             const fence = try service.store.fence(context.conversation_id);
             if (self.pending_transition) |pending| {
                 if (!pending.fence.eql(fence) or !pending.operation.eql(input.operation)) return error.TransitionPending;
             } else self.pending_transition = .{ .fence = fence, .operation = input.operation };
             if (!try service.quiesceChildren(fence, input.operation)) return error.ChildSettlementRequired;
-        }
+        };
         const plan = try self.allocator.create(Prepared);
         errdefer self.allocator.destroy(plan);
         try self.prepared.ensureUnusedCapacity(self.allocator, 1);
         var group = try self.roster.prepareNew(input.request.name orelse "工作终端组", 0xff818cf8, legacy);
         errdefer group.deinit();
-        const handoff = try self.store.prepareHandoff(context.conversation_id, context.binding, context.binding_revision, group.id);
-        var view = try self.app.workspace.prepareGroupView(group.id, group.entry.?.name, legacy);
-        errdefer view.deinit();
+        const handoff = if (background) null else try self.store.prepareHandoff(context.conversation_id, context.binding, context.binding_revision, group.id);
+        var view = if (legacy) |pane| try self.app.workspace.prepareGroupView(group.id, group.entry.?.name, pane) else null;
+        errdefer if (view) |*prepared| prepared.deinit();
         const revision = if (self.notice_revision == 0) @as(u64, 1) else try identity.advance(self.notice_revision);
         plan.* = .{ .operation = input.operation, .context = context, .source = source, .group = group, .handoff = handoff, .view = view, .notice_revision = revision };
         self.notice_revision = revision;
         self.prepared.appendAssumeCapacity(plan);
-        return .{ .id = group.id, .token = plan, .binding_revision = handoff.next_revision, .notice_revision = revision };
+        return .{ .id = group.id, .token = plan, .binding_revision = if (handoff) |value| value.next_revision else context.binding_revision, .notice_revision = revision, .background = background };
     }
     fn commitGroup(self: *Controller, context: host.Context, receipt: runtime.GroupPlan) !void {
         const plan = try self.findPlan(receipt.token);
-        if (plan.published or plan.group.id != receipt.id or plan.handoff.next_revision != receipt.binding_revision or plan.notice_revision != receipt.notice_revision or !plan.context.eql(context)) return error.StaleGroupPlan;
+        if (plan.published or plan.group.id != receipt.id or plan.notice_revision != receipt.notice_revision or !plan.context.eql(context) or receipt.background != (plan.handoff == null)) return error.StaleGroupPlan;
         try self.validateAuthority(context);
+        const handoff = plan.handoff orelse {
+            if (self.child_group != null or receipt.binding_revision != context.binding_revision or !self.app.childMayUseSource(context, plan.source)) return error.TargetNotAuthorized;
+            const group = try plan.group.commit();
+            errdefer self.roster.removeEmpty(group);
+            try self.app.workspace.mountGroup(self.roster, group, false);
+            self.child_group = group;
+            plan.published = true;
+            return;
+        };
+        if (handoff.next_revision != receipt.binding_revision) return error.StaleGroupPlan;
         _ = try self.validateGroupSource(plan.source);
         if (!self.inBinding(plan.source)) return error.SourceChanged;
-        try plan.view.validate();
+        try plan.view.?.validate();
         if (plan.group.entry == null or self.roster.findById(plan.group.id) != null) return error.GroupIdentityConflict;
         const rechecked = try self.store.prepareHandoff(context.conversation_id, context.binding, context.binding_revision, plan.group.id);
-        if (!std.meta.eql(rechecked, plan.handoff)) return error.BindingConflict;
+        if (!std.meta.eql(rechecked, handoff)) return error.BindingConflict;
         // This callback is the single controller safe point. All fallible
         // checks/allocation precede publication; these commits cannot diverge.
         _ = plan.group.commit() catch unreachable;
-        self.store.commitLifecycleHandoff(plan.handoff) catch unreachable;
-        plan.view.commit(self.roster) catch unreachable;
+        self.store.commitLifecycleHandoff(handoff) catch unreachable;
+        plan.view.?.commit(self.roster) catch unreachable;
         plan.published = true;
         if (self.bridge.route_broker) |broker| {
             var next = context;
-            next.binding = plan.handoff.to;
-            next.binding_revision = plan.handoff.next_revision;
+            next.binding = handoff.to;
+            next.binding_revision = handoff.next_revision;
             broker.execution_route.handoff(context, next, plan.source) catch {};
         }
-        self.bridge.bindingChanged(plan.handoff.to);
-        if (self.callbacks.on_handoff) |notify| notify(self.callbacks.context.?, context.conversation_id, plan.handoff.to, plan.handoff.next_revision, plan.notice_revision);
+        self.bridge.bindingChanged(handoff.to);
+        if (self.callbacks.on_handoff) |notify| notify(self.callbacks.context.?, context.conversation_id, handoff.to, handoff.next_revision, plan.notice_revision);
     }
     fn routeCreate(request: @import("../host/lifecycle_supervisor.zig").OpenRequest) @import("../ai/execution_routing.zig").Create {
         const route = @import("../ai/execution_routing.zig");
@@ -478,7 +512,7 @@ pub const Controller = struct {
     }
     fn destroyPlan(self: *Controller, plan: *Prepared) void {
         self.releaseTransition(plan.operation);
-        plan.view.deinit();
+        if (plan.view) |*view| view.deinit();
         plan.group.deinit();
         self.allocator.destroy(plan);
     }
@@ -490,7 +524,7 @@ pub const Controller = struct {
     }
     fn releaseGroup(self: *Controller, receipt: runtime.GroupPlan) !void {
         const plan = try self.findPlan(receipt.token);
-        if (plan.group.id != receipt.id or plan.handoff.next_revision != receipt.binding_revision or plan.notice_revision != receipt.notice_revision) return error.StaleGroupPlan;
+        if (plan.group.id != receipt.id or (if (plan.handoff) |handoff| handoff.next_revision else plan.context.binding_revision) != receipt.binding_revision or plan.notice_revision != receipt.notice_revision) return error.StaleGroupPlan;
         for (self.prepared.items, 0..) |item, index| if (item == plan) {
             _ = self.prepared.orderedRemove(index);
             self.destroyPlan(plan);

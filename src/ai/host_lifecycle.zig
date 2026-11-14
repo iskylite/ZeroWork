@@ -46,6 +46,13 @@ pub const contributions = [_]host.Contribution{
 pub fn supports(tool: []const u8) bool {
     return kind(tool) != null;
 }
+pub fn childCanUse(operation: Kind) bool {
+    return switch (operation) {
+        .create_group, .open_session, .wait_session_ready => true,
+        else => false,
+    };
+}
+
 pub fn kind(tool: []const u8) ?Kind {
     if (!std.mem.startsWith(u8, tool, "host.")) return null;
     return std.meta.stringToEnum(Kind, tool[5..]);
@@ -132,7 +139,7 @@ pub fn parse(invocation: host.Invocation) !Request {
     }
     if (operation == .open_session or operation == .rename_group or operation == .add_group_member or operation == .remove_group_member) {
         request.group = try groupOwner(invocation.context, try text(args, "group_ref"));
-        if (invocation.context.binding != .group or invocation.context.binding.group != @backingInt(request.group.?.id)) return error.TargetNotAuthorized;
+        if (invocation.context.child_origin == null and (invocation.context.binding != .group or invocation.context.binding.group != @backingInt(request.group.?.id))) return error.TargetNotAuthorized;
     }
     if (operation == .open_session) {
         if (args.object.get("interactive_execution")) |value| {

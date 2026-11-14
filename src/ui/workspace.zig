@@ -916,7 +916,7 @@ pub const Workspace = struct {
 
     /// Validate identities and reserve every fallible structure before making
     /// the pending terminal a member. This is the sole owned member commit.
-    pub fn commitOwnedSession(self: *Workspace, group_owner: identity.GroupOwner, handle: identity.SessionHandle, id: SessionId) !u64 {
+    pub fn commitOwnedSession(self: *Workspace, group_owner: identity.GroupOwner, handle: identity.SessionHandle, id: SessionId, background: bool) !u64 {
         const tab = self.sessionTab(id) orelse return error.StaleSession;
         if (!tab.content_owner.eql(.{ .session = handle }) or tab.closing or tab.archived) return error.StaleSession;
         const group_id = std.math.cast(u32, @backingInt(group_owner.id)) orelse return error.UnknownGroup;
@@ -938,15 +938,15 @@ pub const Workspace = struct {
         defer self.creation_group = ambient;
         tab.owned_pending = false;
         errdefer tab.owned_pending = true;
-        try self.installTabModel(tab);
+        try self.installTabModelWithActivation(tab, !background);
         // No fallible work remains after publication of membership.
         const model_tab = &self.model.tabs.items[self.model.indexOf(tab.tab_id).?];
         model_tab.container = parent;
-        self.model.active = parent;
+        if (!background) self.model.active = parent;
         group.members.appendAssumeCapacity(.{ .pane_id = id, .membership_revision = revision });
         group.membership_revision = revision;
-        self.active_group_view = group_id;
-        self.group_present_pending = true;
+        if (!background) self.active_group_view = group_id;
+        if (self.active_group_view == group_id) self.group_present_pending = true;
         if (self.groupView(group_id)) |view| view.dirty = true;
         self.tab_rebuild_pending = true;
         self.cx.requestRedraw();
@@ -1605,6 +1605,9 @@ pub const Workspace = struct {
     }
 
     fn installTabModel(self: *Workspace, tab: *SessionTab) !void {
+        try self.installTabModelWithActivation(tab, true);
+    }
+    fn installTabModelWithActivation(self: *Workspace, tab: *SessionTab, activate: bool) !void {
         tab.tab_color = self.creation_tab_color;
         if (self.owned_creation_pending) {
             tab.owned_pending = true;
@@ -1614,7 +1617,7 @@ pub const Workspace = struct {
         }
         try self.model.tabs.ensureUnusedCapacity(self.allocator, self.prepared_group_views + 1);
         try self.model.recent.ensureUnusedCapacity(self.allocator, self.prepared_group_views + 1);
-        try self.model.append(tab.tab_id, tab.content_owner, tab.titleSlice());
+        if (activate) try self.model.append(tab.tab_id, tab.content_owner, tab.titleSlice()) else try self.model.appendBackground(tab.tab_id, tab.content_owner, tab.titleSlice());
         errdefer self.model.completeClose(tab.tab_id, tab.content_owner) catch {};
         const detail = if (tab.host_snapshot) |saved| blk: {
             const protocol = saved.value.protocolId();
@@ -2944,6 +2947,10 @@ pub const Workspace = struct {
     }
 
     pub fn openGroup(self: *Workspace, roster: *group_model.Roster, id: u32) !void {
+        try self.mountGroup(roster, id, true);
+    }
+
+    pub fn mountGroup(self: *Workspace, roster: *group_model.Roster, id: u32, activate: bool) !void {
         const group = roster.findById(id) orelse return error.UnknownGroup;
         self.group_roster = roster;
         if (self.groupView(id) == null) {
@@ -2956,12 +2963,16 @@ pub const Workspace = struct {
             const tab_id = try tab_ids.allocate();
             const title = try std.fmt.allocPrint(self.allocator, "组 · {s}", .{group.name});
             defer self.allocator.free(title);
-            try self.model.append(tab_id, .{ .group = .{ .id = @fromBackingInt(id), .revision = 1 } }, title);
-            self.group_views.appendAssumeCapacity(created);
+            try self.model.appendBackground(tab_id, .{ .group = .{ .id = @fromBackingInt(id), .revision = 1 } }, title);
+            errdefer self.model.completeClose(tab_id, .{ .group = .{ .id = @fromBackingInt(id), .revision = 1 } }) catch {};
             try self.model.setDetails(tab_id, "会话组 · 分栏工作区");
+            self.group_views.appendAssumeCapacity(created);
         }
         if (self.groupView(id)) |view| self.loadGroupLayout(view);
-        self.activateTabId(self.groupTabId(id).?);
+        if (activate) self.activateTabId(self.groupTabId(id).?) else {
+            self.tab_rebuild_pending = true;
+            self.cx.requestRedraw();
+        }
     }
 
     pub fn refreshGroup(self: *Workspace, id: u32) void {
@@ -3026,6 +3037,11 @@ pub const Workspace = struct {
         if (count == 0) return;
         const at = if (self.model.active) |id| self.model.visibleIndexOf(id) orelse 0 else 0;
         self.selectTabOrdinal(if (next) (at + 1) % count else (at + count - 1) % count);
+    }
+
+    pub fn foregroundSession(self: *Workspace) ?SessionId {
+        if (self.active_group_view) |id| if (self.groupView(id)) |view| return view.focused;
+        return if (self.active_tab) |index| if (index < self.tabs.items.len) self.tabs.items[index].id else null else null;
     }
 
     pub fn focusAdjacentGroupPane(self: *Workspace, next: bool) bool {

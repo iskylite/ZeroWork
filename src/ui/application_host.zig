@@ -817,22 +817,56 @@ pub const ApplicationHost = struct {
     /// Short controller handler: capture the authorized source and enqueue.
     /// Real creation occurs only after the Bridge handler has returned.
     pub fn ownedOpenSource(self: *ApplicationHost, handle: identity.SessionHandle, group_id: identity.GroupId, policy: lifecycle.ConnectionPolicy) !*Mapping {
+        return self.ownedOpenSourceImpl(handle, group_id, policy);
+    }
+    pub fn childOpenSource(self: *ApplicationHost, handle: identity.SessionHandle) !*Mapping {
+        return self.ownedOpenSourceImpl(handle, null, .new_only);
+    }
+    fn ownedOpenSourceImpl(self: *ApplicationHost, handle: identity.SessionHandle, group_id: ?identity.GroupId, policy: lifecycle.ConnectionPolicy) !*Mapping {
         const mapping = self.findHandle(handle) orelse return error.StaleReference;
         const state = self.sessions.queryState(handle) orelse return error.StaleReference;
         const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return error.StaleReference;
         if (!tab.content_owner.eql(.{ .session = handle }) or tab.archived or tab.closing or tab.owned_pending) return error.StaleReference;
         if (state.lifecycle == .closing or state.lifecycle == .closed or state.lifecycle == .cleanup_unknown) return error.SourceChanged;
-        const roster = self.workspace.group_roster orelse return error.UnknownGroup;
-        const group = roster.findById(@intCast(@backingInt(group_id))) orelse return error.UnknownGroup;
-        for (group.members.items) |member| {
-            if (member.active and member.pane_id == mapping.legacy_id) break;
-        } else return error.TargetOutsideScope;
+        if (group_id) |id| {
+            const roster = self.workspace.group_roster orelse return error.UnknownGroup;
+            const group = roster.findById(@intCast(@backingInt(id))) orelse return error.UnknownGroup;
+            for (group.members.items) |member| {
+                if (member.active and member.pane_id == mapping.legacy_id) break;
+            } else return error.TargetOutsideScope;
+        }
         if (mapping.process == null and mapping.source == null) return error.UnsupportedSource;
         if (policy != .new_only) {
             if (mapping.process != null) return error.UnsupportedSource;
             if (state.lifecycle != .ready and state.lifecycle != .attached) return error.SourceChanged;
         }
         return mapping;
+    }
+
+    fn authorizedOpenSource(self: *ApplicationHost, request: lifecycle.OpenRequest, handle: identity.SessionHandle) !*Mapping {
+        if (request.context.child_origin == null) return self.ownedOpenSource(handle, request.group.id, request.connection_policy);
+        const ai = self.domain.ai orelse return error.ScopeChanged;
+        _ = try ai.service.validateAuthority(request.context);
+        if (request.connection_policy != .new_only or !self.childMayUseSource(request.context, handle)) return error.TargetNotAuthorized;
+        return self.childOpenSource(handle);
+    }
+    pub fn childOwnsReadySession(self: *ApplicationHost, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) bool {
+        if (context.child_origin == null) return false;
+        const entry = self.lifecycle_supervisor.resource(handle) orelse return false;
+        return entry.request.context.eql(context) and entry.snapshot.ownership == .created_task and entry.snapshot.state == .ready and entry.snapshot.membership_committed;
+    }
+
+    pub fn childMayUseSource(self: *ApplicationHost, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) bool {
+        const origin = context.child_origin orelse return false;
+        const ai = self.domain.ai orelse return false;
+        const parent = ai.service.store.validateExecution(origin.parent) catch return false;
+        const mapping = self.findHandle(handle) orelse return false;
+        const owner = parent.binding.?.owner;
+        if (owner == .session) return owner.session == @backingInt(handle.session_id);
+        const roster = self.workspace.group_roster orelse return false;
+        const group = roster.findById(std.math.cast(u32, owner.group) orelse return false) orelse return false;
+        for (group.members.items) |member| if (member.active and member.pane_id == mapping.legacy_id) return true;
+        return false;
     }
 
     pub fn queueOwnedSession(self: *ApplicationHost, request: lifecycle.OpenRequest) !lifecycle.Snapshot {
@@ -847,11 +881,12 @@ pub const ApplicationHost = struct {
             if (group.membership_revision != revision) return error.ScopeChanged;
         }
         if ((request.source == null) == (request.saved_source == null)) return error.InvalidSource;
+        if (request.context.child_origin != null and request.saved_source != null) return error.TargetNotAuthorized;
         try self.owned_sources.ensureUnusedCapacity(self.allocator, 1);
         var source: PendingOwnedSource = .{ .operation_ref = request.operation_ref };
         errdefer source.deinit(self.allocator);
         if (request.source) |handle| {
-            const mapping = try self.ownedOpenSource(handle, request.group.id, request.connection_policy);
+            const mapping = try self.authorizedOpenSource(request, handle);
             if (mapping.process != null) {
                 source.cwd = try mapping.process.?.copyCwd(handle, self.allocator);
             } else {
@@ -1246,7 +1281,7 @@ pub const ApplicationHost = struct {
             if (group.membership_revision != revision) return error.ScopeChanged;
         }
         const source: ?*Mapping = if (entry.request.source) |handle|
-            try self.ownedOpenSource(handle, entry.request.group.id, entry.request.connection_policy)
+            try self.authorizedOpenSource(entry.request, handle)
         else blk: {
             _ = try self.validateSavedOwnedSource(entry.request.saved_source orelse return error.InvalidSource);
             break :blk null;
@@ -1384,7 +1419,7 @@ pub const ApplicationHost = struct {
                         lifecycle.Supervisor.transition(entry, .failed_cleanup_pending, "MissingSessionMapping");
                         continue;
                     };
-                    _ = self.workspace.commitOwnedSession(entry.request.group, handle, mapping.legacy_id) catch |err| {
+                    _ = self.workspace.commitOwnedSession(entry.request.group, handle, mapping.legacy_id, entry.request.context.child_origin != null) catch |err| {
                         lifecycle.Supervisor.transition(entry, .failed_cleanup_pending, @errorName(err));
                         continue;
                     };

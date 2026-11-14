@@ -133,6 +133,15 @@ pub const Roster = struct {
         return .{ .roster = self, .id = entry.id, .entry = entry };
     }
 
+    pub fn removeEmpty(self: *Roster, id: u32) void {
+        for (self.groups.items, 0..) |entry, index| {
+            if (entry.id != id or entry.members.items.len != 0) continue;
+            var removed = self.groups.orderedRemove(index);
+            removed.deinit(self.allocator);
+            return;
+        }
+    }
+
     pub fn find(self: *Roster, name: []const u8) ?*GroupEntry {
         for (self.groups.items) |*group| if (std.mem.eql(u8, group.name, name)) return group;
         return null;

@@ -188,6 +188,10 @@ pub const Model = struct {
         tab.revision += 1;
     }
     pub fn append(self: *Model, id: TabId, owner: Owner, name: []const u8) !void {
+        try self.appendBackground(id, owner, name);
+        try self.activate(id);
+    }
+    pub fn appendBackground(self: *Model, id: TabId, owner: Owner, name: []const u8) !void {
         if (self.window_close != null) return error.WindowClosing;
         if (@backingInt(id) == 0) return error.InvalidIdentity;
         const valid_owner = switch (owner) {
@@ -204,7 +208,6 @@ pub const Model = struct {
         try self.tabs.append(self.allocator, tab);
         self.order_revision += 1;
         self.recent.appendAssumeCapacity(id);
-        try self.activate(id);
     }
     /// Host/type metadata is display/search data, never the tab's primary key.
     pub fn setDetails(self: *Model, id: TabId, details: []const u8) !void {

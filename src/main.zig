@@ -1019,6 +1019,16 @@ const AiHost = struct {
                 };
             }
             ids.shrinkRetainingCapacity(kept);
+            if (self.request_host_context) |authority| if (self.application_host) |app| {
+                for (app.workspace.tabs.items) |tab| {
+                    if (tab.content_owner != .session or !app.childOwnsReadySession(authority, tab.content_owner.session)) continue;
+                    const session = @backingInt(tab.content_owner.session.session_id);
+                    if (std.mem.indexOfScalar(u64, ids.items, session) == null) {
+                        try ids.append(self.allocator, session);
+                        result.child_inventory = true;
+                    }
+                }
+            };
         }
         result.members.len = @min(ids.items.len, @import("ai/tool_scope.zig").max_targets);
         @memcpy(result.members.ids[0..result.members.len], ids.items[0..result.members.len]);
@@ -6062,6 +6072,9 @@ const AiHost = struct {
         }
         for (allowed.memberIds()) |id| {
             const tab = self.tabForSession(id) orelse return error.StaleSession;
+            if (self.request_host_context) |authority| if (self.application_host) |app| {
+                if (app.childOwnsReadySession(authority, tab.content_owner.session)) continue;
+            };
             if (excluded) |skip| if (tab.content_owner.session.eql(skip)) continue;
             if (reconnect_task) |task| {
                 const app = self.application_host orelse return error.ContextUnavailable;
@@ -6728,6 +6741,11 @@ const AiHost = struct {
         var image_bundle = try image_draft.freeze();
         defer image_bundle.deinit();
         if (submitted.len == 0 and bundle.items.len == 0 and image_bundle.items.len == 0) return;
+        if (mode == null and bundle.items.len == 0 and image_bundle.items.len == 0) {
+            if (@import("ai/child_gateway.zig").explicitTask(submitted)) |task| {
+                if (try self.dispatchBusyFollowup(backend, task)) return;
+            }
+        }
         const controls = try self.selectedControls();
         const runtime = self.runtime_config orelse return error.ContextUnavailable;
         var effective = runtime.value;
@@ -7038,7 +7056,7 @@ const AiHost = struct {
         }
         const workspace_record = self.shared_service.?.service.store.find(invocation.context.conversation_id) orelse return error.ScopeChanged;
         const workspace = if (self.workspaceScopeRevision(invocation.context.binding) != null) @import("ai/session_prompt.zig").workspaceView(workspace_record.workspace) else null;
-        return @import("ui/ai_host_queries.zig").execute(app, self.roster, state.initial_owner orelse state.owner, .{ .execution_policy = controller.execution_policy, .permission_mode = self.execution().request_permission_mode, .host_contributions = self.execution().tool_bridge.host_binding.?.contributions, .local_workspace = workspace }, self.execution().host_cursor_key, invocation, allocator);
+        return @import("ui/ai_host_queries.zig").execute(app, self.roster, state.initial_owner orelse state.owner, .{ .execution_policy = controller.execution_policy, .permission_mode = self.execution().request_permission_mode, .host_contributions = self.execution().tool_bridge.host_binding.?.contributions, .local_workspace = workspace, .child_work_group = controller.child_group }, self.execution().host_cursor_key, invocation, allocator);
     }
 
     fn controllerScheduler(raw: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque) anyerror!void, cancel: ?*ai_provider.CancelToken) !void {
@@ -7348,6 +7366,14 @@ const AiHost = struct {
                 const cleanup_pending = value.bridge.refreshQueriesOnly();
                 changed = changed or cleanup_pending != value.bridge.queries_only;
                 changed = changed or workspace_changed or shell_changed or value.bridge.capabilityFingerprint(app) != value.bridge.capability_fingerprint;
+                if (value.previous.child_origin != null) for (app.workspace.tabs.items) |tab| {
+                    if (tab.content_owner != .session or !app.childOwnsReadySession(value.previous, tab.content_owner.session)) continue;
+                    const captured = value.bridge.captured_scope orelse return error.ScopeChanged;
+                    if (std.mem.indexOfScalar(u64, captured.memberIds(), @backingInt(tab.content_owner.session.session_id)) == null) {
+                        changed = true;
+                        break;
+                    }
+                };
                 if (state.owner == .group) {
                     const group = (self.roster orelse return error.ContextUnavailable).findById(@intCast(state.owner.group)) orelse return error.GroupRemoved;
                     changed = changed or group.membership_revision != value.bridge.roster_revision;
@@ -7723,7 +7749,7 @@ const AiHost = struct {
             initial.thinking = source.controls.thinking;
             initial.session_retention = source.controls.session_retention;
             initial.permission = source.controls.permission orelse .confirm;
-            initial.execution_mode = source.controls.execution_mode orelse .auto;
+            initial.execution_mode = parent.request_execution_policy.execution_mode;
             initial.targets = shared_host.service.store.agent(record.child.?.info.agent).?.targets;
             const allowed = try parent.attachedView().captureOwnerScope(record.binding.?.owner);
             defer if (allowed.inventory) |ids| parent.attachedView().allocator.free(ids);
@@ -7763,6 +7789,137 @@ const AiHost = struct {
         backend.attached_inputs.appendAssumeCapacity(frozen);
         return runner;
     }
+    const ChildGatewayCall = struct {
+        host: *AiHost,
+        invocation: @import("ai/host_tools.zig").Invocation,
+        request: @import("ai/child_gateway.zig").Request,
+        inherited: ?@import("ai/session_lifecycle.zig").Store.Inherited,
+        allocator: std.mem.Allocator,
+        result: ?@import("ai/host_tools.zig").Result = null,
+        has_events: bool = false,
+        fn run(raw: *anyopaque) !void {
+            const self_call: *@This() = @ptrCast(@alignCast(raw));
+            const value = self_call.host;
+            try value.validateHostContext(self_call.invocation.context);
+            const allowed = try value.captureOwnerScope(self_call.invocation.context.binding);
+            defer value.allocator.free(allowed.inventory.?);
+            var handles: [@import("ai/tool_scope.zig").max_targets]@import("host/identity.zig").SessionHandle = undefined;
+            var terminals: @TypeOf(handles) = undefined;
+            var terminal_count: usize = 0;
+            if (allowed.memberIds().len > handles.len) return error.TooManyToolTargets;
+            for (allowed.memberIds(), 0..) |session_id, i| {
+                const tab = value.tabForSession(session_id) orelse return error.StaleSession;
+                handles[i] = tab.content_owner.session;
+                if (value.workspaceTerminal(tab)) {
+                    terminals[terminal_count] = handles[i];
+                    terminal_count += 1;
+                }
+            }
+            const root = value.attached_runner.?.task_root.?;
+            root.lock();
+            self_call.has_events = for (root.facts[0..root.count]) |fact| {
+                if (fact.parent != null and fact.event_sequence > self_call.request.after_sequence) break true;
+            } else false;
+            root.mutex.unlock();
+            const source = try value.attachedInput(value.attached_runner.?.context.?.submission);
+            if (self_call.request.action == .create) {
+                const selection = self_call.request.model orelse source.controls.model;
+                _ = try ai_provider_config.fromSettingsSelection(value.request_config.?.value.ai, selection);
+                if (self_call.request.effort orelse source.controls.effort) |effort| try ai_provider_config.validateEffort(value.request_config.?.value.ai, selection, effort);
+            }
+            var skill_ids: [32][]const u8 = undefined;
+            var skill_count: usize = 0;
+            var mcp_ids: [16][]const u8 = undefined;
+            var mcp_count: usize = 0;
+            if (value.extension_session) |session| {
+                for (session.frozen.skills) |skill| if (skill.enabled and value.extensionAllowed(skill.id, false)) {
+                    skill_ids[skill_count] = skill.id;
+                    skill_count += 1;
+                };
+                for (session.frozen.servers) |server| if (server.enabled and value.extensionAllowed(server.id, true)) {
+                    mcp_ids[mcp_count] = server.id;
+                    mcp_count += 1;
+                };
+            }
+            self_call.result = try @import("ai/child_gateway.zig").execute(.{ .service = &value.shared_service.?.service, .authority = self_call.invocation.context, .live = allowed, .handles = handles[0..allowed.memberIds().len], .workspace_targets = terminals[0..terminal_count], .inherited = self_call.inherited, .local_files = try value.localFileAuthority(self_call.invocation.context, &value.tool_bridge), .factory = .{ .context = value, .defaults = .{ .context_mode = value.request_config.?.value.ai.child_context_mode, .reuse_policy = value.request_config.?.value.ai.child_reuse_policy }, .model = source.controls.model orelse .{ .provider_id = value.request_config.?.value.ai.default_provider, .model_id = value.model }, .effort = source.controls.effort, .skill_ids = skill_ids[0..skill_count], .mcp_ids = mcp_ids[0..mcp_count], .install = installChildExecution } }, self_call.invocation, self_call.request, self_call.allocator);
+        }
+    };
+    fn availableChildTerminal(self: *AiHost, context: @import("ai/host_tools.zig").Context) !?@import("host/identity.zig").SessionHandle {
+        const app = self.application_host orelse return error.ContextUnavailable;
+        const allowed = try self.captureOwnerScope(context.binding);
+        defer self.allocator.free(allowed.inventory.?);
+        const workspace = app.workspace;
+        const foreground = workspace.foregroundSession();
+        const service = &self.shared_service.?.service;
+        for (allowed.memberIds()) |session| {
+            const tab = self.tabForSession(session) orelse continue;
+            if (tab.id == foreground or !self.workspaceTerminal(tab) or tab.failed) continue;
+            const owner = tab.content_owner.session;
+            if (app.lifecycle_supervisor.resource(owner)) |resource| {
+                if (resource.snapshot.ownership == .created_task) continue;
+            }
+            if (service.childReservesSession(owner, context.task_id)) continue;
+            const running = for (service.runners.items) |runner| {
+                if (runner.agent.owner == .session and runner.agent.owner.session == session and runner.agent.busy) break true;
+            } else false;
+            if (running or self.tool_bridge.writeRisk(owner)) continue;
+            const terminal = tab.terminal orelse continue;
+            if (terminal.terminal_surface) |surface| {
+                if (surface.pending.items.len != 0 or surface.pending_bytes != 0 or surface.preedit.len != 0 or surface.pending_paste != null or surface.paste_requested != null or surface.trusted_pending != null) continue;
+            }
+            const io = if (terminal.terminal_surface) |surface| surface.service else if (tab.runtime) |remote| remote.terminalService() catch continue else continue;
+            const snapshot = io.executionSnapshot() catch continue;
+            if (!snapshot.owner.eql(owner) or !snapshot.interactive_execution or snapshot.remote_effect_unknown) continue;
+            @import("host/terminal_execution.zig").requireReadyInput(snapshot) catch continue;
+            return owner;
+        }
+        return null;
+    }
+
+    fn dispatchBusyFollowup(self: *AiHost, backend: *AiHost, task: []const u8) !bool {
+        if (self.child_identity != null or backend.thread_state.load(.acquire) != 1 or backend.answer_only) return false;
+        const runner = backend.attached_runner orelse return false;
+        const current = runner.context orelse return false;
+        if (runner.task_root == null) return false;
+        const gateway = @import("ai/child_gateway.zig");
+        const id = @import("host/identity.zig");
+        const authority = backend.request_host_context orelse return false;
+        if (task.len > 32768 or std.mem.indexOfScalar(u8, task, 0) != null) return error.InvalidArguments;
+        const mode = backend.request_execution_policy.execution_mode;
+        const selected = if (mode == .isolated_exec or std.mem.eql(u8, @tagName(mode), "new_pty")) null else try backend.availableChildTerminal(authority);
+        var refs: [1][]const u8 = undefined;
+        if (selected) |owner| refs[0] = try @import("ai/host_queries.zig").sessionRef(self.allocator, authority, owner);
+        defer if (selected != null) self.allocator.free(refs[0]);
+        const key = std.fmt.bytesToHex(id.SubmissionId.generate().bytes, .lower);
+        const invocation: @import("ai/host_tools.zig").Invocation = .{
+            .context = authority,
+            .authority = .conversation_context,
+            .operation_id = 1,
+            .turn_id = current.turn,
+            .call_id = &key,
+            .tool_id = gateway.tool_id,
+            .arguments = .null,
+            .arguments_json = "",
+            .arguments_hash = @splat(0),
+            .canonical_arguments_hash = @import("host/terminal_execution.zig").digest(task),
+        };
+        var call: ChildGatewayCall = .{
+            .host = backend,
+            .invocation = invocation,
+            .request = .{ .action = .create, .request_key = &key, .name = "并行任务", .text = task, .session_refs = refs[0..@intFromBool(selected != null)], .context_mode = .independent },
+            .inherited = null,
+            .allocator = self.allocator,
+        };
+        try ChildGatewayCall.run(&call);
+        var result = call.result orelse return error.InvalidControllerReceipt;
+        defer result.deinit(self.allocator);
+        self.prompt.set("");
+        self.promptChanged("");
+        if (self.feedback) |view| view.show("已派发给子智能体", .completion);
+        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        return true;
+    }
+
     fn dispatchChildGateway(self: *AiHost, bridge: *@import("ui/ai_tools.zig").Bridge, invocation: @import("ai/host_tools.zig").Invocation, allocator: std.mem.Allocator, cancel: ?*ai_provider.CancelToken) !@import("ai/host_tools.zig").Result {
         const gateway = @import("ai/child_gateway.zig");
         const parsed = gateway.parse(allocator, invocation.arguments) catch |err| switch (err) {
@@ -7792,62 +7949,7 @@ const AiHost = struct {
             history = try loop.snapshotForChild(allocator, invocation.call_id, child_scope, targets[0..request.session_refs.?.len]);
             inherited = .{ .source = .{ .conversation = invocation.context.conversation_id, .content_revision = self.attached_runner.?.record.?.content_revision, .turn = invocation.turn_id, .message_count = history.messages.len }, .messages = history.messages };
         }
-        const Call = struct {
-            host: *AiHost,
-            invocation: @import("ai/host_tools.zig").Invocation,
-            request: gateway.Request,
-            inherited: ?@import("ai/session_lifecycle.zig").Store.Inherited,
-            allocator: std.mem.Allocator,
-            result: ?@import("ai/host_tools.zig").Result = null,
-            has_events: bool = false,
-            fn run(raw: *anyopaque) !void {
-                const self_call: *@This() = @ptrCast(@alignCast(raw));
-                const value = self_call.host;
-                try value.validateHostContext(self_call.invocation.context);
-                const allowed = try value.captureOwnerScope(self_call.invocation.context.binding);
-                defer value.allocator.free(allowed.inventory.?);
-                var handles: [@import("ai/tool_scope.zig").max_targets]@import("host/identity.zig").SessionHandle = undefined;
-                var terminals: @TypeOf(handles) = undefined;
-                var terminal_count: usize = 0;
-                if (allowed.memberIds().len > handles.len) return error.TooManyToolTargets;
-                for (allowed.memberIds(), 0..) |session_id, i| {
-                    const tab = value.tabForSession(session_id) orelse return error.StaleSession;
-                    handles[i] = tab.content_owner.session;
-                    if (value.workspaceTerminal(tab)) {
-                        terminals[terminal_count] = handles[i];
-                        terminal_count += 1;
-                    }
-                }
-                const root = value.attached_runner.?.task_root.?;
-                root.lock();
-                self_call.has_events = for (root.facts[0..root.count]) |fact| {
-                    if (fact.parent != null and fact.event_sequence > self_call.request.after_sequence) break true;
-                } else false;
-                root.mutex.unlock();
-                const source = try value.attachedInput(value.attached_runner.?.context.?.submission);
-                if (self_call.request.action == .create) {
-                    const selection = self_call.request.model orelse source.controls.model;
-                    _ = try ai_provider_config.fromSettingsSelection(value.request_config.?.value.ai, selection);
-                    if (self_call.request.effort orelse source.controls.effort) |effort| try ai_provider_config.validateEffort(value.request_config.?.value.ai, selection, effort);
-                }
-                var skill_ids: [32][]const u8 = undefined;
-                var skill_count: usize = 0;
-                var mcp_ids: [16][]const u8 = undefined;
-                var mcp_count: usize = 0;
-                if (value.extension_session) |session| {
-                    for (session.frozen.skills) |skill| if (skill.enabled and value.extensionAllowed(skill.id, false)) {
-                        skill_ids[skill_count] = skill.id;
-                        skill_count += 1;
-                    };
-                    for (session.frozen.servers) |server| if (server.enabled and value.extensionAllowed(server.id, true)) {
-                        mcp_ids[mcp_count] = server.id;
-                        mcp_count += 1;
-                    };
-                }
-                self_call.result = try gateway.execute(.{ .service = &value.shared_service.?.service, .authority = self_call.invocation.context, .live = allowed, .handles = handles[0..allowed.memberIds().len], .workspace_targets = terminals[0..terminal_count], .inherited = self_call.inherited, .local_files = try value.localFileAuthority(self_call.invocation.context, &value.tool_bridge), .factory = .{ .context = value, .defaults = .{ .context_mode = value.request_config.?.value.ai.child_context_mode, .reuse_policy = value.request_config.?.value.ai.child_reuse_policy }, .model = source.controls.model orelse .{ .provider_id = value.request_config.?.value.ai.default_provider, .model_id = value.model }, .effort = source.controls.effort, .skill_ids = skill_ids[0..skill_count], .mcp_ids = mcp_ids[0..mcp_count], .install = installChildExecution } }, self_call.invocation, self_call.request, self_call.allocator);
-            }
-        };
-        var call: Call = .{ .host = self, .invocation = invocation, .request = request, .inherited = inherited, .allocator = allocator };
+        var call: ChildGatewayCall = .{ .host = self, .invocation = invocation, .request = request, .inherited = inherited, .allocator = allocator };
         const started = (@import("ai/retry.zig").Clock{}).now();
         const root = self.attached_runner.?.task_root.?;
         const task = self.attached_runner.?.context.?.task;
@@ -7858,7 +7960,7 @@ const AiHost = struct {
         if (request.action == .wait_events) try root.state(task, .waiting_children, "");
         defer if (request.action == .wait_events) root.state(task, .running, "") catch {};
         while (true) {
-            try bridge.callController(&call, Call.run, cancel);
+            try bridge.callController(&call, ChildGatewayCall.run, cancel);
             if (request.action != .wait_events or call.has_events or (@import("ai/retry.zig").Clock{}).now() - started >= @as(i128, request.wait_ms) * std.time.ns_per_ms) return call.result.?;
             call.result.?.deinit(allocator);
             call.result = null;

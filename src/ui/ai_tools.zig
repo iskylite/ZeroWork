@@ -244,11 +244,16 @@ pub const Bridge = struct {
     pub fn prepareHostRoute(self: *Bridge, invocation: host_tools.Invocation, subject: *approvals.Subject, target: identity.SessionHandle, proposed: routing.Route, allocator: std.mem.Allocator) !?host_tools.Result {
         if (self.queries_only) return error.ToolNotAvailable;
         const broker = self.route_broker orelse return null;
-        const resolution = broker.execution_route.resolve(invocation.context, target, subject.detail, routing.fixedRoute(self.execution_mode, proposed));
+        var fixed = routing.fixedRoute(self.execution_mode, proposed);
+        // The UI preflight only proposes new_terminal for a ready session
+        // created by this exact task. Its lifecycle approval permits the
+        // independent target; the command still needs its own approval.
+        if (invocation.context.child_origin != null and proposed == .new_terminal and fixed == .current_terminal) fixed = proposed;
+        const resolution = broker.execution_route.resolve(invocation.context, target, subject.detail, fixed);
         if (!resolution.trusted) if (broker.execution_route.followupTargetChange(invocation.context, target)) |needs_creation|
             return try planChange(invocation, allocator, .new_terminal, needs_creation);
         if (resolution.trusted and (resolution.route != proposed or resolution.needs_creation)) return try planChange(invocation, allocator, resolution.route, resolution.needs_creation);
-        if (!resolution.trusted and self.execution_mode != .auto and self.execution_mode != .ask and routing.fixedRoute(self.execution_mode, proposed) != proposed) return try planChange(invocation, allocator, resolution.route, resolution.route == .new_terminal);
+        if (!resolution.trusted and self.execution_mode != .auto and self.execution_mode != .ask and fixed != proposed) return try planChange(invocation, allocator, resolution.route, resolution.route == .new_terminal);
         const choice: routing.Choice = resolution.choice orelse .{ .route = resolution.route, .source = .{ .session = target }, .retention = self.session_retention };
         if (resolution.trusted and !resolution.approved) try broker.execution_route.select(invocation.context, choice, subject.detail, false);
         subject.route = .{ .proposed = proposed, .choice = choice, .target = target, .selectable = self.execution_mode == .ask and !resolution.trusted, .reason = if (resolution.trusted) "按本次用户明确指令；仅覆盖此命令。" else "按本次命令选择运行方式；权限确认与选择合并。" };

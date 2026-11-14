@@ -7,6 +7,25 @@ const life = @import("session_lifecycle.zig");
 const host = @import("host_tools.zig");
 const budget = @import("task_budget.zig");
 pub const tool_id = "host.agent_tasks";
+
+/// An explicit delegation instruction can be admitted while the model is busy.
+pub fn explicitTask(prompt: []const u8) ?[]const u8 {
+    const prefixes = [_][]const u8{ "/delegate ", "另开一个子智能体", "另开子智能体", "交给子智能体", "让子智能体", "用子智能体", "另一个独立任务", "另外一个独立任务" };
+    for (prefixes) |prefix| if (std.mem.startsWith(u8, prompt, prefix)) {
+        const task = std.mem.trim(u8, prompt[prefix.len..], " \t\r\n:");
+        const body = if (std.mem.startsWith(u8, task, "：")) std.mem.trim(u8, task["：".len..], " \t\r\n") else task;
+        return if (body.len != 0) body else null;
+    };
+    return null;
+}
+
+test "explicit child task leaves ordinary follow-ups with the parent" {
+    try std.testing.expectEqualStrings("检查报告", explicitTask("另开一个子智能体：检查报告").?);
+    try std.testing.expectEqualStrings("检查报告", explicitTask("/delegate 检查报告").?);
+    try std.testing.expect(explicitTask("另外把刚才命令改成只读") == null);
+    try std.testing.expect(explicitTask("交给子智能体：") == null);
+}
+
 pub const contribution: host.Contribution = .{ .authority = .conversation_context, .definition = .{
     .id = tool_id,
     .effect = .resource_write,

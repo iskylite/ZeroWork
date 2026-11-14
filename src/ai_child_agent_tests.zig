@@ -421,7 +421,7 @@ test "v0.4 child journal preserves old null fields and family delete replays ato
     try std.testing.expect(recovered.agent(child_agent_id).?.closing);
 }
 
-test "v0.4 child capability tables require exact per-tool targets and omit empty or lifecycle definitions" {
+test "v0.4 child capability tables require exact targets and limit lifecycle operations" {
     const Tools = @import("ai/plugin_tools.zig");
     const Host = @import("ai/host_tools.zig");
     const context: Host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = live.owner, .binding_revision = 2, .grant_revision = 1, .child_origin = .{ .agent = .generate(), .parent = .{ .agent = .generate(), .conversation = .generate(), .binding = 2, .environment = 1 }, .worker_generation = 1, .scope_revision = 2 } };
@@ -435,13 +435,20 @@ test "v0.4 child capability tables require exact per-tool targets and omit empty
     defer cloned_empty.deinit();
     try std.testing.expectEqual(@as(usize, 0), cloned_empty.entries.len);
     contribution.session_targets = &.{handles[0]};
-    var table = try Tools.RequestTable.initWithHost(a, live, &.{}, &.{}, context, &.{ contribution, .{ .authority = .lifecycle, .definition = .{ .id = "host.create_group", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}" } } });
+    const lifecycle = @import("ai/host_lifecycle.zig");
+    const gateway = @import("ai/child_gateway.zig");
+    var table = try Tools.RequestTable.initWithHost(a, live, &.{}, &.{}, context, &([_]Host.Contribution{contribution} ++ lifecycle.contributions ++ [_]Host.Contribution{gateway.contribution}));
     defer table.deinit();
-    try std.testing.expectEqual(@as(usize, 1), table.entries.len);
+    try std.testing.expectEqual(@as(usize, 4), table.entries.len);
     const reference = try @import("ai/host_queries.zig").sessionRef(a, context, handles[0]);
     defer a.free(reference);
     try std.testing.expect(std.mem.indexOf(u8, table.entries[0].definition.schema, reference) != null);
-    try std.testing.expect(table.lookup("host__create_ugroup") == null);
+    try std.testing.expect(table.lookup("host__create_ugroup") != null);
+    try std.testing.expect(table.lookup("host__open_usession") != null);
+    try std.testing.expect(table.lookup("host__wait_usession_uready") != null);
+    try std.testing.expect(table.lookup("host__add_ugroup_umember") == null);
+    try std.testing.expect(table.lookup("host__close_usession") == null);
+    try std.testing.expect(table.lookup("host__agent_utasks") == null);
 }
 
 test "v0.4 child empty assignment stays explicitly empty for material-only work" {

@@ -14,6 +14,7 @@ const SessionTab = @import("workspace.zig").SessionTab;
 const inventory = @import("../ai/inventory_grants.zig");
 
 pub const Options = struct {
+    child_work_group: ?u32 = null,
     /// Policies captured when this Task was prepared, independent of defaults
     /// or composer selections made while its worker is still running.
     execution_policy: config.ExecutionPolicy,
@@ -85,8 +86,15 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
             for (value.members.items) |member| if (member.active and member.pane_id == tab.id) break :blk true;
             break :blk false;
         } else @backingInt(handle.session_id) == binding.session;
-        if (!in_binding or !assigned(child_agent, handle)) continue;
-        const basic = basicMetadata(app, tab, a);
+        const owned_by_child = app.childOwnsReadySession(context, handle);
+        if (!in_binding and !owned_by_child) continue;
+        var basic = basicMetadata(app, tab, a);
+        if (!assigned(child_agent, handle) and !owned_by_child) {
+            if (child_agent.?.targets.len != 0 or !app.childMayUseSource(context, handle)) continue;
+            basic.metadata_only = true;
+            try sessions.append(a, basic);
+            continue;
+        }
         const state = app.sessions.queryState(handle) orelse {
             try sessions.append(a, basic);
             continue;
@@ -124,12 +132,12 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
     var groups: std.ArrayList(queries.Group) = .empty;
     if (roster) |value| {
         for (value.groups.items) |entry| {
-            if (group == null or entry.id != group.?.id) continue;
+            if ((group == null or entry.id != group.?.id) and options.child_work_group != entry.id) continue;
             var members: std.ArrayList(identity.SessionHandle) = .empty;
             for (entry.members.items) |member| {
                 if (!member.active) continue;
                 for (app.workspace.tabs.items) |tab| {
-                    if (tab.id == member.pane_id and tab.content_owner == .session and assigned(child_agent, tab.content_owner.session)) {
+                    if (tab.id == member.pane_id and tab.content_owner == .session and (assigned(child_agent, tab.content_owner.session) or app.childOwnsReadySession(context, tab.content_owner.session))) {
                         try members.append(a, tab.content_owner.session);
                         break;
                     }
@@ -531,6 +539,8 @@ test "v0.4 child metadata projects only assigned handles and never leaks a sibli
     app.workspace = &workspace;
     app.sessions = &sessions;
     app.deferred_closes = .empty;
+    app.lifecycle_supervisor = @import("../host/lifecycle_supervisor.zig").Supervisor.init(a);
+    defer app.lifecycle_supervisor.deinit();
     var roster = @import("group_model.zig").Roster.init(a);
     defer roster.deinit();
     const group_id = (try roster.join("current", first.id, 0)).id;

@@ -138,7 +138,7 @@ pub const Supervisor = struct {
     }
     pub fn enqueue(self: *Supervisor, request: OpenRequest) !Snapshot {
         try request.context.validate();
-        if (!request.operation_ref.valid() or request.context.binding != .group or request.context.binding.group != @backingInt(request.group.id) or request.group.revision == 0 or (request.source == null) == (request.saved_source == null)) return error.InvalidHostAuthority;
+        if (!request.operation_ref.valid() or (request.context.child_origin == null and (request.context.binding != .group or request.context.binding.group != @backingInt(request.group.id))) or request.group.revision == 0 or (request.source == null) == (request.saved_source == null)) return error.InvalidHostAuthority;
         if (request.source) |source| if (@backingInt(source.session_id) == 0 or source.generation == 0) return error.InvalidHostAuthority;
         if (request.saved_source) |source| if (@backingInt(source.id) == 0 or source.revision == 0) return error.InvalidHostAuthority;
         if (self.find(request.operation_ref)) |entry| {

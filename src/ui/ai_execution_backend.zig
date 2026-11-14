@@ -540,13 +540,21 @@ pub const Context = struct {
     }
     fn captureBoundaryMode(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, handed_to_user: bool, command_hash: [32]u8, attaching: bool) !Boundary {
         if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
+        if (idle) if (self.app.domain.ai) |ai| {
+            if (ai.service.childReservesSession(handle, controller.authority.task_id)) return error.TerminalBusy;
+        };
         const legacy = self.app.legacyForHandle(handle) orelse return error.StaleReference;
         const state = self.app.sessions.queryState(handle) orelse return error.StaleReference;
         const tab = self.app.workspace.sessionTab(legacy) orelse return error.StaleReference;
         if (!tab.content_owner.eql(.{ .session = handle }) or tab.generation != handle.generation or tab.archived or tab.closing or tab.failed or tab.owned_pending) return error.StaleReference;
         if (state.lifecycle != .ready and state.lifecycle != .attached) return error.SessionNotReady;
         if (state.target.window_id != self.app.window_id or state.target.workspace_id != self.app.workspace_id) return error.TargetOutsideScope;
-        const membership_revision = try self.membership(controller, handle, legacy);
+        const membership_revision = if (self.app.childOwnsReadySession(controller.authority, handle)) blk: {
+            const resource = self.app.lifecycle_supervisor.resource(handle).?;
+            const group = self.roster.findById(@intCast(@backingInt(resource.request.group.id))) orelse return error.StaleReference;
+            if (!group.contains(legacy) or self.app.workspace.groupClosing(group.id)) return error.TargetOutsideScope;
+            break :blk group.membership_revision;
+        } else try self.membership(controller, handle, legacy);
         const ownership_revision = try self.ownership(controller, handle, handed_to_user, command_hash);
         var next_input: u64 = 0;
         const service = if (tab.terminal) |view| if (view.terminal_surface) |surface| blk: {
