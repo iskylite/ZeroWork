@@ -66,9 +66,14 @@ pub const RequestPlan = struct {
     cancel: ?*provider.CancelToken = null,
 };
 
-pub fn plan(config: provider_config.ProviderConfig) !RequestPlan {
+pub fn validateEndpoint(config: provider_config.ProviderConfig) !void {
     try config.validate();
     if (!std.mem.startsWith(u8, config.endpoint, "https://") and !isLoopbackHttp(config.endpoint)) return error.InsecureEndpoint;
+}
+
+pub fn plan(config: provider_config.ProviderConfig) !RequestPlan {
+    if (config.credential_ref != null) return error.MissingApiKey;
+    try validateEndpoint(config);
     var result: RequestPlan = switch (config.auth) {
         .anthropic_memory => |key| .{ .endpoint = config.endpoint, .auth_style = .anthropic_key, .api_key = key },
         .bearer_memory => |key| .{ .endpoint = config.endpoint, .auth_style = .bearer, .api_key = key },

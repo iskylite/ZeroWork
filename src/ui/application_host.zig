@@ -139,6 +139,7 @@ pub const WindowConnection = struct {
     }
 };
 const freezeSource = remote_source.freezeSource;
+const freezeDeferredSource = remote_source.freezeDeferredSource;
 const sourceSpec = remote_source.sourceSpec;
 const auth = remote_source.auth;
 pub fn localHomeDirectory(allocator: std.mem.Allocator) ![]u8 {
@@ -902,7 +903,7 @@ pub const ApplicationHost = struct {
                 var arena = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena.deinit();
                 const decoded = try connection_envelope.decodeLegacy(arena.allocator(), source.connection.?.envelope.value);
-                source.connection.?.remote = try freezeSource(self.allocator, decoded, self.workspace.app_config.*, self.workspace.registry.hosts, host_id, index, "");
+                source.connection.?.remote = try freezeDeferredSource(self.allocator, decoded, self.workspace.app_config.*, self.workspace.registry.hosts, host_id, index, "");
             }
         }
         const snapshot = try self.lifecycle_supervisor.enqueue(request);
@@ -2016,7 +2017,7 @@ pub const ApplicationHost = struct {
         const host = self.workspace.registry.hosts[index];
         if (@backingInt(host.connection_id) == 0) return error.InvalidSessionPurpose;
         _ = try self.ensureBackgroundHost();
-        var source = try freezeSource(self.allocator, host, self.workspace.app_config.*, self.workspace.registry.hosts, host_id, index, "");
+        var source = try freezeDeferredSource(self.allocator, host, self.workspace.app_config.*, self.workspace.registry.hosts, host_id, index, "");
         defer source.deinit();
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -2067,7 +2068,7 @@ pub const ApplicationHost = struct {
     /// All factory entry points share the real domain handler and its key.
     pub fn createForInput(self: *ApplicationHost, command_id: u64, host: hosts.HostConfig, host_id: workspace_mod.HostId, source_index: usize, initial_input: []const u8) !commands.Decision {
         if (self.pending_source != null) return error.ReentrantCreate;
-        var source = try freezeSource(self.allocator, host, self.workspace.app_config.*, self.workspace.registry.hosts, host_id, source_index, initial_input);
+        var source = try freezeDeferredSource(self.allocator, host, self.workspace.app_config.*, self.workspace.registry.hosts, host_id, source_index, initial_input);
         defer source.deinit();
         const payload = try std.json.Stringify.valueAlloc(self.allocator, source.value, .{});
         defer self.allocator.free(payload);

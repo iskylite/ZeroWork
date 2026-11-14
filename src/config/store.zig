@@ -12,6 +12,7 @@ pub const CredentialOptions = struct {
     config_path: ?[]const u8 = null,
     hosts_path: ?[]const u8 = null,
     expected_config: ?ConfigBaseline = null,
+    defer_credentials: bool = false,
 };
 
 const ConfigDigest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
@@ -88,7 +89,7 @@ pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: 
     }
     disk.ai.extensions = try value.ai.extensions.clone(allocator);
     for (disk.ai.extensions.servers) |*server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |*entry| if (entry.secret) {
-        const secret = if (entry.value.len != 0) entry.value else if (entry.secret_ref) |ref| (try credentials.getIfPresent(a, ref)) orelse "" else "";
+        const secret = entry.value;
         entry.secret_ref = try tx.stageSetting(io, allocator, secret, entry.secret_ref, entry.secret_ref);
     };
     var previous = plugin_credential_references.References.init(a);
@@ -134,8 +135,9 @@ pub fn load(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path:
 pub fn loadWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, options: CredentialOptions) !LoadedConfig {
     const source = (try readConfigSource(io, dir, allocator, sub_path)) orelse return error.FileNotFound;
     errdefer allocator.free(source);
-    var loaded = try decodeConfig(allocator, source);
+    var loaded = try decodeConfigWithCredentials(allocator, source, !options.defer_credentials);
     errdefer loaded.arena.deinit();
+    if (options.defer_credentials) return loaded;
     for (loaded.value.ai.providers[0..loaded.value.ai.provider_count]) |provider| {
         if (provider.api_key_ref != null or provider.api_key.len == 0) continue;
         var checked = options;
@@ -158,18 +160,22 @@ pub fn readConfigSource(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocato
 /// Decode owned file bytes without rewriting the file or migrating credentials.
 /// On success the returned snapshot owns the bytes; on failure the caller does.
 pub fn decodeConfig(allocator: std.mem.Allocator, source: []u8) !LoadedConfig {
+    return decodeConfigWithCredentials(allocator, source, true);
+}
+
+pub fn decodeConfigWithCredentials(allocator: std.mem.Allocator, source: []u8, resolve: bool) !LoadedConfig {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
     var value = try config.Config.parseWithAllocator(arena.allocator(), source);
     for (value.ai.providers[0..value.ai.provider_count]) |*provider| {
         if (provider.api_key_ref) |reference| {
             if (provider.api_key.len != 0) return error.AmbiguousCredential;
-            provider.api_key = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
+            if (resolve) provider.api_key = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
         }
     }
     for (value.ai.extensions.servers) |*server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |*entry| if (entry.secret_ref) |reference| {
         if (entry.value.len != 0) return error.AmbiguousCredential;
-        entry.value = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
+        if (resolve) entry.value = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
     };
     return .{ .source = source, .arena = arena, .value = value };
 }
@@ -322,16 +328,18 @@ fn loadHostsInternal(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, 
         inline for (.{ .{ "password", "password_ref" }, .{ "key_passphrase", "key_passphrase_ref" }, .{ "totp_secret", "totp_secret_ref" } }) |fields| {
             if (@field(host, fields[1])) |reference| {
                 if (@field(host, fields[0]) != null) return error.AmbiguousCredential;
-                @field(host, fields[0]) = try credentials.getIfPresent(registry.arena.allocator(), reference);
-                if (@field(host, fields[0]) == null) if (skipped_credentials) |count| {
-                    @field(host, fields[1]) = null;
-                    count.* += 1;
-                };
+                if (!options.defer_credentials) {
+                    @field(host, fields[0]) = try credentials.getIfPresent(registry.arena.allocator(), reference);
+                    if (@field(host, fields[0]) == null) if (skipped_credentials) |count| {
+                        @field(host, fields[1]) = null;
+                        count.* += 1;
+                    };
+                }
             } else if (@field(host, fields[0]) != null) migrate = true;
         }
         try host.validate();
     }
-    if (migrate and skipped_credentials == null) {
+    if (migrate and skipped_credentials == null and !options.defer_credentials) {
         observeCleanup(try saveHostsWithOptions(io, dir, sub_path, registry, options));
         const migrated = try loadHostsWithOptions(io, dir, allocator, sub_path, options);
         registry.deinit();

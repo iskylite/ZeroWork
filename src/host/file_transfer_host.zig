@@ -488,7 +488,7 @@ fn sameAuth(a: sessions.AuthOptions, b: sessions.AuthOptions) bool {
     };
 }
 fn sameConfig(a: sessions.RemoteConfig, b: sessions.RemoteConfig) bool {
-    if (!sameEndpoint(a.endpoint, b.endpoint) or !sameAuth(a.auth, b.auth) or a.strict_host_key_checking != b.strict_host_key_checking or !std.mem.eql(u8, a.terminal_type, b.terminal_type) or a.keepalive_sec != b.keepalive_sec or a.compression != b.compression or a.auto_shell_integration != b.auto_shell_integration or a.startup_commands.len != b.startup_commands.len) return false;
+    if (!sameEndpoint(a.endpoint, b.endpoint) or !sameAuth(a.auth, b.auth) or !sameOptional(a.credential, b.credential) or !sameOptional(a.totp_credential, b.totp_credential) or a.strict_host_key_checking != b.strict_host_key_checking or !std.mem.eql(u8, a.terminal_type, b.terminal_type) or a.keepalive_sec != b.keepalive_sec or a.compression != b.compression or a.auto_shell_integration != b.auto_shell_integration or a.startup_commands.len != b.startup_commands.len) return false;
     for (a.startup_commands, b.startup_commands) |left, right| if (!std.mem.eql(u8, left, right)) return false;
     return true;
 }
@@ -497,6 +497,6 @@ fn sameOptional(a: ?[]const u8, b: ?[]const u8) bool {
 }
 fn sameRoute(a: []const sessions.RouteHop, b: []const sessions.RouteHop) bool {
     if (a.len != b.len) return false;
-    for (a, b) |left, right| if (!std.meta.eql(left.owner, right.owner) or !std.mem.eql(u8, left.display_name, right.display_name) or left.protocol != right.protocol or !sameEndpoint(left.endpoint, right.endpoint) or !sameAuth(left.auth, right.auth) or left.strict_host_key_checking != right.strict_host_key_checking) return false;
+    for (a, b) |left, right| if (!std.meta.eql(left.owner, right.owner) or !std.mem.eql(u8, left.display_name, right.display_name) or left.protocol != right.protocol or !sameEndpoint(left.endpoint, right.endpoint) or !sameAuth(left.auth, right.auth) or !sameOptional(left.credential, right.credential) or !sameOptional(left.totp_credential, right.totp_credential) or left.strict_host_key_checking != right.strict_host_key_checking) return false;
     return true;
 }

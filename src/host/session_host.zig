@@ -21,6 +21,45 @@ pub const AuthOptions = union(enum) {
     private_key: struct { path: []const u8, passphrase: ?[]const u8 = null },
     keyboard_interactive,
 };
+/// Called by the transport worker before opening a socket.
+pub fn resolveRemoteAuth(allocator: std.mem.Allocator, auth: AuthOptions, reference: ?[]const u8, cancelled: *const std.atomic.Value(bool)) !AuthOptions {
+    const ref = reference orelse return auth;
+    if (cancelled.load(.acquire)) return error.Cancelled;
+    const secret = try @import("../config/credential_store.zig").getIfPresent(allocator, ref) orelse return error.CredentialMissing;
+    errdefer {
+        std.crypto.secureZero(u8, secret);
+        allocator.free(secret);
+    }
+    if (cancelled.load(.acquire)) return error.Cancelled;
+    return switch (auth) {
+        .password_prompt => .{ .password = secret },
+        .private_key => |key| .{ .private_key = .{ .path = key.path, .passphrase = secret } },
+        else => error.InvalidCredentialReference,
+    };
+}
+
+pub fn releaseRemoteAuth(auth: AuthOptions, reference: ?[]const u8, allocator: std.mem.Allocator) void {
+    if (reference == null) return;
+    const secret = @constCast(switch (auth) {
+        .password => |value| value,
+        .private_key => |key| key.passphrase orelse unreachable,
+        else => unreachable,
+    });
+    std.crypto.secureZero(u8, secret);
+    allocator.free(secret);
+}
+
+pub fn unlockRemoteTotp(reference: ?[]const u8, cancelled: *const std.atomic.Value(bool)) !void {
+    const ref = reference orelse return;
+    if (cancelled.load(.acquire)) return error.Cancelled;
+    const allocator = std.heap.c_allocator;
+    if (try @import("../config/credential_store.zig").getIfPresent(allocator, ref)) |secret| {
+        std.crypto.secureZero(u8, secret);
+        allocator.free(secret);
+    }
+    if (cancelled.load(.acquire)) return error.Cancelled;
+}
+
 pub const RemoteProtocol = enum { ssh, sftp };
 pub const SessionPurpose = enum { interactive, socks_background };
 pub const PresentationPolicy = enum { interactive, background, probe };
@@ -34,13 +73,17 @@ pub const RouteHop = struct {
     protocol: RemoteProtocol = .ssh,
     endpoint: Endpoint,
     auth: AuthOptions = .agent,
+    credential: ?[]const u8 = null,
     totp_secret: ?[]const u8 = null,
+    totp_credential: ?[]const u8 = null,
     strict_host_key_checking: bool = true,
 };
 pub const RemoteConfig = struct {
     endpoint: Endpoint,
     auth: AuthOptions = .agent,
+    credential: ?[]const u8 = null,
     totp_secret: ?[]const u8 = null,
+    totp_credential: ?[]const u8 = null,
     strict_host_key_checking: bool = true,
     terminal_type: []const u8 = "xterm-256color",
     startup_commands: []const []const u8 = &.{},

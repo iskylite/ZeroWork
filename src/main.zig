@@ -16581,12 +16581,12 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         if (process.runtime_config) |existing| break :blk existing;
         const runtime = try std.heap.c_allocator.create(RuntimeConfig);
         errdefer std.heap.c_allocator.destroy(runtime);
-        runtime.* = try RuntimeConfig.loadOrDefault(cx.io, std.Io.Dir.cwd(), std.heap.c_allocator, config_path);
+        runtime.* = try RuntimeConfig.loadWithCredentialPolicy(cx.io, std.Io.Dir.cwd(), std.heap.c_allocator, config_path, true);
         process.runtime_config = runtime;
         break :blk runtime;
     } else blk: {
         const runtime = try cx.allocator.create(RuntimeConfig);
-        runtime.* = try RuntimeConfig.loadOrDefault(cx.io, std.Io.Dir.cwd(), cx.allocator, config_path);
+        runtime.* = try RuntimeConfig.loadWithCredentialPolicy(cx.io, std.Io.Dir.cwd(), cx.allocator, config_path, true);
         try scope.onCleanup(RuntimeConfig, runtime, cleanupRuntimeConfig);
         break :blk runtime;
     };
@@ -20004,22 +20004,6 @@ pub fn main() !void {
         }
         if (err != error.ResetIncomplete) _ = dataStartupAlert(err, false);
         return err;
-    };
-    @import("config/store.zig").prepareCredentials(io_threaded.io(), std.Io.Dir.cwd(), std.heap.c_allocator, data_paths.config, data_paths.hosts) catch |err| {
-        if ((err == error.CredentialDenied or err == error.CredentialLocked) and dataStartupAlert(err, false)) {
-            credentials.authorizeScope() catch |failure| {
-                // Do not offer another authorization loop after cancel/denial.
-                _ = dataStartupAlert(error.CredentialAuthorizationFailed, false);
-                return failure;
-            };
-            @import("config/store.zig").prepareCredentials(io_threaded.io(), std.Io.Dir.cwd(), std.heap.c_allocator, data_paths.config, data_paths.hosts) catch |failure| {
-                _ = dataStartupAlert(error.CredentialAuthorizationFailed, false);
-                return failure;
-            };
-        } else {
-            if (err != error.CredentialDenied and err != error.CredentialLocked) _ = dataStartupAlert(err, false);
-            return err;
-        }
     };
     applog.init(.{}, io_threaded.io());
     defer applog.shutdown();

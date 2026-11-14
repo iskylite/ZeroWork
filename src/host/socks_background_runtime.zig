@@ -554,12 +554,12 @@ fn hostAt(spec: sessions.SessionCreateSpec, index: usize) ?hosts.HostConfig {
     const remote: sessions.RemoteConfig = if (index < saved.route_snapshot.len) blk: {
         const hop = saved.route_snapshot[index];
         owner = hop.owner;
-        break :blk .{ .endpoint = hop.endpoint, .auth = hop.auth, .strict_host_key_checking = hop.strict_host_key_checking, .totp_secret = hop.totp_secret };
+        break :blk .{ .endpoint = hop.endpoint, .auth = hop.auth, .strict_host_key_checking = hop.strict_host_key_checking, .totp_secret = hop.totp_secret, .totp_credential = hop.totp_credential };
     } else if (index == saved.route_snapshot.len) blk: {
         owner = .{ .id = saved.connection_id, .revision = saved.config_revision };
         break :blk saved.immutable_config;
     } else return null;
-    return .{ .connection_id = if (owner) |value| value.id else @fromBackingInt(0), .revision = if (owner) |value| value.revision else 1, .name = remote.endpoint.host, .host = remote.endpoint.host, .port = remote.endpoint.port, .user = remote.endpoint.user, .totp_secret = remote.totp_secret, .strict_host_key_checking = remote.strict_host_key_checking, .auth_mode = switch (remote.auth) {
+    return .{ .connection_id = if (owner) |value| value.id else @fromBackingInt(0), .revision = if (owner) |value| value.revision else 1, .name = remote.endpoint.host, .host = remote.endpoint.host, .port = remote.endpoint.port, .user = remote.endpoint.user, .totp_secret = remote.totp_secret, .totp_secret_ref = remote.totp_credential, .strict_host_key_checking = remote.strict_host_key_checking, .auth_mode = switch (remote.auth) {
         .agent => .agent,
         .private_key => .private_key,
         else => .password,

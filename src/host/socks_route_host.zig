@@ -675,7 +675,7 @@ pub fn selectExit(spec: sessions.SessionCreateSpec, exit_index: ?usize) !session
         .connection_id = owner.id,
         .config_revision = owner.revision,
         .protocol = .ssh,
-        .immutable_config = .{ .endpoint = hop.endpoint, .auth = hop.auth, .strict_host_key_checking = hop.strict_host_key_checking, .totp_secret = hop.totp_secret },
+        .immutable_config = .{ .endpoint = hop.endpoint, .auth = hop.auth, .credential = hop.credential, .strict_host_key_checking = hop.strict_host_key_checking, .totp_secret = hop.totp_secret, .totp_credential = hop.totp_credential },
         .route_snapshot = hops[0..index],
     } };
     return .{ .temporary_ssh = .{ .structured_endpoint = hop.endpoint, .auth_options = hop.auth, .strict_host_key_checking = hop.strict_host_key_checking, .totp_secret = hop.totp_secret, .route_snapshot = hops[0..index] } };
@@ -695,7 +695,7 @@ fn hostAt(spec: sessions.SessionCreateSpec, index: usize) ?hosts.HostConfig {
         const hop = hops[index];
         owner = hop.owner;
         name = hop.display_name;
-        break :blk .{ .endpoint = hop.endpoint, .auth = hop.auth, .strict_host_key_checking = hop.strict_host_key_checking, .totp_secret = hop.totp_secret };
+        break :blk .{ .endpoint = hop.endpoint, .auth = hop.auth, .credential = hop.credential, .strict_host_key_checking = hop.strict_host_key_checking, .totp_secret = hop.totp_secret, .totp_credential = hop.totp_credential };
     } else if (index == hops.len) switch (spec) {
         .saved => |saved| blk: {
             owner = .{ .id = saved.connection_id, .revision = saved.config_revision };
@@ -713,6 +713,7 @@ fn hostAt(spec: sessions.SessionCreateSpec, index: usize) ?hosts.HostConfig {
         .user = remote.endpoint.user,
         .strict_host_key_checking = remote.strict_host_key_checking,
         .totp_secret = remote.totp_secret,
+        .totp_secret_ref = remote.totp_credential,
         .auth_mode = switch (remote.auth) {
             .agent => .agent,
             .private_key => .private_key,

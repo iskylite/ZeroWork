@@ -243,9 +243,16 @@ const Job = struct {
             if (self.cancel.isCancelled()) return error.Cancelled;
             if (!p.enabled or p.endpoint.len == 0) continue;
             const url = try catalog.endpoint(a, p.endpoint, p.kind);
-            const auth: http.AuthStyle = if (p.api_key.len == 0) .none else if (p.kind == .anthropic) .anthropic_key else .bearer;
-            const plan: http.RequestPlan = .{ .method = .GET, .endpoint = url, .accept = "application/json", .auth_style = auth, .api_key = if (p.api_key.len == 0) null else p.api_key, .timeout_ms = 10000, .cancel = &self.cancel };
-            const body = self.fetch(t, plan, "") catch |err| if (self.require_list) return err else null;
+            const secret = if (p.api_key.len == 0 and p.api_key_ref != null and
+                (self.require_list or @import("../config/credential_store.zig").isUnlocked()))
+                try @import("../config/credential_store.zig").getIfPresent(a, p.api_key_ref.?)
+            else
+                null;
+            defer if (secret) |key| @import("provider_config.zig").releaseCredential(a, key);
+            const key = secret orelse p.api_key;
+            const auth: http.AuthStyle = if (key.len == 0) .none else if (p.kind == .anthropic) .anthropic_key else .bearer;
+            const plan: http.RequestPlan = .{ .method = .GET, .endpoint = url, .accept = "application/json", .auth_style = auth, .api_key = if (key.len == 0) null else key, .timeout_ms = 10000, .cancel = &self.cancel };
+            const body = if (key.len == 0 and p.api_key_ref != null) null else self.fetch(t, plan, "") catch |err| if (self.require_list) return err else null;
             var remote: ?catalog.Catalog = if (body) |bytes| catalog.Catalog.parse(std.heap.c_allocator, bytes, if (p.kind == .ollama) .ollama else .endpoint) catch null else null;
             if (self.require_list and remote == null) return error.InvalidCatalog;
             if (p.kind == .anthropic and remote != null and body != null) {
@@ -579,7 +586,15 @@ fn probeChat(a: std.mem.Allocator, t: transport.Transport, resolved: @import("pr
             try stream.feed(bytes);
         }
     };
-    const key: ?[]const u8 = switch (resolved.auth) {
+    const provider_config = @import("provider_config.zig");
+    const secret = try provider_config.loadCredential(resolved, a, cancel);
+    defer if (secret) |key| provider_config.releaseCredential(a, key);
+    var authenticated = resolved;
+    if (secret) |key| {
+        authenticated.credential_ref = null;
+        authenticated.auth = if (resolved.kind == .anthropic) .{ .anthropic_memory = key } else .{ .bearer_memory = key };
+    }
+    const key: ?[]const u8 = switch (authenticated.auth) {
         .bearer_memory, .anthropic_memory => |value| value,
         .none => null,
     };
@@ -592,7 +607,7 @@ fn probeChat(a: std.mem.Allocator, t: transport.Transport, resolved: @import("pr
     var stream = json.Stream.initWithKind(a, kind, Probe.receive, &probe);
     defer stream.deinit();
     const messages = [_]provider.Message{.{ .content = "Reply with OK." }};
-    _ = try transport.requestStream(a, t, resolved, .{ .model = resolved.model, .system = "", .messages = &messages, .max_output = 32, .timeout_ms = 30000, .cancel = cancel }, Probe.chunk, &stream);
+    _ = try transport.requestStream(a, t, authenticated, .{ .model = resolved.model, .system = "", .messages = &messages, .max_output = 32, .timeout_ms = 30000, .cancel = cancel }, Probe.chunk, &stream);
     try stream.finish();
     if (probe.failed or !probe.done or !probe.content) {
         if (diagnostic.status == 0) diagnostic.captureMessage(200, "", key);

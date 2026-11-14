@@ -4,7 +4,7 @@ const session = @import("../../host/session_host.zig");
 const connection_envelope = @import("../../config/connection_envelope.zig");
 const source_codec = @import("connection_source.zig");
 const SourceSnapshot = source_codec.SourceSnapshot;
-const freezeSource = source_codec.freezeSource;
+const freezeDeferredSource = source_codec.freezeDeferredSource;
 const sourceSpec = source_codec.sourceSpec;
 const workspace_mod = @import("../../ui/workspace.zig");
 pub fn Binding(comptime Host: type) type {
@@ -20,7 +20,7 @@ pub fn Binding(comptime Host: type) type {
                 };
                 for (self.file_sources.items) |*previous| if (previous.handle.session_id == request.handle.session_id) break :blk &previous.source;
                 const host = try connection_envelope.decodeLegacy(arena.allocator(), request.spec.plugin);
-                owned_source = try freezeSource(self.allocator, host, self.workspace.app_config.*, self.workspace.registry.hosts, @backingInt(host.connection_id), self.workspace.registry.indexOf(host.connection_id) orelse workspace_mod.removed_host_index, "");
+                owned_source = try freezeDeferredSource(self.allocator, host, self.workspace.app_config.*, self.workspace.registry.hosts, @backingInt(host.connection_id), self.workspace.registry.indexOf(host.connection_id) orelse workspace_mod.removed_host_index, "");
                 break :blk &owned_source.?;
             };
             const payload = try std.json.Stringify.valueAlloc(arena.allocator(), source.value, .{});

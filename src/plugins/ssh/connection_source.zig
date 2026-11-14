@@ -31,6 +31,14 @@ pub const CredentialReader = struct {
         return result;
     }
 
+    pub fn resolveForConnection(self: *CredentialReader, host: hosts.HostConfig, use_totp: bool) !hosts.HostConfig {
+        var wanted = host;
+        if (wanted.auth_mode != .password) wanted.password_ref = null;
+        if (wanted.auth_mode != .private_key) wanted.key_passphrase_ref = null;
+        if (!use_totp) wanted.totp_secret_ref = null;
+        return self.resolve(wanted);
+    }
+
     pub fn deinit(self: *CredentialReader) void {
         for (self.loaded.items) |secret| {
             std.crypto.secureZero(u8, secret);
@@ -54,9 +62,17 @@ pub const WindowConnection = SourceSnapshot;
 /// Generic envelopes never enter the legacy remote configuration decoder.
 pub fn freezeWindowSource(allocator: std.mem.Allocator, host: hosts.HostConfig, global_config: config.Config, registry: []const hosts.HostConfig, host_id: u64, source_index: usize) !?SourceSnapshot {
     if (!host.isLegacy()) return null;
-    return try freezeSource(allocator, host, global_config, registry, host_id, source_index, "");
+    return try freezeDeferredSource(allocator, host, global_config, registry, host_id, source_index, "");
 }
 pub fn freezeSource(allocator: std.mem.Allocator, host: hosts.HostConfig, global_config: config.Config, registry: []const hosts.HostConfig, host_id: u64, source_index: usize, input: []const u8) !SourceSnapshot {
+    return freeze(allocator, host, global_config, registry, host_id, source_index, input, true);
+}
+
+pub fn freezeDeferredSource(allocator: std.mem.Allocator, host: hosts.HostConfig, global_config: config.Config, registry: []const hosts.HostConfig, host_id: u64, source_index: usize, input: []const u8) !SourceSnapshot {
+    return freeze(allocator, host, global_config, registry, host_id, source_index, input, false);
+}
+
+fn freeze(allocator: std.mem.Allocator, host: hosts.HostConfig, global_config: config.Config, registry: []const hosts.HostConfig, host_id: u64, source_index: usize, input: []const u8, resolve: bool) !SourceSnapshot {
     try host.validate();
     if (!host.isLegacy()) return error.UnsupportedProtocol;
     if (host.route.len == 0 and host.jump_chain.len != 0) return error.UnmigratedRoute;
@@ -78,9 +94,9 @@ pub fn freezeSource(allocator: std.mem.Allocator, host: hosts.HostConfig, global
         try hop.validate();
         if (!std.mem.eql(u8, hop.protocolId(), "ssh")) return error.InvalidRouteProtocol;
         if (hop.route.len != 0 or hop.jump_chain.len != 0) return error.NestedRouteUnsupported;
-        route[index] = try reader.resolve(hop);
+        route[index] = if (resolve) try reader.resolve(hop) else hop;
     }
-    const source: Source = .{ .host = try reader.resolve(host), .global_config = global_config, .route_hosts = route[0..host.route.len], .host_id = host_id, .source_index = source_index, .initial_input = input };
+    const source: Source = .{ .host = if (resolve) try reader.resolve(host) else host, .global_config = global_config, .route_hosts = route[0..host.route.len], .host_id = host_id, .source_index = source_index, .initial_input = input };
     var hops: [8]session.RouteHop = undefined;
     try sourceSpec(source, &hops, "").validate();
     return SourceSnapshot.init(allocator, source);
@@ -138,6 +154,14 @@ pub fn auth(host: hosts.HostConfig) session.AuthOptions {
     };
 }
 
+fn credential(host: hosts.HostConfig) ?[]const u8 {
+    return switch (host.auth_mode) {
+        .password => if (host.password == null) host.password_ref else null,
+        .private_key => if (host.key_passphrase == null) host.key_passphrase_ref else null,
+        .agent => null,
+    };
+}
+
 fn endpoint(host: hosts.HostConfig) session.Endpoint {
     return .{ .host = host.host, .port = host.port, .user = host.user };
 }
@@ -149,7 +173,9 @@ pub fn sourceSpec(source: Source, route_buffer: *[8]session.RouteHop, private_op
         .protocol = if (host.protocol == .ssh) .ssh else .sftp,
         .endpoint = endpoint(host),
         .auth = auth(host),
+        .credential = credential(host),
         .totp_secret = host.totp_secret,
+        .totp_credential = if (host.totp_secret == null) host.totp_secret_ref else null,
         .strict_host_key_checking = host.strict_host_key_checking,
     };
     const route = route_buffer[0..source.route_hosts.len];
@@ -158,7 +184,7 @@ pub fn sourceSpec(source: Source, route_buffer: *[8]session.RouteHop, private_op
         .connection_id = source.host.connection_id,
         .config_revision = source.host.revision,
         .protocol = if (source.host.protocol == .ssh) .ssh else .sftp,
-        .immutable_config = .{ .endpoint = endpoint(source.host), .auth = auth(source.host), .totp_secret = source.host.totp_secret, .strict_host_key_checking = source.host.strict_host_key_checking, .terminal_type = if (source.host.terminal_type_explicit) source.host.terminal_type else source.global_config.ssh.term, .startup_commands = source.host.startup_commands, .auto_shell_integration = source.host.auto_shell_integration orelse source.global_config.ssh.auto_shell_integration, .keepalive_sec = if (source.host.keepalive) source.global_config.ssh.keepalive_sec else 0, .compression = if (source.host.compression_explicit) source.host.compression else source.global_config.ssh.compression },
+        .immutable_config = .{ .endpoint = endpoint(source.host), .auth = auth(source.host), .credential = credential(source.host), .totp_secret = source.host.totp_secret, .totp_credential = if (source.host.totp_secret == null) source.host.totp_secret_ref else null, .strict_host_key_checking = source.host.strict_host_key_checking, .terminal_type = if (source.host.terminal_type_explicit) source.host.terminal_type else source.global_config.ssh.term, .startup_commands = source.host.startup_commands, .auto_shell_integration = source.host.auto_shell_integration orelse source.global_config.ssh.auto_shell_integration, .keepalive_sec = if (source.host.keepalive) source.global_config.ssh.keepalive_sec else 0, .compression = if (source.host.compression_explicit) source.host.compression else source.global_config.ssh.compression },
         .route_snapshot = route,
         .private_options = private_options,
     } };

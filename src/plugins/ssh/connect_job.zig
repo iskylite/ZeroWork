@@ -206,7 +206,7 @@ pub fn connectThread(job: *ConnectJob) void {
     if (job.cancelled.load(.acquire)) return;
     const host = job.host_snapshot.value;
     applog.info(.workspace, "connect thread started session={d} for {s}", .{ job.ticket.session_id, host.name });
-    const runtime = SessionRuntime.initForHost(std.heap.c_allocator, job.io_instance.io(), job.config_snapshot.value, runtimeTarget(job)) catch |err| {
+    const runtime = connectWithCredentials(job) catch |err| {
         applog.err(.workspace, "connect FAILED session={d}: {s}", .{ job.ticket.session_id, @errorName(err) });
         job.err = err;
         job.retained_cleanup.finish(&job.resource_ledger, @import("../../ui/session_runtime.zig").drainRetainedResources);
@@ -222,6 +222,25 @@ pub fn connectThread(job: *ConnectJob) void {
     job.runtime_storage = @import("runtime_binding.zig").borrow(runtime);
     job.runtime = &job.runtime_storage;
     applog.info(.workspace, "connect OK session={d}", .{job.ticket.session_id});
+}
+
+fn connectWithCredentials(job: *ConnectJob) !*SessionRuntime {
+    const allocator = std.heap.c_allocator;
+    var reader: @import("connection_source.zig").CredentialReader = .{ .allocator = allocator };
+    defer reader.deinit();
+    const use_totp = job.config_snapshot.value.ssh.totp_autofill;
+    const host = try reader.resolveForConnection(job.host_snapshot.value, use_totp);
+    var hops: [8]hosts_mod.HostConfig = undefined;
+    for (job.jump_snapshot.value, 0..) |hop, index| {
+        if (job.cancelled.load(.acquire)) return error.Cancelled;
+        hops[index] = try reader.resolveForConnection(hop, use_totp);
+    }
+    if (job.cancelled.load(.acquire)) return error.Cancelled;
+    var target = runtimeTarget(job);
+    target.password = host.password;
+    target.key_passphrase = host.key_passphrase;
+    target.jump_hosts = hops[0..job.jump_snapshot.value.len];
+    return SessionRuntime.initForHost(allocator, job.io_instance.io(), job.config_snapshot.value, target);
 }
 
 fn sharedGraphRetained(raw: *anyopaque) void {

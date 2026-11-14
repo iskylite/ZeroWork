@@ -155,7 +155,10 @@ pub fn assign(ai: *config.Ai, address: Address, text: []const u8) !void {
             if (trimmed.len != 0 and !endpointValid(trimmed)) return error.InvalidEndpoint;
             p.endpoint = trimmed;
         },
-        .api_key => p.api_key = text,
+        .api_key => {
+            p.api_key = text;
+            p.api_key_ref = null;
+        },
         .model_id => {
             if (address.model >= p.model_count) return error.UnknownModel;
             if (trimmed.len == 0) return error.EmptyModelId;
@@ -205,12 +208,12 @@ pub fn modelValid(model: config.AiModel) bool {
     return true;
 }
 pub fn connectionValid(p: config.AiProvider) bool {
-    return std.mem.trim(u8, p.name, " \t\r\n").len > 0 and endpointValid(p.endpoint) and (p.api_key.len > 0 or @import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint));
+    return std.mem.trim(u8, p.name, " \t\r\n").len > 0 and endpointValid(p.endpoint) and (p.api_key.len > 0 or p.api_key_ref != null or @import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint));
 }
 pub fn connectionProblem(p: config.AiProvider, index: usize) ?Problem {
     if (std.mem.trim(u8, p.name, " \t\r\n").len == 0) return .{ .address = .{ .provider = index, .field = .name }, .err = error.EmptyProviderName };
     if (!endpointValid(p.endpoint)) return .{ .address = .{ .provider = index, .field = .endpoint }, .err = error.InvalidEndpoint };
-    if (p.api_key.len == 0 and !@import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint)) return .{ .address = .{ .provider = index, .field = .api_key }, .err = error.MissingApiKey };
+    if (p.api_key.len == 0 and p.api_key_ref == null and !@import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint)) return .{ .address = .{ .provider = index, .field = .api_key }, .err = error.MissingApiKey };
     return null;
 }
 

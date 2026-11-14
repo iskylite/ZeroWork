@@ -252,6 +252,7 @@ const Job = struct {
         const a = self.arena.allocator();
         self.config.endpoint = try a.dupe(u8, config.endpoint);
         self.config.model = try a.dupe(u8, config.model);
+        self.config.credential_ref = if (config.credential_ref) |reference| try a.dupe(u8, reference) else null;
         self.config.auth = switch (config.auth) {
             .none => .none,
             .bearer_memory => |key| .{ .bearer_memory = try a.dupe(u8, key) },

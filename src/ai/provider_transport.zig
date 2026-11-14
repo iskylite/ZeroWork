@@ -419,10 +419,33 @@ test "native HTTP authentication requires an explicit key before opening a conne
     }
 }
 
+const RequestAuth = struct {
+    plan: http.RequestPlan,
+    key: ?[]u8,
+
+    fn init(allocator: std.mem.Allocator, config: provider_config.ProviderConfig, cancel: ?*provider.CancelToken) !RequestAuth {
+        try http.validateEndpoint(config);
+        const secret = try provider_config.loadCredential(config, allocator, cancel);
+        errdefer if (secret) |key| provider_config.releaseCredential(allocator, key);
+        var transport_config = config;
+        if (secret) |key| {
+            transport_config.credential_ref = null;
+            transport_config.auth = if (config.kind == .anthropic) .{ .anthropic_memory = key } else .{ .bearer_memory = key };
+        }
+        return .{ .plan = try http.plan(transport_config), .key = secret };
+    }
+
+    fn deinit(self: RequestAuth, allocator: std.mem.Allocator) void {
+        if (self.key) |key| provider_config.releaseCredential(allocator, key);
+    }
+};
+
 pub fn request(allocator: std.mem.Allocator, transport: Transport, config: provider_config.ProviderConfig, chat: provider.ChatRequest) !Response {
     if (chat.retry_after_ms) |hint| hint.* = null;
     if (chat.cancel) |token| if (token.isCancelled()) return error.Cancelled;
-    var plan = try http.plan(config);
+    const auth = try RequestAuth.init(allocator, config, chat.cancel);
+    defer auth.deinit(allocator);
+    var plan = auth.plan;
     const endpoint = try http.chatEndpoint(allocator, config.kind, config.endpoint);
     defer allocator.free(endpoint);
     plan.endpoint = endpoint;
@@ -463,7 +486,9 @@ pub fn requestStream(allocator: std.mem.Allocator, transport: Transport, config:
         if (chat.cancel) |token| if (token.isCancelled()) return error.Cancelled;
         return .{ .status = response.status, .retry_after_ms = response.retry_after_ms };
     };
-    var plan = try http.plan(config);
+    const auth = try RequestAuth.init(allocator, config, chat.cancel);
+    defer auth.deinit(allocator);
+    var plan = auth.plan;
     const endpoint = try http.chatEndpoint(allocator, config.kind, config.endpoint);
     defer allocator.free(endpoint);
     plan.endpoint = endpoint;

@@ -288,7 +288,10 @@ const Native = struct {
         const source = self.source.value;
         const hops = routeOf(source.spec);
         const result = try self.arena.allocator().alloc(ssh.Options, hops.len + 1);
-        for (hops, 0..) |hop, index| result[index] = try self.option(hop.endpoint, hop.auth, hop.owner, hop.strict_host_key_checking, hop.display_name, index, hops.len + 1, cancelled);
+        for (hops, 0..) |hop, index| {
+            try sessions.unlockRemoteTotp(hop.totp_credential, cancelled);
+            result[index] = try self.option(hop.endpoint, hop.auth, hop.credential, hop.owner, hop.strict_host_key_checking, hop.display_name, index, hops.len + 1, cancelled);
+        }
         const remote: sessions.RemoteConfig = switch (source.spec) {
             .saved => |saved| saved.immutable_config,
             .temporary_ssh => |temporary| .{ .endpoint = temporary.structured_endpoint, .auth = temporary.auth_options, .strict_host_key_checking = temporary.strict_host_key_checking },
@@ -298,14 +301,17 @@ const Native = struct {
             .saved => |saved| .{ .id = saved.connection_id, .revision = saved.config_revision },
             else => null,
         };
-        result[hops.len] = try self.option(remote.endpoint, remote.auth, source_owner, remote.strict_host_key_checking, "", hops.len, hops.len + 1, cancelled);
+        try sessions.unlockRemoteTotp(remote.totp_credential, cancelled);
+        result[hops.len] = try self.option(remote.endpoint, remote.auth, remote.credential, source_owner, remote.strict_host_key_checking, "", hops.len, hops.len + 1, cancelled);
         result[hops.len].keepalive_sec = remote.keepalive_sec;
         result[hops.len].compression = remote.compression;
         return result;
     }
-    fn option(self: *Native, endpoint: sessions.Endpoint, auth: sessions.AuthOptions, owner: ?identity.AssetOwner, strict: bool, name: []const u8, index: usize, count: usize, cancelled: *const std.atomic.Value(bool)) !ssh.Options {
+    fn option(self: *Native, endpoint: sessions.Endpoint, auth: sessions.AuthOptions, reference: ?[]const u8, owner: ?identity.AssetOwner, strict: bool, name: []const u8, index: usize, count: usize, cancelled: *const std.atomic.Value(bool)) !ssh.Options {
         const a = self.arena.allocator();
-        const frozen_auth: ssh.Auth = switch (auth) {
+        const authenticated = try sessions.resolveRemoteAuth(allocator, auth, reference, cancelled);
+        defer sessions.releaseRemoteAuth(authenticated, reference, allocator);
+        const frozen_auth: ssh.Auth = switch (authenticated) {
             .agent => .agent,
             .password_prompt => .password_prompt,
             .keyboard_interactive => .keyboard_interactive,

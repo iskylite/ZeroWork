@@ -682,7 +682,10 @@ pub const DirectFactory = struct {
                 .temporary_ssh => |temporary| .{ .endpoint = temporary.structured_endpoint, .auth = temporary.auth_options, .strict_host_key_checking = temporary.strict_host_key_checking },
                 .local, .plugin => return error.UnsupportedProtocol,
             };
-            const auth: ssh.Auth = switch (remote.auth) {
+            try sessions.unlockRemoteTotp(remote.totp_credential, cancelled);
+            const authenticated = try sessions.resolveRemoteAuth(std.heap.c_allocator, remote.auth, remote.credential, cancelled);
+            defer sessions.releaseRemoteAuth(authenticated, remote.credential, std.heap.c_allocator);
+            const auth: ssh.Auth = switch (authenticated) {
                 .agent => .agent,
                 .password_prompt => .password_prompt,
                 .keyboard_interactive => .keyboard_interactive,

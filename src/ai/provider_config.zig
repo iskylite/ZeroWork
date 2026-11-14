@@ -84,6 +84,7 @@ pub const ProviderConfig = struct {
     endpoint: []const u8,
     model: []const u8,
     auth: Auth,
+    credential_ref: ?[]const u8 = null,
     context_window: u32 = 8192,
     vision: bool = false,
     output_limit: ?u32 = null,
@@ -103,6 +104,7 @@ pub const ProviderConfig = struct {
         if ((self.image_token_max_width == null) != (self.image_token_max_height == null) or (self.image_token_max_width != null and self.image_token_reservation == null)) return error.InvalidImageTokenReservation;
         if (self.image_token_max_width) |value| if (value == 0 or value > 8192) return error.InvalidImageTokenReservation;
         if (self.image_token_max_height) |value| if (value == 0 or value > 8192) return error.InvalidImageTokenReservation;
+        if (self.credential_ref != null) return;
         switch (self.kind) {
             .anthropic => if (self.auth != .anthropic_memory) return error.InvalidAuth,
             .openai_compat => if (self.auth != .bearer_memory and !(self.auth == .none and allowsNoAuth(self.kind, self.endpoint))) return error.InvalidAuth,
@@ -131,6 +133,20 @@ pub const ProviderConfig = struct {
     }
 };
 
+/// Resolve only at an admitted request boundary. The caller owns and wipes the key.
+pub fn loadCredential(self: ProviderConfig, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !?[]u8 {
+    const reference = self.credential_ref orelse return null;
+    if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
+    const secret = try @import("../config/credential_store.zig").getIfPresent(allocator, reference) orelse return error.MissingApiKey;
+    errdefer releaseCredential(allocator, secret);
+    if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
+    return secret;
+}
+pub fn releaseCredential(allocator: std.mem.Allocator, secret: []u8) void {
+    std.crypto.secureZero(u8, secret);
+    allocator.free(secret);
+}
+
 pub fn fromSettings(ai: app_config.Ai) !ProviderConfig {
     return fromSettingsSelection(ai, null);
 }
@@ -141,13 +157,13 @@ pub fn fromSettingsSelection(ai: app_config.Ai, selection: ?ModelSelection) !Pro
     const resolved = try settingsModel(ai, selection);
     const p = resolved.provider;
     if (p.endpoint.len == 0) return error.MissingEndpoint;
-    if (p.api_key_ref != null and p.api_key.len == 0) return error.MissingApiKey;
-    const auth: Auth = switch (p.kind) {
+    const credential_ref = if (p.api_key.len == 0) p.api_key_ref else null;
+    const auth: Auth = if (credential_ref != null) .none else switch (p.kind) {
         .ollama => if (p.api_key.len == 0) .none else .{ .bearer_memory = p.api_key },
         .anthropic => if (p.api_key.len == 0) return error.MissingApiKey else .{ .anthropic_memory = p.api_key },
         .openai_compat => if (p.api_key.len != 0) .{ .bearer_memory = p.api_key } else if (allowsNoAuth(p.kind, p.endpoint)) .none else return error.MissingApiKey,
     };
-    const result = ProviderConfig{ .kind = p.kind, .endpoint = p.endpoint, .model = resolved.model.id, .auth = auth, .context_window = resolved.model.context_window, .output_limit = resolved.model.output_discovered, .vision = resolved.model.vision, .image_token_reservation = resolved.model.image_token_reservation, .image_token_max_width = resolved.model.image_token_max_width, .image_token_max_height = resolved.model.image_token_max_height, .native_effort = resolved.model.reasoning_discovered, .reasoning_wire = if (p.kind == .anthropic and resolved.model.reasoning_adaptive) .anthropic_adaptive else toggleProtocol(p.kind, p.endpoint, resolved.model.id) };
+    const result = ProviderConfig{ .kind = p.kind, .endpoint = p.endpoint, .model = resolved.model.id, .auth = auth, .credential_ref = credential_ref, .context_window = resolved.model.context_window, .output_limit = resolved.model.output_discovered, .vision = resolved.model.vision, .image_token_reservation = resolved.model.image_token_reservation, .image_token_max_width = resolved.model.image_token_max_width, .image_token_max_height = resolved.model.image_token_max_height, .native_effort = resolved.model.reasoning_discovered, .reasoning_wire = if (p.kind == .anthropic and resolved.model.reasoning_adaptive) .anthropic_adaptive else toggleProtocol(p.kind, p.endpoint, resolved.model.id) };
     try result.validate();
     return result;
 }
@@ -449,7 +465,7 @@ test "local OpenAI gateway accepts no auth but does not discard a missing saved 
     const ai = app_config.Ai{ .default_provider = "local", .provider_count = 1, .providers = &providers };
     try std.testing.expect((try fromSettings(ai)).auth == .none);
     providers[0].api_key_ref = "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    try std.testing.expectError(error.MissingApiKey, fromSettings(ai));
+    try std.testing.expectEqualStrings(providers[0].api_key_ref.?, (try fromSettings(ai)).credential_ref.?);
     providers[0].api_key_ref = null;
     for ([_][]const u8{ "https://example.test/v1/chat/completions", "http://localhost.evil.test/chat/completions", "http://127.0.0.1@evil.test/chat/completions" }) |endpoint| {
         providers[0].endpoint = endpoint;

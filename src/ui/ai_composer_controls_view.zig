@@ -131,9 +131,9 @@ const Owned = struct {
             const id = providerId(item);
             for (item.models) |model| {
                 if (model.id.len == 0) continue;
-                try appendModel(a, &models, &hash, id, item.kind, item.endpoint, item.enabled and @import("../config/settings_ai_draft.zig").endpointValid(item.endpoint) and (item.api_key.len != 0 or @import("../ai/provider_config.zig").allowsNoAuth(item.kind, item.endpoint)), model);
+                try appendModel(a, &models, &hash, id, item.kind, item.endpoint, item.enabled and @import("../config/settings_ai_draft.zig").endpointValid(item.endpoint) and (item.api_key.len != 0 or item.api_key_ref != null or @import("../ai/provider_config.zig").allowsNoAuth(item.kind, item.endpoint)), model);
             }
-            if (item.models.len == 0 and item.model.len != 0) try appendModel(a, &models, &hash, id, item.kind, item.endpoint, item.enabled and @import("../config/settings_ai_draft.zig").endpointValid(item.endpoint) and (item.api_key.len != 0 or @import("../ai/provider_config.zig").allowsNoAuth(item.kind, item.endpoint)), .{ .id = item.model, .context_window = item.context_window, .efforts = @splat(false) });
+            if (item.models.len == 0 and item.model.len != 0) try appendModel(a, &models, &hash, id, item.kind, item.endpoint, item.enabled and @import("../config/settings_ai_draft.zig").endpointValid(item.endpoint) and (item.api_key.len != 0 or item.api_key_ref != null or @import("../ai/provider_config.zig").allowsNoAuth(item.kind, item.endpoint)), .{ .id = item.model, .context_window = item.context_window, .efforts = @splat(false) });
         }
         var usage = snapshot.usage;
         if (usage) |*value| {

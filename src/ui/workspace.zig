@@ -583,7 +583,7 @@ pub const Workspace = struct {
         empty_state: *ui.Node,
     ) !*Workspace {
         applog.info(.workspace, "init: loading hosts from {s}", .{hosts_path});
-        const registry = store.loadHosts(io, std.Io.Dir.cwd(), allocator, hosts_path) catch |err| blk: {
+        const registry = store.loadHostsWithOptions(io, std.Io.Dir.cwd(), allocator, hosts_path, .{ .defer_credentials = true }) catch |err| blk: {
             applog.err(.workspace, "loadHosts({s}) failed: {s}", .{ hosts_path, @errorName(err) });
             break :blk hosts_mod.Registry{ .arena = std.heap.ArenaAllocator.init(allocator), .hosts = &.{} };
         };
@@ -6190,7 +6190,7 @@ pub const Workspace = struct {
                 }
                 target.failed = true;
                 var failure_buffer: [512]u8 = undefined;
-                const failure_title = std.fmt.bufPrint(&failure_buffer, "连接失败: {s}", .{@import("../proto/ssh/handshake_failure.zig").description(err) orelse @errorName(err)}) catch "连接失败";
+                const failure_title = std.fmt.bufPrint(&failure_buffer, "连接失败: {s}", .{@import("../proto/ssh/handshake_failure.zig").description(err) orelse @import("feedback_message.zig").knownMessage(@errorName(err)) orelse @errorName(err)}) catch "连接失败";
                 var buffer: [768]u8 = undefined;
                 const text = std.fmt.bufPrint(&buffer, "{s} · 会话 {d} {s}", .{ target.titleSlice(), target.id, failure_title }) catch failure_title;
                 target.terminal.?.setOutput(self.cx, text) catch {};

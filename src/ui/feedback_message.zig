@@ -15,6 +15,7 @@ pub fn knownMessage(code: []const u8) ?[]const u8 {
         .{ "CredentialLocked", "系统钥匙串已锁定。请解锁后重试。" },
         .{ "CredentialUnavailable", "暂时无法访问系统钥匙串。请确认钥匙串可用后重试。" },
         .{ "CredentialStorageFailure", "无法读写系统钥匙串。请检查钥匙串状态后重试。" },
+        .{ "CredentialBusy", "正在解锁已保存的凭据，请稍后重试。" },
         .{ "CredentialAuthenticationCanceled", "已取消系统身份验证。请重试并完成验证。" },
         .{ "CredentialAuthenticationFailed", "系统身份验证未通过。请重新验证。" },
         .{ "InvalidCredentialReference", "配置中的凭据引用无效。请重新填写凭据，或检查导入文件。" },

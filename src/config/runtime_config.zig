@@ -110,22 +110,27 @@ pub const RuntimeConfig = struct {
     observed_disk: store.ConfigBaseline = .{},
     observed_stamp: ?ConfigStamp = null,
     external_provider_revision: u64 = 0,
+    defer_credentials: bool = false,
 
     pub fn loadOrDefault(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8) !RuntimeConfig {
+        return loadWithCredentialPolicy(io, dir, allocator, sub_path, false);
+    }
+
+    pub fn loadWithCredentialPolicy(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, defer_credentials: bool) !RuntimeConfig {
         if (sub_path.len == 0) return error.InvalidConfigPath;
         const path = try allocator.dupe(u8, sub_path);
         errdefer allocator.free(path);
-        var loaded = store.load(io, dir, allocator, path) catch |err| switch (err) {
+        var loaded = store.loadWithOptions(io, dir, allocator, path, .{ .defer_credentials = defer_credentials }) catch |err| switch (err) {
             error.FileNotFound => {
                 const owned = try Snapshot.init(allocator, .{});
-                return .{ .allocator = allocator, .path = path, .owned = owned, .value = owned.value };
+                return .{ .allocator = allocator, .path = path, .defer_credentials = defer_credentials, .owned = owned, .value = owned.value };
             },
             else => return err,
         };
         defer loaded.deinit(allocator);
         const owned = try Snapshot.init(allocator, loaded.value);
         const baseline = store.ConfigBaseline.fromSource(loaded.source);
-        return .{ .allocator = allocator, .path = path, .owned = owned, .value = owned.value, .field_revisions = @splat(owned.value.config_revision), .disk_baseline = baseline, .observed_disk = baseline };
+        return .{ .allocator = allocator, .path = path, .defer_credentials = defer_credentials, .owned = owned, .value = owned.value, .field_revisions = @splat(owned.value.config_revision), .disk_baseline = baseline, .observed_disk = baseline };
     }
 
     /// Only Provider settings are hot reloaded. Other file changes still
@@ -150,7 +155,7 @@ pub const RuntimeConfig = struct {
             self.observed_stamp = stamp;
             return false;
         }
-        var loaded = try store.decodeConfig(self.allocator, source);
+        var loaded = try store.decodeConfigWithCredentials(self.allocator, source, !self.defer_credentials);
         owns_source = false;
         defer loaded.deinit(self.allocator);
 

@@ -58,7 +58,7 @@ pub fn build(b: *std.Build) void {
     // The static Local plugin owns the native PTY/process boundary.
     core.addCSourceFile(.{ .file = b.path("src/ai/mcp_native.c"), .flags = &.{"-std=c11"} });
     core.addCSourceFile(.{ .file = b.path("src/local/darwin_process.c"), .flags = &.{"-std=c11"} });
-    core.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = &.{} });
+    core.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = if (test_mode) &.{"-DZW_CREDENTIALS_UI_FIXTURE=1"} else &.{} });
     core.addCSourceFile(.{ .file = b.path("src/platform/data_scope_lock.c"), .flags = &.{"-std=c11"} });
     core.linkFramework("Security", .{});
     core.linkFramework("CoreFoundation", .{});

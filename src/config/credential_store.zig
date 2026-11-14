@@ -59,6 +59,10 @@ pub fn validReference(reference: []const u8) bool {
     for (reference[4..]) |c| if (!std.ascii.isHex(c)) return false;
     return true;
 }
+pub fn isUnlocked() bool {
+    return if (builtin.is_test) true else native.cached();
+}
+
 pub fn get(a: std.mem.Allocator, reference: []const u8) ![]u8 {
     if (!validReference(reference)) return error.InvalidCredentialReference;
     const s = try scope();
@@ -66,6 +70,15 @@ pub fn get(a: std.mem.Allocator, reference: []const u8) ![]u8 {
     if (builtin.is_test) unreachable;
     return native.get(a, s, reference);
 }
+/// Read an already unlocked value for foreground display helpers.
+pub fn getCached(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
+    if (!isUnlocked()) return null;
+    return getIfPresent(a, reference) catch |err| switch (err) {
+        error.CredentialBusy => null,
+        else => return err,
+    };
+}
+
 pub fn getIfPresent(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
     return get(a, reference) catch |err| switch (err) {
         error.CredentialMissing => null,
@@ -139,6 +152,12 @@ pub const Transaction = struct {
     }
     fn stageWithFallback(self: *Transaction, io: std.Io, a: std.mem.Allocator, secret: ?[]const u8, old_reference: ?[]const u8, fallback: ?struct { cached_secret: ?*?[]const u8 = null, reference: ?[]const u8 }) !?[]const u8 {
         const owned = self.arena.allocator();
+        if (secret == null) if (fallback) |retained| if (retained.reference) |reference| {
+            if (old_reference) |previous| {
+                if (!std.mem.eql(u8, reference, previous)) try self.retired.append(owned, try owned.dupe(u8, previous));
+            }
+            return try a.dupe(u8, reference);
+        };
         if (old_reference) |reference| {
             const prior: ?[]u8 = get(owned, reference) catch |err| missing: {
                 if (err != error.CredentialMissing) return err;

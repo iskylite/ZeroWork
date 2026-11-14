@@ -84,6 +84,7 @@ pub const Native = struct {
         var frozen = config;
         frozen.endpoint = try owned.dupe(u8, config.endpoint);
         frozen.model = try owned.dupe(u8, config.model);
+        frozen.credential_ref = if (config.credential_ref) |reference| try owned.dupe(u8, reference) else null;
         frozen.auth = switch (config.auth) {
             .none => .none,
             .bearer_memory => |value| .{ .bearer_memory = try owned.dupe(u8, value) },

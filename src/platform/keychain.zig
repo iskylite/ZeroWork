@@ -1,4 +1,5 @@
 const std = @import("std");
+extern fn zw_credentials_cached() c_int;
 extern fn zw_credentials_authorize(service: [*:0]const u8) c_int;
 extern fn zw_credentials_get(service: [*:0]const u8, account: [*:0]const u8, out: *?[*]u8, length: *usize) c_int;
 extern fn zw_credentials_add(service: [*:0]const u8, account: [*:0]const u8, value: [*]const u8, length: usize) c_int;
@@ -7,7 +8,7 @@ extern fn zw_credentials_collect(service: [*:0]const u8, keep: [*]const [*:0]con
 extern fn zw_credentials_erase(service: [*:0]const u8) c_int;
 extern fn zw_credentials_free(value: ?[*]u8, length: usize) void;
 
-pub const Error = error{ CredentialMissing, CredentialDenied, CredentialLocked, CredentialUnavailable, CredentialAlreadyExists, CredentialStorageFailure, CredentialAuthenticationCanceled, CredentialAuthenticationFailed, OutOfMemory };
+pub const Error = error{ CredentialMissing, CredentialDenied, CredentialLocked, CredentialUnavailable, CredentialAlreadyExists, CredentialStorageFailure, CredentialAuthenticationCanceled, CredentialAuthenticationFailed, CredentialBusy, OutOfMemory };
 fn check(status: c_int) Error!void {
     switch (status) {
         0 => {},
@@ -18,6 +19,7 @@ fn check(status: c_int) Error!void {
         -25291 => return error.CredentialUnavailable,
         -43001 => return error.CredentialAuthenticationCanceled,
         -43002 => return error.CredentialAuthenticationFailed,
+        -43003 => return error.CredentialBusy,
         else => return error.CredentialStorageFailure,
     }
 }
@@ -53,7 +55,11 @@ pub fn erase(service: [:0]const u8) !void {
     try check(zw_credentials_erase(service));
 }
 
-/// Explicit user-requested startup recovery; ordinary reads remain noninteractive.
+pub fn cached() bool {
+    return zw_credentials_cached() != 0;
+}
+
+/// Explicit access recovery for a locked legacy keychain.
 pub fn authorize(service: [:0]const u8) !void {
     try check(zw_credentials_authorize(service));
 }

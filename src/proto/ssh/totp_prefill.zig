@@ -44,7 +44,15 @@ pub fn suggest(snapshot: *const auth.Snapshot, request: auth.RequestIdentity, fr
     const endpoint = snapshot.endpoint();
     if (endpoint.port != frozen_host.port or !std.mem.eql(u8, endpoint.host, frozen_host.host) or !std.mem.eql(u8, endpoint.user, frozen_host.user)) return null;
     if (snapshot.source_owner) |source| if (@backingInt(frozen_host.connection_id) == 0 or !std.meta.eql(source, frozen_host.owner())) return null;
-    const seed = frozen_host.totp_secret orelse return null;
+    const allocated = if (frozen_host.totp_secret == null) blk: {
+        const reference = frozen_host.totp_secret_ref orelse return null;
+        break :blk try @import("../../config/credential_store.zig").getCached(std.heap.c_allocator, reference);
+    } else null;
+    defer if (allocated) |secret| {
+        std.crypto.secureZero(u8, secret);
+        std.heap.c_allocator.free(secret);
+    };
+    const seed = frozen_host.totp_secret orelse allocated orelse return null;
     return .{ .identity = request, .code = try totp.generate(seed, time.unix_seconds), .window = time.unix_seconds / totp.period_seconds, .expires_at_ns = snapshot.expires_at_ns };
 }
 
@@ -61,7 +69,7 @@ pub fn suggestForSpec(snapshot: *const auth.Snapshot, request: auth.RequestIdent
     const remote: sessions.RemoteConfig = if (request.hop_index < hops.len) blk: {
         const hop = hops[request.hop_index];
         source_owner = hop.owner;
-        break :blk .{ .endpoint = hop.endpoint, .totp_secret = hop.totp_secret };
+        break :blk .{ .endpoint = hop.endpoint, .totp_secret = hop.totp_secret, .totp_credential = hop.totp_credential };
     } else if (request.hop_index == hops.len) switch (spec) {
         .saved => |value| blk: {
             source_owner = .{ .id = value.connection_id, .revision = value.config_revision };
@@ -70,5 +78,5 @@ pub fn suggestForSpec(snapshot: *const auth.Snapshot, request: auth.RequestIdent
         .temporary_ssh => |value| .{ .endpoint = value.structured_endpoint, .totp_secret = value.totp_secret },
         .local, .plugin => return null,
     } else return null;
-    return suggest(snapshot, request, .{ .connection_id = if (source_owner) |owner| owner.id else @fromBackingInt(0), .revision = if (source_owner) |owner| owner.revision else 1, .name = remote.endpoint.host, .host = remote.endpoint.host, .user = remote.endpoint.user, .port = remote.endpoint.port, .totp_secret = remote.totp_secret }, enabled, time);
+    return suggest(snapshot, request, .{ .connection_id = if (source_owner) |owner| owner.id else @fromBackingInt(0), .revision = if (source_owner) |owner| owner.revision else 1, .name = remote.endpoint.host, .host = remote.endpoint.host, .user = remote.endpoint.user, .port = remote.endpoint.port, .totp_secret = remote.totp_secret, .totp_secret_ref = remote.totp_credential }, enabled, time);
 }

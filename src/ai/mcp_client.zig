@@ -98,12 +98,14 @@ pub const Client = struct {
     input: std.ArrayList(u8) = .empty,
     pub fn init(a: std.mem.Allocator, server: config.Server) !Client {
         try (config.Extensions{ .servers = @constCast((&[_]config.Server{server})[0..]) }).validate();
-        for ([_][]config.Value{ server.environment, server.headers }) |entries| for (entries) |entry| {
-            if (entry.secret_ref != null and entry.value.len == 0) return error.McpCredentialMissing;
-        };
         var arena = std.heap.ArenaAllocator.init(a);
         errdefer arena.deinit();
         const copy = try (config.Extensions{ .servers = @constCast((&[_]config.Server{server})[0..]) }).clone(arena.allocator());
+        for ([_][]config.Value{ copy.servers[0].environment, copy.servers[0].headers }) |entries| for (entries) |*entry| {
+            if (entry.secret_ref) |reference| if (entry.value.len == 0) {
+                entry.value = try @import("../config/credential_store.zig").getIfPresent(arena.allocator(), reference) orelse return error.McpCredentialMissing;
+            };
+        };
         return .{ .allocator = a, .arena = arena, .server = copy.servers[0], .catalog_arena = .init(a) };
     }
     pub fn deinit(self: *Client) void {
