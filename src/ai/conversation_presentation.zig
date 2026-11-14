@@ -7,6 +7,7 @@ const journal = @import("session_journal.zig");
 const wire = @import("wire_history.zig");
 const text = @import("local_text_attachments.zig");
 const images = @import("image_attachments.zig");
+const provider = @import("provider.zig");
 const Segment = struct { text: []const u8, started_ms: u64, ended_ms: ?u64, expanded: bool, submission: ?@import("../host/identity.zig").SubmissionId = null };
 const Timeline = union(enum) { message: Segment, thinking: Segment, input: Segment, tool: usize, notice: usize };
 const Group = struct { first: usize, expanded: bool };
@@ -24,8 +25,10 @@ const Turn = struct {
     thinking_ended_ms: ?u64,
     thinking_expanded: bool,
     file_source: ?@import("terminal_file_source.zig").Source,
-    before: []const journal.Message,
-    after: []const journal.Message,
+    before: []const journal.Message = &.{},
+    after: []const journal.Message = &.{},
+    before_refs: ?[]const usize = null,
+    after_refs: ?[]const usize = null,
     answer: []const u8,
     prose: []const u8,
     thinking: []const u8,
@@ -39,7 +42,71 @@ const TextItem = struct { id: u64, content: text.Content };
 const TextBundle = struct { owner: text.Owner, conversation_id: ?messages.ConversationId, draft_epoch: u64, items: []const TextItem };
 const ImageBundle = struct { owner: text.Owner, conversation_id: ?messages.ConversationId, draft_epoch: u64, ids: []const u64, messages: []const journal.Message };
 const Message = struct { user: bool, text: []const u8, wire_text: ?[]const u8, turn: ?Turn, attachments: ?TextBundle, images: ?ImageBundle };
-const Snapshot = struct { schema: u8 = 1, messages: []const Message };
+const Snapshot = struct {
+    schema: u8 = 1,
+    messages: []const Message,
+    context: []const journal.Message = &.{},
+};
+
+// Before/after checkpoints often share most of their provider messages.
+// Preserve each ordered checkpoint while encoding each distinct message once.
+const ContextTable = struct {
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(journal.Message) = .empty,
+    indices: std.HashMapUnmanaged(provider.Message, usize, MessageKey, 80) = .empty,
+
+    const MessageKey = struct {
+        pub fn hash(_: MessageKey, message: provider.Message) u64 {
+            return std.hash.Wyhash.hash(@backingInt(message.role), message.content);
+        }
+
+        pub fn eql(_: MessageKey, left: provider.Message, right: provider.Message) bool {
+            if (left.role != right.role or left.origin != right.origin or
+                !std.meta.eql(left.skill, right.skill) or
+                !std.meta.eql(left.image_owner, right.image_owner) or left.image_transform != right.image_transform or
+                !std.mem.eql(u8, left.content, right.content) or
+                (left.tool_call_id == null) != (right.tool_call_id == null) or
+                !std.mem.eql(u8, left.tool_call_id orelse "", right.tool_call_id orelse "") or
+                left.tool_calls.len != right.tool_calls.len or
+                left.file_reference_spans.len != right.file_reference_spans.len or
+                left.images.len != right.images.len or left.offloaded_images.len != right.offloaded_images.len) return false;
+            for (left.tool_calls, right.tool_calls) |a, b| {
+                if (!std.mem.eql(u8, a.id, b.id) or !std.mem.eql(u8, a.name, b.name) or !std.mem.eql(u8, a.arguments, b.arguments)) return false;
+            }
+            for (left.file_reference_spans, right.file_reference_spans) |a, b| {
+                if (!std.meta.eql(a, b)) return false;
+            }
+            for (left.images, right.images) |a, b| {
+                if (!sameImage(a, b)) return false;
+            }
+            for (left.offloaded_images, right.offloaded_images) |a, b| {
+                if (!std.meta.eql(a.owner, b.owner) or !sameImage(a.reference, b.reference)) return false;
+            }
+            return true;
+        }
+
+        fn sameImage(left: images.ContentRef, right: images.ContentRef) bool {
+            if (left.snapshot == right.snapshot) return true;
+            const a = left.content() orelse return false;
+            const b = right.content() orelse return false;
+            return a.captured_at_ms == b.captured_at_ms and std.mem.eql(u8, a.path, b.path) and std.mem.eql(u8, a.bytes, b.bytes);
+        }
+    };
+
+    fn checkpoint(self: *ContextTable, history: []const provider.Message) ![]const usize {
+        const refs = try self.allocator.alloc(usize, history.len);
+        for (history, refs) |message, *ref| {
+            const entry = try self.indices.getOrPut(self.allocator, message);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = self.entries.items.len;
+                const encoded = try journal.Journal.encode(self.allocator, &.{message});
+                try self.entries.append(self.allocator, encoded[0]);
+            }
+            ref.* = entry.value_ptr.*;
+        }
+        return refs;
+    }
+};
 
 pub const Version = struct {
     content: u64 = 0,
@@ -81,12 +148,14 @@ pub const Capture = struct {
     }
 };
 
-fn encodeTurn(a: std.mem.Allocator, source: *const turns.Turn) !Turn {
+fn encodeTurn(a: std.mem.Allocator, source: *const turns.Turn, context: *ContextTable) !Turn {
     var result: Turn = undefined;
     inline for (scalar_fields) |field| @field(result, field) = @field(source, field);
     result.file_source = source.file_source;
-    result.before = try journal.Journal.encode(a, source.before.messages);
-    result.after = try journal.Journal.encode(a, source.after.messages);
+    result.before = &.{};
+    result.after = &.{};
+    result.before_refs = try context.checkpoint(source.before.messages);
+    result.after_refs = try context.checkpoint(source.after.messages);
     result.answer = source.answer;
     result.prose = source.prose.items;
     result.thinking = source.thinking.items;
@@ -107,8 +176,8 @@ fn encodeTurn(a: std.mem.Allocator, source: *const turns.Turn) !Turn {
     result.groups = groups;
     return result;
 }
-fn encodeMessage(a: std.mem.Allocator, source: messages.Message) !Message {
-    var result: Message = .{ .user = source.user, .text = source.text, .wire_text = source.wire_text, .turn = if (source.turn) |*turn| try encodeTurn(a, turn) else null, .attachments = null, .images = null };
+fn encodeMessage(a: std.mem.Allocator, source: messages.Message, context: *ContextTable) !Message {
+    var result: Message = .{ .user = source.user, .text = source.text, .wire_text = source.wire_text, .turn = if (source.turn) |*turn| try encodeTurn(a, turn, context) else null, .attachments = null, .images = null };
     if (source.attachments) |bundle| {
         const items = try a.alloc(TextItem, bundle.items.len);
         for (bundle.items, items) |item, *dest| dest.* = .{ .id = item.id, .content = item.reference.content() orelse return error.EmptyAttachmentResult };
@@ -130,18 +199,21 @@ pub fn capture(allocator: std.mem.Allocator, history: []const messages.Message, 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    var context: ContextTable = .{ .allocator = a };
     var result: std.ArrayList(Message) = .empty;
-    for (history) |message| try result.append(a, try encodeMessage(a, message));
+    for (history) |message| try result.append(a, try encodeMessage(a, message, &context));
     if (current) |message| {
-        try result.append(a, try encodeMessage(a, message));
+        try result.append(a, try encodeMessage(a, message, &context));
         // Older/non-timeline turns still keep their complete rendered response.
         for (cards) |card| switch (card) {
-            .text => |body| try result.append(a, try encodeMessage(a, .{ .user = false, .text = @constCast(body) })),
-            .code => |code| try result.append(a, try encodeMessage(a, .{ .user = false, .text = @constCast(code.body) })),
+            .text => |body| try result.append(a, try encodeMessage(a, .{ .user = false, .text = @constCast(body) }, &context)),
+            .code => |code| try result.append(a, try encodeMessage(a, .{ .user = false, .text = @constCast(code.body) }, &context)),
             else => {},
         };
     }
-    return std.json.Stringify.valueAlloc(allocator, Snapshot{ .messages = result.items }, .{});
+    // Placing the context before the turn rows keeps a streaming tail update
+    // contiguous in the journal patch even when its current row grows.
+    return std.json.Stringify.valueAlloc(allocator, .{ .schema = @as(u8, 2), .context = context.entries.items, .messages = result.items }, .{});
 }
 fn decodeHistory(allocator: std.mem.Allocator, source: []const journal.Message, refs: *std.ArrayList(images.ContentRef)) !wire.History {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -149,14 +221,30 @@ fn decodeHistory(allocator: std.mem.Allocator, source: []const journal.Message, 
     const decoded = try journal.Journal.decode(allocator, arena.allocator(), source, refs);
     return wire.History.copy(allocator, decoded, "");
 }
-fn decodeTurn(a: std.mem.Allocator, source: Turn, refs: *std.ArrayList(images.ContentRef)) !turns.Turn {
+fn decodeCheckpoint(a: std.mem.Allocator, inline_messages: []const journal.Message, indices: ?[]const usize, context: ?[]const provider.Message, refs: *std.ArrayList(images.ContentRef)) !wire.History {
+    const table = context orelse {
+        if (indices != null) return error.InvalidPresentation;
+        return decodeHistory(a, inline_messages, refs);
+    };
+    if (inline_messages.len != 0) return error.InvalidPresentation;
+    const order = indices orelse return error.InvalidPresentation;
+    const ordered = try a.alloc(provider.Message, order.len);
+    defer a.free(ordered);
+    for (order, ordered) |index, *message| {
+        if (index >= table.len) return error.InvalidPresentation;
+        message.* = table[index];
+    }
+    return wire.History.copy(a, ordered, "");
+}
+
+fn decodeTurn(a: std.mem.Allocator, source: Turn, context: ?[]const provider.Message, refs: *std.ArrayList(images.ContentRef)) !turns.Turn {
     var result: turns.Turn = .{};
     errdefer result.deinit(a);
     inline for (scalar_fields) |field| @field(result, field) = @field(source, field);
     result.restored_interrupted = source.ended_at_ms == null;
     result.file_source = if (source.file_source) |value| try value.clone(a) else null;
-    result.before = try decodeHistory(a, source.before, refs);
-    result.after = try decodeHistory(a, source.after, refs);
+    result.before = try decodeCheckpoint(a, source.before, source.before_refs, context, refs);
+    result.after = try decodeCheckpoint(a, source.after, source.after_refs, context, refs);
     result.answer = try a.dupe(u8, source.answer);
     try result.prose.appendSlice(a, source.prose);
     try result.thinking.appendSlice(a, source.thinking);
@@ -196,11 +284,11 @@ fn decodeTurn(a: std.mem.Allocator, source: Turn, refs: *std.ArrayList(images.Co
     }
     return result;
 }
-fn decodeMessage(a: std.mem.Allocator, source: Message, refs: *std.ArrayList(images.ContentRef)) !messages.Message {
+fn decodeMessage(a: std.mem.Allocator, source: Message, context: ?[]const provider.Message, refs: *std.ArrayList(images.ContentRef)) !messages.Message {
     var result: messages.Message = .{ .user = source.user, .text = try a.dupe(u8, source.text) };
     errdefer result.deinit(a);
     result.wire_text = if (source.wire_text) |value| try a.dupe(u8, value) else null;
-    result.turn = if (source.turn) |turn| try decodeTurn(a, turn, refs) else null;
+    result.turn = if (source.turn) |turn| try decodeTurn(a, turn, context, refs) else null;
     if (source.attachments) |bundle| {
         result.attachments = .{ .allocator = a, .owner = bundle.owner, .conversation_id = bundle.conversation_id, .draft_epoch = bundle.draft_epoch, .items = try a.alloc(text.Item, bundle.items.len) };
         const items = result.attachments.?.items;
@@ -222,13 +310,19 @@ fn decodeMessage(a: std.mem.Allocator, source: Message, refs: *std.ArrayList(ima
 pub fn restore(a: std.mem.Allocator, bytes: []const u8, through: u64) !std.ArrayList(messages.Message) {
     const parsed = try std.json.parseFromSlice(Snapshot, a, bytes, .{});
     defer parsed.deinit();
-    if (parsed.value.schema != 1) return error.InvalidPresentation;
     // Turn boundaries and attachment cards share immutable pixels on replay.
     var refs: std.ArrayList(images.ContentRef) = .empty;
     defer {
         for (refs.items) |*ref| ref.release();
         refs.deinit(a);
     }
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const context: ?[]const provider.Message = switch (parsed.value.schema) {
+        1 => if (parsed.value.context.len == 0) null else return error.InvalidPresentation,
+        2 => try journal.Journal.decode(a, arena.allocator(), parsed.value.context, &refs),
+        else => return error.InvalidPresentation,
+    };
     var result: std.ArrayList(messages.Message) = .empty;
     errdefer {
         for (result.items) |*message| message.deinit(a);
@@ -237,7 +331,7 @@ pub fn restore(a: std.mem.Allocator, bytes: []const u8, through: u64) !std.Array
     for (parsed.value.messages) |message| {
         if (message.turn) |turn| if (through != 0 and turn.id > through) break;
         try result.ensureUnusedCapacity(a, 1);
-        result.appendAssumeCapacity(try decodeMessage(a, message, &refs));
+        result.appendAssumeCapacity(try decodeMessage(a, message, context, &refs));
     }
     return result;
 }
@@ -257,6 +351,49 @@ pub fn restoreHistory(a: std.mem.Allocator, bytes: ?[]const u8, through: u64, hi
         result.appendAssumeCapacity(.{ .user = message.role == .user, .text = try a.dupe(u8, message.content) });
     }
     return result;
+}
+
+test "conversation presentation deduplicates repeated provider history without merging edited checkpoints" {
+    const a = std.testing.allocator;
+    const large = try a.alloc(u8, 256 * 1024);
+    defer a.free(large);
+    @memset(large, 'x');
+    var first: turns.Turn = .{ .id = 1 };
+    defer first.deinit(a);
+    var second: turns.Turn = .{ .id = 2 };
+    defer second.deinit(a);
+    first.before = try wire.History.copy(a, &.{.{ .content = large }}, "");
+    first.after = try wire.History.copy(a, first.before.messages, "第一轮");
+    second.before = try wire.History.copy(a, first.after.messages, "");
+    second.after = try wire.History.copy(a, &.{ .{ .content = large }, .{ .role = .assistant, .content = "编辑后" } }, "");
+    const snapshot = try capture(a, &.{.{ .user = true, .text = @constCast("first"), .turn = first }}, .{ .user = true, .text = @constCast("second"), .turn = second }, &.{});
+    defer a.free(snapshot);
+    try std.testing.expect(snapshot.len < large.len + 4096);
+    var restored = try restore(a, snapshot, 0);
+    defer {
+        for (restored.items) |*message| message.deinit(a);
+        restored.deinit(a);
+    }
+    try std.testing.expectEqualStrings(large, restored.items[0].turn.?.before.messages[0].content);
+    try std.testing.expectEqualStrings("第一轮", restored.items[1].turn.?.before.messages[1].content);
+    try std.testing.expectEqualStrings("编辑后", restored.items[1].turn.?.after.messages[1].content);
+
+    // Schema 1 stored each checkpoint inline and is still readable.
+    const legacy = try std.json.parseFromSlice(Snapshot, a, snapshot, .{});
+    defer legacy.deinit();
+    var old = legacy.value.messages[0];
+    old.turn.?.before_refs = null;
+    old.turn.?.after_refs = null;
+    old.turn.?.before = &.{.{ .role = .user, .content = large }};
+    old.turn.?.after = &.{.{ .role = .assistant, .content = "旧回答" }};
+    const legacy_bytes = try std.json.Stringify.valueAlloc(a, Snapshot{ .messages = &.{old} }, .{});
+    defer a.free(legacy_bytes);
+    var legacy_restored = try restore(a, legacy_bytes, 0);
+    defer {
+        for (legacy_restored.items) |*message| message.deinit(a);
+        legacy_restored.deinit(a);
+    }
+    try std.testing.expectEqualStrings("旧回答", legacy_restored.items[0].turn.?.after.messages[0].content);
 }
 
 test "conversation presentation legacy history restores missing and empty snapshots without replay" {

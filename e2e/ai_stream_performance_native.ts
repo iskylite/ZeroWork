@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {mkdtemp, mkdir, writeFile, open, realpath} from 'node:fs/promises';
+import {mkdtemp, mkdir, writeFile, open, realpath, stat} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 
 const prefix = resolve(process.argv[2]);
@@ -12,6 +12,7 @@ const prose = process.argv.includes('--prose') || code;
 const detailsInput = process.argv.includes('--details-input') || prose;
 const chunks = Number(process.env.ZW_AI_PERF_CHUNKS ?? (detailsInput ? 240 : 1200));
 const enforce = process.argv.includes('--enforce');
+const largeHistory = process.argv.includes('--large-history');
 await mkdir(out, {recursive:true});
 const iso = await realpath(await mkdtemp('/tmp/zw-stream-perf-'));
 const data = join(iso,'data'), rpc = join(iso,'rpc'), zdot = join(iso,'zdot');
@@ -47,6 +48,33 @@ const server = createServer(async(req,res)=>{
 });
 await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
 await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\n[ai]\ndefault_provider="perf"\nstep_display="collapsed"\n[[ai.providers]]\nid="perf"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${(server.address() as any).port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="perf"\ncontext_window=200000\ndefault=true\nreasoning=true\nefforts=["low","medium","high"]\n`);
+const journalPath = join(data, 'ai-sessions.jsonl');
+if (largeHistory) {
+  const conversation = '0102030405060708090a0b0c0d0e0f10';
+  const line = (event: object) => JSON.stringify({schema:1,event}) + '\n';
+  const fixture = await open(journalPath, 'w', 0o600);
+  const context = {role:'user',content:'synthetic immutable context '.repeat(32768)};
+  // Write the legacy fixture one message at a time to keep runner memory bounded.
+  try {
+    await fixture.write(line({kind:'migrate_closed',conversation,revision:2,owner:{session:1},initial_origin:{session:1},turn:96}));
+    const [header, trailer] = line({kind:'presentation',conversation,revision:2,presentation:'@@'}).split('@@');
+    const escape = (text: string) => JSON.stringify(text).slice(1, -1);
+    await fixture.write(header + escape('{"schema":1,"messages":['));
+    for (let i=1; i<=96; i++) {
+      const answer = '历史答复 ' + i;
+      const turn = {
+        id:i,task_id:null,sent_at_ms:1700000000000,ended_at_ms:1700000001000,started_mono_ms:0,elapsed_ms:1000,
+        input_tokens:null,output_tokens:null,thinking_started_ms:null,thinking_ended_ms:null,thinking_expanded:false,file_source:null,
+        before:[context],after:[context,{role:'assistant',content:answer}],
+        answer,prose:'',thinking:'',steps:[],notices:[],timeline:[],groups:[],
+      };
+      await fixture.write((i===1?'':',')+escape(JSON.stringify({user:true,text:'历史问题 '+i,wire_text:null,images:null,attachments:null,turn})));
+    }
+    await fixture.write(']}'+trailer);
+  } finally {
+    await fixture.close();
+  }
+}
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const h=await import(join(prefix,'share/zenit/harness/client.ts'));
 const log=await open(join(out,'app.log'),'w');
@@ -59,7 +87,11 @@ const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)
 const report:any={status:'running',prefix,isolated:iso,latency_ms:[]};
 try {
  await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);
- await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
+ await click('workspace.empty.local');await visible('terminal.surface');await click(largeHistory?'toolbar.ai':'ai.strip');
+ if(largeHistory) {
+  await click('ai.sessions');await click('ai.session.restore.1');await visible('ai.message.user.text');
+  report.journal_before_bytes=(await stat(journalPath)).size;
+ }
  await click('ai.prompt');await h.type_('连续核对当前上下文，验证十八个步骤');
  await h.resetTiming();const started=performance.now();await click('ai.send');
  await h.waitFor(()=>{assert.equal(fixtureError,null);return streaming||null},90000);
@@ -154,6 +186,7 @@ try {
  report.latency_p95_ms=[...report.latency_ms].sort((a,b)=>a-b)[Math.ceil(report.latency_ms.length*.95)-1];
  }
  report.latency_p95_ms=[...report.latency_ms].sort((a,b)=>a-b)[Math.ceil(report.latency_ms.length*.95)-1];
+ if(largeHistory) report.journal_during_bytes=(await stat(journalPath)).size;
  assert((await h.screenshot(join(out,'stream-effort.png'))).ok);
  if(prose) {
   const viewport=await h.screenPos('ai.conversation.viewport');
@@ -180,6 +213,7 @@ try {
   }
   assert(report.stream_stats.timing_samples>=10,'need real rendered samples');
   assert(report.latency_p95_ms<250,detailsInput?'composer typing including RPC must respond within 250 ms p95':'effort input including RPC must respond within 250 ms p95');
+  if(largeHistory) assert(report.journal_during_bytes-report.journal_before_bytes<8*1024*1024,'stream updates must not rewrite the legacy history');
  }
  assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);
  const deadline=performance.now()+20000;
@@ -188,6 +222,7 @@ try {
   await Promise.race([ended,delay(100)]);
  }
  assert.notEqual(app.exitCode,null,'normal Quit');assert.deepEqual(await ended,{code:0,signal:null});report.status='passed';
+ if(largeHistory) report.journal_final_bytes=(await stat(journalPath)).size;
 }catch(e){report.status='failed';report.error=String(e);process.exitCode=1;await h.screenshot(join(out,'failure.png')).catch(()=>{});}
 finally {
  interactiveReady=true;finish=true;if(app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await ended;}

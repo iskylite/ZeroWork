@@ -101,22 +101,40 @@ try {
         report.streaming_snapshots = saves;
         await quit();
         const original = await readFile(journal, 'utf8');
-        const latest = original.trim().split('\n').map(JSON.parse).filter(e => e.event?.kind === 'presentation').at(-1);
+        const latest = original.trim().split('\n').map(JSON.parse).find(e => e.event?.kind === 'presentation' && !e.event.presentation_patch);
         assert(latest);
         // Valid obsolete snapshots with large trailing JSON whitespace model
         // the 128 MiB archive without changing any rendered chat content.
         const padded = JSON.stringify({...latest, event: {...latest.event, presentation: latest.event.presentation + ' '.repeat(256 * 1024)}}) + '\n';
-        const final = JSON.stringify(latest) + '\n';
-        const count = Math.floor((128 * 1024 * 1024 - 64 * 1024 - Buffer.byteLength(original + final)) / Buffer.byteLength(padded));
-        await writeFile(journal, original + padded.repeat(count) + final);
+        const count = Math.floor((128 * 1024 * 1024 - 64 * 1024 - Buffer.byteLength(original)) / Buffer.byteLength(padded));
+        // Put obsolete full snapshots before the real base and its patches.
+        const split = original.indexOf('\n') + 1;
+        const file = await open(journal, 'w');
+        try {
+            await file.write(original.slice(0, split));
+            for (let i = 0; i < count; i++) await file.write(padded);
+            await file.write(original.slice(split));
+        } finally {
+            await file.close();
+        }
         report.checks.push('80 streamed deltas produce at most six complete display snapshots');
     }
     const before = await readFile(journal, 'utf8');
     const sourceLines = before.trim().split('\n');
-    const lastPresentation = new Map<string, string>();
+    const lastPresentation = new Map<string, {base: string, patch?: string}>();
     const expected = sourceLines.filter(line => {
         const row = JSON.parse(line);
-        if (row.event?.kind === 'presentation') { lastPresentation.set(row.event.conversation, line); return false; }
+        if (row.event?.kind === 'presentation') {
+            const id = row.event.conversation;
+            if (row.event.presentation_patch) {
+                const saved = lastPresentation.get(id);
+                assert(saved, 'Presentation patch needs a base');
+                saved.patch = line;
+            } else {
+                lastPresentation.set(id, {base: line});
+            }
+            return false;
+        }
         return true;
     });
     await launch();
@@ -124,7 +142,11 @@ try {
     report.bytes_before = Buffer.byteLength(before); report.bytes_after = Buffer.byteLength(after);
     assert(report.bytes_after < report.bytes_before / 4, 'Restart must reclaim superseded snapshots');
     const actual = after.trim().split('\n');
-    for (const line of [...expected, ...lastPresentation.values()]) assert(actual.includes(line), 'Every non-display event and latest complete chat snapshot must survive byte-for-byte');
+    for (const {base, patch} of lastPresentation.values()) {
+        expected.push(base);
+        if (patch) expected.push(patch);
+    }
+    for (const line of expected) assert(actual.includes(line), 'Every non-display event and the latest chat snapshot with its base must survive byte-for-byte');
     assert.equal(requests, fixture ? 0 : 1, 'Reopening must not replay model or tools');
     await click('ai.sessions');
     const buttons = flat(await h.query('ai.sessions.menu')).filter(n => shown(n) && /^ai\.session\.jump\.\d+$/.test(n.test_id ?? ''));

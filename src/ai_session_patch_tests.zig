@@ -339,6 +339,45 @@ test "AI session PATCH journal compaction preserves chat forks drafts receipts a
     try std.testing.expectEqualStrings("first complete snapshot", restored.find(forked).?.presentation.?);
 }
 
+test "AI session PATCH journal stores changed presentation bytes and compacts to the base and latest patch" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = "patch.jsonl";
+    var journal = try Journal.open(a, std.testing.io, tmp.dir, path);
+    defer journal.deinit();
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    try journal.bind(&store);
+    const ticket = try store.create((try store.attach(.{ .session = 1 })).id);
+    const context = try a.alloc(u8, 256 * 1024);
+    defer a.free(context);
+    @memset(context, 'x');
+    const start = "{\"schema\":2,\"context\":[],\"messages\":[\"";
+    const base = try std.mem.concat(a, u8, &.{ start, context, "旧文本\"]}" });
+    defer a.free(base);
+    const intermediate = try std.mem.concat(a, u8, &.{ start, context, "新文本🙂\"]}" });
+    defer a.free(intermediate);
+    const latest = try std.mem.concat(a, u8, &.{ start, context, "最终文本🙃\"]}" });
+    defer a.free(latest);
+    try store.savePresentation(ticket.conversation, base);
+    const base_end = journal.bytes.items.len;
+    try store.savePresentation(ticket.conversation, intermediate);
+    try store.savePresentation(ticket.conversation, latest);
+    try std.testing.expect(journal.bytes.items.len - base_end < 2048);
+    try journal.compact();
+    try std.testing.expect(std.mem.indexOf(u8, journal.bytes.items, "旧文本") != null);
+    try std.testing.expect(std.mem.indexOf(u8, journal.bytes.items, "新文本") == null);
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "replay.jsonl", .data = journal.bytes.items });
+    var replay = try Journal.open(a, std.testing.io, tmp.dir, "replay.jsonl");
+    defer replay.deinit();
+    var restored = lifecycle.Store.init(a);
+    defer restored.deinit();
+    try replay.bind(&restored);
+    try std.testing.expectEqualStrings(latest, restored.find(ticket.conversation).?.presentation.?);
+}
+
 test "AI session PATCH journal repairs only an interrupted tail after validating committed records" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -1045,7 +1084,7 @@ test "AI session PATCH background presentation coalesces versions and survives r
     // and deduplication all return without waiting for the writer.
     try std.testing.expect(journal.mutex.tryLock());
     {
-        defer journal.mutex.unlock();
+        defer journal.mutex.unlock(journal.io);
         const current = @import("ai/assistant_store.zig").Message{ .user = true, .text = &text };
         try std.testing.expectEqual(.queued, try store.queuePresentation(record, first, &.{}, current, &.{}));
         try std.testing.expectEqual(.queued, try store.queuePresentation(record, first, &.{}, current, &.{}));

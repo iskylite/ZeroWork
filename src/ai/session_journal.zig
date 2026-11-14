@@ -6,6 +6,8 @@ const input = @import("session_input.zig");
 const provider = @import("provider.zig");
 const images = @import("image_attachments.zig");
 const compact_bytes = 8 * 1024 * 1024;
+const PresentationPatch = struct { prefix: usize, suffix: usize };
+const ConversationId = @import("../host/identity.zig").ConversationId;
 const Image = struct { path: []const u8, encoded: []const u8, captured_at: i64, offloaded: bool = false, owner: ?@import("../host/identity.zig").SessionHandle = null };
 pub const Message = struct {
     role: provider.Role,
@@ -45,6 +47,7 @@ const StoredEvent = struct {
     draft: ?[]const u8 = null,
     recoverable: bool = true,
     presentation: ?[]const u8 = null,
+    presentation_patch: ?PresentationPatch = null,
     context_usage: ?@import("context_usage.zig").Stored = null,
     initial_input: ?input.Receipt = null,
     initial_origin: ?@import("tool_scope.zig").Owner = null,
@@ -63,7 +66,7 @@ const StoredEvent = struct {
     pub fn jsonStringify(self: StoredEvent, writer: *std.json.Stringify) !void {
         try writer.beginObject();
         inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
-            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text") or std.mem.eql(u8, name, "conversation_model") or std.mem.startsWith(u8, name, "workspace")) @field(self, name) != null else true;
+            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text") or std.mem.eql(u8, name, "conversation_model") or std.mem.eql(u8, name, "presentation_patch") or std.mem.startsWith(u8, name, "workspace")) @field(self, name) != null else true;
             if (emit) {
                 try writer.objectField(name);
                 try writer.write(@field(self, name));
@@ -103,8 +106,9 @@ pub const Journal = struct {
     bytes: std.ArrayList(u8) = .empty,
     stamp: ?Stamp = null,
     compact_at: usize = compact_bytes,
-    mutex: std.atomic.Mutex = .unlocked,
+    mutex: std.Io.Mutex = .init,
     checkpoint_job: ?*Checkpoint = null,
+    presentation_bases: std.AutoHashMapUnmanaged(ConversationId, []u8) = .empty,
 
     const Stamp = struct {
         inode: std.Io.File.INode,
@@ -146,6 +150,20 @@ pub const Journal = struct {
         self.lock_file.close(self.io);
         self.allocator.free(self.path);
         self.bytes.deinit(self.allocator);
+        var bases = self.presentation_bases.valueIterator();
+        while (bases.next()) |base| self.allocator.free(base.*);
+        self.presentation_bases.deinit(self.allocator);
+    }
+
+    fn publishPresentationBase(self: *Journal, id: ConversationId, base: ?[]u8) void {
+        if (self.presentation_bases.fetchRemove(id)) |prior| self.allocator.free(prior.value);
+        if (base) |bytes| self.presentation_bases.putAssumeCapacity(id, bytes);
+    }
+
+    fn preparePresentationBase(self: *Journal, bytes: []const u8) !?[]u8 {
+        if (!std.mem.startsWith(u8, bytes, "{\"schema\":2,")) return null;
+        try self.presentation_bases.ensureUnusedCapacity(self.allocator, 1);
+        return try self.allocator.dupe(u8, bytes);
     }
     pub fn bind(self: *Journal, store: *lifecycle.Store) !void {
         if (store.records.items.len != 0 or store.agents.items.len != 0) return error.JournalRequiresEmptyStore;
@@ -160,7 +178,9 @@ pub const Journal = struct {
             const parsed = try std.json.parseFromSlice(Line, self.allocator, line, .{});
             defer parsed.deinit();
             const row = parsed.value;
-            if (row.schema < 1 or row.schema > 4) return error.InvalidSessionJournal;
+            if (row.schema < 1 or row.schema > 5) return error.InvalidSessionJournal;
+            const patch = if (row.event) |event| event.presentation_patch else null;
+            if ((row.schema == 5) != (patch != null)) return error.InvalidSessionJournal;
             const kinds: u8 = @as(u8, @intFromBool(row.event != null)) + @intFromBool(row.receipt != null) + @intFromBool(row.order != null) + @intFromBool(row.consumed_batch != null);
             if (kinds != 1) return error.InvalidSessionJournal;
             if (row.schema < 4) {
@@ -193,8 +213,19 @@ pub const Journal = struct {
             const transcript = try decode(self.allocator, a, row.transcript, &refs);
             if (row.event) |original| {
                 var event: lifecycle.Event = .{ .kind = original.kind, .conversation = original.conversation, .revision = original.revision, .messages = messages };
-                inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| @field(event, name) = @field(original, name);
+                inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
+                    if (comptime !std.mem.eql(u8, name, "presentation_patch")) @field(event, name) = @field(original, name);
+                }
+                if (patch) |edit| {
+                    if (original.kind != .presentation) return error.InvalidSessionJournal;
+                    const base = self.presentation_bases.get(original.conversation) orelse return error.InvalidSessionJournal;
+                    if (edit.prefix > base.len or edit.suffix > base.len - edit.prefix) return error.InvalidSessionJournal;
+                    event.presentation = try std.mem.concat(a, u8, &.{ base[0..edit.prefix], original.presentation orelse return error.InvalidSessionJournal, base[base.len - edit.suffix ..] });
+                } else if (original.kind == .presentation) {
+                    self.publishPresentationBase(original.conversation, try self.preparePresentationBase(original.presentation orelse return error.InvalidSessionJournal));
+                }
                 try store.replay(event);
+                self.dropRemovedPresentationBases(original);
             } else if (row.consumed_batch) |batch| {
                 if (batch.len == 0 or messages.len != 0) return error.InvalidSessionJournal;
                 const first = batch[0].receipt;
@@ -281,9 +312,9 @@ pub const Journal = struct {
             writeEvent(self.journal, self.event) catch |err| {
                 self.failure = err;
             };
-            while (!self.journal.mutex.tryLock()) std.Thread.yield() catch {};
+            self.journal.mutex.lockUncancelable(self.journal.io);
             self.journal.checkpoint_job = null;
-            self.journal.mutex.unlock();
+            self.journal.mutex.unlock(self.journal.io);
             self.done.store(true, .release);
         }
         fn ready(raw: *anyopaque) bool {
@@ -305,7 +336,7 @@ pub const Journal = struct {
         const self: *Journal = @ptrCast(@alignCast(raw));
         // Controller ticks never wait on another agent's journal IO.
         if (!self.mutex.tryLock()) return error.WorkerBusy;
-        defer self.mutex.unlock();
+        defer self.mutex.unlock(self.io);
         if (self.checkpoint_job != null) return error.WorkerBusy;
         const job = try self.allocator.create(Checkpoint);
         errdefer self.allocator.destroy(job);
@@ -318,10 +349,50 @@ pub const Journal = struct {
     fn writeEvent(raw: *anyopaque, original: lifecycle.Event) !void {
         const self: *Journal = @ptrCast(@alignCast(raw));
         var event: StoredEvent = undefined;
-        inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| @field(event, name) = @field(original, name);
+        inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
+            @field(event, name) = if (comptime std.mem.eql(u8, name, "presentation_patch")) null else @field(original, name);
+        }
+        if (event.kind == .presentation) return self.appendPresentation(event);
         const extended = event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.kind == .task_fact or event.kind == .child_launch;
         const schema: u8 = if (workspaceEvent(event) or event.kind == .conversation_model or hasMessageProvenance(original.messages)) 4 else if (event.kind == .task_fact or event.kind == .child_launch) 3 else if (extended) 2 else 1;
         try self.append(.{ .schema = schema, .event = event }, original.messages, &.{});
+    }
+
+    fn appendPresentation(self: *Journal, original: StoredEvent) !void {
+        const bytes = original.presentation orelse return error.InvalidSessionJournal;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var event = original;
+        if (self.presentation_bases.get(event.conversation)) |base| {
+            var prefix = std.mem.indexOfDiff(u8, base, bytes) orelse @min(base.len, bytes.len);
+            // JSON text can differ inside a UTF-8 codepoint.
+            while (prefix > 0 and prefix < bytes.len and bytes[prefix] & 0xc0 == 0x80) prefix -= 1;
+            var suffix: usize = 0;
+            while (suffix < @min(base.len, bytes.len) - prefix and base[base.len - suffix - 1] == bytes[bytes.len - suffix - 1]) suffix += 1;
+            while (suffix > 0 and bytes[bytes.len - suffix] & 0xc0 == 0x80) suffix -= 1;
+            if (prefix + suffix > bytes.len / 2 and std.mem.startsWith(u8, bytes, "{\"schema\":2,")) {
+                event.presentation = bytes[prefix .. bytes.len - suffix];
+                event.presentation_patch = .{ .prefix = prefix, .suffix = suffix };
+            }
+        }
+        const next_base = if (event.presentation_patch == null) try self.preparePresentationBase(bytes) else null;
+        errdefer if (next_base) |base| self.allocator.free(base);
+        const line: Line = .{ .schema = if (event.presentation_patch == null) 1 else 5, .event = event };
+        const encoded = try std.json.Stringify.valueAlloc(self.allocator, line, .{});
+        defer self.allocator.free(encoded);
+        if (self.bytes.items.len >= self.compact_at) try self.compactLocked();
+        try self.appendLocked(line, encoded);
+        if (event.presentation_patch == null) self.publishPresentationBase(event.conversation, next_base);
+    }
+
+    fn dropRemovedPresentationBases(self: *Journal, event: StoredEvent) void {
+        switch (event.kind) {
+            .remove, .remove_family => {
+                self.publishPresentationBase(event.conversation, null);
+                for (event.children orelse &.{}) |child| self.publishPresentationBase(child, null);
+            },
+            else => {},
+        }
     }
     fn tryDraft(raw: *anyopaque, original: lifecycle.Event) !void {
         const self: *Journal = @ptrCast(@alignCast(raw));
@@ -329,9 +400,8 @@ pub const Journal = struct {
         const encoded = try std.json.Stringify.valueAlloc(self.allocator, Line{ .event = event }, .{});
         defer self.allocator.free(encoded);
         if (!self.mutex.tryLock()) return error.JournalBusy;
-        defer self.mutex.unlock();
-        // Draft input can wait for the next frame. A large journal scan
-        // belongs to the next regular append, never the draft input path.
+        defer self.mutex.unlock(self.io);
+        // Presentation writers handle compaction. The draft path only appends.
         try self.appendLocked(.{ .event = event }, encoded);
     }
     fn writeInput(raw: *anyopaque, receipt: input.Receipt, messages: []const provider.Message) !void {
@@ -382,8 +452,8 @@ pub const Journal = struct {
         line.transcript = try encode(a, transcript);
         var encoded = try std.json.Stringify.valueAlloc(a, line, .{});
         // Serialize only the append, boundary checks and durable acknowledgement.
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         if (line.event) |*event| if (event.kind == .checkpoint) {
             if (self.checkpoint_job) |job| if (event.conversation.eql(job.event.conversation) and event.turn == job.event.turn) {
                 if (event.revision != job.latest_revision) {
@@ -394,8 +464,8 @@ pub const Journal = struct {
                 }
             };
         };
-        if (self.bytes.items.len >= self.compact_at) try self.compactLocked();
         try self.appendLocked(line, encoded);
+        if (line.event) |event| self.dropRemovedPresentationBases(event);
     }
 
     fn appendLocked(self: *Journal, line: Line, encoded: []const u8) !void {
@@ -453,19 +523,19 @@ pub const Journal = struct {
         self.stamp = Stamp.of(try self.dir.statFile(self.io, self.path, .{}));
     }
 
-    /// Keep every lifecycle/receipt event, and the last complete display
-    /// snapshot of each conversation at its original position in the stream.
-    /// Forks carry their own pinned snapshots. No chat messages are discarded.
+    /// Keep lifecycle and receipt events, plus each conversation's latest
+    /// display state and the base it needs. Forks carry their own snapshots.
     pub fn compact(self: *Journal) !void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         try self.compactLocked();
     }
 
     fn compactLocked(self: *Journal) !void {
-        const Header = struct { event: ?struct { kind: @FieldType(lifecycle.Event, "kind"), conversation: @FieldType(lifecycle.Event, "conversation") } = null };
+        const Header = struct { event: ?struct { kind: @FieldType(lifecycle.Event, "kind"), conversation: ConversationId, presentation_patch: ?PresentationPatch = null } = null };
         const Span = struct { start: usize, end: usize, superseded: bool = false };
-        var latest = std.AutoHashMap(@FieldType(lifecycle.Event, "conversation"), usize).init(self.allocator);
+        const Saved = struct { base: ?usize = null, patch: ?usize = null };
+        var latest = std.AutoHashMap(ConversationId, Saved).init(self.allocator);
         defer latest.deinit();
         var spans: std.ArrayList(Span) = .empty;
         defer spans.deinit(self.allocator);
@@ -482,8 +552,15 @@ pub const Journal = struct {
             try spans.append(self.allocator, .{ .start = offset, .end = offset + line.len + 1 });
             if (parsed.value.event) |event| if (event.kind == .presentation) {
                 const entry = try latest.getOrPut(event.conversation);
-                if (entry.found_existing) spans.items[entry.value_ptr.*].superseded = true;
-                entry.value_ptr.* = index;
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                const saved = entry.value_ptr;
+                if (saved.patch) |prior| spans.items[prior].superseded = true;
+                if (event.presentation_patch != null) {
+                    saved.patch = index;
+                } else {
+                    if (saved.base) |prior| spans.items[prior].superseded = true;
+                    saved.* = .{ .base = index };
+                }
             };
             offset += line.len + 1;
         }
