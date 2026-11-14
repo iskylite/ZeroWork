@@ -427,7 +427,10 @@ const server = createServer(async (req, res) => {
         if (name === 'host.wait_session_ready' && result.state === 'ready') liveReconnectEvidence.ready = { ...result, receipt: envelope.receipt };
         if (name === 'host.wait_session_ready') {
           liveReconnectEvidence.wait_result = envelope;
-          if (result.state === 'failed') liveReconnectEvidence.failed = { ...result, receipt: envelope.receipt };
+          if (result.state === 'failed') {
+            assert.equal(envelope.status, 'failed');
+            liveReconnectEvidence.failed = { ...result, receipt: envelope.receipt };
+          }
         }
         if (reconnectGroup && !nextReconnectStarted && name === 'host.get_session' && result.session?.session_id === Number(sourceRef.split(':')[2])) liveReconnectEvidence.target_status = result.session;
       }
@@ -497,7 +500,7 @@ const server = createServer(async (req, res) => {
       assert.equal(body.reasoning_effort, 'xhigh');
       if (reconnectGroup && !nextReconnectStarted) for (const message of body.messages) {
         if (message.role !== 'user' || !message.content.startsWith('{')) continue;
-        const loss = JSON.parse(message.content).ssh_transport_lost;
+        const loss = JSON.parse(message.content).group_reconnects?.find((entry: any) => entry.previous_session_ref === sourceRef);
         if (!loss?.operation_ref) continue;
         assert.equal(loss.previous_session_ref, sourceRef);
         if (liveReconnectEvidence.automatic_operation) assert.equal(loss.operation_ref, liveReconnectEvidence.automatic_operation);
@@ -587,9 +590,9 @@ const server = createServer(async (req, res) => {
       if (name === 'host.wait_execution') waitEmitted = true;
       res.end(frame({ tool_calls: [{ index: 0, id, type: 'function', function: { name: wire(name), arguments: JSON.stringify(args) } }] }) + done);
     };
-    const result = (id: string) => {
+    const result = (id: string, expected = 'succeeded') => {
       const envelope = results.get(id); if (!envelope) return null;
-      assert.equal(envelope.status, 'succeeded', `${id}: ${JSON.stringify(envelope)}`);
+      assert.equal(envelope.status, expected, `${id}: ${JSON.stringify(envelope)}`);
       return bodyOf(envelope);
     };
     if (!sourceRef) {
@@ -604,7 +607,7 @@ const server = createServer(async (req, res) => {
       assert.equal(accepted.state, 'accepted');
       assert.equal(accepted.session_ref, null);
       assert.equal(accepted.previous_session_ref, sourceRef);
-      const terminal = result('reconnect-wait');
+      const terminal = result('reconnect-wait', reconnectFailure ? 'failed' : 'succeeded');
       if (!terminal) return emit('reconnect-wait', 'host.wait_session_ready', { operation_ref: accepted.operation_ref, wait_for: reconnectFailure ? 'transport' : 'interactive', wait_ms: 15000 });
       assert.equal(terminal.operation_ref, accepted.operation_ref);
       assert.equal(terminal.state, reconnectFailure ? 'failed' : 'ready');

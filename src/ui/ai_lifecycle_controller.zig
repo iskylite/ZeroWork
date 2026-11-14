@@ -261,7 +261,15 @@ pub const Controller = struct {
             .joined_automatic = receipt.joined_automatic,
         };
         if (receipt.state == .ready) {
-            const tab = self.app.workspace.sessionTab(receipt.legacy_id) orelse return result;
+            if (!self.app.reconnectSuccessorLive(receipt)) {
+                const reason = "ReconnectConnectionLost";
+                result.state = .failed;
+                result.revision += 1;
+                @memcpy(result.failure[0..reason.len], reason);
+                result.failure_len = reason.len;
+                return result;
+            }
+            const tab = self.app.workspace.sessionTab(receipt.legacy_id).?;
             const facts = @import("ai_host_queries.zig").trustedPtyInfo(self.app, tab, result.successor.?);
             result.execution_readiness = if (facts.ready) .ready else if (facts.failure) |reason| if (std.mem.eql(u8, reason, "WorkerBusy") or std.mem.eql(u8, reason, "ShellIntegrationPending")) .initializing else .unsupported else .initializing;
         }

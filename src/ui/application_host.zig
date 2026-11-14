@@ -33,6 +33,10 @@ pub const ReconnectReceipt = struct {
     failure_len: usize = 0,
     joined_automatic: bool = false,
 
+    pub fn belongsToTask(self: ReconnectReceipt, context: @import("../ai/host_tools.zig").Context) bool {
+        return self.context.conversation_id.eql(context.conversation_id) and self.context.task_id.eql(context.task_id) and self.context.binding.eql(context.binding);
+    }
+
     pub fn fail(self: *ReconnectReceipt, reason: []const u8) void {
         var len = @min(reason.len, self.failure.len);
         while (len > 0 and !std.unicode.utf8ValidateSlice(reason[0..len])) len -= 1;
@@ -1619,17 +1623,49 @@ pub const ApplicationHost = struct {
     }
 
     pub fn taskAutomaticReconnect(self: *const ApplicationHost, context: @import("../ai/host_tools.zig").Context, original: identity.SessionHandle) ?*const ReconnectReceipt {
-        for (self.reconnects.items) |*record| if (record.joined_automatic and record.context.eql(context) and (record.original.eql(original) or (record.successor != null and record.successor.?.handle.eql(original)))) return record;
+        const record = self.taskReconnect(context, original) orelse return null;
+        return if (record.joined_automatic) record else null;
+    }
+
+    pub fn taskReconnect(self: *const ApplicationHost, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) ?*const ReconnectReceipt {
+        for (self.reconnects.items) |*record| {
+            if (record.context.eql(context) and (record.original.eql(handle) or (record.successor != null and record.successor.?.handle.eql(handle)))) return record;
+        }
         return null;
     }
 
     pub fn permitsReconnectExecution(self: *const ApplicationHost, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) bool {
         if (context.binding != .group) return true;
-        for (self.reconnects.items) |record| {
-            if (!record.joined_automatic or !record.context.eql(context)) continue;
-            if (record.state != .ready or record.successor == null or !record.successor.?.handle.eql(handle)) return false;
+        return switch (reconnectExecutionReceipt(self.reconnects.items, context, handle)) {
+            .unrestricted => true,
+            .blocked => false,
+            .ready => |receipt| self.reconnectSuccessorLive(receipt),
+        };
+    }
+
+    fn reconnectExecutionReceipt(records: []const ReconnectReceipt, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) union(enum) { unrestricted, blocked, ready: *const ReconnectReceipt } {
+        var has_reconnect = false;
+        var index = records.len;
+        while (index > 0) {
+            index -= 1;
+            const record = &records[index];
+            if (!record.belongsToTask(context)) continue;
+            has_reconnect = true;
+            if (record.original.session_id != handle.session_id) continue;
+            const successor = record.successor orelse return .blocked;
+            return if (record.state == .ready and successor.handle.eql(handle)) .{ .ready = record } else .blocked;
         }
-        return true;
+        return if (has_reconnect) .blocked else .unrestricted;
+    }
+
+    pub fn reconnectSuccessorLive(self: *const ApplicationHost, receipt: *const ReconnectReceipt) bool {
+        const successor = receipt.successor orelse return false;
+        const state = self.sessions.queryState(successor.handle) orelse return false;
+        if (state.lifecycle != .attached or !state.create_operation.eql(successor.operation)) return false;
+        const tab = self.workspace.sessionTab(receipt.legacy_id) orelse return false;
+        if (!tab.content_owner.eql(.{ .session = successor.handle }) or tab.archived or tab.closing) return false;
+        const transport = (tab.runtime orelse return false).reconnectSnapshot() orelse return false;
+        return transport.key != null and transport.key.?.eql(successor.operation) and (transport.phase == .active or transport.phase == .ready);
     }
 
     pub fn trackTaskAutomaticReconnect(self: *ApplicationHost, context: @import("../ai/host_tools.zig").Context, original: identity.SessionHandle) !?ReconnectReceipt {
@@ -4251,6 +4287,36 @@ const ReceiptTestAdapter = struct {
         return .awaiting;
     }
 };
+
+test "SSH reconnect group execution checks each exact successor independently" {
+    const context: @import("../ai/host_tools.zig").Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .group = 7 }, .binding_revision = 1, .grant_revision = 1 };
+    const first: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
+    const second: identity.SessionHandle = .{ .session_id = @fromBackingInt(2), .generation = 1 };
+    const peer: identity.SessionHandle = .{ .session_id = @fromBackingInt(3), .generation = 1 };
+    const first_next = try first.nextGeneration();
+    const second_next = try second.nextGeneration();
+    const first_key: OperationKey = .{ .owner = .{ .session = first }, .operation_id = 1, .attempt_id = 1 };
+    const second_key: OperationKey = .{ .owner = .{ .session = second }, .operation_id = 2, .attempt_id = 1 };
+    var records = [_]ReconnectReceipt{
+        .{ .context = context, .operation = .generate(), .original = first, .original_attempt = first_key, .legacy_id = 1, .deadline_ns = 1, .joined_automatic = true, .state = .ready, .successor = .{ .handle = first_next, .operation = first_key } },
+        .{ .context = context, .operation = .generate(), .original = second, .original_attempt = second_key, .legacy_id = 2, .deadline_ns = 1, .state = .connecting, .successor = .{ .handle = second_next, .operation = second_key } },
+    };
+    const check = ApplicationHost.reconnectExecutionReceipt;
+    try std.testing.expect(check(&records, context, first_next) == .ready);
+    try std.testing.expect(check(&records, context, second_next) == .blocked);
+    try std.testing.expect(check(&records, context, first) == .blocked);
+    try std.testing.expect(check(&records, context, peer) == .blocked);
+    records[1].state = .failed;
+    try std.testing.expect(check(&records, context, first_next) == .ready);
+    try std.testing.expect(check(&records, context, second_next) == .blocked);
+    try std.testing.expect(check(records[1..], context, peer) == .blocked);
+    records[1].state = .ready;
+    try std.testing.expect(check(&records, context, first_next) == .ready);
+    try std.testing.expect(check(&records, context, second_next) == .ready);
+    var next_task = context;
+    next_task.task_id = .generate();
+    try std.testing.expect(check(&records, next_task, peer) == .unrestricted);
+}
 
 test "SSH reconnect polls lifecycle failure and cleanup without diagnostic snapshots" {
     const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(71), .generation = 3 };

@@ -24,6 +24,8 @@ pub fn explanation(code: []const u8) []const u8 {
         .{ "ShellAttachUnconfirmed", "尚未收到当前 Shell 的接入回执。请确认已进入 bash/zsh 的空提示符，再执行 @shell attach；不要在密码输入或前台程序中执行。" },
         .{ "ShellAttachmentStale", "读取终端后又出现了新的输入或输出，本次接入未开始。请重新读取当前终端和会话状态，确认仍是空 Shell 提示符后再申请接入。" },
         .{ "ShellIntegrationPending", "正在加载当前 Shell 的会话内集成，请等待接入结束后再执行命令。" },
+        .{ "ReconnectConnectionLost", "重连建立的连接已再次断开，终端命令无法继续执行。" },
+        .{ "SshHandshakeReceiveFailed", "SSH 握手期间未收到预期的响应，连接未建立。" },
         .{ "ShellPromptNotObserved", "尚未确认当前 Shell 已准备好接收命令。通过 SSH、su 或容器进入的内层 Shell 可能需要重新接入；请确认处于 Bash/Zsh 的空提示符后输入 @shell attach。不要在密码输入或前台程序中执行；结果不明的命令请先核实，不要重发。" },
         .{ "TerminalBusy", "终端正在由其他操作控制，本次命令未发送。请等待操作结束，或接管终端。" },
         .{ "RecordingNotClosed", "该录制仍在进行，当前工具只能读取已结束的历史录制。请改用当前会话的实时终端读取工具；无需为读取当前输出而关闭会话。" },
@@ -73,13 +75,25 @@ pub fn describe(a: std.mem.Allocator, step: events.Step) !Description {
     const raw = std.mem.trim(u8, step.detail, " \t\r\n");
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, scratch, raw, .{}) catch null;
     const code = if (parsed) |value| errorCode(scratch, value, 0) orelse "ToolRequestFailed" else if (raw.len > 0 and std.mem.indexOfAny(u8, raw, " \t\r\n{[") == null) raw else "ToolRequestFailed";
-    const status = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) "因新消息跳过 · 未执行" else if (step.phase == .cancelled) "已取消 · 未执行" else if (std.mem.eql(u8, code, "ToolApprovalRejected")) "用户已拒绝 · 未执行" else "请求失败 · 未执行";
-    const summary = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) try a.dupe(u8, status) else try std.fmt.allocPrint(a, "{s} · {s}", .{ status, code });
-    errdefer a.free(summary);
     var name_buffer: [64]u8 = undefined;
     const name = @import("plugin_tools.zig").decodeName(&name_buffer, step.name) catch step.name;
+    const reconnect_failed = if (parsed) |value| reconnectFailure(scratch, value, name) else false;
+    const status = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) "因新消息跳过 · 未执行" else if (step.phase == .cancelled) "已取消 · 未执行" else if (std.mem.eql(u8, code, "ToolApprovalRejected")) "用户已拒绝 · 未执行" else if (reconnect_failed) "SSH 重连失败" else "请求失败 · 未执行";
+    const summary = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) try a.dupe(u8, status) else try std.fmt.allocPrint(a, "{s} · {s}", .{ status, code });
+    errdefer a.free(summary);
     const detail = try std.fmt.allocPrint(a, "工具：{s}\n状态：{s}\n错误码：{s}\n原因：{s}\n\n调用参数 / 命令：\n{s}\n\n原始错误：\n{s}", .{ name, status, code, explanation(code), step.command, if (raw.len == 0) "未提供错误详情" else raw });
     return .{ .summary = summary, .detail = detail };
+}
+
+fn reconnectFailure(a: std.mem.Allocator, value: std.json.Value, name: []const u8) bool {
+    if (!std.mem.eql(u8, name, "host.wait_session_ready") and !std.mem.eql(u8, name, "host.reconnect_session")) return false;
+    const content = if (value == .object) value.object.get("content") orelse return false else return false;
+    if (content != .array or content.array.items.len != 1) return false;
+    const block = content.array.items[0];
+    const body = if (block == .object) block.object.get("structured") orelse return false else return false;
+    if (body != .string) return false;
+    const receipt = std.json.parseFromSliceLeaky(struct { state: []const u8, previous_session_ref: []const u8 }, a, body.string, .{ .ignore_unknown_fields = true }) catch return false;
+    return std.mem.eql(u8, receipt.state, "failed");
 }
 
 test "AI step failure retains nested host errors arguments and readable causes" {

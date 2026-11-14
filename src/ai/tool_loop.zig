@@ -176,7 +176,6 @@ pub const Loop = struct {
     /// A valid unknown host receipt permits observation, never fresh effects.
     /// Invalid receipts and legacy uncertain transports retain their stop gate.
     host_observation_only: bool = false,
-    recovered_terminal: ?@import("../host/identity.zig").SessionHandle = null,
     retained_output_bytes: usize = 0,
     tool_table: ?dynamic.RequestTable = null,
     compaction_config: ?@import("provider_config.zig").ProviderConfig = null,
@@ -275,8 +274,8 @@ pub const Loop = struct {
                 const entry = if (self.tool_table) |*table| table.lookup(definition.name()) orelse continue else continue;
                 const read = entry.definition.effect == .read_state or entry.definition.effect == .observe_image;
                 if (read or (!self.read_only and (std.mem.eql(u8, entry.definition.id, "host.stop_execution") or
-                    (std.mem.eql(u8, entry.definition.id, "host.reconnect_session") and self.unknownTerminalOnly() != null) or
-                    (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") and self.recovered_terminal != null)))) try visible.append(self.arena.allocator(), definition);
+                    (std.mem.eql(u8, entry.definition.id, "host.reconnect_session") and self.hasUncertainTerminal(null)) or
+                    (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") and self.hasRecoveredTerminal(null, null))))) try visible.append(self.arena.allocator(), definition);
             }
             self.request.tools = try visible.toOwnedSlice(self.arena.allocator());
         }
@@ -522,26 +521,33 @@ pub const Loop = struct {
     fn operationObservation(name: []const u8, arguments: std.json.Value) bool {
         return arguments == .object and ((std.mem.eql(u8, name, "host.wait_session_ready") and arguments.object.contains("operation_ref")) or std.mem.eql(u8, name, "host.reconnect_session"));
     }
-    fn unknownTerminalOnly(self: *const Loop) ?@import("../host/identity.zig").SessionHandle {
-        var terminal: ?@import("../host/identity.zig").SessionHandle = null;
+    fn hasUncertainTerminal(self: *const Loop, target: ?@import("../host/identity.zig").SessionHandle) bool {
+        var found = false;
         for (self.records.items) |record| if (record.host_result) |result| {
             if (result.status != .outcome_unknown and !result.receipt.remote_effect_unknown and result.receipt.local_released) continue;
-            const owner = result.uncertain_terminal orelse return null;
-            if (terminal) |known| if (!known.eql(owner)) return null;
-            terminal = owner;
+            const owner = result.uncertain_terminal orelse return false;
+            found = found or target == null or target.?.eql(owner);
         };
-        return terminal;
+        return found;
+    }
+    fn hasRecoveredTerminal(self: *const Loop, previous: ?@import("../host/identity.zig").SessionHandle, current: ?@import("../host/identity.zig").SessionHandle) bool {
+        for (self.records.items) |record| if (record.host_result) |result| {
+            const recovered = result.reconnected orelse continue;
+            if (previous != null and !previous.?.eql(recovered.previous)) continue;
+            if (current != null and !current.?.eql(recovered.current)) continue;
+            if (self.hasUncertainTerminal(recovered.previous)) return true;
+        };
+        return false;
     }
     fn permitsRecovery(self: *const Loop, context: dynamic.host.Context, parsed: dynamic.ParsedCall) bool {
-        const owner = self.unknownTerminalOnly() orelse return false;
         const name = parsed.entry.definition.id;
         const arguments = parsed.json.value;
         if (arguments != .object) return false;
         const ref = arguments.object.get("session_ref") orelse return false;
         if (ref != .string) return false;
         const target = @import("host_lifecycle.zig").sessionHandle(context, ref.string) catch return false;
-        if (std.mem.eql(u8, name, "host.reconnect_session")) return target.eql(owner) and self.recovered_terminal == null;
-        if (!std.mem.eql(u8, name, "host.run_in_terminal") or !target.eql(self.recovered_terminal orelse return false)) return false;
+        if (std.mem.eql(u8, name, "host.reconnect_session")) return self.hasUncertainTerminal(target) and !self.hasRecoveredTerminal(target, null);
+        if (!std.mem.eql(u8, name, "host.run_in_terminal") or !self.hasRecoveredTerminal(null, target)) return false;
         // Preserve the unknown outcome and never replay the old command.
         const command = arguments.object.get("command") orelse return false;
         if (command != .string) return false;
@@ -739,9 +745,6 @@ pub const Loop = struct {
             return record.result_body.?;
         };
         record.host_result = result;
-        if (result.reconnected) |reconnected| if (self.unknownTerminalOnly()) |owner| {
-            if (owner.eql(reconnected.previous)) self.recovered_terminal = reconnected.current;
-        };
         for (result.blocks) |block| self.retained_output_bytes += switch (block) {
             .text, .structured => |text| text.len,
         };

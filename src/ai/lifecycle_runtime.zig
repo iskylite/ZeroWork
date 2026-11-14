@@ -706,7 +706,7 @@ fn reconnectResult(a: std.mem.Allocator, invocation: host.Invocation, operation:
     if (receipt.successor) |next| {
         if (!next.eql(try receipt.original.nextGeneration())) return error.InvalidControllerReceipt;
     } else if (receipt.state == .connecting or receipt.state == .ready) return error.InvalidControllerReceipt;
-    var result = try jsonResult(a, invocation, .succeeded, .{
+    var result = try jsonResult(a, invocation, if (receipt.state == .failed) .failed else .succeeded, .{
         .operation_ref = try tools.operationRef(a, invocation.context, operation),
         .previous_session_ref = try queries.sessionRef(a, invocation.context, receipt.original),
         .session_ref = if (receipt.state == .ready) try queries.sessionRef(a, invocation.context, receipt.successor.?) else null,
@@ -721,10 +721,37 @@ fn reconnectResult(a: std.mem.Allocator, invocation: host.Invocation, operation:
         .retryable = if (receipt.state == .failed) @as(?bool, false) else null,
         .recovery_hint = if (receipt.state == .failed) @as(?[]const u8, reconnect_failure_hint) else null,
     }, started, false);
-    if (receipt.state == .ready) result.reconnected = .{ .previous = receipt.original, .current = receipt.successor.? };
+    if (receipt.state == .ready and receipt.execution_readiness == .ready) result.reconnected = .{ .previous = receipt.original, .current = receipt.successor.? };
     return result;
 }
 const reconnect_failure_hint = "Report the SSH failure reason to the user and stop reconnecting this session in this task. Do not retry with a different request_key or session generation. Do not send commands to the disconnected session.";
+test "SSH reconnect reports failure and only attests interactive readiness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const invocation: host.Invocation = .{ .context = context, .authority = .lifecycle, .operation_id = 1, .turn_id = 1, .call_id = "wait", .tool_id = "host.wait_session_ready", .arguments = .null, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    const original: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
+    const operation = identity.HostOperationId.generate();
+    var receipt: ReconnectReceipt = .{ .operation_ref = operation, .original = original, .successor = try original.nextGeneration(), .state = .ready, .revision = 1, .execution_readiness = .initializing };
+    const initializing = try reconnectResult(a, invocation, operation, receipt, true, false, false);
+    try std.testing.expect(initializing.reconnected == null);
+    receipt.execution_readiness = .ready;
+    const ready = try reconnectResult(a, invocation, operation, receipt, false, false, false);
+    try std.testing.expect(ready.reconnected.?.current.eql(receipt.successor.?));
+    receipt.state = .failed;
+    receipt.execution_readiness = .unknown;
+    const code = "ReconnectConnectionLost";
+    @memcpy(receipt.failure[0..code.len], code);
+    receipt.failure_len = code.len;
+    const failed = try reconnectResult(a, invocation, operation, receipt, false, false, false);
+    try std.testing.expectEqual(@as(@TypeOf(failed.status), .failed), failed.status);
+    try std.testing.expect(failed.reconnected == null);
+    const body = try std.json.parseFromSliceLeaky(std.json.Value, a, failed.blocks[0].structured, .{});
+    try std.testing.expect(body.object.get("session_ref").? == .null);
+    try std.testing.expectEqualStrings(code, body.object.get("error_code").?.string);
+}
+
 fn recordResult(a: std.mem.Allocator, invocation: host.Invocation, record: journal.Record, reused: bool) !host.Result {
     const unknown = record.stage == .dispatch_started or record.stage == .running or record.stage == .outcome_unknown or !record.local_released or record.remote_effect_unknown;
     const status: @import("plugin_tools.zig").Status = if (unknown) .outcome_unknown else switch (record.stage) {

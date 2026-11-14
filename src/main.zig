@@ -707,7 +707,6 @@ const AiHost = struct {
     shared_service: ?*@import("ai/attached_service.zig").Host = null,
     resource_stamp: ?u64 = null,
     lost_ssh_session: ?@import("host/identity.zig").SessionHandle = null,
-    group_ssh_loss_operation: ?@import("host/identity.zig").HostOperationId = null,
     reconnect_environment: ?struct {
         context: @import("ai/host_tools.zig").Context,
         operation: @import("host/identity.zig").HostOperationId,
@@ -5599,7 +5598,6 @@ const AiHost = struct {
         self.request_host_context = null;
         self.reconnect_environment = null;
         self.lost_ssh_session = null;
-        self.group_ssh_loss_operation = null;
         self.managerRef().tool_host = null;
         if (self.request_context) |*old| old.deinit(self.allocator);
         self.request_context = null;
@@ -5795,6 +5793,9 @@ const AiHost = struct {
         return self.resourceStampFor(self.attached_runner.?.agent.owner, null, null);
     }
     fn resourceStampFor(self: *AiHost, owner: ai_attachments.Owner, excluded: ?@import("host/identity.zig").SessionHandle, group_revision: ?u64) !u64 {
+        return self.resourceStampExcludingReconnects(owner, excluded, group_revision, null);
+    }
+    fn resourceStampExcludingReconnects(self: *AiHost, owner: ai_attachments.Owner, excluded: ?@import("host/identity.zig").SessionHandle, group_revision: ?u64, reconnect_task: ?@import("ai/host_tools.zig").Context) !u64 {
         const allowed = try self.captureOwnerScope(owner);
         defer self.allocator.free(allowed.inventory.?);
         var hash = std.hash.Wyhash.init(0);
@@ -5806,6 +5807,10 @@ const AiHost = struct {
         for (allowed.memberIds()) |id| {
             const tab = self.tabForSession(id) orelse return error.StaleSession;
             if (excluded) |skip| if (tab.content_owner.session.eql(skip)) continue;
+            if (reconnect_task) |task| {
+                const app = self.application_host orelse return error.ContextUnavailable;
+                if (app.taskReconnect(task, tab.content_owner.session) != null) continue;
+            }
             std.hash.autoHash(&hash, tab.content_owner.session);
             if (tab.runtime) |remote| if (remote.reconnectSnapshot()) |snapshot| {
                 std.hash.autoHash(&hash, snapshot.key);
@@ -5916,12 +5921,7 @@ const AiHost = struct {
             } else continue;
             if (app.taskAutomaticReconnect(context, original) != null) continue;
             const receipt = try app.trackTaskAutomaticReconnect(context, original) orelse continue;
-            if (self.group_ssh_loss_operation == null) {
-                self.lost_ssh_session = original;
-                self.group_ssh_loss_operation = receipt.operation;
-                reconnectAccepted(self, context, receipt);
-                self.host_notice_revision = @max(self.host_notice_revision, self.authority_notice_revision) +| 1;
-            }
+            reconnectAccepted(self, context, receipt);
             tracked = true;
         }
         return tracked;
@@ -5931,6 +5931,10 @@ const AiHost = struct {
         const context = self.request_host_context orelse return false;
         const app = self.application_host orelse return false;
         if (!context.eql(expected.context) or !self.attached_runner.?.agent.owner.eql(context.binding)) return false;
+        if (context.binding == .group) {
+            const other_resources = self.resourceStampExcludingReconnects(context.binding, null, null, context) catch return false;
+            return other_resources == expected.other_resources;
+        }
         const receipt = app.reconnectReceipt(expected.operation, context) orelse return false;
         const current = app.ownerForLegacy(receipt.legacy_id) orelse return false;
         const successor = receipt.successor orelse return false;
@@ -5944,9 +5948,11 @@ const AiHost = struct {
     }
     fn reconnectAccepted(raw: *anyopaque, context: @import("ai/host_tools.zig").Context, receipt: application_host_mod.ReconnectReceipt) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
+        const backend = self.execution();
+        if (context.binding == .group) backend.host_notice_revision = @max(backend.host_notice_revision, backend.authority_notice_revision) +| 1;
         const excluded = if (receipt.successor) |successor| successor.handle else receipt.original;
-        const other_resources = self.resourceStampFor(context.binding, excluded, null) catch return;
-        self.execution().reconnect_environment = .{ .context = context, .operation = receipt.operation, .other_resources = other_resources };
+        const other_resources = self.resourceStampExcludingReconnects(context.binding, excluded, null, if (context.binding == .group) context else null) catch return;
+        backend.reconnect_environment = .{ .context = context, .operation = receipt.operation, .other_resources = other_resources };
     }
     fn closeAttachedSession(self: *AiHost, owner: @import("host/identity.zig").SessionHandle, release_content: bool) application_host_mod.CloseReceipt {
         const shared_host = self.shared_service orelse return .released;
@@ -7064,18 +7070,31 @@ const AiHost = struct {
                 for (pending_handoffs, 0..) |*handoff, index| handoffs[index] = .{ .conversation_id = handoff.context.conversation_id, .task_id = handoff.context.task_id, .revision = handoff.revision, .text = handoff.content() };
                 const lost_ref = if (backend.lost_ssh_session) |disconnected| try @import("ai/host_queries.zig").sessionRef(value.allocator, next_context, disconnected) else null;
                 defer if (lost_ref) |reference| value.allocator.free(reference);
-                const lost_operation_ref = if (backend.group_ssh_loss_operation) |operation| try @import("ai/host_lifecycle.zig").operationRef(value.allocator, next_context, operation) else null;
-                defer if (lost_operation_ref) |reference| value.allocator.free(reference);
+                const GroupReconnect = struct { previous_session_ref: []const u8, operation_ref: []const u8 };
+                var reconnect_arena = std.heap.ArenaAllocator.init(value.allocator);
+                defer reconnect_arena.deinit();
+                const reconnect_alloc = reconnect_arena.allocator();
+                var group_reconnects: std.ArrayList(GroupReconnect) = .empty;
+                if (next_context.binding == .group) for (app.reconnects.items) |*receipt| {
+                    if (!receipt.context.eql(next_context)) continue;
+                    const current = app.ownerForLegacy(receipt.legacy_id) orelse continue;
+                    if (!controller.inBinding(current) or (!current.eql(receipt.original) and (receipt.successor == null or !receipt.successor.?.handle.eql(current)))) continue;
+                    try group_reconnects.append(reconnect_alloc, .{
+                        .previous_session_ref = try @import("ai/host_queries.zig").sessionRef(reconnect_alloc, next_context, receipt.original),
+                        .operation_ref = try @import("ai/host_lifecycle.zig").operationRef(reconnect_alloc, next_context, receipt.operation),
+                    });
+                };
                 const notice = try std.json.Stringify.valueAlloc(value.allocator, .{
                     .host_context_notice = true,
                     .kind = if (workspace_pending) @as([]const u8, "local_workspace_changed") else "authority_changed",
                     .tool_cleanup = if (cleanup_pending) @as(?[]const u8, "pending") else if (value.bridge.queries_only) @as(?[]const u8, "released") else null,
                     .ssh_transport_lost = if (lost_ref) |reference| .{
                         .previous_session_ref = reference,
-                        .operation_ref = lost_operation_ref,
                         .automatic_reconnect = app.workspace.app_config.ssh.auto_reconnect,
-                        .instruction = if (lost_operation_ref != null) "The host accepted one automatic reconnect for this exact group member. If recovery is part of this task, wait on operation_ref with host.wait_session_ready and wait_for=interactive. If you call host.reconnect_session on previous_session_ref, it observes this same operation. On failure report the reason and stop. Do not replay the interrupted command or route it to a different member." else "If this task needs the SSH connection restored, call host.reconnect_session once with previous_session_ref and connection_policy=new_only. This returns a receipt for an automatic reconnect already started by the host. Use host.wait_session_ready with that receipt's operation_ref and wait_for=interactive before issuing any new terminal command. Do not replay the interrupted execution or send input to the old generation.",
+                        .instruction = "If this task needs the SSH connection restored, call host.reconnect_session once with previous_session_ref and connection_policy=new_only. Use host.wait_session_ready with operation_ref and wait_for=interactive before issuing any new terminal command. Do not replay the interrupted execution or send input to the old generation.",
                     } else null,
+                    .group_reconnects = if (group_reconnects.items.len != 0) group_reconnects.items else null,
+                    .group_reconnect_instruction = if (group_reconnects.items.len != 0) "Wait on the operation_ref for each intended group member with host.wait_session_ready and wait_for=interactive. If a reconnect fails, report that member's reason and stop reconnecting it. Keep each command on its intended member. Never replay an interrupted command or move it to another member." else null,
                     .local_workspace = if (workspace_pending) @import("ai/session_prompt.zig").workspaceView(workspace) else null,
                     .local_workspace_enabled = if (workspace_scope_changed) @as(?bool, workspace_enabled) else null,
                     .workspace_before_revision = if (workspace_pending) record.workspace_ack_revision else null,
