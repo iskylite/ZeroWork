@@ -2896,8 +2896,14 @@ const AiHost = struct {
             editor.input.meta.ownership.meta.test_id = "ai.message.edit.input";
             try bubble.appendChild(self.allocator, editor.wrapper);
         } else {
-            const text = try ui.text(cx, message.text, .{ .font_size = 11.5, .wrap = .word, .line_height = 17.0 / 11.5, .color = @import("ui/ai_assistant_styles.zig").userBubbleForeground() });
+            const prompt = if (submission != null) ai_attachment_request.displayPrompt(message.text) else message.text;
+            const text = try ui.text(cx, prompt, .{ .font_size = 11.5, .wrap = .word, .line_height = 17.0 / 11.5, .color = @import("ui/ai_assistant_styles.zig").userBubbleForeground() });
             text.meta.ownership.meta.test_id = "ai.message.user.text";
+            if (prompt.len != message.text.len) {
+                var style = @import("ui/ai_pending_styles.zig").text(true);
+                style.color = @import("ui/ai_assistant_styles.zig").userBubbleForeground().withAlpha(210);
+                try bubble.appendChild(self.allocator, try ui.text(cx, "已附加本机文件引用", style));
+            }
             try bubble.appendChild(self.allocator, text);
             try @import("ui/ai_text_selection.zig").attach(cx, self.conversation_scope.?, bubble);
         }
@@ -3305,8 +3311,15 @@ const AiHost = struct {
         bubble.setStyleInline(self.allocator, .{ .direction = .column, .gap = 4 });
         bubble.meta.ownership.meta.test_id = if (status == null) "ai.followup.consumed" else "ai.followup.pending";
         const text = try ui.text(self.cx, "", .{ .font_size = 11.5, .line_height = 1.4, .color = @import("ui/ai_assistant_styles.zig").userBubbleForeground(), .wrap = .word });
-        try text.setTextContent(self.allocator, content);
+        const prompt = ai_attachment_request.displayPrompt(content);
+        try text.setTextContent(self.allocator, prompt);
         try bubble.appendChild(self.allocator, text);
+        if (prompt.len != content.len) {
+            var style = @import("ui/ai_pending_styles.zig").text(true);
+            style.color = @import("ui/ai_assistant_styles.zig").userBubbleForeground().withAlpha(210);
+            const attachment = try ui.text(self.cx, "已附加本机文件引用", style);
+            try bubble.appendChild(self.allocator, attachment);
+        }
         if (status) |label| {
             var style = @import("ui/ai_pending_styles.zig").text(true);
             style.color = @import("ui/ai_assistant_styles.zig").userBubbleForeground().withAlpha(210);
@@ -6522,7 +6535,7 @@ const AiHost = struct {
                 record.inbox.unlock();
                 return error.SubmissionNotFound;
             };
-            const source_text = if (self.execution().attachedInput(receipt.id)) |frozen| frozen.text else |_| entry.payload.messages[0].content;
+            const source_text = if (self.execution().attachedInput(receipt.id)) |frozen| frozen.text else |_| ai_attachment_request.displayPrompt(entry.payload.messages[0].content);
             const body = self.allocator.dupe(u8, source_text) catch |err| {
                 record.inbox.unlock();
                 return err;
@@ -6636,7 +6649,7 @@ const AiHost = struct {
                 if (entry.receipt.archived or @import("ai/session_input.zig").terminal(entry.receipt.delivery)) continue;
                 if (entry.receipt.route == .steer) continue;
                 if (entry.receipt.route == .start and entry.receipt.pause == null and entry.receipt.delivery != .outcome_unknown) continue;
-                var text = entry.payload.messages[0].content;
+                var text = ai_attachment_request.displayPrompt(entry.payload.messages[0].content);
                 var attachments = entry.payload.messages[0].images.len;
                 if (self.execution().attachedInput(entry.receipt.id)) |frozen| {
                     text = frozen.text;
@@ -6777,7 +6790,7 @@ const AiHost = struct {
                 self.setFeedback(@errorName(err));
                 return;
             };
-            self.refresh("AI 停止中…");
+            self.refresh("正在停止 AI…");
             return;
         };
         self.cancelRef().cancel();
@@ -6788,7 +6801,7 @@ const AiHost = struct {
             if (self.application_host) |app| app.cancelOwnedTask(context.task_id);
             if (self.execution().execution_driver) |driver| driver.stopTask(context) catch {};
         }
-        self.refresh("AI 停止中…");
+        self.refresh("正在停止 AI…");
     }
 
     /// Runs only on the same worker that owns the active Loop. The API-2
@@ -9233,7 +9246,7 @@ const AiHost = struct {
             if (self.requestDisplayed()) self.refresh(self.recoveryReason());
         } else {
             self.consumeResult();
-            if (state == 4 and self.requestDisplayed()) self.refresh("AI 已停止");
+            if (state == 4 and self.requestDisplayed()) self.refresh("已停止生成");
         }
         if (self.assistant_states) |store| if (self.execution().request_conversation) |id| {
             if (store.find(id)) |saved| if (saved.closed) {

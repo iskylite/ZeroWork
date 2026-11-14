@@ -3,6 +3,23 @@ const std = @import("std");
 const attachments = @import("local_text_attachments.zig");
 const provider = @import("provider.zig");
 const references = @import("../host/local_file_reference.zig");
+/// The provider receives the full reference. Transcript readers show only
+/// prompt text when a model message contains the generated reference suffix.
+pub fn displayPrompt(wire: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, wire, "\n\n<local_file_reference>\nsource_kind=host_local\nsource_name=本机\nlocator=") orelse return wire;
+    const suffix = wire[start..];
+    if (!std.mem.endsWith(u8, suffix, "</local_file_reference>") and
+        std.mem.indexOf(u8, suffix, "</local_file_reference>\n\n<") == null) return wire;
+    if (std.mem.indexOf(u8, suffix, "\nreference_only=true\ncontent_included=false\n") == null) return wire;
+    return wire[0..start];
+}
+
+test "local binary references stay out of displayed prompts" {
+    const wire = "检查这个压缩包\n\n<local_file_reference>\nsource_kind=host_local\nsource_name=本机\nlocator={}\nreference_only=true\ncontent_included=false\nreason=binary\n</local_file_reference>";
+    try std.testing.expectEqualStrings("检查这个压缩包", displayPrompt(wire));
+    try std.testing.expectEqualStrings("literal <local_file_reference>", displayPrompt("literal <local_file_reference>"));
+}
+
 pub fn compose(allocator: std.mem.Allocator, prompt: []const u8, bundle: *const attachments.Bundle, max_bytes: usize) ![]u8 {
     return composeWithFileReferences(allocator, prompt, bundle, max_bytes, null);
 }

@@ -676,6 +676,7 @@ test "API2 unknown vision budget keeps observation input new observation and ans
     manager.turn_id = 401;
     manager.tool_host = callbacks;
     manager.tool_limits.context_window = 500_000;
+    manager.retry_policy.max_attempts = 0;
     var original_stop: provider.CancelToken = .{};
     const request: provider.ChatRequest = .{ .model = "gateway/custom-vision@500k", .vision = true, .tool_images = true, .system = "synthetic visual task", .messages = &.{.{ .content = "observe, apply one input, then observe the new result" }}, .tools = definitions, .tool_table = &table, .cancel = &original_stop };
     const p: provider.Provider = .{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models };

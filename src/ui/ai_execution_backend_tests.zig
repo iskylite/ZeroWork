@@ -564,9 +564,10 @@ test "execution backend new PTY accepts only this Task actual owned creation and
     defer call.deinit();
     var prepared = try backend.prepare(call.value, a);
     defer prepared.deinit();
-    const permit = try approve(&ctx, &broker, &prepared);
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    const permit = try awaitWorker(&fixture, deadline, approve, .{ &ctx, &broker, &prepared });
     defer broker.finish(permit);
-    const accepted = try authorize(&ctx, prepared);
+    const accepted = try awaitWorker(&fixture, deadline, authorize, .{ &ctx, prepared });
     try std.testing.expect(accepted.handle.eql(target));
     const api = ctx.backend();
     try api.handed_to_user.?(api.context, target);

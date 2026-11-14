@@ -145,7 +145,7 @@ test "conversation UI history writer queues input and delays unbind until public
     const runner = try service.attach(.{ .session = 1 }, fixture.backend());
     const ticket = try completed(&service, runner);
     runner.controller_busy = true;
-    const receipt = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "wait for compaction" }, .steer);
+    const receipt = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "wait for compaction" }, .queue);
     try std.testing.expect(receipt.delivery == .queued and receipt.route == .queue and runner.thread == null);
     var command = try commands.Command.prepare(&service, .end, ticket.conversation, runner.agent.id);
     defer command.deinit();
