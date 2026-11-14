@@ -427,6 +427,19 @@ pub const Driver = struct {
                     return true;
                 }
                 if (request.wait) |wait| {
+                    if (invocation.dispatch_fence) |fence| if (!fence.current(fence.context, fence.revision)) {
+                        const result = if (std.mem.eql(u8, invocation.tool_id, "host.wait_execution"))
+                            self.controller.interruptedReadWait(wait, "new_input")
+                        else
+                            self.controller.interruptedRunWait(wait, "new_input");
+                        request.result = result catch |err| {
+                            if (err == error.WorkerBusy and now() < wait.deadline) return false;
+                            self.complete(request, err);
+                            return true;
+                        };
+                        self.complete(request, null);
+                        return true;
+                    };
                     const result = self.controller.pollWait(wait, clock) catch |err| {
                         if (err == error.WorkerBusy and now() < wait.deadline) return false;
                         self.complete(request, if (err == error.WorkerBusy) error.Timeout else err);
@@ -995,6 +1008,109 @@ test "execution deadline wait observation spends queue time and retains the runn
     defer body.deinit();
     try std.testing.expect(body.value.object.get("timed_out").?.bool);
     try std.testing.expectEqualStrings("running", body.value.object.get("state").?.string);
+    try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+}
+
+test "execution wait yields to steering while preserving the running command" {
+    const input = @import("session_input.zig");
+    const Fence = struct {
+        fn current(raw: *anyopaque, revision: u64) bool {
+            const inbox: *input.Inbox = @ptrCast(@alignCast(raw));
+            return inbox.planCurrent(revision);
+        }
+    };
+    for ([_][]const u8{ "host.run_in_terminal", "host.wait_execution" }) |tool| {
+        const context = AdmissionTest.invocation().context;
+        const ticket: input.Fence = .{ .agent = .generate(), .conversation = context.conversation_id, .binding = 1, .environment = 1 };
+        var inbox = input.Inbox.init(std.testing.allocator, ticket);
+        defer inbox.deinit();
+        const initial = try inbox.admit(ticket, .generate(), .{ .content = "start" }, .steer);
+        _ = try inbox.claim(initial.id, initial.revision, null, 1, .start);
+
+        var invocation = AdmissionTest.invocation();
+        invocation.tool_id = tool;
+        invocation.dispatch_fence = .{ .context = &inbox, .revision = inbox.inputRevision(), .current = Fence.current };
+        var request: Request = .{ .kind = .{ .execute = invocation }, .deadline = std.math.maxInt(i64), .wake = try Wakeup.init() };
+        defer request.wake.?.deinit();
+        var fixture: AdmissionTest = .{ .request = &request };
+        var driver = fixture.driver();
+        driver.controller.backend = .{ .context = &driver, .authorize = Driver.authorize, .resolve = Driver.resolve, .terminal_call = Driver.terminalCall };
+        const id: identity.ExecutionId = .{ .bytes = @splat(3) };
+        fixture.snapshot.execution_id = id;
+        fixture.snapshot.submit_sent = true;
+        fixture.snapshot.local_released = false;
+        try driver.controller.entries.append(std.testing.allocator, .{ .context = context, .id = id, .target = fixture.snapshot.owner, .journal = undefined, .journal_revision = 1, .journal_stage = .running, .snapshot = fixture.snapshot, .next_renew_at = std.math.maxInt(i64) });
+        defer driver.controller.entries.deinit(std.testing.allocator);
+        request.wait = .{ .context = context, .operation_id = invocation.operation_id, .index = 0, .after_revision = 1, .deadline = std.math.maxInt(i64), .output_cursor = 0, .max_bytes = 128 };
+
+        _ = try inbox.admit(ticket, .generate(), .{ .content = "queued" }, .queue);
+        try std.testing.expect(!driver.process(&request, 10));
+        const steer = try inbox.admit(ticket, .generate(), .{ .content = "follow up" }, .steer);
+        try std.testing.expectEqual(input.Delivery.accepted, steer.delivery);
+        try std.testing.expect(driver.process(&request, 11));
+        try std.testing.expect(request.failure == null);
+        var result = request.result orelse return error.OriginalExecutionLost;
+        defer result.deinit(std.testing.allocator);
+        const body = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.blocks[0].structured, .{});
+        defer body.deinit();
+        try std.testing.expectEqualStrings("running", body.value.object.get("state").?.string);
+        try std.testing.expectEqualStrings("new_input", body.value.object.get("wait_interrupted").?.string);
+        try std.testing.expect(!body.value.object.get("timed_out").?.bool);
+        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(id.bytes, .lower), body.value.object.get("execution_ref").?.string[3..]);
+        try std.testing.expect(result.receipt.side_effect_started);
+        try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+        try std.testing.expectEqual(terminal.execution.State.running, driver.controller.entries.items[0].snapshot.state);
+        try std.testing.expectEqual(@as(usize, 0), driver.controller.finished_tasks.items.len);
+    }
+}
+
+test "execution wait cancels a known unsent command before yielding to steering" {
+    const journal = @import("lifecycle_journal.zig");
+    const Journal = struct {
+        updates: usize = 0,
+        fn begin(_: *anyopaque, _: journal.Request) !journal.Handle {
+            return error.UnexpectedJournalCall;
+        }
+        fn snapshot(_: *anyopaque, _: std.mem.Allocator, _: journal.Handle) !journal.Record {
+            return error.UnexpectedJournalCall;
+        }
+        fn update(raw: *anyopaque, _: journal.Handle, _: u64, change: journal.Update) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(journal.Stage.failed, change.stage);
+            self.updates += 1;
+        }
+    };
+    const Fence = struct {
+        fn current(_: *anyopaque, _: u64) bool {
+            return false;
+        }
+    };
+    var marker: u8 = 0;
+    var invocation = AdmissionTest.invocation();
+    invocation.dispatch_fence = .{ .context = &marker, .revision = 1, .current = Fence.current };
+    var request: Request = .{ .kind = .{ .execute = invocation }, .deadline = std.math.maxInt(i64), .wake = try Wakeup.init() };
+    defer request.wake.?.deinit();
+    var fixture: AdmissionTest = .{ .request = &request };
+    var saved: Journal = .{};
+    var driver = fixture.driver();
+    driver.controller.journal = .{ .context = &saved, .begin_fn = Journal.begin, .snapshot_fn = Journal.snapshot, .update_fn = Journal.update };
+    driver.controller.backend = .{ .context = &driver, .authorize = Driver.authorize, .resolve = Driver.resolve, .terminal_call = Driver.terminalCall };
+    const id: identity.ExecutionId = .{ .bytes = @splat(3) };
+    try driver.controller.entries.append(std.testing.allocator, .{ .context = invocation.context, .id = id, .target = fixture.snapshot.owner, .journal = undefined, .journal_revision = 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = fixture.snapshot.owner, .state = .preparing }, .next_renew_at = 0, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = 1, .ownership_revision = 1, .command = try std.testing.allocator.dupe(u8, "sleep 60"), .command_hash = @splat(0) } });
+    defer driver.controller.entries.deinit(std.testing.allocator);
+    request.wait = .{ .context = invocation.context, .operation_id = invocation.operation_id, .index = 0, .after_revision = 1, .deadline = std.math.maxInt(i64), .output_cursor = 0, .max_bytes = 128 };
+
+    try std.testing.expect(driver.process(&request, 10));
+    try std.testing.expect(request.failure == null);
+    var result = request.result orelse return error.OriginalExecutionLost;
+    defer result.deinit(std.testing.allocator);
+    const body = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.blocks[0].structured, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings("cancelled_unsent", body.value.object.get("state").?.string);
+    try std.testing.expectEqualStrings("new_input", body.value.object.get("wait_interrupted").?.string);
+    try std.testing.expect(!result.receipt.side_effect_started);
+    try std.testing.expect(driver.controller.entries.items[0].dispatch_pending == null);
+    try std.testing.expectEqual(@as(usize, 1), saved.updates);
     try std.testing.expectEqual(@as(usize, 0), fixture.effects);
 }
 

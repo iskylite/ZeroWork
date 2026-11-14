@@ -235,6 +235,13 @@ pub const Broker = struct {
         self.entry = null;
         self.execution_route.revoke();
     }
+    /// A committed lifecycle handoff still invalidates the pending card, but
+    /// its exact Task-local route must be transferred by the controller.
+    pub fn supersedeForHandoff(self: *Broker) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.entry = null;
+    }
     pub fn waitForDecision(self: *Broker, permit: Permit, cancel: ?*provider.CancelToken) !void {
         const waiting = provider.CancelToken.beginUserWait(cancel);
         defer waiting.end();

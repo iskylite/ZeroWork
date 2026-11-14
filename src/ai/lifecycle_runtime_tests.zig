@@ -86,6 +86,7 @@ const Fixture = struct {
                 call.result = .{ .session = self.snapshot.? };
             },
             .query_open, .resolve_owned => call.result = .{ .session = self.snapshot.? },
+            .query_reconnect, .queue_reconnect, .find_automatic_reconnect => return error.UnexpectedReconnect,
             .queue_close => |request| {
                 self.close_count += 1;
                 self.last_operation = request.operation;

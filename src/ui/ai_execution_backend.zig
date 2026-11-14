@@ -207,6 +207,7 @@ pub const Context = struct {
         if (std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal") or std.mem.eql(u8, invocation.tool_id, "host.attach_shell")) {
             const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
             if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
+            if (!self.app.permitsReconnectExecution(invocation.context, handle)) return error.ReconnectTargetUnavailable;
             return;
         }
         const reference = try string(invocation.arguments, "execution_ref");
@@ -640,6 +641,7 @@ pub const Context = struct {
         if (record.cleanup_only) return error.WorkspaceClosed;
         const handle = try parseSession(invocation.context, reference);
         if (!handle.eql(record.boundary.handle)) return error.StaleReference;
+        if (!self.app.permitsReconnectExecution(invocation.context, handle)) return error.ReconnectTargetUnavailable;
         try checkForbidden(command);
         try self.validateApproval(invocation, command, hash);
         const service = try self.resolveAdmission(record, true);

@@ -706,6 +706,13 @@ const AiHost = struct {
     attached_runner: ?*@import("ai/session_runtime.zig").Runner = null,
     shared_service: ?*@import("ai/attached_service.zig").Host = null,
     resource_stamp: ?u64 = null,
+    lost_ssh_session: ?@import("host/identity.zig").SessionHandle = null,
+    group_ssh_loss_operation: ?@import("host/identity.zig").HostOperationId = null,
+    reconnect_environment: ?struct {
+        context: @import("ai/host_tools.zig").Context,
+        operation: @import("host/identity.zig").HostOperationId,
+        other_resources: u64,
+    } = null,
     attached_scope: ?@import("ai/tool_scope.zig").Scope = null,
     attached_inputs: std.ArrayList(AttachedInput) = .empty,
     child_identity: ?@import("host/identity.zig").AgentId = null,
@@ -791,7 +798,7 @@ const AiHost = struct {
             const allowed = try self.child_parent.?.captureOwnerScope(owner);
             defer if (allowed.inventory) |ids| self.child_parent.?.allocator.free(ids);
             const prefs = @import("ai/session_lifecycle.zig").Store.childPreferences(record);
-            const runner = try shared_host.service.useChild(parent, agent, record.revision, allowed, prefs.targets, .{ .context = backend, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .supersede = supersedeAttached, .stop = stopAttached, .release_worker = releaseAttachedWorker }, null);
+            const runner = try shared_host.service.useChild(parent, agent, record.revision, allowed, prefs.targets, .{ .context = backend, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .ready_for_next = attachedReadyForNext, .supersede = supersedeAttached, .supersede_handoff = supersedeAttachedHandoff, .stop = stopAttached, .release_worker = releaseAttachedWorker }, null);
             backend.attached_runner = runner;
             try shared_host.register(.{ .agent = agent, .window = self.application_host.?.window_id, .context = backend, .pump = pumpAttached, .released = disposeReadyAttached, .destroy = destroyAttached, .flush = flushAttached });
         }
@@ -1075,15 +1082,10 @@ const AiHost = struct {
     fn assistantToolsAvailable(self: *AiHost, owner: ai_attachments.Owner) bool {
         if (owner == .group) return true;
         const tab = self.tabForSession(owner.session) orelse return false;
-        if (tab.closing or tab.failed or tab.content_owner != .session) return false;
-        if (tab.local and tab.local_state != .running) return false;
-        if (tab.terminal) |view| if (view.terminal_surface) |surface| if (surface.snapshot) |snapshot| {
-            if (snapshot.eof_seen) return false;
-        };
-        if (tab.runtime) |runtime| if (!runtime.isConnected()) return false;
-        const host = self.application_host orelse return false;
-        const state = host.sessions.queryState(tab.content_owner.session) orelse return false;
-        return state.lifecycle == .attached or state.lifecycle == .ready;
+        // A retained session can be grouped even while its connection is
+        // opening, disconnected or failed. Individual execution services are
+        // still advertised and checked only when actually available.
+        return !tab.archived and !tab.closing and !tab.owned_pending and tab.content_owner == .session and self.application_host != null;
     }
 
     fn tabForSession(self: *AiHost, session_id: u64) ?*ws.SessionTab {
@@ -5465,7 +5467,7 @@ const AiHost = struct {
         const execution_host = try a.create(AiHost);
         errdefer a.destroy(execution_host);
         execution_host.* = self.attachedSlot(a, shared_host);
-        const runner = try shared_host.service.attach(owner, .{ .context = execution_host, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .supersede = supersedeAttached, .stop = stopAttached, .release_worker = releaseAttachedWorker });
+        const runner = try shared_host.service.attach(owner, .{ .context = execution_host, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .ready_for_next = attachedReadyForNext, .supersede = supersedeAttached, .supersede_handoff = supersedeAttachedHandoff, .stop = stopAttached, .release_worker = releaseAttachedWorker });
         execution_host.attached_runner = runner;
         try shared_host.register(.{ .agent = agent.id, .window = self.application_host.?.window_id, .context = execution_host, .pump = pumpAttached, .released = disposeReadyAttached, .destroy = destroyAttached, .flush = flushAttached });
         self.execution_host = execution_host;
@@ -5519,7 +5521,7 @@ const AiHost = struct {
         const stamp = try self.resourceStamp();
         if (self.resource_stamp) |previous_stamp| if (stamp != previous_stamp) {
             self.resource_stamp = stamp;
-            try self.invalidateAttachedEnvironment();
+            try self.invalidateAttachedEnvironment(false);
             return error.StaleEnvironment;
         };
         self.resource_stamp = stamp;
@@ -5587,11 +5589,17 @@ const AiHost = struct {
         self.attached_scope = allowed;
         self.managerRef().scope = allowed;
         try self.validateAttachmentScope(allowed, &input.attachments);
+        if (application_test_mode) if (std.c.getenv("ZW_TEST_AI_TOOL_CLEANUP_RELEASE")) |marker| {
+            self.tool_bridge.cleanup_test_release = std.mem.span(marker);
+        };
         try self.tool_bridge.beginRequest();
         self.request_tools = &.{};
         self.request_tools_len = 0;
         self.request_tool_tokens = 0;
         self.request_host_context = null;
+        self.reconnect_environment = null;
+        self.lost_ssh_session = null;
+        self.group_ssh_loss_operation = null;
         self.managerRef().tool_host = null;
         if (self.request_context) |*old| old.deinit(self.allocator);
         self.request_context = null;
@@ -5620,12 +5628,12 @@ const AiHost = struct {
             self.tool_bridge.configurePolicy(self.managerRef().permission_engine, self.request_policy_revision);
             self.tool_bridge.execution_mode = self.request_execution_policy.execution_mode;
             self.tool_bridge.session_retention = self.request_execution_policy.session_retention;
-            try self.tool_bridge.configureRouting(self.approvalsRef(), authority, input.text, if (tab) |value| value.content_owner.session else null);
+            try self.tool_bridge.configureRouting(self.approvalsRef(), authority, input.text, if (context.owner == .session) tab.?.content_owner.session else null);
             if (self.lifecycle_runtime == null) self.lifecycle_runtime = .{ .journal_owner = try @import("ai/lifecycle_runtime.zig").ProcessJournal.acquire(.{ .data_root = self.data_root }), .controller = .{ .context = self, .invoke = lifecycleCall }, .approval = self.approvalsRef() };
             try self.prepareLifecycleTask(authority);
             self.authority_notice_revision = self.host_notice_revision;
-            self.prepareHostCatalog(authority);
-            try self.tool_bridge.configureHost(.{ .context = authority, .handler_context = self, .invoke = queryHost, .invoke_worker = dispatchHostWorker, .managed_local_files = true, .contributions = self.host_catalog[0..self.host_catalog_len], .refresh = refreshHostAuthority, .acknowledge_notice = acknowledgeHostNotice, .accepted_result = acceptedHostResult });
+            self.prepareHostCatalog(authority, &self.tool_bridge);
+            try self.tool_bridge.configureHost(.{ .context = authority, .handler_context = self, .invoke = queryHost, .invoke_worker = dispatchHostWorker, .managed_local_files = true, .contributions = self.host_catalog[0..self.host_catalog_len], .refresh = refreshHostAuthority, .acknowledge_notice = acknowledgeHostNotice, .accepted_result = acceptedHostResult, .validate_context = validateCleanupWaitContext });
             if (context.owner == .group) try self.tool_bridge.prepareGroup(app, self.roster orelse return error.ContextUnavailable, allowed) else if (context.child_origin != null) try self.tool_bridge.prepareScope(app, allowed) else try self.tool_bridge.prepare(app, (tab orelse return error.StaleSession).content_owner.session);
             self.request_tools = try @import("ai/plugin_tools.zig").providerDefinitions(self.tool_bridge.requestTable().?, self.request_config.?.arena.allocator());
             self.request_tools_len = self.request_tools.len;
@@ -5758,28 +5766,46 @@ const AiHost = struct {
         self.questionsRef().supersede();
         self.inventory_approval.supersede();
     }
-    fn stopAttached(raw: *anyopaque, _: @import("ai/session_runtime.zig").Context) void {
+    fn supersedeAttachedHandoff(raw: *anyopaque, _: @import("ai/session_runtime.zig").Context) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        self.approvalsRef().supersedeForHandoff();
+        self.questionsRef().supersede();
+        self.inventory_approval.supersede();
+    }
+    fn stopAttached(raw: *anyopaque, context: @import("ai/session_runtime.zig").Context) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         self.inventory_approval.stop();
         const view = self.attachedView();
         if (view.compaction_agent) |agent| if (agent.eql(self.attached_runner.?.agent.id)) view.compaction.cancel();
-        if (self.request_host_context) |context| {
-            if (self.application_host) |app| app.cancelOwnedTask(context.task_id);
-            if (self.execution_driver) |driver| driver.stopTask(context) catch {};
+        if (self.attached_runner.?.record) |record| if (record.ending != null) {
+            for (self.lifecycle_controllers.items) |controller| {
+                const task = controller.authority;
+                if (!task.conversation_id.eql(context.fence.conversation)) continue;
+                if (self.application_host) |app| app.cancelOwnedTask(task.task_id);
+                if (self.execution_driver) |driver| driver.stopTask(task) catch {};
+            }
+            return;
+        };
+        if (self.request_host_context) |task| {
+            if (self.application_host) |app| app.cancelOwnedTask(task.task_id);
+            if (self.execution_driver) |driver| driver.stopTask(task) catch {};
         }
     }
     fn resourceStamp(self: *AiHost) !u64 {
-        const owner = self.attached_runner.?.agent.owner;
+        return self.resourceStampFor(self.attached_runner.?.agent.owner, null, null);
+    }
+    fn resourceStampFor(self: *AiHost, owner: ai_attachments.Owner, excluded: ?@import("host/identity.zig").SessionHandle, group_revision: ?u64) !u64 {
         const allowed = try self.captureOwnerScope(owner);
         defer self.allocator.free(allowed.inventory.?);
         var hash = std.hash.Wyhash.init(0);
         std.hash.autoHash(&hash, owner);
         if (owner == .group) {
             const group = (self.roster orelse return error.StaleGroup).findById(std.math.cast(u32, owner.group) orelse return error.StaleGroup) orelse return error.StaleGroup;
-            std.hash.autoHash(&hash, group.membership_revision);
+            std.hash.autoHash(&hash, group_revision orelse group.membership_revision);
         }
         for (allowed.memberIds()) |id| {
             const tab = self.tabForSession(id) orelse return error.StaleSession;
+            if (excluded) |skip| if (tab.content_owner.session.eql(skip)) continue;
             std.hash.autoHash(&hash, tab.content_owner.session);
             if (tab.runtime) |remote| if (remote.reconnectSnapshot()) |snapshot| {
                 std.hash.autoHash(&hash, snapshot.key);
@@ -5788,22 +5814,139 @@ const AiHost = struct {
         }
         return hash.final();
     }
-    fn invalidateAttachedEnvironment(self: *AiHost) !void {
+    /// A lifecycle-created group and its exact new session are expected
+    /// environment changes. Compare the whole prior resource stamp so a
+    /// concurrent reconnect, removal or unrelated membership change still
+    /// revokes the route choice.
+    fn expectedFollowupEnvironment(self: *AiHost) bool {
+        const broker = self.tool_bridge.route_broker orelse return false;
+        const followup = broker.execution_route.followupSnapshot() orelse return false;
+        const runner = self.attached_runner orelse return false;
+        const task = self.request_host_context orelse return false;
+        if (!task.conversation_id.eql(followup.context.conversation_id) or !task.task_id.eql(followup.context.task_id) or followup.context.binding != .group or !runner.agent.owner.eql(followup.context.binding)) return false;
+        const previous = self.resource_stamp orelse return false;
+        const roster = self.roster orelse return false;
+        const group = roster.findById(std.math.cast(u32, followup.context.binding.group) orelse return false) orelse return false;
+        const source = if (followup.source) |handle| blk: {
+            const tab = self.tabForSession(@backingInt(handle.session_id)) orelse return false;
+            if (!tab.content_owner.session.eql(handle)) return false;
+            break :blk tab;
+        } else null;
+        if (followup.create == null) {
+            const tab = source orelse return false;
+            if (group.members.items.len != 1 or !group.members.items[0].active or group.members.items[0].pane_id != tab.id) return false;
+            const before = self.resourceStampFor(.{ .session = @backingInt(tab.content_owner.session.session_id) }, null, null) catch return false;
+            return before == previous;
+        }
+        const app = self.application_host orelse return false;
+        const entry = app.lifecycle_supervisor.find(followup.create.?.operation_id) orelse return false;
+        if (!entry.request.context.eql(followup.context) or entry.snapshot.ownership != .created_task or entry.snapshot.state != .ready or !entry.snapshot.membership_committed) return false;
+        const created = entry.snapshot.session orelse return false;
+        if (followup.created) |known| if (!known.eql(created)) return false;
+        const revision = entry.request.membership_revision orelse return false;
+        if (group.membership_revision != revision +| 1) return false;
+        const before = self.resourceStampFor(followup.context.binding, created, revision) catch return false;
+        return before == previous;
+    }
+    fn invalidateAttachedEnvironment(self: *AiHost, tracked_group_loss: bool) !void {
         const shared_host = self.shared_service.?;
         const runner = self.attached_runner.?;
         const id = runner.agent.current orelse return;
         const ticket = try shared_host.service.store.fence(id);
-        if (runner.agent.owner == .session) {
+        const transport_change = tracked_group_loss or self.expectedReconnectEnvironment() or self.retainedSshTransportChanged();
+        if (runner.agent.owner == .session and !transport_change) {
             _ = try shared_host.service.environmentChanged(ticket);
             return;
         }
-        const next = try shared_host.service.store.environmentChanged(runner.agent.id);
+        const next = if (transport_change)
+            try shared_host.service.store.transportEnvironmentChanged(runner.agent.id)
+        else
+            try shared_host.service.store.environmentChanged(runner.agent.id);
         runner.commit_fence = next;
-        const record = shared_host.service.store.find(id).?;
-        record.inbox.lock();
-        if (record.ending == null) record.inbox.closing = false;
-        record.inbox.unlock();
-        supersedeAttached(self, runner.context orelse return);
+        if (!transport_change) {
+            const record = shared_host.service.store.find(id).?;
+            record.inbox.lock();
+            if (record.ending == null) record.inbox.closing = false;
+            record.inbox.unlock();
+        }
+        const expected = self.expectedFollowupEnvironment();
+        if (expected) supersedeAttachedHandoff(self, runner.context orelse return) else supersedeAttached(self, runner.context orelse return);
+    }
+    fn retainedSshTransportChanged(self: *AiHost) bool {
+        const context = self.request_host_context orelse return false;
+        const runner = self.attached_runner orelse return false;
+        if (runner.thread == null or !runner.agent.owner.eql(context.binding) or context.binding != .session or context.child_origin != null) return false;
+        const app = self.application_host orelse return false;
+        const tab = self.tabForSession(context.binding.session) orelse return false;
+        if (tab.content_owner != .session or tab.closing or tab.archived or tab.owned_pending) return false;
+        const handle = tab.content_owner.session;
+        if (!app.supportsIntegration(handle, "transport_loss")) return false;
+        if (self.lost_ssh_session) |previous| if (app.automaticReconnect(previous)) |recovery| {
+            if (recovery.successor.handle.eql(handle)) return true;
+        };
+        const mapping = app.findHandle(handle) orelse return false;
+        if (mapping.explicit_disconnect or mapping.tab_close_requested) return false;
+        const snapshot = (tab.runtime orelse return false).reconnectSnapshot() orelse return false;
+        if (!snapshot.was_attached or snapshot.key == null or !snapshot.key.?.eql(mapping.create_operation) or
+            (snapshot.phase != .releasing and snapshot.phase != .waiting) or (snapshot.failure orelse error.ConnectionClosed) == error.Cancelled) return false;
+        self.lost_ssh_session = handle;
+        return true;
+    }
+    fn trackGroupSshLoss(self: *AiHost) !bool {
+        const context = self.request_host_context orelse return false;
+        const runner = self.attached_runner orelse return false;
+        if (runner.thread == null or !runner.agent.owner.eql(context.binding) or context.binding != .group or context.child_origin != null) return false;
+        const app = self.application_host orelse return false;
+        const scope = try self.captureOwnerScope(context.binding);
+        defer self.allocator.free(scope.inventory.?);
+        var tracked = false;
+        for (scope.memberIds()) |id| {
+            const tab = self.tabForSession(id) orelse continue;
+            const handle = tab.content_owner.session;
+            if (!app.supportsIntegration(handle, "transport_loss")) continue;
+            const mapping = app.findHandle(handle) orelse continue;
+            if (mapping.explicit_disconnect or mapping.tab_close_requested) continue;
+            const snapshot = (tab.runtime orelse continue).reconnectSnapshot() orelse continue;
+            const original = if (snapshot.was_attached and snapshot.key != null and snapshot.key.?.eql(mapping.create_operation) and
+                (snapshot.phase == .releasing or snapshot.phase == .waiting) and (snapshot.failure orelse error.ConnectionClosed) != error.Cancelled)
+                handle
+            else if (mapping.automatic_reconnect_from) |attempt| candidate: {
+                if (attempt.owner != .session or self.tool_bridge.sourceOwner(id) == null or !self.tool_bridge.sourceOwner(id).?.eql(attempt.owner.session)) continue;
+                break :candidate attempt.owner.session;
+            } else continue;
+            if (app.taskAutomaticReconnect(context, original) != null) continue;
+            const receipt = try app.trackTaskAutomaticReconnect(context, original) orelse continue;
+            if (self.group_ssh_loss_operation == null) {
+                self.lost_ssh_session = original;
+                self.group_ssh_loss_operation = receipt.operation;
+                reconnectAccepted(self, context, receipt);
+                self.host_notice_revision = @max(self.host_notice_revision, self.authority_notice_revision) +| 1;
+            }
+            tracked = true;
+        }
+        return tracked;
+    }
+    fn expectedReconnectEnvironment(self: *AiHost) bool {
+        const expected = self.reconnect_environment orelse return false;
+        const context = self.request_host_context orelse return false;
+        const app = self.application_host orelse return false;
+        if (!context.eql(expected.context) or !self.attached_runner.?.agent.owner.eql(context.binding)) return false;
+        const receipt = app.reconnectReceipt(expected.operation, context) orelse return false;
+        const current = app.ownerForLegacy(receipt.legacy_id) orelse return false;
+        const successor = receipt.successor orelse return false;
+        if (!current.eql(successor.handle)) return false;
+        const state = app.sessions.queryState(current) orelse return false;
+        if (!state.create_operation.eql(successor.operation)) return false;
+        const other_resources = self.resourceStampFor(context.binding, current, null) catch return false;
+        if (other_resources != expected.other_resources) return false;
+        if (receipt.state == .ready or receipt.state == .failed) self.reconnect_environment = null;
+        return true;
+    }
+    fn reconnectAccepted(raw: *anyopaque, context: @import("ai/host_tools.zig").Context, receipt: application_host_mod.ReconnectReceipt) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const excluded = if (receipt.successor) |successor| successor.handle else receipt.original;
+        const other_resources = self.resourceStampFor(context.binding, excluded, null) catch return;
+        self.execution().reconnect_environment = .{ .context = context, .operation = receipt.operation, .other_resources = other_resources };
     }
     fn closeAttachedSession(self: *AiHost, owner: @import("host/identity.zig").SessionHandle, release_content: bool) application_host_mod.CloseReceipt {
         const shared_host = self.shared_service orelse return .released;
@@ -5912,6 +6055,7 @@ const AiHost = struct {
         if (self.attached_runner.?.agent.current) |id| {
             const record = self.shared_service.?.service.store.find(id).?;
             if (record.ending == null) {
+                const tracked_group_loss = try self.trackGroupSshLoss();
                 const current = self.resourceStamp() catch {
                     const ticket = try self.shared_service.?.service.store.fence(id);
                     try self.shared_service.?.service.endConversation(ticket, @import("host/identity.zig").HostOperationId.generate());
@@ -5919,7 +6063,7 @@ const AiHost = struct {
                     self.execution_bridge.pump(app);
                     return;
                 };
-                if (self.resource_stamp) |previous_stamp| if (current != previous_stamp) try self.invalidateAttachedEnvironment();
+                if (self.resource_stamp) |previous_stamp| if (current != previous_stamp or tracked_group_loss) try self.invalidateAttachedEnvironment(tracked_group_loss);
                 self.resource_stamp = current;
             }
         }
@@ -5937,8 +6081,7 @@ const AiHost = struct {
         try view.flushIdleHostNotices();
         view.publishSettledAiCompletions();
     }
-    fn attachedReleased(raw: *anyopaque, _: @import("ai/session_runtime.zig").Context) bool {
-        const self: *AiHost = @ptrCast(@alignCast(raw));
+    fn attachedWorkerReady(self: *AiHost) bool {
         if (self.attached_runner.?.thread != null) return false;
         const view = self.attachedView();
         if (view.compaction_agent) |agent| if (agent.eql(self.attached_runner.?.agent.id) and view.compaction.job != null) return false;
@@ -5947,7 +6090,25 @@ const AiHost = struct {
         self.request_tools = &.{};
         self.request_tools_len = 0;
         self.tool_bridge.clear() catch return false;
-        if (self.execution_driver) |driver| if (self.request_host_context) |context| if (driver.taskEvidence(context.task_id)) |fact| if (!fact.input_grants_released or fact.pending_dispatch != 0) return false;
+        return true;
+    }
+    fn attachedReadyForNext(raw: *anyopaque, current: @import("ai/session_runtime.zig").Context) bool {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        if (!self.attachedWorkerReady()) return false;
+        if (self.execution_driver) |driver| if (self.request_host_context) |context| {
+            if (!context.conversation_id.eql(current.fence.conversation) or !context.task_id.eql(current.task)) return false;
+            const fact = driver.taskEvidenceFor(context) orelse return false;
+            return fact.model_done and fact.pending_dispatch == 0 and fact.pending_waits == 0;
+        };
+        return true;
+    }
+    fn attachedReleased(raw: *anyopaque, _: @import("ai/session_runtime.zig").Context) bool {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        if (!self.attachedWorkerReady()) return false;
+        if (self.execution_driver) |driver| if (self.request_host_context) |context| {
+            const fact = driver.taskEvidenceFor(context) orelse return false;
+            if (!fact.input_grants_released or fact.pending_dispatch != 0) return false;
+        };
         return true;
     }
     fn disposeReadyAttached(raw: *anyopaque) bool {
@@ -6313,6 +6474,7 @@ const AiHost = struct {
 
     fn streamInputConsumed(raw: *anyopaque, id: @import("host/identity.zig").SubmissionId, text: []const u8) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
+        self.execution().tool_bridge.captureFollowupRouting(text);
         try self.execution().step_mailbox.push(.{ .kind = .input, .submission = id, .detail = text, .phase = .succeeded, .at_ms = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)) });
     }
     fn streamToolRejected(raw: *anyopaque, call: ai_provider.ToolCall, detail: []const u8) !void {
@@ -6532,7 +6694,7 @@ const AiHost = struct {
         const Controller = @import("ui/ai_lifecycle_controller.zig").Controller;
         const controller = try self.allocator.create(Controller);
         errdefer self.allocator.destroy(controller);
-        controller.* = try Controller.init(.{ .allocator = self.allocator, .app = self.application_host orelse return error.ContextUnavailable, .roster = self.roster orelse return error.ContextUnavailable, .store = self.assistant_states.?, .bridge = &self.execution().tool_bridge, .authority = context, .execution_policy = self.execution().request_execution_policy, .notice_revision = self.execution().host_notice_revision, .callbacks = .{ .context = self, .on_handoff = handoffCommitted, .on_membership_changed = membershipCommitted } });
+        controller.* = try Controller.init(.{ .allocator = self.allocator, .app = self.application_host orelse return error.ContextUnavailable, .roster = self.roster orelse return error.ContextUnavailable, .store = self.assistant_states.?, .bridge = &self.execution().tool_bridge, .authority = context, .execution_policy = self.execution().request_execution_policy, .notice_revision = self.execution().host_notice_revision, .callbacks = .{ .context = self, .on_handoff = handoffCommitted, .on_membership_changed = membershipCommitted, .on_reconnect_accepted = reconnectAccepted } });
         errdefer controller.deinitAfterWorker();
         try self.execution().lifecycle_controllers.append(self.allocator, controller);
         self.execution().lifecycle_controller = controller;
@@ -6571,7 +6733,7 @@ const AiHost = struct {
         return .{ .store = try plugin.openStore() };
     }
 
-    fn prepareHostCatalog(self: *AiHost, authority: @import("ai/host_tools.zig").Context) void {
+    fn prepareHostCatalog(self: *AiHost, authority: @import("ai/host_tools.zig").Context, bridge: *const @import("ui/ai_tools.zig").Bridge) void {
         self.execution().host_catalog_len = 0;
         self.execution().host_catalog[self.execution().host_catalog_len] = @import("ai/user_interaction.zig").contribution;
         self.execution().host_catalog_len += 1;
@@ -6580,7 +6742,7 @@ const AiHost = struct {
             self.execution().host_catalog_len += 1;
         }
         {
-            const capability = self.localFileAuthority(authority, &self.execution().tool_bridge) catch .none;
+            const capability = self.localFileAuthority(authority, bridge) catch .none;
             if (capability != .none) {
                 const readable = @import("ai/host_local_files.zig").contributions ++ .{@import("ai/local_file_change_query.zig").contribution};
                 for (readable) |contribution| self.appendLocalContribution(contribution);
@@ -6598,12 +6760,12 @@ const AiHost = struct {
             }
         } else |_| {}
         for (@import("ai/host_catalog.zig").contributions) |contribution| {
-            if (self.execution().tool_bridge.queries_only and @import("ai/host_catalog.zig").isMutation(contribution.definition.id)) continue;
+            if (bridge.queries_only and @import("ai/host_catalog.zig").isMutation(contribution.definition.id)) continue;
             self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
             self.execution().host_catalog_len += 1;
         }
         if (self.ai_transfer_host != null) for (@import("ai/host_transfer.zig").contributions) |contribution| {
-            if (self.execution().tool_bridge.queries_only and contribution.definition.effect != .read_state) continue;
+            if (bridge.queries_only and contribution.definition.effect != .read_state) continue;
             self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
             self.execution().host_catalog_len += 1;
         };
@@ -6615,12 +6777,23 @@ const AiHost = struct {
             for (@import("ai/extension_gateway.zig").contributions) |contribution| {
                 const skill_tool = std.mem.eql(u8, contribution.definition.id, "host.skills");
                 if (skill_tool and session.frozen.skills.len == 0) continue;
-                if (!skill_tool and (session.frozen.servers.len == 0 or self.execution().tool_bridge.queries_only)) continue;
+                if (!skill_tool and (session.frozen.servers.len == 0 or bridge.queries_only)) continue;
                 self.execution().host_catalog[self.execution().host_catalog_len] = contribution;
                 self.execution().host_catalog_len += 1;
             }
         }
-        if (self.execution().tool_bridge.queries_only) return;
+        if (bridge.queries_only) {
+            // Grouping is a local binding transaction and does not touch the
+            // retired adapter. Preserve its ownership and all other fences.
+            if (self.execution().lifecycle_controller) |controller| {
+                const group = @import("ai/host_lifecycle.zig").create_group_contribution;
+                if (controller.available(group.definition.id)) {
+                    self.execution().host_catalog[self.execution().host_catalog_len] = group;
+                    self.execution().host_catalog_len += 1;
+                }
+            }
+            return;
+        }
         self.execution().host_catalog[self.execution().host_catalog_len] = @import("ai/builtin_tools.zig").contribution;
         self.execution().host_catalog_len += 1;
         for (@import("ai/host_queries.zig").terminal_contributions) |contribution| {
@@ -6731,7 +6904,7 @@ const AiHost = struct {
                     const group = (self.roster orelse return error.ContextUnavailable).findById(@intCast(state.owner.group)) orelse return error.GroupRemoved;
                     if (group.membership_revision != value.next.roster_revision) return error.AuthorityRefreshStale;
                 }
-                if (!value.next.queries_only and value.bridge.refreshQueriesOnly()) return error.AuthorityRefreshStale;
+                if (value.next.queries_only != value.bridge.refreshQueriesOnly()) return error.AuthorityRefreshStale;
                 const controller = lookupLifecycleTask(self, next_context.conversation_id, next_context.task_id) orelse return error.ScopeChanged;
                 const prior_authority = controller.authority;
                 try controller.refreshAuthority(next_context);
@@ -6748,7 +6921,7 @@ const AiHost = struct {
                     try new_recording.?.captureUi(app, self.roster, &value.next);
                     try new_recording.?.captureClosedReceipts(app);
                 };
-                try value.bridge.replacePreparedExact(&value.next);
+                value.bridge.replacePreparedExact(&value.next) catch |err| return if (err == error.ToolCleanupPending) error.AuthorityRefreshStale else err;
 
                 if (finish_refresh) |prepared_finish| prepared_finish.apply();
                 if (recording_capture) |*capture| {
@@ -6757,7 +6930,7 @@ const AiHost = struct {
                     backend.recording_access = access;
                     new_recording = null;
                 }
-                self.prepareHostCatalog(next_context);
+                self.prepareHostCatalog(next_context, value.bridge);
                 self.managerRef().scope = value.bridge.requestTable().?.captured_scope;
                 backend.request_tools = value.bridge.wire;
                 backend.request_tools_len = backend.request_tools.len;
@@ -6814,6 +6987,8 @@ const AiHost = struct {
                 const shell_hash = @import("host/terminal_execution.zig").digest(shell_notices);
                 const shell_changed = (shell_notices.len > 2 or self.execution().shell_notice_hash != null) and (self.execution().shell_notice_hash == null or !std.mem.eql(u8, &self.execution().shell_notice_hash.?, &shell_hash));
                 var changed = !state.owner.eql(value.previous.binding) or state.binding_revision != value.previous.binding_revision or self.execution().host_notice_revision > self.execution().authority_notice_revision;
+                const cleanup_pending = value.bridge.refreshQueriesOnly();
+                changed = changed or cleanup_pending != value.bridge.queries_only;
                 changed = changed or workspace_changed or shell_changed or value.bridge.capabilityFingerprint(app) != value.bridge.capability_fingerprint;
                 if (state.owner == .group) {
                     const group = (self.roster orelse return error.ContextUnavailable).findById(@intCast(state.owner.group)) orelse return error.GroupRemoved;
@@ -6847,7 +7022,7 @@ const AiHost = struct {
                 };
                 errdefer Staged.destroy(staged);
                 const next = &staged.next;
-                next.queries_only = value.bridge.refreshQueriesOnly();
+                next.queries_only = cleanup_pending;
                 next.configureFiles(self.file_application);
                 next.configurePolicy(value.bridge.permissionPolicy().engine, value.bridge.policy_revision);
                 next.execution_mode = value.bridge.execution_mode;
@@ -6867,7 +7042,7 @@ const AiHost = struct {
                         backend.host_catalog_len = prior_len;
                     }
                     try controller.refreshAuthority(next_context);
-                    self.prepareHostCatalog(next_context);
+                    self.prepareHostCatalog(next_context, next);
                     binding.contributions = backend.host_catalog[0..backend.host_catalog_len];
                     try next.configureHost(binding);
                     if (state.owner == .group) try next.prepareGroup(app, self.roster.?, captured) else if (next_context.child_origin != null) try next.prepareScope(app, captured) else {
@@ -6887,7 +7062,34 @@ const AiHost = struct {
                 const handoffs = try value.allocator.alloc(Handoff, pending_handoffs.len);
                 defer value.allocator.free(handoffs);
                 for (pending_handoffs, 0..) |*handoff, index| handoffs[index] = .{ .conversation_id = handoff.context.conversation_id, .task_id = handoff.context.task_id, .revision = handoff.revision, .text = handoff.content() };
-                const notice = try std.json.Stringify.valueAlloc(value.allocator, .{ .host_context_notice = true, .kind = if (workspace_pending) @as([]const u8, "local_workspace_changed") else "authority_changed", .local_workspace = if (workspace_pending) @import("ai/session_prompt.zig").workspaceView(workspace) else null, .local_workspace_enabled = if (workspace_scope_changed) @as(?bool, workspace_enabled) else null, .workspace_before_revision = if (workspace_pending) record.workspace_ack_revision else null, .workspace_change_reason = if (workspace_pending and record.workspace_change != null) @as(?[]const u8, @tagName(record.workspace_change.?.reason)) else null, .conversation_id = next_context.conversation_id, .task_id = next_context.task_id, .current_binding = next_context.binding, .binding_revision = next_context.binding_revision, .notice_revision = notice_revision, .membership_revision = next.roster_revision, .input_handoffs = handoffs[0..pending_handoffs.len], .shell_switches_json = shell_notices, .instruction = "宿主状态已更新。这是环境事实，不是新用户任务或写入授权。以本轮更新后的系统提示词、工具表及每项工具的目标范围为准；历史能力不代表当前能力。shell_switches_json 仅是已提交的切层候选与层级数据，不证明切层成功，也不授权输入。仅在对应工具仍可用时按系统提示词处理。未知结果需观察核验，不补造退出码、不重发已发送操作。用户接管只归还对应终端输入权，不中断本轮或已运行命令。绑定或成员变化后取得当前引用，历史调用保持原所属和调用ID。" }, .{});
+                const lost_ref = if (backend.lost_ssh_session) |disconnected| try @import("ai/host_queries.zig").sessionRef(value.allocator, next_context, disconnected) else null;
+                defer if (lost_ref) |reference| value.allocator.free(reference);
+                const lost_operation_ref = if (backend.group_ssh_loss_operation) |operation| try @import("ai/host_lifecycle.zig").operationRef(value.allocator, next_context, operation) else null;
+                defer if (lost_operation_ref) |reference| value.allocator.free(reference);
+                const notice = try std.json.Stringify.valueAlloc(value.allocator, .{
+                    .host_context_notice = true,
+                    .kind = if (workspace_pending) @as([]const u8, "local_workspace_changed") else "authority_changed",
+                    .tool_cleanup = if (cleanup_pending) @as(?[]const u8, "pending") else if (value.bridge.queries_only) @as(?[]const u8, "released") else null,
+                    .ssh_transport_lost = if (lost_ref) |reference| .{
+                        .previous_session_ref = reference,
+                        .operation_ref = lost_operation_ref,
+                        .automatic_reconnect = app.workspace.app_config.ssh.auto_reconnect,
+                        .instruction = if (lost_operation_ref != null) "The host accepted one automatic reconnect for this exact group member. If recovery is part of this task, wait on operation_ref with host.wait_session_ready and wait_for=interactive. If you call host.reconnect_session on previous_session_ref, it observes this same operation. On failure report the reason and stop. Do not replay the interrupted command or route it to a different member." else "If this task needs the SSH connection restored, call host.reconnect_session once with previous_session_ref and connection_policy=new_only. This returns a receipt for an automatic reconnect already started by the host. Use host.wait_session_ready with that receipt's operation_ref and wait_for=interactive before issuing any new terminal command. Do not replay the interrupted execution or send input to the old generation.",
+                    } else null,
+                    .local_workspace = if (workspace_pending) @import("ai/session_prompt.zig").workspaceView(workspace) else null,
+                    .local_workspace_enabled = if (workspace_scope_changed) @as(?bool, workspace_enabled) else null,
+                    .workspace_before_revision = if (workspace_pending) record.workspace_ack_revision else null,
+                    .workspace_change_reason = if (workspace_pending and record.workspace_change != null) @as(?[]const u8, @tagName(record.workspace_change.?.reason)) else null,
+                    .conversation_id = next_context.conversation_id,
+                    .task_id = next_context.task_id,
+                    .current_binding = next_context.binding,
+                    .binding_revision = next_context.binding_revision,
+                    .notice_revision = notice_revision,
+                    .membership_revision = next.roster_revision,
+                    .input_handoffs = handoffs[0..pending_handoffs.len],
+                    .shell_switches_json = shell_notices,
+                    .instruction = "宿主状态已更新。这是环境事实，不是新用户任务或写入授权。以本轮更新后的系统提示词、工具表及每项工具的目标范围为准；历史能力不代表当前能力。shell_switches_json 仅是已提交的切层候选与层级数据，不证明切层成功，也不授权输入。仅在对应工具仍可用时按系统提示词处理。未知结果需观察核验，不补造退出码、不重发已发送操作。用户接管只归还对应终端输入权，不中断本轮或已运行命令。绑定或成员变化后取得当前引用，历史调用保持原所属和调用ID。",
+                }, .{});
                 value.result = .{
                     .table = table,
                     .notice = notice,
@@ -7071,6 +7273,12 @@ const AiHost = struct {
         }
         if (state.closed or state.ended or !state.owner.eql(context.binding) or state.binding_revision != context.binding_revision or !self.attachmentOwnerExists(state.owner)) return error.ScopeChanged;
     }
+    fn validateCleanupWaitContext(raw: *anyopaque, context: @import("ai/host_tools.zig").Context) !void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        try self.validateHostContext(context);
+        const app = self.application_host orelse return error.ContextUnavailable;
+        if (app.windowClosePending() or app.workspace.shutting_down or app.workspace.groupClosing(@intCast(context.binding.group))) return error.ScopeChanged;
+    }
     fn committedHandoffPending(self: *AiHost, context: @import("ai/host_tools.zig").Context) bool {
         // commit_group publishes the new owner on the UI thread before the
         // blocked worker can close its result pair and refresh the tool table.
@@ -7143,7 +7351,7 @@ const AiHost = struct {
         _ = try ai_provider_config.fromSettingsSelection(frozen.config.?.value.ai, frozen.controls.model);
         if (frozen.controls.effort) |effort| try ai_provider_config.validateEffort(frozen.config.?.value.ai, frozen.controls.model, effort);
         try backend.attached_inputs.ensureUnusedCapacity(a, 1);
-        const runner = try shared_host.service.adoptChild(record, .{ .context = backend, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .supersede = supersedeAttached, .stop = stopAttached, .release_worker = releaseAttachedWorker }, root, fact);
+        const runner = try shared_host.service.adoptChild(record, .{ .context = backend, .capture = captureAttached, .prepare = prepareAttached, .completed = completeAttached, .local_released = attachedReleased, .ready_for_next = attachedReadyForNext, .supersede = supersedeAttached, .supersede_handoff = supersedeAttachedHandoff, .stop = stopAttached, .release_worker = releaseAttachedWorker }, root, fact);
         backend.attached_runner = runner;
         adopted = true;
         if (existing_bridge == null) try shared_host.register(.{ .agent = agent_id, .window = parent.application_host.?.window_id, .context = backend, .pump = pumpAttached, .released = disposeReadyAttached, .destroy = destroyAttached, .flush = flushAttached });

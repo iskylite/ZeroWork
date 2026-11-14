@@ -19,6 +19,29 @@ const connection_envelope = @import("../config/connection_envelope.zig");
 const disconnect = @import("ai_disconnect_backend.zig");
 pub const BootstrapProduct = @import("../ai/ssh_bootstrap_product.zig");
 pub const DisconnectSnapshot = disconnect.Snapshot;
+pub const ReconnectReceipt = struct {
+    operation: identity.HostOperationId,
+    context: @import("../ai/host_tools.zig").Context,
+    original: identity.SessionHandle,
+    original_attempt: OperationKey,
+    legacy_id: LegacySessionId,
+    state: enum { accepted, connecting, ready, failed } = .accepted,
+    deadline_ns: i128,
+    successor: ?session.Accepted = null,
+    revision: u64 = 1,
+    failure: [384]u8 = @splat(0),
+    failure_len: usize = 0,
+    joined_automatic: bool = false,
+
+    pub fn fail(self: *ReconnectReceipt, reason: []const u8) void {
+        var len = @min(reason.len, self.failure.len);
+        while (len > 0 and !std.unicode.utf8ValidateSlice(reason[0..len])) len -= 1;
+        @memcpy(self.failure[0..len], reason[0..len]);
+        self.failure_len = len;
+        self.state = .failed;
+        self.revision += 1;
+    }
+};
 pub const DisconnectPreflight = struct { create_operation: OperationKey, binding: session.ServiceHandle, impact_revision: u64 };
 pub const lifecycle = @import("../host/lifecycle_supervisor.zig");
 pub const OwnedLifecycleHooks = struct {
@@ -186,12 +209,14 @@ const Mapping = struct {
     local_started: bool = false,
     reconnect_policy: ?ReconnectPolicy = null,
     reconnect_ticket: ?@import("../vt/reconnect.zig").Ticket = null,
+    automatic_reconnect_from: ?OperationKey = null,
     reconnect_count: u8 = 0,
     /// Separate from network retries; reset only after startup actually opens.
     shell_initialization_retry_used: bool = false,
     explicit_disconnect: bool = false,
     runtime_loss_received: bool = false,
     close_display: ?CloseDisplay = null,
+    tab_close_requested: bool = false,
 
     pub fn recordFailure(self: *Mapping, text: []const u8) void {
         var len = @min(text.len, self.failure.len);
@@ -328,6 +353,11 @@ pub const Domain = struct {
             defer event.deinit();
             if (event.value.key.owner != .session) continue;
             const source = self.ownerForHandle(event.value.key.owner.session) orelse continue;
+            if (event.value.kind == .failed) if (event.value.failure) |failure| {
+                for (source.reconnects.items) |*record| {
+                    if (record.state == .connecting and record.successor != null and record.successor.?.operation.eql(event.value.key)) record.fail(failure.code);
+                }
+            };
             const mapping = source.findHandle(event.value.key.owner.session) orelse {
                 if (event.value.kind == .failed) if (event.value.failure) |failure|
                     source.publishFileCreateFailure(event.value.key, failure);
@@ -485,6 +515,7 @@ pub const ApplicationHost = struct {
     owned_lifecycle_hooks: ?OwnedLifecycleHooks = null,
     deferred_closes: std.ArrayList(DeferredClose) = .empty,
     disconnects: disconnect.Ledger = .{},
+    reconnects: std.ArrayList(ReconnectReceipt) = .empty,
     // At most one ownership transition per Supervisor entry (limit 512).
     // Fixed storage keeps accepted user input safe even under allocator OOM.
     owned_input_events: [512]OwnedInputEvent = undefined,
@@ -596,6 +627,7 @@ pub const ApplicationHost = struct {
         self.lifecycle_supervisor.deinit();
         self.deferred_closes.deinit(self.allocator);
         self.disconnects.deinit(self.allocator);
+        self.reconnects.deinit(self.allocator);
         self.allocator.destroy(self);
         if (owns_domain) domain.deinit();
     }
@@ -780,6 +812,25 @@ pub const ApplicationHost = struct {
 
     /// Short controller handler: capture the authorized source and enqueue.
     /// Real creation occurs only after the Bridge handler has returned.
+    pub fn ownedOpenSource(self: *ApplicationHost, handle: identity.SessionHandle, group_id: identity.GroupId, policy: lifecycle.ConnectionPolicy) !*Mapping {
+        const mapping = self.findHandle(handle) orelse return error.StaleReference;
+        const state = self.sessions.queryState(handle) orelse return error.StaleReference;
+        const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return error.StaleReference;
+        if (!tab.content_owner.eql(.{ .session = handle }) or tab.archived or tab.closing or tab.owned_pending) return error.StaleReference;
+        if (state.lifecycle == .closing or state.lifecycle == .closed or state.lifecycle == .cleanup_unknown) return error.SourceChanged;
+        const roster = self.workspace.group_roster orelse return error.UnknownGroup;
+        const group = roster.findById(@intCast(@backingInt(group_id))) orelse return error.UnknownGroup;
+        for (group.members.items) |member| {
+            if (member.active and member.pane_id == mapping.legacy_id) break;
+        } else return error.TargetOutsideScope;
+        if (mapping.process == null and mapping.source == null) return error.UnsupportedSource;
+        if (policy != .new_only) {
+            if (mapping.process != null) return error.UnsupportedSource;
+            if (state.lifecycle != .ready and state.lifecycle != .attached) return error.SourceChanged;
+        }
+        return mapping;
+    }
+
     pub fn queueOwnedSession(self: *ApplicationHost, request: lifecycle.OpenRequest) !lifecycle.Snapshot {
         if (self.lifecycle_supervisor.find(request.operation_ref)) |entry| {
             if (!std.meta.eql(entry.request, request)) return error.IdempotencyConflict;
@@ -796,17 +847,10 @@ pub const ApplicationHost = struct {
         var source: PendingOwnedSource = .{ .operation_ref = request.operation_ref };
         errdefer source.deinit(self.allocator);
         if (request.source) |handle| {
-            const mapping = self.findHandle(handle) orelse return error.StaleReference;
-            const state = self.sessions.queryState(handle) orelse return error.StaleReference;
-            if (state.lifecycle != .ready and state.lifecycle != .attached) return error.SourceChanged;
-            const roster = self.workspace.group_roster orelse return error.UnknownGroup;
-            const group = roster.findById(@intCast(@backingInt(request.group.id))).?;
-            if (!group.contains(mapping.legacy_id)) return error.TargetOutsideScope;
+            const mapping = try self.ownedOpenSource(handle, request.group.id, request.connection_policy);
             if (mapping.process != null) {
-                if (request.connection_policy != .new_only) return error.UnsupportedSource;
                 source.cwd = try mapping.process.?.copyCwd(handle, self.allocator);
             } else {
-                if (mapping.source == null) return error.UnsupportedSource;
                 source.connection = try self.freezeTabWindowConnection(mapping.legacy_id);
             }
         } else {
@@ -1197,15 +1241,9 @@ pub const ApplicationHost = struct {
             const group = self.workspace.group_roster.?.findById(@intCast(@backingInt(entry.request.group.id))).?;
             if (group.membership_revision != revision) return error.ScopeChanged;
         }
-        const source: ?*Mapping = if (entry.request.source) |handle| blk: {
-            const mapping = self.findHandle(handle) orelse return error.SourceChanged;
-            const source_state = self.sessions.queryState(handle) orelse return error.SourceChanged;
-            if (source_state.lifecycle != .attached and source_state.lifecycle != .ready) return error.SourceChanged;
-            const roster = self.workspace.group_roster orelse return error.ScopeChanged;
-            const group = roster.findById(@intCast(@backingInt(entry.request.group.id))) orelse return error.ScopeChanged;
-            if (!group.contains(mapping.legacy_id)) return error.ScopeChanged;
-            break :blk mapping;
-        } else blk: {
+        const source: ?*Mapping = if (entry.request.source) |handle|
+            try self.ownedOpenSource(handle, entry.request.group.id, entry.request.connection_policy)
+        else blk: {
             _ = try self.validateSavedOwnedSource(entry.request.saved_source orelse return error.InvalidSource);
             break :blk null;
         };
@@ -1565,6 +1603,132 @@ pub const ApplicationHost = struct {
         if (!mapping.reconnect_ticket.?.claim(mapping.create_operation, @import("../platform/realtime.zig").monotonicNs(), true)) return error.ReconnectAlreadyRequested;
         mapping.explicit_disconnect = false;
         self.workspace.cx.requestRedraw();
+    }
+
+    pub fn reconnectReceipt(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context) ?*const ReconnectReceipt {
+        for (self.reconnects.items) |*record| if (record.operation.eql(operation) and record.context.eql(context)) return record;
+        return null;
+    }
+
+    pub fn reconnectFailedForTask(self: *const ApplicationHost, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) bool {
+        for (self.reconnects.items) |record| {
+            if (record.state == .failed and record.original.session_id == handle.session_id and
+                record.context.conversation_id.eql(context.conversation_id) and record.context.task_id.eql(context.task_id)) return true;
+        }
+        return false;
+    }
+
+    pub fn taskAutomaticReconnect(self: *const ApplicationHost, context: @import("../ai/host_tools.zig").Context, original: identity.SessionHandle) ?*const ReconnectReceipt {
+        for (self.reconnects.items) |*record| if (record.joined_automatic and record.context.eql(context) and (record.original.eql(original) or (record.successor != null and record.successor.?.handle.eql(original)))) return record;
+        return null;
+    }
+
+    pub fn permitsReconnectExecution(self: *const ApplicationHost, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) bool {
+        if (context.binding != .group) return true;
+        for (self.reconnects.items) |record| {
+            if (!record.joined_automatic or !record.context.eql(context)) continue;
+            if (record.state != .ready or record.successor == null or !record.successor.?.handle.eql(handle)) return false;
+        }
+        return true;
+    }
+
+    pub fn trackTaskAutomaticReconnect(self: *ApplicationHost, context: @import("../ai/host_tools.zig").Context, original: identity.SessionHandle) !?ReconnectReceipt {
+        if (self.taskAutomaticReconnect(context, original)) |existing| return existing.*;
+        const existing = self.automaticReconnect(original);
+        const mapping = if (existing) |running| self.findHandle(running.successor.handle) else self.findHandle(original);
+        const owner = mapping orelse return null;
+        const key = if (existing) |running| running.original else owner.create_operation;
+        if (existing == null) {
+            const ticket = owner.reconnect_ticket orelse return null;
+            if (!ticket.key.eql(key) or ticket.invalidated or (ticket.deadline_ns == null and !ticket.claimed)) return null;
+        }
+        for (self.reconnects.items) |record| if (record.original_attempt.eql(key)) return null;
+        try self.reserveReconnectReceipt();
+        const record: ReconnectReceipt = .{ .operation = .generate(), .context = context, .original = original, .original_attempt = key, .legacy_id = owner.legacy_id, .successor = if (existing) |running| running.successor else null, .deadline_ns = @import("../platform/realtime.zig").monotonicNs() + 30 * std.time.ns_per_s, .joined_automatic = true };
+        self.reconnects.appendAssumeCapacity(record);
+        return record;
+    }
+
+    pub fn automaticReconnect(self: *ApplicationHost, previous: identity.SessionHandle) ?struct { original: OperationKey, successor: session.Accepted, legacy_id: LegacySessionId } {
+        const next = previous.nextGeneration() catch return null;
+        const mapping = self.findHandle(next) orelse return null;
+        const original = mapping.automatic_reconnect_from orelse return null;
+        if (!original.owner.eql(.{ .session = previous })) return null;
+        const state = self.sessions.queryState(next) orelse return null;
+        if (!state.create_operation.eql(mapping.create_operation) or state.lifecycle == .closing or state.lifecycle == .closed) return null;
+        return .{ .original = original, .successor = .{ .handle = next, .operation = mapping.create_operation }, .legacy_id = mapping.legacy_id };
+    }
+
+    pub fn requestAiReconnect(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context, original: identity.SessionHandle, attempt: OperationKey) !ReconnectReceipt {
+        if (self.reconnectReceipt(operation, context)) |prior| {
+            if (!prior.original.eql(original) or !prior.original_attempt.eql(attempt)) return error.IdempotencyConflict;
+            return prior.*;
+        }
+        if (self.reconnectFailedForTask(context, original)) return error.ReconnectFailedForTask;
+        const automatic = self.automaticReconnect(original);
+        const legacy_id = if (automatic) |existing| existing.legacy_id else self.legacyForHandle(original) orelse return error.StaleReference;
+        const key = if (automatic) |existing| existing.original else self.findHandle(original).?.create_operation;
+        if (!key.eql(attempt)) return error.StaleCreateOperation;
+        for (self.reconnects.items) |record| {
+            if (record.original.eql(original) and record.original_attempt.eql(attempt) and (record.state != .failed or record.context.task_id.eql(context.task_id))) return error.ReconnectAlreadyRequested;
+        }
+        try self.reserveReconnectReceipt();
+        if (automatic == null) try self.requestSshReconnect(legacy_id);
+        const record: ReconnectReceipt = .{ .operation = operation, .context = context, .original = original, .original_attempt = attempt, .legacy_id = legacy_id, .successor = if (automatic) |existing| existing.successor else null, .deadline_ns = @import("../platform/realtime.zig").monotonicNs() + 30 * std.time.ns_per_s, .joined_automatic = automatic != null };
+        self.reconnects.appendAssumeCapacity(record);
+        return record;
+    }
+
+    fn reserveReconnectReceipt(self: *ApplicationHost) !void {
+        if (self.reconnects.items.len >= 512) {
+            // Keep every in-flight receipt. Old terminal results can expire,
+            // while their durable request keys still prevent redispatch.
+            for (self.reconnects.items, 0..) |record, i| {
+                if (record.state == .ready or record.state == .failed) {
+                    _ = self.reconnects.orderedRemove(i);
+                    break;
+                }
+            } else return error.ResourceLimit;
+        }
+        try self.reconnects.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    fn pendingAiReconnect(self: *ApplicationHost, attempt: OperationKey) ?*ReconnectReceipt {
+        for (self.reconnects.items) |*record| if (record.state == .accepted and record.original_attempt.eql(attempt)) return record;
+        return null;
+    }
+
+    fn tickAiReconnects(self: *ApplicationHost) void {
+        for (self.reconnects.items) |*record| {
+            if (record.state == .ready or record.state == .failed) continue;
+            const mapping = self.findLegacyId(record.legacy_id) orelse {
+                record.fail("SessionClosed");
+                continue;
+            };
+            if (record.successor) |attempt| {
+                const state = self.sessions.queryState(attempt.handle) orelse {
+                    record.fail("ReconnectSuperseded");
+                    continue;
+                };
+                if (!state.create_operation.eql(attempt.operation)) {
+                    record.fail("ReconnectSuperseded");
+                } else if (state.lifecycle == .attached and mapping.handle.eql(attempt.handle) and mapping.attached_published) {
+                    record.state = .ready;
+                    record.revision += 1;
+                } else if (state.lifecycle == .failed or state.lifecycle == .ended or state.lifecycle == .closing or state.lifecycle == .closed or state.lifecycle == .cleanup_unknown) {
+                    record.fail(if (mapping.handle.eql(attempt.handle) and mapping.failure_len != 0) mapping.failure[0..mapping.failure_len] else if (state.lifecycle == .failed) "ReconnectFailed" else "SessionClosed");
+                    if (mapping.create_operation.eql(attempt.operation)) mapping.reconnect_ticket = null;
+                } else if (record.state == .accepted) {
+                    record.state = .connecting;
+                    record.revision += 1;
+                }
+            } else if (!mapping.handle.eql(record.original) or mapping.reconnect_ticket == null or mapping.reconnect_ticket.?.invalidated or self.sessions.queryState(record.original) == null) {
+                record.fail("ReconnectCancelled");
+            } else if (@import("../platform/realtime.zig").monotonicNs() >= record.deadline_ns and self.sessions.queryState(record.original).?.create_cleanup != .released) {
+                mapping.reconnect_ticket = null;
+                record.fail("PreviousConnectionCleanupTimeout");
+            }
+        }
     }
 
     pub fn legacyForHandle(self: *const ApplicationHost, handle: identity.SessionHandle) ?LegacySessionId {
@@ -2248,14 +2412,27 @@ pub const ApplicationHost = struct {
                 if (state.lifecycle == .closing or state.lifecycle == .closed or self.workspace.shutting_down) {
                     mapping.reconnect_ticket.?.invalidate();
                 } else if (!self.windowClosePending()) {
-                    _ = mapping.reconnect_ticket.?.claim(mapping.create_operation, @import("../platform/realtime.zig").monotonicNs(), false);
+                    const automatic_claim = mapping.reconnect_ticket.?.claim(mapping.create_operation, @import("../platform/realtime.zig").monotonicNs(), false);
+                    if (automatic_claim) mapping.automatic_reconnect_from = mapping.create_operation;
                     const ticket = mapping.reconnect_ticket.?;
                     if (ticket.claimed and !ticket.invalidated and (state.lifecycle == .failed or state.lifecycle == .ended) and state.create_cleanup == .released) {
+                        const reconnect = self.pendingAiReconnect(ticket.key);
                         mapping.reconnect_ticket = null;
-                        _ = self.sessions.retry(mapping.handle) catch |err| {
+                        if (reconnect != null or (mapping.automatic_reconnect_from != null and !mapping.automatic_reconnect_from.?.eql(ticket.key))) mapping.automatic_reconnect_from = null;
+                        const accepted = self.sessions.retry(mapping.handle) catch |err| {
+                            if (reconnect) |record| {
+                                record.fail(@errorName(err));
+                                continue;
+                            }
                             if (mapping.create_operation.eql(ticket.key)) mapping.reconnect_ticket = ticket;
                             return err;
                         };
+                        if (reconnect) |record| {
+                            record.successor = accepted;
+                            record.state = .connecting;
+                            record.revision += 1;
+                            if (record.joined_automatic) mapping.automatic_reconnect_from = ticket.key;
+                        }
                         mapping.reconnect_count +|= 1;
                         pending = true;
                     } else if (!ticket.invalidated and (ticket.deadline_ns != null or ticket.claimed)) pending = true;
@@ -2299,6 +2476,7 @@ pub const ApplicationHost = struct {
                 };
             }
         }
+        self.tickAiReconnects();
         for (self.history_closes.items) |*close| {
             if (close.state != .pending) continue;
             if (self.workspace.tabIndexById(close.tab_id)) |index| {
@@ -2456,6 +2634,12 @@ pub const ApplicationHost = struct {
             mapping.recordFailure(failure.safe_message);
             self.workspace.finishSshReconnect(mapping.legacy_id, mapping.create_operation, notice.failure orelse error.ConnectionClosed);
             const initialization_failure = (notice.failure != null and notice.failure.? == error.ShellInitializationFailed);
+            for (self.reconnects.items) |*record| if ((record.state == .connecting or record.state == .failed) and record.successor != null and record.successor.?.operation.eql(mapping.create_operation)) {
+                if (record.state == .connecting) record.fail(failure.code);
+                mapping.reconnect_ticket = null;
+                if (initialization_failure) tab.shell_init_confirmation_required = true;
+                return notice.cleanup == .awaiting;
+            };
             if (initialization_failure) {
                 // The worker keeps startup input gated until release, so this
                 // retry cannot replace a shell already used by the user.
@@ -2918,6 +3102,9 @@ pub const ApplicationHost = struct {
         const handle = command.owner.session;
         const mapping = self.findHandle(handle) orelse return error.StaleSession;
         if (command.payload.tab != mapping.tab_id) return error.StaleTab;
+        const old_tab_close_requested = mapping.tab_close_requested;
+        if (self.workspace.window_close_request == null) mapping.tab_close_requested = true;
+        errdefer mapping.tab_close_requested = old_tab_close_requested;
         return self.requestCloseLegacy(mapping.legacy_id);
     }
 

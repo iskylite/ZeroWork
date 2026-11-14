@@ -108,6 +108,17 @@ pub const ProcessJournal = struct {
         defer self.mutex.unlock();
         return (try self.openLocked()).snapshot(a, handle);
     }
+    const ReconnectJournalEntry = struct { handle: journal.Handle, revision: u64, stage: journal.Stage };
+    fn reconnectHandle(self: *ProcessJournal, context: host.Context, operation: identity.HostOperationId) !?ReconnectJournalEntry {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        const store = try self.openLocked();
+        for (store.records.items, 0..) |record, index| {
+            if (!record.operation_ref.eql(operation) or !record.context.eql(context) or !std.mem.eql(u8, record.tool_id, "host.reconnect_session")) continue;
+            return .{ .handle = .{ .index = index, .operation_ref = operation }, .revision = record.revision, .stage = record.stage };
+        }
+        return null;
+    }
     pub fn findLocalFile(self: *ProcessJournal, a: std.mem.Allocator, context: host.Context, selector: journal.LocalFileSelector) !?journal.Record {
         lock(&self.mutex);
         defer self.mutex.unlock();
@@ -135,6 +146,16 @@ pub const ProcessJournal = struct {
         lock(&self.mutex);
         defer self.mutex.unlock();
         return (try self.openLocked()).update(handle, revision, change);
+    }
+    fn reconnectFailedForTask(self: *ProcessJournal, context: host.Context, target: identity.SessionHandle) !bool {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        for ((try self.openLocked()).records.items) |record| {
+            if (record.stage != .failed or !record.dispatch_started or !std.mem.eql(u8, record.tool_id, "host.reconnect_session")) continue;
+            if (!record.context.conversation_id.eql(context.conversation_id) or !record.context.task_id.eql(context.task_id)) continue;
+            if (record.created_session) |original| if (original.session_id == target.session_id) return true;
+        }
+        return false;
     }
     /// Persist the provider's acknowledged watermark only at a closed tool-pair
     /// round boundary. Same CID/task is sufficient after a binding handoff.
@@ -168,6 +189,7 @@ pub const Authorized = struct {
     ownership_revision: ?u64 = null,
     impact_revision: ?u64 = null,
     create_operation: ?@import("../host/operation.zig").OperationKey = null,
+    observe_automatic_reconnect: bool = false,
     disconnect_binding: ?@import("../host/session_host.zig").ServiceHandle = null,
     bootstrap_required: bool = false,
 };
@@ -198,6 +220,17 @@ pub const MutationReceipt = struct {
     error_code: ?[]const u8 = null,
     operation_accepted: ?bool = true,
 };
+pub const ReconnectReceipt = struct {
+    operation_ref: identity.HostOperationId,
+    original: identity.SessionHandle,
+    successor: ?identity.SessionHandle,
+    state: enum { accepted, connecting, ready, failed },
+    revision: u64,
+    execution_readiness: @FieldType(lifecycle.Snapshot, "execution_readiness") = .unknown,
+    failure: [384]u8 = @splat(0),
+    failure_len: usize = 0,
+    joined_automatic: bool = false,
+};
 pub const Action = union(enum) {
     authorize: tools.Request,
     prepare_group: struct { operation: identity.HostOperationId, request: tools.Request, authorized: Authorized },
@@ -216,12 +249,15 @@ pub const Action = union(enum) {
     acknowledge_close: identity.HostOperationId,
     set_retention: struct { session: identity.SessionHandle, retention: lifecycle.Retention },
     query_disconnect: identity.HostOperationId,
+    query_reconnect: identity.HostOperationId,
+    find_automatic_reconnect: identity.SessionHandle,
+    queue_reconnect: struct { operation: identity.HostOperationId, request: tools.Request, authorized: Authorized, mutation_fence: ?provider.DispatchFence },
     mutate: struct { operation: identity.HostOperationId, request: tools.Request, authorized: Authorized },
 };
 pub const Call = struct {
     context: host.Context,
     action: Action,
-    result: union(enum) { none, authorized: Authorized, group_plan: GroupPlan, session: lifecycle.Snapshot, close: CloseSnapshot, mutation: MutationReceipt, bootstrap_probe: ?bootstrap_product.Probed } = .none,
+    result: union(enum) { none, authorized: Authorized, group_plan: GroupPlan, session: lifecycle.Snapshot, close: CloseSnapshot, mutation: MutationReceipt, reconnect: ReconnectReceipt, bootstrap_probe: ?bootstrap_product.Probed } = .none,
 };
 pub const Controller = struct { context: *anyopaque, invoke: *const fn (*anyopaque, *Call) anyerror!void };
 /// Bridge adapter: call(context, task_context, task_fn, cancel) invokes the
@@ -274,10 +310,23 @@ pub const Runtime = struct {
         const canonical = try @import("canonical_arguments.zig").digest(allocator, invocation.arguments);
         if (!std.mem.eql(u8, &canonical, &invocation.canonical_arguments_hash)) return error.InvalidArguments;
         if (request.kind == .wait_session_ready) return self.wait(scheduler, invocation, request, allocator, cancel);
-        const handle = self.journal_owner.begin(.{ .context = invocation.context, .tool_id = invocation.tool_id, .request_key = request.request_key, .canonical_hash = canonical, .turn_id = invocation.turn_id, .call_id = invocation.call_id }) catch |err| return journalError(invocation, allocator, err, false);
+        const existing_operation = if (request.kind == .reconnect_session) existing: {
+            const found = try self.controllerCall(scheduler, invocation.context, .{ .find_automatic_reconnect = request.session.? }, cancel);
+            break :existing if (found.result == .reconnect) found.result.reconnect.operation_ref else null;
+        } else null;
+        const handle = self.journal_owner.begin(.{ .context = invocation.context, .tool_id = invocation.tool_id, .request_key = request.request_key, .canonical_hash = canonical, .turn_id = invocation.turn_id, .call_id = invocation.call_id, .existing_operation = existing_operation }) catch |err| return if (err == error.ReconnectAlreadyRequested and existing_operation != null) failureResult(allocator, invocation, existing_operation.?, err, false) else journalError(invocation, allocator, err, false);
         if (handle.reused) {
             var prior = try self.journal_owner.snapshot(allocator, handle);
             defer prior.deinit(allocator);
+            if (request.kind == .reconnect_session and prior.dispatch_started) {
+                const observed = self.controllerCall(scheduler, invocation.context, .{ .query_reconnect = handle.operation_ref }, cancel) catch |err| switch (err) {
+                    error.NotFound => return if (prior.stage == .failed) recordResult(allocator, invocation, prior, true) else failureResult(allocator, invocation, handle.operation_ref, error.ReconnectReceiptUnavailable, true),
+                    else => return err,
+                };
+                if (observed.result != .reconnect) return error.InvalidControllerReceipt;
+                try self.settleReconnect(handle, prior.revision, prior.stage, observed.result.reconnect);
+                return reconnectResult(allocator, invocation, handle.operation_ref, observed.result.reconnect, false, true, false);
+            }
             if (request.kind == .open_session and (prior.stage == .committed or prior.stage == .succeeded) and prior.created_session != null) {
                 const observed = self.controllerCall(scheduler, invocation.context, .{ .query_open = handle.operation_ref }, cancel) catch null;
                 if (observed) |value| if (value.result == .session and value.result.session.session != null and value.result.session.session.?.eql(prior.created_session.?)) return sessionResult(allocator, invocation, handle.operation_ref, value.result.session, false, true);
@@ -306,9 +355,25 @@ pub const Runtime = struct {
         };
     }
     fn fresh(self: *Runtime, scheduler: Scheduler, invocation: host.Invocation, request: tools.Request, handle: journal.Handle, a: std.mem.Allocator, cancel: ?*provider.CancelToken) !host.Result {
+        if (request.kind == .reconnect_session) {
+            const found = try self.controllerCall(scheduler, invocation.context, .{ .find_automatic_reconnect = request.session.? }, cancel);
+            if (found.result == .reconnect) {
+                var receipt = found.result.reconnect;
+                if (!receipt.operation_ref.eql(handle.operation_ref)) return error.ReconnectAlreadyRequested;
+                try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = receipt.original });
+                try self.journal_owner.update(handle, 2, .{ .stage = .running });
+                if (receipt.state == .failed) {
+                    try self.settleReconnect(handle, 3, .running, receipt);
+                } else {
+                    receipt.state = .accepted;
+                }
+                return reconnectResult(a, invocation, handle.operation_ref, receipt, false, false, false);
+            }
+        }
+        if (request.kind == .reconnect_session and try self.journal_owner.reconnectFailedForTask(invocation.context, request.session.?)) return error.ReconnectFailedForTask;
         const first = try self.controllerCall(scheduler, invocation.context, .{ .authorize = request }, cancel);
         if (first.result != .authorized) return error.InvalidControllerReceipt;
-        const authorized = first.result.authorized;
+        var authorized = first.result.authorized;
         var permit: ?approvals.Permit = null;
         var impact: [2048]u8 = undefined;
         const subject = lifecycleSubject(invocation, authorized, &impact);
@@ -319,12 +384,29 @@ pub const Runtime = struct {
         }
         try cancelled(cancel);
         const checked = try self.controllerCall(scheduler, invocation.context, .{ .authorize = request }, cancel);
-        if (checked.result != .authorized or !std.meta.eql(authorized, checked.result.authorized)) return error.ScopeChanged;
+        if (checked.result != .authorized) return error.ScopeChanged;
+        if (!std.meta.eql(authorized, checked.result.authorized)) {
+            if (request.kind != .reconnect_session or !checked.result.authorized.observe_automatic_reconnect or !checked.result.authorized.create_operation.?.eql(authorized.create_operation.?)) return error.ScopeChanged;
+            authorized = checked.result.authorized;
+            if (permit) |value| self.approval.?.finish(value);
+            permit = null;
+        }
         if (permit) |value| if (self.approval.?.authorizeSubject(value, invocation, subject, authorized.policy_revision) != .allow) return error.ScopeChanged;
         switch (request.kind) {
             .create_group => return self.createGroup(scheduler, invocation, request, authorized, handle, a, cancel, permit),
             .open_session => return self.open(scheduler, invocation, request, authorized, handle, a, cancel, permit),
             .close_session => return self.close(scheduler, invocation, request, authorized, handle, a, cancel, permit),
+            .reconnect_session => {
+                try self.validatePermit(permit, invocation, authorized);
+                try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started });
+                const applied = self.controllerCall(scheduler, invocation.context, .{ .queue_reconnect = .{ .operation = handle.operation_ref, .request = request, .authorized = authorized, .mutation_fence = invocation.mutation_fence } }, cancel) catch |err| {
+                    try self.journal_owner.update(handle, 2, .{ .stage = .failed });
+                    return failureResult(a, invocation, handle.operation_ref, err, false);
+                };
+                if (applied.result != .reconnect) return error.InvalidControllerReceipt;
+                self.journal_owner.update(handle, 2, .{ .stage = .running, .created_session = request.session }) catch return failureResult(a, invocation, handle.operation_ref, error.ReconnectJournalUnavailable, true);
+                return reconnectResult(a, invocation, handle.operation_ref, applied.result.reconnect, false, false, !applied.result.reconnect.joined_automatic);
+            },
             .disconnect_session => {
                 try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = request.session });
                 try self.validatePermit(permit, invocation, authorized);
@@ -471,6 +553,25 @@ pub const Runtime = struct {
     }
     fn wait(self: *Runtime, scheduler: Scheduler, invocation: host.Invocation, request: tools.Request, a: std.mem.Allocator, cancel: ?*provider.CancelToken) !host.Result {
         var queried = try self.controllerCall(scheduler, invocation.context, if (request.operation) |op| .{ .query_open = op } else .{ .resolve_owned = request.session.? }, cancel);
+        if (queried.result == .reconnect) {
+            const operation = request.operation orelse return error.InvalidControllerReceipt;
+            var snapshot = queried.result.reconnect;
+            const revision = request.after_revision orelse snapshot.revision;
+            const deadline = now() + request.wait_ms;
+            while (reconnectPending(snapshot, request.wait_for, revision) and now() < deadline) {
+                @import("retry.zig").wait(@min(@as(u32, 50), request.wait_ms), cancel) catch return error.CancelledBeforeDispatch;
+                if (invocation.dispatch_fence) |fence| try fence.check();
+                queried = try self.controllerCall(scheduler, invocation.context, .{ .query_reconnect = operation }, cancel);
+                if (queried.result != .reconnect) return error.InvalidControllerReceipt;
+                snapshot = queried.result.reconnect;
+            }
+            if (snapshot.state == .ready or snapshot.state == .failed) {
+                if (try self.journal_owner.reconnectHandle(invocation.context, operation)) |record| {
+                    try self.settleReconnect(record.handle, record.revision, record.stage, snapshot);
+                }
+            }
+            return reconnectResult(a, invocation, operation, snapshot, reconnectPending(snapshot, request.wait_for, revision), false, false);
+        }
         if (queried.result != .session) return error.InvalidControllerReceipt;
         var snapshot = queried.result.session;
         const initial_revision = request.after_revision orelse snapshot.revision;
@@ -483,7 +584,23 @@ pub const Runtime = struct {
         }
         return sessionResult(a, invocation, snapshot.operation_ref, snapshot, now() >= deadline and sessionPending(snapshot, request.wait_for) and (request.wait_for != .revision or snapshot.revision <= initial_revision), false);
     }
+    fn settleReconnect(self: *Runtime, handle: journal.Handle, revision: u64, stage: journal.Stage, snapshot: ReconnectReceipt) !void {
+        if (stage != .running and stage != .dispatch_started) return;
+        const next: journal.Stage = switch (snapshot.state) {
+            .ready => .succeeded,
+            .failed => .failed,
+            else => return,
+        };
+        try self.journal_owner.update(handle, revision, .{ .stage = next, .created_session = snapshot.original });
+    }
 };
+fn reconnectPending(snapshot: ReconnectReceipt, wait_for: @TypeOf(@as(tools.Request, undefined).wait_for), revision: u64) bool {
+    return switch (snapshot.state) {
+        .accepted, .connecting => wait_for != .revision or snapshot.revision <= revision,
+        .ready => wait_for == .interactive and (snapshot.execution_readiness == .unknown or snapshot.execution_readiness == .initializing),
+        .failed => false,
+    };
+}
 fn sessionPending(snapshot: lifecycle.Snapshot, wait_for: @TypeOf(@as(tools.Request, undefined).wait_for)) bool {
     if (snapshot.state == .queued or snapshot.state == .prepared or snapshot.state == .opening) return true;
     return snapshot.state == .ready and wait_for == .interactive and (snapshot.execution_readiness == .unknown or snapshot.execution_readiness == .initializing);
@@ -584,6 +701,30 @@ fn disconnectResult(a: std.mem.Allocator, invocation: host.Invocation, operation
         .idempotent_reuse = reused,
     }, true, unknown);
 }
+fn reconnectResult(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, receipt: ReconnectReceipt, timed_out: bool, reused: bool, started: bool) !host.Result {
+    if (!receipt.operation_ref.eql(operation) or receipt.failure_len > receipt.failure.len) return error.InvalidControllerReceipt;
+    if (receipt.successor) |next| {
+        if (!next.eql(try receipt.original.nextGeneration())) return error.InvalidControllerReceipt;
+    } else if (receipt.state == .connecting or receipt.state == .ready) return error.InvalidControllerReceipt;
+    var result = try jsonResult(a, invocation, .succeeded, .{
+        .operation_ref = try tools.operationRef(a, invocation.context, operation),
+        .previous_session_ref = try queries.sessionRef(a, invocation.context, receipt.original),
+        .session_ref = if (receipt.state == .ready) try queries.sessionRef(a, invocation.context, receipt.successor.?) else null,
+        .generation = if (receipt.state != .accepted and receipt.successor != null) receipt.successor.?.generation else null,
+        .state = @tagName(receipt.state),
+        .execution_readiness = receipt.execution_readiness,
+        .source_revision = receipt.revision,
+        .error_code = if (receipt.failure_len != 0) receipt.failure[0..receipt.failure_len] else null,
+        .timed_out = timed_out,
+        .idempotent_reuse = reused,
+        .joined_automatic = receipt.joined_automatic,
+        .retryable = if (receipt.state == .failed) @as(?bool, false) else null,
+        .recovery_hint = if (receipt.state == .failed) @as(?[]const u8, reconnect_failure_hint) else null,
+    }, started, false);
+    if (receipt.state == .ready) result.reconnected = .{ .previous = receipt.original, .current = receipt.successor.? };
+    return result;
+}
+const reconnect_failure_hint = "Report the SSH failure reason to the user and stop reconnecting this session in this task. Do not retry with a different request_key or session generation. Do not send commands to the disconnected session.";
 fn recordResult(a: std.mem.Allocator, invocation: host.Invocation, record: journal.Record, reused: bool) !host.Result {
     const unknown = record.stage == .dispatch_started or record.stage == .running or record.stage == .outcome_unknown or !record.local_released or record.remote_effect_unknown;
     const status: @import("plugin_tools.zig").Status = if (unknown) .outcome_unknown else switch (record.stage) {
@@ -600,7 +741,7 @@ fn sessionResult(a: std.mem.Allocator, invocation: host.Invocation, operation: i
     return jsonResult(a, invocation, .succeeded, .{ .operation_ref = try tools.operationRef(a, invocation.context, operation), .session_ref = if (snapshot.session) |session| try queries.sessionRef(a, invocation.context, session) else null, .group_ref = try queries.groupRef(a, invocation.context, @backingInt(snapshot.group.id)), .state = if (snapshot.state == .prepared) "opening" else @tagName(snapshot.state), .execution_readiness = snapshot.execution_readiness, .completion_source = snapshot.completion_source, .source_ref = if (snapshot.source) |source| try queries.sessionRef(a, invocation.context, source) else if (snapshot.saved_source) |source| try tools.connectionRef(a, invocation.context, source) else @as(?[]const u8, null), .ownership = @tagName(snapshot.ownership), .ownership_revision = snapshot.ownership_revision, .retention = @tagName(snapshot.retention), .membership_committed = snapshot.membership_committed, .source_revision = snapshot.revision, .error_code = snapshot.error_code, .timed_out = timed_out, .idempotent_reuse = reused, .local_released = snapshot.local_released, .remote_effect_unknown = snapshot.remote_effect_unknown, .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .truncated = false, .next_cursor = @as(?[]const u8, null) }, !std.mem.eql(u8, invocation.tool_id, "host.wait_session_ready"), false);
 }
 fn failureResult(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, err: anyerror, started: bool) !host.Result {
-    return jsonResult(a, invocation, if (started) .outcome_unknown else if (err == error.CancelledBeforeDispatch) .cancelled_unsent else if (err == error.ToolApprovalRejected) .rejected else .failed, .{ .code = @errorName(err), .stage = if (started) "outcome_unknown" else "preflight", .retryable = false, .operation_ref = try tools.operationRef(a, invocation.context, operation), .side_effect_started = started, .local_released = !started, .remote_effect_unknown = started, .recovery_hint = if (started) "Inspect the original operation; never redispatch an unknown effect." else "No effect was dispatched; inspect and correct the rejected request." }, started, started);
+    return jsonResult(a, invocation, if (started) .outcome_unknown else if (err == error.CancelledBeforeDispatch) .cancelled_unsent else if (err == error.ToolApprovalRejected) .rejected else .failed, .{ .code = @errorName(err), .stage = if (started) "outcome_unknown" else "preflight", .retryable = false, .operation_ref = try tools.operationRef(a, invocation.context, operation), .side_effect_started = started, .local_released = !started, .remote_effect_unknown = started, .recovery_hint = if (err == error.ReconnectFailedForTask) reconnect_failure_hint else if (started) "Inspect the original operation; never redispatch an unknown effect." else "No effect was dispatched; inspect and correct the rejected request." }, started, started);
 }
 fn journalError(invocation: host.Invocation, a: std.mem.Allocator, err: anyerror, started: bool) !host.Result {
     return jsonResult(a, invocation, .failed, .{ .code = if (err == error.IdempotencyConflict) "IdempotencyConflict" else "JournalUnavailable", .stage = "journal_begin", .retryable = false, .detail = @errorName(err), .side_effect_started = started, .local_released = true, .remote_effect_unknown = false, .recovery_hint = "Repair durable lifecycle storage before requesting another effect." }, started, false);

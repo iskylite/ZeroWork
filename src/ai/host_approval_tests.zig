@@ -247,6 +247,37 @@ test "routing approval combines selection and permission and cross tool stays ze
     broker.execution_route.consume(ctx, target, "pwd");
     try std.testing.expect(try broker.beginGrantedSubject(call, correct, 9, a) == null);
 }
+test "reconnect never inherits a confirmed execution permit from the old generation" {
+    const a = std.testing.allocator;
+    const ctx = context();
+    const old: identity.SessionHandle = .{ .session_id = @fromBackingInt(ctx.binding.session), .generation = 1 };
+    const next = try old.nextGeneration();
+    const json = "{\"command\":\"printf reconnect-fixture\"}";
+    const args = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer args.deinit();
+    var call = try invocation(ctx, args.value, json);
+    call.authority = .execution_control;
+    call.tool_id = "host.run_in_terminal";
+    var broker: approval.Broker = .{};
+    try broker.configure(ctx, 9);
+    const subject: approval.Subject = .{ .kind = .terminal_command, .target = "old generation", .detail = "printf reconnect-fixture", .route = .{ .proposed = .current_terminal, .choice = .{ .route = .current_terminal, .source = .{ .session = old } }, .target = old, .selectable = false } };
+    const permit = try broker.beginSubject(call, subject, 9, a);
+    try broker.decide(permit.sequence, permit.arguments_hash, true);
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorizeSubject(permit, call, subject, 9));
+    broker.supersede();
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.approval_required, broker.authorizeSubject(permit, call, subject, 9));
+    var successor = subject;
+    successor.target = "new generation";
+    successor.route.?.target = next;
+    successor.route.?.choice.source = .{ .session = next };
+    call.operation_id += 1;
+    call.call_id = "successor-command";
+    try std.testing.expect(try broker.beginGrantedSubject(call, successor, 9, a) == null);
+    const fresh = try broker.beginSubject(call, successor, 9, a);
+    try std.testing.expect(!try broker.poll(fresh));
+    try broker.decide(fresh.sequence, fresh.arguments_hash, true);
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorizeSubject(fresh, call, successor, 9));
+}
 test "routing rejected pending choice and changed command cannot mint successor permission" {
     const a = std.testing.allocator;
     const ctx = context();
@@ -497,4 +528,20 @@ test "v0.4.3 local file approval requires the resolved target and exact evidence
     try std.testing.expectEqual(Decision.scope_changed, broker.authorizeSubject(permit, call, changed, 9));
     broker.updatePermissionPolicy(.{ .mode = .confirm });
     try std.testing.expectEqual(Decision.approval_required, broker.authorizeSubject(permit, call, subject, 9));
+}
+
+test "followup lifecycle handoff preserves route while ordinary supersede revokes it" {
+    var broker: approval.Broker = .{};
+    const ctx = context();
+    const source: identity.SessionHandle = .{ .session_id = @fromBackingInt(ctx.binding.session), .generation = 1 };
+    try broker.configure(ctx, 9);
+    try broker.execution_route.captureFollowup(ctx, "你可以再开会话监控下带宽或者文件大小呢", source, .auto_idle);
+    broker.supersedeForHandoff();
+    var grouped = ctx;
+    grouped.binding = .{ .group = 7 };
+    grouped.binding_revision += 1;
+    try broker.execution_route.handoff(ctx, grouped, source);
+    try std.testing.expect(broker.execution_route.pendingFollowupSource(grouped).?.eql(source));
+    broker.supersede();
+    try std.testing.expect(broker.execution_route.pendingFollowupSource(grouped) == null);
 }

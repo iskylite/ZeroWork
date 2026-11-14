@@ -61,6 +61,7 @@ pub fn title(name: []const u8) ?[]const u8 {
         .{ "host.reconnect_session", "重新连接会话" },
         .{ "host.set_session_retention", "设置会话保留策略" },
         .{ "host.wait_session_ready", "等待会话就绪" },
+        .{ "host.wait_tool_cleanup", "等待释放旧工具资源" },
         .{ "host.run_command", "执行命令" },
         .{ "host.run_in_terminal", "在终端中执行命令" },
         .{ "host.attach_shell", "接入当前终端" },

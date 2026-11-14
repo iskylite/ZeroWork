@@ -11,6 +11,7 @@ const RuntimeFixture = struct {
     release: std.atomic.Value(bool) = .init(false),
     calls: std.atomic.Value(usize) = .init(0),
     cleaned: bool = true,
+    ready_next: bool = false,
     uses_tools: bool = false,
     hold_prepare: bool = false,
     preparing: std.atomic.Value(bool) = .init(false),
@@ -41,6 +42,9 @@ const RuntimeFixture = struct {
     }
     fn released(raw: *anyopaque, _: runtime.Context) bool {
         return @as(*@This(), @ptrCast(@alignCast(raw))).cleaned;
+    }
+    fn nextReady(raw: *anyopaque, _: runtime.Context) bool {
+        return @as(*@This(), @ptrCast(@alignCast(raw))).ready_next;
     }
     fn backend(self: *@This()) runtime.Backend {
         return .{ .context = self, .prepare = prepare, .local_released = released };
@@ -103,6 +107,34 @@ test "AI session PATCH queued input starts next turn while steering continues cu
     try std.testing.expectEqual(turn, inbox.receipt(steer.id).?.turn.?);
     try std.testing.expect(inbox.receipt(queued.id).?.turn.? > turn);
     try std.testing.expectEqual(@as(usize, 3), fixture.calls.load(.acquire));
+}
+
+test "AI session PATCH next turn starts with an owned execution while end waits for release" {
+    var service = runtime.Service.init(std.testing.allocator);
+    defer service.deinit();
+    var fixture: RuntimeFixture = .{ .cleaned = false, .uses_tools = true };
+    var backend = fixture.backend();
+    backend.ready_for_next = RuntimeFixture.nextReady;
+    const runner = try service.attach(.{ .session = 1 }, backend);
+    const ticket = try service.store.create(runner.agent.id);
+    _ = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "first" }, null);
+    try waitStarted(&fixture);
+    fixture.release.store(true, .release);
+    try waitIdle(&service, runner);
+
+    const next = try service.submit(ticket, identity.SubmissionId.generate(), .{ .content = "next" }, .steer);
+    try std.testing.expectEqual(input.Delivery.queued, next.delivery);
+    fixture.ready_next = true;
+    try service.poll();
+    try waitIdle(&service, runner);
+    try std.testing.expectEqual(input.Delivery.consumed, service.store.find(ticket.conversation).?.inbox.receipt(next.id).?.delivery);
+    try std.testing.expectEqual(@as(usize, 2), fixture.calls.load(.acquire));
+
+    try service.endConversation(ticket, identity.HostOperationId.generate());
+    try std.testing.expect(service.store.find(ticket.conversation).?.binding != null);
+    fixture.cleaned = true;
+    try service.poll();
+    try std.testing.expect(service.store.find(ticket.conversation).?.binding == null);
 }
 
 test "AI session PATCH end remains bound until independent cleanup acknowledges release" {

@@ -286,6 +286,12 @@ pub const Store = struct {
         return .{ .id = id, .runtime_id = state.id, .from = from, .to = .{ .group = group_id }, .revision = revision, .next_revision = try @import("../host/identity.zig").advance(revision) };
     }
     pub fn commitHandoff(self: *Store, plan: Handoff) !void {
+        return self.commitHandoffImpl(plan, false);
+    }
+    pub fn commitLifecycleHandoff(self: *Store, plan: Handoff) !void {
+        return self.commitHandoffImpl(plan, true);
+    }
+    fn commitHandoffImpl(self: *Store, plan: Handoff, preserve_route: bool) !void {
         const state = self.findConversation(plan.id) orelse return error.ConversationNotFound;
         if (state.child_agent != null or state.id != plan.runtime_id or state.closed or state.ended or !state.owner.eql(plan.from) or state.binding_revision != plan.revision) return error.BindingChanged;
         if (plan.from != .session or plan.to != .group or plan.to.group == 0 or plan.next_revision != try @import("../host/identity.zig").advance(plan.revision)) return error.InvalidBindingHandoff;
@@ -293,7 +299,7 @@ pub const Store = struct {
         if (self.authority) |service| if (service.store.find(plan.id)) |record| {
             const ticket = try service.store.fence(record.id);
             if (ticket.binding != plan.revision) return error.BindingChanged;
-            const committed = try service.handoff(ticket, plan.to);
+            const committed = if (preserve_route) try service.handoffLifecycle(ticket, plan.to) else try service.handoff(ticket, plan.to);
             if (committed.binding != plan.next_revision) return error.BindingChanged;
         };
         if (state.initial_owner == null) state.initial_owner = plan.from;

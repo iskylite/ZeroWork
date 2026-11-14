@@ -10,10 +10,12 @@ pub const Route = enum { batch, current_terminal, new_terminal };
 pub const Source = union(enum) {
     session: identity.SessionHandle,
     saved: identity.AssetOwner,
+    group_selection,
     pub fn eql(self: Source, other: Source) bool {
         return std.meta.activeTag(self) == std.meta.activeTag(other) and switch (self) {
             .session => |value| value.eql(other.session),
             .saved => |value| std.meta.eql(value, other.saved),
+            .group_selection => true,
         };
     }
 };
@@ -37,8 +39,13 @@ const Grant = struct {
     command_approved: bool = false,
     create: ?Create = null,
     created: ?identity.SessionHandle = null,
+    // A user's live monitoring follow-up selects one work session for that
+    // task. Each command still gets its own ordinary permission decision.
+    followup: bool = false,
+    independent: bool = false,
 };
 pub const Resolution = struct { route: Route, approved: bool = false, trusted: bool = false, choice: ?Choice = null, needs_creation: bool = false };
+pub const Followup = struct { context: host.Context, source: ?identity.SessionHandle, create: ?Create, created: ?identity.SessionHandle };
 pub const State = struct {
     mutex: std.atomic.Mutex = .unlocked,
     context: ?host.Context = null,
@@ -82,6 +89,7 @@ pub const State = struct {
         defer self.mutex.unlock();
         if (self.context == null or !self.context.?.eql(context)) return error.ScopeChanged;
         self.grant = null;
+        if (try self.captureNewSessionLocked(context, submitted, selected, retention)) return;
         if (submitted.len > 65534 or std.mem.indexOfAny(u8, submitted, "\n\r\"") != null or containsAny(submitted, &.{ "“", "”" }) or containsAny(submitted, &.{ "不要", "别在", "不是", "不要新", "don't", "do not", " if ", "如果", "或者", "也可以", "还是", "或在", " or " })) return;
         var instruction = std.mem.trim(u8, submitted, " \t");
         if (std.mem.startsWith(u8, instruction, "请")) instruction = instruction["请".len..];
@@ -95,6 +103,40 @@ pub const State = struct {
         const route: Route = if (current) .current_terminal else if (fresh and !containsAny(instruction, &.{ "批量", "批处理", "batch" })) .new_terminal else .batch;
         self.grant = .{ .context = context, .choice = .{ .route = route, .create_new = fresh, .source = .{ .session = handle }, .retention = if (containsAny(submitted, &.{ "后保留", "并保留", "and keep" })) .keep else retention } };
     }
+    /// A consumed, actual user steer may select a separate work session while
+    /// the original foreground command is still running. Never derive this
+    /// choice from a model/tool message, and fail closed on ambiguous routing.
+    pub fn captureFollowup(self: *State, context: host.Context, submitted: []const u8, selected: ?identity.SessionHandle, retention: config.SessionRetention) !void {
+        return self.captureIntent(context, submitted, selected, retention);
+    }
+    fn captureNewSessionLocked(self: *State, context: host.Context, submitted: []const u8, selected: ?identity.SessionHandle, retention: config.SessionRetention) !bool {
+        if (submitted.len > 65534 or std.mem.indexOfAny(u8, submitted, "\n\r\"") != null or containsAny(submitted, &.{ "“", "”", "如果", "除非", "不是", "别开", "别新", "不要开", "不要新", "不要创建", "不要在新", "不需要", "不必", "无需", "禁止", "或者在", "或在", "或者用", "或用", "或者原", "或原", "或者当前", "或当前", "还是", "也可以", "怎么", "如何", "什么意思", " don't ", " do not ", " if ", "批量", "批处理" })) return false;
+        // The common explicit protection of the original terminal is allowed;
+        // other negative instructions need user clarification instead.
+        if (std.mem.indexOf(u8, submitted, "不要")) |index| {
+            const allowed = "不要在原会话输入";
+            if (!std.mem.startsWith(u8, submitted[index..], allowed) or std.mem.indexOf(u8, submitted[index + allowed.len ..], "不要") != null) return false;
+        }
+        var instruction = std.mem.trim(u8, submitted, " \t");
+        for (0..3) |_| {
+            var removed = false;
+            for ([_][]const u8{ "你可以", "可以", "请你", "请", "帮我", "麻烦你", "麻烦" }) |prefix| {
+                if (!std.mem.startsWith(u8, instruction, prefix)) continue;
+                instruction = std.mem.trimStart(u8, instruction[prefix.len..], " \t");
+                removed = true;
+                break;
+            }
+            if (!removed) break;
+        }
+        if (!startsAny(instruction, &.{ "再开会话", "再开一个会话", "新开会话", "新开一个会话", "新建会话", "新建一个会话", "另开会话", "另开一个会话", "再开终端", "再开一个终端", "新开终端", "新开一个终端", "新建终端", "另开终端" })) return false;
+        const source: Source = if (selected) |handle| blk: {
+            if (context.binding == .session and context.binding.session != @backingInt(handle.session_id)) return error.TargetOutsideScope;
+            break :blk .{ .session = handle };
+        } else if (context.binding == .group) .group_selection else return false;
+        const keep = containsAny(submitted, &.{ "后保留", "并保留", "and keep" });
+        self.grant = .{ .context = context, .choice = .{ .route = .new_terminal, .create_new = true, .source = source, .retention = if (keep) .keep else retention }, .followup = true, .independent = !containsAny(submitted, &.{ "复用连接", "复用原连接", "共享连接", "reuse the connection" }) };
+        return true;
+    }
     pub fn select(self: *State, context: host.Context, choice: Choice, command: []const u8, approved: bool) !void {
         if (command.len == 0 or command.len > 65534) return error.InvalidArguments;
         self.lock();
@@ -104,6 +146,8 @@ pub const State = struct {
         if (self.grant) |prior| if (prior.context.eql(context) and std.meta.eql(prior.choice, choice) and (prior.command_hash == null or std.mem.eql(u8, &prior.command_hash.?, &next.command_hash.?))) {
             next.create = prior.create;
             next.created = prior.created;
+            next.followup = prior.followup;
+            next.independent = prior.independent;
         };
         self.grant = next;
     }
@@ -114,10 +158,12 @@ pub const State = struct {
         if (!grant.context.eql(context)) return .{ .route = fallback };
         const expected = grant.created orelse switch (grant.choice.source) {
             .session => |value| value,
-            .saved => return .{ .route = fallback },
+            .saved, .group_selection => return .{ .route = fallback },
         };
         if (!expected.eql(target)) {
-            self.grant = null;
+            // A rejected proposal cannot consume the user's work-session
+            // choice. A later PTY call can still prove the exact new session.
+            if (!grant.followup) self.grant = null;
             return .{ .route = fallback };
         }
         if (grant.command_hash) |hash| {
@@ -135,17 +181,27 @@ pub const State = struct {
         if (!grant.context.eql(context) or grant.command_hash == null or !std.mem.eql(u8, &grant.command_hash.?, &hash)) return false;
         const expected = grant.created orelse switch (grant.choice.source) {
             .session => |value| value,
-            .saved => return false,
+            .saved, .group_selection => return false,
         };
         return expected.eql(target) and grant.choice.route != .batch and (!(grant.choice.route == .new_terminal or grant.choice.create_new) or grant.created != null);
     }
     /// Bind a finite successor to the exact host-validated open call displayed
     /// by its own approval card. It does not approve creation on its own.
     pub fn bindCreate(self: *State, context: host.Context, create: Create) !void {
+        return self.bindCreateFrom(context, create, null);
+    }
+    /// equivalent_source is supplied only after the host proves that the
+    /// saved asset is the original session's exact current asset revision.
+    pub fn bindCreateFrom(self: *State, context: host.Context, create: Create, equivalent_source: ?identity.SessionHandle) !void {
         self.lock();
         defer self.mutex.unlock();
         const grant = if (self.grant) |*value| value else return error.RouteGrantNotFound;
-        if (!grant.context.eql(context) or !(grant.choice.route == .new_terminal or grant.choice.create_new) or !grant.choice.source.eql(create.source) or grant.choice.retention != create.retention or !create.operation_id.valid() or grant.created != null) {
+        const same_source = create.source != .group_selection and (grant.choice.source.eql(create.source) or (grant.followup and switch (grant.choice.source) {
+            .group_selection => context.binding == .group,
+            .session => |source| create.source == .saved and equivalent_source != null and source.eql(equivalent_source.?),
+            .saved => false,
+        }));
+        if (!grant.context.eql(context) or !(grant.choice.route == .new_terminal or grant.choice.create_new) or !same_source or (!grant.followup and grant.choice.retention != create.retention) or !create.operation_id.valid() or grant.created != null) {
             self.grant = null;
             return error.RouteGrantChanged;
         }
@@ -155,7 +211,40 @@ pub const State = struct {
                 return error.RouteGrantChanged;
             }
         }
+        if (grant.followup) {
+            grant.choice.retention = create.retention;
+            if (grant.choice.source == .group_selection) grant.choice.source = create.source;
+        }
         grant.create = create;
+    }
+    pub fn pendingFollowupSource(self: *State, context: host.Context) ?identity.SessionHandle {
+        self.lock();
+        defer self.mutex.unlock();
+        const grant = self.grant orelse return null;
+        if (!grant.followup or !grant.context.eql(context) or grant.created != null or grant.choice.source != .session) return null;
+        return grant.choice.source.session;
+    }
+    pub fn requiresIndependentFollowup(self: *State, context: host.Context) bool {
+        self.lock();
+        defer self.mutex.unlock();
+        const grant = self.grant orelse return false;
+        return grant.followup and grant.independent and grant.context.eql(context) and grant.created == null;
+    }
+    /// A mismatched target may require creation or a switch to the proved PTY.
+    pub fn followupTargetChange(self: *State, context: host.Context, target: identity.SessionHandle) ?bool {
+        self.lock();
+        defer self.mutex.unlock();
+        const grant = self.grant orelse return null;
+        if (!grant.followup or !grant.context.eql(context)) return null;
+        if (grant.created) |created_target| return if (created_target.eql(target)) null else false;
+        return true;
+    }
+    pub fn followupSnapshot(self: *State) ?Followup {
+        self.lock();
+        defer self.mutex.unlock();
+        const grant = self.grant orelse return null;
+        if (!grant.followup) return null;
+        return .{ .context = grant.context, .source = if (grant.choice.source == .session) grant.choice.source.session else null, .create = grant.create, .created = grant.created };
     }
     /// Only a committed lifecycle receipt, checked against Task ownership and
     /// actual source/operation by the host, may supply this identity.
@@ -164,6 +253,7 @@ pub const State = struct {
         defer self.mutex.unlock();
         const grant = if (self.grant) |*value| value else return error.RouteGrantNotFound;
         if (!grant.context.eql(context) or grant.create == null or !std.meta.eql(grant.create.?, create) or @backingInt(target.session_id) == 0 or target.generation == 0) return error.RouteGrantChanged;
+        if (grant.followup and grant.choice.source == .session and grant.choice.source.session.eql(target)) return error.RouteGrantChanged;
         if (grant.created) |prior| if (!prior.eql(target)) return error.RouteGrantChanged;
         grant.created = target;
     }
@@ -181,13 +271,18 @@ pub const State = struct {
     pub fn consume(self: *State, context: host.Context, target: identity.SessionHandle, command: []const u8) void {
         self.lock();
         defer self.mutex.unlock();
-        const grant = self.grant orelse return;
+        const grant = if (self.grant) |*value| value else return;
         if (!grant.context.eql(context)) return;
         const expected = grant.created orelse switch (grant.choice.source) {
             .session => |value| value,
-            .saved => return,
+            .saved, .group_selection => return,
         };
-        if (expected.eql(target) and (grant.command_hash == null or std.mem.eql(u8, &grant.command_hash.?, &digest(command)))) self.grant = null;
+        if (expected.eql(target) and (grant.command_hash == null or std.mem.eql(u8, &grant.command_hash.?, &digest(command)))) {
+            if (grant.followup) {
+                grant.command_hash = null;
+                grant.command_approved = false;
+            } else self.grant = null;
+        }
     }
 };
 pub fn fixedRoute(mode: config.ExecutionMode, proposed: Route) Route {

@@ -638,12 +638,20 @@ pub const Store = struct {
         return record.id;
     }
     pub fn environmentChanged(self: *Store, agent_id: identity.AgentId) !input.Fence {
+        return self.changeEnvironment(agent_id, false);
+    }
+    /// A verified transition within the same retained SSH session may keep an
+    /// operation-reference observer alive. Mutating plans still go stale.
+    pub fn transportEnvironmentChanged(self: *Store, agent_id: identity.AgentId) !input.Fence {
+        return self.changeEnvironment(agent_id, true);
+    }
+    fn changeEnvironment(self: *Store, agent_id: identity.AgentId, keep_operation_observation: bool) !input.Fence {
         const target = self.agent(agent_id) orelse return error.AgentNotFound;
         const id = target.current orelse return error.ConversationUnbound;
         const record = self.find(id).?;
         if (record.ending != null) return error.LifecycleBusy;
         const next = try identity.advance(target.environment);
-        record.inbox.pauseAll(.environment);
+        if (!keep_operation_observation) record.inbox.pauseAll(.environment);
         self.save(.{ .kind = .environment, .conversation = id, .agent = target.id, .owner = target.owner, .revision = record.revision, .environment = next }) catch |err| {
             record.inbox.lock();
             record.inbox.admission = false;
@@ -653,7 +661,7 @@ pub const Store = struct {
         target.environment = next;
         record.historical_messages = record.history.messages.len;
         const ticket = try self.fence(id);
-        record.inbox.changeFence(ticket);
+        record.inbox.changeEnvironmentFence(ticket, keep_operation_observation);
         return ticket;
     }
     pub fn handoff(self: *Store, expected: input.Fence, owner: scope.Owner) !input.Fence {

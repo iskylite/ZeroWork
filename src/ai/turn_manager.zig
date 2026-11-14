@@ -258,7 +258,7 @@ pub const Manager = struct {
             try budget.check();
             if (self.input) |inbox| inbox.setWorkPhase(self.turn_id, .continuing);
             if (self.tool_run) |loop| if (self.tool_host) |host| {
-                if (loop.request.workspace_revision != null) loop.refreshAuthority(host, cancel) catch |err| {
+                if (loop.request.workspace_revision != null or loop.round_index != 0) loop.refreshAuthority(host, cancel) catch |err| {
                     if (err == error.AuthorityRefreshStale) continue;
                     return err;
                 };
@@ -269,7 +269,10 @@ pub const Manager = struct {
                 continue;
             }) else 0;
             var current = if (self.tool_run) |loop| loop.frozenNextRequest() else request;
-            if (self.input) |inbox| self.tool_run.?.dispatch_gate = .{ .context = inbox, .revision = input_revision, .current = inputPlanCurrent };
+            if (self.input) |inbox| {
+                self.tool_run.?.dispatch_gate = .{ .context = inbox, .revision = input_revision, .current = inputPlanCurrent };
+                self.tool_run.?.operation_observation_gate = .{ .context = inbox, .revision = input_revision, .current = inputOperationObservationCurrent };
+            }
             // Keep only the caller's token in the retained snapshot. This
             // bounded token borrows the active run and must never escape it.
             current.cancel = cancel;
@@ -299,8 +302,9 @@ pub const Manager = struct {
                     continue;
                 };
 
-                if (self.input) |inbox| if (!inbox.tryCloseAtWorkspace(self.tool_run.?.request.workspace_revision)) {
+                if (self.input) |inbox| if (!inbox.tryCloseAtPlan(self.tool_run.?.request.workspace_revision, input_revision)) {
                     const loop = self.tool_run.?;
+                    if (inbox.operationObservationCurrent(input_revision) and !inbox.planCurrent(input_revision)) continue;
                     if (self.round_text.items.len != 0) loop.appendPrepared(try loop.prepareMessage(.{ .role = .assistant, .content = self.round_text.items }));
                     continue;
                 };
@@ -313,7 +317,6 @@ pub const Manager = struct {
             try self.completeTools(current.cancel, self.permissionEngine(), frozen_policy_revision);
             try budget.check();
             if (self.tool_run.?.uncertain and !self.tool_run.?.host_observation_only) return error.ToolOutcomeUnknown;
-            if (self.tool_host) |host| if (self.tool_run.?.request.workspace_revision == null) try self.tool_run.?.refreshAuthority(host, current.cancel);
             try budget.check();
         }
     }
@@ -321,6 +324,10 @@ pub const Manager = struct {
     fn inputPlanCurrent(raw: *anyopaque, revision: u64) bool {
         const inbox: *@import("session_input.zig").Inbox = @ptrCast(@alignCast(raw));
         return inbox.planCurrent(revision);
+    }
+    fn inputOperationObservationCurrent(raw: *anyopaque, revision: u64) bool {
+        const inbox: *@import("session_input.zig").Inbox = @ptrCast(@alignCast(raw));
+        return inbox.operationObservationCurrent(revision);
     }
     fn hasSteeringInput(self: *Manager) bool {
         return if (self.input) |inbox| inbox.hasPending() else false;
@@ -335,6 +342,7 @@ pub const Manager = struct {
             inbox.lock();
             defer inbox.unlock();
             if (!inbox.admission) return error.Cancelled;
+            if (inbox.pending_admissions != 0) return null;
             if (inbox.workspace_changing or (loop.request.workspace_revision != null and loop.request.workspace_revision.? != inbox.workspace_revision)) {
                 if (self.tool_host == null) return error.WorkspaceChanged;
                 return null;

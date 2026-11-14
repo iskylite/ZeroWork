@@ -58,10 +58,14 @@ pub const Backend = struct {
     /// Nonblocking controller query. Required for a tool backend: worker
     /// completion alone never proves a PTY/input lease has been released.
     local_released: ?*const fn (*anyopaque, Context) bool = null,
+    /// The next model turn may start while a previous execution remains owned
+    /// by the backend. End still waits for local_released and release_worker.
+    ready_for_next: ?*const fn (*anyopaque, Context) bool = null,
     /// Wake only this agent's approval/question wait, without approving it or
     /// cancelling an already dispatched operation. The bridge returns a real
     /// superseded/unsent receipt and rechecks the dispatch fence after waiting.
     supersede: ?*const fn (*anyopaque, Context) void = null,
+    supersede_handoff: ?*const fn (*anyopaque, Context) void = null,
     /// Controller-safe End barrier, after join/capture/completed and local
     /// release. Save final presentation and release backend request resources.
     /// May return ResourceCleanupPending; retry without publishing an unbind.
@@ -387,6 +391,12 @@ pub const Runner = struct {
             worker.questions.supersede();
         }
     }
+    fn supersedeWorkerForHandoff(self: *Runner) void {
+        if (self.worker) |worker| {
+            worker.approvals.supersedeForHandoff();
+            worker.questions.supersede();
+        }
+    }
     fn releaseWorker(self: *Runner) void {
         if (self.worker) |worker| worker.deinit(self.allocator);
         self.worker = null;
@@ -565,11 +575,15 @@ pub const Service = struct {
     pub fn submit(self: *Service, ticket: input.Fence, id: identity.SubmissionId, message: provider.Message, override: ?input.Mode) !input.Receipt {
         const record = try self.store.validateExecution(ticket);
         const runner = self.runnerFor(ticket.agent) orelse return error.AgentNotFound;
-        const previous = record.inbox.receipt(id);
-        const accepted = try record.inbox.admit(ticket, id, message, override orelse if (previous) |prior| prior.mode else self.mode);
-        if (previous == null and accepted.route == .steer) {
-            runner.supersedeWorker();
-            if (!runner.worker_released) if (runner.backend.supersede) |wake| if (runner.context) |context| wake(runner.backend.context, context);
+        {
+            record.inbox.beginAdmission();
+            defer record.inbox.endAdmission();
+            const previous = record.inbox.receipt(id);
+            const accepted = try record.inbox.admit(ticket, id, message, override orelse if (previous) |prior| prior.mode else self.mode);
+            if (previous == null and accepted.route == .steer) {
+                runner.supersedeWorker();
+                if (!runner.worker_released) if (runner.backend.supersede) |wake| if (runner.context) |context| wake(runner.backend.context, context);
+            }
         }
         // Admission has succeeded. Startup failure must leave the input owned
         // and observable, never return a false "not accepted" to the sender.
@@ -577,7 +591,7 @@ pub const Service = struct {
             runner.failure = err;
             record.inbox.pauseAll(.failure);
         };
-        return record.inbox.receipt(accepted.id).?;
+        return record.inbox.receipt(id).?;
     }
     pub fn createAndSubmit(self: *Service, agent_id: identity.AgentId, id: identity.SubmissionId, message: provider.Message, override: ?input.Mode) !input.Receipt {
         const runner = self.runnerFor(agent_id) orelse return error.AgentNotFound;
@@ -687,8 +701,9 @@ pub const Service = struct {
     fn readyForNext(runner: *Runner) bool {
         if (runner.worker_released or !runner.has_tools) return true;
         const context = runner.context orelse return true;
-        const check = runner.backend.local_released orelse return false;
-        return check(runner.backend.context, context);
+        const check = if (runner.end_when_idle) runner.backend.local_released else runner.backend.ready_for_next orelse runner.backend.local_released;
+        const ready = check orelse return false;
+        return ready(runner.backend.context, context);
     }
     /// Serialized controller tick; join only after release-store. A durable
     /// store performs IO here, so use the application coordinator, not a view
@@ -948,11 +963,22 @@ pub const Service = struct {
     /// Host-confirmed session-to-group handoff preserves this Task and worker.
     /// The backend's existing authority-refresh hook rebuilds the next table.
     pub fn handoff(self: *Service, ticket: input.Fence, owner: scope.Owner) !input.Fence {
+        return self.handoffImpl(ticket, owner, false);
+    }
+    /// Only the lifecycle controller's validated, same-Task group transaction
+    /// carries its exact route choice. Manual grouping continues to revoke it.
+    pub fn handoffLifecycle(self: *Service, ticket: input.Fence, owner: scope.Owner) !input.Fence {
+        return self.handoffImpl(ticket, owner, true);
+    }
+    fn handoffImpl(self: *Service, ticket: input.Fence, owner: scope.Owner, preserve_route: bool) !input.Fence {
         const runner = self.runnerFor(ticket.agent) orelse return error.AgentNotFound;
         const next = try self.store.handoff(ticket, owner);
         runner.commit_fence = next;
-        runner.supersedeWorker();
-        if (!runner.worker_released) if (runner.backend.supersede) |wake| if (runner.context) |context| wake(runner.backend.context, context);
+        if (preserve_route) runner.supersedeWorkerForHandoff() else runner.supersedeWorker();
+        if (!runner.worker_released) if (runner.context) |context| {
+            const wake = if (preserve_route) runner.backend.supersede_handoff orelse runner.backend.supersede else runner.backend.supersede;
+            if (wake) |callback| callback(runner.backend.context, context);
+        };
         return next;
     }
     /// Explicit queue-to-steer keeps the submission identity. Idle send-now
@@ -965,6 +991,8 @@ pub const Service = struct {
         if (item.revision != revision) return error.QueueChanged;
         if (runner.agent.busy) {
             const turn = runner.context orelse return error.TurnChanged;
+            record.inbox.beginAdmission();
+            defer record.inbox.endAdmission();
             _ = try record.inbox.claim(id, revision, null, turn.turn, .steer);
             runner.supersedeWorker();
             if (!runner.worker_released) if (runner.backend.supersede) |wake| wake(runner.backend.context, turn);

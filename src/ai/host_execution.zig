@@ -14,7 +14,7 @@ const output_fields = "\"output_cursor\":{\"type\":\"string\",\"maxLength\":128}
 pub const contributions = [_]host.Contribution{
     tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. For nested shells, first host.get_session and include control.shell_context.id/revision as shell_id/shell_revision. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. If ShellPromptNotObserved or IntegrationUnavailable rejects this call before dispatch, inspect host.read_terminal/host.get_session and use host.attach_shell to initialize the confirmed current Shell, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
     tool("get_execution", "Read one execution in this conversation/task, its true process/output/recording stages, recording range and bounded incremental output. An ordinary prompt or printed marker never proves completion.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
-    tool("wait_execution", "Wait up to wait_ms for this authorized execution. Prefer until=decision: actual foreground result, explicit input request, failure, unknown or takeover; ordinary revision/output changes remain internal. Legacy until=revision remains available, then return the same bounded snapshot/output as get_execution. Timeout is not completion and never replays a command.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
+    tool("wait_execution", "Wait up to wait_ms for this authorized execution. Prefer until=decision: actual foreground result, explicit input request, failure, unknown or takeover; ordinary revision/output changes remain internal. Legacy until=revision remains available, then return the same bounded snapshot/output as get_execution. Timeout or wait_interrupted describes only the observation wait; the original command may still be running and must not be replayed.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
     tool("send_execution_input", "Send approved non-secret text or Enter to the current execution using its live input capability, current fence and fresh per-input approval. controlled_line is a helper-attested consumer; terminal_stream only authorizes ordinary PTY bytes and does not prove which foreground program consumes them or that it is waiting. A written receipt means native write completed, not foreground consumption. Text is single line UTF-8, at most 4096 bytes; Enter is a separate key request. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Use user takeover for unknown input targets, raw/TUI interaction or secrets; never infer input authority from prompt text.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("stop_execution", "Revoke future AI input for this exact execution and request only its supported foreground interrupt. Release is distinct from process exit; unknown effects stay unknown. This never aborts a shared SSH transport or closes a borrowed terminal.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ "},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("attach_shell", @import("shell_attachment.zig").description, @import("shell_attachment.zig").schema),
@@ -258,6 +258,22 @@ pub const Controller = struct {
     pub fn interruptedWait(self: *Controller, wait: Wait, reason: []const u8) !host.Result {
         if (wait.index >= self.entries.items.len) return error.ExecutionNotFound;
         return self.result(wait.context, wait.operation_id, wait.index, wait.output_cursor, wait.max_bytes, std.mem.eql(u8, reason, "Timeout"), reason);
+    }
+    pub fn interruptedReadWait(self: *Controller, wait: Wait, reason: []const u8) !host.Result {
+        if (wait.index >= self.entries.items.len) return error.ExecutionNotFound;
+        try self.authorizeRead(wait.context, wait.index);
+        return self.interruptedWait(wait, reason);
+    }
+    pub fn interruptedRunWait(self: *Controller, wait: Wait, reason: []const u8) !host.Result {
+        if (wait.index >= self.entries.items.len) return error.ExecutionNotFound;
+        const entry = &self.entries.items[wait.index];
+        if (entry.dispatch_pending != null) {
+            // A mailbox that has not accepted the command must not dispatch an
+            // older plan after the model has received the new input.
+            entry.stop_intent = .stop;
+            try self.cancelPending(wait.index, "CancelledBeforeDispatch");
+        }
+        return self.interruptedWait(wait, reason);
     }
     /// Host control loop calls this independently of model polling; an abandoned
     /// tool worker therefore stops renewing and the terminal watchdog releases.
@@ -667,6 +683,7 @@ pub const Controller = struct {
             if (body.len <= 65536) {
                 var response = try ownedResult(self.allocator, context, operation_id, body, entry.snapshot.submit_sent or entry.snapshot.submit_native_bytes != 0, entry.snapshot.remote_effect_unknown or entry.snapshot.state == .outcome_unknown);
                 response.verification = entry.verification;
+                if (response.receipt.remote_effect_unknown and entry.snapshot.local_released and entry.snapshot.grant == null) response.uncertain_terminal = entry.target;
                 return response;
             }
             self.allocator.free(body);
@@ -1112,6 +1129,7 @@ test "current-tab read-only execution history crosses related Tasks without gran
     const wait = (try controller.execute(invocation, 1)).wait;
     mock.allowed = false;
     try std.testing.expectError(error.TargetNotAuthorized, controller.pollWait(wait, 101));
+    try std.testing.expectError(error.TargetNotAuthorized, controller.interruptedReadWait(wait, "new_input"));
     invocation.tool_id = "host.get_execution";
     try std.testing.expectError(error.TargetNotAuthorized, controller.execute(invocation, 1));
     mock.allowed = true;

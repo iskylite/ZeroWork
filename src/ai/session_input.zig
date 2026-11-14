@@ -95,10 +95,14 @@ pub const Inbox = struct {
     closing: bool = false,
     work_phase: WorkPhase = .continuing,
     revision: u64 = 1,
+    operation_observation_floor: u64 = 1,
     queue_revision: u64 = 1,
     workspace_revision: u64 = 1,
     workspace_changing: bool = false,
     next_sequence: u64 = 1,
+    /// A submitted steer becomes consumable only after its old approvals and
+    /// route choices have been superseded by the controller.
+    pending_admissions: usize = 0,
     entries: std.ArrayList(*Entry) = .empty,
     persist: ?Persist = null,
     /// Application controller owns this budget. It serializes admissions and
@@ -113,6 +117,17 @@ pub const Inbox = struct {
     }
     pub fn unlock(self: *Inbox) void {
         self.mutex.unlock();
+    }
+    pub fn beginAdmission(self: *Inbox) void {
+        self.lock();
+        defer self.unlock();
+        self.pending_admissions += 1;
+    }
+    pub fn endAdmission(self: *Inbox) void {
+        self.lock();
+        defer self.unlock();
+        std.debug.assert(self.pending_admissions != 0);
+        self.pending_admissions -= 1;
     }
     pub fn beginWorkspaceChange(self: *Inbox) !void {
         self.lock();
@@ -243,6 +258,7 @@ pub const Inbox = struct {
         self.next_sequence = next_sequence;
         self.queue_revision = queue_rev;
         self.revision = input_rev;
+        if (is_steer) self.operation_observation_floor = input_rev;
         return value;
     }
     pub fn claim(self: *Inbox, id: identity.SubmissionId, revision: u64, expected_queue: ?u64, turn: u64, target_route: Route) !Receipt {
@@ -273,6 +289,7 @@ pub const Inbox = struct {
         entry.receipt = value;
         self.queue_revision = next_queue;
         self.revision = next_input;
+        self.operation_observation_floor = next_input;
         if (target_route == .start) {
             self.active_turn = turn;
             self.closing = false;
@@ -390,6 +407,9 @@ pub const Inbox = struct {
         };
     }
     pub fn changeFence(self: *Inbox, fence: Fence) void {
+        self.changeEnvironmentFence(fence, false);
+    }
+    pub fn changeEnvironmentFence(self: *Inbox, fence: Fence, keep_operation_observation: bool) void {
         self.lock();
         defer self.unlock();
         for (self.entries.items) |entry| if (!terminal(entry.receipt.delivery)) {
@@ -400,6 +420,7 @@ pub const Inbox = struct {
             self.admission = false;
             return;
         };
+        if (!keep_operation_observation) self.operation_observation_floor = self.revision;
         self.admission = true;
     }
     pub fn hasPending(self: *Inbox) bool {
@@ -421,11 +442,16 @@ pub const Inbox = struct {
         defer self.unlock();
         return self.admission and !self.closing and revision == self.revision;
     }
+    pub fn operationObservationCurrent(self: *Inbox, revision: u64) bool {
+        self.lock();
+        defer self.unlock();
+        return self.admission and !self.closing and revision >= self.operation_observation_floor and revision <= self.revision;
+    }
     /// Linearization point with admission: an accepted steer wins before close.
     pub fn tryClose(self: *Inbox) bool {
         self.lock();
         defer self.unlock();
-        if (self.pendingLocked()) return false;
+        if (self.pending_admissions != 0 or self.pendingLocked()) return false;
         self.closing = true;
         return true;
     }
@@ -459,7 +485,7 @@ pub const Inbox = struct {
         self.lock();
         defer self.unlock();
         if (!self.admission or (self.closing and entries.len != 0)) return error.Cancelled;
-        if (self.workspace_changing or (workspace != null and workspace.? != self.workspace_revision) or self.revision != revision) return false;
+        if (self.pending_admissions != 0 or self.workspace_changing or (workspace != null and workspace.? != self.workspace_revision) or self.revision != revision) return false;
         for (entries) |entry| if (!self.eligibleLocked(entry)) return false;
         if (entries.len > 1) if (self.persist) |p| if (p.consume_batch == null) return error.DurableRequestBatchUnavailable;
         for (entries, output) |entry, *row| {
@@ -494,10 +520,10 @@ pub const Inbox = struct {
             }
         }
     }
-    pub fn tryCloseAtWorkspace(self: *Inbox, workspace: ?u64) bool {
+    pub fn tryCloseAtPlan(self: *Inbox, workspace: ?u64, revision: u64) bool {
         self.lock();
         defer self.unlock();
-        if (self.workspace_changing or (workspace != null and workspace.? != self.workspace_revision) or self.pendingLocked()) return false;
+        if (self.revision != revision or self.pending_admissions != 0 or self.workspace_changing or (workspace != null and workspace.? != self.workspace_revision) or self.pendingLocked()) return false;
         self.closing = true;
         return true;
     }
@@ -533,4 +559,42 @@ fn sameImage(left: @import("image_attachments.zig").ContentRef, right: @import("
     const a = left.content() orelse return false;
     const b = right.content() orelse return false;
     return std.mem.eql(u8, &a.sha256, &b.sha256) and std.mem.eql(u8, a.path, b.path) and a.captured_at_ms == b.captured_at_ms;
+}
+
+test "followup consumption waits until accepted steer supersedes prior approvals" {
+    const fence: Fence = .{ .agent = .generate(), .conversation = .generate(), .binding = 1, .environment = 1 };
+    var inbox = Inbox.init(std.testing.allocator, fence);
+    defer inbox.deinit();
+    inbox.active_turn = 7;
+    inbox.beginAdmission();
+    const accepted = try inbox.admit(fence, .generate(), .{ .role = .user, .content = "再开会话监控" }, .steer);
+    try std.testing.expectEqual(Route.steer, accepted.route);
+    const entries = [_]*Entry{inbox.entries.items[0]};
+    var rows: [1]Consumption = undefined;
+    const revision = inbox.inputRevision();
+    try std.testing.expect(!(try inbox.reserveConsumption(null, revision, &entries, &rows, 1)));
+    try std.testing.expect(!inbox.tryCloseAtPlan(null, revision));
+    inbox.endAdmission();
+    try std.testing.expect(try inbox.reserveConsumption(null, revision, &entries, &rows, 1));
+    inbox.publishConsumption(&entries, &rows, true);
+}
+
+test "reconnect keeps operation observation across transport fences only" {
+    var fence: Fence = .{ .agent = .generate(), .conversation = .generate(), .binding = 1, .environment = 1 };
+    var inbox = Inbox.init(std.testing.allocator, fence);
+    defer inbox.deinit();
+    inbox.active_turn = 7;
+    const original = inbox.inputRevision();
+    fence.environment += 1;
+    inbox.changeEnvironmentFence(fence, true);
+    try std.testing.expect(!inbox.planCurrent(original));
+    try std.testing.expect(inbox.operationObservationCurrent(original));
+    try std.testing.expect(!inbox.tryCloseAtPlan(null, original));
+    const steer = try inbox.admit(fence, .generate(), .{ .role = .user, .content = "stop waiting" }, .steer);
+    try std.testing.expectEqual(Route.steer, steer.route);
+    try std.testing.expect(!inbox.operationObservationCurrent(original));
+    const current = inbox.inputRevision();
+    fence.environment += 1;
+    inbox.changeFence(fence);
+    try std.testing.expect(!inbox.operationObservationCurrent(current));
 }

@@ -15,6 +15,22 @@ const approvals = @import("../ai/host_approval.zig");
 const routing = approvals.routing;
 const host_tools = @import("../ai/host_tools.zig");
 const terminal_files = @import("../ai/terminal_file_tools.zig");
+pub const cleanup_wait_id = "host.wait_tool_cleanup";
+const cleanup_wait = host_tools.Contribution{ .authority = .conversation_context, .definition = .{
+    .id = cleanup_wait_id,
+    .effect = .read_state,
+    .description = "Wait up to 15 seconds for the host to release previous native tool resources that temporarily block opening sessions. This only observes cleanup. When released, the host refreshes tools at the next round in this same task. If still pending, report the delay or wait again when appropriate.",
+    .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+} };
+const restricted_with_group = @import("../ai/host_queries.zig").contributions ++ [_]host_tools.Contribution{@import("../ai/host_lifecycle.zig").create_group_contribution};
+const restricted_group_cleanup = @import("../ai/host_queries.zig").contributions ++ [_]host_tools.Contribution{cleanup_wait};
+fn restrictedContributions(binding: HostBinding) []const host_tools.Contribution {
+    if (binding.context.binding == .group and binding.context.child_origin == null) return &restricted_group_cleanup;
+    if (binding.context.binding == .session and binding.context.child_origin == null) for (binding.contributions) |item| {
+        if (std.mem.eql(u8, item.definition.id, "host.create_group")) return &restricted_with_group;
+    };
+    return &@import("../ai/host_queries.zig").contributions;
+}
 pub const HostBinding = struct {
     context: host_tools.Context,
     handler_context: *anyopaque,
@@ -25,6 +41,7 @@ pub const HostBinding = struct {
     refresh: ?*const fn (*anyopaque, *Bridge, *const tools.RequestTable, std.mem.Allocator, ?*provider.CancelToken) anyerror!?loop.AuthorityRefresh = null,
     acknowledge_notice: ?*const fn (*anyopaque, u64, ?*provider.CancelToken) anyerror!void = null,
     accepted_result: ?*const fn (*anyopaque, host_tools.Context, []const u8, *const host_tools.Result, ?*provider.CancelToken) anyerror!void = null,
+    validate_context: ?*const fn (*anyopaque, host_tools.Context) anyerror!void = null,
 };
 pub const Approval = legacy.Approval;
 const Child = struct {
@@ -84,6 +101,7 @@ pub const Bridge = struct {
     execution_mode: @import("../config/config.zig").ExecutionMode = .auto,
     session_retention: @import("../config/config.zig").SessionRetention = .auto_idle,
     route_broker: ?*approvals.Broker = null,
+    route_source: ?identity.SessionHandle = null,
     active_route: ?struct { permit: approvals.Permit, invocation: host_tools.Invocation, subject: approvals.Subject } = null,
     policy_revision: u64 = 1,
     roster: ?*@import("group_model.zig").Roster = null,
@@ -92,6 +110,7 @@ pub const Bridge = struct {
     pending: ?*ApprovalExchange = null,
     controller: ?*ControllerExchange = null,
     host_binding: ?HostBinding = null,
+    reconnect_app: ?*Application.ApplicationHost = null,
     host_exchange: ?*HostExchange = null,
     controller_task: ?*ControllerTask = null,
     pending_binding: ?scope.Owner = null,
@@ -110,6 +129,8 @@ pub const Bridge = struct {
     /// Joined Tasks can still own an adapter whose native cleanup is pending.
     /// Keep that exact capture alive while a fresh Task queries host metadata.
     retired: std.ArrayList(*Bridge) = .empty,
+    cleanup_test_release: ?[:0]const u8 = null,
+    cleanup_clear_pending: bool = false,
     queries_only: bool = false,
     /// Worker-only lookup into the active conversation transcript; never a path
     /// reader. API-2 still owns target, generation, policy and approval gates.
@@ -178,18 +199,28 @@ pub const Bridge = struct {
             self.output_store = store;
         }
         self.host_binding = binding;
-        if (self.queries_only) self.host_binding.?.contributions = &@import("../ai/host_queries.zig").contributions;
+        if (self.queries_only) self.host_binding.?.contributions = restrictedContributions(binding);
     }
     /// Submitted is the current trusted composer submission. A model or tool
     /// argument has no entry point for creating an intent grant.
     pub fn configureRouting(self: *Bridge, broker: *approvals.Broker, context: host_tools.Context, submitted: []const u8, selected: ?identity.SessionHandle) !void {
-        if (self.queries_only) {
-            self.route_broker = null;
-            return;
-        }
-        try broker.execution_route.captureIntent(context, submitted, selected, self.session_retention);
+        self.route_source = if (context.binding == .session) selected else null;
+        try broker.execution_route.captureIntent(context, submitted, self.route_source, self.session_retention);
         self.route_broker = broker;
         broker.updatePermissionPolicy(self.permissionPolicy().engine);
+    }
+    /// Called at the worker's consumed-user-input boundary, before the next
+    /// model request. Model arguments and tool output never reach this path.
+    pub fn captureFollowupRouting(self: *Bridge, submitted: []const u8) void {
+        self.lock();
+        const binding = self.host_binding;
+        const broker = self.route_broker;
+        const source = self.route_source;
+        const captured = self.captured_scope;
+        self.mutex.unlock();
+        if (binding == null or broker == null or captured == null) return;
+        if (source) |handle| _ = captured.?.validate(&.{@backingInt(handle.session_id)}) catch return;
+        broker.?.execution_route.captureFollowup(binding.?.context, submitted, source, self.session_retention) catch {};
     }
     /// Before backend preflight, freeze any trusted intent to this exact
     /// command. The backend still owns capability, forbidden and mode gates.
@@ -197,6 +228,8 @@ pub const Bridge = struct {
         if (self.queries_only) return error.ToolNotAvailable;
         const broker = self.route_broker orelse return null;
         const resolution = broker.execution_route.resolve(invocation.context, target, subject.detail, routing.fixedRoute(self.execution_mode, proposed));
+        if (!resolution.trusted) if (broker.execution_route.followupTargetChange(invocation.context, target)) |needs_creation|
+            return try planChange(invocation, allocator, .new_terminal, needs_creation);
         if (resolution.trusted and (resolution.route != proposed or resolution.needs_creation)) return try planChange(invocation, allocator, resolution.route, resolution.needs_creation);
         if (!resolution.trusted and self.execution_mode != .auto and self.execution_mode != .ask and routing.fixedRoute(self.execution_mode, proposed) != proposed) return try planChange(invocation, allocator, resolution.route, resolution.route == .new_terminal);
         const choice: routing.Choice = resolution.choice orelse .{ .route = resolution.route, .source = .{ .session = target }, .retention = self.session_retention };
@@ -225,9 +258,10 @@ pub const Bridge = struct {
         if (self.route_broker) |broker| broker.execution_route.consume(invocation.context, target, command);
     }
     fn planChange(invocation: host_tools.Invocation, allocator: std.mem.Allocator, selected: routing.Route, requires_creation: bool) !host_tools.Result {
-        const next_tool = try tools.toolHints(allocator, if (requires_creation and selected == .batch) &.{ "host.create_group", "host.open_session", "run_command" } else if (selected == .batch) &.{"run_command"} else if (selected == .current_terminal) &.{"host.run_in_terminal"} else &.{ "host.create_group", "host.open_session", "host.run_in_terminal" });
+        const blocked_new_target = selected == .current_terminal and std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal");
+        const next_tool = try tools.toolHints(allocator, if (blocked_new_target) &.{} else if (requires_creation and selected == .batch) &.{ "host.create_group", "host.open_session", "run_command" } else if (selected == .batch) &.{"run_command"} else if (selected == .current_terminal or !requires_creation) &.{"host.run_in_terminal"} else &.{ "host.create_group", "host.open_session", "host.run_in_terminal" });
         defer allocator.free(next_tool);
-        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = "requires_plan_change", .state = "cancelled_unsent", .selected_route = @tagName(selected), .requires_new_session = requires_creation, .host_fact = "当前运行方式已确定，当前工具没有派发。请直接使用 next_tool 指定的工具；无需为了重新确认运行模式查询上下文。仅补充缺少的目标、能力或创建依赖信息，命令权限仍由宿主验证。", .next_tool = next_tool, .side_effect_started = false }, .{});
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = "requires_plan_change", .state = "cancelled_unsent", .selected_route = @tagName(selected), .requires_new_session = requires_creation, .host_fact = if (blocked_new_target) "当前运行方式未授权在所选新会话执行，命令未发送。不要重复相同调用，也不要向正在运行前台命令的原终端输入；说明需要调整运行方式或明确选择。" else "当前运行方式已确定，当前工具没有派发。请直接使用 next_tool 指定的工具；无需为了重新确认运行模式查询上下文。仅补充缺少的目标、能力或创建依赖信息，命令权限仍由宿主验证。", .next_tool = next_tool, .side_effect_started = false }, .{});
         errdefer allocator.free(body);
         const blocks = try allocator.alloc(host_tools.Block, 1);
         blocks[0] = .{ .structured = body };
@@ -242,7 +276,8 @@ pub const Bridge = struct {
             if (err != error.ToolCleanupPending) return err;
             try self.retainPrepared();
         };
-        self.queries_only = self.retired.items.len != 0;
+        self.cleanup_clear_pending = false;
+        self.queries_only = self.refreshQueriesOnly();
     }
     fn retainPrepared(self: *Bridge) !void {
         // While one old Task is unsettled, every subsequent Task is metadata
@@ -328,7 +363,7 @@ pub const Bridge = struct {
             const owner = for (app.workspace.tabs.items) |tab| {
                 if (tab.content_owner == .session and @backingInt(tab.content_owner.session.session_id) == id) break tab.content_owner.session;
             } else return error.StaleSession;
-            const manifest = app.sessions.manifestFor(owner) orelse return error.AdapterNotConnected;
+            const manifest = app.sessions.manifestFor(owner) orelse continue;
             if (!manifest.integration.ai) continue;
             if (@import("ai_transfer_source.zig").resolve(app, owner, false)) |_| {
                 has_transfer_source = true;
@@ -530,7 +565,9 @@ pub const Bridge = struct {
         return self.replacePreparedImpl(next, false);
     }
     pub fn refreshQueriesOnly(self: *const Bridge) bool {
-        if (self.queries_only or self.retired.items.len != 0) return true;
+        // Set only by the test-mode app to exercise the native catalog flow.
+        if (self.cleanup_test_release) |marker| if (std.c.access(marker.ptr, 0) != 0) return true;
+        if (self.cleanup_clear_pending or self.retired.items.len != 0) return true;
         for (self.children.items) |child| if (child.adapter) |adapter| {
             if (adapter.vtable.impact(adapter.context, child.owner).ai != 0) return true;
         };
@@ -543,15 +580,19 @@ pub const Bridge = struct {
     }
     fn replacePreparedImpl(self: *Bridge, next: *Bridge, exact: bool) !void {
         if (self.pending != null or self.controller != null or self.host_exchange != null or self.running != null) return error.ToolCleanupPending;
-        const preserve_queries_only = self.queries_only;
-        if (exact and !next.queries_only and (preserve_queries_only or self.retired.items.len != 0)) return error.ToolCleanupPending;
+        if (exact and !next.queries_only and self.refreshQueriesOnly()) return error.ToolCleanupPending;
         self.clearPrepared() catch |err| {
             if (err != error.ToolCleanupPending) return err;
-            if (exact and !next.queries_only) return err;
+            if (exact and !next.queries_only) {
+                // The worker staged a full catalog. Keep that unpublished and
+                // stage a restricted one before moving the old capture.
+                self.cleanup_clear_pending = true;
+                return err;
+            }
             try self.retainPrepared();
             if (!exact) try next.restrictToHostQueries();
         };
-        if ((preserve_queries_only or self.retired.items.len != 0) and !next.queries_only) try next.restrictToHostQueries();
+        if (self.refreshQueriesOnly() and !next.queries_only) try next.restrictToHostQueries();
         self.children.deinit(self.allocator);
         self.capture_arena.deinit();
         self.lock();
@@ -576,6 +617,7 @@ pub const Bridge = struct {
         next.host_binding = null;
         for (self.children.items) |child| child.invocation_context.output_context = if (self.output_store != null and self.host_binding != null) .{ .store = self.output_store.?, .conversation_id = self.host_binding.?.context.conversation_id, .owner = child.owner } else null;
         self.queries_only = next.queries_only;
+        self.cleanup_clear_pending = false;
         self.pending_binding = null;
         self.mutex.unlock();
     }
@@ -586,9 +628,10 @@ pub const Bridge = struct {
         const roster = self.roster;
         const revision = self.roster_revision;
         var binding = self.host_binding orelse return error.InvalidHostAuthority;
+        const contributions = restrictedContributions(binding);
         try self.clearPrepared();
         self.queries_only = true;
-        binding.contributions = &@import("../ai/host_queries.zig").contributions;
+        binding.contributions = contributions;
         self.host_binding = binding;
         self.captured_scope = try captured.clone(self.capture_arena.allocator());
         self.roster = roster;
@@ -623,9 +666,47 @@ pub const Bridge = struct {
         self.mutex.unlock();
         const current = binding orelse return error.ToolNotAvailable;
         if (stopped or !current.context.eql(invocation.context)) return error.ScopeChanged;
-        if (self.queries_only and !@import("../ai/host_queries.zig").supports(invocation.tool_id) and !@import("../ai/user_interaction.zig").supports(invocation.tool_id)) return error.ToolNotAvailable;
+        if (std.mem.eql(u8, invocation.tool_id, cleanup_wait_id)) {
+            if (!self.queries_only or invocation.authority != .conversation_context or invocation.context.binding != .group or invocation.context.child_origin != null) return error.ToolNotAvailable;
+            return self.waitToolCleanup(invocation, allocator, cancel);
+        }
+        if (self.queries_only and !@import("../ai/host_queries.zig").supports(invocation.tool_id) and !@import("../ai/user_interaction.zig").supports(invocation.tool_id) and !(invocation.authority == .lifecycle and invocation.context.binding == .session and invocation.context.child_origin == null and std.mem.eql(u8, invocation.tool_id, "host.create_group"))) return error.ToolNotAvailable;
         if (current.invoke_worker) |worker_fn| return worker_fn(current.handler_context, self, invocation, allocator, cancel);
         return self.exchangeHost(invocation, allocator, cancel);
+    }
+    fn waitToolCleanup(self: *Bridge, invocation: host_tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !host_tools.Result {
+        const Probe = struct {
+            bridge: *Bridge,
+            context: host_tools.Context,
+            pending: bool = true,
+            fn check(raw: *anyopaque) !void {
+                const value: *@This() = @ptrCast(@alignCast(raw));
+                const live = value.bridge.host_binding orelse return error.ScopeChanged;
+                if (!live.context.eql(value.context) or value.bridge.pending_binding != null or value.bridge.stopped.load(.acquire)) return error.ScopeChanged;
+                if (live.validate_context) |validate| try validate(live.handler_context, value.context);
+                value.pending = value.bridge.refreshQueriesOnly();
+            }
+        };
+        self.emitHostStep(invocation, .running, "等待宿主释放旧工具资源");
+        var probe: Probe = .{ .bridge = self, .context = invocation.context };
+        const deadline = timeNow(self) + 15_000;
+        const waiting = provider.CancelToken.beginResourceWait(cancel);
+        defer waiting.end();
+        while (true) {
+            if (invocation.dispatch_fence) |fence| try fence.check();
+            try self.callController(&probe, Probe.check, cancel);
+            if (!probe.pending or timeNow(self) >= deadline) break;
+            @import("../ai/retry.zig").wait(50, cancel) catch return error.CancelledBeforeDispatch;
+        }
+        const body = try std.json.Stringify.valueAlloc(allocator, .{
+            .state = if (probe.pending) "cleanup_pending" else "cleanup_released",
+            .timed_out = probe.pending,
+            .catalog_refresh = if (probe.pending) "blocked" else "next_round_same_task",
+        }, .{});
+        errdefer allocator.free(body);
+        const blocks = try allocator.alloc(host_tools.Block, 1);
+        blocks[0] = .{ .structured = body };
+        return .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
     }
     pub fn queryHost(self: *Bridge, invocation: host_tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !host_tools.Result {
         return self.exchangeHost(invocation, allocator, cancel);
@@ -857,7 +938,7 @@ pub const Bridge = struct {
             try tools.preflight(invocation.table, invocation.parsed, try liveScope(self), try liveMembers(self));
             _ = try tools.callNeedsApproval(invocation.parsed, self.permissionPolicy(), invocation.table.captured_scope.owner == .group);
             if (invocation.parsed.targets.len != 1) {
-                if (self.execution_mode == .ask) return error.TargetSelectionRequired;
+                if (self.execution_mode == .ask or self.route_broker.?.execution_route.followupSnapshot() != null) return error.TargetSelectionRequired;
             } else {
                 const id = invocation.parsed.targets.slice()[0];
                 const target = for (invocation.parsed.entry.targets) |entry| {
@@ -1162,6 +1243,22 @@ pub const Bridge = struct {
     }
     fn invoke(raw: *anyopaque, target: tools.TargetBinding, request: tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !tools.ToolResult {
         const self: *Bridge = @ptrCast(@alignCast(raw));
+        if (std.mem.eql(u8, request.tool_id, "run_command")) {
+            const Check = struct {
+                bridge: *Bridge,
+                target: identity.SessionHandle,
+                fn run(raw_check: *anyopaque) !void {
+                    const check: *@This() = @ptrCast(@alignCast(raw_check));
+                    const binding = check.bridge.host_binding orelse return;
+                    const window = check.bridge.reconnect_app orelse return;
+                    if (!window.permitsReconnectExecution(binding.context, check.target)) return error.ReconnectTargetUnavailable;
+                }
+            };
+            if (self.host_binding != null and self.host_binding.?.context.binding == .group) {
+                var check: Check = .{ .bridge = self, .target = target.owner };
+                try self.callController(&check, Check.run, cancel);
+            }
+        }
         if (target.binding.execution == .worker) {
             if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
             try tools.markSent(self.operationHistory(), request.owner, request.operation_id, request.call_id, request.tool_id, request.arguments_hash);
@@ -1200,6 +1297,7 @@ pub const Bridge = struct {
         return exchange.result orelse error.ToolOutcomeUnknown;
     }
     pub fn pump(self: *Bridge, app: *Application.ApplicationHost) void {
+        self.reconnect_app = app;
         self.lock();
         var roster_valid = true;
         if (self.roster) |roster| if (self.captured_scope) |captured| {
@@ -1823,7 +1921,7 @@ test "host bridge member close revokes only that member while group Task continu
     try std.testing.expect(bridge.stopped.load(.acquire));
 }
 
-test "host metadata Tasks retain one unknown cleanup owner and reject all effect paths" {
+test "host restricted Tasks retain unknown cleanup ownership and allow only grouping" {
     const a = std.testing.allocator;
     const contributions = @import("../ai/host_queries.zig").contributions ++ @import("../ai/host_execution.zig").contributions ++ @import("../ai/host_lifecycle.zig").contributions ++ @import("../ai/fetch_url.zig").contributions;
     const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(41), .generation = 3 };
@@ -1853,13 +1951,19 @@ test "host metadata Tasks retain one unknown cleanup owner and reject all effect
     for (0..3) |_| {
         current.task_id = identity.TaskId.generate();
         try QueryCleanupProbe.table(&bridge, current, &contributions);
-        try std.testing.expectEqual(@as(usize, 6), bridge.requestTable().?.entries.len);
+        try std.testing.expectEqual(@as(usize, 7), bridge.requestTable().?.entries.len);
         try std.testing.expectEqual(@as(usize, 1), bridge.retired.items.len);
         try std.testing.expect(bridge.retired.items[0] == retained);
         var invocation: host_tools.Invocation = .{ .context = current, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "query", .tool_id = "host.get_current_context", .arguments = .{ .object = .empty }, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
         var result = try bridge.dispatchHost(invocation, a, null);
         defer result.deinit(a);
         try result.validate(current, 1);
+        invocation.tool_id = "host.create_group";
+        invocation.authority = .lifecycle;
+        var group = try bridge.dispatchHost(invocation, a, null);
+        defer group.deinit(a);
+        try group.validate(current, 1);
+        invocation.authority = .conversation_context;
         invocation.tool_id = "host.run_in_terminal";
         try std.testing.expectError(error.ToolNotAvailable, bridge.dispatchHost(invocation, a, null));
         invocation.tool_id = "host.open_session";
@@ -1893,12 +1997,16 @@ test "host metadata Tasks retain one unknown cleanup owner and reject all effect
     try std.testing.expectEqual(@as(usize, 1), probe.destroyed);
     try std.testing.expectEqual(@as(usize, 0), bridge.retired.items.len);
     try std.testing.expect(!bridge.writeRisk(owner));
-    // A running metadata Task remains narrowed; only a new Task can regain
-    // its freshly captured normal catalog after actual cleanup succeeded.
+    // The installed table stays narrowed until a fresh catalog is published
+    // at the next round of this very Task.
     try std.testing.expect(bridge.queries_only);
-    try bridge.beginRequest();
+    try std.testing.expect(!bridge.refreshQueriesOnly());
+    var restored = Bridge.init(a);
+    defer restored.deinit();
+    try QueryCleanupProbe.table(&restored, current, &contributions);
+    try bridge.replacePreparedExact(&restored);
     try std.testing.expect(!bridge.queries_only);
-    try QueryCleanupProbe.table(&bridge, current, &contributions);
+    try std.testing.expect(bridge.requestTable().?.host_context.?.eql(current));
     try std.testing.expect(bridge.requestTable().?.entries.len > 6);
 }
 
@@ -1925,7 +2033,9 @@ test "host authority refresh narrows its cloned directory while preserving origi
     defer cloned.deinit();
     try std.testing.expect(bridge.queries_only);
     try std.testing.expect(cloned.host_context.?.eql(refreshed));
-    try std.testing.expectEqual(@as(usize, 6), cloned.entries.len);
+    try std.testing.expectEqual(@as(usize, 7), cloned.entries.len);
+    var wait_wire: [64]u8 = undefined;
+    try std.testing.expect(cloned.lookup(try tools.encodeName(&wait_wire, cleanup_wait_id)) != null);
     try std.testing.expect(bridge.retired.items[0].requestTable().?.host_context.?.eql(original));
     try std.testing.expect(bridge.writeRisk(owner));
     try std.testing.expectEqual(@as(usize, 0), probe.destroyed);
@@ -1937,7 +2047,7 @@ test "host authority refresh narrows its cloned directory while preserving origi
     try QueryCleanupProbe.table(&later, refreshed, &contributions);
     try bridge.replacePrepared(&later);
     try std.testing.expect(bridge.queries_only);
-    try std.testing.expectEqual(@as(usize, 6), bridge.requestTable().?.entries.len);
+    try std.testing.expectEqual(@as(usize, 7), bridge.requestTable().?.entries.len);
     try std.testing.expectEqual(@as(usize, 1), bridge.retired.items.len);
 }
 
@@ -2144,7 +2254,7 @@ test "routing intent and approval grants cannot expand retired metadata only bri
     const handle: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
     try broker.execution_route.select(ctx, .{ .route = .current_terminal, .source = .{ .session = handle } }, "pwd", true);
     try bridge.configureRouting(&broker, ctx, "这次在当前终端执行 `pwd`", handle);
-    try std.testing.expect(bridge.route_broker == null);
+    try std.testing.expect(bridge.route_broker == &broker);
     const invocation: host_tools.Invocation = .{ .context = ctx, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "retired-route", .tool_id = "host.run_in_terminal", .arguments = .{ .object = .empty }, .arguments_json = "{}", .arguments_hash = routing.digest("{}"), .canonical_arguments_hash = routing.digest("{}") };
     var subject: approvals.Subject = .{ .kind = .terminal_command, .target = "session 1", .detail = "pwd" };
     try std.testing.expectError(error.ToolNotAvailable, bridge.prepareHostRoute(invocation, &subject, handle, .current_terminal, a));

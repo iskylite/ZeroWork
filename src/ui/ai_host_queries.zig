@@ -370,7 +370,7 @@ fn serviceExecutionInfo(service: terminal.Service, handle: identity.SessionHandl
     return .{ .state = if (snapshot.failure == null) "initializing" else "failed", .failure = snapshot.failure };
 }
 
-fn associatedAsset(app: *Application, handle: identity.SessionHandle) ?identity.AssetOwner {
+pub fn associatedAsset(app: *Application, handle: identity.SessionHandle) ?identity.AssetOwner {
     // Resolve only the immutable identity on this visible session. Reading the
     // registry at that exact ID validates freshness without exposing inventory
     // or resolving credential/connection payloads.

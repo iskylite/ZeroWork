@@ -54,6 +54,9 @@ pub const Contribution = struct {
 };
 pub const Invocation = struct {
     dispatch_fence: ?provider.DispatchFence = null,
+    /// Reconnect can observe an existing automatic attempt across a transport
+    /// transition. Starting a connection still requires this stricter fence.
+    mutation_fence: ?provider.DispatchFence = null,
     workspace_revision: ?u64 = null,
     terminal_target: ?identity.SessionHandle = null,
     context: Context,
@@ -89,6 +92,10 @@ pub const DeliveryCheck = struct {
 };
 pub const Result = struct {
     verification: ?@import("readonly_verification.zig").Anchor = null,
+    /// Exact terminal generation of an unknown remote execution, when known.
+    uncertain_terminal: ?@import("../host/identity.zig").SessionHandle = null,
+    /// Exact old generation and its ready successor, attested by the host.
+    reconnected: ?struct { previous: @import("../host/identity.zig").SessionHandle, current: @import("../host/identity.zig").SessionHandle } = null,
     status: @import("plugin_tools.zig").Status,
     blocks: []const Block = &.{},
     images: []@import("image_attachments.zig").ContentRef = &.{},

@@ -18,6 +18,7 @@ pub const Callbacks = struct {
     context: ?*anyopaque = null,
     on_handoff: ?*const fn (*anyopaque, identity.ConversationId, scope.Owner, u64, u64) void = null,
     on_membership_changed: ?*const fn (*anyopaque, identity.ConversationId, identity.GroupOwner, u64, u64) void = null,
+    on_reconnect_accepted: ?*const fn (*anyopaque, host.Context, Application.ReconnectReceipt) void = null,
 };
 pub const Init = struct {
     allocator: std.mem.Allocator,
@@ -65,7 +66,7 @@ pub const Controller = struct {
 
     pub fn init(options: Init) !Controller {
         try options.authority.validate();
-        if ((options.callbacks.on_handoff != null or options.callbacks.on_membership_changed != null) and options.callbacks.context == null) return error.InvalidCallbacks;
+        if ((options.callbacks.on_handoff != null or options.callbacks.on_membership_changed != null or options.callbacks.on_reconnect_accepted != null) and options.callbacks.context == null) return error.InvalidCallbacks;
         var self: Controller = .{ .allocator = options.allocator, .app = options.app, .roster = options.roster, .store = options.store, .bridge = options.bridge, .authority = options.authority, .execution_policy = options.execution_policy, .config_revision = options.app.workspace.app_config.agentPolicyRevision(), .notice_revision = options.notice_revision, .callbacks = options.callbacks };
         try self.validateAuthority(options.authority);
         return self;
@@ -123,6 +124,16 @@ pub const Controller = struct {
         if (require_ready and (state.lifecycle != .ready and state.lifecycle != .attached)) return error.SourceChanged;
         if (require_ready and (tab.terminal == null or self.app.workspace.model.indexOf(tab.tab_id) == null)) return error.CapabilityUnavailable;
         return legacy;
+    }
+    /// Grouping moves the retained workspace view; it does not require a live
+    /// transport, an idle shell, or a SessionHost service to be ready.
+    fn validateGroupSource(self: *Controller, handle_: identity.SessionHandle) !u64 {
+        for (self.app.workspace.tabs.items) |tab| {
+            if (tab.content_owner != .session or !tab.content_owner.session.eql(handle_)) continue;
+            if (tab.archived or tab.closing or tab.owned_pending or self.app.workspace.model.indexOf(tab.tab_id) == null) return error.StaleReference;
+            return tab.id;
+        }
+        return error.StaleReference;
     }
     fn groupOwner(self: *Controller, id: u64) !identity.GroupOwner {
         const small = std.math.cast(u32, id) orelse return error.StaleReference;
@@ -197,10 +208,14 @@ pub const Controller = struct {
         if (context.child_origin != null) return error.TargetNotAuthorized;
         try self.validateAuthority(context);
         if (request.group) |group| if (context.binding != .group or context.binding.group != @backingInt(group.id)) return error.TargetNotAuthorized;
-        if (request.session) |target| if (!self.inBinding(target) and !((request.kind == .close_session or request.kind == .wait_session_ready) and self.permitsHistoricalOwner(target))) return error.TargetNotAuthorized;
+        if (request.session) |target| if (!self.inBinding(target) and !(request.kind == .reconnect_session and (self.reconnectReplayTarget(context, target) or self.automaticReconnectTarget(target) != null)) and !((request.kind == .close_session or request.kind == .wait_session_ready) and self.permitsHistoricalOwner(target))) return error.TargetNotAuthorized;
         if (request.source) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
         if (request.saved_source) |source| try self.authorizeAsset(source);
         if (request.operation) |operation| {
+            if (self.app.reconnectReceipt(operation, context)) |receipt| {
+                if (!self.reconnectInBinding(receipt)) return error.TargetNotAuthorized;
+                return;
+            }
             const entry = self.app.lifecycle_supervisor.find(operation) orelse return error.TargetNotAuthorized;
             if (!entry.request.context.eql(context)) return error.TargetNotAuthorized;
             // A task's own opening operation precedes membership commit.
@@ -211,12 +226,53 @@ pub const Controller = struct {
             }
         }
     }
+    fn reconnectInBinding(self: *Controller, receipt: *const Application.ReconnectReceipt) bool {
+        const current = self.app.ownerForLegacy(receipt.legacy_id) orelse return false;
+        const tab = self.app.workspace.sessionTab(receipt.legacy_id) orelse return false;
+        if (!tab.content_owner.eql(.{ .session = current }) or tab.archived or tab.closing) return false;
+        if (!current.eql(receipt.original) and (receipt.successor == null or !receipt.successor.?.handle.eql(current))) return false;
+        return self.inBinding(current);
+    }
+    fn reconnectReplayTarget(self: *Controller, context: host.Context, target: identity.SessionHandle) bool {
+        for (self.app.reconnects.items) |*receipt| if (receipt.context.eql(context) and receipt.original.eql(target) and self.reconnectInBinding(receipt)) return true;
+        return false;
+    }
+    fn automaticReconnectTarget(self: *Controller, original: identity.SessionHandle) ?@import("../host/operation.zig").OperationKey {
+        const recovery = self.app.automaticReconnect(original) orelse return null;
+        if (!self.inBinding(recovery.successor.handle)) return null;
+        _ = self.validateIdentity(recovery.successor.handle, false) catch return null;
+        return recovery.original;
+    }
+
+    fn reconnectReceipt(self: *Controller, receipt: *const Application.ReconnectReceipt) runtime.ReconnectReceipt {
+        var result: runtime.ReconnectReceipt = .{
+            .operation_ref = receipt.operation,
+            .original = receipt.original,
+            .successor = if (receipt.successor) |next| next.handle else null,
+            .state = switch (receipt.state) {
+                .accepted => .accepted,
+                .connecting => .connecting,
+                .ready => .ready,
+                .failed => .failed,
+            },
+            .revision = receipt.revision,
+            .failure = receipt.failure,
+            .failure_len = receipt.failure_len,
+            .joined_automatic = receipt.joined_automatic,
+        };
+        if (receipt.state == .ready) {
+            const tab = self.app.workspace.sessionTab(receipt.legacy_id) orelse return result;
+            const facts = @import("ai_host_queries.zig").trustedPtyInfo(self.app, tab, result.successor.?);
+            result.execution_readiness = if (facts.ready) .ready else if (facts.failure) |reason| if (std.mem.eql(u8, reason, "WorkerBusy") or std.mem.eql(u8, reason, "ShellIntegrationPending")) .initializing else .unsupported else .initializing;
+        }
+        return result;
+    }
     fn authorize(self: *Controller, context: host.Context, request: tools.Request) !runtime.Authorized {
         try self.validateRequestScope(context, request);
         // Every existing-object ref is rejected before identity/state/source
         // metadata lookup. Existence, generation and old selections cannot
         // affect the external-target error.
-        if (request.session) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
+        if (request.session) |target| if (!self.inBinding(target) and !(request.kind == .reconnect_session and self.automaticReconnectTarget(target) != null)) return error.TargetNotAuthorized;
         if (request.source) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
         var result: runtime.Authorized = .{ .session = request.session, .source = request.source, .saved_source = request.saved_source, .retention = request.retention orelse self.execution_policy.session_retention, .approval_required = true, .policy_revision = self.config_revision };
         if (request.group) |group| {
@@ -234,24 +290,25 @@ pub const Controller = struct {
                 if (context.binding != .session) return error.AlreadyGroup;
                 const target = request.session orelse return error.InvalidArguments;
                 if (!self.inBinding(target)) return error.SourceChanged;
-                _ = try self.validateIdentity(target, true);
+                _ = try self.validateGroupSource(target);
             },
             .open_session => {
                 if (result.group == null or (request.source == null) == (request.saved_source == null)) return error.InvalidArguments;
+                const policy = request.connection_policy orelse return error.InvalidArguments;
+                if (self.bridge.route_broker) |broker| {
+                    if (broker.execution_route.requiresIndependentFollowup(context) and policy != .new_only) return error.IndependentSessionRequired;
+                }
                 if (request.source) |source| {
-                    if (!self.inBinding(source)) return error.TargetNotAuthorized;
-                    _ = try self.validateIdentity(source, true);
-                    const mapping = self.app.findHandle(source).?;
-                    if (mapping.process != null and request.connection_policy != .new_only) return error.UnsupportedSource;
+                    _ = try self.app.ownedOpenSource(source, result.group.?.id, policy);
                 } else {
                     try self.authorizeAsset(request.saved_source.?);
-                    if (request.connection_policy == .reuse_only) return error.ReuseUnavailable;
+                    if (policy == .reuse_only) return error.ReuseUnavailable;
                 }
                 // Shell integration belongs to the terminal's default startup.
                 // A PTY request never authorizes remote helper deployment.
                 // Actual execution readiness is discovered from the live service.
                 // Exact approval explicitly includes any new transport fallback.
-                result.allow_new_fallback = request.connection_policy == .prefer_reuse;
+                result.allow_new_fallback = policy == .prefer_reuse;
             },
             .rename_group => {},
             .add_group_member => {
@@ -299,11 +356,20 @@ pub const Controller = struct {
             },
             .reconnect_session => {
                 const target = request.session orelse return error.InvalidArguments;
+                if (request.connection_policy != .new_only) return error.ToolNotAvailable;
+                if (self.app.reconnectFailedForTask(context, target)) return error.ReconnectFailedForTask;
+                if (self.automaticReconnectTarget(target)) |original| {
+                    result.create_operation = original;
+                    result.approval_required = false;
+                    result.observe_automatic_reconnect = true;
+                    return result;
+                }
                 _ = try self.validateIdentity(target, false);
-                if (request.connection_policy != .new_only or !self.app.supportsIntegration(target, "transport_loss")) return error.ToolNotAvailable;
+                if (!self.app.supportsIntegration(target, "transport_loss")) return error.ToolNotAvailable;
                 const live = self.app.sessions.queryState(target).?;
                 if (live.lifecycle != .failed and live.lifecycle != .ended) return error.AlreadyConnected;
                 if (self.bridge.writeRisk(target)) return error.ActiveExecutionConflict;
+                result.create_operation = live.create_operation;
             },
             .wait_session_ready => return error.InvalidArguments,
         }
@@ -321,7 +387,7 @@ pub const Controller = struct {
         const authorized = try self.authorize(context, input.request);
         if (!std.meta.eql(authorized, input.authorized)) return error.ScopeChanged;
         const source = input.request.session orelse return error.InvalidArguments;
-        const legacy = try self.validateIdentity(source, true);
+        const legacy = try self.validateGroupSource(source);
         if (self.store.authority) |service| {
             const fence = try service.store.fence(context.conversation_id);
             if (self.pending_transition) |pending| {
@@ -347,7 +413,7 @@ pub const Controller = struct {
         const plan = try self.findPlan(receipt.token);
         if (plan.published or plan.group.id != receipt.id or plan.handoff.next_revision != receipt.binding_revision or plan.notice_revision != receipt.notice_revision or !plan.context.eql(context)) return error.StaleGroupPlan;
         try self.validateAuthority(context);
-        _ = try self.validateIdentity(plan.source, true);
+        _ = try self.validateGroupSource(plan.source);
         if (!self.inBinding(plan.source)) return error.SourceChanged;
         try plan.view.validate();
         if (plan.group.entry == null or self.roster.findById(plan.group.id) != null) return error.GroupIdentityConflict;
@@ -356,7 +422,7 @@ pub const Controller = struct {
         // This callback is the single controller safe point. All fallible
         // checks/allocation precede publication; these commits cannot diverge.
         _ = plan.group.commit() catch unreachable;
-        self.store.commitHandoff(plan.handoff) catch unreachable;
+        self.store.commitLifecycleHandoff(plan.handoff) catch unreachable;
         plan.view.commit(self.roster) catch unreachable;
         plan.published = true;
         if (self.bridge.route_broker) |broker| {
@@ -433,10 +499,6 @@ pub const Controller = struct {
             // handles. A route grant for this attempt must also be consumed.
             if (self.bridge.route_broker) |broker| broker.execution_route.revoke();
             return disconnectReceipt(snapshot);
-        }
-        if (request.kind == .reconnect_session) {
-            try self.app.requestSshReconnect(try self.validateIdentity(request.session.?, false));
-            return .{ .state = .pending, .source_revision = self.config_revision, .session = request.session };
         }
         const owner = checked.group orelse return error.InvalidArguments;
         const id: u32 = @intCast(@backingInt(owner.id));
@@ -524,11 +586,24 @@ pub const Controller = struct {
                 call.result = .{ .session = try self.app.queueOwnedSession(request) };
                 if (authorized.bootstrap_required) try self.app.requireOwnedBootstrap(request.operation_ref, call.context);
                 self.open_authorizations.appendAssumeCapacity(.{ .operation = request.operation_ref, .authorized = authorized });
-                if (self.bridge.route_broker) |broker| broker.execution_route.bindCreate(call.context, routeCreate(request)) catch {};
+                if (self.bridge.route_broker) |broker| {
+                    var equivalent: ?identity.SessionHandle = null;
+                    if (request.saved_source) |saved| if (broker.execution_route.pendingFollowupSource(call.context)) |original| {
+                        if (@import("ai_host_queries.zig").associatedAsset(self.app, original)) |associated| {
+                            if (std.meta.eql(saved, associated)) equivalent = original;
+                        }
+                    };
+                    broker.execution_route.bindCreateFrom(call.context, routeCreate(request), equivalent) catch {};
+                }
             },
             .probe_bootstrap => |operation| call.result = .{ .bootstrap_probe = try self.app.probeOwnedBootstrap(operation, call.context) },
             .install_bootstrap => |prepared| try self.app.installOwnedBootstrap(prepared, call.context),
             .query_open => |operation| {
+                if (self.app.reconnectReceipt(operation, call.context)) |receipt| {
+                    if (!self.reconnectInBinding(receipt)) return error.TargetNotAuthorized;
+                    call.result = .{ .reconnect = self.reconnectReceipt(receipt) };
+                    return;
+                }
                 const snapshot = try self.app.queryOwnedSession(operation, call.context);
                 self.adoptRouteSession(call.context, operation, snapshot);
                 call.result = .{ .session = self.withExecutionReadiness(snapshot) };
@@ -540,6 +615,27 @@ pub const Controller = struct {
                 call.result = .{ .session = self.withExecutionReadiness(snapshot) };
             },
             .query_disconnect => |operation| call.result = .{ .mutation = disconnectReceipt(try self.app.querySessionDisconnect(operation, call.context)) },
+            .query_reconnect => |operation| {
+                const receipt = self.app.reconnectReceipt(operation, call.context) orelse return error.NotFound;
+                if (!self.reconnectInBinding(receipt)) return error.TargetNotAuthorized;
+                call.result = .{ .reconnect = self.reconnectReceipt(receipt) };
+            },
+            .find_automatic_reconnect => |target| {
+                if (self.app.taskAutomaticReconnect(call.context, target)) |receipt| {
+                    if (!self.reconnectInBinding(receipt)) return error.TargetNotAuthorized;
+                    call.result = .{ .reconnect = self.reconnectReceipt(receipt) };
+                }
+            },
+            .queue_reconnect => |input| {
+                if (input.request.kind != .reconnect_session) return error.InvalidArguments;
+                const checked = try self.authorize(call.context, input.request);
+                if (!std.meta.eql(checked, input.authorized) and !(checked.observe_automatic_reconnect and checked.create_operation.?.eql(input.authorized.create_operation.?))) return error.ScopeChanged;
+                if (!checked.observe_automatic_reconnect) if (input.mutation_fence) |fence| try fence.check();
+                const receipt = try self.app.requestAiReconnect(input.operation, call.context, checked.session.?, checked.create_operation.?);
+                if (self.bridge.route_broker) |broker| broker.supersede();
+                if (self.callbacks.on_reconnect_accepted) |notify| notify(self.callbacks.context.?, call.context, receipt);
+                call.result = .{ .reconnect = self.reconnectReceipt(&receipt) };
+            },
             .authorize_open => |request| {
                 const entry = self.app.lifecycle_supervisor.find(request.operation) orelse return error.NotFound;
                 const open_request = entry.request;
@@ -737,6 +833,118 @@ fn testMetadata(fixture: *TestFixture, roster: *groups.Roster, context: host.Con
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(arguments, &hash, .{});
     return @import("ai_host_queries.zig").execute(fixture.app, roster, context.binding, .{ .execution_policy = .{ .execution_mode = .auto, .session_retention = .keep }, .permission_mode = .confirm, .host_contributions = &tools.contributions }, @splat(17), .{ .context = context, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "closed-metadata-fixture", .tool_id = tool, .arguments = json.value, .arguments_json = arguments, .arguments_hash = hash, .canonical_arguments_hash = hash }, a);
+}
+
+test "lifecycle controller converts a retained ended session to a group and opens independently" {
+    const a = std.testing.allocator;
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const source = try fixture.local();
+    const binding = switch (fixture.app.sessions.queryService(source, .terminal)) {
+        .available => |value| value,
+        else => return error.TerminalServiceUnavailable,
+    };
+    const service = try fixture.app.findHandle(source).?.process.?.terminalService(binding);
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (true) {
+        const status = service.status() catch |err| {
+            if (err != error.WorkerBusy) return err;
+            try fixture.tick(null);
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.LocalSessionNotReady;
+            continue;
+        };
+        _ = service.write(.{ .input_sequence = 1, .mode_revision = status.mode_revision, .bytes = "exit\n" }) catch |err| {
+            if (err != error.WorkerBusy) return err;
+            try fixture.tick(null);
+            continue;
+        };
+        break;
+    }
+    while (fixture.app.sessions.queryState(source).?.lifecycle != .ended) {
+        try fixture.tick(null);
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.LocalSessionDidNotEnd;
+    }
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const context = try testContext(&store, source);
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .attached_pty, .session_retention = .auto_idle } });
+    defer controller.deinitAfterWorker();
+    const journal = try runtime.ProcessJournal.acquire(.{ .data_root = fixture.directory, .path = "ended-group.json" });
+    defer journal.release();
+    var broker: @import("../ai/host_approval.zig").Broker = .{};
+    var backend: runtime.Runtime = .{ .journal_owner = journal, .controller = controller.handle(), .approval = &broker };
+    const source_ref = try @import("../ai/host_queries.zig").sessionRef(a, context, source);
+    defer a.free(source_ref);
+    const args = try std.json.Stringify.valueAlloc(a, .{ .initial_session_ref = source_ref, .request_key = "ended-group" }, .{});
+    defer a.free(args);
+    var result = try testInvoke(&fixture, &controller, &backend, &broker, "host.create_group", args);
+    defer result.deinit(a);
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, result.status);
+    try std.testing.expect(store.findConversation(context.conversation_id).?.owner == .group);
+    try std.testing.expectEqual(@as(usize, 1), roster.groups.items[0].members.items.len);
+    try std.testing.expectEqual(@import("../host/session_host.zig").Lifecycle.ended, fixture.app.sessions.queryState(source).?.lifecycle);
+    const moved = store.findConversation(context.conversation_id).?;
+    var next = context;
+    next.binding = moved.owner;
+    next.binding_revision = moved.binding_revision;
+    try controller.refreshAuthority(next);
+    const group = try controller.groupOwner(next.binding.group);
+    const group_ref = try @import("../ai/host_queries.zig").groupRef(a, next, next.binding.group);
+    defer a.free(group_ref);
+    const open_args = try std.json.Stringify.valueAlloc(a, .{ .group_ref = group_ref, .source_ref = source_ref, .connection_policy = "new_only", .request_key = "ended-group-open" }, .{});
+    defer a.free(open_args);
+    var opened = try testInvoke(&fixture, &controller, &backend, &broker, "host.open_session", open_args);
+    defer opened.deinit(a);
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, opened.status);
+    try std.testing.expectEqual(@import("../host/session_host.zig").Lifecycle.ended, fixture.app.sessions.queryState(source).?.lifecycle);
+    try std.testing.expectError(error.UnsupportedSource, controller.authorize(next, .{ .kind = .open_session, .group = group, .source = source, .connection_policy = .reuse_only }));
+}
+
+test "lifecycle controller requires an independent connection for the foreground monitoring followup" {
+    const a = std.testing.allocator;
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const source = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    var broker: @import("../ai/host_approval.zig").Broker = .{};
+    bridge.route_broker = &broker;
+    const context = try testContext(&store, source);
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .attached_pty, .session_retention = .auto_idle } });
+    defer controller.deinitAfterWorker();
+    try broker.configure(context, controller.config_revision);
+    try broker.execution_route.captureFollowup(context, "你可以再开会话监控下带宽或者文件大小呢", source, .auto_idle);
+    const journal = try runtime.ProcessJournal.acquire(.{ .data_root = fixture.directory, .path = "independent-group.json" });
+    defer journal.release();
+    var backend: runtime.Runtime = .{ .journal_owner = journal, .controller = controller.handle(), .approval = &broker };
+    const source_ref = try @import("../ai/host_queries.zig").sessionRef(a, context, source);
+    defer a.free(source_ref);
+    const args = try std.json.Stringify.valueAlloc(a, .{ .initial_session_ref = source_ref, .request_key = "independent-group" }, .{});
+    defer a.free(args);
+    var result = try testInvoke(&fixture, &controller, &backend, &broker, "host.create_group", args);
+    defer result.deinit(a);
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, result.status);
+    const moved = store.findConversation(context.conversation_id).?;
+    var next = context;
+    next.binding = moved.owner;
+    next.binding_revision = moved.binding_revision;
+    try controller.refreshAuthority(next);
+    const group = try controller.groupOwner(next.binding.group);
+    const request: tools.Request = .{ .kind = .open_session, .group = group, .source = source, .connection_policy = .reuse_only };
+    try std.testing.expectError(error.IndependentSessionRequired, controller.authorize(next, request));
+    var independent = request;
+    independent.connection_policy = .new_only;
+    _ = try controller.authorize(next, independent);
 }
 
 test "lifecycle controller real Local group open and close preserve conversation and source" {

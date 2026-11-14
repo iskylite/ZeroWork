@@ -136,7 +136,7 @@ pub const Record = struct {
         return out;
     }
 };
-pub const Request = struct { context: host.Context, tool_id: []const u8, request_key: []const u8, canonical_hash: Digest, turn_id: u64, call_id: []const u8 };
+pub const Request = struct { context: host.Context, tool_id: []const u8, request_key: []const u8, canonical_hash: Digest, turn_id: u64, call_id: []const u8, existing_operation: ?identity.HostOperationId = null };
 pub const Handle = struct { index: usize, operation_ref: identity.HostOperationId, reused: bool = false };
 pub const Update = struct {
     verification: ?@import("readonly_verification.zig").Anchor = null,
@@ -268,6 +268,10 @@ pub const Journal = struct {
             if (!std.mem.eql(u8, &record.canonical_hash, &request.canonical_hash)) return error.IdempotencyConflict;
             return .{ .index = index, .operation_ref = record.operation_ref, .reused = true };
         };
+        if (request.existing_operation) |operation| {
+            if (!operation.valid() or !std.mem.eql(u8, request.tool_id, "host.reconnect_session")) return error.InvalidJournalRequest;
+            for (self.records.items) |record| if (record.operation_ref.eql(operation)) return error.ReconnectAlreadyRequested;
+        }
         if (isLocalFile(request.tool_id)) {
             var file_count: usize = 0;
             for (self.records.items) |record| {
@@ -276,7 +280,7 @@ pub const Journal = struct {
             if (file_count >= max_file_records) return error.LocalFileOperationLimit;
         }
         try self.records.ensureUnusedCapacity(self.allocator, 1);
-        var record = try (Record{ .context = request.context, .operation_ref = identity.HostOperationId.generate(), .tool_id = request.tool_id, .request_key = request.request_key, .canonical_hash = request.canonical_hash, .original_turn = request.turn_id, .original_call = request.call_id }).clone(self.allocator);
+        var record = try (Record{ .context = request.context, .operation_ref = request.existing_operation orelse identity.HostOperationId.generate(), .tool_id = request.tool_id, .request_key = request.request_key, .canonical_hash = request.canonical_hash, .original_turn = request.turn_id, .original_call = request.call_id }).clone(self.allocator);
         errdefer record.deinit(self.allocator);
         const next = try self.allocator.alloc(Record, self.records.items.len + 1);
         defer self.allocator.free(next);
