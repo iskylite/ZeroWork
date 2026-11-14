@@ -168,8 +168,16 @@ const WorkerFixture = struct {
     calls: std.atomic.Value(usize) = .init(0),
     release: std.atomic.Value(bool) = .init(false),
     saw_child: std.atomic.Value(bool) = .init(false),
+    release_pending: usize = 0,
+    hold_projection: bool = false,
     fn backend(self: *WorkerFixture) Runtime.Backend {
-        return .{ .context = self, .prepare = prepare };
+        return .{ .context = self, .prepare = prepare, .release_worker = releaseWorker };
+    }
+    fn releaseWorker(raw: *anyopaque) !void {
+        const self: *WorkerFixture = @ptrCast(@alignCast(raw));
+        if (self.release_pending == 0) return;
+        self.release_pending -= 1;
+        return error.ResourceCleanupPending;
     }
     fn prepare(raw: *anyopaque, _: std.mem.Allocator, _: std.Io, context: Runtime.Context) !Runtime.Prepared {
         const self: *WorkerFixture = @ptrCast(@alignCast(raw));
@@ -182,7 +190,7 @@ const WorkerFixture = struct {
         _ = self.calls.fetchAdd(1, .acq_rel);
         if (self.saw_child.load(.acquire)) try std.testing.expect(std.mem.indexOf(u8, request.system, "不能再派生") != null);
         while (!self.release.load(.acquire)) {
-            if (request.cancel) |cancel| if (cancel.isCancelled()) return error.Cancelled;
+            if (!self.hold_projection) if (request.cancel) |cancel| if (cancel.isCancelled()) return error.Cancelled;
             std.Thread.yield() catch {};
         }
         sink(output, .{ .text = "child completed" });
@@ -582,10 +590,14 @@ test "v0.4 child attachment drafts are keyed by conversation even under the same
 
 test "v0.4 child projection counts real workers, excludes human waits and retains unresolved attention" {
     const projection = @import("ai/child_projection.zig");
-    var parent_provider: WorkerFixture = .{};
-    var child_provider: WorkerFixture = .{};
+    var parent_provider: WorkerFixture = .{ .hold_projection = true };
+    var child_provider: WorkerFixture = .{ .hold_projection = true };
     var service = Runtime.Service.init(a);
     defer service.deinit();
+    defer {
+        parent_provider.release.store(true, .release);
+        child_provider.release.store(true, .release);
+    }
     const parent = try service.attach(live.owner, parent_provider.backend());
     const fence = try service.store.create(parent.agent.id);
     _ = try service.submit(fence, .generate(), .{ .content = "parent" }, null);
@@ -620,7 +632,7 @@ test "v0.4 child projection counts real workers, excludes human waits and retain
 
 test "v0.4 child direct user queue creates fresh roots and releases each worker without reviving parent" {
     var parent_provider: WorkerFixture = .{};
-    var child_provider: WorkerFixture = .{};
+    var child_provider: WorkerFixture = .{ .release_pending = 1 };
     var service = Runtime.Service.init(a);
     defer service.deinit();
     const parent = try service.attach(live.owner, parent_provider.backend());
@@ -638,7 +650,12 @@ test "v0.4 child direct user queue creates fresh roots and releases each worker 
     const receipt = try service.submit(ticket, .generate(), .{ .content = "two" }, .queue);
     try std.testing.expectEqual(life.input.Route.queue, receipt.route);
     child_provider.release.store(true, .release);
-    try awaitIdle(&service, runner);
+    const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    while (record.binding != null) {
+        try service.poll();
+        if (start.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() > 3000) return error.WorkerTimeout;
+        std.Thread.yield() catch {};
+    }
     try std.testing.expectEqual(@as(usize, 2), child_provider.calls.load(.acquire));
     try std.testing.expectEqual(@as(u64, 2), runner.worker_generation);
     try std.testing.expect(runner.worker == null and record.binding == null and !record.task_pending);

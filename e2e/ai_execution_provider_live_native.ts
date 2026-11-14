@@ -167,9 +167,12 @@ const assertRecorded=(body:any)=>{
  const hashBytes=typeof s.command_hash==='string'?[...Buffer.from(s.command_hash)]:s.command_hash;assert.deepEqual(hashBytes,[...createHash('sha256').update(command).digest()]);
 };
 async function normalQuit(){
- const start=performance.now();report.normal_quit={attempted:true,route:'POST /quit',confirmations:[]};
+ const start=performance.now();report.normal_quit={attempted:true,route:'POST /zerowork/windows',confirmations:[]};
  if(!alive()){report.normal_quit.before_request={exit_code:app.exitCode,signal:app.signalCode,spawn_error:spawnError};return}
- try{report.normal_quit.response=await h.request('POST','/quit');}catch(error){report.normal_quit.request_error=String(error)}
+ try{
+  report.normal_quit.response=await h.request('POST','/zerowork/windows',{action:'quit'});
+  assert.equal(report.normal_quit.response.ok,true,'ZeroWork must accept the application quit request');
+ }catch(error){report.normal_quit.request_error=String(error)}
  let rpcUnavailable=false;
  while(alive()&&performance.now()-start<20000){
   if(!rpcUnavailable)try{
@@ -181,7 +184,7 @@ async function normalQuit(){
   if(alive())await Promise.race([ended,h.sleep(80)]);
  }
  await Promise.race([ended,h.sleep(200)]);report.normal_quit.exit_code=app.exitCode;report.normal_quit.signal=app.signalCode;report.normal_quit.elapsed_ms=(appClosedAt??performance.now())-start;
- report.normal_quit.passed=app.exitCode===0&&app.signalCode===null;
+ report.normal_quit.passed=report.normal_quit.response?.ok===true&&app.exitCode===0&&app.signalCode===null;
 }
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
@@ -232,7 +235,7 @@ finally{
  quitting=true;await normalQuit().catch(error=>{report.normal_quit_error=String(error)});
  let forced=false;if(alive()){forced=true;app.kill('SIGTERM');await Promise.race([ended,h.sleep(2000)])}if(alive()){app.kill('SIGKILL');await ended}
  report.cleanup={exit_code:app.exitCode,signal:app.signalCode,forced,spawn_error:spawnError};
- if(report.execution_acceptance_passed&&report.normal_quit?.passed&&!forced){report.status='passed';report.checks.push('The real application exits normally through POST /quit with code 0, no signal and no forced fallback.')}
+ if(report.execution_acceptance_passed&&report.normal_quit?.passed&&!forced){report.status='passed';report.checks.push('The real application exits normally through the ZeroWork application quit route with code 0 and no signal.')}
  else{report.status='failed';report.error??='normal application Quit with code 0 was not achieved';process.exitCode=1}
  report.provider_failure=providerFailure;report.provider_probes=providerProbes;report.requests=requests;report.responses=responses;report.calls=[...calls.values()];report.results=Object.fromEntries(results);report.approvals=approvals;
  server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));await log.close();

@@ -47,6 +47,22 @@ test "SSH BootstrapV1 active interval uses one identity and distinct zero-byte o
     const file = try manifest.openManaged(std.testing.io, tmp.dir, loaded.value.files[0].path);
     defer file.close(std.testing.io);
     try std.testing.expectEqualStrings(loaded.value.files[0].checksum, &try manifest.fingerprint(std.testing.io, file, loaded.value.files[0].committed_length));
+
+    // Retention uses the same parent lease as an execution query, so it
+    // cannot delete a segment while the reader still holds its cursor.
+    _ = try rec.persist(100, 30);
+    var index: archive.Archive = .{ .allocator = a, .io = std.testing.io, .dir = tmp.dir };
+    const id_text = std.fmt.bytesToHex(id.bytes, .lower);
+    const execution_text = std.fmt.bytesToHex(execution_id.bytes, .lower);
+    {
+        var segment = try archive.acquireExecutionSegment(index, a, "logs/history/ssh-controlled.session.json", &id_text, 0, &execution_text);
+        defer segment.deinit();
+        try std.testing.expectEqual(@as(usize, 0), try index.prune(1, 2 * std.time.ms_per_day));
+    }
+    try std.testing.expectEqual(@as(usize, 1), try index.prune(1, 2 * std.time.ms_per_day));
+    const segment_path = try manifest.executionSegmentPath(a, "logs/history/ssh-controlled.session.json", &execution_text, .metadata);
+    defer a.free(segment_path);
+    try std.testing.expectError(error.FileNotFound, manifest.openManaged(std.testing.io, tmp.dir, segment_path));
 }
 test "SSH BootstrapV1 active interval refuses own retention loss without fabricating foreground completeness" {
     var tmp = std.testing.tmpDir(.{});

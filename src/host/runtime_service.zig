@@ -55,6 +55,7 @@ pub const Runtime = struct {
         notificationSnapshot: *const fn (*anyopaque, identity.SessionHandle) anyerror!terminal.NotificationSnapshot,
         execService: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!@import("../ai/execbridge.zig").ExecBridge = null,
         transferService: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!*@import("../proto/ssh/shared_transfer_service.zig").Service = null,
+        closeShellForTransfers: ?*const fn (*anyopaque) void = null,
         forwardService: ?*const fn (*anyopaque, session.ServiceHandle, ?usize) anyerror!*@import("../proto/ssh/forward_service.zig").Service = null,
         captureExport: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!@import("../vt/timeline.zig").Timeline.ExportSnapshot = null,
         exportTimeline: *const fn (*anyopaque, std.Io, std.Io.Dir, []const u8) anyerror!void,
@@ -118,6 +119,10 @@ pub const Runtime = struct {
     /// the same opaque facade, never a native worker or downcast escape hatch.
     pub fn workerPtr(self: *Runtime) *Runtime {
         return self;
+    }
+    pub fn closeShellForTransfers(self: *Runtime) void {
+        if (self.torn_down) return;
+        if (self.vtable.closeShellForTransfers) |close_shell| close_shell(self.context);
     }
     pub fn threadPtr(self: *Runtime) *Runtime {
         return self;

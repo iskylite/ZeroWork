@@ -173,8 +173,8 @@ pub const Loop = struct {
     round_index: u64 = 0,
     verification_notes: std.ArrayList(u8) = .empty,
     uncertain: bool = false,
-    /// A valid unknown host receipt permits observation, never fresh effects.
-    /// Invalid receipts and legacy uncertain transports retain their stop gate.
+    /// Valid unknown receipts permit observation and targeted terminal recovery.
+    /// An unaccounted dispatch retains the stop gate.
     host_observation_only: bool = false,
     retained_output_bytes: usize = 0,
     tool_table: ?dynamic.RequestTable = null,
@@ -266,6 +266,11 @@ pub const Loop = struct {
         if (self.host_observation_only or self.read_only) {
             if (self.unfiltered_tools == null) self.unfiltered_tools = self.request.tools;
             var visible: std.ArrayList(provider.ToolDefinition) = .empty;
+            const uncertain_terminal = self.hasUncertainTerminal(null);
+            const independent_group_work = if (self.tool_table) |table|
+                table.host_context != null and table.host_context.?.binding == .group and uncertain_terminal
+            else
+                false;
             for (self.unfiltered_tools.?) |definition| {
                 if (self.tool_table == null) {
                     if (definition.dynamic == null and definition.tool != .run_command) try visible.append(self.arena.allocator(), definition);
@@ -274,8 +279,9 @@ pub const Loop = struct {
                 const entry = if (self.tool_table) |*table| table.lookup(definition.name()) orelse continue else continue;
                 const read = entry.definition.effect == .read_state or entry.definition.effect == .observe_image;
                 if (read or (!self.read_only and (std.mem.eql(u8, entry.definition.id, "host.stop_execution") or
-                    (std.mem.eql(u8, entry.definition.id, "host.reconnect_session") and self.hasUncertainTerminal(null)) or
-                    (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") and self.hasRecoveredTerminal(null, null))))) try visible.append(self.arena.allocator(), definition);
+                    (std.mem.eql(u8, entry.definition.id, "host.reconnect_session") and uncertain_terminal) or
+                    (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") and (independent_group_work or self.hasRecoveredTerminal(null, null))) or
+                    (std.mem.eql(u8, entry.definition.id, "run_command") and independent_group_work)))) try visible.append(self.arena.allocator(), definition);
             }
             self.request.tools = try visible.toOwnedSlice(self.arena.allocator());
         }
@@ -511,7 +517,7 @@ pub const Loop = struct {
             };
             const body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (dispatched) "outcome_unknown" else "cancelled_unsent", .error_code = "InterruptedBeforeResult", .operation_may_have_started = dispatched }, .{});
             try self.messages.append(self.arena.allocator(), .{ .role = .tool, .content = body, .tool_call_id = call.id });
-            self.uncertain = self.uncertain or dispatched;
+            if (dispatched) self.stopForUnknownDispatch();
         }
         self.request.messages = self.messages.items;
     }
@@ -521,13 +527,23 @@ pub const Loop = struct {
     fn operationObservation(name: []const u8, arguments: std.json.Value) bool {
         return arguments == .object and ((std.mem.eql(u8, name, "host.wait_session_ready") and arguments.object.contains("operation_ref")) or std.mem.eql(u8, name, "host.reconnect_session"));
     }
+    fn stopForUnknownDispatch(self: *Loop) void {
+        self.uncertain = true;
+        self.host_observation_only = false;
+    }
     fn hasUncertainTerminal(self: *const Loop, target: ?@import("../host/identity.zig").SessionHandle) bool {
+        if (!self.host_observation_only) return false;
         var found = false;
-        for (self.records.items) |record| if (record.host_result) |result| {
-            if (result.status != .outcome_unknown and !result.receipt.remote_effect_unknown and result.receipt.local_released) continue;
-            const owner = result.uncertain_terminal orelse return false;
-            found = found or target == null or target.?.eql(owner);
-        };
+        for (self.records.items) |record| {
+            if (record.generic_results) |results| for (results) |result| {
+                if (result.status == .outcome_unknown or result.receipt.remote_effect_unknown or !result.receipt.local_released) return false;
+            };
+            if (record.host_result) |result| {
+                if (result.status != .outcome_unknown and !result.receipt.remote_effect_unknown and result.receipt.local_released) continue;
+                const owner = result.uncertain_terminal orelse return false;
+                found = found or target == null or target.?.eql(owner);
+            }
+        }
         return found;
     }
     fn hasRecoveredTerminal(self: *const Loop, previous: ?@import("../host/identity.zig").SessionHandle, current: ?@import("../host/identity.zig").SessionHandle) bool {
@@ -539,6 +555,14 @@ pub const Loop = struct {
         };
         return false;
     }
+    fn permitsIndependentGroupTarget(self: *const Loop, id: @import("../host/identity.zig").SessionId) bool {
+        if (!self.hasUncertainTerminal(null)) return false;
+        for (self.records.items) |record| if (record.host_result) |result| {
+            if (result.status != .outcome_unknown and !result.receipt.remote_effect_unknown and result.receipt.local_released) continue;
+            if (result.uncertain_terminal.?.session_id == id) return false;
+        };
+        return true;
+    }
     fn permitsRecovery(self: *const Loop, context: dynamic.host.Context, parsed: dynamic.ParsedCall) bool {
         const name = parsed.entry.definition.id;
         const arguments = parsed.json.value;
@@ -547,7 +571,9 @@ pub const Loop = struct {
         if (ref != .string) return false;
         const target = @import("host_lifecycle.zig").sessionHandle(context, ref.string) catch return false;
         if (std.mem.eql(u8, name, "host.reconnect_session")) return self.hasUncertainTerminal(target) and !self.hasRecoveredTerminal(target, null);
-        if (!std.mem.eql(u8, name, "host.run_in_terminal") or !self.hasRecoveredTerminal(null, target)) return false;
+        if (!std.mem.eql(u8, name, "host.run_in_terminal")) return false;
+        if (context.binding == .group and self.permitsIndependentGroupTarget(target.session_id)) return true;
+        if (!self.hasRecoveredTerminal(null, target)) return false;
         // Preserve the unknown outcome and never replay the old command.
         const command = arguments.object.get("command") orelse return false;
         if (command != .string) return false;
@@ -733,14 +759,13 @@ pub const Loop = struct {
         var result = execute(host.context, .{ .dispatch_fence = dispatch_gate, .mutation_fence = if (std.mem.eql(u8, parsed.entry.definition.id, "host.reconnect_session")) self.dispatch_gate else null, .workspace_revision = self.request.workspace_revision, .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
             const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.WorkspaceChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ExecutionDeadlineBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
             record.dispatched = !preflight;
-            if (!preflight and affecting) self.uncertain = true;
+            if (!preflight and affecting) self.stopForUnknownDispatch();
             record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else if (!affecting) dynamic.Status.failed else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .side_effect_started = !preflight and affecting, .request_sent = if (parsed.entry.authority == .local_network_read and preflight) @as(?bool, false) else null, .local_released = preflight or !affecting, .remote_effect_unknown = !preflight and affecting }, .{});
             return record.result_body.?;
         };
         result.validate(context, operation_id) catch {
             result.deinit(self.allocator);
-            self.uncertain = true;
-            self.host_observation_only = false;
+            self.stopForUnknownDispatch();
             record.result_body = try self.errorBody("InvalidHostToolResult", null);
             return record.result_body.?;
         };
@@ -791,7 +816,12 @@ pub const Loop = struct {
             return record.result_body.?;
         }
         if (parsed.entry.authority != .session_targets) return self.resolveHost(record, table, parsed, call, host, cancel);
-        if (self.uncertain and (!self.host_observation_only or (parsed.entry.definition.effect != .read_state and parsed.entry.definition.effect != .observe_image))) {
+        const independent_group_batch = independent: {
+            if (!self.uncertain or table.host_context == null or table.host_context.?.binding != .group or !std.mem.eql(u8, parsed.entry.definition.id, "run_command")) break :independent false;
+            for (parsed.targets.slice()) |id| if (!self.permitsIndependentGroupTarget(@fromBackingInt(id))) break :independent false;
+            break :independent true;
+        };
+        if (self.uncertain and (!self.host_observation_only or (parsed.entry.definition.effect != .read_state and parsed.entry.definition.effect != .observe_image and !independent_group_batch))) {
             record.result_body = try self.errorBody("EarlierToolOutcomeUnknown", &parsed.targets);
             return record.result_body.?;
         }
@@ -815,8 +845,8 @@ pub const Loop = struct {
         const results = execute(host.context, .{ .dispatch_fence = self.dispatch_gate, .workspace_revision = self.request.workspace_revision, .table = table, .parsed = parsed, .turn_id = self.turn_id, .call_id = call.id, .arguments = call.arguments, .operation_id = operation_id }, self.allocator, cancel) catch |err| {
             // Policy and approval rejection happen before any dispatch. Other
             // failures are conservatively unknown and never automatically replay.
-            const preflight = err == error.ScopeChanged or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded or err == error.OperationHistoryFull or err == error.ModeConflict;
-            if (!preflight) self.uncertain = true;
+            const preflight = err == error.ScopeChanged or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded or err == error.OperationHistoryFull or err == error.ModeConflict or err == error.ReconnectTargetChanged or err == error.ReconnectTargetUnavailable;
+            if (!preflight) self.stopForUnknownDispatch();
             record.dispatched = !preflight;
             @import("tool_trace.zig").emit(.{ .event = "dynamic_rejected", .call_id = call.id, .tool_id = call.name, .owner = self.scope.owner, .reason = @errorName(err), .dispatched = !preflight });
             record.result_body = if (preflight) try self.errorBody(@errorName(err), &parsed.targets) else try self.unknownBody(@errorName(err), parsed.targets);
@@ -824,7 +854,7 @@ pub const Loop = struct {
         };
         record.generic_results = results;
         if (results.len != parsed.targets.len) {
-            self.uncertain = true;
+            self.stopForUnknownDispatch();
             record.result_body = try self.unknownBody("InvalidToolOutcome", parsed.targets);
             return record.result_body.?;
         }
@@ -837,7 +867,7 @@ pub const Loop = struct {
                 if (@backingInt(bound.owner.session_id) == id) break bound.owner;
             } else unreachable;
             result.validate(owner, operation_id) catch {
-                self.uncertain = true;
+                self.stopForUnknownDispatch();
                 record.result_body = try self.unknownBody("InvalidToolOutcome", parsed.targets);
                 return record.result_body.?;
             };

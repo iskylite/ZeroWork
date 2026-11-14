@@ -11,10 +11,11 @@ const key_field = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLen
 const wait_fields = "\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}";
 const until_field = "\"until\":{\"type\":\"string\",\"enum\":[\"revision\",\"decision\",\"terminal\"]}";
 const output_fields = "\"output_cursor\":{\"type\":\"string\",\"maxLength\":128},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65536}";
+const default_decision_wait_ms = 5 * std.time.ms_per_min;
 pub const contributions = [_]host.Contribution{
     tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. For nested shells, first host.get_session and include control.shell_context.id/revision as shell_id/shell_revision. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. If ShellPromptNotObserved or IntegrationUnavailable rejects this call before dispatch, inspect host.read_terminal/host.get_session and use host.attach_shell to initialize the confirmed current Shell, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
     tool("get_execution", "Read one execution in this conversation/task, its true process/output/recording stages, recording range and bounded incremental output. An ordinary prompt or printed marker never proves completion.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
-    tool("wait_execution", "Wait up to wait_ms for this authorized execution. Prefer until=decision: actual foreground result, explicit input request, failure, unknown or takeover; ordinary revision/output changes remain internal. Legacy until=revision remains available, then return the same bounded snapshot/output as get_execution. Timeout or wait_interrupted describes only the observation wait; the original command may still be running and must not be replayed.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
+    tool("wait_execution", "For an ongoing command, call once with its execution_ref and until=decision, omitting wait_ms. The host waits within the task budget, or up to five minutes when no task deadline is set, for a foreground result, explicit input request, failure, unknown outcome or takeover. Ordinary output stays buffered. Explicit wait_ms requests a shorter bounded observation. Legacy until=revision remains available. If the wait times out or is interrupted, use the returned state and preserve the original execution_ref; do not replay the command or start a shell sleep to check it.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
     tool("send_execution_input", "Send approved non-secret text or Enter to the current execution using its live input capability, current fence and fresh per-input approval. controlled_line is a helper-attested consumer; terminal_stream only authorizes ordinary PTY bytes and does not prove which foreground program consumes them or that it is waiting. A written receipt means native write completed, not foreground consumption. Text is single line UTF-8, at most 4096 bytes; Enter is a separate key request. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Use user takeover for unknown input targets, raw/TUI interaction or secrets; never infer input authority from prompt text.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("stop_execution", "Revoke future AI input for this exact execution and request only its supported foreground interrupt. Release is distinct from process exit; unknown effects stay unknown. This never aborts a shared SSH transport or closes a borrowed terminal.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ "},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("attach_shell", @import("shell_attachment.zig").description, @import("shell_attachment.zig").schema),
@@ -125,7 +126,12 @@ const Entry = struct {
 };
 /// Wait owns only copied metadata, never an invocation's JSON arena or strings.
 pub const WaitUntil = enum { revision, decision, terminal };
-pub const Wait = struct { until: WaitUntil = .revision, context: host.Context, operation_id: u64, index: usize, after_revision: u64, deadline: i64, output_cursor: u64, max_bytes: usize };
+pub const Wait = struct { until: WaitUntil = .revision, context: host.Context, operation_id: u64, index: usize, after_revision: u64, deadline: i64, output_cursor: u64, max_bytes: usize, implicit_decision: bool = false };
+pub fn implicitDecisionWait(invocation: host.Invocation) bool {
+    if (!std.mem.eql(u8, invocation.tool_id, "host.wait_execution") or invocation.arguments != .object or invocation.arguments.object.contains("wait_ms")) return false;
+    const until = invocation.arguments.object.get("until") orelse return false;
+    return until == .string and std.mem.eql(u8, until.string, "decision");
+}
 pub const Response = union(enum) { result: host.Result, wait: Wait };
 const InputOperation = struct {
     operation: journal_mod.Handle,
@@ -201,8 +207,12 @@ pub const Controller = struct {
         const reference = try string(invocation.arguments, "execution_ref");
         const observing = std.mem.eql(u8, invocation.tool_id, "host.get_execution") or std.mem.eql(u8, invocation.tool_id, "host.wait_execution");
         const index = if (observing) try self.findRead(invocation.context, reference) else try self.find(invocation.context, reference);
+        const implicit_decision = implicitDecisionWait(invocation);
         const is_stop = std.mem.eql(u8, invocation.tool_id, "host.stop_execution");
-        if (!is_stop and !terminalState(self.entries.items[index].snapshot.state)) try self.refresh(index, now);
+        if (!is_stop and !terminalState(self.entries.items[index].snapshot.state)) self.refresh(index, now) catch |err| {
+            const expired = implicit_decision and (invocation.decision_wait_deadline_ms orelse std.math.maxInt(i64)) <= now;
+            if (err != error.WorkerBusy or !expired) return err;
+        };
         if (is_stop) {
             _ = try string(invocation.arguments, "request_key");
             const operation = try self.beginJournal(invocation);
@@ -241,14 +251,23 @@ pub const Controller = struct {
             const wait_ms = try integer(invocation.arguments, "wait_ms", 1000, 0, 30000);
             const until_value = invocation.arguments.object.get("until");
             const until: WaitUntil = if (until_value) |value| if (value == .string) std.meta.stringToEnum(WaitUntil, value.string) orelse return error.InvalidArguments else return error.InvalidArguments else .revision;
-            if (!waitReady(self.entries.items[index].snapshot, until, after) and wait_ms > 0) return .{ .wait = .{ .until = until, .context = invocation.context, .operation_id = invocation.operation_id, .index = index, .after_revision = after, .deadline = now + @as(i64, @intCast(wait_ms)), .output_cursor = output_cursor, .max_bytes = max_bytes } };
+            if (!waitReady(self.entries.items[index].snapshot, until, after)) {
+                const deadline = if (implicit_decision)
+                    invocation.decision_wait_deadline_ms orelse now + default_decision_wait_ms
+                else
+                    now + @as(i64, @intCast(wait_ms));
+                if (deadline > now) return .{ .wait = .{ .until = until, .context = invocation.context, .operation_id = invocation.operation_id, .index = index, .after_revision = after, .deadline = deadline, .output_cursor = output_cursor, .max_bytes = max_bytes, .implicit_decision = implicit_decision } };
+                if (implicit_decision) return .{ .result = try self.result(invocation.context, invocation.operation_id, index, output_cursor, max_bytes, true, null) };
+            }
         }
         return .{ .result = try self.result(invocation.context, invocation.operation_id, index, output_cursor, max_bytes, false, null) };
     }
     pub fn pollWait(self: *Controller, wait: Wait, now: i64) !?host.Result {
         if (wait.index >= self.entries.items.len) return error.ExecutionNotFound;
         try self.authorizeRead(wait.context, wait.index);
-        if (!terminalState(self.entries.items[wait.index].snapshot.state)) try self.refresh(wait.index, now);
+        if (!terminalState(self.entries.items[wait.index].snapshot.state)) self.refresh(wait.index, now) catch |err| {
+            if (!wait.implicit_decision or err != error.WorkerBusy or now < wait.deadline) return err;
+        };
         const changed = waitReady(self.entries.items[wait.index].snapshot, wait.until, wait.after_revision);
         if (!changed and now < wait.deadline) return null;
         return try self.result(wait.context, wait.operation_id, wait.index, wait.output_cursor, wait.max_bytes, !changed, null);
@@ -669,6 +688,11 @@ pub const Controller = struct {
         } else if (self.backend.resolve(self.backend.context, context, entry.target)) |service| {
             output = self.terminalOutput(service, entry.id, output_cursor, max_bytes) catch null;
         } else |_| {}
+        const queries = @import("host_terminal_queries.zig");
+        const command_ref = if (entry.snapshot.submit_sent) try queries.executionCommandRef(self.allocator, context.conversation_id, entry.target, entry.id) else null;
+        defer if (command_ref) |reference| self.allocator.free(reference);
+        const recording_query_ref = if (entry.snapshot.recording_id) |id| if (entry.snapshot.recording_generation > 0) try queries.recordingRef(self.allocator, context, id, entry.snapshot.recording_generation) else null else null;
+        defer if (recording_query_ref) |reference| self.allocator.free(reference);
         var keep: usize = if (output) |value| value.bytes.len else 0;
         while (true) {
             // Preserve raw byte cursors; repair invalid UTF-8 only in the view.
@@ -679,7 +703,7 @@ pub const Controller = struct {
             defer self.allocator.free(safe);
             const next_cursor = try std.fmt.allocPrint(self.allocator, "{d}", .{if (output) |value| value.start_cursor + keep else output_cursor});
             defer self.allocator.free(next_cursor);
-            const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .execution_ref = ref, .path = "interactive", .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .state = entry.snapshot.state, .source_revision = entry.snapshot.revision, .snapshot = entry.snapshot, .stop_requested = entry.stop_intent != .none, .output_available = output != null, .recording_ref = if (entry.snapshot.recording_id) |*value| @as([]const u8, value) else null, .output = safe, .output_cursor = if (output) |value| value.start_cursor else output_cursor, .next_cursor = next_cursor, .gap = if (output) |value| value.gap else false, .truncated = if (output) |value| value.truncated or keep < value.bytes.len else false, .requested_max_bytes = max_bytes, .returned_bytes = keep, .response_limited = if (output) |value| keep < value.bytes.len else false, .timed_out = timed_out, .wait_interrupted = interruption }, .{});
+            const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .execution_ref = ref, .command_ref = command_ref, .recording_query_ref = recording_query_ref, .path = "interactive", .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .state = entry.snapshot.state, .source_revision = entry.snapshot.revision, .snapshot = entry.snapshot, .stop_requested = entry.stop_intent != .none, .output_available = output != null, .recording_ref = if (entry.snapshot.recording_id) |*value| @as([]const u8, value) else null, .output = safe, .output_cursor = if (output) |value| value.start_cursor else output_cursor, .next_cursor = next_cursor, .gap = if (output) |value| value.gap else false, .truncated = if (output) |value| value.truncated or keep < value.bytes.len else false, .requested_max_bytes = max_bytes, .returned_bytes = keep, .response_limited = if (output) |value| keep < value.bytes.len else false, .timed_out = timed_out, .wait_interrupted = interruption }, .{});
             if (body.len <= 65536) {
                 var response = try ownedResult(self.allocator, context, operation_id, body, entry.snapshot.submit_sent or entry.snapshot.submit_native_bytes != 0, entry.snapshot.remote_effect_unknown or entry.snapshot.state == .outcome_unknown);
                 response.verification = entry.verification;

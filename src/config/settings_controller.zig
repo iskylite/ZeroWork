@@ -245,7 +245,6 @@ pub const Controller = struct {
         for (self.ai_fields.fields.items) |raw| if (raw.problem) |err| return .{ .page = 4, .ai_address = raw.address, .message = ai_draft.problemText(err) };
         if (self.dirty_fields.isSet(schema.providers_index) or self.dirty_fields.isSet(schema.find("ai", "default_provider").?)) {
             if (ai_draft.firstProblem(self.model.value.ai)) |problem| return .{ .page = 4, .ai_address = problem.address, .message = ai_draft.problemText(problem.err) };
-            ai_draft.validateDefault(self.model.value.ai, self.original.value.ai) catch return .{ .page = 4, .message = ai_draft.problemText(error.DefaultProtected) };
         }
         if (self.ai_fields.new_provider) |i| {
             if (i >= self.model.value.ai.provider_count) return .{ .page = 4, .message = "新增服务提供方尚未完成，请完成配置或取消新增。" };
@@ -598,6 +597,12 @@ pub const Controller = struct {
             self.close_ready = false;
         }
         if (self.next_save_operation == std.math.maxInt(u64)) return error.OperationIdExhausted;
+        if (target.external_provider_revision > self.original.value.config_revision and
+            (self.dirty_fields.isSet(schema.providers_index) or self.dirty_fields.isSet(schema.find("ai", "default_provider").?)))
+        {
+            self.last_error = "ConfigProviderConflict";
+            return error.ConfigProviderConflict;
+        }
         const merged = schema.merge(target.value, self.model.value, self.dirty_fields);
         if (self.transferPolicyChanged()) {
             const policy = merged.transfer;
@@ -1155,6 +1160,82 @@ test "external commit after save preparation rejects stale revision and retry me
     try c.save(std.testing.io, tmp.dir, &target);
     try std.testing.expectEqualStrings("vt100", target.value.ssh.term);
     try std.testing.expectEqual(@as(u8, 18), target.value.ui.font_size);
+}
+
+test "external Provider config reload preserves disk edits and rejects overlapping drafts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const dir = tmp.dir;
+    const file = "config.toml";
+    const allocator = std.testing.allocator;
+    const before = "[meta]\nconfig_revision=10\n[ai]\ndefault_provider=\"old\"\n[[ai.providers]]\nid=\"old\"\n";
+    const external = "[meta]\nconfig_revision=1\n[ai]\ndefault_provider=\"new\"\n[[ai.providers]]\nid=\"new\"\n";
+    try dir.writeFile(io, .{ .sub_path = file, .data = before });
+    var target = try runtime.RuntimeConfig.loadOrDefault(io, dir, allocator, file);
+    defer target.deinit();
+    var overlap = try Controller.init(allocator, target.value);
+    defer overlap.deinit();
+    try overlap.editAiRaw(.{ .provider = 0, .field = .name }, "draft");
+    var unrelated = try Controller.init(allocator, target.value);
+    defer unrelated.deinit();
+    try unrelated.editKey("ui", "font_size", .{ .unsigned = 18 });
+    var prepared = try unrelated.beginSave(&target, false);
+    defer prepared.deinit();
+
+    try dir.writeFile(io, .{ .sub_path = file, .data = external });
+    try std.testing.expectError(error.ConfigFileConflict, unrelated.completeSave(io, dir, &target, &prepared));
+    const untouched = try dir.readFileAlloc(io, file, allocator, .limited(4096));
+    defer allocator.free(untouched);
+    try std.testing.expectEqualStrings(external, untouched);
+    try std.testing.expect(try target.reloadProviders(io, dir));
+    try std.testing.expectEqualStrings("new", target.value.ai.providers[0].name);
+    try std.testing.expectEqualStrings("new", target.value.ai.default_provider);
+    try std.testing.expectEqual(@as(u64, 11), target.modelDiscoveryRevision());
+    try std.testing.expectEqual(@as(u64, 10), target.value.agentPolicyRevision());
+    try std.testing.expectError(error.ConfigProviderConflict, overlap.save(io, dir, &target));
+    try std.testing.expectEqualStrings("draft", overlap.model.value.ai.providers[0].name);
+    try unrelated.save(io, dir, &target);
+    var saved = try runtime.RuntimeConfig.loadOrDefault(io, dir, allocator, file);
+    defer saved.deinit();
+    try std.testing.expectEqualStrings("new", saved.value.ai.providers[0].name);
+    try std.testing.expectEqual(@as(u8, 18), saved.value.ui.font_size);
+}
+
+test "external Provider config reload retains last good values and protects other disk fields" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const dir = tmp.dir;
+    const file = "config.toml";
+    const allocator = std.testing.allocator;
+    const before = "[ai]\ndefault_provider=\"old\"\n[[ai.providers]]\nid=\"old\"\n";
+    const invalid = "[[ai.providers]]\nid=\"unfinished\n";
+    const mixed = "[ui]\nfont_size=22\n[ai]\ndefault_provider=\"new\"\n[[ai.providers]]\nid=\"new\"\n";
+    const resized = "[ui]\nsidebar_width=312\n[ai]\ndefault_provider=\"new\"\n[[ai.providers]]\nid=\"new\"\n";
+    try dir.writeFile(io, .{ .sub_path = file, .data = before });
+    var target = try runtime.RuntimeConfig.loadOrDefault(io, dir, allocator, file);
+    defer target.deinit();
+    try dir.writeFile(io, .{ .sub_path = file, .data = invalid });
+    try std.testing.expectError(error.InvalidValue, target.reloadProviders(io, dir));
+    try std.testing.expectEqualStrings("old", target.value.ai.providers[0].name);
+    try std.testing.expectError(error.ConfigFileConflict, target.updateSetting(io, dir, "ui", "font_size", .{ .unsigned = 18 }));
+    try dir.writeFile(io, .{ .sub_path = file, .data = mixed });
+    try std.testing.expect(try target.reloadProviders(io, dir));
+    try std.testing.expectEqualStrings("new", target.value.ai.providers[0].name);
+    try std.testing.expectEqual(@as(u8, 14), target.value.ui.font_size);
+    try std.testing.expectError(error.ConfigFileConflict, target.updateSetting(io, dir, "ui", "font_size", .{ .unsigned = 18 }));
+    const untouched = try dir.readFileAlloc(io, file, allocator, .limited(4096));
+    defer allocator.free(untouched);
+    try std.testing.expectEqualStrings(mixed, untouched);
+
+    try dir.writeFile(io, .{ .sub_path = file, .data = resized });
+    try std.testing.expect(!try target.reloadProviders(io, dir));
+    try std.testing.expect(target.value.ui.sidebar_width == null);
+    try std.testing.expectError(error.ConfigFileConflict, target.updateSetting(io, dir, "ui", "font_size", .{ .unsigned = 18 }));
+    const untouched_width = try dir.readFileAlloc(io, file, allocator, .limited(4096));
+    defer allocator.free(untouched_width);
+    try std.testing.expectEqualStrings(resized, untouched_width);
 }
 
 test "empty provider registry and disabled incomplete models allow unrelated save" {

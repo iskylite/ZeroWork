@@ -123,7 +123,12 @@ pub const Broker = struct {
             .terminal_command => blk: {
                 const tool = saved.tool.text();
                 if (!std.mem.eql(u8, tool, "host.run_in_terminal") and !std.mem.eql(u8, tool, "run_command") and !std.mem.eql(u8, tool, "host.send_execution_input") and !std.mem.eql(u8, tool, "host.attach_shell")) break :blk false;
-                break :blk permission.classifyTerminal(policy, saved.detail.text(), saved.context.binding == .group) == .allow_auto;
+                const grouped = saved.context.binding == .group;
+                const verdict = if (std.mem.eql(u8, tool, "run_command"))
+                    permission.classify(policy, saved.detail.text(), grouped)
+                else
+                    permission.classifyTerminal(policy, saved.detail.text(), grouped);
+                break :blk verdict == .allow_auto;
             },
         };
         if (automatic) {

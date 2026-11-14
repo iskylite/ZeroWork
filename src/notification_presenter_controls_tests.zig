@@ -367,18 +367,63 @@ test "notification host retains structured details and dispatches built-in actio
     try std.testing.expectEqualStrings("没有文件访问权限", facts[0].event.detail);
     try std.testing.expectEqualStrings("prod-web-01", facts[0].event.owner_name);
     try std.testing.expectEqualStrings("文件传输失败", facts[0].event.title);
-    try std.testing.expectEqualStrings("连接超时", facts[2].event.detail);
-    try std.testing.expectEqual(.warning, facts[3].event.severity);
+    try std.testing.expectEqualStrings("连接超时", facts[1].event.detail);
+    try std.testing.expectEqual(.warning, facts[2].event.severity);
     // Explicit cancellation is silent: no application fact, system delivery
     // record, or queued toast is added by publishTransfer.
-    try std.testing.expectEqual(@as(usize, 4), facts.len);
+    try std.testing.expectEqual(@as(usize, 3), facts.len);
     try std.testing.expectEqual(@as(usize, 3), notice.coordinator.records.items.len);
     try std.testing.expectEqual(@as(usize, 1), notice.coordinator.presentation_count);
     for (facts) |fact| try std.testing.expect(fact.event.operation_id != 4);
     for ([_]host.notifications.Kind{ .transfer_done, .reconnect, .ai_ready }, 0..) |kind, index| {
-        try notice.dispatchAction(facts[if (index == 0) 0 else index + 1].fact_id, 0);
+        try notice.dispatchAction(facts[index].fact_id, 0);
         try std.testing.expectEqual(kind, probe.kind.?);
     }
+}
+
+test "notification transfer failure stays in history when its row is visible and does not replay" {
+    const Probe = struct {
+        presented: bool = true,
+        fn owns(_: *anyopaque, _: host.notifications.Target) bool {
+            return true;
+        }
+        fn activate(_: *anyopaque, _: host.notifications.Target) bool {
+            return true;
+        }
+        fn feedback(_: *anyopaque, _: []const u8) void {}
+        fn transferPresented(raw: *anyopaque, _: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.presented;
+        }
+    };
+    var probe: Probe = .{};
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        notice.windows.deinit(a);
+        notice.coordinator.deinit();
+        notice.activity.deinit();
+    }
+    const window = try notice.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .transfer_presented = Probe.transferPresented });
+    notice.setWindowFocus(window, true);
+    const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
+    const failure: host.TransferCompletion = .{ .result = .failed, .resources_released = true, .notify_complete = false, .details = .{ .object = "download.txt", .detail = "待传输文件不存在" } };
+
+    try notice.publishTransfer(owner, 1, 1, failure);
+    try std.testing.expectEqual(@as(usize, 1), notice.coordinator.historyCount(false));
+    try std.testing.expectEqual(@as(usize, 0), notice.coordinator.presentation_count);
+    probe.presented = false;
+    try notice.publishTransfer(owner, 1, 1, failure);
+    try std.testing.expectEqual(@as(usize, 0), notice.coordinator.presentation_count);
+
+    try notice.publishTransfer(owner, 1, 2, failure);
+    try std.testing.expectEqual(@as(usize, 1), notice.coordinator.presentation_count);
+    const dismissed = notice.coordinator.notification_records.items[1].fact_id;
+    notice.coordinator.dismissNotificationByUser(dismissed);
+    for (0..3) |_| try notice.publishTransfer(owner, 1, 2, failure);
+    notice.coordinator.revealNotification(dismissed);
+    try std.testing.expectEqual(@as(usize, 2), notice.coordinator.historyCount(false));
+    try std.testing.expectEqual(@as(usize, 0), notice.coordinator.presentation_count);
+    try std.testing.expectEqual(.hidden, notice.coordinator.recordFor(dismissed).?.presentation);
 }
 
 test "notification history evicts oldest facts without rejecting new ones and retains dismissed content" {

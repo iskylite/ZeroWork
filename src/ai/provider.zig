@@ -8,11 +8,22 @@ pub const Effort = enum {
     none,
     ultra,
 
+    const ordered = [_]Effort{ .none, .low, .medium, .high, .xhigh, .max, .ultra };
+
     pub fn lowestSupported(supported: [7]bool) ?Effort {
-        for ([_]Effort{ .none, .low, .medium, .high, .xhigh, .max, .ultra }) |effort| {
+        for (ordered) |effort| {
             if (supported[@backingInt(effort)]) return effort;
         }
         return null;
+    }
+
+    pub fn supportedAtOrBelow(supported: [7]bool, preferred: Effort) ?Effort {
+        var result: ?Effort = null;
+        for (ordered) |effort| {
+            if (supported[@backingInt(effort)]) result = effort;
+            if (effort == preferred) break;
+        }
+        return result orelse lowestSupported(supported);
     }
 };
 pub const Role = enum { user, assistant, tool };
@@ -93,11 +104,17 @@ pub const ToolCall = struct {
     name: []const u8,
     arguments: []const u8,
 };
+pub const SkillReference = struct {
+    id: [32]u8,
+    revision: [64]u8,
+};
 pub const Message = struct {
     role: Role = .user,
     /// Internal provenance; provider transports still encode the wire role.
     origin: enum { user_or_tool, host_context_notice } = .user_or_tool,
     content: []const u8,
+    /// Host-resolved user selection. Never serialized as part of provider history.
+    skill: ?SkillReference = null,
     /// Offsets of host-issued locators only, never part of provider JSON.
     file_reference_spans: []const @import("../host/local_file_reference.zig").Span = &.{},
     images: []const @import("image_attachments.zig").ContentRef = &.{},
@@ -125,6 +142,7 @@ pub const CancelToken = struct {
         user_wait: ?*const fn (*const anyopaque, bool) void = null,
         /// Capacity waits pause this branch without reporting a human decision.
         resource_wait: ?*const fn (*const anyopaque, bool) void = null,
+        remaining_ns: ?*const fn (*const anyopaque) i128 = null,
     } = null,
     pub const UserWait = struct {
         token: ?*const CancelToken,

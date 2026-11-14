@@ -230,7 +230,7 @@ pub const Controller = struct {
         const current = self.app.ownerForLegacy(receipt.legacy_id) orelse return false;
         const tab = self.app.workspace.sessionTab(receipt.legacy_id) orelse return false;
         if (!tab.content_owner.eql(.{ .session = current }) or tab.archived or tab.closing) return false;
-        if (!current.eql(receipt.original) and (receipt.successor == null or !receipt.successor.?.handle.eql(current))) return false;
+        if (current.session_id != receipt.original.session_id or current.generation < receipt.original.generation) return false;
         return self.inBinding(current);
     }
     fn reconnectReplayTarget(self: *Controller, context: host.Context, target: identity.SessionHandle) bool {
@@ -260,13 +260,16 @@ pub const Controller = struct {
             .failure_len = receipt.failure_len,
             .joined_automatic = receipt.joined_automatic,
         };
+        if (self.app.ownerForLegacy(receipt.legacy_id)) |current| {
+            const last = if (receipt.successor) |successor| successor.handle else receipt.original;
+            if (current.session_id == last.session_id and current.generation > last.generation) {
+                markReconnectUnavailable(&result, "ReconnectSuperseded");
+                return result;
+            }
+        }
         if (receipt.state == .ready) {
             if (!self.app.reconnectSuccessorLive(receipt)) {
-                const reason = "ReconnectConnectionLost";
-                result.state = .failed;
-                result.revision += 1;
-                @memcpy(result.failure[0..reason.len], reason);
-                result.failure_len = reason.len;
+                markReconnectUnavailable(&result, "ReconnectConnectionLost");
                 return result;
             }
             const tab = self.app.workspace.sessionTab(receipt.legacy_id).?;
@@ -274,6 +277,13 @@ pub const Controller = struct {
             result.execution_readiness = if (facts.ready) .ready else if (facts.failure) |reason| if (std.mem.eql(u8, reason, "WorkerBusy") or std.mem.eql(u8, reason, "ShellIntegrationPending")) .initializing else .unsupported else .initializing;
         }
         return result;
+    }
+
+    fn markReconnectUnavailable(result: *runtime.ReconnectReceipt, comptime reason: []const u8) void {
+        result.state = .failed;
+        result.revision += 1;
+        @memcpy(result.failure[0..reason.len], reason);
+        result.failure_len = reason.len;
     }
     fn authorize(self: *Controller, context: host.Context, request: tools.Request) !runtime.Authorized {
         try self.validateRequestScope(context, request);
@@ -1386,7 +1396,8 @@ const ShellProductExecution = struct {
         defer if (input_prepared) |*value| value.deinit();
         var evidence: Backend.ApprovalEvidence = undefined;
         var subject: ?approvals.Subject = null;
-        const deadline = @import("../platform/realtime.zig").monotonicNs() + 10 * std.time.ns_per_s;
+        const observation_seconds: i128 = if (@import("../ai/host_execution.zig").implicitDecisionWait(invocation)) 40 else 10;
+        const deadline = @import("../platform/realtime.zig").monotonicNs() + observation_seconds * std.time.ns_per_s;
         if (std.mem.eql(u8, tool, "host.run_in_terminal")) {
             prepared = try Backend.prepare(invocation, a);
             invocation = prepared.?.invocation;
@@ -1482,6 +1493,19 @@ const ShellProductExecution = struct {
         defer view.deinit();
         return a.dupe(u8, view.value.execution_ref);
     }
+    fn expectDecision(self: *@This(), session_ref: []const u8, command: []const u8, owner: identity.SessionHandle, exit_code: u8) !void {
+        const reference = try self.run(session_ref, command, "implicit-decision");
+        defer a.free(reference);
+        var result = try self.invoke("host.wait_execution", .{ .execution_ref = reference, .until = "decision" });
+        defer result.deinit(a);
+        var view = try std.json.parseFromSlice(struct { execution_ref: []const u8, snapshot: execution.Snapshot, timed_out: bool }, a, result.blocks[0].structured, .{ .ignore_unknown_fields = true });
+        defer view.deinit();
+        try std.testing.expectEqualStrings(reference, view.value.execution_ref);
+        try std.testing.expect(!view.value.timed_out and view.value.snapshot.owner.eql(owner));
+        const process = view.value.snapshot.process orelse return error.MissingForegroundResult;
+        try std.testing.expect(process.foreground_finished);
+        try std.testing.expectEqual(@as(?u8, exit_code), process.exit_code);
+    }
     const WaitFor = union(enum) { finished, input_ready, written: u64 };
     fn wait(self: *@This(), reference: []const u8, target: WaitFor) !host.Result {
         const deadline = @import("../platform/realtime.zig").monotonicNs() + 10 * std.time.ns_per_s;
@@ -1523,7 +1547,7 @@ const ShellProductExecution = struct {
         try std.testing.expect(std.mem.indexOf(u8, view.value.output, output) != null);
         try execution.PublicReceipt.fromSnapshot(snapshot).?.validate();
     }
-    fn takeoverAndFinish(self: *@This(), reference: []const u8, owner: identity.SessionHandle, ssh_service: ?@import("../host/terminal_service.zig").Service) !void {
+    fn takeoverAndFinish(self: *@This(), reference: []const u8, owner: identity.SessionHandle, ssh_service: ?@import("../host/terminal_service.zig").Service, local_gate: ?[]const u8) !void {
         const id = try identity.ExecutionId.parse(reference[3..]);
         const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
         // The real start boundary must exist before requesting human input.
@@ -1543,16 +1567,21 @@ const ShellProductExecution = struct {
             if (self.driver.executionInputEvidence(self.controller.authority, id)) |fact| if (fact.input_handed_off and fact.local_released and !fact.has_grant) break;
             if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.TakeoverInputNotReleased;
         }
-        var mid = try self.invoke("host.get_execution", .{ .execution_ref = reference });
-        defer mid.deinit(a);
-        var middle = try std.json.parseFromSlice(View, a, mid.blocks[0].structured, .{ .ignore_unknown_fields = true });
-        defer middle.deinit();
-        try std.testing.expect(middle.value.snapshot.input_handed_off and middle.value.snapshot.local_released and middle.value.snapshot.process == null);
-        try std.testing.expect(!middle.value.snapshot.remote_effect_unknown and !middle.value.snapshot.recording_settled);
-        try std.testing.expect(outputLine(middle.value.output, "TAKEOVER_BEGIN") and !outputLine(middle.value.output, "TAKEOVER_END"));
+        while (true) {
+            var mid = try self.invoke("host.get_execution", .{ .execution_ref = reference });
+            defer mid.deinit(a);
+            var middle = try std.json.parseFromSlice(View, a, mid.blocks[0].structured, .{ .ignore_unknown_fields = true });
+            defer middle.deinit();
+            try std.testing.expect(middle.value.snapshot.input_handed_off and middle.value.snapshot.local_released and middle.value.snapshot.process == null);
+            try std.testing.expect(!middle.value.snapshot.remote_effect_unknown and !middle.value.snapshot.recording_settled);
+            try std.testing.expect(!outputLine(middle.value.output, "TAKEOVER_END"));
+            if (outputLine(middle.value.output, "TAKEOVER_BEGIN")) break;
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.TakeoverOutputUnavailable;
+        }
         if (ssh_service) |service| try shellProductHumanInput(self.fixture, service);
         // Model completion must not stop or reacquire the human's terminal.
         try self.driver.finishTask(self.controller.authority);
+        if (local_gate) |path| try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "" });
         var completion = try self.wait(reference, .finished);
         completion.deinit(a);
         var final = try self.invoke("host.get_execution", .{ .execution_ref = reference });
@@ -1625,9 +1654,14 @@ test "lifecycle real Local takeover keeps original observation until natural fin
     defer execution_driver.deinit();
     const reference = try @import("../ai/host_queries.zig").sessionRef(a, context, source);
     defer a.free(reference);
-    const active = try execution_driver.run(reference, "printf 'TAKEOVER_BEGIN\\n'; sleep 2; printf 'TAKEOVER_END\\n'", "local-takeover-finish");
+    try execution_driver.expectDecision(reference, "sleep 31; (exit 9)", source, 9);
+    const gate = try std.fs.path.join(a, &.{ fixture.directory, "takeover-release" });
+    defer a.free(gate);
+    const command = try std.fmt.allocPrint(a, "printf 'TAKEOVER_BEGIN\\n'; for ((i=0;i<300;i++)); do [ -e '{s}' ] && break; sleep 0.05; done; [ -e '{s}' ] && printf 'TAKEOVER_END\\n'", .{ gate, gate });
+    defer a.free(command);
+    const active = try execution_driver.run(reference, command, "local-takeover-finish");
     defer a.free(active);
-    try execution_driver.takeoverAndFinish(active, source, null);
+    try execution_driver.takeoverAndFinish(active, source, null, gate);
     std.debug.print("LOCAL_PRODUCT_TAKEOVER_PASS same_execution=true natural_end=true complete_output=true task_settled=true\n", .{});
 }
 
@@ -1942,6 +1976,7 @@ test "lifecycle default shell integration opens SSH work terminal without helper
     const owned_ref = try @import("../ai/host_queries.zig").sessionRef(a, next, owned);
     defer a.free(owned_ref);
     try shellProductPromptReadiness(&fixture, owned_service, &execution_driver, owned_ref);
+    try execution_driver.expectDecision(owned_ref, "printf 'WAIT_PROGRESS_1\\n'; sleep 1; printf 'WAIT_PROGRESS_2\\n'; sleep 1; (exit 9)", owned, 9);
     const first = try execution_driver.run(owned_ref, "cd /tmp; ZW_AI_STATE=persistent; printf 'AI_READY:%s\\n' \"$ZW_AI_STATE\"", "ai-state-first");
     defer a.free(first);
     try execution_driver.expectFinished(first, owned, 0, "AI_READY:persistent");
@@ -1963,7 +1998,7 @@ test "lifecycle default shell integration opens SSH work terminal without helper
     try execution_driver.expectFinished(interactive, owned, 0, "AI_ANSWER:ordinary-answer");
     const takeover = try execution_driver.run(owned_ref, "printf 'TAKEOVER_BEGIN\\n'; read -r -t 5 ZW_HUMAN; printf 'TAKEOVER_HUMAN:%s\\n' \"$ZW_HUMAN\"; sleep 0.3; printf 'TAKEOVER_END\\n'", "ssh-takeover-finish");
     defer a.free(takeover);
-    try execution_driver.takeoverAndFinish(takeover, owned, owned_service);
+    try execution_driver.takeoverAndFinish(takeover, owned, owned_service, null);
     std.debug.print("SHELL_PRODUCT_TAKEOVER_PASS same_execution=true natural_end=true complete_output=true task_settled=true\n", .{});
     // A shell's next input prompt is not this Task's native lease. Finish the
     // real Driver and wait for its execution/input/recording settlement facts.

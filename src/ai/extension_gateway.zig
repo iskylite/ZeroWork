@@ -56,6 +56,17 @@ pub const Session = struct {
         for (self.frozen.servers, 0..) |s, i| if (s.enabled and std.mem.eql(u8, s.id, server_id)) return i;
         return error.McpNotSelected;
     }
+    pub fn selectedSkill(self: *const Session, id: []const u8, revision: []const u8) !config.Skill {
+        for (self.frozen.skills) |skill| {
+            if (skill.enabled and std.mem.eql(u8, skill.id, id) and std.mem.eql(u8, skill.revision, revision)) return skill;
+        }
+        return error.SkillNotSelected;
+    }
+    pub fn readSkillPage(self: *const Session, a: std.mem.Allocator, io: std.Io, skill: config.Skill, resource: []const u8, offset: usize, diagnostic: ?*local.Diagnostic, cancel: ?*provider.CancelToken) !local.Page {
+        const dir = try std.Io.Dir.cwd().openDir(io, self.data_root, .{});
+        defer dir.close(io);
+        return local.readPage(a, io, dir, skill, resource, offset, diagnostic, cancel);
+    }
     fn connection(self: *Session, i: usize) !*client.Client {
         if (self.clients[i]) |c| return c;
         const c = try self.allocator.create(client.Client);
@@ -149,15 +160,11 @@ pub const Session = struct {
                 return result(a, invocation, .{ .skills = list.items, .next_offset = next_offset, .meaning = "Local guidance only; no execution authority." }, .succeeded, false, false);
             }
             if (r.action != .read or r.skill_id == null or r.revision == null) return error.InvalidArguments;
-            const skill = for (self.frozen.skills) |s| {
-                if (s.enabled and std.mem.eql(u8, s.id, r.skill_id.?) and std.mem.eql(u8, s.revision, r.revision.?)) break s;
-            } else return error.SkillNotSelected;
+            const skill = try self.selectedSkill(r.skill_id.?, r.revision.?);
             try gate.check(gate.context, skill.id, false, cancel);
-            const dir = try std.Io.Dir.cwd().openDir(io, self.data_root, .{});
-            defer dir.close(io);
             const resource = r.resource orelse "SKILL.md";
             var diagnostic: local.Diagnostic = .{};
-            const page = local.readPage(a, io, dir, skill, resource, r.offset, &diagnostic, cancel) catch |err| {
+            const page = self.readSkillPage(a, io, skill, resource, r.offset, &diagnostic, cancel) catch |err| {
                 if (diagnostic.path_len != 0) return result(a, invocation, .{ .code = @errorName(err), .file = diagnostic.path[0..diagnostic.path_len] }, .rejected, false, false);
                 return err;
             };

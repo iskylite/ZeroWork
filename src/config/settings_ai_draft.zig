@@ -192,7 +192,7 @@ pub fn setEnabled(ai: *config.Ai, index: usize, enabled: bool) !void {
             replacement = providerName(other);
             break;
         };
-        ai.default_provider = replacement orelse return error.DefaultProtected;
+        ai.default_provider = replacement orelse "";
     }
     p.enabled = false;
 }
@@ -248,15 +248,6 @@ pub fn eligible(p: config.AiProvider) bool {
 }
 pub fn validate(ai: config.Ai) !void {
     if (firstProblem(ai)) |problem| return problem.err;
-}
-pub fn validateDefault(ai: config.Ai, original: config.Ai) !void {
-    var had_default = false;
-    for (original.providers[0..original.provider_count]) |p| if (p.enabled and eligible(p) and std.mem.eql(u8, providerName(p), original.default_provider)) {
-        had_default = true;
-    };
-    if (!had_default) return;
-    for (ai.providers[0..ai.provider_count]) |p| if (p.enabled and eligible(p) and std.mem.eql(u8, providerName(p), ai.default_provider)) return;
-    return error.DefaultProtected;
 }
 pub fn problemText(err: anyerror) []const u8 {
     return switch (err) {

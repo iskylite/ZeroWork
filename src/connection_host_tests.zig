@@ -458,7 +458,7 @@ test "connection host keeps released failure and authentication in their respect
     }
     const first = f.workspace.connect_jobs.items[0].operation_key.?;
     try std.testing.expect(f.host.progress.matches(first));
-    try std.testing.expect(!f.host.progress.close_disabled.peek());
+    try std.testing.expect(!f.host.progress.header_disabled.peek());
     const first_index = f.workspace.active_tab.?;
     const second = try f.application.create(.{ .name = "Queued", .host = "127.0.0.1", .port = pending.port, .user = "fixture", .auth_mode = .password, .password = "fixture-password" }, 2, 0, "");
     // This test supplies only a typed UI challenge. The second real TCP

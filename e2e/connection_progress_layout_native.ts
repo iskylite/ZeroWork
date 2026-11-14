@@ -75,7 +75,7 @@ for(const scene of (process.argv.slice(3).length?process.argv.slice(3):['direct'
    await visible('connection.progress.logs');
    await h.clickTestId('connection.progress.logs.copy');
    assert(text(await visible('fixture.result')).includes('已收到本次连接日志'));
-   assert(text(await visible('connection.progress')).includes('已复制阶段日志'));
+   assert(text(await visible('connection.progress')).includes('已复制连接日志'));
    await h.resizeWindow(860,480);
    const compact=await visible('connection.progress');
    const footer=await visible('connection.progress.actions');
@@ -85,7 +85,7 @@ for(const scene of (process.argv.slice(3).length?process.argv.slice(3):['direct'
    await h.screenshot(join(out,'direct-logs-860.png'));
    await h.clickTestId('connection.progress.cancel');
    await h.waitFor(async()=>text(await visible('connection.progress.state'))==='已取消'||null);
-   await h.clickTestId('connection.progress.dismiss');
+   await h.clickTestId('connection.progress.close');
    await absent('connection.progress');
    checks.push('direct target, phase hierarchy, one endpoint, node opens filtered logs, copy callback, compact footer, cancel and close');
   }else if(scene==='failed'){

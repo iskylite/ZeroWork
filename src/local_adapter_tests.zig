@@ -1058,7 +1058,15 @@ test "local display progresses without a raw output consumer" {
     }
     try std.testing.expect(found);
     var raw: [64]u8 = undefined;
-    try std.testing.expectEqual(terminal.Read.eof, try service.readOutput(&raw));
+    while (true) {
+        const read = try service.readOutput(&raw);
+        if (read != .would_block) {
+            try std.testing.expectEqual(terminal.Read.eof, read);
+            break;
+        }
+        if (native.zw_local_monotonic_ms() >= until) return error.EofTimeout;
+        pause();
+    }
     try rig.close(accepted.handle);
 }
 

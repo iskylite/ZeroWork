@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="180" viewBox="0 0 720 180">
+  <style>
+    text { font-family: Inter, system-ui, "PingFang SC", sans-serif; font-size: 13px; fill: #e8e7ec; }
+    .panel { fill: #29282f; }
+    .selected { fill: #3b354e; }
+    .icon { fill: none; stroke: #aca2fa; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
+  <defs>
+    <path id="sparkles" class="icon" d="M8 2l1.6 4.4L14 8l-4.4 1.6L8 14l-1.6-4.4L2 8l4.4-1.6z"/>
+  </defs>
+  <g id="commands" transform="translate(22 48)">
+    <rect class="panel" width="320" height="44" rx="11"/>
+    <rect class="selected" x="6" y="6" width="308" height="32" rx="7"/>
+    <use href="#sparkles" x="14" y="14"/>
+    <text x="38" y="27">/skill</text>
+    <path class="icon" d="m295 18 4 4-4 4"/>
+  </g>
+  <g id="skills" transform="translate(378 12)">
+    <rect class="panel" width="320" height="80" rx="11"/>
+    <rect class="selected" x="6" y="6" width="308" height="32" rx="7"/>
+    <use href="#sparkles" x="14" y="14"/>
+    <text x="38" y="27">native-material</text>
+    <use href="#sparkles" x="14" y="50"/>
+    <text x="38" y="63">companion</text>
+  </g>
+  <g id="composer-examples" fill="#29282f">
+    <rect x="12" y="98" width="340" height="64" rx="12"/>
+    <rect x="368" y="98" width="340" height="64" rx="12"/>
+    <text x="22" y="122">/</text>
+    <text x="378" y="122">/skill</text>
+  </g>
+</svg>

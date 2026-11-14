@@ -284,7 +284,10 @@ def execute(args, shell, mode, output):
             checks["new_shell_environment"] = all(("ENV_" + value + "_/tmp").encode() in fixture.outputs for value in ("one", "two", "three"))
         if mode == "history-reopen":
             checks["durable_repeated_history"] = "repeated=3 ai=2 manual=1 manifest=true archive_reopened=true" in result.stderr
-        manifests = list(Path(directory).rglob("*.session.json"))
+        if mode == "execution-rotation":
+            checks["same_shell_and_archive_queries"] = "executions=136 same_session=true same_shell=true archived_query_live=true archived_query_closed=true" in result.stderr
+        manifests = list((Path(directory) / "logs").glob("*.session.json"))
+        manifests += list((Path(directory) / "logs/history").glob("*.session.json"))
         manifest = json.loads(manifests[0].read_bytes()) if len(manifests) == 1 else None
         if mode in {"nominal", "existing", "disabled-existing"} and manifest is not None:
             ranges = manifest["execution_ranges"]
@@ -306,7 +309,7 @@ def main():
     parser.add_argument("--runner", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--shell", action="append", choices=["/bin/bash", "/bin/zsh"])
-    parser.add_argument("--mode", choices=["nominal", "stop", "disconnect", "recording-unavailable", "disabled", "existing", "disabled-existing", "history-reopen", "init-retry-success", "init-retry-fail", "reconnect-startup", "nested", "attach-timeout"])
+    parser.add_argument("--mode", choices=["nominal", "stop", "disconnect", "recording-unavailable", "disabled", "existing", "disabled-existing", "history-reopen", "execution-rotation", "init-retry-success", "init-retry-fail", "reconnect-startup", "nested", "attach-timeout"])
     args = parser.parse_args()
     reports = []
     for shell in args.shell or ["/bin/bash", "/bin/zsh"]:

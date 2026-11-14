@@ -69,7 +69,9 @@ try{
   await click('ai.composer.execution');assert(text(await visible('ai.execution.retention')).includes('空闲后关闭'));await click('ai.execution.close');await closed('ai.execution.menu');
   await click('ai.composer.usage');await cap('01-ready');
   mode='failure';await startCompaction();await status('压缩失败');await cap('02-failed');assert.deepEqual(await history(),before);
-  mode='cancel';const beforeCancel=summaryCount;await click('ai.composer.usage');await startCompaction();await status('正在生成摘要');await waitFor(async()=>summaryCount>beforeCancel||null,10000);await cap('03-running');await click('ai.transcript.compaction.cancel');await status('已取消');await cap('04-cancelled');assert.deepEqual(await history(),before);
+  mode='cancel';const beforeCancel=summaryCount;await click('ai.composer.usage');await startCompaction();await status('正在生成摘要');await waitFor(async()=>summaryCount>beforeCancel||null,10000);await cap('03-running');await click('ai.transcript.compaction.cancel');await status('已取消');const cancelledAt=performance.now();await cap('04-cancelled');assert.deepEqual(await history(),before);
+  await waitFor(async()=>!(await query('ai.transcript.compaction')).some(shown)||null,8000);
+  assert(performance.now()-cancelledAt>=5000,'cancelled compaction should remain visible close to six seconds');
   mode='success';await click('ai.composer.usage');await waitFor(async()=>{const buttons=await query('ai.usage.compaction.start');return buttons.some(n=>shown(n)&&!n.disabled)||null;},20000);
   await startCompaction();await status('正在生成摘要');const success=await status('已压缩');await cap('05-success');
   const reduction=text(success).match(/历史输入约 (\d+) → (\d+) tokens · 减少 (\d+)%/);
@@ -81,10 +83,11 @@ try{
   await click('ai.composer.usage');await settled('ai.usage.menu');
   assert((await query('ai.usage.part.value')).filter(shown).length >= 3);
   report.success_status=text(success);report.status_rect=success.rect;assert.deepEqual(await history(),before);
-  await click('ai.usage.close');await closed('ai.usage.menu');await send('NEXT_NATIVE_REQUEST',4);
+  await click('ai.usage.close');await closed('ai.usage.menu');
+  await status('已压缩');await send('NEXT_NATIVE_REQUEST',4);
   const next=requests.filter(r=>!r.summary).at(-1).body;
   const wire=JSON.stringify(next.messages);assert(wire.includes('MEMORY_NATIVE_BACKUP_TESTS_PASSED'));assert(!wire.includes('OLD_NATIVE_MARKER'));assert(wire.includes('RECENT_NATIVE_SECOND')&&wire.includes('RECENT_NATIVE_LAST'));
-  assert.equal((await history()).length,4);const priorActivity=await status('已压缩');const nextBubble=(await query('ai.message.user.bubble')).find(n=>text(n).includes('NEXT_NATIVE_REQUEST'));assert(nextBubble);assert(priorActivity.rect.y+priorActivity.rect.h<=nextBubble.rect.y+.5);await cap('06-next-request');
+  assert.equal((await history()).length,4);await closed('ai.transcript.compaction');await cap('06-next-request');
   report.status='passed';report.visible_history_count_before=before.length;report.visible_history_count_after=(await history()).length;report.next_request_uses_summary=true;report.summary_requests=summaryCount;report.ordinary_requests=ordinaryCount;
 }catch(e){report.status='failed';report.error=e instanceof Error ? e.stack : String(e);try{await cap('failure');}catch{}}
 finally{

@@ -15,8 +15,10 @@ pub const Bridge = struct {
     flush: ?*const fn (*anyopaque) anyerror!void = null,
     ending: ?identity.HostOperationId = null,
     ending_fence: ?runtime.input.Fence = null,
+    flush_pending: bool = false,
     disposed: bool = false,
 };
+
 pub const Host = struct {
     allocator: std.mem.Allocator,
     service: runtime.Service,
@@ -105,6 +107,7 @@ pub const Host = struct {
             state.historical_environment = true;
             state.listed = record.child == null;
             state.phase = .stopped;
+            if (record.conversation_model) |model| try state.controls.restoreConversationModel(self.allocator, model);
             state.wire_history = try @import("wire_history.zig").History.copy(self.allocator, record.history.messages, "");
             state.wire_history.usage = record.history.usage;
             if (record.draft) |text| state.draft = try self.allocator.dupe(u8, text);
@@ -117,6 +120,8 @@ pub const Host = struct {
         };
         self.journal_io = io;
         self.journal_dir = dir;
+        self.presentations.authority = &self.service;
+        self.service.store.share_storage = .{ .io = io.io(), .dir = dir };
         self.data_root = root;
     }
     pub fn register(self: *Host, bridge: Bridge) !void {
@@ -152,6 +157,7 @@ pub const Host = struct {
         self.service.poll() catch |err| {
             if (failure == null) failure = err;
         };
+        self.service.store.collectPresentations();
         for (self.service.store.records.items) |record| if (self.presentations.findConversation(record.id)) |state| {
             state.binding_revision = record.revision;
             if (record.binding) |binding| {
@@ -168,12 +174,17 @@ pub const Host = struct {
         for (self.bridges.items) |*bridge| {
             if (bridge.disposed or bridge.window != window) continue;
             // Preserve the window's final draft before an idle End can commit.
-            if (bridge.flush) |flush| flush(bridge.context) catch |err| {
-                if (failure == null) failure = err;
-                const active = self.service.runnerFor(bridge.agent).?;
-                if (active.agent.current) |id| self.service.stop(self.service.store.fence(id) catch continue) catch {};
-                continue;
-            };
+            if (bridge.flush) |flush| {
+                bridge.flush_pending = true;
+                flush(bridge.context) catch |err| {
+                    if (err == error.ResourceCleanupPending or err == error.JournalBusy) continue;
+                    if (failure == null) failure = err;
+                    const active = self.service.runnerFor(bridge.agent).?;
+                    if (active.agent.current) |id| self.service.stop(self.service.store.fence(id) catch continue) catch {};
+                    continue;
+                };
+                bridge.flush_pending = false;
+            }
             const runner = self.service.runnerFor(bridge.agent).?;
             if (runner.agent.current) |id| {
                 const ticket = self.service.store.fence(id) catch |err| {
@@ -200,9 +211,9 @@ pub const Host = struct {
         for (self.bridges.items) |bridge| {
             if (bridge.disposed or bridge.window != window) continue;
             const runner = self.service.runnerFor(bridge.agent).?;
-            if (runner.thread != null or runner.agent.busy or runner.pending_commit or runner.pending_notify or runner.agent.current != null or !bridge.released(bridge.context)) ready = false;
+            if (bridge.flush_pending or runner.thread != null or runner.agent.busy or runner.pending_commit or runner.pending_notify or runner.agent.current != null or !bridge.released(bridge.context)) ready = false;
         }
-        return ready;
+        return ready and !self.service.store.presentationPending();
     }
     pub fn releaseWindow(self: *Host, window: identity.WindowId) !void {
         if (!try self.closeWindow(window)) return error.ResourceCleanupPending;
@@ -244,8 +255,11 @@ pub const Host = struct {
                 if (failure == null) failure = err;
             };
         };
+        self.service.store.pollPresentations() catch |err| {
+            if (failure == null) failure = err;
+        };
         if (failure) |err| return err;
-        return ready;
+        return ready and !self.service.store.presentationPending();
     }
     pub fn deinit(self: *Host) !void {
         if (!try self.shutdown()) return error.ResourceCleanupPending;

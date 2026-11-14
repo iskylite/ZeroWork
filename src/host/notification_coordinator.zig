@@ -250,6 +250,7 @@ pub const Coordinator = struct {
             var replacement = try copyNotification(self.allocator, event, record.fact_id, clock.monotonic_ms);
             replacement.listed = record.listed or (!record.owner_ended and self.qualifies(event, definition));
             replacement.presentation = record.presentation;
+            replacement.dismissed_by_user = record.dismissed_by_user;
             replacement.owner_ended = record.owner_ended;
             replacement.history_read = record.history_read;
             replacement.published_ms = record.published_ms;
@@ -415,8 +416,16 @@ pub const Coordinator = struct {
         };
         self.dequeue(fact_id);
     }
+    pub fn dismissNotificationByUser(self: *Coordinator, fact_id: u64) void {
+        for (self.notification_records.items) |*record| if (record.fact_id == fact_id) {
+            record.dismissed_by_user = true;
+            break;
+        };
+        self.dismissNotification(fact_id);
+    }
     pub fn revealNotification(self: *Coordinator, fact_id: u64) void {
         for (self.notification_records.items) |*record| if (record.fact_id == fact_id) {
+            if (record.dismissed_by_user) return;
             record.remaining_ms = if (record.event.actions.len > 0) 8000 else 4000;
             record.last_tick_ms = record.published_ms;
             record.presentation = .queued;
@@ -489,6 +498,10 @@ pub const Coordinator = struct {
         // Each window has one banner. Superseded matters stay in the list;
         // closing a banner must never start a backlog of old presentations.
         if (self.recordFor(fact_id)) |incoming| {
+            if (incoming.dismissed_by_user) {
+                self.dismissNotification(fact_id);
+                return;
+            }
             var index: usize = 0;
             while (index < self.presentation_count) {
                 const old_id = self.presentation_queue[index];
@@ -754,6 +767,7 @@ pub const NotificationRecord = struct {
     event: NotificationEvent,
     system: Receipt = .{ .disposition = .not_applicable },
     presentation: Presentation = .queued,
+    dismissed_by_user: bool = false,
     published_ms: u64,
     remaining_ms: u64 = 4000,
     last_tick_ms: u64,

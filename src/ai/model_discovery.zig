@@ -41,7 +41,12 @@ pub const Service = struct {
         return self.job != null;
     }
     pub fn effective(self: *const Service, ai: config.Ai, revision: u64) config.Ai {
-        if (self.current) |current| if (current.revision == revision) return current.ai;
+        if (self.current) |current| if (current.revision == revision) {
+            var effective_ai = ai;
+            effective_ai.providers = current.ai.providers;
+            effective_ai.provider_count = current.ai.provider_count;
+            return effective_ai;
+        };
         return ai;
     }
     pub fn modelMetadata(self: *const Service, id: []const u8) ?ModelMetadata {
@@ -169,6 +174,7 @@ const Job = struct {
             p.name = try a.dupe(u8, p.name);
             p.endpoint = try a.dupe(u8, p.endpoint);
             p.api_key = try a.dupe(u8, p.api_key);
+            p.api_key_ref = if (p.api_key_ref) |reference| try a.dupe(u8, reference) else null;
             p.model = try a.dupe(u8, p.model);
             p.models = try a.dupe(config.AiModel, p.models[0..@min(p.model_count, p.models.len)]);
             for (p.models) |*m| m.id = try a.dupe(u8, m.id);
@@ -368,6 +374,24 @@ const Job = struct {
         }
     }
 };
+
+test "model discovery keeps latest effort default with cached capabilities" {
+    var models = [_]config.AiModel{.{ .id = "configured", .context_window = 8192 }};
+    var reference = "credential-reference".*;
+    var providers = [_]config.AiProvider{.{ .name = "gateway", .models = &models, .model_count = 1, .api_key_ref = &reference }};
+    var ai: config.Ai = .{ .default_provider = "gateway", .providers = &providers, .provider_count = 1 };
+    var service: Service = .{};
+    defer service.deinit();
+    service.current = try Job.create(ai, 7);
+    service.current.?.ai.providers[0].models[0].context_window = 128000;
+    @memset(&reference, 'x');
+    ai.default_effort = .high;
+    const effective = service.effective(ai, 7);
+    try std.testing.expectEqual(@as(u32, 128000), effective.providers[0].models[0].context_window);
+    try std.testing.expectEqualStrings("credential-reference", effective.providers[0].api_key_ref.?);
+    try std.testing.expectEqual(@import("provider.zig").Effort.high, effective.default_effort.?);
+    try std.testing.expectEqual(@as(u32, 8192), ai.providers[0].models[0].context_window);
+}
 
 test "model discovery preserves configured models and discovers all only when unconfigured" {
     const Fixture = struct {

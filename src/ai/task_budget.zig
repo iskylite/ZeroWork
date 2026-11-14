@@ -132,6 +132,10 @@ pub const Root = struct {
     mutex: std.atomic.Mutex = .unlocked,
     facts: []Fact = &.{},
     count: usize = 0,
+    // Controller-owned cache. Fact strings and targets are immutable in the
+    // root arena and outlive both the worker and the cached facts.
+    display_facts: std.ArrayList(Fact) = .empty,
+    display_revision: u64 = 0,
     counters: Counters = .{},
     revision: u64 = 0,
     last_ns: i128,
@@ -142,7 +146,19 @@ pub const Root = struct {
         return .{ .allocator = a, .arena = .init(a), .last_ns = (Clock{}).now() };
     }
     pub fn deinit(self: *Root) void {
+        self.display_facts.deinit(self.allocator);
         self.arena.deinit();
+    }
+    pub fn displayFacts(self: *Root) []const Fact {
+        if (!self.mutex.tryLock()) return self.display_facts.items;
+        defer self.mutex.unlock();
+        if (self.display_revision != self.revision) {
+            self.display_facts.ensureTotalCapacity(self.allocator, self.count) catch return self.display_facts.items;
+            self.display_facts.clearRetainingCapacity();
+            self.display_facts.appendSliceAssumeCapacity(self.facts[0..self.count]);
+            self.display_revision = self.revision;
+        }
+        return self.display_facts.items;
     }
     pub fn lock(self: *Root) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();

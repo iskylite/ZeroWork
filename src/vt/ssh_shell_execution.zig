@@ -7,6 +7,7 @@ const Queue = @import("input_queue.zig").InputQueue;
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
     snapshot: execution.Snapshot,
+    decision_event: execution.DecisionEvent = .{},
     lease: execution.Lease = .{},
     /// Inactive shell observers own output/results, never a live input lease.
     contexts: std.ArrayList(*Bridge) = .empty,
@@ -83,6 +84,7 @@ pub const Bridge = struct {
         // A fresh AI command additionally waits for the next shell prompt.
         self.snapshot.input_ready = self.snapshot.local_released and
             (self.snapshot.input_handed_off or (!self.active and self.prompt_clean));
+        self.decision_event.publish(self.snapshot);
     }
     pub fn ordinaryInput(self: *Bridge) !void {
         try self.lease.ordinaryInput();
@@ -291,6 +293,17 @@ pub const Bridge = struct {
         self.lease.revoke(self.queued_end != null or self.input_end != null or self.interrupt_end != null);
         self.changed();
     }
+    /// The native channel release cancels all remaining writes. Only the
+    /// bytes already observed by written() can contribute to a receipt.
+    pub fn channelReleased(self: *Bridge) void {
+        self.fail("SessionClosed");
+        self.queued_end = null;
+        self.input_end = null;
+        self.interrupt_end = null;
+        self.snapshot.submit_queued = false;
+        self.lease.draining = false;
+        self.changed();
+    }
     pub fn settled(self: *Bridge, revision: u64, failed: bool) void {
         self.snapshot.manifest_revision = revision;
         self.snapshot.recording_settled = true;
@@ -423,7 +436,7 @@ pub const Bridge = struct {
     // Swap only shell activity. OSC parsing, initialization and the one PTY
     // input lease remain owned by this root bridge.
     fn swapActivity(self: *Bridge, other: *Bridge) void {
-        inline for (.{ "switch_input", "switch_tracking", "snapshot", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "prompt_offset", "debug_start", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "interrupt_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
+        inline for (.{ "switch_input", "switch_tracking", "snapshot", "decision_event", "command", "captured", "capture_start", "capture_total", "prompt_seen", "prompt_clean", "prompt_offset", "debug_start", "active", "start_pending", "end_pending", "queued_start", "queued_end", "queued_length", "start_deadline", "input_end", "interrupt_end", "input_start", "input_bytes", "last_input_sequence", "last_input_hash", "wait_sequence", "context_closed" }) |name| {
             std.mem.swap(@FieldType(Bridge, name), &@field(self, name), &@field(other, name));
         }
     }
@@ -475,6 +488,7 @@ pub const Bridge = struct {
             self.snapshot.output_attribution = .concurrent_observed;
             self.snapshot.output_attribution_reason = "NestedShellObserved";
             self.snapshot.state = .handed_off;
+            self.decision_event.publish(self.snapshot);
         }
         if (returning) {
             // A parent may reappear after several shells disappear together.
@@ -709,6 +723,25 @@ test "SSH shell stream input written receipt and takeover keep observer" {
     bridge.output("answer\x1b]133;D;0\x07", harness.sink(), 9);
     try std.testing.expectEqual(@as(?u8, 0), bridge.snapshot.process.?.exit_code);
     try std.testing.expectEqual(.written, bridge.snapshot.input_receipt.?.stage);
+}
+
+test "SSH shell channel release preserves partial native submission and releases the grant" {
+    var bridge = Bridge.init(std.testing.allocator, .{ .session_id = @fromBackingInt(1) });
+    defer bridge.deinit();
+    var harness = Harness{ .bridge = &bridge };
+    var queue = try Queue.init(std.testing.allocator, 8192);
+    defer queue.deinit(std.testing.allocator);
+    bridge.output("\x1b]133;A\x07\x1b]133;B\x07", harness.sink(), 1);
+    try bridge.begin(Harness.request("printf hello"), 2);
+    bridge.prepared(@splat('a'), 1, 1);
+    try bridge.enqueue(&queue);
+    try queue.consume(4);
+    bridge.written(&queue, 3);
+    bridge.channelReleased();
+    try std.testing.expectEqual(@as(usize, 4), bridge.snapshot.submit_native_bytes);
+    try std.testing.expectEqual(execution.State.outcome_unknown, bridge.snapshot.state);
+    try std.testing.expect(bridge.snapshot.local_released and bridge.snapshot.grant == null and !bridge.snapshot.submit_queued);
+    try std.testing.expect(!bridge.snapshot.input_ready and bridge.snapshot.remote_effect_unknown);
 }
 
 test "SSH malformed or missing shell events never prove completion" {

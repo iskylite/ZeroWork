@@ -25,6 +25,12 @@ pub fn explanation(code: []const u8) []const u8 {
         .{ "ShellAttachmentStale", "读取终端后又出现了新的输入或输出，本次接入未开始。请重新读取当前终端和会话状态，确认仍是空 Shell 提示符后再申请接入。" },
         .{ "ShellIntegrationPending", "正在加载当前 Shell 的会话内集成，请等待接入结束后再执行命令。" },
         .{ "ReconnectConnectionLost", "重连建立的连接已再次断开，终端命令无法继续执行。" },
+        .{ "ReconnectSuperseded", "此重连回执对应的会话代次已被后续代次取代。请查询当前会话状态。" },
+        .{ "ReconnectPtyNotReady", "SSH 已连接，终端尚未就绪。可用同一个操作引用继续等待。" },
+        .{ "ReconnectPtyUnsupported", "SSH 已连接，当前终端不支持交互式命令执行。" },
+        .{ "ReconnectWaitTimedOut", "SSH 重连仍在进行。可用同一个操作引用继续等待。" },
+        .{ "ReconnectTargetChanged", "原命令的目标会话已断线，本次调用不能将该命令改发给其他成员。" },
+        .{ "ReconnectTargetUnavailable", "目标成员已断线或重连尚未就绪，命令未发送。" },
         .{ "SshHandshakeReceiveFailed", "SSH 握手期间未收到预期的响应，连接未建立。" },
         .{ "ShellPromptNotObserved", "尚未确认当前 Shell 已准备好接收命令。通过 SSH、su 或容器进入的内层 Shell 可能需要重新接入；请确认处于 Bash/Zsh 的空提示符后输入 @shell attach。不要在密码输入或前台程序中执行；结果不明的命令请先核实，不要重发。" },
         .{ "TerminalBusy", "终端正在由其他操作控制，本次命令未发送。请等待操作结束，或接管终端。" },
@@ -39,6 +45,8 @@ pub fn explanation(code: []const u8) []const u8 {
         .{ "CancelledBeforeDispatch", "操作在派发前取消，命令未发送。" },
         .{ "ToolNotInRequest", "AI 请求的工具当前不可用，本次操作未执行。" },
         .{ "InvalidArguments", "工具参数不符合要求，本次操作未执行。" },
+        .{ "InvalidParent", "无法进入目标文件的父目录，请核对实际执行的主机和路径。" },
+        .{ "SshFileAbsolutePathRequired", "当前终端位于内层 Shell 或正在切换，请使用 SSH 连接主机上的绝对路径。" },
         .{ "InvalidToolArguments", "AI 提供的工具参数不完整或格式错误，本次操作未执行。" },
     };
     inline for (mappings) |entry| if (std.mem.eql(u8, code, entry[0])) return entry[1];
@@ -78,7 +86,7 @@ pub fn describe(a: std.mem.Allocator, step: events.Step) !Description {
     var name_buffer: [64]u8 = undefined;
     const name = @import("plugin_tools.zig").decodeName(&name_buffer, step.name) catch step.name;
     const reconnect_failed = if (parsed) |value| reconnectFailure(scratch, value, name) else false;
-    const status = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) "因新消息跳过 · 未执行" else if (step.phase == .cancelled) "已取消 · 未执行" else if (std.mem.eql(u8, code, "ToolApprovalRejected")) "用户已拒绝 · 未执行" else if (reconnect_failed) "SSH 重连失败" else "请求失败 · 未执行";
+    const status = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) "因新消息跳过 · 未执行" else if (step.phase == .cancelled) "已取消 · 未执行" else if (std.mem.eql(u8, code, "ToolApprovalRejected")) "用户已拒绝 · 未执行" else if (std.mem.eql(u8, code, "ReconnectPtyNotReady")) "SSH 已连接 · 终端尚未就绪" else if (std.mem.eql(u8, code, "ReconnectPtyUnsupported")) "SSH 已连接 · 终端不支持交互执行" else if (std.mem.eql(u8, code, "ReconnectWaitTimedOut")) "等待超时 · SSH 正在重连" else if (std.mem.eql(u8, code, "ReconnectSuperseded")) "重连回执已被取代" else if (reconnect_failed) "SSH 重连失败" else "请求失败 · 未执行";
     const summary = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) try a.dupe(u8, status) else try std.fmt.allocPrint(a, "{s} · {s}", .{ status, code });
     errdefer a.free(summary);
     const detail = try std.fmt.allocPrint(a, "工具：{s}\n状态：{s}\n错误码：{s}\n原因：{s}\n\n调用参数 / 命令：\n{s}\n\n原始错误：\n{s}", .{ name, status, code, explanation(code), step.command, if (raw.len == 0) "未提供错误详情" else raw });

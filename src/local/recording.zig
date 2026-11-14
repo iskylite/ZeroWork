@@ -752,6 +752,7 @@ pub const Recording = struct {
             .output => .output,
             .resize => .resize,
             .application => .application,
+            .boundary => unreachable,
         } });
         while (self.mappings.items.len > self.timeline.events.items.len) self.evicted_through_sequence = @max(self.evicted_through_sequence, self.mappings.orderedRemove(0).sequence);
     }

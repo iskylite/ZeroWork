@@ -32,6 +32,7 @@ pub const Context = struct {
 pub const Prepared = struct {
     reasoning: ?*const @import("live_reasoning.zig").State = null,
     file_references: ?@import("../host/local_file_reference.zig").Projection = null,
+    skills: ?@import("skill_context.zig").Loader = null,
     provider: provider.Provider,
     request: provider.ChatRequest,
     scope: scope.Scope,
@@ -246,6 +247,9 @@ pub const Runner = struct {
         var task_cancel: provider.CancelToken = .{ .source = .{ .context = &task_control, .poll = TaskControl.cancelled, .user_wait = TaskControl.userWait, .resource_wait = TaskControl.resourceWait } };
         request.cancel = &task_cancel;
         var projection: Projection = .{ .allocator = self.allocator, .original = prepared.provider, .manager = &self.worker.?.manager, .context = self.context.?, .historical_messages = self.historical_messages, .root = self.task_root.?, .slots = self.slots.?, .read_only = self.observation_only, .reasoning = prepared.reasoning, .file_references = prepared.file_references };
+        var skill_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer skill_arena.deinit();
+        projection.skills = if (prepared.skills) |loader| .{ .loader = loader, .allocator = skill_arena.allocator(), .io = io, .context_window = prepared.limits.context_window } else null;
         const adapter: provider.Provider = .{ .ctx = &projection, .chat = Projection.chat, .models = Projection.models };
         if (self.answer_only) {
             if (self.worker.?.manager.tool_run) |loop| loop.request.cancel = &task_cancel;
@@ -308,6 +312,7 @@ pub const Runner = struct {
         read_only: bool = false,
         reasoning: ?*const @import("live_reasoning.zig").State = null,
         file_references: ?@import("../host/local_file_reference.zig").Projection = null,
+        skills: ?@import("skill_context.zig").RequestContext = null,
         fn models(raw: *anyopaque, a: std.mem.Allocator) ![]provider.ModelInfo {
             const self: *@This() = @ptrCast(@alignCast(raw));
             return self.original.models(self.original.ctx, a);
@@ -318,7 +323,7 @@ pub const Runner = struct {
             defer arena.deinit();
             const a = arena.allocator();
             var projected = request;
-            projected.system = try std.fmt.allocPrint(a, "{s}\n本轮起始绑定版本 {d}，环境版本 {d}；当前范围以最新宿主上下文通知和工具表为准。历史环境的连接、目录、执行和审批标识不提供当前操作权；仅当前工具表及本轮查询可确定目标。", .{ request.system, self.context.fence.binding, self.context.fence.environment });
+            projected.system = try std.fmt.allocPrint(a, "{s}\n本轮起始绑定版本 {d}，环境版本 {d}；当前范围以最新宿主上下文通知和工具表为准。历史环境的连接、目录、执行和审批标识不提供当前操作权；仅当前工具表及本轮查询可确定目标。历史环境前缀用于识别上下文来源，请直接回答用户并省略此前缀。", .{ request.system, self.context.fence.binding, self.context.fence.environment });
             if (self.context.child_origin != null) projected.system = try std.fmt.allocPrint(a, "{s}\n你是当前父对话分配的子智能体，只处理本次分配的范围。你不能再派生子智能体、修改父级绑定或管理兄弟任务。继承的历史、技能和用户补充不扩大本次目标或操作授权；当前工具目录和宿主复验决定真实能力。", .{projected.system});
             if (self.read_only) projected.system = try std.fmt.allocPrint(a, "{s}\n本任务仅允许只读核验。此前结果未知的操作仍是未知，禁止重放、修复或任何写入；只报告本次实际观察及其局限。", .{projected.system});
             const slot_wait = provider.CancelToken.beginResourceWait(request.cancel);
@@ -344,8 +349,10 @@ pub const Runner = struct {
                 if (self.file_references) |*projection| message.content = try projection.project(a, message.content, message.file_reference_spans);
                 message.file_reference_spans = &.{};
             }
+            const history_environment = @import("history_environment.zig");
             for (messages[0..@min(self.historical_messages, messages.len)]) |*message| {
-                message.content = try std.fmt.allocPrint(a, "[历史环境，仅作记录]\n{s}", .{message.content});
+                const content = if (message.role == .assistant) history_environment.assistantText(message.content) else message.content;
+                message.content = try std.fmt.allocPrint(a, history_environment.marker ++ "\n{s}", .{content});
                 message.image_owner = null;
                 message.image_transform = 0;
                 const offloaded = try a.dupe(provider.OffloadedImage, message.offloaded_images);
@@ -353,8 +360,9 @@ pub const Runner = struct {
                 message.offloaded_images = offloaded;
             }
             projected.messages = messages;
-            try self.root.take(self.context.task, 1, 0);
             if (self.reasoning) |live| projected = live.apply(projected);
+            if (self.skills) |*skills| try skills.apply(a, projected, messages, request.messages);
+            try self.root.take(self.context.task, 1, 0);
             if (self.manager.tool_run) |loop| if (loop.discardRevokedResults()) {
                 if (request.messages.ptr != loop.messages.items.ptr) {
                     try self.root.usage(self.context.task, null);
@@ -770,7 +778,10 @@ pub const Service = struct {
             runner.pending_notify = true;
         }
         if (runner.pending_notify) {
-            if (runner.backend.completed) |completed| try completed(runner.backend.context, runner);
+            if (runner.backend.completed) |completed| completed(runner.backend.context, runner) catch |err| {
+                if (err == error.PresentationPending) return;
+                return err;
+            };
             if (runner.task_root) |root| if (runner.context) |context| {
                 runner.task_outcome = if (runner.worker.?.manager.tool_run != null and runner.worker.?.manager.tool_run.?.uncertain) .outcome_unknown else if (state == .stopped) .cancelled else if (runner.failure != null) .failed else .succeeded;
                 const summary = if (runner.worker) |worker| if (worker.manager.saw_done) worker.manager.round_text.items else "" else "";
@@ -801,7 +812,7 @@ pub const Service = struct {
             }
         }
         if (runner.end_when_idle and runner.record != null and runner.record.?.ending == null and runner.thread == null and !runner.pending_commit and !runner.pending_notify and runner.record.?.task_pending and runner.record.?.inbox.next() != null and readyForNext(runner)) {
-            try self.continueChildQueue(runner);
+            if (!try self.continueChildQueue(runner)) return;
         }
         if (runner.thread == null and !runner.agent.busy) self.pump(runner) catch |err| {
             runner.failure = err;
@@ -815,10 +826,13 @@ pub const Service = struct {
         for (record.inbox.entries.items) |entry| if (!entry.receipt.archived and (entry.receipt.delivery == .queued or entry.receipt.delivery == .accepted or entry.receipt.delivery == .submitting or entry.receipt.delivery == .outcome_unknown)) return true;
         return false;
     }
-    fn continueChildQueue(self: *Service, runner: *Runner) !void {
+    fn continueChildQueue(self: *Service, runner: *Runner) !bool {
         const context = runner.context orelse return error.TurnChanged;
         if (!runner.worker_released) {
-            if (runner.backend.release_worker) |release| try release(runner.backend.context);
+            if (runner.backend.release_worker) |release| release(runner.backend.context) catch |err| {
+                if (err == error.ResourceCleanupPending) return false;
+                return err;
+            };
             runner.releaseWorker();
             runner.worker_released = true;
         }
@@ -837,6 +851,7 @@ pub const Service = struct {
             runner.pending_task = next_task;
         } else try root.state(context.task, runner.task_outcome, "");
         runner.record.?.task_pending = false;
+        return true;
     }
     fn finishEnd(self: *Service, runner: *Runner, ending: lifecycle.End) !void {
         if (runner.controller_busy or runner.thread != null or runner.pending_commit or runner.pending_notify or !runner.saved or self.store.hasBoundChildren(ending.fence.conversation)) return;

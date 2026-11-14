@@ -7,16 +7,39 @@ const images = @import("image_attachments.zig");
 
 var next_revision = std.atomic.Value(u64).init(1);
 
+const Storage = struct {
+    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+    references: std.atomic.Value(usize) = .init(1),
+};
+
 pub const History = struct {
     /// Stable identity of this immutable transcript, including replacements of equal length.
     revision: u64 = 0,
-    arena: ?std.heap.ArenaAllocator = null,
+    storage: ?*Storage = null,
     messages: []const provider.Message = &.{},
     failure: ?anyerror = null,
     /// Copies/edits/compaction deliberately start without an old measurement.
     usage: ?@import("context_usage.zig").Baseline = null,
 
+    pub fn retain(self: History) History {
+        if (self.storage) |storage| _ = storage.references.fetchAdd(1, .monotonic);
+        return self;
+    }
+
+    pub fn arenaAllocator(self: *const History) std.mem.Allocator {
+        return self.storage.?.arena.allocator();
+    }
+
     pub fn deinit(self: *History) void {
+        const storage = self.storage orelse {
+            self.* = .{};
+            return;
+        };
+        if (storage.references.fetchSub(1, .acq_rel) != 1) {
+            self.* = .{};
+            return;
+        }
         for (self.messages) |message| for (message.images) |reference| {
             var owned = reference;
             owned.release();
@@ -25,7 +48,8 @@ pub const History = struct {
             var owned = image.reference;
             owned.release();
         };
-        if (self.arena) |*arena| arena.deinit();
+        storage.arena.deinit();
+        storage.allocator.destroy(storage);
         self.* = .{};
     }
 
@@ -40,6 +64,7 @@ pub const History = struct {
         const messages = try allocator.dupe(provider.Message, self.messages);
         defer allocator.free(messages);
         messages[index].content = edited;
+        if (!std.mem.eql(u8, @import("skill_context.zig").explicitName(original) orelse "", @import("skill_context.zig").explicitName(edited) orelse "")) messages[index].skill = null;
         messages[index].file_reference_spans = spans;
         return try History.copy(allocator, messages, "");
     }
@@ -51,6 +76,10 @@ pub const History = struct {
         defer if (projected) |messages| allocator.free(messages);
         var calls: []const provider.ToolCall = &.{};
         for (source, 0..) |message, i| {
+            if (message.skill != null) {
+                if (projected == null) projected = try allocator.dupe(provider.Message, source);
+                projected.?[i].skill = null;
+            }
             if (message.role == .assistant) calls = message.tool_calls;
             const id = message.tool_call_id orelse continue;
             for (calls) |call| {
@@ -80,9 +109,11 @@ pub const History = struct {
             for (message.images) |reference| if (reference.content() == null) return error.EmptyAttachmentResult;
             for (message.offloaded_images) |entry| if (entry.reference.content() == null) return error.EmptyAttachmentResult;
         }
-        var result: History = .{ .arena = std.heap.ArenaAllocator.init(allocator), .revision = next_revision.fetchAdd(1, .monotonic) };
+        const storage = try allocator.create(Storage);
+        storage.* = .{ .allocator = allocator, .arena = .init(allocator) };
+        var result: History = .{ .storage = storage, .revision = next_revision.fetchAdd(1, .monotonic) };
         errdefer result.deinit();
-        const a = result.arena.?.allocator();
+        const a = result.arenaAllocator();
         const messages = try a.alloc(provider.Message, count);
         for (source, 0..) |message, index| {
             var owned = message;

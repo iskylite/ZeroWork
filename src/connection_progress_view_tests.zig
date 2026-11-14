@@ -208,7 +208,7 @@ test "connection progress view failed summary remains outside folded logs and re
     try std.testing.expectEqualStrings("连接失败", f.view.state_label.getText().?.content);
     try std.testing.expect(f.view.summary.globalRect().y < f.view.chain_scroll.container.globalRect().y);
     try std.testing.expectEqualStrings("DB", f.view.title.getText().?.content);
-    try std.testing.expect(f.view.close_disabled.peek());
+    try std.testing.expect(f.view.header_disabled.peek());
     f.view.close();
     try std.testing.expect(f.view.isVisible());
     try std.testing.expectEqual(@as(usize, 0), f.closes);
@@ -232,8 +232,8 @@ test "connection progress view failed summary remains outside folded logs and re
     source.cleanup = .released;
     source.resources = ledger.snapshot();
     try f.show(source);
-    try std.testing.expect(!f.view.close_disabled.peek());
-    try std.testing.expectApproxEqAbs(f.view.close_button.?.globalRect().x + f.view.close_button.?.globalRect().w + 8, f.view.retry_button.?.globalRect().x, 0.01);
+    try std.testing.expect(!f.view.header_disabled.peek());
+    try std.testing.expect(f.view.header_action.globalRect().y + f.view.header_action.globalRect().h <= f.view.retry_button.?.globalRect().y);
     try std.testing.expect(f.view.retry_button.?.globalRect().x + f.view.retry_button.?.globalRect().w <= f.view.footer.globalRect().x + f.view.footer.globalRect().w);
     try std.testing.expectEqualStrings("已释放", f.view.slots[1].status.getText().?.content);
     try std.testing.expectEqualStrings("失败 · 已释放", f.view.slots[2].status.getText().?.content);

@@ -388,6 +388,34 @@ test "builtin download source read progress and terminal input survive real shar
     defer a.free(data);
     try std.testing.expectEqual(@as(usize, 96 * 1024 + 53), data.len);
     for (data, 0..) |value, index| try std.testing.expectEqual(@as(u8, @intCast((index * 29 + 17) % 251)), value);
+    const idle_deadline = clock.monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        const sftp_open = blk: {
+            while (!worker.native_mutex.tryLock()) pause();
+            defer worker.native_mutex.unlock();
+            break :blk worker.session.sftp != null;
+        };
+        if (!sftp_open) break;
+        try frames.take();
+        if (clock.monotonicNs() >= idle_deadline) return error.SftpContextReleaseTimeout;
+        pause();
+    }
     _ = try frames.echo("AFTER_DOWNLOAD");
+    const next = try api.open(api.ctx, .{ .session_id = @backingInt(owner.session_id), .transfer_binding = binding, .direction = .download, .sources = &.{"/source.bin"}, .remote_dir = "/", .local_dir = directory, .rename = "reopened.bin", .pacing_kbps = 128 });
+    worker.requestShellCloseForTransfers();
+    try std.testing.expectEqual(transfer.EngineState.succeeded, (try frames.terminal(api, next)).state);
+    const shell_release_deadline = clock.monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        const shell_released = blk: {
+            while (!worker.native_mutex.tryLock()) pause();
+            defer worker.native_mutex.unlock();
+            try std.testing.expect(worker.session.handle != null);
+            break :blk worker.session.channel == null;
+        };
+        if (shell_released) break;
+        try frames.take();
+        if (clock.monotonicNs() >= shell_release_deadline) return error.ShellReleaseTimeout;
+        pause();
+    }
     std.debug.print("BUILTIN_DOWNLOAD_NATIVE source_progress=true speed_nonzero=true during_echo=true after_echo=true bytes={d}\n", .{data.len});
 }

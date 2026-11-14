@@ -65,8 +65,7 @@ const State = struct {
         self.title_value.set(title_text);
         if (self.indicator.header.behavior.interaction.a11y) |*attrs| attrs.label = self.title_value.peek();
         try setText(self.cx, self.title, title_text);
-        const projection = @import("ai_tool_header_projection.zig");
-        const text = if (props.projection_is_status) try self.cx.allocator.dupe(u8, props.projection) else if (props.tool_name) |name| try projection.projectWithStatus(self.cx.allocator, name, props.projection, projection.phaseLabel(props.phase)) else try projection.withStatus(self.cx.allocator, props.projection, projection.phaseLabel(props.phase));
+        const text = try projectHeader(self.cx.allocator, props);
         defer self.cx.allocator.free(text);
         try setText(self.cx, self.projection, text);
         const palette = theme.current();
@@ -171,9 +170,7 @@ pub fn mountRetained(cx: *ui.Cx, scope: *ui.Scope, props: Props) !Result {
     const separator = try ui.boxStyled(cx, S.headerSeparator, .{});
     separator.meta.ownership.meta.test_id = "ai.step.separator";
     try header.appendChild(cx.allocator, separator);
-    const header_projection = @import("ai_tool_header_projection.zig");
-    const status_label = header_projection.phaseLabel(props.phase);
-    const projected = if (props.projection_is_status) try cx.allocator.dupe(u8, props.projection) else if (props.tool_name) |name| try header_projection.projectWithStatus(cx.allocator, name, props.projection, status_label) else try header_projection.withStatus(cx.allocator, props.projection, status_label);
+    const projected = try projectHeader(cx.allocator, props);
     defer cx.allocator.free(projected);
     // The actual zenit text builder copies this temporary into node ownership.
     const projection = try ui.text(cx, projected, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = if (props.phase == .failed or props.phase == .rejected) palette.warn else palette.fg_2, .text_overflow = .ellipsis });
@@ -243,6 +240,14 @@ const Copy = struct {
         self.button.copy(self.text.peek());
     }
 };
+fn projectHeader(a: std.mem.Allocator, props: Props) ![]u8 {
+    const projection = @import("ai_tool_header_projection.zig");
+    const status = projection.phaseLabel(props.phase);
+    if (props.projection_is_status) return a.dupe(u8, props.projection);
+    if (props.tool_name) |name| return projection.projectWithStatus(a, name, props.projection, if (props.phase == .succeeded) props.detail else null, status);
+    return projection.withStatus(a, props.projection, status);
+}
+
 pub fn title(name: []const u8) []const u8 {
     return @import("ai_tool_titles.zig").title(name) orelse "工具调用";
 }

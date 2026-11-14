@@ -504,7 +504,7 @@ pub const Panel = struct {
         self.download_icon.setDisplay(if (upload) .none else .flex);
         self.primary_label.set(if (upload) "开始上传" else "开始下载");
         var name: [512]u8 = undefined;
-        const identity_text = if (data.owner) |owner| std.fmt.bufPrint(&name, "所属会话 · {s} #{d}", .{ data.host_name, @backingInt(owner.session_id) }) catch data.host_name else if (data.host_name.len > 0) data.host_name else "未指定会话";
+        const identity_text = if (data.owner) |owner| std.fmt.bufPrint(&name, "{s} · {s} #{d}", .{ if (upload) "所属会话" else "远端主机", data.host_name, @backingInt(owner.session_id) }) catch data.host_name else if (data.host_name.len > 0) data.host_name else "未指定会话";
         self.identity_name.setTextContent(self.cx.allocator, identity_text) catch {};
         self.identity_endpoint.setTextContent(self.cx.allocator, data.endpoint) catch {};
         self.identity_route.setTextContent(self.cx.allocator, data.link_text) catch {};

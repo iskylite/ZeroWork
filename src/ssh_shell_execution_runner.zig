@@ -94,6 +94,10 @@ pub fn main(init: std.process.Init) !void {
         try historyReopen(init, worker, &ledger, task, dir);
         return;
     }
+    if (std.mem.eql(u8, mode, "execution-rotation")) {
+        try executionRotation(init, worker, &ledger, task, dir, recording);
+        return;
+    }
     {
         const screen = try worker.searchText(a);
         defer a.free(screen);
@@ -343,6 +347,80 @@ fn historyReopen(init: std.process.Init, worker: *Worker, ledger: *ssh.ResourceL
     };
     if (reopened != 3) return error.ReopenedHistoryIncomplete;
     std.debug.print("SHELL_EXECUTION_PASS mode=history-reopen repeated=3 ai=2 manual=1 manifest=true archive_reopened=true\n", .{});
+}
+
+fn executionRotation(init: std.process.Init, worker: *Worker, ledger: *ssh.ResourceLedger, task: identity.TaskId, dir: std.Io.Dir, recording: publication.Options) !void {
+    const original_vt = worker.vt.terminal;
+    const original_fd = worker.session.socket_fd;
+    const first = try run(worker, task, "ZW_ROTATION_PID=$$; ZW_ROTATION_STATE=kept; printf 'ARCHIVED_%s\\n%70000s\\nARCHIVED_%s\\n' first '' last", .{ .expected = "ARCHIVED_first", .exit_code = 0 });
+    for (1..136) |_| {
+        const current = try run(worker, task, "test \"$ZW_ROTATION_PID:$ZW_ROTATION_STATE\" = \"$$:kept\"", .{ .exit_code = 0 });
+        if (!current.owner.eql(first.owner) or current.recording_generation != first.recording_generation or !std.meta.eql(current.shell.id, first.shell.id)) return error.SessionWasReplaced;
+    }
+    if (worker.session.socket_fd != original_fd or worker.vt.terminal != original_vt) return error.SessionWasReplaced;
+    const parent_path = try @import("vt/recording_manifest.zig").pathForCast(a, recording.cast_path);
+    defer a.free(parent_path);
+    const parent = try @import("vt/recording_manifest.zig").load(a, init.io, dir, parent_path);
+    defer parent.deinit();
+    const first_id = std.fmt.bytesToHex(first.execution_id.?.bytes, .lower);
+    for (parent.value.execution_ranges) |range| {
+        if (std.mem.eql(u8, range.execution_id, &first_id)) return error.ArchivedRangeStillActive;
+    }
+    // Force the old output out of the live ring before reading the archive.
+    for (0..worker.timeline.max_events) |_| try worker.timeline.append(realtime.milliseconds(undefined), worker.io.stream_offset, "");
+    try queryRotatedExecution(init.io, dir, first);
+    try release(worker, ledger);
+    _ = try worker.execution_recording.?.persist(worker.io.stream_offset, realtime.milliseconds(undefined));
+    try queryRotatedExecution(init.io, dir, first);
+    std.debug.print("SHELL_EXECUTION_PASS mode=execution-rotation executions=136 same_session=true same_shell=true archived_query_live=true archived_query_closed=true\n", .{});
+}
+
+fn queryRotatedExecution(io: std.Io, dir: std.Io.Dir, first: execution.Snapshot) !void {
+    const host = @import("ai/host_tools.zig");
+    const queries = @import("ai/host_terminal_queries.zig");
+    const Access = @import("ui/ai_recording_query_access.zig").Access;
+    const owner = first.owner;
+    const context: host.Context = .{
+        .conversation_id = .generate(),
+        .task_id = .generate(),
+        .binding = .{ .session = @backingInt(owner.session_id) },
+        .binding_revision = 1,
+        .grant_revision = 1,
+    };
+    const id = first.recording_id.?;
+    var access = try Access.init(a, .{ .allocator = a, .io = io, .dir = dir }, context);
+    defer access.deinit();
+    try access.captureRecordingIdentity(owner, id, first.recording_generation);
+    const reference = try queries.recordingRef(a, context, id, first.recording_generation);
+    defer a.free(reference);
+    const command_ref = try queries.executionCommandRef(a, context.conversation_id, owner, first.execution_id.?);
+    defer a.free(command_ref);
+    const arguments = try std.json.Stringify.valueAlloc(a, .{ .recording_ref = reference, .range_kind = "command", .command_ref = command_ref }, .{});
+    defer a.free(arguments);
+    var next = try a.dupe(u8, arguments);
+    defer a.free(next);
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(a);
+    for (1..64) |operation| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, next, .{});
+        defer parsed.deinit();
+        var result = try access.execute(.{ .context = context, .authority = .conversation_context, .operation_id = operation, .turn_id = 1, .call_id = "execution-rotation", .tool_id = "host.read_terminal", .arguments = parsed.value, .arguments_json = next, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) }, a);
+        defer result.deinit(a);
+        const response = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+        defer response.deinit();
+        if (response.value.object.get("output")) |chunk| try output.appendSlice(a, chunk.string);
+        const cursor = response.value.object.get("next_cursor") orelse return error.ArchivedExecutionOutputMissing;
+        if (cursor == .null) {
+            if (output.items.len < 70_000 or std.mem.indexOf(u8, output.items, "ARCHIVED_first") == null or std.mem.indexOf(u8, output.items, "ARCHIVED_last") == null) return error.ArchivedExecutionOutputMissing;
+            const process = response.value.object.get("process_receipt") orelse return error.ArchivedExecutionReceiptMissing;
+            if (process.object.get("exit_code").?.integer != 0) return error.ArchivedExecutionReceiptMissing;
+            return;
+        }
+        const continuation = try std.json.Stringify.valueAlloc(a, .{ .recording_ref = reference, .range_kind = "cursor", .cursor = cursor.string }, .{});
+        a.free(next);
+        next = continuation;
+    }
+    return error.ArchivedExecutionPaginationDidNotFinish;
 }
 
 fn initializationRecovery(init: std.process.Init, port: u16, directory: []const u8, mode: []const u8) !void {

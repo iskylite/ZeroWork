@@ -10,6 +10,7 @@ const lifecycle = @import("lifecycle_runtime.zig");
 const provider = @import("provider.zig");
 const queries = @import("host_terminal_queries.zig");
 const Wakeup = @import("../platform/wakeup.zig").Wakeup;
+const ExecutionWake = @import("../platform/execution_wakeup.zig");
 const capacity = 32;
 /// Cached owner-thread facts. A missing/busy snapshot is never an idle proof.
 pub const TaskEvidence = struct {
@@ -104,6 +105,7 @@ pub const Driver = struct {
     queued: usize = 0,
     waiting: [capacity]?*Request = @splat(null),
     wake: Wakeup,
+    execution_wake: ExecutionWake.Listener = undefined,
     thread: ?std.Thread = null,
     stopping: std.atomic.Value(bool) = .init(false),
     finished: std.atomic.Value(bool) = .init(false),
@@ -128,6 +130,9 @@ pub const Driver = struct {
         errdefer allocator.destroy(self);
         self.* = .{ .allocator = allocator, .journal_owner = retained, .scheduler = scheduler, .backend = backend, .controller = undefined, .wake = try Wakeup.init() };
         errdefer self.wake.deinit();
+        self.execution_wake = .{ .wake = &self.wake };
+        self.execution_wake.register();
+        errdefer self.execution_wake.unregister();
         self.controller = execution.Controller.initWithJournal(allocator, execution.JournalAccess.from(lifecycle.ProcessJournal, retained), .{ .retained_shell_snapshots = backend.retained_shell_snapshots, .context = self, .authorize = authorize, .resolve = resolve, .handed_to_user = handedToUser, .terminal_call = terminalCall, .should_cancel = shouldCancel, .authorize_input = authorizeInput, .request_secret = requestSecret, .authorize_read = authorizeRead });
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
@@ -222,11 +227,11 @@ pub const Driver = struct {
         var hash = std.hash.Wyhash.init(0);
         for (self.command_records) |item| if (item) |record| {
             if (!record.conversation_id.eql(conversation_id) or !record.target.eql(target)) continue;
-            const reference = try std.fmt.allocPrint(allocator, "c1:{s}:{d}:{d}:{s}", .{ std.fmt.bytesToHex(conversation_id.bytes, .lower), @backingInt(target.session_id), target.generation, std.fmt.bytesToHex(record.execution_id.bytes, .lower) });
+            const reference = try queries.executionCommandRef(allocator, conversation_id, target, record.execution_id);
             errdefer allocator.free(reference);
             const command = try allocator.dupe(u8, record.command);
             errdefer allocator.free(command);
-            try records.append(allocator, .{ .reference = reference, .submitted_command = command, .execution_id = record.execution_id, .submitted_at_ms = if (record.submitted_at_ms > 0) record.submitted_at_ms else null, .verified = record.verified, .exit_code = record.exit_code, .complete = record.complete });
+            try records.append(allocator, .{ .reference = reference, .submitted_command = command, .execution_id = record.execution_id, .submitted_at_ms = if (record.submitted_at_ms > 0) record.submitted_at_ms else null, .verified = record.verified, .exit_code = if (record.verified) record.exit_code else null, .complete = record.complete });
             hash.update(reference);
             hash.update(std.mem.asBytes(&record.revision));
         };
@@ -301,6 +306,7 @@ pub const Driver = struct {
         if (!self.shutdownReady()) return error.WorkerRunning;
         if (self.thread) |thread| thread.join();
         self.thread = null;
+        self.execution_wake.unregister();
         self.wake.deinit();
         self.allocator.free(self.evidence);
         self.allocator.free(self.target_evidence);
@@ -467,7 +473,7 @@ pub const Driver = struct {
                     },
                     .wait => |wait| {
                         var bounded = wait;
-                        bounded.deadline = @min(wait.deadline, request.deadline);
+                        if (!wait.implicit_decision) bounded.deadline = @min(wait.deadline, request.deadline);
                         request.wait = bounded;
                         return false;
                     },
@@ -1001,6 +1007,39 @@ test "execution deadline wait observation spends queue time and retains the runn
     try std.testing.expect(!driver.process(&request, 60));
     try std.testing.expectEqual(@as(i64, 70), request.wait.?.deadline);
     try std.testing.expect(driver.process(&request, 70));
+    try std.testing.expect(request.failure == null);
+    var result = request.result.?;
+    defer result.deinit(std.testing.allocator);
+    var body = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.blocks[0].structured, .{});
+    defer body.deinit();
+    try std.testing.expect(body.value.object.get("timed_out").?.bool);
+    try std.testing.expectEqualStrings("running", body.value.object.get("state").?.string);
+    try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+}
+
+test "execution deadline implicit decision uses the task cutoff beyond the admission window" {
+    var request: Request = .{ .kind = .{ .execute = AdmissionTest.invocation() }, .deadline = 30_000, .wake = try Wakeup.init() };
+    defer request.wake.?.deinit();
+    var fixture: AdmissionTest = .{ .request = &request };
+    var driver = fixture.driver();
+    driver.controller.backend = .{ .context = &driver, .authorize = Driver.authorize, .resolve = Driver.resolve, .terminal_call = Driver.terminalCall };
+    const id: identity.ExecutionId = .{ .bytes = @splat(3) };
+    fixture.snapshot.execution_id = id;
+    try driver.controller.entries.append(std.testing.allocator, .{ .context = request.kind.execute.context, .id = id, .target = fixture.snapshot.owner, .journal = undefined, .journal_revision = 1, .journal_stage = .running, .snapshot = fixture.snapshot, .next_renew_at = std.math.maxInt(i64) });
+    defer driver.controller.entries.deinit(std.testing.allocator);
+    var json: [128]u8 = undefined;
+    const wire = try std.fmt.bufPrint(&json, "{{\"execution_ref\":\"x1:{s}\",\"until\":\"decision\"}}", .{std.fmt.bytesToHex(id.bytes, .lower)});
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, wire, .{});
+    defer parsed.deinit();
+    request.kind.execute.tool_id = "host.wait_execution";
+    request.kind.execute.arguments = parsed.value;
+    request.kind.execute.decision_wait_deadline_ms = 40_000;
+    try std.testing.expect(!driver.process(&request, 1000));
+    try std.testing.expectEqual(@as(i64, 40_000), request.wait.?.deadline);
+    fixture.snapshot.output_received = 4096;
+    fixture.snapshot.revision += 1;
+    try std.testing.expect(!driver.process(&request, 30_001));
+    try std.testing.expect(driver.process(&request, 40_000));
     try std.testing.expect(request.failure == null);
     var result = request.result.?;
     defer result.deinit(std.testing.allocator);

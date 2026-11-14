@@ -2,10 +2,12 @@
 const std = @import("std");
 pub fn knownMessage(code: []const u8) ?[]const u8 {
     const entries = .{
+        .{ "ConfigFileConflict", "config.toml 已在外部更改，未写入设置。若文件仍有未生效的改动，请检查文件或重启后再试。" },
+        .{ "ConfigProviderConflict", "服务提供方已在外部更改，未保存当前草稿。请撤销更改以载入最新配置，再重新编辑。" },
         .{ "MissingProviderConfiguration", "尚未配置 AI 服务，请打开 AI 设置并添加服务提供方和模型。" },
         .{ "MissingProvider", "尚未配置 AI 服务，请打开 AI 设置并添加服务提供方和模型。" },
-        .{ "UnknownProvider", "所选 AI 服务已不存在，请重新选择服务提供方。" },
-        .{ "ProviderDisabled", "所选 AI 服务已停用，请在 AI 设置中启用或选择其他服务。" },
+        .{ "UnknownProvider", "所选 AI 服务已不存在。请在输入栏选择其他模型。" },
+        .{ "ProviderDisabled", "所选 AI 服务已停用。请在输入栏换模型，或在 AI 设置中重新启用。" },
         .{ "MissingApiKey", "缺少 API Key，请在 AI 设置中补齐后重试。" },
         .{ "McpCredentialMissing", "找不到此 MCP 服务已保存的凭据。请在 MCP 设置中重新填写环境变量或请求头，再测试连接。" },
         .{ "CredentialMissing", "系统钥匙串中找不到已保存的凭据。请在对应配置中重新填写。" },
@@ -31,7 +33,8 @@ pub fn knownMessage(code: []const u8) ?[]const u8 {
         .{ "InteractionUnavailable", "这次测试无法询问凭据。请补填凭据，或直接发起连接后按提示输入。" },
         .{ "MissingEndpoint", "缺少 API 地址，请在 AI 设置中填写服务地址。" },
         .{ "MissingModel", "尚未选择可用模型，请在 AI 设置中添加并选择模型。" },
-        .{ "UnknownModel", "所选模型已不存在，请重新选择模型。" },
+        .{ "ModelSelectionRequired", "请在输入栏选择模型后再发送。" },
+        .{ "UnknownModel", "所选模型已不存在。请在输入栏选择其他模型。" },
         .{ "InvalidContextWindow", "模型上下文窗口无效，请在 AI 设置中填写大于 0 的窗口大小。" },
         .{ "UnsupportedEffort", "当前模型不支持所选推理等级，请重新选择等级或模型。" },
         .{ "InvalidImage", "无法识别此图片，请选择有效的 PNG 或 JPEG 图片。" },

@@ -99,6 +99,8 @@ pub const Manifest = struct {
     display: Display = .{},
     recording: struct { version: u32 = 1, generations: []const Generation },
     execution_ranges: []const ExecutionRange = &.{},
+    /// An immutable SSH execution interval within the parent recording.
+    execution_segment: bool = false,
     command_history: []const CommandExecution = &.{},
     files: []const File = &.{},
     events: []const Event = &.{},
@@ -130,6 +132,19 @@ pub fn pathForCast(allocator: std.mem.Allocator, cast_path: []const u8) ![]u8 {
     try validatePath(cast_path);
     if (!std.mem.endsWith(u8, cast_path, ".cast")) return error.InvalidRecordingPath;
     return std.fmt.allocPrint(allocator, "{s}.session.json", .{cast_path[0 .. cast_path.len - 5]});
+}
+pub fn executionDirectory(allocator: std.mem.Allocator, parent_manifest: []const u8) ![]u8 {
+    try validatePath(parent_manifest);
+    const suffix = ".session.json";
+    if (!std.mem.endsWith(u8, parent_manifest, suffix)) return error.InvalidRecordingPath;
+    return std.fmt.allocPrint(allocator, "{s}.executions", .{parent_manifest[0 .. parent_manifest.len - suffix.len]});
+}
+
+pub fn executionSegmentPath(allocator: std.mem.Allocator, parent_manifest: []const u8, id: []const u8, kind: enum { cast, metadata }) ![]u8 {
+    _ = try @import("../host/identity.zig").ExecutionId.parse(id);
+    const directory = try executionDirectory(allocator, parent_manifest);
+    defer allocator.free(directory);
+    return std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ directory, id, if (kind == .cast) ".cast" else ".session.json" });
 }
 pub fn validatePath(path: []const u8) !void {
     if (!std.mem.startsWith(u8, path, "logs/") or std.mem.indexOfScalar(u8, path, '\\') != null) return error.InvalidRecordingPath;
@@ -183,12 +198,23 @@ pub fn save(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []c
     const bytes = try std.json.Stringify.valueAlloc(allocator, value, .{});
     defer allocator.free(bytes);
     if (bytes.len > 8 * 1024 * 1024) return error.ManifestTooLarge;
+    const parent = try createParent(io, dir, path);
+    defer parent.close(io);
+    var atomic = try parent.createFileAtomic(io, std.fs.path.basename(path), .{ .permissions = @as(std.Io.File.Permissions, @fromBackingInt(0o600)), .make_path = false, .replace = true });
+    defer atomic.deinit(io);
+    try atomic.file.writePositionalAll(io, bytes, 0);
+    try atomic.file.sync(io);
+    try atomic.replace(io);
+}
+
+pub fn createParent(io: std.Io, dir: std.Io.Dir, path: []const u8) !std.Io.Dir {
+    try validatePath(path);
     // Resolve/create each managed directory without following symlinks, then
     // publish through that directory handle so a replaced parent cannot move
     // metadata writes outside the configured data root.
     var parent = dir;
     var owns_parent = false;
-    defer if (owns_parent) parent.close(io);
+    errdefer if (owns_parent) parent.close(io);
     var parts = std.mem.splitScalar(u8, std.fs.path.dirname(path).?, '/');
     while (parts.next()) |part| {
         const child = parent.openDir(io, part, .{ .follow_symlinks = false }) catch |err| blk: {
@@ -200,11 +226,7 @@ pub fn save(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []c
         parent = child;
         owns_parent = true;
     }
-    var atomic = try parent.createFileAtomic(io, std.fs.path.basename(path), .{ .permissions = @as(std.Io.File.Permissions, @fromBackingInt(0o600)), .make_path = false, .replace = true });
-    defer atomic.deinit(io);
-    try atomic.file.writePositionalAll(io, bytes, 0);
-    try atomic.file.sync(io);
-    try atomic.replace(io);
+    return parent;
 }
 pub const SizedManifest = struct { parsed: std.json.Parsed(Manifest), source_length: usize };
 pub fn load(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !std.json.Parsed(Manifest) {

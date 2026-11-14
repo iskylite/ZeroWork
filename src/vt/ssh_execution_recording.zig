@@ -7,6 +7,7 @@ const execution = manifest.execution;
 const identity = @import("../host/identity.zig");
 const Timeline = @import("timeline.zig").Timeline;
 pub const Recording = struct {
+    pub const range_limit = 128;
     allocator: std.mem.Allocator,
     io: std.Io,
     dir: std.Io.Dir,
@@ -14,11 +15,30 @@ pub const Recording = struct {
     arena: std.heap.ArenaAllocator,
     revision: u64 = 1,
     ranges: std.ArrayList(Range) = .empty,
-    boundaries: std.ArrayList(Marker) = .empty,
+    boundaries: std.ArrayList(manifest.Position) = .empty,
     failure: ?[]const u8 = null,
     committed_path: ?[]u8 = null,
-    const Range = struct { shell_id: ?[32]u8 = null, id: [32]u8, generation: u64, completion_source: execution.CompletionSource = .unknown, start: manifest.Position, end: ?manifest.Position = null, start_fence: ?u64 = null, end_fence: ?u64 = null, process: ?execution.ProcessReceipt = null, attribution: execution.OutputAttribution = .unverified, reason: ?[]const u8 = null, saved: bool = false, failure: ?[]const u8 = null, evidence: manifest.Evidence = .pending };
-    const Marker = struct { position: manifest.Position, consumed: bool = false };
+    const Range = struct {
+        shell_id: ?[32]u8 = null,
+        id: [32]u8,
+        generation: u64,
+        completion_source: execution.CompletionSource = .unknown,
+        start: manifest.Position,
+        end: ?manifest.Position = null,
+        start_fence: ?u64 = null,
+        end_fence: ?u64 = null,
+        process: ?execution.ProcessReceipt = null,
+        attribution: execution.OutputAttribution = .unverified,
+        reason: ?[]const u8 = null,
+        saved: bool = false,
+        failure: ?[]const u8 = null,
+        evidence: manifest.Evidence = .pending,
+        archived: bool = false,
+
+        fn value(self: *const Range) manifest.ExecutionRange {
+            return .{ .execution_id = &self.id, .shell_context_id = if (self.shell_id) |*shell| shell else null, .completion_source = self.completion_source, .recording_generation = self.generation, .start = self.start, .end = self.end, .start_boundary_sequence = self.start_fence, .end_boundary_sequence = self.end_fence, .output_scope = .session_interval, .completion_evidence = self.evidence, .process_receipt = self.process, .output_attribution = self.attribution, .output_attribution_reason = self.reason, .interval_saved = self.saved, .failure = self.failure };
+        }
+    };
     pub const Barrier = struct { recording_id: [32]u8, generation: u64, revision: u64 };
     pub const BoundaryReceipt = struct { position: manifest.Position, revision: u64 };
     pub fn init(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: recording.Options) !Recording {
@@ -64,16 +84,16 @@ pub const Recording = struct {
             range.evidence = .unknown;
             range.failure = "SessionReconnected";
         };
-        for (self.boundaries.items) |*marker| marker.consumed = true;
+        self.boundaries.clearRetainingCapacity();
         self.options.generations = copy;
     }
     pub fn markBoundary(self: *Recording, raw_offset: u64, now: i64) !manifest.Position {
         if (self.failure != null) return error.RecordingDegraded;
-        if (self.boundaries.items.len >= 256) return error.RecordingBoundaryCapacity;
+        if (self.boundaries.items.len >= range_limit * 2) return error.RecordingBoundaryCapacity;
         try self.boundaries.ensureUnusedCapacity(self.allocator, 1);
         const sequence = try self.options.timeline.?.markBoundary(now, raw_offset);
         const position: manifest.Position = .{ .raw_offset = raw_offset, .event_sequence = sequence };
-        self.boundaries.appendAssumeCapacity(.{ .position = position });
+        self.boundaries.appendAssumeCapacity(position);
         return position;
     }
     pub fn startBarrier(self: *Recording, id: identity.ExecutionId, total: u64) !Barrier {
@@ -81,7 +101,6 @@ pub const Recording = struct {
     }
     pub fn startShellBarrier(self: *Recording, id: identity.ExecutionId, total: u64, shell_id: ?[32]u8, parent_executions: []const identity.ExecutionId) !Barrier {
         if (self.failure != null) return error.RecordingDegraded;
-        if (self.ranges.items.len >= 128) return error.RecordingExecutionCapacity;
         for (self.ranges.items) |range| if (range.end == null and range.evidence == .pending) {
             const parent = for (parent_executions) |execution_id| {
                 const text = std.fmt.bytesToHex(execution_id.bytes, .lower);
@@ -89,6 +108,27 @@ pub const Recording = struct {
             } else false;
             if (shell_id == null or range.shell_id == null or std.meta.eql(shell_id, range.shell_id) or !parent) return error.OperationBusy;
         };
+        const pending = for (self.ranges.items) |range| {
+            if (range.evidence == .pending) break true;
+        } else false;
+        if (!pending) self.boundaries.clearRetainingCapacity();
+        if (self.ranges.items.len >= range_limit) {
+            // Preserve all pending executions, including suspended parents.
+            // A reconnect may have settled old pending entries as unknown.
+            for (self.ranges.items) |*range| {
+                if (range.evidence == .pending or range.archived) continue;
+                try recording.archiveExecution(self.allocator, self.io, self.dir, self.options, self.revision, range.value(), null);
+                range.archived = true;
+            }
+            var kept: usize = 0;
+            for (self.ranges.items) |range| {
+                if (range.evidence != .pending and range.archived) continue;
+                self.ranges.items[kept] = range;
+                kept += 1;
+            }
+            self.ranges.shrinkRetainingCapacity(kept);
+            if (kept >= range_limit) return error.RecordingExecutionCapacity;
+        }
         var frozen = try self.options.timeline.?.snapshotWithAllocator(self.allocator);
         defer frozen.deinit();
         try self.ranges.append(self.allocator, .{ .shell_id = shell_id, .id = std.fmt.bytesToHex(id.bytes, .lower), .generation = self.options.generations[self.options.generations.len - 1].recording_generation, .start = .{ .raw_offset = total, .event_sequence = frozen.next_event_sequence -| 1 } });
@@ -97,48 +137,53 @@ pub const Recording = struct {
     }
     pub fn noteBoundary(self: *Recording, id: identity.ExecutionId, start: bool, boundary: execution.Boundary, total: u64) !BoundaryReceipt {
         const range = try self.find(id);
-        var selected: ?*Marker = null;
-        for (self.boundaries.items) |*marker| if (!marker.consumed and marker.position.raw_offset == boundary.raw_offset) {
-            selected = marker;
-            break;
-        };
-        const marker = selected orelse return error.OutputBoundaryPending;
+        const index = for (self.boundaries.items, 0..) |marker, i| {
+            if (marker.raw_offset == boundary.raw_offset and (boundary.event_sequence == 0 or marker.event_sequence == boundary.event_sequence)) break i;
+        } else return error.OutputBoundaryPending;
+        const position = self.boundaries.items[index];
         if (start) {
             if (range.start_fence != null or boundary.sequence != 1) return error.InvalidExecutionBoundary;
-            range.start = marker.position;
+            range.start = position;
             range.start_fence = boundary.sequence;
         } else {
-            if (range.start_fence == null or range.end != null or boundary.sequence != 2 or marker.position.event_sequence <= range.start.event_sequence) return error.InvalidExecutionBoundary;
-            range.end = marker.position;
+            if (range.start_fence == null or range.end != null or boundary.sequence != 2 or position.event_sequence <= range.start.event_sequence) return error.InvalidExecutionBoundary;
+            range.end = position;
             range.end_fence = boundary.sequence;
         }
-        marker.consumed = true;
-        return .{ .position = marker.position, .revision = try self.persist(total, null) };
+        _ = self.boundaries.orderedRemove(index);
+        return .{ .position = position, .revision = try self.persist(total, null) };
     }
     pub fn saveInterval(self: *Recording, id: identity.ExecutionId, snapshot: execution.Snapshot, total: u64) !u64 {
         const range = try self.find(id);
         if (range.start_fence == null or range.end_fence == null or range.end == null or snapshot.process == null or !snapshot.process.?.foreground_finished or snapshot.output_scope != .session_interval) return error.OutputBoundaryPending;
-        var frozen = try self.options.timeline.?.snapshotWithAllocator(self.allocator);
+        var frozen = try self.options.timeline.?.snapshotExecution(self.allocator, range.start.event_sequence, range.end.?.event_sequence, id, range.generation);
         defer frozen.deinit();
-        if (frozen.events.items.len == 0 or frozen.events.items[0].event_sequence > range.start.event_sequence) return error.ExecutionIntervalNotRetained;
         range.completion_source = snapshot.completion_source;
         range.process = snapshot.process;
         range.attribution = snapshot.output_attribution;
         range.reason = snapshot.output_attribution_reason;
         range.evidence = .foreground_finished;
         range.saved = true;
-        errdefer range.saved = false;
+        errdefer if (!range.archived) {
+            range.saved = false;
+        };
+        try recording.archiveExecution(self.allocator, self.io, self.dir, self.options, try std.math.add(u64, self.revision, 1), range.value(), &frozen);
+        range.archived = true;
         return self.persist(total, null);
     }
     pub fn abandon(self: *Recording, id: identity.ExecutionId, snapshot: execution.Snapshot, total: u64) !u64 {
         const range = self.find(id) catch return self.revision;
+        if (range.archived) return self.revision;
         range.completion_source = snapshot.completion_source;
         range.process = snapshot.process;
         range.attribution = snapshot.output_attribution;
         range.reason = snapshot.output_attribution_reason;
         range.failure = snapshot.failure orelse "ExecutionUnknown";
         range.evidence = if (snapshot.submit_sent) .unknown else .cancelled_unsent;
-        return self.persist(total, null);
+        const revision = try self.persist(total, null);
+        try recording.archiveExecution(self.allocator, self.io, self.dir, self.options, revision, range.value(), null);
+        range.archived = true;
+        return revision;
     }
     fn find(self: *Recording, id: identity.ExecutionId) !*Range {
         const text = std.fmt.bytesToHex(id.bytes, .lower);
@@ -147,18 +192,15 @@ pub const Recording = struct {
     }
     pub fn rangeValues(self: *Recording, buffer: []manifest.ExecutionRange) []const manifest.ExecutionRange {
         std.debug.assert(buffer.len >= self.ranges.items.len);
-        for (self.ranges.items, buffer[0..self.ranges.items.len]) |*range, *value| value.* = .{ .execution_id = &range.id, .shell_context_id = if (range.shell_id) |*shell| shell else null, .completion_source = range.completion_source, .recording_generation = range.generation, .start = range.start, .end = range.end, .start_boundary_sequence = range.start_fence, .end_boundary_sequence = range.end_fence, .output_scope = .session_interval, .completion_evidence = range.evidence, .process_receipt = range.process, .output_attribution = range.attribution, .output_attribution_reason = range.reason, .interval_saved = range.saved, .failure = range.failure };
+        for (self.ranges.items, buffer[0..self.ranges.items.len]) |*range, *value| value.* = range.value();
         return buffer[0..self.ranges.items.len];
     }
     pub fn persist(self: *Recording, total: u64, ended_ms: ?i64) !u64 {
-        var ranges: [128]manifest.ExecutionRange = undefined;
-        var sequences: [256]u64 = undefined;
-        for (self.boundaries.items, 0..) |marker, i| sequences[i] = marker.position.event_sequence;
+        var ranges: [range_limit]manifest.ExecutionRange = undefined;
         var options = self.options;
         options.total_received = total;
         options.ended_ms = ended_ms;
         options.execution_ranges = self.rangeValues(&ranges);
-        options.boundary_sequences = sequences[0..self.boundaries.items.len];
         const receipt = recording.publish(self.allocator, self.io, self.dir, options) catch |err| {
             self.failure = @errorName(err);
             return err;

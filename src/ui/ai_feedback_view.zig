@@ -5,7 +5,8 @@ const ui = @import("ui");
 const S = @import("ai_assistant_styles.zig");
 const theme = @import("app_theme.zig");
 
-pub const Kind = enum { rollback, warning };
+pub const Kind = enum { rollback, completion, warning };
+pub const completion_duration_ns = 6 * std.time.ns_per_s;
 pub const rollback_label = "已回退，原消息已恢复到输入框，此回合及后续对话已移除。";
 
 pub const View = struct {
@@ -15,6 +16,7 @@ pub const View = struct {
     rollback_icon: *ui.Node,
     warning_icon: *ui.Node,
     dismiss_button: *ui.Node,
+    completion_until_ns: ?i128 = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope) !*View {
         const root = try ui.boxStyled(cx, S.noticeHolder, .{});
@@ -36,32 +38,46 @@ pub const View = struct {
         text.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1, .flex_shrink = 1, .margin = .{ .top = 2, .bottom = 2 } });
         try row.appendChild(cx.allocator, text);
         const self = try scope.createState(View, .{ .cx = cx, .root = root, .text = text, .rollback_icon = rollback_icon, .warning_icon = warning_icon, .dismiss_button = undefined });
-        self.dismiss_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 12), .a11y_label = "关闭提示", .base_style = S.windowControl(), .hover_style = S.controlHover(.close), .on_click = cx.on(View, self, dismiss) }).mount(scope, cx);
+        self.dismiss_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 12), .a11y_label = "关闭提示", .base_style = S.windowControl(), .hover_style = S.controlHover(.close), .on_click = cx.on(View, self, clear) }).mount(scope, cx);
         self.dismiss_button.meta.ownership.meta.test_id = "ai.feedback.dismiss";
         try row.appendChild(cx.allocator, self.dismiss_button);
         return self;
     }
 
     pub fn show(self: *View, label: []const u8, kind: Kind) void {
-        // Polling can report the same failure on successive frames. Preserve
-        // the existing notice without keeping the idle scene dirty forever.
-        if (std.mem.eql(u8, self.text.getText().?.content, label) and
-            self.root.style.display == (if (label.len == 0) ui.types.Display.none else .flex) and
-            self.rollback_icon.style.display == (if (kind == .rollback) ui.types.Display.flex else .none) and
-            self.warning_icon.style.display == (if (kind == .warning) ui.types.Display.flex else .none)) return;
+        if (kind == .warning and self.completion_until_ns == null and
+            self.root.style.display == .flex and std.mem.eql(u8, self.text.getText().?.content, label)) return;
         self.text.setTextContent(self.cx.allocator, label) catch return;
+        self.completion_until_ns = if (kind == .warning) null else @import("../platform/realtime.zig").monotonicNs() + completion_duration_ns;
         self.rollback_icon.setDisplay(if (kind == .rollback) .flex else .none);
-        self.warning_icon.setDisplay(if (kind == .warning) .flex else .none);
-        // Blocking reasons stay visible until resolved; completed actions may be dismissed.
+        self.warning_icon.setDisplay(if (kind == .rollback) .none else .flex);
         self.dismiss_button.setDisplay(if (kind == .rollback) .flex else .none);
-        self.root.setDisplay(if (label.len == 0) .none else .flex);
+        self.root.setDisplay(.flex);
         _ = self.rollback_icon.setTint(theme.current().fg_2);
         _ = self.warning_icon.setTint(theme.current().warn_ink);
         self.root.markRenderDirty();
     }
 
-    fn dismiss(self: *View) void {
+    pub fn clearWarning(self: *View) void {
+        if (self.completion_until_ns == null) self.clear();
+    }
+
+    pub fn clearCompletion(self: *View) void {
+        if (self.completion_until_ns != null) self.clear();
+    }
+
+    pub fn pollCompletion(self: *View, now_ns: i128) bool {
+        const deadline = self.completion_until_ns orelse return false;
+        if (now_ns < deadline) {
+            self.cx.scheduleRedrawAfterNs(@intCast(deadline - now_ns));
+            return false;
+        }
+        self.clear();
+        return true;
+    }
+
+    pub fn clear(self: *View) void {
+        self.completion_until_ns = null;
         self.root.setDisplay(.none);
-        self.root.markRenderDirty();
     }
 };

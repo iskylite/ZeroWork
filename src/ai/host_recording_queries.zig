@@ -1,4 +1,4 @@
-//! Closed-recording content authority and bounded, resumable offline VT reads.
+//! Recording content authority and bounded, resumable archive reads.
 //! Only trusted controllers install grants; a model-supplied ID never searches
 //! the archive catalog. Readers pin one committed manifest and all dependencies.
 const std = @import("std");
@@ -52,6 +52,7 @@ const Reader = struct {
     offset: u64 = 0,
     pending: std.ArrayList(u8) = .empty,
     adapter: ?Adapter = null,
+    header_decoded: bool = false,
     decoded: bool = false,
     event_sequence: u64 = 0,
     previous_ms: i64 = 0,
@@ -61,6 +62,7 @@ const Reader = struct {
     execution_range: ?archive_mod.manifest.ExecutionRange = null,
     interval_output: std.ArrayList(u8) = .empty,
     interval_byte: usize = 0,
+    interval_base: usize = 0,
     commands_partial: bool = false,
     after_line: ?u64 = null,
     command_page: usize = 0,
@@ -149,9 +151,19 @@ pub const Backend = struct {
         if (!std.mem.eql(u8, reader.grant.manifest_path, grant.manifest_path) or reader.grant.manifest_revision != grant.manifest_revision or !reader.grant.owner.eql(grant.owner)) return error.CursorExpired;
         for (reader.record.lease.leases.items) |*lease| try lease.validateFrozen();
         try verify(reader);
-        if (reader.verified and !reader.decoded) try decode(reader);
+        if (reader.verified and !reader.decoded and !intervalPageReady(reader)) try decode(reader);
         std.c.arc4random_buf(&reader.token, reader.token.len);
         const result = try render(reader, invocation, allocator);
+        if (reader.record.document.value.execution_segment and reader.interval_byte > 0) {
+            // Retain the preceding search context and up to three bytes to
+            // begin that context at a UTF-8 scalar boundary.
+            const consumed = if (reader.request.query != null) reader.interval_byte -| 35 else reader.interval_byte;
+            const remaining = reader.interval_output.items[consumed..];
+            std.mem.copyForwards(u8, reader.interval_output.items[0..remaining.len], remaining);
+            reader.interval_output.shrinkRetainingCapacity(remaining.len);
+            reader.interval_base += consumed;
+            reader.interval_byte -= consumed;
+        }
         if (reader.decoded and !result.more) self.release(index);
         return result.value;
     }
@@ -162,21 +174,30 @@ pub const Backend = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
-        var record = try archive_mod.acquireQueryRecord(self.archive, std.heap.c_allocator, grant.manifest_path);
+        const execution_id = if (request.command_ref) |reference| if (std.mem.startsWith(u8, reference, "c1:")) try commandExecution(grant, reference) else null else null;
+        var record = if (execution_id) |id|
+            archive_mod.acquireExecutionSegment(self.archive, std.heap.c_allocator, grant.manifest_path, &grant.recording_id, grant.manifest_revision, id) catch |err| switch (err) {
+                error.FileNotFound, error.CommandIndexUnavailable => try archive_mod.acquireQueryRecord(self.archive, std.heap.c_allocator, grant.manifest_path),
+                else => return err,
+            }
+        else
+            try archive_mod.acquireQueryRecord(self.archive, std.heap.c_allocator, grant.manifest_path);
         errdefer record.deinit();
         const doc = record.document.value;
-        if (!std.mem.eql(u8, doc.recording_id, &grant.recording_id) or (grant.manifest_revision != 0 and grant.manifest_revision != doc.manifest_revision)) return error.StaleRecordingRevision;
+        if (!std.mem.eql(u8, doc.recording_id, &grant.recording_id) or (!doc.execution_segment and grant.manifest_revision != 0 and grant.manifest_revision != doc.manifest_revision)) return error.StaleRecordingRevision;
         const generation = for (doc.recording.generations) |item| {
             if (item.recording_generation == grant.recording_generation) break item;
         } else return error.StaleGeneration;
         if (generation.session_id != @backingInt(grant.owner.session_id) or generation.session_generation != grant.owner.generation) return error.StaleGeneration;
         // Multiple generations require a seekable baseline for that generation;
         // never replay another generation from an empty decoder.
-        if (doc.recording.generations.len != 1 or generation.raw_offset_start != 0 or generation.event_sequence_start > 1) return error.RecordingBaselineUnavailable;
-        const has_empty = for (generation.baselines) |baseline| {
-            if (baseline.kind == .initial_empty and baseline.raw_offset == 0 and baseline.event_sequence == 0) break true;
-        } else false;
-        if (!has_empty) return error.RecordingBaselineUnavailable;
+        if (!doc.execution_segment) {
+            if (doc.recording.generations.len != 1 or generation.raw_offset_start != 0 or generation.event_sequence_start > 1) return error.RecordingBaselineUnavailable;
+            const has_empty = for (generation.baselines) |baseline| {
+                if (baseline.kind == .initial_empty and baseline.raw_offset == 0 and baseline.event_sequence == 0) break true;
+            } else false;
+            if (!has_empty) return error.RecordingBaselineUnavailable;
+        }
         var copy = request;
         copy.source = .{ .recording = try a.dupe(u8, request.source.recording) };
         if (copy.query) |value| copy.query = try a.dupe(u8, value);
@@ -185,13 +206,12 @@ pub const Backend = struct {
         var owned_grant = grant;
         owned_grant.manifest_path = try a.dupe(u8, grant.manifest_path);
         reader.* = .{ .arena = arena, .record = record, .grant = owned_grant, .request = copy, .tool = try a.dupe(u8, tool), .last_used = now_ms, .token = undefined };
-        if (request.command_ref) |reference| if (std.mem.startsWith(u8, reference, "c1:")) {
-            const execution_id = try commandExecution(grant, reference);
+        if (execution_id) |id| {
             reader.execution_range = for (doc.execution_ranges) |range| {
-                if (range.recording_generation == grant.recording_generation and std.mem.eql(u8, range.execution_id, execution_id)) break range;
+                if (range.recording_generation == grant.recording_generation and std.mem.eql(u8, range.execution_id, id)) break range;
             } else return error.CommandIndexUnavailable;
             if (reader.execution_range.?.end == null or doc.events.len == 0) return error.RangeUnavailable;
-        };
+        }
         std.c.arc4random_buf(&reader.token, reader.token.len);
         return reader;
     }
@@ -222,6 +242,13 @@ fn verify(reader: *Reader) !void {
     }
     reader.verified = reader.verify_file == files.len;
 }
+fn intervalPageReady(reader: *const Reader) bool {
+    // Keep enough lookahead for UTF-8 repair, a literal spanning pages and its
+    // following context. Retain at most one decoded cast event past that point.
+    return reader.record.document.value.execution_segment and
+        reader.interval_output.items.len - reader.interval_byte >= @min(reader.request.max_bytes, 6000) + 512 + 36;
+}
+
 fn decode(reader: *Reader) !void {
     const a = reader.arena.allocator();
     const lease = reader.record.lease.cast();
@@ -236,7 +263,7 @@ fn decode(reader: *Reader) !void {
             std.mem.copyForwards(u8, reader.pending.items[0..remaining], reader.pending.items[newline + 1 ..]);
             reader.pending.shrinkRetainingCapacity(remaining);
             events += 1;
-            if (reader.decoded) return;
+            if (reader.decoded or intervalPageReady(reader)) return;
             continue;
         }
         if (reader.offset == lease.stat.size) {
@@ -244,7 +271,7 @@ fn decode(reader: *Reader) !void {
                 try decodeLine(reader, reader.pending.items);
                 reader.pending.clearRetainingCapacity();
             }
-            if (reader.adapter == null) return error.EmptyRecording;
+            if (!reader.header_decoded) return error.EmptyRecording;
             reader.decoded = true;
             return;
         }
@@ -261,7 +288,7 @@ fn decodeLine(reader: *Reader, line: []const u8) !void {
     const a = reader.arena.allocator();
     const event = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, line, .{});
     defer event.deinit();
-    if (reader.adapter == null) {
+    if (!reader.header_decoded) {
         if (event.value != .object) return error.InvalidCast;
         const v = event.value.object.get("version") orelse return error.InvalidCast;
         const cols = event.value.object.get("width") orelse return error.InvalidCast;
@@ -273,11 +300,14 @@ fn decodeLine(reader: *Reader, line: []const u8) !void {
             if (metadata != .object) return error.InvalidCast;
             if (metadata.object.get("replay_baseline") != null) return error.RecordingBaselineUnavailable;
         }
-        reader.adapter = try Adapter.init(std.heap.c_allocator, @intCast(rows.integer), @intCast(cols.integer));
-        const continuation_limit: usize = 65536;
-        if (c.ghostty_terminal_set(reader.adapter.?.terminal, c.GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES, &continuation_limit) != c.GHOSTTY_SUCCESS) return error.RecordingDecoderBudgetExceeded;
-        reader.adapter.?.wall_clock_ms = replayClock;
-        try reader.adapter.?.setScrollbackLimit(4096);
+        if (!reader.record.document.value.execution_segment) {
+            reader.adapter = try Adapter.init(std.heap.c_allocator, @intCast(rows.integer), @intCast(cols.integer));
+            const continuation_limit: usize = 65536;
+            if (c.ghostty_terminal_set(reader.adapter.?.terminal, c.GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES, &continuation_limit) != c.GHOSTTY_SUCCESS) return error.RecordingDecoderBudgetExceeded;
+            reader.adapter.?.wall_clock_ms = replayClock;
+            try reader.adapter.?.setScrollbackLimit(4096);
+        }
+        reader.header_decoded = true;
         return;
     }
     if (event.value != .array or event.value.array.items.len != 3) return error.InvalidCast;
@@ -303,22 +333,28 @@ fn decodeLine(reader: *Reader, line: []const u8) !void {
     receive_ms = ms + 1;
     if (std.mem.eql(u8, items[1].string, "o")) {
         if (reader.execution_range) |range| {
-            const mapping = for (reader.record.document.value.events) |mapped| {
+            const doc = reader.record.document.value;
+            const mapping = if (doc.execution_segment) blk: {
+                if (reader.event_sequence >= doc.events.len) return error.RecordingGap;
+                const mapped = doc.events[@intCast(reader.event_sequence)];
+                if (mapped.cast_line != reader.event_sequence + 1) return error.RecordingGap;
+                break :blk mapped;
+            } else for (doc.events) |mapped| {
                 if (mapped.cast_line == reader.event_sequence + 1) break mapped;
             } else return error.RecordingGap;
             if (mapping.kind == .output and mapping.sequence > range.start.event_sequence and mapping.sequence < range.end.?.event_sequence) {
                 if (mapping.raw_offset < range.start.raw_offset or mapping.raw_offset +| mapping.raw_length > range.end.?.raw_offset) return error.RangeUnavailable;
-                if (items[2].string.len > 65536 -| reader.interval_output.items.len) return error.RecordingCommandBudgetExceeded;
+                if (!reader.record.document.value.execution_segment and items[2].string.len > 65536 -| reader.interval_output.items.len) return error.RecordingCommandBudgetExceeded;
                 try reader.interval_output.appendSlice(a, items[2].string);
             }
         }
-        _ = try reader.adapter.?.feed(items[2].string);
+        if (reader.adapter) |*adapter| _ = try adapter.feed(items[2].string);
     } else if (std.mem.eql(u8, items[1].string, "r")) {
         const x = std.mem.indexOfScalar(u8, items[2].string, 'x') orelse return error.InvalidCast;
         const cols = std.fmt.parseInt(u16, items[2].string[0..x], 10) catch return error.InvalidCast;
         const rows = std.fmt.parseInt(u16, items[2].string[x + 1 ..], 10) catch return error.InvalidCast;
         if (cols == 0 or rows == 0 or cols > 500 or rows > 200) return error.InvalidCast;
-        try reader.adapter.?.resize(cols, rows);
+        if (reader.adapter) |*adapter| try adapter.resize(cols, rows);
     } else if (std.mem.eql(u8, items[1].string, "a")) {
         const typed = try std.json.parseFromSlice(terminal.ApplicationRecord, std.heap.c_allocator, items[2].string, .{});
         defer typed.deinit();
@@ -351,7 +387,7 @@ fn finish(invocation: host.Invocation, allocator: std.mem.Allocator, body: []u8,
 fn render(reader: *Reader, invocation: host.Invocation, allocator: std.mem.Allocator) !Rendered {
     const doc = reader.record.document.value;
     const cursor = std.fmt.bytesToHex(reader.token, .lower);
-    if (!reader.decoded) return finish(invocation, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .source_ref = reader.request.source.recording, .source_revision = doc.manifest_revision, .observed_at = std.Io.Clock.real.now(reader.record.lease.cast().io).toMilliseconds(), .timestamp_basis = "client_receive", .time_basis = "cast_first_event_elapsed_ms", .time_coordinate = "cast_first_event_elapsed_ms", .phase = if (reader.verified) "decoding" else "verifying_committed_dependencies", .scan_progress = .{ .verified_files = reader.verify_file, .verified_file_offset = reader.verify_offset, .cast_bytes_scanned = reader.offset, .cast_committed_bytes = reader.record.lease.cast().stat.size, .events_decoded = reader.event_sequence, .max_io_bytes_per_call = scan_bytes * 2, .max_events_per_call = event_limit }, .gap = &[_][]const u8{"scan_in_progress"}, .complete = false, .truncated = true, .next_cursor = &cursor }, .{}), true);
+    if (!reader.decoded and !intervalPageReady(reader)) return finish(invocation, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .source_ref = reader.request.source.recording, .source_revision = doc.manifest_revision, .observed_at = std.Io.Clock.real.now(reader.record.lease.cast().io).toMilliseconds(), .timestamp_basis = "client_receive", .time_basis = "cast_first_event_elapsed_ms", .time_coordinate = "cast_first_event_elapsed_ms", .phase = if (reader.verified) "decoding" else "verifying_committed_dependencies", .scan_progress = .{ .verified_files = reader.verify_file, .verified_file_offset = reader.verify_offset, .cast_bytes_scanned = reader.offset, .cast_committed_bytes = reader.record.lease.cast().stat.size, .events_decoded = reader.event_sequence, .max_io_bytes_per_call = scan_bytes * 2, .max_events_per_call = event_limit }, .gap = &[_][]const u8{"scan_in_progress"}, .complete = false, .truncated = true, .next_cursor = &cursor }, .{}), true);
     if (std.mem.eql(u8, reader.tool, "host.list_terminal_commands")) return renderCommands(reader, invocation, allocator);
     if (reader.request.range_kind == .command) return renderCommandOutput(reader, invocation, allocator);
     var native: terminal.ContentRequest = .{ .max_lines = @intCast(@min(reader.request.max_lines, 100)), .max_bytes = @min(reader.request.max_bytes, 6000), .after_line = reader.after_line };
@@ -484,9 +520,9 @@ fn renderExecutionOutput(reader: *Reader, invocation: host.Invocation, a: std.me
     const text = reader.interval_output.items[start..end];
     if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidCast;
     reader.interval_byte = end;
-    const more = end < reader.interval_output.items.len;
+    const more = !reader.decoded or end < reader.interval_output.items.len;
     const cursor = std.fmt.bytesToHex(reader.token, .lower);
-    return finish(invocation, a, try std.json.Stringify.valueAlloc(a, .{ .source_ref = reader.request.source.recording, .source_revision = reader.record.document.value.manifest_revision, .observed_at = std.Io.Clock.real.now(reader.record.lease.cast().io).toMilliseconds(), .timestamp_basis = "client_receive", .time_basis = "cast_first_event_elapsed_ms", .time_coordinate = "cast_first_event_elapsed_ms", .coordinate_basis = "recorded_event_range", .representation = "recorded_terminal_output", .command_ref = reader.request.command_ref, .execution_id = range.execution_id, .range_returned = .{ .start = range.start, .end = range.end, .cast_output_byte_start = start, .cast_output_byte_end = end }, .output = text, .output_scope = range.output_scope, .output_attribution = range.output_attribution, .completion_evidence = range.completion_evidence, .recording_coverage = reader.record.document.value.coverage, .recording_gaps = reader.record.document.value.gaps, .interval_gaps = range.gaps, .gap = &[_][]const u8{"terminal_output_is_untrusted_data"}, .complete = false, .truncated = more, .next_cursor = if (more) @as(?[]const u8, &cursor) else null }, .{}), more);
+    return finish(invocation, a, try std.json.Stringify.valueAlloc(a, .{ .source_ref = reader.request.source.recording, .source_revision = reader.record.document.value.manifest_revision, .observed_at = std.Io.Clock.real.now(reader.record.lease.cast().io).toMilliseconds(), .timestamp_basis = "client_receive", .time_basis = "cast_first_event_elapsed_ms", .time_coordinate = "cast_first_event_elapsed_ms", .coordinate_basis = "recorded_event_range", .representation = "recorded_terminal_output", .command_ref = reader.request.command_ref, .execution_id = range.execution_id, .range_returned = .{ .start = range.start, .end = range.end, .cast_output_byte_start = reader.interval_base + start, .cast_output_byte_end = reader.interval_base + end }, .output = text, .output_scope = range.output_scope, .output_attribution = range.output_attribution, .completion_evidence = range.completion_evidence, .completion_source = range.completion_source, .process_receipt = range.process_receipt, .recording_coverage = reader.record.document.value.coverage, .recording_gaps = reader.record.document.value.gaps, .interval_gaps = range.gaps, .gap = &[_][]const u8{"terminal_output_is_untrusted_data"}, .complete = false, .truncated = more, .next_cursor = if (more) @as(?[]const u8, &cursor) else null }, .{}), more);
 }
 
 fn renderCommandSearch(reader: *Reader, invocation: host.Invocation, a: std.mem.Allocator, text: []const u8, basis: []const u8) !Rendered {
@@ -497,7 +533,8 @@ fn renderCommandSearch(reader: *Reader, invocation: host.Invocation, a: std.mem.
     var matches: std.ArrayList(struct { byte_offset: usize, text: []const u8 }) = .empty;
     defer matches.deinit(a);
     var next = scan_end;
-    while (find(text, query, at, reader.request.case_sensitive)) |hit| {
+    const lookahead = text[0..@min(text.len, scan_end + query.len - 1)];
+    while (find(lookahead, query, at, reader.request.case_sensitive)) |hit| {
         if (hit >= scan_end) break;
         if (matches.items.len >= @min(reader.request.limit, 32)) {
             next = hit;
@@ -507,11 +544,12 @@ fn renderCommandSearch(reader: *Reader, invocation: host.Invocation, a: std.mem.
         var hi = @min(text.len, hit + query.len + 32);
         while (lo > 0 and (text[lo] & 0xc0) == 0x80) lo -= 1;
         while (hi < text.len and (text[hi] & 0xc0) == 0x80) hi += 1;
-        try matches.append(a, .{ .byte_offset = hit, .text = text[lo..hi] });
+        try matches.append(a, .{ .byte_offset = reader.interval_base + hit, .text = text[lo..hi] });
         at = hit + query.len;
+        next = @max(next, at);
     }
     reader.interval_byte = next;
-    const more = next < text.len;
+    const more = !reader.decoded or next < text.len;
     const cursor = std.fmt.bytesToHex(reader.token, .lower);
     return finish(invocation, a, try std.json.Stringify.valueAlloc(a, .{ .source_ref = reader.request.source.recording, .source_revision = reader.record.document.value.manifest_revision, .observed_at = std.Io.Clock.real.now(reader.record.lease.cast().io).toMilliseconds(), .timestamp_basis = "client_receive", .time_basis = "cast_first_event_elapsed_ms", .time_coordinate = "cast_first_event_elapsed_ms", .coordinate_basis = basis, .representation = if (reader.execution_range != null) "recorded_terminal_output" else "typed_application_record", .command_ref = reader.request.command_ref, .matches = matches.items, .case_folding = if (reader.request.case_sensitive) "exact_utf8" else "ascii_only", .gap = &[_][]const u8{"command_output_only"}, .complete = false, .truncated = more, .next_cursor = if (more) @as(?[]const u8, &cursor) else null }, .{}), more);
 }

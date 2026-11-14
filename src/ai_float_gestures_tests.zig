@@ -163,7 +163,7 @@ test "AI float double click resets only position maximize restores size and curs
     f.view.toggleMaximized();
     f.layout();
     try std.testing.expectEqual(float.safeBounds(pane, window), f.model.rect(pane, window));
-    for (f.view.handles) |handle| try std.testing.expect(!handle.isDisplayedInTree());
+    for (f.view.handles) |handle| try std.testing.expect(handle.isDisplayedInTree());
     const maximized_grip = f.grip.globalRect();
     f.cx.handleMouseMove(maximized_grip.x + maximized_grip.w / 2, maximized_grip.y + maximized_grip.h / 2);
     try std.testing.expectEqual(ui.CursorShape.default, f.cx.current_cursor);
@@ -180,6 +180,71 @@ test "AI float double click resets only position maximize restores size and curs
     f.finish();
     try std.testing.expect(f.model.desired == null);
     try std.testing.expectEqual(reset, archived.desired.?);
+}
+
+test "AI float maximized panel can be resized from every edge and corner" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const initial: float.Rect = .{ .x = 600, .y = 180, .width = 600, .height = 420 };
+    const full = float.safeBounds(pane, window);
+    for ([_]float.Edge{ .n, .s, .w, .e, .nw, .ne, .sw, .se }, 0..) |edge, index| {
+        f.model.setRectangle(initial, pane, window);
+        f.view.toggleMaximized();
+        f.layout();
+        const dx: f32 = if (edge.west()) 40 else if (edge.east()) -40 else 0;
+        const dy: f32 = if (edge.north()) 20 else if (edge.south()) -20 else 0;
+        f.begin(f.view.handles[index], dx, dy);
+        try std.testing.expect(!f.model.maximized);
+        f.finish();
+        const resized = float.resized(full, edge, dx, dy, pane, window);
+        try std.testing.expectEqual(resized, f.model.rect(pane, window));
+        try std.testing.expect(f.model.restore == null);
+        f.view.toggleMaximized();
+        f.layout();
+        try std.testing.expectEqual(full, f.model.rect(pane, window));
+        f.view.toggleMaximized();
+        f.layout();
+        try std.testing.expectEqual(resized, f.model.rect(pane, window));
+    }
+}
+
+test "AI float maximized resize ignores unchanged bounds and escape restores maximization" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const Monitor = struct {
+        model: *float.Model,
+        states: [2]bool = undefined,
+        count: usize = 0,
+        fn changed(self: *@This()) void {
+            if (self.count < self.states.len) self.states[self.count] = self.model.maximized;
+            self.count += 1;
+        }
+    };
+    var monitor: Monitor = .{ .model = &f.model };
+    f.view.on_maximized_change = f.cx.on(Monitor, &monitor, Monitor.changed);
+    const initial: float.Rect = .{ .x = 600, .y = 180, .width = 600, .height = 420 };
+    f.model.setRectangle(initial, pane, window);
+    f.view.toggleMaximized();
+    f.layout();
+    const maximized_geometry = f.model.geometry();
+    f.begin(f.view.handles[3], 40, 0); // Already at the outer bound.
+    f.finish();
+    try std.testing.expect(f.model.maximized);
+    try std.testing.expectEqual(maximized_geometry, f.model.geometry());
+    try std.testing.expectEqual(@as(usize, 0), monitor.count);
+    f.begin(f.view.handles[7], -80, -40);
+    try std.testing.expect(!f.model.maximized);
+    f.cx.handleKeyDown(.escape, .{});
+    f.layout();
+    try std.testing.expect(f.model.maximized);
+    try std.testing.expectEqual(maximized_geometry, f.model.geometry());
+    try std.testing.expectEqual(@as(usize, 2), monitor.count);
+    try std.testing.expectEqualSlices(bool, &.{ false, true }, &monitor.states);
+    f.view.toggleMaximized();
+    f.layout();
+    try std.testing.expectEqual(initial, f.model.rect(pane, window));
 }
 
 test "AI float cursor covers each straight edge along its full resize strip" {

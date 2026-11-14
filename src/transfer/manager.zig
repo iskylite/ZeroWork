@@ -49,6 +49,8 @@ pub const Failure = enum {
     checksum,
     protocol,
     io,
+    source_not_found,
+    destination_directory_not_found,
 };
 
 /// Value-owned startup diagnostics survive connection teardown and retry.
@@ -793,7 +795,8 @@ pub const Manager = struct {
             // Counters are monotone within an engine attempt. A newly
             // accepted attempt may restart from a revalidated earlier offset.
             job.has_progress = false;
-        } else |_| {
+        } else |err| {
+            @import("../platform/applog.zig").warn(.transfer, "transfer engine open failed job={d} attempt={d}: {s}", .{ job.id, job.attempt, @errorName(err) });
             job.failure = .connection;
             self.scheduleRetry(job, now_ms);
         }

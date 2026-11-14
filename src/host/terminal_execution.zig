@@ -150,6 +150,51 @@ pub const Snapshot = struct {
     failure: ?[]const u8 = null,
 };
 
+/// Execution state changes that can affect a wait. Output bytes and lease
+/// heartbeats have their own revision and do not wake decision observers.
+pub const DecisionEvent = struct {
+    id: ?identity.ExecutionId = null,
+    state: State = .unavailable,
+    input: ?InputWait = null,
+    finished: bool = false,
+    handed_off: bool = false,
+    unknown: bool = false,
+
+    pub fn publish(self: *DecisionEvent, snapshot: Snapshot) void {
+        const next: DecisionEvent = .{
+            .id = snapshot.execution_id,
+            .state = snapshot.state,
+            .input = snapshot.input_wait,
+            .finished = if (snapshot.process) |process| process.foreground_finished else false,
+            .handed_off = snapshot.input_handed_off,
+            .unknown = snapshot.remote_effect_unknown,
+        };
+        if (std.meta.eql(self.*, next)) return;
+        self.* = next;
+        if (next.id != null) @import("../platform/execution_wakeup.zig").notify();
+    }
+};
+
+test "execution decision event wakes the driver for foreground completion without waking for output alone" {
+    var wake = try @import("../platform/wakeup.zig").Wakeup.init();
+    defer wake.deinit();
+    var listener: @import("../platform/execution_wakeup.zig").Listener = .{ .wake = &wake };
+    listener.register();
+    defer listener.unregister();
+    var event: DecisionEvent = .{};
+    var snapshot: Snapshot = .{ .owner = .{ .session_id = @fromBackingInt(1) }, .execution_id = .{ .bytes = @splat(1) }, .state = .running };
+    event.publish(snapshot);
+    wake.drain();
+    var fds = [_]std.c.pollfd{.{ .fd = wake.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
+    snapshot.output_received = 100;
+    snapshot.revision += 1;
+    event.publish(snapshot);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.poll(&fds, 1, 0));
+    snapshot.process = .{ .exit_code = 7, .foreground_finished = true };
+    event.publish(snapshot);
+    try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&fds, 1, 0));
+}
+
 /// Lack of a shell prompt event is not evidence of a competing input owner.
 /// In particular an unintegrated nested SSH shell cannot emit the outer
 /// shell's next A/B event, even when it is visibly idle.

@@ -298,6 +298,7 @@ pub const Controller = struct {
                 try archive_mod.writeTombstone(self.allocator, self.io, self.dir, path, "UserRemoved");
                 record.tombstoned = true;
             }
+            try archive_mod.removeExecutionSegments(self.allocator, self.io, self.dir, path);
         }
         for (record.files.items) |*file| {
             if (file.removed) continue;

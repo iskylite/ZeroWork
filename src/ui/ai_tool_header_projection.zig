@@ -2,10 +2,23 @@
 //! approval and dispatch; a header never falls back to call/request identities.
 const std = @import("std");
 
-pub fn projectWithStatus(a: std.mem.Allocator, name: []const u8, raw: []const u8, status: ?[]const u8) ![]u8 {
-    const value = try project(a, name, raw);
+pub fn projectWithStatus(a: std.mem.Allocator, name: []const u8, raw: []const u8, success_detail: ?[]const u8, status: ?[]const u8) ![]u8 {
+    const value = (try userAnswer(a, name, success_detail)) orelse try project(a, name, raw);
     defer a.free(value);
     return withStatus(a, value, status);
+}
+
+pub fn userAnswer(a: std.mem.Allocator, name: []const u8, success_detail: ?[]const u8) !?[]u8 {
+    const detail = success_detail orelse return null;
+    var decoded: [64]u8 = undefined;
+    const logical = @import("../ai/plugin_tools.zig").decodeName(&decoded, name) catch name;
+    if (!@import("../ai/user_interaction.zig").supports(logical)) return null;
+    const parsed = std.json.parseFromSlice(struct { answer: []const u8 }, a, detail, .{ .ignore_unknown_fields = true }) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return null;
+    };
+    defer parsed.deinit();
+    return try singleLine(a, parsed.value.answer);
 }
 
 pub fn phaseLabel(phase: @import("../ai/step_events.zig").Phase) []const u8 {
@@ -143,6 +156,22 @@ test "tool header projection selects concrete schema parameters and hides call i
     };
     for (cases) |case| {
         const actual = try project(a, case.name, case.raw);
+        defer a.free(actual);
+        try std.testing.expectEqualStrings(case.expected, actual);
+    }
+}
+
+test "question projection displays the submitted answer text" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { name: []const u8, detail: ?[]const u8, expected: []const u8 }{
+        .{ .name = "host.request_user_input", .detail = "{\"option_id\":\"reload\",\"answer\":\"平滑重载配置\"}", .expected = "已完成 · 平滑重载配置" },
+        .{ .name = "host__request_uuser_uinput", .detail = "{\"option_id\":null,\"answer\":\"先检查日志\\n再确认配置\"}", .expected = "已完成 · 先检查日志 再确认配置" },
+        .{ .name = "host.request_user_input", .detail = "{}", .expected = "已完成" },
+        .{ .name = "host.request_user_input", .detail = null, .expected = "已完成" },
+        .{ .name = "host.fetch_url", .detail = "{\"answer\":\"无关结果\"}", .expected = "已完成" },
+    };
+    for (cases) |case| {
+        const actual = try projectWithStatus(a, case.name, "{}", case.detail, "已完成");
         defer a.free(actual);
         try std.testing.expectEqualStrings(case.expected, actual);
     }

@@ -1,5 +1,6 @@
 //! Main-thread terminal file operation. Workers own only immutable input/bytes.
 const std = @import("std");
+const applog = @import("../platform/applog.zig");
 const files = @import("../host/terminal_files.zig");
 const identity = @import("../host/identity.zig");
 const sessions = @import("../host/session_host.zig");
@@ -16,6 +17,7 @@ pub const Job = struct {
     binding: sessions.ServiceHandle,
     request: files.Request,
     local: bool,
+    ssh_host: ?[]const u8 = null,
     result: files.Result = .{},
     image: images.ContentRef = .{},
     cancel: @import("../ai/provider.zig").CancelToken = .{},
@@ -59,6 +61,16 @@ pub const Job = struct {
         std.hash.autoHash(&scope_hash, binding.binding_id);
         std.hash.autoHash(&scope_hash, binding.binding_generation);
         self.request.version_scope = scope_hash.final();
+        if (!self.local) {
+            const remote = tab.host_snapshot orelse return error.ServiceUnavailable;
+            self.ssh_host = try storage.dupe(u8, remote.value.host);
+            if (request.path.len > 0 and request.path[0] != '/') {
+                const runtime = tab.runtime orelse return error.ServiceUnavailable;
+                const shell = try (try runtime.terminalService()).executionSnapshot();
+                // A cwd reported by a nested PTY shell does not belong to SSH exec.
+                if (shell.shell.depth != 0 or shell.shell_switch.pending) return error.SshFileAbsolutePathRequired;
+            }
+        }
         self.request.path = try files.pathFor(storage, request.path, cwd);
         if (self.local) {
             const paths = try @import("../config/paths.zig").Paths.forApplication(storage);
@@ -138,7 +150,17 @@ pub const Job = struct {
             _ = app.sessions.journal.completeReleased(active.key, "terminal file operation released") catch {};
             self.active = null;
             if (self.stale or self.cancel.isCancelled() or value.truncated or value.status != .completed or value.exit_code != 0) {
-                self.result.failure = if (self.stale) error.StaleBinding else if (self.cancel.isCancelled()) error.Cancelled else if (value.truncated) error.FileTooLarge else remoteError(value.stderr);
+                const failure = if (self.stale) error.StaleBinding else if (value.truncated) error.FileTooLarge else remoteError(value) orelse if (self.cancel.isCancelled()) error.Cancelled else error.RemoteFileOperationFailed;
+                self.result.failure = failure;
+                // Leave room for the escaped endpoint, path and stderr in the log record.
+                const host = self.ssh_host orelse "";
+                const path = self.request.path;
+                const stderr = value.stderr[0..@min(value.stderr.len, 320)];
+                applog.warn(
+                    .ssh,
+                    "remote file operation failed: session={d} exec_operation={d} kind={s} stage={s} failure={s} status={s} exit={?d} stderr_bytes={d} capture_truncated={} stderr_preview_truncated={} host=\"{f}\" path=\"{f}\"{s} stderr=\"{f}\"",
+                    .{ @backingInt(self.owner.session_id), active.key.operation_id, @tagName(self.request.kind), @tagName(self.stage), @errorName(failure), @tagName(value.status), value.exit_code, value.stderr_bytes, value.truncated, stderr.len < value.stderr.len, std.zig.fmtString(host[0..@min(host.len, 64)]), std.zig.fmtString(path[0..@min(path.len, 64)]), if (path.len > 64) "..." else "", std.zig.fmtString(stderr) },
+                );
                 self.done = true;
                 return;
             }
@@ -168,8 +190,10 @@ pub const Job = struct {
             self.result.committed = true;
             self.result.bytes = self.after;
         }
-        const rejected = value.stdout.len == 0 and value.exit_code != null and value.exit_code != 0 and precommitRejection(value.stderr);
-        self.result.outcome_unknown = !self.result.committed and value.diagnostics.request_started != false and !rejected;
+        const failure = scriptFailure(value);
+        const rejected = value.stdout.len == 0 and failure != null and failure.?.before_commit;
+        const not_sent = value.diagnostics.request_started == false or (value.status == .channel_rejected and value.effect == .none and !value.diagnostics.request_accepted);
+        self.result.outcome_unknown = !self.result.committed and !not_sent and !rejected;
     }
     fn launch(self: *Job, app: *App) !void {
         const a = self.arena.allocator();
@@ -226,41 +250,53 @@ pub const Job = struct {
         a.destroy(self);
     }
 };
-fn remoteError(stderr: []const u8) anyerror {
-    const value = std.mem.trim(u8, stderr, " \r\n\t");
-    inline for (.{ "SourceChanged", "FileNotFound", "FileTooLarge", "SymlinkUnsupported", "NotRegularFile", "PathAlreadyExists", "HardlinkUnsupported", "MetadataPreservationFailed", "ExclusiveCommitUnsupported", "ExclusiveCommitFailed", "UnsupportedFileMetadata", "IncompleteInput", "FileNotWritable" }) |name| {
-        if (std.mem.eql(u8, value, name)) return @field(anyerror, name);
+const ScriptFailure = struct { code: anyerror, before_commit: bool = true };
+
+fn scriptFailure(value: exec.ExecResult) ?ScriptFailure {
+    if (value.status != .completed or value.exit_code != 1 or value.truncated) return null;
+    const stderr = std.mem.trimEnd(u8, value.stderr, "\r\n");
+    const line = if (std.mem.lastIndexOfScalar(u8, stderr, '\n')) |index| stderr[index + 1 ..] else stderr;
+    const prefix = "ZWFILEERROR1 ";
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    const code = line[prefix.len..];
+    inline for (.{ "InvalidParent", "SourceChanged", "FileNotFound", "FileTooLarge", "SymlinkUnsupported", "NotRegularFile", "PathAlreadyExists", "MetadataPreservationFailed", "ExclusiveCommitUnsupported", "UnsupportedFileMetadata", "IncompleteInput", "InvalidInput", "TemporaryFileFailed", "FileNotWritable", "FileReadFailed" }) |name| {
+        if (std.mem.eql(u8, code, name)) return .{ .code = @field(anyerror, name) };
     }
-    return error.RemoteFileOperationFailed;
+    // An error from the commit utility itself does not prove the destination stayed unchanged.
+    inline for (.{ "CommitFailed", "ExclusiveCommitFailed" }) |name| {
+        if (std.mem.eql(u8, code, name)) return .{ .code = @field(anyerror, name), .before_commit = false };
+    }
+    return null;
 }
-fn precommitRejection(stderr: []const u8) bool {
-    const value = std.mem.trim(u8, stderr, " \r\n\t");
-    // Only explicit failures before the commit command prove no mutation.
-    // In particular, CommitFailed/ExclusiveCommitFailed and signal exits do not.
-    inline for (.{ "SourceChanged", "SymlinkUnsupported", "PathAlreadyExists", "MetadataPreservationFailed", "ExclusiveCommitUnsupported", "IncompleteInput", "InvalidInput", "InvalidParent", "TemporaryFileFailed", "FileNotWritable" }) |name| {
-        if (std.mem.eql(u8, value, name)) return true;
-    }
-    return false;
+
+fn remoteError(value: exec.ExecResult) ?anyerror {
+    if (scriptFailure(value)) |failure| return failure.code;
+    return switch (value.status) {
+        .channel_rejected => error.SshChannelRejected,
+        .timed_out => error.Timeout,
+        else => null,
+    };
 }
 
 test "terminal files SSH commit evidence survives cancellation exit failure and unknown cleanup" {
     const a = std.testing.allocator;
     var job: Job = .{ .allocator = a, .arena = .init(a), .owner = .{ .session_id = @fromBackingInt(1) }, .binding = undefined, .request = .{ .kind = .write_text, .path = "/tmp/file" }, .local = false, .started_ns = 0, .stage = .write, .after = "new contents" };
     defer job.arena.deinit();
-    var value: exec.ExecResult = .{ .stdout = "", .stderr = "", .elapsed_ms = 0, .status = .cancelled, .exit_code = 1, .cleanup = .released, .diagnostics = .{ .request_started = true } };
+    var value: exec.ExecResult = .{ .stdout = "", .stderr = "", .elapsed_ms = 0, .status = .completed, .exit_code = 1, .cleanup = .released, .diagnostics = .{ .request_started = true } };
     // A known exit code is not proof that a rename did not happen.
     job.observeWrite(value);
     try std.testing.expect(job.result.outcome_unknown and !job.result.committed);
-    value.stderr = "SourceChanged\n";
+    value.stderr = "ZWFILEERROR1 SourceChanged\n";
     job.observeWrite(value);
     try std.testing.expect(!job.result.outcome_unknown and !job.result.committed);
-    value.stderr = "CommitFailed\n";
+    value.stderr = "ZWFILEERROR1 CommitFailed\n";
     job.observeWrite(value);
     try std.testing.expect(job.result.outcome_unknown);
     value.diagnostics.request_started = false;
     job.observeWrite(value);
     try std.testing.expect(!job.result.outcome_unknown);
     value.diagnostics.request_started = true;
+    value.status = .cancelled;
     value.stdout = "ZWCOMMIT1\n";
     value.cleanup = .unknown;
     job.observeWrite(value);
@@ -271,4 +307,49 @@ test "terminal files SSH commit evidence survives cancellation exit failure and 
     value.exit_code = null;
     job.observeWrite(value);
     try std.testing.expect(job.result.committed and !job.result.outcome_unknown);
+}
+
+test "terminal files SSH recognizes precommit errors with utility stderr and keeps uncertain writes gated" {
+    const a = std.testing.allocator;
+    var job: Job = .{ .allocator = a, .arena = .init(a), .owner = .{ .session_id = @fromBackingInt(1) }, .binding = undefined, .request = .{ .kind = .write_text, .path = "/data/imgxfer/verify_inner.sh" }, .local = false, .started_ns = 0, .stage = .write };
+    defer job.arena.deinit();
+    var value: exec.ExecResult = .{
+        .stdout = "",
+        .stderr = "zw-file: line 18: cd: /data/imgxfer: No such file or directory\nZWFILEERROR1 InvalidParent\n",
+        .elapsed_ms = 0,
+        .exit_code = 1,
+        .cleanup = .released,
+        .diagnostics = .{ .request_started = true, .request_accepted = true },
+    };
+    job.observeWrite(value);
+    try std.testing.expectEqual(error.InvalidParent, remoteError(value).?);
+    try std.testing.expect(!job.result.outcome_unknown and !job.result.committed);
+    value.truncated = true;
+    job.observeWrite(value);
+    try std.testing.expect(job.result.outcome_unknown);
+    value.truncated = false;
+    value.status = .timed_out;
+    job.observeWrite(value);
+    try std.testing.expect(job.result.outcome_unknown);
+
+    value.status = .completed;
+    value.stderr = "mkdir: No space left on device\nZWFILEERROR1 TemporaryFileFailed\n";
+    job.observeWrite(value);
+    try std.testing.expectEqual(error.TemporaryFileFailed, remoteError(value).?);
+    try std.testing.expect(!job.result.outcome_unknown);
+    value.stderr = "link: Input/output error\nZWFILEERROR1 ExclusiveCommitFailed\n";
+    job.observeWrite(value);
+    try std.testing.expectEqual(error.ExclusiveCommitFailed, remoteError(value).?);
+    try std.testing.expect(job.result.outcome_unknown);
+    value.stderr = "InvalidParent\n";
+    job.observeWrite(value);
+    try std.testing.expect(job.result.outcome_unknown);
+
+    value.stderr = "";
+    value.status = .channel_rejected;
+    value.effect = .none;
+    value.diagnostics.request_accepted = false;
+    job.observeWrite(value);
+    try std.testing.expectEqual(error.SshChannelRejected, remoteError(value).?);
+    try std.testing.expect(!job.result.outcome_unknown);
 }

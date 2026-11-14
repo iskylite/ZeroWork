@@ -71,8 +71,17 @@ fn RequestBudget(comptime Timing: type) type {
             const self: *const @This() = @ptrCast(@alignCast(raw));
             return self.reason() != null;
         }
+        fn remainingNs(raw: *const anyopaque) i128 {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            const mutable = self.lock();
+            defer mutable.mutex.unlock();
+            if (self.expired_before_wait) return 0;
+            if (self.deadline_ns == std.math.maxInt(i128)) return self.deadline_ns;
+            const clock = if (self.user_waits == 0) self.timing.now() else self.wait_started_ns;
+            return @max(0, self.deadline_ns -| clock);
+        }
         fn childToken(self: *const @This()) provider.CancelToken {
-            return .{ .source = .{ .context = self, .poll = cancelled, .user_wait = userWait, .resource_wait = resourceWait } };
+            return .{ .source = .{ .context = self, .poll = cancelled, .user_wait = userWait, .resource_wait = resourceWait, .remaining_ns = remainingNs } };
         }
     };
 }
@@ -659,7 +668,26 @@ pub const Manager = struct {
         self.turn.state = .executing;
         const host = self.tool_host.?;
         const execute_host = host.execute_host orelse return error.ToolNotAvailable;
-        return execute_host(host.context, invocation, allocator, cancel);
+        var request = invocation;
+        if (@import("host_execution.zig").implicitDecisionWait(invocation)) {
+            var remaining: i128 = std.math.maxInt(i128);
+            if (cancel) |token| if (token.source) |source| if (source.remaining_ns) |read| {
+                remaining = read(source.context);
+            };
+            if (self.shared_task) |shared| {
+                const shared_remaining = shared.root.remainingNs() catch |err| switch (err) {
+                    error.SharedTaskTimeout => 0,
+                    else => return err,
+                };
+                if (shared_remaining != std.math.maxInt(u64)) remaining = @min(remaining, shared_remaining);
+            }
+            if (remaining != std.math.maxInt(i128)) {
+                const now = (retry.Clock{}).now();
+                const wait_ns = @max(0, remaining - 5 * std.time.ns_per_s);
+                request.decision_wait_deadline_ms = @intCast(@divTrunc(now + wait_ns, std.time.ns_per_ms));
+            }
+        }
+        return execute_host(host.context, request, allocator, cancel);
     }
     fn acceptedHostResult(raw: *anyopaque, context: @import("host_tools.zig").Context, name: []const u8, result: *const @import("host_tools.zig").Result, cancel: ?*provider.CancelToken) !void {
         const self: *Manager = @ptrCast(@alignCast(raw));
@@ -1821,6 +1849,16 @@ test "approval budget nesting preserves remaining time and explicit Stop during 
     try std.testing.expectEqual(error.Timeout, budget.reason().?);
     stop.cancel();
     try std.testing.expectEqual(error.Cancelled, budget.reason().?);
+}
+
+test "PTY decision wait budget preserves an unlimited task deadline" {
+    var timing: TestRetryTiming = .{ .ns = 20 * std.time.ns_per_ms };
+    var budget: RequestBudget(*TestRetryTiming) = .{ .timing = &timing, .deadline_ns = std.math.maxInt(i128), .stop = null };
+    const token = budget.childToken();
+    const source = token.source.?;
+    try std.testing.expectEqual(std.math.maxInt(i128), source.remaining_ns.?(source.context));
+    budget.deadline_ns = 100 * std.time.ns_per_ms;
+    try std.testing.expectEqual(80 * std.time.ns_per_ms, source.remaining_ns.?(source.context));
 }
 
 test "approval explicit Stop interrupts a valid paused budget" {

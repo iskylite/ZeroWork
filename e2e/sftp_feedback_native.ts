@@ -58,12 +58,12 @@ try {
   await click('connection.progress.retry');
   await h.waitFor(async () => { const p = (await h.query('connection.progress')).find(shown); return p && text(p).includes('尝试 2') && text(p).includes('连接失败') ? p : null; }, 20000);
   await capture('connection-retry-failed');
-  await click('connection.progress.dismiss');
+  await click('connection.progress.close');
   await h.waitFor(async () => !(await h.query('connection.progress')).some(shown) || null);
   await h.sleep(300); assert(!(await h.query('connection.progress')).some(shown));
   await click('remote.notice.logs');
   await visible('connection.progress.logs');
-  await click('connection.progress.dismiss');
+  await click('connection.progress.close');
   console.log('checkpoint', report.checks.length + 1);
   report.checks.push('Actual refused TCP connection exposes failure/code/logs; retries original session generation; dismiss remains dismissed');
   await click('sidebar.new'); await click('sidebar.new.host');

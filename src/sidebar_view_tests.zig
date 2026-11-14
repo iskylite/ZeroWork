@@ -212,7 +212,7 @@ test "sidebar native chrome gives host names the unused width and keeps route ba
     try std.testing.expect(row.route.style.display == .flex);
     try std.testing.expectApproxEqAbs(@as(f32, 238), v.root.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 24), v.search_box.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 66), v.search_box.globalRect().y, 0.1);
+    try std.testing.expectApproxEqAbs(v.header.globalRect().y, v.search_box.globalRect().y, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
     const before = row.name.globalRect().w;
     const route_x = row.route.globalRect().x;

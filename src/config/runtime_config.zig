@@ -6,6 +6,13 @@ pub const schema = @import("settings_schema.zig");
 pub const paths = @import("paths.zig");
 
 pub const Change = struct { revision: u64, fields: schema.FieldSet };
+const default_provider_index = schema.find("ai", "default_provider").?;
+const ConfigStamp = struct {
+    inode: std.Io.File.INode,
+    size: u64,
+    modified: std.Io.Timestamp,
+    changed: std.Io.Timestamp,
+};
 
 /// All allocations are complete before the atomic disk replacement starts.
 pub const Prepared = struct {
@@ -99,6 +106,10 @@ pub const RuntimeConfig = struct {
     value: config.Config,
     field_revisions: [schema.field_count]u64 = @splat(1),
     background_ready: bool = false,
+    disk_baseline: store.ConfigBaseline = .{},
+    observed_disk: store.ConfigBaseline = .{},
+    observed_stamp: ?ConfigStamp = null,
+    external_provider_revision: u64 = 0,
 
     pub fn loadOrDefault(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8) !RuntimeConfig {
         if (sub_path.len == 0) return error.InvalidConfigPath;
@@ -113,7 +124,53 @@ pub const RuntimeConfig = struct {
         };
         defer loaded.deinit(allocator);
         const owned = try Snapshot.init(allocator, loaded.value);
-        return .{ .allocator = allocator, .path = path, .owned = owned, .value = owned.value, .field_revisions = @splat(owned.value.config_revision) };
+        const baseline = store.ConfigBaseline.fromSource(loaded.source);
+        return .{ .allocator = allocator, .path = path, .owned = owned, .value = owned.value, .field_revisions = @splat(owned.value.config_revision), .disk_baseline = baseline, .observed_disk = baseline };
+    }
+
+    /// Only Provider settings are hot reloaded. Other file changes still
+    /// invalidate the write baseline so an app save cannot discard them.
+    pub fn reloadProviders(self: *RuntimeConfig, io: std.Io, dir: std.Io.Dir) !bool {
+        const stat = dir.statFile(io, self.path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                self.observed_stamp = null;
+                self.observed_disk = .{};
+                return false;
+            },
+            else => return err,
+        };
+        const stamp: ConfigStamp = .{ .inode = stat.inode, .size = stat.size, .modified = stat.mtime, .changed = stat.ctime };
+        if (std.meta.eql(self.observed_stamp, @as(?ConfigStamp, stamp))) return false;
+        if (stat.kind != .file) return error.InvalidConfigPath;
+        const source = (try store.readConfigSource(io, dir, self.allocator, self.path)) orelse return false;
+        var owns_source = true;
+        defer if (owns_source) self.allocator.free(source);
+        const baseline = store.ConfigBaseline.fromSource(source);
+        if (std.meta.eql(baseline, self.observed_disk)) {
+            self.observed_stamp = stamp;
+            return false;
+        }
+        var loaded = try store.decodeConfig(self.allocator, source);
+        owns_source = false;
+        defer loaded.deinit(self.allocator);
+
+        var fields = schema.changed(self.value, loaded.value);
+        var provider_fields: schema.FieldSet = .empty;
+        if (fields.isSet(schema.providers_index)) provider_fields.set(schema.providers_index);
+        if (fields.isSet(default_provider_index)) provider_fields.set(default_provider_index);
+        fields.toggleSet(provider_fields);
+        if (provider_fields.count() != 0) {
+            var prepared = try self.prepare(schema.merge(self.value, loaded.value, provider_fields));
+            defer prepared.deinit();
+            self.publish(&prepared, self.background_ready);
+            self.external_provider_revision = self.value.config_revision;
+        }
+        // The sidebar width is persisted by its resize action outside the
+        // settings editor's field list.
+        if (fields.count() == 0 and self.value.ui.sidebar_width == loaded.value.ui.sidebar_width) self.disk_baseline = baseline;
+        self.observed_disk = baseline;
+        self.observed_stamp = stamp;
+        return provider_fields.count() != 0;
     }
 
     /// Prepare an owned candidate before writing, then replace memory only
@@ -138,11 +195,16 @@ pub const RuntimeConfig = struct {
         next.config_revision = self.value.config_revision + 1;
         const changed = schema.changed(self.value, next);
         var policy_changes = changed;
+        // A running turn owns its Provider snapshot. Catalog edits only
+        // change future turns, so do not revoke the current tool authority.
+        policy_changes.unset(schema.providers_index);
+        policy_changes.unset(default_provider_index);
         policy_changes.unset(schema.extensions_index);
         policy_changes.unset(schema.find("ai", "child_context_mode").?);
         policy_changes.unset(schema.find("ai", "child_reuse_policy").?);
         policy_changes.unset(schema.find("ai", "permission_mode").?);
         policy_changes.unset(schema.find("ai", "execution_mode").?);
+        policy_changes.unset(schema.default_effort_index);
         next.agent_policy_revision = if (policy_changes.count() == 0) self.value.agentPolicyRevision() else next.config_revision;
         try next.validate();
         return .{ .expected_revision = self.value.config_revision, .changed_fields = changed, .owned = try Snapshot.init(self.allocator, next) };
@@ -157,11 +219,20 @@ pub const RuntimeConfig = struct {
         if (next.value.ui.materials.background.enabled and !prepared.background_ready and !(self.background_ready and same_background)) return error.BackgroundNotPrepared;
         if (!prepared.theme_ready and !std.mem.eql(u8, next.value.ui.theme, self.value.ui.theme))
             try @import("imported_theme.zig").validateReference(io, dir, self.allocator, next.value.ui.theme);
-        next.value = try store.saveWithCredentialRefs(io, dir, self.path, next.value, next.arena.allocator());
+        const saved = try store.saveWithCredentialRefs(io, dir, self.path, next.value, next.arena.allocator(), self.disk_baseline);
+        next.value = saved.value;
+        self.disk_baseline = saved.baseline;
+        self.observed_disk = saved.baseline;
+        self.observed_stamp = null;
+        self.publish(prepared, prepared.background_ready or (same_background and self.background_ready));
+    }
+
+    fn publish(self: *RuntimeConfig, prepared: *Prepared, background_ready: bool) void {
+        const next = &prepared.owned.?;
         self.owned.deinit();
         self.owned = next.*;
         self.value = next.value;
-        self.background_ready = prepared.background_ready or (same_background and self.background_ready);
+        self.background_ready = background_ready;
         for (&self.field_revisions, 0..) |*revision, index| if (prepared.changed_fields.isSet(index)) {
             revision.* = next.value.config_revision;
         };
@@ -178,6 +249,20 @@ pub const RuntimeConfig = struct {
         }
         if (changed.count() == 0) return null;
         return .{ .revision = self.value.config_revision, .fields = changed };
+    }
+
+    /// Model discovery only depends on providers and the default provider.
+    pub fn modelDiscoveryRevision(self: *const RuntimeConfig) u64 {
+        return @max(self.field_revisions[schema.providers_index], self.field_revisions[default_provider_index]);
+    }
+
+    /// Changing the selected effort does not invalidate an open picker.
+    pub fn composerRevision(self: *const RuntimeConfig) u64 {
+        var revision: u64 = 1;
+        for (self.field_revisions, 0..) |field_revision, index| {
+            if (index != schema.default_effort_index) revision = @max(revision, field_revision);
+        }
+        return revision;
     }
 
     /// Validation and persistence share the path selected at load time.
@@ -212,6 +297,29 @@ test "runtime setting update persists to its owned non-default path and reloads"
     try std.testing.expectEqual(@as(u8, 18), runtime.value.ui.font_size);
 }
 
+test "provider reload retries a transient credential error for the same file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = "config.toml";
+    var runtime = try RuntimeConfig.loadOrDefault(io, tmp.dir, std.testing.allocator, file);
+    defer runtime.deinit();
+    var credentials: store.credentials.MemoryBackend = .{ .denied = true };
+    defer credentials.deinit();
+    const previous = store.credentials.useBackendForTesting(credentials.backend());
+    defer store.credentials.restoreBackendForTesting(previous);
+    const source = "[ai]\ndefault_provider=\"new\"\n[[ai.providers]]\nid=\"new\"\n" ++
+        "api_key_ref=\"zw1_0000000000000000000000000000000000000000000000000000000000000000\"\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = file, .data = source });
+
+    try std.testing.expectError(error.CredentialDenied, runtime.reloadProviders(io, tmp.dir));
+    try std.testing.expectEqual(@as(usize, 0), runtime.value.ai.provider_count);
+    credentials.denied = false;
+    try std.testing.expect(try runtime.reloadProviders(io, tmp.dir));
+    try std.testing.expectEqualStrings("new", runtime.value.ai.providers[0].name);
+    try std.testing.expect(!try runtime.reloadProviders(io, tmp.dir));
+}
+
 test "runtime config defaults when file is absent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -244,6 +352,37 @@ test "AI defaults persist across restart while existing agents keep their choice
     try std.testing.expectEqual(config.ExecutionMode.new_pty, next.execution_mode.?);
     try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "session_retention", .{ .text = "keep" });
     try std.testing.expectEqual(runtime.value.config_revision, runtime.value.agentPolicyRevision());
+}
+
+test "reasoning effort default persists atomically without invalidating discovery or policy" {
+    const Effort = @import("../ai/provider.zig").Effort;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var runtime = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer runtime.deinit();
+    try std.testing.expect(runtime.value.ai.default_effort == null);
+    const policy = runtime.value.agentPolicyRevision();
+    const discovery = runtime.modelDiscoveryRevision();
+    const composer = runtime.composerRevision();
+    try runtime.updateSetting(std.testing.io, tmp.dir, "ai", "default_effort", .{ .text = "high" });
+    try std.testing.expectEqual(Effort.high, runtime.value.ai.default_effort.?);
+    try std.testing.expectEqual(policy, runtime.value.agentPolicyRevision());
+    try std.testing.expectEqual(discovery, runtime.modelDiscoveryRevision());
+    try std.testing.expectEqual(composer, runtime.composerRevision());
+    try std.testing.expectError(error.InvalidValue, runtime.updateSetting(std.testing.io, tmp.dir, "ai", "default_effort", .{ .text = "invalid" }));
+    var restarted = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer restarted.deinit();
+    try std.testing.expectEqual(Effort.high, restarted.value.ai.default_effort.?);
+    try restarted.updateSetting(std.testing.io, tmp.dir, "ai", "default_effort", .{ .text = "none" });
+    var again = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer again.deinit();
+    try std.testing.expectEqual(Effort.none, again.value.ai.default_effort.?);
+
+    var blocked = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "blocked/config.toml");
+    defer blocked.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "not a directory" });
+    try std.testing.expectError(error.NotDir, blocked.updateSetting(std.testing.io, tmp.dir, "ai", "default_effort", .{ .text = "high" }));
+    try std.testing.expect(blocked.value.ai.default_effort == null);
 }
 
 test "loaded background permits AI defaults while unprepared replacements remain blocked" {

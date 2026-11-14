@@ -1275,6 +1275,53 @@ test "host uncertain execution blocks a fresh command while preserving exact rea
     try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
 }
 
+test "group terminal continuation stops when a second dispatch has no receipt" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const group: scope_mod.Scope = .{ .owner = .{ .group = 1 }, .members = .{ .ids = .{ 101, 102, 103 } ++ @as([13]u64, @splat(0)), .len = 3 } };
+    const context: tools.host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = group.owner, .binding_revision = 1, .grant_revision = 1 };
+    const lost: identity.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 1 };
+    var table = try tools.RequestTable.initWithHost(a, group, &.{}, &.{}, context, &.{@import("host_execution.zig").contributions[0]});
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const Gateway = struct {
+        calls: usize = 0,
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn invoke(raw: *anyopaque, invocation: tools.host.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (std.mem.eql(u8, invocation.call_id, "missing-receipt")) return error.FixtureTransportFailed;
+            return .{ .status = .outcome_unknown, .uncertain_terminal = lost, .receipt = .{
+                .conversation_id = invocation.context.conversation_id,
+                .task_id = invocation.context.task_id,
+                .operation_id = invocation.operation_id,
+                .binding_revision = invocation.context.binding_revision,
+                .side_effect_started = true,
+                .remote_effect_unknown = true,
+            } };
+        }
+    };
+    var gateway: Gateway = .{};
+    const host: loop_mod.Host = .{ .context = &gateway, .execute = Gateway.legacy, .execute_host = Gateway.invoke };
+    var run = loop_mod.Loop.init(a, group, 17, .{ .context_window = 100_000 });
+    defer run.deinit();
+    try run.start(.{ .model = "test", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    var calls: [4]provider.ToolCall = undefined;
+    for (&calls, [_]u64{ 101, 101, 102, 103 }, [_][]const u8{ "lost", "same-target", "missing-receipt", "other-target" }) |*call, id, key| {
+        const ref = try @import("host_queries.zig").sessionRef(table.arena.allocator(), context, .{ .session_id = @fromBackingInt(id), .generation = 1 });
+        const arguments = try std.json.Stringify.valueAlloc(table.arena.allocator(), .{ .session_ref = ref, .command = "printf ok", .request_key = key }, .{});
+        call.* = .{ .id = key, .name = wire[0].name(), .arguments = arguments };
+    }
+    try run.complete("", calls[0..1], host, .{}, 1, null);
+    try std.testing.expectEqual(@as(usize, 1), (try run.nextRequest()).tools.len);
+    try run.complete("", calls[1..], host, .{}, 1, null);
+    try std.testing.expectEqual(@as(usize, 2), gateway.calls);
+    try std.testing.expect(!run.records.items[1].dispatched and run.records.items[2].dispatched and !run.records.items[3].dispatched);
+    try std.testing.expectError(error.ToolOutcomeUnknown, run.nextRequest());
+}
+
 test "plugin dispatch remains available after a large completed operation history" {
     const tools = @import("plugin_tools.zig");
     const operations = @import("../host/operation_store.zig");

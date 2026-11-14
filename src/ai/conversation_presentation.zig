@@ -41,6 +41,46 @@ const ImageBundle = struct { owner: text.Owner, conversation_id: ?messages.Conve
 const Message = struct { user: bool, text: []const u8, wire_text: ?[]const u8, turn: ?Turn, attachments: ?TextBundle, images: ?ImageBundle };
 const Snapshot = struct { schema: u8 = 1, messages: []const Message };
 
+pub const Version = struct {
+    content: u64 = 0,
+    context: u64 = 0,
+    usage: ?@import("context_usage.zig").Baseline = null,
+};
+
+/// Own the mutable display data before handing it to a serializer. Large
+/// immutable provider transcripts and attachment bytes are retained by reference.
+pub const Capture = struct {
+    history: std.ArrayList(messages.Message) = .empty,
+    current: ?messages.Message = null,
+    cards: @import("card_stream.zig").Stream,
+
+    pub fn init(a: std.mem.Allocator, history: []const messages.Message, current: ?messages.Message, cards: []const @import("card.zig").Card) !Capture {
+        var result: Capture = .{ .cards = .init(a) };
+        errdefer result.deinit(a);
+        try result.history.ensureTotalCapacity(a, history.len);
+        for (history) |message| result.history.appendAssumeCapacity(try message.clone(a));
+        if (current) |message| {
+            result.current = try message.clone(a);
+            for (cards) |card| switch (card) {
+                .text, .code => _ = try result.cards.append(card),
+                else => {},
+            };
+        }
+        return result;
+    }
+
+    pub fn deinit(self: *Capture, a: std.mem.Allocator) void {
+        self.cards.deinit();
+        if (self.current) |*message| message.deinit(a);
+        for (self.history.items) |*message| message.deinit(a);
+        self.history.deinit(a);
+    }
+
+    pub fn encode(self: *const Capture, a: std.mem.Allocator) ![]u8 {
+        return capture(a, self.history.items, self.current, self.cards.cards.items);
+    }
+};
+
 fn encodeTurn(a: std.mem.Allocator, source: *const turns.Turn) !Turn {
     var result: Turn = undefined;
     inline for (scalar_fields) |field| @field(result, field) = @field(source, field);

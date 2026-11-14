@@ -1,6 +1,6 @@
 set -eu
 p=$1 mode=$2 old_size=$3 new_size=$4 expected_stamp=$5
-fail() { printf '%s\n' "$1" >&2; exit 1; }
+fail() { printf 'ZWFILEERROR1 %s\n' "$1" >&2; exit 1; }
 stamp() {
   stat -c '%d:%i:%s:%Y:%Z:%a:%u:%g:%h' "$1" 2>/dev/null ||
   stat -f '%d:%i:%z:%m:%c:%Lp:%u:%g:%l' "$1" 2>/dev/null
@@ -27,10 +27,11 @@ cleanup() {
 }
 trap cleanup 0
 trap 'exit 1' 1 2 15
-mkdir "$tmp/new"
+mkdir "$tmp/new" || fail TemporaryFileFailed
 candidate=$tmp/new/$base
-dd bs=1 count="$old_size" of="$tmp/before" 2>/dev/null
-[ "$(wc -c < "$tmp/before")" -eq "$old_size" ] || fail IncompleteInput
+dd bs=1 count="$old_size" of="$tmp/before" || fail TemporaryFileFailed
+actual_size=$(wc -c < "$tmp/before") || fail TemporaryFileFailed
+[ "$actual_size" -eq "$old_size" ] || fail IncompleteInput
 if [ "$mode" = replace ]; then
   [ -f "$p" ] && [ ! -L "$p" ] || fail SourceChanged
   [ -w "$p" ] || fail FileNotWritable
@@ -47,8 +48,9 @@ else
   [ ! -e "$p" ] && [ ! -L "$p" ] || fail PathAlreadyExists
   command -v link >/dev/null 2>&1 || fail ExclusiveCommitUnsupported
 fi
-dd bs=1 count="$new_size" of="$candidate" 2>/dev/null
-[ "$(wc -c < "$candidate")" -eq "$new_size" ] || fail IncompleteInput
+dd bs=1 count="$new_size" of="$candidate" || fail TemporaryFileFailed
+actual_size=$(wc -c < "$candidate") || fail TemporaryFileFailed
+[ "$actual_size" -eq "$new_size" ] || fail IncompleteInput
 [ "$(dd bs=1 count=1 2>/dev/null | wc -c)" -eq 0 ] || fail InvalidInput
 if [ "$mode" = replace ]; then
   [ ! -L "$p" ] && [ -f "$p" ] || fail SourceChanged

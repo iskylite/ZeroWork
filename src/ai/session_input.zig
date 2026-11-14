@@ -236,6 +236,7 @@ pub const Inbox = struct {
             if (!prior.receipt.fence.eql(fence)) return error.BindingChanged;
             if (!std.meta.eql(prior.receipt.original, original)) return error.SubmissionConflict;
             const prior_message = prior.payload.messages[0];
+            if (!std.meta.eql(prior_message.skill, message.skill)) return error.SubmissionConflict;
             if (prior.receipt.mode != mode or !std.mem.eql(u8, prior_message.content, message.content) or prior_message.images.len != message.images.len or prior_message.offloaded_images.len != message.offloaded_images.len or !std.meta.eql(prior_message.image_owner, message.image_owner) or prior_message.image_transform != message.image_transform) return error.SubmissionConflict;
             for (prior_message.images, message.images) |left, right| if (!sameImage(left, right)) return error.SubmissionConflict;
             for (prior_message.offloaded_images, message.offloaded_images) |left, right| if (!sameImage(left.reference, right.reference) or !std.meta.eql(left.owner, right.owner)) return error.SubmissionConflict;

@@ -618,9 +618,25 @@ fn nowMs() u64 {
 fn classifyError(err: anyerror) manager.Failure {
     return switch (err) {
         error.SftpReadFailed, error.SftpWriteFailed => .io,
-        error.FileNotFound => .not_found,
-        error.AccessDenied, error.PermissionDenied => .permission_denied,
+        error.FileNotFound, error.SftpNotFound => .not_found,
+        error.SourceNotFound => .source_not_found,
+        error.DestinationDirectoryNotFound => .destination_directory_not_found,
+        error.AccessDenied, error.PermissionDenied, error.SftpPermissionDenied => .permission_denied,
         else => .connection,
+    };
+}
+
+fn sourcePathError(err: anyerror) anyerror {
+    return switch (err) {
+        error.FileNotFound, error.SftpNotFound, error.NotDir => error.SourceNotFound,
+        else => err,
+    };
+}
+
+fn destinationCreateError(err: anyerror) anyerror {
+    return switch (err) {
+        error.FileNotFound, error.SftpNotFound, error.NotDir => error.DestinationDirectoryNotFound,
+        else => err,
     };
 }
 
@@ -1415,6 +1431,7 @@ pub const SftpEngine = struct {
         const stamp: ?TargetStamp = if (job.spec.direction == .download) blk: {
             const value = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| {
                 if (err == error.FileNotFound) break :blk null;
+                if (err == error.NotDir) return error.DestinationDirectoryNotFound;
                 return err;
             };
             break :blk TargetStamp.local(value);
@@ -1423,6 +1440,7 @@ pub const SftpEngine = struct {
             defer std.heap.c_allocator.free(zpath);
             const value = job.remote_metadata.target_stat(job.remote_metadata.context, job.session.?, zpath) catch |err| {
                 if (err == error.FileNotFound or err == error.SftpNotFound) break :blk null;
+                if (err == error.NotDir) return error.DestinationDirectoryNotFound;
                 return err;
             };
             break :blk TargetStamp.remote(value);
@@ -1809,6 +1827,9 @@ pub const SftpEngine = struct {
             const job = next.?;
             const turn = self.advance(io, job) catch |err| blk: {
                 if (err == error.TransferPacingPending) break :blk Turn.waiting;
+                if (err != error.Paused and err != error.Cancelled and !job.pause_flag.load(.acquire) and !job.cancel_flag.load(.acquire)) {
+                    @import("../platform/applog.zig").warn(.transfer, "SFTP transfer failed stage={s}: {s}", .{ @tagName(job.runtime.phase), @errorName(err) });
+                }
                 // A native read can observe FIN before Runtime's descriptor
                 // observer wakes. Preserve the checkpoint before error cleanup
                 // discards it, but never infer a transport fault from errno.
@@ -1875,7 +1896,7 @@ pub const SftpEngine = struct {
             job.runtime.outcome = .paused;
             job.runtime.resume_failure = switch (err) {
                 error.SourceChanged, error.PrefixChanged, error.TempOwnershipChanged, error.PathAlreadyExists => .conflict,
-                error.FileNotFound, error.SftpNotFound => .not_found,
+                error.FileNotFound, error.SftpNotFound, error.SourceNotFound, error.DestinationDirectoryNotFound => classifyError(err),
                 error.AccessDenied, error.PermissionDenied, error.SftpPermissionDenied => .permission_denied,
                 else => .io,
             };
@@ -1891,7 +1912,7 @@ pub const SftpEngine = struct {
                     else => classifyError(err),
                 },
                 .retryable = if (job.runtime.verification_pending) false else switch (err) {
-                    error.AccessDenied, error.PermissionDenied, error.SftpPermissionDenied, error.TotalSizeOverflow, error.InvalidWindow, error.InvalidAck, error.InvalidResumeOffset, error.SourceChanged, error.PrefixChanged, error.ChecksumMismatch, error.PathAlreadyExists, error.OperationUnsupported, error.TempOwnershipChanged => false,
+                    error.AccessDenied, error.PermissionDenied, error.SftpPermissionDenied, error.FileNotFound, error.SourceNotFound, error.DestinationDirectoryNotFound, error.TotalSizeOverflow, error.InvalidWindow, error.InvalidAck, error.InvalidResumeOffset, error.SourceChanged, error.PrefixChanged, error.ChecksumMismatch, error.PathAlreadyExists, error.OperationUnsupported, error.TempOwnershipChanged => false,
                     else => true,
                 },
             } };
@@ -1932,14 +1953,14 @@ pub const SftpEngine = struct {
                     .upload => blk: {
                         const path = try uploadLocalPath(std.heap.c_allocator, job.spec.view(), source);
                         defer std.heap.c_allocator.free(path);
-                        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+                        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return sourcePathError(err);
                         defer file.close(io);
                         break :blk (try file.stat(io)).size;
                     },
                     .download => blk: {
                         const path = try downloadRemotePath(std.heap.c_allocator, job.spec.view(), source);
                         defer std.heap.c_allocator.free(path);
-                        break :blk try job.remote_metadata.size(job.remote_metadata.context, session, path);
+                        break :blk job.remote_metadata.size(job.remote_metadata.context, session, path) catch |err| return sourcePathError(err);
                     },
                 };
                 try metadataCheckpoint(job, rt.metadata_started);
@@ -2018,7 +2039,7 @@ pub const SftpEngine = struct {
                                 try nameRace(io, job, .open_remote);
                                 return .advanced;
                             }
-                            return err;
+                            return destinationCreateError(err);
                         };
                     } else {
                         // WRITE only first. Verify this opened handle before
@@ -2035,7 +2056,7 @@ pub const SftpEngine = struct {
                 } else file.remote = if (job.spec.direction == .upload)
                     try job.remote_files.open_write(job.remote_files.context, session, file.remote_path.?, file.resume_offset, true)
                 else
-                    try job.remote_files.open_read(job.remote_files.context, session, file.remote_path.?, .transfer);
+                    job.remote_files.open_read(job.remote_files.context, session, file.remote_path.?, .transfer) catch |err| return sourcePathError(err);
                 if (job.spec.direction == .download) {
                     const current = try FileStamp.remote(try job.remote_files.stat_handle(job.remote_files.context, session, &file.remote.?));
                     if (file.fingerprint == null or !current.same(file.fingerprint.?.stamp)) return error.SourceChanged;
@@ -2061,7 +2082,7 @@ pub const SftpEngine = struct {
                     if (stat.inode != job.owned_temp.?.inode.? or file.target_stamp == null or !reopened.same(file.target_stamp.?)) return error.PrefixChanged;
                     rt.resume_validation = false;
                 } else {
-                    file.local = try std.Io.Dir.cwd().createFile(io, file.part_path.?, .{ .exclusive = true });
+                    file.local = std.Io.Dir.cwd().createFile(io, file.part_path.?, .{ .exclusive = true }) catch |err| return destinationCreateError(err);
                     job.owned_temp.?.created = true;
                     job.owned_temp.?.inode = (try file.local.?.stat(io)).inode;
                 }
@@ -2160,7 +2181,7 @@ pub const SftpEngine = struct {
             downloadRemotePath(allocator, spec, source);
         if (spec.direction == .upload) {
             file.local_path = try uploadLocalPath(allocator, spec, source);
-            file.local = try std.Io.Dir.cwd().openFile(io, file.local_path.?, .{});
+            file.local = std.Io.Dir.cwd().openFile(io, file.local_path.?, .{}) catch |err| return sourcePathError(err);
             if ((try file.local.?.stat(io)).size != file.size) return error.SourceChanged;
         } else {
             var nonce: [16]u8 = undefined;
@@ -2188,11 +2209,12 @@ pub const SftpEngine = struct {
         rt.scan_hash = .init(.{});
         rt.scan_offset = 0;
         if (job.spec.direction == .upload) {
-            if (file.local == null) file.local = try std.Io.Dir.cwd().openFile(io, file.local_path.?, .{});
+            if (file.local == null) file.local = std.Io.Dir.cwd().openFile(io, file.local_path.?, .{}) catch |err| return sourcePathError(err);
             rt.scan_stamp = try FileStamp.local(try file.local.?.stat(io));
         } else {
-            const by_path = try FileStamp.remote(try job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?));
-            file.remote = try job.remote_files.open_read(job.remote_files.context, job.session.?, file.remote_path.?, .fingerprint);
+            const attrs = job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?) catch |err| return sourcePathError(err);
+            const by_path = try FileStamp.remote(attrs);
+            file.remote = job.remote_files.open_read(job.remote_files.context, job.session.?, file.remote_path.?, .fingerprint) catch |err| return sourcePathError(err);
             rt.scan_stamp = try FileStamp.remote(try job.remote_files.stat_handle(job.remote_files.context, job.session.?, &file.remote.?));
             if (!by_path.same(rt.scan_stamp.?)) return error.SourceChanged;
         }
@@ -2413,14 +2435,15 @@ pub const SftpEngine = struct {
         try stopCheckpoint(job);
         if (job.spec.direction == .download) try verifyOwnedTemp(io, job);
         const local_path = if (job.spec.direction == .download) file.part_path.? else file.local_path.?;
-        file.local = try std.Io.Dir.cwd().openFile(io, local_path, .{});
+        file.local = std.Io.Dir.cwd().openFile(io, local_path, .{}) catch |err| return if (job.spec.direction == .upload) sourcePathError(err) else err;
         const local = try FileStamp.local(try file.local.?.stat(io));
         const expected_local = if (job.spec.direction == .upload) file.fingerprint.?.stamp else file.target_stamp orelse return error.TempOwnershipChanged;
         if (!local.same(expected_local) or local.size != file.size) return error.PrefixChanged;
-        const by_path = try FileStamp.remote(try job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?));
+        const attrs = job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?) catch |err| return if (job.spec.direction == .download) sourcePathError(err) else err;
+        const by_path = try FileStamp.remote(attrs);
         const expected_remote = if (job.spec.direction == .download) file.fingerprint.?.stamp else file.target_stamp orelse return error.PrefixChanged;
         if (!by_path.same(expected_remote)) return error.SourceChanged;
-        file.remote = try job.remote_files.open_read(job.remote_files.context, job.session.?, file.remote_path.?, .checksum);
+        file.remote = job.remote_files.open_read(job.remote_files.context, job.session.?, file.remote_path.?, .checksum) catch |err| return if (job.spec.direction == .download) sourcePathError(err) else err;
         const remote = try FileStamp.remote(try job.remote_files.stat_handle(job.remote_files.context, job.session.?, &file.remote.?));
         if (!remote.same(expected_remote) or remote.size != file.size) return error.SourceChanged;
         rt.checksum_local_stamp = local;
@@ -2517,11 +2540,11 @@ pub const SftpEngine = struct {
             file.local = try std.Io.Dir.cwd().openFile(io, file.part_path.?, .{ .mode = .read_write });
             const target = try FileStamp.local(try file.local.?.stat(io));
             if (!target.same(rt.checksum_local_stamp.?)) return error.PrefixChanged;
-            file.remote = try job.remote_files.open_read(job.remote_files.context, job.session.?, file.remote_path.?, .repair);
+            file.remote = job.remote_files.open_read(job.remote_files.context, job.session.?, file.remote_path.?, .repair) catch |err| return sourcePathError(err);
             const source = try FileStamp.remote(try job.remote_files.stat_handle(job.remote_files.context, job.session.?, &file.remote.?));
             if (!source.same(file.fingerprint.?.stamp)) return error.SourceChanged;
         } else {
-            file.local = try std.Io.Dir.cwd().openFile(io, file.local_path.?, .{});
+            file.local = std.Io.Dir.cwd().openFile(io, file.local_path.?, .{}) catch |err| return sourcePathError(err);
             const source = try FileStamp.local(try file.local.?.stat(io));
             if (!source.same(file.fingerprint.?.stamp)) return error.SourceChanged;
             file.remote = try job.remote_files.open_write(job.remote_files.context, job.session.?, file.remote_path.?, from, true);
@@ -2546,11 +2569,13 @@ pub const SftpEngine = struct {
         std.debug.assert(file.local == null and file.remote == null and file.source_cache == null);
         try stopCheckpoint(job);
         if (job.spec.md5_check) {
-            const remote = try FileStamp.remote(try job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?));
+            const attrs = job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?) catch |err| return if (job.spec.direction == .download) sourcePathError(err) else err;
+            const remote = try FileStamp.remote(attrs);
             const expected = if (job.spec.direction == .download) file.fingerprint.?.stamp else file.target_stamp.?;
             if (!remote.same(expected)) return error.SourceChanged;
             if (job.spec.direction == .upload) {
-                const source = try FileStamp.local(try std.Io.Dir.cwd().statFile(io, file.local_path.?, .{}));
+                const stat = std.Io.Dir.cwd().statFile(io, file.local_path.?, .{}) catch |err| return sourcePathError(err);
+                const source = try FileStamp.local(stat);
                 if (!source.same(file.fingerprint.?.stamp)) return error.SourceChanged;
             }
         }
@@ -3103,7 +3128,7 @@ test "SFTP checksum does not require an Exec service before file or network IO" 
     try awaitWorker(&engine.jobs.items[0].worker_done);
     try std.testing.expectEqual(id, engine.jobs.items[0].id);
     try std.testing.expect(engine.jobs.items[0].exec_service == null);
-    try std.testing.expectEqual(manager.Failure.not_found, engine.jobs.items[0].failure.get().?);
+    try std.testing.expectEqual(manager.Failure.source_not_found, engine.jobs.items[0].failure.get().?);
 }
 
 test "open validates JobSpec like manager semantics" {
@@ -3588,6 +3613,51 @@ fn expectLocalPattern(dir: std.Io.Dir, name: []const u8, byte: u8) !void {
         try std.testing.expect(n > 0);
         for (buffer[0..n]) |value| try std.testing.expectEqual(byte, value);
         offset += n;
+    }
+}
+
+test "sftp engine distinguishes missing source and destination directory" {
+    const Missing = struct {
+        fn size(_: ?*anyopaque, _: *ssh_session.Session, _: [:0]const u8) !u64 {
+            return error.FileNotFound;
+        }
+        fn create(_: ?*anyopaque, _: *ssh_session.Session, _: [:0]const u8) !ssh_session.SftpHandle {
+            return error.FileNotFound;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(directory);
+    const missing_directory = try std.fs.path.join(std.testing.allocator, &.{ directory, "missing" });
+    defer std.testing.allocator.free(missing_directory);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "local source" });
+
+    var peer: OwnerTestService = .{};
+    peer.unblock();
+    const engine = try SftpEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    var session: ssh_session.Session = .{};
+    engine.attachSession(&session);
+    for ([_]struct { direction: manager.Direction, missing_source: bool }{
+        .{ .direction = .upload, .missing_source = true },
+        .{ .direction = .upload, .missing_source = false },
+        .{ .direction = .download, .missing_source = true },
+        .{ .direction = .download, .missing_source = false },
+    }, 0..) |case, i| {
+        peer.bind(engine);
+        if (case.direction == .download and case.missing_source) engine.remote_metadata.size = Missing.size;
+        engine.remote_files.create_exclusive = Missing.create;
+        _ = try engine.open(.{
+            .direction = case.direction,
+            .sources = &.{if (case.direction == .upload and case.missing_source) "missing-source" else "a"},
+            .remote_dir = "/frozen",
+            .local_dir = if (case.direction == .download) missing_directory else directory,
+        });
+        const job = engine.jobs.items[i];
+        try awaitWorker(&job.worker_done);
+        const expected: manager.Failure = if (case.missing_source) .source_not_found else .destination_directory_not_found;
+        try std.testing.expectEqual(expected, job.failure.get().?);
     }
 }
 

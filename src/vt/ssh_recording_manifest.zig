@@ -22,7 +22,6 @@ pub const Options = struct {
     retention_days: u16 = 0,
     failure: ?[]const u8 = null,
     execution_ranges: []const manifest.ExecutionRange = &.{},
-    boundary_sequences: []const u64 = &.{},
     extra_files: []const struct { path: []const u8, kind: @FieldType(manifest.File, "kind") } = &.{},
 };
 pub const Receipt = struct { manifest_revision: u64, coverage: manifest.Coverage, replayability: manifest.Replayability };
@@ -64,7 +63,7 @@ pub fn publish(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
     const data_path = if (options.ended_ms == null) try std.fmt.allocPrint(allocator, "{s}.commit-{d}.cast", .{ options.cast_path[0 .. options.cast_path.len - 5], revision }) else try allocator.dupe(u8, options.cast_path);
     defer allocator.free(data_path);
     errdefer if (options.ended_ms == null) dir.deleteFile(io, data_path) catch {};
-    timeline.saveCast(io, dir, data_path, initial.initial_cols, initial.initial_rows) catch |err| {
+    timeline.saveFrozenCast(io, dir, data_path, initial.initial_cols, initial.initial_rows) catch |err| {
         try manifest.save(allocator, io, dir, path, .{ .archive_key = &key, .recording_id = &id, .manifest_revision = revision, .source_kind = .ssh, .connection_id = options.connection_id, .config_revision = options.config_revision, .started_ms = options.started_ms, .ended_ms = options.ended_ms, .state = .unavailable, .display = options.display, .recording = .{ .generations = options.generations }, .coverage = .unavailable, .replayability = .unsupported, .failure = @errorName(err), .total_received = options.total_received });
         return err;
     };
@@ -81,13 +80,8 @@ pub fn publish(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
         hashes[index] = try manifest.fingerprint(io, opened, stat.size);
         file.* = .{ .path = file_path, .kind = if (index == 0) .cast else options.extra_files[index - 1].kind, .committed_length = stat.size, .checksum = &hashes[index] };
     }
-    const events = try allocator.alloc(manifest.Event, timeline.events.items.len);
+    const events = try eventMappings(allocator, timeline);
     defer allocator.free(events);
-    for (timeline.events.items, events, 0..) |event, *target, index| target.* = .{ .sequence = event.event_sequence, .raw_offset = event.stream_offset, .raw_length = if (event.kind == .output) event.payload.len else 0, .cast_line = index + 1, .kind = switch (event.kind) {
-        .output => if (std.mem.indexOfScalar(u64, options.boundary_sequences, event.event_sequence) != null) .boundary else .output,
-        .resize => .resize,
-        .application => .application,
-    } };
     const end: manifest.Position = if (timeline.events.items.len == 0) .{ .raw_offset = options.total_received } else .{ .raw_offset = options.total_received, .event_sequence = timeline.events.items[timeline.events.items.len - 1].event_sequence };
     const start: manifest.Position = if (timeline.events.items.len == 0) .{} else .{ .raw_offset = timeline.events.items[0].stream_offset, .event_sequence = timeline.events.items[0].event_sequence };
     const generations = try allocator.dupe(manifest.Generation, options.generations);
@@ -115,6 +109,80 @@ pub fn publish(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
     try manifest.save(allocator, io, dir, path, value);
     _ = try index.prune(options.retention_days, options.ended_ms.?);
     return .{ .manifest_revision = value.manifest_revision, .coverage = coverage, .replayability = replayability };
+}
+
+fn eventMappings(allocator: std.mem.Allocator, timeline: *const Timeline) ![]manifest.Event {
+    const events = try allocator.alloc(manifest.Event, timeline.events.items.len);
+    for (timeline.events.items, events, 1..) |event, *target, cast_line| {
+        target.* = .{
+            .sequence = event.event_sequence,
+            .raw_offset = event.stream_offset,
+            .raw_length = if (event.kind == .output) event.payload.len else 0,
+            .cast_line = cast_line,
+            .kind = switch (event.kind) {
+                .output => .output,
+                .resize => .resize,
+                .application => .application,
+                .boundary => .boundary,
+            },
+        };
+    }
+    return events;
+}
+
+/// Publish one immutable command interval before its slot can be reused.
+/// The manifest is the commit point and the cast keeps the original offsets.
+pub fn archiveExecution(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options, revision: u64, range: manifest.ExecutionRange, timeline: ?*const Timeline) !void {
+    const parent = try manifest.pathForCast(allocator, options.cast_path);
+    defer allocator.free(parent);
+    const path = try manifest.executionSegmentPath(allocator, parent, range.execution_id, .metadata);
+    defer allocator.free(path);
+    const generation = for (options.generations) |entry| {
+        if (entry.recording_generation == range.recording_generation) break entry;
+    } else return error.InvalidRecordingGeneration;
+    const key = std.fmt.bytesToHex(options.archive_key.bytes, .lower);
+    const id = std.fmt.bytesToHex(options.recording_id.bytes, .lower);
+    var value: manifest.Manifest = .{
+        .archive_key = &key,
+        .recording_id = &id,
+        .manifest_revision = revision,
+        .source_kind = .ssh,
+        .started_ms = options.started_ms,
+        .state = .closed,
+        .recording = .{ .generations = &.{generation} },
+        .execution_ranges = &.{range},
+        .execution_segment = true,
+        .coverage = .unavailable,
+        .replayability = .unsupported,
+        .failure = range.failure,
+        .commit = .{ .state = .metadata_only },
+    };
+    const frozen = timeline orelse return manifest.save(allocator, io, dir, path, value);
+    const cast_path = try manifest.executionSegmentPath(allocator, parent, range.execution_id, .cast);
+    defer allocator.free(cast_path);
+    const events = try eventMappings(allocator, frozen);
+    defer allocator.free(events);
+    // Create the managed parent with the manifest writer's no-symlink traversal.
+    // The cast and final manifest are separate atomic commits.
+    const segment_dir = try manifest.createParent(io, dir, path);
+    defer segment_dir.close(io);
+    const filename = std.fs.path.basename(cast_path);
+    try frozen.saveFrozenCast(io, segment_dir, filename, generation.initial_cols, generation.initial_rows);
+    errdefer segment_dir.deleteFile(io, filename) catch {};
+    const cast = try segment_dir.openFile(io, filename, .{ .follow_symlinks = false });
+    defer cast.close(io);
+    const size = (try cast.stat(io)).size;
+    const checksum = try manifest.fingerprint(io, cast, size);
+    const file: manifest.File = .{ .path = cast_path, .kind = .cast, .committed_length = size, .checksum = &checksum };
+    value.files = &.{file};
+    value.events = events;
+    value.command_history = frozen.command_history.items;
+    value.coverage = .retained;
+    value.replayability = .baseline_unavailable;
+    value.retained_range = .{ .start = range.start, .end = range.end.? };
+    value.total_received = range.end.?.raw_offset;
+    value.commit = .{ .state = .indexed, .committed_length = size };
+    try manifest.save(allocator, io, dir, path, value);
 }
 fn previousRevision(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, key: []const u8, id: []const u8) !u64 {
     const previous = manifest.load(allocator, io, dir, path) catch |err| switch (err) {

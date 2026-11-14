@@ -100,6 +100,7 @@ pub const Bridge = struct {
     stream_buffer: [4096]u8 = undefined,
     stream_len: usize = 0,
     stream_offset: usize = 0,
+    decision_event: execution.DecisionEvent = .{},
     pub fn init(a: std.mem.Allocator, owner: identity.SessionHandle, native: *Native) Bridge {
         return .{ .allocator = a, .owner = owner, .native = native, .snapshot = .{ .owner = owner, .completion_source = .private_protocol } };
     }
@@ -134,6 +135,7 @@ pub const Bridge = struct {
         self.snapshot.lease_expires_at = self.lease.expires_at;
         self.snapshot.input_ready = self.lease.holder == null and !self.lease.draining;
         self.snapshot.local_released = self.snapshot.input_ready;
+        self.decision_event.publish(self.snapshot);
     }
     pub fn renew(self: *Bridge, grant: execution.Grant, now: i64) !void {
         try self.lease.renew(grant, now);
@@ -600,6 +602,11 @@ pub const Bridge = struct {
             self.disable();
             return;
         };
+        self.writePending();
+    }
+    /// Retry the exact pending write while its owner closes an SSH channel.
+    /// Does not read or enqueue new protocol frames.
+    pub fn writePending(self: *Bridge) void {
         if (self.tx_offset < self.tx.items.len) {
             var count: usize = 0;
             const write_status = if (self.tx_secret_channel) zw_local_secret_write(self.secret_native orelse {

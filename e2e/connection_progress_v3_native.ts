@@ -54,7 +54,7 @@ for(const [w,h] of [[1440,900],[860,480]]){
 assert((await clickTestId('remote.notice.logs')).ok);
 await waitFor(async()=>(await query('connection.progress.logs')).find(shown)??null);
 await sleep(240);
-const dismissLogs=await waitFor(async()=>(await query('connection.progress.dismiss')).find(shown)??null);
+const dismissLogs=await waitFor(async()=>(await query('connection.progress.close')).find(shown)??null);
 assert((await clickAt(dismissLogs.rect.x+dismissLogs.rect.w/2,dismissLogs.rect.y+dismissLogs.rect.h/2)).ok);
 await waitFor(async()=>!(await query('connection.progress')).some(shown)||null);
 const previousConnections=sockets.length;

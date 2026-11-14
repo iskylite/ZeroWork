@@ -210,6 +210,7 @@ pub const SshWorker = struct {
     keepalive_watch: @import("../proto/ssh/keepalive_watch.zig").Watch = .{},
     /// IO-owner only. An SSH CHANNEL_EOF is independent of transport loss.
     shell_eof_ns: ?i128 = null,
+    shell_close_for_transfers: std.atomic.Value(bool) = .init(false),
     shell_exit_code: ?i32 = null,
 
     native_mutex: std.atomic.Mutex = .unlocked,
@@ -419,6 +420,7 @@ pub const SshWorker = struct {
         worker.options = session_options;
         worker.keepalive_watch = .{};
         worker.shell_eof_ns = null;
+        worker.shell_close_for_transfers = .init(false);
         worker.shell_exit_code = null;
         worker.session = session;
         worker.exec_bridge = SshExecBridge.init(&worker.session, allocator);
@@ -608,6 +610,7 @@ pub const SshWorker = struct {
     }
 
     pub fn step(self: *SshWorker, timeout_ms: u32) !void {
+        if (self.shell_close_for_transfers.load(.acquire)) return self.stepWithoutShell(timeout_ms);
         if (self.text.projection_requested.swap(false, .acq_rel)) self.io.feed.republish_pending = true;
         try self.applyPendingScrollbackLimit();
         for (self.forward_services[0..self.forward_count]) |service| if (service) |value| if (value.parentCloseRequested()) return error.ForwardParentClosing;
@@ -705,6 +708,143 @@ pub const SshWorker = struct {
             std.log.debug("[worker] interest change write={} pending={d}", .{ next_interest.write, self.input.pending() });
             try self.loop.setInterest(next_interest);
         }
+    }
+
+    pub fn requestShellCloseForTransfers(self: *SshWorker) void {
+        if (self.shell_close_for_transfers.load(.acquire)) return;
+        self.invalidateInput();
+        self.presentation_attached.store(false, .release);
+        self.shell_close_for_transfers.store(true, .release);
+        self.wakeup.notify();
+    }
+
+    fn stepWithoutShell(self: *SshWorker, timeout_ms: u32) !void {
+        const pending = if (self.shared_transfer) |shared| shared.hasPending() else false;
+        if (!self.loop_active) return error.WorkerStopped;
+        if (self.loop.interest.write) try self.loop.setInterest(.{ .read = true });
+        try self.loop.wait(@min(timeout_ms, if (pending) @as(u32, 1) else 25));
+        self.lockNative();
+        defer self.unlockNative();
+        if (self.shared_connection) |group| {
+            if (group.broken) return error.SharedTransportLost;
+            group.stepShellCleanup();
+        }
+        for (self.loop.ready_events[0..self.loop.ready_count]) |event| {
+            if (event.ident == @as(usize, @intCast(self.wakeup.read_fd))) {
+                self.wakeup.drain();
+            } else if (event.flags & (std.c.EV.EOF | std.c.EV.ERROR) != 0) return error.TransferTransportClosed;
+        }
+        self.loop.ready_count = 0;
+        if (self.session.channel) |*channel| {
+            // libssh2 may still own an exact write buffer for this channel.
+            // Settle that packet before closing, without starting future writes.
+            if (try self.finishPendingShellWrite(channel) and self.finishPendingControlWrite()) switch (self.session.closeChannelReceipt(channel)) {
+                .awaiting => {},
+                .unknown => return error.ShellCloseUnknown,
+                .released => {
+                    self.settleReleasedShell();
+                    @import("../platform/applog.zig").info(.ssh, "terminal channel released while transfers drain", .{});
+                },
+            };
+        }
+        if (self.session.channel == null and self.finishPendingControlWrite()) if (self.execution_control) |*channel| switch (self.session.closeChannelReceipt(channel)) {
+            .awaiting => {},
+            .unknown => return error.ExecutionControlCloseUnknown,
+            .released => {
+                self.execution_control = null;
+                self.session.recordResource(.execution_control, .released);
+                while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+                defer self.execution_mutex.unlock();
+                if (self.execution) |*bridge| self.settleReleasedPrivateExecution(bridge);
+            },
+        };
+        try self.session.stepRtt(realtime.monotonicNs());
+        try self.exec_bridge.step();
+        if (self.shared_transfer) |shared| try shared.step();
+        if (self.targetForward()) |service| try service.step(&self.session);
+        try self.stepKeepalive();
+    }
+
+    fn finishPendingShellWrite(self: *SshWorker, channel: *@import("../proto/ssh/channel.zig").Channel) !bool {
+        const native = @import("generated_ssh_session");
+        if (native.zw_libssh2_channel_write_pending(@ptrCast(channel.handle)) == 0) return true;
+        while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.execution_mutex.unlock();
+        if (self.io.repliesPending()) {
+            const count = try self.io.writer.write(self.io.reply_buffer[self.io.reply_offset..self.io.reply_len]);
+            self.io.reply_offset += count;
+            return count != 0;
+        }
+        if (self.io.write_len != 0) {
+            const count = try self.io.writer.write(self.io.write_buffer[0..self.io.write_len]);
+            if (count == 0) return false;
+            try self.input.consume(count);
+            self.io.write_len = 0;
+            if (self.shell_execution) |*bridge| bridge.written(&self.input, executionNow());
+            return true;
+        }
+        if (self.execution) |*bridge| if (bridge.wake_pending) {
+            if (try self.io.writer.write(&self.execution_wake) == 0) return false;
+            bridge.wakeCompleted();
+            return true;
+        };
+        return error.ShellWriteOwnerUnknown;
+    }
+
+    fn finishPendingControlWrite(self: *SshWorker) bool {
+        const channel = if (self.execution_control) |*value| value else return true;
+        const native = @import("generated_ssh_session");
+        if (native.zw_libssh2_channel_write_pending(@ptrCast(channel.handle)) == 0) return true;
+        while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.execution_mutex.unlock();
+        if (self.execution) |*bridge| bridge.writePending();
+        return native.zw_libssh2_channel_write_pending(@ptrCast(channel.handle)) == 0;
+    }
+
+    fn settleReleasedShell(self: *SshWorker) void {
+        while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.execution_mutex.unlock();
+        if (self.shell_execution) |*bridge| {
+            bridge.flushInitializationEcho(.{ .context = self, .output = shellExecutionOutput, .boundary = shellExecutionBoundary, .semantic_context = shellSemanticContext }, executionNow());
+            self.io.stream_offset = bridge.raw_received;
+            bridge.channelReleased();
+            self.settleShellFailure(bridge);
+            for (bridge.contexts.items) |context| {
+                context.channelReleased();
+                self.settleShellFailure(context);
+            }
+        } else if (self.execution_control == null) {
+            if (self.execution) |*bridge| self.settleReleasedPrivateExecution(bridge);
+        }
+        // The replay gate was invalidated before the owner entered this step.
+        // Retire pending bytes only after settling what actually reached SSH.
+        self.io.closed = true;
+        self.io.write_len = 0;
+        self.replay.disconnected(&self.input);
+        self.startup_pending.store(false, .release);
+    }
+
+    fn settleReleasedPrivateExecution(self: *SshWorker, bridge: *ExecutionProtocol.Bridge) void {
+        bridge.fail("SessionClosed", false);
+        // Neither the control channel nor the terminal can complete a write.
+        bridge.lease.draining = false;
+        bridge.wake_pending = false;
+        bridge.awaiting_submit_ack = false;
+        bridge.snapshot.grant = null;
+        bridge.snapshot.input_ready = false;
+        bridge.snapshot.local_released = true;
+        bridge.snapshot.interactive_execution = false;
+        if (bridge.last_execution) |id| if (!bridge.snapshot.recording_settled) {
+            if (self.execution_recording) |*rec| {
+                const snapshot = bridge.snapshot;
+                self.execution_mutex.unlock();
+                const result = rec.abandon(id, snapshot, self.io.stream_offset);
+                while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+                if (result) |revision| bridge.failureSettled(revision, false) else |_| bridge.failureSettled(rec.revision, true);
+                bridge.snapshot.input_ready = false;
+            } else bridge.failureSettled(bridge.snapshot.manifest_revision, true);
+        };
+        bridge.snapshot.revision +|= 1;
     }
 
     /// IO-owner only, including while the transport is ended or awaiting

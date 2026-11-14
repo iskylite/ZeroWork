@@ -207,7 +207,7 @@ pub const Context = struct {
         if (std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal") or std.mem.eql(u8, invocation.tool_id, "host.attach_shell")) {
             const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
             if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
-            if (!self.app.permitsReconnectExecution(invocation.context, handle)) return error.ReconnectTargetUnavailable;
+            if (std.mem.eql(u8, invocation.tool_id, "host.attach_shell")) try self.app.checkReconnectSuccessor(invocation.context, handle);
             return;
         }
         const reference = try string(invocation.arguments, "execution_ref");
@@ -262,6 +262,7 @@ pub const Context = struct {
         try validateNormalized(invocation, command, hash);
         const controller = try self.current(invocation.context, false);
         const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
+        try controller.bridge.checkCommandTarget(self.app, invocation.context, invocation.operation_id, handle, hash);
         const boundary = try self.captureBoundary(controller, handle, true, false, hash);
         try validateShellExpectation(invocation.arguments, boundary.shell);
         try checkForbidden(command);
@@ -641,7 +642,7 @@ pub const Context = struct {
         if (record.cleanup_only) return error.WorkspaceClosed;
         const handle = try parseSession(invocation.context, reference);
         if (!handle.eql(record.boundary.handle)) return error.StaleReference;
-        if (!self.app.permitsReconnectExecution(invocation.context, handle)) return error.ReconnectTargetUnavailable;
+        try self.app.checkReconnectSuccessor(invocation.context, handle);
         try checkForbidden(command);
         try self.validateApproval(invocation, command, hash);
         const service = try self.resolveAdmission(record, true);

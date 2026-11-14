@@ -18,9 +18,10 @@ const data=join(iso,'data'),rpc=join(iso,'rpc'),zdot=join(iso,'zdot'),empty=join
 await Promise.all([mkdir(data),mkdir(rpc),mkdir(zdot),mkdir(empty)]);
 await writeFile(join(zdot,'.zshrc'),"bindkey -e\nPS1='live-permission%# '\n");
 const output=join(iso,'compound-output');
-const command=`if true; then printf '%s\n' COMPOUND_OK | cat > '${output}'; fi; true`;
+const command=`pwd; if true; then printf '%s\n' COMPOUND_OK | cat > '${output}'; fi; true`;
 const blocked=`printf 'safe\\n'; if true; then r""m -rf ${empty}; fi`;
 const unapproved=join(iso,'unapproved-marker'),uncertain=`"$ZW_REVIEW_EXECUTABLE" '${unapproved}'`;
+const assignmentMarker=join(iso,'assignment-marker'),assignment=`value=hello; /usr/bin/touch '${assignmentMarker}'`;
 const frame=(delta:any)=>'data: '+JSON.stringify({choices:[{index:0,delta}]})+'\n\n';
 const wire=(name:string)=>name.replaceAll('_','_u').replaceAll('.','__');
 const observations=new Map<string,any>(),emitted=new Set<string>();
@@ -91,6 +92,8 @@ const server=createServer(async(req,res)=>{
   assert.equal(results.get('blocked-run').error_code,'PermissionDenied');
   if(!results.has('dynamic-run'))return run('dynamic-run',uncertain);
   assert.equal(observations.get('dynamic-run').envelope.status,'rejected');
+  if(!results.has('assignment-run'))return run('assignment-run',assignment);
+  assert.equal(observations.get('assignment-run').envelope.status,'rejected');
   finished=true;res.end(frame({content:'LIVE_PERMISSION_VERIFIED'})+'data: [DONE]\n\n');
  }catch(error){fixtureFailure=String(error);if(!res.headersSent)res.writeHead(500);res.end()}
 });
@@ -126,7 +129,7 @@ try{
  await h.waitFor(async()=>{assert.equal(fixtureFailure,null);return readyToDowngrade||null},60000);
  assert(!(await h.query('ai.interaction.panel')).some(shown));await capture('02-auto-continued');
  assert.equal(await readFile(output,'utf8'),'COMPOUND_OK\n');
- report.checks.push('compound PTY commands with a conditional, semicolons, a pipeline and redirection run automatically and produce the expected file');
+ report.checks.push('A PTY query followed by a conditional, pipeline and redirection runs automatically and produces the expected file');
  await mode('confirm');continueAfterDowngrade();
  await visible('ai.interaction.panel');assert.equal(text(await visible('ai.interaction.command')),command);await capture('03-confirm-restored');
  report.checks.push('auto -> confirm during provider streaming makes the next PTY call wait');
@@ -138,15 +141,21 @@ try{
  assert.equal(await access(unapproved).then(()=>true,()=>false),false);
  await click('ai.interaction.reject');report.decisions.push({call:'dynamic-run',approved:false});
  report.checks.push('An expanded executable name still requires exact approval in auto mode; rejection leaves its marker absent');
+ await visible('ai.interaction.panel');assert.equal(text(await visible('ai.interaction.command')),assignment);
+ await capture('05-assignment-pending');
+ assert.equal(await access(assignmentMarker).then(()=>true,()=>false),false);
+ await click('ai.interaction.reject');report.decisions.push({call:'assignment-run',approved:false});
  await h.waitFor(async()=>{assert.equal(fixtureFailure,null);return finished||null},30000);
  await h.waitFor(async()=>!(await h.query('ai.stop')).some(shown)||null,20000);
+ assert.equal(await access(assignmentMarker).then(()=>true,()=>false),false);
+ report.checks.push('A plain assignment requires exact approval in auto mode; rejection leaves its marker absent');
  assert.equal((await readdir(empty)).length,0);report.checks.push('quote-spliced dangerous rm inside a compound command is blocked in auto mode before dispatch and preserves the owned empty target');
  const journal=JSON.parse(await readFile(join(data,'ai/lifecycle.json'),'utf8'));
  const runs=journal.records.filter((record:any)=>record.tool_id==='host.run_in_terminal'&&record.execution);
  assert.deepEqual(runs.map((record:any)=>record.original_call).sort(),['automatic-run','pending-run']);
  for(const record of runs){assert.equal(record.stage,'succeeded');assert.equal(record.execution_receipt.interval_saved,true)}
  report.checks.push('exactly the two authorized original calls have saved PTY execution receipts');
- await capture('05-complete');
+ await capture('06-complete');
  await click('ai.collapse');assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);
  const quitAt=performance.now();
  while(app.exitCode===null&&app.signalCode===null&&performance.now()-quitAt<15000){

@@ -405,6 +405,21 @@ test "AI session PATCH journal restores orphan as fenced data and resumes only a
     const resumed = try restored.resumeConversation(record.id, target.id, record.revision);
     try std.testing.expect(resumed.binding > ticket.binding and record.inbox.next() == null);
     try std.testing.expectEqualStrings("saved answer", record.history.messages[1].content);
+    try std.testing.expectEqual(@as(u64, 7), record.resumed_history.?.through_turn);
+    try restored.checkpoint(resumed, 8, &.{
+        .{ .content = "past" },
+        .{ .role = .assistant, .content = "saved answer" },
+        .{ .content = "current question" },
+    }, true);
+    {
+        var replayed = lifecycle.Store.init(std.testing.allocator);
+        defer replayed.deinit();
+        try reopened.bind(&replayed);
+        const replayed_record = replayed.find(record.id).?;
+        try std.testing.expectEqual(@as(u64, 8), replayed_record.last_turn);
+        try std.testing.expectEqual(@as(u64, 7), replayed_record.resumed_history.?.through_turn);
+        try std.testing.expectEqual(@as(usize, 1), replayed_record.resumed_history.?.user_messages);
+    }
     const forked = try restored.fork(record.id, record.content_revision);
     const operation = identity.HostOperationId.generate();
     _ = try restored.beginEnd(resumed, operation);
@@ -990,6 +1005,85 @@ test "AI session PATCH steering compaction leaves inbox unlocked for stop and ne
     _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "mock", .system = "", .messages = &.{}, .max_output = 512 });
     try std.testing.expect(fixture.compacted);
     try std.testing.expectEqual(@as(usize, 2), fixture.calls);
+}
+
+test "AI session PATCH task status keeps the committed snapshot while the root is locked" {
+    const budget = @import("ai/task_budget.zig");
+    var root = budget.Root.init(std.testing.allocator);
+    defer root.deinit();
+    const task = identity.TaskId.generate();
+    try root.add(.{ .root = task, .task = task, .conversation = identity.ConversationId.generate(), .agent = identity.AgentId.generate(), .generation = 1 });
+    try std.testing.expectEqual(budget.Status.running, root.displayFacts()[0].status);
+    root.lock();
+    {
+        defer root.mutex.unlock();
+        try std.testing.expectEqual(budget.Status.running, root.displayFacts()[0].status);
+    }
+    try root.state(task, .succeeded, "完成");
+    try std.testing.expectEqual(budget.Status.succeeded, root.displayFacts()[0].status);
+    try std.testing.expectEqualStrings("完成", root.displayFacts()[0].summary);
+}
+
+test "AI session PATCH background presentation coalesces versions and survives reopening" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = "presentations.jsonl";
+    var journal = try Journal.open(a, std.testing.io, tmp.dir, path);
+    defer journal.deinit();
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    try journal.bind(&store);
+    const agent = try store.attach(.{ .group = 1 });
+    const ticket = try store.create(agent.id);
+    const record = store.find(ticket.conversation).?;
+    const first = @import("ai/conversation_presentation.zig").Version{ .content = 1 };
+    const next = @import("ai/conversation_presentation.zig").Version{ .content = 2 };
+    var text = [_]u8{ 'o', 'l', 'd' };
+
+    // Hold the IO lock while checking that capture, a concurrent draft,
+    // and deduplication all return without waiting for the writer.
+    try std.testing.expect(journal.mutex.tryLock());
+    {
+        defer journal.mutex.unlock();
+        const current = @import("ai/assistant_store.zig").Message{ .user = true, .text = &text };
+        try std.testing.expectEqual(.queued, try store.queuePresentation(record, first, &.{}, current, &.{}));
+        try std.testing.expectEqual(.queued, try store.queuePresentation(record, first, &.{}, current, &.{}));
+        try std.testing.expectEqual(.busy, try store.queuePresentation(record, next, &.{}, current, &.{}));
+        try std.testing.expectError(error.JournalBusy, store.setDraft(ticket, record.draft_revision, "未发送"));
+        try std.testing.expect(record.presentation == null and record.draft == null);
+        @memcpy(&text, "new");
+    }
+    const Wait = struct {
+        fn saved(owner: *lifecycle.Store) !void {
+            const start = @import("platform/realtime.zig").monotonicNs();
+            while (owner.presentationPending()) {
+                try owner.pollPresentations();
+                if (@import("platform/realtime.zig").monotonicNs() - start > 5 * std.time.ns_per_s) return error.PresentationTimeout;
+                std.Thread.yield() catch {};
+            }
+        }
+    };
+    try Wait.saved(&store);
+    try std.testing.expect(std.mem.indexOf(u8, record.presentation.?, "old") != null);
+    const count = journal.bytes.items.len;
+    try std.testing.expectEqual(.saved, try store.queuePresentation(record, first, &.{}, null, &.{}));
+    try std.testing.expectEqual(count, journal.bytes.items.len);
+    try std.testing.expectEqual(.queued, try store.queuePresentation(record, next, &.{}, .{ .user = true, .text = &text }, &.{}));
+    try Wait.saved(&store);
+    _ = try store.setDraft(ticket, record.draft_revision, "未发送");
+    try std.testing.expect(std.mem.indexOf(u8, record.presentation.?, "new") != null);
+
+    // Replay from a second path to avoid sharing the live journal lock.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "replay.jsonl", .data = journal.bytes.items });
+    var replay = try Journal.open(a, std.testing.io, tmp.dir, "replay.jsonl");
+    defer replay.deinit();
+    var restored = lifecycle.Store.init(a);
+    defer restored.deinit();
+    try replay.bind(&restored);
+    const recovered = restored.find(ticket.conversation).?;
+    try std.testing.expectEqualStrings(record.presentation.?, recovered.presentation.?);
+    try std.testing.expectEqualStrings("未发送", recovered.draft.?);
 }
 
 test "AI session PATCH asynchronous checkpoint acknowledges durability before publication and retries errors" {

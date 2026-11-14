@@ -41,8 +41,12 @@ const Fixture = struct {
     }
     fn composerKey(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *Fixture = @ptrCast(@alignCast(raw orelse return .ignored));
-        if (event == .key_down and event.key_down.key == .@"return") {
-            switch (@import("ui/ai_composer_keys.zig").handleReturn(event.key_down, self.input.state)) {
+        if (event != .key_down) return .ignored;
+        const key = event.key_down;
+        const keys = @import("ui/ai_composer_keys.zig");
+        if (keys.handleNavigation(key, self.input.state)) return .stop;
+        if (key.key == .@"return") {
+            switch (keys.handleReturn(key, self.input.state)) {
                 .composing => return .ignored,
                 .newline => {},
                 .submit => self.submissions += 1,
@@ -300,4 +304,87 @@ test "AI composer Shift Return inserts a newline while Return submits and queue 
     f.cx.handleImeCommit("中");
     f.settle();
     try std.testing.expect(std.mem.endsWith(u8, f.value.peek(), "中"));
+}
+
+test "AI composer Control navigation preserves draft, selection semantics and IME composition" {
+    var f: Fixture = undefined;
+    try f.init(true);
+    defer f.deinit();
+    const segment = "中间有一段自动换行的文字，光标可以跳到这段文字的开头和结尾。";
+    const text = "前文\n" ++ segment ++ segment ++ segment ++ "结束\n尾行";
+    const line_start = "前文\n".len;
+    const line_end = text.len - "\n尾行".len;
+    const state = f.input.state;
+    f.cx.setFocus(f.input.input);
+    f.cx.handleTextInput(text);
+    f.settle();
+    try std.testing.expect(state.wrap_map.displayLineCount() > 3);
+    _ = state.setAccessibilitySelection(line_end - "结束".len, line_end - "结束".len);
+
+    f.cx.handleKeyDown(.a, .{ .ctrl = true });
+    try std.testing.expectEqual(line_start, state.cursor.offset);
+    try std.testing.expect(!state.cursor.hasSelection());
+    f.cx.handleKeyDown(.e, .{ .ctrl = true, .shift = true });
+    try std.testing.expectEqual(line_end, state.cursor.offset);
+    try std.testing.expectEqual(@as(?usize, line_start), state.cursor.anchor);
+    f.cx.handleKeyDown(.e, .{ .ctrl = true });
+    try std.testing.expect(!state.cursor.hasSelection());
+    f.cx.handleKeyDown(.b, .{ .ctrl = true });
+    try std.testing.expectEqual(line_end - "束".len, state.cursor.offset);
+    f.cx.handleKeyDown(.f, .{ .ctrl = true });
+    try std.testing.expectEqual(line_end, state.cursor.offset);
+    f.cx.handleKeyDown(.n, .{ .ctrl = true });
+    try std.testing.expectEqual(@as(usize, 2), state.doc.offsetToLineCol(state.cursor.offset).line);
+    f.cx.handleKeyDown(.p, .{ .ctrl = true });
+    try std.testing.expectEqual(@as(usize, 1), state.doc.offsetToLineCol(state.cursor.offset).line);
+    try std.testing.expectEqualStrings(text, f.value.peek());
+
+    f.cx.handleKeyDown(.a, .{ .super = true });
+    try std.testing.expectEqualStrings(text, state.getSelectedText().?);
+    f.cx.handleImePreedit("nihao", 5);
+    f.cx.handleKeyDown(.a, .{ .ctrl = true });
+    f.cx.handleKeyDown(.e, .{ .ctrl = true });
+    try std.testing.expect(state.imeIsComposing());
+    try std.testing.expectEqualStrings("nihao", state.preeditText());
+    try std.testing.expectEqualStrings(text, f.value.peek());
+}
+
+test "AI composer skill picker ignores stale rows after a draft edit or caret move" {
+    const Picker = @import("ui/ai_skill_picker.zig");
+    const Skills = @import("config/ai_extensions.zig").Skill;
+    const Probe = struct {
+        changes: usize = 0,
+        fn changed(self: *@This(), _: []const u8) void {
+            self.changes += 1;
+        }
+    };
+    var f: Fixture = undefined;
+    try f.init(true);
+    defer f.deinit();
+    var probe: Probe = .{};
+    const picker = try Picker.View.mount(f.cx, f.scope, f.input, f.cx.on(Probe, &probe, Probe.changed));
+    try f.cx.root.?.appendChild(a, picker.popup.wrapper);
+    const skills = [_]Skills{.{ .id = "sample", .revision = "1", .name = "sample", .description = "" }};
+    f.cx.setFocus(f.input.input);
+    f.cx.handleTextInput("/skill");
+    try picker.refresh(1, 1, &skills, null);
+    try std.testing.expect(picker.popup.open.?.peek());
+    const enter: ui.events.KeyEvent = .{ .key = .@"return" };
+    f.cx.handleTextInput(" unrelated");
+    try std.testing.expect(!picker.handleKey(enter));
+    try std.testing.expectEqualStrings("/skill unrelated", f.value.peek());
+    try std.testing.expectEqual(@as(usize, 0), probe.changes);
+
+    f.value.set("/skill\nexisting task");
+    _ = f.input.state.setAccessibilitySelection(6, 6);
+    try picker.refresh(1, 1, &skills, null);
+    try std.testing.expect(picker.popup.open.?.peek());
+    const end: u32 = @intCast(f.input.state.getText().len);
+    _ = f.input.state.setAccessibilitySelection(end, end);
+    try std.testing.expect(!picker.handleKey(enter));
+    try std.testing.expectEqualStrings("/skill\nexisting task", f.value.peek());
+    _ = f.input.state.setAccessibilitySelection(6, 6);
+    try std.testing.expect(picker.handleKey(enter));
+    try std.testing.expectEqualStrings("/skill sample\nexisting task", f.value.peek());
+    try std.testing.expectEqual(@as(usize, 1), probe.changes);
 }

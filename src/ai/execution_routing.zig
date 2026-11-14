@@ -120,7 +120,7 @@ pub const State = struct {
         var instruction = std.mem.trim(u8, submitted, " \t");
         for (0..3) |_| {
             var removed = false;
-            for ([_][]const u8{ "你可以", "可以", "请你", "请", "帮我", "麻烦你", "麻烦" }) |prefix| {
+            for ([_][]const u8{ "你可以", "可以", "请你", "请", "帮我", "麻烦你", "麻烦", "你" }) |prefix| {
                 if (!std.mem.startsWith(u8, instruction, prefix)) continue;
                 instruction = std.mem.trimStart(u8, instruction[prefix.len..], " \t");
                 removed = true;
@@ -128,7 +128,7 @@ pub const State = struct {
             }
             if (!removed) break;
         }
-        if (!startsAny(instruction, &.{ "再开会话", "再开一个会话", "新开会话", "新开一个会话", "新建会话", "新建一个会话", "另开会话", "另开一个会话", "再开终端", "再开一个终端", "新开终端", "新开一个终端", "新建终端", "另开终端" })) return false;
+        if (!startsAny(instruction, &.{ "再开会话", "再开一个会话", "新开会话", "新开一个会话", "新建会话", "新建一个会话", "另开会话", "另开一个会话", "重新开启一个会话", "再开终端", "再开一个终端", "新开终端", "新开一个终端", "新建终端", "另开终端" })) return false;
         const source: Source = if (selected) |handle| blk: {
             if (context.binding == .session and context.binding.session != @backingInt(handle.session_id)) return error.TargetOutsideScope;
             break :blk .{ .session = handle };

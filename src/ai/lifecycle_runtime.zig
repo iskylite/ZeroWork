@@ -570,7 +570,7 @@ pub const Runtime = struct {
                     try self.settleReconnect(record.handle, record.revision, record.stage, snapshot);
                 }
             }
-            return reconnectResult(a, invocation, operation, snapshot, reconnectPending(snapshot, request.wait_for, revision), false, false);
+            return reconnectResultFor(a, invocation, operation, snapshot, reconnectPending(snapshot, request.wait_for, revision), false, false, request.wait_for);
         }
         if (queried.result != .session) return error.InvalidControllerReceipt;
         var snapshot = queried.result.session;
@@ -702,24 +702,49 @@ fn disconnectResult(a: std.mem.Allocator, invocation: host.Invocation, operation
     }, true, unknown);
 }
 fn reconnectResult(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, receipt: ReconnectReceipt, timed_out: bool, reused: bool, started: bool) !host.Result {
+    return reconnectResultFor(a, invocation, operation, receipt, timed_out, reused, started, .revision);
+}
+
+fn reconnectResultFor(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, receipt: ReconnectReceipt, timed_out: bool, reused: bool, started: bool, wait_for: @TypeOf(@as(tools.Request, undefined).wait_for)) !host.Result {
     if (!receipt.operation_ref.eql(operation) or receipt.failure_len > receipt.failure.len) return error.InvalidControllerReceipt;
     if (receipt.successor) |next| {
         if (!next.eql(try receipt.original.nextGeneration())) return error.InvalidControllerReceipt;
     } else if (receipt.state == .connecting or receipt.state == .ready) return error.InvalidControllerReceipt;
-    var result = try jsonResult(a, invocation, if (receipt.state == .failed) .failed else .succeeded, .{
+    const pty_unavailable = wait_for == .interactive and receipt.state == .ready and receipt.execution_readiness != .ready;
+    const wait_expired = wait_for == .interactive and timed_out;
+    const code: ?[]const u8 = if (receipt.failure_len != 0) receipt.failure[0..receipt.failure_len] else if (pty_unavailable)
+        (if (receipt.execution_readiness == .unsupported) "ReconnectPtyUnsupported" else "ReconnectPtyNotReady")
+    else if (wait_expired)
+        "ReconnectWaitTimedOut"
+    else
+        null;
+    const recovery_hint: ?[]const u8 = if (receipt.state == .failed)
+        reconnect_failure_hint
+    else if (pty_unavailable)
+        (if (receipt.execution_readiness == .unsupported) "SSH is connected, but interactive execution is unavailable. Report this to the user." else "SSH is connected. Wait for the PTY again using the same operation_ref.")
+    else if (wait_expired)
+        "Reconnect is still in progress. Wait again using the same operation_ref."
+    else
+        null;
+    const state: []const u8 = if (pty_unavailable)
+        (if (receipt.execution_readiness == .unsupported) "pty_unsupported" else "pty_pending")
+    else
+        @tagName(receipt.state);
+    var result = try jsonResult(a, invocation, if (receipt.state == .failed or pty_unavailable or wait_expired) .failed else .succeeded, .{
         .operation_ref = try tools.operationRef(a, invocation.context, operation),
         .previous_session_ref = try queries.sessionRef(a, invocation.context, receipt.original),
-        .session_ref = if (receipt.state == .ready) try queries.sessionRef(a, invocation.context, receipt.successor.?) else null,
+        .session_ref = if (receipt.state == .ready and !pty_unavailable) try queries.sessionRef(a, invocation.context, receipt.successor.?) else null,
         .generation = if (receipt.state != .accepted and receipt.successor != null) receipt.successor.?.generation else null,
-        .state = @tagName(receipt.state),
+        .state = state,
+        .transport_ready = receipt.state == .ready,
         .execution_readiness = receipt.execution_readiness,
         .source_revision = receipt.revision,
-        .error_code = if (receipt.failure_len != 0) receipt.failure[0..receipt.failure_len] else null,
+        .error_code = code,
         .timed_out = timed_out,
         .idempotent_reuse = reused,
         .joined_automatic = receipt.joined_automatic,
-        .retryable = if (receipt.state == .failed) @as(?bool, false) else null,
-        .recovery_hint = if (receipt.state == .failed) @as(?[]const u8, reconnect_failure_hint) else null,
+        .retryable = if (receipt.state == .failed or pty_unavailable or wait_expired) @as(?bool, false) else null,
+        .recovery_hint = recovery_hint,
     }, started, false);
     if (receipt.state == .ready and receipt.execution_readiness == .ready) result.reconnected = .{ .previous = receipt.original, .current = receipt.successor.? };
     return result;
@@ -734,14 +759,24 @@ test "SSH reconnect reports failure and only attests interactive readiness" {
     const original: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
     const operation = identity.HostOperationId.generate();
     var receipt: ReconnectReceipt = .{ .operation_ref = operation, .original = original, .successor = try original.nextGeneration(), .state = .ready, .revision = 1, .execution_readiness = .initializing };
-    const initializing = try reconnectResult(a, invocation, operation, receipt, true, false, false);
+    const initializing = try reconnectResultFor(a, invocation, operation, receipt, true, false, false, .interactive);
     try std.testing.expect(initializing.reconnected == null);
+    try std.testing.expect(initializing.status == .failed);
+    const pending = try std.json.parseFromSliceLeaky(std.json.Value, a, initializing.blocks[0].structured, .{});
+    try std.testing.expectEqualStrings("pty_pending", pending.object.get("state").?.string);
+    try std.testing.expect(pending.object.get("transport_ready").?.bool);
+    try std.testing.expect(pending.object.get("session_ref").? == .null);
+    receipt.execution_readiness = .unsupported;
+    const unsupported = try reconnectResultFor(a, invocation, operation, receipt, false, false, false, .interactive);
+    const unsupported_body = try std.json.parseFromSliceLeaky(std.json.Value, a, unsupported.blocks[0].structured, .{});
+    try std.testing.expectEqualStrings("pty_unsupported", unsupported_body.object.get("state").?.string);
+    try std.testing.expect(unsupported_body.object.get("session_ref").? == .null);
     receipt.execution_readiness = .ready;
     const ready = try reconnectResult(a, invocation, operation, receipt, false, false, false);
     try std.testing.expect(ready.reconnected.?.current.eql(receipt.successor.?));
     receipt.state = .failed;
     receipt.execution_readiness = .unknown;
-    const code = "ReconnectConnectionLost";
+    const code = "ReconnectSuperseded";
     @memcpy(receipt.failure[0..code.len], code);
     receipt.failure_len = code.len;
     const failed = try reconnectResult(a, invocation, operation, receipt, false, false, false);

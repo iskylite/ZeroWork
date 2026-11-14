@@ -9,7 +9,8 @@ pub const keys_index = fields.len;
 pub const providers_index = fields.len + 1;
 pub const plugin_preferences_index = fields.len + 2;
 pub const extensions_index = fields.len + 3;
-pub const field_count = fields.len + 4;
+pub const default_effort_index = fields.len + 4;
+pub const field_count = fields.len + 5;
 pub const FieldSet = std.StaticBitSet(field_count);
 
 pub fn find(section: []const u8, key: []const u8) ?usize {
@@ -45,6 +46,7 @@ pub fn same(a: anytype, b: @TypeOf(a)) bool {
 
 pub fn fieldEqual(a: config.Config, b: config.Config, index: usize) bool {
     if (index == extensions_index) return same(a.ai.extensions, b.ai.extensions);
+    if (index == default_effort_index) return a.ai.default_effort == b.ai.default_effort;
     if (index == plugin_preferences_index) return same(a.plugin_preferences, b.plugin_preferences);
     if (index == keys_index) return same(a.keys, b.keys);
     if (index == providers_index) return a.ai.provider_count == b.ai.provider_count and same(a.ai.providers, b.ai.providers);
@@ -97,6 +99,7 @@ pub fn merge(latest: config.Config, draft: config.Config, dirty: FieldSet) confi
         }
     }
     if (dirty.isSet(extensions_index)) result.ai.extensions = draft.ai.extensions;
+    if (dirty.isSet(default_effort_index)) result.ai.default_effort = draft.ai.default_effort;
     if (dirty.isSet(plugin_preferences_index)) result.plugin_preferences = draft.plugin_preferences;
     if (dirty.isSet(keys_index)) result.keys = draft.keys;
     if (dirty.isSet(providers_index)) {
@@ -152,4 +155,17 @@ test "execution policy settings participate in atomic draft change and merge" {
     try std.testing.expectEqual(config.ExecutionMode.new_pty, merged.ai.execution_mode);
     try std.testing.expectEqual(config.SessionRetention.keep, merged.ai.session_retention);
     try std.testing.expectEqual(config.PermissionMode.auto, merged.ai.permission_mode);
+}
+
+test "settings drafts preserve an independently changed reasoning effort default" {
+    const baseline: config.Config = .{};
+    var latest = baseline;
+    latest.ai.default_effort = .high;
+    var draft = baseline;
+    draft.ui.font_size = 18;
+    const dirty = changed(baseline, draft);
+    const result = merge(latest, draft, dirty);
+    try std.testing.expectEqual(@import("../ai/provider.zig").Effort.high, result.ai.default_effort.?);
+    try std.testing.expectEqual(@as(u8, 18), result.ui.font_size);
+    try std.testing.expect(changed(baseline, latest).isSet(default_effort_index));
 }

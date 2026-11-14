@@ -543,6 +543,10 @@ pub fn build(b: *std.Build) void {
             local_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
             local_tests.root_module.linkFramework("Metal", .{});
             local_tests.root_module.linkFramework("QuartzCore", .{});
+            // The production execution driver reaches the MCP transport and schema validator.
+            local_tests.root_module.addCSourceFile(.{ .file = b.path("src/ai/mcp_native.c"), .flags = &.{"-std=c11"} });
+            local_tests.root_module.linkSystemLibrary("curl", .{});
+            addUrlFetchFrameworks(local_tests.root_module);
         }
         if (!std.mem.eql(u8, source, "src/local_process_tests.zig")) {
             // ZSH resolves its private module beside this isolated test binary,
@@ -780,6 +784,7 @@ pub fn build(b: *std.Build) void {
     plugin_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
     plugin_tests.root_module.linkSystemLibrary("z", .{});
     addCoreTextBridgeForTest(zenit_dep, plugin_tests);
+    addNativeFilePanels(b, plugin_tests.root_module);
     addBmcNative(b, plugin_tests.root_module);
     plugin_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     plugin_tests.root_module.linkFramework("Metal", .{});
@@ -894,6 +899,7 @@ pub fn build(b: *std.Build) void {
         if (std.mem.eql(u8, runner.name, "ssh-bootstrap-runner")) bootstrap_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-shell-execution-runner")) {
             fixed_forward_runner.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_password_reveal.m"), .flags = &.{"-fobjc-arc"} });
+            addNativeFilePanels(b, fixed_forward_runner.root_module);
             shell_execution_acceptance.dependOn(&runner_install.step);
         }
         if (std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) shared_acceptance.dependOn(&runner_install.step);

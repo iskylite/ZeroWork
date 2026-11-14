@@ -143,6 +143,16 @@ test "AI transfer progress requires actual cleanup and cancellation never replac
     const completed_value = try json(completed.blocks[0].structured);
     defer completed_value.deinit();
     try std.testing.expect(completed_value.value.object.get("completed").?.bool);
+    fake.progress.state = .failed;
+    for ([_]transfer.Failure{ .source_not_found, .destination_directory_not_found }) |failure| {
+        fake.progress.failure = failure;
+        var failed = try registry.query(query, fake.backend(), a, false);
+        defer failed.deinit(a);
+        const value = try json(failed.blocks[0].structured);
+        defer value.deinit();
+        try std.testing.expectEqualStrings(@tagName(failure), value.value.object.get("failure").?.string);
+        try std.testing.expect(!value.value.object.get("completed").?.bool);
+    }
     fake.denied = true;
     try std.testing.expectError(error.TargetNotAuthorized, registry.query(query, fake.backend(), a, false));
     fake.denied = false;

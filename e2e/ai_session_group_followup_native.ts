@@ -7,6 +7,7 @@
  *   node e2e/ai_session_group_followup_native.ts /tmp/zw-session-group-evidence
  * Set ZW_SESSION_GROUP_MONITOR=1 to also run one fixed read-only size sampler
  * in the new session and verify its result while the original process runs.
+ * ZW_SESSION_GROUP_DEEPEP=1 regresses the original DeepEP version request.
  * ZW_SESSION_GROUP_NATURAL=1 sends only the original follow-up. In that mode,
  * ZW_SESSION_GROUP_REVIEW_SAMPLER=1 lets the operator review model commands
  * outside the built-in patterns using the paired review/approved JSON files.
@@ -31,6 +32,10 @@ const binary = join(prefix, 'bin/zerowork');
 const out = resolve(process.argv[2] ?? '/tmp/zw-session-group-evidence');
 const live = process.env.ZW_SESSION_GROUP_LIVE === '1';
 const monitor = process.env.ZW_SESSION_GROUP_MONITOR === '1';
+const deepEP = process.env.ZW_SESSION_GROUP_DEEPEP === '1';
+const deepEPPrompt = '你重新开启一个会话，然后读取下容器内的deep-ep库的版本';
+const deepEPCommand = 'nerdctl -n k8s.io exec spb-deepep-r1 python3 -m pip show deep_ep';
+const deepEPVersion = '1.1.0+loopback.fixture';
 // Optional exact screenshot follow-up: the real model chooses a sampler. The
 // peer guard still accepts only narrowly parsed, read-only fixture commands.
 const natural = monitor && process.env.ZW_SESSION_GROUP_NATURAL === '1';
@@ -61,6 +66,7 @@ assert(!reconnectNextTask || (reconnectFailure && reconnectDuringCommand && auto
 assert(!reconnectGroup || reconnectNextTask);
 const executionMode = process.env.ZW_SESSION_GROUP_EXECUTION_MODE ?? 'attached_pty';
 assert(['attached_pty', 'auto'].includes(executionMode));
+assert(!deepEP || (!live && !monitor && !cleanup && !disconnected && !reconnect && followUpMode === 'steer' && executionMode === 'attached_pty'));
 const gateway = process.env.ZW_SESSION_GROUP_GATEWAY;
 const gatewayKey = process.env.ZW_SESSION_GROUP_GATEWAY_KEY;
 const liveModel = process.env.ZW_SESSION_GROUP_MODEL;
@@ -177,6 +183,10 @@ if [ "$#" = 3 ] && [ "$1" = -c ]; then
 fi
 exec /usr/bin/stat "$@"
 `, { mode: 0o700 });
+if (deepEP) await writeFile(join(peerDir, 'bin', 'nerdctl'), `#!/bin/sh
+[ "$*" = '${deepEPCommand.slice('nerdctl '.length)}' ] || exit 64
+printf 'Name: deep_ep\\nVersion: ${deepEPVersion}\\n'
+`, { mode: 0o700 });
 const peer = spawn(process.env.ZW_TEST_PYTHON ?? 'python3', ['-u', '-c', peerCode, resolve('e2e'), peerDir], { stdio: ['ignore', peerLog.fd, peerLog.fd] });
 const peerEnded = new Promise<void>(done => peer.once('close', () => done()));
 const waitFile = async (path: string, timeout = 15000) => {
@@ -221,6 +231,7 @@ let userSubmissions = 0;
 let activeReconnectModelRequests = 0;
 let heldResponse: any = null;
 let sourceRef = '', savedRef = '', executionRef = '', groupRef = '', openedRef = '', readyRef = '', monitorRef = '';
+let deepEPResult: any = null;
 let foregroundIssued = false, monitorAttempts = 0, monitorOutput = '', modelReported = '', modelBlockedText = '';
 let monitorBlocked: any = null, originalStart: any = null;
 let monitorOwner: number | null = null;
@@ -646,7 +657,7 @@ const server = createServer(async (req, res) => {
       reconnectCheck = { accepted, terminal, repeated, blocked_original: results.get('reconnect-new-key-original') ?? null, blocked_successor: results.get('reconnect-new-key-successor') ?? null, old_generation_result: results.get('old-generation-command') ?? null, task_id: results.get('reconnect').receipt.task_id };
       return res.end(frame({ content: 'RECONNECT_VERIFIED' }) + done);
     }
-    const hasFollowup = body.messages.some((msg: any) => msg.role === 'user' && typeof msg.content === 'string' && msg.content.startsWith('你可以再开会话监控下带宽或者文件大小呢'));
+    const hasFollowup = body.messages.some((msg: any) => msg.role === 'user' && typeof msg.content === 'string' && (deepEP ? msg.content === deepEPPrompt : msg.content.startsWith('你可以再开会话监控下带宽或者文件大小呢')));
     if (disconnected) {
       const state = result('disconnected');
       if (!state) return emit('disconnected', 'host.get_session', { session_ref: sourceRef });
@@ -695,6 +706,19 @@ const server = createServer(async (req, res) => {
     const readyResult = result('ready');
     if (!readyResult) return emit('ready', 'host.wait_session_ready', { operation_ref: opened.operation_ref, wait_for: 'interactive', wait_ms: 30000 });
     assert.equal(readyResult.state, 'ready'); assert.equal(readyResult.execution_readiness, 'ready'); assert.equal(readyResult.session_ref, openedRef);
+    if (deepEP) {
+      assert(hasFollowup, 'The provider must receive the exact composer follow-up');
+      const version = result('deep-ep-version');
+      if (!version) return emit('deep-ep-version', 'host.run_in_terminal', { session_ref: readyResult.session_ref, command: deepEPCommand, request_key: 'deep-ep-version', wait_ms: 10000 });
+      assert(version.execution_ref);
+      const [, , sessionId, generation] = readyResult.session_ref.split(':');
+      assert.equal(version.snapshot.owner.session_id, Number(sessionId));
+      assert.equal(version.snapshot.owner.generation, Number(generation));
+      assert.equal(version.snapshot.process.exit_code, 0);
+      assert(version.output.includes(`Version: ${deepEPVersion}`));
+      deepEPResult = { prompt: deepEPPrompt, command: deepEPCommand, session_ref: readyResult.session_ref, execution_ref: version.execution_ref, owner: version.snapshot.owner, output: version.output };
+      return res.end(frame({ content: `DeepEP 版本为 ${deepEPVersion}。` }) + done);
+    }
     if (monitor) {
       const monitorEnvelope = results.get('monitor');
       if (monitorEnvelope && monitorEnvelope.status !== 'succeeded') {
@@ -1010,7 +1034,7 @@ try {
     originalStart = before;
     process.kill(before.pid, 0);
     followupSent = true;
-    await send(monitor && !natural ? `你可以再开会话监控下带宽或者文件大小呢。请在新会话逐字运行 \`${monitorCommand}\`，报告两次文件大小（字节）和变化，不要在原会话输入。` : '你可以再开会话监控下带宽或者文件大小呢');
+    await send(deepEP ? deepEPPrompt : monitor && !natural ? `你可以再开会话监控下带宽或者文件大小呢。请在新会话逐字运行 \`${monitorCommand}\`，报告两次文件大小（字节）和变化，不要在原会话输入。` : '你可以再开会话监控下带宽或者文件大小呢');
     queued = true;
     await waitStrict(async () => groupRef && openedRef && readyRef === openedRef ? true : null, live ? 240000 : 90000);
     assert.notEqual(openedRef, sourceRef, 'The work session must be distinct from the foreground session');
@@ -1021,6 +1045,13 @@ try {
     const groupRequest = requests.find(item => item.tools.includes(wire('host.open_session')));
     assert(groupRequest, 'The actual refreshed catalog must advertise open_session');
     report.checks.push({ before, after, group_ref: groupRef, opened_ref: openedRef, catalog_refreshed: true });
+    if (deepEP) {
+      await waitStrict(async () => deepEPResult, 45000);
+      const during = await waitFile(join(home, 'progress.json'));
+      assert.equal(during.pid, before.pid);
+      process.kill(during.pid, 0);
+      report.checks.push({ ...deepEPResult, foreground_during: during });
+    }
     if (monitor) {
       await waitStrict(async () => (monitorRef && sizes && (natural ? monitorFinished : modelReported)) || (monitorBlocked && modelBlockedText) ? true : null, live ? 180000 : 45000);
       if (monitorBlocked && !monitorRef) throw Error(`Monitoring was not dispatched: ${JSON.stringify(monitorBlocked)}`);
@@ -1131,6 +1162,12 @@ try {
     report.new_generation_sent = terminalInput.includes('RECONNECT_NEW_GENERATION_OK');
   }
   let peerCommandsMatch = true;
+  if (deepEP) {
+    const terminalInput = await readFile(join(peerDir, 'inputs.bin'), 'utf8').catch(() => '');
+    report.peer_deep_ep_submissions = terminalInput.split(deepEPCommand).length - 1;
+    peerCommandsMatch = report.peer_deep_ep_submissions === 1;
+    if (success && !peerCommandsMatch) report.error = 'The SSH peer must receive exactly one DeepEP version query';
+  }
   if (liveReconnect) {
     const terminalInput = await readFile(join(peerDir, 'inputs.bin'), 'utf8').catch(() => '');
     report.peer_pwd_submissions = terminalInput.split(/\r?\n/).filter(line => line === 'pwd' || line === 'pwd; sleep 4');

@@ -1221,11 +1221,9 @@ pub const Session = struct {
     }
 
     pub fn sftpSize(self: *Session, path: [:0]const u8) !u64 {
-        if (self.state != .active) return error.SessionNotActive;
         try self.sftpInit();
-        const size = c.zw_libssh2_sftp_size(self.sftp.?, path.ptr);
-        if (size < 0) return error.SftpStatFailed;
-        return @intCast(size);
+        const attrs = try self.sftpStat(path, true);
+        return attrs.size orelse error.SftpSizeMissing;
     }
 
     pub fn sftpReadonlyInit(self: *Session) !void {

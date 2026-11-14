@@ -20,6 +20,7 @@ pub const Service = struct {
     pending: ?*Request = null,
     readers: std.ArrayList(*readonly_mailbox.Mailbox) = .empty,
     readonly_retry: ?*readonly_mailbox.Mailbox = null,
+    idle_shutdown_pending: bool = false,
     files: std.ArrayList(*File) = .empty,
     io_owner: ?std.Thread.Id = null,
     closing: std.atomic.Value(bool) = .init(false),
@@ -251,6 +252,12 @@ pub const Service = struct {
             if (self.pending) |request| if (now >= request.deadline_ns) return error.SftpRequestTimeout;
             for (self.readers.items) |reader| if (reader.retryExpired(now)) return error.SftpRequestTimeout;
         }
+        // A nonblocking shutdown owns the SFTP context until it settles.
+        // New requests can queue, but must wait before reopening the context.
+        if (self.idle_shutdown_pending) {
+            try self.stepIdleShutdown();
+            return;
+        }
         if (self.readonly_retry) |reader| {
             if (reader.step(self.session)) return;
             self.readonly_retry = null;
@@ -285,6 +292,19 @@ pub const Service = struct {
             const receipt = if (self.parent_released.load(.acquire)) ssh.ReleaseReceipt.released else self.session.closeSftpReceipt();
             if (receipt == .released) self.released.store(true, .release);
             if (receipt == .unknown) self.cleanup_unknown.store(true, .release);
+        } else if (!self.closing.load(.acquire) and !self.faulted.load(.acquire) and !self.cleanup_unknown.load(.acquire) and self.pending == null and self.session.sftp != null and self.backend.owner_done.load(.acquire) and self.readonly_retry == null) {
+            for (self.readers.items) |reader| if (!reader.canReleaseParent()) return;
+            for (self.files.items) |value| if (value.native != null) return;
+            try self.stepIdleShutdown();
+        }
+    }
+
+    fn stepIdleShutdown(self: *Service) !void {
+        const receipt = self.session.closeSftpReceipt();
+        self.idle_shutdown_pending = receipt == .awaiting;
+        if (receipt == .unknown) {
+            self.cleanup_unknown.store(true, .release);
+            return error.SftpContextReleaseUnknown;
         }
     }
 
@@ -397,7 +417,7 @@ pub const Service = struct {
         self.lock();
         defer self.unlock();
         for (self.readers.items) |reader| if (reader.hasPending()) return true;
-        return !self.backend.owner_done.load(.acquire) or self.closing.load(.acquire) and !self.released.load(.acquire);
+        return self.idle_shutdown_pending or !self.backend.owner_done.load(.acquire) or self.closing.load(.acquire) and !self.released.load(.acquire);
     }
     pub fn requestClose(self: *Service) void {
         self.closing.store(true, .release);
@@ -435,6 +455,7 @@ pub const Service = struct {
         self.lock();
         defer self.unlock();
         self.parent_released.store(true, .release);
+        self.idle_shutdown_pending = false;
         self.readonly_retry = null;
         for (self.readers.items) |reader| reader.sessionReleased();
         for (self.files.items) |value| {

@@ -740,7 +740,7 @@ pub const ApplicationHost = struct {
         return .{ .target = state.target, .tab_id = tab.tab_id };
     }
 
-    pub fn supportsIntegration(self: *ApplicationHost, handle: identity.SessionHandle, comptime feature: []const u8) bool {
+    pub fn supportsIntegration(self: *const ApplicationHost, handle: identity.SessionHandle, comptime feature: []const u8) bool {
         const manifest = self.sessions.manifestFor(handle) orelse return false;
         return @field(manifest.integration, feature);
     }
@@ -1634,28 +1634,37 @@ pub const ApplicationHost = struct {
         return null;
     }
 
-    pub fn permitsReconnectExecution(self: *const ApplicationHost, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) bool {
-        if (context.binding != .group) return true;
-        return switch (reconnectExecutionReceipt(self.reconnects.items, context, handle)) {
-            .unrestricted => true,
-            .blocked => false,
-            .ready => |receipt| self.reconnectSuccessorLive(receipt),
-        };
+    pub fn checkReconnectSuccessor(self: *const ApplicationHost, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) !void {
+        if (context.binding != .group) return;
+        if (self.transportLostFor(handle)) return error.ReconnectTargetUnavailable;
+        if (reconnectExecutionReceipt(self.reconnects.items, context, handle)) |receipt| {
+            const successor = receipt.successor orelse return error.ReconnectTargetUnavailable;
+            if (receipt.state != .ready or !successor.handle.eql(handle) or !self.reconnectSuccessorLive(receipt)) return error.ReconnectTargetUnavailable;
+        }
     }
 
-    fn reconnectExecutionReceipt(records: []const ReconnectReceipt, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) union(enum) { unrestricted, blocked, ready: *const ReconnectReceipt } {
-        var has_reconnect = false;
+    fn reconnectExecutionReceipt(records: []const ReconnectReceipt, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle) ?*const ReconnectReceipt {
         var index = records.len;
         while (index > 0) {
             index -= 1;
             const record = &records[index];
-            if (!record.belongsToTask(context)) continue;
-            has_reconnect = true;
-            if (record.original.session_id != handle.session_id) continue;
-            const successor = record.successor orelse return .blocked;
-            return if (record.state == .ready and successor.handle.eql(handle)) .{ .ready = record } else .blocked;
+            if (record.belongsToTask(context) and record.original.session_id == handle.session_id) return record;
         }
-        return if (has_reconnect) .blocked else .unrestricted;
+        return null;
+    }
+
+    pub fn transportLostFor(self: *const ApplicationHost, handle: identity.SessionHandle) bool {
+        for (self.mappings.items) |mapping| {
+            if (mapping.handle.session_id != handle.session_id) continue;
+            if (!self.supportsIntegration(mapping.handle, "transport_loss")) return false;
+            if (mapping.handle.generation > handle.generation) return true;
+            if (!mapping.handle.eql(handle)) return false;
+            const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return false;
+            const snapshot = (tab.runtime orelse return false).reconnectSnapshot() orelse return false;
+            return snapshot.was_attached and snapshot.key != null and snapshot.key.?.eql(mapping.create_operation) and
+                (snapshot.phase == .releasing or snapshot.phase == .waiting);
+        }
+        return false;
     }
 
     pub fn reconnectSuccessorLive(self: *const ApplicationHost, receipt: *const ReconnectReceipt) bool {
@@ -1770,6 +1779,11 @@ pub const ApplicationHost = struct {
     pub fn legacyForHandle(self: *const ApplicationHost, handle: identity.SessionHandle) ?LegacySessionId {
         for (self.mappings.items) |mapping| if (mapping.handle.eql(handle)) return mapping.legacy_id;
         return null;
+    }
+
+    pub fn isTabCloseRequested(self: *ApplicationHost, handle: identity.SessionHandle) bool {
+        const mapping = self.findHandle(handle) orelse return false;
+        return mapping.tab_close_requested;
     }
 
     pub fn requestWindowClose(self: *ApplicationHost) !OperationKey {
@@ -2475,6 +2489,14 @@ pub const ApplicationHost = struct {
                 }
             }
             if (mapping.waiting) |waiting| {
+                if (self.sessions.tabTransfersDraining(mapping.handle)) {
+                    self.workspace.hideClosingTerminalTab(mapping.tab_id, mapping.owner) catch |err| {
+                        @import("../platform/applog.zig").warn(.workspace, "hide closing terminal tab: {s}", .{@errorName(err)});
+                    };
+                    if (self.workspace.sessionTab(mapping.legacy_id)) |tab| if (tab.hidden_for_transfer) {
+                        if (tab.runtime) |runtime| runtime.closeShellForTransfers();
+                    };
+                }
                 const close_now = @import("../platform/realtime.zig").monotonicNs();
                 if (mapping.close_log_ns == 0 or close_now - mapping.close_log_ns >= 5 * std.time.ns_per_s) {
                     mapping.close_log_ns = close_now;
@@ -2787,6 +2809,12 @@ pub const ApplicationHost = struct {
     }
 
     fn windowTargetsReleased(self: *ApplicationHost, targets: []const CloseTarget) bool {
+        for (self.mappings.items) |mapping| {
+            const tab = self.workspace.sessionTab(mapping.legacy_id) orelse continue;
+            if (!tab.hidden_for_transfer) continue;
+            const state = self.sessions.queryState(mapping.handle) orelse continue;
+            if (state.lifecycle != .closed) return false;
+        }
         if (self.domain.attachments.items.len == 1) if (self.domain.backgrounds) |host| {
             const values = host.snapshots(self.allocator) catch return false;
             defer self.allocator.free(values);
@@ -4302,20 +4330,16 @@ test "SSH reconnect group execution checks each exact successor independently" {
         .{ .context = context, .operation = .generate(), .original = second, .original_attempt = second_key, .legacy_id = 2, .deadline_ns = 1, .state = .connecting, .successor = .{ .handle = second_next, .operation = second_key } },
     };
     const check = ApplicationHost.reconnectExecutionReceipt;
-    try std.testing.expect(check(&records, context, first_next) == .ready);
-    try std.testing.expect(check(&records, context, second_next) == .blocked);
-    try std.testing.expect(check(&records, context, first) == .blocked);
-    try std.testing.expect(check(&records, context, peer) == .blocked);
+    try std.testing.expect(check(&records, context, first_next).? == &records[0]);
+    try std.testing.expect(check(&records, context, second_next).? == &records[1]);
+    try std.testing.expect(check(&records, context, first).? == &records[0]);
+    try std.testing.expect(check(&records, context, peer) == null);
     records[1].state = .failed;
-    try std.testing.expect(check(&records, context, first_next) == .ready);
-    try std.testing.expect(check(&records, context, second_next) == .blocked);
-    try std.testing.expect(check(records[1..], context, peer) == .blocked);
-    records[1].state = .ready;
-    try std.testing.expect(check(&records, context, first_next) == .ready);
-    try std.testing.expect(check(&records, context, second_next) == .ready);
+    try std.testing.expect(check(&records, context, first_next).?.state == .ready);
+    try std.testing.expect(check(&records, context, second_next).?.state == .failed);
     var next_task = context;
     next_task.task_id = .generate();
-    try std.testing.expect(check(&records, next_task, peer) == .unrestricted);
+    try std.testing.expect(check(&records, next_task, first_next) == null);
 }
 
 test "SSH reconnect polls lifecycle failure and cleanup without diagnostic snapshots" {

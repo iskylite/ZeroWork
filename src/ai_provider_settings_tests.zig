@@ -462,7 +462,7 @@ fn configureInactive(f: *Fixture, index: usize, name: []const u8) !void {
     try f.remount();
 }
 
-test "native provider explicit enable protects the last default and selects an enabled replacement" {
+test "native provider can disable the last default and select an enabled replacement" {
     var f: Fixture = undefined;
     try f.initWithCount(false, 2);
     defer f.deinit();
@@ -476,11 +476,12 @@ test "native provider explicit enable protects the last default and selects an e
     try std.testing.expectEqualStrings("first", f.controller.model.value.ai.default_provider);
     const folded = f.controller.ai_fields.provider_open.get(0) orelse true;
     f.clickId("settings.ai.provider.0.enabled");
-    try std.testing.expect(f.controller.model.value.ai.providers[0].enabled);
-    try std.testing.expectEqualStrings(draft.problemText(error.DefaultProtected), f.mounted.error_text);
+    try std.testing.expect(!f.controller.model.value.ai.providers[0].enabled);
+    try std.testing.expectEqualStrings("", f.controller.model.value.ai.default_provider);
     try std.testing.expectEqual(folded, f.controller.ai_fields.provider_open.get(0) orelse true);
     f.clickId("settings.ai.provider.1.enabled");
     try std.testing.expect(f.controller.model.value.ai.providers[1].enabled);
+    f.clickId("settings.ai.provider.0.enabled");
     f.clickId("settings.ai.provider.0.enabled");
     try std.testing.expect(!f.controller.model.value.ai.providers[0].enabled);
     try std.testing.expectEqualStrings("second", f.controller.model.value.ai.default_provider);

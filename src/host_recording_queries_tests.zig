@@ -271,6 +271,64 @@ test "recording_query c1 command range selects only committed manifest event int
     try std.testing.expectEqualStrings("recorded_event_range", json.value.object.get("coordinate_basis").?.string);
 }
 
+test "recording_query archived search carries offsets and context through page boundaries" {
+    var fixture = try Fixture.init(.ssh, fixture_cast);
+    defer fixture.deinit();
+    const doc = try archive.manifest.load(a, std.testing.io, fixture.tmp.dir, fixture.grant.manifest_path);
+    defer doc.deinit();
+    const execution_id = try identity.ExecutionId.parse("33333333333333333333333333333333");
+    var timeline = try @import("vt/timeline.zig").Timeline.init(a, 8, 8192);
+    defer timeline.deinit();
+    const prefix: [3000]u8 = @splat('x');
+    const suffix: [1000]u8 = @splat('z');
+    const payload = prefix ++ "中文" ++ suffix;
+    const start = try timeline.markBoundary(1000, 0);
+    try timeline.append(1001, 0, payload);
+    const end = try timeline.markBoundary(1002, payload.len);
+    try @import("vt/ssh_recording_manifest.zig").archiveExecution(a, std.testing.io, fixture.tmp.dir, .{
+        .archive_key = try identity.ArchiveKey.parse(doc.value.archive_key),
+        .recording_id = try identity.RecordingId.parse(&recording_id),
+        .generations = doc.value.recording.generations,
+        .cast_path = "logs/history/query.cast",
+        .started_ms = 1000,
+        .display = .{},
+    }, 8, .{
+        .execution_id = "33333333333333333333333333333333",
+        .recording_generation = 2,
+        .start = .{ .event_sequence = start },
+        .end = .{ .event_sequence = end, .raw_offset = payload.len },
+    }, &timeline);
+    var service: backend.Backend = .{ .archive = fixture.archive_, .grants = &.{fixture.grant} };
+    defer service.deinit();
+    const reference = try queries.executionCommandRef(a, context().conversation_id, fixture.grant.owner, execution_id);
+    defer a.free(reference);
+    const extra = try std.fmt.allocPrint(a, ",\"range_kind\":\"command\",\"command_ref\":\"{s}\",\"query\":\"中文\",\"max_bytes\":720", .{reference});
+    defer a.free(extra);
+    var args = try arguments(extra);
+    defer args.deinit();
+    var found = false;
+    for (0..8) |_| {
+        var result = try service.execute(invoke("host.search_terminal", args.value), a);
+        defer result.deinit(a);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+        defer parsed.deinit();
+        for (parsed.value.object.get("matches").?.array.items) |match| {
+            try std.testing.expect(!found);
+            found = true;
+            try std.testing.expectEqual(@as(i64, prefix.len), match.object.get("byte_offset").?.integer);
+            try std.testing.expectEqualStrings(prefix[0..32] ++ "中文" ++ suffix[0..32], match.object.get("text").?.string);
+        }
+        const cursor = parsed.value.object.get("next_cursor").?;
+        if (cursor == .null) break;
+        const next = try std.fmt.allocPrint(a, ",\"range_kind\":\"cursor\",\"cursor\":\"{s}\",\"query\":\"中文\",\"max_bytes\":720", .{cursor.string});
+        defer a.free(next);
+        const continuation = try arguments(next);
+        args.deinit();
+        args = continuation;
+    }
+    try std.testing.expect(found);
+}
+
 test "recording_query UI history grant captures exact selected closed manifest" {
     const controller = @import("ui/ai_host_recording_queries.zig");
     var fixture = try Fixture.init(.local, fixture_cast);

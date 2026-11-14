@@ -6,7 +6,9 @@ const scope = @import("tool_scope.zig");
 const wire = @import("wire_history.zig");
 const provider = @import("provider.zig");
 const context_usage = @import("context_usage.zig");
+const display = @import("conversation_presentation.zig");
 const local_workspace = @import("../host/local_workspace.zig");
+const ConversationModel = @import("provider_config.zig").ConversationModel;
 pub const input = @import("session_input.zig");
 pub const child = @import("child_agent.zig");
 pub const Role = enum { attached, child };
@@ -22,7 +24,7 @@ pub const WorkspaceSource = struct {
     snapshot: local_workspace.Snapshot,
 };
 pub const Event = struct {
-    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config, workspace_update, workspace_ack },
+    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config, workspace_update, workspace_ack, conversation_model },
     conversation: identity.ConversationId,
     agent: ?identity.AgentId = null,
     owner: ?scope.Owner = null,
@@ -50,12 +52,14 @@ pub const Event = struct {
     workspace_source: ?WorkspaceSource = null,
     workspace_change: ?WorkspaceChange = null,
     workspace_ack_revision: ?u64 = null,
+    conversation_model: ?ConversationModel = null,
 };
 pub const Persistence = struct {
     context: *anyopaque,
     write: *const fn (*anyopaque, Event) anyerror!void,
     /// Optional durable worker path; message bytes stay pinned until release.
     checkpoint: ?*const fn (*anyopaque, Event) anyerror!Write = null,
+    try_draft: ?*const fn (*anyopaque, Event) anyerror!void = null,
     pub const Write = struct {
         context: *anyopaque,
         ready: *const fn (*anyopaque) bool,
@@ -77,6 +81,10 @@ pub const Record = struct {
     workspace_ack_revision: u64 = 1,
     history: wire.History = .{},
     presentation: ?[]u8 = null,
+    presentation_version: ?display.Version = null,
+    pending_presentation: ?*PresentationWrite = null,
+    presentation_failure: ?anyerror = null,
+    conversation_model: ?ConversationModel = null,
     recovery_history: wire.History = .{},
     recovery_turn: u64 = 0,
     draft: ?[]u8 = null,
@@ -88,6 +96,7 @@ pub const Record = struct {
     source_revision: ?u64 = null,
     fork_turn: ?u64 = null,
     historical_messages: usize = 0,
+    resumed_history: ?struct { through_turn: u64, user_messages: usize } = null,
     needs_recovery: bool = false,
     /// Controller-only gate until the final task fact is durably committed.
     task_pending: bool = false,
@@ -98,13 +107,22 @@ pub const Record = struct {
     child_settings: ?child.SettingsOwned = null,
     child_settings_revision: u64 = 1,
     inbox: input.Inbox,
+    fn markResumedHistory(self: *Record) void {
+        var user_messages: usize = 0;
+        for (self.history.messages) |message| {
+            if (message.role == .user and message.origin != .host_context_notice and message.content.len != 0) user_messages += 1;
+        }
+        self.resumed_history = if (user_messages == 0 and self.last_turn == 0) null else .{ .through_turn = self.last_turn, .user_messages = user_messages };
+    }
     fn deinit(self: *Record, a: std.mem.Allocator) void {
+        if (self.pending_presentation) |job| job.destroy(a);
         self.workspace.deinit(a);
         if (self.workspace_source) |*source| source.snapshot.deinit(a);
         if (self.child_settings) |*settings| settings.deinit();
         if (self.child) |*owned| owned.deinit();
         self.history.deinit();
         if (self.presentation) |bytes| a.free(bytes);
+        if (self.conversation_model) |model| model.deinit(a);
         self.recovery_history.deinit();
         if (self.draft) |text| a.free(text);
         self.inbox.deinit();
@@ -122,6 +140,40 @@ pub const Agent = struct {
     busy: bool = false,
     closing: bool = false,
 };
+
+const PresentationWrite = struct {
+    allocator: std.mem.Allocator,
+    persistence: ?Persistence,
+    event: Event,
+    version: display.Version,
+    snapshot: display.Capture,
+    history: wire.History,
+    history_revision: u64,
+    thread: ?std.Thread = null,
+    done: std.atomic.Value(bool) = .init(false),
+    failure: ?anyerror = null,
+    bytes: ?[]u8 = null,
+
+    fn run(self: *PresentationWrite) void {
+        self.write() catch |err| {
+            self.failure = err;
+        };
+        self.snapshot.deinit(self.allocator);
+        self.history.deinit();
+        self.done.store(true, .release);
+    }
+    fn write(self: *PresentationWrite) !void {
+        self.bytes = try self.snapshot.encode(self.allocator);
+        self.event.presentation = self.bytes;
+        self.event.context_usage = context_usage.Stored.capture(self.history.messages, self.version.usage);
+        if (self.persistence) |p| try p.write(p.context, self.event);
+    }
+    fn destroy(self: *PresentationWrite, a: std.mem.Allocator) void {
+        if (self.thread) |thread| thread.join();
+        if (self.bytes) |bytes| a.free(bytes);
+        a.destroy(self);
+    }
+};
 pub const Store = struct {
     allocator: std.mem.Allocator,
     agents: std.ArrayList(*Agent) = .empty,
@@ -129,6 +181,7 @@ pub const Store = struct {
     persist: ?Persistence = null,
     input_persist: ?input.Persist = null,
     workspace_io: ?std.Io = null,
+    share_storage: ?struct { io: std.Io, dir: std.Io.Dir } = null,
     budget: input.Budget = .{},
     task_facts: std.ArrayList(@import("task_budget.zig").Owned) = .empty,
 
@@ -174,6 +227,9 @@ pub const Store = struct {
     }
     fn save(self: *Store, event: Event) !void {
         if (self.persist) |p| try p.write(p.context, event);
+    }
+    fn saveDraft(self: *Store, event: Event) !void {
+        if (self.persist) |p| try (p.try_draft orelse p.write)(p.context, event);
     }
     pub fn find(self: *Store, id: identity.ConversationId) ?*Record {
         for (self.records.items) |record| if (record.id.eql(id)) return record;
@@ -459,6 +515,7 @@ pub const Store = struct {
         record.revision = revision;
         target.current = id;
         record.historical_messages = record.history.messages.len;
+        record.markResumedHistory();
         const ticket = try self.fence(id);
         record.inbox.changeFence(ticket);
         return ticket;
@@ -469,7 +526,7 @@ pub const Store = struct {
         const next = try identity.advance(revision);
         const owned = try self.allocator.dupe(u8, text);
         errdefer self.allocator.free(owned);
-        try self.save(.{ .kind = .draft, .conversation = record.id, .revision = record.revision, .draft = text });
+        try self.saveDraft(.{ .kind = .draft, .conversation = record.id, .revision = record.revision, .draft = text });
         if (record.draft) |old| self.allocator.free(old);
         record.draft = owned;
         record.draft_revision = next;
@@ -481,7 +538,7 @@ pub const Store = struct {
         const next = try identity.advance(revision);
         const owned = try self.allocator.dupe(u8, text);
         errdefer self.allocator.free(owned);
-        try self.save(.{ .kind = .draft, .conversation = record.id, .agent = expected.agent, .revision = record.revision, .draft = text });
+        try self.saveDraft(.{ .kind = .draft, .conversation = record.id, .agent = expected.agent, .revision = record.revision, .draft = text });
         if (record.draft) |old| self.allocator.free(old);
         record.draft = owned;
         record.draft_revision = next;
@@ -515,6 +572,16 @@ pub const Store = struct {
         const record = self.find(id) orelse return error.ConversationNotFound;
         try self.savePresentationWithUsage(id, bytes, record.history.usage);
     }
+
+    pub fn saveConversationModel(self: *Store, id: identity.ConversationId, model: ConversationModel) !void {
+        const record = self.find(id) orelse return error.ConversationNotFound;
+        if (record.conversation_model) |prior| if (prior.eql(model)) return;
+        const copy = try model.clone(self.allocator);
+        errdefer copy.deinit(self.allocator);
+        try self.save(.{ .kind = .conversation_model, .conversation = id, .revision = record.revision, .conversation_model = model });
+        if (record.conversation_model) |prior| prior.deinit(self.allocator);
+        record.conversation_model = copy;
+    }
     /// Persist display data and its counter together, including explicit clears.
     pub fn savePresentationWithUsage(self: *Store, id: identity.ConversationId, bytes: []const u8, baseline: ?context_usage.Baseline) !void {
         const record = self.find(id) orelse return error.ConversationNotFound;
@@ -526,7 +593,76 @@ pub const Store = struct {
         try self.save(.{ .kind = .presentation, .conversation = id, .revision = record.revision, .presentation = bytes, .context_usage = stored });
         if (record.presentation) |prior| self.allocator.free(prior);
         record.presentation = owned;
+        record.presentation_version = null;
         record.history.usage = valid;
+    }
+
+    pub const PresentationStatus = enum { saved, queued, busy };
+    pub fn queuePresentation(self: *Store, record: *Record, version: display.Version, history: []const @import("assistant_store.zig").Message, current: ?@import("assistant_store.zig").Message, cards: []const @import("card.zig").Card) !PresentationStatus {
+        try self.pollPresentation(record);
+        if (record.pending_presentation) |job| return if (std.meta.eql(job.version, version)) .queued else .busy;
+        if (std.meta.eql(record.presentation_version, @as(?display.Version, version))) return .saved;
+
+        const a = self.allocator;
+        const job = try a.create(PresentationWrite);
+        errdefer a.destroy(job);
+        job.* = .{
+            .allocator = a,
+            .persistence = self.persist,
+            .event = .{ .kind = .presentation, .conversation = record.id, .revision = record.revision },
+            .version = version,
+            .snapshot = try display.Capture.init(a, history, current, cards),
+            .history = record.history.retain(),
+            .history_revision = record.history.revision,
+        };
+        errdefer job.snapshot.deinit(a);
+        errdefer job.history.deinit();
+        job.thread = try std.Thread.spawn(.{}, PresentationWrite.run, .{job});
+        record.pending_presentation = job;
+        return .queued;
+    }
+
+    pub fn pollPresentations(self: *Store) !void {
+        var failure: ?anyerror = null;
+        for (self.records.items) |record| self.pollPresentation(record) catch |err| {
+            if (failure == null) failure = err;
+        };
+        if (failure) |err| return err;
+    }
+
+    /// Active saves must see their own failures so the runtime can retry them.
+    pub fn collectPresentations(self: *Store) void {
+        for (self.records.items) |record| self.finishPresentation(record) catch |err| {
+            record.presentation_failure = err;
+        };
+    }
+
+    fn pollPresentation(self: *Store, record: *Record) !void {
+        if (record.presentation_failure) |err| {
+            record.presentation_failure = null;
+            return err;
+        }
+        try self.finishPresentation(record);
+    }
+
+    fn finishPresentation(self: *Store, record: *Record) !void {
+        const job = record.pending_presentation orelse return;
+        if (!job.done.load(.acquire)) return;
+        record.pending_presentation = null;
+        defer job.destroy(self.allocator);
+        if (job.failure) |err| return err;
+        if (record.presentation) |old| self.allocator.free(old);
+        record.presentation = job.bytes;
+        job.bytes = null;
+        record.presentation_version = job.version;
+        if (record.history.revision == job.history_revision) {
+            record.history.usage = if (job.event.context_usage) |stored| stored.baseline else null;
+        }
+    }
+
+    pub fn presentationPending(self: *const Store) bool {
+        for (self.records.items) |record| if (record.pending_presentation != null) return true;
+        return false;
     }
     pub const ForkSnapshot = struct {
         source: identity.ConversationId,
@@ -547,11 +683,13 @@ pub const Store = struct {
     /// cannot change the content awaiting an explicit UI confirmation.
     pub fn pinFork(self: *Store, source: identity.ConversationId) !ForkSnapshot {
         const record = self.find(source) orelse return error.ConversationNotFound;
+        try self.pollPresentation(record);
+        if (record.pending_presentation != null) return error.ResourceCleanupPending;
         if (record.child != null) return error.ChildRequiresParent;
         if (record.last_turn == 0 or !record.recoverable or record.history.failure != null) return error.NoStableCheckpoint;
         var history = try wire.History.copy(self.allocator, record.history.messages, "");
         errdefer history.deinit();
-        const presentation = if (record.presentation) |bytes| try history.arena.?.allocator().dupe(u8, bytes) else null;
+        const presentation = if (record.presentation) |bytes| try history.arenaAllocator().dupe(u8, bytes) else null;
         const workspace = try record.workspace.clone(self.allocator);
         return .{ .source = source, .revision = record.content_revision, .turn = record.last_turn, .origin = record.initial_origin, .history = history, .presentation = presentation, .workspace = workspace, .workspace_allocator = self.allocator };
     }
@@ -578,6 +716,7 @@ pub const Store = struct {
         record.fork_turn = pinned.turn;
         record.last_turn = pinned.turn;
         record.historical_messages = record.history.messages.len;
+        if (target != null) record.markResumedHistory();
         self.records.appendAssumeCapacity(record);
         if (target) |agent_value| {
             record.binding = .{ .agent = agent_value.id, .owner = agent_value.owner };
@@ -629,6 +768,7 @@ pub const Store = struct {
         record.fork_turn = selected_checkpoint.turn;
         record.last_turn = selected_checkpoint.turn;
         record.historical_messages = record.history.messages.len;
+        if (target != null) record.markResumedHistory();
         self.records.appendAssumeCapacity(record);
         if (target) |value| {
             record.binding = .{ .agent = value.id, .owner = value.owner };
@@ -944,7 +1084,9 @@ pub const Store = struct {
             return error.TargetOutsideAssistant;
         }
     }
-    fn removable(record: *Record) !void {
+    fn removable(self: *Store, record: *Record) !void {
+        try self.pollPresentation(record);
+        if (record.pending_presentation != null) return error.ResourceCleanupPending;
         if (record.task_pending or record.binding != null or record.ending != null or record.needs_recovery) return error.BindingConflict;
         record.inbox.lock();
         defer record.inbox.unlock();
@@ -956,17 +1098,24 @@ pub const Store = struct {
         const parent = self.find(id) orelse return error.ConversationNotFound;
         if (parent.child != null) return error.ChildRequiresParent;
         if (parent.revision != expected_revision or self.childCount(id) != expected_children) return error.BindingChanged;
-        try removable(parent);
+        try self.removable(parent);
         var children: std.ArrayList(identity.ConversationId) = .empty;
         defer children.deinit(self.allocator);
         for (self.records.items) |record| if (record.child) |owned| {
             if (!owned.info.owning_parent_conversation.eql(id)) continue;
-            try removable(record);
+            try self.removable(record);
             try children.append(self.allocator, record.id);
         };
+        for (children.items) |child_id| try self.removeShare(child_id);
+        try self.removeShare(id);
         try self.save(.{ .kind = .remove_family, .conversation = id, .revision = parent.revision, .children = children.items });
         for (children.items) |child_id| self.eraseRecord(child_id);
         self.eraseRecord(id);
+    }
+    fn removeShare(self: *Store, id: identity.ConversationId) !void {
+        // A share is a regenerable copy. Revoke it before committing deletion
+        // so an IO failure leaves the conversation available for retry.
+        if (self.share_storage) |storage| try @import("conversation_share.zig").remove(storage.io, storage.dir, id);
     }
     fn eraseRecord(self: *Store, id: identity.ConversationId) void {
         for (self.records.items, 0..) |record, index| if (record.id.eql(id)) {
@@ -1037,6 +1186,8 @@ pub const Store = struct {
     }
     pub fn remove(self: *Store, id: identity.ConversationId) !void {
         for (self.records.items, 0..) |record, index| if (record.id.eql(id)) {
+            try self.pollPresentation(record);
+            if (record.pending_presentation != null) return error.ResourceCleanupPending;
             if (record.child != null) return error.ChildRequiresParent;
             if (self.childCount(id) != 0) return error.ChildRecordsPresent;
             if (record.task_pending or record.binding != null or record.ending != null) return error.BindingConflict;
@@ -1046,6 +1197,7 @@ pub const Store = struct {
                 return error.SubmissionUnconfirmed;
             };
             record.inbox.unlock();
+            try self.removeShare(id);
             try self.save(.{ .kind = .remove, .conversation = id, .revision = record.revision });
             record.deinit(self.allocator);
             _ = self.records.orderedRemove(index);
@@ -1162,6 +1314,7 @@ pub const Store = struct {
             return;
         }
         if (event.task_fact != null) return error.InvalidSessionJournal;
+        if ((event.kind == .conversation_model) != (event.conversation_model != null)) return error.InvalidSessionJournal;
         if (!event.conversation.valid() or event.revision == 0) return error.InvalidSessionJournal;
         if (event.kind == .child_create or event.kind == .child_bind) return self.replayChild(event);
         if (event.child_info != null or event.parent_binding != null or event.targets != null or (event.kind != .remove_family and event.children != null)) return error.InvalidSessionJournal;
@@ -1211,6 +1364,7 @@ pub const Store = struct {
                 value.revision = event.revision;
                 value.needs_recovery = true;
                 value.historical_messages = value.history.messages.len;
+                if (event.kind == .bind or event.kind == .fork_bound) value.markResumedHistory();
             },
             .fork => {
                 value.revision = event.revision;
@@ -1259,6 +1413,11 @@ pub const Store = struct {
                 if (value.presentation) |prior| self.allocator.free(prior);
                 value.presentation = bytes;
                 value.history.usage = if (event.context_usage) |stored| stored.restore(value.history.messages) else null;
+            },
+            .conversation_model => {
+                const model = try event.conversation_model.?.clone(self.allocator);
+                if (value.conversation_model) |prior| prior.deinit(self.allocator);
+                value.conversation_model = model;
             },
             .draft => {
                 const text = try self.allocator.dupe(u8, event.draft orelse "");

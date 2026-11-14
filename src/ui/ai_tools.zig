@@ -86,6 +86,12 @@ const ControllerTask = struct {
     ready: bool = false,
     failure: ?anyerror = null,
 };
+const CommandTarget = struct {
+    operation: u64,
+    owner: identity.SessionHandle,
+    command: [32]u8,
+    disconnected: bool = false,
+};
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
     output_store: ?*@import("../ai/batch_output.zig").Store = null,
@@ -111,6 +117,8 @@ pub const Bridge = struct {
     controller: ?*ControllerExchange = null,
     host_binding: ?HostBinding = null,
     reconnect_app: ?*Application.ApplicationHost = null,
+    command_targets: std.ArrayList(CommandTarget) = .empty,
+    disconnected_members: std.ArrayList(identity.SessionHandle) = .empty,
     host_exchange: ?*HostExchange = null,
     controller_task: ?*ControllerTask = null,
     pending_binding: ?scope.Owner = null,
@@ -277,7 +285,55 @@ pub const Bridge = struct {
             try self.retainPrepared();
         };
         self.cleanup_clear_pending = false;
+        self.command_targets.clearRetainingCapacity();
+        self.disconnected_members.clearRetainingCapacity();
         self.queries_only = self.refreshQueriesOnly();
+    }
+
+    pub fn noteTransportLoss(self: *Bridge, owner: identity.SessionHandle) !bool {
+        for (self.disconnected_members.items) |previous| if (previous.eql(owner)) return false;
+        try self.disconnected_members.append(self.allocator, owner);
+        for (self.command_targets.items) |*entry| {
+            if (entry.owner.eql(owner)) entry.disconnected = true;
+        }
+        return true;
+    }
+
+    // Controller thread only. For an identical command, a prior capture on
+    // another member distinguishes independent work from a redirected retry.
+    pub fn checkCommandTarget(self: *Bridge, app: *Application.ApplicationHost, context: host_tools.Context, operation: u64, owner: identity.SessionHandle, command: [32]u8) !void {
+        if (context.binding != .group) return;
+        for (self.command_targets.items) |*entry| {
+            if (app.transportLostFor(entry.owner)) entry.disconnected = true;
+        }
+        const lost = app.transportLostFor(owner);
+        try validateCommandTarget(self.command_targets.items, operation, owner, command);
+        for (self.command_targets.items) |entry| {
+            if (entry.operation == operation and entry.owner.eql(owner)) break;
+        } else {
+            try self.command_targets.append(self.allocator, .{ .operation = operation, .owner = owner, .command = command, .disconnected = lost });
+        }
+        try app.checkReconnectSuccessor(context, owner);
+    }
+
+    fn validateCommandTarget(entries: []const CommandTarget, operation: u64, owner: identity.SessionHandle, command: [32]u8) !void {
+        var known_route = false;
+        var operation_target = false;
+        var operation_disconnected = false;
+        var conflicting_route = false;
+        for (entries) |entry| {
+            if (entry.operation == operation) {
+                operation_target = operation_target or entry.owner.eql(owner);
+                operation_disconnected = operation_disconnected or entry.disconnected;
+            }
+            if (!std.mem.eql(u8, &entry.command, &command)) continue;
+            if (entry.owner.session_id == owner.session_id) {
+                if (entry.disconnected and entry.owner.eql(owner)) return error.ReconnectTargetUnavailable;
+                known_route = true;
+            } else if (entry.disconnected) conflicting_route = true;
+        }
+        if (operation_disconnected and !operation_target) return error.ReconnectTargetChanged;
+        if (conflicting_route and !known_route) return error.ReconnectTargetChanged;
     }
     fn retainPrepared(self: *Bridge) !void {
         // While one old Task is unsettled, every subsequent Task is metadata
@@ -650,12 +706,16 @@ pub const Bridge = struct {
         // is thrown for these, so otherwise the UI only keeps the arguments.
         const detail = if (result.status != .succeeded) std.json.Stringify.valueAlloc(allocator, .{ .status = result.status, .content = result.blocks, .receipt = result.receipt }, .{}) catch null else null;
         defer if (detail) |value| allocator.free(value);
+        const answer = if (result.status == .succeeded and @import("../ai/user_interaction.zig").supports(invocation.tool_id) and result.blocks.len == 1 and result.blocks[0] == .structured)
+            result.blocks[0].structured
+        else
+            "";
         self.emitHostStep(invocation, switch (result.status) {
             .succeeded => .succeeded,
             .rejected => .rejected,
             .cancelled_unsent => .cancelled,
             else => .failed,
-        }, detail orelse "");
+        }, detail orelse answer);
         return result;
     }
     fn dispatchHost(self: *Bridge, invocation: host_tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !host_tools.Result {
@@ -932,6 +992,21 @@ pub const Bridge = struct {
             if (route_permit) |permit| self.route_broker.?.finish(permit);
         }
         const batch_command = std.mem.eql(u8, invocation.parsed.entry.definition.id, "run_command");
+        if (batch_command and invocation.table.captured_scope.owner == .group and self.host_binding != null) {
+            try tools.preflight(invocation.table, invocation.parsed, try liveScope(self), try liveMembers(self));
+            const command = invocation.parsed.json.value.object.get("command") orelse return error.InvalidToolArguments;
+            if (command != .string) return error.InvalidToolArguments;
+            const normalized = try @import("../host/terminal_execution.zig").normalizeCommand(allocator, command.string);
+            defer allocator.free(normalized);
+            var owners: [scope.max_targets]identity.SessionHandle = undefined;
+            for (invocation.parsed.targets.slice(), owners[0..invocation.parsed.targets.len]) |id, *owner| {
+                owner.* = for (invocation.parsed.entry.targets) |entry| {
+                    if (@backingInt(entry.owner.session_id) == id) break entry.owner;
+                } else return error.ToolCapabilityUnavailable;
+            }
+            var check: BatchTargetCheck = .{ .bridge = self, .operation = invocation.operation_id, .targets = owners[0..invocation.parsed.targets.len], .command = @import("../host/terminal_execution.zig").digest(normalized) };
+            try self.callController(&check, BatchTargetCheck.run, cancel);
+        }
         if (batch_command and self.route_broker != null) {
             // Complete target/capability and forbidden preflight before showing
             // a route card. An approval never makes a blocked command legal.
@@ -1241,22 +1316,30 @@ pub const Bridge = struct {
         self.emitStep(current.invocation, if (approved) .approved else .rejected, if (approved) "用户已批准" else "用户已拒绝");
         @import("../ai/tool_trace.zig").emit(.{ .event = "dynamic_approval_decision", .call_id = current.invocation.call_id, .tool_id = current.invocation.parsed.entry.definition.id, .sequence = sequence, .approved = approved, .arguments_hash = std.fmt.bytesToHex(hash, .lower) });
     }
+    const BatchTargetCheck = struct {
+        bridge: *Bridge,
+        operation: u64,
+        targets: []const identity.SessionHandle,
+        command: [32]u8,
+
+        fn run(raw: *anyopaque) !void {
+            const check: *@This() = @ptrCast(@alignCast(raw));
+            const binding = check.bridge.host_binding orelse return error.ScopeChanged;
+            const app = check.bridge.reconnect_app orelse return error.ScopeChanged;
+            for (check.targets) |owner| try check.bridge.checkCommandTarget(app, binding.context, check.operation, owner, check.command);
+        }
+    };
+
     fn invoke(raw: *anyopaque, target: tools.TargetBinding, request: tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !tools.ToolResult {
         const self: *Bridge = @ptrCast(@alignCast(raw));
         if (std.mem.eql(u8, request.tool_id, "run_command")) {
-            const Check = struct {
-                bridge: *Bridge,
-                target: identity.SessionHandle,
-                fn run(raw_check: *anyopaque) !void {
-                    const check: *@This() = @ptrCast(@alignCast(raw_check));
-                    const binding = check.bridge.host_binding orelse return;
-                    const window = check.bridge.reconnect_app orelse return;
-                    if (!window.permitsReconnectExecution(binding.context, check.target)) return error.ReconnectTargetUnavailable;
-                }
-            };
             if (self.host_binding != null and self.host_binding.?.context.binding == .group) {
-                var check: Check = .{ .bridge = self, .target = target.owner };
-                try self.callController(&check, Check.run, cancel);
+                const command = request.arguments.object.get("command") orelse return error.InvalidToolArguments;
+                if (command != .string) return error.InvalidToolArguments;
+                const normalized = try @import("../host/terminal_execution.zig").normalizeCommand(allocator, command.string);
+                defer allocator.free(normalized);
+                var check: BatchTargetCheck = .{ .bridge = self, .targets = &.{target.owner}, .operation = request.operation_id, .command = @import("../host/terminal_execution.zig").digest(normalized) };
+                try self.callController(&check, BatchTargetCheck.run, cancel);
             }
         }
         if (target.binding.execution == .worker) {
@@ -1546,6 +1629,8 @@ pub const Bridge = struct {
     pub fn deinit(self: *Bridge) void {
         self.clear() catch unreachable;
         self.children.deinit(self.allocator);
+        self.command_targets.deinit(self.allocator);
+        self.disconnected_members.deinit(self.allocator);
         self.retired.deinit(self.allocator);
         self.owned_history.deinit();
         if (self.output_store) |store| {
@@ -1900,6 +1985,24 @@ const QueryCleanupProbe = struct {
         return value;
     }
 };
+
+test "SSH reconnect locks interrupted command targets and permits independent operations" {
+    const first: identity.SessionHandle = .{ .session_id = @fromBackingInt(1) };
+    const second: identity.SessionHandle = .{ .session_id = @fromBackingInt(2) };
+    const peer: identity.SessionHandle = .{ .session_id = @fromBackingInt(3) };
+    const command = @import("../host/terminal_execution.zig").digest("pwd");
+    const independent = @import("../host/terminal_execution.zig").digest("df -h");
+    const entries = [_]CommandTarget{
+        .{ .operation = 1, .owner = first, .command = command, .disconnected = true },
+        .{ .operation = 1, .owner = second, .command = command },
+    };
+    try std.testing.expectError(error.ReconnectTargetUnavailable, Bridge.validateCommandTarget(&entries, 1, first, command));
+    try std.testing.expectError(error.ReconnectTargetChanged, Bridge.validateCommandTarget(&entries, 1, peer, independent));
+    try std.testing.expectError(error.ReconnectTargetChanged, Bridge.validateCommandTarget(&entries, 2, peer, command));
+    try Bridge.validateCommandTarget(&entries, 1, second, command);
+    try Bridge.validateCommandTarget(&entries, 2, peer, independent);
+    try Bridge.validateCommandTarget(&entries, 2, try first.nextGeneration(), command);
+}
 
 test "host bridge member close revokes only that member while group Task continues" {
     var bridge = Bridge.init(std.testing.allocator);

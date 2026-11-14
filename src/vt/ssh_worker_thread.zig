@@ -168,7 +168,7 @@ pub const Thread = struct {
                     if (!self.worker.startup_pending.load(.acquire) and !self.worker.shell_initializer_failed) self.reconnect_control.initialized(self.worker.options.operation_key);
                     // A deferred tail frame or close exchange must not busy
                     // spin on the socket's permanent EOF readiness.
-                    if (self.worker.io.closed) pause();
+                    if (self.worker.io.closed and !self.worker.shell_close_for_transfers.load(.acquire)) pause();
                     continue;
                 }
                 self.worker.presentation_attached.store(false, .release);

@@ -6,15 +6,24 @@ pub const ConversationId = @import("../host/identity.zig").ConversationId;
 pub const ModelSelection = @import("provider_config.zig").ModelSelection;
 pub const PermissionMode = @import("../config/config.zig").PermissionMode;
 pub const Effort = @import("provider.zig").Effort;
+const ConversationModel = @import("provider_config.zig").ConversationModel;
 
 /// Next-request overrides belong to one owner. Model IDs are owned independently
 /// of saved configuration snapshots and UI callback payloads.
 pub const Controls = struct {
     model: ?ModelSelection = null,
+    // A removed selection cannot fall through to the global default.
+    model_selection_required: bool = false,
+    model_was_configured: bool = false,
+    // Remember the default an existing conversation actually submitted with.
+    used_default: ?ModelSelection = null,
+    default_was_configured: bool = false,
     permission: ?PermissionMode = null,
     execution_mode: ?@import("../config/config.zig").ExecutionMode = null,
     session_retention: ?@import("../config/config.zig").SessionRetention = null,
     effort: ?Effort = null,
+    effort_explicit: bool = false,
+    effort_fallback_from: ?Effort = null,
     thinking: ?bool = null,
 
     /// Capture defaults once; later global edits belong to future agents.
@@ -24,11 +33,79 @@ pub const Controls = struct {
     }
 
     pub fn ensureEffort(self: *Controls, ai: @import("../config/config.zig").Ai) void {
-        if (self.effort != null or self.thinking == false) return;
-        self.effort = @import("provider_config.zig").lowestEffort(ai, self.model) catch null;
+        if (self.model_selection_required or self.thinking == false) return;
+        const inherited = if (self.effort_explicit) null else ai.default_effort;
+        const preferred = inherited orelse self.effort_fallback_from orelse self.effort;
+        const supported = @import("provider_config.zig").supportedEfforts(ai, self.model) catch return;
+        self.effort = if (preferred) |effort| Effort.supportedAtOrBelow(supported, effort) else Effort.lowestSupported(supported);
+        self.effort_fallback_from = if (self.effort == preferred) null else preferred;
     }
 
     pub fn setModel(self: *Controls, allocator: std.mem.Allocator, key: ?ModelSelection) !void {
+        try replaceSelection(&self.model, allocator, key);
+        self.model_selection_required = false;
+        self.model_was_configured = false;
+        self.default_was_configured = false;
+        try replaceSelection(&self.used_default, allocator, null);
+    }
+
+    pub fn rememberDefault(self: *Controls, allocator: std.mem.Allocator, key: ModelSelection, configured: bool) !void {
+        if (self.model != null or self.model_selection_required) return;
+        try replaceSelection(&self.used_default, allocator, key);
+        self.default_was_configured = configured;
+    }
+
+    pub fn conversationModel(self: *const Controls) ?ConversationModel {
+        if (self.model_selection_required) return .selection_required;
+        if (self.model) |key| return .{ .explicit = .{ .key = key, .configured = self.model_was_configured } };
+        if (self.used_default) |key| return .{ .used_default = .{ .key = key, .configured = self.default_was_configured } };
+        return null;
+    }
+
+    pub fn restoreConversationModel(self: *Controls, allocator: std.mem.Allocator, value: ConversationModel) !void {
+        switch (value) {
+            .explicit => |choice| {
+                try self.setModel(allocator, choice.key);
+                self.model_was_configured = choice.configured;
+            },
+            .used_default => |choice| try self.rememberDefault(allocator, choice.key, choice.configured),
+            .selection_required => self.model_selection_required = true,
+        }
+    }
+
+    pub fn resolveModel(self: *const Controls, ai: @import("../config/config.zig").Ai) !@import("provider_config.zig").ProviderConfig {
+        if (self.model_selection_required) return error.ModelSelectionRequired;
+        return @import("provider_config.zig").fromSettingsSelection(ai, self.model);
+    }
+
+    pub fn modelWasRemoved(self: *Controls, ai: @import("../config/config.zig").Ai) bool {
+        const key = self.model orelse self.used_default orelse return false;
+        const was_configured = if (self.model != null) &self.model_was_configured else &self.default_was_configured;
+        const provider_config = @import("provider_config.zig");
+        if (ai.provider_count > ai.providers.len) return false;
+        for (ai.providers[0..ai.provider_count]) |provider| {
+            if (!std.mem.eql(u8, provider_config.providerId(provider), key.provider_id)) continue;
+            if (!provider.enabled) break;
+            if (provider.model_count == 0 and provider.model.len == 0 and !was_configured.*) return false;
+            if (provider_config.hasConfiguredModel(ai, key)) {
+                was_configured.* = true;
+                return false;
+            }
+            break;
+        }
+        return true;
+    }
+
+    pub fn requireModelSelection(self: *Controls, allocator: std.mem.Allocator) void {
+        self.setModel(allocator, null) catch unreachable;
+        self.model_selection_required = true;
+        self.effort = null;
+        self.effort_explicit = false;
+        self.effort_fallback_from = null;
+        self.thinking = null;
+    }
+
+    fn replaceSelection(slot: *?ModelSelection, allocator: std.mem.Allocator, key: ?ModelSelection) !void {
         var next: ?ModelSelection = null;
         if (key) |value| {
             const provider_id = try allocator.dupe(u8, value.provider_id);
@@ -36,11 +113,11 @@ pub const Controls = struct {
             const model_id = try allocator.dupe(u8, value.model_id);
             next = .{ .provider_id = provider_id, .model_id = model_id };
         }
-        if (self.model) |previous| {
+        if (slot.*) |previous| {
             allocator.free(previous.provider_id);
             allocator.free(previous.model_id);
         }
-        self.model = next;
+        slot.* = next;
     }
 
     pub fn deinit(self: *Controls, allocator: std.mem.Allocator) void {
@@ -48,9 +125,46 @@ pub const Controls = struct {
             allocator.free(previous.provider_id);
             allocator.free(previous.model_id);
         }
+        if (self.used_default) |previous| {
+            allocator.free(previous.provider_id);
+            allocator.free(previous.model_id);
+        }
         self.* = .{};
     }
 };
+
+test "removed model leaves existing explicit and default sessions unselected" {
+    const allocator = std.testing.allocator;
+    const config = @import("../config/config.zig");
+    var models = [_]config.AiModel{
+        .{ .id = "old", .default = true, .context_window = 8192 },
+        .{ .id = "replacement", .context_window = 8192 },
+    };
+    var providers = [_]config.AiProvider{.{ .name = "local", .kind = .openai_compat, .enabled = true, .endpoint = "http://127.0.0.1:9/v1", .model_count = models.len, .models = &models }};
+    const ai: config.Ai = .{ .default_provider = "local", .provider_count = 1, .providers = &providers };
+    const old: ModelSelection = .{ .provider_id = "local", .model_id = "old" };
+    const replacement: ModelSelection = .{ .provider_id = "local", .model_id = "replacement" };
+    var explicit: Controls = .{};
+    defer explicit.deinit(allocator);
+    try explicit.setModel(allocator, old);
+    var inherited: Controls = .{};
+    defer inherited.deinit(allocator);
+    try inherited.rememberDefault(allocator, old, true);
+    var untouched: Controls = .{};
+    try std.testing.expect(!explicit.modelWasRemoved(ai));
+    providers[0].model_count = 1;
+    providers[0].models = models[1..];
+    for ([_]*Controls{ &explicit, &inherited }) |controls| {
+        try std.testing.expect(controls.modelWasRemoved(ai));
+        controls.requireModelSelection(allocator);
+        try std.testing.expect(controls.model == null and controls.used_default == null);
+        try std.testing.expectError(error.ModelSelectionRequired, controls.resolveModel(ai));
+    }
+    try std.testing.expect(!untouched.modelWasRemoved(ai));
+    try std.testing.expectEqualStrings("replacement", (try untouched.resolveModel(ai)).model);
+    try explicit.setModel(allocator, replacement);
+    try std.testing.expectEqualStrings("replacement", (try explicit.resolveModel(ai)).model);
+}
 
 pub const Message = struct {
     user: bool,
@@ -87,6 +201,7 @@ pub const CompactionActivity = struct {
     saving_since_frame: ?u64 = null,
     before_tokens: usize = 0,
     after_tokens: usize = 0,
+    completion_until_ns: ?i128 = null,
 };
 pub const State = struct {
     title: @import("conversation_title.zig").Title = .{},
@@ -106,6 +221,7 @@ pub const State = struct {
     tool_results: ?@import("tool_results.zig").Store = null,
     owner: scope.Owner,
     history: std.ArrayList(Message) = .empty,
+    presentation_revision: u64 = 0,
     wire_history: @import("wire_history.zig").History = .{},
     compaction_activity: ?CompactionActivity = null,
     stream: cards.Stream,
@@ -574,7 +690,7 @@ test "owner controls own callback model strings and keep session and group overr
     try std.testing.expectEqual(Effort.low, group_restored.effort.?);
 }
 
-test "owner controls initialize lowest effort and inherit it across models and providers" {
+test "owner controls fall back to supported effort across models and providers" {
     const allocator = std.testing.allocator;
     var models = [_]@import("../config/config.zig").AiModel{
         .{ .id = "first", .context_window = 8192, .reasoning = true, .efforts = .{ false, true, true, false, false, false, false } },
@@ -592,16 +708,18 @@ test "owner controls initialize lowest effort and inherit it across models and p
     try std.testing.expectEqual(Effort.medium, controls.effort.?);
     try controls.setModel(allocator, .{ .provider_id = "two", .model_id = "second" });
     controls.ensureEffort(ai);
-    try std.testing.expectEqual(Effort.medium, controls.effort.?);
-    try std.testing.expectError(error.UnsupportedEffort, @import("provider_config.zig").validateEffort(ai, controls.model, controls.effort.?));
+    try std.testing.expectEqual(Effort.low, controls.effort.?);
+    try std.testing.expectEqual(Effort.medium, controls.effort_fallback_from.?);
+    controls.effort_fallback_from = null;
     controls.effort = .high;
     try controls.setModel(allocator, .{ .provider_id = "one", .model_id = "quiet" });
     controls.ensureEffort(ai);
-    try std.testing.expectEqual(Effort.high, controls.effort.?);
+    try std.testing.expect(controls.effort == null);
     try controls.setModel(allocator, .{ .provider_id = "two", .model_id = "second" });
     controls.ensureEffort(ai);
     try std.testing.expectEqual(Effort.high, controls.effort.?);
     controls.effort = null;
+    controls.effort_fallback_from = null;
     controls.ensureEffort(ai);
     try std.testing.expectEqual(Effort.low, controls.effort.?);
     controls.effort = null;
@@ -615,6 +733,38 @@ test "owner controls initialize lowest effort and inherit it across models and p
     models[1].efforts[5] = true;
     controls.ensureEffort(ai);
     try std.testing.expectEqual(Effort.none, controls.effort.?);
+}
+
+test "saved reasoning effort default follows across owners without replacing explicit choices" {
+    var models = [_]@import("../config/config.zig").AiModel{
+        .{ .id = "reasoner", .default = true, .context_window = 8192, .reasoning = true, .efforts = .{ true, true, true, false, false, false, false } },
+        .{ .id = "quiet", .context_window = 8192, .reasoning = false, .efforts = @splat(false) },
+    };
+    var providers = [_]@import("../config/config.zig").AiProvider{.{ .name = "one", .enabled = true, .model_count = models.len, .models = &models }};
+    var ai: @import("../config/config.zig").Ai = .{ .default_provider = "one", .provider_count = 1, .providers = &providers };
+    var following: Controls = .{};
+    following.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.low, following.effort.?);
+    var explicit: Controls = .{ .effort = .medium, .effort_explicit = true };
+    ai.default_effort = .high;
+    following.ensureEffort(ai);
+    explicit.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.high, following.effort.?);
+    try std.testing.expectEqual(Effort.medium, explicit.effort.?);
+    var next: Controls = .{};
+    next.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.high, next.effort.?);
+    var quiet: Controls = .{ .model = .{ .provider_id = "one", .model_id = "quiet" } };
+    quiet.ensureEffort(ai);
+    try std.testing.expect(quiet.effort == null);
+    models[0].efforts[@backingInt(Effort.high)] = false;
+    next.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.medium, next.effort.?);
+    try std.testing.expectEqual(Effort.high, next.effort_fallback_from.?);
+    try std.testing.expectEqual(Effort.high, ai.default_effort.?);
+    var child: Controls = .{ .effort = .low, .effort_explicit = true };
+    child.ensureEffort(ai);
+    try std.testing.expectEqual(Effort.low, child.effort.?);
 }
 
 test "owner controls model replacement keeps prior state on allocation failure and supports reset" {

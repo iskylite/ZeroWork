@@ -142,6 +142,11 @@ pub const Button = struct {
         self.cx.requestRedraw();
     }
 
+    pub fn clearStatus(self: *Button) void {
+        self.release();
+        self.status.set(.idle);
+    }
+
     fn reset(raw: ?*anyopaque) void {
         const self: *Button = @ptrCast(@alignCast(raw orelse return));
         self.timer = null;
@@ -236,6 +241,13 @@ test "copy button acknowledges writes, isolates state, resets and cleans up" {
     try std.testing.expectEqual(Button.Status.idle, other.status.peek());
     button.report(true);
     try std.testing.expectEqualStrings("已复制", button.node.behavior.interaction.a11y.?.label.?);
+    const cleared_timer = button.timer.?;
+    button.clearStatus();
+    try std.testing.expectEqual(Button.Status.idle, button.status.peek());
+    try std.testing.expect(button.timer == null);
+    for (cx.timers.items) |timer| try std.testing.expect(timer.id != cleared_timer);
+    try std.testing.expectEqualStrings("复制代码", button.node.behavior.interaction.a11y.?.label.?);
+    button.report(true);
     const previous_timer = button.timer.?;
     button.report(true);
     try std.testing.expect(button.timer.? != previous_timer);

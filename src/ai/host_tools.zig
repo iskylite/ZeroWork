@@ -54,6 +54,8 @@ pub const Contribution = struct {
 };
 pub const Invocation = struct {
     dispatch_fence: ?provider.DispatchFence = null,
+    /// Host-only monotonic cutoff for an implicit execution decision wait.
+    decision_wait_deadline_ms: ?i64 = null,
     /// Reconnect can observe an existing automatic attempt across a transport
     /// transition. Starting a connection still requires this stricter fence.
     mutation_fence: ?provider.DispatchFence = null,

@@ -7,7 +7,7 @@
 const std = @import("std");
 const ui = @import("ui");
 
-pub const Kind = enum { history, virtual, live, cards, compaction, steer, recovery, empty };
+pub const Kind = enum { history, virtual, live, cards, compaction, resumed_history, steer, recovery, empty };
 
 /// One desired section of the transcript. `key` is a stable business identity;
 /// `fingerprint` covers every input that section renders.

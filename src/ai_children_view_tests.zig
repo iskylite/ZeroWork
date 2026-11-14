@@ -62,6 +62,18 @@ test "v0.4 child list retains exact identity under updates, hides removed rows a
     try std.testing.expectApproxEqAbs(logo.y + logo.h / 2, status.y + status.h / 2, 0.1);
     try std.testing.expect(name.x + name.w <= status.x);
     try std.testing.expect(find(row, "ai.child.status.icon").?.getText() == null);
+    const spinner = find(second_row, "ai.child.status.spinner").?;
+    const second_icon = find(second_row, "ai.child.status.icon").?;
+    try std.testing.expect(spinner.style.display == .flex and spinner.hasBeforeRenderHooks());
+    try std.testing.expect(second_icon.style.display == .none);
+    var finished = second;
+    finished.running = false;
+    finished.group = .recent;
+    finished.status = "已完成";
+    try view.update(&.{ first, finished });
+    try std.testing.expect(spinner.style.display == .none);
+    try std.testing.expect(second_icon.style.display == .flex);
+    try std.testing.expectEqual(ui.icons.get("circle-check").?.icon_id.?, second_icon.getIcon().?.icon_id);
     const old_logo = find(row, "ai.child.logo").?;
     const old_icon = old_logo.children.items[0].getIcon().?.icon_id;
     var changed = first;

@@ -33,7 +33,7 @@ pub const Timeline = struct {
         stream_offset: u64,
         payload: []const u8,
         storage: *Payload,
-        kind: enum { output, resize, application } = .output,
+        kind: enum { output, resize, application, boundary } = .output,
     };
 
     const Payload = struct {
@@ -173,7 +173,7 @@ pub const Timeline = struct {
         while (self.events.items.len >= self.max_events) self.evictOldest();
         const sequence = self.next_event_sequence;
         self.next_event_sequence = try std.math.add(u64, sequence, 1);
-        self.events.appendAssumeCapacity(.{ .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .event_sequence = sequence, .payload = storage.bytes, .storage = storage });
+        self.events.appendAssumeCapacity(.{ .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .event_sequence = sequence, .payload = storage.bytes, .storage = storage, .kind = .boundary });
         return sequence;
     }
     pub fn appendApplication(self: *Timeline, record: @import("../host/terminal_service.zig").ApplicationRecord, stream_offset: u64) !void {
@@ -244,6 +244,33 @@ pub const Timeline = struct {
         return copy;
     }
 
+    pub fn snapshotExecution(self: *Timeline, allocator: std.mem.Allocator, start: u64, end: u64, id: @import("../host/identity.zig").ExecutionId, generation: u64) !Timeline {
+        self.lock();
+        defer self.mutex.unlock();
+        const first = if (self.events.items.len > 0) self.events.items[0].event_sequence else return error.ExecutionIntervalNotRetained;
+        if (start < first or end < start or end - first >= self.events.items.len) return error.ExecutionIntervalNotRetained;
+        const events = self.events.items[@intCast(start - first) .. @as(usize, @intCast(end - first)) + 1];
+        if (events[0].event_sequence != start or events[events.len - 1].event_sequence != end or events[0].kind != .boundary or events[events.len - 1].kind != .boundary) return error.ExecutionIntervalNotRetained;
+        var copy = try Timeline.init(allocator, self.max_events, self.max_bytes);
+        errdefer copy.deinit();
+        try copy.events.ensureTotalCapacity(allocator, events.len);
+        for (events) |event| {
+            _ = event.storage.refs.fetchAdd(1, .monotonic);
+            copy.events.appendAssumeCapacity(event);
+            copy.bytes += event.payload.len;
+        }
+        for (self.command_history.items) |item| {
+            const execution_id = item.value.ai_execution_id orelse continue;
+            if (item.recording_generation != generation or !execution_id.eql(id)) continue;
+            try copy.command_history.ensureUnusedCapacity(allocator, 1);
+            var owned = item;
+            if (item.value.command) |command| owned.value.command = try allocator.dupe(u8, command);
+            copy.command_history.appendAssumeCapacity(owned);
+            break;
+        }
+        return copy;
+    }
+
     pub fn exportTextUnlocked(self: *const Timeline, writer: *std.Io.Writer) !void {
         for (self.events.items) |event| {
             if (event.kind == .application) {
@@ -285,6 +312,11 @@ pub const Timeline = struct {
         var pending_len: usize = 0;
         var expected: usize = 0;
         var previous_ms: i64 = origin;
+        var last_output = self.events.items.len;
+        while (last_output > 0) : (last_output -= 1) {
+            const event = self.events.items[last_output - 1];
+            if (event.kind == .output and event.payload.len != 0) break;
+        }
         for (self.events.items, 0..) |event, index| {
             const monotonic_ms = @max(previous_ms, event.timestamp_ms);
             previous_ms = monotonic_ms;
@@ -336,13 +368,21 @@ pub const Timeline = struct {
                     else => try writer.writeByte(byte),
                 }
             }
-            if (index + 1 == self.events.items.len and pending_len > 0)
+            if (index + 1 == last_output and pending_len > 0) {
                 try writer.writeAll("\xef\xbf\xbd");
+                pending_len = 0;
+            }
             try writer.writeAll("\"]\n");
         }
     }
 
     pub fn saveCast(self: *Timeline, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, cols: u16, rows: u16) !void {
+        var frozen = try self.snapshot();
+        defer frozen.deinit();
+        try frozen.saveFrozenCast(io, dir, sub_path, cols, rows);
+    }
+
+    pub fn saveFrozenCast(self: *const Timeline, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, cols: u16, rows: u16) !void {
         var atomic_buffer: [16 * 1024]u8 = undefined;
         var atomic = try dir.createFileAtomic(io, sub_path, .{
             .permissions = @as(std.Io.File.Permissions, @fromBackingInt(@intCast(0o600))),
@@ -351,7 +391,7 @@ pub const Timeline = struct {
         });
         defer atomic.deinit(io);
         var writer = atomic.file.writer(io, &atomic_buffer);
-        try self.exportCast(&writer.interface, cols, rows);
+        try self.exportCastUnlocked(&writer.interface, cols, rows);
         try writer.flush();
         try atomic.file.sync(io);
         try atomic.replace(io);
@@ -440,6 +480,18 @@ test "cast preserves Unicode split across reads and sanitizes invalid bytes" {
     var fixed = std.Io.Writer.fixed(&output);
     try timeline.exportCast(&fixed, 120, 40);
     try std.testing.expectEqualStrings("{\"version\":2,\"width\":120,\"height\":40}\n[0.000,\"o\",\"中\"]\n[0.000,\"o\",\"文�\\u001b\"]\n", fixed.buffer[0..fixed.end]);
+}
+
+test "cast keeps a partial UTF-8 suffix in its output event before an execution boundary" {
+    var timeline = try Timeline.init(std.testing.allocator, 8, 64);
+    defer timeline.deinit();
+    try timeline.append(100, 0, "hi\xe6");
+    _ = try timeline.markBoundary(110, 3);
+    try timeline.appendResize(120, 3, 100, 30);
+    var output: [512]u8 = undefined;
+    var fixed = std.Io.Writer.fixed(&output);
+    try timeline.exportCast(&fixed, 80, 24);
+    try std.testing.expectEqualStrings("{\"version\":2,\"width\":80,\"height\":24}\n[0.000,\"o\",\"hi�\"]\n[0.010,\"o\",\"\"]\n[0.020,\"r\",\"100x30\"]\n", fixed.buffer[0..fixed.end]);
 }
 
 test "cast file export is private and parses as asciicast JSON lines" {

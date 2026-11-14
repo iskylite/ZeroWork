@@ -11,9 +11,22 @@ pub const CredentialOptions = struct {
     provider: ?plugin_credential_references.Provider = null,
     config_path: ?[]const u8 = null,
     hosts_path: ?[]const u8 = null,
+    expected_config: ?ConfigBaseline = null,
 };
 
-pub const SavedConfig = struct { value: config.Config, cleanup: CleanupStatus };
+const ConfigDigest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
+pub const ConfigBaseline = struct {
+    digest: ?ConfigDigest = null,
+
+    pub fn fromSource(source: ?[]const u8) ConfigBaseline {
+        const bytes = source orelse return .{};
+        var digest: ConfigDigest = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        return .{ .digest = digest };
+    }
+};
+
+pub const SavedConfig = struct { value: config.Config, cleanup: CleanupStatus, baseline: ConfigBaseline };
 
 pub const max_config_bytes = 256 * 1024;
 pub const private_permissions: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
@@ -33,10 +46,10 @@ pub fn saveWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value:
 /// Returns the committed provider slice and credential refs in allocator;
 /// other configuration fields borrow value. Returned ownership is allocated
 /// before the atomic replacement.
-pub fn saveWithCredentialRefs(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: config.Config, allocator: std.mem.Allocator) !config.Config {
-    const saved = try saveWithCredentialRefsWithOptions(io, dir, sub_path, value, allocator, .{});
+pub fn saveWithCredentialRefs(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: config.Config, allocator: std.mem.Allocator, expected: ConfigBaseline) !SavedConfig {
+    const saved = try saveWithCredentialRefsWithOptions(io, dir, sub_path, value, allocator, .{ .expected_config = expected });
     observeCleanup(saved.cleanup);
-    return saved.value;
+    return saved;
 }
 
 pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: config.Config, allocator: std.mem.Allocator, options: CredentialOptions) !SavedConfig {
@@ -54,13 +67,13 @@ pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: 
     const a = arena.allocator();
     var disk = value;
     disk.ai.providers = try allocator.dupe(config.AiProvider, value.ai.providers);
+    const baseline_source = try readConfigSource(io, dir, a, sub_path);
+    if (options.expected_config) |expected| {
+        if (!std.meta.eql(expected, ConfigBaseline.fromSource(baseline_source))) return error.ConfigFileConflict;
+    }
+    const baseline = if (baseline_source) |source| try config.Config.parseWithAllocator(a, source) else null;
     var tx = try credentials.Transaction.init();
     defer tx.deinit();
-    const baseline_source = dir.readFileAlloc(io, sub_path, a, std.Io.Limit.limited(max_config_bytes)) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => return err,
-    };
-    const baseline = if (baseline_source) |source| try config.Config.parseWithAllocator(a, source) else null;
     for (disk.ai.providers[0..disk.ai.provider_count], 0..) |*provider, index| {
         var old = provider.api_key_ref;
         if (baseline) |old_config| {
@@ -103,9 +116,13 @@ pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: 
     try writer.interface.writeAll(encoded);
     try writer.interface.flush();
     try atomic.file.sync(io);
+    if (options.expected_config) |expected| {
+        const current = try readConfigSource(io, dir, a, sub_path);
+        if (!std.meta.eql(expected, ConfigBaseline.fromSource(current))) return error.ConfigFileConflict;
+    }
     try atomic.replace(io);
     tx.commit();
-    return .{ .value = disk, .cleanup = cleanup };
+    return .{ .value = disk, .cleanup = cleanup, .baseline = ConfigBaseline.fromSource(encoded) };
 }
 
 /// Loads and validates one configuration snapshot. The returned config borrows
@@ -115,29 +132,45 @@ pub fn load(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path:
 }
 
 pub fn loadWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, options: CredentialOptions) !LoadedConfig {
-    const source = try dir.readFileAlloc(io, sub_path, allocator, std.Io.Limit.limited(max_config_bytes));
+    const source = (try readConfigSource(io, dir, allocator, sub_path)) orelse return error.FileNotFound;
     errdefer allocator.free(source);
-    var arena = std.heap.ArenaAllocator.init(allocator);
+    var loaded = try decodeConfig(allocator, source);
+    errdefer loaded.arena.deinit();
+    for (loaded.value.ai.providers[0..loaded.value.ai.provider_count]) |provider| {
+        if (provider.api_key_ref != null or provider.api_key.len == 0) continue;
+        var checked = options;
+        checked.expected_config = ConfigBaseline.fromSource(source);
+        observeCleanup(try saveWithOptions(io, dir, sub_path, loaded.value, checked));
+        const migrated = try loadWithOptions(io, dir, allocator, sub_path, options);
+        loaded.deinit(allocator);
+        return migrated;
+    }
+    return loaded;
+}
+
+pub fn readConfigSource(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8) !?[]u8 {
+    return dir.readFileAlloc(io, sub_path, allocator, std.Io.Limit.limited(max_config_bytes)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+}
+
+/// Decode owned file bytes without rewriting the file or migrating credentials.
+/// On success the returned snapshot owns the bytes; on failure the caller does.
+pub fn decodeConfig(allocator: std.mem.Allocator, source: []u8) !LoadedConfig {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
     var value = try config.Config.parseWithAllocator(arena.allocator(), source);
-    var migrate = false;
     for (value.ai.providers[0..value.ai.provider_count]) |*provider| {
         if (provider.api_key_ref) |reference| {
             if (provider.api_key.len != 0) return error.AmbiguousCredential;
             provider.api_key = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
-        } else if (provider.api_key.len != 0) migrate = true;
+        }
     }
     for (value.ai.extensions.servers) |*server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |*entry| if (entry.secret_ref) |reference| {
         if (entry.value.len != 0) return error.AmbiguousCredential;
         entry.value = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
     };
-    if (migrate) {
-        observeCleanup(try saveWithOptions(io, dir, sub_path, value, options));
-        const migrated = try loadWithOptions(io, dir, allocator, sub_path, options);
-        arena.deinit();
-        allocator.free(source);
-        return migrated;
-    }
     return .{ .source = source, .arena = arena, .value = value };
 }
 

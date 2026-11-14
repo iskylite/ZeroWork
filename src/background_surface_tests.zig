@@ -466,16 +466,27 @@ test "global background survives real connection and status foreground rebuilds 
         try std.testing.expect(find(info.chrome, "appearance.surface") == null);
         try std.testing.expectEqual(@as(usize, 1), imageCount(w.frame(), 777));
     }
+    // Both popovers belong to the workspace group. Reopen the route card
+    // after exercising the status card so the node selection reaches it.
+    try view.show(snapshot, w.content, 860);
+    _ = w.frame();
+    try std.testing.expect(view.isVisible());
+    try std.testing.expect(!info.isVisible());
+    try std.testing.expect(view.node_modal == null);
     view.pending_selection = .{ .hop = 0 };
     try view.flush();
     _ = w.frame();
-    try std.testing.expect(find(view.node_modal.?.dialog, "appearance.surface") == null);
+    try std.testing.expect(view.node_open.peek());
+    const modal = view.node_modal orelse return error.ExpectedNodeDialog;
+    try std.testing.expect(find(modal.dialog, "appearance.surface") == null);
     var newer = snapshot;
     newer.revision = 2;
     try view.update(newer);
     try view.flush();
     _ = w.frame();
-    try std.testing.expect(find(view.node_modal.?.dialog, "appearance.surface") == null);
+    try std.testing.expect(view.node_open.peek());
+    try std.testing.expectEqual(modal.dialog, (view.node_modal orelse return error.ExpectedNodeDialog).dialog);
+    try std.testing.expect(find(modal.dialog, "appearance.surface") == null);
     try std.testing.expectEqual(@as(usize, 1), imageCount(w.frame(), 777));
 }
 

@@ -100,7 +100,8 @@ pub const State = struct {
         var summary_buffer: [128]u8 = undefined;
         const single_feedback = if (record.targets.len == 1 and record.targets[0].result.local_released) record.targets[0].feedback else null;
         const outcome = if (single_feedback) |info| info.label else if (unknown) "结果待核实" else if (record.error_status) |status| errorStatusLabel(status, record.error_code, record.name) else if (record.host == null and record.targets.len == 1) errorStatusLabel(record.targets[0].result.status, record.targets[0].result.error_code, record.name) else record.summary(&summary_buffer);
-        const projection = try @import("ai_tool_header_projection.zig").projectWithStatus(cx.allocator, record.name, record.command, outcome);
+        const success_detail = if (record.host) |fact| if (fact.status == .succeeded and !unknown) fact.content else null else null;
+        const projection = try @import("ai_tool_header_projection.zig").projectWithStatus(cx.allocator, record.name, record.command, success_detail, outcome);
         defer cx.allocator.free(projection);
         const status = try ui.text(cx, projection, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = if (unknown or failed) palette.warn else palette.fg_2, .text_overflow = .ellipsis });
         status.setStyleInline(cx.allocator, S.headerSummary(cx.tokens));

@@ -13,6 +13,7 @@ pub const Outcome = enum { completed, failed, cancelled };
 pub const Decision = enum { keep, close };
 pub const Control = enum { stop, takeover };
 pub const Phase = enum { working, settling, choice, closing, kept, retained, closed, cleanup_pending, finished };
+const completion_notice_duration_ns = @import("ai_feedback_view.zig").completion_duration_ns;
 pub const Gates = struct {
     pending_tool_slots: usize = 0,
     pending_approvals: usize = 0,
@@ -157,6 +158,7 @@ const Task = struct {
     revision: u64 = 1,
     fingerprint: ?u64 = null,
     phase: Phase = .working,
+    completion_notice: ?struct { phase: Phase, until_ns: i128 } = null,
     finish_sent: bool = false,
     stop_sent: bool = false,
     receipt: ?lifecycle.TaskFinishReceipt = null,
@@ -168,6 +170,21 @@ const Task = struct {
     active_executions: usize = 0,
     remote_effect_unknown: bool = false,
     feedback: ?[]const u8 = null,
+    fn isCompletionNotice(self: *const Task) bool {
+        return !self.remote_effect_unknown and switch (self.phase) {
+            .retained, .kept, .closed => true,
+            else => false,
+        };
+    }
+    fn updateCompletionNotice(self: *Task, now_ns: i128) void {
+        if (!self.isCompletionNotice()) return;
+        if (self.completion_notice) |notice| if (notice.phase == self.phase) return;
+        self.completion_notice = .{ .phase = self.phase, .until_ns = now_ns + completion_notice_duration_ns };
+    }
+    fn completionNoticeDeadline(self: *const Task) ?i128 {
+        const notice = self.completion_notice orelse return null;
+        return if (self.isCompletionNotice() and notice.phase == self.phase) notice.until_ns else null;
+    }
     fn deinit(self: *Task, a: std.mem.Allocator) void {
         self.resources.deinit(a);
         self.selection.deinit(a);
@@ -187,6 +204,7 @@ pub const Snapshot = struct {
     control_pending: bool = false,
     model_done: bool = false,
     targets: []const InputTarget = &.{},
+    completion_notice_until_ns: ?i128 = null,
 };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
@@ -281,7 +299,7 @@ pub const Controller = struct {
         return buffer[0..count];
     }
     fn projected(task: *const Task) Snapshot {
-        return .{ .context = task.context, .sequence = task.order, .revision = task.revision, .phase = task.phase, .resources = task.resources.items, .targets = task.targets.items, .active_executions = task.active_executions, .remote_effect_unknown = task.remote_effect_unknown, .feedback = task.feedback, .visible = if (task.phase == .working) task.active_executions > 0 else task.resources.items.len > 0 or task.phase == .settling, .control_pending = task.pending_control != null or task.takeover_requested or task.stop_sent, .model_done = task.model_ended };
+        return .{ .context = task.context, .sequence = task.order, .revision = task.revision, .phase = task.phase, .resources = task.resources.items, .targets = task.targets.items, .active_executions = task.active_executions, .remote_effect_unknown = task.remote_effect_unknown, .feedback = task.feedback, .visible = if (task.phase == .working) task.active_executions > 0 else task.resources.items.len > 0 or task.phase == .settling, .control_pending = task.pending_control != null or task.takeover_requested or task.stop_sent, .model_done = task.model_ended, .completion_notice_until_ns = task.completionNoticeDeadline() };
     }
     pub fn snapshotFor(self: *Controller, context: host.Context) ?Snapshot {
         const task = self.find(context.task_id) orelse return null;
@@ -295,13 +313,17 @@ pub const Controller = struct {
         };
         return if (latest) |task| projected(task) else null;
     }
-    /// Bounded read-only projection in registration order. Each visible old
-    /// Task keeps its own controls when the same conversation starts new work.
-    pub fn snapshotsForConversation(self: *Controller, conversation: identity.ConversationId, buffer: []Snapshot) ![]Snapshot {
+    /// Bounded read-only projection in registration order. Completion notices
+    /// belong to the latest task; older tasks can still need controls.
+    pub fn snapshotsForConversation(self: *Controller, conversation: identity.ConversationId, now_ns: i128, buffer: []Snapshot) ![]Snapshot {
+        const latest = self.snapshotForConversation(conversation) orelse return buffer[0..0];
         var count: usize = 0;
         for (self.tasks.items) |*task| {
             if (!task.context.conversation_id.eql(conversation)) continue;
             const snapshot = projected(task);
+            if (snapshot.completion_notice_until_ns) |deadline| {
+                if (snapshot.sequence != latest.sequence or now_ns >= deadline) continue;
+            }
             if (!snapshot.visible) continue;
             if (count == buffer.len) return error.OutputTooSmall;
             buffer[count] = snapshot;
@@ -558,6 +580,7 @@ pub const Controller = struct {
         }
     }
     pub fn tick(self: *Controller, app: *Application, execution: ?ExecutionSource, gates: GatesProvider) !bool {
+        const now_ns = @import("../platform/realtime.zig").monotonicNs();
         var pending = false;
         for (self.tasks.items) |*task| {
             try self.harvest(task, app);
@@ -663,6 +686,7 @@ pub const Controller = struct {
             try self.applyDecision(task, app);
             try self.harvest(task, app);
             refreshPhase(task);
+            task.updateCompletionNotice(now_ns);
             publish(task);
             pending = pending or task.phase == .closing or task.phase == .settling;
         }
@@ -674,11 +698,16 @@ pub const Callbacks = struct { context: *anyopaque, on_decision: *const fn (*any
 pub const View = struct {
     cx: *ui.Cx,
     root: *ui.Node,
+    header: *ui.Node = undefined,
     content: *ui.Node,
     title: *ui.Node,
     detail: *ui.Node,
     resources: *ui.Node,
     resources_viewport: *ui.Node,
+    status: *ui.Node = undefined,
+    tag: *ui.Node = undefined,
+    tag_label: *ui.Node = undefined,
+    tag_hint: ui.widgets.TooltipResult = undefined,
     keep_button: *ui.Node,
     close_button: *ui.Node,
     stop_button: *ui.Node = undefined,
@@ -714,15 +743,34 @@ pub const View = struct {
         self.root = try ui.boxStyled(cx, styles.row, .{});
         self.root.meta.ownership.meta.test_id = "ai.task_finish";
         self.root.setDisplay(.none);
+        self.header = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 7 }, .{});
+        try self.root.children.ensureTotalCapacity(cx.allocator, 2);
+        try self.root.appendChild(cx.allocator, self.header);
         self.content = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .row, .align_items = .center, .gap = 7 }, .{});
-        try self.root.appendChild(cx.allocator, self.content);
+        try self.header.appendChild(cx.allocator, self.content);
         self.icon = try ui.iconTint(cx, ui.icons.check, theme.current().ok_ink, .{ .width = .{ .px = 15 }, .height = .{ .px = 15 }, .flex_shrink = 0 });
         try self.content.appendChild(cx.allocator, self.icon);
         const body = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .column, .gap = 1 }, .{});
         try self.content.appendChild(cx.allocator, body);
         self.title = try ui.textStyled(cx, styles.title, "任务已结束");
         self.title.meta.ownership.meta.test_id = "ai.task_finish.title";
-        try body.appendChild(cx.allocator, self.title);
+        self.status = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 7 }, .{});
+        try body.appendChild(cx.allocator, self.status);
+        try self.status.children.ensureTotalCapacity(cx.allocator, 2);
+        try self.status.appendChild(cx.allocator, self.title);
+        self.tag = try ui.box(cx, styles.sessionTag(), .{});
+        self.tag.meta.ownership.meta.test_id = "ai.task_finish.session_tag";
+        self.tag_label = try ui.textStyled(cx, styles.sessionTagText, "");
+        self.tag_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        try self.tag.appendChild(cx.allocator, self.tag_label);
+        self.tag_hint = try ui.widgets.Tooltip(.{ .text = "", .width = @as(f32, styles.session_tag_max_width), .wrap = .char, .position = .bottom_start }).mount(scope, cx);
+        self.tag_hint.content.meta.ownership.meta.test_id = "ai.task_finish.session_tag.tooltip";
+        self.tag_hint.wrapper.setStyleInline(cx.allocator, .{ .flex_shrink = 0, .display = .none });
+        self.tag_hint.trigger.setStyleInline(cx.allocator, .{ .width = .fill() });
+        self.tag.setStyleInline(cx.allocator, .{ .width = .fill() });
+        try self.tag_hint.trigger.appendChild(cx.allocator, self.tag);
+        self.tag_label.meta.ownership.meta.test_id = "ai.task_finish.session_tag.label";
+        try self.status.appendChild(cx.allocator, self.tag_hint.wrapper);
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
         self.resources_viewport = scroll.container;
         scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .max_height = 80, .flex_shrink = 0 });
@@ -737,7 +785,7 @@ pub const View = struct {
         self.detail.meta.ownership.meta.test_id = "ai.task_finish.detail";
         try body.appendChild(cx.allocator, self.detail);
         self.actions = try ui.box(cx, .{ .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
-        try self.root.appendChild(cx.allocator, self.actions);
+        try self.header.appendChild(cx.allocator, self.actions);
         self.keep_button = try ui.widgets.Button(.{ .label = "交给我保留", .variant = .secondary, .base_style = self.keep_style, .disabled = self.disabled, .on_click = cx.on(View, self, keep) }).mount(scope, cx);
         self.keep_button.meta.ownership.meta.test_id = "ai.task_finish.keep";
         self.close_button = try ui.widgets.Button(.{ .label = "关闭任务会话", .variant = .secondary, .base_style = self.close_style, .disabled = self.disabled, .on_click = cx.on(View, self, close) }).mount(scope, cx);
@@ -780,29 +828,60 @@ pub const View = struct {
     fn cleanup(self: *View) void {
         self.cx.removeAfterLayoutHook(self);
     }
+    fn fitSessionTag(self: *View, available: f32, title_width: f32, actions_width: f32, compact: bool) bool {
+        const wrapper = self.tag_hint.wrapper;
+        const padding = 2 * styles.session_tag_padding;
+        const label = self.tag_label.getText().?;
+        const tag_width = @min(styles.session_tag_max_width, @ceil(self.cx.text.measureTextWidth(label.content, label.font_size, label.font_weight, false)) + padding + 1);
+        const left = self.icon.style.width.px + self.content.style.gap;
+        const inline_width = available - left - title_width - self.status.style.gap - if (compact) @as(f32, 0) else actions_width;
+        // If the actions already need their own line, keep the Tag with the title.
+        const inline_tag = compact or tag_width <= inline_width;
+        const parent = if (inline_tag) self.status else self.root;
+        const width = @min(tag_width, @max(0, if (inline_tag) inline_width else available - left));
+        var dirty = false;
+        if (wrapper.parent != parent) {
+            // Both parents reserve space for this one retained node at mount.
+            parent.appendChild(self.cx.allocator, wrapper) catch unreachable;
+            wrapper.setStyle(self.cx.allocator, .margin, .{ .left = if (inline_tag) 0 else left });
+            self.tag_hint.open.?.set(false);
+            dirty = true;
+        }
+        if (wrapper.style.width != .px or @abs(wrapper.style.width.px - width) > 0.5) {
+            wrapper.setStyle(self.cx.allocator, .width, .{ .px = width });
+            dirty = true;
+        }
+        if (self.title.style.width != .px or @abs(self.title.style.width.px - title_width) > 0.5) {
+            self.title.setStyle(self.cx.allocator, .width, .{ .px = title_width });
+            dirty = true;
+        }
+        return dirty;
+    }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
         if (self.root.style.display == .none or self.root.globalRect().w == 0) return .done;
-        // Zenit's wrap layout gives grow children zero main size. Preserve the
-        // HTML's 180px text minimum by moving the complete actions below the
-        // icon/text row at the actual measured width instead.
-        const compact = self.actions.style.display != .none and self.root.globalRect().w < 22 + 15 + 7 + 180 + 7 + self.actions.globalRect().w;
+        const tagged = self.tag_hint.wrapper.style.display != .none;
+        const available = self.root.globalRect().w - self.root.style.padding.left - self.root.style.padding.right;
+        const title = self.title.getText().?;
+        const title_width = if (tagged) @ceil(self.cx.text.measureTextWidth(title.content, title.font_size, title.font_weight, false)) + 1 else 180;
+        const actions_width = if (self.actions.style.display != .none) self.actions.globalRect().w + self.header.style.gap else 0;
+        const compact = actions_width > 0 and available < self.icon.style.width.px + self.content.style.gap + title_width + actions_width;
+        var dirty = tagged and self.fitSessionTag(available, title_width, actions_width, compact);
         const direction: ui.Direction = if (compact) .column else .row;
-        var dirty = false;
         if (self.menu_state) |state| {
             if (state.menu_node) |node| node.meta.ownership.meta.test_id = "ai.task_finish.takeover.menu";
             for (state.item_nodes[0..state.item_count], 0..) |item, i| if (item) |node| {
                 if (i < self.target_count) node.meta.ownership.meta.test_id = std.fmt.bufPrint(&self.menu_test_ids[i], "ai.task_finish.takeover.target.{d}", .{@backingInt(self.targets[i].handle.session_id)}) catch unreachable;
             };
         }
-        if (self.root.style.direction != direction) {
-            self.root.setStyle(self.cx.allocator, .direction, direction);
+        if (self.header.style.direction != direction) {
+            self.header.setStyle(self.cx.allocator, .direction, direction);
             self.content.setStyleInline(self.cx.allocator, .{ .flex = if (compact) 0 else 1, .flex_shrink = 0 });
             self.actions.setStyle(self.cx.allocator, .align_self, if (compact) .end else .center);
             dirty = true;
         }
         const content_height = std.math.clamp(self.resources.globalRect().h, 16, 80);
-        if (@abs(self.resources_viewport.globalRect().h - content_height) > 0.5) {
+        if (!tagged and @abs(self.resources_viewport.globalRect().h - content_height) > 0.5) {
             self.resources_viewport.setStyle(self.cx.allocator, .height, .{ .px = content_height });
             dirty = true;
         }
@@ -879,9 +958,25 @@ pub const View = struct {
             if (snapshot.targets.len == 0) try list.writer.writeAll(if (snapshot.feedback != null) "仍可查看原命令的执行状态，终端保持打开" else "正在确认命令执行和输入控制状态");
         }
         try self.resources.setTextContent(self.cx.allocator, list.writer.buffered());
+        const tagged = snapshot.phase == .working and (snapshot.resources.len == 1 or (snapshot.resources.len == 0 and snapshot.targets.len == 1));
+        self.tag_hint.open.?.set(false);
+        self.resources_viewport.setDisplay(if (tagged) .none else .flex);
+        self.tag_hint.wrapper.setDisplay(if (tagged) .flex else .none);
+        if (tagged) {
+            const label = list.writer.buffered();
+            try self.tag_label.setTextContent(self.cx.allocator, label);
+            const hint_label = self.tag_hint.content.children.items[0];
+            try hint_label.setTextContent(self.cx.allocator, label);
+            if (self.tag_hint.content.behavior.interaction.a11y) |*a| a.label = hint_label.getText().?.content;
+            self.tag.setBackground(styles.sessionTagBackground());
+            self.tag_label.setTextColor(theme.current().fg_2);
+        } else {
+            self.title.setStyle(self.cx.allocator, .width, .fill());
+        }
         self.resources_viewport.setStyle(self.cx.allocator, .height, .{ .px = @floatFromInt(@as(usize, @min(@max(@as(usize, 1), snapshot.resources.len), 5)) * 16) });
-        const detail = snapshot.feedback orelse if (snapshot.phase == .working) (if (snapshot.model_done) "模型答复已结束，前台执行继续运行" else "执行正在运行；可停止或接管终端") else if (snapshot.phase == .cleanup_pending) "关闭结果待核实，未标记已清理" else if (snapshot.remote_effect_unknown) "远端效果未知；原会话与会话组保持打开" else if (snapshot.phase == .choice) "只处理本任务创建的终端；原会话与组保持打开" else "原会话与会话组保持打开";
-        try self.detail.setTextContent(self.cx.allocator, detail);
+        const detail: ?[]const u8 = snapshot.feedback orelse if (snapshot.phase == .working) (if (snapshot.model_done) "模型答复已结束，前台执行继续运行" else null) else if (snapshot.phase == .cleanup_pending) "关闭结果待核实，未标记已清理" else if (snapshot.remote_effect_unknown) "远端效果未知；原会话与会话组保持打开" else if (snapshot.phase == .choice) "只处理本任务创建的终端；原会话与组保持打开" else "原会话与会话组保持打开";
+        if (detail) |message| try self.detail.setTextContent(self.cx.allocator, message);
+        self.detail.setDisplay(if (detail != null) .flex else .none);
         const can_control = snapshot.phase == .working and snapshot.active_executions > 0 and self.callbacks.on_control != null;
         self.keep_button.setDisplay(if (snapshot.phase == .choice) .flex else .none);
         self.close_button.setDisplay(if (snapshot.phase == .choice) .flex else .none);
@@ -921,6 +1016,8 @@ pub const View = struct {
         const callback = self.callbacks.on_control orelse return;
         callback(self.callbacks.context, task, self.revision, action) catch |err| {
             self.detail.setTextContent(self.cx.allocator, if (err == error.ScopeChanged) "执行状态已变化，请重新查看" else "请求尚未接纳，请稍后重试") catch {};
+            self.detail.setDisplay(.flex);
+            self.cx.requestRedraw();
             return;
         };
         self.disabled.set(true);
@@ -949,6 +1046,8 @@ pub const View = struct {
         if (self.callbacks.on_control_target) |callback| {
             callback(self.callbacks.context, task, self.revision, target.handle, target.execution_id) catch {
                 self.detail.setTextContent(self.cx.allocator, "终端输入状态已变化，请重新查看后选择") catch {};
+                self.detail.setDisplay(.flex);
+                self.cx.requestRedraw();
                 return;
             };
             self.disabled.set(true);
@@ -1107,15 +1206,15 @@ test "task finish task registration advances legal binding without losing takeov
     try controller.registerTask(next);
     controller.find(next.task_id).?.active_executions = 1;
     var buffer: [2]Snapshot = undefined;
-    const visible = try controller.snapshotsForConversation(grouped.conversation_id, &buffer);
+    const visible = try controller.snapshotsForConversation(grouped.conversation_id, 0, &buffer);
     try std.testing.expectEqual(@as(usize, 2), visible.len);
     try std.testing.expect(visible[0].context.task_id.eql(grouped.task_id));
     try std.testing.expect(visible[1].context.task_id.eql(next.task_id));
-    try std.testing.expectError(error.OutputTooSmall, controller.snapshotsForConversation(grouped.conversation_id, buffer[0..1]));
-    try std.testing.expectEqual(@as(usize, 0), (try controller.snapshotsForConversation(.generate(), &buffer)).len);
+    try std.testing.expectError(error.OutputTooSmall, controller.snapshotsForConversation(grouped.conversation_id, 0, buffer[0..1]));
+    try std.testing.expectEqual(@as(usize, 0), (try controller.snapshotsForConversation(.generate(), 0, &buffer)).len);
 }
 
-test "task status does not call an idle owned terminal a running execution" {
+test "task finish shows completion notices until expiry or the next task in that conversation" {
     const a = std.testing.allocator;
     var controller = Controller.init(a);
     defer controller.deinit();
@@ -1127,8 +1226,48 @@ test "task status does not call an idle owned terminal a running execution" {
     task.active_executions = 1;
     try std.testing.expect(controller.snapshotFor(context).?.visible);
     task.active_executions = 0;
-    task.phase = .retained;
-    try std.testing.expect(controller.snapshotFor(context).?.visible);
+    var buffer: [2]Snapshot = undefined;
+    const completion_phases = [_]Phase{ .retained, .kept, .closed };
+    for (completion_phases, 0..) |phase, index| {
+        task.phase = phase;
+        const shown_at = @as(i128, @intCast(index)) * completion_notice_duration_ns;
+        const expires_at = shown_at + completion_notice_duration_ns;
+        task.updateCompletionNotice(shown_at);
+        task.updateCompletionNotice(expires_at - 1);
+        const visible = try controller.snapshotsForConversation(context.conversation_id, expires_at - 1, &buffer);
+        try std.testing.expectEqual(@as(usize, 1), visible.len);
+        try std.testing.expectEqual(phase, visible[0].phase);
+        try std.testing.expectEqual(@as(usize, 0), (try controller.snapshotsForConversation(context.conversation_id, expires_at, &buffer)).len);
+    }
+
+    var unrelated = context;
+    unrelated.conversation_id = .generate();
+    unrelated.task_id = .generate();
+    try controller.registerTask(unrelated);
+    const before_expiry = completion_phases.len * completion_notice_duration_ns - 1;
+    try std.testing.expectEqual(@as(usize, 1), (try controller.snapshotsForConversation(context.conversation_id, before_expiry, &buffer)).len);
+
+    var next = context;
+    next.task_id = .generate();
+    try controller.registerTask(next);
+    const previous = controller.find(context.task_id).?;
+    for (completion_phases) |phase| {
+        previous.phase = phase;
+        previous.updateCompletionNotice(before_expiry);
+        try std.testing.expectEqual(@as(usize, 0), (try controller.snapshotsForConversation(context.conversation_id, before_expiry, &buffer)).len);
+        try std.testing.expectEqual(lifecycle.State.ready, previous.resources.items[0].state);
+    }
+    const after_expiry = before_expiry + completion_notice_duration_ns;
+    for ([_]Phase{ .choice, .cleanup_pending }) |phase| {
+        previous.phase = phase;
+        previous.updateCompletionNotice(before_expiry);
+        const visible = try controller.snapshotsForConversation(context.conversation_id, after_expiry, &buffer);
+        try std.testing.expectEqual(@as(usize, 1), visible.len);
+        try std.testing.expectEqual(phase, visible[0].phase);
+    }
+    previous.phase = .closed;
+    previous.remote_effect_unknown = true;
+    try std.testing.expectEqual(@as(usize, 1), (try controller.snapshotsForConversation(context.conversation_id, after_expiry, &buffer)).len);
 }
 
 test "task finish history does not impose a lifetime task quota" {

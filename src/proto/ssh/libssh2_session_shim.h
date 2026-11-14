@@ -183,7 +183,6 @@ LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_read(LIBSSH2_SFTP *sftp, const char *p
 void zw_libssh2_sftp_seek(LIBSSH2_SFTP_HANDLE *handle, unsigned long long offset);
 long zw_libssh2_sftp_read(LIBSSH2_SFTP_HANDLE *handle, unsigned char *buffer, size_t len);
 long zw_libssh2_sftp_write(LIBSSH2_SFTP_HANDLE *handle, const unsigned char *buffer, size_t len);
-long long zw_libssh2_sftp_size(LIBSSH2_SFTP *sftp, const char *path);
 int zw_libssh2_sftp_close(LIBSSH2_SFTP_HANDLE *handle);
 void zw_libssh2_sftp_shutdown(LIBSSH2_SFTP *sftp);
 int zw_libssh2_sftp_release(LIBSSH2_SFTP *sftp);

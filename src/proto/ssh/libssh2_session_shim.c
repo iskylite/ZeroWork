@@ -1084,12 +1084,6 @@ LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_read(LIBSSH2_SFTP *sftp, const char *p
 void zw_libssh2_sftp_seek(LIBSSH2_SFTP_HANDLE *handle, unsigned long long offset) { libssh2_sftp_seek64(handle, (libssh2_uint64_t)offset); }
 long zw_libssh2_sftp_read(LIBSSH2_SFTP_HANDLE *handle, unsigned char *buffer, size_t len) { return (long)libssh2_sftp_read(handle, (char *)buffer, len); }
 long zw_libssh2_sftp_write(LIBSSH2_SFTP_HANDLE *handle, const unsigned char *buffer, size_t len) { return (long)libssh2_sftp_write(handle, (const char *)buffer, len); }
-long long zw_libssh2_sftp_size(LIBSSH2_SFTP *sftp, const char *path) {
-    LIBSSH2_SFTP_ATTRIBUTES attrs;
-    if (libssh2_sftp_stat(sftp, path, &attrs) != 0 || !(attrs.flags & LIBSSH2_SFTP_ATTR_SIZE)) return -1;
-    if (attrs.filesize > 0x7fffffffffffffffULL) return -1;
-    return (long long)attrs.filesize;
-}
 int zw_libssh2_sftp_close(LIBSSH2_SFTP_HANDLE *handle) { return libssh2_sftp_close(handle); }
 void zw_libssh2_sftp_shutdown(LIBSSH2_SFTP *sftp) { if (sftp) libssh2_sftp_shutdown(sftp); }
 int zw_libssh2_sftp_release(LIBSSH2_SFTP *sftp) {

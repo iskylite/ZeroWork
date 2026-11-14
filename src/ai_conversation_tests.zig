@@ -234,7 +234,11 @@ test "AI conversation table rows contain wrapped inline code at narrow widths" {
         }
         const table = find(root, "ai.message.table").?;
         const content = table.children.items[0];
-        try std.testing.expectApproxEqAbs(@max(240, width), content.globalRect().w, 0.1);
+        if (width == 1000) {
+            try std.testing.expect(content.globalRect().w < width);
+        } else {
+            try std.testing.expectApproxEqAbs(@max(240, width), content.globalRect().w, 0.1);
+        }
         const first_row = content.children.items[0];
         if (width > 240) try std.testing.expect(first_row.children.items[0].globalRect().w > first_row.children.items[1].globalRect().w);
         for (content.children.items) |row| {
@@ -297,7 +301,11 @@ test "AI conversation retained Markdown reflows prose tables and wrapped code af
             cx.layout();
             _ = cx.render();
         }
-        try std.testing.expectApproxEqAbs(@max(400, width), content.globalRect().w, 0.1);
+        if (width == 1000) {
+            try std.testing.expect(content.globalRect().w < width);
+        } else {
+            try std.testing.expectApproxEqAbs(@max(400, width), content.globalRect().w, 0.1);
+        }
         const cells = content.children.items[0].children.items;
         try std.testing.expectApproxEqAbs(@as(f32, 40), cells[0].globalRect().w, 0.1);
         if (width > 400) try std.testing.expect(cells[2].globalRect().w > cells[1].globalRect().w);
@@ -342,13 +350,67 @@ test "AI conversation table distributes rendered content independent of column n
         const table = find(message, "ai.message.table").?;
         const content = table.children.items[0];
         const cells = content.children.items[0].children.items;
-        try std.testing.expectApproxEqAbs(width, content.globalRect().w, 0.1);
+        if (width == 900) {
+            try std.testing.expect(content.globalRect().w < width);
+        } else {
+            try std.testing.expectApproxEqAbs(width, content.globalRect().w, 0.1);
+        }
         for (cells[1..], 0..) |cell, i| {
             const actual = cell.globalRect().w;
             try std.testing.expect(actual >= 40 and actual < 80);
             if (compact[i] == 0) compact[i] = actual else try std.testing.expectApproxEqAbs(compact[i], actual, 0.1);
         }
-        try std.testing.expect(cells[0].globalRect().w > width * 0.6);
+        try std.testing.expect(cells[0].globalRect().w > content.globalRect().w * 0.6);
+    }
+}
+
+test "AI conversation short table stays content sized after resize and scrolls when narrow" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(1600, 1000);
+    const root = try ui.box(cx, .{ .width = .{ .px = 1500 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const message = try @import("ui/ai_message_view.zig").mount(cx, scope, "| 节点 | 条目 | getent hosts vm01 |\n| --- | --- | --- |\n" ++
+        "| p7c0–p7c9（10 台计算） | 各 1 条 | 172.20.0.244 |\n" ++
+        "| p7s0–p7s3（4 台交换） | 各 1 条 | 172.20.0.244 |");
+    try root.appendChild(a, message);
+    var natural: [3]f32 = @splat(0);
+    var natural_width: f32 = 0;
+    for ([_]f32{ 1500, 800, 400, 180, 1500 }) |width| {
+        root.setStyleInline(a, .{ .width = .{ .px = width } });
+        for (0..3) |_| {
+            cx.advanceFrameClock();
+            cx.layout();
+            _ = cx.render();
+        }
+        const table = find(message, "ai.message.table").?;
+        const content = table.children.items[0];
+        const cells = content.children.items[0].children.items;
+        if (natural_width == 0) {
+            natural_width = content.globalRect().w;
+            try std.testing.expect(natural_width < 400);
+            try std.testing.expect(cells[0].globalRect().w > 120);
+            for (cells, 0..) |cell, column| natural[column] = cell.globalRect().w;
+        } else if (width >= 400) {
+            try std.testing.expectApproxEqAbs(natural_width, content.globalRect().w, 0.1);
+            for (cells, 0..) |cell, column| try std.testing.expectApproxEqAbs(natural[column], cell.globalRect().w, 0.1);
+        } else {
+            try std.testing.expect(content.globalRect().w > width);
+            const bounds = table.globalRect();
+            const before = content.globalRect().x;
+            cx.handleScroll(.{ .x = bounds.x + 20, .y = bounds.y + 20, .dx = -80, .dy = 0 });
+            cx.layout();
+            _ = cx.render();
+            try std.testing.expect(content.globalRect().x < before);
+        }
+        for (content.children.items) |row| {
+            for (row.children.items, 0..) |cell, column| {
+                try std.testing.expectApproxEqAbs(cells[column].globalRect().w, cell.globalRect().w, 0.1);
+                try std.testing.expectApproxEqAbs(row.globalRect().h, cell.globalRect().h, 0.1);
+            }
+        }
     }
 }
 

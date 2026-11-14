@@ -31,9 +31,9 @@ async function capture(name:string,maximized=false,centered=true){
  const content=(await visible('bmc.content')).rect,panel=(await visible('ai.panel')).rect;
  inside(panel,content,`${name}: assistant stays in KVM content`);
  if(maximized){assert(Math.abs(panel.w-(content.w-16))<1);assert(Math.abs(panel.h-(content.h-16))<1)}
- else {assert.equal(panel.w,600);assert.equal(panel.h,456);if(centered){assert(Math.abs(panel.x-(content.x+(content.w-600)/2))<1);assert(Math.abs(panel.y-(content.y+14))<1)}}
+ else {assert.equal(panel.w,600);assert.equal(panel.h,480);if(centered){assert(Math.abs(panel.x-(content.x+(content.w-600)/2))<1);assert(Math.abs(panel.y-(content.y+14))<1)}}
  for(const id of ['ai.close','ai.prompt','ai.composer.controls'])inside((await visible(id)).rect,panel,`${name}: ${id} stays in assistant`);
- assert((await h.query('ai.float.resize.se')).some(shown)===!maximized,`${name}: resize state follows maximization`);
+ assert((await h.query('ai.float.resize.se')).some(shown),`${name}: resize remains available`);
  await h.screenshot(join(out,name+'.png'));
  report.checks.push({name,content,panel});
 }
@@ -47,9 +47,12 @@ try{
  await click('ai.maximize');await capture('restored');
  await click('ai.collapse');await click('toolbar.ai');await h.resizeWindow(1000,700);await capture('reopened-compact',false,false);
  const prompt=await visible('ai.prompt');await h.clickAt(prompt.rect.x+30,prompt.rect.y+20);await h.type_('KVM layout draft');assert.equal((await h.inputState('ai.prompt')).buffer,'KVM layout draft');
- await h.request('POST','/quit',{});await Promise.race([ended,h.sleep(700)]);
- if(app.exitCode===null&&app.signalCode===null)await click('local.close.accept');
- await h.waitFor(()=>app.exitCode!==null||app.signalCode!==null||null,10000);assert.equal(app.exitCode,0);
+ assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);
+ const quitStarted=performance.now();while(app.exitCode===null&&app.signalCode===null&&performance.now()-quitStarted<15000){
+  for(const id of ['groups.close.accept','local.close.accept','session.close.accept'])try{if((await h.query(id)).some(shown))await h.clickTestId(id)}catch{}
+  await Promise.race([ended,h.sleep(80)]);
+ }
+ assert.equal(app.exitCode,0);
  report.status='passed';
 }catch(error){report.status='failed';report.error=String(error);process.exitCode=1;if(app.exitCode===null)await h.screenshot(join(out,'failure.png')).catch(()=>{});console.error(error)}
 finally{if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await ended;await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));await rm(isolated,{recursive:true,force:true})}

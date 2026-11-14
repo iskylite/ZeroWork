@@ -361,8 +361,8 @@ pub const Turn = struct {
         result.restored_interrupted = self.restored_interrupted;
         errdefer result.deinit(a);
         result.file_source = if (self.file_source) |source| try source.clone(a) else null;
-        result.before = try wire.History.copy(a, self.before.messages, "");
-        result.after = try wire.History.copy(a, self.after.messages, "");
+        result.before = self.before.retain();
+        result.after = self.after.retain();
         result.answer = try a.dupe(u8, self.answer);
         try result.prose.appendSlice(a, self.prose.items);
         result.round_text_offset = self.round_text_offset;

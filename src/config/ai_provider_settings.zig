@@ -584,8 +584,7 @@ pub const ProviderView = struct {
         if (!model.reasoning and !model.vision) try metadata.appendChild(self.cx.allocator, try ui.text(self.cx, "仅文本", .{ .font_size = 10.5, .color = S.theme.current().fg_2, .line_height = 16.0 / 10.5 }));
         try root.appendChild(self.cx.allocator, try self.iconButton(.default_model, i, j, ui.icons.star, if (model.default) "默认模型" else "设为默认模型", 28, model.default, model.default or !self.savedEligible(i, j)));
         try root.appendChild(self.cx.allocator, try self.iconButton(.edit_model, i, j, ui.icons.pencil, "编辑模型", 24, false, false));
-        const protected = self.modelProtected(i, j);
-        try root.appendChild(self.cx.allocator, try self.iconButton(.delete_model, i, j, ui.icons.trash_2, if (protected) "删除默认模型前，请先将另一个模型设为默认" else "删除模型", 24, false, protected));
+        try root.appendChild(self.cx.allocator, try self.iconButton(.delete_model, i, j, ui.icons.trash_2, "删除模型", 24, false, false));
         return root;
     }
     fn capabilityIcon(self: *ProviderView, asset: []const u8, caption: []const u8) !*ui.Node {
@@ -641,7 +640,7 @@ pub const ProviderView = struct {
         action_click.run();
         const after = if (target.model != null) self.controller.model.value.ai.providers[target.provider].model_count else self.controller.model.value.ai.provider_count;
         if (after == before) {
-            dialog.fail(if (self.error_text.len != 0) self.error_text else "当前配置不能删除，请先选择合法替代项。");
+            dialog.fail(if (self.error_text.len != 0) self.error_text else "无法删除当前配置，请重试。");
             return false;
         }
         return true;
@@ -652,10 +651,6 @@ pub const ProviderView = struct {
         const p = ai.providers[i];
         if (j) |index| return index < p.model_count and draft.modelValid(p.models[index]);
         return p.enabled and draft.eligible(p);
-    }
-    fn modelProtected(self: *ProviderView, i: usize, j: usize) bool {
-        const p = self.controller.model.value.ai.providers[i];
-        return p.model_count > 1 and p.models[j].default;
     }
     fn input(self: *ProviderView, address: draft.Address, placeholder: []const u8, width: f32, height: f32) !*ui.Node {
         const scope = self.render_scope.?;
@@ -860,8 +855,8 @@ const ButtonState = struct {
             .fetch_models => self.view.discovery.busy() and self.view.catalog_provider != self.provider,
             .default_provider => self.provider >= ai.provider_count or std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider])) or !self.view.savedEligible(self.provider, null),
             .default_model => self.provider >= ai.provider_count or self.model >= ai.providers[self.provider].model_count or ai.providers[self.provider].models[self.model].default or !self.view.savedEligible(self.provider, self.model),
-            .delete_model => self.provider >= ai.provider_count or self.model >= ai.providers[self.provider].model_count or self.view.modelProtected(self.provider, self.model),
-            .delete_provider => self.provider >= ai.provider_count or (ai.providers[self.provider].enabled and std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider]))),
+            .delete_model => self.provider >= ai.provider_count or self.model >= ai.providers[self.provider].model_count,
+            .delete_provider => self.provider >= ai.provider_count,
             else => self.fallback_blocked,
         };
         self.disabled.set(self.view.disabled.peek() or blocked);
@@ -1035,11 +1030,7 @@ const Click = struct {
             },
             .cancel_provider, .delete_provider => {
                 if (self.provider >= ai.provider_count) return;
-                if (self.action == .delete_provider and ai.providers[self.provider].enabled and std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider]))) {
-                    v.error_text = draft.problemText(error.DefaultProtected);
-                    v.notify();
-                    return;
-                }
+                if (std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider]))) ai.default_provider = "";
                 std.mem.copyForwards(config.AiProvider, ai.providers[self.provider..], ai.providers[self.provider + 1 .. ai.provider_count]);
                 ai.provider_count -= 1;
                 ai.providers = ai.providers[0..ai.provider_count];
@@ -1070,14 +1061,11 @@ const Click = struct {
                     },
                     .delete_model, .cancel_model => {
                         if (self.model >= p.model_count) return;
-                        if (self.action == .delete_model and v.modelProtected(self.provider, self.model)) {
-                            v.error_text = draft.problemText(error.DefaultProtected);
-                            v.notify();
-                            return;
-                        }
+                        const was_default = p.models[self.model].default;
                         std.mem.copyForwards(config.AiModel, p.models[self.model..], p.models[self.model + 1 .. p.model_count]);
                         p.model_count -= 1;
                         p.models = p.models[0..p.model_count];
+                        if (was_default and p.model_count != 0) p.models[0].default = true;
                         if (self.action == .delete_model and p.model_count == 0) p.model = "";
                         v.controller.editProviders(ai.*) catch return;
                         v.controller.ai_fields.removeModel(v.scope.allocator, self.provider, self.model);

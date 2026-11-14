@@ -15,7 +15,11 @@ const out=resolve(process.argv[2]??'/tmp/zw-markdown-resize-evidence');await mkd
 const iso=await realpath(await mkdtemp('/tmp/zw-markdown-resize-'));
 const data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);
 const frame=(content:string)=>'data: '+JSON.stringify({choices:[{index:0,delta:{content}}]})+'\n\n';
-const answer='## 本轮实际发生了什么\n\n| # | 动作 | 回执 | 结论 |\n| --- | --- | --- | --- |\n'+
+const answer='## 本轮实际发生了什么\n\n'+
+ '| 节点 | 条目 | getent hosts vm01 |\n| --- | --- | --- |\n'+
+ '| p7c0–p7c9（10 台计算） | 各 1 条 | 172.20.0.244 |\n'+
+ '| p7s0–p7s3（4 台交换） | 各 1 条 | 172.20.0.244 |\n\n'+
+ '| # | 动作 | 回执 | 结论 |\n| --- | --- | --- | --- |\n'+
  '| 1 | 只读检查：pwd/ls、KVM、libvirt、磁盘与网络 | `cancelled_unsent,error_code=requires_plan_change,side_effect_started=false` | 未派发，保留完整回执以便核对。 |\n'+
  '| 2 | 通过终端执行同一段探查 | `status=outcome_unknown,error_code=TargetNotAuthorized,side_effect_started=true` | 结果未知，需要核对执行状态。 |\n\n'+
  '窗口尺寸变化后，**表格列宽**、正文换行和后续内容位置应立即更新。\n';
@@ -40,11 +44,22 @@ const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??n
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok,id)};
 const report:any={status:'running',binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),isolation:iso,checks:[],geometry:[]};
 const geometry=async(name:string,expectedId?:number)=>{
- const table=await h.waitFor(async()=>{
-  const table=(await h.query('ai.message.table')).find(shown);if(!table)return null;
-  const content=table.children[0];return Math.abs(content.rect.w-Math.max(400,table.rect.w))<.5?table:null;
+ let last='';
+ const {table,short}=await h.waitFor(async()=>{
+  const tables=(await h.query('ai.message.table')).filter(shown);
+  const table=tables.find((n:any)=>n.children[0]?.children[0]?.children.length===4);
+  const short=tables.find((n:any)=>n.children[0]?.children[0]?.children.length===3);
+  if(!table||!short)return null;
+  const content=table.children[0],small=short.children[0];
+  if(content.rect.w>Math.max(400,table.rect.w)+.5||small.rect.w>=short.rect.w)return null;
+  const current=[table.rect.w,content.rect.w,small.rect.w,...content.children[0].children.map((cell:any)=>cell.rect.w)].map((n:number)=>n.toFixed(1)).join(',');
+  if(last!==current){last=current;return null;}
+  return {table,short};
  },10000);
  if(expectedId!==undefined)assert.equal(table.id,expectedId,'Resize must retain the table tree');
+ const small=short.children[0];
+ assert(small.rect.w<400,'Short table should not fill a wide card');
+ if(report.geometry.length)assert(Math.abs(small.rect.w-report.geometry[0].short.w)<.5,'Short table should keep its natural width');
  const widths=table.children[0].children[0].children.map((cell:any)=>cell.rect.w);
  assert(widths[0]<=60,'Number column should stay compact');
  assert(widths[2]>widths[1]&&widths[2]>widths[3],'Long receipt column should receive more space');
@@ -52,7 +67,7 @@ const geometry=async(name:string,expectedId?:number)=>{
   assert(Math.abs(cell.rect.w-widths[column])<.5,'Columns must align across rows');
   assert(Math.abs(cell.rect.h-row.rect.h)<.5,'Cell borders must share the row height');
  }
- report.geometry.push({name,id:table.id,viewport:table.rect,content:table.children[0].rect,widths});
+ report.geometry.push({name,id:table.id,viewport:table.rect,content:table.children[0].rect,short:small.rect,widths});
  assert((await h.screenshot(join(out,name+'.png'))).ok);
  await writeFile(join(out,name+'.json'),JSON.stringify(await h.query('ai.panel'),null,2));
  return table;
@@ -66,7 +81,10 @@ try{
  await h.mouseDown(x,y);await h.mouseMove(x+260,y);await h.mouseUp(x+260,y);
  await h.waitFor(async()=>(await visible('ai.panel')).rect.w>800||null,5000);
  const dragged=await geometry('02-streaming-dragged',initial.id);assert(dragged.rect.w>initial.rect.w+200);
- held.end(frame('\n```sh\nprintf "'+ 'long_argument_'.repeat(18)+'"\n```\n\n后续正文。')+'data: [DONE]\n\n');held=null;
+ held.end(frame('\n```sh\nprintf "'+ 'long_argument_'.repeat(18)+'"\n```\n\n后续正文。\n\n'+
+  '| 节点名称与运行状态 | 管理网络和主机地址 | 系统配置与版本信息 | 服务组件和运行状态 | 网络连通与延迟状态 | 磁盘容量及剩余空间 | 任务结果和执行时间 | 回执状态与后续操作 |\n'+
+  '| --- | --- | --- | --- | --- | --- | --- | --- |\n'+
+  '| p7c0 | 172.20.0.244 | 正常 | 正常 | 正常 | 正常 | 完成 | 已核对 |\n')+'data: [DONE]\n\n');held=null;
  await visible('ai.turn.complete');
  const complete=await geometry('03-completed');
  await click('ai.maximize');const wide=await geometry('04-maximized');assert(wide.rect.w>dragged.rect.w);
@@ -74,7 +92,24 @@ try{
  await h.resizeWindow(1440,1000);await geometry('06-window-restored');
  await click('ai.maximize');await geometry('07-float-restored');
  await click('ai.collapse');await click('toolbar.ai');await geometry('08-reopened');
- assert.equal(requests,1);report.checks.push('Streaming and completed tables follow actual width through edge drag, maximize, host window resize, restore and reopen without additional provider requests');
+ const natural=wide.children[0].rect.w;assert(natural<wide.rect.w,'Long table should stop at its content width');
+ for(const item of report.geometry)assert(Math.abs(item.content.w-Math.max(400,Math.min(natural,item.viewport.w)))<.5,'Long table should fit the viewport up to its content width');
+ const overflow=async()=>h.waitFor(async()=>(await h.query('ai.message.table')).find((n:any)=>shown(n)&&n.children[0]?.children[0]?.children.length===8)??null,5000);
+ for(let i=0;i<16;i++){
+  const table=await overflow(),viewport=(await visible('ai.conversation.viewport')).rect;
+  if(table.rect.y>=viewport.y&&table.rect.y+Math.min(table.rect.h,40)<=viewport.y+viewport.h)break;
+  const delta=Math.max(-500,Math.min(500,viewport.y+viewport.h/2-table.rect.y-20));
+  await h.scrollAt(viewport.x+viewport.w-4,viewport.y+viewport.h/2,0,delta);await h.sleep(70);
+ }
+ const overflowing=await overflow(),viewport=(await visible('ai.conversation.viewport')).rect;
+ assert(overflowing.rect.y>=viewport.y&&overflowing.rect.y+Math.min(overflowing.rect.h,40)<=viewport.y+viewport.h,'Wide table must be reachable');
+ assert(overflowing.children[0].rect.w>overflowing.rect.w,'Wide table must overflow the narrow card');
+ const before=overflowing.children[0].rect.x;
+ await h.scrollAt(overflowing.rect.x+40,overflowing.rect.y+20,-80,0);
+ await h.waitFor(async()=>(await overflow()).children[0].rect.x<before-20||null,5000);
+ assert((await h.screenshot(join(out,'09-horizontal-scroll.png'))).ok);
+ assert.equal(requests,1);report.checks.push('Short and long tables fit their content through streaming, edge drag, maximize, window resize, restore and reopen');
+ report.checks.push('A wide table remains horizontally scrollable when its minimum column widths exceed the card');
  report.status='passed';
 }catch(error){report.status='failed';report.error=String(error);process.exitCode=1;await h.screenshot(join(out,'failure.png')).catch(()=>{});}
 finally{

@@ -106,6 +106,7 @@ const Fixture = struct {
     expect_answer_only: bool = false,
     shared: ?*attached.Host = null,
     final_draft: ?[]const u8 = null,
+    flush_failure: ?anyerror = null,
     fail_projection_once: bool = false,
     projection_failure: ?anyerror = null,
     completion_attempts: usize = 0,
@@ -230,6 +231,7 @@ const Fixture = struct {
     }
     fn flush(raw: *anyopaque) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
+        if (self.flush_failure) |err| return err;
         const text = self.final_draft orelse return;
         const ticket = try self.shared.?.service.store.fence(self.runner.?.agent.current.?);
         const record = self.shared.?.service.store.find(ticket.conversation).?;
@@ -354,6 +356,61 @@ test "AiHost integration window close keeps binding until all its hidden owners 
     try shared.releaseWindow(window);
     try std.testing.expect(first.disposed and second.disposed);
 }
+
+test "AiHost integration window close waits for presentation flush after binding release" {
+    var shared = attached.Host.init(a);
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    defer shared.deinit() catch unreachable;
+    const window: identity.WindowId = @fromBackingInt(7);
+    _ = try fixture.attach(&shared, .{ .session = 1 }, window);
+    fixture.flush_failure = error.ResourceCleanupPending;
+    try std.testing.expect(!try shared.closeWindow(window));
+    try std.testing.expect(!shared.windowReady(window));
+    try std.testing.expectError(error.ResourceCleanupPending, shared.releaseWindow(window));
+    try std.testing.expect(!fixture.disposed);
+    fixture.flush_failure = null;
+    try shared.releaseWindow(window);
+    try std.testing.expect(fixture.disposed);
+}
+
+test "AiHost integration shutdown drains presentation writes without any bridge" {
+    var shared = attached.Host.init(a);
+    defer shared.deinit() catch unreachable;
+    const conversation = identity.ConversationId.generate();
+    const record = try shared.service.store.migrate(conversation, .{ .session = 1 }, 1, false, &.{}, null, 0);
+    try std.testing.expectEqual(.queued, try shared.service.store.queuePresentation(record, .{ .content = 1 }, &.{}, .{ .user = true, .text = @constCast("saved on shutdown") }, &.{}));
+    const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    while (!try shared.shutdown()) {
+        if (start.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() > 3000) return error.PresentationTimeout;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(std.mem.indexOf(u8, record.presentation.?, "saved on shutdown") != null);
+}
+
+test "AiHost integration background presentation failure is preserved for its caller" {
+    const Persist = struct {
+        fn write(_: *anyopaque, event: @import("ai/session_lifecycle.zig").Event) !void {
+            if (event.kind == .presentation) return error.NoSpaceLeft;
+        }
+    };
+    var shared = attached.Host.init(a);
+    defer shared.deinit() catch unreachable;
+    var ignored: u8 = 0;
+    shared.service.store.persist = .{ .context = &ignored, .write = Persist.write };
+    const record = try shared.service.store.migrate(identity.ConversationId.generate(), .{ .session = 1 }, 1, false, &.{}, null, 0);
+    const version = @import("ai/conversation_presentation.zig").Version{ .content = 1 };
+    try std.testing.expectEqual(.queued, try shared.service.store.queuePresentation(record, version, &.{}, null, &.{}));
+    const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    while (!record.pending_presentation.?.done.load(.acquire)) {
+        if (start.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() > 3000) return error.PresentationTimeout;
+        std.Thread.yield() catch {};
+    }
+    try shared.pump();
+    try std.testing.expectError(error.NoSpaceLeft, shared.service.store.queuePresentation(record, version, &.{}, null, &.{}));
+    try std.testing.expect(record.pending_presentation == null and record.presentation == null);
+}
+
 test "AiHost integration migration preserves identity history draft and invalidates old binding tickets" {
     var shared = attached.Host.init(a);
     defer shared.deinit() catch unreachable;
@@ -906,4 +963,57 @@ test "AI local file reference durable journal reopens a fork with its original b
     const locator = try refs.open(temp, key, fork, projected[spans[0].start..]);
     try std.testing.expectEqualStrings("relative.txt", locator.requested);
     try std.testing.expectError(error.InvalidFileReference, refs.open(temp, key, fork, token));
+}
+
+test "conversation model and share follow the durable conversation lifecycle" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path[0..try tmp.dir.realPath(io, &path)];
+    const inherited = identity.ConversationId.generate();
+    const removed = identity.ConversationId.generate();
+    const old_model: @import("ai/provider_config.zig").ConversationModel.Choice = .{ .key = .{ .provider_id = "local", .model_id = "removed" }, .configured = true };
+    const share = @import("ai/conversation_share.zig");
+    {
+        var app = attached.Host.init(a);
+        defer app.deinit() catch unreachable;
+        try app.ensurePersistence(root);
+        _ = try app.service.store.migrate(inherited, .{ .session = 1 }, 1, false, &.{}, null, 0);
+        _ = try app.service.store.migrate(removed, .{ .session = 2 }, 1, false, &.{}, "保留草稿", 0);
+        try app.service.store.saveConversationModel(inherited, .{ .used_default = old_model });
+        try app.service.store.saveConversationModel(removed, .{ .explicit = old_model });
+        try app.service.store.saveConversationModel(removed, .selection_required);
+        for ([_]identity.ConversationId{ inherited, removed }) |id| {
+            const url = try share.save(a, io, root, id, &.{.{ .user = true, .text = @constCast("会话历史") }}, null, &.{});
+            defer a.free(url);
+            try std.testing.expect(std.mem.startsWith(u8, url, "file://"));
+        }
+    }
+    var app = attached.Host.init(a);
+    defer app.deinit() catch unreachable;
+    try app.ensurePersistence(root);
+    const restored = app.presentations.findConversation(inherited).?;
+    try std.testing.expect(restored.controls.used_default.?.eql(old_model.key));
+    try std.testing.expect(restored.controls.modelWasRemoved(.{}));
+    const blocked = app.presentations.findConversation(removed).?;
+    try std.testing.expectError(error.ModelSelectionRequired, blocked.controls.resolveModel(.{}));
+    try std.testing.expectEqualStrings("保留草稿", blocked.draft.?);
+
+    var shares = try tmp.dir.openDir(io, "ai-shares", .{});
+    defer shares.close(io);
+    const hex = std.fmt.bytesToHex(removed.bytes, .lower);
+    const filename = hex ++ ".md";
+    try shares.deleteFile(io, filename);
+    try shares.createDir(io, filename, .default_dir);
+    try std.testing.expectError(error.IsDir, app.service.store.remove(removed));
+    try std.testing.expect(app.service.store.find(removed) != null);
+    try shares.deleteDir(io, filename);
+    const url = try share.save(a, io, root, removed, &.{.{ .user = true, .text = @constCast("会话历史") }}, null, &.{});
+    defer a.free(url);
+    try app.service.store.remove(removed);
+    try std.testing.expect(app.service.store.find(removed) == null);
+    try std.testing.expectError(error.FileNotFound, shares.statFile(io, filename, .{}));
+    const other_hex = std.fmt.bytesToHex(inherited.bytes, .lower);
+    _ = try shares.statFile(io, other_hex ++ ".md", .{});
 }

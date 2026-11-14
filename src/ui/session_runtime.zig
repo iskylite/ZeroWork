@@ -563,15 +563,8 @@ pub const SessionRuntime = struct {
         const cwd = self.worker.copyCwd(self.allocator) catch null;
         defer if (cwd) |value| self.allocator.free(value);
         if (cwd) |value| display.cwd = value;
-        var execution_ranges: [128]manifest.ExecutionRange = undefined;
-        var boundary_sequences: [256]u64 = undefined;
-        var ranges: []const manifest.ExecutionRange = &.{};
-        var boundaries: []const u64 = &.{};
-        if (self.worker.execution_recording) |*recording| {
-            ranges = recording.rangeValues(&execution_ranges);
-            for (recording.boundaries.items, 0..) |marker, i| boundary_sequences[i] = marker.position.event_sequence;
-            boundaries = boundary_sequences[0..recording.boundaries.items.len];
-        }
+        var execution_ranges: [@import("../vt/ssh_execution_recording.zig").Recording.range_limit]manifest.ExecutionRange = undefined;
+        const ranges = if (self.worker.execution_recording) |*recording| recording.rangeValues(&execution_ranges) else &.{};
         _ = try ssh_recording.publish(self.allocator, self.checkpoint.io, dir, .{
             .recording_id = self.worker.recording_id,
             .archive_key = self.worker.archive_key,
@@ -589,7 +582,6 @@ pub const SessionRuntime = struct {
             .failure = self.recording_manifest_failure orelse if (self.worker.recording_generation_failed or self.worker.io.timeline == null) "RecordingDegraded" else null,
             .extra_files = extra[0..count],
             .execution_ranges = ranges,
-            .boundary_sequences = boundaries,
         });
         self.archive_written = true;
     }

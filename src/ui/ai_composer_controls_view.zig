@@ -48,6 +48,7 @@ pub const Snapshot = struct {
     revision: u64,
     providers: []const config.AiProvider = &.{},
     current: ?ModelKey = null,
+    model_selection_required: bool = false,
     permission: PermissionMode = .confirm,
     allow_auto_permission: bool = true,
     global_execution_mode: ExecutionMode = .auto,
@@ -55,6 +56,7 @@ pub const Snapshot = struct {
     execution_mode_override: ?ExecutionMode = null,
     session_retention_override: ?SessionRetention = null,
     effort: ?Effort = null,
+    effort_fallback_from: ?Effort = null,
     thinking: ?bool = null,
     attachments: AttachmentState = .{},
     workspace: ?WorkspaceTicket = null,
@@ -96,7 +98,7 @@ pub fn effortLabel(value: Effort) []const u8 {
     };
 }
 const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
-const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
+const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, model_selection_required: bool, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, effort_fallback_from: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
 // Discovery provenance changes authority/configuration, but does not change a
 // model row when all resolved capabilities and displayed values are identical.
 fn modelRowsEql(a: Projection, b: Projection) bool {
@@ -137,7 +139,7 @@ const Owned = struct {
             value.parts = parts;
         }
         const current = if (snapshot.current) |key| try cloneKey(a, key) else null;
-        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
+        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .model_selection_required = snapshot.model_selection_required, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .effort_fallback_from = snapshot.effort_fallback_from, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
     }
     fn appendModel(a: std.mem.Allocator, models: *std.ArrayList(Model), hash: *std.hash.Wyhash, id: []const u8, kind: config.ProviderKind, endpoint: []const u8, enabled: bool, value: config.AiModel) !void {
         const key: ModelKey = .{ .provider_id = id, .model_id = value.id };
@@ -930,6 +932,7 @@ pub const View = struct {
         self.dismiss();
         const source = &self.source.?.value;
         self.last_error = null;
+        if (kind == .model) self.model_title.setTextContent(self.cx.allocator, "模型与推理强度") catch {};
         self.popups[index].capture = .{ .owner = source.owner, .revision = source.revision, .inventory_conversation_id = source.inventory_conversation_id, .workspace = source.workspace };
         if (kind == .model) self.popups[index].anchor_width = self.buttons[index].globalRect().w;
         self.popups[index].widget.open.?.set(true);
@@ -1022,10 +1025,12 @@ pub const View = struct {
         }
         self.callbacks.action(self.callbacks.context, .{ .owner = captured.owner, .revision = captured.revision, .action = action }) catch |err| {
             self.last_error = err;
+            if (kind == .effort) self.model_title.setTextContent(self.cx.allocator, "无法保存，请重试") catch {};
             if (self.popups[@backingInt(kind)].title) |title| title.setTextContent(self.cx.allocator, "无法更新，请重试") catch {};
             return;
         };
         self.last_error = null;
+        if (kind == .effort) self.model_title.setTextContent(self.cx.allocator, "模型与推理强度") catch {};
         switch (action) {
             .effort => |value| self.proposed_reasoning = .{ .effort = value.value },
             .thinking => |value| self.proposed_reasoning = if (value.enabled) .on else .off,
@@ -1216,10 +1221,12 @@ pub const View = struct {
         try self.labels[1].?.setTextContent(self.cx.allocator, permission);
         if (self.buttons[1].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[1].?.getText().?.content;
         setAsset(self.icons[1], if (source != null and source.?.permission == .auto) "shield-check" else "hand", 12, if (editable) colors.fg_2 else colors.fg_3);
-        const full_model_name = if (current) |item| item.key.model_id else if (source) |value| if (value.current) |key| key.model_id else "未配置模型" else "未配置模型";
-        try self.refreshModelBrand(if (current) |item| item.key.model_id else null);
-        try self.labels[2].?.setTextContent(self.cx.allocator, full_model_name);
-        try self.model_hint_label.setTextContent(self.cx.allocator, full_model_name);
+        const current_key = if (source) |value| value.current else null;
+        const unavailable = current_key != null and (current == null or !current.?.enabled);
+        const model_name = if (unavailable) "模型不可用" else if (current) |item| item.key.model_id else if (source != null and source.?.model_selection_required) "未选择模型" else "未配置模型";
+        try self.refreshModelBrand(if (unavailable) null else if (current) |item| item.key.model_id else null);
+        try self.labels[2].?.setTextContent(self.cx.allocator, model_name);
+        try self.model_hint_label.setTextContent(self.cx.allocator, if (unavailable) current_key.?.model_id else model_name);
         var model_text = self.labels[2].?.getText().?;
         model_text.text_overflow = .ellipsis;
         self.labels[2].?.setText(model_text);
@@ -1236,13 +1243,18 @@ pub const View = struct {
         self.effort_area.setDisplay(if (!self.disabled[3].peek()) .flex else .none);
         self.effort_name.setDisplay(.flex);
         const effort_text = if (current == null or !current.?.enabled) "模型未就绪" else if (!current.?.reasoning) "不支持推理" else if (current.?.toggle and !any_effort) (if (source.?.thinking == null and current.?.thinking_default == null) "模型默认" else if (thinking_enabled) "思考开" else "思考关") else if (!any_effort) "推理未开放" else if (effort) |value| if (current.?.efforts[@backingInt(value)]) effortLabel(value) else "档位不支持" else "模型默认";
+        var fallback_label: [80]u8 = undefined;
+        const display_effort = if (effort != null and source.?.effort_fallback_from != null and any_effort)
+            try std.fmt.bufPrint(&fallback_label, "{s} · 已回落", .{effort_text})
+        else
+            effort_text;
         self.effort_title.setDisplay(if (!self.disabled[3].peek()) .flex else .none);
-        try self.effort_name.setTextContent(self.cx.allocator, if (std.mem.eql(u8, effort_text, "模型默认")) "跟随模型默认" else if (current != null and current.?.enabled and current.?.reasoning and !current.?.toggle and !any_effort) "未开放思考开关或推理档位" else effort_text);
-        try self.labels[3].?.setTextContent(self.cx.allocator, effort_text);
-        const model_width = @ceil(self.cx.text.measureTextWidth(full_model_name, 10, 400, false));
-        const show_effort = current != null and current.?.reasoning;
+        try self.effort_name.setTextContent(self.cx.allocator, if (std.mem.eql(u8, effort_text, "模型默认")) "跟随模型默认" else if (current != null and current.?.enabled and current.?.reasoning and !current.?.toggle and !any_effort) "未开放思考开关或推理档位" else display_effort);
+        try self.labels[3].?.setTextContent(self.cx.allocator, display_effort);
+        const model_width = @ceil(self.cx.text.measureTextWidth(model_name, 10, 400, false));
+        const show_effort = !unavailable and current != null and current.?.reasoning;
         self.labels[3].?.setDisplay(if (show_effort) .flex else .none);
-        const effort_width = if (show_effort) @max(10, self.cx.text.measureTextWidth(effort_text, 10, 400, false)) else 0;
+        const effort_width = if (show_effort) @max(10, self.cx.text.measureTextWidth(display_effort, 10, 400, false)) else 0;
         self.labels[2].?.setStyleInline(self.cx.allocator, S.compactModelLabel(model_width, has_modality));
         self.labels[3].?.setStyleInline(self.cx.allocator, S.compactEffortLabel(model_width, effort_width, has_modality));
         self.chevrons[1].setStyleInline(self.cx.allocator, S.compactModelChevron(model_width, effort_width, has_modality));
@@ -1527,7 +1539,7 @@ fn controlsEql(first: Projection, second: Projection) bool {
     return projectionEql(one, two);
 }
 fn projectionEql(first: Projection, second: Projection) bool {
-    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and WorkspaceTicket.same(first.workspace, second.workspace) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
+    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.model_selection_required == second.model_selection_required and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.effort_fallback_from == second.effort_fallback_from and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and WorkspaceTicket.same(first.workspace, second.workspace) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
 }
 fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;

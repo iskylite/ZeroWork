@@ -13,6 +13,8 @@ const frame=(delta:any)=>'data: '+JSON.stringify({choices:[{index:0,delta}]})+'\
 const wire=(name:string)=>name.replaceAll('_','_u').replaceAll('.','__');
 const payload=(envelope:any)=>{for(const b of envelope.content??[])try{return JSON.parse(b.text)}catch{}return envelope};
 const requests:any[]=[];let serverError:unknown=null;
+let continueAfterAnswer!:()=>void;
+const showAnswer=new Promise<void>(resolve=>{continueAfterAnswer=resolve;});
 const server=createServer(async(req,res)=>{try{
  if(req.method!=='POST')return res.end('{"data":[{"id":"composer-fixture"}]}');
  let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw);requests.push(body);
@@ -25,7 +27,10 @@ const server=createServer(async(req,res)=>{try{
   assert(body.tools.some((t:any)=>t.function?.name===wire('host.request_user_input')),'question tool must be in the actual provider catalog');
   return emit('q-'+scenario,'host.request_user_input',{question:'你希望如何处理 Nginx？',options:[{id:'reload',label:'平滑重载配置',description:'不中断现有连接'},{id:'restart',label:'重启服务',description:'可能短暂中断连接'}]});
  }
- if(scenario==='approve')assert(JSON.stringify(results.get('q-approve')).includes('reload'),'explicit selected answer reaches provider');
+ if(scenario==='approve'){
+  assert.deepEqual(results.get('q-approve'),{option_id:'reload',answer:'平滑重载配置'});
+  await showAnswer;
+ }
  const context:any=results.get('ctx-'+scenario);if(!context)return emit('ctx-'+scenario,'host.get_current_context',{});
  let ready=false;for(let i=0;i<10;i++){
   const facts:any=results.get(`ready-${scenario}-${i}`);
@@ -83,6 +88,18 @@ try{
  await capture('pending-question');await click('ai.interaction.pending');await visible('ai.interaction.option.1');assert.equal((await h.inputState('ai.interaction.answer')).buffer,'保留自定义答案');
  report.checks.push('postpone leaves provider waiting and restores ordinary input');
  await click('ai.interaction.option.0');await click('ai.interaction.submit');
+ const answer=await visible('ai.step_group.projection');assert.equal(answer.text,'已完成 · 平滑重载配置');
+ await h.mouseMove(20,42);assert((await h.screenshot(join(out,'question-answered.png'))).ok);
+ await click('ai.step_group.header');
+ await h.waitFor(async()=>{
+  for(const id of ['ai.tool.result.status','ai.step.projection']){
+   if((await h.query(id)).some((n:any)=>shown(n)&&n.text?.endsWith(' · 平滑重载配置')))return true;
+  }
+  return null;
+ },5000);
+ await click('ai.step_group.header');
+ continueAfterAnswer();
+ report.checks.push('the question group and its tool card show the selected answer label');
  await visible('ai.interaction.approve');assert.equal(await readFile(marker,'utf8').catch(()=>null),null,'zero execution before approval');
  assert(!(await h.query('ai.stop')).some(shown));assert(!(await h.query('ai.send')).some(shown));
  await capture('approval');
@@ -95,4 +112,4 @@ try{
  await click('ai.prompt');await h.key('a',{cmd:true});await h.type_('验证停止');await click('ai.send');await visible('ai.interaction.submit');await click('ai.interaction.postpone');await visible('ai.interaction.pending');await click('ai.stop');await h.waitFor(async()=>!(await h.query('ai.interaction.pending')).some(shown)||null,15000);await visible('ai.send');assert.equal(await readFile(marker,'utf8'),'once');report.checks.push('original Stop cancels postponed question and removes pending capsule');
  assert.equal(serverError,null);report.status='passed';await h.screenshot(join(out,'finished.png'));console.log(JSON.stringify(report));
 }catch(err){report.status='failed';report.error=String(err);await h.screenshot(join(out,'failure.png')).catch(()=>{});await writeFile(join(out,'failure.tree.json'),JSON.stringify(await h.query('ai.panel').catch(()=>[]),null,2));throw err;
-}finally{await writeFile(join(out,'report.json'),JSON.stringify({...report,serverError},null,2));await writeFile(join(out,'requests.json'),JSON.stringify(requests,null,2));app.kill();await ended;await log.close();await new Promise<void>(r=>server.close(()=>r()));}
+}finally{continueAfterAnswer();await writeFile(join(out,'report.json'),JSON.stringify({...report,serverError},null,2));await writeFile(join(out,'requests.json'),JSON.stringify(requests,null,2));app.kill();await ended;await log.close();await new Promise<void>(r=>server.close(()=>r()));}

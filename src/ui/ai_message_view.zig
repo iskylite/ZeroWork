@@ -222,9 +222,10 @@ const TableLayout = struct {
             minimum += @min(preferred, S.table_wrapped_column_min_width);
             weight += @max(0, preferred - S.table_wrapped_column_min_width);
         }
-        // Compact columns keep their measured width. Columns that need wrapping
-        // share the remaining viewport according to their rendered content.
-        const total = if (weight > 0) @max(minimum, viewport.w) else minimum;
+        // Compact columns keep their measured width. Wider columns share the
+        // remaining space up to their measured widths; below the minimum the
+        // horizontal scroll area keeps every column reachable.
+        const total = @max(minimum, @min(viewport.w, minimum + weight));
         var widths: [16]f32 = @splat(0);
         for (self.preferred[0..self.columns], 0..) |preferred, column| {
             widths[column] = @min(preferred, S.table_wrapped_column_min_width);

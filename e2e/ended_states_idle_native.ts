@@ -128,9 +128,9 @@ default=true
         }
         await click('ai.collapse');
         await connect('Idle failed SSH');
-        await h.waitFor(async () => (await h.query('connection.progress.dismiss')).find((n: any) => shown(n) && !n.disabled) ?? null, 30000);
+        await h.waitFor(async () => (await h.query('connection.progress.close')).find((n: any) => shown(n) && !n.disabled) ?? null, 30000);
         await measure('connection-failed-visible', 'connection.progress');
-        await click('connection.progress.dismiss');
+        await click('connection.progress.close');
         await h.waitFor(async () => !(await h.query('connection.progress')).some(shown) || null, 10000);
     }
     await connect('Idle SFTP');

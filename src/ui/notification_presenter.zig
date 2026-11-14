@@ -9,6 +9,18 @@ const S = @import("notification_styles.zig");
 const theme = @import("app_theme.zig");
 const layout = @import("notification_placement.zig");
 const Countdown = @import("notification_countdown.zig").View;
+const component_name = "HostNotificationPresenter";
+
+pub fn containsPress(target: *ui.Node) bool {
+    var node: ?*ui.Node = target;
+    while (node) |current| : (node = current.parent) {
+        if (current.meta.ownership.meta.component_name) |name| {
+            if (std.mem.eql(u8, name, component_name)) return true;
+        }
+    }
+    return false;
+}
+
 const Slot = struct {
     presenter: *Presenter,
     fact_id: ?u64 = null,
@@ -37,7 +49,7 @@ const Slot = struct {
         }
     }
     fn dismiss(self: *Slot) void {
-        if (self.fact_id) |id| self.presenter.host.coordinator.dismissNotification(id);
+        if (self.fact_id) |id| self.presenter.host.coordinator.dismissNotificationByUser(id);
         self.presenter.cx.requestRedraw();
     }
     fn toggle(self: *Slot) void {
@@ -84,10 +96,10 @@ pub const Presenter = struct {
     colors: ?theme.Colors = null,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, notification_host: *host.Host, window_id: host.WindowId) !*Presenter {
         const portal = try cx.ensurePopoverPortalRoot();
-        for (portal.children.items) |child| if (child.meta.ownership.meta.component_name) |name| if (std.mem.eql(u8, name, "HostNotificationPresenter")) return error.NotificationPresenterAlreadyMounted;
+        for (portal.children.items) |child| if (child.meta.ownership.meta.component_name) |name| if (std.mem.eql(u8, name, component_name)) return error.NotificationPresenterAlreadyMounted;
         const root = try ui.boxStyled(cx, S.overlay, .{});
         errdefer cx.destroyDetached(root);
-        root.meta.ownership.meta.component_name = "HostNotificationPresenter";
+        root.meta.ownership.meta.component_name = component_name;
         root.meta.ownership.meta.test_id = "notifications.presenter";
         // Let cards bubble wheel input to the shared scroll viewport first.
         @import("floating_input.zig").protect(cx, root);

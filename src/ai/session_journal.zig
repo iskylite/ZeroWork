@@ -16,12 +16,13 @@ pub const Message = struct {
     image_owner: ?@import("../host/identity.zig").SessionHandle = null,
     image_transform: u64 = 0,
     origin: @FieldType(provider.Message, "origin") = .user_or_tool,
+    skill: ?provider.SkillReference = null,
     file_reference_spans: @FieldType(provider.Message, "file_reference_spans") = &.{},
 
     pub fn jsonStringify(self: Message, writer: *std.json.Stringify) !void {
         try writer.beginObject();
         inline for (@typeInfo(Message).@"struct".field_names) |name| {
-            const omit = if (comptime std.mem.eql(u8, name, "origin")) self.origin == .user_or_tool else if (comptime std.mem.eql(u8, name, "file_reference_spans")) self.file_reference_spans.len == 0 else false;
+            const omit = if (comptime std.mem.eql(u8, name, "origin")) self.origin == .user_or_tool else if (comptime std.mem.eql(u8, name, "skill")) self.skill == null else if (comptime std.mem.eql(u8, name, "file_reference_spans")) self.file_reference_spans.len == 0 else false;
             if (!omit) {
                 try writer.objectField(name);
                 try writer.write(@field(self, name));
@@ -58,10 +59,11 @@ const StoredEvent = struct {
     workspace_source: @FieldType(lifecycle.Event, "workspace_source") = null,
     workspace_change: @FieldType(lifecycle.Event, "workspace_change") = null,
     workspace_ack_revision: @FieldType(lifecycle.Event, "workspace_ack_revision") = null,
+    conversation_model: @FieldType(lifecycle.Event, "conversation_model") = null,
     pub fn jsonStringify(self: StoredEvent, writer: *std.json.Stringify) !void {
         try writer.beginObject();
         inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
-            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text") or std.mem.startsWith(u8, name, "workspace")) @field(self, name) != null else true;
+            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text") or std.mem.eql(u8, name, "conversation_model") or std.mem.startsWith(u8, name, "workspace")) @field(self, name) != null else true;
             if (emit) {
                 try writer.objectField(name);
                 try writer.write(@field(self, name));
@@ -162,7 +164,7 @@ pub const Journal = struct {
             const kinds: u8 = @as(u8, @intFromBool(row.event != null)) + @intFromBool(row.receipt != null) + @intFromBool(row.order != null) + @intFromBool(row.consumed_batch != null);
             if (kinds != 1) return error.InvalidSessionJournal;
             if (row.schema < 4) {
-                if (row.event) |event| if (workspaceEvent(event)) return error.InvalidSessionJournal;
+                if (row.event) |event| if (workspaceEvent(event) or event.kind == .conversation_model or event.conversation_model != null) return error.InvalidSessionJournal;
                 if (row.consumed_batch != null or (row.receipt != null and row.receipt.?.workspace_revision != null) or hasMessageProvenance(row.messages) or hasMessageProvenance(row.transcript)) return error.InvalidSessionJournal;
             }
             if (row.schema < 3) if (row.event) |event| if (event.kind == .task_fact or event.kind == .child_launch or event.task_fact != null or event.initial_text != null) return error.InvalidSessionJournal;
@@ -216,7 +218,7 @@ pub const Journal = struct {
         } else if (self.stamp) |stamp| if (stamp.size != self.bytes.items.len) {
             try self.replaceBytes(self.bytes.items);
         };
-        store.persist = .{ .context = self, .write = writeEvent, .checkpoint = checkpoint };
+        store.persist = .{ .context = self, .write = writeEvent, .checkpoint = checkpoint, .try_draft = tryDraft };
         try store.revalidateRecoveredWorkspaces(self.io);
         store.input_persist = .{ .context = self, .write = writeInput, .consumed = writeConsumed, .order = writeOrder, .consume_batch = writeConsumedBatch };
         for (store.records.items) |record| {
@@ -237,7 +239,7 @@ pub const Journal = struct {
             (event.initial_input != null and event.initial_input.?.workspace_revision != null);
     }
     fn hasMessageProvenance(messages: anytype) bool {
-        for (messages) |message| if (message.origin != .user_or_tool or message.file_reference_spans.len != 0) return true;
+        for (messages) |message| if (message.origin != .user_or_tool or message.skill != null or message.file_reference_spans.len != 0) return true;
         return false;
     }
     pub fn decode(allocator: std.mem.Allocator, a: std.mem.Allocator, source: []const Message, refs: *std.ArrayList(images.ContentRef)) ![]provider.Message {
@@ -264,7 +266,7 @@ pub const Journal = struct {
                 };
                 if (value.offloaded) try offloaded.append(a, .{ .reference = ref, .owner = value.owner }) else try normal.append(a, ref);
             }
-            decoded.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = normal.items, .offloaded_images = offloaded.items, .image_owner = message.image_owner, .image_transform = message.image_transform, .origin = message.origin, .file_reference_spans = message.file_reference_spans };
+            decoded.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = normal.items, .offloaded_images = offloaded.items, .image_owner = message.image_owner, .image_transform = message.image_transform, .origin = message.origin, .skill = message.skill, .file_reference_spans = message.file_reference_spans };
         }
         return messages;
     }
@@ -318,8 +320,19 @@ pub const Journal = struct {
         var event: StoredEvent = undefined;
         inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| @field(event, name) = @field(original, name);
         const extended = event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.kind == .task_fact or event.kind == .child_launch;
-        const schema: u8 = if (workspaceEvent(event) or hasMessageProvenance(original.messages)) 4 else if (event.kind == .task_fact or event.kind == .child_launch) 3 else if (extended) 2 else 1;
+        const schema: u8 = if (workspaceEvent(event) or event.kind == .conversation_model or hasMessageProvenance(original.messages)) 4 else if (event.kind == .task_fact or event.kind == .child_launch) 3 else if (extended) 2 else 1;
         try self.append(.{ .schema = schema, .event = event }, original.messages, &.{});
+    }
+    fn tryDraft(raw: *anyopaque, original: lifecycle.Event) !void {
+        const self: *Journal = @ptrCast(@alignCast(raw));
+        const event: StoredEvent = .{ .kind = .draft, .conversation = original.conversation, .agent = original.agent, .revision = original.revision, .draft = original.draft };
+        const encoded = try std.json.Stringify.valueAlloc(self.allocator, Line{ .event = event }, .{});
+        defer self.allocator.free(encoded);
+        if (!self.mutex.tryLock()) return error.JournalBusy;
+        defer self.mutex.unlock();
+        // Draft input can wait for the next frame. A large journal scan
+        // belongs to the next regular append, never the draft input path.
+        try self.appendLocked(.{ .event = event }, encoded);
     }
     fn writeInput(raw: *anyopaque, receipt: input.Receipt, messages: []const provider.Message) !void {
         const self: *Journal = @ptrCast(@alignCast(raw));
@@ -353,7 +366,7 @@ pub const Journal = struct {
                 _ = std.base64.standard.Encoder.encode(encoded, content.bytes);
                 value.* = .{ .path = content.path, .encoded = encoded, .captured_at = content.captured_at_ms, .offloaded = i >= message.images.len, .owner = if (i >= message.images.len) message.offloaded_images[i - message.images.len].owner else message.image_owner };
             }
-            out.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = image_values, .image_owner = message.image_owner, .image_transform = message.image_transform, .origin = message.origin, .file_reference_spans = message.file_reference_spans };
+            out.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = image_values, .image_owner = message.image_owner, .image_transform = message.image_transform, .origin = message.origin, .skill = message.skill, .file_reference_spans = message.file_reference_spans };
         }
         return messages;
     }
@@ -382,6 +395,10 @@ pub const Journal = struct {
             };
         };
         if (self.bytes.items.len >= self.compact_at) try self.compactLocked();
+        try self.appendLocked(line, encoded);
+    }
+
+    fn appendLocked(self: *Journal, line: Line, encoded: []const u8) !void {
         const prior = self.bytes.items.len;
         try self.bytes.ensureUnusedCapacity(self.allocator, encoded.len + 1);
         self.bytes.appendSliceAssumeCapacity(encoded);

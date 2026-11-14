@@ -102,6 +102,11 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, key, "dedicated_connection")) return setBool(&value.transfer.dedicated_connection, next);
     } else if (std.mem.eql(u8, section, "ai")) {
         if (std.mem.eql(u8, key, "default_provider")) return setText(&value.ai.default_provider, next);
+        if (std.mem.eql(u8, key, "default_effort")) {
+            const text = if (next == .text) next.text else return error.InvalidType;
+            value.ai.default_effort = std.meta.stringToEnum(@import("../ai/provider.zig").Effort, text) orelse return error.InvalidValue;
+            return;
+        }
         if (std.mem.eql(u8, key, "execution_mode")) return setEnum(config.ExecutionMode, &value.ai.execution_mode, next);
         if (std.mem.eql(u8, key, "session_retention")) return setEnum(config.SessionRetention, &value.ai.session_retention, next);
         if (std.mem.eql(u8, key, "child_context_mode")) return setEnum(config.ChildContextMode, &value.ai.child_context_mode, next);

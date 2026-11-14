@@ -176,7 +176,20 @@ fn result(exchange: *Exchange, job: *Job) !tools.ToolResult {
         }
     }
     const known_version: ?[]const u8 = if (value.version[0] == 0) null else &value.version;
-    const body = try std.json.Stringify.valueAlloc(a, .{ .path = job.request.path, .session_id = @backingInt(job.owner.session_id), .text = text, .version = known_version, .size = value.bytes.len, .next_offset = next, .truncated = next != null, .committed = value.committed, .verified = value.verified, .outcome_unknown = value.outcome_unknown, .error_code = if (value.failure) |err| @errorName(err) else null }, .{});
+    const body = try std.json.Stringify.valueAlloc(a, .{
+        .path = job.request.path,
+        .host = if (value.failure != null) job.ssh_host else null,
+        .session_id = @backingInt(job.owner.session_id),
+        .text = text,
+        .version = known_version,
+        .size = value.bytes.len,
+        .next_offset = next,
+        .truncated = next != null,
+        .committed = value.committed,
+        .verified = value.verified,
+        .outcome_unknown = value.outcome_unknown,
+        .error_code = if (value.failure) |err| @errorName(err) else null,
+    }, .{});
     errdefer a.free(body);
     const blocks = try a.alloc(tools.ContentBlock, 1);
     blocks[0] = .{ .structured = body };
@@ -215,4 +228,23 @@ test "terminal files shutdown preserves known commits and distinguishes an undis
     bridge.shutdown(null);
     try std.testing.expectEqual(tools.Status.rejected, current.result.?.status);
     try std.testing.expect(current.result.?.receipt.local_released and !current.result.?.receipt.remote_effect_unknown);
+}
+
+test "terminal files InvalidParent result identifies the SSH host and path with a settled failure" {
+    const a = std.testing.allocator;
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(3), .generation = 1 };
+    var current: Exchange = .{ .allocator = a, .invocation = .{ .owner = owner, .operation_id = 475, .tool_id = "file.write_text", .arguments = .null, .arguments_json = "{}", .arguments_hash = @splat(0) } };
+    var job: Job = .{ .allocator = a, .arena = .init(a), .owner = owner, .binding = undefined, .request = .{ .kind = .write_text, .path = "/data/imgxfer/verify_inner.sh" }, .local = false, .ssh_host = "10.2.209.201", .started_ns = 0, .done = true, .result = .{ .failure = error.InvalidParent } };
+    defer job.arena.deinit();
+    var receipt = try result(&current, &job);
+    defer receipt.deinit(a);
+    try receipt.validate(owner, 475);
+    try std.testing.expectEqual(tools.Status.failed, receipt.status);
+    try std.testing.expect(receipt.receipt.local_released and !receipt.receipt.remote_effect_unknown);
+    const facts = try std.json.parseFromSlice(std.json.Value, a, receipt.blocks[0].structured, .{});
+    defer facts.deinit();
+    try std.testing.expectEqualStrings("10.2.209.201", facts.value.object.get("host").?.string);
+    try std.testing.expectEqualStrings(job.request.path, facts.value.object.get("path").?.string);
+    try std.testing.expectEqualStrings("InvalidParent", facts.value.object.get("error_code").?.string);
+    try std.testing.expect(!facts.value.object.get("committed").?.bool and !facts.value.object.get("outcome_unknown").?.bool);
 }

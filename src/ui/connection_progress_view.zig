@@ -278,14 +278,11 @@ pub const View = struct {
     retry_disabled: *ui.Signal(bool),
     copy_disabled: *ui.Signal(bool),
     cancel_disabled: *ui.Signal(bool),
-    close_disabled: *ui.Signal(bool),
     header_disabled: *ui.Signal(bool),
     cancel_button: ?*ui.Node = null,
     retry_button: ?*ui.Node = null,
-    close_button: ?*ui.Node = null,
     cancel_label: ?*ui.Node = null,
     retry_label: ?*ui.Node = null,
-    close_label: ?*ui.Node = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
         return mountWithOwner(cx, scope, callbacks, null);
@@ -310,7 +307,6 @@ pub const View = struct {
             .retry_disabled = try scope.createSignal(bool, true),
             .copy_disabled = try scope.createSignal(bool, true),
             .cancel_disabled = try scope.createSignal(bool, false),
-            .close_disabled = try scope.createSignal(bool, true),
             .header_disabled = try scope.createSignal(bool, false),
             .title = undefined,
             .header_action = undefined,
@@ -598,9 +594,8 @@ pub const View = struct {
             skin.hover.set(S.actionHover(skin.primary, false));
             skin.pressed.set(S.actionHover(skin.primary, true));
         }
-        for ([_]?*ui.Node{ self.cancel_button, self.close_button, self.retry_button, self.jump_button }) |button_node| if (button_node) |node| ui.hooks.updateFocusRingConfig(self.cx, node, S.focusRing());
+        for ([_]?*ui.Node{ self.cancel_button, self.retry_button, self.jump_button }) |button_node| if (button_node) |node| ui.hooks.updateFocusRingConfig(self.cx, node, S.focusRing());
         if (self.cancel_label) |node| node.setTextColor(S.actionText(false).color);
-        if (self.close_label) |node| node.setTextColor(S.actionText(false).color);
         if (self.retry_label) |node| node.setTextColor(S.actionText(true).color);
         if (self.source != null) self.footer_hint.setTextColor(c.fg_2);
         self.summary_title.setTextColor(c.fg_1);
@@ -697,7 +692,6 @@ pub const View = struct {
         self.authentication_area.setDisplay(if (source.inline_authentication and !source.attached) .flex else .none);
         self.retry_disabled.set(self.retry_requested or !self.canRetry());
         self.cancel_disabled.set(self.cancel_requested or source.attached);
-        self.close_disabled.set(!self.canDismiss());
         self.header_disabled.set(if (source.state == .failed or source.state == .cancelled) !self.canDismiss() else self.cancel_requested or source.attached);
         const icon = ui.icons.get(if (source.state == .failed) "triangle-alert" else "network").?;
         if (icon.icon_id) |id| if (icon.pickRep(22)) |rep| self.header_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = if (source.state == .failed) S.theme.current().danger_ink else S.theme.current().accent });
@@ -734,7 +728,6 @@ pub const View = struct {
         self.footer_hint = hint;
         hint.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0 });
         self.cancel_button = try self.button(self.footer, scope, ctx, "取消连接", 96, false, self.cancel_disabled, ActionContext.cancel, "connection.progress.cancel");
-        self.close_button = try self.button(self.footer, scope, ctx, "关闭", 72, false, self.close_disabled, ActionContext.close, "connection.progress.dismiss");
         self.retry_button = try self.button(self.footer, scope, ctx, "重新连接", 112, true, self.retry_disabled, ActionContext.retry, "connection.progress.retry");
     }
     fn actionTip(self: *View, scope: *ui.Scope, button_node: *ui.Node, text: []const u8, id: []const u8, style: ui.BoxStyle) !*ui.Node {
@@ -866,7 +859,6 @@ pub const View = struct {
         self.summary.setStyleInline(self.cx.allocator, S.notice(fault != null or source.state == .failed));
         self.summary_title.setTextColor(if (fault != null or source.state == .failed) S.theme.current().danger_ink else S.theme.current().fg_1);
         self.setActionDisplay(self.cancel_button.?, source.state != .failed and source.state != .cancelled);
-        self.setActionDisplay(self.close_button.?, source.state == .failed or source.state == .cancelled);
         self.setActionDisplay(self.retry_button.?, source.state == .failed);
         try self.footer_hint.setTextContent(self.cx.allocator, if (source.state == .failed or source.state == .cancelled or self.cancel_requested) switch (source.cleanup) {
             .not_started => "正在确认连接状态",
@@ -1261,7 +1253,6 @@ pub const View = struct {
         const style = S.actionText(primary);
         const button_label = try ui.text(self.cx, label_text, style);
         if (std.mem.eql(u8, id, "connection.progress.cancel")) self.cancel_label = button_label;
-        if (std.mem.eql(u8, id, "connection.progress.dismiss")) self.close_label = button_label;
         if (std.mem.eql(u8, id, "connection.progress.retry")) self.retry_label = button_label;
         try node.appendChild(self.cx.allocator, button_label);
         try parent.appendChild(self.cx.allocator, node);

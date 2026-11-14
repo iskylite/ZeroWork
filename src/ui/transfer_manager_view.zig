@@ -106,6 +106,8 @@ pub fn failureLabel(failure: backend.Failure) []const u8 {
     return switch (failure) {
         .invalid_request => "请求参数不可用",
         .not_found => "文件不存在",
+        .source_not_found => "待传输文件不存在",
+        .destination_directory_not_found => "目标目录不存在",
         .permission_denied => "没有文件访问权限",
         .conflict => "文件冲突或内容已变化",
         .connection => "连接不可用",

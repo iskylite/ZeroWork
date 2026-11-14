@@ -130,6 +130,7 @@ pub const SessionTab = struct {
     owned_pending: bool = false,
     owned_origin: bool = false,
     closing: bool = false,
+    hidden_for_transfer: bool = false,
     local: bool = false,
     detected_os: session_icon.Os = .unknown,
     local_scope: ?*ui.Scope = null,
@@ -307,6 +308,7 @@ pub const ChainBridge = struct {
 
 pub const CloseRisk = struct {
     transfer: bool = false,
+    transfer_continues: bool = false,
     ai_write: bool = false,
     socks: bool = false,
     local_process: bool = false,
@@ -897,6 +899,7 @@ pub const Workspace = struct {
     }
 
     fn tabOverlayOwner(self: *Workspace, tab: *const SessionTab) ?*ui.Node {
+        if (tab.hidden_for_transfer) return null;
         if (self.active_group_view) |id| if (self.groupView(id)) |view| {
             for (view.panes.items) |pane| if (pane.session == tab.id and pane.node.isDisplayedInTree()) return pane.node;
         };
@@ -3252,7 +3255,7 @@ pub const Workspace = struct {
         for (group.members.items) |member| if (group.pinned_pane != member.pane_id) try ordered.append(self.allocator, member);
         for (ordered.items) |member| {
             const tab = self.sessionTab(member.pane_id) orelse continue;
-            if (tab.content_owner != .session or tab.archived or tab.owned_pending) continue;
+            if (tab.content_owner != .session or tab.archived or tab.owned_pending or tab.hidden_for_transfer) continue;
             if (tab.terminal) |*terminal| terminal.setGrouped(true);
             var pane_style = group_styles.pane();
             pane_style.background = ui.Color.TRANSPARENT;
@@ -4081,6 +4084,45 @@ pub const Workspace = struct {
         if (renderer.vtable.prepare_close) |prepare| try prepare(renderer.context);
     }
 
+    /// Runs at the safe UI tick. The close operation still owns the runtime
+    /// and its final receipt after the terminal stops being a workspace tab.
+    pub fn hideClosingTerminalTab(self: *Workspace, id: identity.TabId, owner: identity.ContentOwner) !void {
+        const index = self.tabIndexById(id) orelse return error.StaleTab;
+        const tab = self.tabs.items[index];
+        if (!tab.closing or tab.terminal == null or !tab.content_owner.eql(owner)) return error.StaleTab;
+        if (tab.hidden_for_transfer) return;
+        try self.model.completeClose(id, owner);
+        tab.hidden_for_transfer = true;
+        const was_active = self.active_tab == index;
+        if (was_active) self.active_tab = null;
+        if (self.cx.focus_manager.getFocused()) |focused| {
+            if (focused.isDescendantOf(tab.root)) self.cx.clearFocus();
+        }
+        tab.root.setDisplay(.none);
+        if (tab.terminal) |*terminal| {
+            terminal.removeFrameHook(self.cx);
+            terminal.root.behavior.interaction.text_input_client = null;
+        }
+        if (self.rename_session == tab.id) _ = self.cancelRenameTab();
+        self.cx.refreshTextInputSession();
+        if (self.active_group_view) |group| {
+            if (self.groupView(group)) |view| view.dirty = true;
+            self.group_present_pending = true;
+        }
+        if (self.model.active) |active| {
+            if (was_active and self.active_group_view == null) self.presentTabId(active);
+        } else {
+            self.empty_state.setDisplay(.flex);
+            if (self.grid_node) |grid| grid.setTextContent(self.allocator, "—") catch {};
+        }
+        if (self.picker_view) |view| if (view.open.peek()) {
+            self.picker.update(self.allocator, &self.model, self.picker.query.items) catch {};
+            view.dirty = true;
+        };
+        self.status("传输继续在后台运行");
+        try self.rebuildTabBar();
+    }
+
     pub fn preparePluginWindowClose(self: *Workspace) !void {
         for (self.tabs.items) |tab| if (!tab.closing) try self.preparePluginClose(tab.id);
     }
@@ -4109,7 +4151,8 @@ pub const Workspace = struct {
         }
         applog.info(.workspace, "forceCloseTab index={d}", .{index});
         const tab = self.tabs.items[index];
-        if (!tab.owned_pending) self.model.completeClose(tab.tab_id, tab.content_owner) catch return;
+        const hidden_for_transfer = tab.hidden_for_transfer;
+        if (!tab.owned_pending and !hidden_for_transfer) self.model.completeClose(tab.tab_id, tab.content_owner) catch return;
         if (tab.owned_origin) {
             if (self.group_roster) |roster| _ = roster.leavePane(tab.id);
         }
@@ -4161,7 +4204,7 @@ pub const Workspace = struct {
         if (tab.archive_document) |document| document.destroy();
         self.allocator.destroy(tab);
         _ = self.tabs.orderedRemove(index);
-        if (self.tabs.items.len == 0) {
+        if (self.model.active == null) {
             self.active_tab = null;
             self.status("未连接");
             self.empty_state.setDisplay(.flex);
@@ -4181,7 +4224,9 @@ pub const Workspace = struct {
         if (self.active_group_view) |group| {
             if (self.groupView(group)) |view| view.dirty = true;
             self.group_present_pending = true;
-        } else if (self.model.active) |id| self.presentTabId(id);
+        } else if (!hidden_for_transfer) {
+            if (self.model.active) |id| self.presentTabId(id);
+        }
     }
 
     fn mountHostKeyConfirm(self: *Workspace) !void {
@@ -4852,11 +4897,13 @@ pub const Workspace = struct {
             title.setTextContent(self.allocator, title_writer.buffered()) catch {};
             title.markRenderDirty();
         }
+        const risk = if (self.close_bridge.risk) |callback| callback(self.close_bridge.context, tab.id) else CloseRisk{};
+        const keep_running = risk.transfer_continues and self.window_close_request == null;
         if (tab.host_snapshot) |snapshot| {
             const host = snapshot.value;
             var detail_buffer: [160]u8 = undefined;
             var detail_writer = std.Io.Writer.fixed(&detail_buffer);
-            detail_writer.print("与 {s} 的连接将断开", .{host.host}) catch {};
+            detail_writer.print("与 {s} 的{s}", .{ host.host, if (keep_running) "终端通道将关闭" else "连接将断开" }) catch {};
             self.setRiskDetail("SSH", detail_writer.buffered());
         }
         self.setRiskVisible("SSH", !tab.local);
@@ -4864,11 +4911,12 @@ pub const Workspace = struct {
         // state for the pending tab (wiring lands with their integration;
         // the rows mount with the design text so no fallback text is
         // invented here).
-        const risk = if (self.close_bridge.risk) |callback| callback(self.close_bridge.context, tab.id) else CloseRisk{};
         self.setRiskVisible("传输", risk.transfer);
         self.setRiskVisible("AI", risk.ai_write);
         self.setRiskVisible("SOCKS5", risk.socks);
-        if (risk.transfer) self.setRiskDetail("传输", "尚有未完成任务，关闭将暂停并保留续传数据");
+        if (risk.transfer) {
+            self.setRiskDetail("传输", if (keep_running) "未完成的传输将在后台继续" else "尚有未完成任务，关闭将暂停并保留续传数据");
+        }
         if (risk.ai_write) self.setRiskDetail("AI", "写命令执行中，关闭将中止并清理远端进程");
         if (risk.socks) self.setRiskDetail("SOCKS5", "正在监听，关闭将释放代理连接与端口");
         open.set(true);
@@ -6235,7 +6283,7 @@ pub const Workspace = struct {
             const receipt = self.close_receipts.orderedRemove(0);
             if (self.tabIndexById(receipt.tab)) |index| {
                 const tab = self.tabs.items[index];
-                if (self.model.isCurrentTarget(receipt) or (tab.owned_pending and tab.content_owner.eql(receipt.owner))) self.removeClosedTab(index);
+                if (self.model.isCurrentTarget(receipt) or ((tab.owned_pending or tab.hidden_for_transfer) and tab.content_owner.eql(receipt.owner))) self.removeClosedTab(index);
             }
         }
     }
@@ -7558,6 +7606,48 @@ test "file presentation selects and closes without constructing a terminal or co
     workspace.forceCloseTab(0);
     try std.testing.expectEqual(@as(usize, 0), workspace.tabs.items.len);
     try std.testing.expect(workspace.active_tab == null);
+}
+
+test "hiding an SSH tab during transfer drain preserves workspace focus and accepts its final receipt" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const sidebar = try ui.box(cx, .{}, .{});
+    const strip = try ui.box(cx, .{}, .{});
+    const area = try ui.box(cx, .{}, .{});
+    for ([_]*ui.Node{ sidebar, strip, area }) |node| try root.appendChild(a, node);
+    const empty = try ui.box(cx, .{}, .{});
+    try area.appendChild(a, empty);
+    const controls = try ui.widgets.Button(.{ .label = "传输管理器" }).mount(scope, cx);
+    try root.appendChild(a, controls);
+    const settings: config_mod.Config = .{};
+    const workspace = try Workspace.init(a, cx, scope, std.testing.io, &settings, "", sidebar, strip, area, empty);
+    const ssh: identity.SessionHandle = .{ .session_id = @fromBackingInt(1) };
+    const local: identity.SessionHandle = .{ .session_id = @fromBackingInt(2) };
+    // Mount the same native terminal view as SSH without starting a worker.
+    const ssh_id = try workspace.createLocalSessionDirect(ssh);
+    _ = try workspace.createLocalSessionDirect(local);
+    const tab = workspace.sessionTab(ssh_id).?;
+    tab.local = false;
+    tab.closing = true;
+    const tab_id = tab.tab_id;
+    const other_tab_id = workspace.model.active.?;
+    cx.setFocus(controls);
+    try workspace.hideClosingTerminalTab(tab_id, .{ .session = ssh });
+    try std.testing.expect(cx.focus_manager.getFocused() == controls);
+    try std.testing.expect(workspace.model.indexOf(tab_id) == null);
+    try std.testing.expectEqual(other_tab_id, workspace.model.active.?);
+    try std.testing.expect(workspace.sessionTab(ssh_id) == tab and !tab.root.isDisplayedInTree());
+    try std.testing.expectError(error.StaleTab, workspace.hideClosingTerminalTab(tab_id, .{ .session = try ssh.nextGeneration() }));
+    workspace.receiveCloseReceipt(tab_id, .{ .session = ssh }, true);
+    workspace.drainCloseReceipts();
+    try std.testing.expect(workspace.sessionTab(ssh_id) == null);
+    try std.testing.expect(cx.focus_manager.getFocused() == controls);
+    try std.testing.expectEqual(other_tab_id, workspace.model.active.?);
 }
 
 test "SSH middle menu bridge preserves the clicked handle across active changes and rejects stale owners" {

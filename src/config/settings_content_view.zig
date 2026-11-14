@@ -247,7 +247,11 @@ fn footerStateText(controller: *const Controller) []const u8 {
         .dirty_valid => "未保存",
         .dirty_invalid => "未保存",
         .saving => "正在保存…",
-        .save_failed => controller.last_error orelse "保存失败，草稿已保留",
+        .save_failed => if (controller.last_error) |code| blk: {
+            if (std.mem.eql(u8, code, "ConfigProviderConflict")) break :blk "Provider 配置冲突，草稿已保留";
+            if (std.mem.eql(u8, code, "ConfigFileConflict")) break :blk "配置文件已更改，草稿已保留";
+            break :blk code;
+        } else "保存失败，草稿已保留",
     };
 }
 

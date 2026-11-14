@@ -251,6 +251,7 @@ const Entry = struct {
     create_operation: OperationKey,
     close_operation: ?OperationKey = null,
     close_step: CloseStep = .pause_transfers,
+    draining_tab_transfers: bool = false,
     hooks: CloseHooks = .{},
     close_resources_released: bool = false,
     shutdown_receipt: ?CloseReceipt = null,
@@ -1380,7 +1381,7 @@ pub const SessionHost = struct {
 
     pub fn auxiliaryTransferOperationIsCurrent(self: *SessionHost, owner: SessionHandle, key: OperationKey) bool {
         const entry = self.find(owner) orelse return false;
-        if (entry.state != .attached or !self.manifest(entry).integration.auxiliary_transfer) return false;
+        if (!canRunTabTransfers(entry) or !self.manifest(entry).integration.auxiliary_transfer) return false;
         const auxiliary = self.findAuxiliary(owner) orelse return false;
         return auxiliary.key.eql(key) and !auxiliary.closing and auxiliary.cleanup == .awaiting and !self.journal.isTerminal(key);
     }
@@ -1448,7 +1449,23 @@ pub const SessionHost = struct {
     pub fn sharedTransferOperationIsCurrent(self: *SessionHost, owner: SessionHandle, key: OperationKey) bool {
         const entry = self.find(owner) orelse return false;
         const shared = self.findShared(owner) orelse return false;
-        return self.manifest(entry).integration.auxiliary_transfer and entry.state == .attached and entry.create_operation.eql(key) and shared.key.eql(key) and !shared.closing and shared.cleanup == .awaiting;
+        return self.manifest(entry).integration.auxiliary_transfer and canRunTabTransfers(entry) and entry.create_operation.eql(key) and shared.key.eql(key) and !shared.closing and shared.cleanup == .awaiting;
+    }
+
+    fn canRunTabTransfers(entry: *const Entry) bool {
+        return entry.state == .attached or (entry.state == .closing and entry.close_step == .pause_transfers and entry.draining_tab_transfers);
+    }
+
+    pub fn setTabTransferDrain(self: *SessionHost, owner: SessionHandle, key: OperationKey, active: bool) bool {
+        const entry = self.find(owner) orelse return false;
+        if (entry.state != .closing or entry.close_step != .pause_transfers or entry.close_operation == null or !entry.close_operation.?.eql(key)) return false;
+        entry.draining_tab_transfers = active;
+        return true;
+    }
+
+    pub fn tabTransfersDraining(self: *SessionHost, owner: SessionHandle) bool {
+        const entry = self.find(owner) orelse return false;
+        return entry.draining_tab_transfers and canRunTabTransfers(entry);
     }
 
     pub fn sharedTransferReady(self: *SessionHost, binding: ServiceHandle, key: OperationKey) bool {

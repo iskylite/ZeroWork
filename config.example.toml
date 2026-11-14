@@ -14,7 +14,7 @@ timestamp_gutter = false
 enabled = true
 
 [transfer]
-dedicated_connection = true
+dedicated_connection = false
 window_chunks = 16
 chunk_kb = 64
 download_dir = "~/Downloads"

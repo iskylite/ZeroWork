@@ -8,7 +8,7 @@ const edges = [_]float.Edge{ .n, .s, .w, .e, .nw, .ne, .sw, .se };
 const ids = [_][]const u8{ "ai.float.resize.n", "ai.float.resize.s", "ai.float.resize.w", "ai.float.resize.e", "ai.float.resize.nw", "ai.float.resize.ne", "ai.float.resize.sw", "ai.float.resize.se" };
 const Kind = union(enum) { move, resize: float.Edge };
 const Part = struct { view: *View, kind: Kind };
-const Active = struct { geometry: float.Geometry, rect: float.Rect };
+const Active = struct { geometry: float.Geometry, rect: float.Rect, maximized: bool };
 
 pub const View = struct {
     cx: *ui.Cx,
@@ -21,6 +21,7 @@ pub const View = struct {
     handles: [8]*ui.Node = undefined,
     bindings: [9]?*drag.Binding = @splat(null),
     active: ?Active = null,
+    on_maximized_change: ?ui.Handler(void) = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, card: *ui.Node, grip: *ui.Node, model: *float.Model) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .card = card, .grip = grip, .model = model });
@@ -46,6 +47,7 @@ pub const View = struct {
     }
 
     fn cleanup(self: *View) void {
+        self.on_maximized_change = null;
         self.cancel();
         for (self.bindings, 0..) |binding, index| if (binding) |value| {
             const node = if (index == 0) self.grip else self.handles[index - 1];
@@ -83,10 +85,11 @@ pub const View = struct {
 
     fn syncHandles(self: *View) void {
         const rect = self.model.rect(self.pane, self.window);
-        const enabled = self.bounds_ready and self.model.visible and self.model.expanded and !self.model.maximized and rect.width > 0 and rect.height > 0;
-        for (self.bindings) |binding| if (binding) |value| value.setEnabled(enabled);
-        self.grip.setCursor(if (enabled) .grab else .default);
-        for (self.handles, edges) |node, edge| {
+        const enabled = self.bounds_ready and self.model.visible and self.model.expanded and rect.width > 0 and rect.height > 0;
+        if (self.bindings[0]) |binding| binding.setEnabled(enabled and !self.model.maximized);
+        self.grip.setCursor(if (enabled and !self.model.maximized) .grab else .default);
+        for (self.handles, edges, 0..) |node, edge, index| {
+            if (self.bindings[index + 1]) |binding| binding.setEnabled(enabled);
             node.setDisplay(if (enabled) .flex else .none);
             node.setStyleInline(self.cx.allocator, S.handle(edge, rect.width, rect.height));
         }
@@ -95,7 +98,8 @@ pub const View = struct {
     fn canStart(_: drag.StartRequest, raw: *anyopaque) bool {
         const part: *Part = @ptrCast(@alignCast(raw));
         const self = part.view;
-        return self.bounds_ready and self.model.visible and self.model.expanded and !self.model.maximized;
+        return self.bounds_ready and self.model.visible and self.model.expanded and
+            (!self.model.maximized or part.kind == .resize);
     }
 
     fn changed(event: drag.Event, raw: *anyopaque) void {
@@ -104,14 +108,17 @@ pub const View = struct {
         if (event.phase == .cancel) {
             if (self.active) |active| {
                 self.active = null;
+                const maximized_changed = self.model.maximized != active.maximized;
+                self.model.maximized = active.maximized;
                 self.model.restoreGeometry(active.geometry);
                 self.model.updateBounds(self.pane, self.window);
                 self.syncHandles();
+                if (maximized_changed) if (self.on_maximized_change) |callback| callback.invoke();
                 self.cx.requestRedraw();
             }
             return;
         }
-        if (event.phase == .start) self.active = .{ .geometry = self.model.geometry(), .rect = self.model.rect(self.pane, self.window) };
+        if (event.phase == .start) self.active = .{ .geometry = self.model.geometry(), .rect = self.model.rect(self.pane, self.window), .maximized = self.model.maximized };
         const active = self.active orelse return;
         if (!std.math.isFinite(event.delta.x) or !std.math.isFinite(event.delta.y)) {
             self.cancel();
@@ -124,6 +131,15 @@ pub const View = struct {
                 next.y += event.delta.y;
             },
             .resize => |edge| next = float.resized(active.rect, edge, event.delta.x, event.delta.y, self.pane, self.window),
+        }
+        if (self.model.maximized) {
+            if (std.meta.eql(next, active.rect)) {
+                if (event.phase == .end) self.active = null;
+                return;
+            }
+            self.model.maximized = false;
+            self.model.restore = null;
+            if (self.on_maximized_change) |callback| callback.invoke();
         }
         self.model.setRectangle(next, self.pane, self.window);
         if (event.phase == .end) self.active = null;

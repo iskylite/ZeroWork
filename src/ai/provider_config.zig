@@ -17,6 +17,47 @@ pub const ModelSelection = struct {
     }
 };
 
+pub const ConversationModel = union(enum) {
+    explicit: Choice,
+    used_default: Choice,
+    selection_required,
+
+    pub const Choice = struct { key: ModelSelection, configured: bool };
+
+    pub fn eql(self: ConversationModel, other: ConversationModel) bool {
+        if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
+        return switch (self) {
+            inline .explicit, .used_default => |choice, tag| blk: {
+                const right = @field(other, @tagName(tag));
+                break :blk choice.configured == right.configured and choice.key.eql(right.key);
+            },
+            .selection_required => true,
+        };
+    }
+
+    pub fn clone(self: ConversationModel, allocator: std.mem.Allocator) !ConversationModel {
+        const choice = switch (self) {
+            .explicit, .used_default => |value| value,
+            .selection_required => return self,
+        };
+        const provider_id = try allocator.dupe(u8, choice.key.provider_id);
+        errdefer allocator.free(provider_id);
+        const model_id = try allocator.dupe(u8, choice.key.model_id);
+        const copy: Choice = .{ .key = .{ .provider_id = provider_id, .model_id = model_id }, .configured = choice.configured };
+        return if (self == .explicit) .{ .explicit = copy } else .{ .used_default = copy };
+    }
+
+    pub fn deinit(self: ConversationModel, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .explicit, .used_default => |choice| {
+                allocator.free(choice.key.provider_id);
+                allocator.free(choice.key.model_id);
+            },
+            .selection_required => {},
+        }
+    }
+};
+
 /// The UI and transport share the same explicit no-auth policy.
 pub fn allowsNoAuth(kind: registry.Kind, endpoint: []const u8) bool {
     return kind == .ollama or (kind == .openai_compat and @import("provider_http.zig").isLoopbackHttp(endpoint));
@@ -118,21 +159,25 @@ pub fn providerId(value: app_config.AiProvider) []const u8 {
 /// Provider protocol names do not imply model capability. Legacy model-only
 /// configuration has no declared reasoning/effort capability.
 pub fn supportsEffort(ai: app_config.Ai, selection: ?ModelSelection, effort: provider.Effort) !bool {
-    const resolved = try settingsModel(ai, selection);
-    return (resolved.provider.kind == .openai_compat or resolved.model.reasoning_discovered) and resolved.model.reasoning and resolved.model.efforts[@backingInt(effort)];
+    return (try supportedEfforts(ai, selection))[@backingInt(effort)];
 }
 
 pub fn validateEffort(ai: app_config.Ai, selection: ?ModelSelection, effort: provider.Effort) !void {
     if (!try supportsEffort(ai, selection, effort)) return error.UnsupportedEffort;
 }
 
-pub fn lowestEffort(ai: app_config.Ai, selection: ?ModelSelection) !?provider.Effort {
+pub fn supportedEfforts(ai: app_config.Ai, selection: ?ModelSelection) ![7]bool {
     const resolved = try settingsModel(ai, selection);
-    if (!resolved.model.reasoning or (resolved.provider.kind != .openai_compat and !resolved.model.reasoning_discovered)) return null;
-    return provider.Effort.lowestSupported(resolved.model.efforts);
+    if (!resolved.model.reasoning or (resolved.provider.kind != .openai_compat and !resolved.model.reasoning_discovered)) return @splat(false);
+    return resolved.model.efforts;
 }
 
 const SettingsModel = struct { provider: app_config.AiProvider, model: app_config.AiModel };
+
+pub fn hasConfiguredModel(ai: app_config.Ai, key: ModelSelection) bool {
+    _ = settingsModel(ai, key) catch return false;
+    return true;
+}
 
 fn settingsModel(ai: app_config.Ai, selection: ?ModelSelection) !SettingsModel {
     if (ai.provider_count > ai.providers.len) return error.InvalidProviderCount;

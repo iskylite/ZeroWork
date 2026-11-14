@@ -17,7 +17,7 @@ async function reveal(id:string){
  for(let i=0;i<20;i++){
   const n=await found(id),v=await found('settings.viewport');let clip=v.rect;
   const list=(await query('settings.ai.provider_list')).find((x:any)=>x.rect.w>0&&x.rect.h>0);
-  if(id.startsWith('settings.ai.provider.')&&list){const top=Math.max(v.rect.y,list.rect.y),bottom=Math.min(v.rect.y+v.rect.h,list.rect.y+list.rect.h);clip={...list.rect,y:top,h:bottom-top};}
+  if(id.startsWith('settings.ai.provider.')&&list){const top=Math.max(v.rect.y,list.rect.y),bottom=Math.min(v.rect.y+v.rect.h,list.rect.y+list.rect.h);if(bottom>top)clip={...list.rect,y:top,h:bottom-top};}
   if(n.rect.y>=clip.y&&n.rect.y+n.rect.h<=clip.y+clip.h&&shown(n))return n;
   const distance=n.rect.y<clip.y?clip.y-n.rect.y:clip.y+clip.h-n.rect.y-n.rect.h;
   const direction=Math.sign(distance)*Math.max(2,Math.min(100,Math.abs(distance)*.65));
@@ -29,9 +29,18 @@ async function reveal(id:string){
  throw new Error('Cannot reveal '+id);
 }
 async function click(id:string){const n=id.startsWith('settings.ai.provider.')?await reveal(id):await found(id);assert((await clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok);await sleep(220);}
+async function openProvider(index:number){
+ const id=`settings.ai.provider.${index}`;
+ const card=await found(`${id}.card`),header=await found(`${id}.header`);
+ if(card.rect.h<=header.rect.h+.5)await click(`${id}.header`);
+}
 async function edit(id:string,value:string){await click(id);await key('a',{cmd:true});if(value)await type_(value);else await key('backspace');await sleep(120);assert.equal((await inputState(id)).buffer,value);}
 async function capture(name:string){await sleep(200);assert((await screenshot(join(out,name+'.png'))).ok);}
-async function save(){await click('settings.save');await waitFor(async()=>{const n=await found('settings.footer.state');return n.text==='已保存'?true:null},10000);}
+async function save(){
+ const before=await readFile(config,'utf8');
+ await click('settings.save');
+ await waitFor(async()=>await readFile(config,'utf8')!==before||null,10000);
+}
 const enabledProviders=(source:string)=>source.split('[[ai.providers]]').slice(1).map(block=>/enabled\s*=\s*true/.test(block.split('[[ai.providers.models]]')[0]));
 const near=(a:number,b:number)=>assert(Math.abs(a-b)<.6,`${a} != ${b}`);
 try{
@@ -48,10 +57,13 @@ try{
   await scrollAt(models.rect.x+models.rect.w/2,models.rect.y+models.rect.h/2,0,-550);await sleep(180);await capture('07-many-models-scrolled');
   await resizeWindow(860,480);await reveal('settings.ai.provider.0.models');await capture('08-many-models-compact');report.checks.push('nine actual models remain 44px rows inside bounded190 list; inner scroll and compact capture');
  }else{
- await click('settings.ai.provider.0.enabled');assert((await readFile(config,'utf8'))===initial);await found('settings.ai.provider_error');await capture('02-last-default-protected');report.checks.push('last enabled default cannot be disabled');
+ await click('settings.ai.provider.0.enabled');assert.equal(await readFile(config,'utf8'),initial);await capture('02-last-default-disabled');
+ await save();const allDisabled=await readFile(config,'utf8');assert.deepEqual(enabledProviders(allDisabled),[false,false]);assert.match(allDisabled,/^default_provider\s*=\s*""$/m);
+ report.checks.push('Disabling the last enabled Provider saves both Providers as disabled and clears the global default.');
+ await click('settings.ai.provider.0.enabled');
  await click('settings.ai.provider.1.enabled');await save();let saved=await readFile(config,'utf8');assert(/default_provider\s*=\s*"first"/.test(saved));assert.equal(enabledProviders(saved).filter(Boolean).length,2);
  await click('settings.ai.provider.0.enabled');await save();saved=await readFile(config,'utf8');assert(/default_provider\s*=\s*"second"/.test(saved));assert.equal(enabledProviders(saved).filter(Boolean).length,1);report.checks.push('explicit enable is persisted; disabling default selects existing eligible replacement');
- await edit('settings.ai.provider.0.endpoint','not-a-url');await key('escape');assert.equal((await inputState('settings.ai.provider.0.endpoint')).buffer,'http://127.0.0.1:9/v1/chat/completions');await edit('settings.ai.provider.0.name','first draft');await click('settings.revert');assert.equal((await inputState('settings.ai.provider.0.name')).buffer,'first');report.checks.push('invalid endpoint Escape and name outer revert preserve persisted disabled provider');
+ await openProvider(0);await edit('settings.ai.provider.0.endpoint','not-a-url');await key('escape');assert.equal((await inputState('settings.ai.provider.0.endpoint')).buffer,'http://127.0.0.1:9/v1/chat/completions');await edit('settings.ai.provider.0.name','first draft');await click('settings.revert');await openProvider(0);assert.equal((await inputState('settings.ai.provider.0.name')).buffer,'first');report.checks.push('invalid endpoint Escape and name outer revert preserve persisted disabled provider');
  await click('settings.ai.provider.0.reveal_key');await click('settings.ai.provider.0.reveal_key');assert.equal(await readFile(config,'utf8'),saved);report.checks.push('key reveal/hide does not mutate config');
  await click('settings.ai.provider.0.model.0.delete_model');const dialog=await found('settings.ai.delete.dialog');near(dialog.rect.w,390);await capture('03-delete-cancel');await click('settings.ai.delete.cancel');await waitFor(async()=>!(await query('settings.ai.delete.dialog')).some(shown)||null);await found('settings.ai.provider.0.model.0.card');assert.equal(await readFile(config,'utf8'),saved);
  await click('settings.ai.provider.0.model.0.delete_model');await key('s',{cmd:true});assert.equal(await readFile(config,'utf8'),saved);await click('settings.ai.delete.confirm');await waitFor(async()=>!(await query('settings.ai.delete.dialog')).some(shown)||null);await save();assert(!(await readFile(config,'utf8')).includes('name = "first-model"'));report.checks.push('delete390 confirmation Cancel preserves model; Cmd-S blocked; explicit confirm then outer Save deletes inactive model');

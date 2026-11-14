@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="148" viewBox="0 0 600 148" font-family="-apple-system, BlinkMacSystemFont, PingFang SC, sans-serif">
+  <defs>
+    <g id="status">
+      <circle cx="7.5" cy="7.5" r="6.25" fill="none" stroke="#aabd88" stroke-width="1.3"/>
+      <path d="M7.5 4v3.75l2.5 1.5" fill="none" stroke="#aabd88" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="22" y="11.5" font-size="11.5" font-weight="500" fill="#e1e4d8">执行仍在进行</text>
+    </g>
+    <g id="session-tag">
+      <rect width="188" height="18" rx="4" fill="#333830"/>
+      <text x="6" y="12.5" font-size="10.5" fill="#c9cfbf">ScaleX40-AI01 · session-1 · AI 输入</text>
+    </g>
+    <g id="actions" font-size="11.5" text-anchor="middle" fill="#c9cfbf">
+      <rect width="68" height="28" rx="7" fill="#202620"/>
+      <text x="34" y="18">停止执行</text>
+      <rect x="74" width="68" height="28" rx="7" fill="#262d27"/>
+      <text x="108" y="18">接管终端</text>
+    </g>
+  </defs>
+  <rect width="600" height="148" fill="#181c18"/>
+  <g id="wide">
+    <rect x="14" y="14" width="572" height="46" rx="8" fill="#1d231d"/>
+    <use href="#status" x="25" y="29.5"/>
+    <use href="#session-tag" x="123" y="28"/>
+    <use href="#actions" x="433" y="23"/>
+  </g>
+  <g id="compact">
+    <rect x="14" y="74" width="332" height="66" rx="8" fill="#1d231d"/>
+    <use href="#status" x="25" y="89.5"/>
+    <use href="#session-tag" x="47" y="113"/>
+    <use href="#actions" x="193" y="83"/>
+  </g>
+</svg>

@@ -127,7 +127,7 @@ pub const View = struct {
                 try self.content.appendChild(self.cx.allocator, header);
                 group = entry.group;
             }
-            const row = try scope.createState(Row, .{ .view = self, .agent = entry.agent, .revision = entry.revision, .node = undefined, .name = undefined, .detail = undefined, .status = undefined });
+            const row = try scope.createState(Row, .{ .view = self, .agent = entry.agent, .revision = entry.revision, .node = undefined, .name = undefined, .detail = undefined, .status = undefined, .spinner = undefined, .spinner_color = try scope.createSignal(?ui.Color, theme.current().accent) });
             const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = entry.name, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .justify = .start, .align_items = .center, .padding = ui.Padding.all(10), .gap = 10, .flex_shrink = 0, .border = .{ .radius = 8 } }, .on_click = self.cx.on(Row, row, Row.select) }).mount(scope, self.cx);
             for (node.children.items) |slot| slot.setDisplay(.none);
             row.node = node;
@@ -149,6 +149,10 @@ pub const View = struct {
             row.status = try ui.iconTint(self.cx, ui.icons.circle, theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
             row.status.meta.ownership.meta.test_id = "ai.child.status.icon";
             try status_tip.trigger.appendChild(self.cx.allocator, row.status);
+            row.spinner = try ui.widgets.Spinner(.{ .size = 16, .stroke_width = 1.5, .color = row.spinner_color }).mount(scope, self.cx);
+            row.spinner.meta.ownership.meta.test_id = "ai.child.status.spinner";
+            row.spinner.behavior.interaction.a11y = .{ .hidden = true };
+            try status_tip.trigger.appendChild(self.cx.allocator, row.spinner);
             try copy.appendChild(self.cx.allocator, row.name);
             try copy.appendChild(self.cx.allocator, row.detail);
             try node.appendChild(self.cx.allocator, copy);
@@ -175,6 +179,8 @@ pub const View = struct {
         name: *ui.Node,
         detail: *ui.Node,
         status: *ui.Node,
+        spinner: *ui.Node,
+        spinner_color: *ui.Signal(?ui.Color),
         fn update(self: *Row, entry: projection.Entry) !void {
             self.revision = entry.revision;
             if (!View.sameText(self.name, entry.name)) try self.name.setTextContent(self.view.cx.allocator, entry.name);
@@ -193,8 +199,15 @@ pub const View = struct {
         fn repaint(self: *Row) void {
             Logo.repaint(self.logo, self.agent);
             const colors = theme.current();
+            const running = self.visual == .running;
+            self.spinner.setDisplay(if (running) .flex else .none);
+            self.status.setDisplay(if (running) .none else .flex);
+            if (running) {
+                self.spinner_color.set(colors.accent);
+                return;
+            }
             const asset = ui.icons.get(switch (self.visual) {
-                .running => "loader-circle",
+                .running => unreachable,
                 .waiting => "clock-3",
                 .attention => "circle-help",
                 .failed => "circle-alert",
@@ -202,7 +215,8 @@ pub const View = struct {
                 .complete => "circle-check",
             }).?;
             const tint = switch (self.visual) {
-                .running, .waiting => colors.accent,
+                .running => unreachable,
+                .waiting => colors.accent,
                 .attention => colors.warn,
                 .failed => colors.danger,
                 .stopped => colors.fg_2,

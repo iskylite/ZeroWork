@@ -694,12 +694,42 @@ pub const RecordGroupLease = struct {
 pub const QueryRecord = struct {
     document: std.json.Parsed(manifest.Manifest),
     lease: RecordGroupLease,
+    parent: ?RecordLease = null,
     pub fn deinit(self: *QueryRecord) void {
         self.lease.deinit();
+        if (self.parent) |*lease| lease.deinit();
         self.document.deinit();
     }
 };
 pub fn acquireQueryRecord(archive: Archive, allocator: std.mem.Allocator, manifest_path: []const u8) !QueryRecord {
+    return acquireQueryDocument(archive, allocator, manifest_path, false);
+}
+
+pub fn acquireExecutionSegment(archive: Archive, allocator: std.mem.Allocator, parent_path: []const u8, recording_id: []const u8, revision: u64, id: []const u8) !QueryRecord {
+    var parent = try acquireLease(allocator, archive.io, archive.dir, parent_path);
+    errdefer parent.deinit();
+    const bytes = try parent.readAll(allocator, 8 * 1024 * 1024);
+    defer allocator.free(bytes);
+    const root = try std.json.parseFromSlice(manifest.Manifest, allocator, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
+    defer root.deinit();
+    try manifest.validate(root.value);
+    if (root.value.state == .tombstone) return error.RecordRemoved;
+    if (root.value.source_kind != .ssh or !std.mem.eql(u8, root.value.recording_id, recording_id)) return error.CommandIndexUnavailable;
+    if (revision != 0 and root.value.manifest_revision != revision) return error.StaleRecordingRevision;
+    const path = try manifest.executionSegmentPath(allocator, parent_path, id, .metadata);
+    defer allocator.free(path);
+    var result = try acquireQueryDocument(archive, allocator, path, true);
+    errdefer result.deinit();
+    const doc = result.document.value;
+    if (!std.mem.eql(u8, doc.recording_id, recording_id) or !std.mem.eql(u8, doc.archive_key, root.value.archive_key) or doc.execution_ranges.len != 1 or !std.mem.eql(u8, doc.execution_ranges[0].execution_id, id)) return error.InvalidManifest;
+    const cast_path = try manifest.executionSegmentPath(allocator, parent_path, id, .cast);
+    defer allocator.free(cast_path);
+    if (doc.files.len != 1 or !std.mem.eql(u8, doc.files[0].path, cast_path)) return error.InvalidManifest;
+    result.parent = parent;
+    return result;
+}
+
+fn acquireQueryDocument(archive: Archive, allocator: std.mem.Allocator, manifest_path: []const u8, execution_segment: bool) !QueryRecord {
     var leases: RecordGroupLease = .{ .allocator = allocator };
     errdefer leases.deinit();
     try leases.leases.ensureTotalCapacity(allocator, 9);
@@ -711,9 +741,11 @@ pub fn acquireQueryRecord(archive: Archive, allocator: std.mem.Allocator, manife
     try manifest.validate(parsed.value);
     if (parsed.value.state == .tombstone) return error.RecordRemoved;
     if (parsed.value.state != .closed) return error.RecordingNotClosed;
+    if (parsed.value.execution_segment != execution_segment) return error.InvalidManifest;
+    if (execution_segment and (parsed.value.source_kind != .ssh or parsed.value.execution_ranges.len != 1 or parsed.value.recording.generations.len != 1)) return error.InvalidManifest;
     if (parsed.value.files.len > 8) return error.RecordingDependencyBudgetExceeded;
     if (parsed.value.coverage == .unavailable or parsed.value.replayability == .unsupported) return error.RecordingUnavailable;
-    if (parsed.value.replayability == .baseline_unavailable) return error.RecordingBaselineUnavailable;
+    if (parsed.value.replayability == .baseline_unavailable and !execution_segment) return error.RecordingBaselineUnavailable;
     var found_cast = false;
     for (parsed.value.files) |file| {
         var lease = try acquireLease(allocator, archive.io, archive.dir, file.path);
@@ -922,6 +954,19 @@ fn catalogResolve(archive: *Archive, allocator: std.mem.Allocator, query: Record
                 range = candidate;
                 break;
             };
+            if (range == null and document.source_kind == .ssh) {
+                const path = try manifest.executionSegmentPath(allocator, resolved_descriptor.manifest_path.?, id, .metadata);
+                defer allocator.free(path);
+                const segment = manifest.load(allocator, archive.io, archive.dir, path) catch |err| switch (err) {
+                    error.FileNotFound => return error.ExecutionRangeNotFound,
+                    else => return err,
+                };
+                defer segment.deinit();
+                if (!segment.value.execution_segment or !std.mem.eql(u8, segment.value.archive_key, document.archive_key) or !std.mem.eql(u8, segment.value.recording_id, document.recording_id) or segment.value.execution_ranges.len != 1 or !std.mem.eql(u8, segment.value.execution_ranges[0].execution_id, id)) return error.InvalidManifest;
+                const encoded = try std.json.Stringify.valueAlloc(allocator, segment.value.execution_ranges[0], .{});
+                defer allocator.free(encoded);
+                range = try std.json.parseFromSliceLeaky(manifest.ExecutionRange, catalog.arena.allocator(), encoded, .{ .allocate = .alloc_always });
+            }
             if (range == null) return error.ExecutionRangeNotFound;
         }
         return .{ .catalog = catalog, .descriptor = resolved_descriptor, .execution_range = range };
@@ -1085,13 +1130,35 @@ const RemovalPlan = struct {
         self.paths.deinit(self.allocator);
     }
     fn remove(self: *RemovalPlan, io: std.Io, dir: std.Io.Dir, reason: []const u8) !void {
-        if (self.manifest_path) |path| try writeTombstone(self.allocator, io, dir, path, reason);
+        if (self.manifest_path) |path| {
+            try writeTombstone(self.allocator, io, dir, path, reason);
+            try removeExecutionSegments(self.allocator, io, dir, path);
+        }
         for (self.paths.items) |path| {
             if (self.manifest_path) |sidecar| if (std.mem.eql(u8, path, sidecar)) continue;
             dir.deleteFile(io, path) catch |err| if (err != error.FileNotFound) return err;
         }
     }
 };
+
+/// The parent manifest's removal guard also protects all execution segments.
+pub fn removeExecutionSegments(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, parent_path: []const u8) !void {
+    const path = try manifest.executionDirectory(allocator, parent_path);
+    defer allocator.free(path);
+    const logs = dir.openDir(io, "logs", .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer logs.close(io);
+    if (std.mem.eql(u8, std.fs.path.dirname(path).?, "logs")) return logs.deleteTree(io, std.fs.path.basename(path));
+    if (!std.mem.eql(u8, std.fs.path.dirname(path).?, "logs/history")) return error.InvalidRecordingPath;
+    const history = logs.openDir(io, "history", .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer history.close(io);
+    try history.deleteTree(io, std.fs.path.basename(path));
+}
 fn makeRemovalPlan(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cast_path: []const u8) !RemovalPlan {
     return makeRemovalPlanAt(allocator, io, dir, cast_path, null);
 }

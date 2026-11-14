@@ -173,7 +173,7 @@ pub const Access = struct {
             const id = close.retained_metadata.recording_id orelse continue;
             const generation = close.retained_metadata.recording_generation;
             if (generation == 0) continue;
-            try self.appendCandidate(.{ .owner = close.handle, .id = id, .generation = generation, .origin = .captured_source });
+            try self.captureRecordingIdentity(close.handle, id, generation);
         }
     }
     /// Shared with captureUi after its exact content permission checks. Kept
@@ -184,15 +184,22 @@ pub const Access = struct {
             const recording = service.recordingIdentity() catch return;
             if (!recording.owner.eql(owner) or !recording.available) return;
             const id = recording.recording_id orelse return;
-            try self.appendCandidate(.{ .owner = owner, .id = id, .generation = recording.recording_generation, .origin = .captured_source });
+            try self.captureRecordingIdentity(owner, id, recording.recording_generation);
             return;
         }
         if (service.vtable.execution_snapshot == null) return;
         const facts = service.executionSnapshot() catch return;
         if (!facts.owner.eql(owner) or facts.recording_generation == 0) return;
         const id = facts.recording_id orelse return;
+        try self.captureRecordingIdentity(owner, id, facts.recording_generation);
+    }
+    /// Host-only capture for a recording identity from an already authorized
+    /// live terminal or close receipt.
+    pub fn captureRecordingIdentity(self: *Access, owner: identity.SessionHandle, id: [32]u8, generation: u64) !void {
+        try self.captureReady();
         _ = identity.RecordingId.parse(&id) catch return;
-        try self.appendCandidate(.{ .owner = owner, .id = id, .generation = facts.recording_generation, .origin = .captured_source });
+        if (generation == 0) return;
+        try self.appendCandidate(.{ .owner = owner, .id = id, .generation = generation, .origin = .captured_source });
     }
     /// Call only for an explicitly user-selected descriptor within the binding
     /// or a captured source. Selection itself never grants access outside it;
@@ -260,7 +267,8 @@ pub const Access = struct {
         defer resolved.deinit();
         const descriptor = resolved.descriptor;
         const doc = descriptor.document orelse return error.RecordingUnavailable;
-        if (doc.state != .closed) return error.RecordingNotClosed;
+        const active_ssh = doc.state == .active and doc.source_kind == .ssh and candidate.origin == .captured_source;
+        if (doc.state != .closed and !active_ssh) return error.RecordingNotClosed;
         if (!std.mem.eql(u8, doc.recording_id, &candidate.id)) return error.StaleReference;
         const generation = for (doc.recording.generations) |value| {
             if (value.recording_generation == candidate.generation) break value;
@@ -271,9 +279,9 @@ pub const Access = struct {
         if (candidate.manifest_path) |captured_path| if (!std.mem.eql(u8, captured_path, path)) return error.StaleReference;
         if (candidate.manifest_path == null) {
             candidate.manifest_path = try self.arena.allocator().dupe(u8, path);
-            candidate.manifest_revision = doc.manifest_revision;
+            if (!active_ssh) candidate.manifest_revision = doc.manifest_revision;
         }
-        const grant: backend_mod.Grant = .{ .context = self.context, .owner = candidate.owner, .recording_id = candidate.id, .recording_generation = candidate.generation, .manifest_path = candidate.manifest_path.?, .manifest_revision = doc.manifest_revision, .origin = if (candidate.origin == .explicit_history_selection) .explicit_history_selection else .captured_source };
+        const grant: backend_mod.Grant = .{ .context = self.context, .owner = candidate.owner, .recording_id = candidate.id, .recording_generation = candidate.generation, .manifest_path = candidate.manifest_path.?, .manifest_revision = candidate.manifest_revision, .origin = if (candidate.origin == .explicit_history_selection) .explicit_history_selection else .captured_source };
         try self.grants.append(self.arena.allocator(), grant);
     }
     /// Nonblocking maintenance. No resolve/checksum/decoder IO occurs here;

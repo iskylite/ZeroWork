@@ -19,6 +19,7 @@ pub fn fingerprint(messages: []const p.Message) u64 {
     for (messages) |m| {
         std.hash.autoHash(&hash, m.role);
         hash.update(m.content);
+        if (m.skill) |skill| std.hash.autoHash(&hash, skill);
         if (m.tool_call_id) |id| hash.update(id);
         for (m.tool_calls) |call| {
             hash.update(call.id);
@@ -355,7 +356,8 @@ const Job = struct {
         const a = self.arena.allocator();
         const summary = try self.summarize(&client, self.source.messages[0..self.cut]);
         var messages: std.ArrayList(p.Message) = .empty;
-        try messages.append(a, .{ .role = .user, .content = try std.fmt.allocPrint(a, "{s}{s}", .{ memory_prefix, summary }) });
+        const skill = @import("skill_context.zig").latest(self.source.messages[0..self.cut]);
+        try messages.append(a, .{ .role = .user, .content = try std.fmt.allocPrint(a, "{s}{s}", .{ memory_prefix, summary }), .skill = if (skill) |selected| selected.reference else null });
         try @import("image_offload.zig").retainCompacted(a, self.source.messages[0..self.cut], &messages.items[0]);
         try messages.appendSlice(a, self.source.messages[self.cut..]);
         const budget = @import("local_text_request.zig");

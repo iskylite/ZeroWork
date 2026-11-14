@@ -109,6 +109,12 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
 </g></symbol><symbol id="native.messages-square" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <path d="M16 10a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 14.286V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
   <path d="M20 9a2 2 0 0 1 2 2v10.286a.71.71 0 0 1-1.212.502l-2.202-2.202A2 2 0 0 0 17.172 19H10a2 2 0 0 1-2-2v-1" />
+</g></symbol><symbol id="native.share-2" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="18" cy="5" r="3" />
+  <circle cx="6" cy="12" r="3" />
+  <circle cx="18" cy="19" r="3" />
+  <line x1="8.59" x2="15.42" y1="13.51" y2="17.49" />
+  <line x1="15.41" x2="8.59" y1="6.51" y2="10.49" />
 </g></symbol><symbol id="native.maximize-2" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <path d="M15 3h6v6" />
   <path d="m21 3-7 7" />
@@ -166,18 +172,23 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
 </g>
 <g id="ai.children" >
 <title>子智能体</title>
-<rect id="ai.children.hit" x="423" y="17" width="22" height="22" rx="6" fill="transparent" />
-<use href="#native.bot" x="427" y="21" width="14" height="14" color="#5B5B65"/>
+<rect id="ai.children.hit" x="395" y="17" width="22" height="22" rx="6" fill="transparent" />
+<use href="#native.bot" x="399" y="21" width="14" height="14" color="#5B5B65"/>
 </g>
 <g id="ai.sessions" >
 <title>AI 会话列表</title>
-<rect id="ai.sessions.hit" x="451" y="17" width="22" height="22" rx="6" fill="transparent" />
-<use href="#native.messages-square" x="455" y="21" width="14" height="14" color="#5B5B65"/>
+<rect id="ai.sessions.hit" x="423" y="17" width="22" height="22" rx="6" fill="transparent" />
+<use href="#native.messages-square" x="427" y="21" width="14" height="14" color="#5B5B65"/>
 </g>
 <g id="ai.session.new" >
 <title>新建 AI 会话</title>
-<rect id="ai.session.new.hit" x="479" y="17" width="22" height="22" rx="6" fill="transparent" />
-<use href="#plus" x="483" y="21" width="14" height="14" color="#5B5B65"/>
+<rect id="ai.session.new.hit" x="451" y="17" width="22" height="22" rx="6" fill="transparent" />
+<use href="#plus" x="455" y="21" width="14" height="14" color="#5B5B65"/>
+</g>
+<g id="ai.share" >
+<title>分享会话 · 复制历史链接</title>
+<rect id="ai.share.hit" x="479" y="17" width="22" height="22" rx="6" fill="transparent" />
+<use href="#native.share-2" x="483" y="21" width="14" height="14" color="#5B5B65"/>
 </g>
 <g id="ai.collapse" >
 <title>收起 AI 助手</title>

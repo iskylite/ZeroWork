@@ -29,6 +29,16 @@ def read(path, limit=65536, missing=False):
 def main():
     with tempfile.TemporaryDirectory(prefix="zerowork-file-script-") as directory:
         root = Path(directory)
+        missing_parent = root / "absent" / "verify_inner.sh"
+        for failure in (
+            invoke(READ, missing_parent, 65536, 1),
+            invoke(WRITE, missing_parent, "create", 0, 1, "", data=b"x"),
+        ):
+            assert failure.returncode == 1 and not failure.stdout
+            assert b"No such file or directory" in failure.stderr
+            assert failure.stderr.endswith(b"\nZWFILEERROR1 InvalidParent\n")
+        assert not missing_parent.parent.exists()
+
         path = root / "a 'quoted' $(touch INJECTED);.txt"
         content = b"\xef\xbb\xbfport=80\r\n" + b"x" * 65520
         assert len(content) <= 65536
@@ -38,7 +48,8 @@ def main():
         assert not (root / "INJECTED").exists()
         assert (path.stat().st_mode & 0o777) == 0o600
         existing = invoke(WRITE, path, "create", 0, 3, "", data=b"bad")
-        assert existing.returncode != 0 and path.read_bytes() == content
+        assert existing.returncode == 1 and existing.stderr.endswith(b"\nZWFILEERROR1 PathAlreadyExists\n")
+        assert path.read_bytes() == content
         before, stamp = read(path)
         after = before.replace(b"port=80", b"port=90")
         changed = invoke(WRITE, path, "replace", len(before), len(after), stamp, data=before + after)
@@ -56,7 +67,8 @@ def main():
         assert invoke(READ, link, 65536, 0).returncode != 0
         assert invoke(WRITE, link, "create", 0, 3, "", data=b"bad").returncode != 0
         short = root / "short"
-        assert invoke(WRITE, short, "create", 0, 10, "", data=b"x").returncode != 0
+        incomplete = invoke(WRITE, short, "create", 0, 10, "", data=b"x")
+        assert incomplete.returncode == 1 and incomplete.stderr.endswith(b"\nZWFILEERROR1 IncompleteInput\n")
         assert not short.exists()
         oversized = root / "too-big"
         oversized.write_bytes(b"x" * 65537)

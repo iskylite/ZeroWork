@@ -330,10 +330,6 @@ pub const Host = struct {
             .failed => "传输未完成，请查看任务中的失败原因。",
             .cancelled => "传输已取消，可在任务中查看已传输内容。",
         } });
-        if (completion.result == .failed) for (self.windows.items) |window| if (window.value.owns(window.value.context, .{ .owner = owner, .kind = .transfer_done, .operation_id = job, .attempt_or_turn_id = attempt })) {
-            try self.publishOperationError(window.id, owner, "文件传输", "文件传输失败", if (completion.details.detail.len > 0) completion.details.detail else "传输未完成，请在传输任务中查看原因后重试。", null);
-            break;
-        };
         // A completed transfer is a real session event. Tab attention must not
         // depend on the system notification switches (transfer_done/ai_ready).
         self.activity.observeTabActivity(owner) catch |err| std.log.warn("tab transfer activity: {s}", .{@errorName(err)});
@@ -461,6 +457,7 @@ pub const Host = struct {
                 .reconnect => "查看连接",
                 .ai_ready => "查看对话",
             } }};
+            const transfer_failed = event.kind == .transfer_done and event.result == .failed;
             const presentation = try self.coordinator.publishNotification(.{
                 .definition_id = definition_id,
                 .owner = if (previous) |record| record.event.owner else .{ .window_id = @backingInt(window.id), .content = event.owner },
@@ -488,7 +485,7 @@ pub const Host = struct {
                 .actions = &actions,
                 .system_enabled = event.system_enabled,
                 .attention = .{
-                    .kind = if (event.kind == .reconnect and event.result == .failed) .connection_stopped else if (event.result == .succeeded) .completion else .local,
+                    .kind = if (transfer_failed) .operation_failed else if (event.kind == .reconnect and event.result == .failed) .connection_stopped else if (event.result == .succeeded) .completion else .local,
                     .requires_action = event.kind == .reconnect and event.result == .failed,
                     .time_sensitive = event.kind == .reconnect and event.result == .failed,
                     .resolved = event.result == .recovered,
@@ -613,7 +610,7 @@ pub const Host = struct {
         const now = try localClock();
         for (self.coordinator.notification_records.items) |*record| {
             if (!record.owner_ended and record.event.owner.eql(source) and std.mem.eql(u8, record.event.definition_id, "host.operation_error") and !record.event.attention.resolved and std.mem.eql(u8, record.event.object_name, topic) and std.mem.eql(u8, record.event.detail, bounded(detail, 4096))) {
-                if (record.presentation == .expired or record.presentation == .hidden) {
+                if (!record.dismissed_by_user and (record.presentation == .expired or record.presentation == .hidden)) {
                     record.published_ms = now.monotonic_ms;
                     self.coordinator.revealNotification(record.fact_id);
                 }
@@ -641,9 +638,18 @@ pub const Host = struct {
         self.resolveOwnerOperationErrors(window_id, null, topic);
     }
 
+    pub fn resolveWindowOperationError(self: *Host, window_id: WindowId, topic: []const u8, detail: []const u8) void {
+        self.resolveMatchingOperationErrors(window_id, null, topic, detail);
+    }
+
     pub fn resolveOwnerOperationErrors(self: *Host, window_id: WindowId, owner: ?ContentOwner, topic: []const u8) void {
+        self.resolveMatchingOperationErrors(window_id, owner, topic, null);
+    }
+
+    fn resolveMatchingOperationErrors(self: *Host, window_id: WindowId, owner: ?ContentOwner, topic: []const u8, detail: ?[]const u8) void {
         for (self.coordinator.notification_records.items) |*record| if (record.event.owner.window_id == @backingInt(window_id) and std.mem.eql(u8, record.event.definition_id, "host.operation_error") and std.mem.eql(u8, record.event.object_name, topic) and !record.event.attention.resolved) {
             if (owner) |content| if (record.event.owner.window_only or !record.event.owner.content.eql(content)) continue;
+            if (detail) |message| if (!record.event.owner.window_only or !std.mem.eql(u8, record.event.detail, bounded(message, 4096))) continue;
             record.event.attention.resolved = true;
             self.coordinator.dismissNotification(record.fact_id);
             self.coordinator.history_revision +|= 1;

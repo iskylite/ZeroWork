@@ -25,9 +25,7 @@ pub fn latest(service: *runtime.Service, agent: id.AgentId) ?budget.Fact {
     };
     // Root allocations and their owned strings remain valid until Host teardown.
     for (service.task_roots.items) |root| {
-        root.lock();
-        defer root.mutex.unlock();
-        for (root.facts[0..root.count]) |fact| if (fact.agent.eql(agent)) {
+        for (root.displayFacts()) |fact| if (fact.agent.eql(agent)) {
             result = fact;
         };
     }
@@ -36,9 +34,7 @@ pub fn latest(service: *runtime.Service, agent: id.AgentId) ?budget.Fact {
 pub fn unresolved(service: *runtime.Service, agent: id.AgentId) bool {
     for (service.store.task_facts.items) |saved| if (saved.fact.agent.eql(agent) and (saved.fact.status == .outcome_unknown or saved.fact.status == .interrupted)) return true;
     for (service.task_roots.items) |root| {
-        root.lock();
-        defer root.mutex.unlock();
-        for (root.facts[0..root.count]) |fact| if (fact.agent.eql(agent) and (fact.status == .outcome_unknown or fact.status == .interrupted)) return true;
+        for (root.displayFacts()) |fact| if (fact.agent.eql(agent) and (fact.status == .outcome_unknown or fact.status == .interrupted)) return true;
     }
     return false;
 }
