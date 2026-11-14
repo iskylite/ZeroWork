@@ -208,7 +208,7 @@ pub const Draft = struct {
 
     /// Persistence projection keeps transient login credentials out of the host
     /// transaction unless explicitly selected. store.zig stages the selected
-    /// credentials into Keychain and serializes only their opaque references.
+    /// credentials in the local store and serializes only their references.
     pub fn toPersistentHostConfig(self: Draft) !hosts_mod.HostConfig {
         var host = try self.toHostConfig();
         if (!self.save_password) host.password = null;
@@ -324,10 +324,10 @@ pub const SaveFailure = struct {
                 error.NoSpaceLeft, error.DiskQuota => "磁盘空间不足，无法保存连接。",
                 error.WriteFailed, error.InputOutput => "写入连接配置文件失败。请复制错误详情以便排查。",
                 error.HostRegistryTooLarge => "连接配置文件已达到大小上限。",
-                error.CredentialMissing => "钥匙串中找不到已有的凭据，请检查钥匙串。",
+                error.CredentialMissing => "找不到已保存的凭据。请重新填写。",
                 error.CredentialAuthenticationCanceled => "已取消系统认证。请重试并完成认证。",
                 error.CredentialAuthenticationFailed => "系统认证未通过。请重试并完成认证。",
-                error.CredentialDenied, error.CredentialLocked, error.CredentialUnavailable, error.CredentialStorageFailure => "无法访问系统钥匙串，请解锁或授权后重试。",
+                error.CredentialDenied, error.CredentialLocked, error.CredentialUnavailable, error.CredentialStorageFailure => "无法读写凭据。请检查钥匙串授权或应用数据目录权限。",
                 error.OutOfMemory => "内存不足，无法保存连接。",
                 else => "连接未保存。请复制错误详情以便排查。",
             },

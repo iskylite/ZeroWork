@@ -9,7 +9,7 @@ pub const Hooks = struct {
     overlay_owner: ?*ui.Node = null,
 };
 pub const Mode = enum { confirm, working, failed };
-pub const scope_text = "删除本应用的配置、主机、会话记录、缓存与诊断日志。\n同时删除此应用范围的钥匙串凭据，以及旧 ~/.zerowork\n中的迁移残余。";
+pub const scope_text = "删除本应用的配置、主机、会话记录、缓存与诊断日志。\n同时删除本应用的钥匙串和本地凭据，以及旧 ~/.zerowork 中的迁移残余。";
 pub const preserved_text = "保留共享 ~/.ssh/known_hosts、外部私钥，\n以及用户下载或导出的文件。";
 pub const outcome_text = "不可撤销。清除后退出应用，重启恢复初始状态。";
 

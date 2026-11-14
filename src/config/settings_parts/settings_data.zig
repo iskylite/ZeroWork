@@ -7,16 +7,19 @@ const controls = @import("settings_controls.zig");
 pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const page = try controls.Page.create(cx, bound, "settings.data");
     const query = bound.controller.search_query;
-    if (binding.matches(query, "位置 凭据 本地 配置目录 缓存 诊断 钥匙串 600 config_dir cache_dir logs_dir")) {
-        const section = try page.section("位置与凭据", "本地存储 · macOS 钥匙串", ui.icons.folder, 56, "settings.data.location", null);
+    if (binding.matches(query, "位置 凭据 钥匙串 本地 配置目录 缓存 诊断 600 config_dir cache_dir logs_dir")) {
+        const section = try page.section("位置与凭据", "存储方式与数据目录", ui.icons.folder, 56, "settings.data.location", null);
+        const storage = readPath(bound, "credential_storage");
+        try section.readonly("凭据存储", storage);
+        if (!std.mem.eql(u8, storage, "本地文件")) {
+            try section.iconAction("凭据文件不加密，仅当前用户可读写", "转为本地存储", ui.icons.lock, "settings.data.credential_local", .credential_local);
+        }
         if (bound.hooks.read) |read| {
             if (read(bound.hooks.context, .{ .section = "data", .key = "config_path" })) |value| try section.readonly("配置文件", value.text);
             if (read(bound.hooks.context, .{ .section = "data", .key = "hosts_path" })) |value| try section.readonly("主机配置", value.text);
         }
         try section.readonly("缓存目录", readPath(bound, "cache_dir"));
         try section.readonly("诊断日志目录", readPath(bound, "logs_dir"));
-        try section.readonly("密码与 API Key", "存储于 macOS 钥匙串");
-        try section.iconAction("凭据访问状态", "检查凭据状态", ui.icons.lock, "settings.data.credential_help", .credential_help);
         try section.readonly("配置文件权限", "仅当前用户可读写 · 600");
     }
     if (binding.matches(query, "会话记录 日志 缓冲 上限 快照 间隔 保留 天数 导出格式 ring_mb checkpoint_sec retention_days export_format")) {

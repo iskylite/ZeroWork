@@ -99,6 +99,13 @@ static void expect_secret(const char *reference, const char *expected) {
     assert(length == strlen(expected) && !memcmp(value, expected, length));
     zw_credentials_free(value, length);
 }
+static int verify_export(void *raw, const char *reference, const unsigned char *value, size_t length) {
+    int *count = raw;
+    assert(!strncmp(reference, "zw1_", 4));
+    assert(length == 16 && !memcmp(value, "preserved-secret", length));
+    ++*count;
+    return 0;
+}
 int main(void) {
     const char *scope = "com.zerowork.tests.mock-only";
     const char *a = "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -192,6 +199,16 @@ int main(void) {
     assert(confirmations == confirmations_before + 3 && reads == reads_before_confirmation + 1);
     assert(zw_credentials_get("com.zerowork.tests.other-scope", a, &missing, &length) == errSecParam);
     assert(confirmations == confirmations_before + 3);
+    reset_cache();
+    int copied = 0;
+    fail_confirmation = -43001;
+    assert(zw_credentials_export(scope, &copied, verify_export) == -43001 && copied == 0);
+    fail_confirmation = errSecSuccess;
+    fail_read = errSecAuthFailed;
+    fail_authorize = errSecUserCanceled;
+    assert(zw_credentials_export(scope, &copied, verify_export) == errSecUserCanceled && copied == 0);
+    fail_authorize = errSecSuccess;
+    assert(zw_credentials_export(scope, &copied, verify_export) == errSecSuccess && copied == 1);
     puts("native vault mock regression passed: one item, cached reads, immutable refs, rollback, size limit, restart, metadata-only erase, cache isolation, legacy deletion fallback, no UI");
     return 0;
 }

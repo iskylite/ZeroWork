@@ -16,6 +16,9 @@ const ProcessWindows = struct {
     primary: ?*App = null,
     updater: ?*@import("update/app_host.zig").Host(ProcessWindows) = null,
     runtime_config: ?*RuntimeConfig = null,
+    credential_conversion: ?std.Thread = null,
+    credential_conversion_done: std.atomic.Value(bool) = .init(false),
+    credential_conversion_error: ?anyerror = null,
     font_system: ?@FieldType(App, "font_manager") = null,
     pending: std.ArrayList(PendingWindow) = .empty,
     update_test_legacy_preflight: bool = false,
@@ -335,10 +338,21 @@ const ProcessWindows = struct {
     }
 
     fn deinit(self: *ProcessWindows) void {
+        if (self.credential_conversion) |thread| thread.join();
         for (self.pending.items) |*pending| pending.connection.deinit();
         self.pending.deinit(std.heap.c_allocator);
         if (self.runtime_config) |runtime| cleanupRuntimeConfig(runtime);
         if (self.font_system) |*fonts| fonts.deinit();
+    }
+
+    fn convertCredentials(self: *ProcessWindows) void {
+        const credentials = @import("config/credential_store.zig");
+        credentials.convertToLocal() catch |err| {
+            self.credential_conversion_error = err;
+        };
+        credentials.endConversion();
+        self.credential_conversion_done.store(true, .release);
+        @FieldType(App, "win").postEmptyEvent();
     }
 };
 var process_windows: ?*ProcessWindows = null;
@@ -12901,6 +12915,7 @@ const SettingsHost = struct {
             if (std.mem.eql(u8, key.key, "version_metadata")) return .{ .text = metadata.version_metadata };
         }
         if (std.mem.eql(u8, key.section, "data")) {
+            if (std.mem.eql(u8, key.key, "credential_storage")) return .{ .text = if (@import("config/credential_store.zig").usesLocal()) "本地文件" else "macOS 钥匙串" };
             if (std.mem.eql(u8, key.key, "config_path")) return .{ .text = self.runtime.path };
             if (std.mem.eql(u8, key.key, "hosts_path")) return .{ .text = (self.workspace orelse return null).hosts_path };
         }
@@ -13007,8 +13022,24 @@ const SettingsHost = struct {
                 self.cx.requestRedraw();
                 return;
             },
-            .credential_help => {
-                self.refresh("凭据由 macOS 钥匙串保管；访问权限在实际读取或保存时由系统确认。");
+            .credential_local => {
+                const process = process_windows orelse return;
+                const credentials = @import("config/credential_store.zig");
+                if (process.credential_conversion != null or process.data_cleanup_owner != null) return;
+                if (!credentials.beginConversion()) {
+                    self.refresh("凭据存储正在使用，请稍后重试。");
+                    return;
+                }
+                process.credential_conversion_error = null;
+                process.credential_conversion_done.store(false, .monotonic);
+                process.credential_conversion = std.Thread.spawn(.{}, ProcessWindows.convertCredentials, .{process}) catch {
+                    credentials.endConversion();
+                    self.refresh("无法启动凭据转换。请重试。");
+                    return;
+                };
+                self.refresh("正在将凭据转为本地存储…");
+                self.pending_rebuild = true;
+                self.cx.requestRedraw();
                 return;
             },
         }
@@ -13110,6 +13141,7 @@ const SettingsHost = struct {
 
     /// Rechecked at dispatch across every process-owned window and resource domain.
     fn dataCleanupBlocked(self: *SettingsHost) ?[]const u8 {
+        if (@import("config/credential_store.zig").isConverting()) return "请等待凭据转换完成";
         if (self.hasActiveCleanupSessions()) return "请先结束所有窗口的活动会话与后台连接";
         const process = process_windows orelse return "应用尚未准备好，请稍后重试";
         if (process.data_cleanup_owner) |owner| if (owner != self) return "另一窗口正在清除应用数据";
@@ -13254,7 +13286,7 @@ const SettingsHost = struct {
             return;
         };
         @import("config/credential_store.zig").eraseScope() catch |err| {
-            self.dataCleanupFailure("钥匙串", err);
+            self.dataCleanupFailure("凭据存储", err);
             return;
         };
         const report = @import("config/data_lifecycle.zig").eraseOwned(self.io, process.data_paths) catch |err| {
@@ -13404,6 +13436,12 @@ const SettingsHost = struct {
     }
 
     fn contentActionState(raw: *anyopaque, action: settings_content_view.Action) settings_content_view.ActionState {
+        if (action == .credential_local) {
+            const credentials = @import("config/credential_store.zig");
+            if (credentials.usesLocal()) return .{ .enabled = false, .reason = "已使用本地存储" };
+            if (credentials.isConverting()) return .{ .enabled = false, .reason = "正在转换凭据" };
+            return .{};
+        }
         if (action != .clear_logs and action != .clear_all) return .{};
         if (action == .clear_all) {
             const self: *SettingsHost = @ptrCast(@alignCast(raw));
@@ -13819,6 +13857,7 @@ const AppNavHost = struct {
             process.data_cleanup_exit = true;
             return;
         };
+        if (@import("config/credential_store.zig").isConverting()) return;
         self.native_close_pending = true;
         self.native_close_started = false;
         if (self.transfer_host) |transfer| transfer.closeManagerPopover();
@@ -14291,6 +14330,22 @@ const AppNavHost = struct {
         }
         if (self.settings) |settings| if (settings.open) {
             if (self.session_menu) |menu| if (menu.isOpen()) menu.hide();
+        };
+        if (process_windows) |process| if (process.credential_conversion) |thread| {
+            if (process.credential_conversion_done.load(.acquire)) {
+                thread.join();
+                process.credential_conversion = null;
+                for (process.runtime.windows.items) |*managed| {
+                    if (ProcessWindows.navFor(managed.app)) |nav| if (nav.settings) |settings| {
+                        settings.refresh(if (process.credential_conversion_error) |err|
+                            if (err == error.CredentialAuthenticationCanceled) "已取消转换，继续使用钥匙串。" else "凭据转换失败，继续使用钥匙串。请检查钥匙串授权和数据目录后重试。"
+                        else
+                            "已转为本地存储。");
+                        settings.pending_rebuild = true;
+                        settings.cx.requestRedraw();
+                    };
+                }
+            } else self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
         };
         if (self.settings) |settings| if (settings.open and settings.pending_rebuild) {
             const composing = (if (settings.mounted_page) |page| page.isComposing() else false) or (if (settings.providers) |providers| providers.isComposing() else false);
@@ -17676,7 +17731,7 @@ const WizardHost = struct {
             }
         }
         // The editor selects persistent credentials. The host transaction
-        // writes their Keychain references to the configuration.
+        // writes their credential references to the configuration.
         persistent.totp_secret = null;
         const owner = if (expected) |baseline| blk: {
             const previous = try candidate.get(baseline);
@@ -19989,6 +20044,7 @@ pub fn main() !void {
     const lifecycle = @import("config/data_lifecycle.zig");
     const credentials = @import("config/credential_store.zig");
     try credentials.configureScope(data_paths.directory, data_paths.is_override);
+    try credentials.configureLocal(io_threaded.io(), data_paths.directory);
     _ = lifecycle.prepare(io_threaded.io(), &data_paths) catch |err| {
         if (err == error.ResetIncomplete and dataStartupAlert(err, true)) {
             credentials.eraseScope() catch |failure| {

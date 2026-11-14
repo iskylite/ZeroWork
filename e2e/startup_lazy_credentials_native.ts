@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -20,11 +20,17 @@ async function click(id: string) {
 const report: any = { cases: [] };
 const reference = 'zw1_' + 'a'.repeat(64);
 
-async function scenario(kind: 'ssh' | 'ai', response: 'cancel' | 'success' = 'cancel') {
+async function scenario(kind: 'ssh' | 'ai', response: 'cancel' | 'success' | 'local' | 'migrate' = 'cancel') {
     const isolated = await realpath(await mkdtemp(join(tmpdir(), 'zw-startup-secret-')));
     const data = join(isolated, 'data');
     const rpc = join(isolated, 'rpc');
     await Promise.all([data, rpc].map(path => mkdir(path, { recursive: true })));
+    if (response === 'local') {
+        const credentials = join(data, 'credentials');
+        await mkdir(credentials, { mode: 0o700 });
+        await writeFile(join(credentials, '.local-storage'), '1', { mode: 0o600 });
+        await writeFile(join(credentials, reference), 'fixture-only-secret', { mode: 0o600 });
+    }
     let contacts = 0;
     let authenticatedPosts = 0;
     const server = createServer((request, response) => {
@@ -74,7 +80,7 @@ auth={ password_ref = "${reference}" }
     const app = spawn(join(prefix,'bin/zerowork'), [], { env: {
         ...process.env, ZEROWORK_DATA_DIR: data, ZEROWORK_AUTOCONNECT: '0',
         ZENIT_E2E_BACKGROUND: '1', ZENIT_E2E_ISOLATE_POINTER: '1',
-        ZW_TEST_CREDENTIAL_RESPONSE: response,
+        ZW_TEST_CREDENTIAL_RESPONSE: response === 'local' ? 'cancel' : response === 'migrate' ? 'success' : response,
     }, stdio: ['ignore','ignore','pipe'] });
     const ended = new Promise(done => app.once('close', done));
     let logs = '';
@@ -91,7 +97,22 @@ auth={ password_ref = "${reference}" }
         await h.resizeWindow(1440, 900);
         await new Promise(done => setTimeout(done,1050));
         assert.equal(calls(), 0, 'startup and idle model discovery do not ask for credentials');
-        assert.equal(contacts, 0);
+        if (response !== 'local') assert.equal(contacts, 0);
+        if (response === 'migrate') {
+            await click('toolbar.settings');
+            await click('settings.nav.data');
+            if (!(await h.query('settings.data.credential_local')).some(shown)) await click('settings.data.location.header');
+            await h.screenshot(join(output, 'credential-storage-keychain.png'));
+            await click('settings.data.credential_local');
+            const elapsed = performance.now();
+            assert((await h.resizeWindow(1370, 830)).ok);
+            assert(performance.now() - elapsed < 750);
+            await h.waitFor(async () => await readFile(join(data, 'credentials', '.local-storage'), 'utf8').catch(() => null), 5000);
+            assert.equal(await readFile(join(data, 'credentials', reference), 'utf8'), 'fixture-only-secret');
+            assert.equal(calls(), 1);
+            await h.screenshot(join(output, 'credential-storage-local.png'));
+            await click('settings.close');
+        }
         if (kind === 'ssh') {
             if (!(await h.query('sidebar.host')).some(shown)) await click('sidebar.restore');
             await click('sidebar.host');
@@ -104,7 +125,7 @@ auth={ password_ref = "${reference}" }
             await h.type_('test saved API key');
             await click('ai.send');
         }
-        await h.waitFor(() => calls() >= 1 || null, 5000);
+        if (response !== 'local') await h.waitFor(() => calls() >= 1 || null, 5000);
         const during = performance.now();
         assert((await h.resizeWindow(1350, 820)).ok);
         const responseMs = Math.round(performance.now() - during);
@@ -119,6 +140,8 @@ auth={ password_ref = "${reference}" }
         } else {
             await h.waitFor(async () => JSON.stringify(await h.query('ai.response')).includes('SAVED_KEY_OK') || null, 10000);
             assert(authenticatedPosts >= 1);
+            if (response === 'local') assert.equal(calls(), 0, 'local storage never queries Keychain');
+            if (response === 'migrate') assert.equal(calls(), 1, 'only the conversion queries Keychain');
         }
         assert((await h.resizeWindow(1280, 800)).ok);
         report.cases.push({ kind, response, nativeWindowMs: Math.round(shownAt ?? 0), workspaceReadyMs: readyMs, uiResizeDuringAuthorizationMs: responseMs, authorizationRequests: calls(), outboundConnections: contacts, authenticatedPosts });
@@ -137,6 +160,8 @@ auth={ password_ref = "${reference}" }
 try {
     for (const kind of ['ssh', 'ai'] as const) await scenario(kind);
     await scenario('ai', 'success');
+    await scenario('ai', 'local');
+    await scenario('ai', 'migrate');
     report.ok = true;
 } catch (error) {
     report.error = String(error);

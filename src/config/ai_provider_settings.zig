@@ -493,7 +493,8 @@ pub const ProviderView = struct {
         const label_row = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
         try label_row.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, title));
         if (field == .api_key) {
-            try label_row.appendChild(self.cx.allocator, try self.tooltipOnly(ui.icons.lock, "API Key 存储于 macOS 钥匙串", 18, try self.id(i, null, "keychain")));
+            const storage = if (@import("credential_store.zig").usesLocal()) "API Key 保存在本地应用数据中" else "API Key 存储于 macOS 钥匙串";
+            try label_row.appendChild(self.cx.allocator, try self.tooltipOnly(ui.icons.lock, storage, 18, try self.id(i, null, "keychain")));
         }
         try r.appendChild(self.cx.allocator, label_row);
         const input_wrapper = try self.input(.{ .provider = i, .field = field }, placeholder, 0, 32);

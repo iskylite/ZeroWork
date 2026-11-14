@@ -245,11 +245,12 @@ const Job = struct {
             const url = try catalog.endpoint(a, p.endpoint, p.kind);
             const secret = if (p.api_key.len == 0 and p.api_key_ref != null and
                 (self.require_list or @import("../config/credential_store.zig").isUnlocked()))
-                try @import("../config/credential_store.zig").getIfPresent(a, p.api_key_ref.?)
+                @import("../config/credential_store.zig").getIfPresent(a, p.api_key_ref.?) catch |err| if (self.require_list) return err else null
             else
                 null;
             defer if (secret) |key| @import("provider_config.zig").releaseCredential(a, key);
             const key = secret orelse p.api_key;
+            if (self.require_list and key.len == 0 and p.api_key_ref != null) return error.CredentialMissing;
             const auth: http.AuthStyle = if (key.len == 0) .none else if (p.kind == .anthropic) .anthropic_key else .bearer;
             const plan: http.RequestPlan = .{ .method = .GET, .endpoint = url, .accept = "application/json", .auth_style = auth, .api_key = if (key.len == 0) null else key, .timeout_ms = 10000, .cancel = &self.cancel };
             const body = if (key.len == 0 and p.api_key_ref != null) null else self.fetch(t, plan, "") catch |err| if (self.require_list) return err else null;

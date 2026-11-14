@@ -88,7 +88,7 @@ pub fn description(entry: registry.PluginManifest) []const u8 {
 }
 pub fn permissions(entry: registry.PluginManifest) []const u8 {
     if (std.mem.eql(u8, entry.id, "local")) return "允许本机 Shell 进程与当前目录访问；\n实际授权遵循 macOS 权限。";
-    if (std.mem.eql(u8, entry.id, "ssh")) return "连接时按需读取钥匙串、进行网络连接及用户批准的转发。";
+    if (std.mem.eql(u8, entry.id, "ssh")) return "连接时按需读取凭据，支持网络连接和经用户批准的转发。";
     if (std.mem.eql(u8, entry.id, "sftp")) return "按用户选择的路径访问本地文件，通过远端连接读写目录；传输任务可取消。";
     return "连接时按需请求权限";
 }

@@ -376,9 +376,9 @@ pub fn failureReason(code: ?[]const u8, stage: ?console.progress.Stage) []const 
     if (std.mem.eql(u8, value, "BodyTooLarge")) return "设备返回的脚本超过大小上限，无法验证。";
     if (std.mem.indexOf(u8, value, "AuthenticationEvidence") != null) return "当前设备缺少已验证的认证协议信息，无法继续认证。";
     if (std.mem.indexOf(u8, value, "Authentication") != null or std.mem.eql(u8, value, "PermissionDenied")) return "目标认证未成功，请检查当前凭据与访问权限。";
-    if (std.mem.eql(u8, value, "SecretDenied")) return "无法读取系统钥匙串中的凭据，请解锁或授权后重试。";
+    if (std.mem.eql(u8, value, "SecretDenied")) return "无法读取凭据。请检查钥匙串授权或应用数据目录权限。";
     if (std.mem.eql(u8, value, "SecretUngranted")) return "未获准读取本次连接所需的凭据。请重新打开连接。";
-    if (std.mem.eql(u8, value, "SecretUnavailable")) return "当前连接的凭据不可用，请检查系统钥匙串后重试。";
+    if (std.mem.eql(u8, value, "SecretUnavailable")) return "当前连接的凭据不可用。请检查连接设置后重试。";
     if (std.mem.eql(u8, value, "PasswordReplyUnavailable")) return "当前操作无法询问 BMC 密码。请在主机配置中填写密码后重试。";
     if (@import("../../ui/feedback_message.zig").knownMessage(value)) |message| return message;
     if (std.mem.indexOf(u8, value, "PublicEvidence") != null) return "无法取得可验证的公开设备信息，设备兼容性尚未确认。";

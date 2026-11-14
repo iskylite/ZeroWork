@@ -1,11 +1,16 @@
 //! App-scoped, immutable credential references. Secrets never appear in errors.
-//! Production bootstrap configures a scope once; tests use memory, never Security.
+//! Production defaults to Keychain and can explicitly move to private files.
 const std = @import("std");
 const builtin = @import("builtin");
+const LocalStore = @import("local_credentials.zig");
 const native = @import("../platform/keychain.zig");
 const alloc = std.heap.page_allocator;
 const default_service = "com.zerowork.app.credentials";
 var service: ?[:0]const u8 = null;
+var local_store: ?LocalStore = null;
+var local_mode: std.atomic.Value(bool) = .init(false);
+var converting: std.atomic.Value(bool) = .init(false);
+var transactions: std.atomic.Value(usize) = .init(0);
 var selected_backend: ?Backend = null;
 var test_memory: MemoryBackend = .{};
 var pending_cleanup: std.ArrayList([68]u8) = .empty;
@@ -34,6 +39,42 @@ pub fn configureScope(directory: []const u8, isolated: bool) !void {
 pub fn scopeService() ![]const u8 {
     return scope();
 }
+pub fn configureLocal(io: std.Io, directory: []const u8) !void {
+    if (local_store != null) return error.CredentialScopeAlreadyConfigured;
+    local_store = .{ .io = io, .directory = directory };
+    local_mode.store(try local_store.?.isSelected(), .release);
+}
+fn local() !LocalStore {
+    return local_store orelse error.CredentialScopeNotConfigured;
+}
+pub fn usesLocal() bool {
+    return local_mode.load(.acquire);
+}
+pub fn isUnlocked() bool {
+    return if (builtin.is_test) true else usesLocal() or native.cached();
+}
+pub fn isConverting() bool {
+    return converting.load(.acquire);
+}
+pub fn beginConversion() bool {
+    if (usesLocal() or converting.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return false;
+    if (transactions.load(.seq_cst) == 0) return true;
+    endConversion();
+    return false;
+}
+pub fn endConversion() void {
+    converting.store(false, .release);
+}
+pub fn convertToLocal() !void {
+    if (builtin.is_test) return error.CredentialUnavailable;
+    const target = try local();
+    try target.collect(&.{}, validReference);
+    try native.copyToLocal(try scope(), target);
+    for (pending_cleanup.items) |reference| try target.remove(&reference);
+    try target.select();
+    pending_cleanup.clearRetainingCapacity();
+    local_mode.store(true, .release);
+}
 fn scope() ![:0]const u8 {
     if (service) |s| return s;
     if (builtin.is_test) return "com.zerowork.tests.memory";
@@ -59,24 +100,13 @@ pub fn validReference(reference: []const u8) bool {
     for (reference[4..]) |c| if (!std.ascii.isHex(c)) return false;
     return true;
 }
-pub fn isUnlocked() bool {
-    return if (builtin.is_test) true else native.cached();
-}
-
 pub fn get(a: std.mem.Allocator, reference: []const u8) ![]u8 {
     if (!validReference(reference)) return error.InvalidCredentialReference;
     const s = try scope();
     if (backend()) |b| return b.get(b.context, a, s, reference);
     if (builtin.is_test) unreachable;
+    if (usesLocal()) return (try local()).get(a, reference);
     return native.get(a, s, reference);
-}
-/// Read an already unlocked value for foreground display helpers.
-pub fn getCached(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
-    if (!isUnlocked()) return null;
-    return getIfPresent(a, reference) catch |err| switch (err) {
-        error.CredentialBusy => null,
-        else => return err,
-    };
 }
 
 pub fn getIfPresent(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
@@ -85,16 +115,26 @@ pub fn getIfPresent(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
         else => return err,
     };
 }
+pub fn getCached(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
+    if (!isUnlocked()) return null;
+    return getIfPresent(a, reference) catch |err| switch (err) {
+        error.CredentialBusy => null,
+        else => return err,
+    };
+}
 fn add(reference: []const u8, secret: []const u8) !void {
     const s = try scope();
     if (backend()) |b| return b.add(b.context, s, reference, secret);
     if (builtin.is_test) unreachable;
+    if (usesLocal()) return (try local()).add(reference, secret);
     return native.add(alloc, s, reference, secret);
 }
 fn remove(reference: []const u8) !void {
+    if (!validReference(reference)) return error.InvalidCredentialReference;
     const s = try scope();
     if (backend()) |b| return b.remove(b.context, s, reference);
     if (builtin.is_test) unreachable;
+    if (usesLocal()) return (try local()).remove(reference);
     return native.remove(alloc, s, reference);
 }
 /// Call after both owned files are parsed successfully, retaining their union of refs.
@@ -102,12 +142,15 @@ fn remove(reference: []const u8) !void {
 pub fn reconcileScope(keep: []const []const u8) !void {
     const s = try scope();
     for (keep) |reference| if (!validReference(reference)) return error.InvalidCredentialReference;
-    if (backend()) |b| try b.collect(b.context, s, keep) else if (builtin.is_test) unreachable else try native.collect(alloc, s, keep);
+    if (backend()) |b| try b.collect(b.context, s, keep) else if (builtin.is_test) unreachable else if (usesLocal()) try (try local()).collect(keep, validReference) else try native.collect(alloc, s, keep);
     pending_cleanup.clearRetainingCapacity();
 }
 pub fn eraseScope() !void {
-    const s = try scope();
-    if (backend()) |b| try b.collect(b.context, s, &.{}) else if (builtin.is_test) unreachable else try native.erase(s);
+    if (backend()) |_| return reconcileScope(&.{});
+    if (builtin.is_test) unreachable;
+    if (isConverting()) return error.CredentialBusy;
+    try native.erase(try scope());
+    try (try local()).collect(&.{}, validReference);
     pending_cleanup.clearRetainingCapacity();
 }
 /// Failed cleanup is retried before creating more secrets, bounding accumulation.
@@ -131,6 +174,9 @@ pub const Transaction = struct {
     retired: std.ArrayList([]const u8) = .empty,
     committed: bool = false,
     pub fn init() !Transaction {
+        _ = transactions.fetchAdd(1, .seq_cst);
+        errdefer _ = transactions.fetchSub(1, .seq_cst);
+        if (converting.load(.seq_cst)) return error.CredentialBusy;
         try drainCleanup();
         try pending_cleanup.ensureUnusedCapacity(alloc, 16384);
         return .{ .arena = .init(alloc) };
@@ -138,6 +184,7 @@ pub const Transaction = struct {
     pub fn deinit(self: *Transaction) void {
         if (!self.committed) for (self.created.items) |reference| deferCleanup(reference);
         self.arena.deinit();
+        _ = transactions.fetchSub(1, .seq_cst);
     }
     /// A changed value receives a cryptographically random, immutable new reference.
     pub fn stage(self: *Transaction, io: std.Io, a: std.mem.Allocator, secret: ?[]const u8, old_reference: ?[]const u8) !?[]const u8 {
@@ -298,9 +345,4 @@ test "credential isolated instance service is stable and refuses scope switching
     try configureScope("/owned-fixture/instance-a", true);
     try std.testing.expectError(error.CredentialScopeAlreadyConfigured, configureScope("/owned-fixture/instance-b", true));
     try std.testing.expectEqualStrings(first, try scopeService());
-}
-
-pub fn authorizeScope() !void {
-    if (builtin.is_test) return error.CredentialUnavailable;
-    try native.authorize(try scope());
 }

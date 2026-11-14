@@ -103,7 +103,7 @@ ZeroWork $VERSION · Apple Silicon · macOS 13 或更新版本
 
 本安装包不包含测试 Harness、测试插件、服务器密码或用户配置。
 应用数据存于 ~/Library/Application Support/com.zerowork.app，诊断日志与缓存存于 Library/Logs 和 Library/Caches 下同名目录。
-已保存的 SSH 密码、密钥口令、TOTP 秘钥和 AI API Key 存于 macOS 钥匙串。
+已保存的凭据默认存于 macOS 钥匙串。可在「数据与日志」中转为仅当前用户可读写的本地文件。
 首次启动兼容迁移旧 ~/.zerowork。仅将 App 移到废纸篓会保留数据；彻底清理请在设置 → 数据中选择“清除全部应用数据…”。
 $SIGNING_NOTICE
 TXT

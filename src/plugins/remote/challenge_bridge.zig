@@ -86,7 +86,7 @@ pub const Bridge = struct {
         const endpoint = request.endpoint();
         const source = try std.fmt.allocPrint(allocator, "{s} · {s}@{s}:{d} · 第 {d} 跳", .{ if (details.display_name.len == 0) endpoint.host else details.display_name, endpoint.user, endpoint.host, endpoint.port, request.identity.hop_index + 1 });
         var payload: shared.Payload = .{ .allow_save_password = details.allow_save_password and request.kind == .password, .title = title(request.kind), .source_name = source, .detail = if (request.state == .failed) "认证未通过，请核对后重新填写；取消会停止本次连接。" else if (details.allow_save_password and request.kind == .password) "可选择保存密码供下次连接使用；取消会停止本次认证。" else "仅用于当前连接；取消会停止本次认证。", .submit_label = submitLabel(request.kind) };
-        if (self.password_save_failed and request.kind == .password) payload.detail = "密码保存失败。请解锁或授权系统钥匙串后重试，也可取消勾选保存密码后仅连接本次。";
+        if (self.password_save_failed and request.kind == .password) payload.detail = "密码保存失败。请检查凭据存储，也可以取消勾选保存密码，仅连接本次。";
         var fields: [auth.max_prompts]shared.Field = undefined;
         const kind: shared.Kind = switch (request.kind) {
             .host_key_unknown, .host_key_changed => .trust_material,

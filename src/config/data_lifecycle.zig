@@ -1,5 +1,5 @@
 //! Application-owned filesystem lifecycle. Call prepare before opening stores
-//! or logs. Stop writers, beginReset, erase Keychain, then eraseOwned.
+//! or logs. Stop writers, beginReset, erase credentials, then eraseOwned.
 const std = @import("std");
 const Paths = @import("paths.zig").Paths;
 const Dir = std.Io.Dir;
@@ -172,7 +172,7 @@ fn ensurePrivate(io: std.Io, path: []const u8) !Dir {
     return dir;
 }
 
-/// Establish the durable recovery gate before deleting any Keychain item.
+/// Establish the durable recovery gate before deleting credentials.
 /// Callers must not begin credential erasure unless this succeeds. Both the
 /// default account and an isolated instance use the same startup gate.
 pub fn beginReset(io: std.Io, paths: *const Paths) !void {
@@ -326,7 +326,7 @@ fn eraseData(io: std.Io, path: []const u8) !void {
     };
 }
 
-/// Reports every owned root independently. beginReset and Keychain erasure
+/// Reports every owned root independently. beginReset and credential erasure
 /// must already have succeeded. Retrying must preserve the recovery gate;
 /// never recreate defaults or import residual legacy state during reset.
 pub fn eraseOwned(io: std.Io, paths: *const Paths) !EraseReport {

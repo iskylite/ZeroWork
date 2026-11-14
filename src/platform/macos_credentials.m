@@ -63,6 +63,7 @@ static CFMutableDictionaryRef cached_vault;
 static CFStringRef confirmed_service;
 #endif
 static int vault_exists;
+#if !defined(ZW_CREDENTIALS_LOCAL)
 static pthread_mutex_t vault_lock = PTHREAD_MUTEX_INITIALIZER;
 static void unlock_vault(pthread_mutex_t **lock) { pthread_mutex_unlock(*lock); }
 #define ZW_VAULT_GUARD \
@@ -75,6 +76,9 @@ int zw_credentials_cached(void) {
     pthread_mutex_unlock(&vault_lock);
     return ready;
 }
+#else
+#define ZW_VAULT_GUARD
+#endif
 
 static const CFStringRef vault_account = CFSTR("vault-v1");
 
@@ -241,6 +245,41 @@ static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
 }
 static OSStatus load_vault(const char *service) { return load_vault_with_ui(service, 0); }
 int zw_credentials_authorize(const char *service) { ZW_VAULT_GUARD; return (int)load_vault_with_ui(service, 1); }
+#if !defined(ZW_CREDENTIALS_LOCAL)
+typedef int (*export_value)(void *, const char *, const unsigned char *, size_t);
+struct export_context { export_value write; void *context; int failed; };
+static void write_exported_value(const void *key, const void *value, void *raw) {
+    struct export_context *export = raw;
+    if (export->failed) return;
+    char reference[69];
+    if (!CFStringGetCString(key, reference, sizeof(reference), kCFStringEncodingASCII)) {
+        export->failed = 1;
+        return;
+    }
+    export->failed = export->write(export->context, reference, CFDataGetBytePtr(value), (size_t)CFDataGetLength(value));
+}
+int zw_credentials_export(const char *service, void *context, export_value write) {
+    ZW_VAULT_GUARD;
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+    unsigned char *fixture_value = NULL;
+    size_t fixture_length = 0;
+    int fixture = fixture_credential(&fixture_value, &fixture_length);
+    if (fixture != 1) {
+        if (fixture) return fixture;
+        int failed = write(context, "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", fixture_value, fixture_length);
+        memset(fixture_value, 0, fixture_length);
+        free(fixture_value);
+        return failed ? errSecIO : errSecSuccess;
+    }
+#endif
+    OSStatus status = load_vault(service);
+    if (status == errSecInteractionNotAllowed || status == errSecAuthFailed) status = load_vault_with_ui(service, 1);
+    if (status) return status;
+    struct export_context state = { write, context, 0 };
+    CFDictionaryApplyFunction(cached_vault, write_exported_value, &state);
+    return state.failed ? errSecIO : errSecSuccess;
+}
+#endif
 #pragma clang diagnostic pop
 static OSStatus save_vault(const char *service, CFMutableDictionaryRef candidate) {
     CFMutableDictionaryRef q = vault_query(service);
