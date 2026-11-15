@@ -123,3 +123,8 @@ test "v0.7 run_in_terminal 工具描述与 occupied_policy schema 契约" {
         try std.testing.expect(std.mem.indexOf(u8, contribution.definition.description, "host.attach_shell") != null);
     }
 }
+
+// Pull in the V0.7 §3.7 role-template contract tests through this suite.
+comptime {
+    _ = @import("config/ai_role_templates.zig");
+}

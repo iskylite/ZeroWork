@@ -10840,6 +10840,17 @@ const ChildDialog = struct {
         prefs.mcp_ids = mcps[0..mcp_count];
         prefs.targets = targets[0..target_count];
         const shared = self.host.shared_service.?;
+        // V0.7 §3.9 context budget gate: a model or effort change must fit
+        // the target model's context window; otherwise reject the switch and
+        // keep the session on its current model. History is never trimmed.
+        if (prefs.model) |selection| {
+            if (record.child.?.info.model == null or !std.mem.eql(u8, record.child.?.info.model.?.model_id, selection.model_id) or !std.mem.eql(u8, record.child.?.info.model.?.provider_id, selection.provider_id)) {
+                const live = (self.host.runtime_config orelse return error.ContextUnavailable).value;
+                const capacity = try @import("ai/provider_config.zig").fromSettingsSelection(live.ai, selection);
+                const used = try @import("ai/local_text_request.zig").inputTokens(.{ .model = if (record.child.?.info.model) |current| current.model_id else "", .system = "", .messages = record.history.messages });
+                if (used > capacity.context_window) return error.ContextBudgetExceeded;
+            }
+        }
         const parent = try shared.service.store.fence(record.child.?.info.owning_parent_conversation);
         const owner = (try shared.service.store.validate(parent)).binding.?.owner;
         const allowed = try self.parent.captureOwnerScope(owner);

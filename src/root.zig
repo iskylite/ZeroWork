@@ -1,5 +1,6 @@
 pub const bmc_ikvm = @import("plugins/bmc_ikvm/non_ui.zig");
 pub const config = @import("config/config.zig");
+pub const ai_role_templates = @import("config/ai_role_templates.zig");
 pub const host_identity = @import("host/identity.zig");
 pub const host_operation = @import("host/operation.zig");
 pub const plugin_registry = @import("host/plugin_registry.zig");
