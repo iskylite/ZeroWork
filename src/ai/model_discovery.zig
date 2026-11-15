@@ -18,6 +18,41 @@ fn hasAutomaticList(ai: config.Ai) bool {
     }
     return false;
 }
+const provider_config = @import("provider_config.zig");
+const default_cache_name = "ai-default-model-v1.json";
+const default_cache_limit = 8192;
+const SavedDefault = struct {
+    provider: [32]u8,
+    model: config.AiModel,
+};
+
+fn automaticDefault(ai: config.Ai) ?usize {
+    var selected: ?usize = null;
+    for (ai.providers[0..@min(ai.provider_count, ai.providers.len)], 0..) |p, i| {
+        if (!std.mem.eql(u8, provider_config.providerId(p), ai.default_provider)) continue;
+        if (selected != null or !p.enabled or p.endpoint.len == 0 or !automaticList(p)) return null;
+        if (p.api_key.len == 0 and p.api_key_ref == null and !provider_config.allowsNoAuth(p.kind, p.endpoint)) return null;
+        selected = i;
+    }
+    return selected;
+}
+
+fn providerFingerprint(p: config.AiProvider) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for ([_][]const u8{ provider_config.providerId(p), @tagName(p.kind), p.endpoint, p.api_key_ref orelse "" }) |field| {
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, field.len, .little);
+        hash.update(&length);
+        hash.update(field);
+    }
+    var context: [4]u8 = undefined;
+    std.mem.writeInt(u32, &context, p.context_window, .little);
+    hash.update(&context);
+    return hash.finalResult();
+}
+
+pub const DefaultStatus = enum { setup, loading, unavailable };
+
 pub const ModelMetadata = struct { id: []const u8, reasoning_known: bool, vision_known: bool };
 pub const Service = struct {
     job: ?*Job = null,
@@ -27,6 +62,9 @@ pub const Service = struct {
     next_list_refresh: i64 = 0,
     list_refresh_requested: bool = false,
     revision: u64 = 0,
+    cache_checked_revision: ?u64 = null,
+    default_completed_revision: ?u64 = null,
+    default_cache_dirty: bool = false,
     request_error: ?anyerror = null,
     diagnostic: http.Diagnostic = .{},
     pub fn deinit(self: *Service) void {
@@ -49,6 +87,78 @@ pub const Service = struct {
         };
         return ai;
     }
+    pub fn defaultStatus(self: *const Service, ai: config.Ai, revision: u64) DefaultStatus {
+        if (automaticDefault(ai) == null) return .setup;
+        return if (self.default_completed_revision == revision and self.job == null) .unavailable else .loading;
+    }
+
+    pub fn restoreDefault(self: *Service, io: std.Io, directory: []const u8, ai: config.Ai, revision: u64) !bool {
+        if (self.cache_checked_revision == revision) return false;
+        self.cache_checked_revision = revision;
+        self.default_completed_revision = null;
+        self.default_cache_dirty = false;
+        const index = automaticDefault(ai) orelse return false;
+        if (ai.providers[index].api_key.len != 0) return false;
+        const dir = try std.Io.Dir.cwd().openDir(io, directory, .{});
+        defer dir.close(io);
+        const file = dir.openFile(io, default_cache_name, .{ .follow_symlinks = false, .allow_directory = false }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer file.close(io);
+        const info = try file.stat(io);
+        if (info.kind != .file or info.nlink != 1 or info.size > default_cache_limit) return false;
+        var bytes: [default_cache_limit]u8 = undefined;
+        const count = try file.readPositionalAll(io, bytes[0..@intCast(info.size)], 0);
+        const a = std.heap.c_allocator;
+        const saved = std.json.parseFromSlice(SavedDefault, a, bytes[0..count], .{}) catch return false;
+        defer saved.deinit();
+        if (!std.mem.eql(u8, &saved.value.provider, &providerFingerprint(ai.providers[index]))) return false;
+        const current = try Job.create(ai, revision);
+        errdefer current.destroy();
+        const owned = current.arena.allocator();
+        const models = try owned.alloc(config.AiModel, 1);
+        models[0] = saved.value.model;
+        models[0].id = try owned.dupe(u8, models[0].id);
+        current.ai.providers[index].models = models;
+        current.ai.providers[index].model_count = models.len;
+        _ = provider_config.fromSettings(current.ai) catch {
+            current.destroy();
+            return false;
+        };
+        if (self.current) |old| old.destroy();
+        self.current = current;
+        self.generation +|= 1;
+        return true;
+    }
+
+    pub fn saveDefault(self: *Service, io: std.Io, directory: []const u8, ai: config.Ai, revision: u64) !void {
+        if (!self.default_cache_dirty) return;
+        self.default_cache_dirty = false;
+        const index = automaticDefault(ai) orelse return;
+        if (ai.providers[index].api_key.len != 0) return;
+        const dir = try std.Io.Dir.cwd().openDir(io, directory, .{});
+        defer dir.close(io);
+        const effective_ai = self.effective(ai, revision);
+        const resolved = provider_config.fromSettings(effective_ai) catch {
+            dir.deleteFile(io, default_cache_name) catch |err| if (err != error.FileNotFound) return err;
+            return;
+        };
+        const models = effective_ai.providers[index].models;
+        const model = for (models) |candidate| {
+            if (std.mem.eql(u8, candidate.id, resolved.model)) break candidate;
+        } else return;
+        const a = std.heap.c_allocator;
+        const data = try std.json.Stringify.valueAlloc(a, SavedDefault{ .provider = providerFingerprint(ai.providers[index]), .model = model }, .{});
+        defer a.free(data);
+        if (data.len > default_cache_limit) return error.ModelDiscoveryCacheTooLarge;
+        var pending = try dir.createFileAtomic(io, default_cache_name, .{ .permissions = @fromBackingInt(0o600), .replace = true });
+        defer pending.deinit(io);
+        try pending.file.writePositionalAll(io, data, 0);
+        try pending.file.sync(io);
+        try pending.replace(io);
+    }
+
     pub fn modelMetadata(self: *const Service, id: []const u8) ?ModelMetadata {
         const current = self.current orelse return null;
         for (current.metadata.items) |entry| if (std.mem.eql(u8, entry.id, id)) return entry;
@@ -119,6 +229,11 @@ pub const Service = struct {
         if (self.job) |job| if (job.done.load(.acquire)) {
             job.thread.?.join();
             self.job = null;
+            if (job.revision == revision and automaticDefault(ai) != null) {
+                self.default_completed_revision = revision;
+                self.default_cache_dirty = job.success and job.default_catalog;
+                changed = true;
+            }
             if (job.revision == revision and job.success) {
                 if (self.current) |current| current.destroy();
                 self.current = job;
@@ -155,6 +270,7 @@ const Job = struct {
     cancel: @import("provider.zig").CancelToken = .{},
     done: std.atomic.Value(bool) = .init(false),
     success: bool = false,
+    default_catalog: bool = false,
     require_list: bool = false,
     only_automatic_lists: bool = false,
     automatic_lists: []const bool = &.{},
@@ -182,7 +298,7 @@ const Job = struct {
         return self;
     }
     fn createRefresh(source: config.Ai, previous: config.Ai, revision: u64, only_automatic_lists: bool) !*Job {
-        const job = try Job.create(if (only_automatic_lists) previous else source, revision);
+        const job = try Job.create(previous, revision);
         errdefer job.destroy();
         const automatic = try job.arena.allocator().alloc(bool, job.ai.provider_count);
         for (automatic, source.providers[0..job.ai.provider_count]) |*value, p| value.* = automaticList(p);
@@ -224,7 +340,6 @@ const Job = struct {
             self.diagnostic = context.diagnostic;
         };
         const t = transport.native(&context);
-        const provider_config = @import("provider_config.zig");
         const resolved = try provider_config.fromSettings(self.ai);
         try probeChat(self.arena.allocator(), t, resolved, &self.cancel, &self.diagnostic);
         self.success = true;
@@ -286,13 +401,19 @@ const Job = struct {
                     remote.?.entries = all;
                 }
             }
-            if (remote != null) self.success = true;
+            if (remote != null) {
+                self.success = true;
+                if (std.mem.eql(u8, provider_config.providerId(p.*), self.ai.default_provider)) self.default_catalog = true;
+            }
             defer if (remote) |*c| c.deinit();
             if (self.only_automatic_lists and remote == null) continue;
             var models: std.ArrayList(config.AiModel) = .empty;
-            // A short refresh starts from the published snapshot. Replace an
-            // automatic list only on a valid response; failures keep its old list.
-            const replace_list = self.only_automatic_lists and remote != null;
+            // A valid automatic catalog replaces the current list. Keep the
+            // previous default when it is still offered by the provider.
+            const replace_list = self.automatic_lists.len != 0 and self.automatic_lists[provider_index] and remote != null;
+            const preferred = if (replace_list and p.models.len != 0) for (p.models) |candidate| {
+                if (candidate.default) break candidate.id;
+            } else p.models[0].id else null;
             if (!replace_list) try models.appendSlice(a, p.models);
             if (models.items.len == 0 and p.model.len != 0) try models.append(a, .{ .id = p.model, .context_window = p.context_window, .default = true, .efforts = @splat(false) });
             // A configured list is authoritative. Only an unconfigured provider
@@ -313,6 +434,7 @@ const Job = struct {
                 }
             };
             for (models.items) |*m| {
+                if (preferred) |id| m.default = std.mem.eql(u8, id, m.id);
                 var capability: catalog.Capability = .{};
                 if (remote) |r| capability = r.resolve("", m.id) orelse .{};
                 if (p.kind == .ollama) {
@@ -587,7 +709,6 @@ fn probeChat(a: std.mem.Allocator, t: transport.Transport, resolved: @import("pr
             try stream.feed(bytes);
         }
     };
-    const provider_config = @import("provider_config.zig");
     const secret = try provider_config.loadCredential(resolved, a, cancel);
     defer if (secret) |key| provider_config.releaseCredential(a, key);
     var authenticated = resolved;
@@ -718,4 +839,51 @@ test "model discovery missing window stays unknown while explicit and advertised
             try std.testing.expectEqual(case.expected, selected.context_window);
         }
     }
+}
+
+test "model discovery restores a validated default across restarts for the same provider" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+    var providers = [_]config.AiProvider{.{
+        .name = "gateway",
+        .enabled = true,
+        .endpoint = "http://127.0.0.1:4312/v1/chat/completions",
+        .context_window = 16000,
+    }};
+    const source: config.Ai = .{ .default_provider = "gateway", .providers = &providers, .provider_count = 1 };
+    const revision = 7;
+    var discovery: Service = .{};
+    defer discovery.deinit();
+    try std.testing.expectEqual(.loading, discovery.defaultStatus(source, revision));
+    try std.testing.expect(!try discovery.restoreDefault(std.testing.io, path, source, revision));
+    const found = try Job.create(source, revision);
+    discovery.current = found;
+    const arena = found.arena.allocator();
+    const models = try arena.alloc(config.AiModel, 1);
+    models[0] = .{ .id = "discovered-chat", .context_window = 32000, .vision = true };
+    found.ai.providers[0].models = models;
+    found.ai.providers[0].model_count = models.len;
+    discovery.default_cache_dirty = true;
+    try discovery.saveDefault(std.testing.io, path, source, revision);
+
+    var restarted: Service = .{};
+    defer restarted.deinit();
+    try std.testing.expect(try restarted.restoreDefault(std.testing.io, path, source, 1));
+    const cached = try provider_config.fromSettings(restarted.effective(source, 1));
+    try std.testing.expectEqualStrings("discovered-chat", cached.model);
+    try std.testing.expectEqual(@as(u32, 32000), cached.context_window);
+    try std.testing.expect(cached.vision);
+    try std.testing.expect(!restarted.busy());
+    const refresh = try Job.createRefresh(source, restarted.effective(source, 1), 1, false);
+    defer refresh.destroy();
+    try std.testing.expect(refresh.automatic_lists[0]);
+    try std.testing.expectEqualStrings("discovered-chat", refresh.ai.providers[0].models[0].id);
+
+    providers[0].endpoint = "http://127.0.0.1:4313/v1/chat/completions";
+    try std.testing.expect(!try restarted.restoreDefault(std.testing.io, path, source, 2));
+    try std.testing.expectError(error.MissingModel, provider_config.fromSettings(restarted.effective(source, 2)));
+    providers[0].enabled = false;
+    try std.testing.expectEqual(.setup, restarted.defaultStatus(source, 3));
 }

@@ -530,6 +530,10 @@ pub const Bridge = struct {
                     if (std.mem.eql(u8, id, "host.attach_shell")) {
                         if (attachment_sources.items.len == 0) continue;
                         contribution.session_targets = attachment_sources.items;
+                    } else if (contribution.definition.effect == .read_state) {
+                        // Exact admitted execution receipts are readable even
+                        // while their terminal has no live execution service.
+                        if (!has_terminal_source) continue;
                     } else {
                         if (execution_sources.items.len == 0) continue;
                         if (std.mem.eql(u8, id, "host.run_in_terminal")) contribution.session_targets = execution_sources.items;
@@ -719,9 +723,10 @@ pub const Bridge = struct {
             self.emitHostStep(invocation, if (err == error.CancelledBeforeDispatch) .cancelled else .failed, @errorName(err));
             return err;
         };
-        // Retain rejected/cancelled result blocks too: no host dispatch error
-        // is thrown for these, so otherwise the UI only keeps the arguments.
-        const detail = if (result.status != .succeeded) std.json.Stringify.valueAlloc(allocator, .{ .status = result.status, .content = result.blocks, .receipt = result.receipt }, .{}) catch null else null;
+        // The presentation can read this receipt while the worker still owns
+        // its ledger. Keep the full execution result when the tool completes.
+        const execution_result = @import("../ai/execution_result_projection.zig").supports(invocation.tool_id);
+        const detail = if (result.status != .succeeded or execution_result) std.json.Stringify.valueAlloc(allocator, .{ .status = result.status, .content = result.blocks, .receipt = result.receipt }, .{}) catch null else null;
         defer if (detail) |value| allocator.free(value);
         const answer = if (result.status == .succeeded and @import("../ai/user_interaction.zig").supports(invocation.tool_id) and result.blocks.len == 1 and result.blocks[0] == .structured)
             result.blocks[0].structured

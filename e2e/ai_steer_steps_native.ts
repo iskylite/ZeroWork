@@ -110,7 +110,7 @@ try {
   assert.equal((await visible('ai.turn.complete')).id, footer.id, 'expanding process leaves the summary intact');
   report.checks.push('The process toggle is separate; the original summary remains below the final answer');
   assert.equal((await h.query('ai.followup.consumed')).length, 1);
-  const journal = (await readFile(join(data, 'ai-sessions.jsonl'), 'utf8')).trim().split('\n').map(s => JSON.parse(s));
+  const journal = (await readFile(join(data, 'ai-sessions-active.jsonl'), 'utf8')).trim().split('\n').map(s => JSON.parse(s));
   const consumed = journal.filter((e: any) => e.receipt?.delivery === 'consumed').map((e: any) => e.receipt);
   assert.equal(consumed.length, 2); assert.equal(consumed[0].turn, consumed[1].turn);
   await capture('03-completed');

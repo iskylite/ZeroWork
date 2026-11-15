@@ -22,6 +22,7 @@ await writeFile(file, 'Start of fixture.\nWorkspace content from the isolated lo
 await writeFile(join(zdot, '.zshrc'), "bindkey -e\nPS1='workspace-fixture%# '\n");
 
 const journalPath = join(data, 'ai-sessions.jsonl');
+const activeJournalPath = join(data, 'ai-sessions-active.jsonl');
 if (!picker) {
   const conversation = randomBytes(16).toString('hex');
   const agent = randomBytes(16).toString('hex');
@@ -194,7 +195,7 @@ async function reopenConversation(restore = true) {
   await click('ai.strip');
   if (restore) {
     await click('ai.sessions');
-    await click('ai.session.restore.1');
+    await click('ai.session.restore.2');
   }
 }
 async function quit() {
@@ -211,7 +212,7 @@ async function quit() {
 }
 async function workspaceUpdates() {
   try {
-    return (await readFile(journalPath, 'utf8')).trim().split('\n').filter(Boolean)
+    return (await readFile(activeJournalPath, 'utf8')).trim().split('\n').filter(Boolean)
       .map(line => JSON.parse(line).event).filter(event => event.kind === 'workspace_update');
   } catch (error: any) {
     if (error.code !== 'ENOENT') throw error;
@@ -289,7 +290,7 @@ try {
     return text(await h.query('ai.panel')).includes('WORKSPACE_ROUND_COMPLETE') || null;
   }, 20000);
   await h.waitFor(async () => !(await h.query('ai.workspace')).some(shown) || null, 15000);
-  const rows = String(await readFile(journalPath, 'utf8')).trim().split('\n').map(row => JSON.parse(row));
+  const rows = String(await readFile(activeJournalPath, 'utf8')).trim().split('\n').map(row => JSON.parse(row));
   assert(rows.some(row => row.event?.kind === 'workspace_ack' && row.event.workspace_ack_revision === removalRevision));
   assert.equal(requests.length, 3);
   report.checks.push('Restore did not call the Provider; relative read, list, and search used the saved workspace, then a streamed old relative plan was rejected while a fixed absolute read still succeeded. The new notice was acknowledged and the removal pill cleared.');

@@ -42,7 +42,7 @@ const visible=(id:string)=>h.waitFor(async()=>{assert(alive());return(await h.qu
 const report:any={status:'running',isolation:iso,binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),checks:[],screenshots:[]};
 const click=async(id:string)=>{report.last_action=id;await visible(id);assert((await h.clickTestId(id)).ok,id)};
 const capture=async(name:string)=>{await h.mouseMove(1,1);await h.sleep(200);assert((await h.screenshot(join(out,name+'.png'))).ok);report.screenshots.push(join(out,name+'.png'))};
-const journal=async()=>String(await readFile(join(data,'ai-sessions.jsonl'),'utf8')).trim().split('\n').map(row=>JSON.parse(row));
+const journal=async()=>String(await readFile(join(data,'ai-sessions-active.jsonl'),'utf8')).trim().split('\n').map(row=>JSON.parse(row));
 try{
  await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
  await click('ai.prompt');await h.type_('ROOT_FIRST_TASK 委派材料检查并汇总');await click('ai.send');

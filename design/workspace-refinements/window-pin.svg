@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="164" height="116" viewBox="0 0 164 116">
+  <defs>
+    <g id="island">
+      <rect width="132" height="36" rx="18" fill="#fff"/>
+      <g fill="none" stroke="#5b5b65" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path transform="translate(10 10) scale(.6667)" d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1.45-3.38A1.5 1.5 0 0 1 15.5 15H17a4 4 0 0 0 4-4c0-4.42-4.03-8-9-8ZM7.5 12h.01M10 7.5h.01M15.5 8h.01M18 12h.01"/>
+        <path transform="translate(42 10) scale(.6667)" d="m9.94 14.34 1.06 4 1.06-4a3 3 0 0 1 2.12-2.12l4-1.06-4-1.06A3 3 0 0 1 12.06 8L11 4 9.94 8A3 3 0 0 1 7.82 10.1l-4 1.06 4 1.06a3 3 0 0 1 2.12 2.12ZM20 2v4m-2-2h4M4 18v4m-2-2h4"/>
+        <g transform="translate(74 10) scale(.6667)">
+          <path d="m10 3-.7 2.3-2 .9L5 5.7 3 9l1.7 1.7v2.6L3 15l2 3.3 2.3-.5 2 .9L10 21h4l.7-2.3 2-.9 2.3.5 2-3.3-1.7-1.7v-2.6L21 9l-2-3.3-2.3.5-2-.9L14 3h-4Z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </g>
+      </g>
+    </g>
+    <path id="pin" transform="translate(106 10) scale(.6667)" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 17v5M9 10.76V5a1 1 0 0 0-1-1 1 1 0 0 1 0-2h8a1 1 0 0 1 0 2 1 1 0 0 0-1 1v5.76a2 2 0 0 0 1.11 1.79l1.78.9A2 2 0 0 1 19 15.24V17H5v-1.76a2 2 0 0 1 1.11-1.79l1.78-.9A2 2 0 0 0 9 10.76Z"/>
+  </defs>
+  <rect width="164" height="116" fill="#ececf2"/>
+  <g id="window-pin-off" transform="translate(16 16)" aria-label="窗口置顶">
+    <use href="#island"/>
+    <use href="#pin" color="#5b5b65"/>
+  </g>
+  <g id="window-pin-on" transform="translate(16 64)" aria-label="取消窗口置顶">
+    <use href="#island"/>
+    <use href="#pin" color="#4f5ed9"/>
+  </g>
+</svg>

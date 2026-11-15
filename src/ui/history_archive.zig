@@ -33,6 +33,7 @@ pub const Job = struct {
     allocator: std.mem.Allocator,
     archive: Archive.Archive,
     key: []u8,
+    manifest_path: ?[]u8 = null,
     revision: u64,
     generation: u64,
     thread: ?std.Thread = null,
@@ -41,12 +42,20 @@ pub const Job = struct {
     failure: ?anyerror = null,
     document: ?*Document = null,
     pub fn start(archive: Archive.Archive, key: []const u8, revision: u64, generation: u64) !*Job {
+        return startWithPath(archive, key, revision, generation, null);
+    }
+    pub fn startListed(archive: Archive.Archive, descriptor: Archive.Descriptor, generation: u64) !*Job {
+        return startWithPath(archive, descriptor.archive_key, descriptor.manifest_revision, generation, if (descriptor.document != null) descriptor.manifest_path else null);
+    }
+    fn startWithPath(archive: Archive.Archive, key: []const u8, revision: u64, generation: u64, manifest_path: ?[]const u8) !*Job {
         const allocator = std.heap.c_allocator;
         const self = try allocator.create(Job);
         errdefer allocator.destroy(self);
         const copy = try allocator.dupe(u8, key);
         errdefer allocator.free(copy);
-        self.* = .{ .allocator = allocator, .archive = archive, .key = copy, .revision = revision, .generation = generation };
+        const path = if (manifest_path) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (path) |value| allocator.free(value);
+        self.* = .{ .allocator = allocator, .archive = archive, .key = copy, .manifest_path = path, .revision = revision, .generation = generation };
         self.archive.allocator = allocator;
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
@@ -55,6 +64,7 @@ pub const Job = struct {
         self.cancel.store(true, .release);
         if (self.thread) |thread| thread.join();
         if (self.document) |document| document.destroy();
+        if (self.manifest_path) |path| self.allocator.free(path);
         self.allocator.free(self.key);
         self.allocator.destroy(self);
     }
@@ -70,7 +80,10 @@ pub const Job = struct {
         defer _ = active_decodes.fetchSub(1, .acq_rel);
         if (active >= decode_concurrency) return error.HistoryLoadBusy;
         if (self.cancel.load(.acquire)) return error.Cancelled;
-        var record = self.archive.resolveRecord(self.allocator, .{ .archive_key = self.key }) catch |err| return if (err == error.StreamTooLong) error.HistoryIndexTooLarge else err;
+        var record = if (self.manifest_path) |path|
+            try self.archive.resolveListedRecord(self.allocator, self.key, self.revision, path)
+        else
+            self.archive.resolveRecord(self.allocator, .{ .archive_key = self.key }) catch |err| return if (err == error.StreamTooLong) error.HistoryIndexTooLarge else err;
         errdefer record.deinit();
         if (record.descriptor.manifest_revision != self.revision) return error.StaleArchiveRevision;
         if (!record.descriptor.can_open) return error.RecordingUnavailable;

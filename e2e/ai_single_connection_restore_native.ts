@@ -96,15 +96,18 @@ async function binding(id: number, bound: boolean) {
 }
 async function journal() {
     const records = new Map<string, any>();
-    for (const line of (await readFile(join(data, 'ai-sessions.jsonl'), 'utf8')).trim().split('\n')) {
+    for (const [path, isActive] of [['ai-sessions.jsonl', false], ['ai-sessions-active.jsonl', true]] as const) {
+      const contents = await readFile(join(data, path), 'utf8').catch((err: any) => { if (err.code === 'ENOENT') return ''; throw err; });
+      for (const line of contents.trim().split('\n').filter(Boolean)) {
         const row = JSON.parse(line), event = row.event;
         if (!event) continue;
         const record = records.get(event.conversation) ?? {id: event.conversation};
-        if (['create', 'migrate_bound', 'fork_bound', 'bind', 'handoff'].includes(event.kind)) record.bound = true;
+        if (['create', 'migrate_bound', 'fork_bound', 'bind', 'handoff'].includes(event.kind)) record.bound = isActive;
         if (['unbind', 'migrate_closed', 'fork'].includes(event.kind)) record.bound = false;
         if (event.kind === 'remove') record.removed = true;
         if (event.presentation) record.presentation = event.presentation;
         records.set(event.conversation, record);
+      }
     }
     return [...records.values()].filter(record => !record.removed);
 }
@@ -121,17 +124,17 @@ try {
             assert(text((await h.query('ai.conversation')).filter(shown)).includes('LEGACY_ANSWER_' + index), 'legacy assistant answer');
             await boundCount(1);
         }
-        await menu(); await binding(3, false); await click('ai.session.restore.1'); await confirm();
+        await menu(); await binding(4, false); await click('ai.session.restore.2'); await confirm();
         await legacyHistory(1); await h.screenshot(join(out, '01-legacy-restored.png'));
         report.checks.push('History without a presentation restores visible questions and answers on one connection');
-        await menu(); await click('ai.session.copy_use.2'); await confirm(); await legacyHistory(2);
+        await menu(); await click('ai.session.copy_use.3'); await confirm(); await legacyHistory(2);
         await h.screenshot(join(out, '02-legacy-copy.png'));
         report.checks.push('Copy-and-use repairs an empty saved presentation using the retained canonical history');
-        await menu(); await click('ai.session.restore.3'); await confirm(); await legacyHistory(3);
+        await menu(); await click('ai.session.restore.4'); await confirm(); await legacyHistory(3);
         await click('ai.prompt'); await h.type_('LEGACY_FOLLOWUP'); await click('ai.send');
         await h.waitFor(async () => requests.length === 1 && text((await h.query('ai.response')).filter(shown)).includes('LEGACY_FOLLOWUP') || null, 15000);
         assert(requests[0].messages.some((message: any) => message.content.includes('LEGACY_3')));
-        report.checks.push('A saved orphan binding is released on restart; restore and a follow-up keep the old context');
+        report.checks.push('A saved orphan binding is released on explicit restore; restore and a follow-up keep the old context');
         report.status = 'passed';
     } else {
     await send('ORIGINAL 单连接原问题', ['ORIGINAL']);

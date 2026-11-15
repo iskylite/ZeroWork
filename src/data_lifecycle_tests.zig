@@ -321,3 +321,16 @@ test "final data rmdir permission failure restores synced pending gate in defaul
 test {
     _ = @import("platform/applog.zig");
 }
+
+test "startup skips historical recordings but still rejects an unsafe history root" {
+    var f = try Fixture.init(false);
+    defer f.deinit();
+    try f.write(support ++ "config.toml", "config");
+    try f.write(support ++ "logs/history/record.cast", "recording");
+    const prepared = try lifecycle.prepare(io, &f.paths);
+    try std.testing.expectEqual(@as(usize, 1), prepared.secured_files);
+    try f.expect(support ++ "logs/history/record.cast", "recording");
+    try f.tmp.dir.rename(support ++ "logs/history", f.tmp.dir, support ++ "logs/old-history", io);
+    try f.tmp.dir.symLink(io, "old-history", support ++ "logs/history", .{ .is_directory = true });
+    try std.testing.expectError(error.UnsafeSymlink, lifecycle.prepare(io, &f.paths));
+}

@@ -238,6 +238,23 @@ pub const Store = struct {
     }
     /// Resolve the same execution's newest trusted observation without changing
     /// immutable call facts. Never correlate by active pane or small session ID.
+    pub fn findCall(self: *const Store, turn_id: u64, call_id: []const u8) ?*Record {
+        for (self.records.items) |record| {
+            if (record.turn_id == turn_id and std.mem.eql(u8, record.call_id, call_id)) return record;
+        }
+        return null;
+    }
+
+    pub fn hashExecution(self: *const Store, hash: *std.hash.Wyhash, record: *const Record) void {
+        const execution = self.executionProjection(record) orelse return;
+        std.hash.autoHash(hash, .{
+            execution.source_revision,                  execution.state,               execution.call_status,      execution.output_cursor,
+            @intFromPtr(execution.terminal_output.ptr), execution.terminal_output.len, execution.output_available, execution.output_gap,
+            execution.output_truncated,                 execution.output_retained,     execution.stop_requested,   execution.process,
+            execution.output_from_earlier,              execution.shell_framing_only,
+        });
+    }
+
     pub fn executionProjection(self: *const Store, record: *const Record) ?ExecutionProjection {
         const original = record.execution orelse return null;
         // Input receipts retain their own operation outcome. They neither
@@ -245,9 +262,18 @@ pub const Store = struct {
         if (original.input_result) return original;
         const id = original.execution_id orelse return original;
         var result = original;
+        var last_output: ?ExecutionProjection = null;
         for (self.records.items) |other| if (other.execution) |candidate| {
-            if (!candidate.input_result and candidate.execution_id != null and candidate.execution_id.?.eql(id) and candidate.conversation_id.eql(original.conversation_id) and candidate.task_id.eql(original.task_id)) result = candidate;
+            if (candidate.input_result or candidate.state == null or candidate.execution_id == null or !candidate.execution_id.?.eql(id) or !candidate.conversation_id.eql(original.conversation_id) or !candidate.task_id.eql(original.task_id)) continue;
+            if (candidate.source_revision >= result.source_revision) result = candidate;
+            if (candidate.terminal_output.len != 0 and (last_output == null or candidate.source_revision >= last_output.?.source_revision)) last_output = candidate;
         };
+        if (result.terminal_output.len == 0 and (result.output_cursor != 0 or result.output_retained or !result.output_available or result.output_gap or result.output_truncated)) {
+            if (last_output) |observation| {
+                result.terminal_output = observation.terminal_output;
+                result.output_from_earlier = true;
+            }
+        }
         if (result.command == null) {
             for (self.records.items) |other| if (other.execution) |candidate| {
                 if (candidate.command != null and candidate.execution_id != null and candidate.execution_id.?.eql(id) and candidate.conversation_id.eql(original.conversation_id) and candidate.task_id.eql(original.task_id)) {

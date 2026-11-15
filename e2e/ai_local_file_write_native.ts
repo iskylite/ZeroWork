@@ -475,7 +475,7 @@ async function restoreConversation() {
   if (group) await ensureGroupPanel();
   else await click(unsupported ? 'toolbar.ai' : 'ai.strip');
   await click('ai.sessions');
-  await click('ai.session.restore.1');
+  await click('ai.session.restore.2');
   await visible('ai.prompt');
 }
 async function assertWorkspaceUI(available: boolean, evidence: string) {
@@ -490,7 +490,8 @@ async function assertWorkspaceUI(available: boolean, evidence: string) {
 }
 
 async function assertSavedWorkspace() {
-  const updates = (await readFile(journalPath, 'utf8')).trim().split('\n')
+  const active = await readFile(join(data, 'ai-sessions-active.jsonl'), 'utf8');
+  const updates = ((await readFile(journalPath, 'utf8')) + active).trim().split('\n')
     .map(row => JSON.parse(row).event).filter(event => event?.kind === 'workspace_update');
   assert.deepEqual(updates, [baseline[1].event], 'Membership changes must preserve the saved preference');
 }

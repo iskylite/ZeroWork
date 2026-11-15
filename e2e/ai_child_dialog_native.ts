@@ -84,7 +84,7 @@ const visible=(id:string)=>h.waitFor(async()=>{report.last_wait=id;assert(alive(
 const report:any={status:'running',isolation:iso,binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),checks:[],screenshots:[]};
 const click=async(id:string)=>{report.last_action=id;if(id==='toolbar.ai'&&!(await h.query(id)).some(shown)){const expand=(await h.query('toolbar.expand')).find(shown);if(expand){await h.mouseMove(expand.rect.x+expand.rect.w/2,expand.rect.y+expand.rect.h/2);assert((await h.clickTestId('toolbar.expand')).ok)}}const node=await visible(id);await h.mouseMove(node.rect.x+node.rect.w/2,node.rect.y+node.rect.h/2);assert((await h.clickTestId(id)).ok,id);await h.sleep(250);assert((await h.screenshot(join(out,'interaction-frame.png'))).ok,'native interaction presented')};
 const capture=async(name:string)=>{await h.mouseMove(1,1);await h.sleep(200);assert((await h.screenshot(join(out,name+'.png'))).ok);report.screenshots.push(join(out,name+'.png'))};
-const journal=async()=>String(await readFile(join(data,'ai-sessions.jsonl'),'utf8')).trim().split('\n').map(row=>JSON.parse(row));
+const journal=async()=>String(await readFile(join(data,'ai-sessions-active.jsonl'),'utf8')).trim().split('\n').map(row=>JSON.parse(row));
 try{
  await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
  await click('ai.prompt');await h.type_('ROOT_DIALOG_TASK 委派并汇总');await click('ai.send');

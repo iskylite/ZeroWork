@@ -13,6 +13,7 @@ static int reads, ref_reads, additions, updates, deletions, legacy_deletions;
 static CFStringRef expected_service = CFSTR("com.zerowork.tests.mock-only");
 static int other_item_exists;
 static OSStatus fail_read, fail_write, fail_delete, fail_authorize;
+static int ignore_update;
 static int authorization_reads;
 static int confirmations;
 static OSStatus fail_confirmation;
@@ -53,6 +54,7 @@ static OSStatus fake_update(CFDictionaryRef q, CFDictionaryRef changes) {
     check_query(q); updates++;
     if (fail_write) return fail_write;
     if (!fake_item) return errSecItemNotFound;
+    if (ignore_update) return errSecSuccess;
     CFRelease(fake_item); fake_item = CFRetain(CFDictionaryGetValue(changes, kSecValueData)); return errSecSuccess;
 }
 static OSStatus fake_delete(CFDictionaryRef q) {
@@ -209,6 +211,39 @@ int main(void) {
     assert(zw_credentials_export(scope, &copied, verify_export) == errSecUserCanceled && copied == 0);
     fail_authorize = errSecSuccess;
     assert(zw_credentials_export(scope, &copied, verify_export) == errSecSuccess && copied == 1);
-    puts("native vault mock regression passed: one item, cached reads, immutable refs, rollback, size limit, restart, metadata-only erase, cache isolation, legacy deletion fallback, no UI");
+    const struct import_entry imported[] = {
+        {a, (const unsigned char *)"local-one", 9},
+        {b, (const unsigned char *)"local-two", 9},
+    };
+    reset_cache();
+    fail_read = errSecSuccess;
+    fail_confirmation = -43001;
+    int writes_before_import = updates + additions + deletions;
+    assert(zw_credentials_import(scope, imported, 2) == -43001);
+    assert(updates + additions + deletions == writes_before_import);
+    fail_confirmation = errSecSuccess;
+    expect_secret(a, "preserved-secret");
+    fail_write = errSecIO;
+    assert(zw_credentials_import(scope, imported, 2) == errSecIO);
+    expect_secret(a, "preserved-secret");
+    fail_write = errSecSuccess;
+    ignore_update = 1;
+    assert(zw_credentials_import(scope, imported, 2) == errSecDecode);
+    assert(!cached_service && !cached_vault);
+    ignore_update = 0;
+    expect_secret(a, "preserved-secret");
+    fail_read = errSecIO;
+    assert(zw_credentials_import(scope, imported, 2) == errSecIO);
+    assert(!cached_service && !cached_vault);
+    fail_read = errSecSuccess;
+    int reads_before_import = reads;
+    assert(zw_credentials_import(scope, imported, 2) == errSecSuccess);
+    assert(reads == reads_before_import + 2); // Fresh load and read-back after the write.
+    reset_cache();
+    expect_secret(a, "local-one");
+    expect_secret(b, "local-two");
+    assert(zw_credentials_import(scope, NULL, 0) == errSecSuccess && !fake_item);
+    reset_cache();
+    puts("native vault mock regression passed: verified batch import, cancellation, write and read-back failures, restart, cached reads, rollback, scope isolation, legacy deletion, no UI");
     return 0;
 }

@@ -54,7 +54,7 @@ const click=async(id:string)=>{report.last_action=id;await visible(id);assert((a
 const input=async(value:string)=>{await click('ai.prompt');await h.key('a',{cmd:true});await h.type_(value)};
 const send=async(value:string)=>{await input(value);await click('ai.send')};
 const capture=async(name:string)=>{await h.mouseMove(1,1);await h.sleep(200);assert((await h.screenshot(join(out,name+'.png'))).ok);report.screenshots.push(join(out,name+'.png'))};
-const journal=async()=>String(await readFile(join(data,'ai-sessions.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+const journal=async()=>String(await readFile(join(data,'ai-sessions-active.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
 async function endConversation(){await click('ai.close');await click('ai.close.confirmation.confirm');await absent('ai.panel');await visible('terminal.surface')}
 async function restore(){
  await click('toolbar.ai');await click('ai.sessions');await click('ai.session.restore.1');

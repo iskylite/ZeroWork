@@ -5,6 +5,7 @@ pub const Recent = RowView.Entry;
 pub const Actions = struct {
     logo_texture: ?u32 = null,
     recent: []const Recent = &.{},
+    composer_ready: bool = true,
     session_hooks: ?RowView.Hooks = null,
     context: *anyopaque,
     summarize: *const fn (*anyopaque) void,
@@ -20,8 +21,10 @@ const Click = struct {
         self.run(self.context);
     }
 };
-pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !*ui.Node {
-    if (!configured) return mountSetup(cx, scope, actions);
+pub const State = enum { ready, setup, loading, unavailable };
+pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: State, actions: Actions) !*ui.Node {
+    if (state != .ready) return mountSetup(cx, scope, state, actions);
+    const configured = true;
     const root = try ui.boxStyled(cx, S.root, .{});
     root.meta.ownership.meta.test_id = if (configured) "ai.empty.configured" else "ai.empty.unconfigured";
     const logo = try ui.image(cx, actions.logo_texture orelse 0, .{ .width = .{ .px = 88 }, .height = .{ .px = 88 }, .flex_shrink = 0 });
@@ -42,7 +45,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
     const ids = if (configured) [_][]const u8{ "ai.empty.summarize", "ai.empty.logs" } else [_][]const u8{ "ai.empty.settings", "ai.empty.ollama" };
     for (labels, handlers, ids, 0..) |label, run, id, i| {
         const click = try scope.createState(Click, .{ .context = actions.context, .run = run });
-        const button = try ui.widgets.Button(.{ .label = label, .block = configured, .variant = @as(ui.widgets.button.ButtonVariant, if (!configured and i == 0) .primary else .secondary), .base_style = S.action(configured, !configured and i == 0), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        const button = try ui.widgets.Button(.{ .label = label, .block = configured, .disabled = !actions.composer_ready, .variant = @as(ui.widgets.button.ButtonVariant, if (!configured and i == 0) .primary else .secondary), .base_style = S.action(configured, !configured and i == 0), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
         if (!configured and i == 0) try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
         button.meta.ownership.meta.test_id = id;
         if (configured) {
@@ -123,21 +126,31 @@ const SetupLayout = struct {
         return .done;
     }
 };
-fn mountSetup(cx: *ui.Cx, scope: *ui.Scope, actions: Actions) !*ui.Node {
+fn mountSetup(cx: *ui.Cx, scope: *ui.Scope, state: State, actions: Actions) !*ui.Node {
     const root = try ui.box(cx, S.setup(), .{});
-    root.meta.ownership.meta.test_id = "ai.empty.unconfigured";
+    root.meta.ownership.meta.test_id = switch (state) {
+        .loading => "ai.empty.loading",
+        .unavailable => "ai.empty.unavailable",
+        else => "ai.empty.unconfigured",
+    };
     const logo = try ui.image(cx, actions.logo_texture orelse 0, .{ .width = .{ .px = 88 }, .height = .{ .px = 88 }, .flex_shrink = 0 });
     logo.meta.ownership.meta.test_id = "ai.empty.logo";
     try root.appendChild(cx.allocator, logo);
-    const title = try ui.text(cx, "配置模型，开始对话", S.setupTitle());
+    const title = try ui.text(cx, switch (state) {
+        .loading => "正在加载模型…",
+        .unavailable => "暂时无法加载模型",
+        else => "配置模型，开始对话",
+    }, S.setupTitle());
     title.meta.ownership.meta.test_id = "ai.empty.title";
     try root.appendChild(cx.allocator, title);
-    try root.appendChild(cx.allocator, try ui.text(cx, "添加并启用一个模型服务提供方。", S.setupDescription()));
-    const click = try scope.createState(Click, .{ .context = actions.context, .run = actions.settings });
-    const button = try ui.widgets.Button(.{ .label = "配置 AI 服务", .variant = .primary, .base_style = S.setupAction(true), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
-    try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
-    button.meta.ownership.meta.test_id = "ai.empty.settings";
-    try root.appendChild(cx.allocator, button);
+    if (state == .setup) {
+        try root.appendChild(cx.allocator, try ui.text(cx, "添加并启用一个模型服务提供方。", S.setupDescription()));
+        const click = try scope.createState(Click, .{ .context = actions.context, .run = actions.settings });
+        const button = try ui.widgets.Button(.{ .label = "配置 AI 服务", .variant = .primary, .base_style = S.setupAction(true), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
+        button.meta.ownership.meta.test_id = "ai.empty.settings";
+        try root.appendChild(cx.allocator, button);
+    }
     const layout = try scope.createState(SetupLayout, .{ .cx = cx, .root = root, .logo = logo });
     try cx.addAfterLayoutHook(layout, SetupLayout.frame);
     try scope.onCleanup(SetupLayout, layout, SetupLayout.release);

@@ -46,7 +46,7 @@ const visible=(id:string)=>h.waitFor(async()=>{assert(alive());return(await h.qu
 const report:any={status:'running',isolation:iso,binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),checks:[],screenshots:[]};
 const click=async(id:string)=>{report.last_action=id;await visible(id);assert((await h.clickTestId(id)).ok,id)};
 const capture=async(name:string)=>{await h.mouseMove(1,1);await h.sleep(200);assert((await h.screenshot(join(out,name+'.png'))).ok);report.screenshots.push(join(out,name+'.png'))};
-const journal=async()=>String(await readFile(join(data,'ai-sessions.jsonl'),'utf8')).trim().split('\n').map(row=>JSON.parse(row));
+const journal=async()=>String(await readFile(join(data,'ai-sessions-active.jsonl'),'utf8')).trim().split('\n').map(row=>JSON.parse(row));
 const scrollTo=async(id:string)=>{for(let i=0;i<24;i++){const n=await visible(id),vp=(await visible('settings.viewport')).rect;if(n.rect.y>=vp.y&&n.rect.y+n.rect.h<=vp.y+vp.h)return;const delta=n.rect.y<vp.y?vp.y-n.rect.y+25:vp.y+vp.h-n.rect.y-n.rect.h-25;await h.scrollAt(vp.x+vp.w-4,vp.y+vp.h/2,0,Math.max(-500,Math.min(500,delta)));await h.sleep(70)}throw Error('Cannot reveal '+id)};
 const setting=async(id:string)=>{await scrollTo(id);await click(id)};
 try{

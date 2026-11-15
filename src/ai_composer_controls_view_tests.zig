@@ -682,6 +682,30 @@ test "AI composer model identities expose provider and ID and unconfigured model
     try std.testing.expect(f.last == null);
 }
 
+test "AI composer model discovery shows loading without a configuration action" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.view.callbacks.open_settings = struct {
+        fn open(_: *anyopaque) void {}
+    }.open;
+    var snapshot = f.snapshot();
+    snapshot.revision += 1;
+    snapshot.current = null;
+    snapshot.providers = &.{};
+    snapshot.default_model_status = .loading;
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expectEqualStrings("加载模型中…", f.view.labels[2].?.getText().?.content);
+    try std.testing.expectEqualStrings("正在加载模型…", f.view.model_empty.getText().?.content);
+    try std.testing.expectEqual(.none, f.view.model_settings.style.display);
+    snapshot.default_model_status = .unavailable;
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expectEqualStrings("模型暂不可用", f.view.labels[2].?.getText().?.content);
+    try std.testing.expectEqualStrings("暂时无法加载模型", f.view.model_empty.getText().?.content);
+}
+
 test "native protocol model effort claims cannot enable an unsupported composer slider" {
     var f: Fixture = undefined;
     try f.init();

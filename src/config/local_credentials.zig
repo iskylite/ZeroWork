@@ -68,6 +68,29 @@ pub fn select(self: Store) !void {
     try self.add(selected_marker, "1");
 }
 
+/// Once the marker is removed the active store is Keychain. Local data may
+/// only be deleted after the directory entry has been synced.
+pub fn deselect(self: Store) !bool {
+    var dir = try self.open(false);
+    defer dir.close(self.io);
+    try dir.deleteFile(self.io, selected_marker);
+    return std.c.fsync(dir.handle) == 0;
+}
+
+pub fn references(self: Store, allocator: std.mem.Allocator, comptime valid: fn ([]const u8) bool) ![][68]u8 {
+    var dir = try self.open(false);
+    defer dir.close(self.io);
+    var refs: std.ArrayList([68]u8) = .empty;
+    errdefer refs.deinit(allocator);
+    var entries = dir.iterate();
+    while (try entries.next(self.io)) |entry| {
+        if (!valid(entry.name)) continue;
+        if (refs.items.len == 16384) return error.CredentialLimitExceeded;
+        try refs.append(allocator, entry.name[0..68].*);
+    }
+    return refs.toOwnedSlice(allocator);
+}
+
 pub fn importValue(self: Store, reference: []const u8, value: []const u8) !void {
     self.add(reference, value) catch |err| switch (err) {
         error.CredentialAlreadyExists => {
@@ -144,6 +167,8 @@ test "local credentials persist across opens and reject non-private storage" {
     try std.testing.expect(!try store.isSelected());
     try store.select();
     try std.testing.expect(try store.isSelected());
+    try std.testing.expect(try store.deselect());
+    try std.testing.expect(!try store.isSelected());
     const secret = try store.get(allocator, "first");
     defer allocator.free(secret);
     try std.testing.expectEqualStrings("fixture value", secret);

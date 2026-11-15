@@ -8,6 +8,17 @@ extern fn zw_credentials_collect(service: [*:0]const u8, keep: [*]const [*:0]con
 extern fn zw_credentials_erase(service: [*:0]const u8) c_int;
 extern fn zw_credentials_free(value: ?[*]u8, length: usize) void;
 extern fn zw_credentials_export(service: [*:0]const u8, context: *anyopaque, callback: *const fn (*anyopaque, *const [68]u8, [*]const u8, usize) callconv(.c) c_int) c_int;
+extern fn zw_credentials_import(service: [*:0]const u8, entries: [*]const ImportEntry, count: usize) c_int;
+
+pub const ImportEntry = extern struct {
+    reference: [*:0]const u8,
+    value: [*]const u8,
+    length: usize,
+};
+
+pub fn importVerified(service: [:0]const u8, entries: []const ImportEntry) !void {
+    try check(zw_credentials_import(service, entries.ptr, entries.len));
+}
 
 pub const Error = error{ CredentialMissing, CredentialDenied, CredentialLocked, CredentialUnavailable, CredentialAlreadyExists, CredentialStorageFailure, CredentialAuthenticationCanceled, CredentialAuthenticationFailed, CredentialBusy, OutOfMemory };
 fn check(status: c_int) Error!void {

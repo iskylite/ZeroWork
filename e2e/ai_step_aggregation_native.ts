@@ -1,5 +1,6 @@
 /** Aggregation on the production native transcript, with a held local provider.
  * ZW_AI_TEST_PREFIX=/private/tmp/zw-step-aggregation-build node e2e/ai_step_aggregation_native.ts /tmp/evidence
+ * Set ZW_AI_STEP_INDENT_ONLY=1 to verify disclosure and indentation separately.
  */
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -7,6 +8,7 @@ import {createServer} from 'node:http';
 import {mkdtemp,mkdir,writeFile,readFile,open,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 const prefix=resolve(process.env.ZW_AI_TEST_PREFIX??'/private/tmp/zw-step-aggregation-build');
+const indentOnly=process.env.ZW_AI_STEP_INDENT_ONLY==='1';
 const out=resolve(process.argv[2]??'/private/tmp/zw-step-aggregation-evidence');
 await mkdir(out,{recursive:true});
 const iso=await mkdtemp('/private/tmp/zw-step-aggregation-'),data=join(iso,'data'),rpc=join(iso,'rpc'),zdot=join(iso,'zdot');
@@ -51,13 +53,22 @@ const click=async(id:string)=>{report.last_action=id;await visible(id);assert((a
 const groups=async()=>await h.query('ai.step_group');
 const groupHeaders=async()=>await h.query('ai.step_group.header');
 const waitGroups=async(count:number)=>h.waitFor(async()=>{const found=await groups();return found.length===count?found:null},10000);
-const clickHeader=async(index:number)=>{
+const clickTranscriptNode=async(id:string,index:number)=>{
  for(let attempt=0;attempt<12;attempt++){
-  const n=(await groupHeaders())[index],viewport=await visible('ai.conversation.viewport');assert(n);
-  if(n.rect.y>=viewport.rect.y+1&&n.rect.y+n.rect.h<=viewport.rect.y+viewport.rect.h-1){assert((await h.clickAt(n.rect.x+n.rect.w/2,n.rect.y+16)).ok);return}
+  const n=(await h.query(id)).at(index),viewport=await visible('ai.conversation.viewport');assert(n,id);
+  if(n.rect.y>=viewport.rect.y+1&&n.rect.y+n.rect.h<=viewport.rect.y+viewport.rect.h-1){assert((await h.clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok,id);return}
   await h.scrollAt(viewport.rect.x+viewport.rect.w/2,viewport.rect.y+viewport.rect.h/2,0,n.rect.y<viewport.rect.y?160:-160);await h.sleep(80);
  }
- throw Error('group header did not scroll into view');
+ throw Error('transcript control did not scroll into view: '+id);
+};
+const clickHeader=(index:number)=>clickTranscriptNode('ai.step_group.header',index);
+const returnToAssistant=async(count:number)=>{
+ await click('settings.close');
+ await h.waitFor(async()=>!(await h.query('settings.panel')).some(shown)||null,5000);
+ // Clicking the settings entry dismisses the floating assistant.
+ await click('toolbar.ai');
+ await visible('ai.prompt');
+ return waitGroups(count);
 };
 const capture=async(name:string)=>{assert((await h.screenshot(join(out,name+'.png'))).ok);await writeFile(join(out,name+'.json'),JSON.stringify(await h.query('ai.panel'),null,2))};
 const leaveHeader=async()=>{const prompt=await visible('ai.prompt');await h.mouseMove(prompt.rect.x+4,prompt.rect.y+4)};
@@ -77,11 +88,14 @@ const checkWidths=async(expanded:boolean)=>{
  assert(Math.abs(header.rect.w-group.rect.w)<1,'group header fills the group');
  if(expanded)for(const id of ['ai.tool.result.header','ai.step.header']){
   const cards=await h.query(id);assert(cards.length>0,id);
-  for(const card of cards)assert(Math.abs(card.rect.w-group.rect.w)<1,id+' follows the group width');
+  for(const card of cards){
+   assert(Math.abs(card.rect.x-(header.rect.x+12))<1,id+' is indented from the group header');
+   assert(Math.abs(card.rect.x+card.rect.w-(header.rect.x+header.rect.w))<1,id+' aligns with the right edge of the group header');
+  }
  }
  return group.rect.w;
 };
-try{
+try{acceptance:{
  await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
  await send('请检查当前会话');await h.waitFor(async()=>held||null,20000);await waitGroups(1);
  assert.equal((await groups())[0].rect.h,32,'singleton begins collapsed');
@@ -135,6 +149,27 @@ try{
  await checkWidths(true);await capture('02-wide-expanded');
  await resizePanel(280);assert((await checkWidths(true))<originalWidth-30);
  await capture('02-narrow-expanded');
+ if(indentOnly){
+  const headerRect=(await groupHeaders())[0].rect;
+  report.indentation={
+   group:headerRect,
+   children:flat((await groups())[0]).filter(n=>['ai.tool.result.header','ai.step.header'].includes(n.test_id)).map(n=>n.rect),
+  };
+  assert.equal(report.indentation.children.length,2);
+  await clickHeader(0);
+  await h.waitFor(async()=>(await groups())[0].rect.h===32||null,5000);
+  const disclosure=(await groups())[0].children.find((n:any)=>n.children?.some((child:any)=>child.test_id==='ai.step_group.content'));
+  assert(disclosure&&disclosure.rect.h===0&&disclosure.visible===false,'collapsed disclosure clips both child cards');
+  await capture('03-collapsed-again');
+  await clickHeader(0);
+  await h.waitFor(async()=>(await groups())[0].rect.h>32||null,5000);
+  await checkWidths(true);
+  held.end(frame({content:'已核验步骤卡片。'})+'data: [DONE]\n\n');held=null;
+  await visible('ai.turn.complete');
+  report.checks.push('Native disclosure indents both tool and thinking cards 12px in wide and narrow layouts, aligns their right edges, and hides them again on collapse');
+  report.status='passed';report.requests=requests;
+  break acceptance;
+ }
  await resizePanel(-40);await checkWidths(true);
  await clickHeader(0);await h.waitFor(async()=>(await groups())[0].rect.h===32||null,5000);
  held.write(frame({reasoning_content:'\n最新线索：终端命令在内层 Shell 中执行。'}));
@@ -163,6 +198,7 @@ try{
  held.write(frame({content:'第一段检查结束，继续检查下一部分。'}));
  held.write(frame({reasoning_content:'第二组的独立思考。'}));
  await waitGroups(2);assert.equal((await groups())[1].rect.h,32,'new group uses collapsed default');
+ assert((await groups())[0].rect.h>32,'first group is manually expanded before opening settings');
  assert(text((await h.query('ai.step_group.summary'))[0]).includes('2 个步骤'),'completed thinking restores the existing group summary');
  assert(!text((await h.query('ai.step_group.summary'))[0]).includes('最新线索'),'completed thought does not remain projected');
  report.checks.push('live thinking retains the step count beside the thinking card latest line; collapsed streaming stays collapsed; no active thinking restores the original count/tool projection');
@@ -171,12 +207,14 @@ try{
  await click('toolbar.settings');await click('settings.nav.ai');await click('settings.search');await h.type_('步骤默认显示');
  await click('settings.field.step_display');await click('settings.step_display.expanded');await click('settings.save');
  await h.waitFor(async()=>(await readFile(join(data,'config.toml'),'utf8')).includes('step_display = "expanded"')||null,10000);
- await capture('04-default-setting');await click('settings.close');
- // Settings application must not change groups already created.
- assert.equal((await groups())[1].rect.h,32);
+ await capture('04-default-setting');
+ const restoredGroups=await returnToAssistant(2);
+ assert(restoredGroups[0].rect.h>32,'existing group stays expanded after returning from settings');
+ assert.equal(restoredGroups[1].rect.h,32,'existing group stays collapsed after returning from settings');
  held.write(frame({content:'现在进入第三部分。'}));held.write(frame({reasoning_content:'第三组按新设置默认展开。'}));
- await waitGroups(3);await h.waitFor(async()=>(await groups())[2].rect.h>32||null,5000);
+ await waitGroups(3);await h.waitFor(async()=>(await groups())[2]?.rect.h>32||null,5000);
  assert.equal(text((await h.query('ai.step_group.count'))[2]),'1 个步骤','singleton thinking also retains its step count');
+ assert((await groups())[0].rect.h>32,'old group stays expanded after adding a group');
  assert.equal((await groups())[1].rect.h,32,'old group stays collapsed after changing default');
  await capture('05-new-default-expanded');
  await clickHeader(2);await h.waitFor(async()=>(await groups())[2].rect.h===32||null,5000);
@@ -184,7 +222,10 @@ try{
  await h.waitFor(async()=>text(await h.query('ai.step_group.projection')).includes('追加文本')||null,5000);
  assert.equal((await groups())[2].rect.h,32);
  held.end(frame({tool_calls:[{index:0,id:'aggregation-fail-1',type:'function',function:{name:wire('host.run_in_terminal'),arguments:'{}'}},{index:1,id:'aggregation-fail-2',type:'function',function:{name:wire('host.read_terminal'),arguments:'{}'}}]})+'data: [DONE]\n\n');held=null;await visible('ai.turn.complete');
+ // Completed turns put their steps behind the process disclosure.
+ await clickTranscriptNode('ai.turn.process.toggle',0);
  await waitGroups(3);
+ assert.equal((await groups())[2].rect.h,32,'completion preserves manual collapse');
  // Collapsed details are created only when disclosed.
  await clickHeader(2);await h.waitFor(async()=>(await groups())[2].rect.h>32||null,5000);
  const failures=await h.query('ai.request.unsent');assert.equal(failures.length,2,'both unsent failures retained');
@@ -213,16 +254,16 @@ try{
  await capture('06-grouped-failures');
  report.checks.push('two unsent tool failures stay inside the consecutive step group; count and warning status retained; diagnostics include tool, parameters, error code and raw error');
  await clickHeader(2);await h.waitFor(async()=>(await groups())[2].rect.h===32||null,5000);
- assert.equal((await groups())[2].rect.h,32,'completion preserves manual collapse');
  report.checks.push('ordinary model messages end groups; setting saves in existing AI page; current groups keep state; subsequent groups use new default; completion does not recollapse or reopen');
  await send('SECOND_TURN');await h.waitFor(async()=>text(await h.query('ai.conversation')).includes('SECOND_TURN_COMPLETE')||null,15000);
+ await clickTranscriptNode('ai.turn.process.toggle',1);
  await waitGroups(4);assert((await groups())[3].rect.h>32,'turn boundary always creates a fresh group');
  assert.equal((await groups())[2].rect.h,32,'history clone retains disclosure');
  report.checks.push('new user turn does not merge with the previous group; history preserves disclosure');
  // UI save is persisted and shows the same value when reopening.
  await click('toolbar.settings');await click('settings.nav.ai');await click('settings.search');await h.key('a',{cmd:true});await h.type_('步骤默认显示');
  assert(text(await h.query('settings.field.step_display')).includes('展开'));
- await click('settings.close');
+ await returnToAssistant(4);
  await capture('06-history-state');
  // Recreate the reported combination: an expanded group, open thought/tool
  // details, a scrolled transcript, and new cards appended below the reader.
@@ -263,9 +304,26 @@ try{
  await visible('ai.turn.complete');
  report.checks.push('Stationary hover survives repeated live updates; with thought and tool details open, four newly executed cards preserve the scrolled transcript position within 1px');
  report.status='passed';report.requests=requests;
-}catch(error){report.status='failed';report.error=String(error);await h.screenshot(join(out,'failure.png')).catch(()=>{});await writeFile(join(out,'failure.json'),JSON.stringify(await h.query('ai.panel'),null,2)).catch(()=>{});process.exitCode=1;}
+}}catch(error){report.status='failed';report.error=error instanceof Error?error.stack:String(error);await h.screenshot(join(out,'failure.png')).catch(()=>{});await writeFile(join(out,'failure.json'),JSON.stringify(await h.query('ai.panel'),null,2)).catch(()=>{});process.exitCode=1;}
 finally{
  if(held)held.end();server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));
- app.kill('SIGTERM');await Promise.race([ended,new Promise<void>(r=>setTimeout(()=>{app.kill('SIGKILL');r()},3000))]);
+ if(report.status==='passed'){
+  try{
+   assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);
+   const deadline=Date.now()+8000;
+   while(app.exitCode===null&&app.signalCode===null&&Date.now()<deadline){
+    for(const id of ['local.close.accept','session.close.accept']){
+     const nodes=await h.query(id);
+     if(Array.isArray(nodes)&&nodes.some(shown))await h.clickTestId(id);
+    }
+    await Promise.race([ended,h.sleep(80)]);
+   }
+  }catch(error){report.close_error=String(error)}
+  if(app.exitCode!==0){report.status='failed';report.error='Native App did not exit normally';process.exitCode=1}
+ }
+ if(app.exitCode===null&&app.signalCode===null){
+  app.kill('SIGTERM');await Promise.race([ended,h.sleep(3000)]);
+  if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended}
+ }
  await log.close();await rm(iso,{recursive:true,force:true});await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
 }

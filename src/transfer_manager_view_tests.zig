@@ -1089,11 +1089,12 @@ test "transfer projection Manager receipts reach the frozen event modal without 
     try p.refresh(0, .{ .window_chunks = 16, .chunk_kb = 64 });
     p.show();
     h.frames();
-    try std.testing.expect(std.mem.indexOf(u8, p.source.?.value.rows[0].events, "入队") != null);
-    try std.testing.expect(std.mem.indexOf(u8, p.source.?.value.rows[0].events, "传输中") != null);
+    try std.testing.expectEqualStrings("", p.source.?.value.rows[0].events);
 
     click(h, id(p.root, "transfer.task.events").?);
     h.frames();
+    try std.testing.expect(std.mem.indexOf(u8, p.event_view.?.snapshot, "入队") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.event_view.?.snapshot, "传输中") != null);
     const frozen = try std.testing.allocator.dupe(u8, p.event_view.?.snapshot);
     defer std.testing.allocator.free(frozen);
     const original = manager.progress(job).?;
@@ -1128,11 +1129,12 @@ test "transfer projection global portal Manager receipts reach the frozen event 
     try p.refresh(0, .{ .window_chunks = 16, .chunk_kb = 64 });
     p.show();
     h.frames();
-    try std.testing.expect(std.mem.indexOf(u8, p.source.?.value.rows[0].events, "入队") != null);
-    try std.testing.expect(std.mem.indexOf(u8, p.source.?.value.rows[0].events, "传输中") != null);
+    try std.testing.expectEqualStrings("", p.source.?.value.rows[0].events);
 
     click(h, id(p.root, "transfer.task.events").?);
     h.frames();
+    try std.testing.expect(std.mem.indexOf(u8, p.event_view.?.snapshot, "入队") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.event_view.?.snapshot, "传输中") != null);
     const frozen = try std.testing.allocator.dupe(u8, p.event_view.?.snapshot);
     defer std.testing.allocator.free(frozen);
     const original = manager.progress(job).?;
@@ -1851,13 +1853,22 @@ test "transfer startup failure projection preserves reason events and retry sepa
             try std.testing.expectEqual(V.Phase.failed, task.phase);
             try std.testing.expect(V.allows(task.phase, .retry));
             try std.testing.expect(!V.allows(task.phase, .resume_transfer));
-            try std.testing.expect(std.mem.indexOf(u8, task.events, "AuthFailed") != null);
-            try std.testing.expect(std.mem.indexOf(u8, task.events, "SSH 连接与认证") != null);
+            try std.testing.expectEqualStrings("", task.events);
         } else {
             try std.testing.expectEqual(V.Phase.paused, task.phase);
             try std.testing.expect(V.allows(task.phase, .resume_transfer));
         }
     }
+    var failed_row = text(panel.root, "failed.zip").?;
+    while (failed_row.parent) |parent| {
+        failed_row = parent;
+        if (std.mem.eql(u8, failed_row.meta.ownership.meta.test_id orelse "", "transfer.task")) break;
+    }
+    click(h, id(failed_row, "transfer.task.events").?);
+    h.frames();
+    try std.testing.expectEqual(failed, panel.event_view.?.job);
+    try std.testing.expect(std.mem.indexOf(u8, panel.event_view.?.snapshot, "AuthFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, panel.event_view.?.snapshot, "SSH 连接与认证") != null);
 }
 
 test "transfer projection numeric progress retains row controls scopes and tooltip ownership" {

@@ -382,8 +382,16 @@ pub const Section = struct {
         try self.body.appendChild(self.page.cx.allocator, row);
     }
     pub fn iconAction(self: *Section, label: []const u8, action_label: []const u8, icon: ui.SvgAsset, id: []const u8, action: binding.Action) !void {
+        return self.iconActionWithValue(label, null, action_label, icon, id, action);
+    }
+    pub fn iconActionWithValue(self: *Section, label: []const u8, value: ?[]const u8, action_label: []const u8, icon: ui.SvgAsset, id: []const u8, action: binding.Action) !void {
         if (!self.matchesField(label, id, action_label)) return;
         const row = try plainRow(self.page.cx, label);
+        if (value) |status| {
+            const text = try ui.text(self.page.cx, try owned(self.page.bound.scope, status), S.value(undefined));
+            text.setStyleInline(self.page.cx.allocator, .{ .flex_shrink = 0 });
+            try row.appendChild(self.page.cx.allocator, text);
+        }
         const click = try self.page.bound.scope.allocator.create(ActionClick);
         click.* = .{ .page = self.page, .action = action };
         try self.page.bound.scope.onCleanup(ActionClick, click, ActionClick.cleanup);

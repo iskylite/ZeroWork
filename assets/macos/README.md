@@ -10,6 +10,8 @@
 - `icons.zig`：将三种 PNG 编入应用，无需运行时访问源码目录。
 - `preview.html`：三种底色的实际素材预览。
 
+三种 PNG 统一按 macOS 应用图标网格绘制：底板或透明底主体占 824 × 824，居中于 1024 × 1024 画布（约 80.5% 占位），底板圆角约为底板宽度的 0.22。替换素材时必须保持这一留白与居中，满幅铺满会在 Dock 中比相邻应用明显偏大。
+
 设置 → 外观与主题 → 应用图标提供透明背景、白底、黑底。配置为 `[ui] icon_background = "transparent" | "light" | "dark"`，默认 `transparent`。选择经现有设置事务保存后，更新运行中的 Dock 图标，并将这一外观值同步给随应用签名的 `NSDockTilePlugIn`。Dock 扩展在应用未运行时使用同一选择；取消设置不更新，启动时重新应用已保存配置。扩展只读取图标选择，不读取应用配置或凭据。直接运行未打包的可执行文件时只更新运行中的 Dock 图标。
 
 签名验证：不使用 `NSWorkspace.setIcon`，不向已安装的应用添加 `Icon\r`、FinderInfo 或 ResourceFork，也不要求应用目录可写。图标切换后仍须通过 `codesign --verify --deep --strict`。Finder 文件图标继续由安装包资源和系统决定，独立于 Dock 的外观选择。

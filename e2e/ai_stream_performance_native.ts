@@ -89,7 +89,7 @@ try {
  await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);
  await click('workspace.empty.local');await visible('terminal.surface');await click(largeHistory?'toolbar.ai':'ai.strip');
  if(largeHistory) {
-  await click('ai.sessions');await click('ai.session.restore.1');await visible('ai.message.user.text');
+  await click('ai.sessions');await click('ai.session.restore.2');await visible('ai.message.user.text');
   report.journal_before_bytes=(await stat(journalPath)).size;
  }
  await click('ai.prompt');await h.type_('连续核对当前上下文，验证十八个步骤');

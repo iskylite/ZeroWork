@@ -264,6 +264,19 @@ pub const Controller = struct {
         return recovery.original;
     }
 
+    pub fn permitsReconnectedExecution(self: *Controller, original: identity.SessionHandle) bool {
+        if (self.authority.child_origin != null) return false;
+        // The original execution admission supplies the exact predecessor.
+        // A retry keeps its SessionId and advances the generation on that tab.
+        for (self.app.mappings.items) |mapping| {
+            const current = mapping.handle;
+            if (current.session_id != original.session_id or current.generation <= original.generation or !self.inBinding(current)) continue;
+            _ = self.validateIdentity(current, false) catch continue;
+            return true;
+        }
+        return false;
+    }
+
     fn reconnectReceipt(self: *Controller, receipt: *const Application.ReconnectReceipt) runtime.ReconnectReceipt {
         var result: runtime.ReconnectReceipt = .{
             .operation_ref = receipt.operation,

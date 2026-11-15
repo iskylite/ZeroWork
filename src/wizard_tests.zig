@@ -1388,7 +1388,7 @@ test "wizard credential storage failure keeps the draft visible without save suc
     try std.testing.expect(f.wizard.isVisible());
     try std.testing.expectEqual(error.CredentialStorageFailure, f.wizard.save_failure.?.cause);
     const message = f.wizard.save_error_node.?.getText().?.content;
-    try std.testing.expect(std.mem.indexOf(u8, message, "系统钥匙串") != null);
+    try std.testing.expectEqualStrings("无法读写凭据。请检查钥匙串授权或应用数据目录权限。", message);
     try std.testing.expect(std.mem.indexOf(u8, message, "not-in-error-text") == null);
     try std.testing.expectEqualStrings("not-in-error-text", f.wizard.currentDraft().password.?);
     try std.testing.expectEqual(@as(usize, 1), f.registry.hosts.len);

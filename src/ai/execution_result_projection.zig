@@ -18,7 +18,7 @@ pub fn modelContent(a: std.mem.Allocator, name: []const u8, text: []const u8) ![
     if (snapshot.* != .object) return text;
     var compact: std.json.ObjectMap = .empty;
     defer compact.deinit(a);
-    for ([_][]const u8{ "owner", "execution_id", "state", "revision", "process", "completion_source", "interactive_execution", "input_ready", "input_wait", "input_receipt", "input_handed_off", "local_released", "remote_effect_unknown", "recording_id", "recording_settled", "recording_failed", "interval_saved", "output_scope", "output_attribution", "output_attribution_reason", "failure" }) |key| {
+    for ([_][]const u8{ "owner", "execution_id", "state", "revision", "submit_sent", "process", "completion_source", "elapsed_ms", "output_received", "interactive_execution", "input_ready", "input_wait", "input_receipt", "input_handed_off", "local_released", "remote_effect_unknown", "recording_id", "recording_settled", "recording_failed", "interval_saved", "output_scope", "output_attribution", "output_attribution_reason", "failure" }) |key| {
         if (snapshot.object.get(key)) |value| try compact.put(a, key, value);
     }
     var shell: std.json.ObjectMap = .empty;
@@ -55,6 +55,7 @@ pub const Projection = struct {
     input_receipt: ?terminal.InputReceipt = null,
     not_dispatched: bool = false,
     execution_id: ?identity.ExecutionId = null,
+    source_revision: u64 = 0,
     target: ?identity.SessionHandle = null,
     target_label: []const u8 = "",
     command: ?[]const u8 = null,
@@ -63,7 +64,12 @@ pub const Projection = struct {
     completion_source: terminal.CompletionSource = .unknown,
     recording_id: ?identity.RecordingId = null,
     terminal_output: []const u8 = "",
+    shell_framing_only: bool = false,
     output_available: bool = false,
+    output_cursor: u64 = 0,
+    output_error: ?[]const u8 = null,
+    output_retained: bool = false,
+    output_from_earlier: bool = false,
     output_gap: bool = false,
     output_truncated: bool = false,
     elapsed_ms: ?u64 = null,
@@ -153,6 +159,40 @@ pub const Projection = struct {
             .outcome_unknown => "结果待核实",
         };
     }
+    pub fn processLabel(self: Projection, buffer: []u8) !?[]const u8 {
+        const process = self.process orelse return null;
+        if (!process.foreground_finished) return null;
+        if (process.signal) |signal| return try std.fmt.bufPrint(buffer, "结束信号 {d}", .{signal});
+        if (process.exit_code) |code| return try std.fmt.bufPrint(buffer, "退出码 {d}", .{code});
+        return "命令已结束 · 未提供退出码";
+    }
+    pub fn phase(self: Projection) @import("step_events.zig").Phase {
+        if (self.call_status == .rejected) return .rejected;
+        if (self.state == .cancelled_unsent or self.call_status == .cancelled_unsent) return .cancelled;
+        if (self.active() or self.state == .handed_off) return .running;
+        if (self.process) |process| {
+            if (process.foreground_finished and process.exit_code == 0 and process.signal == null and !self.remote_effect_unknown) return .succeeded;
+        }
+        return .failed;
+    }
+    pub fn outputLabel(self: Projection) ?[]const u8 {
+        if (self.input_result) return null;
+        if (self.terminal_output.len != 0) {
+            if (self.output_retained) return "以下是原执行已采集的输出，后续进度待核实。";
+            if (self.output_error != null) return "本次未能读取新增内容，以下是此前采集的输出。";
+            if (self.output_from_earlier) return "本次未返回新增内容，以下是此前采集的输出。";
+            return null;
+        }
+        if (self.not_dispatched or self.state == .cancelled_unsent or self.call_status == .cancelled_unsent) return "命令未派发，没有执行输出。";
+        if (self.output_retained) return "未保留可显示的输出，后续进度待核实。";
+        if (self.output_gap or self.output_truncated) return "本次未返回可显示的输出，采集范围有缺失。";
+        if (self.output_error != null or !self.output_available) return "未取得输出，无法确认命令是否产生了输出。";
+        if (self.output_cursor != 0) return "这个位置之后暂无新增输出。";
+        if (self.shell_framing_only) return "采集区间只有 Shell 控制信息，没有实际命令输出。";
+        if (self.process) |process| if (process.foreground_finished and (self.sealed() or self.intervalRecorded())) return "本次采集区间没有输出。";
+        if (self.active() or self.state == .handed_off) return "运行中，暂未采集到输出。";
+        return "暂未采集到输出，采集是否完整待核实。";
+    }
     pub fn outputWarning(self: Projection) ?[]const u8 {
         if (self.process) |process| if (process.background_jobs) return "检测到后台任务，前台命令结束后仍可能继续运行。";
         if (self.output_scope != .session_interval) return null;
@@ -172,10 +212,11 @@ pub const Projection = struct {
         copy.terminal_output = try allocator.dupe(u8, self.terminal_output);
         copy.output_attribution_reason = if (self.output_attribution_reason) |text| try allocator.dupe(u8, text) else null;
         copy.failure = if (self.failure) |text| try allocator.dupe(u8, text) else null;
+        copy.output_error = if (self.output_error) |text| try allocator.dupe(u8, text) else null;
         return copy;
     }
     pub fn retainedBytes(self: Projection) usize {
-        return self.target_label.len + (if (self.command) |text| text.len else 0) + self.terminal_output.len + (if (self.output_attribution_reason) |text| text.len else 0) + (if (self.failure) |text| text.len else 0);
+        return self.target_label.len + (if (self.command) |text| text.len else 0) + self.terminal_output.len + (if (self.output_attribution_reason) |text| text.len else 0) + (if (self.failure) |text| text.len else 0) + (if (self.output_error) |text| text.len else 0);
     }
 };
 
@@ -184,6 +225,25 @@ pub fn isRun(name: []const u8) bool {
     const logical = plugin.decodeName(&decoded, name) catch name;
     return std.mem.eql(u8, logical, "host.run_in_terminal");
 }
+pub fn batchStatus(result: @import("tool_loop.zig").TargetResult) []const u8 {
+    if (result.signal != null or (result.exit != null and result.exit.? != 0)) return "命令执行失败";
+    if (result.exit == 0) return "命令已结束";
+    if (result.remote_effect_unknown or !result.local_released) return "远端执行结果待核实";
+    return switch (result.status) {
+        .rejected, .skipped => "命令未派发",
+        .timed_out => "调用超时 · 命令是否结束待核实",
+        else => "未确认命令退出状态",
+    };
+}
+
+pub fn batchOutputLabel(result: @import("tool_loop.zig").TargetResult) ?[]const u8 {
+    if (result.stdout.len != 0 or result.stderr.len != 0) return null;
+    if (result.truncated or result.retained_truncated or result.next_output_cursor != null) return "本次未返回可显示的输出，采集范围有缺失。";
+    if (result.signal != null or result.exit != null) return "本次采集区间没有输出。";
+    if (result.status == .rejected or result.status == .skipped) return "命令未派发，没有执行输出。";
+    return "未取得输出，无法确认命令是否产生了输出。";
+}
+
 pub fn isInput(name: []const u8) bool {
     var decoded: [64]u8 = undefined;
     const logical = plugin.decodeName(&decoded, name) catch name;
@@ -196,6 +256,11 @@ pub fn supports(name: []const u8) bool {
     return false;
 }
 const Snapshot = struct {
+    shell: struct {
+        id: ?[32]u8 = null,
+        kind: @FieldType(terminal.ShellContext, "kind") = .unknown,
+    } = .{},
+    output_received: ?u64 = null,
     owner: ?identity.SessionHandle = null,
     execution_id: ?identity.ExecutionId = null,
     state: ?[]const u8 = null,
@@ -217,7 +282,10 @@ const Snapshot = struct {
 };
 const Wire = struct {
     error_code: ?[]const u8 = null,
+    state: ?[]const u8 = null,
     execution_ref: ?[]const u8 = null,
+    execution_task_id: ?identity.TaskId = null,
+    source_revision: u64 = 0,
     execution_id: ?identity.ExecutionId = null,
     snapshot: ?Snapshot = null,
     execution_receipt: ?std.json.Value = null,
@@ -225,10 +293,47 @@ const Wire = struct {
     recording_ref: ?[]const u8 = null,
     output: ?[]const u8 = null,
     output_available: bool = false,
+    output_cursor: u64 = 0,
+    output_error: ?[]const u8 = null,
+    output_retained: bool = false,
     stop_requested: bool = false,
     gap: bool = false,
     truncated: bool = false,
 };
+
+// The SSH capture starts after the command-start OSC, so input echo before
+// that boundary is already excluded. Only recognize the closing OSC and the
+// exact default Zsh end-of-line marker. Control bytes can be command output too.
+fn onlyShellFraming(output: []const u8, shell: @FieldType(Snapshot, "shell"), exit_code: u8) bool {
+    const osc_start = std.mem.lastIndexOf(u8, output, "\x1b]") orelse return false;
+    const suffix = output[osc_start + 2 ..];
+    const terminator: usize = if (std.mem.endsWith(u8, suffix, "\x07")) 1 else if (std.mem.endsWith(u8, suffix, "\x1b\\")) 2 else return false;
+    var parts = std.mem.splitScalar(u8, suffix[0 .. suffix.len - terminator], ';');
+    const protocol = parts.first();
+    if (!std.mem.eql(u8, protocol, "133") and !std.mem.eql(u8, protocol, "633")) return false;
+    if (!std.mem.eql(u8, parts.next() orelse return false, "D")) return false;
+    const reported = std.fmt.parseInt(u8, parts.next() orelse return false, 10) catch return false;
+    if (reported != exit_code) return false;
+    if (shell.id) |id| {
+        const context = parts.next() orelse return false;
+        if (!std.mem.startsWith(u8, context, "zw_ctx=") or !std.mem.eql(u8, context["zw_ctx=".len..], &id)) return false;
+    }
+    if (parts.next() != null) return false;
+    if (osc_start == 0) return true;
+    if (shell.kind != .zsh) return false;
+    const before = output[0..osc_start];
+    const prefix = "\x1b[1m\x1b[7m";
+    const suffix_style = "\x1b[27m\x1b[1m\x1b[0m";
+    if (!std.mem.startsWith(u8, before, prefix)) return false;
+    const marker = before[prefix.len..];
+    if (marker.len == 0 or (marker[0] != '%' and marker[0] != '#')) return false;
+    if (!std.mem.startsWith(u8, marker[1..], suffix_style)) return false;
+    const padding = marker[1 + suffix_style.len ..];
+    const restore_column = "\r \r";
+    if (padding.len <= restore_column.len or !std.mem.endsWith(u8, padding, restore_column)) return false;
+    for (padding[0 .. padding.len - restore_column.len]) |byte| if (byte != ' ') return false;
+    return true;
+}
 
 pub fn parse(allocator: std.mem.Allocator, name: []const u8, arguments: []const u8, status: plugin.Status, receipt: host.Receipt, content: []const u8) !?Projection {
     if (!supports(name)) return null;
@@ -273,6 +378,10 @@ pub fn parse(allocator: std.mem.Allocator, name: []const u8, arguments: []const 
         result.interval_saved = snapshot.interval_saved;
         result.failure = snapshot.failure;
         if (snapshot.recording_id) |id| result.recording_id = identity.RecordingId.parse(&id) catch null;
+        result.source_revision = wire.source_revision;
+        if (result.execution_id != null) if (wire.execution_task_id) |task| {
+            if (task.valid()) result.task_id = task;
+        };
     } else if (wire.execution_receipt) |raw| recovered: {
         // Journal stages describe an operation outcome, not output ownership.
         // Only a validated durable receipt can restore these execution facts.
@@ -303,6 +412,9 @@ pub fn parse(allocator: std.mem.Allocator, name: []const u8, arguments: []const 
         // PublicReceipt intentionally has no SessionHandle or current grant.
         // Missing target identity must keep all terminal controls unavailable.
     }
+    if (result.state == null) if (wire.state) |state| {
+        if (std.mem.eql(u8, state, "cancelled_unsent") or std.mem.eql(u8, state, "rejected")) result.state = .cancelled_unsent;
+    };
     if (wire.recording_ref) |reference| {
         const id = identity.RecordingId.parse(reference) catch null;
         if (result.recording_id) |prior| {
@@ -312,9 +424,26 @@ pub fn parse(allocator: std.mem.Allocator, name: []const u8, arguments: []const 
     if (result.failure == null) result.failure = wire.error_code;
     result.terminal_output = wire.output orelse "";
     result.output_available = wire.output_available;
+    result.output_cursor = wire.output_cursor;
+    result.output_error = wire.output_error;
+    result.output_retained = wire.output_retained;
     result.output_gap = wire.gap;
     result.output_truncated = wire.truncated;
     result.stop_requested = wire.stop_requested;
+    if (wire.snapshot) |snapshot| {
+        if (result.completion_source == .shell_reported and result.intervalRecorded() and
+            result.output_available and result.output_cursor == 0 and result.output_error == null and
+            !result.output_retained and !result.output_gap and !result.output_truncated and
+            snapshot.output_received == result.terminal_output.len)
+        {
+            if (result.process.?.exit_code) |code| {
+                if (onlyShellFraming(result.terminal_output, snapshot.shell, code)) {
+                    result.shell_framing_only = true;
+                    result.terminal_output = "";
+                }
+            }
+        }
+    }
     return result;
 }
 
@@ -338,6 +467,89 @@ pub fn parseFailure(allocator: std.mem.Allocator, name: []const u8, arguments: [
         if (args) |value| result.command = value.command;
     }
     return result;
+}
+
+pub fn fromStep(allocator: std.mem.Allocator, step: @import("step_events.zig").Step) !?Projection {
+    if (!supports(step.name) or step.ended_ms == null or step.detail.len == 0) return null;
+    const Envelope = struct {
+        status: plugin.Status,
+        receipt: host.Receipt,
+        content: []const struct { structured: ?[]const u8 = null },
+    };
+    const value = std.json.parseFromSliceLeaky(Envelope, allocator, step.detail, .{ .ignore_unknown_fields = true }) catch {
+        if (step.activity_started_ms != null or (step.phase != .rejected and step.phase != .failed)) return null;
+        const failure = std.json.parseFromSliceLeaky(struct {
+            side_effect_started: ?bool = null,
+            error_code: ?[]const u8 = null,
+        }, allocator, step.detail, .{ .ignore_unknown_fields = true }) catch return null;
+        if (failure.side_effect_started != false or failure.error_code == null) return null;
+        return parseFailure(allocator, step.name, step.command, step.detail, false);
+    };
+    if (value.content.len != 1) return null;
+    const structured = value.content[0].structured orelse return null;
+    return parse(allocator, step.name, step.command, value.status, value.receipt, structured);
+}
+
+test "SSH framing-only output requires a complete observed interval and preserves real output" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const receipt: host.Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 1, .binding_revision = 1 };
+    const shell_id = "0123456789abcdef0123456789abcdef";
+    const zsh_marker = "\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m  \r \r";
+    const closing = "\x1b]133;D;1;zw_ctx=" ++ shell_id ++ "\x07";
+    const silent = zsh_marker ++ closing;
+    const WireCase = struct {
+        output: []const u8 = silent,
+        output_cursor: u64 = 0,
+        gap: bool = false,
+        truncated: bool = false,
+        retained: bool = false,
+        count: ?u64 = null,
+        framed: bool = false,
+    };
+    const cases = [_]WireCase{
+        .{ .framed = true },
+        .{ .output = closing, .framed = true },
+        .{ .output = "\x1b]133;D;1;zw_ctx=" ++ shell_id ++ "\x1b\\", .framed = true },
+        .{ .output = "%" ++ silent },
+        .{ .output = "\n" ++ silent },
+        .{ .output = "\x1b[2J" ++ silent },
+        .{ .output = zsh_marker ++ "\x1b]133;D;0;zw_ctx=" ++ shell_id ++ "\x07" },
+        .{ .output = zsh_marker ++ "\x1b]133;D;1;zw_ctx=ffffffffffffffffffffffffffffffff\x07" },
+        .{ .output_cursor = 1 },
+        .{ .gap = true },
+        .{ .truncated = true },
+        .{ .retained = true },
+        .{ .count = silent.len + 1 },
+    };
+    for (cases) |case| {
+        const content = try std.json.Stringify.valueAlloc(arena.allocator(), .{
+            .snapshot = .{
+                .completion_source = .shell_reported,
+                .state = .interval_recorded,
+                .output_scope = .session_interval,
+                .interval_saved = true,
+                .recording_settled = true,
+                .recording_id = shell_id,
+                .process = .{ .foreground_finished = true, .exit_code = 1 },
+                .shell = .{ .kind = .zsh, .id = shell_id },
+                .output_received = case.count orelse case.output.len,
+            },
+            .output = case.output,
+            .output_cursor = case.output_cursor,
+            .gap = case.gap,
+            .truncated = case.truncated,
+            .output_retained = case.retained,
+            .output_available = true,
+        }, .{});
+        const projection = (try parse(arena.allocator(), "host.run_in_terminal", "{}", .succeeded, receipt, content)).?;
+        try std.testing.expectEqual(case.framed, projection.shell_framing_only);
+        try std.testing.expectEqualStrings(if (case.framed) "" else case.output, projection.terminal_output);
+        var buffer: [32]u8 = undefined;
+        try std.testing.expectEqualStrings("退出码 1", (try projection.processLabel(&buffer)).?);
+        if (case.framed) try std.testing.expectEqualStrings("采集区间只有 Shell 控制信息，没有实际命令输出。", projection.outputLabel().?);
+    }
 }
 
 test "execution interval projection preserves saved observation attribution and foreground exit independently" {

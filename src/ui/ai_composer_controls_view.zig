@@ -44,6 +44,8 @@ pub const Usage = struct {
     compaction_before: u64 = 0,
     compaction_after: u64 = 0,
 };
+const DefaultStatus = @import("../ai/model_discovery.zig").DefaultStatus;
+
 pub const Snapshot = struct {
     owner: Owner,
     /// Configuration epoch. Current selection/usage may update within it;
@@ -52,6 +54,7 @@ pub const Snapshot = struct {
     providers: []const config.AiProvider = &.{},
     current: ?ModelKey = null,
     model_selection_required: bool = false,
+    default_model_status: DefaultStatus = .setup,
     permission: PermissionMode = .confirm,
     allow_auto_permission: bool = true,
     global_execution_mode: ExecutionMode = .auto,
@@ -101,11 +104,11 @@ pub fn effortLabel(value: Effort) []const u8 {
     };
 }
 const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
-const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, model_selection_required: bool, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, effort_fallback_from: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
+const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, model_selection_required: bool, default_model_status: DefaultStatus, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, effort_fallback_from: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
 // Discovery provenance changes authority/configuration, but does not change a
 // model row when all resolved capabilities and displayed values are identical.
 fn modelRowsEql(a: Projection, b: Projection) bool {
-    if (!a.owner.eql(b.owner) or !optionalKeyEql(a.current, b.current) or a.editable != b.editable or a.models.len != b.models.len) return false;
+    if (!a.owner.eql(b.owner) or !optionalKeyEql(a.current, b.current) or a.editable != b.editable or a.models.len != b.models.len or a.default_model_status != b.default_model_status) return false;
     for (a.models, b.models) |left, right| {
         if (!left.key.eql(right.key) or left.enabled != right.enabled or left.context_window != right.context_window or
             left.reasoning != right.reasoning or left.vision != right.vision or left.toggle != right.toggle or
@@ -142,7 +145,7 @@ const Owned = struct {
             value.parts = parts;
         }
         const current = if (snapshot.current) |key| try cloneKey(a, key) else null;
-        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .model_selection_required = snapshot.model_selection_required, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .effort_fallback_from = snapshot.effort_fallback_from, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
+        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .model_selection_required = snapshot.model_selection_required, .default_model_status = snapshot.default_model_status, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .effort_fallback_from = snapshot.effort_fallback_from, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
     }
     fn appendModel(a: std.mem.Allocator, models: *std.ArrayList(Model), hash: *std.hash.Wyhash, id: []const u8, kind: config.ProviderKind, endpoint: []const u8, enabled: bool, value: config.AiModel) !void {
         const key: ModelKey = .{ .provider_id = id, .model_id = value.id };
@@ -334,7 +337,7 @@ pub const View = struct {
                 try button.appendChild(cx.allocator, self.model_brand);
             }
             if (index == 1 or index == 2 or index == 3 or index == 4 or index == 5) {
-                const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "未配置模型" else if (index == 3) "推理设置" else if (index == 4) "—" else "自行判断", S.text(10, 400, 14, true), if (index == 5) S.executionLabel() else S.chipLabel(@fromBackingInt(@intCast(index))));
+                const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "选择模型" else if (index == 3) "推理设置" else if (index == 4) "—" else "自行判断", S.text(10, 400, 14, true), if (index == 5) S.executionLabel() else S.chipLabel(@fromBackingInt(@intCast(index))));
                 self.labels[index] = text;
             }
             if (index == 1 or index == 2 or index == 3) {
@@ -361,7 +364,7 @@ pub const View = struct {
         self.ordinary_spacer = try ui.spacer(cx);
         try self.root.appendChild(cx.allocator, self.ordinary_spacer);
         try self.root.appendChild(cx.allocator, self.buttons[4]);
-        const model_hint = try @import("control_hint.zig").mount(cx, scope, self.buttons[2], "未配置模型", .{ .id = "ai.composer.model.tooltip", .width = 320, .wrap = .char });
+        const model_hint = try @import("control_hint.zig").mount(cx, scope, self.buttons[2], "选择模型", .{ .id = "ai.composer.model.tooltip", .width = 320, .wrap = .char });
         self.model_hint_label = model_hint.content.children.items[0];
         try self.root.appendChild(cx.allocator, model_hint.wrapper);
         self.trailing = try ui.box(cx, S.trailing(), .{});
@@ -1123,8 +1126,13 @@ pub const View = struct {
         if (self.source) |*value| for (value.value.models) |model| {
             available = available or model.enabled;
         };
-        self.model_settings.setDisplay(if (!available and self.callbacks.open_settings != null) .flex else .none);
-        try self.model_empty.setTextContent(self.cx.allocator, "暂无已配置模型");
+        const status = if (self.source) |source| source.value.default_model_status else .setup;
+        self.model_settings.setDisplay(if (!available and status == .setup and self.callbacks.open_settings != null) .flex else .none);
+        try self.model_empty.setTextContent(self.cx.allocator, switch (status) {
+            .loading => "正在加载模型…",
+            .unavailable => "暂时无法加载模型",
+            .setup => "暂无已配置模型",
+        });
     }
     fn refreshModelBrand(self: *View, id: ?[]const u8) !void {
         const brand = @import("ai_brand.zig");
@@ -1224,7 +1232,14 @@ pub const View = struct {
         setAsset(self.icons[1], if (source != null and source.?.permission == .auto) "shield-check" else "hand", 12, if (editable) colors.fg_2 else colors.fg_3);
         const current_key = if (source) |value| value.current else null;
         const unavailable = current_key != null and (current == null or !current.?.enabled);
-        const model_name = if (unavailable) "模型不可用" else if (current) |item| item.key.model_id else if (source != null and source.?.model_selection_required) "未选择模型" else "未配置模型";
+        const model_name = if (unavailable) "模型不可用" else if (current) |item| item.key.model_id else if (source) |value|
+            if (value.model_selection_required) "未选择模型" else switch (value.default_model_status) {
+                .loading => "加载模型中…",
+                .unavailable => "模型暂不可用",
+                .setup => "未配置模型",
+            }
+        else
+            "选择模型";
         try self.refreshModelBrand(if (unavailable) null else if (current) |item| item.key.model_id else null);
         try self.labels[2].?.setTextContent(self.cx.allocator, model_name);
         try self.model_hint_label.setTextContent(self.cx.allocator, if (unavailable) current_key.?.model_id else model_name);
@@ -1554,7 +1569,7 @@ fn controlsEql(first: Projection, second: Projection) bool {
     return projectionEql(one, two);
 }
 fn projectionEql(first: Projection, second: Projection) bool {
-    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.model_selection_required == second.model_selection_required and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.effort_fallback_from == second.effort_fallback_from and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and WorkspaceTicket.same(first.workspace, second.workspace) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
+    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.model_selection_required == second.model_selection_required and first.default_model_status == second.default_model_status and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.effort_fallback_from == second.effort_fallback_from and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and WorkspaceTicket.same(first.workspace, second.workspace) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
 }
 fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;

@@ -134,7 +134,6 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     defer cx.allocator.free(tool_detail);
     const tool = try ui.textStyled(cx, S.text, tool_detail);
     tool.meta.ownership.meta.test_id = "ai.execution.result.tool";
-    try scroll.content.appendChild(cx.allocator, tool);
     const body_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, scroll.container, record.expanded);
     try root.appendChild(cx.allocator, body_disclosure.root);
     const collection = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
@@ -144,6 +143,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     collection.content.setStyleInline(cx.allocator, S.content(cx.tokens));
     collection.container.setDisplay(if (!projection.input_result and record.expanded and record.execution_details_expanded) .flex else .none);
     try root.appendChild(cx.allocator, collection.container);
+    try (if (projection.input_result) scroll.content else collection.content).appendChild(cx.allocator, tool);
     if (projection.input_result) {
         if (projection.input_receipt) |receipt| {
             const input_type = try ui.textStyled(cx, S.text, switch (receipt.kind) {
@@ -181,9 +181,8 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
         effect.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         try scroll.content.appendChild(cx.allocator, effect);
     }
-    if (projection.process) |process| {
-        var process_buffer: [128]u8 = undefined;
-        const process_text = if (process.signal) |signal| try std.fmt.bufPrint(&process_buffer, "结束信号 {d}", .{signal}) else if (process.exit_code) |code| try std.fmt.bufPrint(&process_buffer, "退出码 {d}", .{code}) else if (process.foreground_finished) "命令已结束 · 未提供退出码" else "尚未确认命令结束";
+    var process_buffer: [128]u8 = undefined;
+    if (try projection.processLabel(&process_buffer)) |process_text| {
         const process_node = try ui.textStyled(cx, S.metadata, process_text);
         process_node.meta.ownership.meta.test_id = "ai.execution.result.process";
         try scroll.content.appendChild(cx.allocator, process_node);
@@ -223,6 +222,12 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
         source.meta.ownership.meta.test_id = "ai.execution.result.completion_source";
         try collection.content.appendChild(cx.allocator, source);
     }
+    if (projection.outputLabel()) |label| {
+        const note = try ui.textStyled(cx, S.metadata, label);
+        note.meta.ownership.meta.test_id = if (projection.terminal_output.len == 0) "ai.execution.result.output_label" else "ai.execution.result.output_state";
+        note.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+        try scroll.content.appendChild(cx.allocator, note);
+    }
     var command_row: ?*ui.Node = null;
     if (projection.command) |command| {
         const row = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0, .flex_shrink = 0 }, .{});
@@ -239,9 +244,10 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
         identity_node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         try (if (projection.input_result) scroll.content else collection.content).appendChild(cx.allocator, identity_node);
     }
-    if (!projection.input_result) {
-        const output_label = try ui.textStyled(cx, S.metadata, if (projection.terminal_output.len != 0) "终端输出" else if (projection.output_available) "终端暂无输出" else "暂未取得终端输出");
+    if (!projection.input_result and projection.terminal_output.len != 0) {
+        const output_label = try ui.textStyled(cx, S.metadata, "终端输出");
         output_label.meta.ownership.meta.test_id = "ai.execution.result.output_label";
+        output_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         try scroll.content.appendChild(cx.allocator, output_label);
     }
     if (projection.terminal_output.len != 0) _ = try appendOutput(cx, scope, scroll.content, projection.terminal_output, "ai.execution.result.terminal_output", positions);
@@ -335,6 +341,8 @@ fn appendOutput(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, bytes: []const u
 }
 
 fn failureLabel(code: []const u8) []const u8 {
+    if (std.mem.eql(u8, code, "RecordingExecutionCapacity")) return "录制执行记录已满，本条命令未发送。已在运行的命令仍可用原执行记录查看进度。";
+    if (std.mem.eql(u8, code, "SessionClosed") or std.mem.eql(u8, code, "SessionReconnected")) return "原终端连接已结束，断线后的命令状态待核实。";
     if (std.mem.eql(u8, code, "IntegrationUnavailable")) return "当前终端的执行能力不可用。";
     if (std.mem.eql(u8, code, "HostToolGatewayUnavailable")) return "执行服务当前不可用。";
     if (std.mem.eql(u8, code, "ToolApprovalRejected")) return "本次调用未获批准。";

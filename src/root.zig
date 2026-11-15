@@ -51,6 +51,7 @@ test {
     _ = @import("ai/image_offload.zig");
     _ = @import("ai/context_compaction.zig");
     _ = @import("ai/conversation_presentation.zig");
+    _ = @import("ai/conversation_share.zig");
     _ = @import("ai/model_discovery.zig");
     _ = @import("ai/conversation_title.zig");
     _ = @import("bmc_ai_tool_tests.zig");

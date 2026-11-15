@@ -31,8 +31,8 @@ const report:any={prefix,isolated:iso,history_messages:1000,status:'running',lat
 try{
  await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);
  await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await visible('ai.panel');
- await click('ai.sessions');await visible('ai.session.copy_use.1');
- await h.resetTiming();const start=performance.now();await click('ai.session.copy_use.1');
+ await click('ai.sessions');await visible('ai.session.copy_use.2');
+ await h.resetTiming();const start=performance.now();await click('ai.session.copy_use.2');
  if((await h.query('ai.session.close.accept')).some(shown))await click('ai.session.close.accept');
  report.stage='virtual history';await visible('ai.history.virtual');report.open_ms=performance.now()-start;
  const bounded=async()=>{const count=(await h.query('ai.message.user.row')).length;assert(count<40,`resident user rows: ${count}`);return count};

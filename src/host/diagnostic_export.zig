@@ -98,23 +98,14 @@ pub const Plan = struct {
             const before = try file.stat(io);
             if (before.kind != .file) return error.DiagnosticSourceNotRegular;
             if (before.size > max_file_bytes or total + before.size > max_total_bytes) return error.DiagnosticBudgetExceeded;
-            const raw = try allocator.alloc(u8, @intCast(before.size));
-            defer allocator.free(raw);
-            var used: usize = 0;
-            while (used < raw.len) {
-                try options.cancel.check();
-                const count = try file.readPositional(io, &.{raw[used..][0..@min(raw.len - used, 4096)]}, used);
-                if (count == 0) return error.DiagnosticSourceTruncated;
-                used += count;
-            }
+            if (options.failure) |issue| issue.stage = .redact;
+            const safe = try redactFile(allocator, io, file, before.size, options.cancel);
+            errdefer allocator.free(safe.content);
             const after = try file.stat(io);
             if (after.inode != before.inode or after.kind != .file or after.size < before.size) return error.DiagnosticSourceChanged;
             // Appending is permitted, but a same-length in-place rewrite is
             // not passed off as the version whose metadata we captured.
             if (after.size == before.size and (!std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime))) return error.DiagnosticSourceChanged;
-            if (options.failure) |issue| issue.stage = .redact;
-            const safe = try redact(allocator, raw, options.cancel);
-            errdefer allocator.free(safe.content);
             const name = try allocator.dupe(u8, entry.name);
             errdefer allocator.free(name);
             try self.files.append(allocator, .{ .name = name, .handle = file, .identity = before, .frozen_bytes = before.size, .content = safe.content, .structured_records = safe.records, .removed_spans = safe.removed_spans });
@@ -218,35 +209,57 @@ pub fn isDiagnosticName(name: []const u8) bool {
 }
 
 const Redacted = struct { content: []u8, records: usize = 0, removed_spans: usize = 0 };
-fn redact(allocator: std.mem.Allocator, raw: []const u8, cancel: Cancellation) !Redacted {
+fn redactFile(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, length: u64, cancel: Cancellation) !Redacted {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     var result: Redacted = .{ .content = undefined };
     var previous_removed = false;
-    var lines = std.mem.splitScalar(u8, raw, '\n');
-    while (lines.next()) |line| {
+    // Retain only one raw line, even if the source contains many megabytes of
+    // free-form text. The redacted snapshot remains frozen before the picker.
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(allocator);
+    var bytes: [4096]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < length) {
         try cancel.check();
-        if (line.len == 0) continue;
-        if (header(line)) |value| {
-            if (output.items.len + 160 > max_file_bytes) return error.DiagnosticRedactionBudgetExceeded;
-            try output.appendSlice(allocator, value.prefix);
-            if (errorCode(value.message)) |code| {
-                try output.appendSlice(allocator, " error_code=");
-                try output.appendSlice(allocator, code);
-            }
-            try output.appendSlice(allocator, " [free-form diagnostic message removed]\n");
-            result.records += 1;
-            previous_removed = false;
-        } else if (!previous_removed) {
-            if (output.items.len + 64 > max_file_bytes) return error.DiagnosticRedactionBudgetExceeded;
-            try output.appendSlice(allocator, "[unstructured diagnostic content removed]\n");
-            result.removed_spans += 1;
-            previous_removed = true;
+        const chunk = bytes[0..@intCast(@min(length - offset, bytes.len))];
+        const count = try file.readPositional(io, &.{chunk}, offset);
+        if (count == 0) return error.DiagnosticSourceTruncated;
+        offset += count;
+        var remaining = chunk[0..count];
+        while (std.mem.indexOfScalar(u8, remaining, '\n')) |end| {
+            try line.appendSlice(allocator, remaining[0..end]);
+            try redactLine(allocator, &output, &result, &previous_removed, line.items);
+            line.clearRetainingCapacity();
+            remaining = remaining[end + 1 ..];
         }
+        try line.appendSlice(allocator, remaining);
     }
+    try redactLine(allocator, &output, &result, &previous_removed, line.items);
     result.content = try output.toOwnedSlice(allocator);
     return result;
 }
+
+fn redactLine(allocator: std.mem.Allocator, output: *std.ArrayList(u8), result: *Redacted, previous_removed: *bool, line: []const u8) !void {
+    if (line.len == 0) return;
+    if (header(line)) |value| {
+        if (output.items.len + 160 > max_file_bytes) return error.DiagnosticRedactionBudgetExceeded;
+        try output.appendSlice(allocator, value.prefix);
+        if (errorCode(value.message)) |code| {
+            try output.appendSlice(allocator, " error_code=");
+            try output.appendSlice(allocator, code);
+        }
+        try output.appendSlice(allocator, " [free-form diagnostic message removed]\n");
+        result.records += 1;
+        previous_removed.* = false;
+    } else if (!previous_removed.*) {
+        if (output.items.len + 64 > max_file_bytes) return error.DiagnosticRedactionBudgetExceeded;
+        try output.appendSlice(allocator, "[unstructured diagnostic content removed]\n");
+        result.removed_spans += 1;
+        previous_removed.* = true;
+    }
+}
+
 const Header = struct { prefix: []const u8, message: []const u8 };
 fn header(line: []const u8) ?Header {
     const end = std.mem.indexOfScalar(u8, line, ']') orelse return null;

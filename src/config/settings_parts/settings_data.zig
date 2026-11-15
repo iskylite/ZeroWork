@@ -10,9 +10,10 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     if (binding.matches(query, "位置 凭据 钥匙串 本地 配置目录 缓存 诊断 600 config_dir cache_dir logs_dir")) {
         const section = try page.section("位置与凭据", "存储方式与数据目录", ui.icons.folder, 56, "settings.data.location", null);
         const storage = readPath(bound, "credential_storage");
-        try section.readonly("凭据存储", storage);
-        if (!std.mem.eql(u8, storage, "本地文件")) {
-            try section.iconAction("凭据文件不加密，仅当前用户可读写", "转为本地存储", ui.icons.lock, "settings.data.credential_local", .credential_local);
+        if (std.mem.eql(u8, storage, "本地文件")) {
+            try section.iconActionWithValue("凭据存储", storage, "切换到钥匙串…", ui.icons.lock, "settings.data.credential_keychain", .credential_keychain);
+        } else {
+            try section.iconActionWithValue("凭据存储", storage, "切换到本地存储…", ui.icons.lock, "settings.data.credential_local", .credential_local);
         }
         if (bound.hooks.read) |read| {
             if (read(bound.hooks.context, .{ .section = "data", .key = "config_path" })) |value| try section.readonly("配置文件", value.text);

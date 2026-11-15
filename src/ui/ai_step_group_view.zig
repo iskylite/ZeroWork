@@ -13,6 +13,7 @@ pub const Props = struct {
     tool_name: ?[]const u8 = null,
     step_count: ?usize = null,
     phase: events.Phase,
+    status: ?[]const u8 = null,
     elapsed_ms: u64,
     live: bool = false,
     on_toggle: ?ui.Handler(void) = null,
@@ -52,7 +53,7 @@ const State = struct {
         const color = if (props.phase == .failed or props.phase == .rejected) palette.warn else if (props.phase == .succeeded) palette.ok else palette.fg_2;
         const asset = @import("ai_step_disclosure.zig").activityIcon(props.tool_name);
         if (asset.icon_id) |id| if (asset.pickRep(14)) |rep| self.indicator.activity.setIcon(.{ .icon_id = id, .rep = rep, .tint = color });
-        const status = if (props.phase == .failed) "有步骤失败" else if (props.phase == .rejected) "有步骤被拒绝" else if (props.phase == .cancelled) "有步骤取消" else @import("ai_tool_header_projection.zig").phaseLabel(props.phase);
+        const status = statusLabel(props);
         const text = try @import("ai_tool_header_projection.zig").withStatus(self.cx.allocator, props.projection, status);
         defer self.cx.allocator.free(text);
         try self.projection.setTextContent(self.cx.allocator, text);
@@ -95,6 +96,9 @@ fn monotonicMs() u64 {
 fn elapsed(buffer: []u8, ms: u64) ![]const u8 {
     return if (ms < 1000) std.fmt.bufPrint(buffer, "{d}ms", .{ms}) else std.fmt.bufPrint(buffer, "{d:.1}s", .{@as(f64, @floatFromInt(ms)) / 1000});
 }
+fn statusLabel(props: Props) []const u8 {
+    return props.status orelse if (props.phase == .failed) "有步骤失败" else if (props.phase == .rejected) "有步骤被拒绝" else if (props.phase == .cancelled) "有步骤取消" else @import("ai_tool_header_projection.zig").phaseLabel(props.phase);
+}
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !Result {
     const root = try ui.boxStyled(cx, S.root, .{});
     root.meta.ownership.meta.test_id = "ai.step_group";
@@ -113,7 +117,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !Result {
     const summary = try ui.boxStyled(cx, S.summary, .{});
     summary.meta.ownership.meta.test_id = "ai.step_group.summary";
     const header_projection = @import("ai_tool_header_projection.zig");
-    const status_label = if (props.phase == .failed) "有步骤失败" else if (props.phase == .rejected) "有步骤被拒绝" else if (props.phase == .cancelled) "有步骤取消" else header_projection.phaseLabel(props.phase);
+    const status_label = statusLabel(props);
     const projected = try header_projection.withStatus(cx.allocator, props.projection, status_label);
     defer cx.allocator.free(projected);
     const count_label = try ui.text(cx, "", .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = palette.fg_2 });

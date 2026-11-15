@@ -1,5 +1,5 @@
 //! App-scoped, immutable credential references. Secrets never appear in errors.
-//! Production defaults to Keychain and can explicitly move to private files.
+//! Production defaults to Keychain and can move between it and private files.
 const std = @import("std");
 const builtin = @import("builtin");
 const LocalStore = @import("local_credentials.zig");
@@ -11,6 +11,7 @@ var local_store: ?LocalStore = null;
 var local_mode: std.atomic.Value(bool) = .init(false);
 var converting: std.atomic.Value(bool) = .init(false);
 var transactions: std.atomic.Value(usize) = .init(0);
+var readers: std.atomic.Value(usize) = .init(0);
 var selected_backend: ?Backend = null;
 var test_memory: MemoryBackend = .{};
 var pending_cleanup: std.ArrayList([68]u8) = .empty;
@@ -56,9 +57,12 @@ pub fn isUnlocked() bool {
 pub fn isConverting() bool {
     return converting.load(.acquire);
 }
-pub fn beginConversion() bool {
-    if (usesLocal() or converting.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return false;
-    if (transactions.load(.seq_cst) == 0) return true;
+pub const Storage = enum { local, keychain };
+pub const Conversion = enum { complete, local_cleanup_pending };
+
+pub fn beginConversion(target: Storage) bool {
+    if (converting.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return false;
+    if (usesLocal() != (target == .local) and transactions.load(.seq_cst) == 0 and readers.load(.seq_cst) == 0) return true;
     endConversion();
     return false;
 }
@@ -74,6 +78,37 @@ pub fn convertToLocal() !void {
     try target.select();
     pending_cleanup.clearRetainingCapacity();
     local_mode.store(true, .release);
+}
+
+pub fn convertToKeychain() !Conversion {
+    if (builtin.is_test) return error.CredentialUnavailable;
+    const source = try local();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const refs = try source.references(allocator, validReference);
+    var entries: std.ArrayList(native.ImportEntry) = .empty;
+    defer for (entries.items) |entry| std.crypto.secureZero(u8, @constCast(entry.value[0..entry.length]));
+    try entries.ensureTotalCapacity(allocator, refs.len);
+    var total: usize = 0;
+    for (refs) |*reference| {
+        for (pending_cleanup.items) |*retired| {
+            if (std.mem.eql(u8, reference, retired)) break;
+        } else {
+            const account = try allocator.dupeSentinel(u8, reference, 0);
+            const secret = try source.get(allocator, reference);
+            entries.appendAssumeCapacity(.{ .reference = account.ptr, .value = secret.ptr, .length = secret.len });
+            total += secret.len;
+            if (total > 8 * 1024 * 1024) return error.CredentialLimitExceeded;
+        }
+    }
+    try native.importVerified(try scope(), entries.items);
+    const durable = try source.deselect();
+    local_mode.store(false, .release);
+    pending_cleanup.clearRetainingCapacity();
+    if (!durable) return .local_cleanup_pending;
+    source.collect(&.{}, validReference) catch return .local_cleanup_pending;
+    return .complete;
 }
 fn scope() ![:0]const u8 {
     if (service) |s| return s;
@@ -105,6 +140,9 @@ pub fn get(a: std.mem.Allocator, reference: []const u8) ![]u8 {
     const s = try scope();
     if (backend()) |b| return b.get(b.context, a, s, reference);
     if (builtin.is_test) unreachable;
+    _ = readers.fetchAdd(1, .seq_cst);
+    defer _ = readers.fetchSub(1, .seq_cst);
+    if (converting.load(.seq_cst)) return error.CredentialBusy;
     if (usesLocal()) return (try local()).get(a, reference);
     return native.get(a, s, reference);
 }

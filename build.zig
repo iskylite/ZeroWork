@@ -147,6 +147,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkFramework("UserNotifications", .{});
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_data_alert.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_password_reveal.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_window_pin.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/app_icon.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_app_menu.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_menu_bar.m"), .flags = if (test_mode) &.{ "-fobjc-arc", "-DZW_MENU_BAR_TEST=1" } else &.{"-fobjc-arc"} });

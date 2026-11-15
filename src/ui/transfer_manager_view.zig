@@ -301,11 +301,21 @@ const Control = struct {
             .action => p.perform(self.target.?, self.action.?) catch |err| p.fail(err),
             .events => {
                 const task_ = p.task(self.target.?) orelse return;
+                const anchor = self.event_anchor orelse return;
+                const entries = if (p.manager) |manager| blk: {
+                    const progress = manager.progress(task_.target.job) orelse return;
+                    if (progress.attempt != task_.target.attempt) return;
+                    break :blk eventText(p.cx.allocator, manager, progress) catch |err| {
+                        p.fail(err);
+                        return;
+                    };
+                } else task_.events;
+                defer if (p.manager != null) p.cx.allocator.free(entries);
                 if (p.event_view == null) p.event_view = @import("transfer_events_view.zig").View.mount(p.cx, p.scope) catch |err| {
                     p.fail(err);
                     return;
                 };
-                p.event_view.?.show(task_.target.job, task_.events, self.event_anchor orelse return) catch |err| p.fail(err);
+                p.event_view.?.show(task_.target.job, entries, anchor) catch |err| p.fail(err);
             },
             .copy_path, .copy_local_path => {
                 const task_ = p.task(self.target.?) orelse return;
@@ -1462,9 +1472,7 @@ pub const Panel = struct {
                 row.status_detail = try std.fmt.allocPrint(a, "已跳过 {d} 项", .{p.skipped_files});
             }
             if (self.callbacks.?.owner_label) |read_label| row.owner_label = try std.fmt.allocPrint(a, "{s} #{d}", .{ read_label(self.callbacks.?.context, p.job), session });
-            row.events = try eventText(a, manager, p);
-            const history = manager.eventHistory(p.job) orelse &.{};
-            row.event_summary = try std.fmt.allocPrint(a, "{d} 条状态事件 · 当前尝试 {d} · {s}", .{ history.len, p.attempt, phaseLabel(row.phase) });
+            row.event_summary = try std.fmt.allocPrint(a, "{d} 条状态事件 · 当前尝试 {d} · {s}", .{ manager.jobs.items[i].event_count, p.attempt, phaseLabel(row.phase) });
             row.can_resume = manager.canResume(p.job);
             row.can_reveal = if (self.callbacks.?.can_reveal) |read_capability| read_capability(self.callbacks.?.context, p.job) else false;
         }

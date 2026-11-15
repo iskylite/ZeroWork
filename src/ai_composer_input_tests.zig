@@ -223,12 +223,16 @@ test "AI composer empty states mount real shortcuts and configuration actions wi
     defer f.deinit();
     var actions: Actions = .{};
     const hooks: Empty.Actions = .{ .context = &actions, .summarize = Actions.click, .logs = Actions.click, .settings = Actions.click, .ollama = Actions.click };
-    const configured = try Empty.mount(f.cx, f.scope, true, hooks);
+    const configured = try Empty.mount(f.cx, f.scope, .ready, hooks);
     configured.setStyleInline(a, .{ .width = .{ .px = 560 } });
     try f.cx.root.?.appendChild(a, configured);
-    const unconfigured = try Empty.mount(f.cx, f.scope, false, hooks);
+    const unconfigured = try Empty.mount(f.cx, f.scope, .setup, hooks);
     unconfigured.setStyleInline(a, .{ .width = .{ .px = 560 } });
     try f.cx.root.?.appendChild(a, unconfigured);
+    const loading = try Empty.mount(f.cx, f.scope, .loading, hooks);
+    try std.testing.expectEqualStrings("ai.empty.loading", loading.meta.ownership.meta.test_id.?);
+    try std.testing.expectEqual(@as(usize, 2), loading.children.items.len);
+    try f.cx.root.?.appendChild(a, loading);
     f.settle();
     try std.testing.expectEqual(@as(usize, 0), actions.clicks);
     const settings = unconfigured.children.items[3];

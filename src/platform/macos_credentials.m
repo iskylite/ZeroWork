@@ -64,6 +64,11 @@ static CFStringRef confirmed_service;
 #endif
 static int vault_exists;
 #if !defined(ZW_CREDENTIALS_LOCAL)
+static void discard_vault_cache(void) {
+    if (cached_service) CFRelease(cached_service);
+    if (cached_vault) CFRelease(cached_vault);
+    cached_service = NULL; cached_vault = NULL; vault_exists = 0;
+}
 static pthread_mutex_t vault_lock = PTHREAD_MUTEX_INITIALIZER;
 static void unlock_vault(pthread_mutex_t **lock) { pthread_mutex_unlock(*lock); }
 #define ZW_VAULT_GUARD \
@@ -263,7 +268,7 @@ int zw_credentials_export(const char *service, void *context, export_value write
 #if defined(ZW_CREDENTIALS_UI_FIXTURE)
     unsigned char *fixture_value = NULL;
     size_t fixture_length = 0;
-    int fixture = fixture_credential(&fixture_value, &fixture_length);
+    int fixture = cached_service ? 1 : fixture_credential(&fixture_value, &fixture_length);
     if (fixture != 1) {
         if (fixture) return fixture;
         int failed = write(context, "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", fixture_value, fixture_length);
@@ -311,11 +316,80 @@ static OSStatus save_vault(const char *service, CFMutableDictionaryRef candidate
     if (!status) { CFRelease(cached_vault); cached_vault = candidate; }
     return status;
 }
+#if !defined(ZW_CREDENTIALS_LOCAL)
+struct import_entry { const char *reference; const unsigned char *value; size_t length; };
+
+static OSStatus verify_vault_storage(const char *service, CFDictionaryRef expected) {
+    CFMutableDictionaryRef query = vault_query(service);
+    if (!query) return errSecAllocate;
+    CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
+    CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+    CFTypeRef data = NULL;
+    OSStatus status = no_ui_call(0, query, NULL, &data);
+    CFRelease(query);
+    if (status == errSecItemNotFound && CFDictionaryGetCount(expected) == 0) return errSecSuccess;
+    if (!status) {
+        CFPropertyListRef actual = NULL;
+        if (data && CFGetTypeID(data) == CFDataGetTypeID() && CFDataGetLength(data) <= 8 * 1024 * 1024)
+            actual = CFPropertyListCreateWithData(NULL, data, kCFPropertyListImmutable, NULL, NULL);
+        if (!actual || !CFEqual(actual, expected)) status = errSecDecode;
+        if (actual) CFRelease(actual);
+    }
+    if (data) CFRelease(data);
+    return status;
+}
+
+int zw_credentials_import(const char *service, const struct import_entry *entries, size_t count) {
+    ZW_VAULT_GUARD;
+    CFMutableDictionaryRef next = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (!next) return errSecAllocate;
+    OSStatus status = errSecSuccess;
+    for (size_t i = 0; i < count; i++) {
+        const struct import_entry *entry = &entries[i];
+        if (!owned_reference(entry->reference) || entry->length > 8 * 1024 * 1024) { status = errSecParam; break; }
+        CFStringRef key = CFStringCreateWithCString(NULL, entry->reference, kCFStringEncodingASCII);
+        CFDataRef value = CFDataCreate(NULL, entry->value, (CFIndex)entry->length);
+        if (!key || !value) status = errSecAllocate;
+        else if (CFDictionaryContainsKey(next, key)) status = errSecDuplicateItem;
+        else CFDictionarySetValue(next, key, value);
+        if (value) CFRelease(value);
+        if (key) CFRelease(key);
+        if (status) break;
+    }
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+    const char *fixture_mode = getenv("ZW_TEST_CREDENTIAL_RESPONSE");
+    if (!status && fixture_mode) {
+        if (!strcmp(fixture_mode, "write-fail") || !strcmp(fixture_mode, "verify-fail")) status = errSecIO;
+        else {
+            unsigned char *value = NULL; size_t length = 0;
+            status = fixture_credential(&value, &length);
+            if (value) { memset(value, 0, length); free(value); }
+        }
+        if (!status) {
+            CFStringRef name = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+            if (!name) status = errSecAllocate;
+            else { discard_vault_cache(); cached_service = name; cached_vault = next; return errSecSuccess; }
+        }
+    }
+    if (fixture_mode) { CFRelease(next); return status; }
+#endif
+    if (!status) {
+        status = load_vault(service);
+        if (status == errSecInteractionNotAllowed || status == errSecAuthFailed) status = load_vault_with_ui(service, 1);
+    }
+    if (!status) status = save_vault(service, next);
+    if (status) { CFRelease(next); return status; }
+    // Verify through Security (or the signed agent), not the process cache.
+    status = verify_vault_storage(service, next);
+    if (status) discard_vault_cache();
+    return status;
+}
+#endif
 int zw_credentials_get(const char *service, const char *reference, unsigned char **out, size_t *length) {
     ZW_VAULT_GUARD;
     if (!owned_reference(reference)) return errSecParam;
 #if defined(ZW_CREDENTIALS_UI_FIXTURE)
-    int fixture = fixture_credential(out, length);
+    int fixture = cached_service ? 1 : fixture_credential(out, length);
     if (fixture != 1) return fixture;
 #endif
     OSStatus status = load_vault(service); if (status) return status;

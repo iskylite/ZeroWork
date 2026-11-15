@@ -267,6 +267,7 @@ def execute(args, shell, mode, output):
             checks["nested_scope_exercised"] = "manual_attach=true three_layers=true observed_attach=true parent_restored=true stale_rejected=true parent_observer=true actual_nested_ssh=true" in result.stderr
         if mode == "disconnect":
             checks["command_not_replayed"] = fixture.inputs.count(b"DISCONNECT_%s") == 1
+            checks["original_output_available_before_and_after_disconnect"] = "live_progress=true retained_progress=true" in result.stderr
         if mode == "recording-unavailable":
             checks["no_user_command_sent"] = b"NEVER_UNRECORDED" not in fixture.inputs
         if mode == "disabled":

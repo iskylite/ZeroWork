@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, mode, "disconnect")) {
         try disconnected(worker, task);
-        std.debug.print("SHELL_EXECUTION_PASS mode=disconnect unknown=true no_replay=true\n", .{});
+        std.debug.print("SHELL_EXECUTION_PASS mode=disconnect unknown=true no_replay=true live_progress=true retained_progress=true\n", .{});
         return;
     }
     if (std.mem.eql(u8, mode, "stop")) {
@@ -664,14 +664,25 @@ fn run(worker: *Worker, task: identity.TaskId, command: []const u8, checks: Chec
 }
 fn disconnected(worker: *Worker, task: identity.TaskId) !void {
     const before = try worker.executionSnapshot();
-    const command = "printf 'DISCONNECT_%s\\n' armed; sleep 30";
-    try worker.executionRequest(.{ .execution_id = .generate(), .task_id = task, .expected_input_epoch = before.input_epoch, .expected_shell_id = before.shell.id, .expected_shell_revision = before.shell.revision, .ownership_revision = 1, .command = command, .command_hash = execution.digest(command) });
+    const command = "printf 'PROGRESS_%s\\n' first; sleep 1; printf 'DISCONNECT_%s\\n' armed; sleep 30";
+    const id = identity.ExecutionId.generate();
+    try worker.executionRequest(.{ .execution_id = id, .task_id = task, .expected_input_epoch = before.input_epoch, .expected_shell_id = before.shell.id, .expected_shell_revision = before.shell.revision, .ownership_revision = 1, .command = command, .command_hash = execution.digest(command) });
     const deadline = now() + 8000;
+    var observed_running = false;
     while (now() < deadline) {
         tick(worker) catch {};
         const snapshot = try worker.executionSnapshot();
+        if (snapshot.state == .running and !observed_running) {
+            var output = try worker.readExecutionOutput(id, a, 0, 4096);
+            defer output.deinit(a);
+            observed_running = std.mem.indexOf(u8, output.bytes, "PROGRESS_first") != null;
+        }
         if (snapshot.state == .outcome_unknown) {
             if (!snapshot.submit_sent or !snapshot.remote_effect_unknown or snapshot.process != null or snapshot.interval_saved or snapshot.grant != null) return error.FalseDisconnectReceipt;
+            if (!observed_running) return error.StreamWasNotVisibleBeforeFinish;
+            var output = try worker.readExecutionOutput(id, a, 0, 4096);
+            defer output.deinit(a);
+            if (std.mem.indexOf(u8, output.bytes, "PROGRESS_first") == null) return error.ProgressLostOnDisconnect;
             return;
         }
     }
@@ -773,7 +784,10 @@ fn configuredReconnect(init: std.process.Init, port: u16, directory: []const u8)
         cx.advanceFrameClock();
         cx.layout();
         _ = cx.render();
-        _ = try app.safeTick();
+        _ = app.safeTick() catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
         if (workspace.pendingAuthentication()) |challenge| try workspace.submitAuthentication(challenge.identity, .trust_once);
         if (workspace.sessionTab(id) != tab or tab.root != original_root) return error.ReconnectReplacedPane;
         const runtime = tab.runtime orelse continue;

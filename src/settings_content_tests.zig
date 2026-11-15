@@ -998,6 +998,10 @@ const SettingsProbe = struct {
     action_value: ?view.Action = null,
     action_count: usize = 0,
     allow_clear: bool = false,
+    fn read(_: *anyopaque, key: view.Key) ?@import("config/settings_values.zig").Value {
+        if (std.mem.eql(u8, key.section, "data") and std.mem.eql(u8, key.key, "credential_storage")) return .{ .text = "macOS 钥匙串" };
+        return null;
+    }
     fn requestEdit(raw: *anyopaque, key: view.Key, _: *ui.Node) void {
         const self: *SettingsProbe = @ptrCast(@alignCast(raw));
         self.requested_key = key;
@@ -1014,7 +1018,7 @@ const SettingsProbe = struct {
     }
     fn mount(self: *SettingsProbe, fixture: *AppearanceFixture, page: usize) !view.Mounted {
         fixture.controller.model.selectPage(page);
-        const result = try view.mountPage(fixture.cx, fixture.scope, &fixture.controller, .{ .context = self, .changed = changed, .request_edit = requestEdit, .action = runAction, .action_state = actionState, .mount_providers = providers });
+        const result = try view.mountPage(fixture.cx, fixture.scope, &fixture.controller, .{ .context = self, .changed = changed, .request_edit = requestEdit, .read = read, .action = runAction, .action_state = actionState, .mount_providers = providers });
         try fixture.cx.root.?.appendChild(fixture.cx.allocator, result.root);
         fixture.cx.layout();
         return result;
@@ -1226,7 +1230,8 @@ test "native settings data actions use host availability and leave the draft int
     const clear_all = byId(blocked.root, "settings.data.clear_all").?;
     try std.testing.expect(clear_all.behavior.interaction.a11y.?.disabled);
     clickButton(clear_all);
-    try std.testing.expect(textNode(blocked.root, "存储于 macOS 钥匙串") != null);
+    try std.testing.expect(textNode(blocked.root, "macOS 钥匙串") != null);
+    try std.testing.expect(byId(blocked.root, "settings.data.credential_local") != null);
     try std.testing.expect(textNode(blocked.root, "~/.zerowork/") == null);
     try std.testing.expect(clear.behavior.interaction.a11y.?.disabled);
     clickButton(clear);

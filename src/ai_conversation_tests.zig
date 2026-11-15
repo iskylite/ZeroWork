@@ -954,7 +954,7 @@ test "AI step aggregation includes all settled outcomes and leaves only pending 
     try groupEvent(&turn, .{ .call_id = "next", .name = "read_terminal", .phase = .failed, .at_ms = 14 }, false);
     try std.testing.expectEqual(@as(usize, 2), turn.step_groups.items.len);
 }
-test "AI step aggregation native disclosure keeps existing step cards and adds only soft edges" {
+test "AI step aggregation native disclosure indents step cards within soft edges" {
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     const scope = try ui.Scope.init(a, null, cx.owner);
@@ -986,7 +986,8 @@ test "AI step aggregation native disclosure keeps existing step cards and adds o
     try std.testing.expect(group.expanded);
     try std.testing.expectApproxEqAbs(@as(f32, 32), card.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 76), view.root.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(card.globalRect().w, header.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(header.globalRect().x + 12, card.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(header.globalRect().w - 12, card.globalRect().w, 0.1);
     try std.testing.expectEqualStrings("已完成 · original summary", find(card, "ai.step.projection").?.getText().?.content);
     try std.testing.expect(find(card, "ai.step.separator") != null);
     try std.testing.expectEqual(@as(f32, 0), view.root.style.border.width);

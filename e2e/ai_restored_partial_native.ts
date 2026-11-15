@@ -85,7 +85,7 @@ try {
 
   // Compatibility fixture: interrupted answer-only response, no completion
   // timestamp/answer, with independently retained prose and old monotonic time.
-  const journal = join(data, 'ai-sessions.jsonl');
+  const journal = join(data, 'ai-sessions-active.jsonl');
   const lines = (await readFile(journal, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   let changed = 0;
   for (const line of lines) {
@@ -109,7 +109,7 @@ try {
   const originalCalls = modelCalls;
   await launch();
   await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
-  await click('ai.sessions'); await click('ai.session.restore.1');
+  await click('ai.sessions'); await click('ai.session.restore.2');
   if ((await h.query('ai.session.close.accept')).some(shown)) await click('ai.session.close.accept');
   await visible('ai.turn.interrupted'); await visible('ai.turn.process.toggle');
   assert.equal((await h.query('ai.turn.divider')).length, 0, 'process disclosure has no separator line');

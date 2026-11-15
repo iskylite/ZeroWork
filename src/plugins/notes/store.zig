@@ -309,8 +309,34 @@ pub const Store = struct {
         return note;
     }
 
-    /// IDs are scoped to the requested library. The caller owns the result.
-    pub fn listNoteIds(self: *Store, a: Allocator, library_id: model.LibraryId, visibility: Visibility) ![]model.NoteId {
+    pub const NoteSummary = struct {
+        id: model.NoteId,
+        library_id: model.LibraryId,
+        folder_id: ?model.FolderId,
+        title: []const u8,
+        schema_version: u32 = model.schema_version,
+        read_only: bool = false,
+        revision: u64 = 1,
+        deleted_at: ?i64 = null,
+        updated_at: i64,
+
+        fn metadata(self: NoteSummary) model.Note {
+            var note: model.Note = undefined;
+            inline for (@typeInfo(model.Note).@"struct".field_names) |field| {
+                @field(note, field) = if (@hasField(NoteSummary, field))
+                    @field(self, field)
+                else if (comptime std.mem.eql(u8, field, "body_md"))
+                    ""
+                else
+                    null;
+            }
+            return note;
+        }
+    };
+
+    /// Lists metadata in one pass without keeping or parsing Markdown into
+    /// allocated strings. Opening a document still validates its full record.
+    pub fn listNoteSummaries(self: *Store, a: Allocator, library_id: model.LibraryId, visibility: Visibility) ![]NoteSummary {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         const directory = try self.openLibrary(library_id);
@@ -319,21 +345,48 @@ pub const Store = struct {
         defer library.deinit();
         if (visibility == .active and library.value.deleted_at != null) return error.Unavailable;
         const documents = self.openDocuments(directory, true) catch |err| switch (err) {
-            error.FileNotFound => return a.alloc(model.NoteId, 0),
+            error.FileNotFound => return a.alloc(NoteSummary, 0),
             else => return err,
         };
         defer documents.close(self.io);
-        var ids: std.ArrayList(model.NoteId) = .empty;
-        errdefer ids.deinit(a);
+        var summaries: std.ArrayList(NoteSummary) = .empty;
+        errdefer {
+            for (summaries.items) |summary| a.free(summary.title);
+            summaries.deinit(a);
+        }
         var entries = documents.iterate();
         while (try entries.next(self.io)) |entry| {
             const id = entryNoteId(entry.name) orelse continue;
-            const note = try self.readNote(self.allocator, documents, id, library.value);
-            defer note.deinit();
-            if (visibility == .active and !note.value.visible(library.value)) continue;
-            try ids.append(a, id);
+            const file = try self.openRecord(documents, entry.name, max_note_bytes);
+            defer file.close(self.io);
+            var buffer: [4096]u8 = undefined;
+            var stream = file.reader(self.io, &buffer);
+            var tokens = std.json.Reader.init(self.allocator, &stream.interface);
+            defer tokens.deinit();
+            const parsed = try std.json.parseFromTokenSource(NoteSummary, self.allocator, &tokens, .{ .ignore_unknown_fields = true, .max_value_len = max_note_bytes });
+            defer parsed.deinit();
+            var summary = parsed.value;
+            if (!summary.id.eql(id)) return error.InvalidNote;
+            const note = summary.metadata();
+            try note.validate(library.value);
+            if (visibility == .active and !note.visible(library.value)) continue;
+            try summaries.ensureUnusedCapacity(a, 1);
+            summary.title = try a.dupe(u8, summary.title);
+            summaries.appendAssumeCapacity(summary);
         }
-        return ids.toOwnedSlice(a);
+        return summaries.toOwnedSlice(a);
+    }
+
+    /// IDs are scoped to the requested library. The caller owns the result.
+    pub fn listNoteIds(self: *Store, a: Allocator, library_id: model.LibraryId, visibility: Visibility) ![]model.NoteId {
+        const summaries = try self.listNoteSummaries(self.allocator, library_id, visibility);
+        defer {
+            for (summaries) |summary| self.allocator.free(summary.title);
+            self.allocator.free(summaries);
+        }
+        const ids = try a.alloc(model.NoteId, summaries.len);
+        for (ids, summaries) |*id, summary| id.* = summary.id;
+        return ids;
     }
 
     pub fn changeNote(self: *Store, key: model.NoteKey, expected_revision: u64, change: NoteChange) !u64 {
@@ -604,14 +657,21 @@ pub const Store = struct {
         return record;
     }
 
-    fn readRecord(self: *Store, comptime T: type, a: Allocator, directory: Dir, filename: []const u8, limit: usize) !std.json.Parsed(T) {
+    fn openRecord(self: *Store, directory: Dir, filename: []const u8, limit: usize) !std.Io.File {
         const info = try directory.statFile(self.io, filename, .{ .follow_symlinks = false });
         if (info.kind != .file or info.nlink != 1) return error.InvalidRecordFile;
         if (info.size > limit) return error.RecordTooLarge;
         const file = try directory.openFile(self.io, filename, .{ .allow_directory = false, .follow_symlinks = false });
-        defer file.close(self.io);
+        errdefer file.close(self.io);
         const opened = try file.stat(self.io);
         if (opened.kind != .file or opened.nlink != 1 or opened.inode != info.inode) return error.InvalidRecordFile;
+        if (opened.size > limit) return error.RecordTooLarge;
+        return file;
+    }
+
+    fn readRecord(self: *Store, comptime T: type, a: Allocator, directory: Dir, filename: []const u8, limit: usize) !std.json.Parsed(T) {
+        const file = try self.openRecord(directory, filename, limit);
+        defer file.close(self.io);
         var buffer: [4096]u8 = undefined;
         var reader = file.reader(self.io, &buffer);
         const bytes = reader.interface.allocRemaining(a, .limited(limit + 1)) catch |err| switch (err) {

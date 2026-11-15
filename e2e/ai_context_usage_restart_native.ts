@@ -70,14 +70,15 @@ async function stop() {
     app = null;
 }
 async function restore() {
-    await click('ai.sessions'); await click('ai.session.restore.1');
+    await click('ai.sessions'); await click('ai.session.jump.2');
+    await click('ai.history.restore');
     await h.sleep(150);
     if ((await h.query('ai.session.close.accept')).some(shown)) await click('ai.session.close.accept');
     await h.waitFor(async () => (await h.query('ai.message.user.text')).filter(shown).some((n: any) => text(n).includes('重启恢复基准')) || null, 15000);
 }
 async function menu() { await click('ai.composer.usage'); return visible('ai.usage.menu'); }
 async function lastPresentation() {
-    const lines = (await readFile(join(data, 'ai-sessions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const lines = (await readFile(join(data, 'ai-sessions-active.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     const events = lines.map(row => row.event).filter(event => event?.kind === 'presentation');
     const source = events.find(event => event.presentation.includes('重启恢复基准'));
     // Subsequent records may contain only a compact presentation patch.
@@ -107,7 +108,7 @@ try {
     report.checks.push('Another restart with the original model does not revive the invalidated baseline');
     report.status = 'passed';
 } catch (error) {
-    report.status = 'failed'; report.error = String(error); process.exitCode = 1;
+    report.status = 'failed'; report.error = error instanceof Error ? error.stack : String(error); process.exitCode = 1;
     await h.screenshot(join(out, 'failure.png')).catch(() => {});
     await writeFile(join(out, 'failure-tree.json'), JSON.stringify(await h.tree().catch(() => null), null, 2));
 } finally {

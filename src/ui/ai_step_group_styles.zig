@@ -11,7 +11,7 @@ pub fn header(tokens: *const ui.ThemeTokens) ui.BoxStyle {
     return style;
 }
 pub fn content(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .padding = .{ .top = 6, .bottom = 6 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .padding = .{ .top = 6, .bottom = 6, .left = 12 }, .flex_shrink = 0 };
 }
 pub fn summary(tokens: *const ui.ThemeTokens) ui.BoxStyle {
     var style = steps.headerSummary(tokens);

@@ -323,11 +323,15 @@ pub const State = struct {
         defer self.cx.allocator.free(metadata);
         try self.metadata.setTextContent(self.cx.allocator, metadata);
         self.metadata.setDisplay(if (metadata.len == 0) .none else .flex);
-        const state_label = if (!result.local_released and result.remote_effect_unknown) "清理待核实 · 远端执行结果待核实" else if (!result.local_released) "清理待核实" else if (target.feedback) |info| info.label else if (result.remote_effect_unknown) "远端执行结果待核实" else errorStatusLabel(result.status, result.error_code, self.record.name);
+        const batch = std.mem.eql(u8, self.record.name, "run_command");
+        const execution = @import("../ai/execution_result_projection.zig");
+        const state_label = if (!result.local_released and result.remote_effect_unknown) "清理待核实 · 远端执行结果待核实" else if (!result.local_released) "清理待核实" else if (target.feedback) |info| info.label else if (batch) execution.batchStatus(result) else if (result.remote_effect_unknown) "远端执行结果待核实" else errorStatusLabel(result.status, result.error_code, self.record.name);
         try self.showDiagnostic(target.feedback);
         const feedback = if (if (target.feedback == null) failureReason(result.error_code) else null) |reason| try std.fmt.allocPrint(self.cx.allocator, "{s} · {s}", .{ state_label, reason }) else try self.cx.allocator.dupe(u8, state_label);
         defer self.cx.allocator.free(feedback);
-        try self.feedback.setTextContent(self.cx.allocator, feedback);
+        const text = if (batch and result.local_released) if (execution.batchOutputLabel(result)) |output_label| try std.fmt.allocPrint(self.cx.allocator, "{s} · {s}", .{ feedback, output_label }) else null else null;
+        defer if (text) |value| self.cx.allocator.free(value);
+        try self.feedback.setTextContent(self.cx.allocator, text orelse feedback);
         try self.showOutput(result.stdout, result.stderr);
     }
     fn showOutput(self: *State, output: []const u8, failure: []const u8) !void {

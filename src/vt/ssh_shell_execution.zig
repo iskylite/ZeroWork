@@ -317,6 +317,7 @@ pub const Bridge = struct {
         for (self.contexts.items) |context| context.capture(bytes);
         if (!self.active or self.snapshot.start == null or self.snapshot.end != null) return;
         self.capture_total +|= bytes.len;
+        self.snapshot.revision +|= 1;
         if (bytes.len >= max_capture) {
             self.captured.clearRetainingCapacity();
             self.captured.appendSlice(self.allocator, bytes[bytes.len - max_capture ..]) catch {

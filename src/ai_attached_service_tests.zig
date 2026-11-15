@@ -985,7 +985,7 @@ test "conversation model and share follow the durable conversation lifecycle" {
         try app.service.store.saveConversationModel(removed, .{ .explicit = old_model });
         try app.service.store.saveConversationModel(removed, .selection_required);
         for ([_]identity.ConversationId{ inherited, removed }) |id| {
-            const url = try share.save(a, io, root, id, &.{.{ .user = true, .text = @constCast("会话历史") }}, null, &.{});
+            const url = try share.save(a, io, root, id, &.{.{ .user = true, .text = @constCast("会话历史") }}, null, &.{}, null);
             defer a.free(url);
             try std.testing.expect(std.mem.startsWith(u8, url, "file://"));
         }
@@ -1009,11 +1009,40 @@ test "conversation model and share follow the durable conversation lifecycle" {
     try std.testing.expectError(error.IsDir, app.service.store.remove(removed));
     try std.testing.expect(app.service.store.find(removed) != null);
     try shares.deleteDir(io, filename);
-    const url = try share.save(a, io, root, removed, &.{.{ .user = true, .text = @constCast("会话历史") }}, null, &.{});
+    const url = try share.save(a, io, root, removed, &.{.{ .user = true, .text = @constCast("会话历史") }}, null, &.{}, null);
     defer a.free(url);
     try app.service.store.remove(removed);
     try std.testing.expect(app.service.store.find(removed) == null);
     try std.testing.expectError(error.FileNotFound, shares.statFile(io, filename, .{}));
     const other_hex = std.fmt.bytesToHex(inherited.bytes, .lower);
     _ = try shares.statFile(io, other_hex ++ ".md", .{});
+}
+
+test "indexed AI persistence accepts new conversations independently of invalid legacy data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    const index = @import("ai/history_index.zig");
+    const old_bytes = "{\"schema\":255}\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = index.Source.legacy.path(), .data = old_bytes });
+
+    var live = attached.Host.init(a);
+    defer live.deinit() catch unreachable;
+    try live.ensureIndexedPersistence(path);
+    const agent = try live.service.store.attach(.{ .session = 7 });
+    const ticket = try live.service.store.create(agent.id);
+    try live.service.store.checkpoint(ticket, 1, &.{.{ .content = "new chat" }}, true);
+
+    var catalog = index.Catalog.init(a);
+    defer catalog.deinit();
+    const cancel = std.atomic.Value(bool).init(false);
+    try std.testing.expectError(error.InvalidSessionJournal, catalog.scan(std.testing.io, tmp.dir, try index.sourceBounds(std.testing.io, tmp.dir), &cancel));
+    try std.testing.expectEqualStrings("new chat", live.service.store.find(ticket.conversation).?.history.messages[0].content);
+    const legacy_bytes = try tmp.dir.readFileAlloc(std.testing.io, index.Source.legacy.path(), a, .limited(1024));
+    defer a.free(legacy_bytes);
+    try std.testing.expectEqualStrings(old_bytes, legacy_bytes);
+    const active_bytes = try tmp.dir.readFileAlloc(std.testing.io, index.Source.active.path(), a, .limited(16 * 1024));
+    defer a.free(active_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, active_bytes, "new chat") != null);
 }

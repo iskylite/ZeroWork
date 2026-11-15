@@ -32,6 +32,7 @@ const marker='ZW_EXEC_'+randomBytes(16).toString('hex'),markerFile=join(iso,'exe
 // CRLF tests the production normalized approval while preserving original wire.
 const command=`printf '%s\\n' '${marker}' >> '${markerFile}'\r\nprintf '%s\\n' '${marker}'`;
 const normalizedCommand=command.replaceAll('\r\n','\n');
+const deniedFile=join(iso,'must-not-execute-share'),deniedCommand=`printf forbidden > '${deniedFile}'`;
 const stopCommand=`printf forbidden > '${stopFile}'`;
 const unknownExecutionRef='x1:'+randomBytes(16).toString('hex');
 const takeoverFiles={readyA:join(iso,'read-a-ready'),doneA:join(iso,'read-a-result'),readyB:join(iso,'loop-b-ready'),releaseB:join(iso,'release-b'),freshA:join(iso,'fresh-a-result')};
@@ -79,7 +80,7 @@ const result=(results:Map<string,any>,id:string,success=true)=>{
 const assertHostRejected=(envelope:any,code:string)=>{
  const body=payload(envelope);assert.equal(envelope.status,'rejected');assert.equal(body.error_code,code);
  assert.equal(body.side_effect_started,false);assert.equal(body.local_released,true);assert.equal(body.remote_effect_unknown,false);
- assert.equal(envelope.receipt.side_effect_started,false);assert.equal(envelope.receipt.local_released,true);assert.equal(envelope.receipt.remote_effect_unknown,false);
+ const receipt=envelope.receipt??envelope;assert.equal(receipt.side_effect_started,false);assert.equal(receipt.local_released,true);assert.equal(receipt.remote_effect_unknown,false);
  return body;
 };
 const emitMany=(body:any,res:any,calls:any[])=>{
@@ -101,11 +102,11 @@ const holdTakeover=(body:any,res:any,kind:string)=>{
 };
 const releaseTakeover=(kind:string,calls:any[])=>{assert(takeoverHeld&&takeoverHeld.kind===kind);const held=takeoverHeld;takeoverHeld=null;emitMany(held.body,held.res,calls)};
 const finish=(res:any,stage:string)=>{activeCall=null;finalEmitted=true;res.end(frame({content:`[E-${stage}] 已核验真实终端、执行回执与本次任务边界。`})+'data: [DONE]\n\n')};
-const validateWire=(body:any)=>{
+const validateWire=(body:any,currentUser:number)=>{
  const system=body.messages.find((m:any)=>m.role==='system')?.content??'';
  assert(!/assistant_session_id=|provider=.*session_id=/.test(system),'ambient identity must be discovered through tools');
  const pending=new Map<string,any>();
- for(const message of body.messages){
+ for(const [index,message] of body.messages.entries()){
   if(message.role==='assistant')for(const call of message.tool_calls??[]){assert(!pending.has(call.id),'duplicate unresolved call');pending.set(call.id,call)}
   if(message.role==='tool'){
    const call=pending.get(message.tool_call_id);assert(call,`orphan tool result ${message.tool_call_id}`);
@@ -113,7 +114,9 @@ const validateWire=(body:any)=>{
     const expected=emitted.get(call.id);assert.equal(call.function.name,expected.wire);
     assert.deepEqual(JSON.parse(call.function.arguments),expected.arguments,'assistant wire changed original arguments');
    }
-   JSON.parse(message.content);pending.delete(message.tool_call_id);
+   // Prior task results can be wrapped as historical environment text.
+   if(index>=currentUser||!message.content.startsWith('[历史环境，仅作记录]'))JSON.parse(message.content);
+   pending.delete(message.tool_call_id);
   }
  }
  assert.equal(pending.size,0,'provider followup must contain a result for every original call');
@@ -139,11 +142,12 @@ const assertRunning=(body:any,label:string)=>{
 const server=createServer(async(req,res)=>{
  try{
   if(req.method!=='POST'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({data:[{id:'execution-lifecycle-fixture'}]}));return}
-  let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);validateWire(body);
+  let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);
   for(const line of(await readFile(join(out,'app.log'),'utf8')).split('\n')){const start=line.indexOf('AI_TOOL_TRACE ');if(start<0)continue;try{const event=JSON.parse(line.slice(start+14));if(event.event==='host_result')fullHostResults.set(event.call_id,event.result)}catch{}}
   // A real single-to-group handoff adds a host-authored user notice. Keep the
   // fixture's explicit task marker as the boundary across that genuine notice.
   const userIndex=body.messages.findLastIndex((m:any)=>m.role==='user'&&/\[E-(LIFE|STOP|AFTER|CLOSE|NEGATIVE|TAKEOVER)\]/.test(String(m.content)));
+  validateWire(body,userIndex);
   const user=String(body.messages[userIndex]?.content??'');
   const stage=/\[E-(LIFE|STOP|AFTER|CLOSE|NEGATIVE|TAKEOVER)\]/.exec(user)?.[1];if(!stage)throw new AcceptanceFailure('fixture_contract','stage-selection','expected explicit fixture stage');
   const current=body.messages.slice(userIndex+1);
@@ -267,7 +271,18 @@ const server=createServer(async(req,res)=>{
    assert.equal(groupContext.conversation_id,initialContext.conversation_id);assert.equal(groupContext.task_id,initialContext.task_id);assert.equal(groupContext.binding_ref,group.group_ref);assert(groupContext.binding_revision>initialContext.binding_revision);
    const opened=result(results,'life-open');if(!opened)return emit(body,res,'life-open','host.open_session',{group_ref:groupContext.binding_ref,source_ref:initialSession.session_ref,connection_policy:'new_only',retention:'ask',request_key:key+'-open'});
    assert.equal(opened.ownership,'created_task');assert.equal(opened.retention,'ask');assert(opened.session_ref&&opened.operation_ref);assert.notEqual(opened.session_ref,initialSession.session_ref);
-   const ready=result(results,'life-ready');if(!ready)return emit(body,res,'life-ready','host.wait_session_ready',{operation_ref:opened.operation_ref,wait_for:'interactive',wait_ms:30000});
+   let ready;
+   for(let attempt=0;attempt<4;attempt++){
+    const id=attempt===0?'life-ready':`life-ready-${attempt}`;
+    if(!results.has(id))return emit(body,res,id,'host.wait_session_ready',{operation_ref:opened.operation_ref,wait_for:'interactive',wait_ms:30000});
+    // The new member can change the authority fence while a provider round
+    // is in flight. Retry the read against the same open-operation receipt.
+    if(payload(results.get(id)).error_code==='not_dispatched_due_to_new_input')continue;
+    ready=result(results,id);
+    if(ready.state==='ready')break;
+    assert(['queued','prepared','opening'].includes(ready.state),JSON.stringify(ready));
+   }
+   assert(ready,'did not receive a readiness receipt for the approved open operation');
    assert.equal(ready.state,'ready');assert.equal(ready.membership_committed,true);assert.equal(ready.ownership,'created_task');
    ownedSession=ready;assert.equal(ownedSession.session_ref,opened.session_ref);
    const run=result(results,'life-run');if(!run)return emit(body,res,'life-run','host.run_in_terminal',{session_ref:ownedSession.session_ref,command,request_key:key+'-run',wait_ms:2000});
@@ -278,6 +293,9 @@ const server=createServer(async(req,res)=>{
     const id='life-wait-'+i,next=result(results,id);if(!next)return emit(body,res,id,'host.wait_execution',{execution_ref:executionRef,until:'terminal',wait_ms:30000,max_bytes:8192});state=next;
    }
    assertIntervalRecorded(state);recorded=state;assert.equal(await readFile(markerFile,'utf8'),marker+'\n','one native write only');
+   if(!results.has('life-denied'))return emit(body,res,'life-denied','host.run_in_terminal',{session_ref:ownedSession.session_ref,command:deniedCommand,request_key:key+'-denied'});
+   assertHostRejected(results.get('life-denied'),'ToolApprovalRejected');
+   assert.equal(await exists(deniedFile),false);
    return finish(res,stage);
   }
   const contextId=stage.toLowerCase()+'-context',context=result(results,contextId);
@@ -293,7 +311,7 @@ const server=createServer(async(req,res)=>{
  }catch(error){if(takeoverOnly){if(error instanceof AcceptanceFailure)recordFailure(error.category,error.phase,error.message,error.evidence);else recordFailure('verification','provider-fixture-assertion',String(error),{active_call:activeCall})}fixtureFailure??=String(error);await writeFile(join(out,'fixture-failure.txt'),fixtureFailure);if(!res.headersSent)res.writeHead(500);res.end()}
 });
 await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const port=(server.address() as any).port;
-await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n[ai]\ndefault_provider="execution-lifecycle-fixture"\npermission_mode="confirm"\nexecution_mode="${negativeOnly?'interactive':'auto'}"\nsession_retention="ask"\n[[ai.providers]]\nid="execution-lifecycle-fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="execution-lifecycle-fixture"\ncontext_window=200000\ndefault=true\n[log]\nring_mb=1\ncheckpoint_sec=1\n`);
+await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n[ai]\ndefault_provider="execution-lifecycle-fixture"\npermission_mode="confirm"\nexecution_mode="${negativeOnly?'interactive':'auto'}"\nsession_retention="ask"\nstep_display="expanded"\n[[ai.providers]]\nid="execution-lifecycle-fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="execution-lifecycle-fixture"\ncontext_window=200000\ndefault=true\n[log]\nring_mb=1\ncheckpoint_sec=1\n`);
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const binarySha256=createHash('sha256').update(await readFile(binary)).digest('hex');
 if(process.env.ZW_AI_TEST_EXPECTED_SHA256)assert.equal(binarySha256,process.env.ZW_AI_TEST_EXPECTED_SHA256,'candidate binary differs from the explicitly delivered build');
@@ -310,16 +328,17 @@ const controlledPane=(id:number)=>h.waitFor(async()=>{
  const pane=(await h.query('groups.pane.'+id)).find(shown);if(!pane)return null;const nodes=flat(pane),surface=nodes.find((node:any)=>node.test_id==='terminal.surface'&&shown(node)),tag=nodes.find((node:any)=>node.test_id==='terminal.ai_control'&&shown(node)),title=nodes.find((node:any)=>node.test_id==='terminal.ai_control.title'&&shown(node)),button=nodes.find((node:any)=>node.test_id==='terminal.ai_control.takeover'&&shown(node));return surface&&tag&&title&&button?{pane,surface,tag,title,button}:null;
 },15000);
 const cardNode=(card:any,id:string)=>flat(card).find((node:any)=>node.test_id===id&&shown(node));
-const executionCard=(commandMarker:string,reference:string,id?:string,expectedSummary?:string)=>h.waitFor(async()=>{
+const executionCard=(commandMarker:string,reference:string|null,id?:string,expectedSummary?:string)=>h.waitFor(async()=>{
  const roots=id?await h.query(id):flat(await h.query('ai.panel')).filter((node:any)=>/^ai\.tool\.result\.\d+\./.test(node.test_id??''));
  const command=Object.values(takeoverCommands).find(value=>value.includes(commandMarker));
  for(const card of roots){
-  if(shown(card)&&cardNode(card,'ai.execution.result.header')&&card.rect.h<=32.1){
+  if(!shown(card)||!(command?text(cardNode(card,'ai.execution.result.command'))===queryText(command):text(cardNode(card,'ai.execution.result.command')).includes(commandMarker))||expectedSummary&&!text(cardNode(card,'ai.execution.result.summary')).includes(expectedSummary))continue;
+  if(card.rect.h<=32.1){
    const revealed=await revealCardAction(card.test_id,'ai.execution.result.header');
    assert((await h.clickAt(revealed.node.rect.x+20,revealed.node.rect.y+revealed.node.rect.h/2)).ok);
    return null;
   }
-  if(!shown(card)||!(command?text(cardNode(card,'ai.execution.result.command'))===queryText(command):text(cardNode(card,'ai.execution.result.command')).includes(commandMarker))||expectedSummary&&!text(cardNode(card,'ai.execution.result.summary')).includes(expectedSummary))continue;
+  if(reference===null)return card;
   if(!cardNode(card,'ai.execution.result.execution_id')){
    const revealed=await revealCardAction(card.test_id,'ai.execution.result.details_toggle');
    assert((await h.clickAt(revealed.node.rect.x+revealed.node.rect.w/2,revealed.node.rect.y+revealed.node.rect.h/2)).ok);
@@ -334,7 +353,7 @@ const revealCardAction=async(id:string,action:string)=>{
  for(let attempt=0;attempt<10;attempt++){
   const viewport=(await h.query('ai.conversation.viewport')).find(shown),card=(await h.query(id)).find(shown),node=cardNode(card,action);if(!viewport||!card||!node)throw new AcceptanceFailure('query_contract','card-action',`missing ${id} / ${action}`);
   if(node.rect.y>=viewport.rect.y+2&&node.rect.y+node.rect.h<=viewport.rect.y+viewport.rect.h-2)return{card,node};
-  const delta=Math.max(-600,Math.min(600,viewport.rect.y+viewport.rect.h/2-node.rect.y-node.rect.h/2));assert((await h.scrollAt(viewport.rect.x+viewport.rect.w-4,viewport.rect.y+viewport.rect.h/2,0,delta)).ok);await h.sleep(100);
+  const delta=Math.max(-600,Math.min(600,viewport.rect.y+viewport.rect.h/2-node.rect.y-node.rect.h/2));assert((await h.scrollAt(viewport.rect.x+3,viewport.rect.y+20,0,delta)).ok);await h.sleep(100);
  }
  throw new AcceptanceFailure('verification','card-action',`could not reveal ${id} / ${action} in the real conversation viewport`);
 };
@@ -365,9 +384,9 @@ const traceEvents=async()=>{
 const report:any={status:'running',binary,binary_sha256:binarySha256,started_at:new Date().toISOString(),checks:[],limits:['The local HTTP fixture supplies deterministic provider tool calls; all session, terminal, approval, lifecycle and recording results come from the real application.','Local uses its supported new_only policy. Real SSH reuse is a separate acceptance.','Initial discovery is batched; intermediate wait revisions require another genuine provider round and remain subject to the production tool-round budget.','Harness input, the normal owned-window close route and Metal screenshots cover the native window; physical keyboard, IME, VoiceOver and SSH are outside this case.']};
 report.mode=takeoverOnly?'precise_takeover_only':negativeOnly?'execution_rejections_only':closeOnly?'normal_close_only':'full_execution_lifecycle';
 async function normalClose(){
- await click(takeoverOnly?'ai.collapse':'ai.close');const windows=await h.request('POST','/zerowork/windows',{action:'snapshot'});assert.equal(windows.windows.length,1);
- const closingAt=performance.now(),route=takeoverOnly?'POST /quit':'POST /zerowork/windows close';
- assert((takeoverOnly?await h.request('POST','/quit'):await h.request('POST','/zerowork/windows',{action:'close',window:windows.windows[0].window})).ok);
+ await click('ai.collapse');const windows=await h.request('POST','/zerowork/windows',{action:'snapshot'});assert.equal(windows.windows.length,1);
+ const closingAt=performance.now(),route=takeoverOnly?'POST /quit':closeOnly?'POST /zerowork/windows close':'POST /zerowork/windows quit';
+ assert((takeoverOnly?await h.request('POST','/quit'):await h.request('POST','/zerowork/windows',closeOnly?{action:'close',window:windows.windows[0].window}:{action:'quit'})).ok);
  report.close_confirmations=[];let closingRpcUnavailable=false;
  while(app.exitCode===null&&app.signalCode===null&&performance.now()-closingAt<15000){
   // The final native window can unbind before its process exit notification.
@@ -479,7 +498,7 @@ try{acceptance:{
   await h.waitFor(async()=>{
    if(fixtureFailure||finalEmitted)return true;
    const recovery=(await h.query('ai.recovery')).find(shown);if(recovery){report.native_failure=text(recovery);return true}
-   for(const id of ['ai.approval','ai.host_approval'])if((await h.query(id)).some(shown)){report.unexpected_approval=id;return true}
+   for(const id of ['ai.approval','ai.host_approval','ai.interaction.approve'])if((await h.query(id)).some(shown)){report.unexpected_approval=id;return true}
    return null;
   },30000);
   assert.equal(fixtureFailure,null);assert.equal(report.unexpected_approval,undefined,'fixed-mode denial must not request approval');assert(finalEmitted,report.native_failure);await absent('ai.stop');await visible('ai.turn.complete');
@@ -495,7 +514,7 @@ try{acceptance:{
   await h.waitFor(async()=>{
    if(fixtureFailure||finalEmitted)return true;
    const recovery=(await h.query('ai.recovery')).find(shown);if(recovery){report.native_failure=text(recovery);return true}
-   if(!approved&&(await h.query('ai.host_approval')).some(shown)){assert.equal(activeCall?.id,'close-create-group');approved=true;await click('ai.host_approval.accept')}
+   if(!approved&&(await h.query('ai.interaction.approve')).some(shown)){assert.equal(activeCall?.id,'close-create-group');approved=true;await click('ai.interaction.approve')}
    return null;
   },30000);
   assert.equal(fixtureFailure,null);assert(finalEmitted);assert(approved);await absent('ai.stop');await visible('ai.turn.complete');
@@ -506,22 +525,80 @@ try{acceptance:{
   await normalClose();report.status='passed_close_only';break acceptance;
  }
  await send('LIFE');
- const approved=new Set<string>();
+ const decided=new Set<string>();
  await h.waitFor(async()=>{
   if(fixtureFailure||finalEmitted)return true;
   const recovery=(await h.query('ai.recovery')).find(shown);if(recovery){report.native_failure=text(recovery);return true}
-  if((await h.query('ai.host_approval')).some(shown)){
-   assert(activeCall);if(approved.has(activeCall.id))return null;
-   const summary=text(await visible('ai.host_approval.summary'));
-   assert.equal(await exists(markerFile),false,'command must have zero writes before its approval');
+  if((await h.query('ai.interaction.approve')).some(shown)){
+   assert(activeCall);if(decided.has(activeCall.id))return null;
+   const summary=text(await visible('ai.interaction.command'));
    if(activeCall.name==='host.run_in_terminal'){
-    assert.equal(activeCall.id,'life-run');assert.equal(summary,normalizedCommand,'approval must show normalized command');
-    assert.equal(text(await visible('ai.host_approval.title')),'请求执行命令');await capture('03-command-pending-zero-write');
-   }else{assert(['life-create-group','life-open'].includes(activeCall.id),activeCall.id);await capture(activeCall.id==='life-create-group'?'01-group-pending':'02-owned-session-pending')}
-   approved.add(activeCall.id);await click('ai.host_approval.accept');
+    const expected=activeCall.id==='life-run'?normalizedCommand:activeCall.id==='life-denied'?deniedCommand:null;
+    assert(expected,activeCall.id);assert.equal(summary,queryText(expected),'approval must show normalized command');
+    assert.equal(text(await visible('ai.interaction.title')),'确认执行命令');
+    if(activeCall.id==='life-run'){assert.equal(await exists(markerFile),false,'command must have zero writes before its approval');await capture('03-command-pending-zero-write')}
+   }else{assert(['life-create-group','life-open'].includes(activeCall.id),activeCall.id);assert.equal(await exists(markerFile),false);await capture(activeCall.id==='life-create-group'?'01-group-pending':'02-owned-session-pending')}
+   decided.add(activeCall.id);await click(activeCall.id==='life-denied'?'ai.interaction.reject':'ai.interaction.approve');
   }return null;
  },90000);
- assert.equal(fixtureFailure,null);assert(finalEmitted,`native task failed before final text: ${report.native_failure??'unknown'}`);assert.deepEqual([...approved],['life-create-group','life-open','life-run']);await absent('ai.stop');await visible('ai.turn.complete');await visible('ai.task_finish.close');
+ assert.equal(fixtureFailure,null);assert(finalEmitted,`native task failed before final text: ${report.native_failure??'unknown'}`);assert.deepEqual([...decided],['life-create-group','life-open','life-run','life-denied']);await absent('ai.stop');await visible('ai.turn.complete');await visible('ai.task_finish.close');
+ await click('ai.turn.process.toggle');
+ const card=await executionCard(marker,null,undefined,'命令已结束');
+ const facts=executionCardFacts(card);
+ assert.equal(facts.command.replaceAll('\r\n','\n'),queryText(normalizedCommand));
+ assert.equal(facts.summary,'命令已结束');
+ assert.equal(facts.process,'退出码 0');
+ assert.equal(facts.output_label,'终端输出');
+ await capture('share-card-executed');
+ const {node:header}=await revealCardAction(card.test_id,'ai.execution.result.header');
+ assert((await h.clickAt(header.rect.x+20,header.rect.y+header.rect.h/2)).ok);
+ await h.waitFor(async()=>((await h.query(card.test_id)).find(shown)?.rect.h??Infinity)<=32.1 || null,5000);
+ const denied=await h.waitFor(async()=>{
+  const cards=(await h.query('ai.step.tool')).filter(shown);
+  const card=cards.find(item=>text(cardNode(item,'ai.step.projection'))==='未执行 · 已拒绝');
+  if(!card)return null;
+  const header=cardNode(card,'ai.step.header');
+  const viewport=(await visible('ai.conversation.viewport')).rect;
+  if(header.rect.y<viewport.y||header.rect.y+header.rect.h>viewport.y+viewport.h){
+   await h.scrollAt(viewport.x+3,viewport.y+20,0,header.rect.y<viewport.y?200:-200);
+   return null;
+  }
+  if(card.rect.h<=32.1){
+   assert((await h.clickAt(header.rect.x+20,header.rect.y+header.rect.h/2)).ok);
+   return null;
+  }
+  const summary=text(cardNode(card,'ai.step.projection')),detail=text(cardNode(card,'ai.step.detail'));
+  assert(detail.includes('用户拒绝了本次工具操作。'));
+  assert(!detail.includes('退出码'));
+  const reason=detail.split('\n').find(line=>line==='命令未派发，没有执行输出。');
+  assert(reason);
+  return {status:summary,exit:null,no_output_reason:reason};
+ },15000);
+ await capture('04-native-execution-and-rejected-cards');
+ await click('ai.share');
+ const shared=join(data,'ai-shares',initialContext.conversation_id+'.md');
+ await h.waitFor(async()=>await exists(shared)||null,10000);
+ const sections=(await readFile(shared,'utf8')).split(/^## /m).filter(section=>/^工具 · (host\.run_in_terminal|host__run_uin_uterminal) · /.test(section));
+ const matches=sections.filter(section=>section.includes(`执行引用：\`${executionRef}\``));
+ assert.equal(matches.length,1,`one original command section for ${executionRef}`);
+ const section=matches[0],lines=section.split('\n');
+ assert(lines[0].endsWith(' · '+facts.summary));
+ assert.deepEqual(lines.filter(line=>line.startsWith('- 退出码 ')),['- '+facts.process]);
+ assert(!section.includes('已批准，准备提交'));
+ const output=lines.filter(line=>line.startsWith('    ')).slice(normalizedCommand.split('\n').length).map(line=>line.slice(4)).join('\n');
+ assert.equal(queryText(output),facts.output);
+ assert(output.split(/[\n\x07]/).some(line=>line.trimEnd()===marker),'export contains the actual marker beyond the shell echo');
+ report.share_comparison=[{execution_ref:executionRef,status:facts.summary,exit:facts.process,no_output_reason:null}];
+ const rejectedSections=sections.filter(section=>section.includes(deniedCommand));
+ assert.equal(rejectedSections.length,1);
+ const rejectedLines=rejectedSections[0].split('\n');
+ assert(rejectedLines[0].endsWith(' · '+denied.status));
+ assert(rejectedLines.includes('- '+denied.no_output_reason));
+ assert(rejectedLines.includes('- 用户拒绝了本次工具操作。'));
+ assert(!rejectedLines.some(line=>line.startsWith('- 退出码 ')||line.startsWith('- 执行引用：')));
+ report.share_comparison.push({execution_ref:null,...denied});
+ report.checks.push('The native Share button exports the same command outcome, exit code and no-output reason shown on each original execution card');
+ await click('ai.turn.process.toggle');
  assert.equal(text(await visible('ai.task_finish.title')),'任务已结束');assert.equal((await h.query('groups.pane.title')).filter(shown).length,2);await capture('04-interval-recorded-task-finish-ask');
  await click('ai.task_finish.close');
  await h.waitFor(async()=>{
@@ -538,8 +615,9 @@ try{acceptance:{
  for(const file of files){if(!String(file).endsWith('.json'))continue;try{const doc=JSON.parse(await readFile(join(data,String(file)),'utf8'));if(doc.execution_ranges?.some((r:any)=>'x1:'+r.execution_id===executionRef)){matchingManifest={path:String(file),document:doc};break}}catch{}}
  assert(matchingManifest,'the execution must have its real recording manifest');
  const range=matchingManifest.document.execution_ranges.find((r:any)=>'x1:'+r.execution_id===executionRef);assert.equal(range.sealed,false);assert.equal(range.interval_saved,true);assert.equal(range.output_scope,'session_interval');assert.equal(range.completion_evidence,'foreground_finished');assert(range.end&&range.end.raw_offset>=range.start.raw_offset);await writeFile(join(out,'execution-recording-manifest.json'),JSON.stringify(matchingManifest,null,2));
- await send('STOP');await visible('ai.host_approval');assert.equal(activeCall?.id,'stop-run');assert.equal(text(await visible('ai.host_approval.summary')),stopCommand);assert.equal(await exists(stopFile),false);await capture('06-stop-before-dispatch');
- const stopStart=performance.now();await click('ai.stop');await absent('ai.host_approval');await absent('ai.stop');
+ await send('STOP');await visible('ai.interaction.approve');assert.equal(activeCall?.id,'stop-run');assert.equal(text(await visible('ai.interaction.command')),stopCommand);assert.equal(await exists(stopFile),false);await capture('06-stop-before-dispatch');
+ await click('ai.interaction.postpone');await visible('ai.interaction.pending');
+ const stopStart=performance.now();await click('ai.stop');await absent('ai.interaction.pending');await absent('ai.interaction.panel');await absent('ai.stop');
  const cancelled=await h.waitFor(async()=>(await traceEvents()).find((event:any)=>event.event==='tool_feedback'&&event.call_id==='stop-run')??null,15000);
  const envelope=JSON.parse(cancelled.content);assert.equal(envelope.error_code,'CancelledBeforeDispatch');assert.equal(envelope.receipt?.side_effect_started??envelope.side_effect_started,false);assert.equal(envelope.receipt?.local_released??envelope.local_released,true);assert.equal(envelope.receipt?.remote_effect_unknown??envelope.remote_effect_unknown,false);
  assert(!requests.some(r=>r.stage==='STOP'&&r.results.some((r:any)=>r.id==='stop-run')),'Stop must not request another provider round');report.stop={elapsed_ms:performance.now()-stopStart,envelope};
@@ -555,7 +633,7 @@ try{acceptance:{
   assert.equal(receipt.conversation_id,initialContext.conversation_id);assert.equal(receipt.task_id,initialContext.task_id);
  }
  report.checks.push('Durable journal retains one successful original run and its interval-saved native receipt; the real recording manifest has one foreground_finished execution interval','Stop on a fresh pending terminal approval returns original-call CancelledBeforeDispatch and no writes/provider continuation','A later Task keeps the same ConversationId/group and borrowed terminal, rejects the old execution_ref and never replays the stopped command','Every fixture call settles once in its original turn with production tool_feedback; all lifecycle/execution receipts keep the original CID/Task and every provider followup contains complete original wire tool-call/result pairs');
- report.primary_execution_lifecycle_passed=true;report.marker=marker;report.execution=recorded;report.disk_execution_range=range;report.approved_calls=[...approved];
+ report.primary_execution_lifecycle_passed=true;report.marker=marker;report.execution=recorded;report.disk_execution_range=range;report.decided_calls=[...decided];
  await normalClose();
  report.status='passed';
 }}catch(error){report.status='failed';report.error=String(error);report.fixture_failure=fixtureFailure;if(takeoverOnly){if(error instanceof AcceptanceFailure)recordFailure(error.category,error.phase,error.message,error.evidence);else recordFailure('verification','native-acceptance',String(error),{last_action:report.last_action});report.primary_failure=takeoverState.primary_failure}process.exitCode=1;await capture('failure').catch(()=>{});await writeFile(join(out,'failure-tree.json'),JSON.stringify(await h.tree(),null,2)).catch(()=>{})}

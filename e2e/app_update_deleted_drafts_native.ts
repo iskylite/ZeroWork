@@ -80,6 +80,7 @@ finally{
  try{await h.request('POST','/zerowork/windows',{action:'quit'});await h.waitFor(async()=>app.exitCode!==null||null,12000);}catch{if(app.exitCode===null)app.kill('SIGTERM');}
  await ended;await log.close();server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));
  // Preserve only synthetic journal and diagnostic evidence before cleanup.
- await readFile(join(data,'ai-sessions.jsonl'),'utf8').then(j=>writeFile(join(out,'journal.jsonl'),j)).catch(()=>{});
+ for (const file of ['ai-sessions.jsonl', 'ai-sessions-active.jsonl'])
+  await readFile(join(data,file),'utf8').then(j=>writeFile(join(out,file),j)).catch(()=>{});
  await rm(base,{recursive:true,force:true});await rm(root,{recursive:true,force:true});
 }

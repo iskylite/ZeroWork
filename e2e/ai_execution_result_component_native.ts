@@ -13,9 +13,10 @@ const text=(n:any):string=>n.text??(n.children??[]).map(text).join('');
 const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,10000);
 const clipboard=async()=>(await promisify(execFile)('/usr/bin/pbpaste',[],{encoding:'utf8'})).stdout;
 const click=async(id:string)=>{const node=await visible(id);assert((await h.clickAt(node.rect.x+node.rect.w/2,node.rect.y+node.rect.h/2)).ok,id)};
-const labels:any={running:'运行中',sealed:'命令已结束',failed:'命令执行失败',interval_recorded:'命令已结束',interval_unverified:'命令已结束',interval_concurrent:'命令已结束',interval_failed:'命令执行失败',interval_shell:'命令已结束',interval_background:'命令已结束',interval_signal:'命令执行失败',interval_no_exit:'命令已结束 · 退出状态未知',recording_failed:'命令已结束',unknown:'结果待核实',handed_off:'用户已接管',sealing:'正在处理执行结果',cancelled:'已取消',missing:'调用失败',refused:'已拒绝'};
+const labels:any={running:'运行中',sealed:'命令已结束',failed:'命令执行失败',interval_recorded:'命令已结束',interval_unverified:'命令已结束',interval_concurrent:'命令已结束',interval_failed:'命令执行失败',interval_shell:'命令已结束',interval_background:'命令已结束',interval_signal:'命令执行失败',interval_no_exit:'命令已结束 · 退出状态未知',recording_failed:'命令已结束',unknown:'结果待核实',handed_off:'用户已接管',sealing:'正在处理执行结果',cancelled:'已取消',missing:'调用失败',refused:'已拒绝',interval_silent:'命令已结束',recording_failed_silent:'命令已结束',reconnected:'结果待核实'};
 const intervalOnly=process.argv[4]==='interval-only',runningOnly=process.argv[4]==='running-only',collapsedOnly=process.argv[4]==='collapsed-only';
-const report:any={status:'running',binary,matrix:{themes:intervalOnly||runningOnly||collapsedOnly?['dark']:['dark','light','sauber'],width:[600,360],states:collapsedOnly?['running','interval_shell']:runningOnly?['running']:intervalOnly?['interval_recorded','interval_unverified','interval_concurrent','interval_failed','interval_shell','interval_background','interval_signal','interval_no_exit','recording_failed','handed_off']:process.argv[4]==='refused-only'?['refused']:['running','sealed','failed','unknown','handed_off','sealing','cancelled','missing']},checks:[],shutdown:[],sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),limitations:['Uses production Snapshot JSON, Store.capture, typed projection and native view with synthetic immutable receipts.','Callback payloads are verified here; actual Driver stop/takeover and terminal navigation require application integration acceptance.','A saved session_interval is an observed same-PTY range, never proof of complete command output or exclusive writer attribution.','RecordingId is copied as a real stable ID; no unresolved history jump is presented.']};
+const receiptOnly=process.argv[4]==='receipt-only';
+const report:any={status:'running',binary,matrix:{themes:intervalOnly||runningOnly||collapsedOnly||receiptOnly?['dark']:['dark','light','sauber'],width:[600,360],states:receiptOnly?['interval_silent','recording_failed_silent','cancelled','reconnected']:collapsedOnly?['running','interval_shell']:runningOnly?['running']:intervalOnly?['interval_recorded','interval_unverified','interval_concurrent','interval_failed','interval_shell','interval_background','interval_signal','interval_no_exit','recording_failed','handed_off']:process.argv[4]==='refused-only'?['refused']:['running','sealed','failed','unknown','handed_off','sealing','cancelled','missing']},checks:[],shutdown:[],sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),limitations:['Uses production Snapshot JSON, Store.capture, typed projection and native view with synthetic immutable receipts.','Callback payloads are verified here; actual Driver stop/takeover and terminal navigation require application integration acceptance.','A saved session_interval is an observed same-PTY range, never proof of complete command output or exclusive writer attribution.','RecordingId is copied as a real stable ID; no unresolved history jump is presented.']};
 try{
 for(const theme of report.matrix.themes)for(const width of report.matrix.width)for(const state of report.matrix.states){
  const name=`${theme}-${width}-${state}`,rpc=await mkdtemp('/tmp/zw-execution-result-rpc-');process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
@@ -52,15 +53,18 @@ for(const theme of report.matrix.themes)for(const width of report.matrix.width)f
    const warning=(await h.query('ai.execution.result.uncertainty')).find(shown);
    assert.equal(Boolean(warning),['interval_unverified','interval_concurrent','interval_background'].includes(state));
    if(state==='interval_shell')assert(!text(await visible('ai.execution.result.process')).includes('后台'));
-   if(state==='recording_failed')assert.equal(text(await visible('ai.execution.result.effect')),'终端记录保存失败，可查看原终端。');
-   if(savedInterval||state==='recording_failed'||state==='sealed'||state==='failed')assert.equal(text(await visible('ai.execution.result.process')),state==='interval_signal'?'结束信号 15':state==='interval_no_exit'?'命令已结束 · 未提供退出码':`退出码 ${state==='interval_failed'||state==='failed'?7:0}`);
+   if(state.startsWith('recording_failed'))assert.equal(text(await visible('ai.execution.result.effect')),'终端记录保存失败，可查看原终端。');
+   if(savedInterval||state.startsWith('recording_failed')||state==='sealed'||state==='failed')assert.equal(text(await visible('ai.execution.result.process')),state==='interval_signal'?'结束信号 15':state==='interval_no_exit'?'命令已结束 · 未提供退出码':`退出码 ${state==='interval_failed'||state==='failed'?7:0}`);
    else assert(!(await h.query('ai.execution.result.process')).some(shown));
-   assert.equal(text(await visible('ai.execution.result.output_label')),state==='cancelled'?'暂未取得终端输出':'终端输出');
+   const outputLabel=state==='cancelled'?'命令未派发，没有执行输出。':state==='interval_silent'?'本次采集区间没有输出。':state==='recording_failed_silent'?'未取得输出，无法确认命令是否产生了输出。':'终端输出';
+   assert.equal(text(await visible('ai.execution.result.output_label')),outputLabel);
+   if(state==='cancelled')assert(text(await visible('ai.execution.result.failure')).includes('录制执行记录已满'));
+   if(state==='reconnected')assert(text(await visible('ai.execution.result.output_state')).includes('后续进度待核实'));
    await h.resizeWindow(width,600);
    await click('ai.execution.result.details_toggle');
    const collection=await visible('ai.execution.result.collection_details');
    assert(collection.rect.h<=150.1);
-   if(savedInterval||state==='recording_failed'){
+   if(savedInterval||state.startsWith('recording_failed')){
     assert.equal(text(await visible('ai.execution.result.output_scope')),savedInterval?'本次终端输出 · 已保存':'本次终端输出 · 保存失败');
     assert(text(await visible('ai.execution.result.output_limit')).includes('后台任务可能继续输出'));
     if(state==='interval_shell')assert.equal(text(await visible('ai.execution.result.completion_source')),'结束状态来源 · Shell');

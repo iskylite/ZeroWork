@@ -219,7 +219,8 @@ pub const Context = struct {
             if (observing) {
                 if (!record.context.conversation_id.eql(invocation.context.conversation_id)) continue;
             } else if (!sameTask(record.context, invocation.context)) continue;
-            if (!controller.inBinding(record.boundary.handle) and !(observing and controller.permitsHistoricalOwner(record.boundary.handle))) return error.TargetNotAuthorized;
+            const owner = record.boundary.handle;
+            if (!controller.inBinding(owner) and !(observing and (controller.permitsHistoricalOwner(owner) or controller.permitsReconnectedExecution(owner)))) return error.TargetNotAuthorized;
             return;
         };
         return error.TargetNotAuthorized;
@@ -250,7 +251,7 @@ pub const Context = struct {
         const controller = try self.current(context, true);
         for (self.admissions.items) |item| if (item) |record| {
             if (!record.authorized or !record.context.eql(original) or !record.boundary.handle.eql(handle) or record.execution_id == null or !record.execution_id.?.eql(id)) continue;
-            if (!controller.inBinding(handle) and !controller.permitsHistoricalOwner(handle)) return error.TargetNotAuthorized;
+            if (!controller.inBinding(handle) and !controller.permitsHistoricalOwner(handle) and !controller.permitsReconnectedExecution(handle)) return error.TargetNotAuthorized;
             return;
         };
         return error.TargetNotAuthorized;
@@ -667,6 +668,13 @@ pub const Context = struct {
     }
     fn resolve(raw: *anyopaque, authority: host.Context, handle: identity.SessionHandle) !terminal.Service {
         const self: *Context = @ptrCast(@alignCast(raw));
+        // A retry advances the generation only after local cleanup. The
+        // replacement terminal can never answer for the original execution.
+        if (self.app.sessions.queryState(handle) == null) {
+            for (self.app.mappings.items) |mapping| {
+                if (mapping.handle.session_id == handle.session_id and mapping.handle.generation > handle.generation) return error.ExecutionSourceReconnected;
+            }
+        }
         // Close can revoke the policy/store binding before Driver.stopTask is
         // consumed. Exact previously admitted owners still need its receipts.
         for (self.admissions.items) |*item| if (item.*) |*record| if (record.authorized and record.context.eql(authority) and record.boundary.handle.eql(handle) and (record.cleanup_only or self.closing())) {

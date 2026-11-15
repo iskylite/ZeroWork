@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="696" height="394" viewBox="0 0 696 394" role="img">
+  <title>数据与日志</title>
+  <style>
+    text { font-family: "PingFang SC", "Hiragino Sans GB", sans-serif; fill: #e4e8de; font-size: 13px }
+    .strong { font-weight: 600; font-size: 15px }
+    .secondary { fill: #c4cabc; font-size: 12px }
+    .icon { fill: none; stroke: #b9c798; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round }
+  </style>
+  <rect width="696" height="394" rx="16" fill="#191e1a"/>
+  <text x="24" y="36" class="strong">数据与日志</text>
+  <text x="24" y="58" class="secondary">本地配置、会话记录、日志导出与清理</text>
+  <g id="locations">
+    <rect x="24" y="78" width="648" height="292" rx="12" fill="#30362e"/>
+    <path d="M36 78h624a12 12 0 0 1 12 12v35H24V90a12 12 0 0 1 12-12" fill="#353d33"/>
+    <path class="icon" d="M42 94h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H42a2 2 0 0 1-2-2V96a2 2 0 0 1 2-2Z"/>
+    <text x="68" y="107" class="strong">位置与凭据</text>
+    <path class="icon" d="m647 100 4 4 4-4"/>
+    <text x="40" y="154">凭据存储</text>
+    <text x="509" y="154" text-anchor="end" class="secondary">本地文件</text>
+    <g id="switch-to-keychain">
+      <rect x="525" y="134" width="131" height="30" rx="7" fill="#414a39"/>
+      <text x="590.5" y="154" text-anchor="middle">切换到钥匙串…</text>
+    </g>
+    <text x="40" y="198">配置文件</text>
+    <text x="656" y="198" text-anchor="end" class="secondary">~/Library/Application Support/…/config.toml</text>
+    <text x="40" y="239">主机配置</text>
+    <text x="656" y="239" text-anchor="end" class="secondary">~/Library/Application Support/…/hosts.toml</text>
+    <text x="40" y="280">缓存目录</text>
+    <text x="656" y="280" text-anchor="end" class="secondary">~/Library/Caches/com.zerowork.app</text>
+    <text x="40" y="321">诊断日志目录</text>
+    <text x="656" y="321" text-anchor="end" class="secondary">~/Library/Logs/com.zerowork.app</text>
+    <text x="40" y="355">配置文件权限</text>
+    <text x="656" y="355" text-anchor="end" class="secondary">仅当前用户可读写 · 600</text>
+  </g>
+</svg>

@@ -1,10 +1,12 @@
 const std = @import("std");
 const applog = @import("platform/applog.zig");
+const credential_store = @import("config/credential_store.zig");
 pub const application_test_mode = @import("application_options").test_mode;
 const ui = @import("ui");
 const App = @import("zenit_app").App;
 const MultiWindowApp = @import("zenit_app").MultiWindowApp;
 const NativeWindowId = @TypeOf(@as(*App, undefined).windowId());
+const ai_history = @import("ai/history_index.zig");
 const ProcessWindows = struct {
     runtime: *MultiWindowApp,
     domain: *application_host_mod.Domain,
@@ -16,9 +18,16 @@ const ProcessWindows = struct {
     primary: ?*App = null,
     updater: ?*@import("update/app_host.zig").Host(ProcessWindows) = null,
     runtime_config: ?*RuntimeConfig = null,
+    ai_history_thread: ?std.Thread = null,
+    ai_history_done: std.atomic.Value(bool) = .init(false),
+    ai_history_cancel: std.atomic.Value(bool) = .init(false),
+    ai_history_catalog: ?ai_history.Catalog = null,
+    ai_history_error: ?anyerror = null,
     credential_conversion: ?std.Thread = null,
     credential_conversion_done: std.atomic.Value(bool) = .init(false),
     credential_conversion_error: ?anyerror = null,
+    credential_conversion_target: credential_store.Storage = .local,
+    credential_conversion_result: credential_store.Conversion = .complete,
     font_system: ?@FieldType(App, "font_manager") = null,
     pending: std.ArrayList(PendingWindow) = .empty,
     update_test_legacy_preflight: bool = false,
@@ -337,7 +346,70 @@ const ProcessWindows = struct {
         }
     }
 
+    fn requestAiHistory(self: *ProcessWindows) !void {
+        if (self.ai_history_thread != null or self.ai_history_catalog != null) return;
+        self.ai_history_error = null;
+        self.ai_history_done.store(false, .release);
+        self.ai_history_thread = try std.Thread.spawn(.{}, indexAiHistory, .{self});
+    }
+
+    fn indexAiHistory(self: *ProcessWindows) void {
+        defer {
+            self.ai_history_done.store(true, .release);
+            @FieldType(App, "win").postEmptyEvent();
+        }
+        self.loadAiIndex() catch |err| {
+            self.ai_history_error = err;
+        };
+    }
+
+    fn loadAiIndex(self: *ProcessWindows) !void {
+        const started = wallClockMsTransfer();
+        const dir = try std.Io.Dir.cwd().openDir(self.io, self.data_paths.directory, .{});
+        defer dir.close(self.io);
+        var catalog = ai_history.Catalog.init(self.domain.allocator);
+        errdefer catalog.deinit();
+        try catalog.scan(self.io, dir, try ai_history.sourceBounds(self.io, dir), &self.ai_history_cancel);
+        applog.info(.app, "AI history index ms total={d} bytes_read={d} resumed_bytes={d} records={d}", .{ wallClockMsTransfer() - started, catalog.source_bytes, catalog.resumed_bytes, catalog.entries.items.len });
+        self.ai_history_catalog = catalog;
+    }
+
+    fn publishAiHistory(self: *ProcessWindows) void {
+        const thread = self.ai_history_thread orelse return;
+        if (!self.ai_history_done.load(.acquire)) return;
+        thread.join();
+        self.ai_history_thread = null;
+        if (self.ai_history_catalog) |*catalog| if (self.domain.ai) |host| {
+            for (catalog.entries.items) |entry| {
+                if (entry.removed or entry.child) continue;
+                const origin = entry.origin orelse continue;
+                host.presentations.addArchive(entry.conversation, origin, entry.title) catch |err| {
+                    self.ai_history_error = err;
+                    break;
+                };
+            }
+        };
+        for (self.runtime.windows.items) |managed| {
+            if (navFor(managed.app)) |nav| if (nav.ai) |ai| {
+                if (ai.sessions_view) |view| if (view.open.peek()) {
+                    ai.list_requested = true;
+                    if (self.ai_history_error) |err| ai.setFeedback(@errorName(err));
+                };
+            };
+            managed.app.cx.requestRedraw();
+        }
+    }
+
+    fn stopAiHistory(self: *ProcessWindows) void {
+        self.ai_history_cancel.store(true, .release);
+        if (self.ai_history_thread) |thread| {
+            thread.join();
+            self.ai_history_thread = null;
+        }
+    }
+
     fn deinit(self: *ProcessWindows) void {
+        if (self.ai_history_catalog) |*catalog| catalog.deinit();
         if (self.credential_conversion) |thread| thread.join();
         for (self.pending.items) |*pending| pending.connection.deinit();
         self.pending.deinit(std.heap.c_allocator);
@@ -345,14 +417,40 @@ const ProcessWindows = struct {
         if (self.font_system) |*fonts| fonts.deinit();
     }
 
-    fn convertCredentials(self: *ProcessWindows) void {
-        const credentials = @import("config/credential_store.zig");
-        credentials.convertToLocal() catch |err| {
-            self.credential_conversion_error = err;
+    fn convertCredentials(self: *ProcessWindows, target: credential_store.Storage) void {
+        defer {
+            credential_store.endConversion();
+            self.credential_conversion_done.store(true, .release);
+            @FieldType(App, "win").postEmptyEvent();
+        }
+        self.credential_conversion_result = switch (target) {
+            .local => blk: {
+                credential_store.convertToLocal() catch |err| {
+                    self.credential_conversion_error = err;
+                    return;
+                };
+                break :blk .complete;
+            },
+            .keychain => credential_store.convertToKeychain() catch |err| {
+                self.credential_conversion_error = err;
+                return;
+            },
         };
-        credentials.endConversion();
-        self.credential_conversion_done.store(true, .release);
-        @FieldType(App, "win").postEmptyEvent();
+    }
+
+    fn credentialConversionMessage(self: *const ProcessWindows) []const u8 {
+        const to_local = self.credential_conversion_target == .local;
+        if (self.credential_conversion_error) |err| {
+            if (err == error.CredentialAuthenticationCanceled)
+                return if (to_local) "已取消转换，继续使用钥匙串。" else "已取消转换，继续使用本地文件。";
+            return if (to_local)
+                "凭据转换失败，继续使用钥匙串。请检查钥匙串授权和数据目录后重试。"
+            else
+                "凭据转换失败，继续使用本地文件。请检查钥匙串授权和数据目录后重试。";
+        }
+        if (self.credential_conversion_result == .local_cleanup_pending)
+            return "已切换到钥匙串，本地副本未完全清理。请检查数据目录权限。";
+        return if (to_local) "已转为本地存储。" else "已切换到 macOS 钥匙串。";
     }
 };
 var process_windows: ?*ProcessWindows = null;
@@ -489,6 +587,7 @@ const AiHost = struct {
     conversation_action: ?struct { id: u64, action: @import("ui/ai_sessions_view.zig").Action, owner: ?ai_attachments.Owner, current: ?u64 } = null,
     list_limit: usize = 50,
     history_hash: ?u64 = null,
+    archive_preview: ?*ArchivePreview = null,
 
     close_confirmation_view: ?*@import("ui/ai_close_confirmation_view.zig").View = null,
     close_confirmation: ?CloseWindowRequest = null,
@@ -526,6 +625,7 @@ const AiHost = struct {
     settings_host: ?*SettingsHost = null,
     settings_request: ?bool = null,
     send_disabled: ?*ui.Signal(bool) = null,
+    history_input_disabled: ?*ui.Signal(bool) = null,
     send_button: ?*ui.Node = null,
     window_base: ?*ui.Signal(@import("ui/ai_assistant_styles.zig").ButtonStyle) = null,
     window_hovers: [3]?*ui.Signal(?@import("ui/ai_assistant_styles.zig").ButtonStyle) = @splat(null),
@@ -560,6 +660,7 @@ const AiHost = struct {
     live_reasoning: @import("ai/live_reasoning.zig").State = .{},
     request_thinking: ?bool = null,
     model_discovery: @import("ai/model_discovery.zig").Service = .{},
+    model_cache_directory: ?[]const u8 = null,
     request_vision: bool = false,
     request_image_token_reservation: ?u32 = null,
     request_image_token_max_width: ?u32 = null,
@@ -978,7 +1079,7 @@ const AiHost = struct {
         const app = self.application_host orelse return error.ContextUnavailable;
         const service = try app.domain.aiService();
         const already_failed = service.persistence_failure != null;
-        service.ensurePersistence(self.data_root) catch |err| {
+        (if (process_windows != null) service.ensureIndexedPersistence(self.data_root) else service.ensurePersistence(self.data_root)) catch |err| {
             if (!already_failed) self.setFeedback(@errorName(err));
             return err;
         };
@@ -1273,6 +1374,7 @@ const AiHost = struct {
         self.edit_seed = null;
         self.edit_text = null;
         self.display_owner = current_owner;
+        if (self.history_input_disabled) |disabled| disabled.set(false);
         self.conversation_dirty = true;
         self.streaming_label = null;
         self.captureTerminalFocus();
@@ -2264,6 +2366,16 @@ const AiHost = struct {
         const runtime = self.runtime_config orelse return .{};
         return self.model_discovery.effective(runtime.value.ai, runtime.modelDiscoveryRevision());
     }
+    fn loadModelCache(self: *AiHost) void {
+        const directory = self.model_cache_directory orelse return;
+        const runtime = self.runtime_config orelse return;
+        const loaded = self.model_discovery.restoreDefault(self.cx.io, directory, runtime.value.ai, runtime.modelDiscoveryRevision()) catch |err| {
+            applog.warn(.app, "AI default model cache read: {s}", .{@errorName(err)});
+            return;
+        };
+        if (loaded) applog.info(.app, "AI default model cache loaded", .{});
+    }
+
     fn controlsRevision(self: *const AiHost) u64 {
         const runtime = self.runtime_config orelse return 1;
         return runtime.composerRevision() *% 1000000 +% self.model_discovery.generation;
@@ -2541,10 +2653,30 @@ const AiHost = struct {
         const view = self.composer_controls orelse return;
         const runtime = self.runtime_config orelse return;
         const owner = self.display_owner orelse {
+            if (self.controller.model.visible) if (self.currentBinding()) |binding| {
+                const ai = self.effectiveAi();
+                const revision = self.controlsRevision();
+                var hash = std.hash.Wyhash.init(1);
+                std.hash.autoHash(&hash, .{ binding, revision });
+                const fingerprint = hash.final();
+                if (self.composer_hash == fingerprint) return;
+                const model = ai_provider_config.fromSettings(ai) catch null;
+                try view.update(.{
+                    .owner = binding,
+                    .revision = revision,
+                    .providers = ai.providers[0..@min(ai.provider_count, ai.providers.len)],
+                    .current = if (model) |selected| .{ .provider_id = ai.default_provider, .model_id = selected.model } else null,
+                    .default_model_status = self.model_discovery.defaultStatus(runtime.value.ai, runtime.modelDiscoveryRevision()),
+                    .editable = false,
+                });
+                self.composer_hash = fingerprint;
+                return;
+            };
             try view.update(null);
             self.composer_hash = null;
             return;
         };
+        self.loadModelCache();
         const controls = try self.selectedControls();
         var config = runtime.value;
         var catalog_changed = false;
@@ -2552,6 +2684,11 @@ const AiHost = struct {
         if (self.native_binding != null or self.execution().native_binding != null) {
             if (try self.model_discovery.poll(config.ai, runtime.modelDiscoveryRevision(), @intCast(wallClockMsTransfer() / 1000))) {
                 catalog_changed = true;
+                if (self.model_cache_directory) |directory| {
+                    self.model_discovery.saveDefault(self.cx.io, directory, config.ai, runtime.modelDiscoveryRevision()) catch |err| {
+                        applog.warn(.app, "AI default model cache write: {s}", .{@errorName(err)});
+                    };
+                }
                 self.composer_hash = null;
                 // Only the welcome state depends on model readiness; an active
                 // transcript keeps its nodes when catalog metadata arrives.
@@ -2639,7 +2776,7 @@ const AiHost = struct {
         if (self.composer_hash == fingerprint) return;
         const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = estimated, .parts = parts.items, .measured_input = history_usage.measured_tokens, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
         const key: ?@import("ui/ai_composer_controls_view.zig").ModelKey = if (controls.model) |value| .{ .provider_id = value.provider_id, .model_id = value.model_id } else if (selected) |value| .{ .provider_id = config.ai.default_provider, .model_id = value.model } else null;
-        try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .workspace = workspace_ticket, .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .model_selection_required = controls.model_selection_required, .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .effort_fallback_from = controls.effort_fallback_from, .thinking = controls.thinking, .attachments = .{ .image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite() });
+        try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .workspace = workspace_ticket, .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .model_selection_required = controls.model_selection_required, .default_model_status = self.model_discovery.defaultStatus(runtime.value.ai, runtime.modelDiscoveryRevision()), .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .effort_fallback_from = controls.effort_fallback_from, .thinking = controls.thinking, .attachments = .{ .image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite() });
         if (catalog_changed) view.preserveModelPopup();
         self.composer_hash = fingerprint;
         self.promptChanged(self.prompt.peek());
@@ -2999,9 +3136,7 @@ const AiHost = struct {
         // Pending requests are represented by the composer interaction slot.
         // A tool step exists only once execution is approved or dispatched.
         if (step.phase == .assembling or step.phase == .approval) return true;
-        const record = for (self.tool_results.records.items) |candidate| {
-            if (candidate.turn_id == turn.id and std.mem.eql(u8, candidate.call_id, step.call_id)) break candidate;
-        } else null;
+        const record = self.tool_results.findCall(turn.id, step.call_id);
         const on_toggle = self.cx.on(AiHost, self, presentationDisclosureChanged);
         if (record) |result_record| {
             if (result_record.total_elapsed_ms == null) result_record.expanded = step.expanded;
@@ -3009,6 +3144,26 @@ const AiHost = struct {
             result_record.total_elapsed_ms = step.elapsedAt(now);
             if (try @import("ui/ai_workspace_change_view.zig").mountRecord(self.cx, self.conversation_scope.?, result_record, on_toggle)) |node| {
                 try parent.appendChild(self.allocator, node);
+                return true;
+            }
+        }
+        if ((record == null or step.activity_started_ms == null) and @import("ai/execution_result_projection.zig").supports(step.name)) {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const temporary = arena.allocator();
+            if (try @import("ai/execution_result_projection.zig").fromStep(temporary, step.*)) |fact| {
+                var process_buffer: [64]u8 = undefined;
+                const process = (try fact.processLabel(&process_buffer)) orelse "";
+                const detail = try std.mem.join(temporary, "\n", &.{
+                    process,                      if (fact.failure) |code| @import("ai/step_failure.zig").explanation(code) else "",
+                    fact.outputLabel() orelse "", fact.command orelse "",
+                    fact.terminal_output,
+                });
+                try self.appendRetainedStep(parent, .{ .title = view.title(step.name), .tool_name = step.name, .tool_arguments = step.command, .projection = fact.statusLabel(), .projection_is_status = true, .detail = std.mem.trim(u8, detail, "\n"), .phase = fact.phase(), .elapsed_ms = fact.elapsed_ms orelse step.elapsedAt(now), .show_elapsed = step.activity_started_ms != null or fact.elapsed_ms != null, .expanded = &step.expanded, .test_id = "ai.step.tool", .on_toggle = on_toggle }, retained);
+                return true;
+            }
+            if (record == null and step.phase == .succeeded) {
+                try self.appendRetainedStep(parent, .{ .title = view.title(step.name), .tool_name = step.name, .tool_arguments = step.command, .projection = "执行状态待核实", .projection_is_status = true, .detail = "未保留执行回执，无法确认退出状态或输出。", .phase = .failed, .elapsed_ms = step.elapsedAt(now), .expanded = &step.expanded, .test_id = "ai.step.tool", .on_toggle = on_toggle }, retained);
                 return true;
             }
         }
@@ -3086,10 +3241,11 @@ const AiHost = struct {
                     hash.update(step.command);
                     hash.update(step.detail);
                     std.hash.autoHash(&hash, .{ step.phase, step.ended_ms, step.decision, step.activity_started_ms });
-                    for (self.tool_results.records.items) |record| if (record.turn_id == turn.id and std.mem.eql(u8, record.call_id, step.call_id)) {
+                    if (self.tool_results.findCall(turn.id, step.call_id)) |record| {
                         std.hash.autoHash(&source, @intFromPtr(record));
                         std.hash.autoHash(&hash, record.error_status);
-                    };
+                        self.tool_results.hashExecution(&hash, record);
+                    }
                 }
                 const source_key = source.final();
                 if (row.source_key != source_key) retained.clearBody(row);
@@ -3163,9 +3319,10 @@ const AiHost = struct {
                         hash.update(step.command);
                         hash.update(step.detail);
                         std.hash.autoHash(&hash, .{ step.phase, step.ended_ms, step.decision, step.activity_started_ms });
-                        for (self.tool_results.records.items) |record| if (record.turn_id == turn.id and std.mem.eql(u8, record.call_id, step.call_id)) {
+                        if (self.tool_results.findCall(turn.id, step.call_id)) |record| {
                             std.hash.autoHash(&hash, .{ @intFromPtr(record), record.total_elapsed_ms, record.error_status });
-                        };
+                            self.tool_results.hashExecution(&hash, record);
+                        }
                     },
                 };
                 const fingerprint = hash.final();
@@ -3220,8 +3377,21 @@ const AiHost = struct {
                             break :projected if (summary.count == 1) try header.project(self.allocator, step.name, step.command) else try self.allocator.dupe(u8, "");
                         } else try self.allocator.dupe(u8, "");
                         defer self.allocator.free(projection);
+                        const execution_status: ?[]const u8 = if ((row.group == null or row.fingerprint != fingerprint) and latest == .tool and summary.thinking_projection == null and (summary.count == 1 or summary.phase == .succeeded)) status: {
+                            const step = turn.steps.items[latest.tool];
+                            if (self.tool_results.findCall(turn.id, step.call_id)) |record| {
+                                if (self.tool_results.executionProjection(record)) |fact| break :status fact.statusLabel();
+                            }
+                            if (@import("ai/execution_result_projection.zig").supports(step.name)) {
+                                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                                defer arena.deinit();
+                                if (try @import("ai/execution_result_projection.zig").fromStep(arena.allocator(), step)) |fact| break :status fact.statusLabel();
+                                if (step.phase == .succeeded) break :status "执行状态待核实";
+                            }
+                            break :status null;
+                        } else null;
                         const state = groups.find(turn, first).?;
-                        const props: @import("ui/ai_step_group_view.zig").Props = .{ .group = state, .title = title, .projection = projection, .tool_name = if (latest == .tool) turn.steps.items[latest.tool].name else null, .step_count = if (summary.count == 1 and latest == .tool and summary.thinking_projection == null) null else summary.count, .phase = summary.phase, .elapsed_ms = summary.elapsed_ms, .live = summary.live, .on_toggle = self.cx.on(@import("ui/ai_timeline_view.zig").View, retained, @import("ui/ai_timeline_view.zig").View.toggled) };
+                        const props: @import("ui/ai_step_group_view.zig").Props = .{ .group = state, .title = title, .projection = projection, .tool_name = if (latest == .tool) turn.steps.items[latest.tool].name else null, .step_count = if (summary.count == 1 and latest == .tool and summary.thinking_projection == null) null else summary.count, .phase = summary.phase, .status = execution_status, .elapsed_ms = summary.elapsed_ms, .live = summary.live, .on_toggle = self.cx.on(@import("ui/ai_timeline_view.zig").View, retained, @import("ui/ai_timeline_view.zig").View.toggled) };
                         if (row.group == null) {
                             row.group = try @import("ui/ai_step_group_view.zig").mount(self.cx, row.scope, props);
                             try row.root.appendChild(self.allocator, row.group.?.root);
@@ -3981,7 +4151,7 @@ const AiHost = struct {
     /// fully enumerable inputs, so they too can be reused instead of re-rendered.
     fn emptyFingerprint(self: *AiHost, width: f32) u64 {
         var hash = self.transcriptBase(0x454d5054, width);
-        std.hash.autoHash(&hash, self.hasSelectedModel());
+        std.hash.autoHash(&hash, .{ self.welcomeModelState(), self.display_owner != null });
         if (self.assistant_states) |store| {
             for (store.states.items) |*state| {
                 std.hash.autoHash(&hash, .{ state.id, state.closed, state.listed, state.title.text() != null });
@@ -4416,7 +4586,7 @@ const AiHost = struct {
             const state = self.assistant_states.?.find(entry.id) orelse continue;
             entry.owner = if (state.historical_environment and !entry.bound) "历史连接环境" else self.conversationOwnerLabel(state.owner, &recent_owners[recent_slot]);
         }
-        const empty = try Empty.mount(cx, scope, self.hasSelectedModel(), .{ .context = self, .logo_texture = self.welcome_logo_texture, .recent = recent[0..recent_count], .session_hooks = .{ .context = self, .select = selectConversation, .request_close = requestConversationClose, .remove = deleteConversation, .act = conversationAction }, .summarize = emptySummarize, .logs = emptyLogs, .history = emptyHistory, .settings = emptySettings, .ollama = emptyOllama });
+        const empty = try Empty.mount(cx, scope, self.welcomeModelState(), .{ .context = self, .logo_texture = self.welcome_logo_texture, .recent = recent[0..recent_count], .session_hooks = .{ .context = self, .select = selectConversation, .request_close = requestConversationClose, .remove = deleteConversation, .act = conversationAction }, .composer_ready = self.display_owner != null, .summarize = emptySummarize, .logs = emptyLogs, .history = emptyHistory, .settings = emptySettings, .ollama = emptyOllama });
         try root.appendChild(allocator, empty);
     }
 
@@ -4524,7 +4694,10 @@ const AiHost = struct {
 
     fn toggle(self: *AiHost) void {
         if (self.currentBinding() == null) return;
-        self.syncOwner() catch return;
+        self.syncOwner() catch |err| {
+            self.setFeedback(@errorName(err));
+            return;
+        };
         if (!self.controller.model.visible) self.captureTerminalFocus();
         if (self.display_conversation) |id| if (self.assistant_states) |store| {
             if (store.find(id)) |state| state.listed = true;
@@ -4793,7 +4966,20 @@ const AiHost = struct {
         entry.phase = state.phase;
         entry.active = self.display_conversation == id;
         const shared_host = self.shared_service orelse return entry;
-        const record = shared_host.service.store.find(state.conversation_id) orelse return entry;
+        const record = shared_host.service.store.find(state.conversation_id) orelse {
+            if (state.indexed_archive) if (archiveCatalog()) |catalog| {
+                if (catalog.find(state.conversation_id)) |archived| {
+                    entry.can_restore = archived.can_restore and archived.recoverable;
+                    entry.can_copy = archived.can_copy and archived.recoverable;
+                    entry.first_use = archived.first_use;
+                }
+                for (catalog.entries.items) |candidate| if (!candidate.removed and candidate.related != null and candidate.related.?.eql(state.conversation_id)) {
+                    entry.has_children = true;
+                    break;
+                };
+            };
+            return entry;
+        };
         for (shared_host.service.store.records.items) |candidate| if (candidate.child) |child| if (child.info.owning_parent_conversation.eql(record.id)) {
             entry.has_children = true;
             break;
@@ -4822,10 +5008,124 @@ const AiHost = struct {
         for (record.inbox.entries.items) |entry| std.hash.autoHash(&hash, entry.receipt);
         return hash.final();
     }
+    const ArchivePreview = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        dir: std.Io.Dir,
+        bounds: ai_history.Bounds,
+        entry: *const ai_history.Entry,
+        id: u64,
+        thread: ?std.Thread = null,
+        done: std.atomic.Value(bool) = .init(false),
+        cancel: std.atomic.Value(bool) = .init(false),
+        result: ?ai_history.Preview = null,
+        err: ?anyerror = null,
+
+        fn run(self: *ArchivePreview) void {
+            defer {
+                self.done.store(true, .release);
+                @FieldType(App, "win").postEmptyEvent();
+            }
+            const started = wallClockMsTransfer();
+            self.result = ai_history.Preview.load(self.allocator, self.io, self.dir, self.bounds, self.entry, &self.cancel) catch |err| {
+                self.err = err;
+                return;
+            };
+            applog.info(.app, "AI history preview ms total={d} bytes_read={d} rows={d}", .{ wallClockMsTransfer() - started, self.result.?.bytes_read, self.result.?.rows_read });
+        }
+
+        fn destroy(self: *ArchivePreview) void {
+            self.cancel.store(true, .release);
+            if (self.thread) |thread| thread.join();
+            if (self.result) |*value| value.deinit();
+            self.allocator.destroy(self);
+        }
+    };
+
+    fn archiveCatalog() ?*const ai_history.Catalog {
+        const process = process_windows orelse return null;
+        if (process.ai_history_thread != null) return null;
+        return if (process.ai_history_catalog) |*catalog| catalog else null;
+    }
+
+    fn beginArchivePreview(self: *AiHost, state: *const @import("ai/assistant_store.zig").State, host: *@import("ai/attached_service.zig").Host) !void {
+        if (self.archive_preview) |current| {
+            if (current.id == state.id) return;
+            current.destroy();
+            self.archive_preview = null;
+        }
+        const catalog = archiveCatalog() orelse return error.AiHistoryIndexUnavailable;
+        const entry = catalog.find(state.conversation_id) orelse return error.ConversationNotFound;
+        const job = try std.heap.c_allocator.create(ArchivePreview);
+        job.* = .{ .allocator = std.heap.c_allocator, .io = host.journal_io.?.io(), .dir = host.journal_dir.?, .bounds = catalog.bounds, .entry = entry, .id = state.id };
+        errdefer job.destroy();
+        if (self.sessions_view) |view| {
+            const title = state.title.text() orelse "AI 会话";
+            try view.showHistory(.{ .id = state.id, .title = title, .owner = "" }, "正在加载此会话…");
+        }
+        job.thread = try std.Thread.spawn(.{}, ArchivePreview.run, .{job});
+        self.archive_preview = job;
+        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+    }
+
+    fn pollArchivePreview(self: *AiHost) !void {
+        const job = self.archive_preview orelse return;
+        const view = self.sessions_view orelse return;
+        if (!job.done.load(.acquire)) {
+            if (!view.history_open.peek()) job.cancel.store(true, .release);
+            self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            return;
+        }
+        self.archive_preview = null;
+        defer job.destroy();
+        if (!view.history_open.peek() or view.history_entry != job.id) return;
+        const state = self.assistant_states.?.find(job.id) orelse return;
+        var entry = self.conversationEntry(job.id, state.title.text() orelse "AI 会话", "");
+        if (job.err) |err| {
+            entry.can_restore = false;
+            entry.can_copy = false;
+            try view.showHistory(entry, "加载此会话失败。关闭后可重新打开。");
+            return err;
+        }
+        const result = &job.result.?;
+        entry.can_restore = result.can_restore;
+        entry.can_copy = result.can_copy;
+        entry.first_use = result.first_use;
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        defer out.deinit();
+        try result.render(&out.writer);
+        try view.showHistory(entry, out.written());
+    }
+
+    fn hydrateArchive(state: *const @import("ai/assistant_store.zig").State, host: *@import("ai/attached_service.zig").Host) !void {
+        if (!state.indexed_archive) return;
+        const id = state.conversation_id;
+        const catalog = archiveCatalog() orelse return error.AiHistoryIndexUnavailable;
+        if (host.service.store.find(id) == null) {
+            const spans = try catalog.family(id, host.allocator);
+            defer host.allocator.free(spans);
+            var recovered = @import("ai/session_lifecycle.zig").Store.init(host.allocator);
+            defer recovered.deinit();
+            const cancel = std.atomic.Value(bool).init(false);
+            const started = wallClockMsTransfer();
+            const bytes = try @import("ai/session_journal.zig").Journal.replayIndexed(host.allocator, host.journal_io.?.io(), host.journal_dir.?, catalog.bounds, spans, &cancel, &recovered);
+            if (recovered.find(id) == null) return error.ConversationNotFound;
+            try host.adoptArchive(&recovered);
+            applog.info(.app, "AI history restore selected ms total={d} bytes_read={d}", .{ wallClockMsTransfer() - started, bytes });
+        }
+        const record = host.service.store.find(id).?;
+        try host.archivePresentation(record);
+        for (host.service.store.records.items) |child| if (child.child) |details| {
+            if (details.info.owning_parent_conversation.eql(id)) try host.archivePresentation(child);
+        };
+    }
+
     fn showConversationHistory(self: *AiHost, id: u64) !void {
         const store = self.assistant_states orelse return error.ConversationNotFound;
         const state = store.find(id) orelse return error.ConversationNotFound;
-        const record = (try self.shared()).service.store.find(state.conversation_id);
+        const host = try self.shared();
+        if (state.indexed_archive) return self.beginArchivePreview(state, host);
+        const record = host.service.store.find(state.conversation_id);
         var out = std.Io.Writer.Allocating.init(self.allocator);
         defer out.deinit();
         if (record) |value| {
@@ -4924,7 +5224,9 @@ const AiHost = struct {
             }
             if (action.action == .children) {
                 const state = (self.assistant_states orelse return error.ConversationNotFound).find(action.id) orelse return error.ConversationNotFound;
-                self.child_list_parent = state.conversation_id;
+                const parent_id = state.conversation_id;
+                try hydrateArchive(state, try self.shared());
+                self.child_list_parent = parent_id;
                 if (self.children_view) |view| view.open.set(true);
                 return;
             }
@@ -4938,6 +5240,7 @@ const AiHost = struct {
             }
             if (action.owner == null or self.currentBinding() == null or !action.owner.?.eql(self.currentBinding().?) or action.current != self.display_conversation) return error.BindingChanged;
             const shared_host = try self.shared();
+            if (action.action != .new) if (self.assistant_states.?.find(action.id)) |state| try hydrateArchive(state, shared_host);
             if (action.action != .copy) try self.preservePendingEdit();
             self.persistDisplayedDraft() catch |err| {
                 if (err == error.JournalBusy) self.conversation_action = action;
@@ -5144,7 +5447,7 @@ const AiHost = struct {
         const store = self.assistant_states orelse return error.EmptyConversation;
         const state = store.find(self.display_conversation orelse return error.EmptyConversation) orelse return error.EmptyConversation;
         const current: ?HistoryMessage = if (self.last_user_text) |text| .{ .user = true, .text = text, .turn = self.current_turn } else null;
-        return @import("ai/conversation_share.zig").save(self.allocator, self.cx.io, self.data_root, state.conversation_id, self.history.items, current, self.controller.stream.cards.items);
+        return @import("ai/conversation_share.zig").save(self.allocator, self.cx.io, self.data_root, state.conversation_id, self.history.items, current, self.controller.stream.cards.items, &self.tool_results);
     }
     fn showConversations(self: *AiHost) void {
         self.dock.pin();
@@ -5152,6 +5455,11 @@ const AiHost = struct {
             view.open.set(false);
             return;
         };
+        _ = self.shared() catch |err| {
+            self.setFeedback(@errorName(err));
+            return;
+        };
+        if (process_windows) |process| process.requestAiHistory() catch |err| self.setFeedback(@errorName(err));
         self.list_requested = true;
         self.cx.requestRedraw();
     }
@@ -5217,6 +5525,7 @@ const AiHost = struct {
     }
 
     fn processConversationActions(self: *AiHost) void {
+        self.pollArchivePreview() catch |err| self.setFeedback(@errorName(err));
         self.processLifecycleAction() catch |err| {
             if (err == error.ResourceCleanupPending or err == error.JournalBusy) {
                 self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
@@ -5287,6 +5596,10 @@ const AiHost = struct {
         if (self.delete_requested) |id| {
             self.delete_requested = null;
             const store = if (self.assistant_states) |v| v else return;
+            if (self.shared_service) |shared_host| if (store.find(id)) |state| hydrateArchive(state, shared_host) catch |err| {
+                self.setFeedback(@errorName(err));
+                return;
+            };
             const target = store.find(id) orelse return;
             const owner = target.owner;
             if (self.shared_service) |shared_host| if (shared_host.service.store.find(target.conversation_id)) |record| {
@@ -5381,11 +5694,22 @@ const AiHost = struct {
         }
     }
 
-    fn hasSelectedModel(self: *AiHost) bool {
-        if (self.runtime_config == null) return false;
-        const controls = self.selectedControls() catch return false;
-        _ = controls.resolveModel(self.effectiveAi()) catch return false;
-        return true;
+    fn welcomeModelState(self: *AiHost) @import("ui/ai_empty_view.zig").State {
+        const runtime = self.runtime_config orelse return .setup;
+        const failure = if (self.display_owner == null) blk: {
+            _ = ai_provider_config.fromSettings(self.effectiveAi()) catch |err| break :blk err;
+            return .ready;
+        } else blk: {
+            const controls = self.selectedControls() catch return .setup;
+            _ = controls.resolveModel(self.effectiveAi()) catch |err| break :blk err;
+            return .ready;
+        };
+        if (failure != error.MissingModel and failure != error.InvalidContextWindow) return .setup;
+        return switch (self.model_discovery.defaultStatus(runtime.value.ai, runtime.modelDiscoveryRevision())) {
+            .setup => .setup,
+            .loading => .loading,
+            .unavailable => .unavailable,
+        };
     }
 
     fn emptyHistory(raw: *anyopaque) void {
@@ -5650,7 +5974,8 @@ const AiHost = struct {
         const selected = if (self.runtime_config != null and self.display_owner != null) blk: {
             const controls = self.selectedControls() catch break :blk null;
             break :blk controls.resolveModel(self.effectiveAi()) catch |err| {
-                model_problem = err;
+                const readiness = self.welcomeModelState();
+                if (readiness != .loading and readiness != .unavailable) model_problem = err;
                 break :blk null;
             };
         } else null;
@@ -6632,7 +6957,11 @@ const AiHost = struct {
     }
 
     fn submit(self: *AiHost, text: []const u8) void {
-        self.submitAttached(text, null) catch |err| self.refresh(@errorName(err));
+        switch (self.welcomeModelState()) {
+            .loading => self.setFeedback("正在加载模型…"),
+            .unavailable => self.setFeedback("暂时无法加载模型"),
+            else => self.submitAttached(text, null) catch |err| self.refresh(@errorName(err)),
+        }
     }
     fn queueAction(raw: *anyopaque, ticket: @import("ui/ai_pending_view.zig").Ticket, action: @import("ui/ai_pending_view.zig").Action, text: []const u8) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
@@ -9917,6 +10246,8 @@ const AiHost = struct {
     }
 
     fn cleanup(self: *AiHost) void {
+        if (self.archive_preview) |job| job.destroy();
+        self.archive_preview = null;
         if (self.pending_action) |action| if (action.text) |text| self.allocator.free(text);
         self.pending_action = null;
         if (self.lifecycle_command) |*command| command.deinit();
@@ -11680,7 +12011,7 @@ const SettingsHost = struct {
     const FontResolved = @import("config/appearance_font.zig").Resolved;
     const AppearanceApply = @import("config/appearance_apply.zig");
     const BackgroundTexture = @import("ui/background_texture.zig").Texture;
-    const DecisionKind = enum { close, reset };
+    const DecisionKind = enum { close, reset, credential_local, credential_keychain };
     file_picker: ?SettingsFilePicker = null,
     notification_window: ?@import("host/notification_host.zig").WindowId = null,
     application_host: ?*application_host_mod.ApplicationHost = null,
@@ -11739,6 +12070,7 @@ const SettingsHost = struct {
     decision_save: ?*ui.Node = null,
     decision_discard: ?*ui.Node = null,
     decision_reset: ?*ui.Node = null,
+    decision_reset_label: ?*ui.Signal([]const u8) = null,
     record_cleanup: ?RecordCleanup.Controller = null,
     record_cleanup_dir: ?std.Io.Dir = null,
     record_cleanup_view: ?*RecordCleanupView.View = null,
@@ -12540,7 +12872,8 @@ const SettingsHost = struct {
             save_button.setStyleInline(self.allocator, .{ .width = .{ .px = 104 }, .height = .{ .px = 34 } });
             save_button.meta.ownership.meta.test_id = "settings.confirmation.save";
             try actions.appendChild(self.allocator, save_button);
-            const reset = try ui.widgets.Button(.{ .label = "恢复", .variant = .primary, .on_click = self.cx.on(SettingsHost, self, confirmReset) }).mount(self.scope, self.cx);
+            const primary_label = try self.scope.createText("恢复", .{});
+            const reset = try ui.widgets.Button(.{ .label = primary_label, .variant = .primary, .on_click = self.cx.on(SettingsHost, self, confirmDecision) }).mount(self.scope, self.cx);
             try app_theme.stylePrimary(self.cx, self.scope, reset, null);
             reset.setStyleInline(self.allocator, .{ .width = .{ .px = 96 }, .height = .{ .px = 34 } });
             reset.meta.ownership.meta.test_id = "settings.confirmation.reset";
@@ -12554,6 +12887,7 @@ const SettingsHost = struct {
             self.decision_save = save_button;
             self.decision_discard = discard_button;
             self.decision_reset = reset;
+            self.decision_reset_label = primary_label;
         }
         // This retained modal outlives settings content rebuilds. Refresh its
         // explicit paint slots before reopening, without replacing the draft,
@@ -12567,17 +12901,37 @@ const SettingsHost = struct {
         self.decision_kind = kind;
         self.decision_cancel_label.?.set(if (kind == .close) "继续编辑" else "取消");
         self.decision_cancel.?.setStyle(self.allocator, .width, .{ .px = if (kind == .close) @as(f32, 112) else 96 });
-        self.decision_title.?.set(if (kind == .close) "未保存的设置" else "恢复默认设置？");
+        self.decision_title.?.set(switch (kind) {
+            .close => "未保存的设置",
+            .reset => "恢复默认设置？",
+            .credential_local => "切换到本地存储？",
+            .credential_keychain => "切换到 macOS 钥匙串？",
+        });
         var problem_buffer: [2048]u8 = undefined;
         const invalid = kind == .close and self.controller.validationProblem() != null;
-        self.decision_message.?.set(if (invalid) self.controller.validationMessage(&problem_buffer) else if (kind == .close) "设置更改尚未保存。" else "载入默认值草稿？默认主题 Sauber；保存前仍可放弃。");
+        self.decision_message.?.set(if (invalid) self.controller.validationMessage(&problem_buffer) else switch (kind) {
+            .close => "设置更改尚未保存。",
+            .reset => "载入默认值草稿？默认主题 Sauber；保存前仍可放弃。",
+            .credential_local => "已保存的凭据将存入本地文件。文件不加密，仅当前用户可读写。",
+            .credential_keychain => "已保存的凭据将移入钥匙串，验证写入成功后移除本地副本。",
+        });
         self.decision_message_node.?.setTextColor(if (invalid) colors.danger_ink else colors.fg_2);
-        self.decision_notice.?.setTextContent(self.allocator, if (invalid) "请返回设置修正后保存，草稿已保留。" else "保存失败保留草稿；恢复默认值也需保存后生效。") catch {};
+        self.decision_notice.?.setTextContent(self.allocator, if (invalid) "请返回设置修正后保存，草稿已保留。" else switch (kind) {
+            .close, .reset => "保存失败保留草稿；恢复默认值也需保存后生效。",
+            .credential_local, .credential_keychain => "切换时，macOS 可能要求验证身份。",
+        }) catch {};
         if (findSettingsText(self.decision_save.?, "保存关闭") orelse findSettingsText(self.decision_save.?, "返回修正")) |label| label.setTextContent(self.allocator, if (invalid) "返回修正" else "保存关闭") catch {};
         if (self.decision_save.?.behavior.interaction.a11y) |*a11y| a11y.label = if (invalid) "返回修正" else "保存关闭";
         self.decision_save.?.setDisplay(if (kind == .close) .flex else .none);
         self.decision_discard.?.setDisplay(if (kind == .close) .flex else .none);
-        self.decision_reset.?.setDisplay(if (kind == .reset) .flex else .none);
+        const conversion = kind == .credential_local or kind == .credential_keychain;
+        self.decision_reset_label.?.set(if (conversion) "切换" else "恢复");
+        self.decision_reset.?.meta.ownership.meta.test_id = if (conversion) "settings.confirmation.credential_switch" else "settings.confirmation.reset";
+        self.decision_reset.?.setDisplay(if (kind == .close) .none else .flex);
+        const icon = if (conversion) ui.icons.lock else ui.icons.circle_help;
+        if (icon.icon_id) |id| if (icon.pickRep(18)) |rep| {
+            self.decision_icon.?.setIcon(.{ .icon_id = id, .rep = rep, .tint = colors.accent });
+        };
         self.decision_open.?.set(true);
         self.cx.requestRedraw();
     }
@@ -12629,11 +12983,40 @@ const SettingsHost = struct {
     fn saveAndClose(self: *SettingsHost) void {
         self.saveWithClose(true);
     }
-    fn confirmReset(self: *SettingsHost) void {
+    fn confirmDecision(self: *SettingsHost) void {
         if (self.busy()) return;
-        self.controller.resetDefaults();
+        switch (self.decision_kind) {
+            .close => return,
+            .reset => self.controller.resetDefaults(),
+            .credential_local => self.startCredentialConversion(.local),
+            .credential_keychain => self.startCredentialConversion(.keychain),
+        }
         self.cancelDecision();
         self.pending_rebuild = true;
+        self.cx.requestRedraw();
+    }
+
+    fn startCredentialConversion(self: *SettingsHost, target: credential_store.Storage) void {
+        const process = process_windows orelse return;
+        if (process.credential_conversion != null or process.data_cleanup_owner != null) return;
+        if (!credential_store.beginConversion(target)) {
+            self.showCredentialStatus("凭据存储正在使用，请稍后重试。");
+            return;
+        }
+        process.credential_conversion_target = target;
+        process.credential_conversion_error = null;
+        process.credential_conversion_done.store(false, .monotonic);
+        process.credential_conversion = std.Thread.spawn(.{}, ProcessWindows.convertCredentials, .{ process, target }) catch {
+            credential_store.endConversion();
+            self.showCredentialStatus("无法启动凭据转换。请重试。");
+            return;
+        };
+        self.showCredentialStatus(if (target == .local) "正在将凭据转为本地存储…" else "正在将凭据移入钥匙串…");
+    }
+
+    fn showCredentialStatus(self: *SettingsHost, message: []const u8) void {
+        self.status.setTextContent(self.allocator, message) catch return;
+        self.status.setDisplay(.flex);
         self.cx.requestRedraw();
     }
 
@@ -13022,24 +13405,8 @@ const SettingsHost = struct {
                 self.cx.requestRedraw();
                 return;
             },
-            .credential_local => {
-                const process = process_windows orelse return;
-                const credentials = @import("config/credential_store.zig");
-                if (process.credential_conversion != null or process.data_cleanup_owner != null) return;
-                if (!credentials.beginConversion()) {
-                    self.refresh("凭据存储正在使用，请稍后重试。");
-                    return;
-                }
-                process.credential_conversion_error = null;
-                process.credential_conversion_done.store(false, .monotonic);
-                process.credential_conversion = std.Thread.spawn(.{}, ProcessWindows.convertCredentials, .{process}) catch {
-                    credentials.endConversion();
-                    self.refresh("无法启动凭据转换。请重试。");
-                    return;
-                };
-                self.refresh("正在将凭据转为本地存储…");
-                self.pending_rebuild = true;
-                self.cx.requestRedraw();
+            .credential_local, .credential_keychain => {
+                self.showDecision(if (action == .credential_local) .credential_local else .credential_keychain) catch |err| self.refresh(@errorName(err));
                 return;
             },
         }
@@ -13144,6 +13511,7 @@ const SettingsHost = struct {
         if (@import("config/credential_store.zig").isConverting()) return "请等待凭据转换完成";
         if (self.hasActiveCleanupSessions()) return "请先结束所有窗口的活动会话与后台连接";
         const process = process_windows orelse return "应用尚未准备好，请稍后重试";
+        if (process.ai_history_thread != null) return "请等待 AI 会话历史索引完成";
         if (process.data_cleanup_owner) |owner| if (owner != self) return "另一窗口正在清除应用数据";
         if (process.pending.items.len != 0) return "请等待新窗口创建完成";
         if (process.domain.tasks) |tasks| {
@@ -13436,10 +13804,8 @@ const SettingsHost = struct {
     }
 
     fn contentActionState(raw: *anyopaque, action: settings_content_view.Action) settings_content_view.ActionState {
-        if (action == .credential_local) {
-            const credentials = @import("config/credential_store.zig");
-            if (credentials.usesLocal()) return .{ .enabled = false, .reason = "已使用本地存储" };
-            if (credentials.isConverting()) return .{ .enabled = false, .reason = "正在转换凭据" };
+        if (action == .credential_local or action == .credential_keychain) {
+            if (credential_store.isConverting()) return .{ .enabled = false, .reason = "正在转换凭据" };
             return .{};
         }
         if (action != .clear_logs and action != .clear_all) return .{};
@@ -13822,6 +14188,7 @@ const AppNavHost = struct {
     ai_logo_texture: ?u32 = null,
     chrome: struct {
         toolbar_tint: ?*ui.Signal(?ui.Color) = null,
+        window_pin: ?*WindowPin = null,
         transfer_badge: ?*ui.Node = null,
         empty_icon: ?*ui.Node = null,
         empty_title: ?*ui.Node = null,
@@ -14337,10 +14704,7 @@ const AppNavHost = struct {
                 process.credential_conversion = null;
                 for (process.runtime.windows.items) |*managed| {
                     if (ProcessWindows.navFor(managed.app)) |nav| if (nav.settings) |settings| {
-                        settings.refresh(if (process.credential_conversion_error) |err|
-                            if (err == error.CredentialAuthenticationCanceled) "已取消转换，继续使用钥匙串。" else "凭据转换失败，继续使用钥匙串。请检查钥匙串授权和数据目录后重试。"
-                        else
-                            "已转为本地存储。");
+                        if (settings.open) settings.showCredentialStatus(process.credentialConversionMessage());
                         settings.pending_rebuild = true;
                         settings.cx.requestRedraw();
                     };
@@ -15112,6 +15476,7 @@ const AppNavHost = struct {
         };
         if (self.settings) |settings| if (settings.search_input) |input| settings_content_view.styles.paintSearch(self.cx, &input);
         if (self.chrome.toolbar_tint) |tint| tint.set(c.fg_2);
+        if (self.chrome.window_pin) |pin| pin.retheme();
         if (self.chrome.transfer_badge) |badge| badge.setBackground(c.ok);
         if (self.chrome.empty_title) |node| node.setTextColor(c.fg_1);
         if (self.chrome.empty_description) |node| node.setTextColor(c.fg_2);
@@ -16353,6 +16718,37 @@ fn openGlobalHistory(history: *HistoryHost) void {
     };
 }
 
+const WindowPin = struct {
+    cx: *ui.Cx,
+    button: *ui.Node = undefined,
+    tint: *ui.Signal(?ui.Color),
+    pinned: bool = false,
+
+    extern fn zw_window_set_pinned(window_number: u32, pinned: bool) bool;
+
+    fn mount(cx: *ui.Cx, scope: *ui.Scope) !*WindowPin {
+        const self = try scope.createState(WindowPin, .{ .cx = cx, .tint = try scope.createSignal(?ui.Color, app_theme.current().fg_2) });
+        self.button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.pin, .icon_size = @as(f32, 16), .icon_tint = self.tint, .a11y_label = "窗口置顶", .on_click = cx.on(WindowPin, self, toggle) }).mount(scope, cx);
+        shell_styles.titleToolbarButton(cx.allocator, self.button);
+        self.button.meta.ownership.meta.test_id = "toolbar.window_pin";
+        return self;
+    }
+
+    fn toggle(self: *WindowPin) void {
+        const pinned = !self.pinned;
+        if (!zw_window_set_pinned(self.cx.native_window_id, pinned)) return;
+        self.pinned = pinned;
+        if (self.button.behavior.interaction.a11y) |*attrs| attrs.pressed = pinned;
+        self.retheme();
+        self.cx.requestRedraw();
+    }
+
+    fn retheme(self: *WindowPin) void {
+        const palette = app_theme.current();
+        self.tint.set(if (self.pinned) palette.accent else palette.fg_2);
+    }
+};
+
 fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *SettingsHost, workspace: *ws.Workspace, ai_host: *AiHost, nav_host: *AppNavHost, history_host: *HistoryHost) !*ui.Node {
     const bar = try ui.boxStyled(cx, shell_styles.title, .{});
     bar.meta.ownership.meta.test_id = "workspace.titlebar";
@@ -16416,6 +16812,9 @@ fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *Setti
     const settings_trigger = try titleIcon(cx, scope, "⚙️", icon_tint, true, onSettingsTitleClick, @ptrCast(settings_click));
     settings_host.focus_return = settings_trigger;
     try groups[2].appendChild(cx.allocator, settings_trigger);
+    const pin = try WindowPin.mount(cx, scope);
+    nav_host.chrome.window_pin = pin;
+    try groups[2].appendChild(cx.allocator, pin.button);
     nav_host.mist = try MistChrome.View.mount(cx, scope, workspace, controls, tabs, actions, groups);
     return bar;
 }
@@ -16549,7 +16948,9 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     const ai_input_row = try ui.boxStyled(cx, ai_styles.composer, .{});
     ai_styles.finishComposer(cx, ai_input_row);
     try ai_input_row.appendChild(cx.allocator, ai_host.attachments_view.?.root);
-    const ai_input = try ui.widgets.Textarea(.{ .value = ai_prompt, .borderless = true, .rows = 1, .placeholder = "继续提问…", .on_change = cx.on(AiHost, ai_host, AiHost.composerEdited) }).mountResult(scope, cx);
+    const history_input_disabled = try scope.createSignal(bool, false);
+    ai_host.history_input_disabled = history_input_disabled;
+    const ai_input = try ui.widgets.Textarea(.{ .value = ai_prompt, .disabled = history_input_disabled, .borderless = true, .rows = 1, .placeholder = "继续提问…", .on_change = cx.on(AiHost, ai_host, AiHost.composerEdited) }).mountResult(scope, cx);
     ai_input.wrapper.setStyleInline(cx.allocator, ai_styles.input());
     ai_input.input.setStyleInline(cx.allocator, ai_styles.input());
     ai_host.input_node = ai_input.input;
@@ -16790,6 +17191,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     ai_card_box.behavior.events.on_event_capture = AiHost.panelCapture;
     ai_card_box.behavior.events.capture_context = ai_host;
     ai_host.runtime_config = app_config;
+    ai_host.model_cache_directory = data_paths.cache_directory;
+    ai_host.loadModelCache();
     ai_host.card_box = ai_card_box;
     ai_host.conversation_viewport = ai_scroll.container;
     ai_host.tail_follow = .{ .scroll = ai_scroll };
@@ -16870,7 +17273,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try settings_header.appendChild(cx.allocator, settings_close);
     try scope.onCleanup(SettingsHost, settings_host, SettingsHost.cleanup);
     // Kept outside replaceable page scopes; shown only on a concrete error.
-    const settings_status = try ui.text(cx, "", .{ .font_size = 10.5, .color = p.fg_secondary });
+    const settings_status = try ui.text(cx, "", .{ .font_size = 10.5, .color = p.fg_secondary, .wrap = .word });
+    settings_status.meta.ownership.meta.test_id = "settings.operation.status";
     settings_status.setDisplay(.none);
     settings_status.style.flex_shrink = 0;
     try settings_right.appendChild(cx.allocator, settings_status);
@@ -17095,7 +17499,6 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_host.application_host = application_host;
     ai_host.application_host = application_host;
     nav_host.roster.shared_identity = &application_host.domain.group_identity;
-    if (ai_host.shared()) |_| {} else |err| workspace.statusFailure(@errorName(err));
     ai_host.file_application = file_application;
     application_host.install();
     application_host.setCloseExtension(nav_host, AppNavHost.closeStep);
@@ -20019,9 +20422,11 @@ fn dataStartupAlert(err: anyerror, reset_pending: bool) bool {
 }
 
 pub fn main() !void {
+    const started_at = wallClockMsTransfer();
     @import("vt/input_timing.zig").configure();
     @import("vt/output_timing.zig").configure();
     try @import("platform/ui_fonts.zig").register();
+    const fonts_at = wallClockMsTransfer();
     const presentation = @import("platform/presentation_wakeup.zig");
     presentation.wake_fn = struct {
         fn wake() void {
@@ -20034,6 +20439,7 @@ pub fn main() !void {
     const update_data = try std.heap.c_allocator.dupeSentinel(u8, data_paths.directory, 0);
     defer std.heap.c_allocator.free(update_data);
     if (@import("update/client.zig").zw_update_startup_gate(update_data.ptr) == 0) return;
+    const update_at = wallClockMsTransfer();
     var scope_lock = @import("platform/data_scope_lock.zig").Lock.acquire(std.heap.c_allocator, data_paths.directory, data_paths.is_override) catch |err| {
         _ = dataStartupAlert(err, false);
         return err;
@@ -20045,7 +20451,8 @@ pub fn main() !void {
     const credentials = @import("config/credential_store.zig");
     try credentials.configureScope(data_paths.directory, data_paths.is_override);
     try credentials.configureLocal(io_threaded.io(), data_paths.directory);
-    _ = lifecycle.prepare(io_threaded.io(), &data_paths) catch |err| {
+    const scope_at = wallClockMsTransfer();
+    const preparation = lifecycle.prepare(io_threaded.io(), &data_paths) catch |err| {
         if (err == error.ResetIncomplete and dataStartupAlert(err, true)) {
             credentials.eraseScope() catch |failure| {
                 _ = dataStartupAlert(failure, false);
@@ -20061,9 +20468,11 @@ pub fn main() !void {
         if (err != error.ResetIncomplete) _ = dataStartupAlert(err, false);
         return err;
     };
+    const data_at = wallClockMsTransfer();
     applog.init(.{}, io_threaded.io());
     defer applog.shutdown();
     applog.info(.app, "ZeroWork starting", .{});
+    applog.info(.app, "startup ms fonts={d} paths_and_update={d} scope={d} data={d} logging={d} secured_files={d}", .{ fonts_at - started_at, update_at - fonts_at, scope_at - update_at, data_at - scope_at, wallClockMsTransfer() - data_at, preparation.secured_files });
     const notifications = try NotificationHost.create(std.heap.c_allocator, .{});
     defer notifications.destroy();
     process_notifications = notifications;
@@ -20077,6 +20486,7 @@ pub fn main() !void {
     var windows = MultiWindowApp.init(std.heap.c_allocator, .{ .shared_gpu = true, .on_event = ProcessWindows.notesWindowEvent });
     var process: ProcessWindows = .{ .runtime = &windows, .domain = domain, .io = io_threaded.io(), .data_paths = &data_paths };
     defer {
+        process.stopAiHistory();
         domain.deinit();
         process.deinit();
     }
@@ -20103,7 +20513,9 @@ pub fn main() !void {
     if (application_test_mode) try verifyUiFontPaths(app);
     app_font_registry = &registry;
     defer app_font_registry = null;
+    const window_at = wallClockMsTransfer();
     try app.mount(mountUI);
+    const mounted_at = wallClockMsTransfer();
     const nav: *AppNavHost = @ptrCast(@alignCast(app.cx.root.?.behavior.events.capture_context orelse return error.MissingApplicationController));
     nav.app_runtime = app;
     try nav.loadEmptyLogo();
@@ -20139,7 +20551,10 @@ pub fn main() !void {
     var config_read_error: ?anyerror = null;
     var reconciled_provider_revision: u64 = 0;
     // The callback has no Cx/window pointer and remains valid through worker cleanup.
+    var startup_reported = false;
+    var interactive_reported = false;
     while (windows.shouldContinue()) {
+        process.publishAiHistory();
         const menu_action = menu_bar.takeAction();
         if (menu_action == 2) {
             windows.quit();
@@ -20196,6 +20611,15 @@ pub fn main() !void {
         // at this next loop boundary without another timed wait before painting.
         windows.config.pump_timeout_ms = if (changed) 0 else 16;
         if (!try windows.tick()) break;
+        if (!interactive_reported and (nav.startup_view == null or nav.startup_view.?.transition.finished)) {
+            interactive_reported = true;
+            applog.info(.app, "startup interactive ms total={d}", .{wallClockMsTransfer() - started_at});
+        }
+        if (!startup_reported) {
+            startup_reported = true;
+            const ready_at = wallClockMsTransfer();
+            applog.info(.app, "startup first tick ms window_setup={d} mount={d} post_mount={d} total={d}", .{ window_at - data_at, mounted_at - window_at, ready_at - mounted_at, ready_at - started_at });
+        }
         notifications.activity.setForeground(menu_bar.active());
         const maintenance_ran = notifications.maintain(wallClockMsTransfer()) catch |err| blk: {
             applog.warn(.app, "system notification maintenance: {s}", .{@errorName(err)});

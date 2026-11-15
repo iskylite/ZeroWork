@@ -246,6 +246,21 @@ pub const Archive = struct {
     pub fn resolveRecord(self: *Archive, allocator: std.mem.Allocator, query: RecordQuery) !ResolvedRecord {
         return catalogResolve(self, allocator, query);
     }
+    /// A row from the catalog already has a concrete manifest path. Recheck
+    /// its stable identity before opening it instead of rescanning the catalog.
+    pub fn resolveListedRecord(self: *Archive, allocator: std.mem.Allocator, key: []const u8, revision: u64, path: []const u8) !ResolvedRecord {
+        var catalog: Catalog = .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+        errdefer catalog.deinit();
+        const owned = catalog.arena.allocator();
+        const parsed = try manifest.load(allocator, self.io, self.dir, path);
+        defer parsed.deinit();
+        if (parsed.value.manifest_revision != revision or !std.mem.eql(u8, parsed.value.archive_key, key)) return error.CatalogChanged;
+        if (parsed.value.state == .tombstone) return error.RecordRemoved;
+        const encoded = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+        defer allocator.free(encoded);
+        const document = try std.json.parseFromSliceLeaky(manifest.Manifest, owned, encoded, .{ .allocate = .alloc_always });
+        return .{ .catalog = catalog, .descriptor = try descriptorFromManifest(owned, path, document), .execution_range = null };
+    }
     pub fn acquireRecord(self: *Archive, allocator: std.mem.Allocator, descriptor: Descriptor) !RecordGroupLease {
         return catalogAcquire(self, allocator, descriptor, .replay);
     }
@@ -866,7 +881,7 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
     while (try iterator.next(archive.io)) |file| {
         if (file.kind != .file or !std.mem.endsWith(u8, file.name, ".session.json")) continue;
         const path = try std.fmt.allocPrint(owned, "logs/history/{s}", .{file.name});
-        const sized = manifest.loadSized(archive.allocator, archive.io, archive.dir, path) catch |err| {
+        const sized = manifest.loadCatalogMetadata(archive.allocator, archive.io, archive.dir, path) catch |err| {
             if (err == error.OutOfMemory) return err;
             const failure_entry: Entry = .{ .id = 0, .started_ms = 0, .ended_ms = 0, .duration_ms = 0, .host = "", .user = "", .cast_path = path };
             var failed: Descriptor = .{ .archive_key = try legacyKey(owned, archive, failure_entry), .entry = failure_entry, .title = try owned.dupe(u8, file.name), .manifest_path = path, .coverage = .unavailable, .replayability = .unsupported, .failure = @errorName(err), .can_open = false };
@@ -882,19 +897,7 @@ fn catalogLoadWithActive(archive: *Archive, allocator: std.mem.Allocator, includ
         if (!include_active and (parsed.value.state == .tombstone or (parsed.value.state == .active and isActiveRecord(parsed.value.archive_key)))) continue;
         // Catalog rows retain display/identity/file metadata only. Detailed
         // event/range/baseline arrays are loaded for the single resolver target.
-        var projection = parsed.value;
-        projection.events = &.{};
-        projection.execution_ranges = &.{};
-        projection.command_history = &.{};
-        projection.gaps = &.{};
-        const generations = try archive.allocator.dupe(manifest.Generation, projection.recording.generations);
-        defer archive.allocator.free(generations);
-        for (generations) |*generation| {
-            generation.segments = &.{};
-            generation.baselines = &.{};
-        }
-        projection.recording.generations = generations;
-        const encoded = try std.json.Stringify.valueAlloc(archive.allocator, projection, .{});
+        const encoded = try std.json.Stringify.valueAlloc(archive.allocator, parsed.value, .{});
         defer archive.allocator.free(encoded);
         const copy = try std.json.parseFromSliceLeaky(manifest.Manifest, owned, encoded, .{ .allocate = .alloc_always });
         if ((try seen.getOrPut(archive.allocator, copy.archive_key)).found_existing) continue;

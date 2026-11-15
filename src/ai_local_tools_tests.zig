@@ -1212,7 +1212,10 @@ test "session capabilities Local native catalog excludes shell attachment and ke
     try bridge.configureHost(.{ .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = @backingInt(owner.session_id) }, .binding_revision = 1, .grant_revision = 1 }, .handler_context = &f, .invoke = Query.invoke, .contributions = &contributions });
     try bridge.prepare(f.app, owner);
     try std.testing.expect(prompt.has(bridge.wire, "host.read_terminal"));
-    for (@import("ai/host_execution.zig").contributions) |contribution| try std.testing.expect(!prompt.has(bridge.wire, contribution.definition.id));
+    // Existing execution receipts stay observable without a live execution service.
+    for (@import("ai/host_execution.zig").contributions) |contribution| {
+        try std.testing.expectEqual(contribution.definition.effect == .read_state, prompt.has(bridge.wire, contribution.definition.id));
+    }
 }
 
 test "AI transfer catalog hides remote transfer tools from a real local terminal" {

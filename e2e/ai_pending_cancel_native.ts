@@ -65,7 +65,7 @@ const check=async()=>{
  await click('ai.pending.cancel_message.1');await absent('ai.pending.card.1');
  await visible('ai.pending.card.0');await h.mouseMove(5,5);await visible('ai.pending.remove.0');
  await click('ai.pending.remove.0');await absent('ai.pending.card.0');
- const journal=await readFile(join(data,'ai-sessions.jsonl'),'utf8');
+ const journal=await readFile(join(data,'ai-sessions-active.jsonl'),'utf8');
  const rows=journal.trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.receipt?.delivery==='cancelled');
  assert.equal(rows.length,3);assert.equal(rows.filter(row=>row.receipt.route==='steer').length,1);
  assert.equal(requests,1,'the active request was sent exactly once');

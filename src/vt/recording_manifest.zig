@@ -246,6 +246,83 @@ pub fn loadSized(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
     try validate(result.value);
     return .{ .parsed = result, .source_length = bytes.len };
 }
+const CatalogGeneration = struct {
+    recording_generation: u64 = 1,
+    raw_offset_start: u64 = 0,
+    event_sequence_start: u64 = 0,
+    session_id: u64,
+    session_generation: u64,
+    source_ref_hash: ?[]const u8 = null,
+    initial_cols: u16,
+    initial_rows: u16,
+    receive_time_origin: i64,
+};
+
+const CatalogRecord = struct {
+    schema_version: u32 = 1,
+    archive_key: []const u8,
+    recording_id: []const u8,
+    manifest_revision: u64 = 1,
+    source_kind: SourceKind,
+    connection_id: ?u64 = null,
+    config_revision: ?u64 = null,
+    started_ms: i64,
+    ended_ms: ?i64 = null,
+    exit_code: ?i32 = null,
+    end_reason: ?[]const u8 = null,
+    state: @FieldType(Manifest, "state") = .active,
+    display: Display = .{},
+    recording: struct { version: u32 = 1, generations: []const CatalogGeneration },
+    execution_segment: bool = false,
+    files: []const File = &.{},
+    coverage: Coverage = .partial,
+    replayability: Replayability = .verified,
+    retained_range: @FieldType(Manifest, "retained_range") = .{},
+    total_received: u64 = 0,
+    failure: ?[]const u8 = null,
+    commit: @FieldType(Manifest, "commit") = .{},
+
+    fn manifest(self: CatalogRecord, allocator: std.mem.Allocator) !Manifest {
+        const generations = try allocator.alloc(Generation, self.recording.generations.len);
+        for (generations, self.recording.generations) |*target, source| {
+            target.* = .{ .session_id = source.session_id, .session_generation = source.session_generation, .initial_cols = source.initial_cols, .initial_rows = source.initial_rows, .receive_time_origin = source.receive_time_origin };
+            inline for (@typeInfo(CatalogGeneration).@"struct".field_names) |field|
+                @field(target, field) = @field(source, field);
+        }
+        var result: Manifest = .{
+            .archive_key = self.archive_key,
+            .recording_id = self.recording_id,
+            .source_kind = self.source_kind,
+            .started_ms = self.started_ms,
+            .recording = .{ .version = self.recording.version, .generations = generations },
+        };
+        inline for (@typeInfo(CatalogRecord).@"struct".field_names) |field| {
+            if (comptime !std.mem.eql(u8, field, "recording"))
+                @field(result, field) = @field(self, field);
+        }
+        return result;
+    }
+};
+
+/// A catalogue needs paths, coverage and display metadata. Detail readers
+/// still load and validate the full manifest before acquiring a recording.
+pub fn loadCatalogMetadata(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !SizedManifest {
+    const file = try openManaged(io, dir, path);
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.size > 8 * 1024 * 1024) return error.ManifestTooLarge;
+    var buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    var tokens = std.json.Reader.init(allocator, &reader.interface);
+    defer tokens.deinit();
+    const parsed = try std.json.parseFromTokenSource(CatalogRecord, allocator, &tokens, .{ .ignore_unknown_fields = true, .max_value_len = 8 * 1024 * 1024 });
+    errdefer parsed.deinit();
+    if (reader.logicalPos() != stat.size) return error.RecordingTruncated;
+    const summary = try parsed.value.manifest(parsed.arena.allocator());
+    try validate(summary);
+    return .{ .parsed = .{ .arena = parsed.arena, .value = summary }, .source_length = @intCast(stat.size) };
+}
+
 /// Refuse symlinks in every path component, not only the final filename.
 pub fn openManaged(io: std.Io, dir: std.Io.Dir, path: []const u8) !std.Io.File {
     try validatePath(path);

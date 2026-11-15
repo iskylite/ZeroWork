@@ -5,6 +5,8 @@
  *
  * ZW_AI_TEST_PREFIX=/tmp/zw-session-group-build ZW_TEST_PYTHON=/path/to/python \
  *   node e2e/ai_session_group_followup_native.ts /tmp/zw-session-group-evidence
+ * Set ZW_SESSION_GROUP_SHARE=1 for native Markdown sharing of silent SSH batch commands,
+ * or ZW_SESSION_GROUP_SHARE=interactive for the same check over a real SSH PTY.
  * Set ZW_SESSION_GROUP_MONITOR=1 to also run one fixed read-only size sampler
  * in the new session and verify its result while the original process runs.
  * ZW_SESSION_GROUP_DEEPEP=1 regresses the original DeepEP version request.
@@ -13,6 +15,7 @@
  * outside the built-in patterns using the paired review/approved JSON files.
  * ZW_SESSION_GROUP_CLEANUP=1 exercises the restricted catalog after grouping.
  * ZW_SESSION_GROUP_CLEANUP_TIMEOUT=1 also keeps the first wait blocked.
+ * ZW_SESSION_GROUP_LONG_RECOVERY=1 checks recording overflow, SSH reconnect, and the original job.
  * ZW_SESSION_GROUP_RECONNECT=1 tests a real SSH reconnect and stale execution.
  * With ZW_SESSION_GROUP_LIVE=1, interrupt the real model's task after its
  * first read-only command and observe how it recovers without further input.
@@ -24,13 +27,28 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, open, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const prefix = resolve(process.env.ZW_AI_TEST_PREFIX ?? '/tmp/zw-session-group-build');
 const binary = join(prefix, 'bin/zerowork');
 const out = resolve(process.argv[2] ?? '/tmp/zw-session-group-evidence');
 const live = process.env.ZW_SESSION_GROUP_LIVE === '1';
+const interactiveShare = process.env.ZW_SESSION_GROUP_SHARE === 'interactive';
+const batchShare = process.env.ZW_SESSION_GROUP_SHARE === '1';
+const share = interactiveShare || batchShare;
+const longRecovery = process.env.ZW_SESSION_GROUP_LONG_RECOVERY === '1';
+const recoveryCommand = 'python3 -u recovery_fixture.py';
+const recoveryPrepare = '在同一 SSH 终端准备录制执行记录容量验收。';
+const recoveryRun = '执行一次进度任务。录制达到上限后，断线重连，用原执行引用查看已采集输出，并通过重连后的会话读取进度文件。';
+const recoveryNext = '通过重连后的会话读取同一进程的新进度。';
+const executionRangeLimit = 128; // src/vt/ssh_execution_recording.zig
+const recovery: any = {};
+const shareCommands = [{ command: ':', exitCode: 0, status: '命令已结束' }, { command: 'false', exitCode: 1, status: '命令执行失败' }];
+const interactiveShareCommands = [...shareCommands, { command: "printf '%%'", exitCode: 0, status: '命令已结束', output: '%' }];
+const sharedExecutions = new Map<string, string>();
+let shareSession: number | undefined;
+let shareConversation: string | undefined;
 const monitor = process.env.ZW_SESSION_GROUP_MONITOR === '1';
 const deepEP = process.env.ZW_SESSION_GROUP_DEEPEP === '1';
 const deepEPPrompt = '你重新开启一个会话，然后读取下容器内的deep-ep库的版本';
@@ -48,7 +66,7 @@ const reconnectDuringCommand = liveReconnect && process.env.ZW_SESSION_GROUP_REC
 const reconnectGroup = liveReconnect && process.env.ZW_SESSION_GROUP_RECONNECT_GROUP === '1';
 const targetName = 'Reconnect Target';
 const siblingName = 'Online Peer';
-const autoReconnect = process.env.ZW_SESSION_GROUP_AUTO_RECONNECT === '1' || (!disconnected && !reconnect);
+const autoReconnect = process.env.ZW_SESSION_GROUP_AUTO_RECONNECT === '1' || (!disconnected && !reconnect && !longRecovery);
 const reconnectPrompt = reconnectGroup ? `请在组内的 ${targetName} 执行 \`pwd; sleep 4\`。如果这个成员中途断线，请恢复它的连接后在同一成员执行 \`pwd\`，把结果告诉我。` : reconnectAfterDrop ? '当前 SSH 已经断线了，请恢复连接后运行 pwd，把结果告诉我。' : reconnectDuringCommand ? '请在当前 SSH 会话执行 `pwd; sleep 4`。如果运行中意外断开，请恢复连接后执行 `pwd`，把恢复后的结果告诉我。' : '请在当前 SSH 会话运行 pwd，把结果告诉我。如果连接中途意外断开，请恢复连接后再运行一次 pwd，把恢复后的结果也告诉我。';
 const reconnectFailure = reconnect && process.env.ZW_SESSION_GROUP_RECONNECT_FAILURE === '1';
 const reconnectNextTask = liveReconnect && process.env.ZW_SESSION_GROUP_RECONNECT_NEXT_TASK === '1';
@@ -66,6 +84,8 @@ assert(!reconnectNextTask || (reconnectFailure && reconnectDuringCommand && auto
 assert(!reconnectGroup || reconnectNextTask);
 const executionMode = process.env.ZW_SESSION_GROUP_EXECUTION_MODE ?? 'interactive';
 assert(['interactive', 'auto'].includes(executionMode));
+assert(!longRecovery || (!live && !share && !monitor && !deepEP && !cleanup && !disconnected && !reconnect && !autoReconnect));
+assert(!share || (!live && !monitor && !deepEP && !cleanup && !disconnected && !reconnect));
 assert(!deepEP || (!live && !monitor && !cleanup && !disconnected && !reconnect && followUpMode === 'steer' && executionMode === 'interactive'));
 const gateway = process.env.ZW_SESSION_GROUP_GATEWAY;
 const gatewayKey = process.env.ZW_SESSION_GROUP_GATEWAY_KEY;
@@ -82,7 +102,7 @@ const data = join(isolated, 'data'), rpc = join(isolated, 'rpc'), peerDir = join
 const cleanupRelease = join(isolated, 'cleanup-released');
 for (const dir of [data, rpc, peerDir]) await mkdir(dir);
 const peerCode = String.raw`
-import base64, hashlib, json, os, posixpath, signal, socket, sys, time
+import base64, hashlib, json, os, posixpath, signal, socket, subprocess, sys, threading, time
 from pathlib import Path
 import paramiko
 sys.path.insert(0, sys.argv[1])
@@ -93,6 +113,8 @@ def fixture_execve(path, args, env):
  env['PATH']=str(Path(sys.argv[2])/'bin')+':'+env['PATH']
  original_execve(path,args,env)
 os.execve=fixture_execve
+class ReadHandle(paramiko.SFTPHandle):
+ def stat(self): return paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
 class Files(paramiko.SFTPServerInterface):
  def __init__(self, server, *args, **kwargs):
   super().__init__(server,*args,**kwargs); self.server=server
@@ -121,8 +143,25 @@ class Files(paramiko.SFTPServerInterface):
   target=self.target(path)
   if target is None or not target.is_file(): return paramiko.SFTP_NO_SUCH_FILE
   if flags & (os.O_WRONLY|os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_APPEND): return paramiko.SFTP_PERMISSION_DENIED
-  handle=paramiko.SFTPHandle(flags); handle.readfile=target.open('rb'); return handle
+  handle=ReadHandle(flags); handle.readfile=target.open('rb'); return handle
 class TestPeer(Peer):
+ def check_channel_exec_request(self, channel, command):
+  prefix=("cd '"+self.fixture.home+"' && ").encode('ascii')
+  name=command.removeprefix(prefix)
+  if sys.argv[3]=='share' and command.startswith(prefix) and name in (b':',b'false'):
+   def run():
+    # Give Paramiko time to acknowledge the exec request before reporting exit.
+    time.sleep(.01)
+    result=subprocess.run(['/bin/sh','-c',name.decode('ascii')],cwd=self.fixture.home,capture_output=True)
+    self.fixture.actions.append([channel.chanid,'share-exec',name.decode('ascii'),result.returncode])
+    if result.stdout: channel.sendall(result.stdout)
+    if result.stderr: channel.sendall_stderr(result.stderr)
+    channel.send_exit_status(result.returncode)
+    channel.shutdown_write()
+    channel.close()
+   threading.Thread(target=run,daemon=True).start()
+   return True
+  return super().check_channel_exec_request(channel,command)
  def check_channel_subsystem_request(self, channel, name):
   self.fixture.actions.append([channel.chanid,'subsystem',name])
   return paramiko.ServerInterface.check_channel_subsystem_request(self,channel,name) if name=='sftp' else False
@@ -159,6 +198,7 @@ try:
   if b'\x1b]133;B;zw_ctx=' in fixture.outputs: (out/'shell-ready').touch()
   if fixture.outputs.count(b'\x1b]133;B;zw_ctx=') >= 2: (out/'second-shell-ready').touch()
   if any(item[1:] == ['subsystem','sftp'] for item in fixture.actions): (out/'sftp-ready').touch()
+  if sum(item[1:] == ['subsystem','sftp'] for item in fixture.actions) >= 2: (out/'second-sftp-ready').touch()
   if (out/'fixed-handshake-failure').exists() and (out/'disconnected').exists():
    snapshot=out/'live-actions.tmp'; snapshot.write_text(json.dumps(fixture.actions)); snapshot.replace(out/'live-actions.json')
   time.sleep(.05)
@@ -187,7 +227,7 @@ if (deepEP) await writeFile(join(peerDir, 'bin', 'nerdctl'), `#!/bin/sh
 [ "$*" = '${deepEPCommand.slice('nerdctl '.length)}' ] || exit 64
 printf 'Name: deep_ep\\nVersion: ${deepEPVersion}\\n'
 `, { mode: 0o700 });
-const peer = spawn(process.env.ZW_TEST_PYTHON ?? 'python3', ['-u', '-c', peerCode, resolve('e2e'), peerDir], { stdio: ['ignore', peerLog.fd, peerLog.fd] });
+const peer = spawn(process.env.ZW_TEST_PYTHON ?? 'python3', ['-u', '-c', peerCode, resolve('e2e'), peerDir, batchShare ? 'share' : 'regular'], { stdio: ['ignore', peerLog.fd, peerLog.fd] });
 const peerEnded = new Promise<void>(done => peer.once('close', () => done()));
 const waitFile = async (path: string, timeout = 15000) => {
   const deadline = Date.now() + timeout;
@@ -200,7 +240,7 @@ const ready = await waitFile(join(peerDir, 'ready.json'));
 const siblingDir = join(isolated, 'online-peer');
 const siblingLog = reconnectGroup ? await open(join(out, 'online-peer.log'), 'w') : null;
 if (reconnectGroup) await mkdir(siblingDir);
-const sibling = siblingLog ? spawn(process.env.ZW_TEST_PYTHON ?? 'python3', ['-u', '-c', peerCode, resolve('e2e'), siblingDir], { stdio: ['ignore', siblingLog.fd, siblingLog.fd] }) : null;
+const sibling = siblingLog ? spawn(process.env.ZW_TEST_PYTHON ?? 'python3', ['-u', '-c', peerCode, resolve('e2e'), siblingDir, 'regular'], { stdio: ['ignore', siblingLog.fd, siblingLog.fd] }) : null;
 const siblingEnded = sibling ? new Promise<void>(done => sibling.once('close', () => done())) : null;
 const siblingReady = sibling ? await waitFile(join(siblingDir, 'ready.json')) : null;
 const home = join(peerDir, 'home');
@@ -208,10 +248,42 @@ const progressPath = monitor ? join(home, 'progress.bin') : '/fixture/progress.b
 assert(!progressPath.includes("'"));
 const monitorCommand = `printf 'MONITOR_BEGIN='; stat -f %z '${progressPath}'; sleep 2; printf 'MONITOR_END='; stat -f %z '${progressPath}'`;
 await writeFile(join(home, 'copy_fixture.py'), fixtureCode);
+if (longRecovery) await writeFile(join(home, 'recovery_fixture.py'), String.raw`import json, os, subprocess, sys, time
+from pathlib import Path
+
+root = Path(__file__).resolve().parent
+progress = root / "progress.json"
+release = root / "release"
+if sys.argv[1:] == ["worker"]:
+    with (root / "job-starts").open("a") as starts:
+        starts.write(f"{os.getpid()}\n")
+    for tick in range(1, 1201):
+        sample = root / "progress.tmp"
+        sample.write_text(json.dumps({"pid": os.getpid(), "tick": tick}))
+        sample.replace(progress)
+        if release.exists():
+            break
+        time.sleep(.1)
+    (root / "job-finished").touch()
+else:
+    with (root / "command-starts").open("a") as starts:
+        starts.write(f"{os.getpid()}\n")
+    # This fixture models a job that can survive the observer's disconnected PTY.
+    worker = subprocess.Popen([sys.executable, __file__, "worker"], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    print("PTY_BEGIN", flush=True)
+    for _ in range(1200):
+        print("x" * 1023)
+    while not release.exists() and worker.poll() is None:
+        if progress.exists():
+            sample = json.loads(progress.read_text())
+            print(f"PTY_TICK={sample['pid']}:{sample['tick']}", flush=True)
+        time.sleep(.05)
+`);
 const savedHost = (id: number, name: string, port: number) => `[[hosts]]\nconnection_id=${id}\nrevision=1\nprotocol="ssh"\nauth_mode="password"\noptions={strict_host_key=true}\nname="${name}"\nhost="127.0.0.1"\nport=${port}\nuser="shell-fixture"\n`;
 await writeFile(join(data, 'hosts.toml'), `[registry]\nschema_version=2\nrevision=1\nnext_connection_id=${siblingReady ? 3 : 2}\nnext_group_id=1\n` + savedHost(1, reconnectGroup ? targetName : 'Isolated SSH fixture', ready.port) + (siblingReady ? savedHost(2, siblingName, siblingReady.port) : ''));
 
-const wire = (name: string) => name.replaceAll('_', '_u').replaceAll('.', '__');
+const wire = (name: string) => ['run_command', 'read_remote_file', 'list_remote_files'].includes(name) ? name : name.replaceAll('_', '_u').replaceAll('.', '__');
 const frame = (delta: any) => 'data: ' + JSON.stringify({ choices: [{ index: 0, delta }] }) + '\n\n';
 const done = 'data: [DONE]\n\n';
 const requests: any[] = [], responses: any[] = [];
@@ -401,6 +473,7 @@ const server = createServer(async (req, res) => {
         catch (error) {
           // The next task receives prior tool results as historical text.
           // Relay it unchanged and inspect only this task's live receipts.
+          if (longRecovery && String(message.content).startsWith('[历史环境，仅作记录]')) continue;
           if (!nextReconnectStarted || !observedLiveCalls.has(message.tool_call_id)) throw error;
         }
       }
@@ -606,10 +679,162 @@ const server = createServer(async (req, res) => {
       assert.equal(envelope.status, expected, `${id}: ${JSON.stringify(envelope)}`);
       return bodyOf(envelope);
     };
+    const recoveryStage = longRecovery ? body.messages.findLast((message: any) => message.role === 'user' && [recoveryPrepare, recoveryRun, recoveryNext].includes(message.content))?.content : null;
+    if (recoveryStage === recoveryNext) {
+      assert(recovery.retained, 'previous turn must read the original execution after reconnect');
+      const fresh = results.get('recovery-read-file');
+      const sessionId = Number(recovery.successor.session_ref.split(':')[2]);
+      if (!fresh) return emit('recovery-read-file', 'read_remote_file', { path: '/fixture/progress.json', session_ids: [sessionId], max_bytes: 1024 });
+      assert.equal(fresh.targets.length, 1);
+      const file = bodyOf(fresh.targets[0]);
+      assert.equal(file.status, 'succeeded', JSON.stringify(file));
+      assert.equal(file.session_id, sessionId);
+      assert.equal(file.transport, 'sftp');
+      const source = JSON.parse(file.stderr).source.source;
+      assert.equal(source.generation, recovery.successor.generation);
+      assert.equal(source.session_id, sessionId);
+      const progress = JSON.parse(file.stdout);
+      assert.equal(progress.pid, recovery.live.sample.pid);
+      assert(progress.tick > recovery.retained_tick, 'the successor connection reads newer progress from the same job');
+      recovery.new_progress = progress;
+      recovery.new_progress_source = source;
+      return res.end(frame({ content: `通过重连后的 SSH 读取进度文件，同一进程当前进度为 ${progress.tick}。` }) + done);
+    }
     if (!sourceRef) {
       const context = result('context');
       if (!context) return emit('context', 'host.get_current_context', {});
       sourceRef = context.binding_ref;
+    }
+    if (recoveryStage === recoveryPrepare) {
+      const context = result('context');
+      assert(context?.conversation_id);
+      recovery.conversation_id = context.conversation_id;
+      for (let index = 1; index < executionRangeLimit; index++) {
+        const id = 'recovery-prefill-' + index;
+        const started = result(id);
+        if (!started) return emit(id, 'host.run_in_terminal', { session_ref: sourceRef, command: ':', request_key: id, wait_ms: 5000 });
+        const observed = started.state === 'interval_recorded' ? started : result(id + '-wait');
+        if (!observed) return emit(id + '-wait', 'host.wait_execution', { execution_ref: started.execution_ref, until: 'terminal', wait_ms: 15000 });
+        assert.equal(observed.state, 'interval_recorded', JSON.stringify(observed));
+        assert.equal(observed.snapshot.process.exit_code, 0);
+      }
+      return res.end(frame({ content: '录制容量验收准备完成。' }) + done);
+    }
+    if (longRecovery) {
+      assert.equal(recoveryStage, recoveryRun);
+      const originalRef = recovery.source ??= sourceRef;
+      const started = result('recovery-start');
+      if (!started) return emit('recovery-start', 'host.run_in_terminal', { session_ref: originalRef, command: recoveryCommand, request_key: 'run-once', wait_ms: 100 });
+      assert(started.execution_ref);
+      const ref = started.execution_ref;
+      const sample = (result: any) => [...String(result.output).matchAll(/PTY_TICK=(\d+):(\d+)/g)].map(match => ({ pid: Number(match[1]), tick: Number(match[2]) })).at(-1);
+      if (!recovery.live) {
+        for (let index = 0; index < 12; index++) {
+          const id = 'recovery-overflow-' + index;
+          const read = result(id);
+          if (!read) return emit(id, 'host.get_execution', { execution_ref: ref, max_bytes: 512 });
+          assert(['running', 'awaiting_submit'].includes(read.state), JSON.stringify({ state: read.state, error: read.snapshot.failure, output: read.output }));
+          if (!read.gap || read.snapshot.output_received < 1024 * 1024 + 4096) {
+            await new Promise(done => setTimeout(done, 500));
+            continue;
+          }
+          assert.equal(read.state, 'running');
+          recovery.overflow = { cursor: read.output_cursor, gap: read.gap, received: read.snapshot.output_received };
+          const tail = result('recovery-live-tail');
+          if (!tail) {
+            await waitFile(join(home, 'progress.json'));
+            await new Promise(done => setTimeout(done, 1800));
+            return emit('recovery-live-tail', 'host.get_execution', { execution_ref: ref, output_cursor: String(read.snapshot.output_received), max_bytes: 4096 });
+          }
+          assert.equal(tail.execution_ref, ref);
+          assert.equal(tail.state, 'running');
+          assert.equal(tail.output_retained, false);
+          assert(sample(tail), 'terminal must continue emitting progress after overflowing');
+          recovery.live = { result: tail, sample: sample(tail) };
+          const manifest = await findRecoveryManifest(tail.snapshot.recording_id);
+          assert.equal(manifest.execution_ranges.length, executionRangeLimit);
+          const longRange = manifest.execution_ranges.find((range: any) => 'x1:' + range.execution_id === ref);
+          assert(longRange && longRange.end == null, 'the last recording slot belongs to the running command');
+          recovery.range_count_at_drop = manifest.execution_ranges.length;
+          await writeFile(join(peerDir, 'disconnect'), 'disconnect');
+          break;
+        }
+        assert(recovery.live, 'the real 1 MiB execution capture did not overflow');
+      }
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const id = 'recovery-disconnected-' + attempt;
+        if (!results.has(id)) {
+          const deadline = Date.now() + 12000;
+          while (await stat(join(peerDir, 'disconnected')).then(() => false, () => true) && Date.now() < deadline) await new Promise(done => setTimeout(done, 50));
+          return emit(id, 'host.get_session', { session_ref: originalRef });
+        }
+        const envelope = results.get(id);
+        const state = bodyOf(envelope);
+        if (envelope.status === 'succeeded' && ['failed', 'ended'].includes(state.session?.state)) {
+          recovery.disconnected = state.session;
+          break;
+        }
+        await new Promise(done => setTimeout(done, 200));
+      }
+      assert(recovery.disconnected, 'App did not report the old SSH session as disconnected');
+      const accepted = result('recovery-reconnect');
+      if (!accepted) return emit('recovery-reconnect', 'host.reconnect_session', { session_ref: originalRef, connection_policy: 'new_only', request_key: 'reconnect-once' });
+      assert.equal(accepted.previous_session_ref, originalRef);
+      assert(accepted.operation_ref);
+      for (let attempt = 0; attempt < 4 && !recovery.successor; attempt++) {
+        const id = 'recovery-ready-' + attempt;
+        const envelope = results.get(id);
+        if (!envelope) return emit(id, 'host.wait_session_ready', { operation_ref: accepted.operation_ref, wait_for: 'interactive', wait_ms: 15000 });
+        const ready = bodyOf(envelope);
+        if (envelope.status === 'succeeded' && ready.state === 'ready') recovery.successor = ready;
+        else assert(ready.error_code === 'not_dispatched_due_to_new_input' || ['queued', 'prepared', 'opening', 'accepted'].includes(ready.state), JSON.stringify(ready));
+      }
+      assert(recovery.successor);
+      assert.equal(recovery.successor.generation, Number(originalRef.split(':')[3]) + 1);
+      assert.equal(recovery.successor.execution_readiness, 'ready');
+      const old = result('recovery-original-ref', 'outcome_unknown');
+      if (!old) return emit('recovery-original-ref', 'host.get_execution', { execution_ref: ref, output_cursor: String(recovery.live.result.output_cursor), max_bytes: 4096 });
+      assert.equal(old.execution_ref, ref);
+      assert.equal(old.state, 'outcome_unknown');
+      assert.equal(old.output_retained, true);
+      assert(!old.snapshot.process?.foreground_finished && old.snapshot.process?.exit_code == null, 'old PTY never received a foreground exit');
+      assert(old.output.includes(`PTY_TICK=${recovery.live.sample.pid}:${recovery.live.sample.tick}`), 'the original PTY observation is still available');
+      recovery.retained = old;
+      recovery.retained_tick = sample(old)!.tick;
+      return res.end(frame({ content: '断线前的终端记录已保留，退出状态待核实。' }) + done);
+    }
+    if (share) {
+      shareConversation = result('context').conversation_id;
+      shareSession = Number(sourceRef.split(':')[2]);
+      if (interactiveShare) {
+        for (const [index, scenario] of interactiveShareCommands.entries()) {
+          const id = `share-pty-${index}`;
+          const started = result(id);
+          if (!started) return emit(id, 'host.run_in_terminal', { session_ref: sourceRef, command: scenario.command, request_key: id, wait_ms: 5000 });
+          const terminal = started.state === 'interval_recorded' ? started : result(id + '-wait');
+          if (!terminal) return emit(id + '-wait', 'host.wait_execution', { execution_ref: started.execution_ref, until: 'terminal', wait_ms: 30000 });
+          assert.equal(terminal.state, 'interval_recorded');
+          assert.equal(terminal.snapshot.completion_source, 'shell_reported');
+          assert.equal(terminal.snapshot.process.exit_code, scenario.exitCode);
+          assert.equal(terminal.output_available, true);
+          assert(terminal.output.includes(`\x1b]133;D;${scenario.exitCode};zw_ctx=`), 'the raw SSH execution receipt keeps its closing Shell frame');
+          if ('output' in scenario) assert(terminal.output.startsWith(scenario.output), 'raw receipt contains the real printable output');
+          sharedExecutions.set(scenario.command, terminal.execution_ref);
+        }
+        return res.end(frame({ content: 'SSH_SHARE_READY' }) + done);
+      }
+      for (const scenario of shareCommands) {
+        const id = `share-${scenario.exitCode}`;
+        const envelope = results.get(id);
+        if (!envelope) return emit(id, 'run_command', { session_ids: [shareSession], command: scenario.command });
+        assert.equal(envelope.targets.length, 1);
+        const target = bodyOf(envelope.targets[0]);
+        assert.equal(target.session_id, shareSession);
+        assert.equal(target.exit, scenario.exitCode, JSON.stringify(target));
+        assert.equal(target.stdout, '');
+        assert.equal(target.stderr, '');
+      }
+      return res.end(frame({ content: 'SSH_SHARE_READY' }) + done);
     }
     if (reconnect) {
       const request = { session_ref: sourceRef, connection_policy: 'new_only', request_key: 'reconnect-once' };
@@ -748,7 +973,7 @@ const server = createServer(async (req, res) => {
 });
 await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
 const syntheticExtensions = JSON.stringify(JSON.stringify({ skills: [{ id: '1'.repeat(32), revision: '2'.repeat(64), name: 'synthetic-fixture', description: 'Synthetic test metadata; unrelated to shell or monitoring tasks.', enabled: true }], servers: [] }));
-await writeFile(join(data, 'config.toml'), `[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_size=14\n[ssh]\nauto_reconnect=${autoReconnect}\n[ai]\ndefault_provider="fixture"\npermission_mode="auto"\nexecution_mode="${executionMode}"\nfollow_up_mode="${followUpMode}"\nextensions=${syntheticExtensions}\n[[ai.providers]]\nid="fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${(server.address() as any).port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname=${JSON.stringify(live ? liveModel : 'session-group-fixture')}\ncontext_window=200000\ndefault=true\nreasoning=${live}\n${live ? 'efforts=["xhigh"]\n' : ''}`);
+await writeFile(join(data, 'config.toml'), `[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_size=14\n[ssh]\nauto_reconnect=${autoReconnect}\n[ai]\ndefault_provider="fixture"\npermission_mode="${share || longRecovery ? 'confirm' : 'auto'}"\n${share || longRecovery ? 'step_display="expanded"\n' : ''}execution_mode="${batchShare ? 'isolated_exec' : interactiveShare || longRecovery ? 'interactive' : executionMode}"\nfollow_up_mode="${followUpMode}"\nextensions=${syntheticExtensions}\n[[ai.providers]]\nid="fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:${(server.address() as any).port}/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname=${JSON.stringify(live ? liveModel : 'session-group-fixture')}\ncontext_window=200000\ndefault=true\nreasoning=${live}\n${live ? 'efforts=["xhigh"]\n' : ''}${longRecovery ? '\n[log]\nring_mb=1\n[transfer]\ndedicated_connection=false\n' : ''}`);
 process.env.ZENIT_E2E_FILE_RPC_DIR = rpc;
 const h = await import(join(prefix, 'share/zenit/harness/client.ts'));
 const appLog = await open(join(out, 'app.log'), 'w');
@@ -761,6 +986,15 @@ const text = (node: any) => flat(node).map(n => n.text ?? '').join(' ');
 const visible = (id: string, timeout = 15000) => h.waitFor(async () => (await h.query(id)).find(shown) ?? null, timeout);
 const click = async (id: string) => { report.last_action = id; await visible(id); assert((await h.clickTestId(id)).ok, id); };
 const send = async (value: string) => { await click('ai.prompt'); assert((await h.type_(value)).ok); await click('ai.send'); userSubmissions++; };
+const findRecoveryManifest = async (recordingId: string) => {
+  const dir = join(data, 'logs', 'history');
+  for (const name of await readdir(dir)) {
+    if (!name.startsWith('session-ssh-') || !name.endsWith('.session.json')) continue;
+    const manifest = JSON.parse(await readFile(join(dir, name), 'utf8'));
+    if (manifest.recording_id === recordingId) return manifest;
+  }
+  throw Error('The original SSH recording manifest was not found');
+};
 const report: any = { status: 'running', live, monitor, natural, disconnected, follow_up_mode: followUpMode, execution_mode: executionMode, binary_sha256: createHash('sha256').update(await readFile(binary)).digest('hex'), checks: [], approvals: [], isolated };
 if (liveReconnect) {
   report.reconnect = liveReconnectEvidence;
@@ -813,12 +1047,14 @@ try {
   await waitStrict(async () => { try { await readFile(join(peerDir, 'shell-ready')); return true; } catch { return null; } }, 15000);
   await h.sleep(500);
   await click('toolbar.ai');
-  await click('ai.composer.attachment'); await click('ai.attachment.remote_file');
-  await visible('ai.remote.picker');
-  await waitStrict(async () => { try { await readFile(join(peerDir, 'sftp-ready')); return true; } catch { return null; } }, 30000);
-  if ((await h.query('ai.remote.close')).some(shown)) await click('ai.remote.close');
-  await h.sleep(300);
-  if (!(await h.query('ai.prompt')).some(shown)) await click('toolbar.ai');
+  if (!share) {
+    await click('ai.composer.attachment'); await click('ai.attachment.remote_file');
+    await visible('ai.remote.picker');
+    await waitStrict(async () => { try { await readFile(join(peerDir, 'sftp-ready')); return true; } catch { return null; } }, 30000);
+    if ((await h.query('ai.remote.close')).some(shown)) await click('ai.remote.close');
+    await h.sleep(300);
+    if (!(await h.query('ai.prompt')).some(shown)) await click('toolbar.ai');
+  }
   if (reconnectGroup) {
     const joinGroup = async () => {
       await click('terminal.surface');
@@ -851,7 +1087,174 @@ try {
     report.group_panes = { target: groupTargetPane, sibling: groupSiblingPane };
     if (!(await h.query('ai.prompt')).some(shown)) await click('toolbar.ai');
   }
-  if (liveReconnect) {
+  if (longRecovery) {
+    await click('ai.maximize');
+    await send(recoveryPrepare);
+    await waitStrict(async () => text(await h.query('ai.response')).includes('录制容量验收准备完成') || null, 180000);
+    await visible('ai.turn.complete');
+    await send(recoveryRun);
+    await waitStrict(async () => recovery.retained || null, 90000);
+    if (!(await h.query('ai.panel')).some(shown)) await click('toolbar.ai');
+    await waitStrict(async () => text(await h.query('ai.response')).includes('断线前的终端记录已保留') || null, 15000);
+    await visible('ai.turn.complete');
+    await click('ai.composer.attachment');
+    await click('ai.attachment.remote_file');
+    await visible('ai.remote.picker');
+    await waitStrict(() => stat(join(peerDir, 'second-sftp-ready')).then(() => true, () => null), 15000);
+    if ((await h.query('ai.remote.close')).some(shown)) await click('ai.remote.close');
+    await send(recoveryNext);
+    await waitStrict(async () => recovery.new_progress && text(await h.query('ai.response')).includes('同一进程当前进度') || null, 90000);
+    await visible('ai.turn.complete');
+    const toggleProcess = async (index: number) => {
+      await waitStrict(async () => {
+        const toggles = (await h.query('ai.turn.process.toggle')).filter(shown);
+        assert.equal(toggles.length, 3);
+        const rect = toggles[index].rect;
+        const viewport = await visible('ai.conversation.viewport');
+        if (rect.y < viewport.rect.y || rect.y + rect.h > viewport.rect.y + viewport.rect.h) {
+          await h.scrollAt(viewport.rect.x + 3, viewport.rect.y + 20, 0, rect.y < viewport.rect.y ? 250 : -250);
+          return null;
+        }
+        assert((await h.clickAt(rect.x + rect.w / 2, rect.y + rect.h / 2)).ok);
+        return true;
+      }, 10000);
+    };
+    await toggleProcess(1);
+    const original = await waitStrict(async () => {
+      const root = flat(await h.query('ai.turn.process')).find(node => /^ai\.tool\.result\.\d+\./.test(node.test_id ?? '') && flat(node).some(child => child.test_id === 'ai.execution.result.command' && text(child).trim() === recoveryCommand));
+      if (!root) return null;
+      if (root.rect.h > 32.1) return root;
+      const header = flat(root).find(node => node.test_id === 'ai.execution.result.header');
+      assert((await h.clickAt(header.rect.x + 20, header.rect.y + header.rect.h / 2)).ok);
+      return null;
+    }, 15000);
+    const label = (id: string) => text(flat(original).find(node => node.test_id === 'ai.execution.result.' + id && shown(node))).trim();
+    assert.equal(label('summary'), '结果待核实');
+    assert.equal(label('output_state'), '以下是原执行已采集的输出，后续进度待核实。');
+    assert(label('terminal_output').includes('PTY_TICK='));
+    assert.equal(label('process'), '');
+    await h.mouseMove(1, 1);
+    assert((await h.screenshot(join(out, 'long-recovery.png'))).ok);
+    await toggleProcess(1);
+    await toggleProcess(2);
+    const freshCard = await waitStrict(async () => {
+      const root = flat(await h.query('ai.turn.process')).find(node => /^ai\.tool\.result\.\d+\./.test(node.test_id ?? '') && flat(node).some(child => child.test_id === 'ai.tool.result.command' && text(child).includes('/fixture/progress.json')));
+      if (!root) return null;
+      if (root.rect.h > 32.1) return root;
+      const header = flat(root).find(node => node.test_id === 'ai.tool.result.header');
+      const viewport = await visible('ai.conversation.viewport');
+      if (header.rect.y < viewport.rect.y || header.rect.y + header.rect.h > viewport.rect.y + viewport.rect.h) {
+        await h.scrollAt(viewport.rect.x + 3, viewport.rect.y + 20, 0, header.rect.y < viewport.rect.y ? 200 : -200);
+        return null;
+      }
+      assert((await h.clickAt(header.rect.x + 20, header.rect.y + header.rect.h / 2)).ok);
+      return null;
+    }, 15000);
+    const visibleProgress = text(flat(freshCard).find(node => node.test_id === 'ai.tool.result.stdout' && shown(node))).trim();
+    assert.deepEqual(JSON.parse(visibleProgress), recovery.new_progress);
+    await h.mouseMove(1, 1);
+    assert((await h.screenshot(join(out, 'long-recovery-fresh-progress.png'))).ok);
+    await click('ai.share');
+    const markdown: string = await waitStrict(() => readFile(join(data, 'ai-shares', recovery.conversation_id + '.md'), 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }), 10000);
+    const originalSection = markdown.split(/^## /m).find(section => section.startsWith('工具 · host.run_in_terminal · ') && section.includes(recoveryCommand));
+    assert(originalSection?.includes(recovery.retained.execution_ref));
+    assert(originalSection.includes(label('output_state')));
+    assert(!originalSection.includes('退出码'));
+    assert(markdown.includes(`同一进程当前进度为 ${recovery.new_progress.tick}`));
+    const recordingId = recovery.live.result.snapshot.recording_id;
+    const manifest = await findRecoveryManifest(recordingId);
+    const range = manifest.execution_ranges.find((range: any) => 'x1:' + range.execution_id === recovery.retained.execution_ref);
+    assert(range && manifest.retained_range.start.raw_offset > range.start.raw_offset, 'actual recording evicted the beginning of the command');
+    assert(manifest.retained_range.end.raw_offset >= recovery.overflow.received);
+    const retainedBytes = manifest.retained_range.end.raw_offset - manifest.retained_range.start.raw_offset;
+    assert(retainedBytes <= 1024 * 1024);
+    recovery.recording = { coverage: manifest.coverage, retained_bytes: retainedBytes, retained_start: manifest.retained_range.start.raw_offset, total: manifest.total_received };
+    assert.deepEqual((await readFile(join(home, 'job-starts'), 'utf8')).trim().split('\n'), [String(recovery.new_progress.pid)]);
+    assert.equal((await readFile(join(home, 'command-starts'), 'utf8')).trim().split('\n').length, 1);
+    report.long_recovery = recovery;
+  } else if (share) {
+    await click('ai.maximize');
+    await send(interactiveShare ? '通过当前 SSH 终端执行静默命令和有输出的对照命令，并分享实际结果。' : '逐条执行两条无输出的命令，核验并分享实际结果。');
+    await waitStrict(async () => text(await h.query('ai.response')).includes('SSH_SHARE_READY') || null, 45000);
+    await visible('ai.turn.complete');
+    await click('ai.turn.process.toggle');
+    const displayed = [];
+    const cardPrefix = interactiveShare ? 'ai.execution.result.' : 'ai.tool.result.';
+    for (const scenario of interactiveShare ? interactiveShareCommands : shareCommands) {
+      const card = await waitStrict(async () => {
+        const node = flat(await h.query('ai.turn.process')).filter(item => /^ai\.tool\.result\.\d+\./.test(item.test_id ?? '') && shown(item)).find(item => flat(item).some(child => child.test_id === cardPrefix + 'command' && text(child).trim() === scenario.command));
+        if (!node) return null;
+        if (node.rect.h<=32.1) {
+          const header = flat(node).find(child => child.test_id === cardPrefix + 'header');
+          const viewport = await visible('ai.conversation.viewport');
+          if (header.rect.y < viewport.rect.y || header.rect.y + header.rect.h > viewport.rect.y + viewport.rect.h) {
+            await h.scrollAt(viewport.rect.x + 3, viewport.rect.y + 20, 0, header.rect.y < viewport.rect.y ? 200 : -200);
+            return null;
+          }
+          assert((await h.clickAt(header.rect.x + 20, header.rect.y + header.rect.h / 2)).ok);
+          return null;
+        }
+        return flat(node);
+      }, 15000);
+      const fact = (id: string) => text(card.find(node => node.test_id === cardPrefix + id && shown(node))).trim();
+      const [status, reason] = interactiveShare ? [fact('summary'), fact('output_label')] : fact('feedback').split(' · ');
+      const exit = interactiveShare ? fact('process') : fact('metadata').split(' · ')[0];
+      const output = 'output' in scenario ? scenario.output : null;
+      assert.equal(status, scenario.status);
+      assert.equal(exit, `退出码 ${scenario.exitCode}`);
+      if (interactiveShare) {
+        assert.equal(reason, output ? '终端输出' : '采集区间只有 Shell 控制信息，没有实际命令输出。');
+        if (output) assert(fact('terminal_output').startsWith(output));
+        else assert.equal(fact('terminal_output'), '');
+        await h.mouseMove(1, 1);
+        assert((await h.screenshot(join(out, `ssh-share-pty-${displayed.length}.png`))).ok);
+        const header = card.find(node => node.test_id === cardPrefix + 'header');
+        assert((await h.clickAt(header.rect.x + 20, header.rect.y + header.rect.h / 2)).ok);
+      } else {
+        assert.equal(reason, '本次采集区间没有输出。');
+        assert.equal(fact('stdout'), '');
+        assert.equal(fact('stderr'), '');
+      }
+      displayed.push({ command: scenario.command, status, exit, reason, output });
+    }
+    if (batchShare) assert((await h.screenshot(join(out, 'ssh-share-cards.png'))).ok);
+    assert(shareConversation);
+    await click('ai.share');
+    const path = join(data, 'ai-shares', shareConversation + '.md');
+    const markdown: string = await waitStrict(() => readFile(path, 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }), 10000);
+    for (const { command, status, exit, reason, output } of displayed) {
+      if (interactiveShare) {
+        const reference = sharedExecutions.get(command);
+        assert(reference);
+        const matches = markdown.split(/^## /m).filter(section => /^工具 · (host\.run_in_terminal|host__run_uin_uterminal) · /.test(section) && section.includes(`执行引用：\`${reference}\``));
+        assert.equal(matches.length, 1, markdown);
+        const lines = matches[0].split('\n');
+        assert(lines[0].endsWith(' · ' + status));
+        assert(lines.includes('- ' + exit));
+        if (output) assert(lines.some(line => line.startsWith('    ' + output)));
+        else {
+          assert(lines.includes('- ' + reason));
+          assert(!matches[0].includes('\x1b'), 'Shell framing is excluded from the shared command output');
+          assert.deepEqual(lines.filter(line => line.startsWith('    ') && line.trim()), ['    ' + command]);
+        }
+        continue;
+      }
+      const sections = markdown.split(/^## /m).filter(section => section.startsWith('工具 · run_command\n') && section.split('\n').includes('    ' + command));
+      assert.equal(sections.length, 1, markdown);
+      const lines = sections[0].split('\n');
+      assert(lines.includes(`- 会话 #${shareSession} · ${status}`));
+      assert(lines.includes('- ' + exit));
+      assert(lines.includes('- ' + reason));
+      assert(!lines.includes('标准输出') && !lines.includes('标准错误'));
+    }
+    report.share_comparison = displayed;
+  } else if (liveReconnect) {
     if (reconnectFailure) await writeFile(join(peerDir, 'hold-reconnect-handshake'), 'hold');
     if (reconnectGroup) await writeFile(join(peerDir, 'fixed-handshake-failure'), 'armed');
     if (reconnectAfterDrop) {
@@ -1122,6 +1525,10 @@ try {
   await writeFile(join(out, 'failure-tree.json'), JSON.stringify(diagnostics, null, 2));
 } finally {
   await writeFile(join(home, 'release'), 'release').catch(() => {});
+  if (longRecovery && await stat(join(home, 'job-starts')).then(() => true, () => false)) {
+    await h.waitFor(() => stat(join(home, 'job-finished')).then(() => true, () => null), 3000).catch(error => { report.long_recovery_cleanup = String(error); });
+    if (report.long_recovery_cleanup) success = false;
+  }
   if (originalStart && !success) {
     try {
       const completed = await waitFile(join(home, 'done.json'), 10000);
@@ -1161,7 +1568,20 @@ try {
     report.old_generation_sent = terminalInput.includes('NEVER_ON_RECONNECTED_SHELL');
     report.new_generation_sent = terminalInput.includes('RECONNECT_NEW_GENERATION_OK');
   }
-  let peerCommandsMatch = true;
+  let peerCommandsMatch = !batchShare || JSON.stringify(report.peer?.actions.filter((item: any[]) => item[1] === 'share-exec').map((item: any[]) => item.slice(2))) === JSON.stringify(shareCommands.map(scenario => [scenario.command, scenario.exitCode]));
+  if (longRecovery) {
+    const inputs = (await readFile(join(peerDir, 'inputs.bin'), 'utf8')).split(/\r?\n/);
+    const launches = inputs.filter(line => line === recoveryCommand).length;
+    const transports = report.peer?.actions.filter((item: any[]) => item[1] === 'reconnect-transport').length;
+    peerCommandsMatch = launches === 1 && transports === 1;
+    recovery.submissions = { commands: launches, reconnects: transports };
+    report.long_recovery = recovery;
+  }
+  if (interactiveShare) {
+    const inputs = (await readFile(join(peerDir, 'inputs.bin'), 'utf8')).split(/\r?\n/);
+    const raw = await readFile(join(peerDir, 'outputs.bin'), 'utf8');
+    peerCommandsMatch = interactiveShareCommands.every(({command}) => inputs.filter(line => line === command).length === 1 && raw.includes(command));
+  }
   if (deepEP) {
     const terminalInput = await readFile(join(peerDir, 'inputs.bin'), 'utf8').catch(() => '');
     report.peer_deep_ep_submissions = terminalInput.split(deepEPCommand).length - 1;
@@ -1189,7 +1609,7 @@ try {
   const unexpectedPeerErrors = peerErrors.filter(value => !value.startsWith('forbidden-exec:'));
   if (executionMode === 'interactive') unexpectedPeerErrors.push(...report.denied_batch_exec);
   const shells = report.peer?.actions.filter((item: any[]) => item[1] === 'shell').length;
-  const expectedShells = reconnect ? shells === (reconnectFailure && !reconnectNextTask ? 1 : 2) : shells >= 2;
+  const expectedShells = longRecovery ? shells === 2 : share ? shells === 1 : reconnect ? shells === (reconnectFailure && !reconnectNextTask ? 1 : 2) : shells >= 2;
   const rejectedReconnects = report.peer?.actions.filter((item: any[]) => item[1] === 'reconnect-rejected').length;
   const reconnectTransports = report.peer?.actions.filter((item: any[]) => item[1] === 'reconnect-transport').length;
   if (reconnect) report.reconnect_transport_count = reconnectTransports;
@@ -1205,7 +1625,7 @@ try {
   }
   const expectedReconnects = !reconnect || (reconnectTransports === (reconnectFailure && !reconnectNextTask ? 0 : 1) && (!reconnectFailure || rejectedReconnects === 1));
   if (reconnectGroup && !expectedReconnects && !report.error) report.error = 'The SSH peer recorded more than one failed reconnect before service restoration';
-  report.status = success && executionFenced && peerCommandsMatch && siblingUntouched && app.exitCode === 0 && !report.forced_quit && unexpectedPeerErrors.length === 0 && expectedShells && expectedReconnects && report.peer.actions.some((item: any[]) => item[1] === 'subsystem' && item[2] === 'sftp') ? 'passed' : 'failed';
+  report.status = success && executionFenced && peerCommandsMatch && siblingUntouched && app.exitCode === 0 && !report.forced_quit && unexpectedPeerErrors.length === 0 && expectedShells && expectedReconnects && (share || report.peer.actions.some((item: any[]) => item[1] === 'subsystem' && item[2] === 'sftp')) ? 'passed' : 'failed';
   if (report.status !== 'passed') process.exitCode = 1;
   await writeFile(join(out, 'report.json'), JSON.stringify(report, null, 2));
   if (report.status === 'passed') await rm(isolated, { recursive: true, force: true });

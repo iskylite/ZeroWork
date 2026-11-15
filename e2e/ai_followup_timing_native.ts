@@ -82,7 +82,7 @@ try {
   assert.equal((await h.query('ai.followup.consumed')).length, 1);
   assert.equal((await h.query('ai.followup.pending')).length, 0);
   assert.equal((await h.query('ai.followup.status')).length, 0);
-  const journal = (await readFile(join(data, 'ai-sessions.jsonl'), 'utf8')).trim().split('\n').map(s => JSON.parse(s));
+  const journal = (await readFile(join(data, 'ai-sessions-active.jsonl'), 'utf8')).trim().split('\n').map(s => JSON.parse(s));
   const consumed = journal.filter((e: any) => e.receipt?.delivery === 'consumed').map((e: any) => e.receipt);
   assert.equal(consumed.length, 2); assert.equal(consumed[0].turn, consumed[1].turn);
   await capture('02-consumed');

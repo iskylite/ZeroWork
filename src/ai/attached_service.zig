@@ -60,6 +60,12 @@ pub const Host = struct {
     /// journal's exclusive OS lock excludes a second live writer. No saved
     /// worker/lease can be revived by replay in this newly owned process.
     pub fn ensurePersistence(self: *Host, data_root: []const u8) !void {
+        try self.ensurePersistenceMode(data_root, false);
+    }
+    pub fn ensureIndexedPersistence(self: *Host, data_root: []const u8) !void {
+        try self.ensurePersistenceMode(data_root, true);
+    }
+    fn ensurePersistenceMode(self: *Host, data_root: []const u8, indexed: bool) !void {
         if (self.data_root) |root| {
             if (!std.mem.eql(u8, root, data_root)) return error.AiDataScopeChanged;
             return;
@@ -67,12 +73,12 @@ pub const Host = struct {
         // Layout/owner polling must not repeatedly reopen and replay a journal
         // which already failed. A fresh Host (application restart) retries it.
         if (self.persistence_failure) |err| return err;
-        self.loadPersistence(data_root) catch |err| {
+        self.loadPersistence(data_root, indexed) catch |err| {
             self.persistence_failure = err;
             return err;
         };
     }
-    fn loadPersistence(self: *Host, data_root: []const u8) !void {
+    fn loadPersistence(self: *Host, data_root: []const u8, indexed: bool) !void {
         if (self.service.store.records.items.len != 0 or self.service.runners.items.len != 0 or self.presentations.states.items.len != 0) return error.JournalRequiresEmptyStore;
         const io = try self.allocator.create(std.Io.Threaded);
         errdefer self.allocator.destroy(io);
@@ -82,7 +88,10 @@ pub const Host = struct {
         errdefer dir.close(io.io());
         const root = try self.allocator.dupe(u8, data_root);
         errdefer self.allocator.free(root);
-        self.journal = try Journal.open(self.allocator, io.io(), dir, "ai-sessions.jsonl");
+        self.journal = if (indexed)
+            try Journal.openStreaming(self.allocator, io.io(), dir, @import("history_index.zig").Source.active.path())
+        else
+            try Journal.open(self.allocator, io.io(), dir, "ai-sessions.jsonl");
         errdefer {
             self.journal.?.deinit();
             self.journal = null;
@@ -92,27 +101,31 @@ pub const Host = struct {
             self.presentations = legacy.Store.init(self.allocator);
             self.presentations.authority = &self.service;
         }
-        try self.journal.?.bind(&self.service.store);
-        for ([_]bool{ true, false }) |is_child| for (self.service.store.records.items) |record| {
-            if (record.needs_recovery and (record.child != null) == is_child) try self.service.store.recoverOrphan(record.id, .{ .worker_joined = true, .dispatch_closed = true, .local_released = true, .transcript_saved = true });
-        };
-        try self.service.store.recoverTasks();
-        for (self.service.store.records.items) |record| {
-            const origin = record.initial_origin orelse return error.MissingConversationOrigin;
-            const state = if (record.child != null) try self.presentations.createChildPresentation(record, origin) else try self.presentations.create(origin);
-            state.conversation_id = record.id;
-            state.binding_revision = record.revision;
-            state.selected = false;
-            state.ended = true;
-            state.historical_environment = true;
-            state.listed = record.child == null;
-            state.phase = .stopped;
-            if (record.conversation_model) |model| try state.controls.restoreConversationModel(self.allocator, model);
-            state.wire_history = try @import("wire_history.zig").History.copy(self.allocator, record.history.messages, "");
-            state.wire_history.usage = record.history.usage;
-            if (record.draft) |text| state.draft = try self.allocator.dupe(u8, text);
-            const presentation = @import("conversation_presentation.zig");
-            state.history = try presentation.restoreHistory(self.allocator, record.presentation, record.last_turn, record.history.messages);
+        if (indexed) {
+            try self.journal.?.bindActive(&self.service.store);
+        } else {
+            try self.journal.?.bind(&self.service.store);
+            for ([_]bool{ true, false }) |is_child| for (self.service.store.records.items) |record| {
+                if (record.needs_recovery and (record.child != null) == is_child) try self.service.store.recoverOrphan(record.id, .{ .worker_joined = true, .dispatch_closed = true, .local_released = true, .transcript_saved = true });
+            };
+            try self.service.store.recoverTasks();
+            for (self.service.store.records.items) |record| {
+                const origin = record.initial_origin orelse return error.MissingConversationOrigin;
+                const state = if (record.child != null) try self.presentations.createChildPresentation(record, origin) else try self.presentations.create(origin);
+                state.conversation_id = record.id;
+                state.binding_revision = record.revision;
+                state.selected = false;
+                state.ended = true;
+                state.historical_environment = true;
+                state.listed = record.child == null;
+                state.phase = .stopped;
+                if (record.conversation_model) |model| try state.controls.restoreConversationModel(self.allocator, model);
+                state.wire_history = try @import("wire_history.zig").History.copy(self.allocator, record.history.messages, "");
+                state.wire_history.usage = record.history.usage;
+                if (record.draft) |text| state.draft = try self.allocator.dupe(u8, text);
+                const presentation = @import("conversation_presentation.zig");
+                state.history = try presentation.restoreHistory(self.allocator, record.presentation, record.last_turn, record.history.messages);
+            }
         }
         self.local_file_reference_key = @import("../host/local_file_reference.zig").loadOrCreate(io.io(), dir) catch |err| blk: {
             std.log.warn("AI local file reference key unavailable: {s}", .{@errorName(err)});
@@ -123,6 +136,51 @@ pub const Host = struct {
         self.presentations.authority = &self.service;
         self.service.store.share_storage = .{ .io = io.io(), .dir = dir };
         self.data_root = root;
+    }
+    pub fn adoptArchive(self: *Host, recovered: *@import("session_lifecycle.zig").Store) !void {
+        const store = &self.service.store;
+        for (recovered.records.items) |record| {
+            if (store.find(record.id) != null) return error.ConversationAlreadyLoaded;
+            _ = record.initial_origin orelse return error.MissingConversationOrigin;
+        }
+        try store.records.ensureUnusedCapacity(self.allocator, recovered.records.items.len);
+        try store.task_facts.ensureUnusedCapacity(self.allocator, recovered.task_facts.items.len);
+        try self.presentations.states.ensureUnusedCapacity(self.allocator, recovered.records.items.len);
+        try self.journal.?.installPersistence(recovered);
+        for ([_]bool{ true, false }) |is_child| for (recovered.records.items) |record| {
+            if (record.needs_recovery and (record.child != null) == is_child) try recovered.recoverOrphan(record.id, .{ .worker_joined = true, .dispatch_closed = true, .local_released = true, .transcript_saved = true });
+        };
+        try recovered.recoverTasks();
+        store.task_facts.appendSliceAssumeCapacity(recovered.task_facts.items);
+        recovered.task_facts.clearRetainingCapacity();
+        for (recovered.records.items) |record| {
+            record.inbox.budget = &store.budget;
+            store.records.appendAssumeCapacity(record);
+        }
+        recovered.records.clearRetainingCapacity();
+    }
+    pub fn archivePresentation(self: *Host, record: *@import("session_lifecycle.zig").Record) !void {
+        const origin = record.initial_origin orelse return error.MissingConversationOrigin;
+        if (record.child == null) try self.presentations.addArchive(record.id, origin, .{});
+        const state = if (record.child != null) try self.presentations.createChildPresentation(record, origin) else self.presentations.findConversation(record.id).?;
+        if (!state.indexed_archive and state.historical_environment) return;
+        var wire = try @import("wire_history.zig").History.copy(self.allocator, record.history.messages, "");
+        errdefer wire.deinit();
+        wire.usage = record.history.usage;
+        const draft = if (record.draft) |value| try self.allocator.dupe(u8, value) else null;
+        errdefer if (draft) |value| self.allocator.free(value);
+        var controls: legacy.Controls = .{};
+        errdefer controls.deinit(self.allocator);
+        if (record.conversation_model) |model| try controls.restoreConversationModel(self.allocator, model);
+        state.history = try @import("conversation_presentation.zig").restoreHistory(self.allocator, record.presentation, record.last_turn, record.history.messages);
+        state.controls = controls;
+        state.wire_history = wire;
+        state.draft = draft;
+        state.binding_revision = record.revision;
+        state.ended = true;
+        state.historical_environment = true;
+        state.indexed_archive = false;
+        state.phase = .stopped;
     }
     pub fn register(self: *Host, bridge: Bridge) !void {
         self.presentations.authority = &self.service;

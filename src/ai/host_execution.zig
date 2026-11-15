@@ -14,7 +14,7 @@ const output_fields = "\"output_cursor\":{\"type\":\"string\",\"minLength\":1,\"
 const default_decision_wait_ms = 5 * std.time.ms_per_min;
 pub const contributions = [_]host.Contribution{
     tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. Provide shell_id and shell_revision together or omit both. For nested shells, both are required; use control.shell_context.id and revision from host.get_session. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. If ShellPromptNotObserved or IntegrationUnavailable rejects this call before dispatch, inspect host.read_terminal/host.get_session and use host.attach_shell to initialize the confirmed current Shell, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
-    tool("get_execution", "Read one execution in this conversation/task, its true process/output/recording stages, recording range and bounded incremental output. An ordinary prompt or printed marker never proves completion.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
+    tool("get_execution", "Read a previously admitted execution by its original execution_ref. This read uses no new shell command or recording slot. Use next_cursor to read new bytes. output_retained means only previously captured output is available and later progress is unconfirmed. After reconnect use the same reference for old evidence, and an authorized read-only file tool for an existing job log. A new shell prompt or printed marker never proves the old command completed.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
     tool("wait_execution", "For an ongoing command, call once with its execution_ref and until=decision, omitting wait_ms. The host waits within the task budget, or up to five minutes when no task deadline is set, for a foreground result, explicit input request, failure, unknown outcome or takeover. Ordinary output stays buffered. Explicit wait_ms requests a shorter bounded observation. Use after_revision with until=revision to wait for a newer revision. If the wait times out or is interrupted, use the returned state and preserve the original execution_ref; do not replay the command or start a shell sleep to check it.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
     tool("send_execution_input", "Send input to the current execution using its live input capability, current fence and fresh per-input approval. Supply exactly one of text, key=enter, or host_secret_request=true. Omit the other two fields. controlled_line is a helper-attested consumer; terminal_stream only authorizes ordinary PTY bytes and does not prove which foreground program consumes them or that it is waiting. A written receipt means native write completed, not foreground consumption. Text is a single line of UTF-8, at most 4096 bytes, with no control characters. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Use user takeover for unknown input targets, raw/TUI interaction or secrets; never infer input authority from prompt text.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\",\"enum\":[true],\"description\":\"Set to true only to request the supported native secret collector. Omit when sending text or Enter.\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("stop_execution", "Revoke future AI input for this exact execution and request only its supported foreground interrupt. Release is distinct from process exit; unknown effects stay unknown. This never aborts a shared SSH transport or closes a borrowed terminal.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ "},\"required\":[\"execution_ref\",\"request_key\"]}"),
@@ -143,7 +143,8 @@ const Entry = struct {
     journal_stage: journal_mod.Stage,
     snapshot: execution.Snapshot,
     next_renew_at: i64,
-    final_output: ?execution.Output = null,
+    retained_output: ?execution.Output = null,
+    observation_detached: bool = false,
     submitted_command: ?[]const u8 = null,
     dispatch_pending: ?execution.Request = null,
     stop_intent: enum { none, stop, takeover } = .none,
@@ -197,7 +198,7 @@ pub const Controller = struct {
     pub fn deinit(self: *Controller) void {
         for (self.entries.items) |*entry| {
             if (entry.submitted_command) |command| self.allocator.free(command);
-            if (entry.final_output) |*output| output.deinit(self.allocator);
+            if (entry.retained_output) |*output| output.deinit(self.allocator);
             if (entry.dispatch_pending) |request| self.allocator.free(request.command) else {
                 if (self.backend.resolve(self.backend.context, entry.context, entry.target)) |service| {
                     if (self.terminalSnapshot(service)) |current| {
@@ -599,43 +600,30 @@ pub const Controller = struct {
         }
         const service = self.backend.resolve(self.backend.context, entry.context, entry.target) catch |err| {
             if (err == error.WorkerBusy) return err;
-            var unavailable = entry.snapshot;
-            unavailable.state = .outcome_unknown;
-            unavailable.remote_effect_unknown = true;
-            unavailable.failure = "TargetUnavailable";
-            unavailable.revision +|= 1;
-            if (entry.journal_stage != .outcome_unknown) {
-                try self.journal.update(entry.journal, entry.journal_revision, .{ .stage = .outcome_unknown, .execution = entry.id, .execution_receipt = execution.PublicReceipt.fromSnapshot(unavailable), .local_released = false, .remote_effect_unknown = true });
-                entry.journal_revision += 1;
-                entry.journal_stage = .outcome_unknown;
-            }
-            entry.snapshot = unavailable;
+            const reconnected = err == error.ExecutionSourceReconnected;
+            try self.detachObservation(entry, if (reconnected) "SessionReconnected" else "TargetUnavailable", reconnected);
             return;
         };
-        const observed_receipt = try self.terminalCall(service, if (self.backend.retained_shell_snapshots) .{ .snapshot_for = entry.id } else .snapshot);
+        const observed_receipt = self.terminalCall(service, if (self.backend.retained_shell_snapshots) .{ .snapshot_for = entry.id } else .snapshot) catch |err| {
+            if (err != error.ExecutionNotFound and err != error.StaleGeneration and err != error.StaleBinding and err != error.SessionClosed) return err;
+            try self.detachObservation(entry, if (err == error.SessionClosed) "SessionClosed" else "TargetUnavailable", false);
+            return;
+        };
         if (observed_receipt != .snapshot) return error.InvalidControllerReceipt;
         var current = observed_receipt.snapshot;
-        if (current.execution_id) |observed_id| if (!observed_id.eql(entry.id)) {
+        if (!current.owner.eql(entry.target) or (current.execution_id == null and entry.snapshot.submit_sent)) {
+            const reconnected = current.owner.session_id == entry.target.session_id and current.owner.generation > entry.target.generation;
+            try self.detachObservation(entry, if (reconnected) "SessionReconnected" else "TargetUnavailable", reconnected);
+            return;
+        }
+        if (current.execution_id == null) return;
+        if (!current.execution_id.?.eql(entry.id)) {
             // A missed finish cannot be supplied by a later command. The
             // worker's next begin proves the old local grant/record settled,
             // but supplies no completion or output range for this old card.
-            var superseded = entry.snapshot;
-            superseded.state = .outcome_unknown;
-            superseded.grant = null;
-            superseded.input_ready = true;
-            superseded.local_released = true;
-            superseded.remote_effect_unknown = true;
-            superseded.recording_settled = true;
-            superseded.recording_failed = true;
-            superseded.failure = "ExecutionSuperseded";
-            superseded.revision +|= 1;
-            try self.journal.update(entry.journal, entry.journal_revision, .{ .stage = .outcome_unknown, .execution = entry.id, .execution_receipt = execution.PublicReceipt.fromSnapshot(superseded), .local_released = true, .remote_effect_unknown = true });
-            entry.journal_revision += 1;
-            entry.journal_stage = .outcome_unknown;
-            entry.snapshot = superseded;
-            entry.stop_intent = .none;
+            try self.detachObservation(entry, "ExecutionSuperseded", true);
             return;
-        };
+        }
         if (current.grant) |grant| if (!grant.execution_id.eql(entry.id)) return error.StaleGeneration;
         if (entry.stop_intent != .none) {
             if (current.grant) |grant| {
@@ -645,7 +633,16 @@ pub const Controller = struct {
             if (current.grant == null and current.local_released and current.input_ready) entry.stop_intent = .none;
         }
         const previous = entry.snapshot;
-        if (terminalState(current.state) and entry.final_output == null) entry.final_output = self.terminalOutput(service, entry.id, 0, 65536) catch null;
+        // Keep a bounded tail before the transport or a later command removes
+        // this execution's capture. This does not touch the recording writer.
+        if (current.output_received != (if (entry.retained_output) |output| output.next_cursor else 0) or
+            (entry.retained_output == null and terminalState(current.state)))
+        {
+            if (self.terminalOutput(service, entry.id, current.output_received -| 65536, 65536)) |output| {
+                if (entry.retained_output) |*previous_output| previous_output.deinit(self.allocator);
+                entry.retained_output = output;
+            } else |_| {}
+        }
         if (current.grant) |grant| if (entry.stop_intent == .none and !self.taskFinishing(entry.context) and now >= entry.next_renew_at) {
             _ = try self.terminalCall(service, .{ .renew = grant });
             entry.next_renew_at = now + execution.renew_ms;
@@ -677,6 +674,28 @@ pub const Controller = struct {
             }
         };
         entry.snapshot = current;
+        entry.observation_detached = false;
+    }
+    fn detachObservation(self: *Controller, entry: *Entry, reason: []const u8, released: bool) !void {
+        if (entry.observation_detached and entry.snapshot.failure != null and std.mem.eql(u8, entry.snapshot.failure.?, reason) and (!released or entry.snapshot.local_released)) return;
+        var snapshot = entry.snapshot;
+        snapshot.state = .outcome_unknown;
+        snapshot.remote_effect_unknown = true;
+        snapshot.failure = reason;
+        snapshot.revision +|= 1;
+        if (released) {
+            snapshot.grant = null;
+            snapshot.input_ready = true;
+            snapshot.local_released = true;
+            snapshot.recording_settled = true;
+            snapshot.recording_failed = true;
+        }
+        try self.journal.update(entry.journal, entry.journal_revision, .{ .stage = .outcome_unknown, .execution = entry.id, .execution_receipt = execution.PublicReceipt.fromSnapshot(snapshot), .local_released = snapshot.local_released, .remote_effect_unknown = true });
+        entry.journal_revision += 1;
+        entry.journal_stage = .outcome_unknown;
+        entry.snapshot = snapshot;
+        entry.observation_detached = true;
+        if (released) entry.stop_intent = .none;
     }
     fn find(self: *Controller, context: host.Context, reference: []const u8) !usize {
         if (!std.mem.startsWith(u8, reference, "x1:")) return error.ExecutionNotFound;
@@ -704,15 +723,27 @@ pub const Controller = struct {
         defer self.allocator.free(ref);
         var output: ?execution.Output = null;
         defer if (output) |*value| value.deinit(self.allocator);
-        if (entry.final_output) |cached| {
-            if (output_cursor > cached.next_cursor) return error.InvalidCursor;
-            const start = @max(output_cursor, cached.start_cursor);
-            const offset: usize = @intCast(start - cached.start_cursor);
-            const count = @min(max_bytes, cached.bytes.len - offset);
-            output = .{ .bytes = try self.allocator.dupe(u8, cached.bytes[offset..][0..count]), .start_cursor = start, .next_cursor = start + count, .gap = output_cursor < cached.start_cursor or cached.gap, .truncated = offset + count < cached.bytes.len };
-        } else if (self.backend.resolve(self.backend.context, context, entry.target)) |service| {
-            output = self.terminalOutput(service, entry.id, output_cursor, max_bytes) catch null;
-        } else |_| {}
+        var output_error: ?[]const u8 = null;
+        const output_retained = entry.observation_detached or (entry.snapshot.failure != null and std.mem.eql(u8, entry.snapshot.failure.?, "SessionClosed") and entry.snapshot.remote_effect_unknown);
+        if (!entry.observation_detached and (!terminalState(entry.snapshot.state) or entry.retained_output == null)) {
+            if (self.backend.resolve(self.backend.context, entry.context, entry.target)) |service| {
+                output = self.terminalOutput(service, entry.id, output_cursor, max_bytes) catch |err| unavailable: {
+                    output_error = @errorName(err);
+                    break :unavailable null;
+                };
+            } else |err| output_error = @errorName(err);
+        }
+        if (output == null) if (entry.retained_output) |cached| {
+            if (output_cursor > cached.next_cursor) {
+                if (!output_retained) return error.InvalidCursor;
+                output = .{ .bytes = try self.allocator.alloc(u8, 0), .start_cursor = output_cursor, .next_cursor = output_cursor, .gap = true, .truncated = false };
+            } else {
+                const start = @max(output_cursor, cached.start_cursor);
+                const offset: usize = @intCast(start - cached.start_cursor);
+                const count = @min(max_bytes, cached.bytes.len - offset);
+                output = .{ .bytes = try self.allocator.dupe(u8, cached.bytes[offset..][0..count]), .start_cursor = start, .next_cursor = start + count, .gap = output_cursor < cached.start_cursor, .truncated = offset + count < cached.bytes.len or cached.truncated };
+            }
+        };
         const queries = @import("host_terminal_queries.zig");
         const command_ref = if (entry.snapshot.submit_sent) try queries.executionCommandRef(self.allocator, context.conversation_id, entry.target, entry.id) else null;
         defer if (command_ref) |reference| self.allocator.free(reference);
@@ -728,7 +759,7 @@ pub const Controller = struct {
             defer self.allocator.free(safe);
             const next_cursor = try std.fmt.allocPrint(self.allocator, "{d}", .{if (output) |value| value.start_cursor + keep else output_cursor});
             defer self.allocator.free(next_cursor);
-            const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .execution_ref = ref, .command_ref = command_ref, .recording_query_ref = recording_query_ref, .path = "interactive", .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .state = entry.snapshot.state, .source_revision = entry.snapshot.revision, .snapshot = entry.snapshot, .stop_requested = entry.stop_intent != .none, .output_available = output != null, .recording_ref = if (entry.snapshot.recording_id) |*value| @as([]const u8, value) else null, .output = safe, .output_cursor = if (output) |value| value.start_cursor else output_cursor, .next_cursor = next_cursor, .gap = if (output) |value| value.gap else false, .truncated = if (output) |value| value.truncated or keep < value.bytes.len else false, .requested_max_bytes = max_bytes, .returned_bytes = keep, .response_limited = if (output) |value| keep < value.bytes.len else false, .timed_out = timed_out, .wait_interrupted = interruption }, .{});
+            const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .execution_ref = ref, .execution_task_id = entry.context.task_id, .command_ref = command_ref, .recording_query_ref = recording_query_ref, .path = "interactive", .observed_at = @import("../platform/realtime.zig").milliseconds(undefined), .state = entry.snapshot.state, .source_revision = entry.snapshot.revision, .snapshot = entry.snapshot, .stop_requested = entry.stop_intent != .none, .output_available = output != null, .output_error = output_error, .output_retained = output_retained, .recording_ref = if (entry.snapshot.recording_id) |*value| @as([]const u8, value) else null, .output = safe, .output_cursor = if (output) |value| value.start_cursor else output_cursor, .next_cursor = next_cursor, .gap = if (output) |value| value.gap else false, .truncated = if (output) |value| value.truncated or keep < value.bytes.len else false, .requested_max_bytes = max_bytes, .returned_bytes = keep, .response_limited = if (output) |value| keep < value.bytes.len else false, .timed_out = timed_out, .wait_interrupted = interruption }, .{});
             if (body.len <= 65536) {
                 var response = try ownedResult(self.allocator, context, operation_id, body, entry.snapshot.submit_sent or entry.snapshot.submit_native_bytes != 0, entry.snapshot.remote_effect_unknown or entry.snapshot.state == .outcome_unknown);
                 response.verification = entry.verification;
@@ -1180,7 +1211,7 @@ test "current-tab read-only execution history crosses related Tasks without gran
     const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(44), .generation = 2 };
     const id = identity.ExecutionId.generate();
     const bytes = "prior task output";
-    try controller.entries.append(a, .{ .context = original, .id = id, .target = target, .journal = .{ .index = 0, .operation_ref = .generate() }, .journal_revision = 1, .journal_stage = .succeeded, .snapshot = .{ .owner = target, .execution_id = id, .state = .interval_recorded, .revision = 3, .local_released = true }, .next_renew_at = 0, .final_output = .{ .bytes = try a.dupe(u8, bytes), .start_cursor = 0, .next_cursor = bytes.len, .gap = false, .truncated = false } });
+    try controller.entries.append(a, .{ .context = original, .id = id, .target = target, .journal = .{ .index = 0, .operation_ref = .generate() }, .journal_revision = 1, .journal_stage = .succeeded, .snapshot = .{ .owner = target, .execution_id = id, .state = .interval_recorded, .revision = 3, .local_released = true }, .next_renew_at = 0, .retained_output = .{ .bytes = try a.dupe(u8, bytes), .start_cursor = 0, .next_cursor = bytes.len, .gap = false, .truncated = false } });
     const reference = try std.fmt.allocPrint(a, "x1:{s}", .{std.fmt.bytesToHex(id.bytes, .lower)});
     defer a.free(reference);
     const wire = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = reference, .wait_ms = 100, .after_revision = 3 }, .{});
@@ -1227,7 +1258,7 @@ test "efficiency execution output honors requested bytes and bounds escaped resp
     const id = identity.ExecutionId.generate();
     const bytes = try a.alloc(u8, 48 * 1024);
     @memset(bytes, 'a');
-    try controller.entries.append(a, .{ .context = context, .id = id, .target = target, .journal = undefined, .journal_revision = 1, .journal_stage = .succeeded, .snapshot = .{ .owner = target, .execution_id = id, .state = .interval_recorded, .revision = 3 }, .next_renew_at = 0, .final_output = .{ .bytes = bytes, .start_cursor = 0, .next_cursor = bytes.len, .gap = false, .truncated = false } });
+    try controller.entries.append(a, .{ .context = context, .id = id, .target = target, .journal = undefined, .journal_revision = 1, .journal_stage = .succeeded, .snapshot = .{ .owner = target, .execution_id = id, .state = .interval_recorded, .revision = 3 }, .next_renew_at = 0, .retained_output = .{ .bytes = bytes, .start_cursor = 0, .next_cursor = bytes.len, .gap = false, .truncated = false } });
     var result = try controller.result(context, 1, 0, 0, 65536, false, null);
     defer result.deinit(a);
     const parsed = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
@@ -1267,4 +1298,104 @@ test "efficiency semantic wait ignores ordinary revisions and stream capabilitie
     snapshot.process = null;
     snapshot.remote_effect_unknown = true;
     try std.testing.expect(waitReady(snapshot, .decision, 1));
+}
+
+test "execution progress is readable during recording capacity exhaustion and after reconnect" {
+    const TestBackend = struct {
+        snapshot: execution.Snapshot,
+        output: []const u8,
+        connected: bool = true,
+        reads: usize = 0,
+
+        fn authorize(_: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !Target {
+            return error.RecordingExecutionCapacity;
+        }
+        fn resolve(raw: *anyopaque, _: host.Context, _: identity.SessionHandle) !terminal.Service {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.connected) return error.StaleReference;
+            return .{ .context = raw, .binding = undefined, .vtable = undefined };
+        }
+        fn call(raw: *anyopaque, _: terminal.Service, action: TerminalAction) !TerminalResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return switch (action) {
+                .snapshot => .{ .snapshot = self.snapshot },
+                .output => |read| result: {
+                    if (!read.id.eql(self.snapshot.execution_id.?)) return error.ExecutionNotFound;
+                    self.reads += 1;
+                    const start: usize = @intCast(@min(read.cursor, self.output.len));
+                    const end = @min(start + read.max_bytes, self.output.len);
+                    break :result .{ .output = .{ .bytes = try read.allocator.dupe(u8, self.output[start..end]), .start_cursor = start, .next_cursor = end, .gap = false, .truncated = end < self.output.len } };
+                },
+                else => error.UnexpectedTerminalMutation,
+            };
+        }
+    };
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var journal = try journal_mod.Journal.open(a, std.testing.io, tmp.dir, "progress.json");
+    defer journal.deinit();
+    const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
+    const id: identity.ExecutionId = .generate();
+    const operation = try journal.begin(.{ .context = context, .tool_id = "host.run_in_terminal", .request_key = "original-job", .canonical_hash = @splat(1), .turn_id = 1, .call_id = "original-job" });
+    try journal.update(operation, 1, .{ .stage = .dispatch_started, .execution = id, .local_released = false });
+    const running: execution.Snapshot = .{ .owner = target, .execution_id = id, .state = .running, .recording_id = "0123456789abcdef0123456789abcdef".*, .recording_generation = 1, .manifest_revision = 1, .execution_fence = 1, .execution_input_epoch = 1, .command_accepted = true, .submit_sent = true, .accepted_sequence = 1, .submit_sequence = 2, .submit_ack_sequence = 3, .submit_native_bytes = 5, .input_ready = false, .local_released = false };
+    try journal.update(operation, 2, .{ .stage = .running, .execution_receipt = execution.PublicReceipt.fromSnapshot(running), .local_released = false });
+    var backend: TestBackend = .{ .snapshot = running, .output = "progress 25%\n" };
+    var controller = Controller.init(a, &journal, .{ .context = &backend, .authorize = TestBackend.authorize, .resolve = TestBackend.resolve, .terminal_call = TestBackend.call });
+    defer controller.deinit();
+    try controller.entries.append(a, .{ .context = context, .id = id, .target = target, .journal = operation, .journal_revision = 3, .journal_stage = .running, .snapshot = running, .next_renew_at = 0 });
+
+    const reference = try std.fmt.allocPrint(a, "x1:{s}", .{std.fmt.bytesToHex(id.bytes, .lower)});
+    defer a.free(reference);
+    const run_args = "{\"command\":\"probe progress\",\"session_ref\":\"test\",\"request_key\":\"new-probe\"}";
+    const run_json = try std.json.parseFromSlice(std.json.Value, a, run_args, .{});
+    defer run_json.deinit();
+    var invocation: host.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "new-probe", .tool_id = "host.run_in_terminal", .arguments = run_json.value, .arguments_json = run_args, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    var rejected = (try controller.execute(invocation, 1)).result;
+    defer rejected.deinit(a);
+    try std.testing.expectEqual(.rejected, rejected.status);
+    try std.testing.expect(!rejected.receipt.side_effect_started);
+    try std.testing.expect(std.mem.indexOf(u8, rejected.blocks[0].structured, "RecordingExecutionCapacity") != null);
+
+    const read_args = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = reference, .wait_ms = 100, .after_revision = running.revision }, .{});
+    defer a.free(read_args);
+    const read_json = try std.json.parseFromSlice(std.json.Value, a, read_args, .{});
+    defer read_json.deinit();
+    invocation.tool_id = "host.wait_execution";
+    invocation.arguments = read_json.value;
+    invocation.arguments_json = read_args;
+    const wait = (try controller.execute(invocation, 2)).wait;
+    backend.snapshot.revision += 1;
+    backend.snapshot.output_received = backend.output.len;
+    var progress = (try controller.pollWait(wait, 3)).?;
+    defer progress.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, progress.blocks[0].structured, "progress 25%") != null);
+
+    backend.output = "progress 25%\nprogress 50%\n";
+    backend.snapshot.revision += 1;
+    backend.snapshot.output_received = backend.output.len;
+    controller.tick(4);
+    const reads_before_disconnect = backend.reads;
+    backend.connected = false;
+    controller.tick(5);
+    backend.connected = true;
+    backend.snapshot.owner = try target.nextGeneration();
+    backend.snapshot.execution_id = .generate();
+    backend.output = "successor output";
+    controller.tick(6);
+
+    invocation.tool_id = "host.get_execution";
+    var retained = (try controller.execute(invocation, 7)).result;
+    defer retained.deinit(a);
+    const result = try std.json.parseFromSlice(std.json.Value, a, retained.blocks[0].structured, .{});
+    defer result.deinit();
+    try std.testing.expectEqualStrings(reference, result.value.object.get("execution_ref").?.string);
+    try std.testing.expectEqualStrings("outcome_unknown", result.value.object.get("state").?.string);
+    try std.testing.expectEqualStrings("SessionReconnected", controller.entries.items[0].snapshot.failure.?);
+    try std.testing.expect(controller.entries.items[0].snapshot.local_released);
+    try std.testing.expectEqualStrings("progress 25%\nprogress 50%\n", result.value.object.get("output").?.string);
+    try std.testing.expect(result.value.object.get("output_retained").?.bool);
+    try std.testing.expectEqual(reads_before_disconnect, backend.reads);
 }

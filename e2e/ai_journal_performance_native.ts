@@ -1,11 +1,11 @@
-/** Journal growth, restart/compaction and historical copy/restore regression.
+/** Journal growth, lazy indexing and historical copy/restore regression.
  * All writes, terminals and model responses belong to a private data directory.
  * An optional ZW_AI_JOURNAL_FIXTURE is copied, never edited in place.
  */
 import assert from 'node:assert/strict';
 import {execFileSync, spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {mkdtemp, mkdir, readFile, writeFile, copyFile, open, realpath, stat} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, writeFile, copyFile, open, realpath, stat, unlink} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 
 const prefix = resolve(process.env.ZW_AI_TEST_PREFIX ?? '/tmp/zw-ai-journal-build');
@@ -15,6 +15,7 @@ const isolated = await realpath(await mkdtemp('/tmp/zw-ai-journal-'));
 const data = join(isolated, 'data'), rpc = join(isolated, 'rpc');
 await mkdir(data); await mkdir(rpc);
 const journal = join(data, 'ai-sessions.jsonl');
+const active = join(data, 'ai-sessions-active.jsonl');
 const fixture = process.env.ZW_AI_JOURNAL_FIXTURE;
 if (fixture) await copyFile(fixture, journal);
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms));
@@ -95,12 +96,13 @@ try {
         await click('ai.prompt'); await h.type_('JOURNAL_ORIGINAL 保留完整聊天 🙂'); await click('ai.send');
         await h.waitFor(async () => (await h.query('ai.turn.complete')).some(shown) || null, 20000);
         await delay(1000);
-        const events = (await readFile(journal, 'utf8')).trim().split('\n').map(JSON.parse);
+        const events = (await readFile(active, 'utf8')).trim().split('\n').map(JSON.parse);
         const saves = events.filter(e => e.event?.kind === 'presentation').length;
         assert(saves <= 6, `80 stream chunks produced ${saves} full snapshots`);
         report.streaming_snapshots = saves;
         await quit();
-        const original = await readFile(journal, 'utf8');
+        const original = await readFile(active, 'utf8');
+        await unlink(active);
         const latest = original.trim().split('\n').map(JSON.parse).find(e => e.event?.kind === 'presentation' && !e.event.presentation_patch);
         assert(latest);
         // Valid obsolete snapshots with large trailing JSON whitespace model
@@ -120,44 +122,27 @@ try {
         report.checks.push('80 streamed deltas produce at most six complete display snapshots');
     }
     const before = await readFile(journal, 'utf8');
-    const sourceLines = before.trim().split('\n');
-    const lastPresentation = new Map<string, {base: string, patch?: string}>();
-    const expected = sourceLines.filter(line => {
-        const row = JSON.parse(line);
-        if (row.event?.kind === 'presentation') {
-            const id = row.event.conversation;
-            if (row.event.presentation_patch) {
-                const saved = lastPresentation.get(id);
-                assert(saved, 'Presentation patch needs a base');
-                saved.patch = line;
-            } else {
-                lastPresentation.set(id, {base: line});
-            }
-            return false;
-        }
-        return true;
-    });
     await launch();
     const after = await readFile(journal, 'utf8');
     report.bytes_before = Buffer.byteLength(before); report.bytes_after = Buffer.byteLength(after);
-    assert(report.bytes_after < report.bytes_before / 4, 'Restart must reclaim superseded snapshots');
-    const actual = after.trim().split('\n');
-    for (const {base, patch} of lastPresentation.values()) {
-        expected.push(base);
-        if (patch) expected.push(patch);
-    }
-    for (const line of expected) assert(actual.includes(line), 'Every non-display event and the latest chat snapshot with its base must survive byte-for-byte');
+    assert(after === before, 'Startup leaves the archive byte-for-byte intact');
     assert.equal(requests, fixture ? 0 : 1, 'Reopening must not replay model or tools');
     await click('ai.sessions');
-    const buttons = flat(await h.query('ai.sessions.menu')).filter(n => shown(n) && /^ai\.session\.jump\.\d+$/.test(n.test_id ?? ''));
+    const buttons = await h.waitFor(async () => {
+        const rows = flat(await h.query('ai.sessions.menu')).filter(n => shown(n) && /^ai\.session\.copy_use\.\d+$/.test(n.test_id ?? ''));
+        return rows.length > 0 ? rows : null;
+    }, 30000);
     assert(buttons.length > 0, 'Historical sessions must remain listed');
     const id = buttons[0].test_id.split('.').at(-1);
     await click(`ai.session.jump.${id}`);
-    const historicalText = text(await visible('ai.history.body'));
+    const historicalText = await h.waitFor(async () => {
+        const body = text(await visible('ai.history.body'));
+        return body && !body.includes('正在加载此会话') ? body : null;
+    }, 30000);
     assert(historicalText.length > 0);
     assert((await h.screenshot(join(out, '00-history-view.png'))).ok);
     await click('ai.history.close');
-    const eventCount = async (kind: string) => (await readFile(journal, 'utf8')).trim().split('\n').map(JSON.parse).filter(row => row.event?.kind === kind).length;
+    const eventCount = async (kind: string) => (await readFile(active, 'utf8').catch((err: any) => { if (err.code === 'ENOENT') return ''; throw err; })).trim().split('\n').filter(Boolean).map(JSON.parse).filter(row => row.event?.kind === kind).length;
     const forks = await eventCount('fork_bound'), bindings = await eventCount('bind');
     await click('ai.sessions'); await click(`ai.session.copy_use.${id}`); await confirm();
     await h.waitFor(async () => (await eventCount('fork_bound')) === forks + 1 || null, 10000);
@@ -171,7 +156,8 @@ try {
     await h.waitFor(async () => (await rows()) === originalText || null, 20000);
     assert.equal(requests, fixture ? 0 : 1, 'Viewing, copying and restoring history never resends a request');
     assert(!text(await h.query('ai.panel')).includes('JournalLimit'));
-    report.checks.push('Restart compacts a nearly full journal and preserves all non-display events and final snapshots byte-for-byte');
+    assert(await readFile(journal, 'utf8') === before);
+    report.checks.push('Indexing and resuming leave the legacy journal byte-for-byte intact');
     report.checks.push('Historical view, copy-and-use and restore preserve user messages without model/tool replay');
     const ids = (await h.query('ai.message.user.row')).filter(shown).map((n: any) => n.id);
     await delay(1500);

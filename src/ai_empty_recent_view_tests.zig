@@ -22,7 +22,7 @@ const Fixture = struct {
         self.cx.setTheme(theme.widgetTheme(theme.currentName()));
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .left = 14, .right = 14 } }, .{});
         self.scope = try ui.Scope.init(a, null, self.cx.owner);
-        self.view = try V.mount(self.cx, self.scope, true, .{ .context = self, .summarize = ignore, .logs = ignore, .settings = ignore, .ollama = ignore, .session_hooks = .{ .context = self, .select = select, .request_close = select, .remove = select, .act = act }, .recent = &.{ .{ .id = 17, .title = title, .owner = "1 · Local Terminal", .phase = .running, .bound = true, .can_copy = true, .can_remove = false }, .{ .id = 29, .title = "普通短标题", .owner = "历史连接环境", .phase = .stopped, .can_restore = true, .can_copy = true }, .{ .id = 30, .title = "不应显示第三条", .owner = "" } } });
+        self.view = try V.mount(self.cx, self.scope, .ready, .{ .context = self, .summarize = ignore, .logs = ignore, .settings = ignore, .ollama = ignore, .session_hooks = .{ .context = self, .select = select, .request_close = select, .remove = select, .act = act }, .recent = &.{ .{ .id = 17, .title = title, .owner = "1 · Local Terminal", .phase = .running, .bound = true, .can_copy = true, .can_remove = false }, .{ .id = 29, .title = "普通短标题", .owner = "历史连接环境", .phase = .stopped, .can_restore = true, .can_copy = true }, .{ .id = 30, .title = "不应显示第三条", .owner = "" } } });
         try self.cx.root.?.appendChild(a, self.view);
         self.settle();
     }

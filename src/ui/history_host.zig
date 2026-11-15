@@ -441,7 +441,7 @@ pub const Host = struct {
                     return;
                 }
                 if (self.open_job != null) return;
-                self.open_job = try loading.Job.start(self.archive, descriptor.archive_key, descriptor.manifest_revision, self.generation);
+                self.open_job = try loading.Job.startListed(self.archive, descriptor, self.generation);
                 try self.message.setTextContent(self.allocator, "正在加载记录… 按 Esc 可取消");
                 self.message.setDisplay(.flex);
                 self.resize();

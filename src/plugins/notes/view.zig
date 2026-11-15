@@ -1328,18 +1328,12 @@ const View = struct {
         for (libraries) |id| {
             const library = try self.store.loadLibrary(a, id, .active);
             defer library.deinit();
-            const ids = try self.store.listNoteIds(a, id, .active);
-            var notes: std.ArrayList(TreeNote) = .empty;
-            for (ids) |note_id| {
-                const note = self.store.loadNote(self.cx.allocator, .{ .library_id = id, .note_id = note_id }, .active) catch |err| switch (err) {
-                    error.Unavailable, error.FileNotFound => continue,
-                    else => return err,
-                };
-                defer note.deinit();
-                const value = note.value;
-                try notes.append(a, .{ .key = value.key(), .folder = value.folder_id, .title = try a.dupe(u8, value.title), .read_only = value.read_only });
+            const summaries = try self.store.listNoteSummaries(a, id, .active);
+            const notes = try a.alloc(TreeNote, summaries.len);
+            for (notes, summaries) |*note, summary| {
+                note.* = .{ .key = .{ .library_id = id, .note_id = summary.id }, .folder = summary.folder_id, .title = summary.title, .read_only = summary.read_only };
             }
-            try self.addDirectory(scope, self.tree_content, library.value, notes.items, .{ .library = id }, library.value.name);
+            try self.addDirectory(scope, self.tree_content, library.value, notes, .{ .library = id }, library.value.name);
         }
     }
 

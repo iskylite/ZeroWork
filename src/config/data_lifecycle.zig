@@ -8,6 +8,7 @@ const private_file: std.Io.File.Permissions = @fromBackingInt(0o600);
 
 pub const PrepareReport = struct {
     migrated_legacy: bool = false,
+    secured_files: usize = 0,
     moved_diagnostic_files: usize = 0,
 };
 
@@ -99,7 +100,7 @@ fn kind(dir: Dir, io: std.Io, name: []const u8) !?std.Io.File.Kind {
 /// Preflight the complete source before changing its location. Unknown regular
 /// files are retained verbatim, including unknown TOML keys. Hardlinks are
 /// rejected so chmod/migration cannot affect an external inode.
-fn secureTree(io: std.Io, dir: Dir) anyerror!void {
+fn secureTree(io: std.Io, dir: Dir, count: *usize, skip_log_contents: bool) anyerror!void {
     try dir.setPermissions(io, private_dir);
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
@@ -108,7 +109,16 @@ fn secureTree(io: std.Io, dir: Dir) anyerror!void {
             .directory => {
                 var child = try dir.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false });
                 defer child.close(io);
-                try secureTree(io, child);
+                if (skip_log_contents and std.mem.eql(u8, entry.name, "logs")) {
+                    try child.setPermissions(io, private_dir);
+                    if (try kind(child, io, "history")) |history_kind| {
+                        if (history_kind == .sym_link) return error.UnsafeSymlink;
+                        if (history_kind != .directory) return error.NotDir;
+                        var history = try child.openDir(io, "history", .{ .iterate = true, .follow_symlinks = false });
+                        defer history.close(io);
+                        try history.setPermissions(io, private_dir);
+                    }
+                } else try secureTree(io, child, count, false);
             },
             .file => {
                 if (stat.nlink != 1) return error.UnsafeHardlink;
@@ -117,6 +127,7 @@ fn secureTree(io: std.Io, dir: Dir) anyerror!void {
                 const opened = try file.stat(io);
                 if (opened.kind != .file or opened.nlink != 1 or opened.inode != stat.inode) return error.UnsafeFile;
                 try file.setPermissions(io, private_file);
+                count.* += 1;
             },
             .sym_link => return error.UnsafeSymlink,
             else => return error.UnsupportedFileKind,
@@ -230,7 +241,7 @@ pub fn prepare(io: std.Io, paths: *const Paths) !PrepareReport {
             if (old_kind != .directory) return error.NotDir;
             var old = try old_parent.openDir(io, old_name, .{ .iterate = true, .follow_symlinks = false });
             defer old.close(io);
-            try secureTree(io, old);
+            try secureTree(io, old, &result.secured_files, false);
             var parent = try openParent(io, paths.directory, true);
             defer parent.close(io);
             const name = std.fs.path.basename(paths.directory);
@@ -239,7 +250,7 @@ pub fn prepare(io: std.Io, paths: *const Paths) !PrepareReport {
                 if (target_kind != .directory) return error.NotDir;
                 var target = try parent.openDir(io, name, .{ .iterate = true, .follow_symlinks = false });
                 defer target.close(io);
-                try secureTree(io, target);
+                try secureTree(io, target, &result.secured_files, false);
                 try merge(io, old, target);
                 try old_parent.deleteDir(io, old_name);
             } else try old_parent.renamePreserve(old_name, parent, name, io);
@@ -248,9 +259,10 @@ pub fn prepare(io: std.Io, paths: *const Paths) !PrepareReport {
     }
     var data = try ensurePrivate(io, paths.directory);
     defer data.close(io);
-    // All migrated content was secured above; check an existing destination as
-    // well, before store readers can dereference its files.
-    try secureTree(io, data);
+    // Migrations secure their full source above. Session history readers
+    // validate files when opening them, so ordinary startup only secures
+    // the recording directories, not every historical recording.
+    try secureTree(io, data, &result.secured_files, true);
     var cache = try ensurePrivate(io, paths.cache_directory);
     defer cache.close(io);
     var diagnostics = try ensurePrivate(io, paths.diagnostic_directory);
@@ -264,7 +276,16 @@ pub fn prepare(io: std.Io, paths: *const Paths) !PrepareReport {
             var iterator = logs.iterate();
             while (try iterator.next(io)) |entry| {
                 if (!isDiagnosticName(entry.name)) continue;
-                if ((try kind(logs, io, entry.name)) != .file) return error.UnsupportedFileKind;
+                const stat = try logs.statFile(io, entry.name, .{ .follow_symlinks = false });
+                if (stat.kind == .sym_link) return error.UnsafeSymlink;
+                if (stat.kind != .file) return error.UnsupportedFileKind;
+                if (stat.nlink != 1) return error.UnsafeHardlink;
+                const file = try logs.openFile(io, entry.name, .{ .follow_symlinks = false });
+                defer file.close(io);
+                const opened = try file.stat(io);
+                if (opened.kind != .file or opened.nlink != 1 or opened.inode != stat.inode) return error.UnsafeFile;
+                try file.setPermissions(io, private_file);
+                result.secured_files += 1;
                 if (try kind(diagnostics, io, entry.name)) |_| {
                     if (!try equalFiles(io, logs, diagnostics, entry.name)) return error.LegacyConflict;
                     try logs.deleteFile(io, entry.name);

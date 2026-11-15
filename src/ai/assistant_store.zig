@@ -218,6 +218,7 @@ pub const State = struct {
     /// when a terminal becomes independently visible again.
     ended: bool = false,
     historical_environment: bool = false,
+    indexed_archive: bool = false,
     tool_results: ?@import("tool_results.zig").Store = null,
     owner: scope.Owner,
     history: std.ArrayList(Message) = .empty,
@@ -325,6 +326,25 @@ pub const Store = struct {
         self.next_id = if (id == std.math.maxInt(u64)) 0 else id + 1;
         _ = self.select(id);
         return self.find(id).?;
+    }
+    pub fn addArchive(self: *Store, conversation: ConversationId, owner: scope.Owner, title: @import("conversation_title.zig").Title) !void {
+        if (self.findConversation(conversation) != null) return;
+        const id = self.next_id;
+        if (id == 0) return error.ConversationIdentityExhausted;
+        try self.states.append(self.allocator, .{
+            .id = id,
+            .conversation_id = conversation,
+            .initial_owner = owner,
+            .owner = owner,
+            .title = title,
+            .selected = false,
+            .ended = true,
+            .historical_environment = true,
+            .indexed_archive = true,
+            .phase = .stopped,
+            .stream = cards.Stream.init(self.allocator),
+        });
+        self.next_id = if (id == std.math.maxInt(u64)) 0 else id + 1;
     }
     pub fn createChildPresentation(self: *Store, record: *const @import("session_lifecycle.zig").Record, owner: scope.Owner) !*State {
         const info = (record.child orelse return error.ChildNotFound).info;

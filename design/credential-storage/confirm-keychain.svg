@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="432" height="182" viewBox="0 0 432 182" role="img">
+  <title>切换到 macOS 钥匙串</title>
+  <style>
+    text { font-family: "PingFang SC", "Hiragino Sans GB", sans-serif; fill: #e4e8de; font-size: 13px }
+    .title { font-size: 17px; font-weight: 600 }
+    .secondary { fill: #c4cabc }
+  </style>
+  <rect x=".5" y=".5" width="431" height="181" rx="15" fill="#252c24" stroke="#434c3e"/>
+  <path d="M27 34v-5a5 5 0 0 1 10 0v5m-11 0h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H26a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" fill="none" stroke="#b9c798" stroke-width="1.6" stroke-linejoin="round"/>
+  <text x="52" y="43" class="title">切换到 macOS 钥匙串？</text>
+  <text x="24" y="77" class="secondary">已保存的凭据将移入钥匙串，验证写入成功后移除本地副本。</text>
+  <text x="24" y="101" class="secondary">切换时，macOS 可能要求验证身份。</text>
+  <rect x="242" y="128" width="62" height="32" rx="7" fill="#343c31"/>
+  <text x="273" y="149" text-anchor="middle">取消</text>
+  <rect x="314" y="128" width="94" height="32" rx="7" fill="#b9c798"/>
+  <text x="361" y="149" text-anchor="middle" style="fill:#202719;font-weight:600">切换</text>
+</svg>

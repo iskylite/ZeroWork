@@ -1,6 +1,7 @@
 //! Durable, exclusively locked session outbox. Replaying data never starts a
 //! worker. Model credentials and live pointers are not part of this format.
 const std = @import("std");
+const builtin = @import("builtin");
 const lifecycle = @import("session_lifecycle.zig");
 const input = @import("session_input.zig");
 const provider = @import("provider.zig");
@@ -103,7 +104,11 @@ pub const Journal = struct {
     dir: std.Io.Dir,
     path: []u8,
     lock_file: std.Io.File,
+    // Small, mutable mirror for existing parser fixtures. The application
+    // uses the file as the source of truth and retains no raw journal bytes.
     bytes: std.ArrayList(u8) = .empty,
+    mirror: bool = false,
+    bytes_read: u64 = 0,
     stamp: ?Stamp = null,
     compact_at: usize = compact_bytes,
     mutex: std.Io.Mutex = .init,
@@ -122,6 +127,14 @@ pub const Journal = struct {
     };
 
     pub fn open(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !Journal {
+        return openMode(a, io, dir, path, builtin.is_test);
+    }
+
+    pub fn openStreaming(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !Journal {
+        return openMode(a, io, dir, path, false);
+    }
+
+    fn openMode(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, mirror: bool) !Journal {
         if (path.len == 0 or std.fs.path.isAbsolute(path) or std.mem.indexOf(u8, path, "..") != null) return error.InvalidJournalPath;
         if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(io, parent);
         const lock_name = try std.fmt.allocPrint(a, "{s}.lock", .{path});
@@ -130,8 +143,15 @@ pub const Journal = struct {
         errdefer lock_file.close(io);
         const owned = try a.dupe(u8, path);
         errdefer a.free(owned);
-        var result: Journal = .{ .allocator = a, .io = io, .dir = dir, .path = owned, .lock_file = lock_file };
+        var result: Journal = .{ .allocator = a, .io = io, .dir = dir, .path = owned, .lock_file = lock_file, .mirror = mirror };
         errdefer result.bytes.deinit(a);
+        const stat = dir.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return result,
+            else => return err,
+        };
+        if (stat.kind != .file or stat.nlink != 1) return error.InvalidSessionJournal;
+        result.stamp = Stamp.of(stat);
+        if (!mirror) return result;
         const source = dir.readFileAlloc(io, path, a, .unlimited) catch |err| switch (err) {
             error.FileNotFound => return result,
             else => return err,
@@ -142,7 +162,7 @@ pub const Journal = struct {
         const committed = if (source.len == 0 or source[source.len - 1] == '\n') source.len else if (std.mem.lastIndexOfScalar(u8, source, '\n')) |index| index + 1 else 0;
         if (source.len != 0 and committed == 0) return error.InvalidSessionJournal;
         try result.bytes.appendSlice(a, source[0..committed]);
-        result.stamp = Stamp.of(try dir.statFile(io, path, .{}));
+        try result.checkUnchanged();
         return result;
     }
     pub fn deinit(self: *Journal) void {
@@ -150,6 +170,10 @@ pub const Journal = struct {
         self.lock_file.close(self.io);
         self.allocator.free(self.path);
         self.bytes.deinit(self.allocator);
+        self.clearBases();
+    }
+
+    fn clearBases(self: *Journal) void {
         var bases = self.presentation_bases.valueIterator();
         while (bases.next()) |base| self.allocator.free(base.*);
         self.presentation_bases.deinit(self.allocator);
@@ -172,83 +196,44 @@ pub const Journal = struct {
             store.deinit();
             store.* = lifecycle.Store.init(allocator);
         }
-        var lines = std.mem.splitScalar(u8, self.bytes.items, '\n');
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            const parsed = try std.json.parseFromSlice(Line, self.allocator, line, .{});
-            defer parsed.deinit();
-            const row = parsed.value;
-            if (row.schema < 1 or row.schema > 5) return error.InvalidSessionJournal;
-            const patch = if (row.event) |event| event.presentation_patch else null;
-            if ((row.schema == 5) != (patch != null)) return error.InvalidSessionJournal;
-            const kinds: u8 = @as(u8, @intFromBool(row.event != null)) + @intFromBool(row.receipt != null) + @intFromBool(row.order != null) + @intFromBool(row.consumed_batch != null);
-            if (kinds != 1) return error.InvalidSessionJournal;
-            if (row.schema < 4) {
-                if (row.event) |event| if (workspaceEvent(event) or event.kind == .conversation_model or event.conversation_model != null) return error.InvalidSessionJournal;
-                if (row.consumed_batch != null or (row.receipt != null and row.receipt.?.workspace_revision != null) or hasMessageProvenance(row.messages) or hasMessageProvenance(row.transcript)) return error.InvalidSessionJournal;
-            }
-            if (row.schema < 3) if (row.event) |event| if (event.kind == .task_fact or event.kind == .child_launch or event.task_fact != null or event.initial_text != null) return error.InvalidSessionJournal;
-            if (row.schema == 1) if (row.event) |event| if (event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.child_info != null or event.parent_binding != null or event.targets != null or event.children != null or event.task_fact != null or event.kind == .task_fact or event.kind == .child_launch or event.initial_text != null) return error.InvalidSessionJournal;
-            if (row.order) |order| {
-                const record = store.find(order.fence.conversation) orelse return error.InvalidSessionJournal;
-                if (order.ids.len != record.inbox.entries.items.len) return error.InvalidSessionJournal;
-                const ordered = try self.allocator.alloc(*input.Entry, order.ids.len);
-                defer self.allocator.free(ordered);
-                for (order.ids, 0..) |id, i| {
-                    for (order.ids[0..i]) |prior| if (prior.eql(id)) return error.InvalidSessionJournal;
-                    ordered[i] = record.inbox.findLocked(id) orelse return error.InvalidSessionJournal;
-                }
-                @memcpy(record.inbox.entries.items, ordered[0..order.ids.len]);
-                continue;
-            }
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            var refs: std.ArrayList(images.ContentRef) = .empty;
-            defer {
-                for (refs.items) |*ref| ref.release();
-                refs.deinit(self.allocator);
-            }
-            const a = arena.allocator();
-            const messages = try decode(self.allocator, a, row.messages, &refs);
-            const transcript = try decode(self.allocator, a, row.transcript, &refs);
-            if (row.event) |original| {
-                var event: lifecycle.Event = .{ .kind = original.kind, .conversation = original.conversation, .revision = original.revision, .messages = messages };
-                inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
-                    if (comptime !std.mem.eql(u8, name, "presentation_patch")) @field(event, name) = @field(original, name);
-                }
-                if (patch) |edit| {
-                    if (original.kind != .presentation) return error.InvalidSessionJournal;
-                    const base = self.presentation_bases.get(original.conversation) orelse return error.InvalidSessionJournal;
-                    if (edit.prefix > base.len or edit.suffix > base.len - edit.prefix) return error.InvalidSessionJournal;
-                    event.presentation = try std.mem.concat(a, u8, &.{ base[0..edit.prefix], original.presentation orelse return error.InvalidSessionJournal, base[base.len - edit.suffix ..] });
-                } else if (original.kind == .presentation) {
-                    self.publishPresentationBase(original.conversation, try self.preparePresentationBase(original.presentation orelse return error.InvalidSessionJournal));
-                }
-                try store.replay(event);
-                self.dropRemovedPresentationBases(original);
-            } else if (row.consumed_batch) |batch| {
-                if (batch.len == 0 or messages.len != 0) return error.InvalidSessionJournal;
-                const first = batch[0].receipt;
-                const record = store.find(first.fence.conversation) orelse return error.InvalidSessionJournal;
-                for (batch, 0..) |consumed, i| {
-                    const receipt = consumed.receipt;
-                    if (!receipt.fence.eql(first.fence) or receipt.turn != first.turn or receipt.request_sequence == null or receipt.request_sequence != first.request_sequence or receipt.delivery != .consumed or record.inbox.findLocked(receipt.id) == null) return error.InvalidSessionJournal;
-                    for (batch[0..i]) |prior| if (prior.receipt.id.eql(receipt.id)) return error.InvalidSessionJournal;
-                    try store.replayInput(receipt, try decode(self.allocator, a, consumed.messages, &refs));
-                }
-                try self.restoreTranscript(store, first, transcript);
-            } else {
-                try store.replayInput(row.receipt.?, messages);
-                if (transcript.len != 0) try self.restoreTranscript(store, row.receipt.?, transcript);
-            }
+        if (self.mirror) {
+            var lines = std.mem.splitScalar(u8, self.bytes.items, '\n');
+            while (lines.next()) |line| if (line.len != 0) try self.replayLine(store, line, null);
+            if (self.bytes.items.len >= self.compact_at) {
+                try self.compactLocked();
+            } else if (self.stamp) |stamp| if (stamp.size != self.bytes.items.len) {
+                try self.replaceBytes(self.bytes.items);
+            };
+        } else {
+            try self.replayFile(store);
         }
-        // Validate replay before touching the original file. Presentation
-        // events replace a full display snapshot, not individual chat messages.
-        if (self.bytes.items.len >= self.compact_at) {
-            try self.compactLocked();
-        } else if (self.stamp) |stamp| if (stamp.size != self.bytes.items.len) {
-            try self.replaceBytes(self.bytes.items);
+        try self.installPersistence(store);
+    }
+
+    /// Initialize the active journal without replaying any settled sessions.
+    /// A final incomplete row was never acknowledged and is safe to truncate.
+    pub fn bindActive(self: *Journal, store: *lifecycle.Store) !void {
+        if (self.stamp) |stamp| if (stamp.size != 0) {
+            const file = try self.dir.openFile(self.io, self.path, .{ .mode = .read_write, .follow_symlinks = false });
+            defer file.close(self.io);
+            if (!std.meta.eql(stamp, Stamp.of(try file.stat(self.io)))) return error.JournalConflict;
+            var position = stamp.size;
+            var buffer: [4096]u8 = undefined;
+            while (position > 0) {
+                const size: usize = @intCast(@min(position, buffer.len));
+                position -= size;
+                if (try file.readPositionalAll(self.io, buffer[0..size], position) != size) return error.JournalConflict;
+                if (std.mem.lastIndexOfScalar(u8, buffer[0..size], '\n')) |last| {
+                    position += last + 1;
+                    break;
+                }
+            }
+            if (position != stamp.size) try self.rollbackAppend(file, position);
         };
+        try self.installPersistence(store);
+    }
+
+    pub fn installPersistence(self: *Journal, store: *lifecycle.Store) !void {
         store.persist = .{ .context = self, .write = writeEvent, .checkpoint = checkpoint, .try_draft = tryDraft };
         try store.revalidateRecoveredWorkspaces(self.io);
         store.input_persist = .{ .context = self, .write = writeInput, .consumed = writeConsumed, .order = writeOrder, .consume_batch = writeConsumedBatch };
@@ -257,6 +242,145 @@ pub const Journal = struct {
             record.inbox.persist = store.input_persist;
         }
     }
+    pub fn replayIndexed(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, index: @import("history_index.zig").Bounds, spans: []const @import("history_index.zig").Span, cancel: *const std.atomic.Value(bool), store: *lifecycle.Store) !u64 {
+        var parser: Journal = .{ .allocator = a, .io = io, .dir = dir, .lock_file = undefined, .path = &.{} };
+        defer parser.clearBases();
+        const Replay = struct {
+            parser: *Journal,
+            store: *lifecycle.Store,
+            fn row(self: @This(), line: []const u8) anyerror!void {
+                try self.parser.replayLine(self.store, line, null);
+            }
+        };
+        return @import("history_index.zig").readSpans(io, dir, a, index, spans, cancel, Replay{ .parser = &parser, .store = store }, Replay.row);
+    }
+
+    fn replayLine(self: *Journal, store: *lifecycle.Store, line: []const u8, presentation: ?*?PresentationRow) !void {
+        const parsed = try std.json.parseFromSlice(Line, self.allocator, line, .{});
+        defer parsed.deinit();
+        const row = parsed.value;
+        if (row.schema < 1 or row.schema > 5) return error.InvalidSessionJournal;
+        const patch = if (row.event) |event| event.presentation_patch else null;
+        if ((row.schema == 5) != (patch != null)) return error.InvalidSessionJournal;
+        if (presentation) |info| if (row.event) |event| {
+            if (event.kind == .presentation) info.* = .{ .id = event.conversation, .patch = patch != null };
+        };
+        const kinds: u8 = @as(u8, @intFromBool(row.event != null)) + @intFromBool(row.receipt != null) + @intFromBool(row.order != null) + @intFromBool(row.consumed_batch != null);
+        if (kinds != 1) return error.InvalidSessionJournal;
+        if (row.schema < 4) {
+            if (row.event) |event| if (workspaceEvent(event) or event.kind == .conversation_model or event.conversation_model != null) return error.InvalidSessionJournal;
+            if (row.consumed_batch != null or (row.receipt != null and row.receipt.?.workspace_revision != null) or hasMessageProvenance(row.messages) or hasMessageProvenance(row.transcript)) return error.InvalidSessionJournal;
+        }
+        if (row.schema < 3) if (row.event) |event| if (event.kind == .task_fact or event.kind == .child_launch or event.task_fact != null or event.initial_text != null) return error.InvalidSessionJournal;
+        if (row.schema == 1) if (row.event) |event| if (event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.child_info != null or event.parent_binding != null or event.targets != null or event.children != null or event.task_fact != null or event.kind == .task_fact or event.kind == .child_launch or event.initial_text != null) return error.InvalidSessionJournal;
+        if (row.order) |order| {
+            const record = store.find(order.fence.conversation) orelse return error.InvalidSessionJournal;
+            if (order.ids.len != record.inbox.entries.items.len) return error.InvalidSessionJournal;
+            const ordered = try self.allocator.alloc(*input.Entry, order.ids.len);
+            defer self.allocator.free(ordered);
+            for (order.ids, 0..) |id, i| {
+                for (order.ids[0..i]) |prior| if (prior.eql(id)) return error.InvalidSessionJournal;
+                ordered[i] = record.inbox.findLocked(id) orelse return error.InvalidSessionJournal;
+            }
+            @memcpy(record.inbox.entries.items, ordered[0..order.ids.len]);
+            return;
+        }
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        var refs: std.ArrayList(images.ContentRef) = .empty;
+        defer {
+            for (refs.items) |*ref| ref.release();
+            refs.deinit(self.allocator);
+        }
+        const a = arena.allocator();
+        const messages = try decode(self.allocator, a, row.messages, &refs);
+        const transcript = try decode(self.allocator, a, row.transcript, &refs);
+        if (row.event) |original| {
+            var event: lifecycle.Event = .{ .kind = original.kind, .conversation = original.conversation, .revision = original.revision, .messages = messages };
+            inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
+                if (comptime !std.mem.eql(u8, name, "presentation_patch")) @field(event, name) = @field(original, name);
+            }
+            if (patch) |edit| {
+                if (original.kind != .presentation) return error.InvalidSessionJournal;
+                const base = self.presentation_bases.get(original.conversation) orelse return error.InvalidSessionJournal;
+                if (edit.prefix > base.len or edit.suffix > base.len - edit.prefix) return error.InvalidSessionJournal;
+                event.presentation = try std.mem.concat(a, u8, &.{ base[0..edit.prefix], original.presentation orelse return error.InvalidSessionJournal, base[base.len - edit.suffix ..] });
+            } else if (original.kind == .presentation) {
+                self.publishPresentationBase(original.conversation, try self.preparePresentationBase(original.presentation orelse return error.InvalidSessionJournal));
+            }
+            try store.replay(event);
+            self.dropRemovedPresentationBases(original);
+        } else if (row.consumed_batch) |batch| {
+            if (batch.len == 0 or messages.len != 0) return error.InvalidSessionJournal;
+            const first = batch[0].receipt;
+            const record = store.find(first.fence.conversation) orelse return error.InvalidSessionJournal;
+            for (batch, 0..) |consumed, i| {
+                const receipt = consumed.receipt;
+                if (!receipt.fence.eql(first.fence) or receipt.turn != first.turn or receipt.request_sequence == null or receipt.request_sequence != first.request_sequence or receipt.delivery != .consumed or record.inbox.findLocked(receipt.id) == null) return error.InvalidSessionJournal;
+                for (batch[0..i]) |prior| if (prior.receipt.id.eql(receipt.id)) return error.InvalidSessionJournal;
+                try store.replayInput(receipt, try decode(self.allocator, a, consumed.messages, &refs));
+            }
+            try self.restoreTranscript(store, first, transcript);
+        } else {
+            try store.replayInput(row.receipt.?, messages);
+            if (transcript.len != 0) try self.restoreTranscript(store, row.receipt.?, transcript);
+        }
+    }
+
+    fn openSource(self: *Journal) !std.Io.File {
+        const file = try self.dir.openFile(self.io, self.path, .{ .follow_symlinks = false, .allow_directory = false });
+        errdefer file.close(self.io);
+        const stat = try file.stat(self.io);
+        if (stat.kind != .file or stat.nlink != 1 or !std.meta.eql(self.stamp, @as(?Stamp, Stamp.of(stat)))) return error.JournalConflict;
+        return file;
+    }
+
+    fn nextCompleteLine(reader: *std.Io.File.Reader, line: *std.Io.Writer.Allocating) !?[]const u8 {
+        line.clearRetainingCapacity();
+        _ = reader.interface.streamDelimiter(&line.writer, '\n') catch |err| switch (err) {
+            error.EndOfStream => return null, // An interrupted append has no newline.
+            error.ReadFailed => return reader.err orelse err,
+            else => return err,
+        };
+        reader.interface.toss(1);
+        return line.written();
+    }
+
+    fn replayFile(self: *Journal, store: *lifecycle.Store) !void {
+        const stamp = self.stamp orelse return;
+        const file = try self.openSource();
+        defer file.close(self.io);
+        var buffer: [64 * 1024]u8 = undefined;
+        var reader = file.reader(self.io, &buffer);
+        var line: std.Io.Writer.Allocating = .init(self.allocator);
+        defer line.deinit();
+        var plan: CompactionPlan = .{ .allocator = self.allocator };
+        defer plan.deinit();
+        var committed: u64 = 0;
+        while (try nextCompleteLine(&reader, &line)) |value| {
+            const start = committed;
+            committed = reader.logicalPos();
+            if (value.len == 0) continue;
+            var info: ?PresentationRow = null;
+            try self.replayLine(store, value, &info);
+            if (stamp.size >= self.compact_at) {
+                if (info) |row| try plan.note(row, start, committed);
+            }
+        }
+        self.bytes_read += reader.logicalPos();
+        if (stamp.size != 0 and committed == 0) return error.InvalidSessionJournal;
+        try self.checkUnchanged();
+        if (plan.changed) {
+            try self.applyCompaction(file, plan.spans.items, committed);
+        } else if (committed < stamp.size) {
+            // Repair only an uncommitted tail, after all complete records validate.
+            const writable = try self.dir.openFile(self.io, self.path, .{ .mode = .read_write, .follow_symlinks = false });
+            defer writable.close(self.io);
+            if (!std.meta.eql(stamp, Stamp.of(try writable.stat(self.io)))) return error.JournalConflict;
+            try self.rollbackAppend(writable, committed);
+        }
+    }
+
     fn restoreTranscript(self: *Journal, store: *lifecycle.Store, receipt: input.Receipt, transcript: []const provider.Message) !void {
         if (receipt.delivery != .consumed or receipt.turn == null or transcript.len == 0) return error.InvalidSessionJournal;
         const record = store.find(receipt.fence.conversation) orelse return error.InvalidSessionJournal;
@@ -380,7 +504,7 @@ pub const Journal = struct {
         const line: Line = .{ .schema = if (event.presentation_patch == null) 1 else 5, .event = event };
         const encoded = try std.json.Stringify.valueAlloc(self.allocator, line, .{});
         defer self.allocator.free(encoded);
-        if (self.bytes.items.len >= self.compact_at) try self.compactLocked();
+        if (self.mirror and self.bytes.items.len >= self.compact_at) try self.compactLocked();
         try self.appendLocked(line, encoded);
         if (event.presentation_patch == null) self.publishPresentationBase(event.conversation, next_base);
     }
@@ -469,11 +593,14 @@ pub const Journal = struct {
     }
 
     fn appendLocked(self: *Journal, line: Line, encoded: []const u8) !void {
-        const prior = self.bytes.items.len;
-        try self.bytes.ensureUnusedCapacity(self.allocator, encoded.len + 1);
-        self.bytes.appendSliceAssumeCapacity(encoded);
-        self.bytes.appendAssumeCapacity('\n');
-        errdefer self.bytes.shrinkRetainingCapacity(prior);
+        const prior = if (self.stamp) |existing| existing.size else 0;
+        const mirror_prior = self.bytes.items.len;
+        if (self.mirror) {
+            try self.bytes.ensureUnusedCapacity(self.allocator, encoded.len + 1);
+            self.bytes.appendSliceAssumeCapacity(encoded);
+            self.bytes.appendAssumeCapacity('\n');
+        }
+        errdefer self.bytes.shrinkRetainingCapacity(mirror_prior);
         const file = if (self.stamp != null) self.dir.openFile(self.io, self.path, .{ .mode = .read_write }) catch |err| switch (err) {
             error.FileNotFound => return error.JournalConflict,
             else => return err,
@@ -486,7 +613,8 @@ pub const Journal = struct {
         // Append only the new record. fsync precedes publication to the store;
         // on failure roll back to the last acknowledged boundary.
         errdefer self.rollbackAppend(file, prior) catch {};
-        try file.writePositionalAll(self.io, self.bytes.items[prior..], prior);
+        try file.writePositionalAll(self.io, encoded, prior);
+        try file.writePositionalAll(self.io, "\n", prior + encoded.len);
         try file.sync(self.io);
         self.stamp = Stamp.of(try file.stat(self.io));
         // A live handoff may commit before the checkpoint worker acquires the
@@ -499,7 +627,7 @@ pub const Journal = struct {
         };
     }
 
-    fn rollbackAppend(self: *Journal, file: std.Io.File, prior: usize) !void {
+    fn rollbackAppend(self: *Journal, file: std.Io.File, prior: u64) !void {
         try file.setLength(self.io, prior);
         try file.sync(self.io);
         self.stamp = Stamp.of(try file.stat(self.io));
@@ -528,16 +656,110 @@ pub const Journal = struct {
     pub fn compact(self: *Journal) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (!self.mirror) return self.compactFile();
         try self.compactLocked();
+    }
+
+    const PresentationRow = struct { id: ConversationId, patch: bool };
+    const Span = struct { start: u64, end: u64, superseded: bool = false };
+    const CompactionPlan = struct {
+        const Saved = struct { base: ?usize = null, patch: ?usize = null };
+        allocator: std.mem.Allocator,
+        latest: std.AutoHashMapUnmanaged(ConversationId, Saved) = .empty,
+        spans: std.ArrayList(Span) = .empty,
+        changed: bool = false,
+
+        fn deinit(self: *CompactionPlan) void {
+            self.latest.deinit(self.allocator);
+            self.spans.deinit(self.allocator);
+        }
+
+        fn supersede(self: *CompactionPlan, index: ?usize) void {
+            if (index) |previous| {
+                self.spans.items[previous].superseded = true;
+                self.changed = true;
+            }
+        }
+
+        fn note(self: *CompactionPlan, row: PresentationRow, start: u64, end: u64) !void {
+            const index = self.spans.items.len;
+            try self.spans.append(self.allocator, .{ .start = start, .end = end });
+            const entry = try self.latest.getOrPut(self.allocator, row.id);
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            const saved = entry.value_ptr;
+            self.supersede(saved.patch);
+            if (row.patch) {
+                saved.patch = index;
+            } else {
+                self.supersede(saved.base);
+                saved.* = .{ .base = index };
+            }
+        }
+    };
+
+    fn compactFile(self: *Journal) !void {
+        const stamp = self.stamp orelse return;
+        const file = try self.openSource();
+        defer file.close(self.io);
+        var buffer: [64 * 1024]u8 = undefined;
+        var reader = file.reader(self.io, &buffer);
+        var line: std.Io.Writer.Allocating = .init(self.allocator);
+        defer line.deinit();
+        const Header = struct { event: ?struct { kind: @FieldType(lifecycle.Event, "kind"), conversation: ConversationId, presentation_patch: ?PresentationPatch = null } = null };
+        var plan: CompactionPlan = .{ .allocator = self.allocator };
+        defer plan.deinit();
+        var offset: u64 = 0;
+        while (try nextCompleteLine(&reader, &line)) |value| {
+            const end = reader.logicalPos();
+            defer offset = end;
+            if (value.len == 0) continue;
+            const parsed = try std.json.parseFromSlice(Header, self.allocator, value, .{ .ignore_unknown_fields = true });
+            defer parsed.deinit();
+            if (parsed.value.event) |event| if (event.kind == .presentation)
+                try plan.note(.{ .id = event.conversation, .patch = event.presentation_patch != null }, offset, end);
+        }
+        self.bytes_read += reader.logicalPos();
+        if (offset != stamp.size) return error.JournalConflict;
+        if (plan.changed) try self.applyCompaction(file, plan.spans.items, offset);
+    }
+
+    fn applyCompaction(self: *Journal, source: std.Io.File, spans: []const Span, committed: u64) !void {
+        var atomic = try self.dir.createFileAtomic(self.io, self.path, .{ .permissions = @fromBackingInt(0o600), .replace = true });
+        defer atomic.deinit(self.io);
+        var position: u64 = 0;
+        var total: u64 = 0;
+        for (spans) |span| {
+            if (!span.superseded) continue;
+            try self.copySpan(source, atomic.file, position, span.start, &total);
+            position = span.end;
+        }
+        try self.copySpan(source, atomic.file, position, committed, &total);
+        try atomic.file.sync(self.io);
+        try self.checkUnchanged();
+        try atomic.replace(self.io);
+        self.stamp = Stamp.of(try self.dir.statFile(self.io, self.path, .{}));
+    }
+
+    fn copySpan(self: *Journal, source: std.Io.File, target: std.Io.File, start: u64, end: u64, total: *u64) !void {
+        var buffer: [64 * 1024]u8 = undefined;
+        var position = start;
+        while (position < end) {
+            const chunk = buffer[0..@intCast(@min(end - position, buffer.len))];
+            if (try source.readPositionalAll(self.io, chunk, position) != chunk.len) return error.JournalConflict;
+            self.bytes_read += chunk.len;
+            try target.writePositionalAll(self.io, chunk, total.*);
+            total.* += chunk.len;
+            position += chunk.len;
+        }
     }
 
     fn compactLocked(self: *Journal) !void {
         const Header = struct { event: ?struct { kind: @FieldType(lifecycle.Event, "kind"), conversation: ConversationId, presentation_patch: ?PresentationPatch = null } = null };
-        const Span = struct { start: usize, end: usize, superseded: bool = false };
+        const MirrorSpan = struct { start: usize, end: usize, superseded: bool = false };
         const Saved = struct { base: ?usize = null, patch: ?usize = null };
         var latest = std.AutoHashMap(ConversationId, Saved).init(self.allocator);
         defer latest.deinit();
-        var spans: std.ArrayList(Span) = .empty;
+        var spans: std.ArrayList(MirrorSpan) = .empty;
         defer spans.deinit(self.allocator);
         var lines = std.mem.splitScalar(u8, self.bytes.items, '\n');
         var offset: usize = 0;

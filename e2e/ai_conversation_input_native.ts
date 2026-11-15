@@ -98,7 +98,7 @@ try{
  await h.key(',',{cmd:true});await visible('settings.panel');
  const tree=flat(await h.query('settings.navigation'));const ai=tree.find((n:any)=>n.text==='AI 辅助');assert(ai);assert((await h.clickAt(ai.rect.x+ai.rect.w/2,ai.rect.y+ai.rect.h/2)).ok);
  if(!(await h.query('settings.field.follow_up_mode')).some(shown))await click('settings.ai.conversation.header');await visible('settings.field.follow_up_mode');await click('settings.field.follow_up_mode');await click('settings.follow_up_mode.steer');await click('settings.save');await h.waitFor(async()=>(await readFile(join(data,'config.toml'),'utf8')).includes('follow_up_mode = "steer"')||null,15000);await capture('follow-up-settings');report.checks.push('AI settings exposes and saves the global follow-up mode through the production settings transaction');
- const journal=await readFile(join(data,'ai-sessions.jsonl'),'utf8');const events=journal.trim().split('\n').map(s=>JSON.parse(s));await writeFile(join(out,'journal.json'),JSON.stringify(events,null,2));
+ const journal=await readFile(join(data,'ai-sessions-active.jsonl'),'utf8');const events=journal.trim().split('\n').map(s=>JSON.parse(s));await writeFile(join(out,'journal.json'),JSON.stringify(events,null,2));
  const lifecycle=events.flatMap((e:any)=>e.event?[e.event]:[]);
  const checkpoints=events.filter((e:any)=>e.event?.kind==='checkpoint');const source=checkpoints[0].event.conversation;
  const consumed=events.flatMap((e:any)=>e.consumed_batch?.map((entry:any)=>entry.receipt)??(e.receipt?.delivery==='consumed'?[e.receipt]:[]));

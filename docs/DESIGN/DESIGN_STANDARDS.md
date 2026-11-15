@@ -402,7 +402,7 @@ Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用�
 
 品牌 Logo 使用用户于 2026-10-26 确认的 Zero 蜥蜴双手持终端，资源和署名见 `assets/macos/README.md`。默认透明背景，设置可选择白底或黑底；该选择同时更新运行中的 Dock 图标及应用文件的自定义图标，退出后保留；Finder 等系统位置也使用所选图标，不替换签名 Contents 内的资源。
 
-应用图标源为 `assets/macos/AppIcon.png`（1024×1024），`AppIcon.svg` 仅为嵌入 PNG 的容器；通过 `scripts/build_app_icon.sh` 生成安装 `.icns`。保留比例、不拉伸；侧栏标题继续使用服务器线稿，不将品牌 Logo 放进功能导航。
+应用图标源为 `assets/macos/AppIcon.png`（1024×1024），`AppIcon.svg` 仅为嵌入 PNG 的容器；通过 `scripts/build_app_icon.sh` 生成安装 `.icns`。三种底色的素材按 macOS 应用图标网格排布：底板或透明底主体占 824×824 并居中于 1024×1024 画布，底板圆角约为底板宽度的 0.22，不能满幅铺满，否则 Dock 中会比相邻应用明显偏大。保留比例、不拉伸；侧栏标题继续使用服务器线稿，不将品牌 Logo 放进功能导航。
 
 ## 5. 动效与控件状态
 
