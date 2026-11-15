@@ -160,6 +160,15 @@ pub const Root = struct {
     /// consumer. Advanced atomically when a wait_events response is accepted
     /// into the Loop; an omitted after_sequence pages from here.
     delivered_watermark: u64 = 0,
+    /// V0.7 §11/G8: shared board posts appended to this root's event stream.
+    /// Board events ride the same {kind, origin, text, ts} envelope and the
+    /// same delivery watermark as settle reports; stage-3 UI reads them via
+    /// the same cursor.
+    board_posts: std.ArrayList(@import("swarm_board.zig").Post) = .empty,
+    /// V0.7 §11.2 ask debounce counters per member (index = seq-1, ≤16).
+    /// The 4th consecutive ask gets an automatic best-judgment reply; the
+    /// counter clears when the member settles.
+    board_ask_counts: [16]u32 = @splat(0),
     /// V0.7 §2.3: max active delegated children per this root (1–16,
     /// clamped). Frozen at root creation from process configuration.
     child_limit: u8 = 4,
@@ -168,7 +177,28 @@ pub const Root = struct {
     }
     pub fn deinit(self: *Root) void {
         self.display_facts.deinit(self.allocator);
+        for (self.board_posts.items) |post| self.allocator.free(post.text);
+        self.board_posts.deinit(self.allocator);
         self.arena.deinit();
+    }
+    /// V0.7 §11: append a board post to this root's event stream. The post
+    /// text is owned by the root after this call. Delivery follows the §11.2
+    /// rules: parent/member-targeted posts surface in the next model round;
+    /// @all posts stay board-only.
+    pub fn postBoard(self: *Root, post: @import("swarm_board.zig").Post) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        var owned = post;
+        owned.text = try self.allocator.dupe(u8, post.text);
+        errdefer self.allocator.free(owned.text);
+        try self.board_posts.append(self.allocator, owned);
+    }
+    /// Board posts not yet consumed into the model transcript, ordered by
+    /// arrival. The caller copies what it needs; entries stay retained.
+    pub fn undeliveredBoardPosts(self: *Root) []const @import("swarm_board.zig").Post {
+        self.lock();
+        defer self.mutex.unlock();
+        return self.board_posts.items;
     }
     pub fn displayFacts(self: *Root) []const Fact {
         if (!self.mutex.tryLock()) return self.display_facts.items;
@@ -467,6 +497,8 @@ pub const Root = struct {
         }
         self.facts[i] = try self.write(fact);
         if (fact.parent == null and (status == .failed or status == .cancelled or status == .interrupted)) self.cancelled = true;
+        // V0.7 §11.2: a settled member's ask debounce counter clears.
+        if (fact.parent != null and fact.seq != 0 and fact.seq <= 16) self.board_ask_counts[fact.seq - 1] = 0;
     }
     pub fn usage(self: *Root, task: id.TaskId, stats: ?provider.ChatStats) !void {
         self.lock();

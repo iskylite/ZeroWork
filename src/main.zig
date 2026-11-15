@@ -7620,6 +7620,10 @@ const AiHost = struct {
         if (authority.child_origin == null) {
             self.execution().host_catalog[self.execution().host_catalog_len] = @import("ai/child_gateway.zig").contribution;
             self.execution().host_catalog_len += 1;
+        } else {
+            // V0.7 §11: children carry the shared board posting tool.
+            self.execution().host_catalog[self.execution().host_catalog_len] = @import("ai/swarm_board.zig").contribution;
+            self.execution().host_catalog_len += 1;
         }
         if (self.execution().extension_session) |session| {
             for (@import("ai/extension_gateway.zig").contributions) |contribution| {
@@ -8395,6 +8399,77 @@ const AiHost = struct {
         return true;
     }
 
+    /// V0.7 §11: dispatch host.post for a child agent. Writes the post into
+    /// the parent root's board (G8 event stream), applies the ask debounce
+    /// auto-reply, and never lets a post alter authorization.
+    fn dispatchBoardPost(self: *AiHost, bridge: *@import("ui/ai_tools.zig").Bridge, invocation: @import("ai/host_tools.zig").Invocation, allocator: std.mem.Allocator, cancel: ?*ai_provider.CancelToken) !@import("ai/host_tools.zig").Result {
+        _ = cancel;
+        const board = @import("ai/swarm_board.zig");
+        if (invocation.arguments != .object) return error.InvalidArguments;
+        const to = if (invocation.arguments.object.get("to")) |value| (if (value == .string) value.string else return error.InvalidArguments) else "";
+        const category = if (invocation.arguments.object.get("category")) |value| (if (value == .string) value.string else return error.InvalidArguments) else return error.InvalidArguments;
+        const text = if (invocation.arguments.object.get("text")) |value| (if (value == .string) value.string else return error.InvalidArguments) else return error.InvalidArguments;
+        const parsed = board.parse(to, category, text) catch return rejectedHostInvocation(invocation, allocator, error.InvalidArguments);
+        const Gate = struct {
+            host: *AiHost,
+            invocation: @import("ai/host_tools.zig").Invocation,
+            parsed: board.Parsed,
+            fn run(context: *anyopaque) !void {
+                const gate: *@This() = @ptrCast(@alignCast(context));
+                try gate.host.validateHostContext(gate.invocation.context);
+                const origin = gate.invocation.context.child_origin orelse return error.ChildCannotPost;
+                const parent = gate.host.child_parent orelse return error.ScopeChanged;
+                const root = parent.attached_runner.?.task_root orelse return error.ScopeChanged;
+                root.lock();
+                defer root.mutex.unlock();
+                for (root.facts[0..root.count]) |fact| {
+                    if (fact.parent != null and fact.agent.eql(origin.agent)) return;
+                }
+                return error.ScopeChanged;
+            }
+        };
+        var gate: Gate = .{ .host = self, .invocation = invocation, .parsed = parsed };
+        bridge.callController(&gate, Gate.run, null) catch |err| return rejectedHostInvocation(invocation, allocator, err);
+        // Persist into the parent root's board; ask debounce auto-reply when
+        // this member's consecutive asks hit 4.
+        const origin = invocation.context.child_origin orelse return error.ChildCannotPost;
+        const parent = self.child_parent orelse return error.ScopeChanged;
+        const root = parent.attached_runner.?.task_root orelse return error.ScopeChanged;
+        const seq: u32 = blk: {
+            root.lock();
+            defer root.mutex.unlock();
+            for (root.facts[0..root.count]) |fact| {
+                if (fact.parent != null and fact.agent.eql(origin.agent)) break :blk fact.seq;
+            }
+            return error.ScopeChanged;
+        };
+        var post: board.Post = .{ .origin = seq, .to = parsed.to, .category = parsed.category, .text = parsed.text, .ts = @import("platform/realtime.zig").milliseconds(undefined) };
+        const digest = board.textDigest(parsed.text);
+        @memcpy(post.post_id[0..16], digest[0..16]);
+        const auto_reply: ?[]const u8 = if (parsed.category == .ask) blk: {
+            root.lock();
+            defer root.mutex.unlock();
+            // Debounce per member: stored on the root (index = seq-1, ≤16).
+            var counts: [16]u32 = undefined;
+            const slot = if (seq == 0 or seq > 16) return error.ScopeChanged else seq - 1;
+            @memcpy(&counts, &root.board_ask_counts);
+            counts[slot] += 1;
+            @memcpy(&root.board_ask_counts, &counts);
+            if (counts[slot] >= 4) break :blk "按当前最佳判断继续";
+            break :blk null;
+        } else null;
+        try root.postBoard(post);
+        if (parsed.category == .ask and auto_reply == null) {
+            // ask 打断父依赖等待循环（§11.2）：由父 runner 的等待轮询在
+            // needsChildren 检查后走 deliverSettledReports 时发现新帖。
+        }
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .accepted = true, .post_id = std.fmt.bytesToHex(post.post_id, .lower), .note = auto_reply }, .{});
+        errdefer allocator.free(body);
+        const blocks = try allocator.alloc(@import("ai/host_tools.zig").Block, 1);
+        blocks[0] = .{ .structured = body };
+        return .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+    }
+
     fn dispatchChildGateway(self: *AiHost, bridge: *@import("ui/ai_tools.zig").Bridge, invocation: @import("ai/host_tools.zig").Invocation, allocator: std.mem.Allocator, cancel: ?*ai_provider.CancelToken) !@import("ai/host_tools.zig").Result {
         const gateway = @import("ai/child_gateway.zig");
         const parsed = gateway.parse(allocator, invocation.arguments) catch |err| switch (err) {
@@ -8822,6 +8897,9 @@ const AiHost = struct {
                 error.ChildAwaitingUser => rejectedHostInvocation(invocation, allocator, err),
                 else => err,
             };
+        }
+        if (std.mem.eql(u8, invocation.tool_id, @import("ai/swarm_board.zig").tool_id)) {
+            return self.dispatchBoardPost(bridge, invocation, allocator, cancel);
         }
         if (@import("ai/user_interaction.zig").supports(invocation.tool_id)) {
             const Validate = struct {

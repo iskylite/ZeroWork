@@ -128,3 +128,41 @@ test "v0.7 run_in_terminal 工具描述与 occupied_policy schema 契约" {
 comptime {
     _ = @import("config/ai_role_templates.zig");
 }
+
+// V0.7 阶段3 批S1/S2/S3/S5 契约测试通过本套件收集。
+comptime {
+    _ = @import("ai/swarm_mode.zig");
+    _ = @import("ai/swarm_board.zig");
+    _ = @import("ai/swarm_orchestration.zig");
+    _ = @import("ai/swarm_prompts.zig");
+}
+
+test "v0.7 board 引擎：postBoard 入流、ask 计数与终态清零" {
+    const budget_mod = @import("ai/task_budget.zig");
+    var root = budget_mod.Root.init(a);
+    defer root.deinit();
+    const parent = id.TaskId.generate();
+    try root.add(.{ .root = parent, .task = parent, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1, .request_key = "root" });
+    const child = delegated(parent, id.TaskId.generate());
+    try root.add(child);
+    // ask×3 不触发自动回复，第 4 次触发。
+    for (0..3) |_| {
+        const reply = blk: {
+            root.lock();
+            defer root.mutex.unlock();
+            root.board_ask_counts[root.facts[1].seq - 1] +|= 1;
+            break :blk if (root.board_ask_counts[root.facts[1].seq - 1] >= 4) "按当前最佳判断继续" else null;
+        };
+        try std.testing.expect(reply == null);
+    }
+    root.board_ask_counts[root.facts[1].seq - 1] +|= 1;
+    try std.testing.expectEqual(@as(u32, 4), root.board_ask_counts[root.facts[1].seq - 1]);
+    // postBoard 入流；父目标帖与 @all 帖可投递（deliverableText 语义）。
+    try root.postBoard(.{ .origin = child.seq, .to = .parent, .category = .ask, .text = "请求确认方案", .ts = 1 });
+    try root.postBoard(.{ .origin = child.seq, .to = .all, .category = .note, .text = "广播: " ++ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", .ts = 2 });
+    try root.postBoard(.{ .origin = child.seq, .to = .{ .member = 2 }, .category = .answer, .text = "给成员 2 的结果", .ts = 3 });
+    try std.testing.expectEqual(@as(usize, 3), root.board_posts.items.len);
+    // 终态清零 ask 计数。
+    try root.state(child.task, .succeeded, "done");
+    try std.testing.expectEqual(@as(u32, 0), root.board_ask_counts[root.facts[1].seq - 1]);
+}

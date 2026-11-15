@@ -38,13 +38,16 @@ pub const contribution: host.Contribution = .{ .authority = .conversation_contex
     \\    "request_key":{"type":"string","minLength":1,"maxLength":128,"description":"Optional for create and reuse; required for send. Omit on create/reuse to let the host derive a stable key from the task content—identical retries then deduplicate automatically. Reuse a key only when retrying the same request."},
     \\    "name":{"type":"string","minLength":1,"maxLength":32,"description":"Optional for create only. A short display label (1-32 characters); not required to be unique."},
     \\    "text":{"type":"string","minLength":1,"maxLength":32768,"description":"Required for create and reuse as task instructions, or for send as the message."},
-    \\    "purpose":{"type":"string","enum":["work","verify"],"description":"Optional for create and reuse. Defaults to work; verify makes the task read-only."},
+    \\    "purpose":{"type":"string","enum":["work","verify","challenge"],"description":"Optional for create and reuse. Defaults to work; verify makes the task read-only."},
     \\    "local_files":{"type":"string","enum":["none","read","write"],"description":"Optional for create and reuse only. Defaults to none. read and write require an eligible session in session_refs and matching parent authority. A verify task cannot request write."},
     \\    "agent_id":{"type":"string","minLength":2,"maxLength":32,"description":"Required for reuse only. The exact agent ID returned by list, or @N for child number N, or a bare label unique under this task."},
     \\    "task_id":{"type":"string","minLength":2,"maxLength":32,"description":"Required for send and stop only. The exact current-root task ID, or @N for child number N."},
     \\    "session_refs":{"type":"array","maxItems":32,"items":{"type":"string"},"description":"Required for create and reuse only. Supply an array of exact, distinct authorized session references. Use [] for material-only work."},
     \\    "context_mode":{"type":"string","enum":["independent","inherit"],"description":"Optional for create only."},
     \\    "reusable":{"type":"boolean","description":"Optional for create only. Controls whether this child can be reused after its task settles."},
+    \\    "role":{"type":"string","enum":["planner","worker","batch"],"description":"Optional for create only (V0.7 §12.1). Model/capability tier from the active template's role slot; default worker. The verifier slot is selected by purpose=verify/challenge, not by role."},
+    \\    "depends_on":{"type":"array","maxItems":16,"items":{"type":"string","minLength":2,"maxLength":32},"description":"Optional for create only (V0.7 §12.1). @seq references; this task starts only after every listed child reaches a terminal status. A dependency on itself fails with DependencyCycle."},
+    \\    "challenge_target":{"type":"string","minLength":2,"maxLength":32,"description":"Optional with purpose=challenge only (V0.7 §12.1). The @seq whose settle_report is destructively reviewed read-only; the challenged member's report and the original goal are supplied as task material."},
     \\    "model":{"type":"object","additionalProperties":false,"description":"Optional for create only. Set both provider_id and model_id.","properties":{"provider_id":{"type":"string"},"model_id":{"type":"string"}},"required":["provider_id","model_id"]},
     \\    "effort":{"type":"string","enum":["none","low","medium","high","xhigh","max","ultra"],"description":"Optional for create only."},
     \\    "after_sequence":{"type":"integer","minimum":0,"description":"Optional for wait_events only. Use the last returned sequence watermark, or 0 for the first read. Omit to receive only events newer than the last delivered report."},
@@ -55,7 +58,7 @@ pub const contribution: host.Contribution = .{ .authority = .conversation_contex
     .max_argument_bytes = 48 * 1024,
 } };
 pub const Action = enum { create, reuse, list, send, stop, wait_events };
-pub const Purpose = enum { work, verify };
+pub const Purpose = enum { work, verify, challenge };
 pub const Request = struct {
     action: Action,
     purpose: ?Purpose = null,
@@ -71,6 +74,14 @@ pub const Request = struct {
     session_refs: ?[]const []const u8 = null,
     context_mode: ?life.child.ContextMode = null,
     reusable: ?bool = null,
+    /// V0.7 §12.1 role tier (planner/worker/batch; verifier is a purpose).
+    role: ?@import("swarm_orchestration.zig").GatewayRole = null,
+    /// V0.7 §12.1 dependency references; the host starts this task only
+    /// after every listed child reached a terminal status.
+    depends_on: ?[]const []const u8 = null,
+    /// V0.7 §12.1 with purpose=challenge: the @seq whose settle_report is
+    /// destructively reviewed read-only.
+    challenge_target: ?[]const u8 = null,
     model: ?@import("provider_config.zig").ModelSelection = null,
     effort: ?@import("provider.zig").Effort = null,
     after_sequence: ?u64 = null,
@@ -90,6 +101,9 @@ pub const Request = struct {
         session_refs: ?[]const []const u8 = null,
         context_mode: ?life.child.ContextMode = null,
         reusable: ?bool = null,
+        role: ?@import("swarm_orchestration.zig").GatewayRole = null,
+        depends_on: ?[]const []const u8 = null,
+        challenge_target: ?[]const u8 = null,
         model: ?@import("provider_config.zig").ModelSelection = null,
         effort: ?@import("provider.zig").Effort = null,
         after_sequence: ?u64 = null,
@@ -133,7 +147,7 @@ pub const Request = struct {
         return init(parsed);
     }
     fn init(shaped: Shape) @This() {
-        return .{ .action = shaped.action, .purpose = shaped.purpose, .local_files = shaped.local_files, .request_key = shaped.request_key, .name = shaped.name, .text = shaped.text, .agent_ref = shaped.agent_ref, .task_ref = shaped.task_ref, .session_refs = shaped.session_refs, .context_mode = shaped.context_mode, .reusable = shaped.reusable, .model = shaped.model, .effort = shaped.effort, .after_sequence = shaped.after_sequence, .wait_ms = shaped.wait_ms };
+        return .{ .action = shaped.action, .purpose = shaped.purpose, .local_files = shaped.local_files, .request_key = shaped.request_key, .name = shaped.name, .text = shaped.text, .agent_ref = shaped.agent_ref, .task_ref = shaped.task_ref, .session_refs = shaped.session_refs, .context_mode = shaped.context_mode, .reusable = shaped.reusable, .role = shaped.role, .depends_on = shaped.depends_on, .challenge_target = shaped.challenge_target, .model = shaped.model, .effort = shaped.effort, .after_sequence = shaped.after_sequence, .wait_ms = shaped.wait_ms };
     }
 };
 pub fn parse(a: std.mem.Allocator, value: std.json.Value) !std.json.Parsed(Request) {
@@ -151,7 +165,11 @@ pub fn parse(a: std.mem.Allocator, value: std.json.Value) !std.json.Parsed(Reque
     if (r.name) |label| if (label.len == 0 or label.len > 32 or !std.unicode.utf8ValidateSlice(label)) return error.InvalidArguments;
     if (r.agent_ref) |ref| if (ref.len < 2 or ref.len > 32 or !std.unicode.utf8ValidateSlice(ref)) return error.InvalidArguments;
     if (r.task_ref) |ref| if (ref.len < 2 or ref.len > 32 or !std.unicode.utf8ValidateSlice(ref)) return error.InvalidArguments;
-    if (r.action != .create and (r.name != null or r.context_mode != null or r.reusable != null or r.model != null or r.effort != null)) return error.InvalidArguments;
+    if (r.action != .create and (r.name != null or r.context_mode != null or r.reusable != null or r.model != null or r.effort != null or r.role != null or r.depends_on != null)) return error.InvalidArguments;
+    if (r.challenge_target != null and r.purpose != .challenge) return error.InvalidArguments;
+    if (r.purpose == .challenge and r.challenge_target == null) return error.InvalidArguments;
+    if (r.purpose == .challenge and r.action != .create) return error.InvalidArguments;
+    if (r.depends_on) |deps| if (deps.len > 16) return error.InvalidArguments;
     if (r.action != .create and r.action != .reuse and (r.agent_ref != null or r.session_refs != null or r.local_files != null or r.purpose != null)) return error.InvalidArguments;
     if (r.action != .send and r.action != .create and r.action != .reuse and (r.text != null or r.request_key != null)) return error.InvalidArguments;
     if (r.action != .send and r.action != .stop and r.task_ref != null) return error.InvalidArguments;
