@@ -344,6 +344,9 @@ const Job = struct {
         try probeChat(self.arena.allocator(), t, resolved, &self.cancel, &self.diagnostic);
         self.success = true;
     }
+    fn credentialWaitCancelled(cancel: *@import("provider.zig").CancelToken) bool {
+        return cancel.isCancelled();
+    }
     fn discover(self: *Job) !void {
         var io: std.Io.Threaded = .init(std.heap.c_allocator, .{});
         defer io.deinit();
@@ -358,9 +361,12 @@ const Job = struct {
             if (self.cancel.isCancelled()) return error.Cancelled;
             if (!p.enabled or p.endpoint.len == 0) continue;
             const url = try catalog.endpoint(a, p.endpoint, p.kind);
-            const secret = if (p.api_key.len == 0 and p.api_key_ref != null and
-                (self.require_list or @import("../config/credential_store.zig").isUnlocked()))
-                @import("../config/credential_store.zig").getIfPresent(a, p.api_key_ref.?) catch |err| if (self.require_list) return err else null
+            const credentials = @import("../config/credential_store.zig");
+            const secret = if (p.api_key.len == 0 and p.api_key_ref != null)
+                credentials.getForWorker(a, p.api_key_ref.?, &self.cancel, credentialWaitCancelled) catch |err| blk: {
+                    if (self.require_list or err == error.Cancelled) return err;
+                    break :blk null;
+                }
             else
                 null;
             defer if (secret) |key| @import("provider_config.zig").releaseCredential(a, key);

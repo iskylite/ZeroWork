@@ -133,11 +133,15 @@ pub const ProviderConfig = struct {
     }
 };
 
+fn credentialWaitCancelled(cancel: ?*provider.CancelToken) bool {
+    return if (cancel) |token| token.isCancelled() else false;
+}
+
 /// Resolve only at an admitted request boundary. The caller owns and wipes the key.
 pub fn loadCredential(self: ProviderConfig, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !?[]u8 {
     const reference = self.credential_ref orelse return null;
-    if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
-    const secret = try @import("../config/credential_store.zig").getIfPresent(allocator, reference) orelse return error.MissingApiKey;
+    const credentials = @import("../config/credential_store.zig");
+    const secret = try credentials.getForWorker(allocator, reference, cancel, credentialWaitCancelled) orelse return error.MissingApiKey;
     errdefer releaseCredential(allocator, secret);
     if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
     return secret;

@@ -229,11 +229,11 @@ fn connectWithCredentials(job: *ConnectJob) !*SessionRuntime {
     var reader: @import("connection_source.zig").CredentialReader = .{ .allocator = allocator };
     defer reader.deinit();
     const use_totp = job.config_snapshot.value.ssh.totp_autofill;
-    const host = try reader.resolveForConnection(job.host_snapshot.value, use_totp);
+    const host = try reader.resolveForConnection(job.host_snapshot.value, use_totp, &job.cancelled);
     var hops: [8]hosts_mod.HostConfig = undefined;
     for (job.jump_snapshot.value, 0..) |hop, index| {
         if (job.cancelled.load(.acquire)) return error.Cancelled;
-        hops[index] = try reader.resolveForConnection(hop, use_totp);
+        hops[index] = try reader.resolveForConnection(hop, use_totp, &job.cancelled);
     }
     if (job.cancelled.load(.acquire)) return error.Cancelled;
     var target = runtimeTarget(job);

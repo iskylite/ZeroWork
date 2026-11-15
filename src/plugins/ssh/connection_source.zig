@@ -14,10 +14,17 @@ pub const CredentialReader = struct {
     loaded: std.ArrayList([]u8) = .empty,
 
     pub fn resolve(self: *CredentialReader, host: hosts.HostConfig) !hosts.HostConfig {
+        return self.resolveCredentials(host, null);
+    }
+
+    fn resolveCredentials(self: *CredentialReader, host: hosts.HostConfig, cancelled: ?*const std.atomic.Value(bool)) !hosts.HostConfig {
         var result = host;
         inline for (.{ .{ "password", "password_ref" }, .{ "key_passphrase", "key_passphrase_ref" }, .{ "totp_secret", "totp_secret_ref" } }) |fields| {
             if (@field(result, fields[0]) == null) if (@field(result, fields[1])) |reference| {
-                const value = try credentials.getIfPresent(self.allocator, reference);
+                const value = if (cancelled) |flag|
+                    try credentials.getForWorker(self.allocator, reference, flag, session.credentialWaitCancelled)
+                else
+                    try credentials.getIfPresent(self.allocator, reference);
                 if (value) |secret| {
                     errdefer {
                         std.crypto.secureZero(u8, secret);
@@ -31,12 +38,12 @@ pub const CredentialReader = struct {
         return result;
     }
 
-    pub fn resolveForConnection(self: *CredentialReader, host: hosts.HostConfig, use_totp: bool) !hosts.HostConfig {
+    pub fn resolveForConnection(self: *CredentialReader, host: hosts.HostConfig, use_totp: bool, cancelled: *const std.atomic.Value(bool)) !hosts.HostConfig {
         var wanted = host;
         if (wanted.auth_mode != .password) wanted.password_ref = null;
         if (wanted.auth_mode != .private_key) wanted.key_passphrase_ref = null;
         if (!use_totp) wanted.totp_secret_ref = null;
-        return self.resolve(wanted);
+        return self.resolveCredentials(wanted, cancelled);
     }
 
     pub fn deinit(self: *CredentialReader) void {

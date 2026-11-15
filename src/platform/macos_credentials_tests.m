@@ -89,8 +89,6 @@ static OSStatus fake_set_interaction(Boolean value) { fake_interaction = value; 
 #include "macos_credentials.m"
 
 static void reset_cache(void) {
-    if (confirmed_service) CFRelease(confirmed_service);
-    confirmed_service = NULL;
     if (cached_service) CFRelease(cached_service);
     if (cached_vault) CFRelease(cached_vault);
     cached_service = NULL; cached_vault = NULL; vault_exists = 0;
@@ -100,6 +98,10 @@ static void expect_secret(const char *reference, const char *expected) {
     assert(zw_credentials_get("com.zerowork.tests.mock-only", reference, &value, &length) == errSecSuccess);
     assert(length == strlen(expected) && !memcmp(value, expected, length));
     zw_credentials_free(value, length);
+}
+static void *read_concurrently(void *reference) {
+    expect_secret(reference, "preserved-secret");
+    return NULL;
 }
 static int verify_export(void *raw, const char *reference, const unsigned char *value, size_t length) {
     int *count = raw;
@@ -121,6 +123,8 @@ int main(void) {
     assert(zw_credentials_erase(scope) == errSecSuccess); // Missing is success.
     assert(reads == 0 && ref_reads == 0 && fake_interaction);
     fail_read = errSecSuccess;
+    assert(zw_credentials_authorize(scope) == errSecSuccess);
+    assert(reads == 1 && !confirmations && !authorization_reads && !vault_exists);
     assert(zw_credentials_add(scope, a, (const unsigned char *)"owned-first", 11) == errSecSuccess);
     assert(reads == 1 && additions == 1 && updates == 0 && fake_interaction);
     assert(zw_credentials_add(scope, b, (const unsigned char *)"owned-second", 12) == errSecSuccess);
@@ -191,16 +195,19 @@ int main(void) {
     int reads_before_confirmation = reads;
     int confirmations_before = confirmations;
     fail_confirmation = -43001;
-    assert(zw_credentials_get(scope, a, &missing, &length) == -43001);
-    assert(!cached_service && !cached_vault && !confirmed_service && reads == reads_before_confirmation);
-    fail_confirmation = -43002;
-    assert(zw_credentials_authorize(scope) == -43002);
-    assert(!cached_service && !cached_vault && reads == reads_before_confirmation);
-    fail_confirmation = errSecSuccess; fail_read = errSecSuccess;
+    fail_read = errSecSuccess;
+    assert(zw_credentials_authorize(scope) == errSecSuccess);
     expect_secret(a, "preserved-secret"); expect_secret(a, "preserved-secret");
-    assert(confirmations == confirmations_before + 3 && reads == reads_before_confirmation + 1);
+    assert(confirmations == confirmations_before && reads == reads_before_confirmation + 1);
+    assert(authorization_reads == 2);
     assert(zw_credentials_get("com.zerowork.tests.other-scope", a, &missing, &length) == errSecParam);
-    assert(confirmations == confirmations_before + 3);
+    // A cached read succeeds with another reader active, while writes stay exclusive.
+    assert(pthread_rwlock_rdlock(&vault_lock) == 0);
+    pthread_t reader;
+    assert(pthread_create(&reader, NULL, read_concurrently, (void *)a) == 0);
+    assert(pthread_join(reader, NULL) == 0);
+    assert(zw_credentials_add(scope, c, (const unsigned char *)"concurrent", 10) == -43003);
+    assert(pthread_rwlock_unlock(&vault_lock) == 0);
     reset_cache();
     int copied = 0;
     fail_confirmation = -43001;

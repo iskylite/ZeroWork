@@ -11,10 +11,14 @@
 static int fixture_credential(unsigned char **out, size_t *length) {
     const char *mode = getenv("ZW_TEST_CREDENTIAL_RESPONSE");
     if (!mode) return 1;
-    fputs("ZW_TEST_CREDENTIAL_REQUEST\n", stderr);
-    fflush(stderr);
-    usleep(900000);
-    if (strcmp(mode, "success") != 0) return -43001;
+    if (strcmp(mode, "silent-success") != 0) {
+        fputs("ZW_TEST_CREDENTIAL_REQUEST\n", stderr);
+        fflush(stderr);
+        int slow_success = strcmp(mode, "slow-success") == 0;
+        if (slow_success) sleep(3);
+        else usleep(900000);
+        if (!slow_success && strcmp(mode, "success") != 0) return -43001;
+    }
     const char value[] = "fixture-only-secret";
     *length = sizeof(value) - 1;
     *out = malloc(*length);
@@ -59,9 +63,6 @@ static OSStatus confirm_vault(void) {
 // item from its process cache. The agent keeps its own default macOS ACL.
 static CFStringRef cached_service;
 static CFMutableDictionaryRef cached_vault;
-#if !defined(ZW_CREDENTIALS_LOCAL)
-static CFStringRef confirmed_service;
-#endif
 static int vault_exists;
 #if !defined(ZW_CREDENTIALS_LOCAL)
 static void discard_vault_cache(void) {
@@ -69,20 +70,33 @@ static void discard_vault_cache(void) {
     if (cached_vault) CFRelease(cached_vault);
     cached_service = NULL; cached_vault = NULL; vault_exists = 0;
 }
-static pthread_mutex_t vault_lock = PTHREAD_MUTEX_INITIALIZER;
-static void unlock_vault(pthread_mutex_t **lock) { pthread_mutex_unlock(*lock); }
+static pthread_rwlock_t vault_lock = PTHREAD_RWLOCK_INITIALIZER;
+static void unlock_vault(pthread_rwlock_t **lock) { pthread_rwlock_unlock(*lock); }
+
+// The populated cache is read-only under a shared lock. Loading a cold
+// vault requires the exclusive lock, just as writes and conversion do.
+static int lock_vault_read(void) {
+    if (pthread_rwlock_tryrdlock(&vault_lock) != 0) return 0;
+    if (cached_service) return 1;
+    pthread_rwlock_unlock(&vault_lock);
+    return pthread_rwlock_trywrlock(&vault_lock) == 0;
+}
 #define ZW_VAULT_GUARD \
-    if (pthread_mutex_trylock(&vault_lock) != 0) return -43003; \
-    pthread_mutex_t *guard __attribute__((cleanup(unlock_vault), unused)) = &vault_lock
+    if (pthread_rwlock_trywrlock(&vault_lock) != 0) return -43003; \
+    pthread_rwlock_t *guard __attribute__((cleanup(unlock_vault), unused)) = &vault_lock
+#define ZW_VAULT_READ_GUARD \
+    if (!lock_vault_read()) return -43003; \
+    pthread_rwlock_t *guard __attribute__((cleanup(unlock_vault), unused)) = &vault_lock
 
 int zw_credentials_cached(void) {
-    if (pthread_mutex_trylock(&vault_lock) != 0) return 0;
+    if (pthread_rwlock_tryrdlock(&vault_lock) != 0) return 0;
     int ready = cached_service != NULL;
-    pthread_mutex_unlock(&vault_lock);
+    pthread_rwlock_unlock(&vault_lock);
     return ready;
 }
 #else
 #define ZW_VAULT_GUARD
+#define ZW_VAULT_READ_GUARD
 #endif
 
 static const CFStringRef vault_account = CFSTR("vault-v1");
@@ -176,26 +190,12 @@ static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
     }
     CFMutableDictionaryRef q = vault_query(service);
     if (!q) { CFRelease(name); return errSecAllocate; }
-#if !defined(ZW_CREDENTIALS_LOCAL)
-    // Probe metadata before reading any saved secret. New/empty installations
-    // do not ask for authentication. Cache is published only after all checks.
-    OSStatus presence = no_ui_call(0, q, NULL, NULL);
-    if (presence != errSecSuccess && presence != errSecItemNotFound) {
-        CFRelease(q); CFRelease(name); return presence;
-    }
-    if (presence == errSecSuccess && (!confirmed_service || !CFEqual(confirmed_service, name))) {
-        OSStatus confirmation = confirm_vault();
-        if (confirmation) { CFRelease(q); CFRelease(name); return confirmation; }
-        if (confirmed_service) CFRelease(confirmed_service);
-        confirmed_service = CFRetain(name);
-    }
-#endif
     CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
     CFTypeRef data = NULL;
     OSStatus status;
     if (allow_ui) {
-        // Only the explicit startup recovery action may request system UI.
+        // Startup recovery and explicit conversion may request system UI.
         // This reads the same vault and preserves its existing access control.
 #if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING)
         if (credential_agent_is_bundled()) status = credential_agent_call(0, q, NULL, &data, 1);
@@ -249,8 +249,59 @@ static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
     cached_service = name; cached_vault = next; vault_exists = exists; return errSecSuccess;
 }
 static OSStatus load_vault(const char *service) { return load_vault_with_ui(service, 0); }
+#if defined(ZW_CREDENTIALS_LOCAL)
 int zw_credentials_authorize(const char *service) { ZW_VAULT_GUARD; return (int)load_vault_with_ui(service, 1); }
-#if !defined(ZW_CREDENTIALS_LOCAL)
+#else
+static OSStatus authorize_vault(const char *service) {
+    OSStatus status = load_vault(service);
+    if (status == errSecInteractionNotAllowed || status == errSecAuthFailed) status = load_vault_with_ui(service, 1);
+    return status;
+}
+
+int zw_credentials_authorize(const char *service) {
+    ZW_VAULT_GUARD;
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+    if (!cached_service) {
+        unsigned char *value = NULL; size_t length = 0;
+        int result = fixture_credential(&value, &length);
+        if (result != 1) {
+            if (result) return result;
+            CFDataRef data = CFDataCreate(NULL, value, (CFIndex)length);
+            memset(value, 0, length); free(value);
+            CFStringRef name = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+            CFMutableDictionaryRef vault = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            if (data && name && vault) {
+                CFDictionarySetValue(vault, CFSTR("zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), data);
+                cached_service = name; cached_vault = vault;
+            } else {
+                if (name) CFRelease(name);
+                if (vault) CFRelease(vault);
+                result = errSecAllocate;
+            }
+            if (data) CFRelease(data);
+            return result;
+        }
+    }
+#endif
+    return authorize_vault(service);
+}
+
+static OSStatus authorize_conversion(const char *service) {
+    if (!cached_service) {
+        CFMutableDictionaryRef query = vault_query(service);
+        if (!query) return errSecAllocate;
+        OSStatus presence = no_ui_call(0, query, NULL, NULL);
+        CFRelease(query);
+        if (presence == errSecSuccess) {
+            OSStatus confirmation = confirm_vault();
+            if (confirmation) return confirmation;
+        } else if (presence != errSecItemNotFound && presence != errSecInteractionNotAllowed && presence != errSecAuthFailed) {
+            return presence;
+        }
+    }
+    return authorize_vault(service);
+}
+
 typedef int (*export_value)(void *, const char *, const unsigned char *, size_t);
 struct export_context { export_value write; void *context; int failed; };
 static void write_exported_value(const void *key, const void *value, void *raw) {
@@ -277,8 +328,7 @@ int zw_credentials_export(const char *service, void *context, export_value write
         return failed ? errSecIO : errSecSuccess;
     }
 #endif
-    OSStatus status = load_vault(service);
-    if (status == errSecInteractionNotAllowed || status == errSecAuthFailed) status = load_vault_with_ui(service, 1);
+    OSStatus status = authorize_conversion(service);
     if (status) return status;
     struct export_context state = { write, context, 0 };
     CFDictionaryApplyFunction(cached_vault, write_exported_value, &state);
@@ -373,10 +423,7 @@ int zw_credentials_import(const char *service, const struct import_entry *entrie
     }
     if (fixture_mode) { CFRelease(next); return status; }
 #endif
-    if (!status) {
-        status = load_vault(service);
-        if (status == errSecInteractionNotAllowed || status == errSecAuthFailed) status = load_vault_with_ui(service, 1);
-    }
+    if (!status) status = authorize_conversion(service);
     if (!status) status = save_vault(service, next);
     if (status) { CFRelease(next); return status; }
     // Verify through Security (or the signed agent), not the process cache.
@@ -386,12 +433,8 @@ int zw_credentials_import(const char *service, const struct import_entry *entrie
 }
 #endif
 int zw_credentials_get(const char *service, const char *reference, unsigned char **out, size_t *length) {
-    ZW_VAULT_GUARD;
+    ZW_VAULT_READ_GUARD;
     if (!owned_reference(reference)) return errSecParam;
-#if defined(ZW_CREDENTIALS_UI_FIXTURE)
-    int fixture = cached_service ? 1 : fixture_credential(out, length);
-    if (fixture != 1) return fixture;
-#endif
     OSStatus status = load_vault(service); if (status) return status;
     CFStringRef key = CFStringCreateWithCString(NULL, reference, kCFStringEncodingUTF8);
     if (!key) return errSecAllocate;

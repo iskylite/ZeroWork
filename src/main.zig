@@ -13508,7 +13508,7 @@ const SettingsHost = struct {
 
     /// Rechecked at dispatch across every process-owned window and resource domain.
     fn dataCleanupBlocked(self: *SettingsHost) ?[]const u8 {
-        if (@import("config/credential_store.zig").isConverting()) return "请等待凭据转换完成";
+        if (credential_store.isConverting() or credential_store.startupPending()) return "请等待凭据操作完成";
         if (self.hasActiveCleanupSessions()) return "请先结束所有窗口的活动会话与后台连接";
         const process = process_windows orelse return "应用尚未准备好，请稍后重试";
         if (process.ai_history_thread != null) return "请等待 AI 会话历史索引完成";
@@ -20513,6 +20513,9 @@ pub fn main() !void {
     if (application_test_mode) try verifyUiFontPaths(app);
     app_font_registry = &registry;
     defer app_font_registry = null;
+    const unlock_credentials = credentials.reserveStartupUnlock();
+    var credential_unlock_started: ?u64 = null;
+    defer if (unlock_credentials and credential_unlock_started == null) credentials.completeStartupUnlock(error.Cancelled);
     const window_at = wallClockMsTransfer();
     try app.mount(mountUI);
     const mounted_at = wallClockMsTransfer();
@@ -20553,6 +20556,7 @@ pub fn main() !void {
     // The callback has no Cx/window pointer and remains valid through worker cleanup.
     var startup_reported = false;
     var interactive_reported = false;
+    var credential_unlock_reported = false;
     while (windows.shouldContinue()) {
         process.publishAiHistory();
         const menu_action = menu_bar.takeAction();
@@ -20614,6 +20618,19 @@ pub fn main() !void {
         if (!interactive_reported and (nav.startup_view == null or nav.startup_view.?.transition.finished)) {
             interactive_reported = true;
             applog.info(.app, "startup interactive ms total={d}", .{wallClockMsTransfer() - started_at});
+            if (unlock_credentials) {
+                credential_unlock_started = wallClockMsTransfer();
+                if (std.Thread.spawn(.{}, credentials.unlockAtStartup, .{})) |worker| {
+                    worker.detach();
+                } else |err| credentials.completeStartupUnlock(err);
+            }
+        }
+        if (!credential_unlock_reported and credential_unlock_started != null) {
+            if (credentials.startupUnlockResult()) |result| {
+                credential_unlock_reported = true;
+                const status = if (result) |_| "ok" else |err| @errorName(err);
+                applog.info(.app, "startup credentials ms total={d} result={s}", .{ wallClockMsTransfer() - credential_unlock_started.?, status });
+            }
         }
         if (!startup_reported) {
             startup_reported = true;

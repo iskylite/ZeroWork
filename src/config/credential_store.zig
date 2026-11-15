@@ -9,6 +9,9 @@ const default_service = "com.zerowork.app.credentials";
 var service: ?[:0]const u8 = null;
 var local_store: ?LocalStore = null;
 var local_mode: std.atomic.Value(bool) = .init(false);
+var startup_reserved: std.atomic.Value(bool) = .init(false);
+var startup_finished: std.Io.Event = .unset;
+var startup_failure: ?anyerror = null;
 var converting: std.atomic.Value(bool) = .init(false);
 var transactions: std.atomic.Value(usize) = .init(0);
 var readers: std.atomic.Value(usize) = .init(0);
@@ -54,6 +57,47 @@ pub fn usesLocal() bool {
 pub fn isUnlocked() bool {
     return if (builtin.is_test) true else usesLocal() or native.cached();
 }
+pub fn reserveStartupUnlock() bool {
+    const reserve = !usesLocal();
+    startup_reserved.store(reserve, .release);
+    return reserve;
+}
+pub fn startupPending() bool {
+    return startup_reserved.load(.acquire) and !startup_finished.isSet();
+}
+pub fn unlockAtStartup() void {
+    const result = if (scope()) |name| native.authorize(name) else |err| err;
+    completeStartupUnlock(result);
+}
+pub fn completeStartupUnlock(result: anyerror!void) void {
+    startup_failure = if (result) |_| null else |err| err;
+    startup_finished.set(std.Io.Threaded.global_single_threaded.io());
+}
+pub fn startupUnlockResult() ?anyerror!void {
+    if (!startup_finished.isSet()) return null;
+    if (startup_failure) |err| return @as(anyerror!void, err);
+    return {};
+}
+/// Only workers wait for the shared system request. UI callers get CredentialBusy.
+fn waitForStartup(cancel: anytype, comptime isCancelled: fn (@TypeOf(cancel)) bool) !void {
+    while (startupPending()) {
+        if (isCancelled(cancel)) return error.Cancelled;
+        startup_finished.waitTimeout(std.Io.Threaded.global_single_threaded.io(), .{
+            .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake },
+        }) catch |err| switch (err) {
+            error.Timeout => {},
+            error.Canceled => return error.Cancelled,
+        };
+    }
+    if (isCancelled(cancel)) return error.Cancelled;
+}
+fn checkStartupUnlock() !void {
+    if (startupPending()) return error.CredentialBusy;
+    if (startupUnlockResult()) |result| result catch |err| {
+        if (!native.cached()) return err;
+    };
+}
+
 pub fn isConverting() bool {
     return converting.load(.acquire);
 }
@@ -61,6 +105,7 @@ pub const Storage = enum { local, keychain };
 pub const Conversion = enum { complete, local_cleanup_pending };
 
 pub fn beginConversion(target: Storage) bool {
+    if (startupPending()) return false;
     if (converting.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return false;
     if (usesLocal() != (target == .local) and transactions.load(.seq_cst) == 0 and readers.load(.seq_cst) == 0) return true;
     endConversion();
@@ -144,6 +189,7 @@ pub fn get(a: std.mem.Allocator, reference: []const u8) ![]u8 {
     defer _ = readers.fetchSub(1, .seq_cst);
     if (converting.load(.seq_cst)) return error.CredentialBusy;
     if (usesLocal()) return (try local()).get(a, reference);
+    try checkStartupUnlock();
     return native.get(a, s, reference);
 }
 
@@ -153,6 +199,11 @@ pub fn getIfPresent(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
         else => return err,
     };
 }
+pub fn getForWorker(a: std.mem.Allocator, reference: []const u8, cancel: anytype, comptime isCancelled: fn (@TypeOf(cancel)) bool) !?[]u8 {
+    try waitForStartup(cancel, isCancelled);
+    return getIfPresent(a, reference);
+}
+
 pub fn getCached(a: std.mem.Allocator, reference: []const u8) !?[]u8 {
     if (!isUnlocked()) return null;
     return getIfPresent(a, reference) catch |err| switch (err) {
@@ -165,6 +216,7 @@ fn add(reference: []const u8, secret: []const u8) !void {
     if (backend()) |b| return b.add(b.context, s, reference, secret);
     if (builtin.is_test) unreachable;
     if (usesLocal()) return (try local()).add(reference, secret);
+    try checkStartupUnlock();
     return native.add(alloc, s, reference, secret);
 }
 fn remove(reference: []const u8) !void {
@@ -173,6 +225,7 @@ fn remove(reference: []const u8) !void {
     if (backend()) |b| return b.remove(b.context, s, reference);
     if (builtin.is_test) unreachable;
     if (usesLocal()) return (try local()).remove(reference);
+    try checkStartupUnlock();
     return native.remove(alloc, s, reference);
 }
 /// Call after both owned files are parsed successfully, retaining their union of refs.
@@ -180,13 +233,16 @@ fn remove(reference: []const u8) !void {
 pub fn reconcileScope(keep: []const []const u8) !void {
     const s = try scope();
     for (keep) |reference| if (!validReference(reference)) return error.InvalidCredentialReference;
-    if (backend()) |b| try b.collect(b.context, s, keep) else if (builtin.is_test) unreachable else if (usesLocal()) try (try local()).collect(keep, validReference) else try native.collect(alloc, s, keep);
+    if (backend()) |b| try b.collect(b.context, s, keep) else if (builtin.is_test) unreachable else if (usesLocal()) try (try local()).collect(keep, validReference) else {
+        try checkStartupUnlock();
+        try native.collect(alloc, s, keep);
+    }
     pending_cleanup.clearRetainingCapacity();
 }
 pub fn eraseScope() !void {
     if (backend()) |_| return reconcileScope(&.{});
     if (builtin.is_test) unreachable;
-    if (isConverting()) return error.CredentialBusy;
+    if (isConverting() or startupPending()) return error.CredentialBusy;
     try native.erase(try scope());
     try (try local()).collect(&.{}, validReference);
     pending_cleanup.clearRetainingCapacity();

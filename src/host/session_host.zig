@@ -21,11 +21,15 @@ pub const AuthOptions = union(enum) {
     private_key: struct { path: []const u8, passphrase: ?[]const u8 = null },
     keyboard_interactive,
 };
+pub fn credentialWaitCancelled(cancelled: *const std.atomic.Value(bool)) bool {
+    return cancelled.load(.acquire);
+}
+
 /// Called by the transport worker before opening a socket.
 pub fn resolveRemoteAuth(allocator: std.mem.Allocator, auth: AuthOptions, reference: ?[]const u8, cancelled: *const std.atomic.Value(bool)) !AuthOptions {
     const ref = reference orelse return auth;
-    if (cancelled.load(.acquire)) return error.Cancelled;
-    const secret = try @import("../config/credential_store.zig").getIfPresent(allocator, ref) orelse return error.CredentialMissing;
+    const credentials = @import("../config/credential_store.zig");
+    const secret = try credentials.getForWorker(allocator, ref, cancelled, credentialWaitCancelled) orelse return error.CredentialMissing;
     errdefer {
         std.crypto.secureZero(u8, secret);
         allocator.free(secret);
@@ -51,9 +55,9 @@ pub fn releaseRemoteAuth(auth: AuthOptions, reference: ?[]const u8, allocator: s
 
 pub fn unlockRemoteTotp(reference: ?[]const u8, cancelled: *const std.atomic.Value(bool)) !void {
     const ref = reference orelse return;
-    if (cancelled.load(.acquire)) return error.Cancelled;
+    const credentials = @import("../config/credential_store.zig");
     const allocator = std.heap.c_allocator;
-    if (try @import("../config/credential_store.zig").getIfPresent(allocator, ref)) |secret| {
+    if (try credentials.getForWorker(allocator, ref, cancelled, credentialWaitCancelled)) |secret| {
         std.crypto.secureZero(u8, secret);
         allocator.free(secret);
     }
