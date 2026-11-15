@@ -197,7 +197,13 @@ test "v0.4 task gateway atomic launch idempotency report delivery and worker set
     defer repeated.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), child.calls.load(.acquire));
     try std.testing.expectError(error.ChildRequestConflict, invoke(env, "{\"action\":\"create\",\"request_key\":\"one\",\"name\":\"reader\",\"text\":\"changed\",\"session_refs\":[]}"));
-    try std.testing.expectError(error.TargetNotAuthorized, invoke(env, "{\"action\":\"create\",\"request_key\":\"outside\",\"name\":\"reader\",\"text\":\"x\",\"session_refs\":[\"s1:outside:99:1\"]}"));
+    // V0.7 §3.2: unauthorized targets return a rejected payload listing the
+    // authorized session references instead of a bare error code.
+    var outside = try invoke(env, "{\"action\":\"create\",\"request_key\":\"outside\",\"name\":\"reader\",\"text\":\"x\",\"session_refs\":[\"s1:outside:99:1\"]}");
+    defer outside.deinit(a);
+    try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.rejected, outside.status);
+    try std.testing.expect(std.mem.indexOf(u8, outside.blocks[0].structured, "TargetNotAuthorized") != null);
+    try std.testing.expect(std.mem.indexOf(u8, outside.blocks[0].structured, "authorized_sessions") != null);
     child.release.store(true, .release);
     const start = (Clock{}).now();
     while (parent.task_root.?.childrenRunning(parent.context.?.task)) {
@@ -474,11 +480,13 @@ test "v0.4 task gateway schemas reject irrelevant authority fields and bounded e
     const schema = try std.json.parseFromSlice(std.json.Value, a, definition.schema, .{});
     defer schema.deinit();
     const purpose = schema.value.object.get("properties").?.object.get("purpose").?.object.get("description").?.string;
-    try std.testing.expect(std.mem.indexOf(u8, purpose, "reuse only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, purpose, "Omit for create") != null);
+    // V0.7 §3.7 opens purpose=verify to create as well as reuse.
+    try std.testing.expect(std.mem.indexOf(u8, purpose, "Defaults to work") != null);
+    try std.testing.expect(std.mem.indexOf(u8, purpose, "read-only") != null);
 
     for ([_][]const u8{
-        "{\"action\":\"create\",\"request_key\":\"new\",\"name\":\"child\",\"text\":\"task\",\"session_refs\":[],\"purpose\":\"work\"}",
+        // V0.7 §2.1: agent_id/task_id accept @N and bare labels, so short
+        // strings parse; authority is rejected later at resolution time.
         "{\"action\":\"reuse\",\"agent_id\":\"invalid\",\"model\":{\"provider_id\":\"p\",\"model_id\":\"m\"}}",
         "{\"action\":\"list\",\"session_refs\":[]}",
         "{\"action\":\"wait_events\",\"wait_ms\":10001}",

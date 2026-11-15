@@ -8290,7 +8290,7 @@ const AiHost = struct {
             const root = value.attached_runner.?.task_root.?;
             root.lock();
             self_call.has_events = for (root.facts[0..root.count]) |fact| {
-                if (fact.parent != null and fact.event_sequence > self_call.request.after_sequence) break true;
+                if (fact.parent != null and fact.event_sequence > (self_call.request.after_sequence orelse root.delivered_watermark)) break true;
             } else false;
             root.mutex.unlock();
             const source = try value.attachedInput(value.attached_runner.?.context.?.submission);

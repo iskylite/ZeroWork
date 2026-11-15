@@ -70,6 +70,13 @@ pub const Fact = struct {
     event_sequence: u64 = 0,
     status: Status = .running,
     request_key: []const u8 = "",
+    /// Host-assigned display sequence within the parent conversation scope.
+    /// Unique per owning parent conversation; reuse keeps it, destroy never
+    /// recycles it (V0.7 §2.1). Zero only for pre-V0.7 journal replay rows.
+    seq: u32 = 0,
+    /// Optional mnemonic label. Not unique, never used as a reference alone
+    /// unless it uniquely matches one child under the same parent task.
+    label: []const u8 = "",
     input_hash: [32]u8 = @splat(0),
     summary: []const u8 = "",
     delivered: bool = false,
@@ -94,6 +101,7 @@ pub const Fact = struct {
     }
     pub fn validate(self: Fact) !void {
         if (!self.root.valid() or !self.task.valid() or !self.conversation.valid() or !self.agent.valid() or self.generation == 0 or self.sequence == 0 or self.attempt == 0 or self.summary.len > 4096 or self.request_key.len > 128 or !std.unicode.utf8ValidateSlice(self.summary) or !std.unicode.utf8ValidateSlice(self.request_key)) return error.InvalidTaskFact;
+        if (self.label.len > 32 or !std.unicode.utf8ValidateSlice(self.label)) return error.InvalidTaskFact;
         if ((self.parent == null and self.local_files != .none) or (self.read_only and self.local_files == .write)) return error.InvalidTaskFact;
         if (self.targets) |targets| {
             if (targets.len > 32) return error.InvalidTaskFact;
@@ -104,6 +112,8 @@ pub const Fact = struct {
         }
         if (self.parent) |parent| {
             if (!parent.eql(self.root) or self.task.eql(self.root)) return error.InvalidTaskFact;
+            // Delegated facts require a host-assigned seq (V0.7 §2.1).
+            if (self.seq == 0) return error.InvalidTaskFact;
         } else if (!self.task.eql(self.root)) return error.InvalidTaskFact;
         if (self.counters.pending_requests > self.counters.requests) return error.InvalidTaskFact;
     }
@@ -118,6 +128,7 @@ pub const Owned = struct {
         var copy = fact;
         copy.summary = try arena.allocator().dupe(u8, fact.summary);
         copy.request_key = try arena.allocator().dupe(u8, fact.request_key);
+        copy.label = try arena.allocator().dupe(u8, fact.label);
         if (fact.targets) |targets| copy.targets = try arena.allocator().dupe(id.SessionHandle, targets);
         return .{ .arena = arena, .fact = copy };
     }
@@ -142,6 +153,13 @@ pub const Root = struct {
     persist: ?Persist = null,
     failed_storage: bool = false,
     cancelled: bool = false,
+    /// Per-parent-task seq allocation watermark (V0.7 §2.1). Destroyed
+    /// children never recycle their numbers; reuse keeps the original seq.
+    next_seq: u32 = 0,
+    /// V0.7 §3.3/G2: host-tracked delivered event watermark for the model
+    /// consumer. Advanced atomically when a wait_events response is accepted
+    /// into the Loop; an omitted after_sequence pages from here.
+    delivered_watermark: u64 = 0,
     pub fn init(a: std.mem.Allocator) Root {
         return .{ .allocator = a, .arena = .init(a), .last_ns = (Clock{}).now() };
     }
@@ -190,6 +208,46 @@ pub const Root = struct {
         for (self.facts[0..self.count], 0..) |fact, i| if (fact.task.eql(task)) return i;
         return error.TaskNotFound;
     }
+    /// Allocate the next per-parent display seq under the root lock. Called
+    /// only for delegated facts; roots keep seq 0. The seq identifies the
+    /// member (V0.7 §2.1/G1): a rollover's new task keeps the member's
+    /// number, so a duplicate number is an error only for a different agent.
+    fn allocateSeqLocked(self: *Root, parent: id.TaskId, agent: id.AgentId, requested: u32) !u32 {
+        if (requested != 0) {
+            for (self.facts[0..self.count]) |prior| if (prior.parent != null and prior.parent.?.eql(parent) and prior.seq == requested and !prior.agent.eql(agent)) return error.InvalidTaskFact;
+            if (requested > self.next_seq) self.next_seq = requested;
+            return requested;
+        }
+        if (self.next_seq == std.math.maxInt(u32)) return error.InvalidTaskFact;
+        self.next_seq += 1;
+        return self.next_seq;
+    }
+    /// Resolve a #seq reference to the single delegated fact under the parent
+    /// task's scope. Caller holds no lock; this takes it.
+    pub fn factForSeq(self: *Root, parent: id.TaskId, seq: u32) !Fact {
+        self.lock();
+        defer self.mutex.unlock();
+        for (self.facts[0..self.count]) |fact| if (fact.parent != null and fact.parent.?.eql(parent) and fact.seq == seq) return fact;
+        return error.TaskNotFound;
+    }
+    /// Resolve a bare label reference: exactly one live-or-terminal delegated
+    /// fact with this label may exist under the parent task. Multiple matches
+    /// return an error carrying the candidate display names for the model.
+    pub fn factsForLabel(self: *Root, parent: id.TaskId, label: []const u8) !LabelResolution {
+        self.lock();
+        defer self.mutex.unlock();
+        var found: [16]Fact = undefined;
+        var count: usize = 0;
+        for (self.facts[0..self.count]) |fact| if (fact.parent != null and fact.parent.?.eql(parent) and std.mem.eql(u8, fact.label, label)) {
+            if (count == found.len) return error.LabelAmbiguous;
+            found[count] = fact;
+            count += 1;
+        };
+        if (count == 0) return error.TaskNotFound;
+        if (count > 1) return error.LabelAmbiguous;
+        return .{ .fact = found[0], .candidates = &.{} };
+    }
+    pub const LabelResolution = struct { fact: Fact, candidates: []const Fact };
     fn write(self: *Root, original: Fact) !Fact {
         var fact = original;
         const now_ms = @import("../platform/realtime.zig").milliseconds(undefined);
@@ -225,8 +283,15 @@ pub const Root = struct {
         }
         var fact = original;
         fact.request_key = try self.arena.allocator().dupe(u8, fact.request_key);
+        fact.label = try self.arena.allocator().dupe(u8, fact.label);
         if (fact.targets) |targets| fact.targets = try self.arena.allocator().dupe(id.SessionHandle, targets);
         fact.summary = try self.arena.allocator().dupe(u8, fact.summary);
+        // V0.7 §2.1: add() always publishes a fresh delegated fact, so it
+        // receives the next seq; only rollover keeps the member's number.
+        if (fact.parent != null) {
+            fact.seq = 0;
+            fact.seq = try self.allocateSeqLocked(fact.parent.?, fact.agent, 0);
+        }
         self.facts[self.count] = try self.write(fact);
         self.count += 1;
     }
@@ -244,12 +309,14 @@ pub const Root = struct {
         if (active >= 4) return error.ChildTaskLimit;
         var fact = original;
         fact.request_key = try self.arena.allocator().dupe(u8, original.request_key);
+        fact.label = try self.arena.allocator().dupe(u8, original.label);
         if (original.targets) |targets| fact.targets = try self.arena.allocator().dupe(id.SessionHandle, targets);
         fact.created_at_ms = @import("../platform/realtime.zig").milliseconds(undefined);
         fact.changed_at_ms = fact.created_at_ms;
         fact.sequence = if (self.revision == 0) 1 else try id.advance(self.revision);
         fact.counters = self.counters;
         fact.event_sequence = fact.sequence;
+        if (fact.parent != null) fact.seq = try self.allocateSeqLocked(fact.parent.?, fact.agent, fact.seq);
         try commit(context, &fact);
         self.facts[self.count] = fact;
         self.count += 1;
@@ -272,10 +339,13 @@ pub const Root = struct {
             return error.InvalidTaskFact;
         var next = original;
         next.request_key = try self.arena.allocator().dupe(u8, original.request_key);
+        next.label = try self.arena.allocator().dupe(u8, original.label);
         next.summary = try self.arena.allocator().dupe(u8, original.summary);
         if (next.targets) |targets| next.targets = try self.arena.allocator().dupe(id.SessionHandle, targets);
         next.created_at_ms = @import("../platform/realtime.zig").milliseconds(undefined);
         next.changed_at_ms = next.created_at_ms;
+        // Rollover keeps the member's original display seq (V0.7 §2.1).
+        next.seq = prior.seq;
         try next.validate();
         var done = prior;
         done.status = outcome;
@@ -312,6 +382,20 @@ pub const Root = struct {
             self.counters.timeout_ns = @as(u64, timeout_ms) * std.time.ns_per_ms;
         }
     }
+    pub const Outstanding = struct { seq: u32, label: []const u8, status: Status };
+    /// V0.7 §3.3 (approved 2026-11-15): resuming an answer no longer hard-fails
+    /// on unsettled children. The caller must disclose the returned outstanding
+    /// list (#seq label) in its final reply; delivered reports stay delivered.
+    pub fn outstandingChildren(self: *Root, a: std.mem.Allocator, parent: id.TaskId) ![]Outstanding {
+        self.lock();
+        defer self.mutex.unlock();
+        var list: std.ArrayList(Outstanding) = .empty;
+        errdefer list.deinit(a);
+        for (self.facts[0..self.count]) |fact| if (fact.parent != null and fact.parent.?.eql(parent) and !terminal(fact.status)) {
+            try list.append(a, .{ .seq = fact.seq, .label = fact.label, .status = fact.status });
+        };
+        return list.toOwnedSlice(a);
+    }
     pub fn resumeAnswer(self: *Root, task: id.TaskId) !void {
         self.lock();
         defer self.mutex.unlock();
@@ -319,7 +403,6 @@ pub const Root = struct {
         if (self.failed_storage) return error.TaskPersistenceFailed;
         const i = try self.index(task);
         if (self.facts[i].status == .cancelled or self.facts[i].status == .interrupted) return error.TaskAlreadyFinished;
-        for (self.facts[0..self.count]) |fact| if (fact.parent != null and !terminal(fact.status)) return error.ChildSettlementRequired;
         var fact = self.facts[i];
         fact.status = .running;
         fact.event_sequence = 0;
@@ -337,6 +420,18 @@ pub const Root = struct {
         fact.delivered = terminal(fact.status);
         fact.reported_sequence = sequence;
         self.facts[i] = try self.write(fact);
+    }
+    /// V0.7 §3.3/G2: advance the model-consumer watermark after a wait_events
+    /// result entered the Loop. Delivery and interface reading levels are
+    /// tracked separately; this one belongs to the model only.
+    pub fn advanceDeliveredWatermark(self: *Root, sequence: u64) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.advanceDeliveredWatermarkLocked(sequence);
+    }
+    /// Caller must already hold the root mutex.
+    pub fn advanceDeliveredWatermarkLocked(self: *Root, sequence: u64) void {
+        if (sequence > self.delivered_watermark) self.delivered_watermark = sequence;
     }
     pub fn take(self: *Root, task: id.TaskId, requests: u32, calls: u32) !void {
         self.lock();

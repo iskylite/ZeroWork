@@ -172,6 +172,7 @@ pub const View = struct {
         revision: u64,
         test_id: [48]u8 = undefined,
         a11y_label: [384]u8 = undefined,
+        display_name: [64]u8 = undefined,
         node: *ui.Node,
         logo: *ui.Node = undefined,
         status_text: *ui.Signal([]const u8) = undefined,
@@ -183,8 +184,16 @@ pub const View = struct {
         spinner_color: *ui.Signal(?ui.Color),
         fn update(self: *Row, entry: projection.Entry) !void {
             self.revision = entry.revision;
-            if (!View.sameText(self.name, entry.name)) try self.name.setTextContent(self.view.cx.allocator, entry.name);
-            if (self.node.behavior.interaction.a11y) |*a11y| a11y.label = try std.fmt.bufPrint(&self.a11y_label, "{s}，{s}", .{ self.name.getText().?.content, entry.status });
+            // V0.7 §2.1: rows show the host display name "#N label".
+            const display = if (entry.seq != 0)
+                if (entry.name.len != 0)
+                    try std.fmt.bufPrint(&self.display_name, "#{d} {s}", .{ entry.seq, entry.name })
+                else
+                    try std.fmt.bufPrint(&self.display_name, "#{d}", .{entry.seq})
+            else
+                entry.name;
+            if (!View.sameText(self.name, display)) try self.name.setTextContent(self.view.cx.allocator, display);
+            if (self.node.behavior.interaction.a11y) |*a11y| a11y.label = try std.fmt.bufPrint(&self.a11y_label, "{s}，{s}", .{ display, entry.status });
             self.status_text.set(entry.status);
             self.visual = if (entry.running) .running else if (std.mem.eql(u8, entry.status, "失败")) .failed else if (entry.group == .attention) .attention else if (entry.group == .active) .waiting else if (std.mem.eql(u8, entry.status, "已停止")) .stopped else .complete;
             self.repaint();

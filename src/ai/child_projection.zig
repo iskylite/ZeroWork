@@ -10,6 +10,8 @@ pub const Entry = struct {
     conversation: id.ConversationId,
     revision: u64,
     name: []const u8,
+    /// V0.7 §2.1: host-assigned member number for display (#N label).
+    seq: u32 = 0,
     summary: []const u8 = "",
     status: []const u8,
     group: Group,
@@ -52,7 +54,7 @@ pub fn entry(service: *runtime.Service, record: *life.Record) Entry {
         .running, .waiting_model, .waiting_children, .settling => .active,
         else => .recent,
     };
-    return .{ .agent = info.agent, .conversation = record.id, .revision = record.child_settings_revision, .name = prefs.name, .summary = if (fact) |value| value.summary else "", .status = if (record.ending != null) "收尾中" else if (needs_verification and budget.terminal(state)) "待核验" else if (fact == null) "空闲" else switch (state) {
+    return .{ .agent = info.agent, .conversation = record.id, .revision = record.child_settings_revision, .name = prefs.name, .seq = if (fact) |value| value.seq else 0, .summary = if (fact) |value| value.summary else "", .status = if (record.ending != null) "收尾中" else if (needs_verification and budget.terminal(state)) "待核验" else if (fact == null) "空闲" else switch (state) {
         .human_wait => "等待用户",
         .failed => "失败",
         .outcome_unknown => "结果未知",

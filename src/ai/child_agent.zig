@@ -48,7 +48,7 @@ pub const Info = struct {
                 for (ids[0..i]) |prior| if (std.mem.eql(u8, prior, key)) return error.InvalidChildConfiguration;
             }
         }
-        try validateText(self.name, 128);
+        try validateLabel(self.name);
         try validateText(self.request_key, 128);
         if (self.model) |model| {
             try validateText(model.provider_id, 128);
@@ -89,6 +89,12 @@ pub const Owned = struct {
 };
 fn validateText(value: []const u8, max: usize) !void {
     if (std.mem.trim(u8, value, " \t\r\n").len == 0 or value.len > max or std.mem.indexOfScalar(u8, value, 0) != null or !std.unicode.utf8ValidateSlice(value)) return error.InvalidChildConfiguration;
+}
+/// V0.7 §2.1: the child name became an optional display label. Empty means
+/// "host-assigned display only (#N)"; a provided label is at most 32 chars.
+fn validateLabel(value: []const u8) !void {
+    if (value.len == 0) return;
+    if (std.mem.trim(u8, value, " \t\r\n").len == 0 or value.len > 32 or std.mem.indexOfScalar(u8, value, 0) != null or !std.unicode.utf8ValidateSlice(value)) return error.InvalidChildConfiguration;
 }
 
 /// User-editable next-task preferences. Creation provenance in Info is immutable.

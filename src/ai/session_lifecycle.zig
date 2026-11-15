@@ -227,6 +227,20 @@ pub const Store = struct {
         const self: *Store = @ptrCast(@alignCast(raw));
         try self.save(.{ .kind = .task_fact, .conversation = fact.conversation, .revision = fact.sequence, .task_fact = fact });
     }
+    /// V0.7 §2.1 replay migration: a delegated fact without a persisted seq
+    /// receives the next number in persisted order under its parent task.
+    /// Replayed updates of the same task keep that first assigned number.
+    fn replaySeqFor(self: *Store, parent: identity.TaskId, task: identity.TaskId) !u32 {
+        var watermark: u32 = 0;
+        for (self.task_facts.items) |prior| {
+            const delegated = prior.fact.parent orelse continue;
+            if (!delegated.eql(parent)) continue;
+            if (prior.fact.seq > watermark) watermark = prior.fact.seq;
+            if (prior.fact.task.eql(task)) return prior.fact.seq;
+        }
+        if (watermark == std.math.maxInt(u32)) return error.RevisionExhausted;
+        return watermark + 1;
+    }
     fn save(self: *Store, event: Event) !void {
         if (self.persist) |p| try p.write(p.context, event);
     }
@@ -939,6 +953,13 @@ pub const Store = struct {
         try record.inbox.entries.ensureUnusedCapacity(self.allocator, 1);
         fact.conversation = record.id;
         fact.agent = agent_value.id;
+        // V0.7 §2.1: production paths arrive with a root-assigned seq. Direct
+        // host-side launches (and V0.4-era callers) may omit it; assign the
+        // next persisted number under this parent task, mirroring the journal
+        // replay migration so both writers converge on the same numbering.
+        if (fact.parent) |parent_task| if (fact.seq == 0) {
+            fact.seq = try self.replaySeqFor(parent_task, fact.task);
+        };
         try fact.validate();
         if (original_persist) |persist| try persist.write(persist.context, .{ .kind = .child_launch, .conversation = record.id, .agent = agent_value.id, .owner = live.owner, .revision = record.revision, .environment = agent_value.environment, .child_info = if (created) record.child.?.info else null, .parent_binding = parent, .targets = agent_value.targets, .messages = if (created) record.history.messages else &.{}, .initial_origin = record.initial_origin, .initial_input = receipt, .initial_text = text, .task_fact = fact.*, .workspace = if (update) |pending| pending.snapshot else if (created and record.workspace_source != null) record.workspace else null, .workspace_source = if (created) record.workspace_source else null, .workspace_change = if (update) |pending| pending.change else null });
         if (update) |*pending| self.publishWorkspace(record, &pending.snapshot, pending.change);
@@ -1294,7 +1315,13 @@ pub const Store = struct {
         }
         if (event.initial_text != null) return error.InvalidSessionJournal;
         if (event.kind == .task_fact) {
-            const fact = event.task_fact orelse return error.InvalidSessionJournal;
+            var fact = event.task_fact orelse return error.InvalidSessionJournal;
+            // V0.7 §2.1 migration: pre-V0.7 delegated facts carry no seq.
+            // Repair deterministically in persisted order: the same task
+            // keeps its first assigned number across all replayed updates.
+            if (fact.parent != null and fact.seq == 0) {
+                fact.seq = try self.replaySeqFor(fact.parent.?, fact.task);
+            }
             fact.validate() catch return error.InvalidSessionJournal;
             if (!fact.conversation.eql(event.conversation) or fact.sequence != event.revision) return error.InvalidSessionJournal;
             var existing: ?usize = null;
