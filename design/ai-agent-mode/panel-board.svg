@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="364" height="520" viewBox="0 0 364 520" xml:lang="zh-CN">
+  <title>子智能体面板 · Board 板帖流（新增视图 · 最新在上）</title>
+  <style>
+    text { font-family: Inter, "PingFang SC", sans-serif; fill: #f4f4f5; dominant-baseline: central; }
+    .secondary { fill: #a1a1aa; }
+    .muted { fill: #5b5b64; }
+    .panel { fill: #1b1b1f; }
+    .row { fill: #202026; }
+    .row-pending { fill: #2b2b47; }
+    .tab-on { fill: #2b2b47; }
+    .chip { fill: #33334a; }
+    .icon { fill: none; stroke: #a1a1aa; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .icon-acc { stroke: #8c8ef5; }
+    .icon-warn { stroke: #f59e0b; }
+    .icon-ok { stroke: #22c55e; }
+  </style>
+
+  <rect width="364" height="520" rx="12" class="panel"/>
+
+  <rect class="tab-on" x="18" y="18" width="72" height="24" rx="8"/>
+  <text x="54" y="30" font-size="11" font-weight="500" text-anchor="middle">Board</text>
+  <rect class="chip" x="96" y="18" width="72" height="24" rx="8"/>
+  <text x="132" y="30" font-size="11" text-anchor="middle">Graph</text>
+
+  <g font-size="10.5" class="secondary">
+    <rect x="18" y="56" width="52" height="22" rx="6" class="chip"/>
+    <text x="44" y="67" text-anchor="middle">全部</text>
+    <rect x="76" y="56" width="64" height="22" rx="6" class="chip"/>
+    <text x="108" y="67" text-anchor="middle">仅待处理</text>
+    <rect x="146" y="56" width="52" height="22" rx="6" class="chip"/>
+    <text x="172" y="67" text-anchor="middle">报告</text>
+  </g>
+
+  <g id="pending" font-size="11">
+    <g transform="translate(18 88)">
+      <rect class="row-pending" width="328" height="58" rx="9"/>
+      <circle class="icon icon-warn" cx="18" cy="16" r="4"/>
+      <text x="34" y="17" font-weight="500">#3 查 cache-01 状态</text>
+      <text x="216" y="17" class="secondary" text-anchor="end">→ #2 · 待回应</text>
+      <text x="34" y="36">上海节点 SSH 认证失败，请确认凭据是否更新。</text>
+      <text x="34" y="50" font-size="9.5" class="muted">提问 · 14:32:41</text>
+    </g>
+    <g transform="translate(18 154)">
+      <rect class="row-pending" width="328" height="58" rx="9"/>
+      <path class="icon icon-warn" d="M12 16a4 4 0 1 1 4 4v2"/>
+      <text x="34" y="17" font-weight="500">#3 查 cache-01 状态</text>
+      <text x="216" y="17" class="secondary" text-anchor="end">等待审批</text>
+      <text x="34" y="36">sudo systemctl status cache · 在主对话审批</text>
+      <text x="34" y="50" font-size="9.5" class="muted">审批 · 14:34:02</text>
+    </g>
+  </g>
+
+  <g id="stream" font-size="11">
+    <g transform="translate(18 220)">
+      <rect class="row" width="328" height="58" rx="9"/>
+      <path class="icon" d="M14 16c0 4-6 6-6 6s-6-2-6-6c0-5 4-8 6-8s6 3 6 8z" transform="translate(3 0)"/>
+      <text x="34" y="17" font-weight="500">#2 查 db-01 磁盘</text>
+      <text x="216" y="17" class="secondary" text-anchor="end">→ 全体</text>
+      <text x="34" y="36">北京节点配置基线已同步至最新版。</text>
+      <text x="34" y="50" font-size="9.5" class="muted">留言 · 14:33:20</text>
+    </g>
+    <g transform="translate(18 286)">
+      <rect class="row" width="328" height="58" rx="9"/>
+      <path class="icon" d="M12 14a3 3 0 0 1 3-3h2a3 3 0 0 1 3 3v2a3 3 0 0 1-3 3h-2a3 3 0 0 1-3-3zM15 9v2"/>
+      <text x="34" y="17" font-weight="500">#2 查 db-01 磁盘</text>
+      <text x="216" y="17" class="secondary" text-anchor="end">→ #3</text>
+      <text x="34" y="36">凭据上轮已核验更新，请重试连接。</text>
+      <text x="34" y="50" font-size="9.5" class="muted">回复 · 14:33:02</text>
+    </g>
+    <g transform="translate(18 352)">
+      <rect class="row" width="328" height="58" rx="9"/>
+      <path class="icon icon-acc" d="M14 16h8m-8 4h5m-5 4h8"/>
+      <text x="34" y="17" font-weight="500">#1 查 web-01 日志</text>
+      <text x="216" y="17" class="secondary" text-anchor="end">→ 协调者</text>
+      <text x="34" y="36">分片参数已确认，正在应用新的轮转配置。</text>
+      <text x="34" y="50" font-size="9.5" class="muted">进展 · 14:32:08</text>
+    </g>
+    <g transform="translate(18 418)">
+      <rect class="row" width="328" height="58" rx="9"/>
+      <path class="icon icon-ok" d="m13 16 2.4 2.4 5-5"/>
+      <text x="34" y="17" font-weight="500">#0 查磁盘占用</text>
+      <text x="216" y="17" class="secondary" text-anchor="end">→ 协调者</text>
+      <text x="34" y="36">已完成：/var/log 分区占用 82%，清理建议见报告。</text>
+      <text x="34" y="50" font-size="9.5" class="muted">报告 · 14:30:55</text>
+    </g>
+  </g>
+</svg>
