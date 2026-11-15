@@ -83,6 +83,8 @@ pub const Action = union(enum) {
     thinking: struct { model: ModelKey, enabled: bool },
     attachment: Attachment,
     choose_workspace: WorkspaceTicket,
+    /// V0.7 §10: swarm orchestration mode (Auto/Swarm/Boost).
+    swarm_mode: @import("../ai/swarm_mode.zig").Mode,
 };
 pub const Envelope = struct { owner: Owner, revision: u64, action: Action };
 pub const Callbacks = struct { context: *anyopaque, action: *const fn (*anyopaque, Envelope) anyerror!void, open_settings: ?*const fn (*anyopaque) void = null, models_opened: ?*const fn (*anyopaque) void = null };
@@ -214,14 +216,14 @@ pub const View = struct {
     followup_send: ?*ui.Node = null,
     ordinary_spacer: *ui.Node = undefined,
     interaction_active: bool = false,
-    buttons: [6]*ui.Node = undefined,
-    button_styles: [6]*ui.Signal(ui.BoxStyle) = undefined,
-    disabled: [6]*ui.Signal(bool) = undefined,
+    buttons: [7]*ui.Node = undefined,
+    button_styles: [7]*ui.Signal(ui.BoxStyle) = undefined,
+    disabled: [7]*ui.Signal(bool) = undefined,
     hover_style: *ui.Signal(?ui.BoxStyle),
-    labels: [6]?*ui.Node = @splat(null),
-    icons: [6]*ui.Node = undefined,
+    labels: [7]?*ui.Node = @splat(null),
+    icons: [7]*ui.Node = undefined,
     chevrons: [3]*ui.Node = undefined,
-    popups: [6]Popup = undefined,
+    popups: [7]Popup = undefined,
     popup_count: usize = 0,
     source: ?Owned = null,
     pending: ?Owned = null,
@@ -252,6 +254,13 @@ pub const View = struct {
     execution_rows: [execution_mode_count]*ui.Node = undefined,
     execution_styles: [execution_mode_count]*ui.Signal(ui.BoxStyle) = undefined,
     execution_checks: [execution_mode_count]*ui.Node = undefined,
+    /// V0.7 §10.1: mode chip state. Session-level mode; switching applies to
+    /// the next user request. The label tracks the active mode.
+    swarm_mode: @import("../ai/swarm_mode.zig").Mode = .auto,
+    mode_rows: [3]*ui.Node = undefined,
+    mode_styles: [3]*ui.Signal(ui.BoxStyle) = undefined,
+    mode_checks: [3]*ui.Node = undefined,
+    mode_label: ?*ui.Node = null,
     retention_select: ui.widgets.SelectResult = undefined,
     retention_value: *ui.Signal(?[]const u8),
     retention_default: *ui.Signal([]const u8),
@@ -296,9 +305,9 @@ pub const View = struct {
         // Clear our focus before native Button/Popover child scopes dispose.
         const focus_guard = try scope.childScope();
         try focus_guard.onCleanup(View, self, releaseFocus);
-        const names = [_][]const u8{ "添加附件", "执行权限", "选择模型", "推理档位", "上下文与来源", "当前对话运行方式" };
-        const assets = [_]ui.SvgAsset{ ui.icons.plus, ui.icons.get("hand").?, ui.icons.chevron_down, ui.icons.get("sliders-horizontal").?, ui.icons.circle, ui.icons.terminal };
-        for (0..6) |index| {
+        const names = [_][]const u8{ "添加附件", "执行权限", "选择模型", "推理档位", "上下文与来源", "当前对话运行方式", "编排模式" };
+        const assets = [_]ui.SvgAsset{ ui.icons.plus, ui.icons.get("hand").?, ui.icons.chevron_down, ui.icons.get("sliders-horizontal").?, ui.icons.circle, ui.icons.terminal, ui.icons.get("bot").? };
+        for (0..7) |index| {
             self.disabled[index] = try scope.createSignal(bool, true);
             const base = switch (index) {
                 0 => S.iconButton(8),
@@ -306,6 +315,7 @@ pub const View = struct {
                 2 => S.chip(190, 8),
                 3 => S.chip(80, 7),
                 4 => S.chip(48, 8),
+                6 => S.chip(84, 8),
                 else => S.executionChip(),
             };
             self.button_styles[index] = try scope.createSignal(ui.BoxStyle, base);
@@ -318,12 +328,13 @@ pub const View = struct {
                 2 => "ai.composer.model",
                 3 => "ai.composer.effort",
                 4 => "ai.composer.usage",
+                6 => "ai.composer.mode",
                 else => "ai.composer.execution",
             };
             self.buttons[index] = button;
             const size: f32 = switch (index) {
                 0, 4 => 14,
-                1, 5 => 12,
+                1, 5, 6 => 12,
                 3 => 14,
                 2 => 10,
                 else => 16,
@@ -337,7 +348,7 @@ pub const View = struct {
                 try button.appendChild(cx.allocator, self.model_brand);
             }
             if (index == 1 or index == 2 or index == 3 or index == 4 or index == 5) {
-                const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "选择模型" else if (index == 3) "推理设置" else if (index == 4) "—" else "自行判断", S.text(10, 400, 14, true), if (index == 5) S.executionLabel() else S.chipLabel(@fromBackingInt(@intCast(index))));
+                const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "选择模型" else if (index == 3) "推理设置" else if (index == 4) "—" else if (index == 6) "Auto" else "自行判断", S.text(10, 400, 14, true), if (index == 5) S.executionLabel() else if (index == 6) S.chipLabel(.permission) else S.chipLabel(@fromBackingInt(@intCast(index))));
                 self.labels[index] = text;
             }
             if (index == 1 or index == 2 or index == 3) {
@@ -346,7 +357,7 @@ pub const View = struct {
                 chevron.setStyleInline(cx.allocator, S.chipChevron(@fromBackingInt(@intCast(index))));
                 try button.appendChild(cx.allocator, chevron);
             }
-            if (index == 5) try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.chevron_down, S.theme.current().fg_3, S.icon(12)));
+            if (index == 5 or index == 6) try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.chevron_down, S.theme.current().fg_3, S.icon(12)));
             if (index == 4) {
                 self.ring = self.icons[index];
                 self.ring.setCustomDraw(drawRing, self);
@@ -370,7 +381,7 @@ pub const View = struct {
         self.trailing = try ui.box(cx, S.trailing(), .{});
         self.trailing.meta.ownership.meta.test_id = "ai.composer.trailing";
         try self.root.appendChild(cx.allocator, self.trailing);
-        for (0..6) |index| {
+        for (0..7) |index| {
             self.popups[index] = try self.mountPopup(@fromBackingInt(@intCast(index)));
             self.popup_count += 1;
         }
@@ -378,6 +389,7 @@ pub const View = struct {
         try self.mountPermissions();
         try self.mountExecution();
         try self.mountModels();
+        try self.mountModeMenu();
         try self.mountEffort();
         const usage_scroll = try ui.widgets.ScrollArea(.{}).mount(scope, cx);
         usage_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
@@ -408,13 +420,14 @@ pub const View = struct {
             .effort => "ai.effort.menu",
             .usage => "ai.usage.menu",
             .execution => "ai.execution.menu",
+            .mode => "ai.mode.menu",
         };
         var title: ?*ui.Node = null;
-        if (kind == .permission or kind == .usage or kind == .execution) {
+        if (kind == .permission or kind == .usage or kind == .execution or kind == .mode) {
             const header = try ui.box(self.cx, S.header(), .{});
-            header.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.header" else if (kind == .execution) "ai.execution.header" else "ai.usage.header";
-            const heading_icon = try ui.iconTint(self.cx, if (kind == .permission) ui.icons.shield else if (kind == .execution) ui.icons.terminal else ui.icons.chart_pie, S.theme.current().accent, S.icon(16));
-            heading_icon.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.header.icon" else if (kind == .execution) "ai.execution.header.icon" else "ai.usage.header.icon";
+            header.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.header" else if (kind == .execution) "ai.execution.header" else if (kind == .mode) "ai.mode.header" else "ai.usage.header";
+            const heading_icon = try ui.iconTint(self.cx, if (kind == .permission) ui.icons.shield else if (kind == .execution) ui.icons.terminal else if (kind == .mode) ui.icons.get("network").? else ui.icons.chart_pie, S.theme.current().accent, S.icon(16));
+            heading_icon.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.header.icon" else if (kind == .execution) "ai.execution.header.icon" else if (kind == .mode) "ai.mode.header.icon" else "ai.usage.header.icon";
             try header.appendChild(self.cx.allocator, heading_icon);
             title = try self.label(header, switch (kind) {
                 .permission => "执行权限",
@@ -422,12 +435,13 @@ pub const View = struct {
                 .effort => "推理档位",
                 .usage => "上下文与来源",
                 .execution => "当前对话运行方式",
+                .mode => "编排模式",
                 else => unreachable,
             }, S.text(13, 700, 20, false), S.flexibleLabel(20));
-            title.?.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.title" else if (kind == .execution) "ai.execution.title" else "ai.usage.title";
+            title.?.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.title" else if (kind == .execution) "ai.execution.title" else if (kind == .mode) "ai.mode.title" else "ai.usage.title";
             const close_context = try self.scope.createState(Choice, .{ .view = self, .kind = kind });
             const close_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = 14, .a11y_label = "关闭选项", .base_style = S.close(), .hover_style = self.hover_style, .on_click = self.cx.on(Choice, close_context, Choice.choose) }).mount(self.scope, self.cx);
-            close_button.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.close" else if (kind == .execution) "ai.execution.close" else "ai.usage.close";
+            close_button.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.close" else if (kind == .execution) "ai.execution.close" else if (kind == .mode) "ai.mode.close" else "ai.usage.close";
             try header.appendChild(self.cx.allocator, close_button);
             try result.content.appendChild(self.cx.allocator, header);
         }
@@ -545,7 +559,47 @@ pub const View = struct {
         try policy.appendChild(self.cx.allocator, self.retention_select.wrapper);
         try scroll.content.appendChild(self.cx.allocator, policy);
     }
-    fn retentionChanged(self: *View, value: ?[]const u8) void {
+    /// V0.7 §10.1/§10.1.4: the mode menu lists Auto/Swarm/Boost plus the
+    /// template section (the built-in 均衡 template this edition; custom
+    /// template management lands with settings integration). Choosing a mode
+    /// applies to the next user request.
+    fn mountModeMenu(self: *View) !void {
+        const popup = &self.popups[@backingInt(S.Kind.mode)];
+        const scroll = try ui.widgets.ScrollArea(.{}).mount(self.scope, self.cx);
+        scroll.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
+        scroll.container.meta.ownership.meta.test_id = "ai.mode.viewport";
+        scroll.content.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 2 });
+        try popup.body.appendChild(self.cx.allocator, scroll.container);
+        const swarm_mode = @import("../ai/swarm_mode.zig");
+        for ([_]swarm_mode.Mode{ .auto, .swarm, .boost }, 0..) |mode, index| {
+            const name = swarm_mode.modeLabel(mode);
+            self.mode_styles[index] = try self.scope.createSignal(ui.BoxStyle, S.executionOption(false));
+            const choice = try self.scope.createState(Choice, .{ .view = self, .kind = .mode, .action = .{ .swarm_mode = mode } });
+            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = name, .base_style = self.mode_styles[index], .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
+            prepareCustomButton(button, .start, self.cx.allocator);
+            button.meta.ownership.meta.test_id = switch (mode) {
+                .auto => "ai.mode.auto",
+                .swarm => "ai.mode.swarm",
+                .boost => "ai.mode.boost",
+            };
+            self.mode_rows[index] = button;
+            self.mode_checks[index] = try ui.iconTint(self.cx, ui.icons.get(swarm_mode.modeIcon(mode)).?, S.theme.current().accent, S.icon(14));
+            try button.appendChild(self.cx.allocator, self.mode_checks[index]);
+            _ = try self.label(button, name, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
+            _ = try self.label(button, switch (mode) {
+                .auto => "宿主按信号+实质自动判定",
+                .swarm => "多子并行编排",
+                .boost => "实现→挑战→修复深度攻坚",
+            }, S.text(10, 400, 16, false), S.flexibleLabel(16));
+            try scroll.content.appendChild(self.cx.allocator, button);
+        }
+        // §10.1.4: template section inside the mode menu.
+        const templates = try ui.box(self.cx, S.policySection(), .{});
+        _ = try self.label(templates, "角色模板", S.text(11.5, 400, 18, false), S.flexibleLabel(18));
+        _ = try self.label(templates, "均衡（默认）· 全部槽继承父会话模型", S.text(10, 400, 16, false), S.flexibleLabel(16));
+        try scroll.content.appendChild(self.cx.allocator, templates);
+    }
+        fn retentionChanged(self: *View, value: ?[]const u8) void {
         const text = value orelse return;
         const retention: ?SessionRetention = if (std.mem.eql(u8, text, "inherit")) null else std.meta.stringToEnum(SessionRetention, text) orelse return;
         self.emit(.execution, .{ .session_retention = retention });
@@ -797,13 +851,23 @@ pub const View = struct {
         }
         self.cx.requestRedraw();
     }
-    /// Discovery changes the control revision, but the model picker can rebind
+    /// V0.7 §10: set the session swarm mode from the mode menu. Updates the
+    /// chip label/icon and the menu selection state.
+    pub fn setSwarmMode(self: *View, mode: @import("../ai/swarm_mode.zig").Mode) void {
+        self.swarm_mode = mode;
+        if (self.labels[6]) |chip_label| {
+            const name = @import("../ai/swarm_mode.zig").modeLabel(mode);
+            chip_label.setTextContent(self.cx.allocator, name) catch {};
+        }
+        self.cx.requestRedraw();
+    }
+        /// Discovery changes the control revision, but the model picker can rebind
     /// to the new catalog at flush's safe point without closing under the user.
     pub fn preserveModelPopup(self: *View) void {
         self.keep_model_popup_on_update = true;
     }
     pub fn dismiss(self: *View) void {
-        for (0..6) |index| self.close(@fromBackingInt(@intCast(index)), false);
+        for (0..7) |index| self.close(@fromBackingInt(@intCast(index)), false);
         self.focus_pending = null;
     }
     /// Interaction decisions replace all ordinary composer controls.
@@ -1000,6 +1064,7 @@ pub const View = struct {
         if (!source.editable and action != .revoke_inventory) return;
         if (action == .permission and action.permission == .auto and !source.allow_auto_permission) return;
         switch (action) {
+            .swarm_mode => {},
             .revoke_inventory => |conversation_id| {
                 if (!source.inventory_authorized or source.inventory_conversation_id == null or !source.inventory_conversation_id.?.eql(conversation_id)) return;
                 if (self.pending) |pending| if (!pending.value.inventory_authorized or pending.value.inventory_conversation_id == null or !pending.value.inventory_conversation_id.?.eql(conversation_id)) return;
@@ -1479,6 +1544,7 @@ pub const View = struct {
                 .effort => self.slider.wrapper,
                 .attachment => if (firstEnabled(self.attachment_disabled)) |index| self.attachment_rows[index] else self.workspace_row,
                 .usage => self.buttons[4],
+                .mode => self.mode_rows[@intFromEnum(self.swarm_mode)],
                 .execution => self.execution_rows[if (self.source) |source| @as(usize, @intCast(@backingInt(source.value.execution_mode_override orelse source.value.global_execution_mode))) else 0],
             };
             self.cx.setFocus(node);

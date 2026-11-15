@@ -2,7 +2,7 @@
 //! 1425377 / 1446740; attachment menu 414:1872239.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
-pub const Kind = enum { attachment, permission, model, effort, usage, execution };
+pub const Kind = enum { attachment, permission, model, effort, usage, execution, mode };
 pub fn width(kind: Kind) f32 {
     return switch (kind) {
         .attachment => 300,
@@ -11,6 +11,8 @@ pub fn width(kind: Kind) f32 {
         .effort => 276,
         .usage => 288,
         .execution => 296,
+        // V0.7 §10.1: mode chip menu (Auto/Swarm/Boost + template submenu).
+        .mode => 296,
     };
 }
 pub const workspace_menu_extra_height: f32 = 45;
@@ -23,6 +25,7 @@ pub fn height(kind: Kind) f32 {
         .effort => 86,
         .usage => 156,
         .execution => 218,
+        .mode => 190,
     };
 }
 pub fn row() ui.BoxStyle {

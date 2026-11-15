@@ -2554,6 +2554,18 @@ const AiHost = struct {
                 .local_text => try self.chooseLocalText(envelope.owner, null),
                 .remote_file => try self.chooseRemoteFile(envelope.owner),
             },
+            // V0.7 §10.2: switching the mode applies to the next user
+            // request; running tasks are never migrated. Boost requires an
+            // explicit user click (the menu is the explicit path).
+            .swarm_mode => |mode| {
+                const composer = self.composer_controls orelse return;
+                composer.setSwarmMode(mode);
+                if (self.feedback) |view| view.show(switch (mode) {
+                    .auto => "已切换为 Auto：宿主自动判定",
+                    .swarm => "已切换为 Swarm：下一次请求按多子并行编排",
+                    .boost => "已切换为 Boost：下一次请求按深度攻坚",
+                }, .completion);
+            },
         }
         if (self.child_identity != null) {
             try self.saveChildPreferences();
