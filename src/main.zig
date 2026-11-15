@@ -9277,18 +9277,29 @@ const AiHost = struct {
         const question_pending = if (own_request) self.questionsRef().snapshot() else null;
         var child_name: ?[]const u8 = null;
         var child_authority: ?@import("ai/host_tools.zig").Context = null;
+        // V0.7 §3.6: approval queue. Count every child waiting on the user so
+        // the surfaced card carries its queue position; approving one card
+        // lets the next child surface on the next update.
+        var queue_size: usize = 0;
         if (host_pending == null and tool_pending == null and question_pending == null and self.child_identity == null) {
-            if (self.shared_service) |shared_host| for (shared_host.service.runners.items) |runner| {
-                if (runner.agent.role != .child) continue;
-                const child = self.childApprovalBackend(runner.agent.id) orelse continue;
-                host_pending = child.host.approvalsRef().snapshot();
-                tool_pending = if (host_pending == null) child.host.tool_bridge.pendingApproval() else null;
-                if (host_pending == null and tool_pending == null) continue;
-                source = child.host;
-                child_name = child.name;
-                child_authority = child.authority;
-                break;
-            };
+            if (self.shared_service) |shared_host| {
+                for (shared_host.service.runners.items) |runner| {
+                    if (runner.agent.role != .child) continue;
+                    const child = self.childApprovalBackend(runner.agent.id) orelse continue;
+                    if (child.host.approvalsRef().snapshot() != null or child.host.tool_bridge.pendingApproval() != null) queue_size += 1;
+                }
+                if (queue_size != 0) for (shared_host.service.runners.items) |runner| {
+                    if (runner.agent.role != .child) continue;
+                    const child = self.childApprovalBackend(runner.agent.id) orelse continue;
+                    host_pending = child.host.approvalsRef().snapshot();
+                    tool_pending = if (host_pending == null) child.host.tool_bridge.pendingApproval() else null;
+                    if (host_pending == null and tool_pending == null) continue;
+                    source = child.host;
+                    child_name = child.name;
+                    child_authority = child.authority;
+                    break;
+                };
+            }
         }
         var title_owned: ?[]u8 = null;
         defer if (title_owned) |owned| self.allocator.free(owned);
@@ -9344,7 +9355,10 @@ const AiHost = struct {
         }
         const was_expanded = view.expanded();
         const was_pending = view.pendingVisible();
-        const child_title = if (child_name) |name| try std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ snapshot.?.title, name }) else null;
+        // V0.7 §3.6: the surfaced card carries its queue position (i/N)
+        // when several children wait on the user; approving one advances
+        // the queue on the next update.
+        const child_title = if (child_name) |name| try std.fmt.allocPrint(self.allocator, "{s} · {s}{s}", .{ snapshot.?.title, name, if (queue_size > 1) try std.fmt.allocPrint(self.allocator, "（审批队列 {d}/{d}）", .{ 1, queue_size }) else "" }) else null;
         defer if (child_title) |title| self.allocator.free(title);
         if (child_title) |title| snapshot.?.title = title;
         const changed = try view.update(snapshot);
@@ -9988,7 +10002,18 @@ const AiHost = struct {
         const host_approval = self.approvalsRef().snapshot();
         const inventory_approval = backend.inventory_approval.snapshot();
         const question = self.questionsRef().snapshot();
-        const sequence: ?u64 = if (question) |pending| pending.ticket.sequence | (@as(u64, 1) << 61) else if (host_approval) |pending| pending.sequence | (@as(u64, 1) << 63) else if (inventory_approval) |pending| pending.ticket.sequence | (@as(u64, 1) << 62) else if (approval) |pending| pending.sequence else null;
+        // V0.7 §3.6: child approvals also reach the desktop notification poll.
+        // A child waiting on the user surfaces like a parent one; the queue
+        // count rides the attempt id so each new waiting child re-notifies.
+        var child_waiting: usize = 0;
+        if (self.child_identity == null and approval == null and host_approval == null and question == null and inventory_approval == null) {
+            if (self.shared_service) |shared_host| for (shared_host.service.runners.items) |runner| {
+                if (runner.agent.role != .child) continue;
+                const child = self.childApprovalBackend(runner.agent.id) orelse continue;
+                if (child.host.approvalsRef().snapshot() != null or child.host.tool_bridge.pendingApproval() != null) child_waiting += 1;
+            };
+        }
+        const sequence: ?u64 = if (question) |pending| pending.ticket.sequence | (@as(u64, 1) << 61) else if (host_approval) |pending| pending.sequence | (@as(u64, 1) << 63) else if (inventory_approval) |pending| pending.ticket.sequence | (@as(u64, 1) << 62) else if (approval) |pending| pending.sequence else if (child_waiting != 0) child_waiting | (@as(u64, 1) << 60) else null;
         const view = backend.attachedView();
         const app_focused = notifications.appFocused();
         const source_visible = app_focused and view.cx.window_active and backend.request_conversation != null and
