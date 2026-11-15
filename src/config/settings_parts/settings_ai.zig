@@ -36,7 +36,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             .{ .value = "queue", .label = "排队", .test_id = "settings.follow_up_mode.queue" },
         }, null);
     }
-    if (binding.matches(query, "子 Agent 默认上下文 独立 继承 复用策略 每次新建 优先复用 模型决定 child_context_mode child_reuse_policy")) {
+    if (binding.matches(query, "子 Agent 默认上下文 独立 继承 复用策略 每次新建 优先复用 模型决定 预算 并发 上限 child_context_mode child_reuse_policy child_max_active child_request_concurrency model_slots")) {
         const section = try page.section("子 Agent", "只用于之后创建的子配置；已有子配置保持原选择", ui.icons.get("messages-square").?, 30, "settings.ai.children", null);
         try section.select(.{ .section = "ai", .key = "child_context_mode" }, "默认上下文", "独立上下文从任务材料开始；继承上下文复制创建时已消费的合法历史。显式创建参数优先。", &[_]ui.widgets.SelectOption{
             .{ .value = "independent", .label = "独立上下文", .test_id = "settings.child_context.independent" },
@@ -47,6 +47,11 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             .{ .value = "prefer_reuse", .label = "优先复用", .test_id = "settings.child_reuse.prefer_reuse" },
             .{ .value = "model", .label = "模型决定", .test_id = "settings.child_reuse.model" },
         }, null);
+        // V0.7 §2.3: configurable budgets. Defaults keep the V0.4 values;
+        // ranges are enforced with localized errors in the settings schema.
+        try section.input(.{ .section = "ai", .key = "child_max_active" }, "子任务预算 · 每任务最大活跃数", "1–16。默认 4。只对新根任务生效；16 是内存护栏不可突破。", null);
+        try section.input(.{ .section = "ai", .key = "child_request_concurrency" }, "子任务预算 · 每任务并发模型请求", "1–8。默认 2。只对新根任务生效。", null);
+        try section.input(.{ .section = "ai", .key = "model_slots" }, "子任务预算 · 进程级模型请求槽", "2–8。默认 4。进程启动时生效。", null);
     }
     if (binding.matches(query, "上下文 来源 脱敏 隐私 IP 主机 用户 redact_ip")) {
         const section = try page.section("上下文", "连接身份与敏感信息", ui.icons.file_text, 25, "settings.ai.context", null);

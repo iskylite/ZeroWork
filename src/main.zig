@@ -1083,6 +1083,9 @@ const AiHost = struct {
             if (!already_failed) self.setFeedback(@errorName(err));
             return err;
         };
+        // V0.7 §2.3: freeze the process-level budgets from the frozen
+        // configuration at first shared-service use (process-start semantics).
+        if (self.runtime_config) |runtime| service.service.applySettings(runtime.value.ai);
         self.shared_service = service;
         self.assistant_states = &service.presentations;
         return service;
@@ -8455,6 +8458,7 @@ const AiHost = struct {
         return prompt.buildWithSkills(allocator, self.request_execution_policy.execution_mode, tools, .{
             .context_mode = ai.child_context_mode,
             .reuse_policy = ai.child_reuse_policy,
+            .batch_fallback = ai.interactive_batch_fallback,
         }, workspace, skills.items);
     }
 
@@ -9109,9 +9113,30 @@ const AiHost = struct {
             var consume_route = false;
             defer if (consume_route) bridge.consumeHostRoute(prepared.invocation, target, prepared.command);
             var reconfirm = false;
+            var auto_shell_attempts: u8 = 0;
             while (true) {
                 if (prepared.invocation.dispatch_fence) |fence| try fence.check();
-                bridge.callController(&preflight, Preflight.run, cancel) catch |err| return rejectedHostInvocation(invocation, allocator, err);
+                bridge.callController(&preflight, Preflight.run, cancel) catch |err| {
+                    // V0.7 §2.2 auto-shell: recover the observed-prompt fence
+                    // inside the same tool call instead of bouncing the model
+                    // through the manual read/attach dance. One bounded
+                    // recovery per call; the original blocker is reported
+                    // unchanged when recovery does not reach prompt_ready.
+                    if (err != error.ShellPromptNotObserved or auto_shell_attempts != 0) return rejectedHostInvocation(invocation, allocator, err);
+                    auto_shell_attempts += 1;
+                    const Recovery = struct {
+                        backend: *@import("ui/ai_execution_backend.zig").Context,
+                        invocation: @import("ai/host_tools.zig").Invocation,
+                        hash: [32]u8,
+                        fn run(context: *anyopaque) !void {
+                            const value: *@This() = @ptrCast(@alignCast(context));
+                            try value.backend.autoRecoverShell(value.invocation, value.hash, 30000);
+                        }
+                    };
+                    var recovery: Recovery = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash };
+                    bridge.callController(&recovery, Recovery.run, cancel) catch |recover_err| return rejectedHostInvocation(invocation, allocator, recover_err);
+                    continue;
+                };
                 prepared.subject.impact = preflight.evidence.text();
                 prepared.subject.reconfirmation = reconfirm;
                 const permit = try bridge.requestHostRoute(prepared.invocation, prepared.subject, allocator, cancel);
@@ -16728,7 +16753,8 @@ const WindowPin = struct {
 
     fn mount(cx: *ui.Cx, scope: *ui.Scope) !*WindowPin {
         const self = try scope.createState(WindowPin, .{ .cx = cx, .tint = try scope.createSignal(?ui.Color, app_theme.current().fg_2) });
-        self.button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.pin, .icon_size = @as(f32, 16), .icon_tint = self.tint, .a11y_label = "窗口置顶", .on_click = cx.on(WindowPin, self, toggle) }).mount(scope, cx);
+        // V0.7 §3.10: unpinned starts as the tilted pin_off glyph.
+        self.button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.pin_off, .icon_size = @as(f32, 16), .icon_tint = self.tint, .a11y_label = "窗口置顶", .on_click = cx.on(WindowPin, self, toggle) }).mount(scope, cx);
         shell_styles.titleToolbarButton(cx.allocator, self.button);
         self.button.meta.ownership.meta.test_id = "toolbar.window_pin";
         return self;
@@ -16738,14 +16764,20 @@ const WindowPin = struct {
         const pinned = !self.pinned;
         if (!zw_window_set_pinned(self.cx.native_window_id, pinned)) return;
         self.pinned = pinned;
-        if (self.button.behavior.interaction.a11y) |*attrs| attrs.pressed = pinned;
+        if (self.button.behavior.interaction.a11y) |*attrs| {
+            attrs.pressed = pinned;
+            attrs.label = if (pinned) "取消窗口置顶" else "窗口置顶";
+        }
         self.retheme();
         self.cx.requestRedraw();
     }
 
     fn retheme(self: *WindowPin) void {
         const palette = app_theme.current();
+        // V0.7 §3.10: shape encodes state—tilted pin means unpinned, upright
+        // pin means pinned. Color only reinforces; the glyph differs.
         self.tint.set(if (self.pinned) palette.accent else palette.fg_2);
+        self.button.setIcon(.{ .icon_id = (if (self.pinned) ui.icons.pin else ui.icons.pin_off).icon_id.?, .rep = (if (self.pinned) ui.icons.pin else ui.icons.pin_off).pickRep(16).?, .tint = if (self.pinned) palette.accent else palette.fg_2 });
     }
 };
 
@@ -16814,7 +16846,8 @@ fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *Setti
     try groups[2].appendChild(cx.allocator, settings_trigger);
     const pin = try WindowPin.mount(cx, scope);
     nav_host.chrome.window_pin = pin;
-    try groups[2].appendChild(cx.allocator, pin.button);
+    // V0.7 §3.10: window-level control leads the application group.
+    try groups[2].insertChildBefore(cx.allocator, pin.button, ai_trigger);
     nav_host.mist = try MistChrome.View.mount(cx, scope, workspace, controls, tabs, actions, groups);
     return bar;
 }

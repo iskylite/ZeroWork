@@ -4,7 +4,8 @@ const std = @import("std");
 const identity = @import("../host/identity.zig");
 pub const ContextMode = @import("../config/config.zig").ChildContextMode;
 pub const ReusePolicy = @import("../config/config.zig").ChildReusePolicy;
-pub const Defaults = struct { context_mode: ContextMode = .independent, reuse_policy: ReusePolicy = .new };
+/// V0.7 §2.2.3: interactive-mode batch fallback (null keeps the default on).
+pub const Defaults = struct { context_mode: ContextMode = .independent, reuse_policy: ReusePolicy = .new, batch_fallback: ?bool = null };
 pub fn resolve(defaults: Defaults, mode: ?ContextMode, reusable: ?bool) struct { context_mode: ContextMode, reusable: bool } {
     return .{ .context_mode = mode orelse defaults.context_mode, .reusable = reusable orelse (defaults.reuse_policy == .prefer_reuse) };
 }

@@ -111,6 +111,10 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, key, "session_retention")) return setEnum(config.SessionRetention, &value.ai.session_retention, next);
         if (std.mem.eql(u8, key, "child_context_mode")) return setEnum(config.ChildContextMode, &value.ai.child_context_mode, next);
         if (std.mem.eql(u8, key, "child_reuse_policy")) return setEnum(config.ChildReusePolicy, &value.ai.child_reuse_policy, next);
+        if (std.mem.eql(u8, key, "interactive_batch_fallback")) return setBool(&value.ai.interactive_batch_fallback, next);
+        if (std.mem.eql(u8, key, "child_max_active")) return setUnsigned(&value.ai.child_max_active, next, 1, 16);
+        if (std.mem.eql(u8, key, "child_request_concurrency")) return setUnsigned(&value.ai.child_request_concurrency, next, 1, 8);
+        if (std.mem.eql(u8, key, "model_slots")) return setUnsigned(&value.ai.model_slots, next, 2, 8);
         if (std.mem.eql(u8, key, "follow_up_mode")) return setEnum(config.FollowUpMode, &value.ai.follow_up_mode, next);
         if (std.mem.eql(u8, key, "step_display")) return setEnum(config.StepDisplay, &value.ai.step_display, next);
         if (std.mem.eql(u8, key, "permission_mode")) {
@@ -249,6 +253,10 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
         if (std.mem.eql(u8, key, "session_retention")) return .{ .text = @tagName(value.ai.session_retention) };
         if (std.mem.eql(u8, key, "child_context_mode")) return .{ .text = @tagName(value.ai.child_context_mode) };
         if (std.mem.eql(u8, key, "child_reuse_policy")) return .{ .text = @tagName(value.ai.child_reuse_policy) };
+        if (std.mem.eql(u8, key, "interactive_batch_fallback")) return .{ .boolean = value.ai.interactive_batch_fallback };
+        if (std.mem.eql(u8, key, "child_max_active")) return .{ .unsigned = value.ai.child_max_active };
+        if (std.mem.eql(u8, key, "child_request_concurrency")) return .{ .unsigned = value.ai.child_request_concurrency };
+        if (std.mem.eql(u8, key, "model_slots")) return .{ .unsigned = value.ai.model_slots };
         if (std.mem.eql(u8, key, "follow_up_mode")) return .{ .text = @tagName(value.ai.follow_up_mode) };
         if (std.mem.eql(u8, key, "step_display")) return .{ .text = @tagName(value.ai.step_display) };
         if (std.mem.eql(u8, key, "permission_mode")) return .{ .text = @tagName(value.ai.permission_mode) };

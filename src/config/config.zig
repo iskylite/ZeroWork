@@ -141,6 +141,7 @@ pub const Config = struct {
         try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nfollow_up_mode = \"{s}\"\nstep_display = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), @tagName(self.ai.follow_up_mode), @tagName(self.ai.step_display), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
         if (self.ai.default_effort) |effort| try writer.print("default_effort = \"{s}\"\n", .{@tagName(effort)});
         try writer.print("child_context_mode = \"{s}\"\nchild_reuse_policy = \"{s}\"\n", .{ @tagName(self.ai.child_context_mode), @tagName(self.ai.child_reuse_policy) });
+        try writer.print("interactive_batch_fallback = {}\nchild_max_active = {d}\nchild_request_concurrency = {d}\nmodel_slots = {d}\n", .{ self.ai.interactive_batch_fallback, self.ai.child_max_active, self.ai.child_request_concurrency, self.ai.model_slots });
         if (self.ai.extensions.skills.len != 0 or self.ai.extensions.servers.len != 0) {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
@@ -245,7 +246,16 @@ pub const Config = struct {
                     const a = allocator orelse return error.RequiresAllocator;
                     const encoded = try parseOwnedString(allocator, value);
                     self.ai.extensions = std.json.parseFromSliceLeaky(ai_extensions.Extensions, a, encoded, .{ .allocate = .alloc_always }) catch return error.InvalidValue;
-                } else if (eq(key, "child_context_mode")) self.ai.child_context_mode = std.meta.stringToEnum(ChildContextMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "child_reuse_policy")) self.ai.child_reuse_policy = std.meta.stringToEnum(ChildReusePolicy, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "default_effort")) self.ai.default_effort = std.meta.stringToEnum(@import("../ai/provider.zig").Effort, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = ExecutionMode.parse(try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
+                } else if (eq(key, "child_context_mode")) self.ai.child_context_mode = std.meta.stringToEnum(ChildContextMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "child_reuse_policy")) self.ai.child_reuse_policy = std.meta.stringToEnum(ChildReusePolicy, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "interactive_batch_fallback")) self.ai.interactive_batch_fallback = try parseBool(value) else if (eq(key, "child_max_active")) {
+                    self.ai.child_max_active = try parseInt(u8, value);
+                    if (self.ai.child_max_active < 1 or self.ai.child_max_active > 16) return error.OutOfRange;
+                } else if (eq(key, "child_request_concurrency")) {
+                    self.ai.child_request_concurrency = try parseInt(u8, value);
+                    if (self.ai.child_request_concurrency < 1 or self.ai.child_request_concurrency > 8) return error.OutOfRange;
+                } else if (eq(key, "model_slots")) {
+                    self.ai.model_slots = try parseInt(u8, value);
+                    if (self.ai.model_slots < 2 or self.ai.model_slots > 8) return error.OutOfRange;
+                } else if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "default_effort")) self.ai.default_effort = std.meta.stringToEnum(@import("../ai/provider.zig").Effort, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = ExecutionMode.parse(try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
             },
             .log => {
                 if (eq(key, "ring_mb")) self.log.ring_mb = try parseInt(u16, value) else if (eq(key, "checkpoint_sec")) self.log.checkpoint_sec = try parseInt(u16, value) else if (eq(key, "retention_days")) self.log.retention_days = try parseInt(u16, value) else if (eq(key, "export_format")) self.log.export_format = try parseString(value) else return error.UnknownKey;
@@ -473,6 +483,17 @@ pub const ChildReusePolicy = enum { new, prefer_reuse, model };
 pub const Ai = struct {
     child_context_mode: ChildContextMode = .independent,
     child_reuse_policy: ChildReusePolicy = .new,
+    /// V0.7 §2.2.3: interactive mode may run a stateless command through batch
+    /// execution while the terminal is occupied (default on). Turning this off
+    /// restores the strict V0.4 interactive-only rule.
+    interactive_batch_fallback: bool = true,
+    /// V0.7 §2.3: per-active-root child task budget (1–16). Default keeps the
+    /// V0.4 value; the 16 ceiling is a memory guardrail and cannot be exceeded.
+    child_max_active: u8 = 4,
+    /// V0.7 §2.3: concurrent provider requests per root task (1–8).
+    child_request_concurrency: u8 = 2,
+    /// V0.7 §2.3: process-level concurrent model request slots (2–8).
+    model_slots: u8 = 4,
     extensions: ai_extensions.Extensions = .{},
     follow_up_mode: FollowUpMode = .steer,
     default_provider: []const u8 = "anthropic",

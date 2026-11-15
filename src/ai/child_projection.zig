@@ -19,6 +19,9 @@ pub const Entry = struct {
     reusable: bool,
     changed_at_ms: i64 = 0,
     task: ?id.TaskId = null,
+    /// V0.7 §3.8: per-child usage facts (requests and token totals).
+    requests: u64 = 0,
+    tokens: u64 = 0,
 };
 pub fn latest(service: *runtime.Service, agent: id.AgentId) ?budget.Fact {
     var result: ?budget.Fact = null;
@@ -65,7 +68,7 @@ pub fn entry(service: *runtime.Service, record: *life.Record) Entry {
         .settling => "收尾中",
         .succeeded => "已完成",
         .cancelled => "已停止",
-    }, .group = group, .running = active, .reusable = prefs.reusable, .changed_at_ms = if (fact) |value| value.changed_at_ms else 0, .task = if (fact) |value| value.task else null };
+    }, .group = group, .running = active, .reusable = prefs.reusable, .changed_at_ms = if (fact) |value| value.changed_at_ms else 0, .task = if (fact) |value| value.task else null, .requests = if (fact) |value| value.counters.requests else 0, .tokens = if (fact) |value| value.counters.input_tokens + value.counters.output_tokens else 0 };
 }
 pub fn less(_: void, left: Entry, right: Entry) bool {
     if (left.group != right.group) return @backingInt(left.group) < @backingInt(right.group);

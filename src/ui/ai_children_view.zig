@@ -201,7 +201,11 @@ pub const View = struct {
             const seconds: i64 = if (entry.changed_at_ms > 0) @max(0, @divTrunc(@import("../platform/realtime.zig").milliseconds(undefined) - entry.changed_at_ms, 1000)) else 0;
             var summary_len = @min(entry.summary.len, 100);
             while (summary_len != 0 and summary_len < entry.summary.len and entry.summary[summary_len] & 0xc0 == 0x80) summary_len -= 1;
-            const detail = try std.fmt.bufPrint(&buf, "{s}{s} · {d} 秒前", .{ if (entry.summary.len != 0) entry.summary[0..summary_len] else entry.status, if (entry.reusable) " · 可复用" else "", seconds });
+            // V0.7 §3.8: usage facts as established facts (no ledger).
+            const detail = if (entry.requests != 0)
+                try std.fmt.bufPrint(&buf, "{s}{s} · {d} 次请求 · {d} tokens · {d} 秒前", .{ if (entry.summary.len != 0) entry.summary[0..summary_len] else entry.status, if (entry.reusable) " · 可复用" else "", entry.requests, entry.tokens, seconds })
+            else
+                try std.fmt.bufPrint(&buf, "{s}{s} · {d} 秒前", .{ if (entry.summary.len != 0) entry.summary[0..summary_len] else entry.status, if (entry.reusable) " · 可复用" else "", seconds });
             if (!View.sameText(self.detail, detail)) try self.detail.setTextContent(self.view.cx.allocator, detail);
         }
         const Visual = enum { running, waiting, attention, failed, stopped, complete };

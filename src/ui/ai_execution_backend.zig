@@ -278,6 +278,44 @@ pub const Context = struct {
         try self.admissions.append(self.app.allocator, record);
         return evidence;
     }
+    /// V0.7 §2.2 auto-shell: recover an unobserved shell prompt inside the
+    /// SAME host.run_in_terminal call. The host takes fresh screen/state
+    /// evidence from the terminal snapshot, dispatches the same attachment
+    /// pipeline @shell attach uses, waits up to `timeout_ms` for
+    /// prompt_ready, and lets the caller retry its preflight. All evidence
+    /// rules are preserved: attachment is attested from real snapshots and
+    /// integration receipts; a failed or timed-out recovery reports the
+    /// original blocker without sending any business command.
+    pub fn autoRecoverShell(self: *Context, invocation: host.Invocation, command_hash: [32]u8, timeout_ms: u32) !void {
+        const controller = try self.current(invocation.context, false);
+        const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
+        const started = @import("../platform/realtime.zig").monotonicNs();
+        const deadline = started + @as(i128, timeout_ms) * std.time.ns_per_ms;
+        var attempt: u8 = 0;
+        while (true) {
+            attempt += 1;
+            const now = try self.captureBoundary(controller, handle, true, command_hash);
+            const snapshot = try now.service.executionSnapshot();
+            // Integration genuinely unavailable: never loop past the blocker.
+            if (!snapshot.interactive_execution) return error.IntegrationUnavailable;
+            if (snapshot.input_ready and snapshot.shell.prompt_ready == true) return;
+            if (snapshot.failure) |failure| {
+                if (std.mem.eql(u8, failure, "UnsupportedShell") or std.mem.eql(u8, failure, "UnsupportedMultiplexer") or std.mem.eql(u8, failure, "ShellHooksConflict")) return error.UnsupportedShell;
+            }
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.ShellPromptNotObserved;
+            if (attempt > 8) return error.ShellPromptNotObserved;
+            const legacy = self.app.legacyForHandle(handle) orelse return error.StaleReference;
+            const tab = self.app.workspace.sessionTab(legacy) orelse return error.StaleReference;
+            const runtime = tab.runtime orelse return error.UnsupportedShell;
+            try runtime.attachShell(.{ .task_id = invocation.context.task_id, .shell_id = snapshot.shell.id, .shell_revision = snapshot.shell.revision, .input_epoch = snapshot.input_epoch, .output_sequence = (try now.service.status()).output_sequence });
+            const wait_deadline = @import("../platform/realtime.zig").monotonicNs() + 1000 * std.time.ns_per_ms;
+            while (@import("../platform/realtime.zig").monotonicNs() < @min(wait_deadline, deadline)) {
+                const latest = try now.service.executionSnapshot();
+                if (latest.input_ready and latest.shell.prompt_ready == true) return;
+                std.Thread.yield() catch {};
+            }
+        }
+    }
     /// Attachment intentionally does not require an already integrated prompt.
     /// It has the same scope/permission checks and a separate fresh-screen fence.
     pub fn preflightAttachment(self: *Context, invocation: host.Invocation) !AttachmentPrepared {

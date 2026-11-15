@@ -160,6 +160,9 @@ pub const Root = struct {
     /// consumer. Advanced atomically when a wait_events response is accepted
     /// into the Loop; an omitted after_sequence pages from here.
     delivered_watermark: u64 = 0,
+    /// V0.7 §2.3: max active delegated children per this root (1–16,
+    /// clamped). Frozen at root creation from process configuration.
+    child_limit: u8 = 4,
     pub fn init(a: std.mem.Allocator) Root {
         return .{ .allocator = a, .arena = .init(a), .last_ns = (Clock{}).now() };
     }
@@ -279,7 +282,7 @@ pub const Root = struct {
             for (self.facts[0..self.count]) |fact| if (fact.parent != null and !terminal(fact.status)) {
                 active += 1;
             };
-            if (active >= 4) return error.ChildTaskLimit;
+            if (active >= self.child_limit) return error.ChildTaskLimit;
         }
         var fact = original;
         fact.request_key = try self.arena.allocator().dupe(u8, fact.request_key);
@@ -306,7 +309,7 @@ pub const Root = struct {
         for (self.facts[0..self.count]) |fact| if (fact.parent != null and !terminal(fact.status)) {
             active += 1;
         };
-        if (active >= 4) return error.ChildTaskLimit;
+        if (active >= self.child_limit) return error.ChildTaskLimit;
         var fact = original;
         fact.request_key = try self.arena.allocator().dupe(u8, original.request_key);
         fact.label = try self.arena.allocator().dupe(u8, original.label);
@@ -522,13 +525,26 @@ pub const Root = struct {
 
 /// Only actual Provider calls occupy slots. FIFO within a root; rotate eligible
 /// roots on each admission. Waiting is cancellable without acquiring a slot.
+/// V0.7 §2.3: capacities are process-frozen from configuration (model_slots,
+/// child_request_concurrency); queue depth keeps the V0.4 fixed bound.
 pub const Slots = struct {
     mutex: std.atomic.Mutex = .unlocked,
     next: u64 = 1,
     last_root: id.TaskId = .{},
     queue: [64]?Ticket = @splat(null),
-    active: [4]?Ticket = @splat(null),
+    active: [8]?Ticket = @splat(null),
+    /// Number of active slots actually used (2–8, frozen at process start).
+    active_slots: usize = 4,
+    /// Concurrent provider requests per root (1–8, frozen at process start).
+    per_root: usize = 2,
     pub const Ticket = struct { sequence: u64, root: id.TaskId };
+    pub fn configure(self: *Slots, model_slots: u8, request_concurrency: u8) void {
+        self.active_slots = @min(8, @max(2, @as(usize, model_slots)));
+        self.per_root = @min(8, @max(1, @as(usize, request_concurrency)));
+        self.lock();
+        defer self.mutex.unlock();
+        for (self.active[self.active_slots..]) |*entry| entry.* = null;
+    }
     fn lock(self: *Slots) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
@@ -554,17 +570,17 @@ pub const Slots = struct {
     pub fn tryAcquire(self: *Slots, ticket: Ticket) bool {
         self.lock();
         defer self.mutex.unlock();
-        const vacant = for (self.active, 0..) |entry, i| {
+        const vacant = for (self.active[0..self.active_slots], 0..) |entry, i| {
             if (entry == null) break i;
         } else return false;
         var selected: ?usize = null;
         var alternative: ?usize = null;
         for (self.queue, 0..) |maybe, i| if (maybe) |entry| {
             var count: usize = 0;
-            for (self.active) |running| if (running != null and running.?.root.eql(entry.root)) {
+            for (self.active[0..self.active_slots]) |running| if (running != null and running.?.root.eql(entry.root)) {
                 count += 1;
             };
-            if (count >= 2) continue;
+            if (count >= self.per_root) continue;
             if (selected == null or entry.sequence < self.queue[selected.?].?.sequence) selected = i;
             if (!entry.root.eql(self.last_root) and (alternative == null or entry.sequence < self.queue[alternative.?].?.sequence)) alternative = i;
         };

@@ -436,11 +436,19 @@ pub const Service = struct {
     task_roots: std.ArrayList(*task_budget.Root) = .empty,
     slots: task_budget.Slots = .{},
     mode: input.Mode = .steer,
+    /// V0.7 §2.3: frozen child task limit for new roots (1–16).
+    child_limit: u8 = 4,
     pub fn init(a: std.mem.Allocator) Service {
         return .{ .allocator = a, .store = lifecycle.Store.init(a) };
     }
     pub fn applySettings(self: *Service, ai: @import("../config/config.zig").Ai) void {
         self.mode = ai.follow_up_mode;
+        // V0.7 §2.3: freeze the process-level model slots and per-root request
+        // concurrency from configuration; a mid-run edit applies only where
+        // the design allows (slot config takes effect at process start, the
+        // call below is idempotent for the already-frozen default).
+        self.slots.configure(ai.model_slots, ai.child_request_concurrency);
+        self.child_limit = ai.child_max_active;
     }
     pub fn deinit(self: *Service) void {
         for (self.runners.items) |runner| runner.stopWorker();
@@ -660,6 +668,8 @@ pub const Service = struct {
             const root = try self.allocator.create(task_budget.Root);
             root.* = task_budget.Root.init(self.allocator);
             root.persist = .{ .context = &self.store, .write = lifecycle.Store.persistTask };
+            // V0.7 §2.3: the root freezes the configured child limit.
+            root.child_limit = self.child_limit;
             self.task_roots.appendAssumeCapacity(root);
             runner.task_root = root;
         }
