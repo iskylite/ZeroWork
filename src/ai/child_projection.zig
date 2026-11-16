@@ -22,7 +22,38 @@ pub const Entry = struct {
     /// V0.7 §3.8: per-child usage facts (requests and token totals).
     requests: u64 = 0,
     tokens: u64 = 0,
+    /// V0.7 §12.2: "疑似卡住" (running but counters idle > stuck_minutes).
+    /// Displayed as a row mark; never auto-intervened.
+    stuck: bool = false,
 };
+
+/// V0.7 §10.2: Auto-upgrade decisions on the task event stream, newest
+/// first. The panel renders them above the board as an explainable timeline.
+pub const DecisionRow = struct {
+    at_ms: i64,
+    reason: []const u8,
+};
+
+pub fn decisionRows(a: std.mem.Allocator, service: *runtime.Service, parent: id.ConversationId) ![]DecisionRow {
+    var rows: std.ArrayList(DecisionRow) = .empty;
+    errdefer rows.deinit(a);
+    for (service.task_roots.items) |root| {
+        const decisions = root.decisionsSnapshot(a) catch continue;
+        defer a.free(decisions);
+        var owns = false;
+        root.lock();
+        defer root.mutex.unlock();
+        for (root.facts[0..root.count]) |fact| {
+            if (fact.parent == null and fact.conversation.eql(parent)) {
+                owns = true;
+                break;
+            }
+        }
+        if (!owns) continue;
+        for (decisions) |decision| try rows.append(a, .{ .at_ms = decision.at_ms, .reason = decision.reason });
+    }
+    return rows.toOwnedSlice(a);
+}
 
 /// V0.7 §14.2 Board row: a board post rendered from the G8 event stream.
 pub const BoardRow = struct {
@@ -95,10 +126,20 @@ pub fn less(_: void, left: Entry, right: Entry) bool {
     return std.mem.order(u8, &left.agent.bytes, &right.agent.bytes) == .lt;
 }
 pub fn query(a: std.mem.Allocator, service: *runtime.Service, parent: id.ConversationId) ![]Entry {
+    return queryStuck(a, service, parent, &.{});
+}
+
+/// V0.7 §12.2: the caller passes the stuck member set from the shared host.
+pub fn queryStuck(a: std.mem.Allocator, service: *runtime.Service, parent: id.ConversationId, stuck: []const id.AgentId) ![]Entry {
     var rows: std.ArrayList(Entry) = .empty;
     errdefer rows.deinit(a);
     for (service.store.records.items) |record| if (record.child) |owned| if (owned.info.owning_parent_conversation.eql(parent)) {
-        try rows.append(a, entry(service, record));
+        var row = entry(service, record);
+        for (stuck) |agent| if (agent.eql(row.agent)) {
+            row.stuck = true;
+            if (row.status.len != 0 and std.mem.indexOf(u8, row.status, "疑似卡住") == null) row.status = "疑似卡住";
+        };
+        try rows.append(a, row);
     };
     std.mem.sort(Entry, rows.items, {}, less);
     return rows.toOwnedSlice(a);

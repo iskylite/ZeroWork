@@ -1078,7 +1078,16 @@ const AiHost = struct {
             // V0.7 §12.2/§14.4: surface the level-2 stall escalation.
             view.setStallEscalated(shared_host.stall_escalated);
             const state = (self.assistant_states orelse return).find(self.display_conversation orelse return) orelse return;
-            const rows = try @import("ai/child_projection.zig").query(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id);
+            // V0.7 §12.2: pass the stuck-member set so rows carry 疑似卡住.
+            var stuck_keys: [16]@import("host/identity.zig").AgentId = undefined;
+            var stuck_count: usize = 0;
+            var stuck_it = shared_host.stuck_members.keyIterator();
+            while (stuck_it.next()) |agent| {
+                if (stuck_count == stuck_keys.len) break;
+                stuck_keys[stuck_count] = agent.*;
+                stuck_count += 1;
+            }
+            const rows = try @import("ai/child_projection.zig").queryStuck(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id, stuck_keys[0..stuck_count]);
             defer self.allocator.free(rows);
             var running_count: ?usize = null;
             if (self.child_list_parent != null) {
@@ -1093,7 +1102,11 @@ const AiHost = struct {
             const board_rows = try @import("ai/child_projection.zig").boardRows(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id);
             defer self.allocator.free(board_rows);
             try view.updateBoard(board_rows);
-            try view.updateGraph(rows);
+            // V0.7 §10.2: the Auto-upgrade decision timeline rides the Board.
+            const decision_rows = try @import("ai/child_projection.zig").decisionRows(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id);
+            defer self.allocator.free(decision_rows);
+            try view.updateDecisions(decision_rows);
+            try view.updateGraph(rows, board_rows);
             const round_rows = try @import("ai/child_projection.zig").roundRows(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id);
             defer self.allocator.free(round_rows);
             try view.updateRounds(round_rows);
@@ -2844,7 +2857,7 @@ const AiHost = struct {
         if (self.composer_hash == fingerprint) return;
         const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = estimated, .parts = parts.items, .measured_input = history_usage.measured_tokens, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
         const key: ?@import("ui/ai_composer_controls_view.zig").ModelKey = if (controls.model) |value| .{ .provider_id = value.provider_id, .model_id = value.model_id } else if (selected) |value| .{ .provider_id = config.ai.default_provider, .model_id = value.model } else null;
-        try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .workspace = workspace_ticket, .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .model_selection_required = controls.model_selection_required, .default_model_status = self.model_discovery.defaultStatus(runtime.value.ai, runtime.modelDiscoveryRevision()), .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .effort_fallback_from = controls.effort_fallback_from, .thinking = controls.thinking, .attachments = .{ .image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite() });
+        try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .workspace = workspace_ticket, .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .model_selection_required = controls.model_selection_required, .default_model_status = self.model_discovery.defaultStatus(runtime.value.ai, runtime.modelDiscoveryRevision()), .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .effort_fallback_from = controls.effort_fallback_from, .thinking = controls.thinking, .attachments = .{ .image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite(), .custom_templates = config.ai.child_role_templates });
         if (catalog_changed) view.preserveModelPopup();
         self.composer_hash = fingerprint;
         self.promptChanged(self.prompt.peek());
@@ -7025,6 +7038,31 @@ const AiHost = struct {
     }
 
     fn submit(self: *AiHost, text: []const u8) void {
+        // V0.7 §10.1 keyboard equivalents: /swarm /boost /auto switch the
+        // session mode before this input is sent, so the new mode applies to
+        // the current prompt. The command itself is consumed, never sent; a
+        // trailing payload ("/swarm 巡检三台主机") is sent under the new mode.
+        if (text.len > 0 and text[0] == '/') {
+            const command_end = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
+            const command = text[0..command_end];
+            if (@import("ai/swarm_mode.zig").modeForCommand(command)) |mode| {
+                if (self.composer_controls) |controls| {
+                    controls.setSwarmMode(mode);
+                    self.setFeedback(switch (mode) {
+                        .auto => "已切换为 Auto：宿主自动判定，对当前输入生效",
+                        .swarm => "已切换为 Swarm：当前输入按多子并行编排",
+                        .boost => "已切换为 Boost：当前输入按深度攻坚",
+                    });
+                    self.cx.requestRedraw();
+                    const rest = std.mem.trim(u8, text[command_end..], " \t\r\n");
+                    if (rest.len != 0) {
+                        self.submitAttached(rest, null) catch |err| self.refresh(@errorName(err));
+                        return;
+                    }
+                    return;
+                }
+            }
+        }
         switch (self.welcomeModelState()) {
             .loading => self.setFeedback("正在加载模型…"),
             .unavailable => self.setFeedback("暂时无法加载模型"),
@@ -7260,6 +7298,13 @@ const AiHost = struct {
                 if (decision.upgrade) {
                     auto_parallel_note = try std.fmt.allocPrint(self.allocator, "本次并行执行 · {s}", .{decision.reason});
                     if (self.feedback) |view| view.show(auto_parallel_note.?, .completion);
+                }
+                // §10.2: persist the decision (hit or miss stays silent) on
+                // the parent root's event stream for the panel timeline.
+                if (decision.upgrade) {
+                    if (self.execution().attached_runner) |runner| if (runner.task_root) |root| {
+                        root.recordDecision(@import("platform/realtime.zig").milliseconds(undefined), auto_parallel_note orelse decision.reason) catch {};
+                    };
                 }
             }
         }
@@ -10262,6 +10307,21 @@ const AiHost = struct {
                 } else if (fact.reported_sequence < fact.event_sequence) undelivered = true;
             }
             if (!parent_active or root_task == null) continue;
+            // V0.7 §12.2 "疑似卡住": a child is running but its counters
+            // have not changed for stuck_minutes. Mark the row (via the
+            // fact summary suffix); never auto-intervene.
+            if (any_running) {
+                for (root.facts[0..root.count]) |fact| {
+                    if (fact.parent == null or budget.terminal(fact.status) or fact.status != .running) continue;
+                    const idle = now -| fact.changed_at_ms;
+                    if (@divTrunc(idle, 60000) >= config.stuck_minutes and !shared_host.stuck_members.contains(fact.agent)) {
+                        shared_host.stuck_members.put(fact.agent, fact.seq) catch {};
+                        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                    } else if (@divTrunc(idle, 60000) < config.stuck_minutes) {
+                        _ = shared_host.stuck_members.remove(fact.agent);
+                    }
+                }
+            }
             // Level 1: all children settled, parent has not finished — the
             // parent's dependency wait already delivers on its next tick;
             // track the idle window for level 2.
@@ -10274,6 +10334,24 @@ const AiHost = struct {
                         shared_host.stall_escalated = true;
                         shared_host.stall_parent_task = root_task;
                         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                        // §12.2 level 2: desktop notification; the
+                        // 催父/停全部 actions live on the panel banner.
+                        if (process_notifications) |notifications| {
+                            if (self.notification_window) |window| {
+                                _ = notifications.publish(.{
+                                    .definition_id = "host.ai_attention",
+                                    .owner = .{ .window_id = @backingInt(window), .window_only = true },
+                                    .operation_id = 1,
+                                    .attempt_id = @intCast(@divTrunc(now, 1000)),
+                                    .event_revision = 1,
+                                    .phase = .failed,
+                                    .severity = .warning,
+                                    .title = "集群停滞",
+                                    .detail = "父任务长时间无动作。可在子智能体面板催父或停止全部子任务。",
+                                    .owner_name = "AI 助手",
+                                }) catch {};
+                            }
+                        }
                     }
                 }
                 continue;

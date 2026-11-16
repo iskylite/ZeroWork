@@ -39,8 +39,10 @@ pub const Host = struct {
     stall_since_ms: i64 = 0,
     stall_escalated: bool = false,
     stall_parent_task: ?@import("../host/identity.zig").TaskId = null,
+    /// V0.7 §12.2: members marked "疑似卡住" (running but counters idle).
+    stuck_members: std.AutoHashMap(@import("../host/identity.zig").AgentId, u32),
     pub fn init(a: std.mem.Allocator) Host {
-        return .{ .allocator = a, .service = runtime.Service.init(a), .presentations = legacy.Store.init(a) };
+        return .{ .allocator = a, .service = runtime.Service.init(a), .presentations = legacy.Store.init(a), .stuck_members = std.AutoHashMap(@import("../host/identity.zig").AgentId, u32).init(a) };
     }
     pub fn referenceProjection(self: *Host, conversation: identity.ConversationId) ?@import("../host/local_file_reference.zig").Projection {
         const key = self.local_file_reference_key orelse return null;
@@ -327,6 +329,7 @@ pub const Host = struct {
         return ready and !self.service.store.presentationPending();
     }
     pub fn deinit(self: *Host) !void {
+        self.stuck_members.deinit();
         if (!try self.shutdown()) return error.ResourceCleanupPending;
         for (self.bridges.items) |*bridge| if (!bridge.disposed) {
             bridge.destroy(bridge.context);

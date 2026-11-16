@@ -1,3 +1,4 @@
+const std = @import("std");
 const ui = @import("ui");
 const binding = @import("../settings_content_view.zig");
 const draft = @import("../settings_ai_draft.zig");
@@ -63,6 +64,19 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.input(.{ .section = "ai", .key = "swarm_stall_minutes" }, "停滞第一级阈值（分钟）", "1–30。默认 3。全部子空闲且板上无新帖达到阈值后唤醒父。", null);
         try section.input(.{ .section = "ai", .key = "swarm_stall_parent_minutes" }, "停滞第二级阈值（分钟）", "1–30。默认 2。父被唤醒后仍无动作达到阈值后面板警示并桌面通知。", null);
         try section.input(.{ .section = "ai", .key = "boost_max_rounds" }, "Boost 轮次上限", "1–8。默认 5。单条实现→挑战→修复链的轮次上限；父可声明更小值。", null);
+        // V0.7 §3.7: custom role-template management. The built-in 均衡
+        // template is implicit; the list reads the persisted
+        // [ai] child_role_templates entries (name + planner/verifier/
+        // worker/batch effort slots).
+        const templates = bound.controller.model.value.ai.child_role_templates;
+        if (templates.len != 0) {
+            for (templates, 0..) |template, index| {
+                const title = try std.fmt.allocPrint(bound.scope.allocator, "模板 {d} · {s}", .{ index + 1, template.name });
+                defer bound.scope.allocator.free(title);
+                try section.readonly(title, "自定义角色模板；新建子任务按模板槽位解析模型与推理档位。");
+            }
+        } else try section.readonly("角色模板", "仅内置「均衡」模板（全部槽继承）。可在配置文件 child_role_templates 中添加自定义模板。");
+        try section.readonly("模板管理", "新建/编辑/复制/删除自定义模板：模式菜单（编排模式芯片）内选择活动模板；本版设置页提供只读清单。");
     }
         if (binding.matches(query, "上下文 来源 脱敏 隐私 IP 主机 用户 redact_ip")) {
         const section = try page.section("上下文", "连接身份与敏感信息", ui.icons.file_text, 25, "settings.ai.context", null);

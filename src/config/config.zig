@@ -143,6 +143,14 @@ pub const Config = struct {
         try writer.print("child_context_mode = \"{s}\"\nchild_reuse_policy = \"{s}\"\n", .{ @tagName(self.ai.child_context_mode), @tagName(self.ai.child_reuse_policy) });
         try writer.print("interactive_batch_fallback = {}\nchild_max_active = {d}\nchild_request_concurrency = {d}\nmodel_slots = {d}\n", .{ self.ai.interactive_batch_fallback, self.ai.child_max_active, self.ai.child_request_concurrency, self.ai.model_slots });
         try writer.print("swarm_mode_default = \"{s}\"\nswarm_stall_minutes = {d}\nswarm_stall_parent_minutes = {d}\nboost_max_rounds = {d}\n", .{ @tagName(self.ai.swarm_mode_default), self.ai.swarm_stall_minutes, self.ai.swarm_stall_parent_minutes, self.ai.boost_max_rounds });
+        if (self.ai.child_role_templates.len != 0) {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const encoded = try @import("ai_role_templates.zig").Stored.encode(arena.allocator(), self.ai.child_role_templates);
+            try writer.writeAll("child_role_templates = ");
+            try std.json.Stringify.value(encoded, .{}, &writer);
+            try writer.writeByte('\n');
+        }
         if (self.ai.extensions.skills.len != 0 or self.ai.extensions.servers.len != 0) {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
@@ -265,6 +273,12 @@ pub const Config = struct {
                 } else if (eq(key, "boost_max_rounds")) {
                     self.ai.boost_max_rounds = try parseInt(u8, value);
                     if (self.ai.boost_max_rounds < 1 or self.ai.boost_max_rounds > 8) return error.OutOfRange;
+                } else if (eq(key, "child_role_templates")) {
+                    const a = allocator orelse return error.RequiresAllocator;
+                    const encoded = try parseOwnedString(allocator, value);
+                    const decoded = @import("ai_role_templates.zig").Stored.decode(a, encoded) catch return error.InvalidValue;
+                    for (decoded) |template| template.validate() catch return error.InvalidValue;
+                    self.ai.child_role_templates = decoded;
                 } else if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "default_effort")) self.ai.default_effort = std.meta.stringToEnum(@import("../ai/provider.zig").Effort, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = ExecutionMode.parse(try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
             },
             .log => {
@@ -513,6 +527,9 @@ pub const Ai = struct {
     swarm_stall_parent_minutes: u8 = 2,
     /// V0.7 §12.3: boost chain round ceiling (1–8, declared by parent ≤8).
     boost_max_rounds: u8 = 5,
+    /// V0.7 §3.7/§5: custom role templates (JSON on [ai]; the built-in
+    /// 均衡 template is implicit and always available).
+    child_role_templates: []const @import("ai_role_templates.zig").Stored = &.{},
     extensions: ai_extensions.Extensions = .{},
     follow_up_mode: FollowUpMode = .steer,
     default_provider: []const u8 = "anthropic",

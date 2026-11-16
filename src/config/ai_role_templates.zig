@@ -131,6 +131,43 @@ pub fn intersectIds(a: std.mem.Allocator, granted: []const []const u8, mask: ?[]
     return out.toOwnedSlice(a);
 }
 
+/// V0.7 §3.7/§5: the persisted template list on [ai] child_role_templates.
+/// JSON-encoded like extensions; the built-in 均衡 template is implicit.
+pub const Stored = struct {
+    name: []const u8,
+    /// Per-slot model ids (empty = inherit), indexed by Role.
+    models: [5]?[]const u8 = @splat(null),
+    /// Per-slot efforts (null = adapted/inherit).
+    efforts: [5]?@import("../ai/provider.zig").Effort = @splat(null),
+    /// Slot index by role order parent=0,planner=1,verifier=2,worker=3,batch=4.
+    pub fn encode(a: std.mem.Allocator, list: []const Stored) ![]const u8 {
+        return std.json.Stringify.valueAlloc(a, list, .{});
+    }
+    pub fn decode(a: std.mem.Allocator, text: []const u8) ![]Stored {
+        return std.json.parseFromSliceLeaky([]Stored, a, text, .{ .allocate = .alloc_always }) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidRoleTemplate,
+        };
+    }
+    pub fn validate(self: Stored) !void {
+        if (std.mem.trim(u8, self.name, " \t\r\n").len == 0 or self.name.len > 64 or !std.unicode.utf8ValidateSlice(self.name)) return error.InvalidRoleTemplate;
+    }
+};
+
+test "v0.7 stored templates round trip json" {
+    const a = std.testing.allocator;
+    const list = [_]Stored{.{ .name = "攻坚", .models = @splat(null), .efforts = .{ null, .high, null, .medium, null } }};
+    const encoded = try Stored.encode(a, &list);
+    defer a.free(encoded);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const decoded = try Stored.decode(arena.allocator(), encoded);
+    try std.testing.expectEqual(@as(usize, 1), decoded.len);
+    try std.testing.expectEqualStrings("攻坚", decoded[0].name);
+    try std.testing.expectEqual(@import("../ai/provider.zig").Effort.high, decoded[0].efforts[1].?);
+    try std.testing.expectError(error.InvalidRoleTemplate, Stored.decode(arena.allocator(), "not json"));
+}
+
 test "v0.7 role templates four-layer fallback chain resolves per layer" {
     const P = @import("../ai/provider_config.zig");
     const E = @import("../ai/provider.zig").Effort;

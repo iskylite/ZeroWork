@@ -5,6 +5,17 @@ const theme = @import("app_theme.zig");
 const projection = @import("../ai/child_projection.zig");
 const Logo = @import("ai_child_logo.zig");
 const S = @import("ai_children_styles.zig");
+/// V0.7 §14.2: Board filter actions (cx.on needs a named outer type).
+const BoardFilterPick = struct {
+    view: *View,
+    fn toggleAsk(self: *BoardFilterPick) void {
+        self.view.setBoardFilters(self.view.board_filter_member, !self.view.board_filter_ask_only);
+    }
+    fn resetMember(self: *BoardFilterPick) void {
+        self.view.setBoardFilters(null, self.view.board_filter_ask_only);
+    }
+};
+
 /// V0.7 §14: page tab click handler (cx.on needs a named outer type).
 const TabPick = struct {
     view: *View,
@@ -55,6 +66,10 @@ pub const View = struct {
     board_fingerprint: u64 = 0,
     graph_fingerprint: u64 = 0,
     rounds_fingerprint: u64 = 0,
+    decisions_fingerprint: u64 = 0,
+    /// V0.7 §14.2 Board filters: member (#seq), category, ask-only.
+    board_filter_member: ?u32 = null,
+    board_filter_ask_only: bool = false,
     rows: std.ArrayList(*Row) = .empty,
     rows_scope: ?*ui.Scope = null,
     fingerprint: u64 = 0,
@@ -183,13 +198,44 @@ pub const View = struct {
             if (tab.behavior.interaction.a11y) |*a11y| a11y.pressed = members;
         }
     }
-    /// V0.7 §14.2 Board: render the G8 board post stream (from/#to +
+    /// V0.7 §10.2: render the Auto-upgrade decision timeline at the top of
+    /// the Board page (explainable: why a request ran in parallel).
+    pub fn updateDecisions(self: *View, rows: []const projection.DecisionRow) !void {
+        const list = self.board_list orelse return;
+        var hash = std.hash.Wyhash.init(0);
+        for (rows) |row| {
+            std.hash.autoHash(&hash, row.at_ms);
+            hash.update(row.reason);
+        }
+        const stamp = hash.final();
+        if (stamp == self.decisions_fingerprint) return;
+        self.decisions_fingerprint = stamp;
+        while (list.children.items.len != 0) {
+            const child = list.children.items[0];
+            self.cx.detachChild(list, child);
+            self.cx.destroyDetached(child);
+        }
+        for (rows) |row| {
+            var label: [128]u8 = undefined;
+            const head = try std.fmt.bufPrint(&label, "升级判定 · {s}", .{row.reason[0..@min(row.reason.len, 96)]});
+            const wrap = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 2, .padding = ui.Padding.all(8), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 }, .{});
+            wrap.meta.ownership.meta.test_id = "ai.children.decision";
+            try wrap.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, head));
+            try list.appendChild(self.cx.allocator, wrap);
+        }
+    }
+        /// V0.7 §14.2 Board: render the G8 board post stream (from/#to +
     /// category icon + folded text). Read-only; delivery watermarks stay
     /// owned by the model/panel levels separately (G2).
     pub fn updateBoard(self: *View, rows: []const projection.BoardRow) !void {
         const list = self.board_list orelse return;
         var hash = std.hash.Wyhash.init(0);
+        hash.update(if (self.board_filter_member) |member| &.{@as(u8, 1), @intCast(member)} else &.{@as(u8, 0)});
+        std.hash.autoHash(&hash, self.board_filter_ask_only);
         for (rows) |row| {
+            // §14.2 filters: by member, by category, ask-only.
+            if (self.board_filter_member) |member| if (member != row.origin) continue;
+            if (self.board_filter_ask_only and std.mem.eql(u8, row.category, "ask") == false and !std.mem.eql(u8, row.category, "answer")) continue;
             std.hash.autoHash(&hash, row.origin);
             hash.update(row.kind);
             hash.update(row.category);
@@ -205,11 +251,11 @@ pub const View = struct {
             self.cx.detachChild(list, child);
             self.cx.destroyDetached(child);
         }
-        if (rows.len == 0) {
-            try list.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, "留言板暂无帖子"));
-            return;
-        }
+        var shown: usize = 0;
         for (rows) |row| {
+            if (self.board_filter_member) |member| if (member != row.origin) continue;
+            if (self.board_filter_ask_only and !std.mem.eql(u8, row.category, "ask") and !std.mem.eql(u8, row.category, "answer")) continue;
+            shown += 1;
             var label: [96]u8 = undefined;
             const head = try std.fmt.bufPrint(&label, "从 #{d} → {s} · {s}", .{ row.origin, row.to, row.category });
             const wrap = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 2, .flex_shrink = 0 }, .{});
@@ -218,11 +264,36 @@ pub const View = struct {
             try wrap.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, body));
             try list.appendChild(self.cx.allocator, wrap);
         }
+        if (shown == 0) try list.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, if (rows.len == 0) "留言板暂无帖子" else "当前筛选无匹配帖子"));
+        _ = try self.mountBoardFilter(list);
+    }
+    /// §14.2: the filter row (仅看 ask toggle + member reset) rides the top
+    /// of the Board page. Mounted dynamically after each rebuild.
+    fn mountBoardFilter(self: *View, list: *ui.Node) !void {
+        const state = try self.scope.createState(BoardFilterPick, .{ .view = self });
+        const row = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 4, .bottom = 4 }, .flex_shrink = 0 }, .{});
+        row.meta.ownership.meta.test_id = "ai.children.board.filters";
+        const ask = try ui.widgets.Button(.{ .label = if (self.board_filter_ask_only) "✓ 仅看 ask/answer" else "仅看 ask/answer", .variant = .ghost, .on_click = self.cx.on(BoardFilterPick, state, BoardFilterPick.toggleAsk) }).mount(self.scope, self.cx);
+        ask.meta.ownership.meta.test_id = "ai.children.board.filter.ask";
+        try row.appendChild(self.cx.allocator, ask);
+        if (self.board_filter_member != null) {
+            const reset = try ui.widgets.Button(.{ .label = "清除成员筛选", .variant = .ghost, .on_click = self.cx.on(BoardFilterPick, state, BoardFilterPick.resetMember) }).mount(self.scope, self.cx);
+            reset.meta.ownership.meta.test_id = "ai.children.board.filter.reset";
+            try row.appendChild(self.cx.allocator, reset);
+        }
+        if (list.children.items.len != 0) try list.insertChildBefore(self.cx.allocator, row, list.children.items[0]) else try list.appendChild(self.cx.allocator, row);
+    }
+    /// §14.2: set Board filters (member #seq or null for all; ask-only).
+    pub fn setBoardFilters(self: *View, member: ?u32, ask_only: bool) void {
+        self.board_filter_member = member;
+        self.board_filter_ask_only = ask_only;
+        self.board_fingerprint = 0;
+        self.cx.requestRedraw();
     }
     /// V0.7 §14.2 Graph: deterministic radial layout — parent centered,
     /// children on a fixed ring (≤16, no physics). Node cards reuse the G3
     /// rows; edges are the accumulated board traffic (width by volume).
-    pub fn updateGraph(self: *View, entries: []const projection.Entry) !void {
+    pub fn updateGraph(self: *View, entries: []const projection.Entry, posts: []const projection.BoardRow) !void {
         const canvas = self.graph_canvas orelse return;
         var hash = std.hash.Wyhash.init(0);
         for (entries) |entry| {
@@ -230,6 +301,9 @@ pub const View = struct {
             hash.update(entry.status);
             hash.update(entry.name);
         }
+        // §14.2 edges: board post accumulation between parent and member
+        // (width 1/2/4px by volume, accent translucent).
+        for (posts) |post| std.hash.autoHash(&hash, post.origin);
         const stamp = hash.final();
         const visible = entries.len > 1;
         if (stamp == self.graph_fingerprint) return;
@@ -258,6 +332,30 @@ pub const View = struct {
         const parent_node = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = center_x - 40 }, .top = .{ .px = center_y - 16 } }, .width = .{ .px = 80 }, .height = .{ .px = 32 }, .align_items = .center, .justify = .center, .border = .{ .width = 1, .radius = 16 }, .flex_shrink = 0 }, .{});
         try parent_node.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, "父任务"));
         try canvas.appendChild(self.cx.allocator, parent_node);
+        // Edges: per-member post volume draws a line from the ring node to
+        // the parent. Simple axis-aligned segments (deterministic layout).
+        for (entries[0..@min(entries.len, 16)], 0..) |entry, index| {
+            var volume: usize = 0;
+            for (posts) |post| if (post.origin == entry.seq) {
+                volume += 1;
+            };
+            if (volume == 0) continue;
+            const width: f32 = if (volume >= 4) 4 else if (volume >= 2) 2 else 1;
+            const angle = 2 * std.math.pi * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(@min(entries.len, 16)));
+            const node_x = center_x + radius * @cos(angle);
+            const node_y = center_y + radius * @sin(angle);
+            // Horizontal + vertical two-segment approximation toward center.
+            const h_len = @abs(node_x - center_x);
+            const h_x = @min(node_x, center_x);
+            const horizontal = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = h_x }, .top = .{ .px = (node_y + center_y) / 2 } }, .width = .{ .px = h_len }, .height = .{ .px = width }, .background = theme.current().accent, .opacity = 0.35, .flex_shrink = 0 }, .{});
+            try canvas.appendChild(self.cx.allocator, horizontal);
+            const v_len = @abs(node_y - center_y);
+            if (v_len > 0.5) {
+                const v_y = @min(node_y, center_y);
+                const vertical = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = node_x - width / 2 }, .top = .{ .px = v_y } }, .width = .{ .px = width }, .height = .{ .px = v_len }, .background = theme.current().accent, .opacity = 0.35, .flex_shrink = 0 }, .{});
+                try canvas.appendChild(self.cx.allocator, vertical);
+            }
+        }
     }
     /// V0.7 §14.3 Rounds: boost chain rounds as a vertical timeline of node
     /// cards (seq/label/status/summary), with the final verification bar.

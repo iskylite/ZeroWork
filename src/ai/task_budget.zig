@@ -169,6 +169,11 @@ pub const Root = struct {
     /// The 4th consecutive ask gets an automatic best-judgment reply; the
     /// counter clears when the member settles.
     board_ask_counts: [16]u32 = @splat(0),
+    /// V0.7 §10.2/G4: Auto upgrade decisions on the task event stream. Each
+    /// entry records the triggering signal and the hit substance condition;
+    /// the panel renders them as an explainable "why this ran in parallel"
+    /// timeline (可解释). Bounded ring, host-written only.
+    decisions: std.ArrayList(Decision) = .empty,
     /// V0.7 §2.3: max active delegated children per this root (1–16,
     /// clamped). Frozen at root creation from process configuration.
     child_limit: u8 = 4,
@@ -179,9 +184,32 @@ pub const Root = struct {
         self.display_facts.deinit(self.allocator);
         for (self.board_posts.items) |post| self.allocator.free(post.text);
         self.board_posts.deinit(self.allocator);
+        for (self.decisions.items) |decision| self.allocator.free(decision.reason);
+        self.decisions.deinit(self.allocator);
         self.arena.deinit();
     }
-    /// V0.7 §11: append a board post to this root's event stream. The post
+    /// V0.7 §10.2: record an Auto-upgrade decision (bounded to 16, oldest
+    /// dropped) so the panel can explain why a request ran in parallel.
+    pub fn recordDecision(self: *Root, at_ms: i64, reason: []const u8) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        const owned = try self.allocator.dupe(u8, reason);
+        errdefer self.allocator.free(owned);
+        if (self.decisions.items.len == 16) {
+            const dropped = self.decisions.orderedRemove(0);
+            self.allocator.free(dropped.reason);
+        }
+        try self.decisions.append(self.allocator, .{ .at_ms = at_ms, .reason = owned });
+    }
+    /// Panel projection: copied decisions (caller frees reasons slice only).
+    pub fn decisionsSnapshot(self: *Root, a: std.mem.Allocator) ![]Decision {
+        self.lock();
+        defer self.mutex.unlock();
+        const copy = try a.alloc(Decision, self.decisions.items.len);
+        for (self.decisions.items, 0..) |decision, i| copy[i] = .{ .at_ms = decision.at_ms, .reason = decision.reason };
+        return copy;
+    }
+        /// V0.7 §11: append a board post to this root's event stream. The post
     /// text is owned by the root after this call. Delivery follows the §11.2
     /// rules: parent/member-targeted posts surface in the next model round;
     /// @all posts stay board-only.
@@ -554,6 +582,9 @@ pub const Root = struct {
         return false;
     }
 };
+
+/// V0.7 §10.2: an explainable Auto-upgrade decision (panel-readable).
+pub const Decision = struct { at_ms: i64, reason: []const u8 };
 
 /// Only actual Provider calls occupy slots. FIFO within a root; rotate eligible
 /// roots on each admission. Waiting is cancellable without acquiring a slot.

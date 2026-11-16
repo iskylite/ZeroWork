@@ -68,6 +68,8 @@ pub const Snapshot = struct {
     workspace: ?WorkspaceTicket = null,
     usage: ?Usage = null,
     editable: bool = true,
+    /// V0.7 §3.7: persisted custom role templates for the mode menu.
+    custom_templates: []const @import("../config/ai_role_templates.zig").Stored = &.{},
     inventory_authorized: bool = false,
     inventory_conversation_id: ?identity.ConversationId = null,
 };
@@ -106,7 +108,7 @@ pub fn effortLabel(value: Effort) []const u8 {
     };
 }
 const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
-const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, model_selection_required: bool, default_model_status: DefaultStatus, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, effort_fallback_from: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
+const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, model_selection_required: bool, default_model_status: DefaultStatus, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, effort_fallback_from: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, custom_templates: []const @import("../config/ai_role_templates.zig").Stored = &.{}, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
 // Discovery provenance changes authority/configuration, but does not change a
 // model row when all resolved capabilities and displayed values are identical.
 fn modelRowsEql(a: Projection, b: Projection) bool {
@@ -147,7 +149,7 @@ const Owned = struct {
             value.parts = parts;
         }
         const current = if (snapshot.current) |key| try cloneKey(a, key) else null;
-        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .model_selection_required = snapshot.model_selection_required, .default_model_status = snapshot.default_model_status, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .effort_fallback_from = snapshot.effort_fallback_from, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
+        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .model_selection_required = snapshot.model_selection_required, .default_model_status = snapshot.default_model_status, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .effort_fallback_from = snapshot.effort_fallback_from, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .custom_templates = if (snapshot.custom_templates.len != 0) try a.dupe(@import("../config/ai_role_templates.zig").Stored, snapshot.custom_templates) else &.{}, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
     }
     fn appendModel(a: std.mem.Allocator, models: *std.ArrayList(Model), hash: *std.hash.Wyhash, id: []const u8, kind: config.ProviderKind, endpoint: []const u8, enabled: bool, value: config.AiModel) !void {
         const key: ModelKey = .{ .provider_id = id, .model_id = value.id };
@@ -593,10 +595,19 @@ pub const View = struct {
             }, S.text(10, 400, 16, false), S.flexibleLabel(16));
             try scroll.content.appendChild(self.cx.allocator, button);
         }
-        // §10.1.4: template section inside the mode menu.
+        // §10.1.4: template section inside the mode menu. The built-in 均衡
+        // template plus the persisted custom templates; the active template
+        // carries a selection state (per-session; full activation wiring
+        // rides the create-time slot resolution).
         const templates = try ui.box(self.cx, S.policySection(), .{});
         _ = try self.label(templates, "角色模板", S.text(11.5, 400, 18, false), S.flexibleLabel(18));
         _ = try self.label(templates, "均衡（默认）· 全部槽继承父会话模型", S.text(10, 400, 16, false), S.flexibleLabel(16));
+        const source_value = if (self.source) |src| &src.value else if (self.pending) |*pend| &pend.value else null;
+        if (source_value) |value| for (value.custom_templates) |template| {
+            const entry = try std.fmt.allocPrint(self.cx.allocator, "{s} · 自定义模板", .{template.name});
+            defer self.cx.allocator.free(entry);
+            _ = try self.label(templates, entry, S.text(10, 400, 16, false), S.flexibleLabel(16));
+        };
         try scroll.content.appendChild(self.cx.allocator, templates);
     }
         fn retentionChanged(self: *View, value: ?[]const u8) void {
