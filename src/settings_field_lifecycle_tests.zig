@@ -35,6 +35,7 @@ fn nextValue(value: config.Config, entry: @TypeOf(schema.fields[0])) !values.Val
         .{ .section = "ai", .key = "follow_up_mode", .text = "queue" },
         .{ .section = "ai", .key = "child_context_mode", .text = "inherit" },
         .{ .section = "ai", .key = "child_reuse_policy", .text = "prefer_reuse" },
+        .{ .section = "ai", .key = "swarm_mode_default", .text = "swarm" },
         .{ .section = "notify", .key = "quiet_hours", .text = "23:00-07:00" },
         .{ .section = "log", .key = "export_format", .text = "txt" },
         .{ .section = "ui.materials.background", .key = "path", .text = "/fixture/settings-background.png" },

@@ -317,7 +317,7 @@ pub const View = struct {
                 2 => S.chip(190, 8),
                 3 => S.chip(80, 7),
                 4 => S.chip(48, 8),
-                6 => S.chip(84, 8),
+                6 => S.chip(56, 8),
                 else => S.executionChip(),
             };
             self.button_styles[index] = try scope.createSignal(ui.BoxStyle, base);
@@ -364,14 +364,19 @@ pub const View = struct {
                 self.ring = self.icons[index];
                 self.ring.setCustomDraw(drawRing, self);
             }
-            try self.root.appendChild(cx.allocator, button);
+            // V0.7 §10.1: the mode chip rides the trailing send slot (it
+            // never participates in the root flex row, so narrow rows keep
+            // the V0.4 layout math).
+            if (index != 6) try self.root.appendChild(cx.allocator, button);
         }
         self.buttons[3].setDisplay(.none);
         cx.detachChild(self.buttons[3], self.labels[3].?);
         self.labels[3].?.setStyleInline(cx.allocator, S.combinedEffortLabel());
         try self.buttons[2].insertChildBefore(cx.allocator, self.labels[3].?, self.chevrons[1]);
-        // Left: attachment, permission, execution. Right: usage, model/reasoning,
-        // then the original send/stop slot. Keep the existing widgets and sizes.
+        // Left: attachment, permission, execution, mode. Right: usage,
+        // model/reasoning, then the original send/stop slot. The mode chip
+        // stays in the left group so the spacer keeps absorbing free width
+        // (V0.7 §10.1: 当前对话运行方式芯片右侧).
         cx.detachChild(self.root, self.buttons[4]);
         cx.detachChild(self.root, self.buttons[2]);
         self.ordinary_spacer = try ui.spacer(cx);
@@ -383,6 +388,7 @@ pub const View = struct {
         self.trailing = try ui.box(cx, S.trailing(), .{});
         self.trailing.meta.ownership.meta.test_id = "ai.composer.trailing";
         try self.root.appendChild(cx.allocator, self.trailing);
+        try self.trailing.appendChild(cx.allocator, self.buttons[6]);
         for (0..7) |index| {
             self.popups[index] = try self.mountPopup(@fromBackingInt(@intCast(index)));
             self.popup_count += 1;

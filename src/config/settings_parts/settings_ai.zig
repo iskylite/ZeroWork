@@ -87,7 +87,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         const section = try page.section("权限", "执行前的默认确认方式", ui.icons.shield, 24, "settings.ai.permissions", null);
         try section.select(.{ .section = "ai", .key = "permission_mode" }, "默认权限模式", "确认后执行：执行命令前确认。自动执行：授权范围内可自动运行命令和工具，包括组内写操作。", &[_]ui.widgets.SelectOption{ .{ .value = "confirm", .label = "确认后执行" }, .{ .value = "auto", .label = "自动执行" } }, null);
     }
-    if (binding.matches(query, "运行方式 执行 批处理 交互式 自行判断 每次询问 execution_mode 保留 任务结束 空闲后关闭 保留任务会话 session_retention")) {
+    if (binding.matches(query, "运行方式 执行 批处理 交互式 自行判断 每次询问 execution_mode 保留 任务结束 空闲后关闭 保留任务会话 session_retention interactive_batch_fallback 终端被占用 独立无状态命令")) {
         const section = try page.section("运行方式", "全局默认；对话可以单独调整", ui.icons.terminal, 28, "settings.ai.execution", null);
         try section.select(.{ .section = "ai", .key = "execution_mode" }, "默认运行方式", "交互式由助手按任务选择使用当前终端或新建工作会话。", &[_]ui.widgets.SelectOption{
             .{ .value = "auto", .label = "自行判断" },
@@ -100,6 +100,8 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             .{ .value = "ask", .label = "每次询问" },
             .{ .value = "keep", .label = "保留任务会话" },
         }, null);
+        // V0.7 §2.2.3: 交互式批处理回退开关（默认开）。
+        try section.toggle(.{ .section = "ai", .key = "interactive_batch_fallback" }, "交互式批处理回退", "终端被占用时，独立无状态命令可走批处理执行（交互模式下）。关闭则严格禁止切换。", null);
     }
     if (binding.matches(query, "对话 跟进行为 排队 引导 follow_up_mode queue steer")) {
         const section = try page.section("对话", "AI 工作时如何处理新消息", ui.icons.get("messages-square").?, 29, "settings.ai.conversation", null);
