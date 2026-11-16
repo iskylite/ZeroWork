@@ -71,6 +71,7 @@ pub const MacOSWindow = struct {
     extern fn macos_set_titlebar_drag_height(window_ptr: *anyopaque, height: f32) void;
     extern fn macos_set_window_title(window_ptr: *anyopaque, title: [*:0]const u8) void;
     extern fn macos_set_titlebar_hit_callback(window_ptr: *anyopaque, cb: ?*const fn (?*anyopaque, f32, f32) callconv(.c) c_int, ctx: ?*anyopaque) void;
+    extern fn macos_set_titlebar_client_rects(window_ptr: *anyopaque, rects: [*]const TitlebarClientRect, count: usize) void;
     extern fn macos_set_titlebar_drag_right_inset(window_ptr: *anyopaque, inset: f32) void;
     extern fn macos_destroy_window(window_ptr: *anyopaque) void;
     extern fn macos_begin_window_close(window_ptr: *anyopaque) c_int;
@@ -908,6 +909,13 @@ pub const MacOSWindow = struct {
     /// fall back to pure-rect model.
     pub fn setTitlebarHitCallback(self: *MacOSWindow, cb: ?*const fn (?*anyopaque, f32, f32) callconv(.c) c_int, ctx: ?*anyopaque) void {
         macos_set_titlebar_hit_callback(self.window_ptr, cb, ctx);
+    }
+
+    pub const TitlebarClientRect = extern struct { x: f32, y: f32, width: f32, height: f32 };
+
+    /// Reserve client input in the AppKit titlebar using top-left logical coordinates.
+    pub fn setTitlebarClientRects(self: *MacOSWindow, rects: []const TitlebarClientRect) void {
+        macos_set_titlebar_client_rects(self.window_ptr, rects.ptr, rects.len);
     }
 
     /// Change the window title after creation.

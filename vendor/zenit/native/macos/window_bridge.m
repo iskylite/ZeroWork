@@ -3037,6 +3037,7 @@ typedef void (*ZenitEmbeddedInputCallback)(void *context);
 // titlebar right exclude width (logical px). For titlebar right
 // action buttons to receive click without performWindowDragWithEvent.
 @property (nonatomic) float titlebarDragRightInset;
+@property (nonatomic, strong) NSMutableArray<NSView *> *titlebarClientViews;
 // hit-driven drag area: mouseDown in band asks Zig if point has
 // interactive control; non-zero = has, event normal not window drag.
 // NULL = fall back to rect model.
@@ -3081,6 +3082,20 @@ typedef void (*ZenitEmbeddedInputCallback)(void *context);
 - (void)applyTrafficLightsInset;
 - (void)stopObservingTrafficLights;
 @end
+
+// AppKit's titlebar hit map excludes opaque, non-draggable views in the
+// native titlebar hierarchy. This view reserves that input area while Zenit
+// handles its drawing and pointer events.
+@interface ZenitTitlebarClientView : NSView
+@end
+
+@implementation ZenitTitlebarClientView
+- (BOOL)isOpaque { return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (void)mouseDown:(NSEvent *)event {}
+@end
+
 // System buttons must win over application drag regions.
 static BOOL chromePointInNativeButton(WindowWrapper *w, NSPoint p) {
     for (NSWindowButton kind=NSWindowCloseButton; kind<=NSWindowZoomButton; kind++) {
@@ -6069,6 +6084,31 @@ void macos_set_titlebar_hit_callback(void* window_ptr, int (*cb)(void* ctx, floa
         WindowWrapper *wrapper = (__bridge WindowWrapper*)window_ptr;
         wrapper.titlebarHitCallback = cb;
         wrapper.titlebarHitContext = ctx;
+    }
+}
+
+typedef struct { float x, y, width, height; } ZenitTitlebarClientRect;
+
+void macos_set_titlebar_client_rects(void *window_ptr, const ZenitTitlebarClientRect *rects, size_t count) {
+    WindowWrapper *wrapper = (__bridge WindowWrapper *)window_ptr;
+    NSWindow *window = wrapper.window;
+    NSView *content = window.contentView;
+    NSView *titlebar = [window standardWindowButton:NSWindowCloseButton].superview;
+    if (!titlebar || wrapper.chromeFullscreenTransition || (window.styleMask & NSWindowStyleMaskFullScreen)) count = 0;
+    if (count && !wrapper.titlebarClientViews) wrapper.titlebarClientViews = [NSMutableArray array];
+    NSMutableArray<NSView *> *views = wrapper.titlebarClientViews;
+    while (views.count > count) {
+        [views.lastObject removeFromSuperview];
+        [views removeLastObject];
+    }
+    for (size_t i = 0; i < count; i++) {
+        ZenitTitlebarClientRect rect = rects[i];
+        NSRect frame = [titlebar convertRect:NSMakeRect(rect.x, NSMaxY(content.bounds) - rect.y - rect.height, rect.width, rect.height)
+                                       fromView:content];
+        if (i == views.count) [views addObject:[[ZenitTitlebarClientView alloc] initWithFrame:frame]];
+        NSView *view = views[i];
+        if (!NSEqualRects(view.frame, frame)) view.frame = frame;
+        if (view.superview != titlebar) [titlebar addSubview:view positioned:NSWindowAbove relativeTo:nil];
     }
 }
 

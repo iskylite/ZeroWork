@@ -15232,7 +15232,25 @@ const AppNavHost = struct {
             }
         }
 
+        if (comptime @import("builtin").os.tag == .macos) self.syncTitlebarClientRects();
         return if (before != self.quick.sidebar.collapsed or resize or title_chrome_changed or sidebar_width_changed or notes_layout_changed) .needs_layout else .done;
+    }
+
+    fn syncTitlebarClientRects(self: *AppNavHost) void {
+        const app = self.app_runtime orelse return;
+        const chrome = self.mist orelse return;
+        const nodes = [_]?*ui.Node{ chrome.tabs, chrome.more, chrome.groups[0], chrome.groups[1], chrome.groups[2], if (self.collapsed_sidebar) |sidebar| sidebar.root else null };
+        var rects: [nodes.len]@TypeOf(app.win).TitlebarClientRect = undefined;
+        var count: usize = 0;
+        for (nodes) |maybe| {
+            const node = maybe orelse continue;
+            if (!node.isDisplayedInTree()) continue;
+            const rect = node.globalRect();
+            if (rect.w <= 0 or rect.h <= 0) continue;
+            rects[count] = .{ .x = rect.x, .y = rect.y, .width = rect.w, .height = rect.h };
+            count += 1;
+        }
+        app.win.setTitlebarClientRects(rects[0..count]);
     }
 
     fn modalOwnsInput(self: *const AppNavHost) bool {

@@ -794,6 +794,17 @@ static void verifyTitlebarDoubleClick(WindowWrapper *live) {
     WindowWrapper *sibling = (__bridge WindowWrapper *)siblingPtr;
     NSRect siblingFrame = sibling.window.frame;
     NSRect original = live.window.frame;
+    const ZenitTitlebarClientRect clientRects[] = {{120,12,100,28},{270,12,120,28}};
+    void *livePtr = (__bridge void *)live;
+    macos_set_titlebar_client_rects(livePtr,clientRects,2);
+    assert(live.titlebarClientViews.count == 2 && live.window.movable);
+    NSView *block = live.titlebarClientViews.firstObject;
+    assert(block.opaque && !block.mouseDownCanMoveWindow);
+    assert(block.superview == [live.window standardWindowButton:NSWindowCloseButton].superview);
+    macos_set_titlebar_client_rects(livePtr,clientRects + 1,1);
+    assert(live.titlebarClientViews.count == 1 && live.titlebarClientViews.firstObject == block);
+    macos_set_titlebar_client_rects(livePtr,NULL,0);
+    assert(live.titlebarClientViews.count == 0 && !block.superview);
     live.titlebarDragHeight = 40;
     live.titlebarDragRightInset = 150;
     live.titlebarHitCallback = titlebarControl;
