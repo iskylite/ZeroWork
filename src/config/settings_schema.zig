@@ -10,7 +10,8 @@ pub const providers_index = fields.len + 1;
 pub const plugin_preferences_index = fields.len + 2;
 pub const extensions_index = fields.len + 3;
 pub const default_effort_index = fields.len + 4;
-pub const field_count = fields.len + 5;
+pub const role_templates_index = fields.len + 5;
+pub const field_count = fields.len + 6;
 pub const FieldSet = std.StaticBitSet(field_count);
 
 pub fn find(section: []const u8, key: []const u8) ?usize {
@@ -46,6 +47,17 @@ pub fn same(a: anytype, b: @TypeOf(a)) bool {
 
 pub fn fieldEqual(a: config.Config, b: config.Config, index: usize) bool {
     if (index == extensions_index) return same(a.ai.extensions, b.ai.extensions);
+    if (index == role_templates_index) return a.ai.child_role_templates.len == b.ai.child_role_templates.len and blk: {
+        for (a.ai.child_role_templates, b.ai.child_role_templates) |left, right| {
+            if (!std.mem.eql(u8, left.name, right.name)) break :blk false;
+            for (left.efforts, right.efforts) |l, r| if (l != r) break :blk false;
+            for (left.models, right.models) |l, r| {
+                if ((l == null) != (r == null)) break :blk false;
+                if (l) |lv| if (!std.mem.eql(u8, lv, r.?)) break :blk false;
+            }
+        }
+        break :blk true;
+    };
     if (index == default_effort_index) return a.ai.default_effort == b.ai.default_effort;
     if (index == plugin_preferences_index) return same(a.plugin_preferences, b.plugin_preferences);
     if (index == keys_index) return same(a.keys, b.keys);
@@ -99,6 +111,7 @@ pub fn merge(latest: config.Config, draft: config.Config, dirty: FieldSet) confi
         }
     }
     if (dirty.isSet(extensions_index)) result.ai.extensions = draft.ai.extensions;
+    if (dirty.isSet(role_templates_index)) result.ai.child_role_templates = draft.ai.child_role_templates;
     if (dirty.isSet(default_effort_index)) result.ai.default_effort = draft.ai.default_effort;
     if (dirty.isSet(plugin_preferences_index)) result.plugin_preferences = draft.plugin_preferences;
     if (dirty.isSet(keys_index)) result.keys = draft.keys;

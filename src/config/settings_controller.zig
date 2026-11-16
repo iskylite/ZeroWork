@@ -105,7 +105,24 @@ pub const Controller = struct {
         self.model.value = owned.value;
         self.refreshDirty();
     }
-    pub fn setPluginPreference(self: *Controller, plugin_id: []const u8, key: []const u8, value: []const u8) !void {
+    /// V0.7 §3.7: template management writes enter here. The list is
+    /// validated (names unique, effort enums legal) and deep-copied into the
+    /// draft; save persists it through the [ai] child_role_templates JSON.
+    pub fn setRoleTemplates(self: *Controller, templates: []const config.ai_role_templates.Stored) !void {
+        if (self.model.locked) return error.SettingsLocked;
+        for (templates, 0..) |template, index| {
+            template.validate() catch |err| return err;
+            for (templates[0..index]) |prior| if (std.mem.eql(u8, prior.name, template.name)) return error.DuplicateRoleTemplate;
+        }
+        var candidate = self.model.value;
+        candidate.ai.child_role_templates = templates;
+        const owned = try runtime.Snapshot.init(self.allocator, candidate);
+        if (self.draft) |*previous| previous.deinit();
+        self.draft = owned;
+        self.model.value = owned.value;
+        self.refreshDirty();
+    }
+        pub fn setPluginPreference(self: *Controller, plugin_id: []const u8, key: []const u8, value: []const u8) !void {
         try self.ensureEditable();
         const manifest = self.plugin_page.registry_source.find(plugin_id) orelse return error.UnknownPlugin;
         const section = manifest.settings_section orelse return error.UnknownKey;

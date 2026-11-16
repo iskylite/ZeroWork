@@ -3,6 +3,7 @@ pub const keybindings = @import("keybindings.zig");
 pub const hosts = @import("hosts.zig");
 pub const store = @import("store.zig");
 pub const ai_extensions = @import("ai_extensions.zig");
+pub const ai_role_templates = @import("ai_role_templates.zig");
 pub const material = @import("background_asset.zig");
 
 pub const Config = struct {

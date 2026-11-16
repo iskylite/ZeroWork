@@ -61,6 +61,19 @@ pub const Snapshot = struct {
         copy.ui.materials.background.path = try owned.dupe(u8, value.ui.materials.background.path);
         copy.transfer.download_dir = try owned.dupe(u8, value.transfer.download_dir);
         copy.ai.extensions = try value.ai.extensions.clone(owned);
+        // V0.7 §3.7: template entries carry borrowed name/model strings;
+        // own them with the snapshot so controller callers may pass stack
+        // literals.
+        {
+            const owned_templates = try owned.dupe(config.ai_role_templates.Stored, value.ai.child_role_templates);
+            for (owned_templates) |*template| {
+                template.name = try owned.dupe(u8, template.name);
+                for (&template.models) |*model| {
+                    if (model.*) |id| model.* = try owned.dupe(u8, id);
+                }
+            }
+            copy.ai.child_role_templates = owned_templates;
+        }
         copy.ai.default_provider = try owned.dupe(u8, value.ai.default_provider);
         copy.ai.providers = try owned.dupe(config.AiProvider, value.ai.providers);
         for (copy.ai.providers, value.ai.providers) |*dst, src| {

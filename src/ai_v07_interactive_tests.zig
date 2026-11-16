@@ -218,3 +218,70 @@ test "v0.7 §12.3 swarm 配置键解析、范围与往返 + 停滞升级阈值�
     try std.testing.expectEqual(@as(u8, 5), stall.idle_minutes);
     try std.testing.expectEqual(@as(u8, 4), stall.parent_minutes);
 }
+
+test "v0.7 §3.7 child_role_templates 配置持久化往返（Stored JSON）" {
+    const C = @import("config/config.zig");
+    const a2 = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a2);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    // 两个模板（含槽位 effort）编码进 JSON 串。
+    const list = [_]C.ai_role_templates.Stored{
+        .{ .name = "攻坚", .efforts = .{ null, .high, null, .medium, .low } },
+        .{ .name = "巡检", .models = .{ null, null, null, "group/deepseek-v4.1-flash-1017", null } },
+    };
+    const encoded = try C.ai_role_templates.Stored.encode(aa, &list);
+    const key = try std.fmt.allocPrint(aa, "[ai]\nchild_role_templates = {s}\n", .{try std.json.Stringify.valueAlloc(aa, encoded, .{})});
+    const parsed = try C.Config.parseWithAllocator(aa, key);
+    try std.testing.expectEqual(@as(usize, 2), parsed.ai.child_role_templates.len);
+    try std.testing.expectEqualStrings("攻坚", parsed.ai.child_role_templates[0].name);
+    try std.testing.expectEqual(@import("ai/provider.zig").Effort.high, parsed.ai.child_role_templates[0].efforts[1].?);
+    try std.testing.expectEqualStrings("group/deepseek-v4.1-flash-1017", parsed.ai.child_role_templates[1].models[3].?);
+    // 格式化往返：写出再读回保持。
+    var buffer: [4096]u8 = undefined;
+    const formatted = try parsed.format(&buffer);
+    const reloaded = try C.Config.parseWithAllocator(aa, formatted);
+    try std.testing.expectEqual(@as(usize, 2), reloaded.ai.child_role_templates.len);
+    try std.testing.expectEqualStrings("巡检", reloaded.ai.child_role_templates[1].name);
+    // 重名拒绝（配置层校验重名，由 setRoleTemplates 与 UI 层保证）。
+    const dup = [_]C.ai_role_templates.Stored{ .{ .name = "x" }, .{ .name = "x" } };
+    const dup_json = try std.json.Stringify.valueAlloc(aa, try C.ai_role_templates.Stored.encode(aa, &dup), .{});
+    const dup_source = try std.fmt.allocPrint(aa, "[ai]\nchild_role_templates = {s}\n", .{dup_json});
+    const parsed_dup = try C.Config.parseWithAllocator(aa, dup_source);
+    // 配置解析不查重名（结构合法）；重名拒绝发生在 controller 写通道。
+    try std.testing.expectEqual(@as(usize, 2), parsed_dup.ai.child_role_templates.len);
+}
+
+test "v0.7 §3.7 模板管理 controller 写通道（新建/复制/删除/校验）" {
+    const controller_mod = @import("config/settings_controller.zig");
+    const C = @import("config/config.zig");
+    const a2 = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var target = try @import("config/runtime_config.zig").RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, a2, "config.toml");
+    defer target.deinit();
+    var controller = try controller_mod.Controller.init(a2, target.value);
+    defer controller.deinit();
+    // 新建：空列表 → 一个"新模板"。
+    try controller.setRoleTemplates(&.{.{ .name = "新模板" }});
+    try std.testing.expectEqual(@as(usize, 1), controller.model.value.ai.child_role_templates.len);
+    // 复制语义在 UI 层（副本名由按钮处理器生成）；controller 接受任意合法列表。
+    try controller.setRoleTemplates(&.{ .{ .name = "攻坚", .efforts = .{ null, .high, null, .medium, .low } }, .{ .name = "新模板" } });
+    try std.testing.expectEqual(@as(usize, 2), controller.model.value.ai.child_role_templates.len);
+    try std.testing.expectEqual(@import("ai/provider.zig").Effort.high, controller.model.value.ai.child_role_templates[0].efforts[1].?);
+    // 删除：写回剩余列表。
+    try controller.setRoleTemplates(&.{.{ .name = "新模板" }});
+    try std.testing.expectEqualStrings("新模板", controller.model.value.ai.child_role_templates[0].name);
+    // 非法列表拒绝（空名）。
+    try std.testing.expectError(error.InvalidRoleTemplate, controller.setRoleTemplates(&.{.{ .name = " " }}));
+    // 保存持久化到 [ai] child_role_templates 并可读回。
+    try controller.save(std.testing.io, tmp.dir, &target);
+    const raw = try tmp.dir.readFileAlloc(std.testing.io, "config.toml", a2, .unlimited);
+    defer a2.free(raw);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "child_role_templates") != null);
+    var loaded = try @import("config/runtime_config.zig").RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, a2, "config.toml");
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), loaded.value.ai.child_role_templates.len);
+    try std.testing.expectEqualStrings("新模板", loaded.value.ai.child_role_templates[0].name);
+    _ = C;
+}
