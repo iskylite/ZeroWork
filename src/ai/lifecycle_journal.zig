@@ -590,6 +590,7 @@ fn cloneFileEvidence(a: std.mem.Allocator, value: file_commit.Evidence) !file_co
     out.request_path = try a.dupe(u8, value.request_path);
     errdefer a.free(out.request_path);
     if (value.base_directory) |base| out.base_directory = try a.dupe(u8, base);
+    if (value.destination) |destination| out.destination = try a.dupe(u8, destination);
     return out;
 }
 
@@ -597,6 +598,7 @@ fn freeFileEvidence(a: std.mem.Allocator, value: file_commit.Evidence) void {
     a.free(value.target);
     a.free(value.request_path);
     if (value.base_directory) |base| a.free(base);
+    if (value.destination) |destination| a.free(destination);
 }
 
 fn cloneFileResult(a: std.mem.Allocator, value: LocalFileResult) !LocalFileResult {

@@ -266,6 +266,9 @@ pub const Loop = struct {
             if (self.unfiltered_tools == null) self.unfiltered_tools = self.request.tools;
             var visible: std.ArrayList(provider.ToolDefinition) = .empty;
             const uncertain_terminal = self.hasUncertainTerminal(null);
+            const parent_shell_work = uncertain_terminal and for (self.records.items) |record| {
+                if (record.host_result != null and record.host_result.?.parent_shell != null) break true;
+            } else false;
             const independent_group_work = if (self.tool_table) |table|
                 table.host_context != null and table.host_context.?.binding == .group and uncertain_terminal
             else
@@ -279,7 +282,7 @@ pub const Loop = struct {
                 const read = entry.definition.effect == .read_state or entry.definition.effect == .observe_image;
                 if (read or (!self.read_only and (std.mem.eql(u8, entry.definition.id, "host.stop_execution") or
                     (std.mem.eql(u8, entry.definition.id, "host.reconnect_session") and uncertain_terminal) or
-                    (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") and independent_group_work) or
+                    (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") and (independent_group_work or parent_shell_work)) or
                     (std.mem.eql(u8, entry.definition.id, "run_command") and independent_group_work)))) try visible.append(self.arena.allocator(), definition);
             }
             self.request.tools = try visible.toOwnedSlice(self.arena.allocator());
@@ -564,6 +567,26 @@ pub const Loop = struct {
         };
         return true;
     }
+    fn resumesParentShell(self: *const Loop, target: @import("../host/identity.zig").SessionHandle, arguments: std.json.ObjectMap) bool {
+        if (!self.hasUncertainTerminal(target)) return false;
+        const shell_id = arguments.get("shell_id") orelse return false;
+        const shell_revision = arguments.get("shell_revision") orelse return false;
+        const command = arguments.get("command") orelse return false;
+        if (shell_id != .string or shell_revision != .integer or command != .string) return false;
+        const execution = @import("../host/terminal_execution.zig");
+        const normalized = execution.normalizeCommand(self.allocator, command.string) catch return false;
+        defer self.allocator.free(normalized);
+        const hash = execution.digest(normalized);
+        for (self.records.items) |record| {
+            const result = record.host_result orelse continue;
+            const owner = result.uncertain_terminal orelse continue;
+            if (!owner.eql(target)) continue;
+            const parent = result.parent_shell orelse return false;
+            if (!std.mem.eql(u8, shell_id.string, &parent.id) or shell_revision.integer <= parent.child_revision or
+                std.mem.eql(u8, &hash, &parent.command_hash)) return false;
+        }
+        return true;
+    }
     fn permitsRecovery(self: *const Loop, context: dynamic.host.Context, parsed: dynamic.ParsedCall) bool {
         const name = parsed.entry.definition.id;
         const arguments = parsed.json.value;
@@ -733,7 +756,15 @@ pub const Loop = struct {
             return record.result_body.?;
         };
         const affecting = parsed.entry.definition.effect == .remote_input or parsed.entry.definition.effect == .resource_write;
-        if (self.uncertain and affecting and !std.mem.eql(u8, parsed.entry.definition.id, "host.stop_execution") and !self.permitsRecovery(context, parsed)) {
+        const resuming_parent_shell = parent: {
+            if (!self.uncertain or !std.mem.eql(u8, parsed.entry.definition.id, "host.run_in_terminal") or parsed.json.value != .object) break :parent false;
+            const arguments = parsed.json.value.object;
+            const reference = arguments.get("session_ref") orelse break :parent false;
+            if (reference != .string) break :parent false;
+            const target = @import("host_lifecycle.zig").sessionHandle(context, reference.string) catch break :parent false;
+            break :parent self.resumesParentShell(target, arguments);
+        };
+        if (self.uncertain and affecting and !std.mem.eql(u8, parsed.entry.definition.id, "host.stop_execution") and !resuming_parent_shell and !self.permitsRecovery(context, parsed)) {
             record.result_body = try self.errorBody("EarlierToolOutcomeUnknown", null);
             return record.result_body.?;
         }
@@ -745,7 +776,7 @@ pub const Loop = struct {
             return record.result_body.?;
         };
         record.dispatched = true;
-        var result = execute(host.context, .{ .dispatch_fence = dispatch_gate, .mutation_fence = if (std.mem.eql(u8, parsed.entry.definition.id, "host.reconnect_session")) self.dispatch_gate else null, .workspace_revision = self.request.workspace_revision, .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
+        var result = execute(host.context, .{ .dispatch_fence = dispatch_gate, .mutation_fence = if (std.mem.eql(u8, parsed.entry.definition.id, "host.reconnect_session")) self.dispatch_gate else null, .workspace_revision = self.request.workspace_revision, .resuming_parent_shell = resuming_parent_shell, .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
             const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.WorkspaceChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ExecutionDeadlineBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
             record.dispatched = !preflight;
             if (!preflight and affecting) self.stopForUnknownDispatch();
@@ -792,6 +823,23 @@ pub const Loop = struct {
     fn resolveDynamic(self: *Loop, record: *Record, table: *const dynamic.RequestTable, call: provider.ToolCall, host: Host, cancel: ?*provider.CancelToken) ![]const u8 {
         @import("tool_trace.zig").emit(.{ .event = "dynamic_invocation", .call_id = call.id, .tool_id = call.name, .owner = self.scope.owner, .arguments_hash = std.fmt.bytesToHex(record.arguments_hash, .lower) });
         var parsed = table.parse(self.allocator, call.name, call.arguments) catch |err| {
+            if (err == error.InvalidToolArguments) {
+                if (table.lookup(call.name)) |entry| {
+                    if (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal")) {
+                        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+                        defer scratch.deinit();
+                        if (table.argumentIssue(scratch.allocator(), call.name, call.arguments) catch null) |issue| {
+                            record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{
+                                .status = Status.rejected,
+                                .error_code = @errorName(err),
+                                .session_ids = @as([]const u64, &.{}),
+                                .argument_issue = issue,
+                            }, .{ .emit_null_optional_fields = false });
+                            return record.result_body.?;
+                        }
+                    }
+                }
+            }
             record.result_body = (try @import("kvm_tool_feedback.zig").preflightBody(self.arena.allocator(), call.name, @errorName(err), &.{})) orelse try self.errorBody(@errorName(err), null);
             return record.result_body.?;
         };

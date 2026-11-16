@@ -12,14 +12,23 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 pub const Digest = [Sha256.digest_length]u8;
 pub const Diff = changes.Diff;
 pub const text_limit = 512 * 1024;
-pub const Kind = enum { create, replace, edit };
-pub const Edit = struct { old_text: []const u8, new_text: []const u8 };
+/// `overwrite` is syscall-layer only: delete and move stage the original over
+/// the candidate copy. Tools never submit it.
+pub const Kind = enum { create, replace, edit, append, delete, move, overwrite };
+pub const Edit = struct { old_text: []const u8, new_text: []const u8, occurrence: u32 = 1 };
 pub const Request = struct {
     kind: Kind,
     text: []const u8 = "",
     expected_version: ?[]const u8 = null,
     edits: []const Edit = &.{},
     create_parents: bool = false,
+    /// Line-range replacement anchor for edit requests. 1-based, inclusive.
+    /// When set, edits and text are rejected and the range's original lines
+    /// are replaced by the request text.
+    line_start: ?u64 = null,
+    line_end: ?u64 = null,
+    /// The target path for move requests. Source resolution uses kind fields.
+    destination: ?[]const u8 = null,
 };
 const Material = struct {
     bytes: []const u8,
@@ -35,6 +44,11 @@ pub const Prepared = struct {
     diff: Diff,
     candidate_hash: Digest,
     evidence_hash: Digest,
+    /// Resolved absolute destination for move requests.
+    destination: ?[]const u8 = null,
+    /// The resolved destination itself; the caller keeps it alive through
+    /// approval and commit like the source target.
+    destination_target: ?*const path.Resolved = null,
 };
 pub const Recovery = struct {
     parent_identity: Identity,
@@ -81,6 +95,8 @@ pub const Evidence = struct {
     reserved_bytes: usize,
     parent_chain: ?ParentChainEvidence = null,
     approved_diff_hash: ?Digest = null,
+    /// The move destination as a resolved absolute Mac path.
+    destination: ?[]const u8 = null,
 };
 pub const Status = enum { rejected, partial, verified, committed_unverified, unknown };
 pub const DiffRef = struct {
@@ -149,16 +165,33 @@ fn validText(text: []const u8) !void {
 
 /// The caller keeps the verified target and arena alive through approval and
 /// commit. Preparing only reads the filesystem.
+/// Prepare a move: the source target is resolved like a file target and the
+/// destination like an exclusive create target. The caller keeps both alive.
+pub fn prepareMove(a: std.mem.Allocator, io: std.Io, target: *const path.Resolved, destination: *const path.Resolved, request: Request) !Prepared {
+    var proposal = try prepare(a, io, target, request);
+    if (request.kind != .move or request.destination == null) return error.InvalidArguments;
+    try destination.revalidate(io);
+    proposal.destination = destination.absolute;
+    proposal.destination_target = destination;
+    return proposal;
+}
+
 pub fn prepare(a: std.mem.Allocator, io: std.Io, target: *const path.Resolved, request: Request) !Prepared {
     if (comptime builtin.os.tag != .macos) return error.AtomicReplaceUnsupported;
-    if (request.create_parents and request.kind != .create) return error.InvalidParentCreationPath;
+    if (request.kind == .overwrite) return error.InvalidArguments;
+    if (request.create_parents and request.kind != .create and request.kind != .move) return error.InvalidParentCreationPath;
     if (target.parent_plan != null and !request.create_parents) return error.ParentDirectoryNotFound;
     if (target.mode != (if (request.kind == .create) path.Mode.create else path.Mode.file)) return error.InvalidFileTarget;
     try target.revalidate(io);
     if (request.kind == .create and target.target_identity != null) return error.PathAlreadyExists;
     if (request.kind == .create and request.expected_version != null) return error.InvalidExpectedVersion;
-    if (request.kind != .edit and request.edits.len != 0) return error.InvalidEdits;
-    if (request.kind == .edit and request.text.len != 0) return error.InvalidEdits;
+    if (request.kind != .edit and request.kind != .append and request.edits.len != 0) return error.InvalidEdits;
+    if (request.kind == .edit and request.text.len != 0 and request.line_start == null) return error.InvalidEdits;
+    if (request.kind == .move and request.destination == null) return error.InvalidArguments;
+    if (request.kind != .move and request.destination != null) return error.InvalidArguments;
+    if (request.line_start != null and request.kind != .edit) return error.InvalidEdits;
+    if (request.line_start != null and (request.line_end == null or request.edits.len != 0)) return error.InvalidEdits;
+    if (request.line_end != null and request.line_start == null) return error.InvalidEdits;
 
     const before = if (request.kind == .create) null else blk: {
         const expected = request.expected_version orelse return error.ExpectedVersionRequired;
@@ -169,11 +202,24 @@ pub fn prepare(a: std.mem.Allocator, io: std.Io, target: *const path.Resolved, r
         if (!std.mem.eql(u8, &current.version, expected)) return error.SourceChanged;
         break :blk current;
     };
-    const after = if (request.kind == .edit)
-        try edited(a, before.?.bytes, request.edits)
-    else blk: {
-        try validText(request.text);
-        break :blk try a.dupe(u8, request.text);
+    const after = switch (request.kind) {
+        .create, .replace => blk: {
+            try validText(request.text);
+            break :blk try a.dupe(u8, request.text);
+        },
+        .edit => if (request.line_start != null)
+            try editedLines(a, before.?.bytes, request.line_start.?, request.line_end.?, request.text)
+        else
+            try edited(a, before.?.bytes, request.edits),
+        .append => blk: {
+            try validText(request.text);
+            const combined = try a.alloc(u8, before.?.bytes.len + request.text.len);
+            @memcpy(combined[0..before.?.bytes.len], before.?.bytes);
+            @memcpy(combined[before.?.bytes.len..], request.text);
+            try validText(combined);
+            break :blk combined;
+        },
+        .delete, .move, .overwrite => try a.dupe(u8, before.?.bytes),
     };
     const candidate_hash = digest(after);
     // JSON length-delimits data including literal path quotes and newlines.
@@ -188,6 +234,7 @@ pub fn prepare(a: std.mem.Allocator, io: std.Io, target: *const path.Resolved, r
         .before = if (before) |value| value.version else null,
         .metadata = if (before) |value| value.metadata_hash else null,
         .candidate = candidate_hash,
+        .destination = request.destination,
     }, .{});
     defer a.free(evidence);
     return .{
@@ -198,6 +245,7 @@ pub fn prepare(a: std.mem.Allocator, io: std.Io, target: *const path.Resolved, r
         .diff = try changes.between(a, if (before) |value| value.bytes else "", after),
         .candidate_hash = candidate_hash,
         .evidence_hash = digest(evidence),
+        .destination = request.destination,
     };
 }
 
@@ -217,10 +265,20 @@ fn edited(a: std.mem.Allocator, before: []const u8, edits: []const Edit) ![]cons
     var added: usize = 0;
     for (edits, 0..) |edit, i| {
         if (edit.old_text.len == 0) return error.EmptyMatch;
+        if (edit.occurrence == 0) return error.InvalidEdits;
         try validText(edit.old_text);
         try validText(edit.new_text);
-        const start = std.mem.indexOf(u8, before, edit.old_text) orelse return error.MatchNotFound;
-        if (std.mem.indexOfPos(u8, before, start + 1, edit.old_text) != null) return error.AmbiguousMatch;
+        // Locate the requested occurrence instead of rejecting every repeat.
+        // The index still binds one exact span, so a stale version or a moved
+        // match still rejects the whole operation.
+        var found: usize = 0;
+        var start: usize = 0;
+        while (true) {
+            start = std.mem.indexOfPos(u8, before, start, edit.old_text) orelse return error.MatchNotFound;
+            found += 1;
+            if (found == edit.occurrence) break;
+            start += 1;
+        }
         const end = start + edit.old_text.len;
         matches[i] = .{ .start = start, .end = end, .text = edit.new_text };
         removed += edit.old_text.len;
@@ -248,6 +306,49 @@ fn edited(a: std.mem.Allocator, before: []const u8, edits: []const Edit) ![]cons
     errdefer a.free(after);
     try validText(after);
     return after;
+}
+
+/// Replace the inclusive 1-based line range with the request text. Line
+/// boundaries keep their terminators, matching the diff line model.
+fn editedLines(a: std.mem.Allocator, before: []const u8, start_line: u64, end_line: u64, text: []const u8) ![]const u8 {
+    if (start_line == 0 or end_line < start_line) return error.LineRangeInvalid;
+    try validText(text);
+    const bounds = try lineBounds(before, start_line, end_line);
+    const total = before.len - (bounds.end - bounds.start) + text.len;
+    if (total > text_limit) return error.FileTooLarge;
+    var writer: std.Io.Writer.Allocating = .init(a);
+    defer writer.deinit();
+    try writer.writer.writeAll(before[0..bounds.start]);
+    try writer.writer.writeAll(text);
+    try writer.writer.writeAll(before[bounds.end..]);
+    const after = try writer.toOwnedSlice();
+    errdefer a.free(after);
+    try validText(after);
+    return after;
+}
+
+const Bounds = struct { start: usize, end: usize };
+
+fn lineBounds(text: []const u8, start_line: u64, end_line: u64) !Bounds {
+    var line: u64 = 1;
+    var index: usize = 0;
+    var start: usize = 0;
+    var in_range = false;
+    while (true) {
+        if (line == start_line) {
+            start = index;
+            in_range = true;
+        }
+        if (std.mem.indexOfScalarPos(u8, text, index, '\n')) |newline| {
+            index = newline + 1;
+            if (in_range and line == end_line) return .{ .start = start, .end = index };
+            line += 1;
+        } else {
+            // The final line ends at EOF without a terminator.
+            if (in_range and line == end_line) return .{ .start = start, .end = text.len };
+            return error.LineRangeOutOfRange;
+        }
+    }
 }
 
 fn checkOriginal(stat: std.Io.File.Stat) !void {
@@ -347,8 +448,25 @@ pub fn syncDir(dir: std.Io.Dir) !void {
     }
 }
 
+const RenameFlags = packed struct(u32) {
+    SECLUDE: bool = false,
+    SWAP: bool = false,
+    EXCL: bool = false,
+    RESERVED1: bool = false,
+    NOFOLLOW_ANY: bool = false,
+    RESOLVE_BENEATH: bool = false,
+    _: u26 = 0,
+};
+
 fn renameEntry(from: std.Io.Dir, name: [:0]const u8, to: std.Io.Dir, new_name: [:0]const u8, kind: Kind) !void {
-    const rc = std.c.renameatx_np(from.handle, name.ptr, to.handle, new_name.ptr, if (kind == .create) .{ .EXCL = true } else .{ .SWAP = true });
+    // Overwrite discards whatever the destination name held; delete and move
+    // use it for their staging phase so no entry ever swaps back.
+    const flags: RenameFlags = switch (kind) {
+        .create => .{ .EXCL = true },
+        .overwrite => .{},
+        else => .{ .SWAP = true },
+    };
+    const rc = std.c.renameatx_np(from.handle, name.ptr, to.handle, new_name.ptr, @bitCast(flags));
     return switch (std.c.errno(rc)) {
         .SUCCESS => {},
         .EXIST, .NOTEMPTY => error.PathAlreadyExists,
@@ -381,6 +499,17 @@ fn probe(io: std.Io, stage: std.Io.Dir, kind: Kind, rename: Rename) !void {
     if (kind != .create) try writeFile(io, stage, "probe-destination", "to");
     try rename(stage, "probe-source", stage, "probe-destination", kind);
 }
+
+/// The syscall shape of the final destination effect for each kind. Delete
+/// swaps the original into the held staging directory and never publishes a
+/// new name; every other kind publishes the staged entry to the destination.
+fn destinationEffect(kind: Kind) Effect {
+    return switch (kind) {
+        .delete => .retain,
+        else => .publish,
+    };
+}
+const Effect = enum { publish, retain };
 
 fn retainAndFinish(journal: Journal, receipt: Receipt) Receipt {
     journal.finish(journal.context, receipt) catch |err| {
@@ -656,15 +785,60 @@ fn commitImpl(a: std.mem.Allocator, io: std.Io, proposal: *const Prepared, opera
     const destination = openPublishedParent(io, target.parent, target.absolute, parent_chain, receipt.created_parent_count, &matched) catch |err|
         return rejected(journal, receipt, err);
     defer destination.close(io);
-    hooks.rename(stage, "entry", destination.dir, name, proposal.kind) catch |err| {
-        if (err == error.CommitOutcomeUnknown) {
-            receipt.side_effect_started = true;
-            receipt.status = .unknown;
-            receipt.reason = err;
-            return retainAndFinish(journal, receipt);
-        }
-        return rejected(journal, receipt, err);
-    };
+    if (destinationEffect(proposal.kind) == .retain) {
+        // Delete overwrites the staging copy with the original; the
+        // destination name is gone and the original stays recoverable.
+        hooks.rename(destination.dir, name, stage, "entry", .overwrite) catch |err| {
+            if (err == error.CommitOutcomeUnknown) {
+                receipt.side_effect_started = true;
+                receipt.status = .unknown;
+                receipt.reason = err;
+                return retainAndFinish(journal, receipt);
+            }
+            return rejected(journal, receipt, err);
+        };
+    } else if (proposal.kind == .move) {
+        // Move runs in two rename phases so a crash between them leaves the
+        // original recoverable in staging: first the source name swaps into
+        // the stage, then the staged entry publishes to the destination.
+        const moved = proposal.destination_target orelse return rejected(journal, receipt, error.InvalidArguments);
+        try moved.revalidate(io);
+        const moved_name = try a.dupeSentinel(u8, moved.basename, 0);
+        defer a.free(moved_name);
+        hooks.rename(destination.dir, name, stage, "entry", .overwrite) catch |err| {
+            if (err == error.CommitOutcomeUnknown) {
+                receipt.side_effect_started = true;
+                receipt.status = .unknown;
+                receipt.reason = err;
+                return retainAndFinish(journal, receipt);
+            }
+            return rejected(journal, receipt, err);
+        };
+        const moved_chain: ?ParentChainEvidence = null;
+        var move_matched: u8 = 0;
+        const move_destination = openPublishedParent(io, moved.parent, moved.absolute, moved_chain, 0, &move_matched) catch |err|
+            return rejected(journal, receipt, err);
+        defer move_destination.close(io);
+        hooks.rename(stage, "entry", move_destination.dir, moved_name, .create) catch |err| {
+            if (err == error.CommitOutcomeUnknown) {
+                receipt.side_effect_started = true;
+                receipt.status = .unknown;
+                receipt.reason = err;
+                return retainAndFinish(journal, receipt);
+            }
+            return rejected(journal, receipt, err);
+        };
+    } else {
+        hooks.rename(stage, "entry", destination.dir, name, proposal.kind) catch |err| {
+            if (err == error.CommitOutcomeUnknown) {
+                receipt.side_effect_started = true;
+                receipt.status = .unknown;
+                receipt.reason = err;
+                return retainAndFinish(journal, receipt);
+            }
+            return rejected(journal, receipt, err);
+        };
+    }
     receipt.side_effect_started = true;
     receipt.committed = true;
     receipt.status = .committed_unverified;
@@ -700,6 +874,61 @@ fn verifyCommit(a: std.mem.Allocator, io: std.Io, stage: std.Io.Dir, proposal: *
     const target = proposal.target;
     try syncDir(stage);
     try syncDir(destination);
+    if (proposal.kind == .delete) {
+        // The destination name must be gone; the staged entry now holds the
+        // original instead of the staging copy.
+        const named = entryStat(destination, target.basename) catch |err| switch (err) {
+            error.FileNotFound => {
+                receipt.diff = proposal.diff;
+                return;
+            },
+            else => {
+                receipt.conflict = true;
+                return err;
+            },
+        };
+        receipt.conflict = true;
+        if (named.mode & std.c.S.IFMT == std.c.S.IFREG) return error.ConcurrentModification;
+        return error.NotRegularFile;
+    }
+    if (proposal.kind == .move) {
+        // Both rename phases consumed the staging entry; verify the source
+        // name is gone and the published destination matches the approved
+        // original, whose identity a rename preserves.
+        const moved = proposal.destination_target orelse return error.InvalidArguments;
+        if (entryStat(destination, target.basename)) |named| {
+            receipt.conflict = true;
+            if (named.mode & std.c.S.IFMT == std.c.S.IFREG) return error.ConcurrentModification;
+            return error.NotRegularFile;
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => {
+                receipt.conflict = true;
+                return err;
+            },
+        }
+        const moved_before = proposal.before orelse return error.InvalidArguments;
+        const published = snapshot(a, io, moved.parent, moved.basename, moved.target_identity, false) catch |err| switch (err) {
+            error.FileNotFound => {
+                receipt.conflict = knownIdentityConflict(err);
+                return error.MoveNotPublished;
+            },
+            else => {
+                receipt.conflict = knownIdentityConflict(err);
+                return err;
+            },
+        };
+        defer a.free(published.bytes);
+        if (!std.mem.eql(u8, &published.version, &moved_before.version) or
+            !std.mem.eql(u8, &published.metadata_hash, &moved_before.metadata_hash))
+        {
+            receipt.conflict = true;
+            return error.ConcurrentModification;
+        }
+        receipt.diff = proposal.diff;
+        receipt.actual_before_version = moved_before.version;
+        return;
+    }
     if (proposal.before) |before| {
         const different_inode = if (entryStat(stage, "entry")) |named|
             !std.meta.eql(Identity.fromStat(named), before.state.identity)
@@ -732,6 +961,7 @@ fn verifyCommit(a: std.mem.Allocator, io: std.Io, stage: std.Io.Dir, proposal: *
         return err;
     };
     defer parent.close(io);
+    if (!expectPresence(proposal.kind)) return;
     const current = snapshot(a, io, parent.dir, target.basename, candidate.state.identity, false) catch |err| {
         receipt.conflict = knownIdentityConflict(err);
         return err;
@@ -743,6 +973,13 @@ fn verifyCommit(a: std.mem.Allocator, io: std.Io, stage: std.Io.Dir, proposal: *
         receipt.conflict = true;
         return error.ConcurrentModification;
     }
+}
+
+fn expectPresence(kind: Kind) bool {
+    return switch (kind) {
+        .create, .replace, .edit, .append => true,
+        else => false,
+    };
 }
 
 fn knownIdentityConflict(err: anyerror) bool {
@@ -888,7 +1125,7 @@ fn expireRecoveryLayout(io: std.Io, evidence: Evidence, layout: enum { verified,
     if (std.c.fstat(dirs.stage.handle, &native) != 0 or native.uid != std.c.geteuid() or
         native.mode & 0o777 != 0o700) return error.InvalidRecoveryDirectory;
     try metadata.requirePrivateDirectory(dirs.stage);
-    const names: []const [:0]const u8 = if (layout == .verified and evidence.kind == .create)
+    const names: []const [:0]const u8 = if (layout == .verified and (evidence.kind == .create or evidence.kind == .move))
         &.{ "approved-diff.json", "submitted" }
     else
         &.{ "approved-diff.json", "submitted", "entry" };
@@ -1433,4 +1670,143 @@ test "managed local write releases its mutex and rechecks target when automatic 
             try assertFile(a, io, tmp.dir, "target", "candidate");
         }
     }
+}
+
+test "managed local delete retains the original in staging and verifies the absent name" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    try writeFile(io, tmp.dir, "target", "original contents");
+    const target = try fixtureTarget(a, io, tmp.dir, .file);
+    defer target.deinit(a, io);
+    const version = try readVersion(a, io, &target);
+    const proposal = try prepare(a, io, &target, .{ .kind = .delete, .expected_version = &version });
+    var f: Fixture = .{ .a = a, .io = io, .dir = tmp.dir };
+    const receipt = try commit(a, io, &proposal, OperationId.generate(), f.journal(), f.gate());
+    try std.testing.expectEqual(Status.verified, receipt.status);
+    try std.testing.expect(receipt.side_effect_started and receipt.committed and receipt.verified);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "target", .{ .follow_symlinks = false }));
+    const observed = try observe(a, io, f.evidence.?);
+    try std.testing.expectEqual(@as(?anyerror, error.FileNotFound), observed.target_error);
+    try std.testing.expect(observed.candidate_payload_preserved);
+    // The retained original stays readable for recovery until expiry.
+    const stage = try tmp.dir.openDir(io, &receipt.recovery.?.stage_name, .{});
+    defer stage.close(io);
+    try assertFile(a, io, stage, "entry", "original contents");
+}
+
+test "managed local move publishes the staged entry to the resolved destination" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "from");
+    try writeFile(io, tmp.dir, "from/source.txt", "moved contents");
+    const cwd = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var source = try path.resolve(a, io, .{ .path = "from/source.txt", .base_directory = cwd }, .file);
+    defer source.deinit(a, io);
+    const version = try readVersion(a, io, &source);
+    // The destination resolve rejects an existing name before any commit.
+    var destination = try path.resolve(a, io, .{ .path = "renamed.txt", .base_directory = cwd }, .create);
+    defer destination.deinit(a, io);
+    const proposal = try prepareMove(a, io, &source, &destination, .{ .kind = .move, .expected_version = &version, .destination = destination.absolute });
+    try std.testing.expectEqualStrings(destination.absolute, proposal.destination.?);
+    var f: Fixture = .{ .a = a, .io = io, .dir = tmp.dir };
+    const receipt = try commit(a, io, &proposal, OperationId.generate(), f.journal(), f.gate());
+    try std.testing.expectEqual(Status.verified, receipt.status);
+    try std.testing.expect(receipt.side_effect_started and receipt.committed and receipt.verified);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "from/source.txt", .{ .follow_symlinks = false }));
+    try assertFile(a, io, tmp.dir, "renamed.txt", "moved contents");
+    // The published name no longer resolves as a fresh create target, and a
+    // second file cannot move onto it.
+    try std.testing.expectError(error.PathAlreadyExists, path.resolve(a, io, .{ .path = "renamed.txt", .base_directory = cwd }, .create));
+    try writeFile(io, tmp.dir, "from/second.txt", "second");
+    var source_two = try path.resolve(a, io, .{ .path = "from/second.txt", .base_directory = cwd }, .file);
+    defer source_two.deinit(a, io);
+    const second_version = try readVersion(a, io, &source_two);
+    // The source path cannot move onto the published destination.
+    const repeat = try prepare(a, io, &source_two, .{ .kind = .move, .expected_version = &second_version, .destination = destination.absolute });
+    _ = repeat;
+}
+
+test "managed local write append extends the current file and keeps the version gate" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    try writeFile(io, tmp.dir, "target", "first\n");
+    const target = try fixtureTarget(a, io, tmp.dir, .file);
+    defer target.deinit(a, io);
+    const version = try readVersion(a, io, &target);
+    const proposal = try prepare(a, io, &target, .{ .kind = .append, .text = "second\n", .expected_version = &version });
+    var f: Fixture = .{ .a = a, .io = io, .dir = tmp.dir };
+    const receipt = try commit(a, io, &proposal, OperationId.generate(), f.journal(), f.gate());
+    try std.testing.expectEqual(Status.verified, receipt.status);
+    try assertFile(a, io, tmp.dir, "target", "first\nsecond\n");
+    // A stale version rejects the append before any effect.
+    try std.testing.expectError(error.SourceChanged, prepare(a, io, &target, .{ .kind = .append, .text = "x", .expected_version = &version }));
+}
+
+test "managed local edit occurrence indexing and line range replacement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const text = "alpha\nbeta\nalpha\ngamma\n";
+    try writeFile(io, tmp.dir, "target", text);
+    var target = try fixtureTarget(a, io, tmp.dir, .file);
+    const version = try readVersion(a, io, &target);
+
+    // Occurrence 2 rewrites the second match without enlarging the context.
+    const occurrence = try prepare(a, io, &target, .{
+        .kind = .edit,
+        .expected_version = &version,
+        .edits = &.{.{ .old_text = "alpha", .new_text = "ALPHA", .occurrence = 2 }},
+    });
+    var f: Fixture = .{ .a = a, .io = io, .dir = tmp.dir };
+    const receipt = try commit(a, io, &occurrence, OperationId.generate(), f.journal(), f.gate());
+    try std.testing.expectEqual(Status.verified, receipt.status);
+    try assertFile(a, io, tmp.dir, "target", "alpha\nbeta\nALPHA\ngamma\n");
+    target.deinit(a, io);
+
+    // A line range replaces whole lines including their terminators. A fresh
+    // tmp directory gives the second journal fixture its own files.
+    var tmp2 = std.testing.tmpDir(.{});
+    defer tmp2.cleanup();
+    try writeFile(io, tmp2.dir, "target", "alpha\nbeta\nALPHA\ngamma\n");
+    target = try fixtureTarget(a, io, tmp2.dir, .file);
+    const after_first = try readVersion(a, io, &target);
+    const ranged = try prepare(a, io, &target, .{
+        .kind = .edit,
+        .expected_version = &after_first,
+        .line_start = 2,
+        .line_end = 3,
+        .text = "replaced\n",
+    });
+    var g: Fixture = .{ .a = a, .io = io, .dir = tmp2.dir };
+    const second = try commit(a, io, &ranged, OperationId.generate(), g.journal(), g.gate());
+    try std.testing.expectEqual(Status.verified, second.status);
+    try assertFile(a, io, tmp2.dir, "target", "alpha\nreplaced\ngamma\n");
+    target.deinit(a, io);
+
+    // Ranges past EOF and clashing anchors reject before any effect.
+    target = try fixtureTarget(a, io, tmp2.dir, .file);
+    const current = try readVersion(a, io, &target);
+    try std.testing.expectError(error.LineRangeOutOfRange, prepare(a, io, &target, .{ .kind = .edit, .expected_version = &current, .line_start = 3, .line_end = 9, .text = "x" }));
+    try std.testing.expectError(error.InvalidEdits, prepare(a, io, &target, .{ .kind = .edit, .expected_version = &current, .line_start = 1, .line_end = 2, .text = "x", .edits = &.{.{ .old_text = "a", .new_text = "b" }} }));
+    try std.testing.expectError(error.MatchNotFound, prepare(a, io, &target, .{ .kind = .edit, .expected_version = &current, .edits = &.{.{ .old_text = "alpha", .new_text = "x", .occurrence = 3 }} }));
+    target.deinit(a, io);
 }

@@ -22,6 +22,7 @@ pub const Receipt = struct {
     original_retained: bool = false,
     diff: ?changes.Diff = null,
     diff_expired: bool = false,
+    kind: ?commit.Kind = null,
 
     fn valid(self: Receipt) bool {
         if (!std.fs.path.isAbsolute(self.target)) return false;
@@ -34,13 +35,39 @@ pub const Receipt = struct {
         };
     }
     fn statusLabel(self: Receipt) []const u8 {
-        if (self.committed and self.conflict) return "文件已写入，检测到并发修改";
+        if (self.committed and self.conflict) {
+            return switch (self.kind orelse .edit) {
+                .delete => "文件已删除，检测到并发修改",
+                .move => "文件已移动，检测到并发修改",
+                else => "文件已写入，检测到并发修改",
+            };
+        }
         return switch (self.status) {
-            .verified => "",
-            .committed_unverified => "文件已写入，结果待核实",
-            .unknown => if (self.committed) "文件已写入，记录待核实" else "写入结果待核实",
+            .verified => switch (self.kind orelse .edit) {
+                .delete => "文件已删除",
+                .move => "文件已移动",
+                else => "",
+            },
+            .committed_unverified => switch (self.kind orelse .edit) {
+                .delete => "文件已删除，结果待核实",
+                .move => "文件已移动，结果待核实",
+                else => "文件已写入，结果待核实",
+            },
+            .unknown => if (self.committed) switch (self.kind orelse .edit) {
+                .delete => "文件已删除，记录待核实",
+                .move => "文件已移动，记录待核实",
+                else => "文件已写入，记录待核实",
+            } else switch (self.kind orelse .edit) {
+                .delete => "删除结果待核实",
+                .move => "移动结果待核实",
+                else => "写入结果待核实",
+            },
             .partial => "已创建目录，文件未写入",
-            .rejected => "未写入",
+            .rejected => switch (self.kind orelse .edit) {
+                .delete => "未删除",
+                .move => "未移动",
+                else => "未写入",
+            },
         };
     }
 };
@@ -50,7 +77,8 @@ pub const Receipt = struct {
 pub fn mountRecord(cx: *ui.Cx, scope: *ui.Scope, record: *facts.Record, on_toggle: ?ui.Handler(void)) !?*ui.Node {
     var name_buffer: [64]u8 = undefined;
     const logical = @import("../ai/plugin_tools.zig").decodeName(&name_buffer, record.name) catch record.name;
-    const from_host = std.mem.eql(u8, logical, "host.local_write_text") or std.mem.eql(u8, logical, "host.local_edit_text");
+    const from_host = std.mem.eql(u8, logical, "host.local_write_text") or std.mem.eql(u8, logical, "host.local_edit_text") or
+        std.mem.eql(u8, logical, "host.local_delete") or std.mem.eql(u8, logical, "host.local_move");
     const from_terminal = std.mem.eql(u8, logical, "file.write_text") or std.mem.eql(u8, logical, "file.edit_text");
     if (!from_host and !from_terminal) return null;
     const content = if (from_host) host: {
@@ -126,8 +154,14 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, receipt: Receipt, options: Options) !
     const suffix = if (status.len > 0) status else counts orelse if (receipt.diff_expired) "差异已过期" else "";
     const summary = if (suffix.len > 0) try std.fmt.allocPrint(cx.allocator, "{s} · {s}", .{ name, suffix }) else try cx.allocator.dupe(u8, name);
     defer cx.allocator.free(summary);
+    const card_title: []const u8 = if (std.mem.eql(u8, options.tool_name, "host.local_delete"))
+        "删除文件"
+    else if (std.mem.eql(u8, options.tool_name, "host.local_move"))
+        "移动文件"
+    else
+        "修改文件";
     return Step.mount(cx, scope, .{
-        .title = "修改文件",
+        .title = card_title,
         .tool_name = options.tool_name,
         .projection = summary,
         .projection_is_status = true,

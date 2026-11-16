@@ -37,7 +37,7 @@ const State = struct {
     projection: *ui.Node,
     count: *ui.Node,
     count_separator: *ui.Node,
-    ticking: bool = false,
+    bottom_edge: *ui.Node,
     mounted_ms: u64,
     last_tick_ms: u64 = 0,
     fn update(self: *State, props: Props) !void {
@@ -63,9 +63,6 @@ const State = struct {
         var buffer: [64]u8 = undefined;
         if (props.step_count) |count| try self.count.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{d} 个步骤", .{count}));
         try self.clock.setTextContent(self.cx.allocator, try elapsed(&buffer, props.elapsed_ms));
-        if (props.live and !self.ticking) try self.cx.addAfterLayoutHook(self, State.tick);
-        if (!props.live and self.ticking) self.cx.removeAfterLayoutHook(self);
-        self.ticking = props.live;
     }
     fn toggle(self: *State) void {
         self.props.group.expanded = !self.props.group.expanded;
@@ -78,15 +75,23 @@ const State = struct {
         self.cx.removeAfterLayoutHook(self);
         self.props.group.release();
     }
-    fn tick(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *State = @ptrCast(@alignCast(raw));
+        // Nested details can increase the fit height after absolute children
+        // have already been placed. Use the disclosure's resolved height.
+        const top = self.disclosure.root.globalRect().h - self.bottom_edge.globalRect().h;
+        const previous = self.bottom_edge.style.inset().top;
+        const edge_moved = previous != .px or @abs(previous.px - top) > 0.05;
+        if (edge_moved) self.bottom_edge.setStyle(self.cx.allocator, .inset, .{ .left = .{ .px = 0 }, .top = .{ .px = top } });
+        const result: ui.AfterLayoutResult = if (edge_moved) .needs_layout else .done;
+        if (!self.props.live) return result;
         const now = monotonicMs();
         self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
-        if (now -| self.last_tick_ms < 100) return .done;
+        if (now -| self.last_tick_ms < 100) return result;
         self.last_tick_ms = now;
         var buffer: [32]u8 = undefined;
-        const value = elapsed(&buffer, self.props.elapsed_ms +| (now -| self.mounted_ms)) catch return .done;
-        self.clock.setTextContent(self.cx.allocator, value) catch return .done;
+        const value = elapsed(&buffer, self.props.elapsed_ms +| (now -| self.mounted_ms)) catch return result;
+        self.clock.setTextContent(self.cx.allocator, value) catch return result;
         return .needs_layout;
     }
 };
@@ -139,21 +144,23 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !Result {
     try root.appendChild(cx.allocator, header);
     const content = try ui.boxStyled(cx, S.content, .{});
     content.meta.ownership.meta.test_id = "ai.step_group.content";
-    for ([_]bool{ false, true }) |bottom| {
-        const edge = try ui.boxStyled(cx, S.edge, .{});
-        edge.meta.ownership.meta.test_id = if (bottom) "ai.step_group.edge.bottom" else "ai.step_group.edge.top";
-        edge.setStyleInline(cx.allocator, .{ .inset = if (bottom) .{ .left = .{ .px = 0 }, .bottom = .{ .px = 0 } } else .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } } });
-        edge.setHitTestVisible(false);
-        try content.appendChild(cx.allocator, edge);
-    }
     const disclosure = try motion.Disclosure.mount(cx, scope, content, props.group.expanded);
+    const top_edge = try ui.boxStyled(cx, S.edge, .{});
+    top_edge.meta.ownership.meta.test_id = "ai.step_group.edge.top";
+    top_edge.setHitTestVisible(false);
+    try disclosure.root.appendChild(cx.allocator, top_edge);
+    const bottom_edge = try ui.boxStyled(cx, S.edge, .{});
+    bottom_edge.meta.ownership.meta.test_id = "ai.step_group.edge.bottom";
+    bottom_edge.setHitTestVisible(false);
+    try disclosure.root.appendChild(cx.allocator, bottom_edge);
     try root.appendChild(cx.allocator, disclosure.root);
-    const state = try scope.createState(State, .{ .cx = cx, .props = props, .disclosure = disclosure, .indicator = indicator, .clock = clock, .title = title, .title_text = title_text, .projection = projection, .count = count_label, .count_separator = count_separator, .mounted_ms = monotonicMs() });
+    const state = try scope.createState(State, .{ .cx = cx, .props = props, .disclosure = disclosure, .indicator = indicator, .clock = clock, .title = title, .title_text = title_text, .projection = projection, .count = count_label, .count_separator = count_separator, .bottom_edge = bottom_edge, .mounted_ms = monotonicMs() });
     props.group.retain();
     scope.onCleanup(State, state, State.cleanup) catch |err| {
         props.group.release();
         return err;
     };
+    try cx.addAfterLayoutHook(state, State.afterLayout);
     try state.update(props);
     _ = ui.clickable(header, cx.on(State, state, State.toggle));
     return .{ .root = root, .content = content, .state = state };

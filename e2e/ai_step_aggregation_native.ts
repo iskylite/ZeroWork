@@ -15,7 +15,7 @@ const iso=await mkdtemp('/private/tmp/zw-step-aggregation-'),data=join(iso,'data
 await mkdir(data);await mkdir(rpc);await mkdir(zdot);await writeFile(join(zdot,'.zshrc'),"PS1='aggregation-test%# '\n");
 const frame=(delta:any)=>'data: '+JSON.stringify({choices:[{index:0,delta}]})+'\n\n';
 const wire=(name:string)=>name.replaceAll('_','_u').replaceAll('.','__');
-let held:any=null,fixtureFailure:string|null=null,requests=0;
+let held:any=null,fixtureFailure:string|null=null,requests=0,sessionRef:string;
 const server=createServer(async(req,res)=>{
  try{
   if(req.method!=='POST')return res.end('{"data":[{"id":"aggregation-fixture"}]}');
@@ -30,10 +30,18 @@ const server=createServer(async(req,res)=>{
    held=res;return;
   }
   if(user==='SECOND_TURN')return res.end(frame({reasoning_content:'新回合独立思考。'})+frame({content:'SECOND_TURN_COMPLETE'})+'data: [DONE]\n\n');
-  if(!body.messages.some((m:any)=>m.role==='tool'&&m.tool_call_id==='aggregation-read')){
+  const currentContext=body.messages.find((m:any)=>m.role==='tool'&&m.tool_call_id==='aggregation-read');
+  if(!currentContext){
    return res.end(frame({content:'先核对当前会话，再检查问题。'})+frame({tool_calls:[{index:0,id:'aggregation-read',type:'function',function:{name:wire('host.get_current_context'),arguments:'{}'}}]})+'data: [DONE]\n\n');
   }
-  if(body.messages.some((m:any)=>m.role==='tool'&&m.tool_call_id==='aggregation-fail-2'))return res.end(frame({content:'AGGREGATION_COMPLETE'})+'data: [DONE]\n\n');
+  sessionRef=JSON.parse(JSON.parse(currentContext.content).content[0].text).binding_ref;
+  if(body.messages.some((m:any)=>m.role==='tool'&&m.tool_call_id==='aggregation-fail-2')){
+   const rejection=JSON.parse(body.messages.find((m:any)=>m.role==='tool'&&m.tool_call_id==='aggregation-fail-1').content);
+   assert.equal(rejection.status,'rejected');
+   assert.equal(rejection.error_code,'InvalidToolArguments');
+   assert.deepEqual(rejection.argument_issue,{field:'wait_ms',rule:'maximum',expected:30000});
+   return res.end(frame({content:'AGGREGATION_COMPLETE'})+'data: [DONE]\n\n');
+  }
   held=res;
  }catch(error){fixtureFailure=String(error);res.end();}
 });
@@ -62,6 +70,12 @@ const clickTranscriptNode=async(id:string,index:number)=>{
  throw Error('transcript control did not scroll into view: '+id);
 };
 const clickHeader=(index:number)=>clickTranscriptNode('ai.step_group.header',index);
+const checkBottomEdge=(index:number)=>h.waitFor(async()=>{
+ const group=(await groups()).at(index);
+ const disclosure=group?.children.find((node:any)=>node.children?.some((child:any)=>child.test_id==='ai.step_group.content'));
+ const edge=disclosure?.children.find((node:any)=>node.test_id==='ai.step_group.edge.bottom');
+ return edge&&Math.abs(edge.rect.y+edge.rect.h-group.rect.y-group.rect.h)<.5?edge:null;
+},5000);
 const returnToAssistant=async(count:number)=>{
  await click('settings.close');
  await h.waitFor(async()=>!(await h.query('settings.panel')).some(shown)||null,5000);
@@ -143,7 +157,7 @@ try{acceptance:{
  assert.equal(text((await h.query('ai.step_group.count'))[0]),'2 个步骤');
  assert.equal(text((await h.query('ai.step_group.projection'))[0]),text((await h.query('ai.step.projection')).at(-1)),'thinking projection is separate from the fixed count');
  await h.waitFor(async()=>Math.abs((await groups())[0].rect.h-114)<.1||null,5000);
- const lastCard=(await h.query('ai.thinking'))[0],bottomEdge=(await h.query('ai.step_group.edge.bottom'))[0];
+ const lastCard=(await h.query('ai.thinking'))[0],bottomEdge=await checkBottomEdge(0);
  assert(bottomEdge.rect.y>=lastCard.rect.y+lastCard.rect.h-.1,'soft edge is below the last complete card');
  await capture('02-expanded-latest-cards');
  await checkWidths(true);await capture('02-wide-expanded');
@@ -221,7 +235,7 @@ try{acceptance:{
  held.write(frame({reasoning_content:' 追加文本仍然保持手动收起。'}));
  await h.waitFor(async()=>text(await h.query('ai.step_group.projection')).includes('追加文本')||null,5000);
  assert.equal((await groups())[2].rect.h,32);
- held.end(frame({tool_calls:[{index:0,id:'aggregation-fail-1',type:'function',function:{name:wire('host.run_in_terminal'),arguments:'{}'}},{index:1,id:'aggregation-fail-2',type:'function',function:{name:wire('host.read_terminal'),arguments:'{}'}}]})+'data: [DONE]\n\n');held=null;await visible('ai.turn.complete');
+ held.end(frame({tool_calls:[{index:0,id:'aggregation-fail-1',type:'function',function:{name:wire('host.run_in_terminal'),arguments:JSON.stringify({session_ref:sessionRef,command:'printf fixture',request_key:'fixture',wait_ms:60000})}},{index:1,id:'aggregation-fail-2',type:'function',function:{name:wire('host.read_terminal'),arguments:'{}'}}]})+'data: [DONE]\n\n');held=null;await visible('ai.turn.complete');
  // Completed turns put their steps behind the process disclosure.
  await clickTranscriptNode('ai.turn.process.toggle',0);
  await waitGroups(3);
@@ -229,6 +243,8 @@ try{acceptance:{
  // Collapsed details are created only when disclosed.
  await clickHeader(2);await h.waitFor(async()=>(await groups())[2].rect.h>32||null,5000);
  const failures=await h.query('ai.request.unsent');assert.equal(failures.length,2,'both unsent failures retained');
+ const edgeOffset=async()=>{const edge=await checkBottomEdge(2);return edge.rect.y-(await groupHeaders())[2].rect.y};
+ const beforeDetails=await edgeOffset();
  const descendants=flat((await groups())[2]);
  assert.equal(descendants.filter((n:any)=>n.test_id==='ai.request.unsent').length,2,'all failures belong to the existing third group');
  assert(text(await h.query('ai.step_group.summary')).includes('3 个步骤'),'failures counted alongside thinking');
@@ -242,17 +258,28 @@ try{acceptance:{
   assert(text(failure).includes('工具：'),'failure detail identifies tool');
   assert(text(failure).includes('原因：'),'failure detail includes readable reason');
  }
- for(let attempt=0;attempt<12;attempt++){
-  const failedCard=(await h.query('ai.request.unsent'))[0];
-  const failedHeader=flat(failedCard).find((n:any)=>n.test_id==='ai.step.header'),viewport=await visible('ai.conversation.viewport');assert(failedHeader);
-  if(failedHeader.rect.y>=viewport.rect.y+1&&failedHeader.rect.y+32<=viewport.rect.y+viewport.rect.h-1){
-   await h.clickAt(failedHeader.rect.x+failedHeader.rect.w/2,failedHeader.rect.y+16);break;
-  }
-  await h.scrollAt(viewport.rect.x+viewport.rect.w-6,viewport.rect.y+viewport.rect.h/2,0,failedHeader.rect.y<viewport.rect.y?160:-160);await h.sleep(80);
- }
- await h.waitFor(async()=>(await h.query('ai.request.unsent'))[0].rect.h>32||null,5000);
+ const argumentFailure=async()=>(await h.query('ai.request.unsent')).find((node:any)=>text(node).includes('InvalidToolArguments'));
+ const toggleFailure=async()=>{
+  const failedHeader=flat(await argumentFailure()).find((n:any)=>n.test_id==='ai.step.header');
+  assert(failedHeader);
+  const index=(await h.query('ai.step.header')).findIndex((node:any)=>node.id===failedHeader.id);
+  assert(index>=0);
+  await clickTranscriptNode('ai.step.header',index);
+ };
+ await toggleFailure();
+ await h.waitFor(async()=>((await argumentFailure())?.rect.h??0)>32||null,5000);
+ assert(text(await argumentFailure()).includes('wait_ms 最大为 30000'));
+ assert(await edgeOffset()>beforeDetails,'bottom edge follows the expanded error details');
+ const viewport=await visible('ai.conversation.viewport');
+ const edge=await checkBottomEdge(2);
+ const overflow=edge.rect.y+edge.rect.h-(viewport.rect.y+viewport.rect.h);
+ if(overflow>0)await h.scrollAt(viewport.rect.x+viewport.rect.w-6,viewport.rect.y+viewport.rect.h/2,0,-(overflow+24));
+ await h.waitFor(async()=>{const bottom=await checkBottomEdge(2);return bottom.rect.y+bottom.rect.h<=viewport.rect.y+viewport.rect.h||null},5000);
  await capture('06-grouped-failures');
- report.checks.push('two unsent tool failures stay inside the consecutive step group; count and warning status retained; diagnostics include tool, parameters, error code and raw error');
+ await toggleFailure();
+ await h.waitFor(async()=>Math.abs(await edgeOffset()-beforeDetails)<.5||null,5000);
+ await capture('06-grouped-failures-collapsed');
+ report.checks.push('the group bottom edge tracks terminal parameter details on expand and collapse; the same rejected field and limit reach both the native card and the model');
  await clickHeader(2);await h.waitFor(async()=>(await groups())[2].rect.h===32||null,5000);
  report.checks.push('ordinary model messages end groups; setting saves in existing AI page; current groups keep state; subsequent groups use new default; completion does not recollapse or reopen');
  await send('SECOND_TURN');await h.waitFor(async()=>text(await h.query('ai.conversation')).includes('SECOND_TURN_COMPLETE')||null,15000);

@@ -38,6 +38,50 @@ const server=createServer(async(req,res)=>{
   };
   if(!get('sessions'))return emit('sessions','host.list_sessions',{limit:8});
   const source=get('sessions').sessions[0];assert(source?.ready);const reference=source.session_ref;
+  if(phase==='return-to-parent'){
+   const child=source.control.shell_context;
+   assert.equal(child.known_depth,1);
+   if(!get('exit'))return emit('exit','host.run_in_terminal',{session_ref:reference,request_key:'child-exit',command:'exit',shell_id:child.id,shell_revision:child.revision,wait_ms:3000});
+   const exit=get('exit');assert(exit.execution_ref,JSON.stringify(exit));
+   const childResult=get('child-result')??exit;
+   if(!get('child-result')&&childResult.state!=='outcome_unknown')return emit('child-result','host.wait_execution',{execution_ref:exit.execution_ref,until:'decision',wait_ms:5000});
+   assert.equal(childResult.state,'outcome_unknown',JSON.stringify(childResult));
+   assert.equal(childResult.snapshot.failure,'ShellContextExitedWithoutCompletion');
+   assert.equal(childResult.snapshot.process,null);
+   assert.equal(childResult.snapshot.local_released,true);
+   assert(request.tools.some((t:any)=>t.function.name===wire('host.run_in_terminal')));
+   assert(!request.tools.some((t:any)=>t.function.name===wire('host.attach_shell')));
+   if(!get('parent'))return emit('parent','host.get_session',{session_ref:reference});
+   let parent=get('parent').session.control;
+   for(let attempt=1;attempt<=3&&!(parent.shell_context.prompt_ready&&parent.input_ready);attempt++){
+    const key='parent-ready-'+attempt;
+    if(!get(key)){await new Promise(r=>setTimeout(r,150));return emit(key,'host.get_session',{session_ref:reference})}
+    parent=get(key).session.control;
+   }
+   assert.equal(parent.shell_context.id,report.observations['proactive-before'].body.session.control.shell_context.id);
+   assert(parent.shell_context.revision>child.revision&&parent.shell_context.prompt_ready&&parent.input_ready,JSON.stringify(parent));
+   const args={session_ref:reference,shell_id:parent.shell_context.id,shell_revision:parent.shell_context.revision};
+   if(!get('replay'))return emit('replay','host.run_in_terminal',{...args,request_key:'child-exit-replay',command:'exit'});
+   assert.equal(get('replay').error_code,'EarlierToolOutcomeUnknown');
+   const command="printf 'PARENT_RESUMED_OK\\n'";
+   if(!get('stale-parent'))return emit('stale-parent','host.run_in_terminal',{...args,shell_revision:args.shell_revision+1,request_key:'stale-parent',command});
+   assert.equal(get('stale-parent').error_code,'ShellContextChanged');
+   assert.equal(get('stale-parent').side_effect_started,false);
+   if(!get('parent-run'))return emit('parent-run','host.run_in_terminal',{...args,request_key:'parent-run',command,wait_ms:3000});
+   const run=get('parent-run');assert(run.execution_ref,JSON.stringify(run));
+   if(run.state!=='interval_recorded'&&!get('parent-result'))return emit('parent-result','host.wait_execution',{execution_ref:run.execution_ref,wait_ms:5000});
+   const parentResult=get('parent-result')??run;
+   assert.equal(parentResult.state,'interval_recorded',JSON.stringify(parentResult));
+   assert.equal(parentResult.snapshot.process.exit_code,0);
+   assert.equal(parentResult.snapshot.shell.id,args.shell_id);
+   assert(parentResult.output.includes('PARENT_RESUMED_OK'));
+   if(!get('retained-child'))return emit('retained-child','host.get_execution',{execution_ref:exit.execution_ref});
+   const retained=get('retained-child');
+   assert.equal(retained.execution_ref,exit.execution_ref);
+   assert.equal(retained.state,'outcome_unknown');
+   assert.equal(retained.snapshot.process,null);
+   finished=true;res.end(frame({content:'父层命令已完成，子层 exit 的退出码仍未知。'})+'data: [DONE]\n\n');return;
+  }
   if(phase==='unknown'){
    if(!get('run'))return emit('run','host.run_in_terminal',{session_ref:reference,request_key:'unknown-run',command:"printf 'UNKNOWN_SCREEN_OK\\n'",shell_id:source.control.shell_context.id,shell_revision:source.control.shell_context.revision});
    const run=get('run');assert(run.execution_ref,JSON.stringify(run));
@@ -131,6 +175,8 @@ try{
  assert(report.notices.some((notice:string)=>{try{return JSON.parse(JSON.parse(notice).shell_switches_json).some((item:any)=>item.kind==='ssh'&&item.pending)}catch{return false}}),'switch notice must reach the model');
  report.checks.push('Stale screen/input evidence rejects without initialization; repeated key returns duplicate without reinitializing; changed arguments with the same key reject');
  report.checks.push('Ordinary nested SSH entry -> bound model notice -> terminal read -> AI attach -> verified business execution; zero human attach or permission clicks');
+ phase='return-to-parent';await ask();await capture('04-return-to-parent-in-same-turn');
+ report.checks.push('Nested SSH exit preserves its unknown receipt, rejects replay and stale parent fences, then runs a new command on the ready parent within the same AI turn');
  await click('ai.collapse');await command("alias inner='bash --noprofile --norc -i'");await h.sleep(200);await command('inner');await h.sleep(250);phase='fallback';await click('toolbar.ai');await click('ai.maximize');await ask();await capture('02-missed-alias-ai-recovery');
  report.checks.push('Alias entry missed by classifier -> known-unsent business rejection -> terminal read -> same AI attachment API -> one successful execution');
  phase='unknown';await writeFile(join(iso,'peer','drop-completion'),'');

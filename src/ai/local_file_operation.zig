@@ -18,10 +18,11 @@ pub const Request = struct {
 
 /// Normalize only arguments from the original request. Store the resolved
 /// path and workspace dependency separately as evidence on the same record.
-pub fn canonicalHash(a: std.mem.Allocator, target: union(enum) {
+pub const CanonicalTarget = union(enum) {
     path: []const u8,
     file_ref: []const u8,
-}, base_directory: ?[]const u8, request: commit.Request) !commit.Digest {
+};
+pub fn canonicalHash(a: std.mem.Allocator, target: CanonicalTarget, base_directory: ?[]const u8, request: commit.Request) !commit.Digest {
     const encoded = try std.json.Stringify.valueAlloc(a, .{
         .target_kind = @tagName(target),
         .target = switch (target) {

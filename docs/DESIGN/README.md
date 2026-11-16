@@ -1,5 +1,7 @@
 # ZeroWork 首版实施设计
 
+> **V0.7.0 PATCH · 阶段 1 宿主本地文件工具补全（2026-11-16）**：[删除、移动与编辑增强](V0.7.0_PATCH_LOCAL_FILE_TOOLS.md)。`host.local_delete` / `host.local_move` / append 模式 / 编辑锚点增强；纯 Mac 本机实现，不触碰 `file.*` 远端栈；工作区门禁语义不变（工具加载与工作区启用无关）。
+
 > **V0.7 AI 助手降阻与 Swarm 编排（2026-11-15，单一版本计划）**：[设计方案](V0.7_AI_AGENT_FLOW.md)与 [7 张 SVG](../../design/ai-agent-mode/)。四阶段：①子任务通道降阻（seq 命名、参数可选、报告自动投递与抢救、审批透传队列、错误载荷）；②角色模板（模型/effort/能力掩码）+ 中途切模型校验闸 + 提示词三段式重构；③三档模式（Auto/Swarm/Boost）+ 共享留言板（`host.post` + @seq 定向直达）+ 编排原语（role/depends_on/challenge）+ 宿主停滞检测；④swarm 面板三形态（列表/Board+Graph/Rounds + 气泡浮窗）。当前为设计目标，未实施。
 
 > **V0.5 笔记插件（2026-11-11）**：[完整方案](V0.5_NOTES_PLUGIN.md)与 [15 张 SVG](../UI_V4/notes/README.md)。原生插件已纳入 0.6.0。标准页与连接会话右侧浮窗共用笔记，支持文档只读、块级实时预览、图片、搜索返回和知识库 AI 读取。知识库下最多两级子目录。

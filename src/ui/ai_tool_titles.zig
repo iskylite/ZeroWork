@@ -25,6 +25,8 @@ pub fn title(name: []const u8) ?[]const u8 {
         .{ "host.local_read_text", "读取文件" },
         .{ "host.local_write_text", "修改文件" },
         .{ "host.local_edit_text", "修改文件" },
+        .{ "host.local_delete", "删除文件" },
+        .{ "host.local_move", "移动文件" },
         .{ "host.fetch_url", "读取网页内容" },
         .{ "host.skills", "读取本地技能" },
         .{ "host.mcp_catalog", "查询 MCP 工具" },

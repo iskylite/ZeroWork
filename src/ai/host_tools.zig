@@ -61,6 +61,9 @@ pub const Invocation = struct {
     mutation_fence: ?provider.DispatchFence = null,
     workspace_revision: ?u64 = null,
     terminal_target: ?identity.SessionHandle = null,
+    /// Continue on the already integrated parent. Do not initialize a shell
+    /// or dispatch until the requested parent prompt is confirmed live.
+    resuming_parent_shell: bool = false,
     context: Context,
     authority: provider.ToolAuthority,
     operation_id: u64,
@@ -96,6 +99,9 @@ pub const Result = struct {
     verification: ?@import("readonly_verification.zig").Anchor = null,
     /// Exact terminal generation of an unknown remote execution, when known.
     uncertain_terminal: ?@import("../host/identity.zig").SessionHandle = null,
+    /// A submitted child execution lost its completion when its parent
+    /// returned. This does not change the outcome of the child execution.
+    parent_shell: ?struct { id: [32]u8, child_revision: u64, command_hash: [32]u8 } = null,
     /// Exact old generation and its ready successor, attested by the host.
     reconnected: ?struct { previous: @import("../host/identity.zig").SessionHandle, current: @import("../host/identity.zig").SessionHandle } = null,
     status: @import("plugin_tools.zig").Status,

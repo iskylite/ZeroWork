@@ -340,6 +340,15 @@ pub const RequestTable = struct {
         for (self.entries) |*entry| if (std.mem.eql(u8, entry.provider_name, provider_name)) return entry;
         return null;
     }
+    /// The caller owns the scratch allocator and must serialize the issue before
+    /// freeing it. Use after a failed parse to keep the successful path unchanged.
+    pub fn argumentIssue(self: *const RequestTable, scratch: std.mem.Allocator, name: []const u8, arguments: []const u8) !?ArgumentIssue {
+        const entry = self.lookup(name) orelse return null;
+        if (arguments.len > entry.definition.max_argument_bytes) return .{ .rule = "maxBytes", .expected = .{ .integer = @intCast(entry.definition.max_argument_bytes) } };
+        const value = try std.json.parseFromSliceLeaky(std.json.Value, scratch, arguments, .{});
+        const schema = try std.json.parseFromSliceLeaky(std.json.Value, scratch, entry.definition.schema, .{});
+        return findArgumentIssue(schema, value, 0);
+    }
     pub fn parse(self: *const RequestTable, allocator: std.mem.Allocator, name: []const u8, arguments: []const u8) !ParsedCall {
         const entry = self.lookup(name) orelse return error.ToolNotInRequest;
         if (arguments.len > entry.definition.max_argument_bytes) return error.InvalidToolArguments;
@@ -578,48 +587,65 @@ pub fn validateArguments(schema: std.json.Value, value: std.json.Value) !void {
     try validateValue(schema, value, 0);
 }
 fn validateValue(schema: std.json.Value, value: std.json.Value, depth: usize) anyerror!void {
-    if (depth > 12) return error.InvalidToolArguments;
+    if (findArgumentIssue(schema, value, depth) != null) return error.InvalidToolArguments;
+}
+pub const ArgumentIssue = struct {
+    rule: []const u8,
+    field: ?[]const u8 = null,
+    expected: ?std.json.Value = null,
+};
+fn findArgumentIssue(schema: std.json.Value, value: std.json.Value, depth: usize) ?ArgumentIssue {
+    if (depth > 12) return .{ .rule = "maxDepth" };
     const kind = schema.object.get("type").?.string;
     const matches = if (std.mem.eql(u8, kind, "object")) value == .object else if (std.mem.eql(u8, kind, "array")) value == .array else if (std.mem.eql(u8, kind, "string")) value == .string else if (std.mem.eql(u8, kind, "integer")) value == .integer else if (std.mem.eql(u8, kind, "number")) number(value) != null else if (std.mem.eql(u8, kind, "boolean")) value == .bool else value == .null;
-    if (!matches) return error.InvalidToolArguments;
+    if (!matches) return .{ .rule = "type", .expected = .{ .string = kind } };
     if (schema.object.get("enum")) |values| {
         var found = false;
         for (values.array.items) |candidate| if (jsonEqual(candidate, value)) {
             found = true;
             break;
         };
-        if (!found) return error.InvalidToolArguments;
+        if (!found) return .{ .rule = "enum", .expected = values };
     }
     if (number(value)) |numeric| {
-        if (schema.object.get("minimum")) |min| if (numeric < number(min).?) return error.InvalidToolArguments;
-        if (schema.object.get("maximum")) |max| if (numeric > number(max).?) return error.InvalidToolArguments;
+        if (schema.object.get("minimum")) |min| if (numeric < number(min).?) return .{ .rule = "minimum", .expected = min };
+        if (schema.object.get("maximum")) |max| if (numeric > number(max).?) return .{ .rule = "maximum", .expected = max };
     }
     if (value == .string) {
-        if (!std.unicode.utf8ValidateSlice(value.string) or std.mem.indexOfScalar(u8, value.string, 0) != null) return error.InvalidToolArguments;
-        const length = std.unicode.utf8CountCodepoints(value.string) catch return error.InvalidToolArguments;
-        if (schema.object.get("minLength")) |min| if (length < min.integer) return error.InvalidToolArguments;
-        if (schema.object.get("maxLength")) |max| if (length > max.integer) return error.InvalidToolArguments;
+        if (!std.unicode.utf8ValidateSlice(value.string)) return .{ .rule = "utf8" };
+        if (std.mem.indexOfScalar(u8, value.string, 0) != null) return .{ .rule = "nullByte" };
+        const length = std.unicode.utf8CountCodepoints(value.string) catch return .{ .rule = "utf8" };
+        if (schema.object.get("minLength")) |min| if (length < min.integer) return .{ .rule = "minLength", .expected = min };
+        if (schema.object.get("maxLength")) |max| if (length > max.integer) return .{ .rule = "maxLength", .expected = max };
     }
     if (value == .array) {
-        if (schema.object.get("minItems")) |min| if (value.array.items.len < min.integer) return error.InvalidToolArguments;
-        if (schema.object.get("maxItems")) |max| if (value.array.items.len > max.integer) return error.InvalidToolArguments;
+        if (schema.object.get("minItems")) |min| if (value.array.items.len < min.integer) return .{ .rule = "minItems", .expected = min };
+        if (schema.object.get("maxItems")) |max| if (value.array.items.len > max.integer) return .{ .rule = "maxItems", .expected = max };
         for (value.array.items, 0..) |item, index| {
-            if (schema.object.get("items")) |item_schema| try validateValue(item_schema, item, depth + 1);
-            if (schema.object.get("uniqueItems")) |unique| if (unique.bool) for (value.array.items[0..index]) |previous| if (jsonEqual(previous, item)) return error.InvalidToolArguments;
+            if (schema.object.get("items")) |item_schema| if (findArgumentIssue(item_schema, item, depth + 1)) |issue| return issue;
+            if (schema.object.get("uniqueItems")) |unique| if (unique.bool) for (value.array.items[0..index]) |previous| if (jsonEqual(previous, item)) return .{ .rule = "uniqueItems" };
         }
     }
     if (value == .object) {
-        if (schema.object.get("required")) |required| for (required.array.items) |key| if (value.object.get(key.string) == null) return error.InvalidToolArguments;
+        if (schema.object.get("required")) |required| for (required.array.items) |key| if (value.object.get(key.string) == null) return .{ .rule = "required", .field = key.string };
         const properties = schema.object.get("properties");
         var iterator = value.object.iterator();
         while (iterator.next()) |field| {
             if (properties) |all| if (all.object.get(field.key_ptr.*)) |field_schema| {
-                try validateValue(field_schema, field.value_ptr.*, depth + 1);
+                if (findArgumentIssue(field_schema, field.value_ptr.*, depth + 1)) |issue| {
+                    var tagged = issue;
+                    if (tagged.field == null) tagged.field = field.key_ptr.*;
+                    return tagged;
+                }
                 continue;
             };
-            if (schema.object.get("additionalProperties")) |additional| if (!additional.bool) return error.InvalidToolArguments;
+            if (schema.object.get("additionalProperties")) |additional| if (!additional.bool) return .{
+                .rule = "additionalProperties",
+                .field = if (field.key_ptr.len <= 64 and std.unicode.utf8ValidateSlice(field.key_ptr.*)) field.key_ptr.* else null,
+            };
         }
     }
+    return null;
 }
 
 /// Generates wire definitions from the same captured table used for execution.

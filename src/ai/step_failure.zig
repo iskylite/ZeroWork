@@ -86,6 +86,33 @@ fn errorCode(a: std.mem.Allocator, value: std.json.Value, depth: u8) ?[]const u8
     return null;
 }
 
+fn argumentExplanation(a: std.mem.Allocator, value: std.json.Value) !?[]const u8 {
+    const issue = if (value == .object) value.object.get("argument_issue") orelse return null else return null;
+    if (issue != .object) return null;
+    const rule = issue.object.get("rule") orelse return null;
+    if (rule != .string) return null;
+    const field = if (issue.object.get("field")) |name| (if (name == .string) name.string else "调用参数") else "调用参数";
+    if (std.mem.eql(u8, rule.string, "required")) return try std.fmt.allocPrint(a, "缺少必填字段 {s}，本次操作未执行。", .{field});
+    if (std.mem.eql(u8, rule.string, "additionalProperties")) return try std.fmt.allocPrint(a, "工具不接受字段 {s}，本次操作未执行。", .{field});
+    const constraints = .{
+        .{ "type", "应为 JSON 类型" },
+        .{ "enum", "应从以下值中选择" },
+        .{ "minimum", "最小为" },
+        .{ "maximum", "最大为" },
+        .{ "minLength", "最少字符数为" },
+        .{ "maxLength", "最多字符数为" },
+        .{ "maxBytes", "最多字节数为" },
+    };
+    const expected = issue.object.get("expected") orelse return null;
+    inline for (constraints) |constraint| {
+        if (std.mem.eql(u8, rule.string, constraint[0])) {
+            const limit = try std.json.Stringify.valueAlloc(a, expected, .{});
+            return try std.fmt.allocPrint(a, "{s} {s} {s}，本次操作未执行。", .{ field, constraint[1], limit });
+        }
+    }
+    return null;
+}
+
 pub fn describe(a: std.mem.Allocator, step: events.Step) !Description {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -99,7 +126,8 @@ pub fn describe(a: std.mem.Allocator, step: events.Step) !Description {
     const status = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) "因新消息跳过 · 未执行" else if (step.phase == .cancelled) "已取消 · 未执行" else if (std.mem.eql(u8, code, "ToolApprovalRejected")) "用户已拒绝 · 未执行" else if (std.mem.eql(u8, code, "ReconnectPtyNotReady")) "SSH 已连接 · 终端尚未就绪" else if (std.mem.eql(u8, code, "ReconnectPtyUnsupported")) "SSH 已连接 · 终端不支持交互执行" else if (std.mem.eql(u8, code, "ReconnectWaitTimedOut")) "等待超时 · SSH 正在重连" else if (std.mem.eql(u8, code, "ReconnectSuperseded")) "重连回执已被取代" else if (reconnect_failed) "SSH 重连失败" else "请求失败 · 未执行";
     const summary = if (std.mem.eql(u8, code, "not_dispatched_due_to_new_input")) try a.dupe(u8, status) else try std.fmt.allocPrint(a, "{s} · {s}", .{ status, code });
     errdefer a.free(summary);
-    const detail = try std.fmt.allocPrint(a, "工具：{s}\n状态：{s}\n错误码：{s}\n原因：{s}\n\n调用参数 / 命令：\n{s}\n\n原始错误：\n{s}", .{ name, status, code, explanation(code), step.command, if (raw.len == 0) "未提供错误详情" else raw });
+    const argument_explanation = if (parsed) |value| try argumentExplanation(scratch, value) else null;
+    const detail = try std.fmt.allocPrint(a, "工具：{s}\n状态：{s}\n错误码：{s}\n原因：{s}\n\n调用参数 / 命令：\n{s}\n\n原始错误：\n{s}", .{ name, status, code, argument_explanation orelse explanation(code), step.command, if (raw.len == 0) "未提供错误详情" else raw });
     return .{ .summary = summary, .detail = detail };
 }
 

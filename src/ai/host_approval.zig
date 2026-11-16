@@ -164,7 +164,8 @@ pub const Broker = struct {
             .lifecycle => if (invocation.authority != .lifecycle) return error.InvalidHostApproval,
             .terminal_command => if (invocation.authority != .execution_control) return error.InvalidHostApproval,
             .local_file => if (invocation.authority != .local_files or subject.evidence_hash == null or !std.fs.path.isAbsolute(subject.target) or std.mem.indexOfScalar(u8, subject.target, 0) != null or
-                (!std.mem.eql(u8, invocation.tool_id, "host.local_write_text") and !std.mem.eql(u8, invocation.tool_id, "host.local_edit_text"))) return error.InvalidHostApproval,
+                (!std.mem.eql(u8, invocation.tool_id, "host.local_write_text") and !std.mem.eql(u8, invocation.tool_id, "host.local_edit_text") and
+                    !std.mem.eql(u8, invocation.tool_id, "host.local_delete") and !std.mem.eql(u8, invocation.tool_id, "host.local_move"))) return error.InvalidHostApproval,
         }
         if (subject.route != null and subject.kind != .terminal_command) return error.InvalidHostApproval;
         const args = invocation.arguments;

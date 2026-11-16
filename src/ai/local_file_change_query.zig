@@ -64,6 +64,7 @@ const Projection = struct {
     resolution_source: ?[]const u8 = null,
     workspace_revision: ?u64 = null,
     kind: ?commit.Kind = null,
+    destination: ?[]const u8 = null,
     stage: journal.Stage,
     status: commit.Status,
     side_effect_started: ?bool,
@@ -144,6 +145,7 @@ fn project(a: std.mem.Allocator, io: std.Io, record: journal.Record, live: ?comm
         .resolution_source = if (evidence) |prepared| @tagName(prepared.source) else null,
         .workspace_revision = if (evidence) |prepared| prepared.workspace_revision else null,
         .kind = if (evidence) |prepared| prepared.kind else null,
+        .destination = if (evidence) |prepared| prepared.destination else null,
         .stage = record.stage,
         .status = status,
         .side_effect_started = if (live) |receipt| receipt.side_effect_started else if (old) |value| value.side_effect_started else if (record.local_file_parent_progress != null) true else if (record.dispatch_started) null else false,
@@ -231,7 +233,9 @@ pub fn mutationResult(a: std.mem.Allocator, io: std.Io, invocation: host.Invocat
     if (invocation.authority != .local_files or !Scope.from(invocation.context).matches(record.context) or
         !std.mem.eql(u8, record.tool_id, journal.local_file_tool_id) or
         (!std.mem.eql(u8, invocation.tool_id, "host.local_write_text") and
-            !std.mem.eql(u8, invocation.tool_id, "host.local_edit_text"))) return error.InvalidHostAuthority;
+            !std.mem.eql(u8, invocation.tool_id, "host.local_edit_text") and
+            !std.mem.eql(u8, invocation.tool_id, "host.local_delete") and
+            !std.mem.eql(u8, invocation.tool_id, "host.local_move"))) return error.InvalidHostAuthority;
     if (live) |value| if (!value.operation_ref.eql(record.operation_ref)) return error.StaleOperation;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
