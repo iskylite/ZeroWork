@@ -32,6 +32,8 @@ pub const Host = struct {
     data_root: ?[]u8 = null,
     local_file_reference_key: ?@import("../host/local_file_reference.zig").Key = null,
     persistence_failure: ?anyerror = null,
+    /// V0.7 §12.2: last host stall sweep timestamp (monotonic ns).
+    last_stall_sweep: i128 = 0,
     pub fn init(a: std.mem.Allocator) Host {
         return .{ .allocator = a, .service = runtime.Service.init(a), .presentations = legacy.Store.init(a) };
     }

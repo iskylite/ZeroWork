@@ -166,3 +166,24 @@ test "v0.7 board 引擎：postBoard 入流、ask 计数与终态清零" {
     try root.state(child.task, .succeeded, "done");
     try std.testing.expectEqual(@as(u32, 0), root.board_ask_counts[root.facts[1].seq - 1]);
 }
+
+test "v0.7 depends_on 门控与 challenge 工具契约" {
+    const gateway = @import("ai/child_gateway.zig");
+    const orchestration = @import("ai/swarm_orchestration.zig");
+    const a2 = std.testing.allocator;
+    // schema 拒绝非 create 的 depends_on 与未配对的 challenge。
+    const bad_reuse = try std.json.parseFromSlice(std.json.Value, a2, "{\"action\":\"reuse\",\"agent_id\":\"01010101010101010101010101010101\",\"text\":\"x\",\"session_refs\":[],\"depends_on\":[]}", .{});
+    defer bad_reuse.deinit();
+    try std.testing.expectError(error.InvalidArguments, gateway.parse(a2, bad_reuse.value));
+    const bad_challenge = try std.json.parseFromSlice(std.json.Value, a2, "{\"action\":\"create\",\"text\":\"x\",\"session_refs\":[],\"purpose\":\"challenge\"}", .{});
+    defer bad_challenge.deinit();
+    try std.testing.expectError(error.InvalidArguments, gateway.parse(a2, bad_challenge.value));
+    const ok_challenge = try std.json.parseFromSlice(std.json.Value, a2, "{\"action\":\"create\",\"text\":\"复审\",\"session_refs\":[],\"purpose\":\"challenge\",\"challenge_target\":\"@1\"}", .{});
+    defer ok_challenge.deinit();
+    const parsed = try gateway.parse(a2, ok_challenge.value);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.purpose == .challenge);
+    try std.testing.expectEqualStrings("@1", parsed.value.challenge_target.?);
+    // 依赖引用解析与环检测。
+    try std.testing.expectError(error.DependencyCycle, orchestration.containsSelf(&.{1, 2}, 2));
+}

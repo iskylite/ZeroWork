@@ -267,6 +267,25 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
     switch (r.action) {
         .create, .reuse => {
             const text = r.text.?;
+            // V0.7 §12.1 challenge material: the challenger receives the
+            // challenged member's settle_report and its member identity
+            // inline as task material (read-only review semantics).
+            var challenge_owned: ?[]const u8 = null;
+            defer if (challenge_owned) |owned| a.free(owned);
+            const effective_text = blk: {
+                const target_ref = r.challenge_target orelse break :blk text;
+                if (target_ref.len < 2 or target_ref[0] != '@') break :blk text;
+                const target_seq = std.fmt.parseInt(u32, target_ref[1..], 10) catch return error.InvalidArguments;
+                root.lock();
+                const target_fact = root.factForSeq(context.task, target_seq) catch {
+                    root.mutex.unlock();
+                    return rejectionWithPayload(invocation, a, error.ChildTaskNotFound, try std.fmt.allocPrint(a, "#{d}", .{target_seq}));
+                };
+                root.mutex.unlock();
+                const report: []const u8 = if (target_fact.summary.len != 0) target_fact.summary else "(no settle report text)";
+                challenge_owned = try std.fmt.allocPrint(a, "[Challenge target #{d} {s} settle report; untrusted evidence]\n{s}\n\n---\n\n{s}", .{ target_fact.seq, if (target_fact.label.len != 0) target_fact.label else "", report, text });
+                break :blk challenge_owned.?;
+            };
             const digest = invocation.canonical_arguments_hash;
             // V0.7 §3.2: an omitted key is content-derived, so identical
             // retries hit the idempotency check below automatically.
@@ -339,16 +358,17 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 submission: id.SubmissionId,
                 label: []const u8,
                 effective_key: []const u8,
+                effective_text: []const u8,
                 reuse_agent: ?id.AgentId,
                 record: ?*life.Record = null,
                 fn run(raw: *anyopaque, fact: *budget.Fact) !void {
                     const self: *@This() = @ptrCast(@alignCast(raw));
-                    self.record = try self.env.service.store.launchChild(try self.env.service.store.fence(self.env.authority.conversation_id), if (self.request.action == .create) .{ .request_key = self.effective_key, .name = self.label, .context_mode = life.child.resolve(self.env.factory.defaults, self.request.context_mode, self.request.reusable).context_mode, .reusable = life.child.resolve(self.env.factory.defaults, self.request.context_mode, self.request.reusable).reusable, .model = self.request.model orelse self.env.factory.model, .effort = self.request.effort orelse self.env.factory.effort, .skill_ids = self.env.factory.skill_ids, .mcp_ids = self.env.factory.mcp_ids } else null, self.reuse_agent, self.env.inherited, self.env.live, self.targets, self.submission, self.request.text.?, fact);
+                    self.record = try self.env.service.store.launchChild(try self.env.service.store.fence(self.env.authority.conversation_id), if (self.request.action == .create) .{ .request_key = self.effective_key, .name = self.label, .context_mode = life.child.resolve(self.env.factory.defaults, self.request.context_mode, self.request.reusable).context_mode, .reusable = life.child.resolve(self.env.factory.defaults, self.request.context_mode, self.request.reusable).reusable, .model = self.request.model orelse self.env.factory.model, .effort = self.request.effort orelse self.env.factory.effort, .skill_ids = self.env.factory.skill_ids, .mcp_ids = self.env.factory.mcp_ids } else null, self.reuse_agent, self.env.inherited, self.env.live, self.targets, self.submission, self.effective_text, fact);
                 }
             };
             const generation = if (reuse_record) |record| if (env.service.runnerFor(record.child.?.info.agent)) |existing| try id.advance(existing.worker_generation) else 1 else 1;
-            var commit: Commit = .{ .env = env, .request = r, .targets = targets[0..r.session_refs.?.len], .submission = id.SubmissionId.generate(), .label = label, .effective_key = effective_key, .reuse_agent = reuse_agent };
-            var fact = root.launch(.{ .root = context.root_task, .task = id.TaskId.generate(), .parent = context.task, .conversation = .{}, .agent = .{}, .generation = generation, .request_key = effective_key, .label = label, .input_hash = digest, .read_only = r.purpose == .verify, .local_files = local_files, .targets = targets[0..r.session_refs.?.len] }, &commit, Commit.run) catch |err| {
+            var commit: Commit = .{ .env = env, .request = r, .targets = targets[0..r.session_refs.?.len], .submission = id.SubmissionId.generate(), .label = label, .effective_key = effective_key, .effective_text = effective_text, .reuse_agent = reuse_agent };
+            var fact = root.launch(.{ .root = context.root_task, .task = id.TaskId.generate(), .parent = context.task, .conversation = .{}, .agent = .{}, .generation = generation, .request_key = effective_key, .label = label, .input_hash = digest, .read_only = r.purpose == .verify or r.purpose == .challenge, .local_files = local_files, .targets = targets[0..r.session_refs.?.len] }, &commit, Commit.run) catch |err| {
                 // V0.7 §3.5: budget errors carry {active count, limit,
                 // holders as #seq label} so the model can decide to stop one
                 // or wait instead of guessing from a bare error code.
@@ -356,7 +376,7 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 return rejectionWithPayload(invocation, a, err, try childLimitPayload(a, root, context.task));
             };
             const record = commit.record.?;
-            const runner = env.factory.install(env.factory.context, record, root, fact, commit.submission, text) catch |err| {
+            const runner = env.factory.install(env.factory.context, record, root, fact, commit.submission, effective_text) catch |err| {
                 try root.state(fact.task, .settling, @errorName(err));
                 const ticket = try env.service.store.fence(record.id);
                 if (env.service.runnerFor(ticket.agent)) |failed| {
@@ -373,6 +393,66 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 }
                 return error.ChildStartupFailed;
             };
+            // V0.7 §12.1 depends_on gate: the created task holds its active
+            // slot immediately, but the worker only starts once every listed
+            // dependency reached a terminal status. A failed/cancelled/
+            // interrupted/outcome_unknown dependency never auto-starts; the
+            // structured disclosure carries it for the parent to re-plan
+            // (re-dispatch, serialize or drop the branch).
+            var gated = false;
+            var blocked_seq: u32 = 0;
+            var blocked_status: []const u8 = "";
+            if (r.depends_on) |refs| {
+                const orchestration = @import("swarm_orchestration.zig");
+                const dependencies = orchestration.parseDependencies(refs) catch |err| return rejectionWithPayload(invocation, a, err, .{ .reason = "invalid depends_on references" });
+                orchestration.containsSelf(dependencies, fact.seq) catch |err| return rejectionWithPayload(invocation, a, err, try std.fmt.allocPrint(a, "dependency cycle through #{d}", .{fact.seq}));
+                // Resolve dependencies under one lock; the facts array is
+                // scanned directly (factForSeq takes its own lock).
+                var resolved: [16]budget.Fact = undefined;
+                var resolved_count: usize = 0;
+                var missing: u32 = 0;
+                {
+                    root.lock();
+                    defer root.mutex.unlock();
+                    for (dependencies) |dep_seq| {
+                        var found: ?budget.Fact = null;
+                        for (root.facts[0..root.count]) |candidate| {
+                            if (candidate.parent != null and candidate.parent.?.eql(context.task) and candidate.seq == dep_seq) {
+                                found = candidate;
+                                break;
+                            }
+                        } else {
+                            missing = dep_seq;
+                            break;
+                        }
+                        resolved[resolved_count] = found.?;
+                        resolved_count += 1;
+                    }
+                }
+                if (missing != 0) return rejectionWithPayload(invocation, a, error.ChildTaskNotFound, try std.fmt.allocPrint(a, "#{d}", .{missing}));
+                for (resolved[0..resolved_count]) |dep| {
+                    if (budget.terminal(dep.status)) {
+                        if (dep.status != .succeeded) {
+                            blocked_seq = dep.seq;
+                            blocked_status = @tagName(dep.status);
+                            break;
+                        }
+                    } else gated = true;
+                }
+            }
+            if (blocked_seq != 0) {
+                // The task keeps its slot but never auto-starts; the parent
+                // decides the branch. The structured result discloses the
+                // unsatisfied dependency (never hides it).
+                try root.state(fact.task, .queued_dependency, "dependency failed");
+                return result(invocation, .{ .task = fact, .gated = true, .blocked_dependency = try std.fmt.allocPrint(a, "#{d} {s}", .{ blocked_seq, blocked_status }), .local_workspace = childWorkspace(env, fact) }, a);
+            }
+            if (gated) {
+                // Waiting dependencies: hold the slot, defer the start to the
+                // host's dependency sweep (turn_manager deliver pass).
+                try root.state(fact.task, .queued_dependency, "");
+                return result(invocation, .{ .task = fact, .gated = true, .local_workspace = childWorkspace(env, fact) }, a);
+            }
             env.service.pump(runner) catch |err| {
                 initializeFailedStartup(env.service, runner, record, root, fact, commit.submission);
                 runner.failure = err;

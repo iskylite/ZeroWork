@@ -3,7 +3,7 @@ const std = @import("std");
 const id = @import("../host/identity.zig");
 const provider = @import("provider.zig");
 const Clock = @import("retry.zig").Clock;
-pub const Status = enum { running, human_wait, waiting_model, waiting_children, settling, succeeded, failed, cancelled, interrupted, outcome_unknown };
+pub const Status = enum { running, human_wait, waiting_model, waiting_children, settling, succeeded, failed, cancelled, interrupted, outcome_unknown, queued_dependency };
 pub fn terminal(status: Status) bool {
     return switch (status) {
         .succeeded, .failed, .cancelled, .interrupted, .outcome_unknown => true,

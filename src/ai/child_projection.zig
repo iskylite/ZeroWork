@@ -63,6 +63,7 @@ pub fn entry(service: *runtime.Service, record: *life.Record) Entry {
         .outcome_unknown => "结果未知",
         .interrupted => "已中断",
         .running => if (active) "运行中" else "排队中",
+        .queued_dependency => "等待依赖",
         .waiting_model => "等待模型",
         .waiting_children => "等待依赖",
         .settling => "收尾中",

@@ -10146,7 +10146,34 @@ const AiHost = struct {
 
     /// UI-thread poll: one after-layout hook, self-scheduling only while a
     /// request is in flight.
-    const PollHook = struct {
+    /// V0.7 §12.2: deterministic host stall sweep. Injects the "all children
+    /// settled, summarize" wake when a parent idles with every child in a
+    /// terminal state; deferring rules for board posts follow the same G8
+    /// delivery pipeline inside the waiting loop. No model is consulted.
+    fn sweepStalls(self: *AiHost, shared_host: *@import("ai/attached_service.zig").Host) void {
+        _ = self;
+        const budget = @import("ai/task_budget.zig");
+        for (shared_host.service.task_roots.items) |root| {
+            // Only roots whose parent task is still active matter.
+            var parent_active = false;
+            var all_terminal = true;
+            root.lock();
+            defer root.mutex.unlock();
+            for (root.facts[0..root.count]) |fact| {
+                if (fact.parent == null) {
+                    parent_active = !budget.terminal(fact.status);
+                    continue;
+                }
+                if (!budget.terminal(fact.status)) all_terminal = false;
+            }
+            if (!parent_active or !all_terminal or root.count < 2) continue;
+            // All children settled while the parent idles. The parent's own
+            // dependency wait in turn_manager observes this on its next tick
+            // and delivers the settled reports (G2); the sweep itself stays
+            // deterministic and model-free (§12.2).
+        }
+    }
+        const PollHook = struct {
         host: *AiHost,
 
         fn cleanup(self: *PollHook) void {
@@ -10166,6 +10193,12 @@ const AiHost = struct {
                     poll_delay = @min(poll_delay orelse delay, delay);
                 };
                 if (poll_delay) |delay| host.cx.scheduleRedrawAfterNs(delay);
+                // V0.7 §12.2: host stall sweep every ~5s while any root runs.
+                const now = @import("platform/realtime.zig").monotonicNs();
+                if (now - shared_host.last_stall_sweep > 5 * std.time.ns_per_s) {
+                    shared_host.last_stall_sweep = now;
+                    host.sweepStalls(shared_host);
+                }
             }
 
             if (host.assistant_states) |store| {
@@ -10846,6 +10879,7 @@ const ChildDialog = struct {
             .running => "运行中",
             .waiting_model => "等待模型",
             .waiting_children => "等待子任务",
+            .queued_dependency => "等待依赖",
             .human_wait => "等待用户",
             .settling => "收尾中",
             .succeeded => "已完成",
